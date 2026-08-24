@@ -20,7 +20,7 @@ import { isPanelTaskRestoreForPage, panelTaskSessionKey, type PanelTaskRestoreDe
 import { FILE_GRID_GAP, FILE_LIST_HEADER_HEIGHT, FILE_LIST_ROW_HEIGHT, FILE_SURFACE_HORIZONTAL_PADDING, FILE_SURFACE_PADDING, calculateFileGridGeometry, fileSurfaceContentWidth, finiteLogicalCanvasSize, hitMarqueeIndices, mergeMarqueeSelection, normalizeMarqueeRect, rectanglesIntersect, viewportPointToContentPoint, type MarqueeRect } from './marquee-selection-model';
 import { advanceMarqueeAutoScroll, marqueeAutoScrollDelta } from './marquee-auto-scroll';
 import { converterTriggerAction } from './project-panel-lifecycle';
-import { PROJECT_BACKGROUND_LOAD_DELAYS_MS, resolveProjectWorkspaceLifecycle, shouldReconcileProjectWatch, type ProjectWorkspaceLifecycleIdentity } from './project-workspace-lifecycle';
+import { PROJECT_BACKGROUND_LOAD_DELAYS_MS, isForegroundDirectoryRefresh, resolveProjectWorkspaceLifecycle, shouldReconcileProjectWatch, type ProjectWorkspaceLifecycleIdentity } from './project-workspace-lifecycle';
 import { applyShortcutPreviewState } from './shortcut-preview-state-model';
 import { directoryEntryToSelectOnReturn, fileEntryClickIntent } from './file-entry-interaction-model';
 import { FOLDER_ALPHABET_FILTER_THRESHOLD, FOLDER_ALPHABET_KEYS, availableFolderAlphabetKeys, folderAlphabetKey } from './folder-alphabet-filter-model';
@@ -33,10 +33,10 @@ import { projectWorkspaceClient } from '../../platform/project-workspace-client'
 import { useProjectFileSelection } from './useProjectFileSelection';
 import { defaultProjectFileSortDirection, isFolderLikeEntry, sortProjectFileEntries } from './file-entry-sort-model';
 import { ImportCompletionNotice, ToolModal } from './ProjectToolModal';
-import { ColumnResizeHandle, ComponentToolbarActions, ViewportContextMenu } from './ProjectWorkspaceLayout';
+import { ColumnResizeHandle, ComponentToolbarActions, FileListColumnResizeHandle, ViewportContextMenu } from './ProjectWorkspaceLayout';
 import { deleteMediaThumbnailPreview, findCachedMediaThumbnailPreview, forgetMediaThumbnailPreviews, getMediaThumbnailPreview, mediaThumbnailPreviewKey, rememberMediaThumbnailPreview, requestThumbnail, useThumbnailUpdates } from './useProjectThumbnail';
 import { formatShutterSpeed, isOfficeOpenXmlEntry, isPhotoshopOpenEntry, isScreenshotMainImageEntry, pickCaptureDate, pickMetadataValue, requestCaptureDateTime } from './project-workspace-media-metadata';
-import { clampNumber, fitProjectColumnWidths, readStoredBoolean, readStoredNumber, scheduleAfterProjectPaint } from './project-workspace-layout-model';
+import { DEFAULT_FILE_LIST_COLUMN_WIDTHS, FILE_LIST_COLUMN_KEYS, FILE_LIST_GRID_CHROME_WIDTH, clampNumber, fitFileListColumnWidths, fitProjectColumnWidths, readStoredBoolean, readStoredNumber, resizeFileListColumnBoundary, scheduleAfterProjectPaint, type FileListColumnBoundary, type FileListColumnWidths } from './project-workspace-layout-model';
 import { PhotoshopIcon } from './PhotoshopIcon';
 const FILE_VIRTUAL_OVERSCAN_ROWS = 10;
 const RECENT_FILES_PAGE_SIZE = 240;
@@ -74,6 +74,13 @@ const PROJECT_PANEL_TITLES: Record<MountedProjectPanel, string> = {
 };
 type ProjectBrowseMode = 'recent' | 'grid' | 'list' | 'version-tree';
 const isProjectBrowseMode = (value: unknown): value is ProjectBrowseMode => value === 'recent' || value === 'grid' || value === 'list' || value === 'version-tree';
+const FILE_LIST_COLUMN_STORAGE_KEYS: Record<keyof FileListColumnWidths, string> = {
+  name: 'photoflow:file-list-name-column-width',
+  modified: 'photoflow:file-list-modified-column-width',
+  type: 'photoflow:file-list-type-column-width',
+  size: 'photoflow:file-list-size-column-width',
+};
+const FILE_LIST_COLUMNS_CUSTOMIZED_STORAGE_KEY = 'photoflow:file-list-columns-customized-v2';
 const DEFAULT_FOLDER_GRID_ICON_SIZE = 132;
 const MIN_FOLDER_GRID_ICON_SIZE = 80;
 const MAX_FOLDER_GRID_ICON_SIZE = 360;
@@ -372,6 +379,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [foregroundDirectoryReady, setForegroundDirectoryReady] = useState(false);
   const [currentDirectoryViaExternalLink, setCurrentDirectoryViaExternalLink] = useState(false);
   const [currentExternalLinkRootPath, setCurrentExternalLinkRootPath] = useState('');
+  const [hasExternalFolderLinks, setHasExternalFolderLinks] = useState(false);
   const [virtualWindow, setVirtualWindow] = useState({ start: 0, end: 120, top: 0, bottom: 0, rowHeight: 0, columns: 1 });
   const virtualWindowRef = useRef(virtualWindow);
   virtualWindowRef.current = virtualWindow;
@@ -552,6 +560,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     preview: readStoredNumber('photoflow:preview-column-width', 340),
     metadata: readStoredNumber('photoflow:metadata-column-width', 320)
   }));
+  const [fileListColumnWidths, setFileListColumnWidths] = useState<FileListColumnWidths>(() => Object.fromEntries(FILE_LIST_COLUMN_KEYS.map(key => [
+    key,
+    readStoredNumber(FILE_LIST_COLUMN_STORAGE_KEYS[key], DEFAULT_FILE_LIST_COLUMN_WIDTHS[key]),
+  ])) as FileListColumnWidths);
+  const [fileListColumnsCustomized, setFileListColumnsCustomized] = useState(() => readStoredBoolean(FILE_LIST_COLUMNS_CUSTOMIZED_STORAGE_KEY, false));
   const [projectLayoutWidth, setProjectLayoutWidth] = useState(0);
   const [selectionBox, setSelectionBox] = useState<{ left: number; top: number; width: number; height: number } | null>(null);
   const [selectionCanvasSize, setSelectionCanvasSize] = useState({ width: 0, height: 0 });
@@ -861,6 +874,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     window.localStorage.setItem('photoflow:preview-column-width', String(Math.round(columnWidths.preview)));
     window.localStorage.setItem('photoflow:metadata-column-width', String(Math.round(columnWidths.metadata)));
   }, [columnWidths]);
+
+  useEffect(() => {
+    if (!fileListColumnsCustomized) return;
+    try {
+      for (const key of FILE_LIST_COLUMN_KEYS) window.localStorage.setItem(FILE_LIST_COLUMN_STORAGE_KEYS[key], String(Math.round(fileListColumnWidths[key])));
+      window.localStorage.setItem(FILE_LIST_COLUMNS_CUSTOMIZED_STORAGE_KEY, 'true');
+    } catch { /* Ignore unavailable storage. */ }
+  }, [fileListColumnWidths, fileListColumnsCustomized]);
 
   useEffect(() => {
     const layout = projectColumnLayoutRef.current;
@@ -1380,16 +1401,35 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const safeRelativePath = typeof relativePath === 'string' ? relativePath : currentRelativePathRef.current;
     const requestedPath = safeRelativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
     const requestedProjectPath = project.path;
+    // Callers that mutate version metadata often invalidate the root while the
+    // user is browsing a child folder. Such a refresh must not take ownership
+    // of the visible directory's loading state or invalidate its active read.
+    if (!isForegroundDirectoryRefresh(requestedPath, currentRelativePathRef.current, requestedProjectPath, projectPathRef.current)) return;
     const refreshSequence = ++refreshSequenceRef.current;
     const cachedEntries = directoryEntriesCacheRef.current.get(requestedPath);
-    if (cachedEntries && requestedPath === currentRelativePathRef.current && requestedProjectPath === projectPathRef.current) {
+    if (cachedEntries) {
       setFileEntries(cachedEntries);
       if (activeRef.current) setForegroundDirectoryReady(true);
     }
     setDirectoryLoading(!cachedEntries);
-    const contentsPromise = projectWorkspaceClient.getProjectContents(workspacePath, project.status, project.name);
-    const browseResult = await projectWorkspaceClient.browseProjectFiles(workspacePath, project.status, project.name, requestedPath, mediaCacheConfig);
-    if (refreshSequence !== refreshSequenceRef.current || requestedPath !== currentRelativePathRef.current || requestedProjectPath !== projectPathRef.current) return;
+    const contentsPromise = projectWorkspaceClient.getProjectContents(workspacePath, project.status, project.name).then(
+      result => ({ result }),
+      error => ({ error }),
+    );
+    let browseResult: Awaited<ReturnType<typeof projectWorkspaceClient.browseProjectFiles>>;
+    try {
+      browseResult = await projectWorkspaceClient.browseProjectFiles(workspacePath, project.status, project.name, requestedPath, mediaCacheConfig);
+    } catch (error) {
+      if (refreshSequence !== refreshSequenceRef.current
+        || !isForegroundDirectoryRefresh(requestedPath, currentRelativePathRef.current, requestedProjectPath, projectPathRef.current)) return;
+      setDirectoryLoading(false);
+      if (activeRef.current) setForegroundDirectoryReady(true);
+      setFileEntries([]);
+      onNotice(`读取目录失败：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    }
+    if (refreshSequence !== refreshSequenceRef.current
+      || !isForegroundDirectoryRefresh(requestedPath, currentRelativePathRef.current, requestedProjectPath, projectPathRef.current)) return;
     setDirectoryLoading(false);
     if (activeRef.current) setForegroundDirectoryReady(true);
     if (browseResult.success) {
@@ -1402,6 +1442,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       });
       directoryEntriesCacheRef.current.set(requestedPath, entries);
       setFileEntries(entries);
+      if (!requestedPath) setHasExternalFolderLinks(entries.some(entry => entry.externalLink && entry.externalLinkTargetKind !== 'file'));
     } else {
       // Never leave entries from the previous directory under a new breadcrumb.
       setCurrentDirectoryViaExternalLink(Boolean(browseResult.externalLinkOffline));
@@ -1430,8 +1471,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       }
       onNotice(`读取目录失败：${browseResult.error || '无法读取文件'}`);
     }
-    const result = await contentsPromise;
-    if (refreshSequence !== refreshSequenceRef.current || requestedPath !== currentRelativePathRef.current || requestedProjectPath !== projectPathRef.current) return;
+    const contentsOutcome = await contentsPromise;
+    if (refreshSequence !== refreshSequenceRef.current
+      || !isForegroundDirectoryRefresh(requestedPath, currentRelativePathRef.current, requestedProjectPath, projectPathRef.current)) return;
+    if ('error' in contentsOutcome) {
+      onNotice(`读取${browserContext.title}失败：${contentsOutcome.error instanceof Error ? contentsOutcome.error.message : String(contentsOutcome.error)}`);
+      return;
+    }
+    const { result } = contentsOutcome;
     if (result.success) setFolders(result.folders);
     else onNotice(`${inspirationMode ? '读取灵感库' : '读取项目'}失败：${result.error || '无法读取文件夹'}`);
   };
@@ -1515,6 +1562,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setProgressFolders([]);
     setVersionGraphEdges([]);
     setFileEntries([]);
+    setHasExternalFolderLinks(false);
     setDirectoryHistory({ back: [], forward: [] });
     setPreviewPath('');
     setPreviewTechnicalMetadata({});
@@ -1597,6 +1645,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       void projectWorkspaceClient.watchFileRoot(workspacePath, project.status, project.name, { reconcile }).then(result => {
         if (disposed) return;
         setRootWatchFailed(!result.success || result.degraded === true);
+        if (typeof result.externalFolderLinks === 'number') setHasExternalFolderLinks(result.externalFolderLinks > 0);
         if (result.reconciled) {
           watchReconcileStateRef.current = { identity: watchIdentity, externalWatchRevision, lastReconciledAt: Date.now() };
           if (projectWorkflows) void loadProgressFolders();
@@ -1616,6 +1665,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const interval = window.setInterval(() => {
       void projectWorkspaceClient.watchFileRoot(workspacePath, project.status, project.name, { reconcile: true }).then(result => {
         if (result.success && !result.degraded) setRootWatchFailed(false);
+        if (typeof result.externalFolderLinks === 'number') setHasExternalFolderLinks(result.externalFolderLinks > 0);
         if (result.reconciled) {
           watchReconcileStateRef.current = {
             identity: `${workspacePath}\0${project.status}\0${project.name}\0${project.path}`,
@@ -1810,7 +1860,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       }
       if (!result.success) {
         setRecentHasMore(false);
-        setRecentLoadError(result.error || '继续读取最近文件失败');
+        setRecentLoadError(result.error || '继续读取所有文件失败');
         return;
       }
       setSearchEntries(current => {
@@ -3571,6 +3621,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!result.success) { onNotice(`移动外链到项目失败：${result.error || '未知错误'}`, 7000); return; }
     directoryEntriesCacheRef.current.clear();
     await refresh(currentRelativePathRef.current);
+    if (!relativePaths?.length) setHasExternalFolderLinks(false);
     onNotice(result.count ? `已将 ${result.count} 个外链文件夹移动到项目内` : '没有可移动的 PhotoFlow 外链文件夹');
   };
   const relinkExternalFolder = async (relativePath: string) => {
@@ -4466,6 +4517,23 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     return () => window.removeEventListener('keydown', switchPreviewMedia);
   }, [previewPaneOpen, previewEntry?.relativePath, previewEntry?.kind, navigatePreviewMedia]);
   const displayedColumnWidths = fitProjectColumnWidths(columnWidths, projectLayoutWidth, previewPaneOpen, metadataPaneOpen);
+  const fileListTrackWidth = Math.max(0, displayedColumnWidths.files - FILE_SURFACE_HORIZONTAL_PADDING * 2 - FILE_LIST_GRID_CHROME_WIDTH);
+  const displayedFileListColumnWidths = fileListColumnsCustomized
+    ? fileListColumnWidths
+    : fitFileListColumnWidths(DEFAULT_FILE_LIST_COLUMN_WIDTHS, fileListTrackWidth);
+  const fileListColumnsWidth = FILE_LIST_COLUMN_KEYS.reduce((total, key) => total + displayedFileListColumnWidths[key], FILE_LIST_GRID_CHROME_WIDTH);
+  const fileListViewportWidth = Math.max(0, displayedColumnWidths.files - FILE_SURFACE_HORIZONTAL_PADDING * 2);
+  const fileListGridStyle = {
+    '--file-list-name-width': `${displayedFileListColumnWidths.name}px`,
+    '--file-list-modified-width': `${displayedFileListColumnWidths.modified}px`,
+    '--file-list-type-width': `${displayedFileListColumnWidths.type}px`,
+    '--file-list-size-width': `${displayedFileListColumnWidths.size}px`,
+    width: Math.max(fileListColumnsWidth, fileListViewportWidth),
+  } as React.CSSProperties;
+  const resizeFileListBoundary = (boundary: FileListColumnBoundary, deltaX: number) => {
+    setFileListColumnsCustomized(true);
+    setFileListColumnWidths(resizeFileListColumnBoundary(displayedFileListColumnWidths, boundary, deltaX));
+  };
   const visiblePreferredTotal = columnWidths.files + (previewPaneOpen ? columnWidths.preview : 0) + (metadataPaneOpen ? columnWidths.metadata : 0);
   const visibleAvailableWidth = Math.max(1, projectLayoutWidth - Number(previewPaneOpen) - Number(metadataPaneOpen));
   const columnCompressionScale = Math.min(1, visibleAvailableWidth / Math.max(1, visiblePreferredTotal));
@@ -5216,7 +5284,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <div className="my-1 border-t border-slate-100"/>
         <button disabled={!clipboardHasFiles} title={clipboardHasFiles ? `粘贴到“${surfaceMenu.targetLabel}”` : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void runFileOperation('paste', undefined, [], target); }}><ClipboardPaste size={14}/>粘贴</button>
         <button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void copyCurrentDirectoryPath(target); }}><FileText size={14}/>复制此文件夹地址</button>
-        <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); void materializeExternalLinks(); }}><FolderInput size={14}/>移动所有外链文件夹到项目内</button>
+        {hasExternalFolderLinks && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); void materializeExternalLinks(); }}><FolderInput size={14}/>移动所有外链文件夹到项目内</button>}
         {projectWorkflows && <><div className="my-1 border-t border-slate-100"/><button className="project-menu-item project-menu-danger" onClick={() => { setSurfaceMenu(null); setPanel('trash'); }}><Trash2 size={14}/>将项目移入回收站</button></>}
       </ViewportContextMenu>, document.body)}
       <div ref={projectColumnLayoutRef} className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
@@ -5304,8 +5372,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             </div>
           </div>}
         </div>
+        <span aria-hidden className="toolbar-divider"/>
         <div className="ml-auto flex shrink-0 items-center gap-1 pl-3">
-          <button type="button" onClick={() => { setSearchQuery(''); selectFolderBrowseMode('recent'); }} title="最近文件（包含子文件夹和文件夹快捷方式）" aria-label="最近文件" aria-pressed={browseMode === 'recent'} className={`rounded-md p-1.5 ${browseMode === 'recent' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><GalleryVerticalEnd size={17}/></button>
+          <button type="button" onClick={() => { setSearchQuery(''); selectFolderBrowseMode('recent'); }} title="所有文件（包含子文件夹和文件夹快捷方式）" aria-label="所有文件" aria-pressed={browseMode === 'recent'} className={`rounded-md p-1.5 ${browseMode === 'recent' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><GalleryVerticalEnd size={17}/></button>
           <button type="button" onClick={() => selectFolderBrowseMode('grid')} title="图标模式" aria-label="图标模式" aria-pressed={browseMode === 'grid'} className={`rounded-md p-1.5 ${browseMode === 'grid' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><Grid2X2 size={17}/></button>
           <button type="button" onClick={() => selectFolderBrowseMode('list')} title="列表模式" aria-label="列表模式" aria-pressed={browseMode === 'list'} className={`rounded-md p-1.5 ${browseMode === 'list' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><LayoutList size={17}/></button>
           {projectVersionTreeAvailable && <button type="button" onClick={showVersionTree} title="项目版本树" aria-label="项目版本树" aria-pressed={browseMode === 'version-tree'} className={`rounded-md p-1.5 ${browseMode === 'version-tree' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><GitBranch size={17}/></button>}
@@ -5614,22 +5683,27 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             onCanvasControllerChange={setVersionTreeCanvasController}
           /></>}
         </div> : <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={handleFileSurfacePointerDownCapture} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING, paddingInline: FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-[220px] flex-1 select-none outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
-          {groupedResultsActive && (groupedLoading ? <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>{projectRootFilterActive ? '正在分页读取全部文件…' : searchQuery.trim() ? `正在搜索${recursiveScopeLabel}…` : '正在读取最近文件…'}</p> : groupedError ? <p className="py-8 text-center text-sm text-red-600">读取文件失败：{groupedError}</p> : searchResultGroups.length ? <div className="pb-4">
-            <p className="px-1 text-xs text-slate-500">{projectRootFilterActive ? `已分页加载${browserContext.title}中的 ${displayedFileEntries.length} 个文件` : searchQuery.trim() ? `在${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : recursiveScopeLabel}中找到 ${displayedFileEntries.length} 个文件` : `已加载${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : recursiveScopeLabel}最近修改的 ${displayedFileEntries.length} 个文件`}</p>
+          {groupedResultsActive && (groupedLoading ? <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>{projectRootFilterActive ? '正在分页读取全部文件…' : searchQuery.trim() ? `正在搜索${recursiveScopeLabel}…` : '正在读取所有文件…'}</p> : groupedError ? <p className="py-8 text-center text-sm text-red-600">读取文件失败：{groupedError}</p> : searchResultGroups.length ? <div className="pb-4">
+            <p className="px-1 text-xs text-slate-500">{projectRootFilterActive ? `已分页加载${browserContext.title}中的 ${displayedFileEntries.length} 个文件` : searchQuery.trim() ? `在${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : recursiveScopeLabel}中找到 ${displayedFileEntries.length} 个文件` : `已加载${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : recursiveScopeLabel}中的 ${displayedFileEntries.length} 个文件`}</p>
             {searchResultGroups.map(([folderPath, entries], groupIndex) => { const viaShortcut = entries.some(entry => entry.viaShortcut); const viaExternalLink = entries.some(entry => entry.viaExternalLink); const readOnlyShortcut = viaShortcut && !viaExternalLink; const folderLabel = viaShortcut ? folderPath.replace(/\.lnk(?=\/|$)/gi, '') : folderPath; const targetLabel = folderLabel || project.name; const normalizedFolderPath = normalizeProjectRelativePath(folderPath); return <section key={folderPath || '__root__'} data-recursive-folder-path={normalizedFolderPath} data-recursive-folder-label={targetLabel} data-recursive-folder-readonly={readOnlyShortcut ? 'true' : 'false'} onContextMenu={event => { if (readOnlyShortcut) { event.preventDefault(); event.stopPropagation(); onNotice('快捷方式指向的外部文件夹是只读浏览区域'); } else openSurfaceMenu(event, normalizedFolderPath, targetLabel); }} onDragOver={event => handleRecursiveFolderDragOver(event, normalizedFolderPath, readOnlyShortcut)} onDragLeave={event => handleRecursiveFolderDragLeave(event, normalizedFolderPath)} onDrop={event => void handleRecursiveFolderDrop(event, normalizedFolderPath, targetLabel, readOnlyShortcut)} className={`${groupIndex ? 'mt-5 border-t border-slate-200 pt-4' : 'pt-3'} rounded-lg transition ${recursiveDropTargetPath === normalizedFolderPath ? 'bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}><header className="mb-2 flex min-w-0 items-center gap-2 px-1"><Folder size={16} className="shrink-0 text-blue-500"/>{readOnlyShortcut ? <span title={`${folderLabel}（快捷方式）`} className="min-w-0 truncate text-sm font-bold text-slate-700">{folderLabel || '快捷方式'} <span className="font-normal text-slate-400">（快捷方式）</span></span> : <button type="button" onClick={() => { setSearchQuery(''); navigateToDirectory(folderPath); }} title={`打开 ${folderPath || project.name}`} className="min-w-0 truncate text-sm font-bold text-slate-700 hover:text-blue-600">{folderPath || '项目根目录'}</button>}<span className="shrink-0 text-xs text-slate-400">{entries.length} 个</span></header><div className="grid w-full content-start" style={{ gap: FILE_GRID_GAP, gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{entries.map(entry => <div key={`${entry.relativePath}|${entry.path}`} role="button" tabIndex={0} draggable={!entry.viaShortcut || entry.viaExternalLink} onDragStart={event => startEntryDrag(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} onClick={event => handleEntryClick(event, entry)} onDoubleClick={event => handleEntryDoubleClick(event, entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.relativePath} className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50 ring-1 ring-blue-400' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''}`}><span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span><div className="relative flex aspect-square items-center justify-center">{renderEntryIcon(entry, true)}</div><p className="mt-2 truncate text-xs font-medium text-slate-700">{getEntryDisplayName(entry)}</p><p className="mt-0.5 text-[10px] uppercase text-slate-400">{getEntryTypeLabel(entry)}</p></div>)}</div></section>; })}
             {(!searchQuery.trim() || projectRootFilterActive) && <p className={`py-6 text-center text-xs ${groupedLoadError ? 'text-red-500' : 'text-slate-400'}`}>{groupedLoadError ? `继续加载失败：${groupedLoadError}` : groupedLoadingMore ? <><Loader2 size={14} className="mr-1.5 inline animate-spin"/>正在继续加载…</> : groupedHasMore ? '继续向下滚动以加载更多文件' : '已显示当前范围内的全部文件'}</p>}
-          </div> : <p className="py-12 text-center text-sm text-slate-400">{projectRootFilterActive ? `${browserContext.title}中没有符合筛选条件的${filteredFileTypeLabel}。` : searchQuery.trim() ? `没有在${recursiveScopeLabel}中找到包含“${searchQuery}”且符合筛选条件的文件。` : `当前范围内没有可显示的最近${filteredFileTypeLabel}。`}</p>)}
+          </div> : <p className="py-12 text-center text-sm text-slate-400">{projectRootFilterActive ? `${browserContext.title}中没有符合筛选条件的${filteredFileTypeLabel}。` : searchQuery.trim() ? `没有在${recursiveScopeLabel}中找到包含“${searchQuery}”且符合筛选条件的文件。` : `当前范围内没有可显示的${filteredFileTypeLabel}。`}</p>)}
           {!groupedResultsActive && searchQuery.trim() && searchLoading && <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>正在搜索{recursiveScopeLabel}…</p>}
           {!groupedResultsActive && searchQuery.trim() && searchError && <p className="py-8 text-center text-sm text-red-600">搜索失败：{searchError}</p>}
           <div className={groupedResultsActive || Boolean(searchQuery.trim() && (searchLoading || searchError)) ? 'hidden' : undefined}>
-          {directoryLoading ? <div role="status" aria-live="polite" className="flex min-h-[220px] items-center justify-center border-y border-slate-200 text-sm text-slate-500"><Loader2 size={18} className="mr-2 animate-spin"/>加载中…</div> : displayedFileEntries.length ? viewMode === 'list' ? <div className="min-w-[620px] border-y border-slate-200 text-sm">
-            <div className="file-list-row file-list-heading text-xs font-medium text-slate-500"><span>名称</span><span>修改日期</span><span>类型</span><span>大小</span></div>
+          {directoryLoading ? <div role="status" aria-live="polite" className="flex min-h-[220px] items-center justify-center border-y border-slate-200 text-sm text-slate-500"><Loader2 size={18} className="mr-2 animate-spin"/>加载中…</div> : displayedFileEntries.length ? viewMode === 'list' ? <div className="file-list-table border-y border-slate-200 text-sm" style={fileListGridStyle}>
+            <div className="file-list-row file-list-heading text-xs font-medium text-slate-500">
+              <span className="file-list-heading-cell"><span className="file-list-heading-label">名称</span><FileListColumnResizeHandle label="调整名称列宽度" onDrag={deltaX => resizeFileListBoundary(0, deltaX)}/></span>
+              <span className="file-list-heading-cell"><span className="file-list-heading-label">修改日期</span><FileListColumnResizeHandle label="调整修改日期列宽度" onDrag={deltaX => resizeFileListBoundary(1, deltaX)}/></span>
+              <span className="file-list-heading-cell"><span className="file-list-heading-label">类型</span><FileListColumnResizeHandle label="调整类型列宽度" onDrag={deltaX => resizeFileListBoundary(2, deltaX)}/></span>
+              <span className="file-list-heading-cell"><span className="file-list-heading-label">大小</span><FileListColumnResizeHandle last label="调整大小列宽度" onDrag={deltaX => resizeFileListBoundary(3, deltaX)}/></span>
+            </div>
             {virtualWindow.top > 0 && <div aria-hidden style={{ height: virtualWindow.top }} />}
             {renderedFileEntries.map(entry => <div role="button" tabIndex={0} draggable={inlineRenamePath !== entry.relativePath} onDragStart={event => startEntryDrag(event, entry)} onDragOver={event => handleEntryDragOver(event, entry)} onDragLeave={event => handleEntryDragLeave(event, entry)} onDrop={event => void handleEntryDrop(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} key={entry.path} onMouseEnter={() => prefetchDirectory(entry)} onClick={event => handleEntryClick(event, entry)} onDoubleClick={event => handleEntryDoubleClick(event, entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.name} className={`file-list-row group w-full cursor-default border-t border-slate-200 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-inset ring-blue-500' : ''}`}>
-              <span className="flex min-w-0 items-center gap-2.5"><span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-select-box ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-transparent'} flex h-4 w-4 shrink-0 items-center justify-center rounded border`}><CheckSquare size={12}/></span><span className="relative flex h-9 w-11 shrink-0 items-center justify-center overflow-hidden">{renderEntryIcon(entry)}</span>{renderEntryName(entry)}</span>
-              <span className="text-slate-500">{entry.updatedAt ? new Date(entry.updatedAt).toLocaleString() : '…'}</span>
-              <span className="uppercase text-slate-500">{getEntryTypeLabel(entry)}</span>
-              <span className="text-slate-500">{entry.kind === 'folder' ? '' : entry.size >= 0 ? formatFileSize(entry.size) : '…'}</span>
+              <span className="flex min-w-0 items-center gap-2.5 overflow-hidden"><span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-select-box ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-transparent'} flex h-4 w-4 shrink-0 items-center justify-center rounded border`}><CheckSquare size={12}/></span><span className="relative flex h-9 w-11 shrink-0 items-center justify-center overflow-hidden">{renderEntryIcon(entry)}</span>{renderEntryName(entry)}</span>
+              <span className="min-w-0 truncate text-slate-500">{entry.updatedAt ? new Date(entry.updatedAt).toLocaleString() : '…'}</span>
+              <span className="min-w-0 truncate uppercase text-slate-500">{getEntryTypeLabel(entry)}</span>
+              <span className="min-w-0 truncate text-slate-500">{entry.kind === 'folder' ? '' : entry.size >= 0 ? formatFileSize(entry.size) : '…'}</span>
             </div>)}
             {virtualWindow.bottom > 0 && <div aria-hidden style={{ height: virtualWindow.bottom }} />}
           </div> : <><div aria-hidden style={{ height: virtualWindow.top }}/><div className="grid w-full content-start" style={{ gap: FILE_GRID_GAP, gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{renderedFileEntries.map(entry => <div role="button" tabIndex={0} draggable={inlineRenamePath !== entry.relativePath} onDragStart={event => startEntryDrag(event, entry)} onDragOver={event => handleEntryDragOver(event, entry)} onDragLeave={event => handleEntryDragLeave(event, entry)} onDrop={event => void handleEntryDrop(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} key={entry.path} onMouseEnter={() => prefetchDirectory(entry)} onClick={event => handleEntryClick(event, entry)} onDoubleClick={event => handleEntryDoubleClick(event, entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.name} className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) || previewPath === entry.relativePath ? 'bg-blue-50 ring-1 ring-blue-400' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-blue-500' : ''}`}><span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span><div className="relative flex aspect-square items-center justify-center">{renderEntryIcon(entry, true)}</div>{renderEntryName(entry, true)}<p className="mt-0.5 text-[10px] uppercase text-slate-400">{getEntryTypeLabel(entry)}</p></div>)}</div><div aria-hidden style={{ height: virtualWindow.bottom }}/></> : <p className="border-y border-slate-200 py-12 text-center text-sm text-slate-400">{searchQuery ? `没有找到包含“${searchQuery}”且符合筛选条件的文件。` : `当前文件夹没有${filteredFileTypeLabel}。`}</p>}

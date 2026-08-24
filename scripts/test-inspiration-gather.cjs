@@ -131,6 +131,9 @@ registerWorkspaceIpc({
     const managedExternalTarget = path.join(sourceRoot, '参考目录');
     const managedExternalShortcut = path.join(targetRoot, '外部素材.lnk');
     projectVirtualPaths.createManagedExternalLink(managedExternalShortcut, { target: managedExternalTarget, kind: 'folder', displayName: '参考目录' });
+    const managedExternalWatch = await watchFileRoot({}, temporaryRoot, '策划中', '项目', { reconcile: false });
+    assert.strictEqual(managedExternalWatch.externalFolderLinks, 1, 'project watchers must report managed external folders for conditional project actions');
+    await unwatchFileRoot({}, temporaryRoot, '策划中', '项目');
     const projectRootBrowse = await browseFiles({}, temporaryRoot, '策划中', '项目');
     const managedExternalEntry = projectRootBrowse.entries.find(entry => entry.name === '外部素材.lnk');
     assert.strictEqual(managedExternalEntry?.externalLink, true, 'managed folder links must be identified as external links in the project root');

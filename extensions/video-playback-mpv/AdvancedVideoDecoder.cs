@@ -163,6 +163,12 @@ namespace PhotoFlow.AdvancedVideoDecoder
             SetOption("demuxer-max-bytes", "256MiB");
             SetOption("keep-open", "yes");
             SetOption("idle", "yes");
+            // Subtitle playback is temporarily disabled. DJI and similar camera files
+            // can contain telemetry subtitle tracks, and mpv may also discover a
+            // same-name sidecar subtitle automatically.
+            SetOption("sub-auto", "no");
+            SetOption("sid", "no");
+            SetOption("sub-visibility", "no");
             SetOptionalOption("osc", "no");
             SetOption("input-default-bindings", "no");
             SetOption("input-cursor", "no");

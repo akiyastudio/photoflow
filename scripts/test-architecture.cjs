@@ -32,6 +32,13 @@ const ffmpegTranscode = read('python/ffmpeg_transcode.py');
 const cutVideo = read('python/cut_video.py');
 const videoTrimCommitService = read('electron/services/video-trim-commit-service.cjs');
 const componentBuilder = read('scripts/build-components.cjs');
+const pythonEnvironmentSetup = read('scripts/setup-python.cjs');
+const pythonEnvironmentVerifier = read('scripts/verify-python-environment.py');
+const teamRetouchSetup = read('scripts/setup-team-retouch.cjs');
+const rootRequirements = read('requirements.txt');
+const modelExportRequirements = read('requirements-model-export.txt');
+const projectChecksWorkflow = read('.github/workflows/project-checks.yml');
+const pythonEnvironmentService = read('electron/services/python-environment-service.cjs');
 const rawDecoder = read('python/raw_decoder.py');
 assert(!componentBuilder.includes("'research-tools':") && !componentBuilder.includes("'office-media-extractor':") && !fs.existsSync(path.join(root, 'extensions', 'research-tools')) && !fs.existsSync(path.join(root, 'extensions', 'office-media-extractor')), 'built-in research and Office workers must not retain retired optional-component packaging');
 assert(toolViews.includes('const dateStr = `${month}.${day}`') && toolViews.includes('该月份中不存在这个日期') && toolViews.includes('min="1" max="12"'), 'birthday editor must save canonical dates and reject invalid or negative values');
@@ -214,6 +221,24 @@ const nativeRecycleBinService = read('electron/native/RecycleBinService.cs');
 assert(recycleBinService.includes("['probe-many']") && nativeRecycleBinService.includes('ProbeMany(ReadValues(5000))'), 'deleted-project maintenance must batch recycle-bin probes into one native helper process');
 assert(systemIpc.includes('componentStatusCache.integrityTokens') && systemIpc.includes('seedIntegrityToken') && systemIpc.includes('lastDetailedAttemptAt') && systemIpc.includes('policy.shouldProbeRuntime') && systemIpc.includes('forceRuntimeProbe') && systemIpc.includes('componentStatusForceQueued ||= force'), 'component status refresh must reuse integrity metadata while runtime probes honor TTL, failure backoff, and queued manual refresh');
 const packageJson = JSON.parse(read('package.json'));
+assert(packageJson.scripts['setup:python'] === 'node scripts/setup-python.cjs'
+  && packageJson.scripts['check:python'] === 'node scripts/check-python-environment.cjs'
+  && pythonEnvironmentSetup.includes("'-r', 'requirements.txt'")
+  && teamRetouchSetup.includes('ensurePythonEnvironment()')
+  && projectChecksWorkflow.includes('- run: npm run setup:python'),
+'development, component setup, and CI must all synchronize the shared Python environment');
+assert(rootRequirements.includes('pi-heif==1.4.0')
+  && rootRequirements.includes('Send2Trash==1.8.3')
+  && !rootRequirements.includes('torch==')
+  && modelExportRequirements.includes('torch==2.9.1+cu126')
+  && pythonEnvironmentVerifier.includes('verify_worker_imports()'),
+'runtime dependencies must be audited while the CUDA-only model-export stack remains optional');
+assert(main.includes('createDevelopmentPythonResolver({ projectRoot })')
+  && pythonEnvironmentService.includes("verify-python-environment.py")
+  && pythonEnvironmentService.includes("'--quick'")
+  && !pythonBuild.includes("existsSync(venvPython) ? venvPython : 'python'")
+  && !componentBuilder.includes("fs.existsSync(venvPython) ? venvPython : 'python'"),
+'development and build workers must fail clearly instead of falling back to an unrelated system Python');
 assert(main.includes("'thumbnail_image', 'video_preview', 'workspace_db'") && pythonBuild.includes("'--hidden-import', 'thumbnail_image'") && pythonBuild.includes("'--hidden-import', 'video_preview', '--hidden-import', 'workspace_db'") && !pythonBuild.includes("'--name', 'thumbnail-image-worker'") && !pythonBuild.includes("'--name', 'workspace-db-worker'") && !JSON.stringify(packageJson.build.win.extraResources).includes('thumbnail-image-worker') && !JSON.stringify(packageJson.build.win.extraResources).includes('workspace-db-worker'), 'lightweight Python services must share the tools runtime instead of duplicating PyInstaller runtimes');
 assert(pythonBuild.includes("const sharedWorkerName = 'PhotoFlowImportWorker'") && main.includes("'python', 'PhotoFlowImportWorker', `PhotoFlowImportWorker${exeSuffix}`") && JSON.stringify(packageJson.build.win.extraResources).includes('artifacts/python/PhotoFlowImportWorker') && JSON.stringify(packageJson.build.mac.extraResources).includes('artifacts/python/PhotoFlowImportWorker') && !JSON.stringify(packageJson.build).includes('artifacts/python/tools'), 'the shared Python worker must use its explicit PhotoFlowImportWorker executable and packaged resource name');
 assert(['react', 'react-dom', 'lucide-react'].every(dependency => !packageJson.dependencies[dependency] && packageJson.devDependencies[dependency]), 'renderer-only dependencies must remain build-time dependencies instead of being duplicated in app.asar');
@@ -482,7 +507,7 @@ assert(projectWorkspace.includes('fileMenuEntries.map(entry => entry.path)') && 
 assert(!settingsFeature.includes("saving ? '保存中…' : '保存设置'") && settingsFeature.includes("onNotice('已更改设置')"), 'settings must save changes live and report the change through the shared toast');
 assert(settingsFeature.includes('pendingSaveRef') && settingsFeature.includes('while (pendingSaveRef.current)'), 'rapid live setting changes must be serialized and coalesced safely');
 assert(settingsFeature.includes('恢复默认设置') && settingsFeature.includes('getDefaultSettings') && app.includes('DEFAULT_CONFIG(userPath'), 'general settings must expose restoration from the application default configuration');
-assert(projectWorkspace.includes('GalleryVerticalEnd') && projectWorkspace.includes("type ProjectBrowseMode = 'recent' | 'grid' | 'list'") && projectWorkspace.includes('最近文件（包含子文件夹和文件夹快捷方式）') && projectWorkspace.includes('listRecentProjectFiles'), 'the shared file browser must expose recent, grid, and list as mutually exclusive browsing modes');
+assert(projectWorkspace.includes('GalleryVerticalEnd') && projectWorkspace.includes("type ProjectBrowseMode = 'recent' | 'grid' | 'list'") && projectWorkspace.includes('所有文件（包含子文件夹和文件夹快捷方式）') && projectWorkspace.includes('listRecentProjectFiles'), 'the shared file browser must expose all-files, grid, and list as mutually exclusive browsing modes');
 assert(projectWorkspace.includes("type ProjectFileFilter = 'all' | 'media' | 'image' | 'video'") && projectWorkspace.includes("if (fileFilter === 'image')") && projectWorkspace.includes("if (fileFilter === 'video')") && projectWorkspace.includes("{ value: 'image', label: '图片' }") && projectWorkspace.includes("{ value: 'video', label: '视频' }"), 'the shared file browser must filter all media, images including RAW, or videos independently of the search query');
 assert(types.includes("export type ProjectFilterScope = 'current-folder' | 'project-root'") && projectWorkspace.includes("useState<ProjectFilterScope>('current-folder')"), 'filter scope must be page-local and default to direct children of the current folder');
 assert(browserContext.includes("rootFilterLabel: '当前项目'") && browserContext.includes("rootFilterLabel: '全部文件'") && projectWorkspace.includes('browserContext.rootFilterLabel'), 'filter scope labels must come from the shared browser context instead of page-mode branches');

@@ -9613,8 +9613,15 @@ def mutate(root: str, database: str, action: str, payload: dict):
         project_path = os.path.join(os.path.abspath(root), payload["relativePath"])
         retired = db.execute("SELECT id FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],)).fetchone()
         if retired is not None:
-            delete_team_project_rows(db, retired["id"])
-            db.execute("DELETE FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],))
+            # Most project creation only needs the catalog. Reusing a retired
+            # name also removes detached media/team ownership, so reopen with
+            # those stores attached only for this conflict path.
+            db.close()
+            db = connect(root, database, include_team=True)
+            retired = db.execute("SELECT id FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],)).fetchone()
+            if retired is not None:
+                delete_team_project_rows(db, retired["id"])
+                db.execute("DELETE FROM projects WHERE is_deleted=1 AND name=? COLLATE NOCASE", (payload["name"],))
         db.execute(
             "INSERT INTO projects(id,name,status,relative_path,filesystem_id,created_at,updated_at,extra_json) VALUES(?,?,?,?,?,?,?,?)",
             (str(uuid.uuid4()), payload["name"], payload["status"], payload["relativePath"], directory_identity(project_path), now, now, json.dumps(payload.get("extra") or {}, ensure_ascii=False)),

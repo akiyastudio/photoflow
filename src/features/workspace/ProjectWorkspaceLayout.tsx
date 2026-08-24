@@ -69,3 +69,34 @@ export const ColumnResizeHandle = ({ onDrag, label }: { onDrag: (deltaX: number)
   };
   return <div role="separator" aria-orientation="vertical" aria-label={label} tabIndex={0} onPointerDown={onPointerDown} onKeyDown={onKeyDown} className="column-resize-handle"/>;
 };
+
+export const FileListColumnResizeHandle = ({ onDrag, label, last = false }: { onDrag: (deltaX: number) => void; label: string; last?: boolean }) => {
+  const onPointerDown = (event: React.PointerEvent<HTMLButtonElement>) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const startX = event.clientX;
+    const previousCursor = document.body.style.cursor;
+    const previousUserSelect = document.body.style.userSelect;
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+    const move = (moveEvent: PointerEvent) => onDrag(moveEvent.clientX - startX);
+    const finish = () => {
+      document.body.style.cursor = previousCursor;
+      document.body.style.userSelect = previousUserSelect;
+      window.removeEventListener('pointermove', move);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+    };
+    window.addEventListener('pointermove', move);
+    window.addEventListener('pointerup', finish);
+    window.addEventListener('pointercancel', finish);
+  };
+  const onKeyDown = (event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;
+    event.preventDefault();
+    event.stopPropagation();
+    onDrag(event.key === 'ArrowLeft' ? -16 : 16);
+  };
+  return <button type="button" role="separator" aria-orientation="vertical" aria-label={label} title={label} onPointerDown={onPointerDown} onKeyDown={onKeyDown} className={`file-list-column-resize-handle ${last ? 'is-last' : ''}`}/>;
+};

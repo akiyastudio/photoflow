@@ -29,8 +29,18 @@ def main():
             (now, now),
         )
         db.execute(
+            """INSERT INTO projects(id,name,status,relative_path,is_deleted,created_at,updated_at,extra_json)
+               VALUES('project-recreate','待重建项目','后期中','待重建项目',1,?,?, '{}')""",
+            (now, now),
+        )
+        db.execute(
             """INSERT INTO team_person_identities(id,project_id,name,color,created_at,updated_at)
                VALUES('identity-1','project-1','人物 1','#2563eb',?,?)""",
+            (now, now),
+        )
+        db.execute(
+            """INSERT INTO team_person_identities(id,project_id,name,color,created_at,updated_at)
+               VALUES('identity-recreate','project-recreate','待清理人物','#2563eb',?,?)""",
             (now, now),
         )
         db.commit()
@@ -54,6 +64,22 @@ def main():
             ).fetchone()[0] == "人物 1"
         finally:
             raw_team.close()
+
+        recreated_project = workspace_db.mutate(str(workspace), str(database), "add", {
+            "name": "待重建项目", "status": "策划中", "relativePath": "待重建项目", "extra": {},
+        })
+        assert recreated_project["success"] is True
+        recreated_check = workspace_db.connect(str(workspace), str(database), include_team=True)
+        try:
+            replacement = recreated_check.execute(
+                "SELECT id,is_deleted FROM projects WHERE name='待重建项目'"
+            ).fetchone()
+            assert replacement is not None and replacement["id"] != "project-recreate" and not replacement["is_deleted"]
+            assert recreated_check.execute(
+                "SELECT 1 FROM team_person_identities WHERE id='identity-recreate'"
+            ).fetchone() is None, "recreating a retired project name must clean its detached team rows"
+        finally:
+            recreated_check.close()
 
         # Progress-only workers deliberately do not attach the team store. A
         # canonical team-workspace directory must still be discoverable without

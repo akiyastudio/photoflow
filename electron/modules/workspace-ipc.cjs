@@ -1076,6 +1076,7 @@ const registerWorkspaceIpc = context => {
     }
     watchedProjectFileRoots.set(key, acquired);
     const offlineLinks = managedLinks.filter(link => link.offline).length;
+    const externalFolderLinks = managedLinks.filter(link => link.externalTargetKind === 'folder').length;
     const mainWatched = acquired.includes(bindings[0]);
     let degraded = !mainWatched || failedRoots.length > 0 || offlineLinks > 0;
     let reconciliationFailed = false;
@@ -1096,7 +1097,7 @@ const registerWorkspaceIpc = context => {
     watchedProjectFileRootHealth.set(key, { degraded });
     return {
       success: mainWatched, root: publishRoot, requiredRoots: bindings.length, watchedRoots: acquired.length,
-      failedRoots, offlineLinks, degraded, reconciled, reconciliationFailed,
+      failedRoots, offlineLinks, externalFolderLinks, degraded, reconciled, reconciliationFailed,
       ...(!mainWatched ? { error: '无法监听项目文件夹' } : {}),
     };
   };

@@ -61,6 +61,7 @@ const { findPythonJsonFailureMessage, parsePythonJsonMessages } = require('./ser
 const { createMediaRatingService } = require('./services/media-rating-service.cjs');
 const { createRawOrientationService } = require('./services/raw-orientation-service.cjs');
 const { createImageThumbnailRuntime } = require('./services/image-thumbnail-runtime.cjs');
+const { createDevelopmentPythonResolver } = require('./services/python-environment-service.cjs');
 const { createVersionService } = require('./domains/versioning/public.cjs');
 const { createVersionStaleDetectionService } = require('./services/version-stale-detection-service.cjs');
 const { createMediaTrackingScanScheduler } = require('./services/media-tracking-scan-scheduler.cjs');
@@ -608,13 +609,7 @@ const loadMainWindowRenderer = () => {
 const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'operations_db', 'team_retouch_db', 'backup_db']);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
 
-const getDevelopmentPython = () => {
-  const isWin = process.platform === 'win32';
-  const venvPython = isWin
-    ? path.join(projectRoot, '.venv', 'Scripts', 'python.exe')
-    : path.join(projectRoot, '.venv', 'bin', 'python');
-  return fs.existsSync(venvPython) ? venvPython : 'python';
-};
+const getDevelopmentPython = createDevelopmentPythonResolver({ projectRoot });
 let pluginService;
 
 const getRunConfig = (scriptName, args) => {

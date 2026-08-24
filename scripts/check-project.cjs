@@ -5,6 +5,7 @@ if (!npmCli) throw new Error('npm_execpath is unavailable; run this check throug
 const testsOnly = process.argv.includes('--tests-only');
 
 const steps = [
+  ['Python environment', ['run', 'check:python']],
   ...(!testsOnly ? [
     ['lint', ['run', 'lint']],
     ['typecheck', ['run', 'typecheck']],

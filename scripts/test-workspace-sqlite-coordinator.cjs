@@ -48,6 +48,8 @@ const run = async () => {
   assert.equal(policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'maintenance_run' }).mode, 'exclusive');
   const multi = policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'media_sync_apply_batch' });
   assert.equal(new Set(multi.databases.map(item => normalizeDatabasePath(item.path))).size, 3, 'media operations acquire catalog, media, and versioning databases together');
+  const recreateProject = policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'add' });
+  assert.equal(new Set(recreateProject.databases.map(item => normalizeDatabasePath(item.path))).size, 4, 'project creation reserves catalog, media, versioning, and team stores for retired-name cleanup');
 
   const retryCoordinator = new WorkspaceSqliteCoordinator();
   const attemptEvents = [];

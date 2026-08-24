@@ -1,13 +1,13 @@
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { ensurePythonEnvironment } = require('./setup-python.cjs');
 
 const root = path.join(__dirname, '..');
 const venvRoot = path.join(root, '.venv');
 const venvPython = process.platform === 'win32'
   ? path.join(venvRoot, 'Scripts', 'python.exe')
   : path.join(venvRoot, 'bin', 'python');
-const systemPython = process.platform === 'win32' ? 'python' : 'python3';
 const modelRoot = path.join(root, 'extensions', 'team-retouch', 'models');
 const requiredModels = [
   [path.join(modelRoot, 'rtmdet-ins_m_640x640.onnx'), 100 * 1024 * 1024],
@@ -27,7 +27,7 @@ try {
   for (const [modelPath, minBytes] of requiredModels) {
     if (!fs.existsSync(modelPath) || fs.statSync(modelPath).size < minBytes) throw new Error(`Team-retouch model is missing or incomplete: ${modelPath}`);
   }
-  if (!fs.existsSync(venvPython)) run(systemPython, ['-m', 'venv', venvRoot]);
+  ensurePythonEnvironment();
   // OpenCV packages share the same cv2 directory. Uninstall every variant
   // before reinstalling the one supported build so stale DLLs cannot leak into
   // either component package.

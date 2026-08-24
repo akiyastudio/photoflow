@@ -27,11 +27,14 @@ class WorkspaceDatabaseOperationPolicy {
     if (scriptName === 'operations_db.py') {
       if (action === 'init' && payload.legacyDatabase) databases.push({ path: payload.legacyDatabase, mode: 'read' });
     } else if (scriptName === 'workspace_db.py') {
+      const needsRetiredProjectCleanup = action === 'add';
       const needsDomains = action === 'maintenance_run' || VERSIONING_ONLY_ACTIONS.has(action)
         || /^(media_|progress_|batch_|tracking_|version_)/.test(action)
-        || ['deleted_projects_list', 'deleted_project_cleanup_plan', 'purge_deleted_project', 'purge_missing_project'].includes(action);
+        || ['deleted_projects_list', 'deleted_project_cleanup_plan', 'purge_deleted_project', 'purge_missing_project'].includes(action)
+        || needsRetiredProjectCleanup;
       if (needsDomains) databases.push({ path: domainDatabasePath(database, 'versioning'), mode });
       if (needsDomains && !VERSIONING_ONLY_ACTIONS.has(action)) databases.push({ path: domainDatabasePath(database, 'media'), mode });
+      if (needsRetiredProjectCleanup) databases.push({ path: domainDatabasePath(database, 'team-retouch'), mode });
     }
 
     return { databases, idempotent: IDEMPOTENT_ACTIONS.has(action), mode };

@@ -192,7 +192,7 @@ try {
   const compiledProjectWorkspaceLifecycle = ts.transpileModule(projectWorkspaceLifecycleSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const projectWorkspaceLifecycleModule = { exports: {} };
   new Function('module', 'exports', compiledProjectWorkspaceLifecycle)(projectWorkspaceLifecycleModule, projectWorkspaceLifecycleModule.exports);
-  const { PROJECT_BACKGROUND_LOAD_DELAYS_MS, PROJECT_WATCH_RECONCILE_COOLDOWN_MS, resolveProjectWorkspaceLifecycle, shouldReconcileProjectWatch } = projectWorkspaceLifecycleModule.exports;
+  const { PROJECT_BACKGROUND_LOAD_DELAYS_MS, PROJECT_WATCH_RECONCILE_COOLDOWN_MS, isForegroundDirectoryRefresh, resolveProjectWorkspaceLifecycle, shouldReconcileProjectWatch } = projectWorkspaceLifecycleModule.exports;
   const pageIdentity = (pageId, overrides = {}) => ({ pageId, projectId: 'shared-project', projectPath: 'C:\\projects\\original', projectName: 'original', projectStatus: 'planning', ...overrides });
   const pageAIdentity = pageIdentity('page-a');
   const pageBIdentity = pageIdentity('page-b');
@@ -212,6 +212,9 @@ try {
   assert.strictEqual(shouldReconcileProjectWatch(10_000, 10_000 + PROJECT_WATCH_RECONCILE_COOLDOWN_MS - 1), false, 'quick tab reactivation must reuse the recent reconciliation');
   assert.strictEqual(shouldReconcileProjectWatch(10_000, 10_000 + PROJECT_WATCH_RECONCILE_COOLDOWN_MS), true, 'an older watcher reconciliation must be refreshed');
   assert.strictEqual(shouldReconcileProjectWatch(10_000, 10_001, true), true, 'external-link changes and degraded watcher recovery must force reconciliation');
+  assert.strictEqual(isForegroundDirectoryRefresh('图片选片', '图片选片', 'C:\\projects\\original', 'C:\\projects\\original'), true, 'the visible directory refresh must own its loading state');
+  assert.strictEqual(isForegroundDirectoryRefresh('', '图片选片', 'C:\\projects\\original', 'C:\\projects\\original'), false, 'a root refresh requested after version marking must not take over a visible child directory');
+  assert.strictEqual(isForegroundDirectoryRefresh('图片选片', '图片选片', 'C:\\projects\\original', 'D:\\archive\\moved'), false, 'a request for an obsolete project location must not update the visible directory');
   const shortcutPreviewStateModelSource = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'workspace', 'shortcut-preview-state-model.ts'), 'utf8');
   const compiledShortcutPreviewStateModel = ts.transpileModule(shortcutPreviewStateModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const shortcutPreviewStateModelModule = { exports: {} };

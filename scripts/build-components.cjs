@@ -9,7 +9,8 @@ const pythonBuildRoot = path.join(root, 'artifacts', 'python-build');
 const venvPython = process.platform === 'win32'
   ? path.join(root, '.venv', 'Scripts', 'python.exe')
   : path.join(root, '.venv', 'bin', 'python');
-const python = fs.existsSync(venvPython) ? venvPython : 'python';
+if (!fs.existsSync(venvPython)) throw new Error('Python virtual environment is missing. Run: npm run setup:python');
+const python = venvPython;
 const requested = process.argv.includes('--only') ? process.argv[process.argv.indexOf('--only') + 1] : '';
 const componentIds = requested ? [requested] : (process.platform === 'win32' ? ['team-retouch'] : []);
 const buildRenderer = id => {

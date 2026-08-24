@@ -6,7 +6,8 @@ const root = join(__dirname, '..');
 const venvPython = process.platform === 'win32'
   ? join(root, '.venv', 'Scripts', 'python.exe')
   : join(root, '.venv', 'bin', 'python');
-const python = existsSync(venvPython) ? venvPython : 'python';
+if (!existsSync(venvPython)) throw new Error('Python virtual environment is missing. Run: npm run setup:python');
+const python = venvPython;
 const sharedWorkerName = 'PhotoFlowImportWorker';
 const pythonDistRoot = join(root, 'artifacts', 'python');
 const pythonBuildRoot = join(root, 'artifacts', 'python-build');

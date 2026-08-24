@@ -1,0 +1,6 @@
+# Optional developer-only dependencies for scripts/export-team-retouch-*.py.
+# They are intentionally excluded from requirements.txt because the shipped
+# workers use ONNX Runtime and do not need the multi-gigabyte CUDA PyTorch SDK.
+--extra-index-url https://download.pytorch.org/whl/cu126
+torch==2.9.1+cu126
+onnx>=1.17,<2

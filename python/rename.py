@@ -7,12 +7,17 @@ import subprocess
 import json
 from event_protocol import emit, log_error, log_info, log_progress, log_success
 from PIL import Image
-from pi_heif import register_heif_opener
 from ffmpeg_utils import get_ffmpeg_exe
 
-register_heif_opener(thumbnails=False)
+try:
+    from pi_heif import register_heif_opener
+except ImportError:
+    register_heif_opener = None
+else:
+    register_heif_opener(thumbnails=False)
 
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif')
+HEIF_EXTENSIONS = ('.heic', '.heif', '.hif', '.avif')
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.crm')
 RAW_EXTENSIONS = ('.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw')
 FFMPEG_IMAGE_EXTENSIONS = RAW_EXTENSIONS
@@ -201,6 +206,9 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     if source_files is not None:
         selected_names = {str(file_name).casefold() for file_name in source_files}
         list_b = [file_name for file_name in list_b if file_name.casefold() in selected_names]
+    if register_heif_opener is None and any(file_name.lower().endswith(HEIF_EXTENSIONS) for file_name in [*list_a, *list_b]):
+        log_error("HEIC/HEIF/HIF/AVIF 匹配需要 pi-heif；请运行 npm run setup:python")
+        return False
     all_a = {f: (os.path.join(folder_a, f), media_kind(f)) for f in list_a}
     all_b = {f: (os.path.join(folder_b, f), media_kind(f)) for f in list_b}
 

@@ -159,11 +159,13 @@
 
 ```powershell
 npm install
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
+npm run setup:python
 npm run electron:dev
 ```
+
+`setup:python` 会创建或同步 `.venv`，安装根目录 `requirements.txt`，并验证所有
+Python worker 都能导入。仅用于导出团片 ONNX 模型的 CUDA PyTorch 依赖单独位于
+`requirements-model-export.txt`，不会进入日常开发或主程序打包环境。
 
 完整媒体与组件构建还需要相应的 FFmpeg、OpenCV、ONNX Runtime / DirectML 依赖。团片协作开发环境可通过以下命令准备：
 
@@ -187,6 +189,7 @@ npm run electron:build
 
 ```powershell
 npm run lint
+npm run check:python
 npm run test:architecture
 npm run test:file-transfer
 npm run test:filesystem-safety

@@ -28,6 +28,13 @@ export const shouldReconcileProjectWatch = (
   cooldownMs = PROJECT_WATCH_RECONCILE_COOLDOWN_MS,
 ) => force || lastReconciledAt <= 0 || now - lastReconciledAt >= cooldownMs;
 
+export const isForegroundDirectoryRefresh = (
+  requestedRelativePath: string,
+  currentRelativePath: string,
+  requestedProjectPath: string,
+  currentProjectPath: string,
+) => requestedRelativePath === currentRelativePath && requestedProjectPath === currentProjectPath;
+
 export const resolveProjectWorkspaceLifecycle = (
   previous: ProjectWorkspaceLifecycleIdentity | undefined,
   next: ProjectWorkspaceLifecycleIdentity,
