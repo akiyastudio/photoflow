@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { LEGACY_HOST_CAPABILITIES } = require('./compatibility/component-v1-metadata.cjs');
 
 const COMPONENT_HOST_CONTRACT_VERSION = 2;
 const COMPONENT_HOST_API_VERSION = 2;
@@ -9,10 +10,7 @@ const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPa
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const VERSIONED_METHOD = /^[a-z][a-z0-9.-]{0,119}\.v[1-9][0-9]*$/;
 const HOST_CAPABILITIES = new Set([
-  'project.media.list.v1', 'project.media.read.v1', 'project.output.authorize.v1',
-  'version.register.v1', 'tasks.report.v1', 'component.settings.v1',
-  'component.storage.v1', 'dialogs.open.v1', 'component.lifecycle.v1',
-  'component.runtime.v1', 'project.media.access.v1', 'project.identity.complete.v1',
+  ...LEGACY_HOST_CAPABILITIES,
   'project.media.page.v2', 'project.media.variants.v2', 'project.input.tokens.v2',
   'project.output.v2', 'version.create.v2', 'tasks.v2', 'dialogs.v2',
   'component.storage.v2', 'component.settings.v2', 'component.events.v2',

@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const { LEGACY_DOMAIN } = require('../compatibility/component-v1-metadata.cjs');
 
 const sha256File = filePath => new Promise((resolve, reject) => {
   const hash = crypto.createHash('sha256');
@@ -90,7 +91,7 @@ const createComponentLifecycleService = ({ app, backgroundTasks, pluginService, 
       const compatibility = descriptor.advancedRuntime;
       if (!compatibility?.apiVersion) throw new Error('组件没有声明高级运行时兼容策略');
       const entries = await fs.promises.readdir(containerRoot, { withFileTypes: true });
-      const packages = entries.filter(item => item.isFile() && /^PhotoFlow-team-retouch-advanced-.*\.zip$/i.test(item.name)).map(item => path.join(containerRoot, item.name));
+      const packages = entries.filter(item => item.isFile() && LEGACY_DOMAIN.advancedPackagePattern.test(item.name)).map(item => path.join(containerRoot, item.name));
       if (packages.length !== 1) throw new Error(packages.length ? '高级环境目录存在多个离线包' : '未找到高级环境离线包');
       args.push(
         '-InstallRoot', installRoot,

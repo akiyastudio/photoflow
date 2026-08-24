@@ -1,4 +1,5 @@
 const path = require('path');
+const { LEGACY_DOMAIN } = require('../compatibility/component-v1-metadata.cjs');
 
 // workspace_db currently attaches domain stores through a helper that verifies
 // and updates domain schema metadata. Until that attachment path is genuinely
@@ -34,7 +35,7 @@ class WorkspaceDatabaseOperationPolicy {
         || needsRetiredProjectCleanup;
       if (needsDomains) databases.push({ path: domainDatabasePath(database, 'versioning'), mode });
       if (needsDomains && !VERSIONING_ONLY_ACTIONS.has(action)) databases.push({ path: domainDatabasePath(database, 'media'), mode });
-      if (needsRetiredProjectCleanup) databases.push({ path: domainDatabasePath(database, 'team-retouch'), mode });
+      if (needsRetiredProjectCleanup) databases.push({ path: domainDatabasePath(database, LEGACY_DOMAIN.id), mode });
     }
 
     return { databases, idempotent: IDEMPOTENT_ACTIONS.has(action), mode };

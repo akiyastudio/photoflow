@@ -6,7 +6,6 @@ const DOMAIN_IDS = Object.freeze([
   'media',
   'versioning',
   'backup-archive',
-  'team-retouch',
   'inspiration-tools',
   'telemetry',
 ]);
@@ -39,10 +38,6 @@ const DOMAIN_OWNERSHIP = Object.freeze({
   'backup-archive': Object.freeze({
     owns: Object.freeze(['backup-snapshots', 'backup-retention', 'archive-placement', 'restore-plans']),
     storage: Object.freeze(['backup-store', 'archive-target']),
-  }),
-  'team-retouch': Object.freeze({
-    owns: Object.freeze(['team-identities', 'person-assignments', 'retouch-patches', 'recomposition-jobs']),
-    storage: Object.freeze(['team-retouch.sqlite3', 'team-workspaces']),
   }),
   'inspiration-tools': Object.freeze({
     owns: Object.freeze(['inspiration-index', 'tool-job-state']),

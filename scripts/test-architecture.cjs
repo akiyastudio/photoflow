@@ -15,6 +15,11 @@ const coreRendererSource = fs.readdirSync(path.join(root, 'src'), { recursive: t
   .join('\n');
 const forbiddenComponentSemantics = /team-retouch|teamRetouch|TeamRetouch|团片|edited_patch_path|identityComplete|personDetection|TeamPatch|TeamIdentity|TeamPerson|TeamProject|team_workspace|team-workspace/i;
 assert(!forbiddenComponentSemantics.test(coreRendererSource), 'core renderer/types must not retain component-owned settings, data, domain, or version semantics outside src/compatibility');
+const electronCoreSource = fs.readdirSync(path.join(root, 'electron'), { recursive: true })
+  .filter(name => /\.cjs$/.test(name) && !String(name).replace(/\\/g, '/').startsWith('compatibility/'))
+  .map(name => read(path.join('electron', name)))
+  .join('\n');
+assert(!/team-retouch|team_patch|团片|edited_patch_path|identity\.complete|team\.|workspace-team|team_/i.test(electronCoreSource), 'Electron core must contain no component-owned identifiers, RPC methods, event channels, or tool names outside compatibility');
 
 const main = read('electron/main.cjs');
 const preload = read('electron/preload.cjs');
@@ -114,6 +119,7 @@ const selectionIpc = read('electron/modules/selection-ipc.cjs');
 const selectionService = read('electron/services/selection-service.cjs');
 const systemIpc = read('electron/modules/system-ipc.cjs');
 const backupService = read('electron/services/backup-service.cjs');
+const legacyStorageAdoption = read('electron/compatibility/component-storage-v1-adoption.cjs');
 const backupDb = read('python/backup_db.py');
 const domainRecovery = read('python/domain_recovery.py');
 const teamRetouchStorage = read('python/team_retouch_storage.py');
@@ -130,6 +136,11 @@ assert(!['team-retouch', 'edited_patch_path', 'team_patch_tasks', '团片'].some
   && main.includes("require('./compatibility/component-host-v1.cjs')")
   && !main.includes("require('./compatibility/component-team-retouch"),
 'generic component capabilities and the composition root must isolate all V1 business knowledge behind one deprecated protocol adapter');
+assert(backupService.includes("'component-storage'") && backupService.includes("path.join(workspaceDataRoot, 'components')")
+  && backupService.includes('组件数据包恢复后哈希校验失败') && !backupService.includes('storage.sqlite3')
+  && legacyStorageAdoption.includes('copyTreeVerified') && legacyStorageAdoption.indexOf("state: 'committed'") < legacyStorageAdoption.indexOf('rename(pending, componentRoot)')
+  && legacyStorageAdoption.includes('legacyDatabasePath'),
+'backup/restore must enumerate opaque component-private storage while V1 adoption stays copy-verified, receipted before commit, and source-preserving in compatibility');
 assert(componentProjectCapabilities.includes("'component.media.v2'") && componentProjectCapabilities.includes("'project.progress.v2'")
   && componentProjectCapabilities.includes("kind: 'component-output-commit'") && componentProjectCapabilities.includes("state: 'prepared'")
   && systemIpc.includes("register('component.lifecycle.v2'") && read('electron/services/component-lifecycle-service.cjs').includes("'component.lifecycle.manage'"),
@@ -703,7 +714,7 @@ assert(workspaceIpc.includes("ipcMain.handle('workspace-search-files'") && proje
 assert(projectWorkspace.includes("const currentFolderRecursiveSearchActive = Boolean(searchQuery.trim()) && filterScope === 'current-folder' && !versionTreeOpen && !finalViewOpen") && projectWorkspace.includes('!(recursiveFlatOpen || currentFolderRecursiveSearchActive)') && projectWorkspace.includes('recursiveFlatOpen || currentFolderRecursiveSearchActive ? searchEntries'), 'searching from ordinary grid or list mode must recurse through the current folder instead of filtering only its loaded children');
 assert(projectWorkspace.includes("const recursiveScopeLabel = currentRelativePath ? '当前文件夹及其子文件夹' : inspirationMode ? '整个灵感库' : '整个项目'"), 'recursive search scope labels must identify the whole project or inspiration library at root and the current folder below root');
 assert(projectWorkspace.includes('标记…') && projectWorkspace.includes('isFolderLikeEntry(fileMenu.entry)') && projectWorkspace.includes('<FolderMarkPanel'), 'any ordinary or managed external project folder must open the unified purpose-marking panel');
-assert(protectedProjectFolderService.includes("'raw'") && protectedProjectFolderService.includes("'策划'") && protectedProjectFolderService.includes("'团片协作'") && filesIpc.includes('isProtectedProjectFolderPath'), 'remaining workflow-managed root folders must reject ordinary rename operations in both renderer and backend');
+assert(protectedProjectFolderService.includes("'raw'") && protectedProjectFolderService.includes("'策划'") && protectedProjectFolderService.includes('LEGACY_DOMAIN.projectFolder') && filesIpc.includes('isProtectedProjectFolderPath'), 'workflow-managed and compatibility-provided component root folders must reject ordinary rename operations in both renderer and backend');
 assert(projectWorkspace.includes('preflightManualSelection') && projectWorkspace.includes('sourceFolderRelativePath') && !projectWorkspace.includes('entryIsInSelectionSourceFolder(entry)'), 'manual selection must use the current arbitrary source folder through the V2 preflight');
 assert(versionsIpc.includes("ipcMain.handle('workspace-progress-update'") && workspaceDb.includes('def progress_update_tree('), 'progress edits must update the complete descendant version tree');
 assert(projectWorkspace.includes('const refreshProgressTracking') && projectWorkspace.includes('startProgressTracking') && projectWorkspace.includes("mode: progressFolder.lastTrackedAt || progressFolder.trackingState === 'stale' ? 'refresh' : 'compare'"), 'existing main nodes must refresh through the recoverable V2 background task without treating a never-completed failed compare as tracked');

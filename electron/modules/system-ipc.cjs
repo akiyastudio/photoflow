@@ -2,6 +2,7 @@ const { validateRendererPythonInvocation } = require('../security-policy.cjs');
 const { listStorageDevices } = require('../services/storage-device-service.cjs');
 const { decideComponentStatusRefresh, nextComponentProbeTimestamps } = require('../services/component-status-refresh-policy.cjs');
 const { createComponentLifecycleService } = require('../services/component-lifecycle-service.cjs');
+const { resolveLegacyPackageForDeletion } = require('../compatibility/component-v1-metadata.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
 
@@ -134,7 +135,6 @@ const registerSystemIpc = context => {
   };
 
   const componentRoot = componentId => path.join(pluginService.installRoot, String(componentId));
-  const teamRetouchRoot = () => componentRoot('team-retouch');
 
   const componentStatusCachePath = path.join(app.getPath('userData'), 'component-status-cache.json');
   const componentRuntimeProbeTtlMs = 24 * 60 * 60 * 1000;
@@ -342,14 +342,13 @@ const registerSystemIpc = context => {
     if (archives.length === 1) return archives[0];
     throw new Error(`未在组件安装包目录中找到${description}：${packageRoot}`);
   };
-  const resolveAdvancedPackage = () => resolvePreparedPackage(teamRetouchRoot(), /^PhotoFlow-team-retouch-advanced-.*\.zip$/i, '照片流高级引擎包');
   const resolveComponentPackage = componentId => Promise.resolve(pluginService.resolvePackage(componentId).packagePath);
   const resolvePackageForDeletion = async (kind, componentId = '') => {
     let archivePath;
     let allowedRoot;
-    if (kind === 'advanced') {
-      archivePath = await resolveAdvancedPackage();
-      allowedRoot = teamRetouchRoot();
+    const legacy = await resolveLegacyPackageForDeletion({ fs, path, pluginService, kind, resolvePreparedPackage });
+    if (legacy) {
+      ({ archivePath, allowedRoot } = legacy);
     } else if (kind === 'component') {
       const known = pluginService.list().find(component => component.id === componentId);
       if (!known) throw new Error(`未知组件：${componentId}`);

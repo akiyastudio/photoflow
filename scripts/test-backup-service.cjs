@@ -10,7 +10,7 @@ const { PythonDatabaseClient } = require('../electron/repositories/database-clie
 const { createWorkspaceRepository } = require('../electron/repositories/workspace-repository.cjs');
 const { createMediaRepository } = require('../electron/repositories/media-repository.cjs');
 const { createOperationsRepository } = require('../electron/repositories/operations-repository.cjs');
-const { createBackupService, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
+const { createBackupService, safeDestination, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
 
 const waitForCoordinatorQueue = async (coordinator, minimum, timeoutMs = 5000) => {
   const deadline = Date.now() + timeoutMs;
@@ -69,9 +69,12 @@ const prepareWorkspace = async (temporaryRoot, name, id) => {
   await fs.promises.mkdir(project, { recursive: true });
   await fs.promises.mkdir(dataRoot, { recursive: true });
   await fs.promises.mkdir(path.join(dataRoot, 'team-retouch'), { recursive: true });
+  await fs.promises.mkdir(path.join(dataRoot, 'components', 'sample-component', 'private'), { recursive: true });
   await fs.promises.writeFile(path.join(root, '.photoflow-workspace-id'), `${id}\n`, 'utf8');
   await fs.promises.writeFile(path.join(project, '原片.jpg'), `photo-${id}`, 'utf8');
   await fs.promises.writeFile(path.join(dataRoot, 'team-retouch', 'shared.json'), `internal-${id}`, 'utf8');
+  await fs.promises.writeFile(path.join(dataRoot, 'components', 'sample-component', 'storage.sqlite3'), `opaque-database-${id}`, 'utf8');
+  await fs.promises.writeFile(path.join(dataRoot, 'components', 'sample-component', 'private', 'state.json'), JSON.stringify({ id }), 'utf8');
   await runPython('workspace_db.py', ['catalog_sync', '--root', root, '--database', database, '--payload', '{}']);
   await runPython('workspace_db.py', ['team_patch_list', '--root', root, '--database', database, '--payload', JSON.stringify({ photoId: 'missing' })]);
   await runPython('operations_db.py', ['undo_record_add', '--database', operationsDatabase, '--payload', JSON.stringify({
@@ -83,6 +86,8 @@ const prepareWorkspace = async (temporaryRoot, name, id) => {
 const main = async () => {
   const temporaryRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-backup-service-'));
   try {
+    assert.throws(() => safeDestination(path.join(temporaryRoot, 'component-restore'), '../escaped.bin'), /无效路径|越界/);
+    assert.throws(() => safeDestination(path.join(temporaryRoot, 'component-restore'), 'sample/../../escaped.bin'), /无效路径|越界/);
     const target = path.join(temporaryRoot, 'backup-target');
     const configPath = path.join(temporaryRoot, 'photoflow_config.json');
     const birthdaysPath = path.join(temporaryRoot, 'birthdays.json');
@@ -114,6 +119,9 @@ const main = async () => {
     const recoveryActionOptions = [];
     const databaseLogs = [];
     let rejectRecoveryPause = false;
+    let componentServicesActive = true;
+    let componentQuiesceCount = 0;
+    let componentResumeCount = 0;
     let nextRecoveryBarrier = null;
     const armRecoveryBarrier = () => {
       let admit;
@@ -132,7 +140,7 @@ const main = async () => {
       getManagedExternalLinks: () => currentWorkspace === first ? [{ linkId: 'backed-link' }] : [],
       getWorkspaceDatabasePath: () => currentWorkspace.database,
       getWorkspaceOperationsDatabasePath: () => currentWorkspace.operationsDatabase,
-      getWorkspaceTeamRetouchDatabasePath: () => currentWorkspace.teamRetouchDatabase,
+      getLegacyComponentDatabasePath: () => currentWorkspace.teamRetouchDatabase,
       getWorkspaceMediaDatabasePath: () => currentWorkspace.mediaDatabase,
       getWorkspaceVersioningDatabasePath: () => currentWorkspace.versioningDatabase,
       getWorkspaceDataRoot: () => currentWorkspace.dataRoot,
@@ -163,6 +171,14 @@ const main = async () => {
         return runPython(...args);
       },
       shell: { readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')) },
+      componentServiceManager: {
+        quiesceForStorageSnapshot: async () => {
+          assert.equal(componentServicesActive, true);
+          componentServicesActive = false;
+          componentQuiesceCount += 1;
+          return async () => { componentServicesActive = true; componentResumeCount += 1; };
+        },
+      },
       writeLog: (...args) => databaseLogs.push(args.map(String).join(' ')),
     });
 
@@ -191,6 +207,10 @@ const main = async () => {
     assert.strictEqual(firstRun.task.state, 'completed');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'operations.sqlite3'), 'operations database must use a consistent online snapshot');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'team-retouch.sqlite3'), 'team-retouch database must use a consistent online snapshot');
+    const componentEntries = firstRun.result.files.filter(entry => entry.scope === 'component-storage');
+    assert.deepStrictEqual(componentEntries.map(entry => entry.path).sort(), ['sample-component/private/state.json', 'sample-component/storage.sqlite3']);
+    assert(componentEntries.every(entry => /^[a-f0-9]{64}$/.test(entry.hash)), 'component package entries must be content-addressed');
+    assert.equal(componentServicesActive, true, 'component services must resume after the immutable package is staged');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'media.sqlite3'), 'media database must use a consistent online snapshot');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'versioning.sqlite3'), 'versioning database must use a consistent online snapshot');
     assert.strictEqual((await service.status(first.root)).snapshotCount, 1);
@@ -334,11 +354,14 @@ const main = async () => {
     const restoredUndo = await runPython('operations_db.py', ['undo_record_latest', '--database', restoredOperationsDatabase, '--payload', '{}']);
     assert.strictEqual(restoredUndo.record.id, 'workspace-one-id-undo', 'workspace restore must restore the operations journal');
     assert.ok((await fs.promises.stat(restoredTeamRetouchDatabase)).isFile(), 'workspace restore must restore the team-retouch store');
+    assert.equal(await fs.promises.readFile(path.join(restoredDataRoot, 'components', 'sample-component', 'storage.sqlite3'), 'utf8'), 'opaque-database-workspace-one-id');
+    assert.equal(JSON.parse(await fs.promises.readFile(path.join(restoredDataRoot, 'components', 'sample-component', 'private', 'state.json'), 'utf8')).id, 'workspace-one-id');
     const workspaceRestoredExternalLinks = JSON.parse(await fs.promises.readFile(externalLinksPath, 'utf8'));
     assert.ok(workspaceRestoredExternalLinks.links['backed-link'], 'workspace restore must restore identities referenced by restored shortcuts');
     assert.ok(workspaceRestoredExternalLinks.links['current-link'], 'workspace restore must preserve current identities');
     assert.strictEqual(workspaceRestoredExternalLinks.links['unrelated-link'], undefined, 'workspace restore must not restore unrelated global identities');
     assert.ok((await fs.promises.readdir(path.join(target, STORE_DIRECTORY, 'objects'))).length > 0);
+    assert.equal(componentQuiesceCount, componentResumeCount, 'every component storage quiesce must resume even across the complete backup suite');
     currentWorkspace = { ...first, dataRoot: originalDataRoot, database: originalDatabase };
 
     await Promise.all([maintenanceClient.stop(), writerClient.stop(), domainWriterClient.stop(), operationsClient.stop()]);

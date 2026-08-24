@@ -4,6 +4,7 @@ const path = require('path');
 const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { AsyncLocalStorage } = require('async_hooks');
+const { LEGACY_DOMAIN } = require('../compatibility/component-v1-metadata.cjs');
 const {
   MANAGED_EXTERNAL_FOLDER_PREFIX,
   MANAGED_EXTERNAL_FILE_PREFIX,
@@ -54,7 +55,7 @@ const createBackupService = context => {
     getManagedExternalLinks,
     getWorkspaceDatabasePath,
     getWorkspaceOperationsDatabasePath,
-    getWorkspaceTeamRetouchDatabasePath,
+    getLegacyComponentDatabasePath,
     getWorkspaceMediaDatabasePath,
     getWorkspaceVersioningDatabasePath,
     getWorkspaceDataRoot,
@@ -65,13 +66,14 @@ const createBackupService = context => {
     runPythonJsonAction,
     shell,
     writeLog,
+    componentServiceManager,
   } = context;
   const recoveryDatabaseGetters = {
     core: getWorkspaceDatabasePath,
     operations: getWorkspaceOperationsDatabasePath,
     media: getWorkspaceMediaDatabasePath,
     versioning: getWorkspaceVersioningDatabasePath,
-    'team-retouch': getWorkspaceTeamRetouchDatabasePath,
+    [LEGACY_DOMAIN.id]: getLegacyComponentDatabasePath,
   };
   const recoveryDatabases = (workspaceRoot, domains) => domains.map(domain => {
     const databasePath = recoveryDatabaseGetters[domain]?.(workspaceRoot);
@@ -81,7 +83,7 @@ const createBackupService = context => {
   const recoveryLeaseContext = new AsyncLocalStorage();
   const runRecoveryPythonAction = async (scriptName, args, timeoutMs) => {
     const action = String(args?.[0] || '');
-    const restoreTool = ['backup_db.py', 'domain_recovery.py', 'team_retouch_db.py'].includes(scriptName)
+    const restoreTool = ['backup_db.py', 'domain_recovery.py', LEGACY_DOMAIN.databaseScript].includes(scriptName)
       && (action.startsWith('restore-') || action === 'reset');
     if (restoreTool) {
       const lease = recoveryLeaseContext.getStore();
@@ -223,6 +225,32 @@ const createBackupService = context => {
       }
     }
     return output;
+  };
+
+  const snapshotComponentStorage = async (workspaceDataRoot, stage) => {
+    const sourceRoot = path.join(workspaceDataRoot, 'components');
+    if (!await exists(sourceRoot)) return [];
+    if (!componentServiceManager?.quiesceForStorageSnapshot) throw new Error('组件数据包快照缺少通用 service quiesce 边界');
+    const resume = await componentServiceManager.quiesceForStorageSnapshot();
+    const snapshotRoot = path.join(stage, 'component-storage');
+    try {
+      const liveFiles = await collectFiles(sourceRoot, 'component-storage', (_relative, item) => {
+        if (item.isSymbolicLink()) throw new Error('组件数据包包含不允许的符号链接');
+        return false;
+      });
+      for (const file of liveFiles) {
+        const destination = safeDestination(snapshotRoot, file.relative);
+        await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+        const before = await fs.promises.stat(file.absolute);
+        await fs.promises.copyFile(file.absolute, destination, fs.constants.COPYFILE_EXCL);
+        const after = await fs.promises.stat(file.absolute);
+        if (before.size !== after.size || before.mtimeMs !== after.mtimeMs
+          || await sha256File(file.absolute) !== await sha256File(destination)) throw new Error('组件数据包在 quiesce 快照期间发生变化');
+      }
+      return collectFiles(snapshotRoot, 'component-storage');
+    } finally {
+      await resume();
+    }
   };
 
   const storeFile = async (target, sourcePath, task, progress, backupConfig = {}) => {
@@ -549,13 +577,13 @@ const createBackupService = context => {
           'snapshot', '--source', liveOperationsDatabasePath, '--destination', operationsSnapshot,
         ], 30 * 60 * 1000);
       }
-      const liveTeamRetouchDatabasePath = getWorkspaceTeamRetouchDatabasePath?.(root);
-      let teamRetouchSnapshot = null;
-      let teamRetouchDatabaseInfo = null;
-      if (liveTeamRetouchDatabasePath && await exists(liveTeamRetouchDatabasePath)) {
-        teamRetouchSnapshot = path.join(stage, 'team-retouch.sqlite3');
-        teamRetouchDatabaseInfo = await runPythonJsonAction('team_retouch_db.py', [
-          'snapshot', '--source', liveTeamRetouchDatabasePath, '--destination', teamRetouchSnapshot,
+      const liveLegacyComponentDatabasePath = getLegacyComponentDatabasePath?.(root);
+      let legacyComponentSnapshot = null;
+      let legacyComponentDatabaseInfo = null;
+      if (liveLegacyComponentDatabasePath && await exists(liveLegacyComponentDatabasePath)) {
+        legacyComponentSnapshot = path.join(stage, LEGACY_DOMAIN.databaseFile);
+        legacyComponentDatabaseInfo = await runPythonJsonAction(LEGACY_DOMAIN.databaseScript, [
+          'snapshot', '--source', liveLegacyComponentDatabasePath, '--destination', legacyComponentSnapshot,
         ], 30 * 60 * 1000);
       }
       const workspaceId = await readWorkspaceId(root);
@@ -578,24 +606,24 @@ const createBackupService = context => {
       const operationsDatabaseRelative = liveOperationsDatabasePath
         ? normalizeKey(path.relative(workspaceDataRoot, liveOperationsDatabasePath))
         : '';
-      const teamRetouchDatabaseRelative = liveTeamRetouchDatabasePath
-        ? normalizeKey(path.relative(workspaceDataRoot, liveTeamRetouchDatabasePath))
+      const legacyComponentDatabaseRelative = liveLegacyComponentDatabasePath
+        ? normalizeKey(path.relative(workspaceDataRoot, liveLegacyComponentDatabasePath))
         : '';
       const mediaDatabaseRelative = liveMediaDatabasePath ? normalizeKey(path.relative(workspaceDataRoot, liveMediaDatabasePath)) : '';
       const versioningDatabaseRelative = liveVersioningDatabasePath ? normalizeKey(path.relative(workspaceDataRoot, liveVersioningDatabasePath)) : '';
       const workspaceDataFiles = await collectFiles(workspaceDataRoot, 'workspace-data', (relative, item) => {
         const normalized = normalizeKey(relative);
         const first = normalized.split('/')[0];
-        return (item.isDirectory() && ['thumbnails', 'backups'].includes(first))
+        return (item.isDirectory() && ['thumbnails', 'backups', 'components'].includes(first))
           || normalized === databaseRelative
           || normalized === `${databaseRelative}-wal`
           || normalized === `${databaseRelative}-shm`
           || normalized === operationsDatabaseRelative
           || normalized === `${operationsDatabaseRelative}-wal`
           || normalized === `${operationsDatabaseRelative}-shm`
-          || normalized === teamRetouchDatabaseRelative
-          || normalized === `${teamRetouchDatabaseRelative}-wal`
-          || normalized === `${teamRetouchDatabaseRelative}-shm`
+          || normalized === legacyComponentDatabaseRelative
+          || normalized === `${legacyComponentDatabaseRelative}-wal`
+          || normalized === `${legacyComponentDatabaseRelative}-shm`
           || normalized === mediaDatabaseRelative
           || normalized === `${mediaDatabaseRelative}-wal`
           || normalized === `${mediaDatabaseRelative}-shm`
@@ -603,6 +631,10 @@ const createBackupService = context => {
           || normalized === `${versioningDatabaseRelative}-wal`
           || normalized === `${versioningDatabaseRelative}-shm`;
       });
+      // Component Host V2 owns this complete tree. The host treats it as an
+      // opaque, hash-addressed data package and never opens a component file
+      // or assumes a database/schema layout.
+      const componentStorageFiles = await snapshotComponentStorage(workspaceDataRoot, stage);
       const appFiles = [];
       for (const [relative, absolute] of [['photoflow_config.json', getConfigPath()], ['birthdays.json', getUserBirthdaysPath()]]) {
         if (await exists(absolute)) appFiles.push({ scope: 'app-config', relative, absolute });
@@ -632,6 +664,7 @@ const createBackupService = context => {
       const inputs = [
         ...workspaceFiles,
         ...workspaceDataFiles,
+        ...componentStorageFiles,
         ...appFiles,
         { scope: 'database', relative: 'workspace.sqlite3', absolute: databaseSnapshot },
         ...(mediaSnapshot ? [{ scope: 'domain-database', relative: 'media.sqlite3', absolute: mediaSnapshot, schemaVersion: mediaDatabaseInfo?.schemaVersion || 0 }] : []),
@@ -642,11 +675,11 @@ const createBackupService = context => {
           absolute: operationsSnapshot,
           schemaVersion: operationsDatabaseInfo?.schemaVersion || 0,
         }] : []),
-        ...(teamRetouchSnapshot ? [{
+        ...(legacyComponentSnapshot ? [{
           scope: 'domain-database',
-          relative: 'team-retouch.sqlite3',
-          absolute: teamRetouchSnapshot,
-          schemaVersion: teamRetouchDatabaseInfo?.schemaVersion || 0,
+          relative: LEGACY_DOMAIN.databaseFile,
+          absolute: legacyComponentSnapshot,
+          schemaVersion: legacyComponentDatabaseInfo?.schemaVersion || 0,
         }] : []),
       ];
       const totalBytes = (await Promise.all(inputs.map(item => fs.promises.stat(item.absolute).then(stat => stat.size)))).reduce((sum, size) => sum + size, 0);
@@ -945,9 +978,16 @@ const createBackupService = context => {
         const progress = 75 + (index + 1) / Math.max(1, dataEntries.length) * 10;
         task.saveCheckpoint({ version: 1, phase: 'workspace-data', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData] }, progress, `正在恢复内部数据 ${index + 1}/${dataEntries.length}`);
       }
+      const componentEntries = manifest.files.filter(item => item.scope === 'component-storage');
+      const componentStorageRoot = path.join(newDataRoot, 'components');
+      for (const entry of componentEntries) {
+        const entryDestination = safeDestination(componentStorageRoot, entry.path);
+        await materialize(target, entry, entryDestination, task);
+        if (await sha256File(entryDestination) !== entry.hash) throw new Error('组件数据包恢复后哈希校验失败');
+      }
       await withWorkspaceRecoveryLease({
         workspaceRoot: destination,
-        domains: ['core', 'operations', 'media', 'versioning', 'team-retouch'],
+        domains: ['core', 'operations', 'media', 'versioning', LEGACY_DOMAIN.id],
         signal: task.signal,
         deadlineAt: Date.now() + 30 * 60 * 1000,
       }, async () => {
@@ -955,7 +995,7 @@ const createBackupService = context => {
           ['operations', getWorkspaceOperationsDatabasePath],
           ['media', getWorkspaceMediaDatabasePath],
           ['versioning', getWorkspaceVersioningDatabasePath],
-          ['team-retouch', getWorkspaceTeamRetouchDatabasePath],
+          [LEGACY_DOMAIN.id, getLegacyComponentDatabasePath],
         ]) {
           const entry = manifest.files.find(item => item.scope === 'domain-database' && item.path === `${domain}.sqlite3`);
           if (!entry || !getter) continue;
@@ -1071,7 +1111,7 @@ const createBackupService = context => {
       }
       await withWorkspaceRecoveryLease({
         workspaceRoot: root,
-        domains: ['core', 'media', 'versioning', 'team-retouch'],
+        domains: ['core', 'media', 'versioning', LEGACY_DOMAIN.id],
         signal: task.signal,
         deadlineAt: Date.now() + 30 * 60 * 1000,
       }, async () => {
@@ -1101,11 +1141,11 @@ const createBackupService = context => {
             '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
           ], 30 * 60 * 1000);
         }
-        const teamRetouchEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'team-retouch.sqlite3');
-        if (teamRetouchEntry && getWorkspaceTeamRetouchDatabasePath) {
-          await runRecoveryPythonAction('team_retouch_db.py', [
-            'restore-project', '--source', objectPath(target, teamRetouchEntry.hash),
-            '--destination', getWorkspaceTeamRetouchDatabasePath(root), '--project-id', project.id,
+        const legacyComponentEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === LEGACY_DOMAIN.databaseFile);
+        if (legacyComponentEntry && getLegacyComponentDatabasePath) {
+          await runRecoveryPythonAction(LEGACY_DOMAIN.databaseScript, [
+            'restore-project', '--source', objectPath(target, legacyComponentEntry.hash),
+            '--destination', getLegacyComponentDatabasePath(root), '--project-id', project.id,
             '--old-root', manifest.workspace.root, '--new-root', root,
             '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
           ], 30 * 60 * 1000);
@@ -1173,7 +1213,7 @@ const createBackupService = context => {
     media: getWorkspaceMediaDatabasePath,
     versioning: getWorkspaceVersioningDatabasePath,
     operations: getWorkspaceOperationsDatabasePath,
-    'team-retouch': getWorkspaceTeamRetouchDatabasePath,
+    [LEGACY_DOMAIN.id]: getLegacyComponentDatabasePath,
   })[domain]?.(path.resolve(workspaceRoot));
 
   const verifyDomain = async (workspaceRoot, domain) => {
@@ -1246,4 +1286,4 @@ const createBackupService = context => {
   return { approveTarget, isApprovedTarget, runBackup, runDomainBackup, runIfDue, status, restoreWorkspace, restoreProject, restoreDomain, resetDomain, verify, verifyDomain, testConnection, spaceStatus, cleanup, withWorkspaceRecoveryLease };
 };
 
-module.exports = { createBackupService, STORE_DIRECTORY };
+module.exports = { createBackupService, safeDestination, STORE_DIRECTORY };

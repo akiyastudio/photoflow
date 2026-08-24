@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer } = require('electron');
+const { LEGACY_PRELOAD_EVENTS } = require('./compatibility/component-v1-metadata.cjs');
 
 const subscribe = (channel, callback) => {
   if (typeof callback !== 'function') throw new TypeError('Component lifecycle callback must be a function');
@@ -7,14 +8,6 @@ const subscribe = (channel, callback) => {
   return () => ipcRenderer.removeListener(channel, listener);
 };
 
-const COMPONENT_EVENTS = Object.freeze({
-  'advanced.progress': 'team-retouch-advanced-progress',
-  'workflow.progress': 'workspace-team-workflow-progress',
-  'patch.detect.progress': 'workspace-team-patch-detect-progress',
-  'patch.detect-batch.progress': 'workspace-team-patch-detect-batch-progress',
-  'patch.return-batch.progress': 'workspace-team-patch-return-batch-progress',
-});
-
 contextBridge.exposeInMainWorld('photoFlowComponent', Object.freeze({
   contractVersion: 1,
   getContext: () => ipcRenderer.invoke('component-sdk:get-context'),
@@ -22,7 +15,7 @@ contextBridge.exposeInMainWorld('photoFlowComponent', Object.freeze({
   onEvent: (topic, callback) => {
     const normalizedTopic = String(topic || '');
     if (typeof callback !== 'function') throw new TypeError('Component event callback must be a function');
-    const channel = COMPONENT_EVENTS[normalizedTopic];
+    const channel = LEGACY_PRELOAD_EVENTS[normalizedTopic];
     if (channel) {
       const listener = (_event, value) => callback(value);
       ipcRenderer.on(channel, listener);

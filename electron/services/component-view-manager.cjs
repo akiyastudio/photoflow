@@ -1,4 +1,5 @@
 const path = require('path');
+const { LEGACY_VIEW_EVENT_CHANNELS } = require('../compatibility/component-v1-metadata.cjs');
 
 const PAGE_KEY_SEPARATOR = '\u001f';
 const normalizeIdentity = value => String(value || '').trim().replace(/\\/g, '/').toLocaleLowerCase();
@@ -123,8 +124,7 @@ class ComponentViewManager {
         ...normalizeOpenScope(request),
         eventSender: view.webContents,
         emitComponentEvent: (topic, payload) => {
-          const channels = { 'workflow.progress': 'workspace-team-workflow-progress', 'patch.return-batch.progress': 'workspace-team-patch-return-batch-progress' };
-          const channel = channels[String(topic || '')];
+          const channel = LEGACY_VIEW_EVENT_CHANNELS[String(topic || '')];
           if (channel && !view.webContents.isDestroyed()) view.webContents.send(channel, payload);
           if (descriptor.service?.events?.includes(String(topic || '')) && !view.webContents.isDestroyed()) {
             view.webContents.send('component-sdk:event', { topic: String(topic), payload });

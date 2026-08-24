@@ -1,11 +1,12 @@
 const readline = require('readline');
 const path = require('path');
+const { LEGACY_COALESCED_READ_METHODS, LEGACY_LONG_RUNNING_METHODS } = require('../compatibility/component-v1-metadata.cjs');
 
 const MAX_LINE_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 60 * 1000;
-const LONG_RUNNING_METHODS = new Set(['team.workflow.generate.v1', 'team.workflow.return-batch.v1', 'team.patch.return-batch.v1']);
+const LONG_RUNNING_METHODS = new Set(LEGACY_LONG_RUNNING_METHODS);
 const LONG_REQUEST_TIMEOUT_MS = 4 * 60 * 60 * 1000;
-const COALESCED_READ_METHODS = new Set(['team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1']);
+const COALESCED_READ_METHODS = new Set(LEGACY_COALESCED_READ_METHODS);
 
 const cloneRequestPayload = payload => {
   if (payload === undefined || payload === null) return {};
@@ -46,6 +47,9 @@ class ComponentServiceManager {
     this.sessionTransitions = new Map();
     this.inflightReads = new Map();
     this.nextRequestId = 1;
+    this.storageSnapshotBarrier = null;
+    this.activeInvocations = 0;
+    this.activityWaiters = new Set();
   }
 
   supports(componentId, method) {
@@ -53,6 +57,12 @@ class ComponentServiceManager {
   }
 
   async invoke(componentId, method, payload, boundContext) {
+    if (this.storageSnapshotBarrier) {
+      await this.storageSnapshotBarrier.released;
+      return this.invoke(componentId, method, payload, boundContext);
+    }
+    this.activeInvocations += 1;
+    try {
     const descriptor = this.registry.resolve(componentId);
     if (!descriptor?.service?.rpcMethods.includes(String(method || ''))) throw new Error(`Unknown component service RPC method: ${method}`);
     this.capabilityBroker.assertCapabilities(descriptor);
@@ -66,9 +76,16 @@ class ComponentServiceManager {
         if (this.inflightReads.get(key) === operation) this.inflightReads.delete(key);
       });
       this.inflightReads.set(key, operation);
-      return operation;
+      return await operation;
     }
-    return this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext);
+    return await this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext);
+    } finally {
+      this.activeInvocations -= 1;
+      if (this.activeInvocations === 0) {
+        for (const notify of this.activityWaiters) notify();
+        this.activityWaiters.clear();
+      }
+    }
   }
 
   async invokeOnce(descriptor, method, payload, boundContext) {
@@ -103,6 +120,10 @@ class ComponentServiceManager {
   }
 
   async ensureSession(descriptor) {
+    if (this.storageSnapshotBarrier) {
+      await this.storageSnapshotBarrier.released;
+      return this.ensureSession(descriptor);
+    }
     const componentId = descriptor.componentId;
     const existing = this.sessions.get(componentId);
     if (existing && existing.version === descriptor.componentVersion && !existing.managed.released) return existing;
@@ -226,7 +247,55 @@ class ComponentServiceManager {
     return true;
   }
 
+  async quiesceForStorageSnapshot({ timeoutMs = 5000 } = {}) {
+    if (this.storageSnapshotBarrier) {
+      await this.storageSnapshotBarrier.released;
+      return this.quiesceForStorageSnapshot();
+    }
+    let releaseBarrier;
+    const barrier = { released: new Promise(resolve => { releaseBarrier = resolve; }), release: () => releaseBarrier() };
+    this.storageSnapshotBarrier = barrier;
+    if (this.activeInvocations > 0) {
+      let timer;
+      let activityNotify;
+      try {
+        await Promise.race([
+          new Promise(resolve => { activityNotify = resolve; this.activityWaiters.add(resolve); }),
+          new Promise((_, reject) => { timer = setTimeout(() => { const error = new Error('Component service is busy; storage snapshot was deferred'); error.code = 'COMPONENT_BUSY'; reject(error); }, timeoutMs); }),
+        ]);
+      } catch (error) {
+        if (this.storageSnapshotBarrier === barrier) this.storageSnapshotBarrier = null;
+        releaseBarrier();
+        throw error;
+      } finally { clearTimeout(timer); if (activityNotify) this.activityWaiters.delete(activityNotify); }
+    }
+    await Promise.allSettled([...this.sessionTransitions.values()]);
+    const descriptors = [...this.sessions.values()].map(session => session.descriptor);
+    const stopResults = await Promise.allSettled(descriptors.map(descriptor => this.stop(descriptor.componentId, 'component-storage-snapshot')));
+    const stopErrors = stopResults.filter(result => result.status === 'rejected').map(result => result.reason);
+    if (stopErrors.length) {
+      if (this.storageSnapshotBarrier === barrier) this.storageSnapshotBarrier = null;
+      releaseBarrier();
+      const restoreResults = await Promise.allSettled(descriptors.map(descriptor => this.ensureSession(descriptor)));
+      const restoreErrors = restoreResults.filter(result => result.status === 'rejected').map(result => result.reason);
+      throw new AggregateError([...stopErrors, ...restoreErrors], 'Unable to quiesce every component service for storage snapshot');
+    }
+    let resumed = false;
+    return async () => {
+      if (resumed) return;
+      resumed = true;
+      if (this.storageSnapshotBarrier === barrier) this.storageSnapshotBarrier = null;
+      releaseBarrier();
+      const results = await Promise.allSettled(descriptors.map(descriptor => this.ensureSession(descriptor)));
+      const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
+      if (errors.length) throw new AggregateError(errors, 'Unable to resume every component service after storage snapshot');
+    };
+  }
+
   async destroy() {
+    const barrier = this.storageSnapshotBarrier;
+    this.storageSnapshotBarrier = null;
+    barrier?.release();
     await Promise.allSettled([...this.sessionTransitions.values()]);
     const sessions = [...this.sessions.values()];
     this.sessions.clear();

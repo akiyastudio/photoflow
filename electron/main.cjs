@@ -14,6 +14,7 @@ const { ComponentServiceManager } = require('./services/component-service-manage
 const { registerComponentProjectCapabilities } = require('./services/component-project-capabilities.cjs');
 const { COMPONENT_HOST_V1_RPC_REGISTRARS, registerDeprecatedComponentHostV1Capabilities } = require('./compatibility/component-host-v1.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
+const { LEGACY_MERGED_PYTHON_TOOLS, legacyDatabasePath } = require('./compatibility/component-v1-metadata.cjs');
 const { registerComponentHostIpc } = require('./modules/component-host-ipc.cjs');
 const { registerComponentIconProtocol } = require('./modules/component-icon-protocol.cjs');
 const { PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
@@ -607,7 +608,7 @@ const loadMainWindowRenderer = () => {
 };
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'operations_db', 'team_retouch_db', 'backup_db']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'operations_db', 'backup_db', ...LEGACY_MERGED_PYTHON_TOOLS]);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
 
 const getDevelopmentPython = createDevelopmentPythonResolver({ projectRoot });
@@ -908,11 +909,7 @@ const getWorkspaceOperationsDatabasePath = root => path.join(
   'operations.sqlite3',
 );
 
-const getWorkspaceTeamRetouchDatabasePath = root => path.join(
-  getWorkspaceDataRoot(root),
-  'databases',
-  'team-retouch.sqlite3',
-);
+const getLegacyComponentDatabasePath = root => legacyDatabasePath(getWorkspaceDataRoot, root);
 const getWorkspaceMediaDatabasePath = root => path.join(
   getWorkspaceDataRoot(root),
   'databases',
@@ -1928,7 +1925,7 @@ app.whenReady().then(async () => {
       if (failures.length) throw new AggregateError(failures, '数据库恢复完成，但部分 client 未能恢复');
     });
   });
-  const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getWorkspaceTeamRetouchDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, workspaceSqliteCoordinator, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog });
+  const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getLegacyComponentDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, workspaceSqliteCoordinator, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog, componentServiceManager });
   registerBackupIpc({ backupService, credentialService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
   const archiveService = createArchiveService({ backgroundTasks, movePathAtomic, readSavedConfig, workspaceRepository, writeLog });
   registerArchiveIpc({ archiveService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });

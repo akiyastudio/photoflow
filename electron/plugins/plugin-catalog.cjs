@@ -1,15 +1,8 @@
 const PLUGIN_API_VERSION = 1;
+const { LEGACY_PLUGIN_DEFINITIONS } = require('../compatibility/component-v1-metadata.cjs');
 
 const PLUGIN_DEFINITIONS = Object.freeze({
-  'team-retouch': {
-    id: 'team-retouch',
-    version: '26.8.24.1',
-    name: '团片协作',
-    description: 'AI识别人后规划可合并的工作图，支持人物标记、确定性任务重建并自动合回原尺寸。',
-    capabilities: ['team-retouch.detect', 'team-retouch.identify', 'team-retouch.merge'],
-    developmentEntry: ['extensions', 'team-retouch', 'team_retouch.py'],
-    requiredAssets: [['models', 'rtmdet-ins_m_640x640.onnx']],
-  },
+  ...LEGACY_PLUGIN_DEFINITIONS,
   'video-playback-mpv': {
     id: 'video-playback-mpv',
     runtimeOnly: true,

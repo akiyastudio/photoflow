@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { spawnSync } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -134,5 +135,9 @@ const keepAlive = setInterval(() => undefined, 1000);
   const pending = manager.invoke('sample-component', 'sample.crash.v1', {}, boundContext);
   await assert.rejects(pending, /exited before completing sample-component\.sample\.crash\.v1/);
   await manager.destroy();
+  for (const test of ['test-component-storage-adoption.cjs', 'test-component-storage-quiesce.cjs']) {
+    const child = spawnSync(process.execPath, [path.join(__dirname, test)], { stdio: 'inherit' });
+    assert.equal(child.status, 0, `${test} must pass under the component-service CI target`);
+  }
   console.log('Component service protocol and capability boundary tests passed');
 })().finally(() => { clearInterval(keepAlive); fs.rmSync(sandbox, { recursive: true, force: true }); }).catch(error => { console.error(error); process.exitCode = 1; });

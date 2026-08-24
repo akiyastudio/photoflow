@@ -12,6 +12,7 @@ const { scheduleSdImportedMedia } = require('./workspace/sd-import-media-scan.cj
 const { createDeletedProjectCleanup } = require('./workspace/deleted-project-cleanup.cjs');
 const { formatProjectDate, normalizeProjectDate, readProjectDate } = require('./workspace/project-date.cjs');
 const { runWorkspaceMaintenanceWithRetry, workspaceDatabaseTaskResource } = require('./workspace/workspace-maintenance.cjs');
+const { invokeLegacyArtifactMigration } = require('../compatibility/component-v1-metadata.cjs');
 
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
@@ -68,14 +69,7 @@ const registerWorkspaceIpc = context => {
     } catch { return undefined; }
   };
   const migrateTeamWorkflowArtifacts = async (workspaceRoot, from, to) => {
-    if (!componentServiceManager?.supports('team-retouch', 'team.workflow.artifact.migrate.v1')) {
-      writeLog('warn', 'Team workflow artifact migration deferred because component service is unavailable', { from, to });
-      return [];
-    }
-    return componentServiceManager.invoke('team-retouch', 'team.workflow.artifact.migrate.v1', { from, to }, {
-      componentId: 'team-retouch', componentVersion: '', workspacePath: workspaceRoot,
-      projectId: `artifact:${String(from.projectName || '')}`, projectName: String(from.projectName || ''), projectStatus: String(from.status || ''),
-    });
+    return invokeLegacyArtifactMigration({ componentServiceManager, writeLog, workspaceRoot, from, to });
   };
   const { selectWorkspaceForWrite } = createWorkspaceStoragePolicy({ fs, path, ensureWorkspace });
   const { acknowledgeImportReceipt, commitImportManifest, importStagingRoots, readImportReceipt, receiptLocationsForSession } = createImportReceiptService({ crypto, fs, path, pathExists, versionService });

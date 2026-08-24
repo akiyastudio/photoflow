@@ -1,4 +1,5 @@
 const { COMPONENT_HOST_ERROR_CODES: CODES, hostError } = require('../contracts/component-host-errors.cjs');
+const { adoptLegacyStorageV1 } = require('../compatibility/component-storage-v1-adoption.cjs');
 
 const MAX_MEDIA_PAGE_SIZE = 200;
 const MAX_INPUT_TOKENS = 2000;
@@ -71,64 +72,6 @@ const replaceJsonAtomic = async ({ fs, crypto, filePath, value }) => {
 };
 const readJson = async (fs, filePath) => {
   try { return JSON.parse(await fs.promises.readFile(filePath, 'utf8')); } catch { return null; }
-};
-const copyTreeSafe = async (fs, path, source, destination, { overwrite = false } = {}) => {
-  const stat = await fs.promises.lstat(source);
-  if (stat.isSymbolicLink()) throw hostError(CODES.PERMISSION_DENIED, 'Legacy component storage contains a symbolic link');
-  if (stat.isDirectory()) {
-    await fs.promises.mkdir(destination, { recursive: true });
-    for (const entry of await fs.promises.readdir(source)) await copyTreeSafe(fs, path, path.join(source, entry), path.join(destination, entry), { overwrite });
-    return;
-  }
-  if (!stat.isFile()) throw hostError(CODES.PERMISSION_DENIED, 'Legacy component storage contains an unsupported entry');
-  await fs.promises.mkdir(path.dirname(destination), { recursive: true });
-  await fs.promises.copyFile(source, destination, overwrite ? 0 : fs.constants.COPYFILE_EXCL);
-};
-const adoptLegacyStorageV1 = async ({ fs, path, crypto, dataRoot, componentRoot, descriptor }) => {
-  const receiptPath = path.join(componentRoot, 'receipts', 'migrations', 'legacy-storage-v1.json');
-  const existingReceipt = await readJson(fs, receiptPath);
-  if (existingReceipt?.state === 'committed' && existingReceipt?.componentId === descriptor.componentId) return existingReceipt;
-  const legacyDataRoot = path.join(dataRoot, descriptor.componentId);
-  const legacyDatabasePath = path.join(dataRoot, 'databases', `${descriptor.componentId}.sqlite3`);
-  const legacyData = await fs.promises.lstat(legacyDataRoot).catch(() => null);
-  const legacyDatabase = await fs.promises.lstat(legacyDatabasePath).catch(() => null);
-  if ((!legacyData?.isDirectory() || legacyData.isSymbolicLink()) && (!legacyDatabase?.isFile() || legacyDatabase.isSymbolicLink())) return null;
-  if ((legacyData && (!legacyData.isDirectory() || legacyData.isSymbolicLink())) || (legacyDatabase && (!legacyDatabase.isFile() || legacyDatabase.isSymbolicLink()))) throw hostError(CODES.PERMISSION_DENIED, 'Legacy component storage source is unsafe');
-  const parent = path.dirname(componentRoot); const token = crypto.randomUUID();
-  const pending = path.join(parent, `.${descriptor.componentId}.legacy-v1-${token}.pending`);
-  const backup = path.join(parent, `.${descriptor.componentId}.legacy-v1-${token}.backup`);
-  let backedUp = false;
-  await fs.promises.mkdir(parent, { recursive: true });
-  try {
-    if (legacyData) await copyTreeSafe(fs, path, legacyDataRoot, pending);
-    else await fs.promises.mkdir(pending, { recursive: true });
-    if (legacyDatabase) {
-      const pendingDatabase = path.join(pending, 'storage.sqlite3'); await fs.promises.copyFile(legacyDatabasePath, pendingDatabase, fs.constants.COPYFILE_EXCL);
-      if (await sha256File(fs, crypto, pendingDatabase) !== await sha256File(fs, crypto, legacyDatabasePath)) throw hostError(CODES.CONFLICT, 'Legacy component database copy verification failed');
-      for (const suffix of ['-wal', '-shm']) {
-        const source = `${legacyDatabasePath}${suffix}`; const stat = await fs.promises.lstat(source).catch(() => null);
-        if (!stat) continue;
-        if (!stat.isFile() || stat.isSymbolicLink()) throw hostError(CODES.PERMISSION_DENIED, 'Legacy component database sidecar is unsafe');
-        await fs.promises.copyFile(source, `${pendingDatabase}${suffix}`, fs.constants.COPYFILE_EXCL);
-      }
-    }
-    if (fs.existsSync(componentRoot)) {
-      await copyTreeSafe(fs, path, componentRoot, pending, { overwrite: true });
-      await fs.promises.rename(componentRoot, backup); backedUp = true;
-    }
-    await fs.promises.rename(pending, componentRoot);
-    const receipt = { schemaVersion: 1, kind: 'component-storage-adoption', state: 'committed', componentId: descriptor.componentId, fromHostApiVersion: 1, toHostApiVersion: 2, adoptedDataRoot: Boolean(legacyData), adoptedDatabase: Boolean(legacyDatabase), legacyDataRoot: legacyData ? legacyDataRoot : '', legacyDatabasePath: legacyDatabase ? legacyDatabasePath : '', databaseSha256: legacyDatabase ? await sha256File(fs, crypto, legacyDatabasePath) : '', adoptedAt: Date.now() };
-    await replaceJsonAtomic({ fs, crypto, filePath: receiptPath, value: receipt });
-    if (backedUp) await fs.promises.rm(backup, { recursive: true, force: true });
-    return receipt;
-  } catch (error) {
-    await fs.promises.rm(pending, { recursive: true, force: true }).catch(() => undefined);
-    if (backedUp) {
-      await fs.promises.rm(componentRoot, { recursive: true, force: true }).catch(() => undefined);
-      await fs.promises.rename(backup, componentRoot).catch(() => undefined);
-    }
-    throw error;
-  }
 };
 const stableUuid = (crypto, value) => {
   const bytes = crypto.createHash('sha256').update(String(value)).digest().subarray(0, 16);
