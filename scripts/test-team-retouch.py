@@ -23,7 +23,7 @@ import team_retouch as team_engine  # noqa: E402
 from team_retouch import bounded_planning_box, box_coverage_by_crop, centered_work_crop, detect_batch, emit_progress, excluded_detection_indices, face_shoulder_planning_box, fuse_boxes, identify_people, load_mask, mask_bounds, match_returned_batch, matches_exclusion, maximize_assignment, plan_work_tiles, rebuild_without_person, reposition_crop_to_avoid_bystanders, restore_patches, save_mask, spatially_order_people  # noqa: E402
 from identity_engine import constrained_clusters, ranked_similarity_pairs  # noqa: E402
 from patch_merge import merge, safe_exif_bytes, save_tiff  # noqa: E402
-from workspace_db import connect, team_identity_assign, team_identity_complete, team_identity_confirm_group, team_identity_save, team_patch_delete, team_patch_replace, team_patch_update, team_person_exclusion_add, team_person_exclusion_clear, team_person_exclusion_list, team_project_register_photo, team_project_unregister_photo, team_project_workspace  # noqa: E402
+from workspace_db import connect, mutate, team_identity_assign, team_identity_complete, team_identity_confirm_group, team_identity_save, team_patch_delete, team_patch_update, team_person_exclusion_add, team_person_exclusion_clear, team_person_exclusion_list, team_project_register_photo, team_project_unregister_photo, team_project_workspace  # noqa: E402
 
 
 def main():
@@ -90,7 +90,10 @@ def main():
     )
     assert len(fused_mask_separated_people) == 2
 
-    with tempfile.TemporaryDirectory(prefix="photoflow-team-retouch-test-") as directory:
+    temporary = tempfile.TemporaryDirectory(prefix="photoflow-team-retouch-test-")
+    db = None
+    try:
+        directory = temporary.name
         test_root = Path(directory)
         width, height = 320, 240
         x_axis = np.linspace(20, 220, width, dtype=np.uint8)
@@ -494,7 +497,8 @@ def main():
 
         # Group membership survives the workspace database round-trip while
         # old databases gain the new column through connect() migration.
-        db = connect(str(test_root), str(test_root / "workspace.sqlite3"))
+        database_path = test_root / "workspace.sqlite3"
+        db = connect(str(test_root), str(database_path), include_compatibility=True)
         db.execute("INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
                    ("project", "Test", "未分类", "Test", 1, 1))
         db.execute("""INSERT INTO photos(id,project_id,media_type,original_name,display_name,original_file_path,created_at,updated_at)
@@ -504,7 +508,7 @@ def main():
                       VALUES(?,?,?,?,?,?,?,?)""",
                    ("version", "photo", 0, "原片", str(base_path), str(base_path).casefold(), 1, 1))
         db.commit()
-        stored = team_patch_replace(db, {"photoId": "photo", "baseVersionId": "version", "tasks": [{
+        replace_payload = {"photoId": "photo", "baseVersionId": "version", "tasks": [{
             "id": "group-task", "personIndex": 1, "personName": "人物 1、2", "assignee": "",
             "detector": "test", "bbox": {"x": 10, "y": 10, "width": 100, "height": 100},
             "members": [
@@ -513,7 +517,11 @@ def main():
             ],
             "crop": crop, "patchPath": str(restored_path), "maskPath": str(mask_path),
             "mask": {"width": width, "height": height, "scale": 1}, "status": "exported",
-        }]})
+        }]}
+        db.close()
+        db = None
+        stored = mutate(str(test_root), str(database_path), "team_patch_replace", replace_payload)
+        db = connect(str(test_root), str(database_path), include_compatibility=True)
         assert [member["personIndex"] for member in stored["tasks"][0]["members"]] == [1, 2]
         uploaded_path = test_root / "uploaded-group.png"
         Image.fromarray(edited, "RGB").save(uploaded_path)
@@ -718,7 +726,12 @@ def main():
         workspace = team_project_workspace(str(test_root), db, {"projectName": "Test"})
         assert not workspace["assignments"]
         db.close()
+        db = None
         print("team-retouch merge regression test passed")
+    finally:
+        if db is not None:
+            db.close()
+        temporary.cleanup()
 
 
 if __name__ == "__main__":
