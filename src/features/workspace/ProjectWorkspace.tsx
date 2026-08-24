@@ -3915,7 +3915,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return;
     }
     if (operation === 'rename' && targetEntries.some(entry => entry.externalLink && registeredProgressFolderForEntry(entry))) {
-      onNotice('已纳入版本树的外链不能普通重命名；请使用版本管理功能，或先移动外链到项目内');
+      onNotice('已标记为版本节点的外链不能普通重命名；请使用版本管理功能，或先移动外链到项目内');
       return;
     }
     if (operation === 'trash' && projectWorkflows) {
@@ -4864,7 +4864,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       const entry = activeFileEntries.find(candidate => normalizeProjectRelativePath(candidate.relativePath) === normalizeProjectRelativePath(relativePath));
       return Boolean(entry?.externalLink && registeredProgressFolderForEntry(entry));
     })) {
-      onNotice('已纳入版本树的外链不能普通移动；请使用版本管理功能，或先移动外链到项目内');
+      onNotice('已标记为版本节点的外链不能普通移动；请使用版本管理功能，或先移动外链到项目内');
       return;
     }
     const result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, operation, paths, targetRelativePath);
@@ -5045,41 +5045,19 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   }, [viewMode, folderGridIconSizeStorageKey]);
 
   const versionTreeStatusLabel = (folder: ProgressFolder) => trackingStateLabel(folder);
-  const adoptVersionTreeFolder = async (entry: Pick<ProjectFileEntry, 'name' | 'relativePath'>, mode: 'original' | 'companion' | 'preview' | 'broll', mediaKind: 'image' | 'video' | 'mixed') => {
-    let sourceProgressId: string | undefined;
-    if (mode === 'companion' || mode === 'preview') {
-      const candidates = progressFolders.filter(folder => !folder.folderMissing && folder.mediaKind === mediaKind
-        && (mode === 'companion' ? folder.nodeRole === 'original' && !folder.artifactKind
-          : folder.nodeRole === 'original' && !folder.artifactKind
-            || folder.nodeRole === 'progress' && Boolean(folder.parentProgressId) && folder.relationKind === 'main'));
-      if (!candidates.length) {
-        onNotice(mode === 'companion' ? '请先设置一个图片原始素材节点。' : `请先设置一个${mediaKind === 'image' ? '图片' : '视频'}原始素材或主进度节点。`);
-        return false;
-      }
-      const selected = await appDialog.choice({
-        title: mode === 'companion' ? '选择配套素材来源' : '选择预览产物来源',
-        message: `“${entry.name}”将连接到哪个来源节点？`,
-        choices: candidates.map(folder => ({ value: folder.id, label: folder.displayName })),
-        defaultValue: candidates[0].id,
-        cancelLabel: '取消',
-        cancelDefault: true,
-      });
-      if (!selected) return false;
-      sourceProgressId = selected;
-    }
+  const adoptVersionTreeFolder = async (entry: Pick<ProjectFileEntry, 'name' | 'relativePath'>, mode: 'original' | 'broll', mediaKind: 'image' | 'video' | 'mixed') => {
     const result = await projectWorkspaceClient.adoptVersionTreeFolder(workspacePath, project.status, {
       projectName: project.name,
       relativePath: entry.relativePath,
       mode,
       mediaKind,
-      sourceProgressId,
     });
     if (!result.success || !result.progressFolder) {
-      onNotice(`纳入版本树失败：${result.error || '未知错误'}`, 5000);
+      onNotice(`标记失败：${result.error || '未知错误'}`, 5000);
       return false;
     }
     await loadProgressFolders();
-    onNotice(mode === 'original' ? `已将“${entry.name}”设为${mediaKind === 'image' ? '图片' : '视频'}原始素材。` : mode === 'broll' ? `已将“${entry.name}”标记为花絮。` : mode === 'companion' ? `已将“${entry.name}”设为配套素材。` : `已将“${entry.name}”设为预览产物。`);
+    onNotice(mode === 'original' ? `已将“${entry.name}”设为${mediaKind === 'image' ? '图片' : '视频'}原始素材。` : `已将“${entry.name}”标记为花絮。`);
     return true;
   };
   const renderVersionTreeEntry = (entry: ProjectFileEntry, progressFolder?: ProgressFolder, sourceKind?: 'image' | 'video') => {
@@ -5205,7 +5183,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       </div></div>}
       {fileMenu && createPortal(<ViewportContextMenu x={fileMenu.x} y={fileMenu.y} widthClass="w-52" allowSubmenus>
         {isFolderLikeEntry(fileMenu.entry) && !isUnsupportedShortcutContent(fileMenu.entry) && onOpenDirectoryPage && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); onOpenDirectoryPage(entry.relativePath); }}><FolderPlus size={14}/>在新标签页打开</button><div className="my-1 border-t border-slate-100"/></>}
-        {projectWorkflows && isFolderLikeEntry(fileMenu.entry) && !fileMenuVersionTreeFolder && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>标记…</button><div className="group/submenu relative"><button type="button" className="project-menu-item w-full"><FolderPlus size={14}/>纳入版本树<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-56 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100"><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'companion', 'image'); }}>设为图片配套素材…</button><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'preview', 'image'); }}>设为图片预览产物…</button><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void adoptVersionTreeFolder(entry, 'preview', 'video'); }}>设为视频预览产物…</button></div></div><div className="my-1 border-t border-slate-100"/></>}
+        {projectWorkflows && isFolderLikeEntry(fileMenu.entry) && !fileMenuVersionTreeFolder && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>标记…</button><div className="my-1 border-t border-slate-100"/></>}
         {projectWorkflows && fileMenuRegisteredProgressFolder && <><button disabled={fileMenuRegisteredProgressFolder.trackingState === 'committing' || fileMenuRegisteredProgressFolder.trackingState === 'needs_repair'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>修改进度</button>{!fileMenuRegisteredProgressFolder.parentProgressId && <button className="project-menu-item" onClick={() => { const progressFolder = fileMenuRegisteredProgressFolder; setFileMenu(null); void unregisterLegacyOrphanProgress(progressFolder); }}><X size={14}/>取消旧版游离进度登记</button>}{progressTrackingAction(fileMenuRegisteredProgressFolder) && <button disabled={progressSubmitting || Boolean(progressTask) || fileMenuRegisteredProgressFolder.trackingState === 'committing'} title="按已持久化策略刷新当前主分支版本跟踪" className="project-menu-item" onClick={() => { const progressFolder = fileMenuRegisteredProgressFolder; setFileMenu(null); void refreshProgressTracking(progressFolder); }}><RefreshCw size={14}/>{progressTrackingRefreshLabel(fileMenuRegisteredProgressFolder)}</button>}<div className="my-1 border-t border-slate-100"/></>}
         {gatherToProject && <><button disabled={fileMenuContainsShortcutContent || gatheringInspiration || !inspirationProjects.length} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); startGatherInspiration(targets); }}><FolderInput size={14}/>添加到项目{inspirationTargetProject ? `“${inspirationTargetProject.name}”` : '…'}</button>{inspirationTargetProject && <button disabled={fileMenuContainsShortcutContent || gatheringInspiration} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); setGatherPickerPaths(targets); }}><ChevronDown size={14}/>选择其他项目…</button>}<div className="my-1 border-t border-slate-100"/></>}
         {projectWorkflows && canSelectFileMenuMedia && <><button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><div className="my-1 border-t border-slate-100"/></>}

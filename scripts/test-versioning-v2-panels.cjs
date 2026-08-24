@@ -122,8 +122,15 @@ const ordinaryFolderMenu = projectWorkspaceSource.slice(
   projectWorkspaceSource.indexOf('projectWorkflows && isFolderLikeEntry(fileMenu.entry) && !fileMenuVersionTreeFolder'),
   projectWorkspaceSource.indexOf('projectWorkflows && fileMenuRegisteredProgressFolder'),
 );
-assert(ordinaryFolderMenu.includes('标记…') && ordinaryFolderMenu.includes("'companion'") && ordinaryFolderMenu.includes("'preview'"), 'ordinary-folder context menu must expose one marking entry and keep advanced companion/preview relations');
+assert(ordinaryFolderMenu.includes('标记…'), 'ordinary-folder context menu must expose the unified marking entry');
+assert(!ordinaryFolderMenu.includes('纳入版本树') && !ordinaryFolderMenu.includes('配套素材') && !ordinaryFolderMenu.includes('预览产物')
+  && !ordinaryFolderMenu.includes("'companion'") && !ordinaryFolderMenu.includes("'preview'"), 'ordinary-folder context menu must not expose redundant version-tree adoption or legacy artifact purposes');
 assert(!ordinaryFolderMenu.includes("'original'") && !ordinaryFolderMenu.includes("'broll'"), 'the context menu must not pre-route original, progress, or broll purposes');
+const purposeAdoptionSource = projectWorkspaceSource.slice(
+  projectWorkspaceSource.indexOf('const adoptVersionTreeFolder'),
+  projectWorkspaceSource.indexOf('const renderVersionTreeEntry'),
+);
+assert(purposeAdoptionSource.includes("mode: 'original' | 'broll'") && !purposeAdoptionSource.includes("'companion'") && !purposeAdoptionSource.includes("'preview'"), 'the unified mark submit path must create only original or broll standalone purposes');
 const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
 const versioningPublic = { ...model, ...layoutModel, ...canvasModel, ...edgeModel, ...canvasHook };
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {
