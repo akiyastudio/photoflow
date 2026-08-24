@@ -66,11 +66,149 @@ const replaceJsonAtomic = async (filePath, value) => {
   }
 };
 
-const callHost = (parentId, method, payload = {}) => new Promise((resolve, reject) => {
+const callHostV2 = (parentId, method, payload = {}) => new Promise((resolve, reject) => {
   const id = `cap-${nextCapabilityId++}`;
   pendingCapabilities.set(id, { resolve, reject });
   writeFrame({ type: 'capability', id, parentId, method, payload });
 });
+
+const materializeInput = async (parentId, token) => callHostV2(parentId, 'project.input.tokens.v2', { action: 'materialize', token });
+const readMediaV2 = async (parentId, payload) => {
+  const refs = Array.isArray(payload.mediaRefs) ? payload.mediaRefs
+    : [...(payload.photoIds || []).map(photoId => ({ photoId })), ...(payload.relativePaths || []).map(relativePath => ({ relativePath }))];
+  const items = [];
+  for (const ref of refs.slice(0, MAX_ITEMS)) {
+    try {
+      const variant = await callHostV2(parentId, 'project.media.variants.v2', { ...ref, variants: [] });
+      const metadata = variant.metadata || {};
+      const photoId = String(metadata.photoId || variant.mediaRef?.photoId || ref.photoId || '');
+      const versionId = String(metadata.versionId || variant.mediaRef?.versionId || ref.versionId || '');
+      const relativePath = String(metadata.relativePath || variant.mediaRef?.relativePath || ref.relativePath || '');
+      items.push({
+        photo: { id: photoId, currentVersionId: String(metadata.currentVersionId || versionId), displayName: metadata.displayName || metadata.originalName || path.basename(relativePath), originalName: metadata.originalName || path.basename(relativePath) },
+        versions: [{ id: versionId, photoId, relativePath, relativePathState: metadata.fileMissing ? 'missing' : 'ready', fileMissing: Boolean(metadata.fileMissing), isCurrent: Boolean(metadata.isCurrent || metadata.currentVersionId === versionId), mediaRef: variant.mediaRef }],
+        relativePath,
+      });
+    } catch (error) {
+      if (payload.strict) throw error;
+    }
+  }
+  return { items };
+};
+const materializeMediaForOperation = async (parentId, refs) => {
+  const unique = new Map();
+  for (const ref of refs || []) unique.set(ref.photoId ? `${ref.photoId}\0${ref.versionId || ''}` : `path\0${ref.relativePath || ''}`, ref);
+  const items = []; const directories = new Set();
+  try {
+    for (const ref of unique.values()) {
+      const variant = await callHostV2(parentId, 'project.media.variants.v2', { ...ref, variants: ['original'] });
+      if (!variant.input?.token) throw new Error('Host did not grant materialization for requested media');
+      const input = await materializeInput(parentId, variant.input.token); directories.add(path.dirname(input.privatePath));
+      const metadata = variant.metadata || {}; const photoId = String(metadata.photoId || variant.mediaRef?.photoId || ref.photoId || ''); const versionId = String(metadata.versionId || variant.mediaRef?.versionId || ref.versionId || '');
+      const relativePath = metadata.relativePath || variant.mediaRef?.relativePath || ref.relativePath || '';
+      items.push({ relativePath, photo: { id: photoId, currentVersionId: String(metadata.currentVersionId || versionId), displayName: metadata.displayName || metadata.originalName || '', originalName: metadata.originalName || '' }, versions: [{ id: versionId, photoId, filePath: input.privatePath, relativePath, fileMissing: Boolean(metadata.fileMissing), isCurrent: Boolean(metadata.isCurrent || metadata.currentVersionId === versionId) }] });
+    }
+    return { items, cleanup: async () => { for (const directory of directories) await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined); } };
+  } catch (error) { for (const directory of directories) await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined); throw error; }
+};
+const artifactGrantV2 = async (parentId, payload) => {
+  const storage = await callHostV2(parentId, 'component.storage.v2', {});
+  const dataDirectory = path.join(storage.dataPath, 'media', safeSegment(payload.photoId, 'photo'), safeSegment(payload.baseVersionId, 'version'));
+  return { dataDirectory, analysisDirectory: path.join(dataDirectory, 'analysis'), uploadDirectory: path.join(dataDirectory, 'uploads'), mergeDirectory: path.join(dataDirectory, 'merge'), deliveryDirectory: path.join(dataDirectory, 'delivery'), legacyDataRoot: storage.dataPath, deliveryPrefix: safeSegment(payload.deliveryPrefix || payload.photoId, 'photo') };
+};
+const inputStages = new Map();
+const storageMigrationOperations = new Map();
+const hostStorage = async parentId => {
+  const value = await callHostV2(parentId, 'component.storage.v2', {}); const storage = { ...value, dataRoot: value.dataPath };
+  if (value.adoption?.legacyDataRoot) {
+    let operation = storageMigrationOperations.get(value.databasePath);
+    if (!operation) { operation = migrateAdoptedPrivatePaths(storage).finally(() => storageMigrationOperations.delete(value.databasePath)); storageMigrationOperations.set(value.databasePath, operation); }
+    await operation;
+  }
+  return storage;
+};
+const readMedia = (parentId, payload) => readMediaV2(parentId, payload);
+const artifactsScope = (parentId, payload) => artifactGrantV2(parentId, payload);
+const hostSettings = (parentId, settings) => callHostV2(parentId, 'component.settings.v2', settings === undefined ? { action: 'get' } : { action: 'merge', settings });
+const workflowPrivateScope = async parentId => {
+  const storage = await hostStorage(parentId); const key = sha256(String(storage.projectId));
+  return { outputDirectory: path.join(storage.dataPath, 'workflow-content', key), manifestPath: path.join(storage.dataPath, 'workflows', `${key}.json`), reviewDirectory: path.join(storage.dataPath, 'workflow-return-reviews', key) };
+};
+const selectInputFiles = (parentId, { title = '选择图片', multiple = true } = {}) => callHostV2(parentId, 'dialogs.v2', { kind: 'openFiles', title, extensions: [...RETURN_IMAGE_EXTENSIONS].map(value => value.slice(1)), multiple });
+const materializeInputStage = async (parentId, tokens) => {
+  const stageId = crypto.randomUUID(); const items = [];
+  for (const [index, token] of (tokens || []).entries()) { const input = await materializeInput(parentId, token); items.push({ id: input.inputId, name: path.basename(input.privatePath), path: input.privatePath, index }); }
+  inputStages.set(stageId, items.map(item => path.dirname(item.path))); return { stageId, items };
+};
+const discardInputStage = async stageId => {
+  for (const directory of inputStages.get(String(stageId)) || []) await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined);
+  inputStages.delete(String(stageId));
+};
+const PROGRESS_EVENTS = Object.freeze({
+  'patch.detect.progress': 'team.patch.detect.progress.v1',
+  'patch.detect-batch.progress': 'team.patch.detect-batch.progress.v1',
+  'patch.return-batch.progress': 'team.return.progress.v1',
+  'workflow.progress': 'team.workflow.progress.v1',
+});
+const emitProgress = (parentId, topic, event) => {
+  const declaredTopic = PROGRESS_EVENTS[String(topic || '')];
+  if (!declaredTopic) return Promise.reject(new Error(`Unknown component progress topic: ${topic}`));
+  return callHostV2(parentId, 'component.events.v2', { topic: declaredTopic, event });
+};
+const hostTask = async (parentId, operationId, action, update = {}, topic = '') => {
+  const mapped = action === 'failed' ? 'fail' : action;
+  if (mapped === 'latest') return { task: null, cancelled: false };
+  const result = await callHostV2(parentId, 'tasks.v2', { action: mapped, operationId: String(operationId || 'team-operation'), title: update.title, message: update.message, progress: update.progress, phase: update.phase, checkpoint: update.checkpoint, error: update.error });
+  if (topic) await emitProgress(parentId, topic, update).catch(() => undefined);
+  return result;
+};
+const lifecycleAction = (parentId, action) => callHostV2(parentId, 'component.lifecycle.v2', { action });
+
+const publishProjectFileV2 = async (parentId, sourcePath, outputRelativePath, idempotencyKey, replacement = null) => {
+  const stage = await callHostV2(parentId, 'project.output.v2', { action: 'stage' });
+  const name = path.basename(sourcePath);
+  const sourceName = `${crypto.randomUUID()}-${name}`;
+  const stagedPath = path.join(stage.privatePath, sourceName);
+  try {
+    await fs.promises.copyFile(sourcePath, stagedPath, fs.constants.COPYFILE_EXCL);
+    await callHostV2(parentId, 'project.output.v2', { action: 'write', stageId: stage.stageId, name, sourceName, outputRelativePath, ...(replacement ? { replace: true, previousCommitId: replacement.commitId, previousArtifactId: replacement.artifactId, expectedDigest: replacement.sha256 } : {}) });
+    await callHostV2(parentId, 'project.output.v2', { action: 'validate', stageId: stage.stageId });
+    return await callHostV2(parentId, 'project.output.v2', { action: 'commit', stageId: stage.stageId, idempotencyKey });
+  } catch (error) {
+    await callHostV2(parentId, 'project.output.v2', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined);
+    throw error;
+  }
+};
+const publishProjectFilesV2 = async (parentId, files, idempotencyKey, replacements = new Map()) => {
+  const stage = await callHostV2(parentId, 'project.output.v2', { action: 'stage' });
+  try {
+    for (const [index, file] of files.entries()) {
+      const name = path.basename(file.sourcePath); const sourceName = `${String(index + 1).padStart(4, '0')}-${name}`;
+      await fs.promises.copyFile(file.sourcePath, path.join(stage.privatePath, sourceName), fs.constants.COPYFILE_EXCL);
+      const previous = replacements.get(file.outputRelativePath);
+      await callHostV2(parentId, 'project.output.v2', { action: 'write', stageId: stage.stageId, name, sourceName, outputRelativePath: file.outputRelativePath, ...(previous ? { replace: true, previousCommitId: previous.commitId, previousArtifactId: previous.artifactId, expectedDigest: previous.sha256 } : {}) });
+    }
+    await callHostV2(parentId, 'project.output.v2', { action: 'validate', stageId: stage.stageId });
+    return await callHostV2(parentId, 'project.output.v2', { action: 'commit', stageId: stage.stageId, idempotencyKey });
+  } catch (error) {
+    await callHostV2(parentId, 'project.output.v2', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined);
+    throw error;
+  }
+};
+const publishWorkingImageV2 = async (parentId, storage, sourcePath, baseRelativePath, operationKey) => {
+  const normalizedBase = String(baseRelativePath || '').replace(/\\/g, '/'); const parsed = path.posix.parse(normalizedBase);
+  const outputRelativePath = [parsed.dir, `${parsed.name}_裁切`, path.basename(sourcePath)].filter(Boolean).join('/');
+  const ledgerPath = path.join(storage.dataPath, 'output-ownership', 'working-images.json'); const ledger = await readJson(ledgerPath, {});
+  let previous = ledger[outputRelativePath] || null;
+  if (!previous) {
+    try { const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: `working-${sha256(outputRelativePath).slice(0, 24)}`, outputs: [{ relativePath: outputRelativePath }] }); const output = adopted.outputs?.[0]; if (output) previous = { commitId: adopted.commitId, artifactId: output.artifactId, sha256: output.sha256 }; } catch { /* A new working image has no legacy target to adopt. */ }
+  }
+  const committed = await publishProjectFileV2(parentId, sourcePath, outputRelativePath, `working-${sha256(operationKey).slice(0, 24)}`, previous);
+  const output = committed.outputs[0]; const imported = await callHostV2(parentId, 'project.output.v2', { action: 'materializeOwned', commitId: committed.commitId, artifactId: output.artifactId });
+  ledger[outputRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256 };
+  await replaceJsonAtomic(ledgerPath, ledger);
+  return { privatePath: imported.privatePath, outputRelativePath, ownership: ledger[outputRelativePath] };
+};
 
 const ensureSchema = databasePath => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
@@ -249,9 +387,7 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
   lines.on('line', line => {
     let message;
     try { message = JSON.parse(line); } catch { return; }
-    if (message?.type === 'progress' && topic) void callHost(parentId, 'tasks.report.v1', { topic, value: { ...progress, ...message } }).then(report => {
-      if (report?.cancelled && !cancelled) { cancelled = true; child.kill(); }
-    }).catch(() => undefined);
+    if (message?.type === 'progress' && topic) void emitProgress(parentId, topic, { ...progress, ...message }).catch(() => undefined);
     else if (message?.type === 'result') result = message.result;
     else if (message && typeof message === 'object') result = message;
   });
@@ -300,10 +436,10 @@ const assertAuthorizedArtifacts = async (parentId, rows) => {
   const grants = new Map();
   for (const row of rows || []) {
     const key = `${row.photo_id}:${row.base_version_id}`;
-    if (!grants.has(key)) grants.set(key, await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: row.photo_id, baseVersionId: row.base_version_id }));
+    if (!grants.has(key)) grants.set(key, await artifactsScope(parentId, { photoId: row.photo_id, baseVersionId: row.base_version_id }));
     const grant = grants.get(key);
     for (const filePath of [row.patch_path, row.mask_path, row.edited_patch_path].filter(Boolean)) {
-      if (![grant.dataDirectory, grant.deliveryDirectory].some(root => isInside(root, filePath))) throw new Error('团片文件超出组件授权目录');
+      if (![grant.dataDirectory, grant.deliveryDirectory, grant.legacyDataRoot].some(root => isInside(root, filePath))) throw new Error('团片文件超出组件授权目录');
     }
   }
 };
@@ -332,15 +468,17 @@ const rollbackPublished = async published => {
 const commitPublished = async published => Promise.all(published.map(item => item.backupPath ? fs.promises.rm(item.backupPath, { force: true }) : undefined));
 
 const detectPhoto = async (parentId, payload, context) => {
-  const media = await callHost(parentId, 'project.media.read.v1', { photoIds: [payload.photoId] });
-  const bundle = media.items?.[0];
-  const base = bundle?.versions?.find(version => String(version.id) === String(payload.baseVersionId));
-  if (!base || base.fileMissing || !fs.existsSync(base.filePath)) throw new Error('基础版本文件不存在');
-  assertDecodableImage(base.filePath);
-  const authorized = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: payload.photoId, baseVersionId: payload.baseVersionId });
-  const settings = (await callHost(parentId, 'component.settings.v1', { action: 'get' })).settings || {};
-  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  const described = await readMedia(parentId, { strict: true, mediaRefs: [{ photoId: payload.photoId, versionId: payload.baseVersionId }] });
+  const metadataBase = described.items?.[0]?.versions?.find(version => String(version.id) === String(payload.baseVersionId));
+  if (!metadataBase || metadataBase.fileMissing) throw new Error('基础版本文件不存在');
+  const authorized = await artifactsScope(parentId, { photoId: payload.photoId, baseVersionId: payload.baseVersionId, deliveryPrefix: path.posix.parse(String(metadataBase.relativePath || '').replace(/\\/g, '/')).name });
+  const settings = (await hostSettings(parentId)).settings || {};
+  const storage = await hostStorage(parentId);
   const db = ensureSchema(storage.databasePath);
+  const materialized = await materializeMediaForOperation(parentId, [{ photoId: payload.photoId, versionId: payload.baseVersionId }]);
+  const bundle = materialized.items?.[0]; const base = bundle?.versions?.[0];
+  if (!base || !fs.existsSync(base.filePath)) { await materialized.cleanup(); db.close(); throw new Error('基础版本文件不存在'); }
+  try { assertDecodableImage(base.filePath); } catch (error) { await materialized.cleanup(); db.close(); throw error; }
   const operationId = crypto.randomUUID();
   const stagingRoot = path.join(authorized.dataDirectory, '.staging', operationId);
   const stagingAnalysis = path.join(stagingRoot, 'analysis');
@@ -357,8 +495,8 @@ const detectPhoto = async (parentId, payload, context) => {
     if (missing.length) throw new Error(`切好的图片没有成功保存（缺少 ${missing.length} 个文件）`);
     const publishedTasks = [];
     for (const task of detected.tasks || []) {
-      const patchTarget = path.join(authorized.deliveryDirectory, path.basename(task.patchPath));
-      published.push(await publishStagedFile(task.patchPath, patchTarget, operationId));
+      const working = await publishWorkingImageV2(parentId, storage, task.patchPath, metadataBase.relativePath, `${operationId}\0${task.id || task.personIndex}`);
+      const patchTarget = working.privatePath;
       let maskTarget = null;
       if (task.maskPath) { maskTarget = path.join(authorized.analysisDirectory, path.basename(task.maskPath)); published.push(await publishStagedFile(task.maskPath, maskTarget, operationId)); }
       publishedTasks.push({ ...task, patchPath: patchTarget, maskPath: maskTarget });
@@ -378,11 +516,11 @@ const detectPhoto = async (parentId, payload, context) => {
     await rollbackPublished(published);
     await appendCommand(storage, { operationId, type: 'detect', state: 'rolled-back', error: error.message || String(error) }).catch(() => undefined);
     throw error;
-  } finally { await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); db.close(); }
+  } finally { await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); await materialized.cleanup(); db.close(); }
 };
 
 const getPatchBundle = async (parentId, payload, context) => {
-  const media = await callHost(parentId, 'project.media.read.v1', { relativePaths: [String(payload.relativePath || '')] });
+  const media = await readMedia(parentId, { relativePaths: [String(payload.relativePath || '')] });
   const bundle = media.items?.[0];
   if (!bundle) throw new Error('团片图片不存在');
   return withDomain(parentId, db => {
@@ -405,17 +543,18 @@ const updatePatch = async (parentId, payload, context) => withDomain(parentId, a
   let stagedPath = '';
   try {
     if (crop) {
-      const media = await callHost(parentId, 'project.media.read.v1', { photoIds: [row.photo_id] });
+      const materialized = await materializeMediaForOperation(parentId, [{ photoId: row.photo_id, versionId: row.base_version_id }]);
+      const media = materialized;
       const base = media.items?.[0]?.versions?.find(item => String(item.id) === String(row.base_version_id));
-      if (!base || !fs.existsSync(base.filePath)) throw new Error('基础图片不存在，无法重新裁图');
-      const authorized = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: row.photo_id, baseVersionId: row.base_version_id });
+      if (!base || !fs.existsSync(base.filePath)) { await materialized.cleanup(); throw new Error('基础图片不存在，无法重新裁图'); }
+      const authorized = await artifactsScope(parentId, { photoId: row.photo_id, baseVersionId: row.base_version_id });
       await fs.promises.mkdir(authorized.dataDirectory, { recursive: true });
       const manifestPath = path.join(authorized.dataDirectory, `recrop-${operationId}.json`);
       stagedPath = path.join(authorized.dataDirectory, `recrop-${operationId}.png`);
       await fs.promises.writeFile(manifestPath, JSON.stringify({ tasks: [{ ...serializeTask(row), crop, patchPath: stagedPath }] }), 'utf8');
       await appendCommand(storage, { operationId, type: 'recrop', state: 'prepared', taskId: row.id });
       try { await runAlgorithm(parentId, ['restore', '--input', base.filePath, '--manifest', manifestPath], { timeoutMs: 10 * 60 * 1000 }); }
-      finally { await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined); }
+      finally { await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined); await materialized.cleanup(); }
       if (!fs.existsSync(stagedPath)) throw new Error('重新裁切没有生成工作图');
       backupPath = `${row.patch_path}.${operationId}.backup`;
       await fs.promises.rename(row.patch_path, backupPath);
@@ -496,17 +635,19 @@ const uploadPatch = (parentId, payload, context) => withDomain(parentId, async (
   const personIndex = Number(payload.personIndex);
   if (!Number.isInteger(personIndex) || !members.some(member => Number(member.personIndex) === personIndex)) throw new Error('人物不属于这个修图任务');
   const existingAssignment = db.prepare('SELECT identity_id FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?').get(String(context.projectId), row.photo_id, row.base_version_id, personIndex);
-  const choice = await callHost(parentId, 'dialogs.open.v1', { kind: 'image', title: `上传 ${row.person_name} 的修图结果` });
-  if (choice.cancelled) return { success: true, cancelled: true, tasks: listTasks(db, row.photo_id).map(publicTask) };
-  const authorized = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: row.photo_id, baseVersionId: row.base_version_id });
+  const choice = await selectInputFiles(parentId, { title: `上传 ${row.person_name} 的修图结果`, multiple: false });
+  if (choice.cancelled || !choice.inputs?.length) return { success: true, cancelled: true, tasks: listTasks(db, row.photo_id).map(publicTask) };
+  const materialized = await materializeInput(parentId, choice.inputs[0].token);
+  const choicePath = materialized.privatePath;
+  const authorized = await artifactsScope(parentId, { photoId: row.photo_id, baseVersionId: row.base_version_id });
   await fs.promises.mkdir(authorized.uploadDirectory, { recursive: true });
   const operationId = crypto.randomUUID();
-  const stagedPath = path.join(authorized.uploadDirectory, `.${row.id}-${operationId}.staging${path.extname(choice.filePath).toLowerCase()}`);
-  const outputPath = path.join(authorized.uploadDirectory, `${row.id}-${operationId}${path.extname(choice.filePath).toLowerCase()}`);
+  const stagedPath = path.join(authorized.uploadDirectory, `.${row.id}-${operationId}.staging${path.extname(choicePath).toLowerCase()}`);
+  const outputPath = path.join(authorized.uploadDirectory, `${row.id}-${operationId}${path.extname(choicePath).toLowerCase()}`);
   await appendCommand(storage, { operationId, type: 'patch-upload', state: 'prepared', taskId: row.id });
   let committed = false;
   try {
-    await fs.promises.copyFile(choice.filePath, stagedPath, fs.constants.COPYFILE_EXCL);
+    await fs.promises.copyFile(choicePath, stagedPath, fs.constants.COPYFILE_EXCL);
     await fs.promises.rename(stagedPath, outputPath);
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -593,52 +734,94 @@ const excludePerson = async (parentId, payload, context) => {
 };
 
 const mergePatches = async (parentId, payload, context) => withDomain(parentId, async (db, storage) => {
-  const media = await callHost(parentId, 'project.media.read.v1', { photoIds: [payload.photoId] });
+  const materialized = await materializeMediaForOperation(parentId, [{ photoId: payload.photoId, versionId: payload.baseVersionId }]);
+  const media = materialized;
   const bundle = media.items?.[0];
   const base = bundle?.versions?.find(item => String(item.id) === String(payload.baseVersionId));
-  if (!base || !fs.existsSync(base.filePath)) throw new Error('基础版本文件不存在');
+  if (!base || !fs.existsSync(base.filePath)) { await materialized.cleanup(); throw new Error('基础版本文件不存在'); }
   const tasks = listTasks(db, payload.photoId, payload.baseVersionId).filter(task => task.editedPatchPath && fs.existsSync(task.editedPatchPath));
   if (!tasks.length) throw new Error('请至少上传一张工作图的修图结果');
   await assertAuthorizedArtifacts(parentId, taskRows(db, payload.photoId, payload.baseVersionId));
-  const output = await callHost(parentId, 'project.output.authorize.v1', { operation: 'merge', photoId: payload.photoId, baseVersionId: payload.baseVersionId, outputProgressId: payload.outputProgressId });
+  const progress = await callHostV2(parentId, 'project.progress.v2', { action: 'list' });
+  const outputProgress = (progress.progress || []).find(item => String(item.id) === String(payload.outputProgressId));
+  const relativeDirectory = String(outputProgress?.contentRef?.relativeDirectory || '');
+  if (!outputProgress || outputProgress.mediaKind !== 'image' || !relativeDirectory) throw new Error('合成结果的目标图片进度不存在或不在项目内容边界内');
+  const output = await artifactGrantV2(parentId, { operation: 'artifacts', photoId: payload.photoId, baseVersionId: payload.baseVersionId });
   await fs.promises.mkdir(output.mergeDirectory, { recursive: true });
   const operationId = crypto.randomUUID();
-  const versionId = crypto.randomUUID();
   const manifestPath = path.join(output.mergeDirectory, `merge-${operationId}.json`);
-  await appendCommand(storage, { operationId, type: 'patch-merge', state: 'prepared', photoId: payload.photoId, outputPath: output.outputPath });
+  const outputName = `${safeSegment(path.parse(bundle.photo?.originalName || bundle.photo?.displayName || payload.photoId).name, '素材')}_多人修图_${Date.now()}.tif`;
+  const privateOutputPath = path.join(output.mergeDirectory, outputName);
+  const outputRelativePath = [relativeDirectory, outputName].filter(Boolean).join('/');
+  await appendCommand(storage, { operationId, type: 'patch-merge', state: 'prepared', photoId: payload.photoId, outputRelativePath });
   try {
     await fs.promises.writeFile(manifestPath, JSON.stringify({ photoId: payload.photoId, baseVersionId: base.id, tasks }), 'utf8');
-    const merged = await runAlgorithm(parentId, ['merge', '--input', base.filePath, '--manifest', manifestPath, '--output', output.outputPath]);
-    if (!fs.existsSync(output.outputPath)) throw new Error('合成算法没有生成输出文件');
+    const merged = await runAlgorithm(parentId, ['merge', '--input', base.filePath, '--manifest', manifestPath, '--output', privateOutputPath]);
+    if (!fs.existsSync(privateOutputPath)) throw new Error('合成算法没有生成输出文件');
     const threshold = Math.max(500, Number(merged.width || 0) * Number(merged.height || 0) * .00005);
     const needsReview = Boolean(merged.needsReview) || Number(merged.conflictPixels || 0) > threshold;
-    const registered = await callHost(parentId, 'version.register.v1', { versionId, photoId: payload.photoId, parentVersionId: base.id, versionName: String(payload.versionName || '').trim().slice(0, 80) || `团片协作合成 ${output.nextNumber}`, versionType: 'team-retouch', note: `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(threshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`, status: needsReview ? 'needs-review' : 'draft', isFinal: false, filePath: output.outputPath });
+    const committed = await publishProjectFileV2(parentId, privateOutputPath, outputRelativePath, `merge-${operationId}`);
+    const artifact = committed.outputs[0];
+    const registered = await callHostV2(parentId, 'version.create.v2', { commitId: committed.commitId, artifactId: artifact.artifactId, photoId: payload.photoId, parentVersionId: base.id, idempotencyKey: `version-${operationId}`, name: String(payload.versionName || '').trim().slice(0, 80) || '团片协作合成', type: 'team-retouch', note: `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(threshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`, status: needsReview ? 'needs-review' : 'draft', isFinal: false });
+    const versionId = registered.versionId;
     db.exec('BEGIN IMMEDIATE');
     try {
       for (const task of tasks) db.prepare(`UPDATE team_patch_tasks SET status='merged',merged_version_id=?,merge_metrics_json=?,updated_at=? WHERE id=?`).run(versionId, JSON.stringify(merged.metrics?.find(item => item.taskId === task.id) || {}), Date.now(), task.id);
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     await appendCommand(storage, { operationId, type: 'patch-merge', state: 'committed', versionId });
-    return { ...publicBundle(registered), tasks: listTasks(db, payload.photoId).map(publicTask), merge: { ...merged, outputPath: undefined, outputProgressId: output.outputProgressId, versionId, needsReview } };
+    return { ...publicBundle(registered.result), tasks: listTasks(db, payload.photoId).map(publicTask), merge: { ...merged, outputPath: undefined, outputProgressId: outputProgress.id, versionId, needsReview } };
   } catch (error) {
-    await fs.promises.rm(output.outputPath, { force: true }).catch(() => undefined);
+    await fs.promises.rm(privateOutputPath, { force: true }).catch(() => undefined);
     await appendCommand(storage, { operationId, type: 'patch-merge', state: 'rolled-back', error: error.message || String(error) }).catch(() => undefined);
     throw error;
-  } finally { await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined); }
+  } finally { await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined); await materialized.cleanup(); }
 });
+async function migrateAdoptedPrivatePaths(storage) {
+  const legacyRoot = path.resolve(String(storage.adoption?.legacyDataRoot || ''));
+  const targetRoot = path.resolve(String(storage.dataPath || ''));
+  if (!legacyRoot || legacyRoot === targetRoot || !isInside(path.dirname(legacyRoot), legacyRoot)) return;
+  const db = ensureSchema(storage.databasePath);
+  try {
+    if (db.prepare("SELECT value FROM meta WHERE key='storage_path_adoption_v2'").get()?.value === 'committed') return;
+    const specs = [
+      ['team_patch_tasks', 'id', ['patch_path', 'mask_path', 'edited_patch_path']],
+      ['team_person_assignments', 'rowid', ['edited_patch_path']],
+      ['team_task_artifacts', 'id', ['artifact_path']],
+    ];
+    const updates = [];
+    for (const [table, key, fields] of specs) for (const row of db.prepare(`SELECT ${key} AS migration_key,${fields.join(',')} FROM ${table}`).all()) for (const field of fields) {
+      const current = String(row[field] || ''); if (!current || !path.isAbsolute(current) || !isInside(legacyRoot, current)) continue;
+      const relative = path.relative(legacyRoot, current); const target = path.resolve(targetRoot, relative);
+      if (!isInside(targetRoot, target)) throw new Error('旧组件私有路径迁移超出 V2 storage');
+      const targetStat = await fs.promises.lstat(target).catch(() => null);
+      if (!targetStat?.isFile() || targetStat.isSymbolicLink()) throw new Error(`旧组件私有文件副本缺失：${path.basename(current)}`);
+      const sourceStat = await fs.promises.lstat(current).catch(() => null);
+      if (sourceStat?.isFile() && !sourceStat.isSymbolicLink() && (sourceStat.size !== targetStat.size || await fileSha256(current) !== await fileSha256(target))) throw new Error(`旧组件私有文件副本校验失败：${path.basename(current)}`);
+      updates.push({ table, key, field, value: target, migrationKey: row.migration_key });
+    }
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const item of updates) db.prepare(`UPDATE ${item.table} SET ${item.field}=? WHERE ${item.key}=?`).run(item.value, item.migrationKey);
+      db.prepare("INSERT INTO meta(key,value) VALUES('storage_path_adoption_v2','committed') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
+  } finally { db.close(); }
+}
 
 const detectBatch = async (parentId, payload, context) => {
   const relativePaths = uniqueText(payload.relativePaths);
   if (!relativePaths.length) throw new Error('请至少选择一张图片');
   if (relativePaths.length > MAX_ITEMS) throw new Error('批量检测图片过多');
-  const media = await callHost(parentId, 'project.media.read.v1', { relativePaths });
+  const materialized = await materializeMediaForOperation(parentId, relativePaths.map(relativePath => ({ relativePath })));
+  const media = materialized;
   const prepared = (media.items || []).map((bundle, index) => ({
     bundle, relativePath: bundle.relativePath || relativePaths[index],
     base: bundle.versions?.find(item => String(item.id) === String(bundle.photo?.currentVersionId)) || bundle.versions?.find(item => item.isCurrent) || bundle.versions?.at(-1),
   })).filter(item => item.bundle.photo?.id && item.base?.id);
   return withPhotoOperations(prepared.map(item => item.bundle.photo.id), async () => {
-    const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
-    const settings = (await callHost(parentId, 'component.settings.v1', { action: 'get' })).settings || {};
+    const storage = await hostStorage(parentId);
+    const settings = (await hostSettings(parentId)).settings || {};
     const operationId = crypto.randomUUID();
     const stagingRoot = path.join(storage.dataRoot, '.batch-staging', operationId);
     const manifestPath = path.join(stagingRoot, 'manifest.json');
@@ -647,7 +830,7 @@ const detectBatch = async (parentId, payload, context) => {
     try {
       for (const [index, item] of prepared.entries()) {
         assertDecodableImage(item.base.filePath);
-        const authorized = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: item.bundle.photo.id, baseVersionId: item.base.id });
+        const authorized = await artifactsScope(parentId, { photoId: item.bundle.photo.id, baseVersionId: item.base.id, deliveryPrefix: path.posix.parse(String(item.base.relativePath || '').replace(/\\/g, '/')).name });
         const itemRoot = path.join(stagingRoot, String(index + 1));
         const exclusions = db.prepare('SELECT bbox_json FROM team_person_exclusions WHERE project_id=? AND photo_id=? AND base_version_id=?').all(String(context.projectId), String(item.bundle.photo.id), String(item.base.id)).map(row => parseJson(row.bbox_json, {}));
         entries.push({ ...item, authorized, key: `${index}`, outputDir: path.join(itemRoot, 'analysis'), deliveryDir: path.join(itemRoot, 'delivery'), exclusions });
@@ -664,8 +847,8 @@ const detectBatch = async (parentId, payload, context) => {
         try {
           const publishedTasks = [];
           for (const task of detected.tasks || []) {
-            const patchTarget = path.join(item.authorized.deliveryDirectory, path.basename(task.patchPath));
-            published.push(await publishStagedFile(task.patchPath, patchTarget, operationId));
+            const working = await publishWorkingImageV2(parentId, storage, task.patchPath, item.base.relativePath, `${operationId}\0${item.bundle.photo.id}\0${task.id || task.personIndex}`);
+            const patchTarget = working.privatePath;
             let maskTarget = null;
             if (task.maskPath) { maskTarget = path.join(item.authorized.analysisDirectory, path.basename(task.maskPath)); published.push(await publishStagedFile(task.maskPath, maskTarget, operationId)); }
             publishedTasks.push({ ...task, patchPath: patchTarget, maskPath: maskTarget });
@@ -680,7 +863,7 @@ const detectBatch = async (parentId, payload, context) => {
         } catch (error) { await rollbackPublished(published); results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: false, error: error.message || String(error) }); }
       }
       return { success: results.some(item => item.success), results, persistentBackend: Boolean(detectedBatch.persistentBackend), requestedMode: detectedBatch.requestedMode || 'auto', advancedUsedCount: results.filter(item => item.advancedBackend).length, fallbackCount: results.filter(item => item.fallbackReason).length, error: results.some(item => item.success) ? undefined : '批量识别全部失败' };
-    } finally { db.close(); await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); }
+    } finally { db.close(); await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); await materialized.cleanup(); }
   });
 };
 
@@ -689,7 +872,7 @@ const readJsonFile = filePath => {
 };
 
 const withDomain = async (parentId, worker) => {
-  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  const storage = await hostStorage(parentId);
   const db = ensureSchema(storage.databasePath);
   try { return await worker(db, storage); } finally { db.close(); }
 };
@@ -704,7 +887,7 @@ const cleanupGeneratedIdentities = (db, projectId) => {
 
 const assertOwnedSubjects = async (parentId, projectId, assignments) => {
   const photoIds = uniqueText(assignments.map(item => item.photoId));
-  const media = photoIds.length ? await callHost(parentId, 'project.media.read.v1', { photoIds }) : { items: [] };
+  const media = photoIds.length ? await readMedia(parentId, { strict: true, mediaRefs: assignments.map(item => ({ photoId: item.photoId, versionId: item.baseVersionId })) }) : { items: [] };
   const versions = new Map((media.items || []).map(bundle => [String(bundle.photo?.id || ''), new Set((bundle.versions || []).map(version => String(version.id)))]));
   for (const item of assignments) {
     if (!versions.get(String(item.photoId))?.has(String(item.baseVersionId))) throw new Error('人物实例不属于当前团片协作项目');
@@ -854,7 +1037,7 @@ const deleteIdentity = (parentId, payload, context) => withDomain(parentId, db =
 });
 
 const readIdentitySimilarities = async (parentId, _payload, context) => {
-  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  const storage = await hostStorage(parentId);
   const payload = await readJson(path.join(storage.dataRoot, 'identity-similarities', `${sha256(context.projectName)}.json`), {});
   return { success: true, similarities: Array.isArray(payload.similarities) ? payload.similarities : [] };
 };
@@ -864,6 +1047,8 @@ const isGeneratedIdentity = identity => /^待确认人物\s+\d+$/.test(String(id
 
 const suggestIdentities = async (parentId, _payload, context) => {
   const initial = await workspaceSnapshot(parentId, context);
+  const materialized = await materializeMediaForOperation(parentId, initial.photos.map(photo => ({ photoId: photo.photoId, versionId: photo.baseVersionId })));
+  const sourceByPhoto = new Map(materialized.items.map(item => [String(item.photo.id), item.versions[0]?.filePath]));
   const subjects = initial.photos.flatMap(photo => photo.tasks.flatMap(task => (
     task.members?.length ? task.members : [{ personIndex: task.personIndex }]
   ).map(member => ({
@@ -871,13 +1056,13 @@ const suggestIdentities = async (parentId, _payload, context) => {
     photoId: photo.photoId,
     baseVersionId: photo.baseVersionId,
     personIndex: Number(member.personIndex),
-    sourcePath: photo.sourcePath,
+    sourcePath: sourceByPhoto.get(String(photo.photoId)),
     patchPath: task.patchPath,
     bbox: member.bbox || task.bbox,
     faceBox: member.faceBox || null,
   }))));
-  if (!subjects.length) throw new Error('项目里还没有已识别的人物');
-  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  if (!subjects.length) { await materialized.cleanup(); throw new Error('项目里还没有已识别的人物'); }
+  const storage = await hostStorage(parentId);
   const batchDirectory = path.join(storage.dataRoot, 'batches');
   const manifestPath = path.join(batchDirectory, `identify-${crypto.randomUUID()}.json`);
   let suggested;
@@ -887,6 +1072,7 @@ const suggestIdentities = async (parentId, _payload, context) => {
     suggested = await runAlgorithm(parentId, ['identify', '--manifest', manifestPath]);
   } finally {
     await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined);
+    await materialized.cleanup();
   }
   await withDomain(parentId, db => {
     const projectId = String(context.projectId);
@@ -957,12 +1143,23 @@ const saveWorkflowSettings = async (parentId, payload, context) => {
     preferredIdentityId: preferredIdentityOrder[0] || undefined,
     sameWeekIdentityIds,
   };
-  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  const storage = await hostStorage(parentId);
   await replaceJsonAtomic(path.join(storage.dataRoot, 'workflow-settings', `${sha256(context.projectName)}.json`), { updatedAt: Date.now(), ...workflowSettings });
   return { success: true, workflowSettings };
 };
 
-const componentSettings = async (parentId, payload) => callHost(parentId, 'component.settings.v1', payload);
+const componentSettings = async (parentId, payload) => payload.action === 'get' ? hostSettings(parentId) : hostSettings(parentId, payload.settings || {});
+const listProjectProgress = async parentId => { const value = await callHostV2(parentId, 'project.progress.v2', { action: 'list' }); return { success: true, progressFolders: value.progress || [], edges: value.edges || [] }; };
+const createProjectProgress = async (parentId, payload) => {
+  const listed = await callHostV2(parentId, 'project.progress.v2', { action: 'list' });
+  const raw = payload.progress || payload; const parentProgressId = String(raw.parentProgressId || payload.workflowInputProgressIds?.[0] || (listed.progress || []).find(item => item.nodeRole === 'original')?.id || '');
+  if (!parentProgressId) throw new Error('创建输出进度需要一个来源进度');
+  const displayName = String(raw.displayName || '团片协作输出').slice(0, 120);
+  const relativePath = String(raw.relativePath || safeSegment(displayName, '团片协作输出')).replace(/\\/g, '/');
+  const result = await callHostV2(parentId, 'project.progress.v2', { action: 'create', relativePath, mediaKind: raw.mediaKind === 'video' ? 'video' : 'image', versionKey: String(raw.versionKey || Date.now()), parentProgressId, displayName, trackingEnabled: raw.trackingEnabled === true, sourceProgressIds: payload.workflowInputProgressIds || [] });
+  return { success: true, progressFolder: result.progress, edges: result.edges || [] };
+};
+const listProjectMediaPage = async (parentId, payload) => { const value = await callHostV2(parentId, 'project.media.page.v2', { pageSize: Math.min(200, Math.max(1, Number(payload.pageSize) || 200)), ...(payload.cursor ? { cursor: payload.cursor } : {}), kinds: ['image', 'raw'] }); return { success: true, items: value.items || [], hasMore: Boolean(value.page?.hasMore), cursor: value.page?.cursor || null }; };
 
 const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomain(parentId, async db => {
   const source = path.resolve(sourcePath);
@@ -972,7 +1169,7 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
   if (!sourceStat?.isFile() || !RETURN_IMAGE_EXTENSIONS.has(extension)) throw new Error('返图格式不受支持；请导出为 JPEG、PNG、TIFF 或 WebP');
   const row = db.prepare('SELECT * FROM team_patch_tasks WHERE id=? AND photo_id=? AND base_version_id=? AND is_deleted=0').get(String(payload.taskId || ''), String(payload.photoId || ''), String(payload.baseVersionId || ''));
   if (!row) throw new Error('Component return task is outside the bound photo version');
-  const authorized = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: row.photo_id, baseVersionId: row.base_version_id });
+  const authorized = await artifactsScope(parentId, { photoId: row.photo_id, baseVersionId: row.base_version_id });
   const destination = path.join(authorized.uploadDirectory, `${row.id}-${crypto.randomUUID()}${path.extname(source).toLowerCase()}`);
   await fs.promises.mkdir(authorized.uploadDirectory, { recursive: true });
   await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
@@ -997,6 +1194,39 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
   }
 });
 const mediaRequest = payload => Object.fromEntries(['kind', 'photoId', 'baseVersionId', 'taskId', 'personIndex', 'reviewSessionId', 'returnId'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
+const componentMediaV2 = async (parentId, payload, action = 'variants') => {
+  if (payload.kind === 'original') {
+    if (action !== 'variants') return { success: false, error: '原图由项目媒体查看器打开' };
+    const media = await callHostV2(parentId, 'project.media.variants.v2', { photoId: payload.photoId, versionId: payload.baseVersionId, variants: ['preview', 'original'] });
+    return { success: true, url: media.variants.preview?.url || media.variants.original?.url, previewUrl: media.variants.preview?.url, originalUrl: media.variants.original?.url, opaqueRef: media.mediaRef };
+  }
+  const storage = await callHostV2(parentId, 'component.storage.v2', {});
+  let candidate = '';
+  if (payload.kind === 'review-return') {
+    const directory = path.join(storage.dataPath, 'workflow-return-reviews', sha256(String(storage.projectId)));
+    const session = await readJson(path.join(directory, 'session.json'), null);
+    const match = (session?.result?.matches || []).find(item => String(item.returnId) === String(payload.returnId));
+    candidate = String(match?.path || '');
+  } else {
+    const db = ensureSchema(storage.databasePath);
+    try {
+      const owner = db.prepare('SELECT project_id FROM team_retouch_photos WHERE photo_id=?').get(String(payload.photoId || ''));
+      if (owner && String(owner.project_id) !== String(storage.projectId)) throw new Error('组件媒体 outside the bound project');
+      const row = db.prepare('SELECT * FROM team_patch_tasks WHERE id=? AND photo_id=? AND base_version_id=? AND is_deleted=0').get(String(payload.taskId || ''), String(payload.photoId || ''), String(payload.baseVersionId || ''));
+      if (!row) throw new Error('组件媒体 outside the bound photo version');
+      if (payload.kind === 'working') candidate = String(row.patch_path || '');
+      else {
+        const assignment = Number.isInteger(Number(payload.personIndex)) ? db.prepare('SELECT edited_patch_path FROM team_person_assignments WHERE photo_id=? AND base_version_id=? AND person_index=?').get(String(payload.photoId), String(payload.baseVersionId), Number(payload.personIndex)) : null;
+        candidate = String(assignment?.edited_patch_path || row.edited_patch_path || '');
+      }
+    } finally { db.close(); }
+  }
+  if (!candidate || !isInside(storage.dataPath, candidate)) throw new Error('组件媒体引用已失效');
+  const relativePath = path.relative(storage.dataPath, candidate).replace(/\\/g, '/');
+  if (action === 'open') return callHostV2(parentId, 'component.media.v2', { action: 'open', relativePath });
+  const media = await callHostV2(parentId, 'component.media.v2', { action: 'variants', relativePath, variants: ['preview', 'original'] });
+  return { success: true, url: media.variants.preview?.url || media.variants.original?.url, previewUrl: media.variants.preview?.url, originalUrl: media.variants.original?.url, opaqueRef: media.opaqueRef };
+};
 const completeIdentity = (parentId, payload, context) => withDomain(parentId, async db => {
   const photoId = String(payload.photoId || '');
   const baseVersionId = String(payload.baseVersionId || '');
@@ -1040,13 +1270,13 @@ const publicWorkspace = value => ({
 });
 
 const migrateWorkflowArtifacts = async (parentId, payload) => {
-  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  const storage = await hostStorage(parentId);
   const artifacts = createTeamWorkflowArtifactService({ crypto, fs, getWorkspaceDataRoot: () => path.dirname(storage.dataRoot), path, writeLog: () => undefined });
   return artifacts.migrate('', payload.from || {}, payload.to || {});
 };
 
 const workspaceSnapshot = async (parentId, context) => {
-  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  const storage = await hostStorage(parentId);
   const db = ensureSchema(storage.databasePath);
   try {
     const projectId = String(storage.projectId || context.projectId || '');
@@ -1063,8 +1293,9 @@ const workspaceSnapshot = async (parentId, context) => {
           AND NOT EXISTS (SELECT 1 FROM team_retouch_photos p WHERE p.photo_id=t.photo_id)
           AND NOT EXISTS (SELECT 1 FROM team_person_assignments a WHERE a.photo_id=t.photo_id)`).all().map(row => row.photo_id),
     ]).slice(0, MAX_ITEMS);
+    const versionByPhoto = new Map([...registered.map(row => [String(row.photo_id), String(row.base_version_id)]), ...assignments.map(row => [String(row.photo_id), String(row.base_version_id)])]);
     const media = candidatePhotoIds.length
-      ? await callHost(parentId, 'project.media.read.v1', { photoIds: candidatePhotoIds })
+      ? await readMedia(parentId, { mediaRefs: candidatePhotoIds.map(photoId => ({ photoId, ...(versionByPhoto.get(String(photoId)) ? { versionId: versionByPhoto.get(String(photoId)) } : {}) })) })
       : { items: [] };
     const bundles = new Map((media.items || []).map(item => [String(item.photo?.id || ''), item]));
     const registrations = new Map(registered.map(row => [String(row.photo_id), row]));
@@ -1094,8 +1325,8 @@ const workspaceSnapshot = async (parentId, context) => {
       const base = (bundle.versions || []).find(version => String(version.id) === baseVersionId);
       if (!base) continue;
       photos.push({
-        photoId, baseVersionId, name: bundle.photo?.displayName || path.parse(bundle.photo?.originalName || base.filePath || '').name,
-        relativePath: base.relativePath || '', relativePathState: base.relativePathState || 'unresolvable', sourcePath: base.filePath,
+        photoId, baseVersionId, name: bundle.photo?.displayName || path.parse(bundle.photo?.originalName || base.relativePath || '').name,
+        relativePath: base.relativePath || '', relativePathState: base.relativePathState || 'unresolvable', mediaRef: { photoId, versionId: baseVersionId, relativePath: base.relativePath || '' },
         tasks: (grouped.get(baseVersionId) || []).map(serializeTask),
         excludedPersonCount: Number(db.prepare('SELECT COUNT(*) AS count FROM team_person_exclusions WHERE project_id=? AND photo_id=? AND base_version_id=?').get(projectId, photoId, baseVersionId)?.count || 0),
       });
@@ -1130,7 +1361,7 @@ const workspaceSnapshot = async (parentId, context) => {
   } finally { db.close(); }
 };
 
-const workflowScope = parentId => callHost(parentId, 'project.output.authorize.v1', { action: 'workflow' });
+const workflowScope = parentId => workflowPrivateScope(parentId);
 const readWorkflowManifest = async parentId => {
   const scope = await workflowScope(parentId);
   return { ...scope, manifest: await readJson(scope.manifestPath, null) };
@@ -1152,10 +1383,7 @@ const writeJsonAtomic = async (target, value) => {
   }
 };
 
-const reportTask = async (parentId, operationId, action, update = {}, topic = '') => callHost(parentId, 'tasks.report.v1', {
-  action, operationId, kind: 'workspace-team-workflow', title: '生成团片协作工作流',
-  eventTopic: topic, event: update, ...update,
-});
+const reportTask = async (parentId, operationId, action, update = {}, topic = '') => hostTask(parentId, operationId, action, { title: '生成团片协作工作流', ...update }, topic);
 
 const generateWorkflow = async (parentId, payload, context) => {
   const operationId = String(payload.operationId || crypto.randomUUID());
@@ -1164,8 +1392,12 @@ const generateWorkflow = async (parentId, payload, context) => {
   if (existing?.state === 'running') return { success: true, alreadyRunning: true, operationId: existing.operationId };
   const job = { operationId, cancelled: false, state: 'running', phase: 'preparing', progress: 0, message: '正在准备工作流程' };
   workflowJobs.set(key, job);
+  const jobStorage = await hostStorage(parentId); const jobStatePath = path.join(jobStorage.dataPath, 'workflow-jobs', `${sha256(key)}.json`);
+  let jobPersistence = Promise.resolve(); const persistJob = () => { const snapshot = { ...job }; jobPersistence = jobPersistence.catch(() => undefined).then(() => replaceJsonAtomic(jobStatePath, snapshot)); return jobPersistence; };
+  await persistJob();
   const publish = async update => {
     Object.assign(job, update);
+    await persistJob();
     const host = await reportTask(parentId, operationId, update.state === 'completed' ? 'complete' : update.state === 'failed' ? 'failed' : 'report', update, 'workflow.progress');
     if (host?.cancelled) job.cancelled = true;
   };
@@ -1175,7 +1407,8 @@ const generateWorkflow = async (parentId, payload, context) => {
   try {
     await reportTask(parentId, operationId, 'start', { message: job.message, checkpoint: { projectId: context.projectId, operationId } }, 'workflow.progress');
     const scope = await workflowScope(parentId);
-    if (fs.existsSync(scope.outputDirectory) && !payload.replace) return { success: true, requiresConfirmation: true, operationId };
+    const previousManifest = await readJson(scope.manifestPath, null);
+    if ((fs.existsSync(scope.outputDirectory) || previousManifest) && !payload.replace) return { success: true, requiresConfirmation: true, operationId };
     const snapshot = await workspaceSnapshot(parentId, context);
     const projectDirectory = path.dirname(scope.outputDirectory);
     stagingDirectory = path.join(projectDirectory, '.photoflow-team-workflow-staging');
@@ -1211,20 +1444,34 @@ const generateWorkflow = async (parentId, payload, context) => {
       if (backupDirectory && fs.existsSync(backupDirectory) && !fs.existsSync(scope.outputDirectory)) await fs.promises.rename(backupDirectory, scope.outputDirectory).catch(() => undefined);
       throw error;
     }
-    try { await writeJsonAtomic(scope.manifestPath, manifest); }
+    try {
+      const replacements = new Map(Object.entries(previousManifest?.outputOwnership || {}).map(([relativePath, value]) => [relativePath, value]));
+      if (!replacements.size && previousManifest?.groups?.length) {
+        const legacyOutputs = previousManifest.groups.flatMap(group => (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ relativePath: `团片协作/${String(item.relativePath).replace(/\\/g, '/')}` })));
+        if (legacyOutputs.length) {
+          const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: `workflow-${sha256(String(context.projectId)).slice(0, 24)}`, outputs: legacyOutputs });
+          for (const item of adopted.outputs || []) replacements.set(item.relativePath, { commitId: adopted.commitId, artifactId: item.artifactId, sha256: item.sha256 });
+        }
+      }
+      const outputFiles = manifest.groups.flatMap(group => (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ sourcePath: path.resolve(scope.outputDirectory, item.relativePath), outputRelativePath: `团片协作/${String(item.relativePath).replace(/\\/g, '/')}` })));
+      const committed = await publishProjectFilesV2(parentId, outputFiles, `workflow-${sha256(fingerprint).slice(0, 24)}`, replacements);
+      manifest.outputOwnership = Object.fromEntries((committed.outputs || []).map(item => [item.relativePath, { commitId: committed.commitId, artifactId: item.artifactId, sha256: item.sha256 }]));
+      await writeJsonAtomic(scope.manifestPath, manifest);
+    }
     catch (error) {
       await fs.promises.rm(scope.outputDirectory, { recursive: true, force: true }).catch(() => undefined);
       if (backupDirectory && fs.existsSync(backupDirectory)) await fs.promises.rename(backupDirectory, scope.outputDirectory).catch(() => undefined);
       throw error;
     }
     checkpointReady = false;
-    if (backupDirectory) await callHost(parentId, 'project.output.authorize.v1', { action: 'cleanup-workflow-backup', backupName: path.basename(backupDirectory) }).catch(() => undefined);
+    if (backupDirectory) await fs.promises.rm(backupDirectory, { recursive: true, force: true }).catch(() => undefined);
     await publish({ state: 'completed', phase: 'complete', progress: 100, completedFiles: plan.files.length, totalFiles: plan.files.length, copiedBytes: plan.totalBytes, totalBytes: plan.totalBytes, message: '工作流程生成完成' });
     return { success: true, operationId, count: plan.files.length, groupCount: manifest.groups.length };
   } catch (error) {
     const cancelled = job.cancelled || error?.code === CANCELLED_CODE;
     job.state = cancelled ? 'cancelled' : 'failed';
     job.message = cancelled ? '工作流程生成已取消，可在下次继续' : error.message || String(error);
+    await persistJob().catch(() => undefined);
     await reportTask(parentId, operationId, cancelled ? 'cancel' : 'failed', { ...job, error: cancelled ? '' : job.message }, 'workflow.progress').catch(() => undefined);
     if (backupDirectory && fs.existsSync(backupDirectory)) {
       const scope = await workflowScope(parentId).catch(() => null);
@@ -1240,8 +1487,8 @@ const workflowStatus = async (parentId, _payload, context) => {
   const key = `${context.projectId}:${context.projectStatus}:${context.projectName}`;
   const job = workflowJobs.get(key) || null;
   if (!job) {
-    const recovered = await callHost(parentId, 'tasks.report.v1', { action: 'latest', kind: 'workspace-team-workflow' }).catch(() => null);
-    return { success: true, job: recovered?.task ? { operationId: recovered.task.metadata?.operationId, state: recovered.task.state, phase: recovered.task.metadata?.phase, progress: recovered.task.progress, message: recovered.task.message, resumable: recovered.task.state === 'interrupted' } : null, reconciliation };
+    const storage = await hostStorage(parentId); const recovered = await readJson(path.join(storage.dataPath, 'workflow-jobs', `${sha256(key)}.json`), null);
+    return { success: true, job: recovered, reconciliation };
   }
   const host = await reportTask(parentId, job.operationId, 'status').catch(() => null);
   return { success: true, job: { ...job, task: host?.task || undefined }, reconciliation };
@@ -1263,7 +1510,12 @@ const exportWorkflow = async (parentId, payload, open = false) => {
   if (!group?.relativePath || !isInside(outputDirectory, directory) || !fs.existsSync(directory)) throw new Error('任务文件夹不存在，请重新生成工作流程');
   const count = (group.items || []).filter(item => item.available && item.relativePath && isInside(outputDirectory, path.resolve(outputDirectory, item.relativePath)) && fs.existsSync(path.resolve(outputDirectory, item.relativePath))).length;
   if (!count) throw new Error('本周任务仍在等待上一位返图');
-  if (open) await callHost(parentId, 'dialogs.open.v1', { action: 'open-workflow', relativePath: group.relativePath });
+  if (open) {
+    const first = (group.items || []).find(item => item.available && item.relativePath);
+    const owned = first ? manifest.outputOwnership?.[`团片协作/${String(first.relativePath).replace(/\\/g, '/')}`] : null;
+    if (!owned) throw new Error('任务输出尚未进入 Host V2 ownership，请重新生成工作流程');
+    await callHostV2(parentId, 'dialogs.v2', { kind: 'revealOutput', commitId: owned.commitId, artifactId: owned.artifactId });
+  }
   return { success: true, count };
 };
 
@@ -1284,8 +1536,8 @@ const publicMatch = ({ path: _path, patchPath: _patchPath, mediaPath: _mediaPath
 const presentReview = session => ({ ...session.result, reviewSessionId: session.id, matches: (session.result?.matches || []).map(publicMatch) });
 
 const selectReturns = async parentId => {
-  const selected = await callHost(parentId, 'dialogs.open.v1', { action: 'select-images' });
-  return { success: true, cancelled: Boolean(selected.cancelled), files: selected.tokens || [] };
+  const selected = await selectInputFiles(parentId, { title: '选择返图', multiple: true });
+  return { success: true, cancelled: Boolean(selected.cancelled), files: (selected.inputs || []).map(item => item.token) };
 };
 
 const readyWorkflowCandidates = (snapshot, requested = []) => {
@@ -1305,15 +1557,16 @@ const readyWorkflowCandidates = (snapshot, requested = []) => {
 };
 
 const runMatcher = async (returned, candidates) => {
-  const runtime = path.join(__dirname, process.platform === 'win32' ? 'team-retouch.exe' : 'team-retouch');
-  if (!fs.existsSync(runtime)) {
+  const testEngine = String(process.env.PHOTOFLOW_TEAM_TEST_ENGINE || '');
+  const runtime = testEngine ? process.execPath : path.join(__dirname, process.platform === 'win32' ? 'team-retouch.exe' : 'team-retouch');
+  if ((!testEngine && !fs.existsSync(runtime)) || (testEngine && !fs.existsSync(testEngine))) {
     return { matches: returned.map((item, index) => ({ ...item, ...(candidates[index] || {}), confidence: candidates[index] ? 'review' : 'unmatched', matchConfidence: 'unknown', score: 0, needsReview: true, editEvidence: { reallyModified: false }, returnWarnings: ['返图匹配算法不可用，必须人工确认'] })) };
   }
   const manifestPath = path.join(path.dirname(returned[0].path), `match-${crypto.randomUUID()}.json`);
   await fs.promises.writeFile(manifestPath, JSON.stringify({ returned, candidates }), 'utf8');
   try {
     return await new Promise((resolve, reject) => {
-      const child = spawn(runtime, ['match-batch', '--manifest', manifestPath], { cwd: __dirname, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
+      const child = spawn(runtime, [...(testEngine ? [testEngine] : []), 'match-batch', '--manifest', manifestPath], { cwd: __dirname, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = '';
       let stderr = '';
       child.stdout.on('data', chunk => { stdout += chunk; });
@@ -1338,8 +1591,8 @@ const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb 
     const task = db.prepare('SELECT * FROM team_patch_tasks WHERE id=? AND is_deleted=0').get(String(taskId));
     if (!task) throw new Error('工作流程引用的修图任务不存在');
     if (chain.some(entry => String(entry.item.photoId) !== String(task.photo_id) || String(entry.item.baseVersionId) !== String(task.base_version_id))) throw new Error('工作流程 task 链跨越了错误的照片版本');
-    const artifactGrant = await callHost(parentId, 'project.output.authorize.v1', { operation: 'artifacts', photoId: task.photo_id, baseVersionId: task.base_version_id });
-    const artifactRoots = [artifactGrant.dataDirectory, artifactGrant.deliveryDirectory].filter(Boolean);
+    const artifactGrant = await artifactsScope(parentId, { photoId: task.photo_id, baseVersionId: task.base_version_id });
+    const artifactRoots = [artifactGrant.dataDirectory, artifactGrant.deliveryDirectory, artifactGrant.legacyDataRoot].filter(Boolean);
     const assertSource = sourcePath => {
       if (!sourcePath || !fs.existsSync(sourcePath)) return false;
       if (!artifactRoots.some(root => isInside(root, sourcePath))) throw new Error('工作流程输入超出组件授权目录');
@@ -1378,8 +1631,10 @@ const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb 
     }
     let activeTarget = '';
     const activeSource = activeIndex >= 0 ? stages[activeIndex].inputPath : '';
+    const priorOutputs = [];
     for (const [index, stage] of stages.entries()) {
       const relativePath = String(stage.entry.item.relativePath || '');
+      if (relativePath) priorOutputs.push({ index, relativePath: `团片协作/${relativePath.replace(/\\/g, '/')}`, ownership: scope.manifest.outputOwnership?.[`团片协作/${relativePath.replace(/\\/g, '/')}`] || null });
       const currentTarget = relativePath ? path.resolve(scope.outputDirectory, relativePath) : '';
       if (!currentTarget || !isInside(scope.outputDirectory, currentTarget)) throw new Error('工作流程阶段路径超出授权输出目录');
       stage.entry.item.available = false;
@@ -1407,6 +1662,24 @@ const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb 
       active.relativePath = path.relative(scope.outputDirectory, activeTarget).replace(/\\/g, '/');
       active.available = true;
     }
+    const ownership = { ...(scope.manifest.outputOwnership || {}) };
+    for (const previous of priorOutputs) if (!previous.ownership) {
+      try {
+        const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: `relay-${sha256(`${task.id}\0${previous.relativePath}`).slice(0, 24)}`, outputs: [{ relativePath: previous.relativePath }] });
+        const output = adopted.outputs?.[0]; if (output) previous.ownership = { commitId: adopted.commitId, artifactId: output.artifactId, sha256: output.sha256 };
+      } catch { /* A missing historical relay file is reconstructed below when active. */ }
+    }
+    const activeRelativePath = activeIndex >= 0 ? `团片协作/${stages[activeIndex].entry.item.relativePath}` : '';
+    if (activeIndex >= 0) {
+      const prior = priorOutputs.find(item => item.relativePath === activeRelativePath)?.ownership || ownership[activeRelativePath] || null;
+      const committed = await publishProjectFileV2(parentId, activeTarget, activeRelativePath, `relay-${sha256(`${task.id}\0${activeIndex}\0${await fileSha256(activeTarget)}`).slice(0, 24)}`, prior);
+      const output = committed.outputs[0]; ownership[activeRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256 };
+    }
+    for (const previous of priorOutputs) if (previous.relativePath !== activeRelativePath && previous.ownership) {
+      await callHostV2(parentId, 'project.output.v2', { action: 'delete', previousCommitId: previous.ownership.commitId, previousArtifactId: previous.ownership.artifactId, expectedDigest: previous.ownership.sha256, idempotencyKey: `relay-delete-${sha256(`${task.id}\0${previous.relativePath}`).slice(0, 20)}` }).catch(() => undefined);
+      delete ownership[previous.relativePath];
+    }
+    scope.manifest.outputOwnership = ownership;
     await writeJsonAtomic(scope.manifestPath, scope.manifest);
     return { reconciled: true, taskId: task.id, activePersonIndex: activeIndex >= 0 ? stages[activeIndex].personIndex : null, complete: activeIndex < 0 };
   };
@@ -1414,7 +1687,7 @@ const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb 
 };
 
 const queueWorkflowReconcile = async (parentId, payload, error) => {
-  const storage = await callHost(parentId, 'component.storage.v1', { namespace: 'domain' });
+  const storage = await hostStorage(parentId);
   const db = ensureSchema(storage.databasePath);
   try { db.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET photo_id=excluded.photo_id,error=excluded.error,updated_at=excluded.updated_at`).run(String(payload.taskId), String(payload.photoId), error.message || String(error), Date.now()); }
   finally { db.close(); }
@@ -1458,9 +1731,12 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
   if (existing?.session) throw new Error('还有一批返图等待确认，请先继续处理或放弃');
   const snapshot = await workspaceSnapshot(parentId, context);
   const requestedPaths = new Set(uniqueText(payload.relativePaths));
-  const candidates = workflowMode ? readyWorkflowCandidates(snapshot, payload.items) : (snapshot.photos || []).filter(photo => !requestedPaths.size || requestedPaths.has(String(photo.relativePath || ''))).flatMap(photo => (photo.tasks || []).map(task => ({ taskId: task.id, photoId: photo.photoId, baseVersionId: photo.baseVersionId, personIndex: task.personIndex, photoName: photo.name, personName: task.personName, originalPath: photo.sourcePath, patchPath: task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath })).filter(item => item.patchPath && fs.existsSync(item.patchPath)));
+  let candidates = workflowMode ? readyWorkflowCandidates(snapshot, payload.items) : (snapshot.photos || []).filter(photo => !requestedPaths.size || requestedPaths.has(String(photo.relativePath || ''))).flatMap(photo => (photo.tasks || []).map(task => ({ taskId: task.id, photoId: photo.photoId, baseVersionId: photo.baseVersionId, personIndex: task.personIndex, photoName: photo.name, personName: task.personName, patchPath: task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath })).filter(item => item.patchPath && fs.existsSync(item.patchPath)));
   if (!candidates.length) throw new Error('当前没有可接收返图的任务');
-  const staged = await callHost(parentId, 'project.output.authorize.v1', { action: 'stage-inputs', tokens: payload.returnedFiles || [] });
+  const materialized = await materializeMediaForOperation(parentId, candidates.map(item => ({ photoId: item.photoId, versionId: item.baseVersionId })));
+  const originals = new Map(materialized.items.map(item => [`${item.photo.id}:${item.versions[0]?.id}`, item.versions[0]?.filePath]));
+  candidates = candidates.map(item => ({ ...item, originalPath: originals.get(`${item.photoId}:${item.baseVersionId}`) }));
+  const staged = await materializeInputStage(parentId, payload.returnedFiles || []).catch(async error => { await materialized.cleanup(); throw error; });
   try {
     const returnOperationId = `returns-${staged.stageId}`;
     await reportTask(parentId, returnOperationId, 'start', { kind: 'team-return-batch', title: '批量处理协作返图', message: '正在识别返图' }, 'patch.return-batch.progress');
@@ -1501,7 +1777,7 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
       } catch (error) { await fs.promises.rm(pending, { recursive: true, force: true }).catch(() => undefined); throw error; }
     }
     return result;
-  } finally { await callHost(parentId, 'project.output.authorize.v1', { action: 'discard-stage', stageId: staged.stageId }).catch(() => undefined); }
+  } finally { await discardInputStage(staged.stageId).catch(() => undefined); await materialized.cleanup(); }
 };
 
 const reviewGet = async (parentId, _payload, context) => {
@@ -1526,6 +1802,59 @@ const reviewIgnore = async (parentId, payload) => {
   else await fs.promises.rm(target.directory, { recursive: true, force: true });
   return { success: true, reviewSessionCompleted: !target.session.result.reviewCount };
 };
+const legacyProjectMigrationOperations = new Map();
+const migrateLegacyProjectArtifacts = async (parentId, context) => {
+  const storage = await hostStorage(parentId); const key = `${storage.databasePath}\0${context.projectId}`;
+  if (legacyProjectMigrationOperations.has(key)) return legacyProjectMigrationOperations.get(key);
+  const operation = (async () => {
+    const db = ensureSchema(storage.databasePath);
+    try {
+      const databaseMigrated = db.prepare("SELECT value FROM meta WHERE key='legacy_project_artifacts_v2'").get()?.value === 'committed';
+      if (!databaseMigrated) {
+        const rows = db.prepare(`SELECT id,photo_id,base_version_id,patch_path,mask_path,edited_patch_path FROM team_patch_tasks WHERE is_deleted=0`).all();
+        const updates = [];
+        for (const row of rows) {
+          const described = await readMedia(parentId, { strict: true, mediaRefs: [{ photoId: row.photo_id, versionId: row.base_version_id }] });
+          const relativeBase = String(described.items?.[0]?.versions?.[0]?.relativePath || ''); const parsed = path.posix.parse(relativeBase.replace(/\\/g, '/'));
+          for (const field of ['patch_path', 'mask_path', 'edited_patch_path']) {
+            const current = String(row[field] || ''); if (!current || !path.isAbsolute(current) || isInside(storage.dataPath, current)) continue;
+            const relativePath = [parsed.dir, `${parsed.name}_裁切`, path.basename(current)].filter(Boolean).join('/');
+            const migrationId = `artifact-${sha256(`${row.id}\0${field}\0${relativePath}`).slice(0, 24)}`;
+            const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId, outputs: [{ relativePath }] });
+            const output = adopted.outputs?.[0]; if (!output) throw new Error(`旧项目输出无法建立 V2 ownership：${relativePath}`);
+            const imported = await callHostV2(parentId, 'project.output.v2', { action: 'materializeOwned', commitId: adopted.commitId, artifactId: output.artifactId });
+            updates.push({ id: row.id, field, previousPath: current, privatePath: imported.privatePath });
+          }
+        }
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          for (const item of updates) {
+            db.prepare(`UPDATE team_patch_tasks SET ${item.field}=? WHERE id=?`).run(item.privatePath, item.id);
+            db.prepare('UPDATE team_person_assignments SET edited_patch_path=? WHERE edited_patch_path=?').run(item.privatePath, item.previousPath);
+            db.prepare('UPDATE team_task_artifacts SET artifact_path=? WHERE artifact_path=?').run(item.privatePath, item.previousPath);
+          }
+          db.prepare("INSERT INTO meta(key,value) VALUES('legacy_project_artifacts_v2','committed') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
+          db.exec('COMMIT');
+        } catch (error) { db.exec('ROLLBACK'); throw error; }
+      }
+    } finally { db.close(); }
+    const oldManifestDirectory = path.join(storage.dataPath, 'workflows');
+    const target = await workflowPrivateScope(parentId); const manifests = await fs.promises.readdir(oldManifestDirectory).catch(() => []);
+    if (!fs.existsSync(target.manifestPath)) for (const name of manifests.filter(value => value.endsWith('.json'))) {
+      const candidate = await readJson(path.join(oldManifestDirectory, name), null);
+      if (candidate && String(candidate.projectName || '') === String(context.projectName) && String(candidate.status || '') === String(context.projectStatus)) { await writeJsonAtomic(target.manifestPath, candidate); break; }
+    }
+    const legacyReview = path.join(storage.dataPath, 'workflow-return-reviews', sha256(context.projectName));
+    const legacyReviewSource = storage.adoption?.legacyDataRoot ? path.join(storage.adoption.legacyDataRoot, 'workflow-return-reviews', sha256(context.projectName)) : legacyReview;
+    if (!fs.existsSync(target.reviewDirectory) && fs.existsSync(legacyReview)) await fs.promises.cp(legacyReview, target.reviewDirectory, { recursive: true, errorOnExist: true, force: false });
+    const reviewSessionPath = path.join(target.reviewDirectory, 'session.json'); const reviewSession = await readJson(reviewSessionPath, null);
+    if (reviewSession) {
+      const rewrite = value => Array.isArray(value) ? value.map(rewrite) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([field, item]) => [field, rewrite(item)])) : typeof value === 'string' && path.isAbsolute(value) && isInside(legacyReviewSource, value) ? path.join(target.reviewDirectory, path.relative(legacyReviewSource, value)) : value;
+      await writeJsonAtomic(reviewSessionPath, rewrite(reviewSession));
+    }
+  })().finally(() => legacyProjectMigrationOperations.delete(key));
+  legacyProjectMigrationOperations.set(key, operation); return operation;
+};
 const returnConfirm = async (parentId, payload, context) => {
   const target = await readReview(parentId);
   if (!target.session || String(target.session.id) !== String(payload.reviewSessionId)) throw new Error('待确认返图批次已经变化');
@@ -1545,13 +1874,14 @@ const returnConfirm = async (parentId, payload, context) => {
 
 const handlers = {
   'team.project.get.v1': async (parentId, _payload, context) => {
+    await migrateLegacyProjectArtifacts(parentId, context);
     await retryPendingWorkflowReconciles(parentId, context).catch(() => undefined);
     return publicWorkspace(await workspaceSnapshot(parentId, context));
   },
   'team.project.register.v1': async (parentId, payload, context) => {
     const relativePaths = uniqueText(payload.relativePaths);
     if (relativePaths.length > MAX_ITEMS) throw new Error(`Too many project media items: ${relativePaths.length}`);
-    const media = await callHost(parentId, 'project.media.read.v1', { relativePaths });
+    const media = await readMedia(parentId, { relativePaths });
     await withDomain(parentId, db => {
       db.exec('BEGIN IMMEDIATE');
       try {
@@ -1585,8 +1915,9 @@ const handlers = {
   'team.identity.similarities.v1': readIdentitySimilarities,
   'team.identity.suggest.v1': suggestIdentities,
   'team.identity.complete.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => completeIdentity(parentId, payload, context)),
-  'team.media.authorize.v1': (parentId, payload) => callHost(parentId, 'project.media.access.v1', { action: 'authorize', ...mediaRequest(payload) }),
-  'team.patch.open.v1': (parentId, payload) => callHost(parentId, 'project.media.access.v1', { action: 'open', ...mediaRequest({ ...payload, kind: 'working' }) }),
+  'team.media.page.v1': (parentId, payload) => listProjectMediaPage(parentId, payload),
+  'team.media.authorize.v1': (parentId, payload) => componentMediaV2(parentId, mediaRequest(payload)),
+  'team.patch.open.v1': (parentId, payload) => componentMediaV2(parentId, mediaRequest({ ...payload, kind: 'working' }), 'open'),
   'team.workflow.settings.save.v1': saveWorkflowSettings,
   'team.workflow.status.v1': workflowStatus,
   'team.workflow.cancel.v1': cancelWorkflow,
@@ -1601,16 +1932,18 @@ const handlers = {
   'team.patch.select-returns.v1': selectReturns,
   'team.patch.return-batch.v1': (parentId, payload, context) => returnBatch(parentId, payload, context, false),
   'team.workflow.artifact.migrate.v1': migrateWorkflowArtifacts,
-  'component.settings.get.v1': parentId => componentSettings(parentId, { action: 'get' }),
-  'component.settings.update.v1': (parentId, payload) => componentSettings(parentId, { action: 'update', settings: payload }),
-  'component.advanced.preflight.v1': parentId => callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.preflight' }),
-  'component.advanced.install.v1': async (parentId, payload) => {
-    const installed = await callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.install', repair: payload.repair === true });
+  'team.progress.list.v1': parentId => listProjectProgress(parentId),
+  'team.progress.create.v1': (parentId, payload) => createProjectProgress(parentId, payload),
+  'team.settings.get.v1': parentId => componentSettings(parentId, { action: 'get' }),
+  'team.settings.update.v1': (parentId, payload) => componentSettings(parentId, { action: 'update', settings: payload }),
+  'team.advanced.preflight.v1': parentId => lifecycleAction(parentId, 'preflight'),
+  'team.advanced.install.v1': async (parentId, payload) => {
+    const installed = await lifecycleAction(parentId, payload.repair === true ? 'repair' : 'install');
     const probe = await runAlgorithm(parentId, ['probe-advanced-runtime'], { timeoutMs: 4 * 60 * 1000 });
     if (!probe.pairDetrReady || !probe.sam2Ready) throw new Error('高级模型服务没有全部进入可用状态');
     return installed;
   },
-  'component.advanced.uninstall.v1': parentId => callHost(parentId, 'component.lifecycle.v1', { action: 'advanced.uninstall' }),
+  'team.advanced.uninstall.v1': parentId => lifecycleAction(parentId, 'uninstall'),
 };
 
 const startService = () => {
@@ -1639,4 +1972,5 @@ process.once('exit', () => { for (const child of activeAlgorithms) child.kill();
 };
 
 if (require.main === module) startService();
+module.exports = { ensureSchema, migrateAdoptedPrivatePaths };
 module.exports = { ensureSchema, startService };

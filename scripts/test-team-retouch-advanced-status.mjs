@@ -7,7 +7,7 @@ globalThis.window = {
   photoFlowComponent: {
     contractVersion: 1,
     rpc: async method => {
-      assert.equal(method, 'component.advanced.preflight.v1');
+      assert.equal(method, 'team.advanced.preflight.v1');
       return preflight;
     },
     onEvent: () => () => undefined,

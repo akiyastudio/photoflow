@@ -14,6 +14,19 @@ $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
 $OutputEncoding = [Text.Encoding]::UTF8
 
+$hostAction = [string]$env:PHOTOFLOW_COMPONENT_LIFECYCLE_ACTION
+if ($hostAction -eq 'preflight') { $CheckOnly = $true }
+if ($hostAction -eq 'repair') { $Repair = $true }
+if (-not $ExpectedComponentVersion.Trim() -and $env:PHOTOFLOW_COMPONENT_VERSION) { $ExpectedComponentVersion = [string]$env:PHOTOFLOW_COMPONENT_VERSION }
+if ($ExpectedAdvancedRuntimeApiVersion -le 0 -and $env:PHOTOFLOW_COMPONENT_ADVANCED_RUNTIME_API_VERSION) { $ExpectedAdvancedRuntimeApiVersion = [int]$env:PHOTOFLOW_COMPONENT_ADVANCED_RUNTIME_API_VERSION }
+if (-not $CompatibleLegacyComponentVersions.Trim() -and $env:PHOTOFLOW_COMPONENT_COMPATIBLE_LEGACY_VERSIONS) { $CompatibleLegacyComponentVersions = [string]$env:PHOTOFLOW_COMPONENT_COMPATIBLE_LEGACY_VERSIONS }
+if (($hostAction -eq 'install' -or $hostAction -eq 'repair') -and -not $PackagePath.Trim()) {
+    $componentRoot = Split-Path -Parent $PSScriptRoot
+    $packages = @(Get-ChildItem -LiteralPath $componentRoot -Filter 'PhotoFlow-team-retouch-advanced-*.zip' -File)
+    if ($packages.Count -ne 1) { throw $(if ($packages.Count) { 'The component contains multiple advanced offline packages.' } else { 'The component does not contain an advanced offline package.' }) }
+    $PackagePath = $packages[0].FullName
+}
+
 function Assert-SafeArchiveEntries {
     param([string[]]$Entries)
     foreach ($entry in $Entries) {

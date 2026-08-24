@@ -11,6 +11,7 @@ const { registerDeprecatedTeamRetouchV1Capabilities: registerComponentProjectCap
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-team-service-'));
 const workspace = path.join(sandbox, 'workspace');
 const dataRoot = path.join(sandbox, 'workspace-data', 'key');
+const componentDataRoot = path.join(dataRoot, 'team-retouch');
 const projectRoot = path.join(workspace, 'active', 'Project');
 const configPath = path.join(sandbox, 'config.json');
 const selectedReturn = path.join(sandbox, 'selected-return.jpg');
@@ -83,20 +84,55 @@ registerComponentProjectCapabilities({
   RAW_EXTENSIONS: new Set(['.dng']), IMAGE_PREVIEW_CONVERSION_EXTENSIONS: new Set(['.heic']),
 });
 broker.register('component.lifecycle.v1', payload => Object.keys(payload).every(field => ['action', 'repair'].includes(field)) ? { success: true, action: payload.action } : Promise.reject(new Error('lifecycle injection rejected')));
-const descriptor = { componentId: 'team-retouch', service: { runtimeActions: [], capabilities: ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'project.media.access.v1', 'component.settings.v1', 'component.lifecycle.v1'] } };
+const legacyDescriptor = { componentId: 'team-retouch', service: { runtimeActions: [], capabilities: ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'project.media.access.v1', 'component.settings.v1', 'component.lifecycle.v1'] } };
+const inputTokens = new Map(); const outputStages = new Map(); const outputReceipts = new Map();
+broker.register('component.storage.v2', async (_payload, ctx) => { const legacy = await broker.invoke(legacyDescriptor, 'component.storage.v1', { namespace: 'domain' }, ctx); return { apiVersion: 2, dataPath: legacy.dataRoot, databasePath: legacy.databasePath, projectId: legacy.projectId, ownership: 'component-private' }; });
+broker.register('component.settings.v2', (payload, ctx) => broker.invoke(legacyDescriptor, 'component.settings.v1', payload.action === 'get' ? payload : { action: 'update', settings: payload.settings }, ctx).then(result => ({ apiVersion: 2, revision: 1, settings: result.settings })));
+broker.register('project.media.variants.v2', async (payload, ctx) => {
+  const listed = await broker.invoke(legacyDescriptor, 'project.media.read.v1', payload.relativePath ? { relativePaths: [payload.relativePath] } : { photoIds: [payload.photoId] }, ctx);
+  const bundle = listed.items[0]; const version = (bundle?.versions || []).find(item => !payload.versionId || String(item.id) === String(payload.versionId)) || bundle?.versions?.find(item => item.isCurrent) || bundle?.versions?.at(-1);
+  if (!bundle?.photo || !version) throw new Error('Media was not found');
+  const token = `component-input:v2:${require('crypto').randomUUID()}`; inputTokens.set(token, version.filePath);
+  const original = `photoflow-media:${path.basename(version.filePath)}`;
+  const preview = ['.dng', '.heic'].includes(path.extname(version.filePath).toLowerCase()) ? 'photoflow-media:generated-preview' : original;
+  return { apiVersion: 2, mediaRef: { photoId: bundle.photo.id, versionId: version.id, relativePath: version.relativePath || bundle.relativePath }, metadata: { photoId: bundle.photo.id, versionId: version.id, currentVersionId: bundle.photo.currentVersionId || version.id, displayName: bundle.photo.displayName || '', originalName: bundle.photo.originalName || path.basename(version.filePath), relativePath: version.relativePath || bundle.relativePath || path.basename(version.filePath), isCurrent: Boolean(version.isCurrent), fileMissing: Boolean(version.fileMissing) }, variants: { preview: { url: preview, maxEdge: 1600, derived: true }, original: { url: original, byteLength: fs.existsSync(version.filePath) ? fs.statSync(version.filePath).size : 0, derived: false } }, input: { token, expiresAt: Date.now() + 60000 } };
+});
+broker.register('project.media.page.v2', () => ({ apiVersion: 2, items: [], page: { hasMore: false, cursor: null, pageSize: 100 } }));
+broker.register('project.input.tokens.v2', payload => { const source = inputTokens.get(payload.token); if (!source) throw new Error('Input token expired'); const inputId = require('crypto').randomUUID(); const directory = path.join(componentDataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); return { apiVersion: 2, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; });
+broker.register('component.media.v2', async payload => { const filePath = path.join(dataRoot, 'team-retouch', payload.relativePath); if (!fs.existsSync(filePath)) throw new Error('Component private media is missing'); const url = `photoflow-media:${path.basename(filePath)}`; return payload.action === 'variants' ? { apiVersion: 2, opaqueRef: `component-media:v2:${payload.relativePath}`, variants: { preview: { url, maxEdge: 1600, derived: true }, original: { url, byteLength: fs.statSync(filePath).size, derived: false } } } : { apiVersion: 2, opaqueRef: `component-media:v2:${payload.relativePath}`, action: payload.action, opened: true, success: true }; });
+broker.register('dialogs.v2', async (payload, ctx) => { const legacy = await broker.invoke(legacyDescriptor, 'dialogs.open.v1', payload.multiple === false ? { kind: 'image', title: payload.title } : { action: 'select-images' }, ctx); const paths = legacy.filePath ? [legacy.filePath] : (legacy.tokens || []).map(token => token.replace(/^media-token:/, '')); const inputs = paths.map(filePath => { const token = `component-input:v2:${require('crypto').randomUUID()}`; inputTokens.set(token, filePath); return { name: path.basename(filePath), token, expiresAt: Date.now() + 60000 }; }); return { apiVersion: 2, cancelled: Boolean(legacy.cancelled), inputs }; });
+broker.register('tasks.v2', async (payload, ctx) => { const legacy = await broker.invoke(legacyDescriptor, 'tasks.report.v1', { ...payload, kind: 'workspace-team-workflow' }, ctx); return { apiVersion: 2, task: legacy.task || null, cancelled: Boolean(legacy.cancelled) }; });
+broker.register('component.events.v2', () => ({ apiVersion: 2, emitted: true }));
+broker.register('component.lifecycle.v2', payload => ({ apiVersion: 2, success: true, action: payload.action, taskId: 'lifecycle-test', message: 'ok' }));
+broker.register('project.progress.v2', async (_payload, ctx) => { const listed = await broker.invoke(legacyDescriptor, 'project.output.authorize.v1', { operation: 'merge', photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'unused' }, ctx).catch(() => null); return { apiVersion: 2, progress: listed ? [{ id: listed.outputProgressId, mediaKind: 'image', contentRef: { relativeDirectory: path.relative(projectRoot, path.dirname(listed.outputPath)).replace(/\\/g, '/') } }] : [], edges: [] }; });
+broker.register('project.output.v2', async payload => {
+  if (payload.action === 'stage') { const stageId = require('crypto').randomUUID(); const privatePath = path.join(dataRoot, 'team-retouch', 'v2-stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); return { apiVersion: 2, stageId, privatePath, expiresAt: Date.now() + 60000 }; }
+  if (payload.action === 'adoptLegacyV1') { const commitId = require('crypto').randomUUID(); const outputs = payload.outputs.filter(item => fs.existsSync(path.join(projectRoot, item.relativePath))).map(item => ({ artifactId: require('crypto').randomUUID(), relativePath: item.relativePath, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(path.join(projectRoot, item.relativePath))).digest('hex') })); const result = { apiVersion: 2, commitId, idempotencyKey: payload.migrationId, outputs }; outputReceipts.set(commitId, result); return result; }
+  const stage = outputStages.get(payload.stageId);
+  if (payload.action === 'write') { stage.files.push(payload); return { apiVersion: 2, stageId: payload.stageId, artifactId: require('crypto').randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, payload.sourceName)).size }; }
+  if (payload.action === 'validate') return { apiVersion: 2, stageId: payload.stageId, valid: true, fileCount: stage.files.length, totalBytes: 1 };
+  if (payload.action === 'rollback') { fs.rmSync(stage?.privatePath || '', { recursive: true, force: true }); return { apiVersion: 2, stageId: payload.stageId, rolledBack: true }; }
+  if (payload.action === 'commit') { const commitId = require('crypto').randomUUID(); const outputs = stage.files.map(file => { const destination = path.join(projectRoot, file.outputRelativePath); fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.copyFileSync(path.join(stage.privatePath, file.sourceName), destination); return { artifactId: require('crypto').randomUUID(), relativePath: file.outputRelativePath, filePath: destination, byteLength: fs.statSync(destination).size, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(destination)).digest('hex') }; }); const result = { apiVersion: 2, commitId, idempotencyKey: payload.idempotencyKey, outputs }; outputReceipts.set(commitId, result); return result; }
+  throw new Error(`Unexpected output action: ${payload.action}`);
+});
+broker.register('version.create.v2', async (payload, ctx) => { const output = outputReceipts.get(payload.commitId)?.outputs.find(item => item.artifactId === payload.artifactId); const versionId = require('crypto').randomUUID(); const result = await broker.invoke(legacyDescriptor, 'version.register.v1', { versionId, photoId: payload.photoId, parentVersionId: payload.parentVersionId, versionName: payload.name, versionType: payload.type, note: payload.note, status: payload.status, isFinal: payload.isFinal, filePath: output.filePath }, ctx); return { apiVersion: 2, versionId, result }; });
+const teamManifestService = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'extensions', 'team-retouch', 'component.template.json'), 'utf8')).componentHost.service;
+const manifestCapabilities = teamManifestService.capabilities;
+const descriptor = { componentId: 'team-retouch', migrations: { legacyStorageV1: true, legacyOutputV1: true }, service: { runtimeActions: [], capabilities: manifestCapabilities, permissions: teamManifestService.permissions, events: teamManifestService.events } };
 assert.equal(broker.assertCapabilities(descriptor), true, 'every capability declared by the real team service manifest must have a registered broker implementation');
 const context = { workspacePath: workspace, projectId: 'project-1', projectName: 'Project', projectStatus: 'active' };
-assert.throws(() => broker.invoke(descriptor, 'component.storage.v1', { namespace: 'arbitrary' }, context), /Unknown component storage namespace/);
+assert.throws(() => broker.invoke(legacyDescriptor, 'component.storage.v1', { namespace: 'arbitrary' }, context), /Unknown component storage namespace/);
 assert.rejects(() => broker.invoke({ componentId: 'other-component', service: { capabilities: ['component.settings.v1'] } }, 'component.settings.v1', { action: 'get' }, context), /Unknown component settings namespace/);
-assert.rejects(() => broker.invoke(descriptor, 'project.output.authorize.v1', { action: 'stage-inputs', tokens: ['C:/arbitrary.jpg'] }, context), /selector tokens/);
-assert.rejects(() => broker.invoke(descriptor, 'version.register.v1', { action: 'team-return', photoId: 'other-photo', baseVersionId: 'version-1', taskId: 'task-1', stageId: '12345678', inputName: 'escape.jpg' }, context), /outside the bound project/);
+assert.rejects(() => broker.invoke(legacyDescriptor, 'project.output.authorize.v1', { action: 'stage-inputs', tokens: ['C:/arbitrary.jpg'] }, context), /selector tokens/);
+assert.rejects(() => broker.invoke(legacyDescriptor, 'version.register.v1', { action: 'team-return', photoId: 'other-photo', baseVersionId: 'version-1', taskId: 'task-1', stageId: '12345678', inputName: 'escape.jpg' }, context), /outside the bound project/);
 
 const child = spawn(process.execPath, [path.join(__dirname, '..', 'extensions', 'team-retouch', 'service.cjs')], {
-  env: { SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
+  env: { SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'inherit'],
 });
 const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
 let nextRequestId = 1;
 const pending = new Map();
+const capabilityFrames = [];
 const invoke = (method, payload = {}) => new Promise((resolve, reject) => {
   const id = String(nextRequestId++);
   pending.set(id, { resolve, reject });
@@ -109,6 +145,9 @@ const ready = new Promise((resolve, reject) => {
     const frame = JSON.parse(line);
     if (frame.type === 'ready') { resolve(); return; }
     if (frame.type === 'capability') {
+      capabilityFrames.push(frame);
+      assert(manifestCapabilities.includes(frame.method), `service emitted undeclared capability frame: ${frame.method}`);
+      assert(frame.method.endsWith('.v2'), `service emitted a non-V2 host capability frame: ${frame.method}`);
       Promise.resolve().then(() => broker.invoke(descriptor, frame.method, frame.payload, context)).then(
         result => child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: true, result })}\n`),
         error => child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: false, error: error.message })}\n`),
@@ -128,11 +167,11 @@ const ready = new Promise((resolve, reject) => {
     await ready;
     const startupStartedAt = Date.now();
     const [emptyStartupSnapshot, startupSettings, startupPreflight] = await Promise.all([
-      invoke('team.project.get.v1'), invoke('component.settings.get.v1'), invoke('component.advanced.preflight.v1'),
+      invoke('team.project.get.v1'), invoke('team.settings.get.v1'), invoke('team.advanced.preflight.v1'),
     ]);
     assert.equal(emptyStartupSnapshot.photos.length, 0);
     assert.deepEqual(startupSettings.settings, { useGpu: false, oversizeCropMode: 'expand' });
-    assert.equal(startupPreflight.action, 'advanced.preflight');
+    assert.equal(startupPreflight.action, 'preflight');
     assert(Date.now() - startupStartedAt < 2000, 'project, settings, and preflight startup requests must not serialize into a self-wait');
     const registered = await invoke('team.project.register.v1', { relativePaths: ['one.jpg'], workspacePath: 'C:/escape' });
     assert.equal(registered.success, true);
@@ -142,13 +181,13 @@ const ready = new Promise((resolve, reject) => {
     const databasePath = path.join(dataRoot, 'databases', 'team-retouch.sqlite3');
     const db = new DatabaseSync(databasePath);
     assert.equal(db.prepare('SELECT COUNT(*) AS count FROM team_retouch_photos WHERE project_id=? AND photo_id=?').get('project-1', 'photo-1').count, 1, 'register RPC writes the isolated team domain idempotently');
-    db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`).run('task-1', 'photo-1', 'version-1', 1, '人物 1', '{}', '{}', path.join(dataRoot, 'authorized-patch.png'), 1, 1);
+    db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`).run('task-1', 'photo-1', 'version-1', 1, '人物 1', '{}', '{}', path.join(componentDataRoot, 'authorized-patch.png'), 1, 1);
     db.prepare('INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)').run('photo-other', 'project-other', 'version-other', 1, 1);
     const insertTask = db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`);
-    insertTask.run('task-other', 'photo-other', 'version-other', 1, '其他项目人物', '{}', '{}', path.join(dataRoot, 'other.png'), 1, 1);
-    insertTask.run('task-orphan', 'photo-orphan', 'version-orphan', 1, '旧版孤立人物', '{}', '{}', path.join(dataRoot, 'orphan.png'), 1, 1);
+    insertTask.run('task-other', 'photo-other', 'version-other', 1, '其他项目人物', '{}', '{}', path.join(componentDataRoot, 'other.png'), 1, 1);
+    insertTask.run('task-orphan', 'photo-orphan', 'version-orphan', 1, '旧版孤立人物', '{}', '{}', path.join(componentDataRoot, 'orphan.png'), 1, 1);
     db.close();
-    fs.writeFileSync(path.join(dataRoot, 'authorized-patch.png'), Buffer.alloc(1024 * 1024, 7));
+    fs.mkdirSync(componentDataRoot, { recursive: true }); fs.writeFileSync(path.join(componentDataRoot, 'authorized-patch.png'), Buffer.alloc(1024 * 1024, 7));
     bundles.set('photo-1', {
       success: true,
       photo: { id: 'photo-1', projectId: 'project-1', currentVersionId: 'version-current', displayName: 'one' },
@@ -170,12 +209,12 @@ const ready = new Promise((resolve, reject) => {
     assert.equal(originalAccess.url, 'photoflow-media:one.jpg');
     assert.equal((await invoke('team.media.authorize.v1', { kind: 'working', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', filePath: 'C:/escape' })).url, 'photoflow-media:authorized-patch.png');
     assert.equal((await invoke('team.patch.open.v1', { photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' })).success, true);
-    const returnedPath = path.join(dataRoot, 'returned-patch.png'); fs.writeFileSync(returnedPath, 'returned');
+    const returnedPath = path.join(componentDataRoot, 'returned-patch.png'); fs.writeFileSync(returnedPath, 'returned');
     const returnedDb = new DatabaseSync(databasePath); returnedDb.prepare('UPDATE team_patch_tasks SET edited_patch_path=?,status=? WHERE id=?').run(returnedPath, 'uploaded', 'task-1'); returnedDb.close();
     assert.equal((await invoke('team.media.authorize.v1', { kind: 'returned', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' })).url, 'photoflow-media:returned-patch.png');
     const returnedAuthorizations = await Promise.all(Array.from({ length: 141 }, () => invoke('team.media.authorize.v1', { kind: 'returned', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' })));
     assert.equal(returnedAuthorizations.filter(result => result.url === 'photoflow-media:returned-patch.png').length, 141, 'returned media authorization remains stable for production assignment fan-out');
-    const reviewDirectory = path.join(dataRoot, 'team-retouch', 'workflow-return-reviews', require('crypto').createHash('sha256').update('Project').digest('hex'));
+    const reviewDirectory = path.join(dataRoot, 'team-retouch', 'workflow-return-reviews', require('crypto').createHash('sha256').update('project-1').digest('hex'));
     fs.mkdirSync(reviewDirectory, { recursive: true }); const reviewPath = path.join(reviewDirectory, 'return-1.jpg'); fs.writeFileSync(reviewPath, 'review');
     fs.writeFileSync(path.join(reviewDirectory, 'session.json'), JSON.stringify({ id: 'review-session', projectName: 'Project', result: { matches: [{ returnId: 'return-1', path: reviewPath }] } }));
     assert.equal((await invoke('team.media.authorize.v1', { kind: 'review-return', reviewSessionId: 'review-session', returnId: 'return-1' })).url, 'photoflow-media:return-1.jpg');
@@ -191,7 +230,7 @@ const ready = new Promise((resolve, reject) => {
     await assert.rejects(invoke('team.patch.open.v1', { photoId: 'photo-other', baseVersionId: 'version-other', taskId: 'task-other' }), /outside the bound project/, 'cross-project photo IDs must fail through the real service process');
     await assert.rejects(invoke('team.media.authorize.v1', { kind: 'working', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-other' }), /outside the bound photo version/, 'a task from another photo must not authorize media');
     await assert.rejects(invoke('team.identity.complete.v1', { photoId: 'photo-1', baseVersionId: 'other-version', personIndex: 1 }), /outside the bound photo/, 'cross-version completion must fail through the real service process');
-    assert.equal((await invoke('component.advanced.preflight.v1')).action, 'advanced.preflight');
+    assert.equal((await invoke('team.advanced.preflight.v1')).action, 'preflight');
     const saved = await invoke('team.identity.save.v1', { name: '人物 A', assignments: [] });
     assert(saved.identityId);
     await invoke('team.identity.assign.v1', { photoId: 'photo-1', baseVersionId: 'version-1', personIndex: 1, identityId: saved.identityId, completed: false });
@@ -202,8 +241,8 @@ const ready = new Promise((resolve, reject) => {
     fs.mkdirSync(similarityDirectory, { recursive: true });
     fs.writeFileSync(path.join(similarityDirectory, `${require('crypto').createHash('sha256').update('Project').digest('hex')}.json`), JSON.stringify({ similarities: [{ left: 'a', right: 'b', score: .8 }] }));
     assert.equal((await invoke('team.identity.similarities.v1')).similarities[0].score, .8);
-    assert.deepEqual((await invoke('component.settings.get.v1')).settings, { useGpu: false, oversizeCropMode: 'expand' });
-    assert.deepEqual((await invoke('component.settings.update.v1', { useGpu: true, oversizeCropMode: 'face-centered' })).settings, { useGpu: true, oversizeCropMode: 'face-centered' });
+    assert.deepEqual((await invoke('team.settings.get.v1')).settings, { useGpu: false, oversizeCropMode: 'expand' });
+    assert.deepEqual((await invoke('team.settings.update.v1', { useGpu: true, oversizeCropMode: 'face-centered' })).settings, { useGpu: true, oversizeCropMode: 'face-centered' });
     const generated = await invoke('team.workflow.generate.v1', { operationId: 'workflow-real-process', replace: true, preferredIdentityOrder: [saved.identityId], groups: [{ week: 1, identityId: saved.identityId, identityName: '人物 A', items: [{ photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1, photoName: 'one' }] }] });
     assert.equal(generated.success, true, `a real supervised-style service process must generate workflow files: ${generated.error || ''}`);
     assert.equal(fs.existsSync(path.join(projectRoot, '团片协作', '第1周', '人物 A', 'one_人物1.png')), true);
@@ -221,7 +260,7 @@ const ready = new Promise((resolve, reject) => {
     fs.rmSync(workflowDataDirectory, { force: true });
     fs.mkdirSync(workflowDataDirectory, { recursive: true });
     const selected = await invoke('team.patch.select-returns.v1');
-    assert.equal(selected.files[0].startsWith('media-token:'), true, 'the selector must return authorization tokens instead of paths');
+    assert.equal(selected.files[0].startsWith('component-input:v2:'), true, 'the selector must return scoped V2 input tokens instead of paths');
     const migratedArtifacts = await invoke('team.workflow.artifact.migrate.v1', { from: { status: 'active', projectName: 'Project' }, to: { status: 'active', projectName: 'Project Renamed' } });
     assert.equal(migratedArtifacts.some(item => item.state === 'migrated'), true, 'artifact identity migration must execute inside the real component service process');
     await invoke('team.identity.complete.v1', { photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' });
@@ -269,22 +308,27 @@ const ready = new Promise((resolve, reject) => {
     }
     for (let index = 2; index <= 79; index += 1) {
       const photoNumber = 2 + ((index - 2) % 26); const photoId = `photo-${photoNumber}`; const versionId = `version-${photoNumber}`;
-      const patchPath = path.join(dataRoot, `current-${index}.png`); fs.writeFileSync(patchPath, 'patch');
+      const patchPath = path.join(componentDataRoot, `current-${index}.png`); fs.writeFileSync(patchPath, 'patch');
       insertScaleTask.run(`task-current-${index}`, photoId, versionId, index, `人物 ${index}`, '{}', '{}', patchPath, index, index);
     }
     for (let index = 2; index <= 57; index += 1) insertPhoto.run(`photo-other-${index}`, 'project-other', `version-other-${index}`, index, index);
     for (let index = 2; index <= 163; index += 1) {
       const photoNumber = 2 + ((index - 2) % 56);
-      insertScaleTask.run(`task-other-${index}`, `photo-other-${photoNumber}`, `version-other-${photoNumber}`, index, `其他人物 ${index}`, '{}', '{}', path.join(dataRoot, `other-${index}.png`), index, index);
+      insertScaleTask.run(`task-other-${index}`, `photo-other-${photoNumber}`, `version-other-${photoNumber}`, index, `其他人物 ${index}`, '{}', '{}', path.join(componentDataRoot, `other-${index}.png`), index, index);
     }
     scaleDb.close();
     requestedPhotoIds.length = 0;
+    capabilityFrames.length = 0;
     const scaleStartedAt = Date.now();
     const scaledSnapshot = await invoke('team.project.get.v1');
     const scaleElapsedMs = Date.now() - scaleStartedAt;
     const scaleBytes = Buffer.byteLength(JSON.stringify(scaledSnapshot));
     const snapshotMediaReadCount = requestedPhotoIds.length;
     assert.equal(scaledSnapshot.photos.length, 27, 'a production-sized snapshot returns only the bound project photos');
+    assert.equal(capabilityFrames.filter(frame => frame.method === 'project.input.tokens.v2').length, 0, 'project snapshots describe media without materializing original pixels');
+    assert(!JSON.stringify(scaledSnapshot).includes('privatePath'), 'project snapshots retain stable IDs and opaque refs rather than materialized paths');
+    capabilityFrames.length = 0; await invoke('team.project.get.v1');
+    assert.equal(capabilityFrames.filter(frame => frame.method === 'project.input.tokens.v2').length, 0, 'repeated project loads do not grow component-private inputs');
     assert.equal(new Set(scaledSnapshot.photos.map(photo => photo.relativePath)).size, 27, 'every registered photo keeps one unique project-relative base path');
     assert(scaledSnapshot.photos.every(photo => photo.relativePath && !path.isAbsolute(photo.relativePath) && !photo.relativePath.split(/[\\/]/).includes('..')), 'all snapshot paths remain non-empty and inside the project namespace');
     const originalAuthorizations = await Promise.all(scaledSnapshot.photos.map(photo => invoke('team.media.authorize.v1', { kind: 'original', photoId: photo.photoId, baseVersionId: photo.baseVersionId })));
@@ -300,7 +344,7 @@ const ready = new Promise((resolve, reject) => {
     assert(patchBundles.every(bundle => bundle.success !== false), 'every restored project path must resolve through team.patch.get.v1');
     assert.equal(patchBundles.reduce((total, bundle) => total + bundle.tasks.length, 0), 80, 'restored project paths must associate all existing tasks with their registered photos');
     console.log(`Production-sized team snapshot: ${scaledSnapshot.photos.length} photos / ${scaledSnapshot.photos.reduce((total, photo) => total + photo.tasks.length, 0)} tasks / ${snapshotMediaReadCount} snapshot media reads / ${scaleBytes} bytes / ${scaleElapsedMs}ms`);
-    const assignmentReturnedPath = path.join(dataRoot, 'assignment-returned.png'); fs.writeFileSync(assignmentReturnedPath, 'assignment-returned');
+    const assignmentReturnedPath = path.join(componentDataRoot, 'assignment-returned.png'); fs.writeFileSync(assignmentReturnedPath, 'assignment-returned');
     const assignmentReturnedDb = new DatabaseSync(databasePath); assignmentReturnedDb.prepare('UPDATE team_person_assignments SET edited_patch_path=?,completed=1,completion_kind=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?').run(assignmentReturnedPath, 'returned', 'project-1', 'photo-1', 'version-1', 1); assignmentReturnedDb.close();
     assert.equal((await invoke('team.media.authorize.v1', { kind: 'returned', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1 })).url, 'photoflow-media:assignment-returned.png', 'person-scoped returned references resolve the assignment artifact instead of the shared task return');
     await invoke('team.identity.delete.v1', { identityId: saved.identityId });

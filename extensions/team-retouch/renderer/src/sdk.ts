@@ -25,7 +25,7 @@ export type ComponentSdk = {
 declare global { interface Window { photoFlowComponent: ComponentSdk } }
 
 const allowedMethods = new Set([
-  'project.files.list.v1', 'project.progress.list.v1', 'project.progress.create.v1',
+  'team.media.page.v1', 'team.progress.list.v1', 'team.progress.create.v1',
   'team.project.get.v1', 'team.project.register.v1', 'team.project.remove-photo.v1',
   'team.media.authorize.v1', 'team.patch.open.v1',
   'team.identity.similarities.v1', 'team.identity.suggest.v1', 'team.identity.save.v1',
@@ -38,8 +38,8 @@ const allowedMethods = new Set([
   'team.workflow.cancel.v1', 'team.workflow.export.v1', 'team.workflow.open-export.v1', 'team.workflow.return-batch.v1',
   'team.workflow.return-review.get.v1', 'team.workflow.return-review.discard.v1',
   'team.workflow.return-review.ignore.v1', 'team.workflow.return-confirm.v1',
-  'component.settings.get.v1', 'component.settings.update.v1', 'component.advanced.preflight.v1',
-  'component.advanced.install.v1', 'component.advanced.uninstall.v1',
+  'team.settings.get.v1', 'team.settings.update.v1', 'team.advanced.preflight.v1',
+  'team.advanced.install.v1', 'team.advanced.uninstall.v1',
 ]);
 
 export const rpc = <T = unknown>(method: string, payload?: unknown) => {

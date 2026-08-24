@@ -13,6 +13,7 @@ const workspace = fs.readFileSync(path.join(root, 'src', 'features', 'workspace'
 const settings = fs.readFileSync(path.join(root, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
 const versionsIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
 const systemIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
+const sha256 = file => require('crypto').createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 
 assert(fs.existsSync(path.join(rendererOutput, 'index.html')), 'independent team-retouch renderer must be built before this test');
 const outputFiles = fs.readdirSync(path.join(rendererOutput, 'assets'));
@@ -23,6 +24,8 @@ assert(template.componentHost.contributions.some(item => item.type === 'componen
 assert(template.requiredFiles.includes('ui/index.html') && template.requiredFiles.includes('ui/team-retouch.svg'), 'installation must reject a component missing its renderer or icon');
 assert(template.requiredFiles.includes('service.cjs'), 'installation must reject a component missing its backend service');
 assert(template.requiredFiles.includes('workflow-generation.cjs') && template.requiredFiles.includes('workflow-artifact.cjs'), 'installation must reject a component missing workflow orchestration modules');
+assert.equal(template.componentHost.service.lifecycleActions.preflight.sha256, sha256(path.join(root, 'scripts', 'setup-team-retouch-advanced.ps1')));
+assert.equal(template.componentHost.service.lifecycleActions.uninstall.sha256, sha256(path.join(root, 'scripts', 'uninstall-team-retouch-advanced.ps1')));
 assert.deepEqual(template.componentHost.service.rpcMethods, [
   'team.project.get.v1', 'team.project.register.v1', 'team.project.remove-photo.v1',
   'team.identity.save.v1', 'team.identity.assign.v1', 'team.identity.confirm-group.v1', 'team.identity.delete.v1',
@@ -30,15 +33,16 @@ assert.deepEqual(template.componentHost.service.rpcMethods, [
   'team.patch.update.v1', 'team.patch.delete.v1', 'team.patch.cleanup.v1', 'team.patch.upload.v1',
   'team.patch.remove-upload.v1', 'team.patch.merge.v1',
   'team.identity.similarities.v1', 'team.identity.suggest.v1', 'team.identity.complete.v1',
-  'team.media.authorize.v1', 'team.patch.open.v1', 'team.workflow.settings.save.v1',
+  'team.media.page.v1', 'team.media.authorize.v1', 'team.patch.open.v1', 'team.workflow.settings.save.v1',
   'team.workflow.status.v1', 'team.workflow.cancel.v1', 'team.workflow.generate.v1',
   'team.workflow.export.v1', 'team.workflow.open-export.v1',
   'team.workflow.return-review.get.v1', 'team.workflow.return-review.discard.v1', 'team.workflow.return-review.ignore.v1',
   'team.workflow.return-batch.v1', 'team.workflow.return-confirm.v1',
   'team.patch.select-returns.v1', 'team.patch.return-batch.v1',
   'team.workflow.artifact.migrate.v1',
-  'component.settings.get.v1', 'component.settings.update.v1',
-  'component.advanced.preflight.v1', 'component.advanced.install.v1', 'component.advanced.uninstall.v1',
+  'team.progress.list.v1', 'team.progress.create.v1',
+  'team.settings.get.v1', 'team.settings.update.v1',
+  'team.advanced.preflight.v1', 'team.advanced.install.v1', 'team.advanced.uninstall.v1',
 ]);
 assert(template.componentHost.service.rpcMethods.every(method => !COMPONENT_RPC_METHODS[method]), 'service-owned routes must not retain legacy RPC mappings');
 for (const channel of [
@@ -56,8 +60,9 @@ for (const channel of [
   'workspace-team-patch-select-returns', 'workspace-team-patch-return-batch',
 ]) assert(!versionsIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must have exactly one component-service writer`);
 for (const channel of ['component-settings-get', 'component-settings-update']) assert(!systemIpc.includes(`ipcMain.handle('${channel}'`), `${channel} must not retain a system IPC route`);
-for (const capability of ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'project.media.access.v1', 'component.settings.v1', 'component.lifecycle.v1']) assert(template.componentHost.service.capabilities.includes(capability), `${capability} must be manifest-granted`);
-assert(!template.componentHost.service.capabilities.includes('project.identity.complete.v1'), 'identity completion is component-owned and must not request a host-private capability');
+for (const capability of ['project.media.page.v2', 'project.media.variants.v2', 'project.input.tokens.v2', 'project.output.v2', 'version.create.v2', 'project.progress.v2', 'tasks.v2', 'dialogs.v2', 'component.storage.v2', 'component.settings.v2', 'component.events.v2', 'component.lifecycle.v2', 'component.media.v2']) assert(template.componentHost.service.capabilities.includes(capability), `${capability} must be manifest-granted`);
+assert(template.componentHost.service.capabilities.every(capability => capability.endsWith('.v2')), 'current source manifest grants only Host API V2 capabilities');
+assert(template.componentHost.service.rpcMethods.every(method => method.startsWith('team.')), 'renderer-facing source RPC routes stay in the component-owned team namespace');
 assert(!template.componentHost.service.capabilities.includes('component.runtime.v1') && template.componentHost.service.runtimeActions.length === 0, 'team algorithms must execute inside the component service instead of a host runtime action');
 assert.equal((versionsIpc.match(/ipcMain\.handle\('workspace-team-/g) || []).length, 0, 'versions IPC must not register any legacy team handler');
 assert(!versionsIpc.includes('shell.openPath'), 'versions IPC must not retain arbitrary team path-opening code');
@@ -78,7 +83,7 @@ assert(rendererSource.includes("rpc<Json>('team.identity.similarities.v1')") && 
 assert(!rendererSource.includes('returnedPath:') && !rendererSource.includes('patchPath: subject.task') && !rendererSource.includes('window.electronAPI'), 'renderer must never submit paths or access the application preload');
 const serviceSource = fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'service.cjs'), 'utf8');
 assert(serviceSource.includes('if (host?.cancelled) job.cancelled = true') && serviceSource.includes('.photoflow-workflow-checkpoint.json'), 'task-center cancellation and checkpoint recovery must be enforced by the component service');
-assert(serviceSource.includes('await fs.promises.rename(backupDirectory, scope.outputDirectory)') && serviceSource.includes("action: 'cleanup-workflow-backup'"), 'workflow replacement must roll back crashes and defer committed backup cleanup');
+assert(serviceSource.includes('await fs.promises.rename(backupDirectory, scope.outputDirectory)') && serviceSource.includes("'project.output.v2'"), 'workflow replacement must roll back private staging and publish through Host V2 output ownership');
 
 const staged = fs.mkdtempSync(path.join(require('os').tmpdir(), 'photoflow-team-component-'));
 try {
@@ -95,7 +100,7 @@ try {
   assert.equal(descriptor.advancedRuntime.apiVersion, 1);
   assert.deepEqual(descriptor.advancedRuntime.compatibleLegacyComponentVersions, ['26.7.30.1']);
   assert.deepEqual(descriptor.service.runtimeActions, []);
-  assert.equal(descriptor.service.lifecycleActions['advanced.install'].sha256.length, 64);
+  assert.equal(descriptor.service.lifecycleActions.install.sha256.length, 64);
 } finally {
   fs.rmSync(staged, { recursive: true, force: true });
 }

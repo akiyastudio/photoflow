@@ -10,14 +10,16 @@ const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'team-retouch-reconcile-')
 const dataRoot = path.join(sandbox, 'data', 'team-retouch');
 const databasePath = path.join(sandbox, 'data', 'databases', 'team-retouch.sqlite3');
 const projectRoot = path.join(sandbox, 'project');
-const outputDirectory = path.join(projectRoot, '团片协作');
-const manifestPath = path.join(dataRoot, 'workflows', 'manifest.json');
-const reviewDirectory = path.join(dataRoot, 'reviews');
-const deliveryDirectory = path.join(projectRoot, '原始工作图');
+const projectStorageKey = require('crypto').createHash('sha256').update('project').digest('hex');
+const outputDirectory = path.join(dataRoot, 'workflow-content', projectStorageKey);
+const manifestPath = path.join(dataRoot, 'workflows', `${projectStorageKey}.json`);
+const reviewDirectory = path.join(dataRoot, 'workflow-return-reviews', projectStorageKey);
+const deliveryDirectory = path.join(dataRoot, 'legacy-work');
 const taskOnePatch = path.join(deliveryDirectory, 'task-one.png');
 const taskTwoPatch = path.join(deliveryDirectory, 'task-two.png');
 const returnedSource = path.join(sandbox, 'returned-a.png');
 fs.mkdirSync(deliveryDirectory, { recursive: true });
+fs.mkdirSync(projectRoot, { recursive: true });
 fs.writeFileSync(taskOnePatch, 'ORIGINAL-TASK-ONE');
 fs.writeFileSync(taskTwoPatch, 'ORIGINAL-TASK-TWO');
 fs.writeFileSync(returnedSource, 'RETURNED-BY-A');
@@ -42,9 +44,11 @@ let workflowScopeCount = 0;
 let breakManifestOnArtifactCall = 0;
 let artifactScopeCount = 0;
 let manifestDirectoryBackup = '';
+const inputTokens = new Map(); const outputStages = new Map();
+const emittedTopics = new Set();
 const waitForHeldWorkflow = () => new Promise(resolve => { heldWorkflowResolve = resolve; });
 const releaseHeldWorkflow = () => {
-  child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: heldWorkflowFrame.id, ok: true, result: { outputDirectory, manifestPath, reviewDirectory } })}\n`);
+  child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: heldWorkflowFrame.id, ok: true, result: { apiVersion: 2, dataPath: dataRoot, databasePath, projectId: 'project', ownership: 'component-private' } })}\n`);
   heldWorkflowFrame = null;
 };
 const invoke = (method, payload = {}) => new Promise((resolve, reject) => {
@@ -61,29 +65,37 @@ const ready = new Promise((resolve, reject) => {
       let result;
       let error;
       try {
-        if (frame.method === 'component.storage.v1') result = { dataRoot, databasePath, projectId: 'project' };
-        else if (frame.method === 'project.media.read.v1') result = { items: [bundle] };
-        else if (frame.method === 'tasks.report.v1') result = { cancelled: false };
-        else if (frame.method === 'dialogs.open.v1') result = { cancelled: false, filePath: returnedSource };
-        else if (frame.method === 'project.output.authorize.v1' && frame.payload.operation === 'artifacts') {
+        if (frame.method === 'component.storage.v2') {
           artifactScopeCount += 1;
-          if (breakManifestOnArtifactCall > 0 && artifactScopeCount === breakManifestOnArtifactCall) {
+          const breakAtStorageCall = breakManifestOnArtifactCall === 2 ? 6 : breakManifestOnArtifactCall === 1 ? 3 : 0;
+          if (breakAtStorageCall && artifactScopeCount === breakAtStorageCall) {
             const manifestDirectory = path.dirname(manifestPath);
             manifestDirectoryBackup = `${manifestDirectory}.backup`;
             fs.renameSync(manifestDirectory, manifestDirectoryBackup);
             fs.writeFileSync(manifestDirectory, 'block manifest writes');
           }
-          const itemRoot = path.join(dataRoot, 'photo', 'base');
-          result = { dataDirectory: itemRoot, analysisDirectory: path.join(itemRoot, 'analysis'), uploadDirectory: path.join(itemRoot, 'uploads'), mergeDirectory: path.join(itemRoot, 'merge'), deliveryDirectory, deliveryPrefix: 'photo' };
-        } else if (frame.method === 'project.output.authorize.v1' && frame.payload.action === 'workflow') {
           workflowScopeCount += 1;
-          if (holdSecondWorkflowScope && workflowScopeCount === 2) {
+          if (holdSecondWorkflowScope && workflowScopeCount === 5) {
             heldWorkflowFrame = frame;
             heldWorkflowResolve?.();
             return;
           }
-          result = { outputDirectory, manifestPath, reviewDirectory };
-        } else if (frame.method === 'project.output.authorize.v1' && frame.payload.action === 'cleanup-workflow-backup') result = { success: true };
+          result = { apiVersion: 2, dataPath: dataRoot, databasePath, projectId: 'project', ownership: 'component-private' };
+        } else if (frame.method === 'project.media.variants.v2') {
+          const token = `test-input:${bundle.versions[0].filePath}`; inputTokens.set(token, bundle.versions[0].filePath);
+          result = { apiVersion: 2, mediaRef: { photoId: 'photo', versionId: 'base', relativePath: 'photo.jpg' }, metadata: { photoId: 'photo', versionId: 'base', currentVersionId: 'base', displayName: '接力照片', originalName: 'photo.jpg', relativePath: 'photo.jpg', isCurrent: true, fileMissing: false }, variants: { original: { url: 'test', byteLength: 4, derived: false } }, input: { token, expiresAt: Date.now() + 1000 } };
+        } else if (frame.method === 'project.input.tokens.v2') { const source = inputTokens.get(frame.payload.token) || frame.payload.token.slice('test-input:'.length); const inputId = require('crypto').randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 2, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
+        else if (frame.method === 'tasks.v2') result = { apiVersion: 2, task: frame.payload.action === 'complete' ? { state: 'completed' } : null, cancelled: false };
+        else if (frame.method === 'component.events.v2') { emittedTopics.add(frame.payload.topic); result = { apiVersion: 2, emitted: true }; }
+        else if (frame.method === 'dialogs.v2') { const token = `test-input:${returnedSource}`; inputTokens.set(token, returnedSource); result = { apiVersion: 2, cancelled: false, inputs: [{ name: path.basename(returnedSource), token, expiresAt: Date.now() + 1000 }] }; }
+        else if (frame.method === 'project.output.v2') {
+          if (frame.payload.action === 'stage') { const stageId = require('crypto').randomUUID(); const privatePath = path.join(dataRoot, 'v2-stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); result = { apiVersion: 2, stageId, privatePath, expiresAt: Date.now() + 60000 }; }
+          else if (frame.payload.action === 'write') { const stage = outputStages.get(frame.payload.stageId); stage.files.push(frame.payload); result = { apiVersion: 2, stageId: frame.payload.stageId, artifactId: require('crypto').randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, frame.payload.sourceName)).size }; }
+          else if (frame.payload.action === 'validate') result = { apiVersion: 2, stageId: frame.payload.stageId, valid: true, fileCount: outputStages.get(frame.payload.stageId).files.length, totalBytes: 1 };
+          else if (frame.payload.action === 'commit') { const stage = outputStages.get(frame.payload.stageId); const commitId = require('crypto').randomUUID(); result = { apiVersion: 2, commitId, idempotencyKey: frame.payload.idempotencyKey, outputs: stage.files.map(file => ({ artifactId: require('crypto').randomUUID(), relativePath: file.outputRelativePath, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(path.join(stage.privatePath, file.sourceName))).digest('hex') })) }; }
+          else if (frame.payload.action === 'rollback') result = { apiVersion: 2, stageId: frame.payload.stageId, rolledBack: true };
+          else throw new Error(`unexpected output action ${frame.payload.action}`);
+        }
         else throw new Error(`unexpected capability ${frame.method} ${JSON.stringify(frame.payload)}`);
       } catch (value) { error = value; }
       child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: !error, result, error: error?.message })}\n`);
@@ -165,6 +177,7 @@ const restoreManifestDirectory = () => {
       ],
     });
     assert.equal(generated.success, true, generated.error);
+    assert(emittedTopics.has('team.workflow.progress.v1'), 'workflow progress reaches the host on its declared V2 event topic');
     assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
     const taskTwoActive = assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
     assertInactive('task-1', 2);

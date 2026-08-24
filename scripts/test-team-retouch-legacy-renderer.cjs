@@ -13,6 +13,8 @@ const html = read('extensions/team-retouch/renderer/index.html');
 const legacyStyle = read('extensions/team-retouch/renderer/src/legacy-style.css');
 const style = read('extensions/team-retouch/renderer/src/legacy-style.css');
 const compactStyle = style.replace(/\s+/g, '');
+const manifest = JSON.parse(read('extensions/team-retouch/component.template.json'));
+const service = read('extensions/team-retouch/service.cjs');
 
 assert(html.includes('/src/legacy-main.tsx'), 'packaged renderer must enter the source-faithful legacy migration');
 assert(!manager.includes('legacy-photo-card') && !people.includes('legacy-photo-card'), 'legacy page must not be replaced by a hand-built lookalike');
@@ -35,8 +37,13 @@ assert(manager.includes('entry.teamHistoryMissing') && manager.includes('缺失 
 assert(manager.includes('readableLegacyMediaError') && manager.includes('重试预览') && manager.includes("title={error}>{error"), 'preview failures must expose their actionable error text and retry in the visible UI');
 assert(manager.includes('advancedStatusLoading') && manager.includes('advancedStatusError') && manager.includes('onRetryAdvancedStatus'), 'advanced status must distinguish checking, failure/retry, and resolved states');
 assert(!manager.includes('window.electronAPI') && !people.includes('window.electronAPI'), 'legacy UI may only use the component adapter');
-for (const method of ['team.project.get.v1', 'team.patch.get.v1', 'team.media.authorize.v1', 'team.identity.confirm-group.v1', 'team.workflow.generate.v1', 'team.workflow.return-confirm.v1', 'team.patch.merge.v1', 'project.progress.create.v1', 'component.settings.update.v1']) assert(adapter.includes(`'${method}'`) || entry.includes(`'${method}'`), `versioned adapter route missing: ${method}`);
+for (const method of ['team.project.get.v1', 'team.patch.get.v1', 'team.media.authorize.v1', 'team.identity.confirm-group.v1', 'team.workflow.generate.v1', 'team.workflow.return-confirm.v1', 'team.patch.merge.v1', 'team.progress.create.v1', 'team.settings.update.v1']) assert(adapter.includes(`'${method}'`) || entry.includes(`'${method}'`), `versioned adapter route missing: ${method}`);
 assert(adapter.includes("['photoflow-ref', kind") && !adapter.includes('sourcePath: task.') && !adapter.includes('returnedPath:'), 'media compatibility must use opaque IDs instead of exposing or submitting paths');
+for (const topic of ['team.patch.detect.progress.v1', 'team.patch.detect-batch.progress.v1', 'team.return.progress.v1', 'team.workflow.progress.v1']) {
+  assert(manifest.componentHost.service.events.includes(topic), `manifest event allowlist missing: ${topic}`);
+  assert(adapter.includes(`'${topic}'`), `legacy renderer subscription missing V2 event topic: ${topic}`);
+  assert(service.includes(`'${topic}'`), `service event mapping missing: ${topic}`);
+}
 const workflowCssMarker = '/* Weeks stack vertically. Each person gets one compact horizontal task lane. */';
 const migratedWorkflowCss = legacyStyle.slice(legacyStyle.indexOf(workflowCssMarker));
 for (const rule of ['grid-template-columns: minmax(175px, 205px) minmax(0, 1fr)', 'width: 220px', 'height: 150px', 'overflow-x: auto', '@media (max-width: 900px)', 'html.dark .workflow-task-card']) assert(migratedWorkflowCss.includes(rule), `workflow CSS key rule missing: ${rule}`);
