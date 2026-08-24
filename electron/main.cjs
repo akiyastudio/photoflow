@@ -75,7 +75,7 @@ const { describeActionableWatchChanges, forgetMissingWatchChanges, recordActiona
 const { createProjectVirtualPathService } = require('./services/project-virtual-path-service.cjs');
 const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
-const { createElectronSecurity, normalizeBundledPythonTool, normalizeExternalUrl } = require('./security-policy.cjs');
+const { createElectronSecurity, normalizeBundledPythonTool, normalizeDevelopmentRendererUrl, normalizeExternalUrl } = require('./security-policy.cjs');
 const smokeTestEnabled = process.env.PHOTOFLOW_SMOKE_TEST === '1';
 const smokeUserDataPath = String(process.env.PHOTOFLOW_USER_DATA_DIR || '').trim(); const smokeSessionDataPath = String(process.env.PHOTOFLOW_SMOKE_SESSION_DATA_DIR || '').trim();
 if (smokeTestEnabled) {
@@ -402,9 +402,10 @@ const databaseHealthOptions = domainId => ({
 
 const rendererEntryFile = path.join(__dirname, '../artifacts/web/index.html');
 const isDevelopmentRenderer = () => process.env.NODE_ENV === 'development';
+const developmentRendererUrl = isDevelopmentRenderer() ? normalizeDevelopmentRendererUrl(process.env.PHOTOFLOW_DEV_SERVER_URL) : '';
 const { configureWindowSecurity, ipcMain, openAllowedExternalUrl } = createElectronSecurity({
   electronIpcMain, getMainWindow: () => mainWindow, isDevelopment: isDevelopmentRenderer,
-  rendererFile: rendererEntryFile, shell, writeLog,
+  rendererFile: rendererEntryFile, developmentRendererUrl, shell, writeLog,
 });
 const getShellThumbnailExecutable = () => app.isPackaged
   ? path.join(process.resourcesPath, 'shell-thumbnail.exe')
@@ -600,7 +601,7 @@ const loadMainWindowRenderer = () => {
   if (!mainWindow || mainWindow.isDestroyed()) return;
   const isDev = process.env.NODE_ENV === 'development';
   if (isDev) {
-    void mainWindow.loadURL('http://localhost:5173');
+    void mainWindow.loadURL(developmentRendererUrl);
     //mainWindow.webContents.openDevTools();
   } else {
     void mainWindow.loadFile(rendererEntryFile);

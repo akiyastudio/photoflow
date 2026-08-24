@@ -12,6 +12,9 @@ export default defineConfig({
   },
   base: './', 
   server: {
+    host: 'localhost',
+    port: 5173,
+    strictPort: true,
     watch: {
       // The repository also contains generated media runtimes and build caches.
       // Watching them can create hundreds of thousands of Windows file handles

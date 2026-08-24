@@ -24,13 +24,25 @@ const normalizeOpenScope = request => {
 const componentPageKey = ({ componentId, workspacePath, projectId }) => [componentId, normalizeIdentity(workspacePath), String(projectId || '').trim()].join(PAGE_KEY_SEPARATOR);
 const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
+const selectComponentPreload = (descriptor, { core, compatibilityV1 }) => {
+  const contractVersion = Number(descriptor?.contractVersion);
+  const hostApiVersion = Number(descriptor?.hostApiVersion);
+  if (contractVersion === 1 && hostApiVersion >= 1) return compatibilityV1;
+  if (contractVersion === 2 && hostApiVersion === 2) return core;
+  throw new Error(`Unsupported component preload contract: contract=${contractVersion || 'unknown'} hostApi=${hostApiVersion || 'unknown'}`);
+};
+const diagnosticToken = value => {
+  const token = String(value || '').trim();
+  return /^[a-z0-9_.:-]{1,80}$/i.test(token) ? token : 'unknown';
+};
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, writeLog = () => undefined }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, compatibilityPreloadPath = path.join(path.dirname(preloadPath), 'compatibility', 'component-preload-v1.cjs'), ipcMain, serviceManager = null, writeLog = () => undefined }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
     this.preloadPath = preloadPath;
+    this.compatibilityPreloadPath = compatibilityPreloadPath;
     this.ipcMain = ipcMain;
     this.writeLog = writeLog;
     this.serviceManager = serviceManager;
@@ -104,8 +116,9 @@ class ComponentViewManager {
       this.activate(existing.instanceId); return this.publicInstance(existing);
     }
     const instanceId = `component-page-${Date.now()}-${Math.random().toString(36).slice(2)}`;
+    const selectedPreloadPath = selectComponentPreload(descriptor, { core: this.preloadPath, compatibilityV1: this.compatibilityPreloadPath });
     const view = new this.WebContentsView({ webPreferences: {
-      preload: this.preloadPath,
+      preload: selectedPreloadPath,
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
@@ -135,6 +148,26 @@ class ComponentViewManager {
     this.instances.set(key, instance);
     const senderId = view.webContents.id;
     this.senderBindings.set(senderId, instance);
+    const diagnostic = (level, message, details = {}) => this.writeLog(level, message, {
+      componentId: descriptor.componentId,
+      contractVersion: descriptor.contractVersion,
+      hostApiVersion: descriptor.hostApiVersion,
+      ...details,
+    });
+    view.webContents.on('preload-error', (_event, _preloadPath, error) => diagnostic('error', 'Component preload failed', {
+      errorName: diagnosticToken(error?.name), errorCode: diagnosticToken(error?.code), messageLength: Math.min(String(error?.message || '').length, 10000),
+    }));
+    view.webContents.on('did-fail-load', (_event, errorCode, errorDescription, _validatedUrl, isMainFrame) => {
+      if (isMainFrame !== false) diagnostic('error', 'Component page failed to load', { errorCode, errorDescription: diagnosticToken(errorDescription) });
+    });
+    view.webContents.on('render-process-gone', (_event, details) => diagnostic('error', 'Component renderer process exited', {
+      reason: diagnosticToken(details?.reason), exitCode: Number(details?.exitCode) || 0,
+    }));
+    view.webContents.on('console-message', (_event, detailsOrLevel, message, lineNumber) => {
+      const details = typeof detailsOrLevel === 'object' ? detailsOrLevel : { level: detailsOrLevel, message, lineNumber };
+      if (!['error', 3].includes(details?.level)) return;
+      diagnostic('error', 'Component renderer console error', { lineNumber: Number(details?.lineNumber) || 0, messageLength: Math.min(String(details?.message || '').length, 10000) });
+    });
     view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     view.webContents.on('will-navigate', event => event.preventDefault());
     view.webContents.on('will-attach-webview', event => event.preventDefault());
@@ -242,4 +275,4 @@ class ComponentViewManager {
   destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); }
 }
 
-module.exports = { ComponentViewManager, componentPageKey, normalizeOpenScope, normalizeResolvedTheme, validBounds };
+module.exports = { ComponentViewManager, componentPageKey, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };

@@ -174,6 +174,7 @@ try {
   const teamSdk = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'sdk.ts'), 'utf8');
   const componentRpcContract = fs.readFileSync(path.join(repositoryRoot, 'electron', 'compatibility', 'component-team-retouch-rpc-v1.cjs'), 'utf8');
   const componentPreload = fs.readFileSync(path.join(repositoryRoot, 'electron', 'component-preload.cjs'), 'utf8');
+  const componentPreloadV1 = fs.readFileSync(path.join(repositoryRoot, 'electron', 'compatibility', 'component-preload-v1.cjs'), 'utf8');
   const teamTemplate = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
   for (const legacyUi of ['TeamRetouchManager.tsx', 'PersonIdentityManager.tsx', 'TeamRetouchSteps.tsx', 'TeamRetouchOutputProgress.tsx', 'useTeamOutputProgress.ts']) {
     assert(!fs.existsSync(path.join(repositoryRoot, 'src', 'components', legacyUi)), `${legacyUi} must not remain in the application renderer`);
@@ -184,9 +185,11 @@ try {
   assert(teamSdk.includes('allowedMethods') && teamSdk.includes('window.photoFlowComponent.rpc') && !teamSdk.includes('electronAPI') && !teamSdk.includes('ipcRenderer'), 'the component renderer must depend only on its restricted SDK');
   assert(componentRpcContract.includes('sanitizePayload') && componentRpcContract.includes('fields:') && componentRpcContract.includes('manager.registerRpcMethod') && componentRpcContract.includes("'team-retouch'"), 'component RPC methods must have payload field allowlists and a component owner');
   assert(componentPreload.includes("ipcRenderer.on('component-sdk:event'")
-    && componentPreload.includes("LEGACY_PRELOAD_EVENTS[normalizedTopic]")
+    && !componentPreload.includes('LEGACY_PRELOAD_EVENTS')
     && componentPreload.includes('Invalid component event topic')
     && !componentPreload.includes('COMPONENT_EVENTS')
+    && componentPreloadV1.includes("LEGACY_PRELOAD_EVENTS[normalizedTopic]")
+    && !componentPreloadV1.includes("require('./component-v1-metadata.cjs')")
     && !componentPreload.includes("exposeInMainWorld('electronAPI'"),
   'component preload must use the single versioned event stream while legacy channels remain compatibility-owned and the application bridge stays absent');
   assert(teamTemplate.componentHost.contributions.some(item => item.type === 'component.fullPage' && item.entry === 'ui/index.html'), 'team-retouch manifest must declare its packaged renderer entry');

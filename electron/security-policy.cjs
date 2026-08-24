@@ -37,6 +37,16 @@ const normalizeBundledPythonTool = scriptName => {
   return normalized;
 };
 
+const normalizeDevelopmentRendererUrl = value => {
+  const raw = String(value || '').trim();
+  let parsed;
+  try { parsed = new URL(raw); } catch { throw new Error('PHOTOFLOW_DEV_SERVER_URL must be a valid URL'); }
+  if (parsed.protocol !== 'http:' || parsed.hostname !== 'localhost' || !/^\d+$/.test(parsed.port) || parsed.username || parsed.password || parsed.pathname !== '/' || parsed.search || parsed.hash) {
+    throw new Error('PHOTOFLOW_DEV_SERVER_URL must be an http://localhost:<port>/ origin');
+  }
+  return parsed.origin;
+};
+
 const validateRendererPythonInvocation = (scriptName, args, requestId) => {
   const normalizedScriptName = normalizeBundledPythonTool(scriptName);
   if (!RENDERER_PYTHON_TOOLS.has(normalizedScriptName)) throw new Error('Python tool is not available to the renderer');
@@ -52,11 +62,14 @@ const validateRendererPythonInvocation = (scriptName, args, requestId) => {
   return { scriptName: normalizedScriptName, args: normalizedArgs, requestId: normalizedRequestId };
 };
 
-const isTrustedRendererUrl = (value, { development = false, rendererFile = '' } = {}) => {
+const isTrustedRendererUrl = (value, { development = false, developmentRendererUrl = '', rendererFile = '' } = {}) => {
   if (typeof value !== 'string' || !value) return false;
   try {
     const parsed = new URL(value);
-    if (development) return parsed.protocol === 'http:' && parsed.hostname === 'localhost' && parsed.port === '5173';
+    if (development) {
+      const trusted = new URL(developmentRendererUrl);
+      return parsed.protocol === 'http:' && parsed.hostname === 'localhost' && parsed.origin === trusted.origin;
+    }
     if (parsed.protocol !== 'file:' || !rendererFile) return false;
     return path.resolve(fileURLToPath(parsed)) === path.resolve(rendererFile);
   } catch {
@@ -113,8 +126,8 @@ const createSecureIpcMain = ({ ipcMain, isTrustedEvent, onRejected = () => undef
   },
 });
 
-const createElectronSecurity = ({ electronIpcMain, getMainWindow, isDevelopment, rendererFile, shell, writeLog }) => {
-  const trustedRenderer = value => isTrustedRendererUrl(value, { development: isDevelopment(), rendererFile });
+const createElectronSecurity = ({ electronIpcMain, getMainWindow, isDevelopment, developmentRendererUrl = '', rendererFile, shell, writeLog }) => {
+  const trustedRenderer = value => isTrustedRendererUrl(value, { development: isDevelopment(), developmentRendererUrl, rendererFile });
   const isTrustedEvent = event => {
     const mainWindow = getMainWindow();
     const sender = event?.sender;
@@ -158,6 +171,7 @@ module.exports = {
   createSecureIpcMain,
   isTrustedRendererUrl,
   normalizeBundledPythonTool,
+  normalizeDevelopmentRendererUrl,
   normalizeExternalUrl,
   validateRendererPythonInvocation,
 };

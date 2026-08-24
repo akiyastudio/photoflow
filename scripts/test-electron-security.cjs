@@ -6,6 +6,7 @@ const {
   createSecureIpcMain,
   isTrustedRendererUrl,
   normalizeBundledPythonTool,
+  normalizeDevelopmentRendererUrl,
   normalizeExternalUrl,
   validateRendererPythonInvocation,
 } = require('../electron/security-policy.cjs');
@@ -27,9 +28,14 @@ assert.throws(() => validateRendererPythonInvocation('workspace_db.py', [], 'abc
 assert.throws(() => validateRendererPythonInvocation('classify.py', ['safe\n--overwrite'], 'abcd1234'), /Invalid Python tool argument/);
 assert.throws(() => validateRendererPythonInvocation('classify.py', [], 'short'), /request identifier/);
 
-assert(isTrustedRendererUrl('http://localhost:5173/tools?tab=one', { development: true, rendererFile }));
-assert(!isTrustedRendererUrl('http://localhost.evil.test:5173/', { development: true, rendererFile }));
-assert(!isTrustedRendererUrl('http://127.0.0.1:5173/', { development: true, rendererFile }));
+const developmentRendererUrl = 'http://localhost:61234';
+assert.equal(normalizeDevelopmentRendererUrl('http://localhost:61234/'), developmentRendererUrl);
+assert.throws(() => normalizeDevelopmentRendererUrl('http://127.0.0.1:61234/'), /localhost/);
+assert.throws(() => normalizeDevelopmentRendererUrl('http://localhost:61234/path'), /localhost/);
+assert(isTrustedRendererUrl('http://localhost:61234/tools?tab=one', { development: true, developmentRendererUrl, rendererFile }));
+assert(!isTrustedRendererUrl('http://localhost:5173/', { development: true, developmentRendererUrl, rendererFile }));
+assert(!isTrustedRendererUrl('http://localhost.evil.test:61234/', { development: true, developmentRendererUrl, rendererFile }));
+assert(!isTrustedRendererUrl('http://127.0.0.1:61234/', { development: true, developmentRendererUrl, rendererFile }));
 assert(isTrustedRendererUrl(pathToFileURL(rendererFile).toString(), { rendererFile }));
 assert(!isTrustedRendererUrl(pathToFileURL(path.join(root, 'other.html')).toString(), { rendererFile }));
 

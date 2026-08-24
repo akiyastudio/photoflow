@@ -97,6 +97,7 @@ try {
   });
   assert.equal(exposedWorlds.has('electronAPI'), false, 'component preload behavior must not expose the application bridge');
   const restrictedSdk = exposedWorlds.get('photoFlowComponent');
+  assert.equal(restrictedSdk.contractVersion, 1, 'bridge ABI stays at V1 even for Host API V2 components');
   assert.throws(() => restrictedSdk.onEvent('invalid-topic', () => undefined), /Invalid component event topic/, 'preload rejects non-versioned topics');
   const receivedEvents = [];
   const unsubscribeEvent = restrictedSdk.onEvent('sample.changed.v1', payload => receivedEvents.push(payload));
@@ -129,12 +130,13 @@ try {
   const mainWindow = { contentView: { addChildView: view => children.push(view), removeChildView: view => children.splice(children.indexOf(view), 1) } };
   const handlers = new Map();
   const rawIpc = { handle: (channel, handler) => handlers.set(channel, handler) };
+  const componentLogs = [];
   let activeSampleDescriptor = { ...registry.resolve('sample-component'), service: { events: ['sample.changed.v1'] } };
   const liveRegistry = {
     list: () => registry.list().map(item => item.componentId === 'sample-component' ? activeSampleDescriptor : item),
     resolve: componentId => componentId === 'sample-component' ? activeSampleDescriptor : registry.resolve(componentId),
   };
-  const manager = new ComponentViewManager({ WebContentsView: FakeView, mainWindow, registry: liveRegistry, preloadPath: 'host-preload.cjs', ipcMain: rawIpc });
+  const manager = new ComponentViewManager({ WebContentsView: FakeView, mainWindow, registry: liveRegistry, preloadPath: 'host-preload.cjs', compatibilityPreloadPath: 'host-preload-v1.cjs', ipcMain: rawIpc, writeLog: (level, message, details) => componentLogs.push({ level, message, details }) });
   const request = { componentId: 'sample-component', pageId: 'main', workspacePath: 'C:\\Work', projectId: 'project-1', projectName: '项目一', projectStatus: '后期中', scopeRelativePath: '图片后期_1', selectedRelativePaths: ['图片后期_1/a.jpg'], sourcePageId: 'project-page-1' };
   Promise.resolve().then(async () => {
     const hostLayerModel = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'components', 'host-layer-state.ts')).href);
@@ -180,7 +182,14 @@ try {
     assert.equal(view.webContents.sent.some(item => item.channel === 'component-sdk:event' && item.payload.topic === 'sample.undeclared.v1'), false, 'undeclared component event topics are not forwarded');
     boundInstance.context.emitComponentEvent('sample.changed.v1', { value: 9 });
     assert.deepStrictEqual(view.webContents.sent.find(item => item.channel === 'component-sdk:event' && item.payload.topic === 'sample.changed.v1')?.payload, { topic: 'sample.changed.v1', payload: { value: 9 } }, 'manifest-declared event topics forward their payload through the single component event channel');
-    assert.deepEqual(view.options.webPreferences, { preload: 'host-preload.cjs', nodeIntegration: false, contextIsolation: true, sandbox: true, webviewTag: false });
+    assert.deepEqual(view.options.webPreferences, { preload: 'host-preload-v1.cjs', nodeIntegration: false, contextIsolation: true, sandbox: true, webviewTag: false });
+    view.webContents.emit('preload-error', {}, 'C:\\private\\component-preload.cjs', Object.assign(new Error('failed at C:\\private\\secret.txt'), { code: 'ERR_PRELOAD' }));
+    view.webContents.emit('did-fail-load', {}, -6, 'ERR_FILE_NOT_FOUND', 'file:///C:/private/component.html', true);
+    view.webContents.emit('console-message', {}, { level: 'error', message: `private file:///C:/private/secret.html ${'x'.repeat(400)}`, lineNumber: 12 });
+    assert(componentLogs.some(item => item.message === 'Component preload failed' && item.details.errorCode === 'ERR_PRELOAD' && !JSON.stringify(item.details).includes('secret.txt')), 'preload failures are logged without private message or path content');
+    assert(componentLogs.some(item => item.message === 'Component page failed to load' && item.details.errorCode === -6), 'main-frame load failures are logged');
+    const consoleDiagnostic = componentLogs.find(item => item.message === 'Component renderer console error');
+    assert(consoleDiagnostic && consoleDiagnostic.details.messageLength === 439 && !JSON.stringify(consoleDiagnostic.details).includes('secret.html'), 'critical console diagnostics retain bounded metadata without private message content');
     assert.deepEqual(view.webContents.windowOpenHandler(), { action: 'deny' });
     const navigation = { prevented: false, preventDefault() { this.prevented = true; } };
     view.webContents.emit('will-navigate', navigation, 'https://example.com');
@@ -215,6 +224,7 @@ try {
     assert.match(developmentAction.iconUrl, /^photoflow-component:\/\/icon\/team-retouch\?v=/, 'the development toolbar action uses the component-owned icon protocol URL');
     const developmentPage = await developmentManager.open({ ...request, componentId: 'team-retouch', pageId: 'main' });
     const developmentView = FakeView.created.at(-1);
+    assert.equal(developmentView.options.webPreferences.preload, 'host-preload.cjs', 'Host API V2 selects the core preload without changing its bridge ABI');
     assert.equal(developmentView.webContents.loadedEntry, path.join(repositoryRoot, 'artifacts', 'component-renderers', 'team-retouch', 'index.html'), 'clicking the development toolbar action loads the prepared independent renderer');
     assert.equal(developmentPage.componentId, 'team-retouch');
     developmentManager.destroy();
