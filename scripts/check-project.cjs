@@ -14,6 +14,8 @@ const steps = [
   ['domain contracts', ['run', 'test:domain-contracts']],
   ['operations storage', ['run', 'test:operations-storage']],
   ['team-retouch storage', ['run', 'test:team-storage']],
+  ['component service and migrations', ['run', 'test:component-service']],
+  ['team-retouch component renderer', ['run', 'test:component-team-retouch']],
   ['media/versioning storage', ['run', 'test:domain-storage']],
   ['domain command journal', ['run', 'test:domain-journal']],
   ['domain health', ['run', 'test:domain-health']],

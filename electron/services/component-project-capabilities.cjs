@@ -114,7 +114,7 @@ const registerComponentProjectCapabilities = ({
   IMAGE_EXTENSIONS, VIDEO_EXTENSIONS = new Set(), RAW_EXTENSIONS = new Set(),
   path, fs, crypto, getConfigPath, readSavedConfig, getProjectPath, dialog, mainWindow, shell,
   mediaService, backgroundTasks, ensureTrackedVersionThumbnail, getBoundProject = null, projectVirtualPaths = null,
-  replaceJson = replaceJsonAtomic, now = Date.now,
+  replaceJson = replaceJsonAtomic, now = Date.now, adoptionInteractiveBudgetMs = 25, adoptionFaultInjector = () => undefined,
 }) => {
   const bound = (context, descriptor) => {
     const workspaceRoot = ensureWorkspace(context.workspacePath);
@@ -298,15 +298,21 @@ const registerComponentProjectCapabilities = ({
     let adoption = null;
     if (descriptor.migrations?.legacyStorageV1) {
       const key = `${descriptor.componentId}\0${scope.workspaceRoot}`;
-      let operation = storageAdoptions.get(key);
-      if (!operation) {
-        operation = adoptLegacyStorageV1({ fs, path, crypto, dataRoot: getWorkspaceDataRoot(scope.workspaceRoot), componentRoot: scope.componentRoot, descriptor }).finally(() => storageAdoptions.delete(key));
-        storageAdoptions.set(key, operation);
+      let record = storageAdoptions.get(key);
+      if (!record) {
+        record = { state: 'pending', receipt: null, error: null, startedAt: now(), promise: null };
+        record.promise = adoptLegacyStorageV1({ fs, path, crypto, dataRoot: getWorkspaceDataRoot(scope.workspaceRoot), componentRoot: scope.componentRoot, descriptor, faultInjector: adoptionFaultInjector })
+          .then(receipt => { record.state = 'committed'; record.receipt = receipt; })
+          .catch(error => { record.state = 'failed'; record.error = error; });
+        storageAdoptions.set(key, record);
       }
-      adoption = await operation;
+      if (record.state === 'pending' && adoptionInteractiveBudgetMs > 0) await Promise.race([record.promise, new Promise(resolve => setTimeout(resolve, adoptionInteractiveBudgetMs))]);
+      if (record.state === 'failed') { storageAdoptions.delete(key); throw record.error; }
+      if (record.state === 'pending') return { apiVersion: 2, projectId: String(scope.project.id), ownership: 'component-private', adoption: { schemaVersion: 1, kind: 'component-storage-adoption', state: 'pending', componentId: descriptor.componentId, fromHostApiVersion: 1, toHostApiVersion: 2, startedAt: record.startedAt } };
+      adoption = record.receipt;
     }
     await fs.promises.mkdir(scope.componentRoot, { recursive: true });
-    return { apiVersion: 2, dataPath: scope.componentRoot, databasePath: path.join(scope.componentRoot, 'storage.sqlite3'), projectId: String(scope.project.id), ownership: 'component-private', ...(adoption ? { adoption: { kind: adoption.kind, fromHostApiVersion: 1, state: adoption.state, legacyDataRoot: adoption.legacyDataRoot || '', legacyDatabasePath: adoption.legacyDatabasePath || '', databaseSha256: adoption.databaseSha256 || '' } } : {}) };
+    return { apiVersion: 2, dataPath: scope.componentRoot, databasePath: path.join(scope.componentRoot, 'storage.sqlite3'), projectId: String(scope.project.id), ownership: 'component-private', ...(adoption ? { adoption: { schemaVersion: adoption.schemaVersion, kind: adoption.kind, state: adoption.state, componentId: adoption.componentId, fromHostApiVersion: adoption.fromHostApiVersion, toHostApiVersion: adoption.toHostApiVersion, adoptedDataRoot: adoption.adoptedDataRoot === true, adoptedDatabase: adoption.adoptedDatabase === true, legacyDataRoot: adoption.legacyDataRoot || '', legacyDatabasePath: adoption.legacyDatabasePath || '', databaseSha256: adoption.databaseSha256 || '', copiedFileCount: Number(adoption.copiedFileCount) || 0, copiedByteCount: Number(adoption.copiedByteCount) || 0 } } : {}) };
   });
 
   broker.register('component.settings.v2', async (payload, _context, descriptor) => {

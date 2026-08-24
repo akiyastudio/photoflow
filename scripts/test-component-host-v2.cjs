@@ -86,6 +86,12 @@ for (const schema of ['component-manifest-v2.schema.json', 'component-host-api-v
 const capabilitySchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api-v2.schema.json'), 'utf8'));
 const schemaMethods = Object.values(capabilitySchema.$defs).map(value => value?.properties?.method?.const).filter(Boolean).sort();
 assert.deepEqual(schemaMethods, allV2Capabilities.slice().sort(), 'machine-readable schema must discriminate every V2 capability method');
+const storageVariants = capabilitySchema.$defs.storage.properties.result.oneOf;
+const pendingStorageSchema = storageVariants.find(value => value.properties?.adoption?.properties?.state?.const === 'pending');
+const committedStorageSchema = storageVariants.find(value => value.properties?.adoption?.properties?.state?.const === 'committed');
+assert(pendingStorageSchema && !Object.hasOwn(pendingStorageSchema.properties, 'dataPath') && !Object.hasOwn(pendingStorageSchema.properties, 'databasePath'), 'pending storage schema grants no path');
+for (const field of ['schemaVersion', 'kind', 'state', 'componentId', 'fromHostApiVersion', 'toHostApiVersion', 'startedAt']) assert(pendingStorageSchema.properties.adoption.required.includes(field), `pending adoption requires ${field}`);
+for (const field of ['adoptedDataRoot', 'adoptedDatabase', 'legacyDataRoot', 'legacyDatabasePath', 'databaseSha256', 'copiedFileCount', 'copiedByteCount']) assert(committedStorageSchema.properties.adoption.required.includes(field), `committed adoption requires ${field}`);
 const writtenFrames = [];
 const typedHostClient = createServiceHostClient({ writeFrame: frame => writtenFrames.push(frame) });
 const typedCall = typedHostClient.callHost('parent-1', 'component.lifecycle.v2', { action: 'describe' });
@@ -185,7 +191,8 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
 
   const legacyDataRoot = path.join(dataRoot, descriptor.componentId); const legacyDatabasePath = path.join(dataRoot, 'databases', `${descriptor.componentId}.sqlite3`);
   fs.mkdirSync(legacyDataRoot, { recursive: true }); fs.mkdirSync(path.dirname(legacyDatabasePath), { recursive: true }); fs.writeFileSync(path.join(legacyDataRoot, 'legacy-private.bin'), 'legacy-private'); fs.writeFileSync(legacyDatabasePath, 'legacy-database');
-  const storage = await broker.invoke(descriptor, 'component.storage.v2', {}, context);
+  let storage = await broker.invoke(descriptor, 'component.storage.v2', {}, context);
+  for (let attempt = 0; storage.adoption?.state === 'pending' && attempt < 100; attempt += 1) { await new Promise(resolve => setTimeout(resolve, 10)); storage = await broker.invoke(descriptor, 'component.storage.v2', {}, context); }
   assert(storage.dataPath.startsWith(path.join(dataRoot, 'components', descriptor.componentId)));
   assert.equal(storage.adoption?.state, 'committed'); assert.equal(storage.adoption.legacyDataRoot, legacyDataRoot); assert.equal(fs.readFileSync(path.join(storage.dataPath, 'legacy-private.bin'), 'utf8'), 'legacy-private'); assert.equal(fs.readFileSync(storage.databasePath, 'utf8'), 'legacy-database');
   const privateMediaPath = path.join(storage.dataPath, 'previews', 'private.jpg');

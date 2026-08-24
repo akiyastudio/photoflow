@@ -5,6 +5,7 @@ import { resolveLegacyTeamSourceProgressIds } from '../extensions/team-retouch/r
 import { createLatestHistoryLoadGuard, historyLoadPresentation } from '../extensions/team-retouch/renderer/src/legacy/legacy-history-load-model.ts';
 import { legacyAdvancedStatusPresentation } from '../extensions/team-retouch/renderer/src/legacy/legacy-advanced-status-model.ts';
 import { legacyPreviewRequests, readableLegacyMediaError, summarizeLegacyPreviewResults } from '../extensions/team-retouch/renderer/src/legacy/legacy-media-preview-model.ts';
+import { readableComponentRpcError } from '../extensions/team-retouch/renderer/src/sdk.ts';
 
 const workspace = { photos: [
   { photoId: 'p1', relativePath: '图片后期_1/a.jpg', name: 'a.jpg' },
@@ -45,11 +46,17 @@ assert.deepEqual(legacyAdvancedStatusPresentation(undefined, true), { state: 'ch
 assert.equal(legacyAdvancedStatusPresentation(undefined, false, '超时').state, 'error');
 assert.equal(legacyAdvancedStatusPresentation(undefined, false).state, 'unknown');
 assert.equal(legacyAdvancedStatusPresentation({ advancedState: 'not-installed' }, false).state, 'not-installed', 'only explicit not-installed metadata renders that state');
+assert.match(readableComponentRpcError('team.project.get.v1', new Error('Error invoking remote method: Component service request timed out after 60000ms\n    at ipc (C:\\secret\\preload.js:1)')), /团片历史读取超时.*重试/);
+for (const unsafe of ['Component service request timed out', ' at ipc ', 'C:\\secret', 'localhost']) assert(!readableComponentRpcError('team.project.get.v1', new Error('Error invoking remote method: Component service request timed out after 60000ms\n    at ipc (C:\\secret\\preload.js:1)')).includes(unsafe), `renderer error leaked technical detail: ${unsafe}`);
+assert.match(readableComponentRpcError('team.project.migrate-step.v1', new Error('SQLITE_BUSY: database is locked')), /正在整理.*稍后重试/);
 
 const entry = fs.readFileSync(new URL('../extensions/team-retouch/renderer/src/legacy-main.tsx', import.meta.url), 'utf8');
 assert(!entry.includes("rpc<Json>('project.files.list.v1'"), 'team entry must never recursively enumerate the project');
 assert(entry.includes("rpc<Json>('team.project.get.v1'") && entry.includes('currentRelativePaths') && entry.includes('selectedRelativePaths') && entry.includes("rpc<Json>('team.project.register.v1'"), 'entry restores history, keeps opened entries, then registers explicit selection');
-assert(entry.indexOf('setEntries(historyEntries)') < entry.indexOf("rpc<Json>('team.project.register.v1'"), 'registration failure must preserve the successfully restored history');
+assert(entry.includes("rpc<Json>('team.project.migrate-step.v1'") && entry.includes('历史可正常只读'), 'legacy outputs migrate through incremental background requests after the first snapshot');
+assert(entry.includes("migration?.phase === 'host-storage-adoption' ? 750 : 100") && entry.includes('if (waitingForHostStorage) return'), 'first Host adoption uses bounded polling and stops selection writes until committed');
+assert(entry.includes('waitingForHostStorage && selectedRelativePaths.length'), 'selection deferred by Host adoption is registered exactly once after the committed refresh');
+assert(entry.indexOf('setEntries(historyEntries)') < entry.lastIndexOf("rpc<Json>('team.project.register.v1'"), 'registration failure must preserve the successfully restored history');
 assert(entry.includes('重新读取团片历史') && entry.includes('retryHistory') && entry.includes('entriesLoaded') && entry.includes('loadGuardRef'), 'loading failure exposes retry and latest-request state');
 assert(entry.includes('团片历史路径恢复失败') && entry.includes('resolvedHistoryCount === 0') && entry.includes('historyPathWarning'), 'all-missing and partially-missing paths have distinct diagnostic states');
 assert(!entry.includes('整个项目'), 'team history loading copy must not imply recursive project scope');

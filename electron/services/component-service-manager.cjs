@@ -37,12 +37,14 @@ const prepareReady = session => {
 };
 
 class ComponentServiceManager {
-  constructor({ registry, processSupervisor, capabilityBroker, executablePath = process.execPath, writeLog = () => undefined }) {
+  constructor({ registry, processSupervisor, capabilityBroker, executablePath = process.execPath, writeLog = () => undefined, requestTimeoutMs = REQUEST_TIMEOUT_MS, longRequestTimeoutMs = LONG_REQUEST_TIMEOUT_MS }) {
     this.registry = registry;
     this.processSupervisor = processSupervisor;
     this.capabilityBroker = capabilityBroker;
     this.executablePath = executablePath;
     this.writeLog = writeLog;
+    this.requestTimeoutMs = requestTimeoutMs;
+    this.longRequestTimeoutMs = longRequestTimeoutMs;
     this.sessions = new Map();
     this.sessionTransitions = new Map();
     this.inflightReads = new Map();
@@ -103,15 +105,19 @@ class ComponentServiceManager {
         const pending = session.pending.get(id);
         if (!pending) return;
         session.pending.delete(id);
+        let cancelError = null;
+        try { this.writeFrame(session, { type: 'cancel', id, reason: 'deadline-exceeded' }); }
+        catch (error) { cancelError = error; }
         const elapsedMs = Date.now() - startedAt;
         const capability = pending.lastCapability
           ? `; last capability ${pending.lastCapability} for ${Math.max(0, Date.now() - pending.capabilityStartedAt)}ms`
           : '; no capability response was pending';
         const error = new Error(`Component service request timed out after ${elapsedMs}ms: ${descriptor.componentId}.${method}${capability}`);
         error.code = 'COMPONENT_HOST_TIMEOUT';
-        this.writeLog('warn', 'Component service request timed out', { componentId: descriptor.componentId, method, elapsedMs, lastCapability: pending.lastCapability || '', pendingCount: session.pending.size });
         reject(error);
-      }, LONG_RUNNING_METHODS.has(String(method || '')) ? LONG_REQUEST_TIMEOUT_MS : REQUEST_TIMEOUT_MS);
+        try { this.writeLog('warn', 'Component service request timed out', { componentId: descriptor.componentId, method, elapsedMs, lastCapability: pending.lastCapability || '', pendingCount: session.pending.size }); } catch { /* Timeout rejection must not depend on logging. */ }
+        if (cancelError) try { this.writeLog('warn', 'Component service timeout cancellation could not be delivered', { componentId: descriptor.componentId, method, error: cancelError.message || String(cancelError) }); } catch { /* Best effort only. */ }
+      }, LONG_RUNNING_METHODS.has(String(method || '')) ? this.longRequestTimeoutMs : this.requestTimeoutMs);
       timer.unref?.();
       session.pending.set(id, { resolve, reject, timer, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0 });
       try { this.writeFrame(session, message); }
@@ -226,6 +232,15 @@ class ComponentServiceManager {
           parent.capabilityStartedAt = 0;
         }
       }
+      return;
+    }
+    if (frame?.type === 'metric') {
+      this.writeLog('info', 'Component service migration phase', {
+        componentId: session.descriptor.componentId,
+        migration: String(frame.migration || ''), phase: String(frame.phase || ''),
+        itemCount: Math.max(0, Number(frame.itemCount) || 0), byteCount: Math.max(0, Number(frame.byteCount) || 0),
+        elapsedMs: Math.max(0, Number(frame.elapsedMs) || 0), state: String(frame.state || ''),
+      });
       return;
     }
     managed.recycle('unexpected-protocol-frame');

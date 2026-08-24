@@ -4,18 +4,21 @@ const digest = async (fs, crypto, filePath) => {
   for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
   return hash.digest('hex');
 };
-const copyTreeVerified = async ({ fs, path, crypto, source, destination, overwrite = false }) => {
+const copyTreeVerified = async ({ fs, path, crypto, source, destination, overwrite = false, metrics = { fileCount: 0, byteCount: 0 } }) => {
   const stat = await fs.promises.lstat(source);
   if (stat.isSymbolicLink()) throw new Error('Legacy component storage contains a symbolic link');
   if (stat.isDirectory()) {
     await fs.promises.mkdir(destination, { recursive: true });
-    for (const entry of await fs.promises.readdir(source)) await copyTreeVerified({ fs, path, crypto, source: path.join(source, entry), destination: path.join(destination, entry), overwrite });
-    return;
+    for (const entry of await fs.promises.readdir(source)) await copyTreeVerified({ fs, path, crypto, source: path.join(source, entry), destination: path.join(destination, entry), overwrite, metrics });
+    return metrics;
   }
   if (!stat.isFile()) throw new Error('Legacy component storage contains an unsupported entry');
   await fs.promises.mkdir(path.dirname(destination), { recursive: true });
   await fs.promises.copyFile(source, destination, overwrite ? 0 : fs.constants.COPYFILE_EXCL);
   if (await digest(fs, crypto, source) !== await digest(fs, crypto, destination)) throw new Error('Legacy component storage copy verification failed');
+  metrics.fileCount += 1;
+  metrics.byteCount += stat.size;
+  return metrics;
 };
 const readReceipt = async (fs, filePath) => { try { return JSON.parse(await fs.promises.readFile(filePath, 'utf8')); } catch { return null; } };
 const transactionPaths = (path, componentRoot, componentId) => {
@@ -103,18 +106,19 @@ const adoptLegacyStorageV1 = async ({ fs, path, crypto, dataRoot, componentRoot,
   let movedPrevious = false;
   await fs.promises.mkdir(parent, { recursive: true });
   try {
-    if (legacyData) await copyTreeVerified({ fs, path, crypto, source: legacyDataRoot, destination: pending });
+    const copied = { fileCount: 0, byteCount: 0 };
+    if (legacyData) await copyTreeVerified({ fs, path, crypto, source: legacyDataRoot, destination: pending, metrics: copied });
     else await fs.promises.mkdir(pending, { recursive: true });
     if (legacyDatabase) {
       const destination = path.join(pending, 'storage.sqlite3');
-      await copyTreeVerified({ fs, path, crypto, source: legacyDatabasePath, destination });
+      await copyTreeVerified({ fs, path, crypto, source: legacyDatabasePath, destination, metrics: copied });
       for (const suffix of ['-wal', '-shm']) {
         const source = `${legacyDatabasePath}${suffix}`;
-        if (await fs.promises.lstat(source).catch(() => null)) await copyTreeVerified({ fs, path, crypto, source, destination: `${destination}${suffix}` });
+        if (await fs.promises.lstat(source).catch(() => null)) await copyTreeVerified({ fs, path, crypto, source, destination: `${destination}${suffix}`, metrics: copied });
       }
     }
-    if (fs.existsSync(componentRoot)) await copyTreeVerified({ fs, path, crypto, source: componentRoot, destination: pending, overwrite: true });
-    const receipt = { schemaVersion: 1, kind: 'component-storage-adoption', state: 'committed', componentId: descriptor.componentId, fromHostApiVersion: 1, toHostApiVersion: 2, adoptedDataRoot: Boolean(legacyData), adoptedDatabase: Boolean(legacyDatabase), legacyDataRoot: legacyData ? legacyDataRoot : '', legacyDatabasePath: legacyDatabase ? legacyDatabasePath : '', databaseSha256: legacyDatabase ? await digest(fs, crypto, legacyDatabasePath) : '', adoptedAt: Date.now() };
+    if (fs.existsSync(componentRoot)) await copyTreeVerified({ fs, path, crypto, source: componentRoot, destination: pending, overwrite: true, metrics: copied });
+    const receipt = { schemaVersion: 1, kind: 'component-storage-adoption', state: 'committed', componentId: descriptor.componentId, fromHostApiVersion: 1, toHostApiVersion: 2, adoptedDataRoot: Boolean(legacyData), adoptedDatabase: Boolean(legacyDatabase), legacyDataRoot: legacyData ? legacyDataRoot : '', legacyDatabasePath: legacyDatabase ? legacyDatabasePath : '', databaseSha256: legacyDatabase ? await digest(fs, crypto, legacyDatabasePath) : '', copiedFileCount: copied.fileCount, copiedByteCount: copied.byteCount, adoptedAt: Date.now() };
     const receiptPath = path.join(pending, receiptRelative);
     await fs.promises.mkdir(path.dirname(receiptPath), { recursive: true });
     await fs.promises.writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });

@@ -8,14 +8,21 @@ const { CANCELLED_CODE, buildWorkflowPlan, copyWorkflowPlan } = require('./workf
 const { createTeamWorkflowArtifactService } = require('./workflow-artifact.cjs');
 
 const MAX_ITEMS = 2000;
+const DB_BUSY_TIMEOUT_MS = 750;
 const RETURN_IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.tif', '.tiff', '.webp']);
 const pendingCapabilities = new Map();
 const activeAlgorithms = new Set();
 const workflowJobs = new Map();
 const photoOperations = new Map();
+const activeRequestControls = new Map();
 let nextCapabilityId = 1;
 
 const writeFrame = value => process.stdout.write(`${JSON.stringify(value)}\n`);
+const migrationMetric = (migration, phase, startedAt, values = {}) => writeFrame({
+  type: 'metric', migration, phase, elapsedMs: Date.now() - startedAt,
+  itemCount: Math.max(0, Number(values.itemCount) || 0), byteCount: Math.max(0, Number(values.byteCount) || 0),
+  state: String(values.state || ''),
+});
 const parseJson = (value, fallback) => {
   try { return JSON.parse(value || ''); } catch { return fallback; }
 };
@@ -68,7 +75,7 @@ const replaceJsonAtomic = async (filePath, value) => {
 
 const callHostV2 = (parentId, method, payload = {}) => new Promise((resolve, reject) => {
   const id = `cap-${nextCapabilityId++}`;
-  pendingCapabilities.set(id, { resolve, reject });
+  pendingCapabilities.set(id, { parentId: String(parentId), resolve, reject });
   writeFrame({ type: 'capability', id, parentId, method, payload });
 });
 
@@ -77,7 +84,9 @@ const readMediaV2 = async (parentId, payload) => {
   const refs = Array.isArray(payload.mediaRefs) ? payload.mediaRefs
     : [...(payload.photoIds || []).map(photoId => ({ photoId })), ...(payload.relativePaths || []).map(relativePath => ({ relativePath }))];
   const items = [];
-  for (const ref of refs.slice(0, MAX_ITEMS)) {
+  const selected = refs.slice(0, MAX_ITEMS); let cursor = 0;
+  const workers = Array.from({ length: Math.min(16, selected.length) }, async () => { while (cursor < selected.length) {
+    const ref = selected[cursor++];
     try {
       const variant = await callHostV2(parentId, 'project.media.variants.v2', { ...ref, variants: [] });
       const metadata = variant.metadata || {};
@@ -92,7 +101,8 @@ const readMediaV2 = async (parentId, payload) => {
     } catch (error) {
       if (payload.strict) throw error;
     }
-  }
+  } });
+  await Promise.all(workers);
   return { items };
 };
 const materializeMediaForOperation = async (parentId, refs) => {
@@ -112,19 +122,24 @@ const materializeMediaForOperation = async (parentId, refs) => {
   } catch (error) { for (const directory of directories) await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined); throw error; }
 };
 const artifactGrantV2 = async (parentId, payload) => {
-  const storage = await callHostV2(parentId, 'component.storage.v2', {});
+  const storage = await hostStorage(parentId);
   const dataDirectory = path.join(storage.dataPath, 'media', safeSegment(payload.photoId, 'photo'), safeSegment(payload.baseVersionId, 'version'));
   return { dataDirectory, analysisDirectory: path.join(dataDirectory, 'analysis'), uploadDirectory: path.join(dataDirectory, 'uploads'), mergeDirectory: path.join(dataDirectory, 'merge'), deliveryDirectory: path.join(dataDirectory, 'delivery'), legacyDataRoot: storage.dataPath, deliveryPrefix: safeSegment(payload.deliveryPrefix || payload.photoId, 'photo') };
 };
 const inputStages = new Map();
 const storageMigrationOperations = new Map();
-const hostStorage = async parentId => {
-  const value = await callHostV2(parentId, 'component.storage.v2', {}); const storage = { ...value, dataRoot: value.dataPath };
+const rawHostStorage = async parentId => {
+  const value = await callHostV2(parentId, 'component.storage.v2', {}); const storage = { ...value, ...(value.dataPath ? { dataRoot: value.dataPath } : {}) };
   if (value.adoption?.legacyDataRoot) {
     let operation = storageMigrationOperations.get(value.databasePath);
     if (!operation) { operation = migrateAdoptedPrivatePaths(storage).finally(() => storageMigrationOperations.delete(value.databasePath)); storageMigrationOperations.set(value.databasePath, operation); }
     await operation;
   }
+  return storage;
+};
+const hostStorage = async parentId => {
+  const storage = await rawHostStorage(parentId);
+  if (storage.adoption?.state === 'pending') throw new Error('团片历史正在完成首次安全迁移，请稍后重试；当前操作尚未写入');
   return storage;
 };
 const readMedia = (parentId, payload) => readMediaV2(parentId, payload);
@@ -207,7 +222,7 @@ const publishWorkingImageV2 = async (parentId, storage, sourcePath, baseRelative
 const ensureSchema = databasePath => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const db = new DatabaseSync(databasePath);
-  db.exec('PRAGMA busy_timeout=30000; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;');
+  db.exec(`PRAGMA busy_timeout=${DB_BUSY_TIMEOUT_MS}; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`);
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS team_patch_tasks (
@@ -307,6 +322,16 @@ const fileSha256 = filePath => new Promise((resolve, reject) => {
   input.on('data', chunk => digest.update(chunk));
   input.on('end', () => resolve(digest.digest('hex')));
 });
+const assertOrdinaryParentSegments = async (root, relative, verified = new Set()) => {
+  let current = root;
+  for (const segment of relative.split(path.sep).filter(Boolean).slice(0, -1)) {
+    current = path.join(current, segment);
+    if (verified.has(current)) continue;
+    const stat = await fs.promises.lstat(current).catch(() => null);
+    if (!stat?.isDirectory() || stat.isSymbolicLink()) throw new Error('旧组件私有文件副本缺失或路径不安全');
+    verified.add(current);
+  }
+};
 
 const serializeTask = row => {
   const generation = parseJson(row.generation_json, {});
@@ -775,9 +800,15 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   } finally { await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined); await materialized.cleanup(); }
 });
 async function migrateAdoptedPrivatePaths(storage) {
+  const startedAt = Date.now();
   const legacyRoot = path.resolve(String(storage.adoption?.legacyDataRoot || ''));
   const targetRoot = path.resolve(String(storage.dataPath || ''));
-  if (!legacyRoot || legacyRoot === targetRoot || !isInside(path.dirname(legacyRoot), legacyRoot)) return;
+  const receipt = storage.adoption || {};
+  if (receipt.schemaVersion !== 1 || receipt.kind !== 'component-storage-adoption' || receipt.state !== 'committed'
+    || receipt.componentId !== 'team-retouch' || receipt.fromHostApiVersion !== 1 || receipt.toHostApiVersion !== 2 || receipt.adoptedDataRoot !== true) {
+    throw new Error('Host 存储迁移凭据无效，已停止路径改写；请重启应用后重试');
+  }
+  if (!legacyRoot || legacyRoot === targetRoot || !isInside(path.dirname(legacyRoot), legacyRoot)) throw new Error('Host 存储迁移凭据中的旧目录无效');
   const db = ensureSchema(storage.databasePath);
   try {
     if (db.prepare("SELECT value FROM meta WHERE key='storage_path_adoption_v2'").get()?.value === 'committed') return;
@@ -786,22 +817,29 @@ async function migrateAdoptedPrivatePaths(storage) {
       ['team_person_assignments', 'rowid', ['edited_patch_path']],
       ['team_task_artifacts', 'id', ['artifact_path']],
     ];
-    const updates = [];
+    const updates = []; const verifiedDirectories = new Set(); let byteCount = 0;
     for (const [table, key, fields] of specs) for (const row of db.prepare(`SELECT ${key} AS migration_key,${fields.join(',')} FROM ${table}`).all()) for (const field of fields) {
       const current = String(row[field] || ''); if (!current || !path.isAbsolute(current) || !isInside(legacyRoot, current)) continue;
       const relative = path.relative(legacyRoot, current); const target = path.resolve(targetRoot, relative);
       if (!isInside(targetRoot, target)) throw new Error('旧组件私有路径迁移超出 V2 storage');
+      await assertOrdinaryParentSegments(targetRoot, relative, verifiedDirectories);
       const targetStat = await fs.promises.lstat(target).catch(() => null);
       if (!targetStat?.isFile() || targetStat.isSymbolicLink()) throw new Error(`旧组件私有文件副本缺失：${path.basename(current)}`);
       const sourceStat = await fs.promises.lstat(current).catch(() => null);
-      if (sourceStat?.isFile() && !sourceStat.isSymbolicLink() && (sourceStat.size !== targetStat.size || await fileSha256(current) !== await fileSha256(target))) throw new Error(`旧组件私有文件副本校验失败：${path.basename(current)}`);
-      updates.push({ table, key, field, value: target, migrationKey: row.migration_key });
+      if (!sourceStat?.isFile() || sourceStat.isSymbolicLink() || sourceStat.size !== targetStat.size) throw new Error(`旧组件私有文件源缺失或大小不一致：${path.basename(current)}`);
+      byteCount += targetStat.size;
+      updates.push({ table, key, field, previous: current, value: target, migrationKey: row.migration_key });
     }
+    migrationMetric('storage-path-adoption-v2', 'validated-metadata', startedAt, { itemCount: updates.length, byteCount, state: 'prepared' });
     db.exec('BEGIN IMMEDIATE');
     try {
-      for (const item of updates) db.prepare(`UPDATE ${item.table} SET ${item.field}=? WHERE ${item.key}=?`).run(item.value, item.migrationKey);
+      for (const item of updates) {
+        const changed = db.prepare(`UPDATE ${item.table} SET ${item.field}=? WHERE ${item.key}=? AND ${item.field}=?`).run(item.value, item.migrationKey, item.previous);
+        if (changed.changes !== 1 && db.prepare(`SELECT ${item.field} value FROM ${item.table} WHERE ${item.key}=?`).get(item.migrationKey)?.value !== item.value) throw new Error('旧组件私有路径在迁移期间发生变化，请稍后重试');
+      }
       db.prepare("INSERT INTO meta(key,value) VALUES('storage_path_adoption_v2','committed') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
       db.exec('COMMIT');
+      migrationMetric('storage-path-adoption-v2', 'database-commit', startedAt, { itemCount: updates.length, byteCount, state: 'committed' });
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   } finally { db.close(); }
 }
@@ -1197,7 +1235,7 @@ const componentMediaV2 = async (parentId, payload, action = 'variants') => {
     const media = await callHostV2(parentId, 'project.media.variants.v2', { photoId: payload.photoId, versionId: payload.baseVersionId, variants: ['preview', 'original'] });
     return { success: true, url: media.variants.preview?.url || media.variants.original?.url, previewUrl: media.variants.preview?.url, originalUrl: media.variants.original?.url, opaqueRef: media.mediaRef };
   }
-  const storage = await callHostV2(parentId, 'component.storage.v2', {});
+  const storage = await hostStorage(parentId);
   let candidate = '';
   if (payload.kind === 'review-return') {
     const directory = path.join(storage.dataPath, 'workflow-return-reviews', sha256(String(storage.projectId)));
@@ -1282,13 +1320,6 @@ const workspaceSnapshot = async (parentId, context) => {
     const candidatePhotoIds = uniqueText([
       ...registered.map(row => row.photo_id),
       ...assignments.map(row => row.photo_id),
-      // Old releases could leave tasks without either ownership table. Probe
-      // only those genuinely orphaned rows through the host; registered tasks
-      // from another project must never expand this project's media query.
-      ...db.prepare(`SELECT DISTINCT t.photo_id FROM team_patch_tasks t
-        WHERE t.is_deleted=0
-          AND NOT EXISTS (SELECT 1 FROM team_retouch_photos p WHERE p.photo_id=t.photo_id)
-          AND NOT EXISTS (SELECT 1 FROM team_person_assignments a WHERE a.photo_id=t.photo_id)`).all().map(row => row.photo_id),
     ]).slice(0, MAX_ITEMS);
     const versionByPhoto = new Map([...registered.map(row => [String(row.photo_id), String(row.base_version_id)]), ...assignments.map(row => [String(row.photo_id), String(row.base_version_id)])]);
     const media = candidatePhotoIds.length
@@ -1708,8 +1739,11 @@ const storeReturnedAndReconcile = (parentId, sourcePath, payload, context) => wi
   return finalizeReconcile(parentId, context, payload, registered);
 });
 
-const retryPendingWorkflowReconciles = async (parentId, context) => {
-  const pending = await withDomain(parentId, db => db.prepare('SELECT task_id,photo_id FROM team_workflow_reconcile_pending ORDER BY updated_at').all());
+const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1) => {
+  const pending = await withDomain(parentId, db => db.prepare(`SELECT pending.task_id,pending.photo_id FROM team_workflow_reconcile_pending pending
+    JOIN team_patch_tasks task ON task.id=pending.task_id
+    JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+    WHERE registered.project_id=? ORDER BY pending.updated_at LIMIT ?`).all(String(context.projectId), Math.max(1, Number(maxItems) || 1)));
   let recovered = 0;
   for (const item of pending) await withPhotoOperation(item.photo_id, async () => {
     try {
@@ -1800,55 +1834,103 @@ const reviewIgnore = async (parentId, payload) => {
   return { success: true, reviewSessionCompleted: !target.session.result.reviewCount };
 };
 const legacyProjectMigrationOperations = new Map();
-const migrateLegacyProjectArtifacts = async (parentId, context) => {
-  const storage = await hostStorage(parentId); const key = `${storage.databasePath}\0${context.projectId}`;
+const projectMigrationMetaKey = projectId => `legacy_project_artifacts_v2_state:${sha256(String(projectId)).slice(0, 24)}`;
+const projectMigrationCommittedKey = projectId => `legacy_project_artifacts_v2:${sha256(String(projectId)).slice(0, 24)}`;
+const migrationStateFromDb = (db, projectId, fallback = {}) => {
+  const stored = parseJson(db.prepare('SELECT value FROM meta WHERE key=?').get(projectMigrationMetaKey(projectId))?.value, {});
+  const committed = db.prepare('SELECT value FROM meta WHERE key=?').get(projectMigrationCommittedKey(projectId))?.value === 'committed'
+    || db.prepare("SELECT value FROM meta WHERE key='legacy_project_artifacts_v2'").get()?.value === 'committed';
+  return { state: committed ? 'committed' : String(stored.state || fallback.state || 'pending'), phase: String(stored.phase || fallback.phase || 'outputs'), processedCount: Math.max(0, Number(stored.processedCount) || 0), pendingCount: Math.max(0, Number(stored.pendingCount ?? fallback.pendingCount) || 0), attemptCount: Math.max(0, Number(stored.attemptCount) || 0), lastError: String(stored.lastError || ''), retryable: stored.retryable !== false, updatedAt: Math.max(0, Number(stored.updatedAt) || 0) };
+};
+const writeMigrationState = (db, projectId, state) => db.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(projectMigrationMetaKey(projectId), JSON.stringify({ ...state, updatedAt: Date.now() }));
+const pendingLegacyArtifactItems = (db, dataPath, projectId) => {
+  const items = [];
+  for (const row of db.prepare(`SELECT task.id,task.photo_id,task.base_version_id,task.patch_path,task.mask_path,task.edited_patch_path
+    FROM team_patch_tasks task JOIN team_retouch_photos registered
+      ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+    WHERE task.is_deleted=0 AND registered.project_id=? ORDER BY task.id`).all(String(projectId))) {
+    for (const field of ['patch_path', 'mask_path', 'edited_patch_path']) {
+      const current = String(row[field] || '');
+      if (current && path.isAbsolute(current) && !isInside(dataPath, current)) items.push({ row, field, current });
+    }
+  }
+  return items;
+};
+const legacyProjectMigrationStatus = async parentId => {
+  const storage = await rawHostStorage(parentId);
+  if (storage.adoption?.state === 'pending') return { state: 'pending', phase: 'host-storage-adoption', processedCount: 0, pendingCount: 1, attemptCount: 0, lastError: '', retryable: true, updatedAt: Number(storage.adoption.startedAt) || 0 };
+  const db = ensureSchema(storage.databasePath);
+  try {
+    const projectId = String(storage.projectId); const pendingCount = pendingLegacyArtifactItems(db, storage.dataPath, projectId).length;
+    const maintenancePendingCount = Number(db.prepare(`SELECT COUNT(*) count FROM team_workflow_reconcile_pending pending
+      JOIN team_patch_tasks task ON task.id=pending.task_id
+      JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+      WHERE registered.project_id=?`).get(projectId)?.count) || 0;
+    const state = migrationStateFromDb(db, projectId, { state: pendingCount ? 'pending' : 'committed', pendingCount });
+    return { ...state, state: state.state === 'committed' && maintenancePendingCount ? 'pending' : state.state, phase: state.state === 'committed' && maintenancePendingCount ? 'workflow-reconcile' : state.phase, maintenancePendingCount };
+  } finally { db.close(); }
+};
+const migrateLegacyProjectArtifacts = async (parentId, context, control = {}) => {
+  const storage = await rawHostStorage(parentId);
+  if (storage.adoption?.state === 'pending') return { state: 'pending', phase: 'host-storage-adoption', processedCount: 0, pendingCount: 1, attemptCount: 0, lastError: '', retryable: true, updatedAt: Number(storage.adoption.startedAt) || 0 };
+  const projectId = String(storage.projectId || context.projectId); const key = `${storage.databasePath}\0${projectId}`;
   if (legacyProjectMigrationOperations.has(key)) return legacyProjectMigrationOperations.get(key);
   const operation = (async () => {
+    const startedAt = Date.now();
     const db = ensureSchema(storage.databasePath);
     try {
-      const databaseMigrated = db.prepare("SELECT value FROM meta WHERE key='legacy_project_artifacts_v2'").get()?.value === 'committed';
-      if (!databaseMigrated) {
-        const rows = db.prepare(`SELECT id,photo_id,base_version_id,patch_path,mask_path,edited_patch_path FROM team_patch_tasks WHERE is_deleted=0`).all();
-        const updates = [];
-        for (const row of rows) {
-          const described = await readMedia(parentId, { strict: true, mediaRefs: [{ photoId: row.photo_id, versionId: row.base_version_id }] });
-          const relativeBase = String(described.items?.[0]?.versions?.[0]?.relativePath || ''); const parsed = path.posix.parse(relativeBase.replace(/\\/g, '/'));
-          for (const field of ['patch_path', 'mask_path', 'edited_patch_path']) {
-            const current = String(row[field] || ''); if (!current || !path.isAbsolute(current) || isInside(storage.dataPath, current)) continue;
-            const relativePath = [parsed.dir, `${parsed.name}_裁切`, path.basename(current)].filter(Boolean).join('/');
-            const migrationId = `artifact-${sha256(`${row.id}\0${field}\0${relativePath}`).slice(0, 24)}`;
-            const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId, outputs: [{ relativePath }] });
-            const output = adopted.outputs?.[0]; if (!output) throw new Error(`旧项目输出无法建立 V2 ownership：${relativePath}`);
-            const imported = await callHostV2(parentId, 'project.output.v2', { action: 'materializeOwned', commitId: adopted.commitId, artifactId: output.artifactId });
-            updates.push({ id: row.id, field, previousPath: current, privatePath: imported.privatePath });
-          }
+      if (control.signal?.aborted || Date.now() >= Number(control.deadlineAt || Infinity)) return migrationStateFromDb(db, projectId);
+      const pending = pendingLegacyArtifactItems(db, storage.dataPath, projectId);
+      if (!pending.length) {
+        const oldManifestDirectory = path.join(storage.dataPath, 'workflows');
+        const target = await workflowPrivateScope(parentId); const manifests = await fs.promises.readdir(oldManifestDirectory).catch(() => []);
+        if (!fs.existsSync(target.manifestPath)) for (const name of manifests.filter(value => value.endsWith('.json'))) {
+          const candidate = await readJson(path.join(oldManifestDirectory, name), null);
+          if (candidate && String(candidate.projectName || '') === String(context.projectName) && String(candidate.status || '') === String(context.projectStatus)) { await writeJsonAtomic(target.manifestPath, candidate); break; }
+        }
+        const legacyReview = path.join(storage.dataPath, 'workflow-return-reviews', sha256(context.projectName));
+        const legacyReviewSource = storage.adoption?.legacyDataRoot ? path.join(storage.adoption.legacyDataRoot, 'workflow-return-reviews', sha256(context.projectName)) : legacyReview;
+        if (!fs.existsSync(target.reviewDirectory) && fs.existsSync(legacyReview)) await fs.promises.cp(legacyReview, target.reviewDirectory, { recursive: true, errorOnExist: true, force: false });
+        const reviewSessionPath = path.join(target.reviewDirectory, 'session.json'); const reviewSession = await readJson(reviewSessionPath, null);
+        if (reviewSession) {
+          const rewrite = value => Array.isArray(value) ? value.map(rewrite) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([field, item]) => [field, rewrite(item)])) : typeof value === 'string' && path.isAbsolute(value) && isInside(legacyReviewSource, value) ? path.join(target.reviewDirectory, path.relative(legacyReviewSource, value)) : value;
+          await writeJsonAtomic(reviewSessionPath, rewrite(reviewSession));
         }
         db.exec('BEGIN IMMEDIATE');
         try {
-          for (const item of updates) {
-            db.prepare(`UPDATE team_patch_tasks SET ${item.field}=? WHERE id=?`).run(item.privatePath, item.id);
-            db.prepare('UPDATE team_person_assignments SET edited_patch_path=? WHERE edited_patch_path=?').run(item.privatePath, item.previousPath);
-            db.prepare('UPDATE team_task_artifacts SET artifact_path=? WHERE artifact_path=?').run(item.privatePath, item.previousPath);
-          }
-          db.prepare("INSERT INTO meta(key,value) VALUES('legacy_project_artifacts_v2','committed') ON CONFLICT(key) DO UPDATE SET value=excluded.value").run();
+          db.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(projectMigrationCommittedKey(projectId), 'committed');
+          const prior = migrationStateFromDb(db, projectId); writeMigrationState(db, projectId, { ...prior, state: 'committed', phase: 'complete', pendingCount: 0, retryable: false });
           db.exec('COMMIT');
         } catch (error) { db.exec('ROLLBACK'); throw error; }
+        const state = migrationStateFromDb(db, projectId); migrationMetric('legacy-project-artifacts-v2', 'complete', startedAt, { itemCount: state.processedCount, state: state.state }); return state;
+      }
+      const item = pending[0]; const { row, field, current } = item;
+      try {
+        const described = await readMedia(parentId, { strict: true, mediaRefs: [{ photoId: row.photo_id, versionId: row.base_version_id }] });
+        const relativeBase = String(described.items?.[0]?.versions?.[0]?.relativePath || ''); const parsed = path.posix.parse(relativeBase.replace(/\\/g, '/'));
+        const relativePath = [parsed.dir, `${parsed.name}_裁切`, path.basename(current)].filter(Boolean).join('/');
+        const migrationId = `artifact-${sha256(`${row.id}\0${field}\0${relativePath}`).slice(0, 24)}`;
+        const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId, outputs: [{ relativePath }] });
+        const output = adopted.outputs?.[0]; if (!output) throw new Error('旧项目输出文件暂时缺失');
+        const imported = await callHostV2(parentId, 'project.output.v2', { action: 'materializeOwned', commitId: adopted.commitId, artifactId: output.artifactId });
+        if (control.signal?.aborted) return migrationStateFromDb(db, projectId);
+        const targetStat = await fs.promises.lstat(imported.privatePath).catch(() => null);
+        if (!targetStat?.isFile() || targetStat.isSymbolicLink() || !isInside(storage.dataPath, imported.privatePath)) throw new Error('Host 返回的旧项目输出副本无效');
+        db.exec('BEGIN IMMEDIATE');
+        try {
+          db.prepare(`UPDATE team_patch_tasks SET ${field}=? WHERE id=? AND ${field}=?`).run(imported.privatePath, row.id, current);
+          db.prepare('UPDATE team_person_assignments SET edited_patch_path=? WHERE task_id=? AND edited_patch_path=?').run(imported.privatePath, row.id, current);
+          db.prepare('UPDATE team_task_artifacts SET artifact_path=? WHERE task_id=? AND artifact_path=?').run(imported.privatePath, row.id, current);
+          const prior = migrationStateFromDb(db, projectId); writeMigrationState(db, projectId, { state: 'pending', phase: 'outputs', processedCount: prior.processedCount + 1, pendingCount: Math.max(0, pending.length - 1), attemptCount: prior.attemptCount + 1, lastError: '', retryable: true });
+          db.exec('COMMIT');
+        } catch (error) { db.exec('ROLLBACK'); throw error; }
+        const state = migrationStateFromDb(db, projectId); migrationMetric('legacy-project-artifacts-v2', 'output-checkpoint', startedAt, { itemCount: 1, byteCount: targetStat.size, state: state.state }); return state;
+      } catch (error) {
+        const prior = migrationStateFromDb(db, projectId); writeMigrationState(db, projectId, { ...prior, state: 'pending', phase: 'outputs', pendingCount: pending.length, attemptCount: prior.attemptCount + 1, lastError: '旧项目输出暂时缺失或不可用，请保留原文件后重试', retryable: true });
+        migrationMetric('legacy-project-artifacts-v2', 'deferred', startedAt, { itemCount: 0, state: 'pending' });
+        return migrationStateFromDb(db, projectId);
       }
     } finally { db.close(); }
-    const oldManifestDirectory = path.join(storage.dataPath, 'workflows');
-    const target = await workflowPrivateScope(parentId); const manifests = await fs.promises.readdir(oldManifestDirectory).catch(() => []);
-    if (!fs.existsSync(target.manifestPath)) for (const name of manifests.filter(value => value.endsWith('.json'))) {
-      const candidate = await readJson(path.join(oldManifestDirectory, name), null);
-      if (candidate && String(candidate.projectName || '') === String(context.projectName) && String(candidate.status || '') === String(context.projectStatus)) { await writeJsonAtomic(target.manifestPath, candidate); break; }
-    }
-    const legacyReview = path.join(storage.dataPath, 'workflow-return-reviews', sha256(context.projectName));
-    const legacyReviewSource = storage.adoption?.legacyDataRoot ? path.join(storage.adoption.legacyDataRoot, 'workflow-return-reviews', sha256(context.projectName)) : legacyReview;
-    if (!fs.existsSync(target.reviewDirectory) && fs.existsSync(legacyReview)) await fs.promises.cp(legacyReview, target.reviewDirectory, { recursive: true, errorOnExist: true, force: false });
-    const reviewSessionPath = path.join(target.reviewDirectory, 'session.json'); const reviewSession = await readJson(reviewSessionPath, null);
-    if (reviewSession) {
-      const rewrite = value => Array.isArray(value) ? value.map(rewrite) : value && typeof value === 'object' ? Object.fromEntries(Object.entries(value).map(([field, item]) => [field, rewrite(item)])) : typeof value === 'string' && path.isAbsolute(value) && isInside(legacyReviewSource, value) ? path.join(target.reviewDirectory, path.relative(legacyReviewSource, value)) : value;
-      await writeJsonAtomic(reviewSessionPath, rewrite(reviewSession));
-    }
   })().finally(() => legacyProjectMigrationOperations.delete(key));
   legacyProjectMigrationOperations.set(key, operation); return operation;
 };
@@ -1871,9 +1953,20 @@ const returnConfirm = async (parentId, payload, context) => {
 
 const handlers = {
   'team.project.get.v1': async (parentId, _payload, context) => {
-    await migrateLegacyProjectArtifacts(parentId, context);
-    await retryPendingWorkflowReconciles(parentId, context).catch(() => undefined);
-    return publicWorkspace(await workspaceSnapshot(parentId, context));
+    const startedAt = Date.now();
+    const migration = await legacyProjectMigrationStatus(parentId);
+    if (migration.phase === 'host-storage-adoption') {
+      migrationMetric('team-project-get-v1', 'storage-adoption-pending', startedAt, { itemCount: 0, state: migration.state });
+      return { success: true, photos: [], identities: [], assignments: [], workflowGenerated: false, workflowNeedsRegeneration: false, workflowAvailableKeys: [], workflowAvailableSubjectKeys: [], workflowSettings: { preferredIdentityOrder: [], sameWeekIdentityIds: [] }, migration };
+    }
+    const snapshot = publicWorkspace(await workspaceSnapshot(parentId, context));
+    migrationMetric('team-project-get-v1', 'snapshot', startedAt, { itemCount: snapshot.photos?.length || 0, state: migration.state });
+    return { ...snapshot, migration };
+  },
+  'team.project.migrate-step.v1': async (parentId, _payload, context) => {
+    const migration = await migrateLegacyProjectArtifacts(parentId, context, { signal: context.signal, deadlineAt: Date.now() + 1000 });
+    if (migration.state === 'committed' && !context.signal?.aborted) await retryPendingWorkflowReconciles(parentId, context, 1);
+    return legacyProjectMigrationStatus(parentId);
   },
   'team.project.register.v1': async (parentId, payload, context) => {
     const relativePaths = uniqueText(payload.relativePaths);
@@ -1956,12 +2049,22 @@ input.on('line', line => {
     else pending.resolve(frame.result);
     return;
   }
+  if (frame?.type === 'cancel') {
+    const requestId = String(frame.id || ''); activeRequestControls.get(requestId)?.abort();
+    for (const [capabilityId, pending] of pendingCapabilities) if (pending.parentId === requestId) {
+      pendingCapabilities.delete(capabilityId);
+      pending.reject(Object.assign(new Error('团片请求已超时取消，可从上次安全进度重试'), { code: 'COMPONENT_REQUEST_CANCELLED' }));
+    }
+    return;
+  }
   if (frame?.type !== 'request') return;
   const id = String(frame.id || '');
   const handler = handlers[String(frame.method || '')];
-  Promise.resolve(handler ? handler(id, frame.payload || {}, frame.context || {}) : Promise.reject(new Error('Unknown team-retouch service method')))
+  const control = new AbortController(); activeRequestControls.set(id, control);
+  Promise.resolve(handler ? handler(id, frame.payload || {}, { ...(frame.context || {}), signal: control.signal }) : Promise.reject(new Error('Unknown team-retouch service method')))
     .then(result => writeFrame({ type: 'response', id, ok: true, result }))
-    .catch(error => writeFrame({ type: 'response', id, ok: false, error: error.message || String(error) }));
+    .catch(error => writeFrame({ type: 'response', id, ok: false, error: error.message || String(error) }))
+    .finally(() => activeRequestControls.delete(id));
 });
 
 writeFrame({ type: 'ready', protocolVersion: 1 });
@@ -1969,4 +2072,4 @@ process.once('exit', () => { for (const child of activeAlgorithms) child.kill();
 };
 
 if (require.main === module) startService();
-module.exports = { ensureSchema, startService, migrateAdoptedPrivatePaths };
+module.exports = { ensureSchema, startService, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState };

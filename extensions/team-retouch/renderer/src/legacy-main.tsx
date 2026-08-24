@@ -60,6 +60,39 @@ const App = () => {
       let workspace = assertSuccess(await rpc<Json>('team.project.get.v1'), '无法读取团片协作历史');
       if (!loadGuardRef.current.isCurrent(requestId)) return;
       setWorkspaceSnapshot(normalizeWorkspace(workspace));
+      const waitingForHostStorage = workspace.migration?.phase === 'host-storage-adoption';
+      if (workspace.migration?.state !== 'committed') {
+        const advanceMigration = async () => {
+          let migration = workspace.migration;
+          while (loadGuardRef.current.isCurrent(requestId) && migration?.state !== 'committed') {
+            setHistoryPathWarning(migration?.phase === 'host-storage-adoption'
+              ? '团片历史正在完成首次安全迁移，完成后会自动恢复，期间不会写入；请保持应用运行。'
+              : `团片旧项目文件正在后台整理，剩余约 ${Number(migration?.pendingCount) || 0} 项；历史可正常只读。`);
+            const delayMs = migration?.phase === 'host-storage-adoption' ? 750 : 100;
+            await new Promise(resolve => window.setTimeout(resolve, delayMs));
+            migration = await rpc<Json>('team.project.migrate-step.v1');
+          }
+          if (loadGuardRef.current.isCurrent(requestId) && migration?.state === 'committed') {
+            let refreshed = assertSuccess(await rpc<Json>('team.project.get.v1'), '无法刷新团片协作历史');
+            if (!loadGuardRef.current.isCurrent(requestId)) return;
+            if (waitingForHostStorage && selectedRelativePaths.length) refreshed = assertSuccess(await rpc<Json>('team.project.register.v1', { relativePaths: selectedRelativePaths }), '无法登记所选团片图片');
+            if (!loadGuardRef.current.isCurrent(requestId)) return;
+            setWorkspaceSnapshot(normalizeWorkspace(refreshed));
+            const refreshedResolution = resolveTeamRetouchEntriesForOpen(refreshed, entriesRef.current.map(entry => String(entry.relativePath || '')).filter(Boolean));
+            legacyApi.setProjectEntries(refreshedResolution.entries); entriesRef.current = refreshedResolution.entries; setEntries(refreshedResolution.entries);
+            setHistoryRecordCount(refreshedResolution.historyPhotoCount); setHistoryOwnershipPendingCount(refreshedResolution.ownershipPendingCount);
+            entriesLoadedRef.current = true; setEntriesLoaded(true); setInitialLoading(false);
+            setHistoryPathWarning('团片旧项目文件整理完成。');
+          }
+        };
+        void advanceMigration().catch(error => {
+          if (!loadGuardRef.current.isCurrent(requestId)) return;
+          const message = `团片旧项目文件整理已暂停：${error instanceof Error ? error.message : String(error)}`;
+          if (waitingForHostStorage) { setInitialLoading(false); setLoadError(message); }
+          else setHistoryPathWarning(message);
+        });
+      }
+      if (waitingForHostStorage) return;
       const currentRelativePaths = entriesRef.current.filter(entry => !entry.teamHistoryMissing).map(entry => String(entry.relativePath || '')).filter(Boolean);
       const historyResolution = resolveTeamRetouchEntriesForOpen(workspace, currentRelativePaths);
       setHistoryRecordCount(historyResolution.historyPhotoCount); setHistoryOwnershipPendingCount(historyResolution.ownershipPendingCount);

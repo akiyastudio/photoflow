@@ -20,7 +20,19 @@ export interface MediaVariantsResponse { apiVersion: 2; mediaRef: { photoId?: st
 export interface InputMaterializeRequest { action: 'materialize'; token: string }
 export interface InputMaterializeResponse { apiVersion: 2; inputId: string; privatePath: string; byteLength: number }
 export type ComponentStorageRequest = Record<string, never>;
-export interface ComponentStorageResponse { apiVersion: 2; dataPath: string; databasePath: string; projectId: string; ownership: 'component-private'; adoption?: { kind: 'component-storage-adoption'; fromHostApiVersion: 1; state: 'committed'; legacyDataRoot: string; legacyDatabasePath: string; databaseSha256: string } }
+export interface ComponentStorageAdoptionPending {
+  schemaVersion: 1; kind: 'component-storage-adoption'; state: 'pending'; componentId: string;
+  fromHostApiVersion: 1; toHostApiVersion: 2; startedAt: number;
+}
+export interface ComponentStorageAdoptionCommitted {
+  schemaVersion: 1; kind: 'component-storage-adoption'; state: 'committed'; componentId: string;
+  fromHostApiVersion: 1; toHostApiVersion: 2; adoptedDataRoot: boolean; adoptedDatabase: boolean;
+  legacyDataRoot: string; legacyDatabasePath: string; databaseSha256: string;
+  copiedFileCount: number; copiedByteCount: number;
+}
+export type ComponentStorageResponse =
+  | { apiVersion: 2; projectId: string; ownership: 'component-private'; adoption: ComponentStorageAdoptionPending }
+  | { apiVersion: 2; dataPath: string; databasePath: string; projectId: string; ownership: 'component-private'; adoption?: ComponentStorageAdoptionCommitted };
 export type ComponentSettingsRequest = { action: 'get' } | { action: 'replace' | 'merge'; settings: JsonObject };
 export interface ComponentSettingsResponse { apiVersion: 2; revision: number; settings: JsonObject }
 export type ProjectOutputRequest = { action: 'stage' } | { action: 'write'; stageId: string; name: string; outputRelativePath: string; sourceName?: string; inputToken?: string; base64?: string; replace?: boolean; previousCommitId?: string; previousArtifactId?: string; expectedDigest?: string } | { action: 'validate' | 'rollback'; stageId: string } | { action: 'commit'; stageId: string; idempotencyKey: string } | { action: 'adoptLegacyV1'; migrationId: string; outputs: Array<{ relativePath: string; artifactId?: string }> } | { action: 'delete'; previousCommitId: string; previousArtifactId: string; expectedDigest: string; idempotencyKey: string } | { action: 'materializeOwned'; commitId: string; artifactId: string };

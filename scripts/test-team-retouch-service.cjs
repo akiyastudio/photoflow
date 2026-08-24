@@ -185,6 +185,7 @@ const ready = new Promise((resolve, reject) => {
     db.prepare('INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)').run('photo-other', 'project-other', 'version-other', 1, 1);
     const insertTask = db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)`);
     insertTask.run('task-other', 'photo-other', 'version-other', 1, '其他项目人物', '{}', '{}', path.join(componentDataRoot, 'other.png'), 1, 1);
+    db.prepare('UPDATE team_patch_tasks SET edited_patch_path=? WHERE id=?').run(path.join(projectRoot, 'missing-other-return.png'), 'task-other');
     insertTask.run('task-orphan', 'photo-orphan', 'version-orphan', 1, '旧版孤立人物', '{}', '{}', path.join(componentDataRoot, 'orphan.png'), 1, 1);
     db.close();
     fs.mkdirSync(componentDataRoot, { recursive: true }); fs.writeFileSync(path.join(componentDataRoot, 'authorized-patch.png'), Buffer.alloc(1024 * 1024, 7));
@@ -202,9 +203,15 @@ const ready = new Promise((resolve, reject) => {
     assert.equal(snapshot.photos[0].relativePath, 'one.jpg', 'snapshot paths must follow the registered base version instead of the current merged output');
     assert.equal(snapshot.photos[0].sourcePath, undefined);
     assert.equal(snapshot.photos[0].tasks[0].patchPath, undefined, 'renderer responses must not disclose host media paths');
-    assert(requestedPhotoIds.includes('photo-1') && requestedPhotoIds.includes('photo-orphan'), 'the current project and genuinely ownerless legacy tasks must be resolved through the host');
+    assert(requestedPhotoIds.includes('photo-1'), 'the current project media is resolved through the host');
+    assert(!requestedPhotoIds.includes('photo-orphan'), 'ownerless legacy tasks cannot borrow the current project Host scope');
     assert(!requestedPhotoIds.includes('photo-other'), 'registered tasks owned by another project must not expand the current project media query');
     assert(!snapshot.photos.some(photo => photo.photoId === 'photo-orphan' || photo.photoId === 'photo-other'), 'host-filtered orphan or foreign tasks must never leak into the snapshot');
+    assert.equal(snapshot.migration.state, 'committed', 'another project missing output does not block the current project snapshot');
+    await invoke('team.project.migrate-step.v1');
+    const markerDb = new DatabaseSync(databasePath); const markerHash = value => require('crypto').createHash('sha256').update(value).digest('hex').slice(0, 24);
+    assert.equal(markerDb.prepare('SELECT value FROM meta WHERE key=?').get(`legacy_project_artifacts_v2:${markerHash('project-1')}`)?.value, 'committed');
+    assert.equal(markerDb.prepare('SELECT value FROM meta WHERE key=?').get(`legacy_project_artifacts_v2:${markerHash('project-other')}`), undefined, 'project A marker must not hide project B migration'); markerDb.close();
     const originalAccess = await invoke('team.media.authorize.v1', { kind: 'original', photoId: 'photo-1', baseVersionId: 'version-1' });
     assert.equal(originalAccess.url, 'photoflow-media:one.jpg');
     assert.equal((await invoke('team.media.authorize.v1', { kind: 'working', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', filePath: 'C:/escape' })).url, 'photoflow-media:authorized-patch.png');

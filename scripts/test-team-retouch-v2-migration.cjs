@@ -18,6 +18,8 @@ const legacyPrivatePatch = path.join(legacyRoot, 'photo-1', 'version-1', 'delive
 const legacyProjectReturn = path.join(projectRoot, 'one_裁切', 'one_人物01-return.png');
 const legacyWorkflowFile = path.join(projectRoot, '团片协作', '第1周', '人物 A', 'one_人物1.png');
 for (const file of [basePath, legacyPrivatePatch, legacyProjectReturn, legacyWorkflowFile]) { fs.mkdirSync(path.dirname(file), { recursive: true }); fs.writeFileSync(file, path.basename(file)); }
+const bulkLegacyDirectory = path.join(legacyRoot, 'bulk'); fs.mkdirSync(bulkLegacyDirectory, { recursive: true });
+for (let index = 0; index < 2400; index += 1) fs.writeFileSync(path.join(bulkLegacyDirectory, `${index}.mock`), 'x');
 fs.mkdirSync(path.dirname(legacyDatabase), { recursive: true });
 const seeded = ensureSchema(legacyDatabase); const now = Date.now();
 seeded.prepare('INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)').run('photo-1', 'project-1', 'version-1', now, now);
@@ -33,6 +35,7 @@ fs.mkdirSync(oldReviewDirectory, { recursive: true }); fs.writeFileSync(oldRevie
 
 const bundle = { photo: { id: 'photo-1', projectId: 'project-1', currentVersionId: 'version-1', displayName: 'one', originalName: 'one.jpg' }, versions: [{ id: 'version-1', filePath: basePath, relativePath: 'one.jpg', isCurrent: true }] };
 const broker = new ComponentCapabilityBroker();
+let releaseAdoption; const adoptionGate = new Promise(resolve => { releaseAdoption = resolve; });
 const taskHandles = new Map();
 const backgroundTasks = { create(definition) { const task = { ...definition, state: 'running', metadata: definition.metadata || {} }; const handle = { task, context: { signal: { aborted: false }, report() {}, saveCheckpoint() {} }, waitForStart: async () => undefined, isFinished: () => false, complete: message => { task.state = 'completed'; task.message = message; }, fail: error => { task.state = 'failed'; task.error = error.message; }, snapshot: () => task }; taskHandles.set(task.id, handle); return handle; }, get: id => taskHandles.get(id)?.snapshot() || null, cancel: () => true, list: () => [...taskHandles.values()].map(item => item.snapshot()) };
 registerComponentProjectCapabilities({
@@ -42,7 +45,8 @@ registerComponentProjectCapabilities({
   IMAGE_EXTENSIONS: new Set(['.jpg', '.png']), path, fs, crypto, getConfigPath: () => path.join(sandbox, 'config.json'), readSavedConfig: () => ({}),
   getProjectPath: (_root, status, name) => path.join(workspace, status, name), dialog: {}, mainWindow: {}, shell: { openPath: async () => '', showItemInFolder() {} },
   mediaService: { grantPath() {}, grantRoot() {}, toUrl: file => `photoflow-media:${path.basename(file)}`, requestThumbnail: async request => ({ previewUrl: `photoflow-media:preview-${path.basename(request.filePath)}` }) },
-  backgroundTasks, getBoundProject: () => ({ id: 'project-1', name: 'Project', status: 'active' }),
+  backgroundTasks, getBoundProject: () => ({ id: 'project-1', name: 'Project', status: 'active' }), adoptionInteractiveBudgetMs: 0,
+  adoptionFaultInjector: phase => phase === 'before-journal' ? adoptionGate : undefined,
 });
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
 const descriptor = { componentId: 'team-retouch', componentVersion: manifest.version, contractVersion: 2, hostApiVersion: 2, migrations: manifest.componentHost.migrations, service: manifest.componentHost.service };
@@ -57,7 +61,24 @@ const ready = new Promise((resolve, reject) => { child.once('exit', code => reje
 
 (async () => {
   try {
-    await ready; const snapshot = await invoke('team.project.get.v1'); assert.equal(snapshot.photos[0].photoId, 'photo-1');
+    await ready; const startedAt = Date.now(); const firstSnapshot = await invoke('team.project.get.v1'); const firstSnapshotElapsedMs = Date.now() - startedAt;
+    assert(firstSnapshotElapsedMs < 2000, 'first unadopted historical snapshot must return migration state within the interactive latency budget');
+    assert.equal(firstSnapshot.migration.phase, 'host-storage-adoption', 'large first adoption runs outside the ordinary project.get request');
+    await assert.rejects(invoke('team.project.register.v1', { relativePaths: ['one.jpg'] }), /首次安全迁移/, 'mutations fail closed while Host storage adoption is pending');
+    await assert.rejects(invoke('team.patch.detect.v1', { photoId: 'photo-1', baseVersionId: 'version-1' }), /首次安全迁移/, 'detect cannot write private artifacts while Host storage adoption is pending');
+    assert.equal(fs.existsSync(path.join(dataRoot, 'components', 'team-retouch', 'storage.sqlite3')), false, 'pending mutations never create or write the V2 component root');
+    releaseAdoption();
+    let snapshot = firstSnapshot;
+    for (let attempt = 0; snapshot.migration.phase === 'host-storage-adoption' && attempt < 300; attempt += 1) { await new Promise(resolve => setTimeout(resolve, 100)); snapshot = await invoke('team.project.get.v1'); }
+    assert.equal(snapshot.photos[0]?.photoId, 'photo-1', JSON.stringify(snapshot));
+    assert.equal(snapshot.migration.state, 'pending'); assert(snapshot.migration.pendingCount >= 1, 'snapshot exposes recoverable output migration state');
+    assert(fs.existsSync(legacyRoot) && fs.existsSync(legacyPrivatePatch), 'Host adoption retains the legacy source for rollback');
+    const concurrentSteps = await Promise.all(Array.from({ length: 3 }, () => invoke('team.project.migrate-step.v1')));
+    assert(concurrentSteps.every(item => item.processedCount === concurrentSteps[0].processedCount), 'concurrent migration requests share one checkpoint operation');
+    let migration = concurrentSteps[0]; let steps = 0;
+    while (migration.state !== 'committed' && steps++ < 10) migration = await invoke('team.project.migrate-step.v1');
+    assert.equal(migration.state, 'committed', 'incremental migration eventually commits idempotently');
+    assert.equal((await invoke('team.project.migrate-step.v1')).state, 'committed', 'completed migration remains idempotent');
     const storage = await broker.invoke(descriptor, 'component.storage.v2', {}, context); const migrated = new DatabaseSync(storage.databasePath);
     const task = migrated.prepare("SELECT patch_path,edited_patch_path FROM team_patch_tasks WHERE id='task-1'").get(); const assignment = migrated.prepare("SELECT edited_patch_path FROM team_person_assignments WHERE photo_id='photo-1'").get();
     for (const value of [task.patch_path, task.edited_patch_path, assignment.edited_patch_path]) { assert(value.startsWith(storage.dataPath)); assert(!value.startsWith(legacyRoot)); assert(fs.existsSync(value)); }
@@ -69,6 +90,6 @@ const ready = new Promise((resolve, reject) => { child.once('exit', code => reje
     assert((await invoke('team.media.authorize.v1', { kind: 'review-return', reviewSessionId: 'review-1', returnId: 'return-1' })).url, 'legacy review media is served only from adopted private storage');
     await invoke('team.identity.complete.v1', { photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1, completed: false });
     assert(fs.existsSync(path.join(projectRoot, '团片协作', '第1周', '人物 A', 'one_人物1.png')), 'reconcile republishes the relay file through V2 output ownership');
-    console.log('Team-retouch V1 storage/output to Host V2 migration regression passed');
-  } finally { lines.close(); child.kill(); fs.rmSync(sandbox, { recursive: true, force: true }); }
+    console.log(`Team-retouch V1 storage/output to Host V2 migration regression passed; first 2400-file unadopted snapshot ${firstSnapshotElapsedMs}ms`);
+  } finally { lines.close(); const exited = new Promise(resolve => child.once('exit', resolve)); child.kill(); await exited; fs.rmSync(sandbox, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

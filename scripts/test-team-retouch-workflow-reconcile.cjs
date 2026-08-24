@@ -244,7 +244,7 @@ const restoreManifestDirectory = () => {
     pendingDb.close();
     restoreManifestDirectory();
     breakManifestOnArtifactCall = 0;
-    await invoke('team.project.get.v1');
+    const reload = await invoke('team.project.get.v1'); assert.equal(reload.migration.state, 'pending'); await invoke('team.project.migrate-step.v1');
     const recoveredDb = new DatabaseSync(databasePath);
     assert.equal(recoveredDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 0, 'project reload clears a successfully reconciled pending task');
     recoveredDb.close();
@@ -264,7 +264,7 @@ const restoreManifestDirectory = () => {
     noRetouchPendingDb.close();
     restoreManifestDirectory();
     breakManifestOnArtifactCall = 0;
-    await invoke('team.project.get.v1');
+    const noRetouchReload = await invoke('team.project.get.v1'); assert.equal(noRetouchReload.migration.state, 'pending'); await invoke('team.project.migrate-step.v1');
     assertActive('task-1', 2, 'ORIGINAL-TASK-ONE');
     const noRetouchRecoveredDb = new DatabaseSync(databasePath);
     assert.equal(noRetouchRecoveredDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 0);

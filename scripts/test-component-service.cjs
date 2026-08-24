@@ -27,14 +27,14 @@ const baseManifest = {
     ],
     service: {
       protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' },
-      rpcMethods: ['sample.echo.v1', 'sample.crash.v1', 'team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1'], capabilities: ['project.media.list.v1'],
+      rpcMethods: ['sample.echo.v1', 'sample.crash.v1', 'sample.hang.v1', 'team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1'], capabilities: ['project.media.list.v1'],
     },
   },
 };
 
 const descriptor = parseComponentHostManifest(baseManifest, sandbox);
 assert.equal(descriptor.service.entry, serviceEntry);
-assert.deepEqual(descriptor.service.rpcMethods, ['sample.echo.v1', 'sample.crash.v1', 'team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1']);
+assert.deepEqual(descriptor.service.rpcMethods, ['sample.echo.v1', 'sample.crash.v1', 'sample.hang.v1', 'team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1']);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, rpcMethods: ['unversioned'] } } }, sandbox), /versioned allowlist/);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, capabilities: ['ipc.any.v1'] } } }, sandbox), /unknown host capability/);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, entrypoints: { default: '../escape.cjs' } } } }, sandbox), /escapes component root/);
@@ -64,6 +64,8 @@ class FakeChild extends EventEmitter {
 
 const launched = [];
 let serviceRequestCount = 0;
+const cancelledRequestIds = [];
+let disableStdinAfterHang = false;
 const fakeSupervisor = {
   launch(spec) {
     const requestFrames = new Map();
@@ -71,8 +73,11 @@ const fakeSupervisor = {
       if (frame.type === 'request') {
         serviceRequestCount += 1;
         if (frame.method === 'sample.crash.v1') { process.nextTick(() => target.emit('exit', 9, null)); return true; }
+        if (frame.method === 'sample.hang.v1') { requestFrames.set(frame.id, frame); if (disableStdinAfterHang) process.nextTick(() => { target.stdin.writable = false; }); return true; }
         requestFrames.set(frame.id, frame);
         target.stdout.write(`${JSON.stringify({ type: 'capability', id: `cap-${frame.id}`, parentId: frame.id, method: 'project.media.list.v1', payload: { cursor: 'next' } })}\n`);
+      } else if (frame.type === 'cancel') {
+        cancelledRequestIds.push(frame.id); requestFrames.delete(frame.id);
       } else if (frame.type === 'capability-response') {
         const requestId = String(frame.id).replace(/^cap-/, '');
         const requestFrame = requestFrames.get(requestId);
@@ -97,7 +102,7 @@ const fakeSupervisor = {
 
 let activeDescriptor = descriptor;
 const registry = { resolve: id => id === activeDescriptor.componentId ? activeDescriptor : null };
-const manager = new ComponentServiceManager({ registry, processSupervisor: fakeSupervisor, capabilityBroker: broker, executablePath: 'electron.exe' });
+const manager = new ComponentServiceManager({ registry, processSupervisor: fakeSupervisor, capabilityBroker: broker, executablePath: 'electron.exe', requestTimeoutMs: 100 });
 const keepAlive = setInterval(() => undefined, 1000);
 
 (async () => {
@@ -120,6 +125,13 @@ const keepAlive = setInterval(() => undefined, 1000);
     manager.invoke('sample-component', 'component.advanced.preflight.v1', {}, boundContext),
   ]);
   assert.equal(serviceRequestCount - beforeIndependentReads, 2, 'different startup reads remain concurrent without waiting on each other');
+  const hanging = manager.invoke('sample-component', 'sample.hang.v1', {}, boundContext);
+  await assert.rejects(hanging, /timed out/);
+  assert.equal(cancelledRequestIds.length, 1, 'a timed-out host request cooperatively cancels service work');
+  disableStdinAfterHang = true;
+  const unavailableStdin = manager.invoke('sample-component', 'sample.hang.v1', {}, boundContext);
+  await assert.rejects(unavailableStdin, /timed out/, 'timeout still rejects normally when the cancellation frame cannot be written');
+  disableStdinAfterHang = false; launched.at(-1).managed.child.stdin.writable = true;
 
   const launchCountBeforeUpgrade = launched.length;
   activeDescriptor = parseComponentHostManifest({ ...baseManifest, version: '2.0.0' }, sandbox);
