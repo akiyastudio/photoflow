@@ -542,7 +542,9 @@ const run = async () => {
     for (const name of trashNames) fs.writeFileSync(path.join(trashProject, name), name);
     const trashHandlers = new Map();
     let trashBatchCalls = 0;
+    let trashBatchSourceCount = 0;
     let trashUndo;
+    let rejectTrashUndoPersistence = false;
     registerFileOperationsIpc({
       Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
       ipcMain: { handle: (name, handler) => trashHandlers.set(name, handler), on: () => {} },
@@ -550,24 +552,146 @@ const run = async () => {
       fileOperationState: { projectFileClipboard: null }, ensureWorkspace: () => root,
       capturePathIdentity, writeLog: () => {},
       recycleBinService: {
+        trash: async source => {
+          fs.rmSync(source, { recursive: true });
+          return { success: true, originalPath: source, recyclePidl: 'pidl-single', preciseRestore: true, permanent: false };
+        },
         trashMany: async sources => {
           trashBatchCalls += 1;
+          trashBatchSourceCount = sources.length;
           for (const source of sources) fs.unlinkSync(source);
           return { success: true, items: sources.map((source, index) => ({ success: true, originalPath: source, recyclePidl: `pidl-${index}`, preciseRestore: true, permanent: false })) };
         },
       },
-      workspaceRepository: { addUndoRecord: async () => ({ id: 'batch-trash-undo' }) },
+      workspaceRepository: { addUndoRecord: async () => {
+        if (rejectTrashUndoPersistence) throw new Error('No pyvenv.cfg file');
+        return { id: 'batch-trash-undo' };
+      } },
       pushUndoOperation: async operation => { trashUndo = operation; },
     });
     const trashResult = await trashHandlers.get('workspace-file-operation')(
       { sender: { isDestroyed: () => false, send: () => {} } },
-      'workspace', '策划中', 'project', 'trash', trashNames,
+      'workspace', '策划中', 'project', 'trash', [trashNames[0], trashNames[0], trashNames[1]],
     );
     assert.strictEqual(trashResult.success, true);
     assert.strictEqual(trashResult.count, 2);
     assert.strictEqual(trashBatchCalls, 1, 'multi-selection trash must use one native batch request');
+    assert.strictEqual(trashBatchSourceCount, 2, 'batch trash must collapse duplicate physical paths before invoking the native helper');
     assert.deepStrictEqual(trashUndo.items.map(item => item.recyclePidl), ['pidl-0', 'pidl-1']);
     assert(trashUndo.items.every(item => item.originalIdentity), 'batch trash must preserve every source identity for safe undo');
+
+    const duplicateTrashFolder = path.join(trashProject, 'duplicate-folder');
+    fs.mkdirSync(duplicateTrashFolder);
+    fs.writeFileSync(path.join(duplicateTrashFolder, 'inside.txt'), 'inside');
+    const duplicateTrashResult = await trashHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'trash', ['duplicate-folder', 'duplicate-folder'],
+    );
+    assert.strictEqual(duplicateTrashResult.success, true, duplicateTrashResult.error);
+    assert.strictEqual(duplicateTrashResult.count, 1, 'duplicate virtual selections must delete one physical folder once');
+    assert.strictEqual(trashBatchCalls, 1, 'a duplicate-only selection must collapse to the single-item recycle path');
+    assert.strictEqual(fs.existsSync(duplicateTrashFolder), false);
+    assert.deepStrictEqual(trashUndo.items.map(item => item.recyclePidl), ['pidl-single']);
+
+    const undoFailureTrashFolder = path.join(trashProject, 'undo-failure-folder');
+    fs.mkdirSync(undoFailureTrashFolder);
+    rejectTrashUndoPersistence = true;
+    const undoFailureTrashResult = await trashHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'trash', ['undo-failure-folder'],
+    );
+    rejectTrashUndoPersistence = false;
+    assert.strictEqual(undoFailureTrashResult.success, true, 'a completed recycle operation must not be reported as a deletion failure when only undo persistence is unavailable');
+    assert.strictEqual(undoFailureTrashResult.undoUnavailable, true);
+    assert.match(undoFailureTrashResult.warning, /应用内撤销记录未能保存/);
+    assert.strictEqual(fs.existsSync(undoFailureTrashFolder), false);
+
+    const aliasedPhysicalFolder = path.join(root, 'aliased-trash-folder');
+    fs.mkdirSync(aliasedPhysicalFolder);
+    fs.writeFileSync(path.join(aliasedPhysicalFolder, 'inside.txt'), 'inside');
+    const aliasedTrashHandlers = new Map();
+    let aliasedTrashCalls = 0;
+    let aliasedTrashUndo;
+    registerFileOperationsIpc({
+      Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => aliasedTrashHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => trashProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null }, ensureWorkspace: () => root,
+      capturePathIdentity, writeLog: () => {},
+      projectVirtualPaths: {
+        listManagedExternalLinks: () => [],
+        resolve: (_projectRoot, relativePath) => ({
+          projectRoot: trashProject,
+          virtualPath: String(relativePath).replace(/\\/g, '/'),
+          physicalPath: aliasedPhysicalFolder,
+          viaExternalLink: true,
+          isExternalLinkRoot: false,
+        }),
+      },
+      recycleBinService: {
+        trash: async source => {
+          aliasedTrashCalls += 1;
+          fs.rmSync(source, { recursive: true });
+          return { success: true, originalPath: source, recyclePidl: 'pidl-alias', preciseRestore: true, permanent: false };
+        },
+      },
+      workspaceRepository: { addUndoRecord: async () => ({ id: 'alias-trash-undo' }) },
+      pushUndoOperation: async operation => { aliasedTrashUndo = operation; },
+    });
+    const aliasedTrashResult = await aliasedTrashHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'trash', ['alias-a/folder', 'alias-b/folder'],
+    );
+    assert.strictEqual(aliasedTrashResult.success, true, aliasedTrashResult.error);
+    assert.strictEqual(aliasedTrashResult.count, 1, 'virtual aliases resolving to one folder must delete that physical target once');
+    assert.strictEqual(aliasedTrashCalls, 1);
+    assert.deepStrictEqual(aliasedTrashResult.affectedDirectories, ['alias-a', 'alias-b'], 'all virtual aliases must be refreshed after their shared physical target is deleted');
+    assert.deepStrictEqual(aliasedTrashUndo.items.map(item => item.recyclePidl), ['pidl-alias']);
+
+    const partialTrashProject = path.join(root, 'partial-trash-project');
+    fs.mkdirSync(partialTrashProject);
+    fs.writeFileSync(path.join(partialTrashProject, 'deleted.txt'), 'deleted');
+    fs.writeFileSync(path.join(partialTrashProject, 'retained.txt'), 'retained');
+    const partialTrashHandlers = new Map();
+    let partialTrashUndo;
+    let partialTrashWatcherRefreshes = 0;
+    registerFileOperationsIpc({
+      Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => partialTrashHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => partialTrashProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null }, ensureWorkspace: () => root,
+      capturePathIdentity, writeLog: () => {},
+      projectVirtualPaths: {
+        listManagedExternalLinks: () => [],
+        resolve: (_projectRoot, relativePath) => ({
+          projectRoot: partialTrashProject,
+          virtualPath: String(relativePath).replace(/\\/g, '/'),
+          physicalPath: path.join(partialTrashProject, relativePath),
+          viaExternalLink: relativePath === 'deleted.txt',
+          isExternalLinkRoot: relativePath === 'deleted.txt',
+        }),
+      },
+      refreshManagedExternalWatchers: async () => { partialTrashWatcherRefreshes += 1; },
+      recycleBinService: {
+        trashMany: async sources => {
+          fs.unlinkSync(sources[0]);
+          return { success: true, items: [{ success: true, originalPath: sources[0], recyclePidl: 'pidl-partial', preciseRestore: true, permanent: false }] };
+        },
+      },
+      workspaceRepository: { addUndoRecord: async () => ({ id: 'partial-trash-undo' }) },
+      pushUndoOperation: async operation => { partialTrashUndo = operation; },
+    });
+    const partialTrashResult = await partialTrashHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'trash', ['deleted.txt', 'retained.txt'],
+    );
+    assert.strictEqual(partialTrashResult.success, false);
+    assert.strictEqual(partialTrashResult.errorCode, 'RECYCLE_BIN_FAILED');
+    assert.strictEqual(partialTrashResult.count, 1, 'a partial native response must report how many paths were actually deleted');
+    assert.strictEqual(fs.existsSync(path.join(partialTrashProject, 'deleted.txt')), false);
+    assert.strictEqual(fs.existsSync(path.join(partialTrashProject, 'retained.txt')), true);
+    assert.deepStrictEqual(partialTrashUndo.items.map(item => item.recyclePidl), ['pidl-partial'], 'successfully deleted paths must remain undoable when another batch item fails');
+    assert.strictEqual(partialTrashWatcherRefreshes, 1, 'partial trash success must refresh managed external watchers before reporting the remaining failure');
 
     const undoHandlers = new Map();
     const renameHistory = [replacementUndo];

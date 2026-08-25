@@ -286,6 +286,9 @@ assert(rootRequirements.includes('pi-heif==1.4.0')
 assert(main.includes('createDevelopmentPythonResolver({ projectRoot })')
   && pythonEnvironmentService.includes("verify-python-environment.py")
   && pythonEnvironmentService.includes("'--quick'")
+  && pythonEnvironmentService.includes("path.join(venvRoot, 'pyvenv.cfg')")
+  && pythonEnvironmentService.includes('validatedFingerprint')
+  && pythonEnvironmentSetup.includes("'--clear', venvRoot")
   && !pythonBuild.includes("existsSync(venvPython) ? venvPython : 'python'")
   && !componentBuilder.includes("fs.existsSync(venvPython) ? venvPython : 'python'"),
 'development and build workers must fail clearly instead of falling back to an unrelated system Python');
@@ -532,6 +535,14 @@ assert(!projectWorkspace.includes('teamRetouch') && !projectWorkspace.includes('
 assert(!settingsFeature.includes('componentItems') && settingsFeature.includes("id: 'components', label: '组件管理'"), 'application settings must expose only generic component management, not component-owned pages');
 assert(app.includes("delete componentSettings['research-tools']") && app.includes('const researchSettings:') && app.includes('const inspirationLibrary:'), 'legacy research component config must migrate into the built-in storyboard panel defaults');
 assert(inspirationLibrary.includes('FileBrowserWorkspace') && inspirationLibrary.includes('INSPIRATION_FILE_BROWSER_CONTEXT') && inspirationLibrary.includes('InspirationLibraryNavigator') && browserContext.includes('PROJECT_FILE_BROWSER_CONTEXT') && browserContext.includes('INSPIRATION_FILE_BROWSER_CONTEXT'), 'project and inspiration shells must compose the shared file browser through explicit contexts');
+assert(inspirationLibrary.includes('const createdRelativePath =')
+  && inspirationLibrary.includes('onNavigate(createdRelativePath)')
+  && inspirationLibrary.includes('renamedEntryDestinationPath(folder.relativePath, nextName, result.movedItems)')
+  && inspirationLibrary.includes('onNavigate(navigationTarget)'), 'inspiration tree creation and rename must select the exact resulting folder so its existing selected-row scroll behavior can reveal it');
+assert(inspirationLibrary.includes('folderLoadQueuedRef')
+  && inspirationLibrary.includes('lastFolderLoadAtRef')
+  && inspirationLibrary.includes('current.every((folder, index) =>')
+  && inspirationLibrary.includes('Date.now() - lastFolderLoadAtRef.current >= 30_000'), 'the inspiration tree must coalesce in-flight refreshes, reuse equal folder structures, and avoid rescanning every mounted page on each focus');
 assert(workspaceIpc.includes("ipcMain.handle('workspace-folder-tree'") && inspirationLibrary.includes('listWorkspaceFolders') && inspirationLibrary.includes('visibleFolders.map'), 'the inspiration sidebar must recursively list folders only through the workspace IPC boundary');
 assert(!inspirationLibrary.includes('刷新灵感库目录') && !inspirationLibrary.includes('window.setInterval(() => void loadFolders(), 2500)') && workspaceIpc.includes("ipcMain.handle('workspace-watch-file-root'") && fileRootWatcherService.includes('const watchers = new Map()') && fileRootWatcherService.includes('references += 1'), 'the inspiration directory tree must use a ref-counted multi-root watcher instead of normal-operation polling');
 assert(app.includes("projectPages.filter(page => page.kind === 'inspiration').map(page =>") && app.includes('<InspirationLibraryPage pageId={page.id}') && app.includes("className={active ? 'h-full w-full' : 'hidden'}"), 'every inspiration page must stay independently mounted like project pages');
@@ -548,6 +559,7 @@ assert(!settingsFeature.includes("activeSection === 'research'") && !settingsFea
 assert(workspaceIpc.includes("ipcMain.handle('workspace-add-inspiration-to-project'") && workspaceIpc.includes("path.join(targetRoot, '策划')") && workspaceIpc.includes('shell.writeShortcutLink') && workspaceIpc.includes('await copyFileAtomic(source, destination)'), 'inspiration gathering must create folder shortcuts and copy files into the selected project planning folder');
 assert(workspaceIpc.includes("ipcMain.handle('workspace-resolve-shortcut'") && workspaceIpc.includes('shell.readShortcutLink') && projectWorkspace.includes('resolveProjectShortcut') && app.includes('onOpenInspirationPath={navigateInspiration}'), 'project shortcuts must resolve safely and navigate into the configured inspiration library');
 assert(projectWorkspace.includes('inspiration-target-button') && projectWorkspace.includes('inspirationTargetProject.name') && projectWorkspace.includes('添加到项目') && projectWorkspace.includes('addInspirationToProject'), 'the inspiration browser must expose its selected target project and project gathering actions');
+assert(projectWorkspace.includes('const hasGatherToolbarTools =') && projectWorkspace.includes('gatherToProject && hasGatherToolbarTools && <span aria-hidden className="toolbar-divider"/>'), 'the inspiration target picker must not leave an orphan toolbar divider when no image or video tools follow it');
 assert(inspirationLibrary.includes('添加到项目') && inspirationLibrary.includes('renamingPath === relativePath') && inspirationLibrary.includes("'rename'") && inspirationLibrary.includes("'trash'"), 'the inspiration sidebar must expose inline rename, project gathering, and recycle-bin deletion for folders');
 assert(inspirationLibrary.includes('onOpenInNewTab(relativePath)') || inspirationLibrary.includes('onOpenInNewTab(path)') && inspirationLibrary.includes("application/x-photoflow-folder-tab"), 'the inspiration sidebar must expose explicit new-tab opening and a folder drag payload');
 assert(folderTabNavigation.includes("'data-folder-tab-drop-zone': 'true'") && folderTabNavigation.includes('openInNewTab(payload.relativePath)') && folderTabNavigation.includes("payload.kind === 'project'") && app.includes('<div {...folderTabDropProps} data-folder-tab-drop-zone="true" aria-label="标签栏"') && app.includes("openProjectInNewTab: project => openProjectDirectoryPage(project, '')") && !app.includes('拖到顶部栏即可在新标签页打开') && projectNavigator.includes("JSON.stringify({ kind: 'project', project })") && projectWorkspace.includes("[data-folder-tab-drop-zone=\"true\"]") && projectWorkspace.includes("new Event('photoflow:folder-tab-drag-start')") && projectWorkspace.includes('onOpenDirectoryPage(draggedEntry.relativePath)'), 'only the real titlebar tab strip must accept inspiration folders, sidebar projects, and project file-browser folders as new tabs');
@@ -704,6 +716,26 @@ assert(projectWorkspace.includes('entryPointerModifiersRef.current')
   && fileEntryInteractionModel.includes("if (additive || selectionCount > 0) return 'toggle-select'")
   && projectWorkspace.includes("if (intent === 'toggle-select')"), 'Ctrl-click must preserve pointer modifiers and toggle selection instead of opening an entry');
 assert(projectWorkspace.includes('directoryEntryToSelectOnReturn(currentRelativePathRef.current, normalizedPath)') && projectWorkspace.includes('pendingDirectoryReturnSelectionRef') && projectWorkspace.includes('setSelectedPaths([returnedFolder.relativePath])') && projectWorkspace.includes('requestFileReveal(returnedFolder.relativePath)'), 'returning to an ancestor directory must select and reveal the child folder that was just left');
+assert(projectWorkspace.includes('const selectAndRevealFileEntry =')
+  && projectWorkspace.includes("setFolderAlphabetFilter('')")
+  && projectWorkspace.includes('setPendingMutationSelection({')
+  && projectWorkspace.includes("setSearchQuery('')")
+  && projectWorkspace.includes("setFileFilter('all')")
+  && projectWorkspace.includes("setRatingFilter('all')")
+  && projectWorkspace.includes('selectAndRevealFileEntry(relativePath);')
+  && projectWorkspace.includes('const renamedPath = renamedEntryDestinationPath(sourcePath, nextName, result.movedItems)')
+  && projectWorkspace.includes('projectPathRef.current !== requestedProjectPath')
+  && projectWorkspace.includes('await refresh(sourceDirectoryPath,')
+  && projectWorkspace.includes('selectAndRevealFileEntry(renamedPath);'), 'created and renamed entries must remain selected and reveal themselves after the refreshed virtual list is committed');
+assert(projectWorkspace.includes('const retainedEntries = cachedEntries ??')
+  && projectWorkspace.includes('renderedDirectoryRef.current.ready')
+  && projectWorkspace.includes('upsertOptimisticDirectoryEntry(normalizedTarget')
+  && projectWorkspace.includes('upsertOptimisticDirectoryEntry(sourceDirectoryPath')
+  && projectWorkspace.includes('mergeRefreshedEntryMetadata(browseResult.entries')
+  && projectWorkspace.includes('includeProjectContents: !normalizedTarget'), 'same-directory revalidation must retain the painted list and stable mutation metadata instead of flashing a loading surface, re-sorting the selected target, or rescanning unrelated roots');
+assert(workspaceIpc.includes("path.relative(root, entryPath).replace(/\\\\/g, '/')")
+  && workspaceIpc.includes('suppressWorkspaceWatchPath?.(folderPath)')
+  && workspaceIpc.includes('releaseWorkspaceWatchPath?.(suppressedFolderPath)'), 'nested browse paths must be slash-stable and local folder creation must suppress its delayed watcher echo');
 assert(types.includes('folderAlphabetFilterEnabled: boolean') && app.includes('folderAlphabetFilterEnabled: true') && app.includes('fileConfig.folderAlphabetFilterEnabled !== false') && settingsFeature.includes('文件夹首字母筛选') && inspirationLibrary.includes('folderAlphabetFilterEnabled={config.folderAlphabetFilterEnabled}') && app.includes('folderAlphabetFilterEnabled={config.folderAlphabetFilterEnabled}'), 'folder alphabet filtering must be enabled by default, configurable in general settings, migrated, and shared by project and inspiration browsers');
 assert(folderAlphabetFilterModel.includes('FOLDER_ALPHABET_FILTER_THRESHOLD = 30') && folderAlphabetFilterModel.includes("zh-CN-u-co-pinyin") && projectWorkspace.includes('currentDirectoryFolders.length > FOLDER_ALPHABET_FILTER_THRESHOLD') && projectWorkspace.includes('folderAlphabetKey(entry.name) === folderAlphabetFilter') && projectWorkspace.includes('aria-label="按文件夹首字母筛选"'), 'large grid folders must expose a pinyin-aware A-Z folder filter above the icon grid');
 assert(projectWorkspace.includes("active && activeView === 'project' && (viewportStatus || folderOnlyGridCount > 0)") && projectWorkspace.includes(': folderOnlyGridCount}</span>') && projectWorkspace.includes("browseMode === 'grid' && filesInCurrentDirectory.length === 0") && projectWorkspace.includes("if (browseMode !== 'grid' || !viewportCurrentEntry"), 'the active project grid must keep one bottom-right viewport status and show only the folder count when the directory contains no files');

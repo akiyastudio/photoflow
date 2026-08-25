@@ -526,6 +526,7 @@ const registerWorkspaceIpc = context => {
   });
   
   ipcMain.handle('workspace-create-project-folder', async (_event, workspacePath, status, projectName, folderName, relativePath = '', makeUnique = false) => {
+    let suppressedFolderPath = '';
     try {
       const cleanedName = cleanProjectName(folderName || '');
       if (!cleanedName) throw new Error('文件夹名称不能为空');
@@ -543,11 +544,15 @@ const registerWorkspaceIpc = context => {
           folderPath = path.resolve(parentPath, actualName);
         }
       } else if (fs.existsSync(folderPath)) throw new Error('同名文件夹已存在');
+      suppressWorkspaceWatchPath?.(folderPath);
+      suppressedFolderPath = folderPath;
       fs.mkdirSync(folderPath);
       await pushUndoOperation({ kind: 'remove-created', paths: [folderPath], label: '新建文件夹' });
       return { success: true, folder: { name: actualName, path: folderPath, relativePath: [parentResolution.virtualPath, actualName].filter(Boolean).join('/'), updatedAt: Date.now() } };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
+    } finally {
+      if (suppressedFolderPath) releaseWorkspaceWatchPath?.(suppressedFolderPath);
     }
   });
 
@@ -560,16 +565,21 @@ const registerWorkspaceIpc = context => {
   });
 
   ipcMain.handle('workspace-create-shell-new-file', async (_event, workspacePath, status, projectName, relativePath, typeId) => {
+    let suppressedParentPath = '';
     try {
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       const parentResolution = virtualPaths.resolve(projectPath, relativePath, { externalRootMode: 'target' });
       const parentPath = parentResolution.physicalPath;
       if (!(await fs.promises.stat(parentPath)).isDirectory()) throw new Error('新建文件位置不是文件夹');
+      suppressWorkspaceWatchPath?.(parentPath);
+      suppressedParentPath = parentPath;
       const created = await shellNewService.create(typeId, parentPath, uniqueDestination);
       await pushUndoOperation({ kind: 'remove-created', paths: [created.path], label: '新建文件' });
       return { success: true, file: { ...created, relativePath: [parentResolution.virtualPath, path.basename(created.path)].filter(Boolean).join('/'), updatedAt: Date.now() } };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
+    } finally {
+      if (suppressedParentPath) releaseWorkspaceWatchPath?.(suppressedParentPath);
     }
   });
   
@@ -1193,7 +1203,7 @@ const registerWorkspaceIpc = context => {
           }
           const virtualRelativePath = viaExternalLink
             ? [normalizedRelativePath, entry.name].filter(Boolean).join('/')
-            : path.relative(root, entryPath);
+            : path.relative(root, entryPath).replace(/\\/g, '/');
           return { name: entry.name, path: displayPath, relativePath: virtualRelativePath, kind, extension, size: -1, createdAt: 0, updatedAt: 0, ...(sourceChannel ? { sourceChannel } : {}), ...(externalLink ? { externalLink: true, externalLinkTarget, externalLinkTargetKind, externalLinkOffline: !fs.existsSync(externalLinkTarget), shortcutBroken: !fs.existsSync(externalLinkTarget), viaShortcut: true, viaExternalLink: true, readOnly: false } : {}), ...(viaExternalLink ? { viaShortcut: true, viaExternalLink: true, readOnly: false } : {}) };
         })
         .sort((a, b) => (a.kind === 'folder' || a.externalLink && a.externalLinkTargetKind !== 'file' ? 0 : 1) - (b.kind === 'folder' || b.externalLink && b.externalLinkTargetKind !== 'file' ? 0 : 1) || a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
@@ -2023,7 +2033,7 @@ const registerWorkspaceIpc = context => {
       return {
         success: true,
         progressFolder: registered.progressFolder,
-        folder: { name: cleanedName, path: folderPath, relativePath: path.relative(projectPath, folderPath), updatedAt: Date.now() },
+        folder: { name: cleanedName, path: folderPath, relativePath: path.relative(projectPath, folderPath).replace(/\\/g, '/'), updatedAt: Date.now() },
       };
     } catch (error) {
       if (folderPath) await fs.promises.rmdir(folderPath).catch(() => undefined);
@@ -2847,7 +2857,7 @@ const registerWorkspaceIpc = context => {
           importedPaths: [source],
           progressFolder: registered.progressFolder,
           watchDegraded: !watcherResult?.success,
-          folder: { name: path.basename(shortcutPath), path: shortcutPath, relativePath: path.relative(projectPath, shortcutPath), updatedAt: Date.now() },
+          folder: { name: path.basename(shortcutPath), path: shortcutPath, relativePath: path.relative(projectPath, shortcutPath).replace(/\\/g, '/'), updatedAt: Date.now() },
         };
       }
       const expandedSourcePaths = [];
@@ -3033,7 +3043,7 @@ const registerWorkspaceIpc = context => {
         appended: Boolean(appendProgress),
         importedPaths: [...createdTargets, ...moves.map(move => move.destination)],
         progressFolder: registered.progressFolder,
-        folder: { name: cleanedName, path: destinationDir, relativePath: path.relative(projectPath, destinationDir), updatedAt: Date.now() },
+        folder: { name: cleanedName, path: destinationDir, relativePath: path.relative(projectPath, destinationDir).replace(/\\/g, '/'), updatedAt: Date.now() },
       };
     } catch (error) {
       if (progressUndoToken) removeUndoOperation(progressUndoToken);

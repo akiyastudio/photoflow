@@ -9,6 +9,7 @@ const player = read('src/components/AdvancedVideoPlayer.tsx');
 const preload = read('electron/preload.cjs');
 const ipc = read('electron/modules/advanced-video-ipc.cjs');
 const workspace = read('src/features/workspace/ProjectWorkspace.tsx');
+const hoverThumbnail = read('src/components/VideoHoverThumbnail.tsx');
 const versions = read('src/components/VersionManager.tsx');
 const config = read('src/features/app/app-config.ts');
 const ts = require('typescript');
@@ -72,7 +73,14 @@ assert(preload.includes("ipcRenderer.invoke('video-player-subtitle-choose'") && 
 assert(config.includes('subtitlesEnabled: false') && config.includes('subtitleSize: DEFAULT_SUBTITLE_FONT_SIZE') && config.includes("subtitleStyle: 'standard'"), 'global subtitle defaults must remain disabled and numerically normalized');
 assert(read('src/features/settings/SettingsFeature.tsx').includes('type="range"') && read('src/features/settings/SettingsFeature.tsx').includes('step={1}') && read('src/features/settings/SettingsFeature.tsx').includes('aria-label="字幕字号"'), 'global subtitle size must use a one-step slider with a numeric readout');
 assert(decoder.includes('ReadSubtitleFontSize') && decoder.includes('sub-font-size') && decoder.includes('normalized / 55.0'), 'native subtitle sizing must accept bounded integer values while preserving legacy scale behavior');
-assert(!workspace.includes('<video') && !versions.includes('<video'), 'formal playback and hover paths must not use Chromium video');
+assert(hoverThumbnail.includes('<video ref={videoRef}')
+  && hoverThumbnail.includes('muted playsInline')
+  && hoverThumbnail.includes('activeHoverVideo')
+  && hoverThumbnail.includes('onMouseMove')
+  && hoverThumbnail.includes('onEnded={restartPlayback}')
+  && workspace.includes('HOVER_VIDEO_PLAY_DELAY_MS = 300'),
+'thumbnail hover previews must use one delayed, muted, seekable, looping Chromium playback surface');
+assert(!workspace.includes('<video') && !versions.includes('<video'), 'formal playback paths must remain on the native video player');
 assert(decoder.includes('GetProperty("track-list/count")') && decoder.includes('"track-list/" + index') && !decoder.includes('GetProperty("track-list")'), 'libmpv node arrays must be read through indexed scalar properties');
 assert(decoder.indexOf('player.LoadPendingSidecars()') > decoder.indexOf('type == "file-loaded"') && decoder.indexOf('Run("loadfile"') < decoder.indexOf('player.LoadPendingSidecars()'), 'sidecars must be attached only after the active file-loaded event');
 assert(decoder.includes('Path.GetFileName(path)') && !decoder.includes('Path.GetFullPath(path)).ToLowerInvariant()'), 'external stable ids must not embed an absolute machine path');

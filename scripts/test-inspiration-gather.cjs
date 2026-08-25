@@ -128,6 +128,9 @@ registerWorkspaceIpc({
     const browseResult = await browseFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__');
     assert.strictEqual(browseResult.success, true, browseResult.error);
     assert(!browseResult.entries.some(entry => entry.name === '.photoflow-workspace-id'), 'the inspiration library must hide its workspace identity marker');
+    const nestedBrowseResult = await browseFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '参考目录');
+    assert.strictEqual(nestedBrowseResult.success, true, nestedBrowseResult.error);
+    assert.strictEqual(nestedBrowseResult.entries.find(entry => entry.name === '二级目录')?.relativePath, '参考目录/二级目录', 'ordinary nested browse paths must use stable forward slashes so mutation selection survives a refresh on Windows');
     const managedExternalTarget = path.join(sourceRoot, '参考目录');
     const managedExternalShortcut = path.join(targetRoot, '外部素材.lnk');
     projectVirtualPaths.createManagedExternalLink(managedExternalShortcut, { target: managedExternalTarget, kind: 'folder', displayName: '参考目录' });

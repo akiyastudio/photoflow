@@ -3,7 +3,7 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 
 (async () => {
-  const { directoryEntryToSelectOnReturn, fileEntryClickIntent } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
+  const { directoryEntryToSelectOnReturn, fileEntryClickIntent, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, renamedEntryDestinationPath } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
   const { availableFolderAlphabetKeys, folderAlphabetKey } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'folder-alphabet-filter-model.ts')).href);
   const intent = overrides => fileEntryClickIntent({
     openMode: 'single',
@@ -26,6 +26,32 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(directoryEntryToSelectOnReturn('客户/婚礼', ''), '客户', 'returning to the root selects the top-level folder that was just left');
   assert.strictEqual(directoryEntryToSelectOnReturn('客户', '客户/婚礼'), '', 'entering a child directory does not request a return selection');
   assert.strictEqual(directoryEntryToSelectOnReturn('客户/婚礼', '归档'), '', 'navigating to an unrelated directory does not request a return selection');
+
+  assert.strictEqual(renamedEntryDestinationPath('客户/旧文件夹', '新文件夹', [{
+    sourceRelativePath: '客户\\旧文件夹',
+    destinationRelativePath: '客户\\新文件夹 (1)',
+  }]), '客户/新文件夹 (1)', 'rename selection must use the exact destination returned by the filesystem operation');
+  assert.strictEqual(renamedEntryDestinationPath('客户/旧文件夹', '新文件夹'), '客户/新文件夹', 'rename selection retains a safe compatibility fallback when the backend omits move details');
+
+  const mutationContext = {
+    requestedProjectPath: 'D:/照片流/项目',
+    currentProjectPath: 'D:/照片流/项目',
+    mutationDirectoryPath: '客户/婚礼',
+    currentDirectoryPath: '客户\\婚礼',
+    browseMode: 'grid',
+  };
+  assert.strictEqual(mutatedEntryCanBeRevealed(mutationContext), true, 'a completed mutation remains revealable in its originating directory');
+  assert.strictEqual(mutatedEntryCanBeRevealed({ ...mutationContext, currentDirectoryPath: '客户/写真' }), false, 'navigation during a mutation must not create a ghost selection in the new directory');
+  assert.strictEqual(mutatedEntryCanBeRevealed({ ...mutationContext, currentProjectPath: 'D:/照片流/其他项目' }), false, 'a stale mutation must not select an entry after the page changes projects');
+  assert.strictEqual(mutatedEntryCanBeRevealed({ ...mutationContext, browseMode: 'recent' }), false, 'a mutation target cannot be revealed in the recursive recent-files view');
+  assert.strictEqual(mutatedEntryFiltersNeedReset({ searchQuery: '旧名称', fileFilter: 'all', ratingFilter: 'all', filterScope: 'current-folder' }), true, 'search text that can hide a renamed folder must be reset before reveal');
+  assert.strictEqual(mutatedEntryFiltersNeedReset({ searchQuery: '', fileFilter: 'image', ratingFilter: 'all', filterScope: 'current-folder' }), true, 'a file-type filter that hides folders must be reset before reveal');
+  assert.strictEqual(mutatedEntryFiltersNeedReset({ searchQuery: '', fileFilter: 'all', ratingFilter: 'all', filterScope: 'current-folder' }), false, 'an unfiltered current directory can reveal the target immediately');
+  const refreshedMutationEntries = mergeRefreshedEntryMetadata([
+    { relativePath: '客户/新建文件夹', size: -1, createdAt: 0, updatedAt: 0 },
+    { relativePath: '客户/旧文件夹', size: -1, createdAt: 0, updatedAt: 0 },
+  ], [{ relativePath: '客户/新建文件夹', size: 0, createdAt: 100, updatedAt: 200 }]);
+  assert.deepStrictEqual(refreshedMutationEntries[0], { relativePath: '客户/新建文件夹', size: 0, createdAt: 100, updatedAt: 200 }, 'authoritative browse results must retain optimistic mutation metadata so date sorting cannot move the selected target twice');
 
   assert.strictEqual(folderAlphabetKey('Alice'), 'A', 'Latin folder names use their first letter');
   assert.strictEqual(folderAlphabetKey('崩坏'), 'B', 'Chinese folder names use their pinyin initial');

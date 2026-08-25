@@ -290,7 +290,7 @@ const registerFileOperationsIpc = context => {
   
   ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, projectName, operation, relativePaths = [], targetRelativePath = '', nextName = '', options = {}) => {
     let suppressedProjectRoot = '';
-    const responseContext = { operationId: '', affectedDirectories: [] };
+    const responseContext = { operationId: '', affectedDirectories: [], count: 0 };
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
       const projectLinkHints = projectVirtualPaths?.listManagedExternalLinks(root) || [];
@@ -925,10 +925,19 @@ const registerFileOperationsIpc = context => {
         }
       }
       if (operation === 'trash') {
-        const existingSources = sources.filter(source => fs.existsSync(source));
+        const existingSourceResolutions = sourceResolutions.filter(resolution => fs.existsSync(resolution.physicalPath));
+        const uniqueSourceResolutions = [];
+        const seenSourcePaths = new Set();
+        for (const resolution of existingSourceResolutions) {
+          const sourceKey = clipboardPathKey(resolution.physicalPath);
+          if (seenSourcePaths.has(sourceKey)) continue;
+          seenSourcePaths.add(sourceKey);
+          uniqueSourceResolutions.push(resolution);
+        }
+        const existingSources = uniqueSourceResolutions.map(resolution => resolution.physicalPath);
         const operationId = crypto.randomUUID();
-        const affectedDirectories = Array.from(new Set(existingSources.map(source => {
-          const virtual = virtualPathFor(root, source, [...sourceResolutions, ...projectLinkHints]);
+        const affectedDirectories = Array.from(new Set(existingSourceResolutions.map(resolution => {
+          const virtual = String(resolution.virtualPath || virtualPathFor(root, resolution.physicalPath, [resolution, ...projectLinkHints])).replace(/\\/g, '/');
           const parent = path.posix.dirname(virtual);
           return parent === '.' ? '' : parent;
         })));
@@ -969,17 +978,22 @@ const registerFileOperationsIpc = context => {
             publish({ phase: 'trashing', progress: 0, currentName: `正在移入回收站（${totalCount} 个项目）`, processedCount, totalCount });
             const batch = await recycleBinService.trashMany(existingSources);
             if (job.cancelled) throw Object.assign(new Error('文件操作已取消'), { code: CANCELLED_CODE });
-            if (!Array.isArray(batch?.items) || batch.items.length !== existingSources.length) throw new Error('回收站批量操作未返回完整结果');
+            const batchItems = Array.isArray(batch?.items) ? batch.items : [];
+            const batchItemsByPath = new Map(batchItems.flatMap(item => item?.originalPath
+              ? [[clipboardPathKey(item.originalPath), item]]
+              : []));
             const failures = [];
             for (let index = 0; index < existingSources.length; index += 1) {
               const source = existingSources[index];
-              const recycled = batch.items[index];
-              if (recycled.success) {
+              const recycled = batchItemsByPath.get(clipboardPathKey(source))
+                || (batchItems.length === existingSources.length ? batchItems[index] : null);
+              if (recycled?.success) {
                 if (recycled.recyclePidl) undoItems.push({ original: source, originalIdentity: originalIdentities[index], recyclePidl: recycled.recyclePidl, preciseRestore: recycled.preciseRestore !== false });
                 if (recycled.permanent) permanentCount += 1;
                 processedCount += 1;
+                responseContext.count = processedCount;
               } else {
-                failures.push({ source, error: recycled.error || 'Windows 回收站操作失败' });
+                failures.push({ source, error: recycled?.error || '回收站批量操作未返回该项目的结果' });
               }
               publish({ phase: 'trashing', progress: Math.round((index + 1) / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
             }
@@ -997,17 +1011,43 @@ const registerFileOperationsIpc = context => {
               if (recycled.recyclePidl) undoItems.push({ original: source, originalIdentity, recyclePidl: recycled.recyclePidl, preciseRestore: recycled.preciseRestore !== false });
               if (recycled.permanent) permanentCount += 1;
               processedCount += 1;
+              responseContext.count = processedCount;
               publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
             }
           }
-          await persistTrashUndo();
-          await refreshExternalWatchers(workspacePath, status, projectName, sourceResolutions);
+          let undoUnavailable = false;
+          let watchRefreshDegraded = false;
+          try {
+            await persistTrashUndo();
+          } catch (persistError) {
+            undoUnavailable = true;
+            writeLog('warn', 'Trash completed but its undo record could not be persisted', {
+              workspacePath, projectName, error: persistError.message || String(persistError),
+            });
+          }
+          try {
+            await refreshExternalWatchers(workspacePath, status, projectName, existingSourceResolutions);
+          } catch (watchError) {
+            watchRefreshDegraded = true;
+            writeLog('warn', 'Trash completed but external watchers could not be refreshed', {
+              workspacePath, status, projectName, error: watchError.message || String(watchError),
+            });
+          }
           publish({ phase: 'complete', progress: 100, currentName: '', processedCount, totalCount });
-          task.complete('文件已移入回收站');
+          task.complete(undoUnavailable ? '文件已移入回收站；应用内撤销暂不可用' : '文件已移入回收站');
           writeLog('info', 'Project files moved to trash', { projectName, count: processedCount, operationId, batch: useBatchTrash, durationMs: Date.now() - startedAt });
-          return { success: true, cancelled: false, errorCode: undefined, count: processedCount, permanentCount, operationId, affectedDirectories };
+          const warning = undoUnavailable
+            ? '文件已移入回收站，但应用内撤销记录未能保存；如需恢复，请使用系统回收站。'
+            : watchRefreshDegraded ? '文件已移入回收站，但目录监听刷新失败；页面会在后续核对时更新。' : undefined;
+          return { success: true, cancelled: false, errorCode: undefined, count: processedCount, permanentCount, operationId, affectedDirectories, undoUnavailable, warning };
         } catch (error) {
           await persistTrashUndo().catch(persistError => writeLog('error', 'Unable to persist partial trash undo record', persistError));
+          if (processedCount > 0) {
+            await refreshExternalWatchers(workspacePath, status, projectName, existingSourceResolutions)
+              .catch(watchError => writeLog('warn', 'Unable to refresh external watchers after partial trash operation', {
+                workspacePath, status, projectName, error: watchError.message || String(watchError),
+              }));
+          }
           const cancelled = error?.code === CANCELLED_CODE;
           publish({ phase: cancelled ? 'cancelled' : 'failed', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: '', processedCount, totalCount, error: error.message || String(error) });
           if (cancelled) task.cancelled();
@@ -1134,7 +1174,7 @@ const registerFileOperationsIpc = context => {
                 ? '操作中的文件或文件夹已在外部移动或删除，请刷新后重试'
                 : error.message || String(error);
       writeLog('error', 'Project file operation failed', { projectName, operation, targetRelativePath, count: relativePaths.length, errorCode: errorCode || undefined, transferStage: transferStage || undefined, sourcePath: error?.sourcePath, destinationPath: error?.destinationPath, nativeError: error?.message || String(error), error: errorMessage });
-      return { success: false, operationId: responseContext.operationId || undefined, affectedDirectories: responseContext.affectedDirectories, cancelled: errorCode === CANCELLED_CODE || undefined, error: errorMessage, errorCode: errorCode || undefined, transferStage: transferStage || undefined };
+      return { success: false, operationId: responseContext.operationId || undefined, affectedDirectories: responseContext.affectedDirectories, count: responseContext.count || undefined, cancelled: errorCode === CANCELLED_CODE || undefined, error: errorMessage, errorCode: errorCode || undefined, transferStage: transferStage || undefined };
     } finally {
       if (suppressedProjectRoot) releaseWorkspaceWatchPath?.(suppressedProjectRoot);
     }
