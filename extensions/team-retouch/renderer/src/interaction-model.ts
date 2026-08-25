@@ -133,7 +133,7 @@ export const relayChainForItems = (items: Json[]) => {
     const returned = assignment.completionKind === 'returned' && !assignment.returnMissing;
     const skipped = Boolean(assignment.completed) && assignment.completionKind !== 'returned';
     const ready = predecessorReady && item.ready !== false;
-    const reason = assignment.returnMissing ? '返图文件缺失' : returned ? '' : ready ? `当前持有人：${name}` : `等待 ${item.blockedBy?.join('、') || '上一位返图'}`;
+    const reason = assignment.returnMissing ? '返图文件缺失' : returned || skipped ? '' : ready ? `当前持有人：${name}` : `等待 ${item.blockedBy?.join('、') || '上一位返图'}`;
     nodes.push({ key: String(item.key || `${item.task?.id || item.taskId}:${item.personIndex}`), label: returned ? `${name} 返图` : skipped ? `${name} · 不用修` : name, kind: returned ? 'return' : ready ? 'holder' : 'waiting', state: assignment.returnMissing ? 'warning' : returned || skipped ? 'done' : ready ? 'current' : 'waiting', reason: reason || undefined });
     predecessorReady = predecessorReady && Boolean(assignment.completed) && !assignment.returnMissing;
   }

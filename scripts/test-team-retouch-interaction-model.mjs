@@ -117,6 +117,9 @@ assert.match(relay[2].reason, /当前持有人/);
 const waitingRelay = relayChainForItems([{ key: 'a', week: 1, identity: { name: 'A' }, ready: false, blockedBy: ['上一位'] }]);
 assert.equal(waitingRelay[1].state, 'waiting');
 assert.match(waitingRelay[1].reason, /等待/);
+const completedBlockedRelay = relayChainForItems([{ key: 'a', week: 1, identity: { name: 'A' }, ready: false, blockedBy: ['协作流程重新生成'], assignment: { completed: true, completionKind: 'no-retouch' } }]);
+assert.equal(completedBlockedRelay[1].state, 'done');
+assert.equal(completedBlockedRelay[1].reason, undefined, 'a completed no-retouch node must render the done-state fallback instead of a stale waiting reason');
 
 const unknownEdit = returnModificationAssessment({});
 assert.equal(unknownEdit.known, false); assert.equal(unknownEdit.suspicious, false); assert.equal(unknownEdit.label, '修改有效性待人工查看');
