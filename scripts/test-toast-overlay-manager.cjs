@@ -25,7 +25,8 @@ class FakeWindow extends EventEmitter {
 
 const mainContents = new FakeContents(1); const parent = new EventEmitter();
 Object.assign(parent, { webContents: mainContents, currentBounds: { x: -1920, y: 120, width: 1536, height: 864 }, minimized: false, visible: true,
-  getBounds() { return this.currentBounds; }, isMinimized() { return this.minimized; }, isVisible() { return this.visible; }, isDestroyed() { return false; } });
+  focusCount: 0, getBounds() { return this.currentBounds; }, isMinimized() { return this.minimized; }, isVisible() { return this.visible; }, isDestroyed() { return false; }, focus() { this.focusCount += 1; } });
+mainContents.focusCount = 0; mainContents.focus = () => { mainContents.focusCount += 1; };
 const handlers = new Map(); const listeners = new Map();
 const ipcMain = { handle: (name, handler) => handlers.set(name, handler), removeHandler: name => handlers.delete(name), on: (name, handler) => listeners.set(name, handler), removeAllListeners: name => listeners.delete(name) };
 const manager = new ToastOverlayManager({ BrowserWindow: FakeWindow, mainWindow: parent, ipcMain, preloadPath: 'overlay-preload.cjs', rendererFile: 'toast-overlay.html' });
@@ -43,10 +44,15 @@ mainContents.emit('did-start-loading');
 assert.deepStrictEqual(overlay.webContents.sent.at(-1), ['toast-overlay:snapshot', { html: '', dark: false }], 'main renderer reload immediately clears stale overlay markup');
 listeners.get('toast-overlay:pointer-interactive')({ sender: overlay.webContents }, true);
 assert.deepStrictEqual(overlay.ignored.at(-1), [false, { forward: true }], 'toast cards enable native pointer interaction');
+assert.equal(parent.focusCount, 0, 'hovering a toast never steals or changes focus');
 listeners.get('toast-overlay:pointer-interactive')({ sender: overlay.webContents }, false);
 assert.deepStrictEqual(overlay.ignored.at(-1), [true, { forward: true }], 'transparent gaps pass pointers through');
 listeners.get('toast-overlay:action')({ sender: overlay.webContents }, { action: 'notice-dismiss', id: '7' });
 assert.deepStrictEqual(mainContents.sent.at(-1), ['toast-overlay:action', { action: 'notice-dismiss', id: '7' }]);
+assert.equal(parent.focusCount, 1); assert.equal(mainContents.focusCount, 1, 'ordinary close restores the main renderer focus after routing');
+listeners.get('toast-overlay:action')({ sender: overlay.webContents }, { action: 'task-pause', id: 'task-1' });
+assert.deepStrictEqual(mainContents.sent.at(-1), ['toast-overlay:action', { action: 'task-pause', id: 'task-1' }]);
+assert.equal(parent.focusCount, 2); assert.equal(mainContents.focusCount, 2, 'task controls restore the main renderer focus after routing');
 assert(validSnapshot({ html: '', dark: true }) && !validSnapshot({ html: '', dark: 'yes' }));
 assert(validAction({ action: 'task-cancel', id: 'task-1' }) && !validAction({ action: 'open-url', id: 'x' }));
 

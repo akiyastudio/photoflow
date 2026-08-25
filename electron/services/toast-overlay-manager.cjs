@@ -38,8 +38,23 @@ class ToastOverlayManager {
     });
     this.ipcMain.on('toast-overlay:action', (event, action) => {
       if (event.sender !== this.overlayWindow?.webContents || !validAction(action)) return;
-      if (!this.mainWindow?.isDestroyed() && !this.mainWindow.webContents.isDestroyed()) this.mainWindow.webContents.send('toast-overlay:action', Object.freeze({ action: action.action, id: action.id }));
+      if (!this.mainWindow?.isDestroyed() && !this.mainWindow.webContents.isDestroyed()) {
+        this.mainWindow.webContents.send('toast-overlay:action', Object.freeze({ action: action.action, id: action.id }));
+        this.restoreMainWindowFocus();
+      }
     });
+  }
+
+  restoreMainWindowFocus() {
+    const target = this.mainWindow;
+    if (!target || target.isDestroyed() || target.isMinimized() || !target.isVisible()) return false;
+    try {
+      target.focus();
+      target.webContents.focus?.();
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   create() {
