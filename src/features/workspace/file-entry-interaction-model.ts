@@ -1,6 +1,6 @@
 export type FileEntryOpenMode = 'single' | 'double';
 
-export type FileEntryClickIntent = 'ignore-repeat' | 'range-select' | 'toggle-select' | 'open' | 'focus';
+export type FileEntryClickIntent = 'ignore-repeat' | 'range-select' | 'toggle-select' | 'add-and-preview' | 'select' | 'open';
 
 export interface FileEntryClickIntentInput {
   openMode: FileEntryOpenMode;
@@ -19,11 +19,47 @@ export const fileEntryClickIntent = ({
 }: FileEntryClickIntentInput): FileEntryClickIntent => {
   if (clickCount > 1) return 'ignore-repeat';
   if (range) return 'range-select';
-  if (additive || selectionCount > 0) return 'toggle-select';
-  return openMode === 'single' ? 'open' : 'focus';
+  if (additive) return 'toggle-select';
+  if (selectionCount > 0) return 'add-and-preview';
+  return openMode === 'single' ? 'open' : 'select';
 };
 
 const normalizeDirectoryPath = (path: string) => path.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+
+const normalizeComparablePath = (path: string) => path.replace(/\\/g, '/').replace(/\/+$/g, '');
+
+const pathSuffixWithin = (candidate: string, directory: string) => {
+  const normalizedCandidate = normalizeComparablePath(candidate);
+  const normalizedDirectory = normalizeComparablePath(directory);
+  const candidateIdentity = normalizedCandidate.toLocaleLowerCase('zh-CN');
+  const directoryIdentity = normalizedDirectory.toLocaleLowerCase('zh-CN');
+  if (candidateIdentity === directoryIdentity) return '';
+  if (!directoryIdentity || !candidateIdentity.startsWith(`${directoryIdentity}/`)) return null;
+  return normalizedCandidate.slice(normalizedDirectory.length + 1);
+};
+
+export interface ProgressFolderEntryLocation {
+  folderPath: string;
+  relativePath: string;
+}
+
+/** Keep an open media entry attached to the same progress node after its folder moves. */
+export const remapEntryAfterProgressFolderMove = <T extends { path: string; relativePath: string; previewUrl?: string }>(
+  entry: T,
+  previous: ProgressFolderEntryLocation,
+  next: ProgressFolderEntryLocation,
+): T => {
+  const relativeSuffix = pathSuffixWithin(entry.relativePath, previous.relativePath);
+  const physicalSuffix = pathSuffixWithin(entry.path, previous.folderPath);
+  if (relativeSuffix === null || physicalSuffix === null) return entry;
+  const nextRelativeRoot = normalizeDirectoryPath(next.relativePath);
+  const nextPhysicalRoot = normalizeComparablePath(next.folderPath);
+  const relativePath = [nextRelativeRoot, relativeSuffix].filter(Boolean).join('/');
+  const path = [nextPhysicalRoot, physicalSuffix].filter(Boolean).join('/');
+  if (relativePath === entry.relativePath && path === entry.path) return entry;
+  const { previewUrl: _stalePreviewUrl, ...retained } = entry;
+  return { ...retained, path, relativePath } as T;
+};
 
 export const mutatedEntryCanBeRevealed = ({
   requestedProjectPath,

@@ -20,6 +20,30 @@ const { pathToFileURL } = require('node:url');
   assert.equal(first.nodes.find(item => item.id === 'root').y, first.nodes.find(item => item.id === 'v1').y, 'main branch should stay horizontal');
   assert.ok(first.nodes.find(item => item.id === 'selection').y > first.nodes.find(item => item.id === 'root').y, 'selection should be below its source');
 
+  const siblingVersions = layoutVersionTree({
+    ...options,
+    nodes: [
+      node('raw', 'original'),
+      node('jpg', 'original'),
+      node('version-1'),
+      node('version-2'),
+      node('pick', 'selection'),
+    ],
+    edges: [
+      { parentId: 'raw', childId: 'version-1', relationKind: 'main' },
+      { parentId: 'raw', childId: 'version-2', relationKind: 'main' },
+      { parentId: 'raw', childId: 'jpg', relationKind: 'media_companion' },
+      { parentId: 'raw', childId: 'pick', relationKind: 'auxiliary' },
+      { parentId: 'pick', childId: 'version-1', relationKind: 'workflow_input' },
+      { parentId: 'pick', childId: 'version-2', relationKind: 'workflow_input' },
+    ],
+  });
+  const siblingById = new Map(siblingVersions.nodes.map(item => [item.id, item]));
+  assert.equal(siblingById.get('version-1').y, siblingById.get('raw').y, 'the first main version should stay on the source lane');
+  assert.equal(siblingById.get('version-2').y, siblingById.get('version-1').y + options.nodeHeight + options.rowGap, 'main-version siblings should be packed before workflow inputs');
+  assert.equal(siblingById.get('pick').y, siblingById.get('version-2').y + options.nodeHeight + options.auxiliaryGap, 'selection should follow the complete main-version branch');
+  assert.equal(siblingById.get('jpg').y, siblingById.get('pick').y, 'secondary source nodes should share the lane below the main versions');
+
   const shuffled = layoutVersionTree({ ...options, nodes: [...nodes].reverse(), edges: [edges[2], edges[0], edges[3], edges[1]] });
   assert.deepEqual(
     shuffled.nodes.map(item => [item.id, item.x, item.y]),

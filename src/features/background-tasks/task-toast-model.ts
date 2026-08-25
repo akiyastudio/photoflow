@@ -62,6 +62,8 @@ export const taskToastExpiresAt = (task: BackgroundTask) => task.state === 'fail
     ? task.updatedAt + RESULT_TOAST_MS
     : 0;
 
+export const taskToastLiveRole = (state: BackgroundTask['state']): 'alert' | 'status' | undefined => state === 'failed' ? 'alert' : state === 'completed' ? 'status' : undefined;
+
 export const isActiveProjectFileTask = (task: BackgroundTask, now = Date.now()) => {
   const active = task.state === 'queued' || task.state === 'running' || task.state === 'pausing' || task.state === 'paused' || task.state === 'resuming';
   const progressPolicy = task.notificationPolicy === 'progress-toast'

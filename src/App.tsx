@@ -489,7 +489,7 @@ const App: React.FC = () => {
         if (policy !== 'rename' && policy !== 'overwrite') { showNotice('已取消撤销'); return; }
         result = await window.electronAPI.undoLastRename(undoWorkspacePath, { restoreConflictPolicy: policy });
       }
-      showNotice(result.success ? (result.message || '\u5df2\u64a4\u9500\u4e0a\u4e00\u6b21\u91cd\u547d\u540d') : (result.error || '\u6682\u65e0\u53ef\u64a4\u9500\u7684\u91cd\u547d\u540d'));
+      showNotice(result.success ? (result.message || '\u5df2\u64a4\u9500\u4e0a\u4e00\u6b21\u91cd\u547d\u540d') : (result.error || '\u6682\u65e0\u53ef\u64a4\u9500\u7684\u91cd\u547d\u540d'), 3500, result.success ? 'success' : 'error');
       if (result.success) {
         if (result.project) {
           openProjectTab(result.project, null, selectedProject?.path);
@@ -870,7 +870,7 @@ const App: React.FC = () => {
                     <span className="min-w-0 flex-1"><span className="block text-base font-bold text-slate-800">灵感库</span><span className="mt-1 block truncate text-xs text-slate-500">整理和浏览灵感素材</span></span>
                     <ChevronRight size={19} className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500"/>
                   </button>
-                  <BackupHomeCard status={backupStatus} onOpen={openBackupSettings} onRun={() => { void window.electronAPI.runBackup(config.workspacePath, 'manual').then(result => { if (!result.success) showNotice(result.error || '无法开始备份', 5000); else void refreshBackupStatus(); }); }}/>
+                  <BackupHomeCard status={backupStatus} onOpen={openBackupSettings} onRun={() => { void window.electronAPI.runBackup(config.workspacePath, 'manual').then(result => { if (!result.success) showNotice(result.error || '无法开始备份', 5000, 'error'); else { showNotice('手动备份已开始', 3500, 'success'); void refreshBackupStatus(); } }); }}/>
                 </div>;
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>

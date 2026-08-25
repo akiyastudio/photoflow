@@ -173,27 +173,70 @@ const layoutVersionTreeDag = (input: VersionTreeLayoutInput): VersionTreeLayoutR
   const positioned = new Map<string, PositionedVersionNode>();
   const occupiedByDepth = new Map<number, number[]>();
   const nextRootYByComponent = new Map<number, number>();
+  const anchorById = new Map<string, VersionTreeLayoutEdge | undefined>();
   for (const id of orderedIds) {
+    const parents = incoming.get(id) || [];
+    const supplementalAnchor = [...parents].sort((left, right) =>
+      (depths.get(right.parentId) || 0) - (depths.get(left.parentId) || 0)
+      || compareIds(left.parentId, right.parentId)
+      || compareEdges(left, right)
+    )[0];
+    anchorById.set(id, parents.find(edge => edge.relationKind === 'main')
+      || parents.find(edge => edge.relationKind === 'auxiliary')
+      || supplementalAnchor);
+  }
+  // Placement has a different priority from dependency traversal. A workflow
+  // input can make a main-version node topologically ready only after its
+  // selection node, but the main-version branch should still claim the upper
+  // lanes first. Otherwise the selection occupies the second lane and pushes
+  // a sibling version several rows down.
+  const placementIds: string[] = [];
+  const pendingPlacement = new Set(orderedIds);
+  const placementRelationOrder: Record<VersionTreeLayoutRelationKind, number> = {
+    main: 0,
+    workflow_input: 1,
+    media_companion: 2,
+    derived_preview: 2,
+    derived_transcode: 2,
+    auxiliary: 3,
+  };
+  while (pendingPlacement.size) {
+    const readyForPlacement = [...pendingPlacement].filter(id => {
+      const anchor = anchorById.get(id);
+      return !anchor || !pendingPlacement.has(anchor.parentId);
+    }).sort((left, right) => {
+      const componentDifference = (componentById.get(left) || 0) - (componentById.get(right) || 0);
+      if (componentDifference) return componentDifference;
+      const leftAnchor = anchorById.get(left);
+      const rightAnchor = anchorById.get(right);
+      return (leftAnchor ? placementRelationOrder[leftAnchor.relationKind] : -1)
+        - (rightAnchor ? placementRelationOrder[rightAnchor.relationKind] : -1)
+        || compareIds(left, right);
+    });
+    const nextId = readyForPlacement[0] || [...pendingPlacement].sort(compareIds)[0];
+    pendingPlacement.delete(nextId);
+    placementIds.push(nextId);
+  }
+  for (const id of placementIds) {
     const node = nodeById.get(id)!;
     const componentIndex = componentById.get(id) || 0;
     const depth = (depths.get(id) || 0) + (componentDepthOffset.get(componentIndex) || 0);
     const parents = incoming.get(id) || [];
-    const supplementalAnchor = [...parents].sort((left, right) => {
-      const leftParent = positioned.get(left.parentId);
-      const rightParent = positioned.get(right.parentId);
-      return (rightParent?.depth || 0) - (leftParent?.depth || 0)
-        || (rightParent?.x || 0) - (leftParent?.x || 0)
-        || compareEdges(left, right);
-    })[0];
-    const anchor = parents.find(edge => edge.relationKind === 'main')
-      || parents.find(edge => edge.relationKind === 'auxiliary')
-      || supplementalAnchor;
+    const anchor = anchorById.get(id);
     const parent = anchor ? positioned.get(anchor.parentId) : undefined;
     const followsParentLane = anchor?.relationKind === 'main'
       || anchor?.relationKind === 'workflow_input' && node.nodeRole === 'progress';
     let y = parent
       ? parent.y + (followsParentLane ? 0 : nodeHeight + auxiliaryGap)
       : nextRootYByComponent.get(componentIndex) || 0;
+    if (parent && !followsParentLane) {
+      const mainBranchFloor = (outgoing.get(parent.id) || [])
+        .filter(edge => edge.relationKind === 'main')
+        .map(edge => positioned.get(edge.childId))
+        .filter((child): child is PositionedVersionNode => Boolean(child))
+        .reduce((floor, child) => Math.max(floor, child.y + nodeHeight + auxiliaryGap), y);
+      y = Math.max(y, mainBranchFloor);
+    }
     const occupied = occupiedByDepth.get(depth) || [];
     while (occupied.some(candidate => Math.abs(candidate - y) < nodeHeight + rowGap)) y += nodeHeight + rowGap;
     occupied.push(y);

@@ -43,9 +43,10 @@ const normalizeNotificationPayload = value => {
 
 class ComponentNotificationService {
   constructor({ mainWindow, now = Date.now }) {
-    this.mainWindow = mainWindow; this.now = now; this.stateByComponent = new Map(); this.sequence = 0; this.rendererReady = false; this.buffer = [];
-    this.handleRendererReload = () => { this.rendererReady = false; };
-    mainWindow?.webContents?.on?.('did-start-loading', this.handleRendererReload);
+    this.mainWindow = mainWindow; this.rendererWebContents = mainWindow?.webContents; this.now = now; this.stateByComponent = new Map(); this.sequence = 0; this.rendererReady = false; this.rendererSession = { token: '', revision: -1 }; this.retiredRendererTokens = new Set(); this.buffer = [];
+    this.handleRendererReload = () => { this.rendererReady = false; if (this.rendererSession.token) this.retiredRendererTokens.add(this.rendererSession.token); while (this.retiredRendererTokens.size > 8) this.retiredRendererTokens.delete(this.retiredRendererTokens.values().next().value); this.rendererSession = { token: '', revision: -1 }; };
+    this.rendererWebContents?.on?.('did-start-loading', this.handleRendererReload);
+    this.rendererWebContents?.on?.('render-process-gone', this.handleRendererReload);
   }
 
   deliver(event) {
@@ -54,8 +55,18 @@ class ComponentNotificationService {
     try { target.webContents.send('component-host:notification.v2', event); return true; } catch { return false; }
   }
 
-  setRendererReady(ready) {
-    this.rendererReady = ready === true;
+  setRendererReady(update) {
+    const token = String(update?.rendererToken || ''); const revision = Number(update?.revision);
+    if (!token || token.length > 200 || !Number.isSafeInteger(revision) || revision < 0 || typeof update?.ready !== 'boolean') throw new Error('Invalid notification renderer readiness');
+    if (token !== this.rendererSession.token) {
+      if (this.retiredRendererTokens.has(token)) return { ready: this.rendererReady, flushed: 0, stale: true };
+      if (this.rendererSession.token) this.retiredRendererTokens.add(this.rendererSession.token);
+      while (this.retiredRendererTokens.size > 8) this.retiredRendererTokens.delete(this.retiredRendererTokens.values().next().value);
+      this.rendererSession = { token, revision: -1 };
+    }
+    if (revision <= this.rendererSession.revision) return { ready: this.rendererReady, flushed: 0, stale: true };
+    this.rendererSession = { token, revision };
+    this.rendererReady = update.ready;
     if (!this.rendererReady) return { ready: false, flushed: 0 };
     const now = this.now();
     const pending = this.buffer.filter(item => now - item.queuedAt <= BUFFER_TTL_MS);
@@ -69,7 +80,7 @@ class ComponentNotificationService {
   }
 
   publish(descriptor, payload, context = {}) {
-    if (Number(descriptor?.hostApiVersion) < 4) return failure('NOTIFICATION_HOST_API_REQUIRED', 'Notifications require Host API 4');
+    if (!Number.isInteger(descriptor?.hostApiVersion) || descriptor.hostApiVersion < 4) return failure('NOTIFICATION_HOST_API_REQUIRED', 'Notifications require Host API 4');
     if (!descriptor?.service?.capabilities?.includes(NOTIFICATION_CAPABILITY)) return failure('NOTIFICATION_CAPABILITY_NOT_GRANTED', 'Notification capability is not granted');
     if (!descriptor?.service?.permissions?.includes(NOTIFICATION_PERMISSION)) return failure('NOTIFICATION_PERMISSION_DENIED', 'Notification permission is not granted');
     if (!['project', 'application.settings'].includes(context.surface)) return failure('NOTIFICATION_CONTEXT_INVALID', 'Notification surface is not bound');
@@ -80,6 +91,7 @@ class ComponentNotificationService {
     const target = this.mainWindow;
     if (!target || target.isDestroyed?.() || !target.webContents || target.webContents.isDestroyed?.()) return failure('NOTIFICATION_HOST_UNAVAILABLE', 'Main notification host is unavailable', true);
     const now = this.now();
+    if (!this.rendererReady && this.buffer.length) this.buffer = this.buffer.filter(item => now - item.queuedAt <= BUFFER_TTL_MS);
     const state = this.stateByComponent.get(componentId) || { normalTimestamps: [], errorTimestamps: [], recent: new Map() };
     state.normalTimestamps = state.normalTimestamps.filter(timestamp => now - timestamp < RATE_WINDOW_MS);
     state.errorTimestamps = state.errorTimestamps.filter(timestamp => now - timestamp < RATE_WINDOW_MS);
@@ -110,7 +122,7 @@ class ComponentNotificationService {
     if (id && this.rendererReady) this.deliver(Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, type: 'purge', componentId: id }));
     return removed;
   }
-  destroy() { this.mainWindow?.webContents?.removeListener?.('did-start-loading', this.handleRendererReload); this.stateByComponent.clear(); this.buffer = []; this.rendererReady = false; }
+  destroy() { this.rendererWebContents?.removeListener?.('did-start-loading', this.handleRendererReload); this.rendererWebContents?.removeListener?.('render-process-gone', this.handleRendererReload); this.stateByComponent.clear(); this.buffer = []; this.rendererReady = false; this.rendererSession = { token: '', revision: -1 }; this.retiredRendererTokens.clear(); }
 }
 
 module.exports = { BUFFER_LIMIT, BUFFER_TTL_MS, BURST_LIMIT, BURST_WINDOW_MS, CONTENT_DEDUPE_WINDOW_MS, DEFAULT_DURATION_MS, DEDUPE_KEY, DURATION_MAX_MS, DURATION_MIN_MS, ERROR_BURST_LIMIT, ERROR_RATE_LIMIT, MESSAGE_MAX_LENGTH, NOTIFICATION_API_VERSION, NOTIFICATION_CAPABILITY, NOTIFICATION_PERMISSION, RATE_LIMIT, RATE_WINDOW_MS, ComponentNotificationService, failure, normalizeNotificationPayload };

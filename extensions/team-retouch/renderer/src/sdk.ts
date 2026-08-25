@@ -28,8 +28,7 @@ export type ComponentSdk = {
 declare global { interface Window { photoFlowComponent: ComponentSdk } }
 
 export type NoticeTone = 'info' | 'success' | 'warning' | 'error';
-const inferredNoticeTone = (message: string): NoticeTone => /失败|错误|异常|无法|未通过/.test(message) ? 'error' : /警告|注意|请先|已暂停|缺少/.test(message) ? 'warning' : /完成|成功|已保存|已安装|已卸载|已更新|已删除|已添加|已生成|已识别|已恢复/.test(message) ? 'success' : 'info';
-export const notify = (message: string, tone: NoticeTone = inferredNoticeTone(message)) => {
+export const notify = (message: string, tone: NoticeTone) => {
   const cleanMessage = String(message || '').trim().slice(0, 360);
   if (!cleanMessage) return;
   const api = window.photoFlowComponent?.notify;

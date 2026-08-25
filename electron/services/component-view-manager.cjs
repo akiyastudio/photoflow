@@ -25,8 +25,10 @@ const componentPageKey = ({ componentId, workspacePath, projectId }) => ['projec
 const componentSettingsPageKey = ({ componentId, pageId }) => ['application.settings', componentId, String(pageId || '').trim()].join(PAGE_KEY_SEPARATOR);
 const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
+const MIN_COMPONENT_SURFACE_HEIGHT = 120;
 const componentViewBoundsWithHostOverlay = (bounds, reservedBottom) => {
-  const bottom = Math.max(bounds.y, Math.min(bounds.y + bounds.height, Number(reservedBottom) || 0));
+  const maximumReservedBottom = bounds.y + Math.max(0, bounds.height - Math.min(bounds.height, MIN_COMPONENT_SURFACE_HEIGHT));
+  const bottom = Math.max(bounds.y, Math.min(maximumReservedBottom, Number(reservedBottom) || 0));
   return { x: Math.round(bounds.x), y: Math.round(bottom), width: Math.round(bounds.width), height: Math.round(Math.max(0, bounds.y + bounds.height - bottom)) };
 };
 const selectComponentPreload = (descriptor, { core, compatibilityV1 }) => {
@@ -389,4 +391,4 @@ class ComponentViewManager {
   destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); this.notificationService?.destroy?.(); }
 }
 
-module.exports = { ComponentViewManager, componentPageKey, componentSettingsPageKey, componentViewBoundsWithHostOverlay, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };
+module.exports = { MIN_COMPONENT_SURFACE_HEIGHT, ComponentViewManager, componentPageKey, componentSettingsPageKey, componentViewBoundsWithHostOverlay, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };

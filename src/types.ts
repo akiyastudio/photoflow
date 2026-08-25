@@ -898,7 +898,7 @@ export interface IElectronAPI {
   activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
   setHostSurfaceSuspended: (update: { rendererToken: string; revision: number; suspended: boolean }) => Promise<{ success: boolean }>;
   setHostToastReservation: (update: { rendererToken: string; revision: number; bottom: number }) => Promise<{ success: boolean }>;
-  setComponentNotificationReady: (ready: boolean) => Promise<{ ready: boolean; flushed: number }>;
+  setComponentNotificationReady: (update: { rendererToken: string; revision: number; ready: boolean }) => Promise<{ ready: boolean; flushed: number; stale?: boolean }>;
   setComponentPageBounds: (instanceId: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<{ success: boolean }>;
   closeComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
   closeProjectComponentPages: (workspacePath: string, projectId: string) => Promise<{ success: boolean; closedCount: number }>;

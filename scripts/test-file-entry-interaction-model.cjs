@@ -4,7 +4,7 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 
 (async () => {
-  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, renamedEntryDestinationPath } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
+  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
   const { availableFolderAlphabetKeys, folderAlphabetKey } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'folder-alphabet-filter-model.ts')).href);
   const intent = overrides => fileEntryClickIntent({
     openMode: 'single',
@@ -15,9 +15,9 @@ const { pathToFileURL } = require('url');
   });
 
   assert.strictEqual(intent({ openMode: 'single' }), 'open', 'single-click mode opens when selection mode is inactive');
-  assert.strictEqual(intent({ openMode: 'double' }), 'focus', 'double-click mode focuses on its first click');
-  assert.strictEqual(intent({ openMode: 'single', selectionCount: 1 }), 'toggle-select', 'an existing selection keeps single-click mode in selection interaction');
-  assert.strictEqual(intent({ openMode: 'double', selectionCount: 1 }), 'toggle-select', 'an existing selection keeps double-click mode in selection interaction');
+  assert.strictEqual(intent({ openMode: 'double' }), 'select', 'double-click mode selects on its first click');
+  assert.strictEqual(intent({ openMode: 'single', selectionCount: 1 }), 'add-and-preview', 'an existing selection makes a plain body click add the entry and synchronize open preview panes in single-click mode');
+  assert.strictEqual(intent({ openMode: 'double', selectionCount: 1 }), 'add-and-preview', 'an existing selection makes a plain body click add the entry and synchronize open preview panes in double-click mode');
   assert.strictEqual(intent({ additive: true }), 'toggle-select', 'Ctrl/Cmd click toggles selection without opening');
   assert.strictEqual(intent({ range: true, selectionCount: 2 }), 'range-select', 'Shift click retains range selection precedence');
   assert.strictEqual(intent({ selectionCount: 2, clickCount: 2 }), 'ignore-repeat', 'the second click in a double click must not undo the first selection change');
@@ -33,6 +33,18 @@ const { pathToFileURL } = require('url');
   assert(workspaceSource.includes('requestFileReveal(returnedFolder.relativePath)'), 'returning must scroll the folder back into view');
   const focusEntrySource = workspaceSource.slice(workspaceSource.indexOf('const focusEntry'), workspaceSource.indexOf('const activateMediaPreview'));
   assert(focusEntrySource.includes('setPreviewPath(entry.relativePath)') && !focusEntrySource.includes('setSelectedPaths') && !focusEntrySource.includes('selectionAnchorPathRef'), 'opening a preview must not silently select the previously previewed file');
+  const entryClickSource = workspaceSource.slice(workspaceSource.indexOf('const handleEntryClick'), workspaceSource.indexOf('const handleEntryDoubleClick'));
+  assert(entryClickSource.includes("if ('key' in event)") && entryClickSource.includes('activateEntry(entry)') && entryClickSource.includes("intent === 'add-and-preview'") && entryClickSource.includes('addSelectionAndSyncOpenPanes(entry)') && entryClickSource.includes("intent === 'select'") && entryClickSource.includes('setSelectedPaths([entry.relativePath])'), 'Enter must open in both modes, a selected-session body click must add and preview, and the first plain double-mode click must select exactly one entry');
+  const entryDoubleClickSource = workspaceSource.slice(workspaceSource.indexOf('const handleEntryDoubleClick'), workspaceSource.indexOf('const handleFileSurfacePointerDownCapture'));
+  assert(entryDoubleClickSource.includes('event.ctrlKey || event.metaKey || event.shiftKey') && entryDoubleClickSource.indexOf('return;') < entryDoubleClickSource.indexOf('activateEntry(entry)'), 'modified double-click gestures must remain selection-only instead of opening the entry');
+  const selectionControlSource = workspaceSource.slice(workspaceSource.indexOf('const renderEntrySelectionControl'), workspaceSource.indexOf('const startEntryDrag'));
+  assert(selectionControlSource.includes('<button') && selectionControlSource.includes('aria-pressed={selected}') && selectionControlSource.includes('onPointerDown={event => event.stopPropagation()}') && selectionControlSource.includes("if (event.key === 'Enter' || event.key === ' ') event.stopPropagation()") && selectionControlSource.includes('onDoubleClick={event => { event.preventDefault(); event.stopPropagation(); }}') && selectionControlSource.includes('if (event.detail > 1) return;'), 'the selection control must isolate only its Enter/Space activation keys, allow file shortcuts such as Delete to bubble, and must not toggle twice or activate its parent on double-click');
+  assert(workspaceSource.includes('fileMenuSelectionSnapshotRef') && workspaceSource.includes('fileMenuSelectionWasImplicitRef') && workspaceSource.includes('if (restoreSelection)') && workspaceSource.includes('openPreviewFromMenu(entry)'), 'explicit context-menu preview must restore any selection created only to target the context menu');
+  const addAndPreviewSource = workspaceSource.slice(workspaceSource.indexOf('const addSelectionAndSyncOpenPanes'), workspaceSource.indexOf('const activateEntry'));
+  assert(addAndPreviewSource.includes('setSelectedPaths(current => current.includes(entry.relativePath) ? current : [...current, entry.relativePath])') && addAndPreviewSource.includes('if (!previewPaneOpen && !metadataPaneOpen) return') && addAndPreviewSource.includes('if (previewPaneOpen) setPreviewMediaPath') && !addAndPreviewSource.includes('setPreviewPaneOpen'), 'selected-session body clicks must preserve existing selections and synchronize only panes that are already open');
+  assert(!workspaceSource.includes('syncOpenPanesToSelection') && !workspaceSource.includes('clearPreviewAfterSelectionDrag'), 'generic selection operations must not move or clear the preview content cursor');
+  const previewNavigationSource = workspaceSource.slice(workspaceSource.indexOf('const navigatePreviewMedia'), workspaceSource.indexOf('const displayedColumnWidths'));
+  assert(previewNavigationSource.includes('setPreviewHighlightPath(nextEntry.relativePath)') && workspaceSource.includes('previewHighlightPath === entry.relativePath || directoryReturnHighlightPath === entry.relativePath'), 'preview navigation and directory return must share the one visual preview state');
   assert(workspaceSource.includes("querySelectorAll<HTMLElement>('[data-entry-path]')") && workspaceSource.includes('entryNode.focus({ preventScroll: true })'), 'preview navigation must move the real entry focus so only the native focus outline follows the preview');
 
   assert.strictEqual(renamedEntryDestinationPath('客户/旧文件夹', '新文件夹', [{
@@ -40,6 +52,22 @@ const { pathToFileURL } = require('url');
     destinationRelativePath: '客户\\新文件夹 (1)',
   }]), '客户/新文件夹 (1)', 'rename selection must use the exact destination returned by the filesystem operation');
   assert.strictEqual(renamedEntryDestinationPath('客户/旧文件夹', '新文件夹'), '客户/新文件夹', 'rename selection retains a safe compatibility fallback when the backend omits move details');
+
+  const openVersionEntry = {
+    name: 'AKI_4147.jpg',
+    path: 'D:\\照片流\\项目\\一修\\AKI_4147.jpg',
+    relativePath: '一修/AKI_4147.jpg',
+    previewUrl: 'media://stale-token',
+  };
+  const remappedVersionEntry = remapEntryAfterProgressFolderMove(openVersionEntry,
+    { folderPath: 'D:\\照片流\\项目\\一修', relativePath: '一修' },
+    { folderPath: 'D:\\照片流\\项目\\图片后期_1_一修', relativePath: '图片后期_1_一修' });
+  assert.strictEqual(remappedVersionEntry.relativePath, '图片后期_1_一修/AKI_4147.jpg', 'an open version entry follows its stable progress node after the folder is renamed');
+  assert.strictEqual(remappedVersionEntry.path, 'D:/照片流/项目/图片后期_1_一修/AKI_4147.jpg', 'the physical media path follows the renamed progress folder');
+  assert.strictEqual(remappedVersionEntry.previewUrl, undefined, 'a path-bound preview authorization must not survive a folder move');
+  assert.strictEqual(remapEntryAfterProgressFolderMove(openVersionEntry,
+    { folderPath: 'D:\\照片流\\项目\\其他', relativePath: '其他' },
+    { folderPath: 'D:\\照片流\\项目\\新名称', relativePath: '新名称' }), openVersionEntry, 'unrelated open entries must not be remapped');
 
   const mutationContext = {
     requestedProjectPath: 'D:/照片流/项目',

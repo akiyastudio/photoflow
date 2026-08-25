@@ -1,6 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const ts = require('typescript');
 
 const root = path.resolve(__dirname, '..');
 const read = relative => fs.readFileSync(path.join(root, relative), 'utf8');
@@ -9,6 +10,7 @@ const people = read('extensions/team-retouch/renderer/src/legacy/PersonIdentityM
 const comparison = read('extensions/team-retouch/renderer/src/legacy/ImageComparisonView.tsx');
 const adapter = read('extensions/team-retouch/renderer/src/legacy/legacy-api.ts');
 const entry = read('extensions/team-retouch/renderer/src/legacy-main.tsx');
+const modernEntry = read('extensions/team-retouch/renderer/src/main.tsx');
 const settingsEntry = read('extensions/team-retouch/renderer/src/settings-main.tsx');
 const settingsContent = read('extensions/team-retouch/renderer/src/team-settings-content.tsx');
 const settingsHtml = read('extensions/team-retouch/renderer/settings.html');
@@ -18,6 +20,11 @@ const style = read('extensions/team-retouch/renderer/src/legacy-style.css');
 const compactStyle = style.replace(/\s+/g, '');
 const manifest = JSON.parse(read('extensions/team-retouch/component.template.json'));
 const service = read('extensions/team-retouch/service.cjs');
+for (const [source, file] of [[entry, 'legacy-main.tsx'], [modernEntry, 'main.tsx'], [settingsEntry, 'settings-main.tsx'], [manager, 'TeamRetouchManager.tsx'], [people, 'PersonIdentityManager.tsx'], [settingsContent, 'team-settings-content.tsx']]) {
+  const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
+  const visit = node => { if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && ['notify', 'onNotice'].includes(node.expression.text)) assert(node.arguments.length >= 2, `${file} notification calls must pass an explicit tone`); ts.forEachChild(node, visit); };
+  visit(parsed);
+}
 
 assert(html.includes('/src/legacy-main.tsx'), 'packaged renderer must enter the source-faithful legacy migration');
 assert(!manager.includes('legacy-photo-card') && !people.includes('legacy-photo-card'), 'legacy page must not be replaced by a hand-built lookalike');
@@ -48,6 +55,7 @@ for (const method of ['team.project.get.v1', 'team.patch.get.v1', 'team.media.au
 assert(settingsEntry.includes("context.surface !== 'application.settings'") && settingsEntry.includes('<TeamSettingsContent') && !settingsEntry.includes('pf-modal-backdrop') && !settingsEntry.includes('aria-label="关闭设置"'), 'the application settings entry must render the shared content as a non-modal root');
 assert(settingsHtml.includes('class="component-settings-root"') && legacyStyle.includes('body.component-settings-root { overflow-y: auto; }') && legacyStyle.includes('body.component-settings-root #app { height: auto; min-height: 100%; overflow: visible; }'), 'the independent settings root must scroll in a small WebContentsView');
 assert(settingsContent.includes('aria-label="优先使用 GPU"') && settingsContent.includes('aria-label="超大人物裁剪方式"'), 'team settings controls must expose explicit accessible names');
+assert(!style.includes('.notice{') && !style.includes('.notice.error'), 'retired local notification CSS must be removed');
 assert(entry.includes("notify(guard.reason, 'warning')") && manager.includes("onNotice(`人物姓名已修改为“${name}”`, 'success')") && people.includes("result.warning ? 'warning' : 'success'") && people.includes("保存姓名失败：${result.error || '未知错误'}`, 'error'") && settingsContent.includes(", 'error');"), 'representative blocked, success, warning, and failure paths must pass explicit notification tones');
 assert(settingsContent.includes('window.photoFlowComponent.onActivate') && settingsContent.includes('refreshEnvironment()') && settingsContent.includes('statusGuardRef.current.invalidate()'), 'advanced environment status must refresh on every surface activation and reject stale status responses');
 assert(entry.includes('<TeamSettingsContent') && !entry.includes('PairDETR + SAM 2.1'), 'the compatibility dialog must be a thin shell over the shared settings implementation');

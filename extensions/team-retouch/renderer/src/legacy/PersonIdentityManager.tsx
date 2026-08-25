@@ -28,7 +28,7 @@ type Props = {
   stageSummaries?: import('../interaction-model').StageSummary[];
   onBlockedStage?: (reason: string) => void;
   onClose: () => void;
-  onNotice: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
+  onNotice: (message: string, tone: 'info' | 'success' | 'warning' | 'error') => void;
   onProjectChanged: () => void;
   onBusyChange?: (busy: boolean) => void;
 };
@@ -406,13 +406,13 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       const result = await legacyApi.discardTeamWorkflowReturnReview(workspacePath, project.name, workflowReturnResult.reviewSessionId);
       setBusy('');
       if (!result.success) {
-        onNotice(`放弃返图审核批次失败：${result.error || '未知错误'}`);
+        onNotice(`放弃返图审核批次失败：${result.error || '未知错误'}`, 'error');
         return;
       }
     }
     setWorkflowReturnReviewOpen(false);
     setWorkflowReturnResult(null);
-    onNotice('已放弃本批次未确认返图；已经确认完成的返图不受影响');
+    onNotice('已放弃本批次未确认返图；已经确认完成的返图不受影响', 'success');
   };
   useEscapeLayer(Boolean(workflowReturnResult) && workflowReturnReviewOpen, () => void requestCloseWorkflowReturnReview(), !busy.startsWith('workflow-'));
   const [workflowReturnProgress, setWorkflowReturnProgress] = useState<WorkflowReturnProgressState | null>(null);
@@ -437,7 +437,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     } catch (error) {
       if (sequence !== workspaceLoadSequenceRef.current) return;
       const message = error instanceof Error ? error.message : String(error);
-      setWorkspaceLoadError(message); onNotice(`读取人物识别失败：${message}`);
+      setWorkspaceLoadError(message); onNotice(`读取人物识别失败：${message}`, 'error');
     } finally { if (showLoading && sequence === workspaceLoadSequenceRef.current) setLoading(false); }
   };
   useEffect(() => {
@@ -453,7 +453,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     void legacyApi.getTeamWorkflowReturnReview(workspacePath, project.name, project.status).then(result => {
       if (!active) return;
       if (!result.success) {
-        onNotice(`恢复未确认返图失败：${result.error || '未知错误'}`);
+        onNotice(`恢复未确认返图失败：${result.error || '未知错误'}`, 'error');
         return;
       }
       if (result.review) {
@@ -485,7 +485,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       const subject = subjects.find(item => item.key === key);
       if (subject) {
         if (tab === 'workflow' && subject.assignment?.completed) {
-          onNotice('该人物任务已经完成；请先撤销完成状态，再修改人物归属');
+          onNotice('该人物任务已经完成；请先撤销完成状态，再修改人物归属', 'warning');
           return;
         }
         setAssigningSubject(subject);
@@ -533,7 +533,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   useEffect(() => {
     if (!workspace.workflowNode?.id) return;
     void outputProgress.ensureWorkflowInputs(workspace.workflowNode.id).then(() => onProjectChanged()).catch(error => {
-      onNotice(`登记团片来源关系失败：${error instanceof Error ? error.message : String(error)}`);
+      onNotice(`登记团片来源关系失败：${error instanceof Error ? error.message : String(error)}`, 'error');
     });
   }, [workspace.workflowNode?.id, outputProgress.sourceProgressIds.join('|')]);
   const grouped = useMemo(() => {
@@ -598,18 +598,18 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     setBusy('suggest');
     const result = await legacyApi.suggestTeamIdentities(workspacePath, project.name);
     setBusy('');
-    if (!result.success) { onNotice(`自动人物分组失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`自动人物分组失败：${result.error || '未知错误'}`, 'error'); return; }
     setSimilarities([]);
     setWorkspace({ ...result, similarities: undefined, workflowSettings: workspace.workflowSettings });
     onProjectChanged();
     const engine = result.faceBackend?.startsWith('adaface') ? 'AdaFace IR-18' : '身份识别模型';
-    onNotice(`已生成 ${result.candidateGroupCount || 0} 个跨图候选组；${result.unmatchedCount || 0} 个人物因证据不足保持未标注 · ${engine}`);
+    onNotice(`已生成 ${result.candidateGroupCount || 0} 个跨图候选组；${result.unmatchedCount || 0} 个人物因证据不足保持未标注 · ${engine}`, 'success');
   };
   const createIdentity = async () => {
     const answer = await appDialog.prompt({ title: '新建人物身份', message: '填写姓名或便于团队识别的称呼。', defaultValue: `人物 ${workspace.identities.length + 1}`, confirmLabel: '新建' });
     if (!answer?.trim()) return;
     const result = await legacyApi.saveTeamIdentity(workspacePath, { projectName: project.name, name: answer.trim() });
-    if (!result.success) onNotice(`新建人物失败：${result.error || '未知错误'}`); else void load(false);
+    if (!result.success) onNotice(`新建人物失败：${result.error || '未知错误'}`, 'error'); else void load(false);
   };
   const renameIdentity = async (identity: TeamIdentity, name: string) => {
     if (!name.trim() || name.trim() === identity.name) return;
@@ -648,7 +648,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         return currentAssignment?.updatedAt === updatedAt ? replaceAssignment(current, previousAssignment) : current;
       });
       if (reopenPickerOnFailure) setAssigningSubject(subject);
-      onNotice(`标注人物失败：${result.error || '未知错误'}`);
+      onNotice(`标注人物失败：${result.error || '未知错误'}`, 'error');
     } else {
       if (previousAssignment?.identityId && previousAssignment.identityId !== nextIdentityId) {
         preservePeopleScrollPosition(subject.key);
@@ -659,7 +659,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       }
       if (tab === 'workflow' && previousAssignment?.identityId !== nextIdentityId) {
         onProjectChanged();
-        onNotice('人物归属已更新。请重新生成协作流程。');
+        onNotice('人物归属已更新。请重新生成协作流程。', 'warning');
       }
     }
   };
@@ -667,12 +667,12 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     const answer = await appDialog.prompt({ title: '把这张图标记为新人物', message: '填写姓名或便于团队识别的称呼。', defaultValue: `人物 ${workspace.identities.length + 1}`, confirmLabel: '新建并归入' });
     if (!answer?.trim()) return;
     const result = await legacyApi.saveTeamIdentity(workspacePath, { projectName: project.name, name: answer.trim(), assignments: [{ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, confidence: 1, source: 'manual' }] });
-    if (!result.success) onNotice(`新建人物失败：${result.error || '未知错误'}`); else {
+    if (!result.success) onNotice(`新建人物失败：${result.error || '未知错误'}`, 'error'); else {
       setAssigningSubject(null);
       void load(false);
       if (tab === 'workflow') {
         onProjectChanged();
-        onNotice('已添加人物。请重新生成协作流程。');
+        onNotice('已添加人物。请重新生成协作流程。', 'warning');
       }
     }
   };
@@ -680,11 +680,11 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     const answer = await appDialog.confirm({ title: `删除人物“${identity.name}”？`, message: '只删除身份与归属标记，不会删除照片或团片协作工作图。', confirmLabel: '删除', tone: 'danger' });
     if (!answer) return;
     const result = await legacyApi.deleteTeamIdentity(workspacePath, { projectName: project.name, identityId: identity.id });
-    if (!result.success) onNotice(`删除人物失败：${result.error || '未知错误'}`); else void load(false);
+    if (!result.success) onNotice(`删除人物失败：${result.error || '未知错误'}`, 'error'); else void load(false);
   };
   const savePreferredIdentityOrder = async (identityOrder: string[], requestedSameWeekIdentityIds: string[], successMessage: string) => {
     if (workflowOrderLocked) {
-      onNotice('已有任务返图或完成，开工顺序已锁定');
+      onNotice('已有任务返图或完成，开工顺序已锁定', 'warning');
       return;
     }
     const nextOrder = [...new Set(identityOrder)].filter(identityId => workflowIdentityOptions.some(identity => identity.id === identityId));
@@ -697,7 +697,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     });
     setBusy('');
     if (!result.success) {
-      onNotice(`保存开工顺序失败：${result.error || '未知错误'}`);
+      onNotice(`保存开工顺序失败：${result.error || '未知错误'}`, 'error');
       return;
     }
     setWorkspace(current => ({
@@ -705,7 +705,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       workflowNeedsRegeneration: Boolean(current.workflowGenerated),
       workflowSettings: result.workflowSettings || { ...current.workflowSettings, preferredIdentityOrder: nextOrder, preferredIdentityId: nextOrder[0], sameWeekIdentityIds: nextSameWeekIdentityIds },
     }));
-    onNotice(successMessage);
+    onNotice(successMessage, 'success');
   };
   const addPreferredIdentity = async (identityId: string) => {
     if (!identityId || preferredIdentityOrder.includes(identityId)) return;
@@ -803,7 +803,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       status: project.status,
     });
     setBusy('');
-    if (!result.success) onNotice(`更新完成状态失败：${result.error || '未知错误'}`); else { if (result.warning) onNotice(result.warning); void load(false); }
+    if (!result.success) onNotice(`更新完成状态失败：${result.error || '未知错误'}`, 'error'); else { if (result.warning) onNotice(result.warning, 'warning'); void load(false); }
   };
   const markWeekNoRetouch = async (identity: TeamIdentity, week: number, groupItems: WorkflowItem[]) => {
     const pending = groupItems.filter(item => item.ready && !item.assignment?.completed);
@@ -839,9 +839,9 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     }
     setBusy('');
     await load(false);
-    if (errorMessage) onNotice(`已标记 ${completedCount} 个任务，剩余任务处理失败：${errorMessage}`);
-    else if (warningMessage) onNotice(warningMessage);
-    else onNotice(`“${identity.name}”第 ${week} 周的 ${completedCount} 个任务已标记为不用修`);
+    if (errorMessage) onNotice(`已标记 ${completedCount} 个任务，剩余任务处理失败：${errorMessage}`, 'error');
+    else if (warningMessage) onNotice(warningMessage, 'warning');
+    else onNotice(`“${identity.name}”第 ${week} 周的 ${completedCount} 个任务已标记为不用修`, 'success');
   };
   const upload = async (item: WorkflowItem) => {
     setBusy(`upload:${item.key}`);
@@ -860,18 +860,18 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       status: project.status,
     });
     setBusy('');
-    if (!result.success) onNotice(`删除返图失败：${result.error || '未知错误'}`);
+    if (!result.success) onNotice(`删除返图失败：${result.error || '未知错误'}`, 'error');
     else {
       await load(false);
       onProjectChanged();
-      onNotice(result.warning || '返图已删除，并已撤销完成标记');
+      onNotice(result.warning || '返图已删除，并已撤销完成标记', result.warning ? 'warning' : 'success');
     }
   };
   const openTaskFolder = async (identity: TeamIdentity, week: number) => {
     setBusy(`open:${week}:${identity.id}`);
     const result = await legacyApi.exportTeamIdentityTasks(workspacePath, project.status, project.name, { week, identityId: identity.id });
     setBusy('');
-    if (!result.success) onNotice(`打开任务文件夹失败：${result.error || '未知错误'}`); else if (result.path) void legacyApi.openTeamPatchFolder(result.path);
+    if (!result.success) onNotice(`打开任务文件夹失败：${result.error || '未知错误'}`, 'error'); else if (result.path) void legacyApi.openTeamPatchFolder(result.path);
   };
   const receiveWorkflowBatch = async (items: WorkflowItem[]) => {
     const operationId = crypto.randomUUID();
@@ -899,16 +899,16 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
             .map(candidate => candidate.personIndex),
         })),
       });
-      if (!result.success) { onNotice(`批量导入返图失败：${result.error || '未知错误'}`); return; }
+      if (!result.success) { onNotice(`批量导入返图失败：${result.error || '未知错误'}`, 'error'); return; }
       if ((result.reviewCount || 0) > 0) {
         setWorkflowReturnResult(result);
         setWorkflowReturnReviewOpen(true);
       }
       await load(false);
       onProjectChanged();
-      onNotice(result.warning || `批量返图完成：自动识别并标记完成 ${result.acceptedCount || 0} 张，${result.reviewCount || 0} 张需要单独确认`);
+      onNotice(result.warning || `批量返图完成：自动识别并标记完成 ${result.acceptedCount || 0} 张，${result.reviewCount || 0} 张需要单独确认`, result.warning || result.reviewCount ? 'warning' : 'success');
     } catch (error) {
-      onNotice(`批量导入返图失败：${error instanceof Error ? error.message : String(error)}`);
+      onNotice(`批量导入返图失败：${error instanceof Error ? error.message : String(error)}`, 'error');
     } finally {
       setBusy('');
       setWorkflowReturnProgress(null);
@@ -957,7 +957,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const ignoreWorkflowReturn = async (match: TeamPatchReturnMatch) => {
     const reviewSessionId = workflowReturnResult?.reviewSessionId;
     if (!reviewSessionId) {
-      onNotice('当前审核批次无法单独移除返图，请重新进入项目后重试');
+      onNotice('当前审核批次无法单独移除返图，请重新进入项目后重试', 'warning');
       return;
     }
     const confirmed = await appDialog.confirm({
@@ -973,7 +973,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     const result = await legacyApi.ignoreTeamWorkflowReturnReview(workspacePath, project.name, reviewSessionId, match.returnId);
     setBusy('');
     if (!result.success) {
-      onNotice(`移除非任务返图失败：${result.error || '未知错误'}`);
+      onNotice(`移除非任务返图失败：${result.error || '未知错误'}`, 'error');
       return;
     }
     if (result.reviewSessionCompleted) {
@@ -986,7 +986,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         matches: current.matches.filter(item => item.returnId !== match.returnId),
       } : current);
     }
-    onNotice(`已将“${match.sourceName}”标记为不是任务返图；没有任务被完成`);
+    onNotice(`已将“${match.sourceName}”标记为不是任务返图；没有任务被完成`, 'success');
   };
 
   const workflowGroups = new Map<string, { identity: TeamIdentity; week: number; items: WorkflowItem[] }>();
@@ -1047,11 +1047,11 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     }
     if (result.alreadyRunning) return;
     if (!result.success) {
-      if (result.cancelled) onNotice(result.resumable ? '已停止生成；下次会从现有进度继续' : '已停止生成协作流程');
-      else onNotice(`生成协作流程失败：${result.error || '未知错误'}`);
+      if (result.cancelled) onNotice(result.resumable ? '已停止生成；下次会从现有进度继续' : '已停止生成协作流程', 'info');
+      else onNotice(`生成协作流程失败：${result.error || '未知错误'}`, 'error');
       return;
     }
-    onNotice(`协作流程已保存：${result.groupCount || 0} 个批次，${result.count || 0} 张任务图`);
+    onNotice(`协作流程已保存：${result.groupCount || 0} 个批次，${result.count || 0} 张任务图`, 'success');
     await load(false);
     onProjectChanged();
   };
@@ -1059,7 +1059,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!workflowGeneration?.operationId || !workflowGenerating) return;
     setWorkflowGeneration(current => current ? { ...current, phase: 'cancelling', message: '正在安全停止…' } : current);
     const result = await legacyApi.cancelTeamWorkflowGeneration(workflowGeneration.operationId);
-    if (!result.success) onNotice(`停止生成失败：${result.error || '未知错误'}`);
+    if (!result.success) onNotice(`停止生成失败：${result.error || '未知错误'}`, 'error');
   };
 
   const mergeablePhotos = workspace.photos.filter(photo => {
@@ -1088,9 +1088,9 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       }
       await load(false);
       onProjectChanged();
-      onNotice(`已将 ${merged}/${mergeablePhotos.length} 张全部完成的图片合成到目标进度`);
+      onNotice(`已将 ${merged}/${mergeablePhotos.length} 张全部完成的图片合成到目标进度`, 'success');
     } catch (error) {
-      onNotice(`合成照片失败：${error instanceof Error ? error.message : String(error)}`);
+      onNotice(`合成照片失败：${error instanceof Error ? error.message : String(error)}`, 'error');
     } finally {
       setBusy('');
     }

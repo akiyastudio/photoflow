@@ -12,10 +12,10 @@ const normalizedSettings = (value: unknown, fallback: TeamSettings = { useGpu: t
   return { useGpu: hasUseGpu ? candidate.useGpu as boolean : fallback.useGpu, oversizeCropMode: hasCropMode ? candidate.oversizeCropMode as TeamSettings['oversizeCropMode'] : fallback.oversizeCropMode };
 };
 
-export const createTeamSettingsController = ({ read, merge, notice = () => undefined }: {
+export const createTeamSettingsController = ({ read, merge, notice = (_message, _tone) => undefined }: {
   read: () => Promise<{ settings?: unknown }>;
   merge: (patch: TeamSettingsPatch) => Promise<{ settings?: unknown }>;
-  notice?: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
+  notice?: (message: string, tone: 'info' | 'success' | 'warning' | 'error') => void;
 }) => {
   let authoritative: TeamSettings | undefined;
   let pending: Array<{ id: number; patch: TeamSettingsPatch }> = [];
@@ -84,7 +84,7 @@ export const createTeamSettingsController = ({ read, merge, notice = () => undef
   };
 };
 
-export const runNotifiedAction = async (label: string, action: () => Promise<boolean | void>, notice: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void) => {
+export const runNotifiedAction = async (label: string, action: () => Promise<boolean | void>, notice: (message: string, tone: 'info' | 'success' | 'warning' | 'error') => void) => {
   const completed = await action();
   if (completed !== false) notice(`${label}完成`, 'success');
   return completed !== false;

@@ -1,5 +1,17 @@
 const { contextBridge, ipcRenderer } = require('electron');
-const { createComponentNotifyInvoker } = require('./component-notify-bridge.cjs');
+
+const notificationFailure = (code, message) => Object.freeze({ apiVersion: 2, accepted: false, error: Object.freeze({ code, message, retryable: false }) });
+const normalizeNotification = value => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return notificationFailure('NOTIFICATION_INVALID_PAYLOAD', 'Notification payload must be an object');
+  const unknown = Object.keys(value).find(key => !['tone', 'message', 'durationMs', 'dedupeKey'].includes(key));
+  if (unknown) return notificationFailure('NOTIFICATION_INVALID_PAYLOAD', `Unknown notification field: ${unknown}`);
+  if (!['info', 'success', 'warning', 'error'].includes(value.tone)) return notificationFailure('NOTIFICATION_INVALID_TONE', 'Notification tone is invalid');
+  if (typeof value.message !== 'string' || value.message.length > 360 || !value.message.trim()) return notificationFailure('NOTIFICATION_INVALID_MESSAGE', 'Notification message must contain 1-360 characters');
+  if (value.durationMs !== undefined && (!Number.isInteger(value.durationMs) || value.durationMs < 1200 || value.durationMs > 15000)) return notificationFailure('NOTIFICATION_INVALID_DURATION', 'Notification duration is invalid');
+  if (value.dedupeKey !== undefined && (typeof value.dedupeKey !== 'string' || !/^[a-z0-9][a-z0-9._:-]{0,79}$/i.test(value.dedupeKey))) return notificationFailure('NOTIFICATION_INVALID_DEDUPE_KEY', 'Notification dedupeKey is invalid');
+  return Object.freeze({ tone: value.tone, message: value.message.trim(), durationMs: value.durationMs ?? 3500, ...(value.dedupeKey ? { dedupeKey: value.dedupeKey } : {}) });
+};
+const notify = payload => { const normalized = normalizeNotification(payload); return normalized.accepted === false ? Promise.resolve(normalized) : ipcRenderer.invoke('component-sdk:notify', normalized); };
 
 const subscribe = (channel, callback) => {
   if (typeof callback !== 'function') throw new TypeError('Component lifecycle callback must be a function');
@@ -12,7 +24,7 @@ contextBridge.exposeInMainWorld('photoFlowComponent', Object.freeze({
   // Bridge ABI version; Host API negotiation is reported by getContext().
   contractVersion: 1,
   getContext: () => ipcRenderer.invoke('component-sdk:get-context'),
-  notify: createComponentNotifyInvoker(payload => ipcRenderer.invoke('component-sdk:notify', payload)),
+  notify,
   rpc: (method, payload) => ipcRenderer.invoke('component-sdk:rpc', String(method || ''), payload),
   onEvent: (topic, callback) => {
     const normalizedTopic = String(topic || '');

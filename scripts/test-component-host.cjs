@@ -91,19 +91,24 @@ try {
   const componentPreload = fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'component-preload.cjs'), 'utf8');
   assert(componentPreload.includes("exposeInMainWorld('photoFlowComponent'") && !componentPreload.includes("exposeInMainWorld('electronAPI'"), 'component preload exposes the restricted SDK instead of the application bridge');
   const preloadIpc = new EventEmitter();
-  preloadIpc.invoke = async () => ({});
+  const preloadInvocations = [];
+  preloadIpc.invoke = async (...args) => { preloadInvocations.push(args); return {}; };
   preloadIpc.removeListener = preloadIpc.removeListener.bind(preloadIpc);
   const exposedWorlds = new Map();
   vm.runInNewContext(componentPreload, {
     Object, String, TypeError, Error,
     require: requestPath => requestPath === 'electron'
       ? { contextBridge: { exposeInMainWorld: (name, value) => exposedWorlds.set(name, value) }, ipcRenderer: preloadIpc }
-      : requestPath === './compatibility/component-v1-metadata.cjs' ? { LEGACY_PRELOAD_EVENTS: Object.freeze({}) }
-        : requestPath === './component-notify-bridge.cjs' ? require('../electron/component-notify-bridge.cjs') : require(requestPath),
+      : requestPath === './compatibility/component-v1-metadata.cjs' ? { LEGACY_PRELOAD_EVENTS: Object.freeze({}) } : require(requestPath),
   });
   assert.equal(exposedWorlds.has('electronAPI'), false, 'component preload behavior must not expose the application bridge');
   const restrictedSdk = exposedWorlds.get('photoFlowComponent');
   assert.equal(restrictedSdk.contractVersion, 1, 'bridge ABI stays at V1 even for Host API V2 components');
+  assert(!/require\(['"]\.\//.test(componentPreload), 'sandboxed component preload must stay single-file and must not require local CJS modules');
+  restrictedSdk.notify({ tone: 'info', message: `${' '.repeat(100000)}x` }).then(result => assert.equal(result.error.code, 'NOTIFICATION_INVALID_MESSAGE')).catch(error => { throw error; });
+  assert.equal(preloadInvocations.length, 0, 'oversized renderer notifications are rejected before IPC');
+  void restrictedSdk.notify({ tone: 'success', message: 'saved' });
+  assert.equal(JSON.stringify(preloadInvocations[0]), JSON.stringify(['component-sdk:notify', { tone: 'success', message: 'saved', durationMs: 3500 }]));
   assert.throws(() => restrictedSdk.onEvent('invalid-topic', () => undefined), /Invalid component event topic/, 'preload rejects non-versioned topics');
   const receivedEvents = [];
   const unsubscribeEvent = restrictedSdk.onEvent('sample.changed.v1', payload => receivedEvents.push(payload));

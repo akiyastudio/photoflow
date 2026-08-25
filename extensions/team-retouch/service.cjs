@@ -149,11 +149,11 @@ const materializeMediaForOperation = async (parentId, refs) => {
     return { items, cleanup: async () => { for (const directory of directories) await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined); } };
   } catch (error) { for (const directory of directories) await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined); throw error; }
 };
-const artifactGrantV2 = async (parentId, payload) => {
-  const storage = await hostStorage(parentId);
+const artifactGrantForStorage = (storage, payload) => {
   const dataDirectory = path.join(storage.dataPath, 'media', safeSegment(payload.photoId, 'photo'), safeSegment(payload.baseVersionId, 'version'));
   return { dataDirectory, analysisDirectory: path.join(dataDirectory, 'analysis'), uploadDirectory: path.join(dataDirectory, 'uploads'), mergeDirectory: path.join(dataDirectory, 'merge'), deliveryDirectory: path.join(dataDirectory, 'delivery'), legacyDataRoot: storage.dataPath, deliveryPrefix: safeSegment(payload.deliveryPrefix || payload.photoId, 'photo') };
 };
+const artifactGrantV2 = async (parentId, payload) => artifactGrantForStorage(await hostStorage(parentId), payload);
 const inputStages = new Map();
 const storageMigrationOperations = new Map();
 const rawHostStorage = async parentId => {
@@ -1254,7 +1254,7 @@ const markWorkflowReconcilePending = (db, payload, error) => db.prepare(`INSERT 
   ON CONFLICT(task_id) DO UPDATE SET photo_id=excluded.photo_id,error=excluded.error,updated_at=excluded.updated_at`)
   .run(String(payload.taskId), String(payload.photoId), error?.message || String(error || '等待后台更新接力任务'), Date.now());
 
-const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomain(parentId, async (db, storage) => {
+const storeReturnedPatchInDomain = async (db, storage, sourcePath, payload, context) => {
   const source = path.resolve(sourcePath);
   const sourceStat = await fs.promises.stat(source).catch(() => null);
   const extension = path.extname(source).toLowerCase();
@@ -1262,7 +1262,7 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
   if (!sourceStat?.isFile() || !RETURN_IMAGE_EXTENSIONS.has(extension)) throw new Error('返图格式不受支持；请导出为 JPEG、PNG、TIFF 或 WebP');
   const row = db.prepare('SELECT * FROM team_patch_tasks WHERE id=? AND photo_id=? AND base_version_id=? AND is_deleted=0').get(String(payload.taskId || ''), String(payload.photoId || ''), String(payload.baseVersionId || ''));
   if (!row) throw new Error('Component return task is outside the bound photo version');
-  const authorized = await artifactsScope(parentId, { photoId: row.photo_id, baseVersionId: row.base_version_id });
+  const authorized = artifactGrantForStorage(storage, { photoId: row.photo_id, baseVersionId: row.base_version_id });
   const destination = path.join(authorized.uploadDirectory, `${row.id}-${crypto.randomUUID()}${path.extname(source).toLowerCase()}`);
   await fs.promises.mkdir(authorized.uploadDirectory, { recursive: true });
   await archiveReturnedFile(source, destination, storage.dataPath);
@@ -1281,7 +1281,7 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
       if (payload.deferReconcile) markWorkflowReconcilePending(db, { taskId: row.id, photoId: row.photo_id }, new Error('返图已确认，等待后台更新接力任务'));
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
-    if (payload.deferReconcile) await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: row.id, photoId: row.photo_id, error: '返图已确认，等待后台更新接力任务' }).catch(() => undefined);
+    if (payload.deferReconcile) void appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: row.id, photoId: row.photo_id, error: '返图已确认，等待后台更新接力任务' }).catch(() => undefined);
     return {
       success: true,
       artifactPath: destination,
@@ -1291,7 +1291,7 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
     await fs.promises.rm(destination, { force: true }).catch(() => undefined);
     throw error;
   }
-});
+};
 const TEAM_MEDIA_VARIANTS = new Set(['preview', 'original']);
 const mediaRequest = payload => Object.fromEntries(['kind', 'variant', 'photoId', 'baseVersionId', 'taskId', 'personIndex', 'reviewSessionId', 'returnId'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
 const unavailableMedia = (variant, category) => ({ success: false, state: 'MISSING', category, variant, error: category === 'variant-unavailable' ? (variant === 'preview' ? '预览暂时无法生成，可重试或明确打开原图' : '原图暂时无法读取，请检查历史文件后重试') : '历史媒体引用缺失或文件暂时不可用' });
@@ -1493,7 +1493,8 @@ const writeJsonAtomic = async (target, value) => {
 };
 
 const workflowDirectoryResolver = createWorkflowManifestResolver({ crypto, fs, path, writeJsonAtomic });
-const workflowScope = async (parentId, context) => workflowDirectoryResolver(await hostStorage(parentId), context);
+const workflowScopeForStorage = (storage, context) => workflowDirectoryResolver(storage, context);
+const workflowScope = async (parentId, context) => workflowScopeForStorage(await hostStorage(parentId), context);
 const readWorkflowManifest = (parentId, context) => workflowScope(parentId, context);
 
 const reportTask = async (parentId, operationId, action, update = {}, topic = '') => hostTask(parentId, operationId, action, { title: '生成团片协作工作流', operationId, ...update }, topic);
@@ -1640,18 +1641,31 @@ const exportWorkflow = async (parentId, payload, context, open = false) => {
   return { success: true, count };
 };
 
-const reviewTarget = async (parentId, context) => {
-  const scope = await workflowScope(parentId, context);
-  return { directory: scope.reviewDirectory, sessionPath: path.join(scope.reviewDirectory, 'session.json') };
+const reviewTargetForStorage = (storage, context) => {
+  const projectId = String(storage.projectId || context?.projectId || '');
+  if (!projectId) throw new Error('返图审核缺少项目 ID');
+  const directory = path.join(storage.dataPath, 'workflow-return-reviews', sha256(projectId));
+  return { directory, sessionPath: path.join(directory, 'session.json') };
 };
-const readReview = async (parentId, context) => {
-  const target = await reviewTarget(parentId, context);
+const reviewTarget = async (parentId, context) => reviewTargetForStorage(await hostStorage(parentId), context);
+const readReviewFromStorage = async (storage, context) => {
+  const target = await reviewTargetForStorage(storage, context);
   let session = await readJson(target.sessionPath, null);
   if (session && Number(session.version || 1) < 2) {
     session = { ...session, version: 2, updatedAt: Date.now(), result: { ...session.result, matches: (session.result?.matches || []).map(match => ({ matchConfidence: match.matchConfidence || match.confidence || 'unknown', editEvidence: match.editEvidence || { reallyModified: false, legacyUnknown: true }, returnWarnings: match.returnWarnings || ['旧版返图审核记录缺少修改证据，请人工确认'], needsReview: match.accepted !== true, ...match })) } };
     await writeJsonAtomic(target.sessionPath, session);
   }
   return { ...target, session };
+};
+const readReview = async (parentId, context) => readReviewFromStorage(await hostStorage(parentId), context);
+const retireReviewTarget = async target => {
+  const retiredDirectory = `${target.directory}.completed-${crypto.randomUUID()}`;
+  try {
+    await fs.promises.rename(target.directory, retiredDirectory);
+    void fs.promises.rm(retiredDirectory, { recursive: true, force: true }).catch(() => undefined);
+  } catch {
+    await fs.promises.rm(target.directory, { recursive: true, force: true });
+  }
 };
 const publicMatch = ({ path: _path, patchPath: _patchPath, mediaPath: _mediaPath, originalPath: _originalPath, alternatives, ...item }) => ({ ...item, alternatives: (alternatives || []).map(({ path: _a, patchPath: _b, mediaPath: _c, originalPath: _d, ...alternative }) => alternative) });
 const presentReview = session => ({ ...session.result, reviewSessionId: session.id, matches: (session.result?.matches || []).map(publicMatch) });
@@ -1675,6 +1689,26 @@ const readyWorkflowCandidates = (snapshot, requested = []) => {
     candidates.push({ taskId: task.id, photoId: photo.photoId, baseVersionId: photo.baseVersionId, personIndex: Number(member.personIndex), identityId: identity.id, photoName: photo.name, personName: identity.name, originalPath: photo.sourcePath, patchPath: task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath });
   }
   return candidates.filter(item => item.patchPath && fs.existsSync(item.patchPath));
+};
+
+const readyWorkflowCandidateFromDb = (db, context, payload) => {
+  const task = db.prepare(`SELECT task.* FROM team_patch_tasks task
+    JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+    WHERE task.id=? AND task.photo_id=? AND task.base_version_id=? AND registered.project_id=? AND task.is_deleted=0`)
+    .get(String(payload.taskId || ''), String(payload.photoId || ''), String(payload.baseVersionId || ''), String(context.projectId));
+  if (!task) return null;
+  const personIndex = Number(payload.personIndex);
+  const members = parseJson(task.members_json, []);
+  if ((members.length ? members : [{ personIndex: task.person_index }]).every(member => Number(member.personIndex) !== personIndex)) return null;
+  const assignment = db.prepare(`SELECT * FROM team_person_assignments
+    WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?`)
+    .get(String(context.projectId), task.photo_id, task.base_version_id, personIndex);
+  if (!assignment?.identity_id || assignment.completed || assignment.return_missing || assignment.task_id && String(assignment.task_id) !== String(task.id)) return null;
+  const identity = db.prepare('SELECT id,name FROM team_person_identities WHERE id=? AND project_id=?').get(String(assignment.identity_id), String(context.projectId));
+  if (!identity) return null;
+  const patchPath = task.edited_patch_path && fs.existsSync(task.edited_patch_path) ? task.edited_patch_path : task.patch_path;
+  if (!patchPath || !fs.existsSync(patchPath)) return null;
+  return { taskId: task.id, photoId: task.photo_id, baseVersionId: task.base_version_id, personIndex, identityId: identity.id, personName: identity.name, patchPath };
 };
 
 const runMatcher = async (returned, candidates, onProgress = () => undefined) => {
@@ -1851,13 +1885,7 @@ const storeReturnedAndReconcile = (parentId, sourcePath, payload, context) => wi
   const registered = await storeReturnedPatch(parentId, sourcePath, payload, context);
   return finalizeReconcile(parentId, context, payload, registered);
 });
-
-// Manual review confirmation only archives the return and persists the reconcile
-// job here. The renderer's host-bound refresh drains that job without keeping the
-// confirmation button blocked on hashing and project-output publication.
-const storeReturnedAndQueueReconcile = (parentId, sourcePath, payload, context) => withPhotoOperation(payload.photoId, () => (
-  storeReturnedPatch(parentId, sourcePath, { ...payload, deferReconcile: true }, context)
-));
+const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomain(parentId, (db, storage) => storeReturnedPatchInDomain(db, storage, sourcePath, payload, context));
 
 const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1) => {
   const pending = await withDomain(parentId, db => db.prepare(`SELECT pending.task_id,pending.photo_id FROM team_workflow_reconcile_pending pending
@@ -2090,19 +2118,26 @@ const migrateLegacyProjectArtifacts = async (parentId, context, control = {}) =>
   legacyProjectMigrationOperations.set(key, operation); return operation;
 };
 const returnConfirm = async (parentId, payload, context) => {
-  const target = await readReview(parentId, context);
+  const storage = await hostStorage(parentId);
+  const target = await readReviewFromStorage(storage, context);
   if (!target.session || String(target.session.id) !== String(payload.reviewSessionId)) throw new Error('待确认返图批次已经变化');
   const match = target.session.result.matches.find(item => String(item.returnId) === String(payload.returnId));
   if (!match || match.accepted) throw new Error('这张返图已经处理');
-  const candidate = readyWorkflowCandidates(await workspaceSnapshot(parentId, context), [payload])[0];
-  if (!candidate || String(candidate.taskId) !== String(payload.taskId)) throw new Error('候选任务当前不可确认');
   if (!match.path || !isInside(target.directory, match.path)) throw new Error('Reviewed return escaped its component review grant');
-  const registered = await storeReturnedAndQueueReconcile(parentId, match.path, { photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true }, context);
+  const registered = await withPhotoOperation(payload.photoId, async () => {
+    const db = ensureSchema(storage.databasePath);
+    try {
+      const candidate = readyWorkflowCandidateFromDb(db, context, payload);
+      if (!candidate || String(candidate.taskId) !== String(payload.taskId)) throw new Error('候选任务当前不可确认');
+      return await storeReturnedPatchInDomain(db, storage, match.path, { photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true, deferReconcile: true }, context);
+    } finally { db.close(); }
+  });
+  const candidate = { photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), taskId: String(payload.taskId), personIndex: Number(payload.personIndex) };
   match.accepted = true; match.confidence = 'manual'; match.photoId = candidate.photoId; match.baseVersionId = candidate.baseVersionId; match.taskId = candidate.taskId; match.personIndex = candidate.personIndex;
   target.session.result.reviewCount = target.session.result.matches.filter(item => !item.accepted).length;
   target.session.result.acceptedCount = target.session.result.matches.filter(item => item.accepted).length;
   if (target.session.result.reviewCount) await writeJsonAtomic(target.sessionPath, target.session);
-  else await fs.promises.rm(target.directory, { recursive: true, force: true });
+  else await retireReviewTarget(target);
   return { success: true, warning: registered.warning, reconcilePending: Boolean(registered.reconcilePending) };
 };
 

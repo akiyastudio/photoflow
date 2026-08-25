@@ -23,7 +23,7 @@ import { advanceMarqueeAutoScroll, marqueeAutoScrollDelta } from './marquee-auto
 import { converterTriggerAction } from './project-panel-lifecycle';
 import { PROJECT_BACKGROUND_LOAD_DELAYS_MS, PROJECT_WATCH_FALLBACK_REFRESH_MS, isForegroundDirectoryRefresh, resolveProjectWorkspaceLifecycle, shouldReconcileProjectWatch, type ProjectWorkspaceLifecycleIdentity } from './project-workspace-lifecycle';
 import { applyShortcutPreviewState } from './shortcut-preview-state-model';
-import { directoryEntryToRevealOnReturn, fileEntryClickIntent, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, renamedEntryDestinationPath } from './file-entry-interaction-model';
+import { directoryEntryToRevealOnReturn, fileEntryClickIntent, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath, type ProgressFolderEntryLocation } from './file-entry-interaction-model';
 import { FOLDER_ALPHABET_FILTER_THRESHOLD, FOLDER_ALPHABET_KEYS, availableFolderAlphabetKeys, folderAlphabetKey } from './folder-alphabet-filter-model';
 import { useRecentFilesAutoLoad } from './useRecentFilesAutoLoad';
 import { collectProgressSubtree, inspectProgressRelations } from './progress-tree-model';
@@ -496,7 +496,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     initialPaths: string[];
     additive: boolean;
     started: boolean;
-    clearPreviewOnFinish: boolean;
   } | null>(null);
   const marqueeLayoutRegistryRef = useRef(new Map<string, MarqueeRect>());
   const selectionAutoScrollFrameRef = useRef(0);
@@ -522,6 +521,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [surfaceDropActive, setSurfaceDropActive] = useState(false);
   const [operationDirectoryPath, setOperationDirectoryPath] = useState('');
   const [previewPath, setPreviewPath] = useState('');
+  const [previewHighlightPath, setPreviewHighlightPath] = useState('');
   const [previewMediaPath, setPreviewMediaPath] = useState('');
   const [postTrimPreviewEntry, setPostTrimPreviewEntry] = useState<ProjectFileEntry>();
   useEffect(() => {
@@ -548,12 +548,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [pendingFileReveal, setPendingFileReveal] = useState<{ path: string; requestId: number; align: 'nearest' | 'center' } | null>(null);
   const [directoryReturnHighlightPath, setDirectoryReturnHighlightPath] = useState('');
   const toggleSelected = (relativePath: string) => {
-    setDirectoryReturnHighlightPath('');
     toggleProjectFileSelection(relativePath);
   };
-  useEffect(() => {
-    if (directoryReturnHighlightPath && selectedPaths.length) setDirectoryReturnHighlightPath('');
-  }, [directoryReturnHighlightPath, selectedPaths.length]);
   const [pendingMutationSelection, setPendingMutationSelection] = useState<{ path: string; align: 'nearest' | 'center'; directoryPath: string; projectPath: string } | null>(null);
   const previousPaneLayoutRef = useRef('');
   const paneLayoutRevealPendingRef = useRef(false);
@@ -714,6 +710,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   useEscapeLayer(active && confirmDelete, () => setConfirmDelete(false), true, true);
   useEscapeLayer(Boolean(gatherPickerPaths), () => setGatherPickerPaths(null), !gatheringInspiration, true);
   const [fileMenu, setFileMenu] = useState<{ entry: ProjectFileEntry; x: number; y: number } | null>(null);
+  const fileMenuSelectionSnapshotRef = useRef<string[]>([]);
+  const fileMenuSelectionAnchorSnapshotRef = useRef('');
+  const fileMenuSelectionWasImplicitRef = useRef(false);
   const [surfaceMenu, setSurfaceMenu] = useState<{ x: number; y: number; targetRelativePath: string; targetLabel: string; kind: 'files' | 'version-tree-layout' } | null>(null);
   const versionTreeCanvasControllerRef = useRef<VersionTreeCanvasController | null>(null);
   const setVersionTreeCanvasController = useCallback((controller: VersionTreeCanvasController | null) => {
@@ -728,6 +727,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [screenshotMainImageTargets, setScreenshotMainImageTargets] = useState<string[]>([]);
   const [screenshotMainImageMode, setScreenshotMainImageMode] = useState<'extract' | 'crop'>('extract');
   const [versionEntry, setVersionEntry] = useState<ProjectFileEntry | null>(null);
+  const [versionProgressId, setVersionProgressId] = useState('');
+  const versionProgressLocationRef = useRef<(ProgressFolderEntryLocation & { progressId: string }) | null>(null);
   const [, setFinalVersionSummary] = useState({ count: 0, availableCount: 0, missingCount: 0 });
   const [finalExporting, setFinalExporting] = useState(false);
   const [finalExportParentId, setFinalExportParentId] = useState('');
@@ -1455,6 +1456,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setFinalViewOpen(false);
     setSelectedPaths([]);
     setPreviewPath('');
+    setPreviewHighlightPath('');
     setPreviewPaneOpen(previewPanePinnedRef.current);
     setMetadataPaneOpen(metadataPanePinnedRef.current);
     setSearchOpen(false);
@@ -1648,12 +1650,15 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setHasExternalFolderLinks(false);
     setDirectoryHistory({ back: [], forward: [] });
     setPreviewPath('');
+    setPreviewHighlightPath('');
     setPreviewTechnicalMetadata({});
     setPreviewPaneOpen(previewPanePinnedRef.current);
     setMetadataPaneOpen(metadataPanePinnedRef.current);
     setFinalViewOpen(false);
     setFinalViewEntries([]);
     setVersionEntry(null);
+    setVersionProgressId('');
+    versionProgressLocationRef.current = null;
     setProgressSetup(null);
     setFolderMarkSetup(null);
     setProgressCompare(null);
@@ -1697,6 +1702,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
     setSelectedPaths([]);
     setPreviewPath('');
+    setPreviewHighlightPath('');
     setPreviewTechnicalMetadata({});
     setPreviewPaneOpen(previewPanePinnedRef.current);
     setMetadataPaneOpen(metadataPanePinnedRef.current);
@@ -3069,6 +3075,19 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         if (!registered.success || !registered.progressFolder) throw new Error(registered.error || '版本文件夹已修改，但无法保存版本跟踪策略');
         setProgressSetup(null);
         directoryEntriesCacheRef.current.clear();
+        if (versionProgressId === existingProgress.id) {
+          const previousLocation = versionProgressLocationRef.current;
+          const nextLocation = {
+            progressId: registered.progressFolder.id,
+            folderPath: registered.progressFolder.folderPath,
+            relativePath: progressFolderRelativePath(registered.progressFolder),
+          };
+          if (previousLocation) {
+            setVersionEntry(current => current ? remapEntryAfterProgressFolderMove(current, previousLocation, nextLocation) : current);
+          }
+          versionProgressLocationRef.current = nextLocation;
+          setVersionProgressId(registered.progressFolder.id);
+        }
         progressFoldersRef.current = progressFoldersRef.current.map(folder => folder.id === registered.progressFolder!.id ? registered.progressFolder! : folder);
         setProgressFolders(current => current.map(folder => folder.id === registered.progressFolder!.id ? registered.progressFolder! : folder));
         setSelectedPaths([relativePath]);
@@ -3596,7 +3615,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     }
   };
   const selectEntryRange = (relativePath: string, additive: boolean) => {
-    setDirectoryReturnHighlightPath('');
     selectProjectFileRange(relativePath, additive, displayedFileEntries);
   };
   const beginInlineRename = (relativePath: string) => {
@@ -3734,6 +3752,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     window.dispatchEvent(new Event('photoflow-menu-open'));
     setSurfaceMenu(null);
     setOperationDirectoryPath(entry.viaShortcut ? currentRelativePath : projectRelativeParentPath(entry.relativePath));
+    fileMenuSelectionSnapshotRef.current = [...selectedPaths];
+    fileMenuSelectionAnchorSnapshotRef.current = selectionAnchorPathRef.current;
+    fileMenuSelectionWasImplicitRef.current = selectEntry && !selectedPaths.includes(entry.relativePath);
     if (selectEntry) {
       if (!selectedPaths.includes(entry.relativePath)) selectionAnchorPathRef.current = entry.relativePath;
       setSelectedPaths(current => current.includes(entry.relativePath) ? current : [entry.relativePath]);
@@ -3796,6 +3817,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const returnEntryPath = directoryEntryToRevealOnReturn(currentRelativePathRef.current, normalizedPath);
     pendingDirectoryReturnRevealRef.current = returnEntryPath ? { directoryPath: normalizedPath, entryPath: returnEntryPath } : null;
     setDirectoryReturnHighlightPath('');
+    setPreviewHighlightPath('');
     // Invalidate the directory that is still loading before React commits the
     // breadcrumb change, so its late result cannot replace the new folder.
     refreshSequenceRef.current += 1;
@@ -3827,6 +3849,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setFinalViewOpen(false);
     setSelectedPaths([]);
     setPreviewPath('');
+    setPreviewHighlightPath('');
     setPreviewPaneOpen(previewPanePinnedRef.current);
     setMetadataPaneOpen(metadataPanePinnedRef.current);
     setSearchOpen(false);
@@ -3902,16 +3925,40 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     });
   };
   const hasVersionProgressForEntry = (entry?: ProjectFileEntry) => Boolean(progressFolderForMediaEntry(entry));
+  const versionProgressFolder = versionProgressId ? progressFolders.find(folder => folder.id === versionProgressId) : undefined;
+  const versionProgressLocation = versionProgressFolder && !versionProgressFolder.folderMissing ? {
+    progressId: versionProgressFolder.id,
+    folderPath: versionProgressFolder.folderPath,
+    relativePath: progressFolderRelativePath(versionProgressFolder),
+  } : null;
+  const renderedVersionEntry = versionEntry && versionProgressLocationRef.current && versionProgressLocation
+    ? remapEntryAfterProgressFolderMove(versionEntry, versionProgressLocationRef.current, versionProgressLocation)
+    : versionEntry;
+  useEffect(() => {
+    if (!versionProgressLocation) return;
+    const previousLocation = versionProgressLocationRef.current;
+    if (versionEntry && previousLocation?.progressId === versionProgressLocation.progressId) {
+      setVersionEntry(current => current ? remapEntryAfterProgressFolderMove(current, previousLocation, versionProgressLocation) : current);
+    }
+    versionProgressLocationRef.current = versionProgressLocation;
+  }, [versionProgressLocation?.folderPath, versionProgressLocation?.progressId, versionProgressLocation?.relativePath]);
   const openVersions = (entry?: ProjectFileEntry) => {
     const target = entry || selectedEntries[0];
     if (!target || !['image', 'raw', 'video'].includes(target.kind)) {
       onNotice('请先选择一张图片、RAW 或视频');
       return;
     }
-    if (!hasVersionProgressForEntry(target)) {
+    const targetProgressFolder = progressFolderForMediaEntry(target);
+    if (!targetProgressFolder) {
       onNotice(`项目尚未录入${target.kind === 'video' ? '视频' : '图片'}进度，请先标记或导入版本进度`);
       return;
     }
+    versionProgressLocationRef.current = {
+      progressId: targetProgressFolder.id,
+      folderPath: targetProgressFolder.folderPath,
+      relativePath: progressFolderRelativePath(targetProgressFolder),
+    };
+    setVersionProgressId(targetProgressFolder.id);
     setVersionEntry(target);
     onOpenToolTab('version', `版本 · ${target.name}`);
   };
@@ -3950,6 +3997,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       setFinalViewEntries([]);
       setSelectedPaths([]);
       setPreviewPath('');
+      setPreviewHighlightPath('');
       setPreviewPaneOpen(previewPanePinnedRef.current);
       setMetadataPaneOpen(metadataPanePinnedRef.current);
       navigateToDirectory(result.folder.relativePath);
@@ -3988,13 +4036,16 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const result = await projectWorkspaceClient.copyProjectEntryPath(workspacePath, project.status, project.name, targetRelativePath);
     onNotice(result.success ? '成功复制文字' : `复制文件夹地址失败：${result.error || '未知错误'}`);
   };
-  const clearPreviewAfterSelectionDrag = (drag: NonNullable<typeof selectionDragRef.current>) => {
-    if (!drag.clearPreviewOnFinish) return;
+  const dismissPreviewFromBlankClick = (drag: NonNullable<typeof selectionDragRef.current>) => {
+    if (drag.started || drag.additive) return;
     if (previewPath && (previewPaneOpen || metadataPaneOpen)) {
       paneLayoutRevealPathRef.current = previewPath;
       paneLayoutRevealPendingRef.current = true;
     }
     setPreviewPath('');
+    setPreviewHighlightPath('');
+    setDirectoryReturnHighlightPath('');
+    setPreviewMediaPath('');
     setViewportCurrentPath('');
     setPreviewPaneOpen(previewPanePinnedRef.current);
     setMetadataPaneOpen(metadataPanePinnedRef.current);
@@ -4116,7 +4167,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!selectionAutoScrollFrameRef.current) selectionAutoScrollFrameRef.current = window.requestAnimationFrame(runSelectionAutoScroll);
   };
   const startSelectionDrag = (event: React.PointerEvent<HTMLDivElement>) => {
-    setDirectoryReturnHighlightPath('');
     const pointerTarget = event.target as HTMLElement;
     if (event.button !== 0 || pointerTarget.closest('[data-entry-path], button, input, select, textarea')) return;
     const container = filesColumnRef.current;
@@ -4150,7 +4200,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       initialPaths: [...selectedPaths],
       additive,
       started: false,
-      clearPreviewOnFinish: !additive,
     };
     if (!additive) {
       setSelectedPaths([]);
@@ -4165,7 +4214,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       selectionDragRef.current = null;
       setSelectionBox(null);
       if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-      clearPreviewAfterSelectionDrag(drag);
+      dismissPreviewFromBlankClick(drag);
       return;
     }
     drag.lastClientX = event.clientX;
@@ -4193,7 +4242,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     selectionDragRef.current = null;
     setSelectionBox(null);
     if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
-    clearPreviewAfterSelectionDrag(drag);
+    dismissPreviewFromBlankClick(drag);
   };
   useEffect(() => {
     const drag = selectionDragRef.current;
@@ -4499,6 +4548,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       else {
         setFinalViewEntries(current => current.filter(entry => entry.path !== targetEntry.path));
         setPreviewPath('');
+        setPreviewHighlightPath('');
         setPreviewPaneOpen(previewPanePinnedRef.current);
         setMetadataPaneOpen(metadataPanePinnedRef.current);
       }
@@ -4539,6 +4589,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     selectionAnchorPathRef.current = targetRelativePath;
     setSelectedPaths([targetRelativePath]);
     setPreviewPath(targetRelativePath);
+    setPreviewHighlightPath(targetRelativePath);
     setPreviewMediaPath(targetRelativePath);
     setPreviewTechnicalMetadata({});
     setPreviewPaneOpen(true);
@@ -4787,6 +4838,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (nextIndex === currentIndex) return;
     const nextEntry = navigableEntries[nextIndex];
     setPreviewPath(nextEntry.relativePath);
+    setPreviewHighlightPath(nextEntry.relativePath);
+    setDirectoryReturnHighlightPath('');
     setPreviewMediaPath(nextEntry.relativePath);
     setPreviewTechnicalMetadata({});
   }, [previewEntry?.relativePath, previewMediaEntries]);
@@ -5006,6 +5059,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
   const activateMediaPreview = (entry: ProjectFileEntry) => {
     if (entry.kind !== 'image' && entry.kind !== 'raw' && entry.kind !== 'video') return;
+    setPreviewHighlightPath('');
+    setDirectoryReturnHighlightPath('');
     focusEntry(entry);
     setPreviewMediaPath(entry.relativePath);
     setPreviewTechnicalMetadata({});
@@ -5013,6 +5068,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
   const openPreviewFromMenu = (entry: ProjectFileEntry) => {
     if (entry.kind !== 'image' && entry.kind !== 'raw' && entry.kind !== 'video') return;
+    setPreviewHighlightPath(entry.relativePath);
+    setDirectoryReturnHighlightPath('');
     focusEntry(entry);
     setPreviewMediaPath(entry.relativePath);
     setPreviewTechnicalMetadata({});
@@ -5041,78 +5098,81 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setMetadataPaneAutoOpenSuppressed(false);
     if (nextPinned) setMetadataPaneOpen(true);
   };
-  const syncOpenPanesToSelection = (entry: ProjectFileEntry) => {
-    if (!previewPaneOpen && !metadataPaneOpen) return;
-    const isMedia = entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video';
-    setPreviewPath(entry.relativePath);
-    if (previewPaneOpen) setPreviewMediaPath(isMedia ? entry.relativePath : '');
-    setPreviewTechnicalMetadata({});
-  };
   const openEntryDetails = (entry: ProjectFileEntry) => {
+    setPreviewHighlightPath('');
+    setDirectoryReturnHighlightPath('');
     focusEntry(entry);
     setMetadataPaneAutoOpenSuppressed(false);
     setMetadataPaneOpen(true);
   };
-  const handleEntryClick = (event: React.MouseEvent | React.KeyboardEvent, entry: ProjectFileEntry) => {
-    if (inlineRenamePath === entry.relativePath) return;
-    setDirectoryReturnHighlightPath('');
-    (event.currentTarget as HTMLElement).focus({ preventScroll: true });
-    setOperationDirectoryPath(entry.viaShortcut ? currentRelativePath : projectRelativeParentPath(entry.relativePath));
-    const pointerModifiers = entryPointerModifiersRef.current?.path === entry.relativePath ? entryPointerModifiersRef.current : null;
-    entryPointerModifiersRef.current = null;
-    const range = event.shiftKey || Boolean(pointerModifiers?.range);
-    const additive = event.ctrlKey || event.metaKey || Boolean(pointerModifiers?.additive);
-    const clickCount = 'detail' in event ? event.detail : 1;
-    if (isFolderLikeEntry(entry) && entry.externalLink && !range && !additive && clickCount === 1) {
-      focusEntry(entry);
-      void openProjectEntry(entry);
-      return;
-    }
-    const intent = fileEntryClickIntent({ openMode: itemOpenMode, selectionCount: selectedPaths.length, range, additive, clickCount });
-    if (intent === 'ignore-repeat') return;
-    if (intent === 'range-select') {
-      selectEntryRange(entry.relativePath, additive);
-      syncOpenPanesToSelection(entry);
-      return;
-    }
-    if (intent === 'toggle-select') {
-      toggleSelected(entry.relativePath);
-      syncOpenPanesToSelection(entry);
-      return;
-    }
-    if (intent === 'open' && isFolderLikeEntry(entry)) { void openProjectEntry(entry); return; }
-    focusEntry(entry);
+  const addSelectionAndSyncOpenPanes = (entry: ProjectFileEntry) => {
+    selectionAnchorPathRef.current = entry.relativePath;
+    setSelectedPaths(current => current.includes(entry.relativePath) ? current : [...current, entry.relativePath]);
+    if (!previewPaneOpen && !metadataPaneOpen) return;
     const isMedia = entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video';
-    if (intent === 'focus') {
-      if (isMedia && previewPaneOpen) {
-        setPreviewMediaPath(entry.relativePath);
-        setPreviewTechnicalMetadata({});
-      }
-      if (metadataPanePinned || !metadataPaneAutoOpenSuppressed) setMetadataPaneOpen(true);
-      return;
-    }
+    setPreviewPath(entry.relativePath);
+    setPreviewHighlightPath('');
+    setDirectoryReturnHighlightPath('');
+    if (previewPaneOpen) setPreviewMediaPath(isMedia ? entry.relativePath : '');
+    setPreviewTechnicalMetadata({});
+  };
+  const activateEntry = (entry: ProjectFileEntry) => {
+    const isMedia = entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video';
     if (isMedia) {
       activateMediaPreview(entry);
       if (metadataPanePinned || !previewOnlyOnMediaClick && !metadataPaneAutoOpenSuppressed) setMetadataPaneOpen(true);
       else if (previewOnlyOnMediaClick) setMetadataPaneOpen(false);
       return;
     }
+    setPreviewHighlightPath('');
+    setDirectoryReturnHighlightPath('');
+    focusEntry(entry);
     if (previewPanePinned) setPreviewPaneOpen(true);
     else setPreviewPaneOpen(false);
     if (metadataPanePinned || !metadataPaneAutoOpenSuppressed) setMetadataPaneOpen(true);
     void openProjectEntry(entry);
   };
+  const handleEntryClick = (event: React.MouseEvent | React.KeyboardEvent, entry: ProjectFileEntry) => {
+    if (inlineRenamePath === entry.relativePath) return;
+    (event.currentTarget as HTMLElement).focus({ preventScroll: true });
+    setOperationDirectoryPath(entry.viaShortcut ? currentRelativePath : projectRelativeParentPath(entry.relativePath));
+    if ('key' in event) {
+      event.preventDefault();
+      event.stopPropagation();
+      activateEntry(entry);
+      return;
+    }
+    const pointerModifiers = entryPointerModifiersRef.current?.path === entry.relativePath ? entryPointerModifiersRef.current : null;
+    entryPointerModifiersRef.current = null;
+    const range = event.shiftKey || Boolean(pointerModifiers?.range);
+    const additive = event.ctrlKey || event.metaKey || Boolean(pointerModifiers?.additive);
+    const intent = fileEntryClickIntent({ openMode: itemOpenMode, selectionCount: selectedPaths.length, range, additive, clickCount: event.detail });
+    if (intent === 'ignore-repeat') return;
+    if (intent === 'range-select') {
+      selectEntryRange(entry.relativePath, additive);
+      return;
+    }
+    if (intent === 'toggle-select') {
+      toggleSelected(entry.relativePath);
+      return;
+    }
+    if (intent === 'add-and-preview') {
+      addSelectionAndSyncOpenPanes(entry);
+      return;
+    }
+    if (intent === 'select') {
+      selectionAnchorPathRef.current = entry.relativePath;
+      setSelectedPaths([entry.relativePath]);
+      return;
+    }
+    activateEntry(entry);
+  };
   const handleEntryDoubleClick = (event: React.MouseEvent, entry: ProjectFileEntry) => {
     if (itemOpenMode !== 'double' || inlineRenamePath === entry.relativePath) return;
     event.preventDefault();
     event.stopPropagation();
-    if (entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video') {
-      activateMediaPreview(entry);
-      if (metadataPanePinned || !previewOnlyOnMediaClick && !metadataPaneAutoOpenSuppressed) setMetadataPaneOpen(true);
-      else if (previewOnlyOnMediaClick) setMetadataPaneOpen(false);
-      return;
-    }
-    void openProjectEntry(entry);
+    if (event.ctrlKey || event.metaKey || event.shiftKey) return;
+    activateEntry(entry);
   };
   const handleFileSurfacePointerDownCapture = (event: React.PointerEvent<HTMLDivElement>) => {
     const pointerTarget = event.target as HTMLElement;
@@ -5161,9 +5221,27 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video') return <><MediaThumbnail entry={entry} cacheConfig={mediaCacheConfig} requestedSize={large ? gridThumbnailSize : 160} queueOrder={queueOrder} large={large}/>{entry.externalLink && <span aria-label="外链" className="shortcut-cover-badge"><ArrowUpRight size={large ? 16 : 10}/></span>}</>;
     return <SystemFileIcon filePath={entry.path} size={large ? 48 : 28}/>;
   };
-  const directoryReturnHighlightClass = (entry: ProjectFileEntry, inset = false) => directoryReturnHighlightPath === entry.relativePath
-    ? inset ? 'ring-2 ring-inset ring-blue-500' : 'ring-2 ring-blue-500'
-    : '';
+  const entryHasPreviewState = (entry: ProjectFileEntry) => previewHighlightPath === entry.relativePath || directoryReturnHighlightPath === entry.relativePath;
+  const renderEntrySelectionControl = (entry: ProjectFileEntry, list = false) => {
+    const selected = selectedPaths.includes(entry.relativePath);
+    return <button
+      type="button"
+      aria-pressed={selected}
+      aria-label={`${selected ? '取消选择' : '选择'} ${getEntryDisplayName(entry)}`}
+      onPointerDown={event => event.stopPropagation()}
+      onKeyDown={event => {
+        if (event.key === 'Enter' || event.key === ' ') event.stopPropagation();
+      }}
+      onDoubleClick={event => { event.preventDefault(); event.stopPropagation(); }}
+      onClick={event => {
+        event.stopPropagation();
+        if (event.detail > 1) return;
+        if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey);
+        else toggleSelected(entry.relativePath);
+      }}
+      className={`${list ? 'file-select-box' : 'file-grid-select'} ${selected ? 'is-selected border-blue-600 bg-blue-600 text-white' : `border-slate-300 ${list ? 'bg-white' : 'bg-white/90'} text-transparent`} ${list ? 'flex h-4 w-4 shrink-0' : 'absolute left-3 top-3 z-10 flex h-4 w-4'} items-center justify-center rounded border`}
+    ><CheckSquare size={12}/></button>;
+  };
   const startEntryDrag = (event: React.DragEvent<HTMLDivElement>, entry: ProjectFileEntry) => {
     event.preventDefault();
     event.stopPropagation();
@@ -5460,7 +5538,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   }, [loadProgressFolders, onNotice, project.name, project.path, project.status, refresh, workspacePath]);
   const renderVersionTreeEntry = (entry: ProjectFileEntry, progressFolder?: ProgressFolder, sourceKind?: 'image' | 'video') => {
     const selected = selectedPaths.includes(entry.relativePath);
-    const previewed = previewPath === entry.relativePath;
+    const previewed = entryHasPreviewState(entry);
     const returnHighlighted = directoryReturnHighlightPath === entry.relativePath;
     const workflow = progressFolder?.nodeRole === 'workflow';
     const previewArtifact = progressFolder?.nodeRole === 'artifact' && progressFolder.artifactKind === 'preview';
@@ -5493,9 +5571,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }}
       onContextMenu={event => openFileMenu(event, entry)}
       title={entry.name}
-      className={`group relative min-w-0 cursor-default rounded-lg border p-2 text-left transition ${progressFolder ? 'border-transparent bg-slate-500/[0.025] hover:border-blue-300/60 hover:bg-blue-500/[0.04]' : 'overflow-hidden border-transparent hover:bg-blue-50'} ${selected ? 'border-blue-400/80 bg-blue-500/[0.07] ring-1 ring-blue-400/70 shadow-sm' : ''} ${previewed ? 'project-file-entry-preview' : ''} ${returnHighlighted ? 'ring-2 ring-blue-500' : ''} ${previewArtifact ? 'border-amber-400/20' : transcodeArtifact ? 'border-blue-400/20' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'border-blue-500 bg-blue-100 ring-2 ring-blue-500' : ''}`}
+      className={`group relative min-w-0 cursor-default rounded-lg border p-2 text-left transition ${progressFolder ? 'border-transparent bg-slate-500/[0.025] hover:border-blue-300/60 hover:bg-blue-500/[0.04]' : 'overflow-hidden border-transparent hover:bg-blue-50'} ${selected ? 'border-blue-400/80 bg-blue-500/[0.07] ring-1 ring-blue-400/70 shadow-sm focus-visible:outline-none' : ''} ${previewed && !selected ? 'project-file-entry-preview' : ''} ${previewArtifact ? 'border-amber-400/20' : transcodeArtifact ? 'border-blue-400/20' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'border-blue-500 bg-blue-100 ring-2 ring-blue-500' : ''}`}
     >
-      <span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span>
+      {renderEntrySelectionControl(entry)}
       {progressFolder && (progressFolder.nodeRole === 'progress' ? <button type="button" onPointerDown={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); openMarkProgress(entry); }} title={`编辑 V${progressFolder.versionKey} 进度`} aria-label={`编辑 V${progressFolder.versionKey} 进度`} className="absolute right-3 top-3 z-10 rounded-full bg-blue-600 px-2 py-1 text-[10px] font-bold text-white shadow-sm transition hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-300">{versionTreeNodeBadgeLabel(progressFolder)}</button> : <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' || workflow ? 'bg-violet-600 text-white' : previewArtifact ? 'bg-amber-500 text-white' : transcodeArtifact ? 'bg-blue-600 text-white' : 'bg-slate-700 text-white'}`}>{versionTreeNodeBadgeLabel(progressFolder)}</span>)}
       {!progressFolder && sourceKind && <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-700 px-2 py-1 text-[10px] font-bold text-white shadow-sm">原始素材</span>}
       <div className={`relative flex aspect-square items-center justify-center ${previewArtifact ? 'rounded-xl bg-amber-500/[0.035]' : transcodeArtifact ? 'rounded-xl bg-blue-500/[0.035]' : ''}`}>{renderEntryIcon(entry, true)}</div>
@@ -5592,7 +5670,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         {projectWorkflows && fileMenuRegisteredProgressFolder && <><button disabled={fileMenuRegisteredProgressFolder.trackingState === 'committing' || fileMenuRegisteredProgressFolder.trackingState === 'needs_repair'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>修改进度</button>{!fileMenuRegisteredProgressFolder.parentProgressId && <button className="project-menu-item" onClick={() => { const progressFolder = fileMenuRegisteredProgressFolder; setFileMenu(null); void unregisterLegacyOrphanProgress(progressFolder); }}><X size={14}/>取消旧版游离进度登记</button>}{progressTrackingAction(fileMenuRegisteredProgressFolder) && <button disabled={progressSubmitting || Boolean(progressTask) || fileMenuRegisteredProgressFolder.trackingState === 'committing'} title="按已持久化策略刷新当前主分支版本跟踪" className="project-menu-item" onClick={() => { const progressFolder = fileMenuRegisteredProgressFolder; setFileMenu(null); void refreshProgressTracking(progressFolder); }}><RefreshCw size={14}/>{progressTrackingRefreshLabel(fileMenuRegisteredProgressFolder)}</button>}<div className="my-1 border-t border-slate-100"/></>}
         {gatherToProject && <><button disabled={fileMenuContainsShortcutContent || gatheringInspiration || !inspirationProjects.length} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); startGatherInspiration(targets); }}><FolderInput size={14}/>添加到项目{inspirationTargetProject ? `“${inspirationTargetProject.name}”` : '…'}</button>{inspirationTargetProject && <button disabled={fileMenuContainsShortcutContent || gatheringInspiration} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); setGatherPickerPaths(targets); }}><ChevronDown size={14}/>选择其他项目…</button>}<div className="my-1 border-t border-slate-100"/></>}
         {projectWorkflows && canSelectFileMenuMedia && <><button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><div className="my-1 border-t border-slate-100"/></>}
-        {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); openPreviewFromMenu(entry); }}><PanelLeftOpen size={14}/>预览</button>}
+        {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; const restoreSelection = fileMenuSelectionWasImplicitRef.current ? fileMenuSelectionSnapshotRef.current : null; setFileMenu(null); if (restoreSelection) { selectionAnchorPathRef.current = fileMenuSelectionAnchorSnapshotRef.current; setSelectedPaths(restoreSelection); } openPreviewFromMenu(entry); }}><PanelLeftOpen size={14}/>预览</button>}
         {!isFolderLikeEntry(fileMenu.entry) && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openProjectEntry(entry); }}><ExternalLink size={14}/>{fileMenu.entry.kind === 'shortcut' ? '打开快捷方式' : '用默认方式打开'}</button>}
         {fileMenu.entry.externalLink && <><button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; setFileMenu(null); void relinkExternalFolder(path); }}><RefreshCw size={14}/>重新定位外链</button><button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; setFileMenu(null); void materializeExternalLinks([path]); }}><FolderInput size={14}/>移动外链{fileMenu.entry.externalLinkTargetKind === 'file' ? '文件' : '文件夹'}到项目内</button></>}
         {fileMenu.entry.kind === 'shortcut' && !fileMenu.entry.externalLink && <button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; setFileMenu(null); void relinkExternalFolder(path); }}><RefreshCw size={14}/>重新接管旧版外链…</button>}
@@ -5646,8 +5724,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       </div>
 
       <div className="project-toolbar-wrap sticky top-0 z-30 -mx-6 w-[calc(100%+3rem)] bg-slate-50">
-      <div className="project-toolbar flex w-full flex-nowrap items-center border-b border-slate-200 px-6 py-1">
-        <div className="relative" onClick={event => event.stopPropagation()}>
+      <div className={`project-toolbar flex w-full flex-nowrap items-center border-b border-slate-200 px-6 py-1 ${selectedPaths.length ? 'project-toolbar--has-selection' : ''}`}>
+        <div className="project-toolbar-create-action relative" onClick={event => event.stopPropagation()}>
           <button onClick={toggleCreateMenu} title="新建" aria-label="新建" aria-haspopup="menu" aria-expanded={showCreateMenu} className="project-action-button"><FolderPlus size={16}/>新建</button>
           {showCreateMenu && <div className="project-create-menu absolute left-0 top-full z-40 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">
             {projectWorkflows && <button className="project-menu-item" onClick={() => void openProgressSetup('create')}><FolderPlus size={14}/>新建进度</button>}
@@ -5661,15 +5739,15 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             </div>
           </div>}
         </div>
-        <div className="relative" onClick={event => event.stopPropagation()}>
+        <div className="project-toolbar-import-action relative" onClick={event => event.stopPropagation()}>
           <button onClick={() => { const next = !showImportMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowImportMenu(next); }} title="导入" aria-label="导入" aria-haspopup="menu" aria-expanded={showImportMenu} className="project-action-button"><FolderInput size={16}/>导入</button>
           {showImportMenu && <div className="absolute left-0 top-full z-40 mt-1 w-48 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">
             {projectWorkflows && <button className="project-menu-item" onClick={() => { setShowImportMenu(false); setPanel('import'); }}><MemoryStick size={14}/>从 SD 卡导入</button>}
             <button className="project-menu-item" onClick={() => openManualImport(projectWorkflows ? 'original' : 'files')}><FolderInput size={14}/>导入</button>
           </div>}
         </div>
-        <span aria-hidden className="toolbar-divider"/>
-        {selectedPaths.length > 0 && <span className="mr-1 self-center text-xs text-slate-500">已选 {selectedPaths.length}</span>}
+        <span aria-hidden className="project-toolbar-core-divider toolbar-divider"/>
+        {selectedPaths.length > 0 && <span className="project-toolbar-selection mr-1 self-center text-xs text-slate-500">已选 {selectedPaths.length}</span>}
         <button disabled={finalViewOpen || selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : selectedContainsProtectedRenameEntry ? '所选文件夹由项目工作流管理，不能普通重命名' : finalViewOpen ? '喜爱图片浏览为只读视图' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={() => beginRename()} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
         <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '喜爱图片浏览为只读视图' : '剪切'} onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action"><Cut size={16}/>剪切</button>
         <button disabled={selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : '复制'} onClick={() => runFileOperation('copy')} className="project-action-button compact-hide-file-action"><Copy size={16}/>复制</button>
@@ -5701,6 +5779,23 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
               <button disabled={finalViewOpen || !clipboardHasFiles} onClick={() => runFileOperation('paste')} className="project-menu-item"><ClipboardPaste size={14}/>粘贴</button>
               <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('trash')} className="project-menu-item project-menu-danger"><Trash2 size={14}/>删除</button>
             </div>
+            <div className="project-toolbar-overflow-compact">
+              <div className="my-1 border-t border-slate-100"/>
+              <p className="px-2 pb-1 pt-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">新建与导入</p>
+              {projectWorkflows && <button className="project-menu-item" onClick={() => void openProgressSetup('create')}><FolderPlus size={14}/>新建进度</button>}
+              <button className="project-menu-item" onClick={() => void createFolder()}><Folder size={14}/>新建文件夹</button>
+              {shellNewTypes.length > 0 && <div className="max-h-40 overflow-y-auto border-y border-slate-100 py-1">
+                {shellNewTypes.map(type => <button key={`compact-${type.id}`} className="project-menu-item" onClick={() => void createShellNewFile(type)}>{type.iconDataUrl ? <img src={type.iconDataUrl} alt="" className="h-3.5 w-3.5 shrink-0 object-contain"/> : <File size={14}/>}<span className="min-w-0 flex-1 truncate">新建{type.label}</span></button>)}
+              </div>}
+              {projectWorkflows && <button className="project-menu-item" onClick={() => setPanel('import')}><MemoryStick size={14}/>从 SD 卡导入</button>}
+              <button className="project-menu-item" onClick={() => openManualImport(projectWorkflows ? 'original' : 'files')}><FolderInput size={14}/>导入文件</button>
+              <div className="my-1 border-t border-slate-100"/>
+              <p className="px-2 pb-1 pt-1 text-[10px] font-bold uppercase tracking-wide text-slate-400">视图</p>
+              <button type="button" onClick={() => { setSearchQuery(''); selectFolderBrowseMode('recent'); }} aria-pressed={browseMode === 'recent'} className={`project-menu-item ${browseMode === 'recent' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><GalleryVerticalEnd size={14}/>所有文件</button>
+              <button type="button" onClick={() => selectFolderBrowseMode('grid')} aria-pressed={browseMode === 'grid'} className={`project-menu-item ${browseMode === 'grid' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><Grid2X2 size={14}/>图标模式</button>
+              <button type="button" onClick={() => selectFolderBrowseMode('list')} aria-pressed={browseMode === 'list'} className={`project-menu-item ${browseMode === 'list' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><LayoutList size={14}/>列表模式</button>
+              {projectVersionTreeAvailable && <button type="button" onClick={showVersionTree} aria-pressed={browseMode === 'version-tree'} className={`project-menu-item ${browseMode === 'version-tree' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><GitBranch size={14}/>项目版本树</button>}
+            </div>
             <div className="project-toolbar-overflow-secondary">
               {(gatherToProject || projectWorkflows && hasProjectToolbarActions) && <div className="my-1 border-t border-slate-100"/>}
               {gatherToProject && <><button type="button" disabled={!selectedPaths.length || selectedContainsShortcutContent || gatheringInspiration || !inspirationProjects.length} onClick={() => startGatherInspiration(selectedPaths)} className="project-menu-item">{gatheringInspiration ? <Loader2 size={14} className="animate-spin"/> : <FolderInput size={14}/>}添加到{inspirationTargetProject ? `“${inspirationTargetProject.name}”` : '项目'}</button><button type="button" disabled={!selectedPaths.length || selectedContainsShortcutContent || gatheringInspiration || !inspirationProjects.length} onClick={() => setGatherPickerPaths(selectedPaths)} className="project-menu-item"><ChevronDown size={14}/>选择目标项目</button></>}
@@ -5711,14 +5806,16 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             </div>
           </div>}
         </div>
-        <span aria-hidden className="toolbar-divider"/>
-        <div className="ml-auto flex shrink-0 items-center gap-1 pl-3">
+        <span aria-hidden className="project-toolbar-view-divider toolbar-divider"/>
+        <div className="project-toolbar-view-actions ml-auto flex shrink-0 items-center gap-1 pl-3">
+          <div className="project-toolbar-view-mode-actions contents">
           <button type="button" onClick={() => { setSearchQuery(''); selectFolderBrowseMode('recent'); }} title="所有文件（包含子文件夹和文件夹快捷方式）" aria-label="所有文件" aria-pressed={browseMode === 'recent'} className={`rounded-md p-1.5 ${browseMode === 'recent' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><GalleryVerticalEnd size={17}/></button>
           <button type="button" onClick={() => selectFolderBrowseMode('grid')} title="图标模式" aria-label="图标模式" aria-pressed={browseMode === 'grid'} className={`rounded-md p-1.5 ${browseMode === 'grid' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><Grid2X2 size={17}/></button>
           <button type="button" onClick={() => selectFolderBrowseMode('list')} title="列表模式" aria-label="列表模式" aria-pressed={browseMode === 'list'} className={`rounded-md p-1.5 ${browseMode === 'list' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><LayoutList size={17}/></button>
           {projectVersionTreeAvailable && <button type="button" onClick={showVersionTree} title="项目版本树" aria-label="项目版本树" aria-pressed={browseMode === 'version-tree'} className={`rounded-md p-1.5 ${browseMode === 'version-tree' ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><GitBranch size={17}/></button>}
+          </div>
           {(browseMode === 'grid' || browseMode === 'version-tree') && <input aria-label="图标大小" title="图标大小" type="range" min={MIN_FOLDER_GRID_ICON_SIZE} max={MAX_FOLDER_GRID_ICON_SIZE} step="4" value={gridIconSize} onChange={event => selectFolderGridIconSize(Number(event.target.value))} className="compact-hide-slider ml-2 w-24 accent-blue-600"/>}
-          <span aria-hidden className="mx-1 h-5 w-px bg-slate-200"/>
+          <span aria-hidden className="project-toolbar-view-mode-divider mx-1 h-5 w-px bg-slate-200"/>
           <div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !showSortMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowSortMenu(next); }} title={versionTreeOpen ? '排序版本树中的媒体' : recursiveFlatOpen ? '排序每个文件夹中的文件' : '排序'} aria-label="排序" aria-haspopup="menu" aria-expanded={showSortMenu} className={`rounded-md p-1.5 ${showSortMenu ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><ArrowUpDown size={17}/></button>{showSortMenu && <div className="sort-menu absolute right-0 top-full z-40 mt-1 w-44 rounded-lg border border-slate-200 bg-white p-1 shadow-xl">{([['name', '文件名'], ['date', '修改日期'], ['size', '大小']] as const).map(([field, label]) => <button key={field} type="button" onClick={() => selectSortField(field)} className={`project-menu-item ${sortField === field ? 'bg-blue-50 font-bold text-blue-600' : ''}`}>{label}</button>)}<div className="my-1 border-t border-slate-100"/><button type="button" onClick={() => setSortDirection('asc')} className={`project-menu-item ${sortDirection === 'asc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowUp size={14}/><span>递增</span></button><button type="button" onClick={() => setSortDirection('desc')} className={`project-menu-item ${sortDirection === 'desc' ? 'bg-blue-50 font-bold text-blue-600' : ''}`}><ArrowDown size={14}/><span>递减</span></button></div>}</div>
           <div className="relative" onClick={event => event.stopPropagation()}><button type="button" onClick={() => { const next = !searchOpen; window.dispatchEvent(new Event('photoflow-menu-open')); setSearchOpen(next); }} title={versionTreeOpen ? '查找版本树中的文件（Ctrl+F）' : '查找文件（Ctrl+F）'} aria-label="查找文件" aria-expanded={searchOpen} className={`rounded-md p-1.5 ${searchOpen || searchQuery ? 'bg-blue-100 text-blue-700' : 'text-slate-500 hover:bg-slate-200'}`}><Search size={17}/></button>{searchOpen && <div className="absolute right-0 top-full z-40 mt-1 w-72 rounded-lg border border-slate-200 bg-white p-2 shadow-xl"><div className="flex items-center gap-2 rounded-md border border-slate-200 bg-slate-50 px-2"><Search size={15} className="shrink-0 text-slate-400"/><input ref={searchInputRef} autoFocus value={searchQuery} onChange={event => setSearchQuery(event.target.value)} onKeyDown={event => { if (event.key === 'Escape') { setSearchOpen(false); setSearchQuery(''); } }} placeholder="输入文件名" className="min-w-0 flex-1 bg-transparent py-2 text-sm text-slate-800 outline-none"/>{searchQuery && <button type="button" onClick={() => setSearchQuery('')} title="清除查找" className="rounded p-0.5 text-slate-400 hover:bg-slate-200"><X size={14}/></button>}</div></div>}</div>
           <div className="relative" onClick={event => event.stopPropagation()}>
@@ -5985,7 +6082,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <section className="mt-5 border-t border-slate-200 pt-5"><h4 className="mb-2 text-sm font-bold text-slate-700">扩展名</h4><div className="flex flex-wrap items-center gap-3 rounded-lg border border-slate-200 bg-slate-50 p-3"><select value={batchExtensionMode} onChange={event => setBatchExtensionMode(event.target.value as 'preserve' | 'replace')} className="w-40 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm"><option value="preserve">不修改扩展名</option><option value="replace">修改扩展名</option></select>{batchExtensionMode === 'replace' && <input autoFocus value={batchExtensionValue} onChange={event => setBatchExtensionValue(event.target.value.replace(/^\.+/, ''))} placeholder="例如 jpg" className="min-w-[180px] flex-1 rounded-md border border-slate-300 bg-white px-3 py-2 text-sm outline-none focus:border-blue-500"/>}<span className="text-xs text-slate-400">文件夹不受此设置影响</span></div></section>
         <section className="mt-5 border-t border-slate-200 pt-5"><h4 className="mb-2 text-sm font-bold text-slate-700">预览</h4><div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50">{batchRenameEntries.slice(0, 20).map((entry, index) => <div key={entry.path} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-b border-slate-200 px-3 py-2 text-xs last:border-0"><span className="truncate text-slate-500" title={entry.name}>{entry.name}</span><ArrowRight size={13} className="text-slate-300"/><span className="truncate font-medium text-slate-700" title={batchRenameNames[index]}>{batchRenameNames[index] || '（空文件名）'}</span></div>)}{batchRenameEntries.length > 20 && <p className="px-3 py-2 text-center text-xs text-slate-400">另有 {batchRenameEntries.length - 20} 个项目</p>}</div></section>
       </div><footer className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-4"><p className="text-xs text-slate-500">重命名使用临时文件过渡，不会因名称互换产生冲突。</p><div className="flex gap-2"><button onClick={() => setBatchRenameOpen(false)} className="dialog-secondary">取消</button><button onClick={commitBatchRename} disabled={!batchRenameNames.length || batchRenameNames.some(name => !name) || batchExtensionMode === 'replace' && !batchExtensionValue.trim() || new Set(batchRenameNames.map(name => name.toLocaleLowerCase())).size !== batchRenameNames.length || renameCommitRef.current} className="dialog-primary">批量重命名</button></div></footer></div></div>}
-      {versionEntry && <div className={activeView === 'version' ? 'contents' : 'hidden'}><VersionManager active={active && activeView === 'version'} entry={versionEntry} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} videoPlaybackSettings={videoPlaybackSettings} progressId={progressFolderForMediaEntry(versionEntry)?.id} progressVersionKey={progressFolderForMediaEntry(versionEntry)?.versionKey} onNotice={onNotice} onVersionStateChanged={() => { if (finalViewOpen) void loadFinalViewEntries(); }} onClose={() => { setVersionEntry(null); onCloseToolTab('version'); if (finalViewOpen) void loadFinalViewEntries(); }}/></div>}
+      {renderedVersionEntry && <div className={activeView === 'version' ? 'contents' : 'hidden'}><VersionManager active={active && activeView === 'version'} entry={renderedVersionEntry} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} videoPlaybackSettings={videoPlaybackSettings} progressId={versionProgressFolder?.id || versionProgressId} progressVersionKey={versionProgressFolder?.versionKey} onNotice={onNotice} onVersionStateChanged={() => { if (finalViewOpen) void loadFinalViewEntries(); }} onClose={() => { setVersionEntry(null); setVersionProgressId(''); versionProgressLocationRef.current = null; onCloseToolTab('version'); if (finalViewOpen) void loadFinalViewEntries(); }}/></div>}
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {versionTreeOpen ? <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={handleFileSurfacePointerDownCapture} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-0 flex-1 select-none overflow-hidden outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
@@ -6026,7 +6123,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         </div> : <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={handleFileSurfacePointerDownCapture} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING, paddingInline: FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-[220px] flex-1 select-none outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
           {groupedResultsActive && (groupedLoading ? <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>{projectRootFilterActive ? '正在分页读取全部文件…' : searchQuery.trim() ? `正在搜索${recursiveScopeLabel}…` : '正在读取所有文件…'}</p> : groupedError ? <p className="py-8 text-center text-sm text-red-600">读取文件失败：{groupedError}</p> : searchResultGroups.length ? <div className="pb-4">
             <p className="px-1 text-xs text-slate-500">{projectRootFilterActive ? `已分页加载${browserContext.title}中的 ${displayedFileEntries.length} 个文件` : searchQuery.trim() ? `在${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : recursiveScopeLabel}中找到 ${displayedFileEntries.length} 个文件` : `已加载${currentRelativePath ? `“${currentRelativePath}”及其子文件夹` : recursiveScopeLabel}中的 ${displayedFileEntries.length} 个文件`}</p>
-            {searchResultGroups.map(([folderPath, entries], groupIndex) => { const viaShortcut = entries.some(entry => entry.viaShortcut); const viaExternalLink = entries.some(entry => entry.viaExternalLink); const readOnlyShortcut = viaShortcut && !viaExternalLink; const folderLabel = viaShortcut ? folderPath.replace(/\.lnk(?=\/|$)/gi, '') : folderPath; const targetLabel = folderLabel || project.name; const normalizedFolderPath = normalizeProjectRelativePath(folderPath); return <section key={folderPath || '__root__'} data-recursive-folder-path={normalizedFolderPath} data-recursive-folder-label={targetLabel} data-recursive-folder-readonly={readOnlyShortcut ? 'true' : 'false'} onContextMenu={event => { if (readOnlyShortcut) { event.preventDefault(); event.stopPropagation(); onNotice('快捷方式指向的外部文件夹是只读浏览区域'); } else openSurfaceMenu(event, normalizedFolderPath, targetLabel); }} onDragOver={event => handleRecursiveFolderDragOver(event, normalizedFolderPath, readOnlyShortcut)} onDragLeave={event => handleRecursiveFolderDragLeave(event, normalizedFolderPath)} onDrop={event => void handleRecursiveFolderDrop(event, normalizedFolderPath, targetLabel, readOnlyShortcut)} className={`${groupIndex ? 'mt-5 border-t border-slate-200 pt-4' : 'pt-3'} rounded-lg transition ${recursiveDropTargetPath === normalizedFolderPath ? 'bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}><header className="mb-2 flex min-w-0 items-center gap-2 px-1"><Folder size={16} className="shrink-0 text-blue-500"/>{readOnlyShortcut ? <span title={`${folderLabel}（快捷方式）`} className="min-w-0 truncate text-sm font-bold text-slate-700">{folderLabel || '快捷方式'} <span className="font-normal text-slate-400">（快捷方式）</span></span> : <button type="button" onClick={() => { setSearchQuery(''); navigateToDirectory(folderPath); }} title={`打开 ${folderPath || project.name}`} className="min-w-0 truncate text-sm font-bold text-slate-700 hover:text-blue-600">{folderPath || '项目根目录'}</button>}<span className="shrink-0 text-xs text-slate-400">{entries.length} 个</span></header><div className="grid w-full content-start" style={{ gap: FILE_GRID_GAP, gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{entries.map(entry => <div key={`${entry.relativePath}|${entry.path}`} role="button" tabIndex={0} draggable={!entry.viaShortcut || entry.viaExternalLink} onDragStart={event => startEntryDrag(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} onClick={event => handleEntryClick(event, entry)} onDoubleClick={event => handleEntryDoubleClick(event, entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.relativePath} className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) ? 'bg-blue-50 ring-1 ring-blue-400' : ''} ${previewPath === entry.relativePath ? 'project-file-entry-preview' : ''} ${directoryReturnHighlightClass(entry)} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''}`}><span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span><div className="relative flex aspect-square items-center justify-center">{renderEntryIcon(entry, true)}</div><p className="mt-2 truncate text-xs font-medium text-slate-700">{getEntryDisplayName(entry)}</p><p className="mt-0.5 text-[10px] uppercase text-slate-400">{getEntryTypeLabel(entry)}</p></div>)}</div></section>; })}
+            {searchResultGroups.map(([folderPath, entries], groupIndex) => { const viaShortcut = entries.some(entry => entry.viaShortcut); const viaExternalLink = entries.some(entry => entry.viaExternalLink); const readOnlyShortcut = viaShortcut && !viaExternalLink; const folderLabel = viaShortcut ? folderPath.replace(/\.lnk(?=\/|$)/gi, '') : folderPath; const targetLabel = folderLabel || project.name; const normalizedFolderPath = normalizeProjectRelativePath(folderPath); return <section key={folderPath || '__root__'} data-recursive-folder-path={normalizedFolderPath} data-recursive-folder-label={targetLabel} data-recursive-folder-readonly={readOnlyShortcut ? 'true' : 'false'} onContextMenu={event => { if (readOnlyShortcut) { event.preventDefault(); event.stopPropagation(); onNotice('快捷方式指向的外部文件夹是只读浏览区域'); } else openSurfaceMenu(event, normalizedFolderPath, targetLabel); }} onDragOver={event => handleRecursiveFolderDragOver(event, normalizedFolderPath, readOnlyShortcut)} onDragLeave={event => handleRecursiveFolderDragLeave(event, normalizedFolderPath)} onDrop={event => void handleRecursiveFolderDrop(event, normalizedFolderPath, targetLabel, readOnlyShortcut)} className={`${groupIndex ? 'mt-5 border-t border-slate-200 pt-4' : 'pt-3'} rounded-lg transition ${recursiveDropTargetPath === normalizedFolderPath ? 'bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}><header className="mb-2 flex min-w-0 items-center gap-2 px-1"><Folder size={16} className="shrink-0 text-blue-500"/>{readOnlyShortcut ? <span title={`${folderLabel}（快捷方式）`} className="min-w-0 truncate text-sm font-bold text-slate-700">{folderLabel || '快捷方式'} <span className="font-normal text-slate-400">（快捷方式）</span></span> : <button type="button" onClick={() => { setSearchQuery(''); navigateToDirectory(folderPath); }} title={`打开 ${folderPath || project.name}`} className="min-w-0 truncate text-sm font-bold text-slate-700 hover:text-blue-600">{folderPath || '项目根目录'}</button>}<span className="shrink-0 text-xs text-slate-400">{entries.length} 个</span></header><div className="grid w-full content-start" style={{ gap: FILE_GRID_GAP, gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{entries.map(entry => <div key={`${entry.relativePath}|${entry.path}`} role="button" tabIndex={0} draggable={!entry.viaShortcut || entry.viaExternalLink} onDragStart={event => startEntryDrag(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} onClick={event => handleEntryClick(event, entry)} onDoubleClick={event => handleEntryDoubleClick(event, entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.relativePath} className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) ? 'bg-blue-50 ring-1 ring-blue-400 focus-visible:outline-none' : ''} ${entryHasPreviewState(entry) && !selectedPaths.includes(entry.relativePath) ? 'project-file-entry-preview' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''}`}>{renderEntrySelectionControl(entry)}<div className="relative flex aspect-square items-center justify-center">{renderEntryIcon(entry, true)}</div><p className="mt-2 truncate text-xs font-medium text-slate-700">{getEntryDisplayName(entry)}</p><p className="mt-0.5 text-[10px] uppercase text-slate-400">{getEntryTypeLabel(entry)}</p></div>)}</div></section>; })}
             {(!searchQuery.trim() || projectRootFilterActive) && <p className={`py-6 text-center text-xs ${groupedLoadError ? 'text-red-500' : 'text-slate-400'}`}>{groupedLoadError ? `继续加载失败：${groupedLoadError}` : groupedLoadingMore ? <><Loader2 size={14} className="mr-1.5 inline animate-spin"/>正在继续加载…</> : groupedHasMore ? '继续向下滚动以加载更多文件' : '已显示当前范围内的全部文件'}</p>}
           </div> : <p className="py-12 text-center text-sm text-slate-400">{projectRootFilterActive ? `${browserContext.title}中没有符合筛选条件的${filteredFileTypeLabel}。` : searchQuery.trim() ? `没有在${recursiveScopeLabel}中找到包含“${searchQuery}”且符合筛选条件的文件。` : `当前范围内没有可显示的${filteredFileTypeLabel}。`}</p>)}
           {!groupedResultsActive && searchQuery.trim() && searchLoading && <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>正在搜索{recursiveScopeLabel}…</p>}
@@ -6040,14 +6137,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
               <span className="file-list-heading-cell"><span className="file-list-heading-label">大小</span><FileListColumnResizeHandle last label="调整大小列宽度" onDrag={deltaX => resizeFileListBoundary(3, deltaX)}/></span>
             </div>
             {virtualWindow.top > 0 && <div aria-hidden style={{ height: virtualWindow.top }} />}
-            {renderedFileEntries.map(entry => <div role="button" tabIndex={0} draggable={inlineRenamePath !== entry.relativePath} onDragStart={event => startEntryDrag(event, entry)} onDragOver={event => handleEntryDragOver(event, entry)} onDragLeave={event => handleEntryDragLeave(event, entry)} onDrop={event => void handleEntryDrop(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} key={entry.path} onMouseEnter={() => prefetchDirectory(entry)} onClick={event => handleEntryClick(event, entry)} onDoubleClick={event => handleEntryDoubleClick(event, entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.name} className={`file-list-row group w-full cursor-default border-t border-slate-200 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) ? 'bg-blue-50' : ''} ${previewPath === entry.relativePath ? 'project-file-entry-preview' : ''} ${directoryReturnHighlightClass(entry, true)} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-inset ring-blue-500' : ''}`}>
-              <span className="flex min-w-0 items-center gap-2.5 overflow-hidden"><span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-select-box ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white text-transparent'} flex h-4 w-4 shrink-0 items-center justify-center rounded border`}><CheckSquare size={12}/></span><span className="relative flex h-9 w-11 shrink-0 items-center justify-center overflow-hidden">{renderEntryIcon(entry)}</span>{renderEntryName(entry)}</span>
+            {renderedFileEntries.map(entry => <div role="button" tabIndex={0} draggable={inlineRenamePath !== entry.relativePath} onDragStart={event => startEntryDrag(event, entry)} onDragOver={event => handleEntryDragOver(event, entry)} onDragLeave={event => handleEntryDragLeave(event, entry)} onDrop={event => void handleEntryDrop(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} key={entry.path} onMouseEnter={() => prefetchDirectory(entry)} onClick={event => handleEntryClick(event, entry)} onDoubleClick={event => handleEntryDoubleClick(event, entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.name} className={`file-list-row group w-full cursor-default border-t border-slate-200 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) ? 'bg-blue-50 focus-visible:outline-none' : ''} ${entryHasPreviewState(entry) && !selectedPaths.includes(entry.relativePath) ? 'project-file-entry-preview' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-inset ring-blue-500' : ''}`}>
+              <span className="flex min-w-0 items-center gap-2.5 overflow-hidden">{renderEntrySelectionControl(entry, true)}<span className="relative flex h-9 w-11 shrink-0 items-center justify-center overflow-hidden">{renderEntryIcon(entry)}</span>{renderEntryName(entry)}</span>
               <span className="min-w-0 truncate text-slate-500">{entry.updatedAt ? new Date(entry.updatedAt).toLocaleString() : '…'}</span>
               <span className="min-w-0 truncate uppercase text-slate-500">{getEntryTypeLabel(entry)}</span>
               <span className="min-w-0 truncate text-slate-500">{entry.kind === 'folder' ? '' : entry.size >= 0 ? formatFileSize(entry.size) : '…'}</span>
             </div>)}
             {virtualWindow.bottom > 0 && <div aria-hidden style={{ height: virtualWindow.bottom }} />}
-          </div> : <><div aria-hidden style={{ height: virtualWindow.top }}/><div className="grid w-full content-start" style={{ gap: FILE_GRID_GAP, gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{renderedFileEntries.map(entry => <div role="button" tabIndex={0} draggable={inlineRenamePath !== entry.relativePath} onDragStart={event => startEntryDrag(event, entry)} onDragOver={event => handleEntryDragOver(event, entry)} onDragLeave={event => handleEntryDragLeave(event, entry)} onDrop={event => void handleEntryDrop(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} key={entry.path} onMouseEnter={() => prefetchDirectory(entry)} onClick={event => handleEntryClick(event, entry)} onDoubleClick={event => handleEntryDoubleClick(event, entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.name} className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) ? 'bg-blue-50 ring-1 ring-blue-400' : ''} ${previewPath === entry.relativePath ? 'project-file-entry-preview' : ''} ${directoryReturnHighlightClass(entry)} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-blue-500' : ''}`}><span onClick={event => { event.stopPropagation(); if (event.shiftKey) selectEntryRange(entry.relativePath, event.ctrlKey || event.metaKey); else toggleSelected(entry.relativePath); }} className={`file-grid-select ${selectedPaths.includes(entry.relativePath) ? 'is-selected border-blue-600 bg-blue-600 text-white' : 'border-slate-300 bg-white/90 text-transparent'} absolute left-3 top-3 z-10 flex h-4 w-4 items-center justify-center rounded border`}><CheckSquare size={12}/></span><div className="relative flex aspect-square items-center justify-center">{renderEntryIcon(entry, true)}</div>{renderEntryName(entry, true)}<p className="mt-0.5 text-[10px] uppercase text-slate-400">{getEntryTypeLabel(entry)}</p></div>)}</div><div aria-hidden style={{ height: virtualWindow.bottom }}/></> : <p className="border-y border-slate-200 py-12 text-center text-sm text-slate-400">{searchQuery ? `没有找到包含“${searchQuery}”且符合筛选条件的文件。` : `当前文件夹没有${filteredFileTypeLabel}。`}</p>}
+          </div> : <><div aria-hidden style={{ height: virtualWindow.top }}/><div className="grid w-full content-start" style={{ gap: FILE_GRID_GAP, gridTemplateColumns: `repeat(auto-fill, minmax(min(100%, ${gridIconSize}px), 1fr))` }}>{renderedFileEntries.map(entry => <div role="button" tabIndex={0} draggable={inlineRenamePath !== entry.relativePath} onDragStart={event => startEntryDrag(event, entry)} onDragOver={event => handleEntryDragOver(event, entry)} onDragLeave={event => handleEntryDragLeave(event, entry)} onDrop={event => void handleEntryDrop(event, entry)} data-entry-kind={entry.kind} data-entry-path={entry.relativePath} key={entry.path} onMouseEnter={() => prefetchDirectory(entry)} onClick={event => handleEntryClick(event, entry)} onDoubleClick={event => handleEntryDoubleClick(event, entry)} onKeyDown={event => { if (event.key === 'Enter') handleEntryClick(event, entry); }} onContextMenu={event => openFileMenu(event, entry)} title={entry.name} className={`group relative min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedPaths.includes(entry.relativePath) ? 'bg-blue-50 ring-1 ring-blue-400 focus-visible:outline-none' : ''} ${entryHasPreviewState(entry) && !selectedPaths.includes(entry.relativePath) ? 'project-file-entry-preview' : ''} ${cutPaths.includes(entry.relativePath) ? 'opacity-45' : ''} ${dragTargetPath === entry.relativePath ? 'bg-blue-100 ring-2 ring-blue-500' : ''}`}>{renderEntrySelectionControl(entry)}<div className="relative flex aspect-square items-center justify-center">{renderEntryIcon(entry, true)}</div>{renderEntryName(entry, true)}<p className="mt-0.5 text-[10px] uppercase text-slate-400">{getEntryTypeLabel(entry)}</p></div>)}</div><div aria-hidden style={{ height: virtualWindow.bottom }}/></> : <p className="border-y border-slate-200 py-12 text-center text-sm text-slate-400">{searchQuery ? `没有找到包含“${searchQuery}”且符合筛选条件的文件。` : `当前文件夹没有${filteredFileTypeLabel}。`}</p>}
           </div>
         </div>}
       </section>

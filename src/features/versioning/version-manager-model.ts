@@ -41,7 +41,10 @@ export const mainBranchPhotoSummaries = (entries: readonly MainBranchMediaLike[]
       missing: versions.every(entry => entry.version.fileMissing),
       previewVersion: previewEntry?.version,
     };
-  }).sort((left, right) => left.firstBranchIndex - right.firstBranchIndex || left.originalName.localeCompare(right.originalName, 'zh-CN') || left.photoId.localeCompare(right.photoId));
+  }).sort((left, right) => Number(right.versionCount > 1) - Number(left.versionCount > 1)
+    || left.firstBranchIndex - right.firstBranchIndex
+    || left.originalName.localeCompare(right.originalName, 'zh-CN')
+    || left.photoId.localeCompare(right.photoId));
 };
 
 export const paginateMainBranchPhotos = (photos: readonly MainBranchPhotoSummary[], page: number, pageSize = MAIN_BRANCH_PHOTO_PAGE_SIZE) => {

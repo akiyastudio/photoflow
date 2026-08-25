@@ -24,7 +24,7 @@ export const teamWorkflowSourcePaths = (photos: TeamProjectPhoto[]) => photos
   .filter(photo => photo.tasks.length > 0)
   .map(photo => photo.sourcePath);
 
-export const useTeamOutputProgress = (sourceFilePaths: string | string[], workspacePath: string, project: WorkspaceProject, onNotice: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void) => {
+export const useTeamOutputProgress = (sourceFilePaths: string | string[], workspacePath: string, project: WorkspaceProject, onNotice: (message: string, tone: 'info' | 'success' | 'warning' | 'error') => void) => {
   const normalizedSourcePaths = useMemo(
     () => [...new Set((Array.isArray(sourceFilePaths) ? sourceFilePaths : [sourceFilePaths]).filter(Boolean))],
     [Array.isArray(sourceFilePaths) ? sourceFilePaths.join('|') : sourceFilePaths],
@@ -68,7 +68,7 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
   useEffect(() => {
     let active = true;
     void refresh().catch(error => {
-      if (active) onNotice(`读取合成目标失败：${error instanceof Error ? error.message : String(error)}`);
+      if (active) onNotice(`读取合成目标失败：${error instanceof Error ? error.message : String(error)}`, 'error');
     });
     return () => { active = false; };
   }, [refresh, onNotice]);

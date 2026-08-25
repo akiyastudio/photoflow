@@ -35,7 +35,7 @@ type Props = {
   onBlockedStage?: (reason: string) => void;
   onClose: () => void;
   onOpenSettings: () => void;
-  onNotice: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
+  onNotice: (message: string, tone: 'info' | 'success' | 'warning' | 'error') => void;
   onEntriesChange?: (entries: ProjectFileEntry[]) => void;
   onProjectChanged?: () => void;
   onBusyChange?: (busy: boolean) => void;
@@ -478,7 +478,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, comp
     setLoading(true);
     const result = await legacyApi.getTeamPatches(workspacePath, project.status, project.name, entry.relativePath, initialPhoto?.baseVersionId || entry.teamHistoryBaseVersionId || '');
     setLoading(false);
-    if (!result.success) { onNotice(`打开团片协作失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`打开团片协作失败：${result.error || '未知错误'}`, 'error'); return; }
     setBundle(normalizeBundle(result));
   };
   useEffect(() => {
@@ -517,17 +517,17 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, comp
     setDetectionProgress({ progress: 1, message: '正在启动 AI 识别进程…' });
     const result = await legacyApi.detectTeamPatchPeople(workspacePath, project.status, project.name, { photoId: bundle.photo.id, baseVersionId: baseVersion.id, restoreExcluded });
     setBusy('');
-    if (!result.success) { onNotice(`AI 识别失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`AI 识别失败：${result.error || '未知错误'}`, 'error'); return; }
     setBundle(normalizeBundle(result));
     await onDetectionComplete();
     const personCount = result.detection?.personCount || result.tasks.reduce((total, task) => total + membersOf(task).length, 0);
-    onNotice(restoreExcluded ? `已恢复人工排除记录并重新识别 ${personCount} 个人物` : `已识别 ${personCount} 个人物，并自动尝试匹配项目中的人物身份`);
+    onNotice(restoreExcluded ? `已恢复人工排除记录并重新识别 ${personCount} 个人物` : `已识别 ${personCount} 个人物，并自动尝试匹配项目中的人物身份`, 'success');
   };
 
   const updateTask = async (task: TeamPatchTask, changes: { personName?: string; assignee?: string; crop?: Crop; needsReview?: boolean; reviewReason?: string }) => {
     if (!bundle.photo) return null;
     const result = await legacyApi.updateTeamPatch(workspacePath, { photoId: bundle.photo.id, taskId: task.id, status: project.status, projectName: project.name, ...changes });
-    if (!result.success) { onNotice(`更新工作图失败：${result.error || '未知错误'}`); return null; }
+    if (!result.success) { onNotice(`更新工作图失败：${result.error || '未知错误'}`, 'error'); return null; }
     setBundle(current => ({ ...current, tasks: result.tasks }));
     return result;
   };
@@ -537,7 +537,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, comp
     setBusy(`crop:${cropEditor.task.id}`);
     const result = await updateTask(cropEditor.task, { crop: cropEditor.crop, needsReview: false, reviewReason: '' });
     setBusy('');
-    if (result) { setCropEditor(null); onNotice(result.warning || `已按新范围重新生成工作图${result.workflowRefreshCount ? `，并同步更新 ${result.workflowRefreshCount} 个工作区文件` : ''}`); }
+    if (result) { setCropEditor(null); onNotice(result.warning || `已按新范围重新生成工作图${result.workflowRefreshCount ? `，并同步更新 ${result.workflowRefreshCount} 个工作区文件` : ''}`, result.warning ? 'warning' : 'success'); }
   };
 
   const deleteTask = async (task: TeamPatchTask) => {
@@ -545,7 +545,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, comp
     setBusy(`delete:${task.id}`);
     const result = await legacyApi.deleteTeamPatch(workspacePath, { photoId: bundle.photo.id, taskId: task.id });
     setBusy('');
-    if (!result.success) { onNotice(`删除工作图失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`删除工作图失败：${result.error || '未知错误'}`, 'error'); return; }
     setBundle(current => ({ ...current, tasks: result.tasks }));
     await onIdentityChanged();
   };
@@ -555,7 +555,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, comp
     setBusy('remove-photo');
     const result = await legacyApi.removeProjectTeamPhoto(workspacePath, { photoId: bundle.photo.id, baseVersionId: baseVersion.id });
     setBusy('');
-    if (!result.success) { onNotice(`删除失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`删除失败：${result.error || '未知错误'}`, 'error'); return; }
     onProjectChanged?.();
     onEntriesChange?.([]);
   };
@@ -668,7 +668,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
       if (sequence === identityLoadSequenceRef.current) {
         const message = error instanceof Error ? error.message : String(error);
         setIdentityLoadError(message);
-        onNotice(`读取人物数据失败：${message}`);
+        onNotice(`读取人物数据失败：${message}`, 'error');
       }
     } finally {
       if (sequence === identityLoadSequenceRef.current) setIdentityLoading(false);
@@ -686,13 +686,13 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
   useEffect(() => {
     if (!identityState.workflowNode?.id) return;
     void teamGraph.ensureWorkflowInputs(identityState.workflowNode.id).then(() => onProjectChanged?.()).catch(error => {
-      onNotice(`登记团片来源关系失败：${error instanceof Error ? error.message : String(error)}`);
+      onNotice(`登记团片来源关系失败：${error instanceof Error ? error.message : String(error)}`, 'error');
     });
   }, [identityState.workflowNode?.id, teamGraph.sourceProgressIds.join('|')]);
 
   const openIdentityPicker = (subjectKey: string) => {
     const subject = identitySubjects.find(candidate => candidate.key === subjectKey);
-    if (!subject) { onNotice('人物识别数据仍在加载，请稍后再试'); return; }
+    if (!subject) { onNotice('人物识别数据仍在加载，请稍后再试', 'info'); return; }
     const identityId = subject.assignment?.identityId;
     const source = subject.assignment?.source;
     const candidates = identityId && (isGeneratedIdentity(subject.identity) || source === 'suggested')
@@ -705,7 +705,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
   };
 
   const openNextUnmarkedIdentity = () => {
-    if (!identitySubjects.some(isUnmarkedIdentitySubject)) { onNotice('当前没有未标记人物'); return; }
+    if (!identitySubjects.some(isUnmarkedIdentitySubject)) { onNotice('当前没有未标记人物', 'info'); return; }
     const lastIndex = identitySubjects.findIndex(subject => subject.key === lastUnmarkedSubjectKeyRef.current);
     const ordered = lastIndex >= 0 ? [...identitySubjects.slice(lastIndex + 1), ...identitySubjects.slice(0, lastIndex + 1)] : identitySubjects;
     const nextSubject = ordered.find(isUnmarkedIdentitySubject);
@@ -733,7 +733,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
       assignments,
     });
     setIdentityPickerBusy(false);
-    if (!result.success) { onNotice(`整组标记人物失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`整组标记人物失败：${result.error || '未知错误'}`, 'error'); return; }
     setIdentityState(result);
     setIdentityPickerKey('');
     setIncludedIdentityKeys(new Set());
@@ -743,7 +743,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     const releaseNote = result.autoReleasedCount ? `；同图中 ${result.autoReleasedCount} 个自动候选已让位` : '';
     const skippedDuplicates = Math.max(duplicateCount, result.duplicateSkippedCount || 0);
     const duplicateNote = skippedDuplicates ? `；已自动取消 ${skippedDuplicates} 张同图重复候选` : '';
-    onNotice(identity ? `已将 ${result.updatedCount || assignments.length} 个人物实例标记为“${identity.name}”${releaseNote}${duplicateNote}` : `已将 ${result.updatedCount || assignments.length} 个人物实例设为未标记${duplicateNote}`);
+    onNotice(identity ? `已将 ${result.updatedCount || assignments.length} 个人物实例标记为“${identity.name}”${releaseNote}${duplicateNote}` : `已将 ${result.updatedCount || assignments.length} 个人物实例设为未标记${duplicateNote}`, result.warning ? 'warning' : 'success');
   };
 
   const toggleIdentityCandidate = (key: string) => {
@@ -756,7 +756,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
       } else {
         const duplicate = identitySubjects.find(subject => subject.key !== key && next.has(subject.key) && identitySubjectPhotoKey(subject) === identitySubjectPhotoKey(candidate));
         if (duplicate?.key === selectedIdentitySubject.key) {
-          onNotice('当前图片中的人物优先保留，已跳过这张同图重复候选');
+          onNotice('当前图片中的人物优先保留，已跳过这张同图重复候选', 'warning');
           return current;
         }
         if (duplicate) next.delete(duplicate.key);
@@ -798,7 +798,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     setIdentityPickerBusy(true);
     const result = await legacyApi.deleteTeamIdentity(workspacePath, { projectName: project.name, identityId: identity.id });
     setIdentityPickerBusy(false);
-    if (!result.success) { onNotice(`删除人物失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`删除人物失败：${result.error || '未知错误'}`, 'error'); return; }
     const nextState = {
       ...identityState,
       identities: identityState.identities.filter(item => item.id !== identity.id),
@@ -807,7 +807,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     setIdentityState(nextState);
     setIdentityPickerKey('');
     void syncTaskLabels(workspacePath, nextState).catch(() => undefined);
-    onNotice(`已删除人物“${identity.name}”`);
+    onNotice(`已删除人物“${identity.name}”`, 'success');
   };
 
   const excludeSubjectFromPicker = async () => {
@@ -830,12 +830,12 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
       personIndex: subject.personIndex,
     });
     setPhotoProcessingMessages(current => { const next = { ...current }; delete next[photoId]; return next; });
-    if (!result.success) { onNotice(`移除误识别人物失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`移除误识别人物失败：${result.error || '未知错误'}`, 'error'); return; }
     setIdentityState(result);
     setPhotoRefreshTokens(current => ({ ...current, [photoId]: (current[photoId] || 0) + 1 }));
     void syncTaskLabels(workspacePath, result).catch(() => undefined);
     onProjectChanged?.();
-    onNotice(result.warning || `已移除误识别人物，并重新计算当前图片的工作图；其他人物标记已保留${result.workflowRefreshCount ? `，同步更新 ${result.workflowRefreshCount} 个任务文件` : ''}`);
+    onNotice(result.warning || `已移除误识别人物，并重新计算当前图片的工作图；其他人物标记已保留${result.workflowRefreshCount ? `，同步更新 ${result.workflowRefreshCount} 个任务文件` : ''}`, result.warning ? 'warning' : 'success');
   };
 
   const identifyAndSync = async () => {
@@ -845,7 +845,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     setIdentityState(current => ({ ...current, identifying: true }));
     const result = await legacyApi.suggestTeamIdentities(workspacePath, project.name);
     identifyingRef.current = false;
-    if (!result.success) { setIdentityState(current => ({ ...current, identifying: false })); onNotice(`人物自动标记失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { setIdentityState(current => ({ ...current, identifying: false })); onNotice(`人物自动标记失败：${result.error || '未知错误'}`, 'error'); return; }
     await syncTaskLabels(workspacePath, result);
     setIdentityState({ ...result, identifying: false });
     onProjectChanged?.();
@@ -860,9 +860,9 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     setRunning(false);
     setResults(result.results || []);
     setRefreshToken(current => current + 1);
-    if (!result.success) { onNotice(`识别图片失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`识别图片失败：${result.error || '未知错误'}`, 'error'); return; }
     await identifyAndSync();
-    onNotice(`识别完成：${result.results.filter(item => item.success).length}/${targetEntries.length} 张成功，并已自动尝试标记人物`);
+    onNotice(`识别完成：${result.results.filter(item => item.success).length}/${targetEntries.length} 张成功，并已自动尝试标记人物`, 'success');
   };
 
   const overallProgress = progress.itemCount ? Math.max(0, Math.min(100, ((Math.max(1, progress.itemIndex) - 1) + progress.progress / 100) / progress.itemCount * 100)) : 0;

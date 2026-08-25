@@ -8,7 +8,7 @@ type Json = Record<string, any>;
 export type { TeamSettings } from './team-settings-model';
 const assertSuccess = (value: Json, fallback: string) => { if (value?.success === false) throw new Error(value.error || fallback); return value; };
 
-export const TeamSettingsContent = ({ value, patch, notice }: { value: TeamSettings; patch: (value: TeamSettingsPatch) => void | Promise<void>; notice: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void }) => {
+export const TeamSettingsContent = ({ value, patch, notice }: { value: TeamSettings; patch: (value: TeamSettingsPatch) => void | Promise<void>; notice: (message: string, tone: 'info' | 'success' | 'warning' | 'error') => void }) => {
   const appDialog = useAppDialog();
   const [busy, setBusy] = useState('');
   const [environment, setEnvironment] = useState<Json>();

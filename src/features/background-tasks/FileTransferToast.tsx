@@ -2,7 +2,7 @@ import { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { CheckCircle2, Clock3, Loader2, Minimize2, Pause, Play, X, XCircle } from 'lucide-react';
 import type { BackgroundTask } from '../../types';
 import { useTaskCenter } from './TaskCenter';
-import { selectProjectFileTaskToasts, taskToastExpiresAt } from './task-toast-model';
+import { selectProjectFileTaskToasts, taskToastExpiresAt, taskToastLiveRole } from './task-toast-model';
 
 const formatBytes = (value: number) => value >= 1024 ** 3
   ? `${(value / 1024 ** 3).toFixed(1)} GB`
@@ -39,7 +39,7 @@ export const FileTransferToastItem = ({ task, onMinimize, onDismiss }: { task: B
     ? window.electronAPI.cancelSelectionOperation(String(task.metadata?.operationId || ''))
     : window.electronAPI.cancelBackgroundTask(task.id);
 
-  return <div role={failed ? 'alert' : 'status'} data-top-toast-id={`task:${task.id}`} className={`file-transfer-toast ${failed ? 'border-red-200 bg-red-50' : completed ? 'border-emerald-200 bg-emerald-50' : ''}`}>
+  return <div role={taskToastLiveRole(task.state)} data-top-toast-id={`task:${task.id}`} className={`file-transfer-toast ${failed ? 'border-red-200 bg-red-50' : completed ? 'border-emerald-200 bg-emerald-50' : ''}`}>
     <div className="flex min-w-0 items-center gap-3">
       {failed ? <XCircle size={16} className="shrink-0 text-red-600"/> : completed ? <CheckCircle2 size={16} className="shrink-0 text-emerald-600"/> : queued ? <Clock3 size={16} className="shrink-0 text-blue-600"/> : paused || pausing ? <Pause size={16} className="shrink-0 text-amber-600"/> : <Loader2 size={16} className="shrink-0 animate-spin text-blue-600"/>}
       <div className="min-w-0 flex-1">
@@ -91,6 +91,7 @@ export const FileTransferToast = ({ stackRef }: { stackRef: React.RefObject<HTML
       nextPositions.set(id, top);
       const previousTop = previousPositionsRef.current.get(id);
       if (previousTop === undefined || Math.abs(previousTop - top) < 1) continue;
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) continue;
       element.animate([{ transform: `translateY(${previousTop - top}px)` }, { transform: 'translateY(0)' }], { duration: 200, easing: 'ease-out' });
     }
     previousPositionsRef.current = nextPositions;

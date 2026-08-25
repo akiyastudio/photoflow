@@ -47,6 +47,7 @@ let artifactScopeCount = 0;
 let manifestDirectoryBackup = '';
 const inputTokens = new Map(); const outputStages = new Map();
 const emittedTopics = new Set();
+const capabilityCounts = new Map();
 const waitForHeldWorkflow = () => new Promise(resolve => { heldWorkflowResolve = resolve; });
 const releaseHeldWorkflow = () => {
   child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: heldWorkflowFrame.id, ok: true, result: { apiVersion: 2, dataPath: dataRoot, databasePath, projectId: 'project', ownership: 'component-private' } })}\n`);
@@ -63,6 +64,7 @@ const ready = new Promise((resolve, reject) => {
     const frame = JSON.parse(line);
     if (frame.type === 'ready') { resolve(); return; }
     if (frame.type === 'capability') {
+      capabilityCounts.set(frame.method, (capabilityCounts.get(frame.method) || 0) + 1);
       let result;
       let error;
       try {
@@ -280,10 +282,16 @@ const restoreManifestDirectory = () => {
     assertInactive('task-2', 4);
 
     seedReview('concurrent-return', 'CONCURRENT-RETURN');
+    workflowScopeCount = 0;
+    const mediaReadsBeforeConfirm = capabilityCounts.get('project.media.variants.v2') || 0;
+    const outputCallsBeforeConfirm = capabilityCounts.get('project.output.v2') || 0;
     const confirmation = await invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'concurrent-return', returnId: 'concurrent-return', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
     assert.equal(confirmation.success, true);
     assert.equal(confirmation.reconcilePending, true, 'manual confirmation returns after durable archival instead of waiting for relay publication');
     assert.match(confirmation.warning, /后台更新/);
+    assert.equal(workflowScopeCount, 1, 'manual confirmation resolves component storage only once');
+    assert.equal(capabilityCounts.get('project.media.variants.v2') || 0, mediaReadsBeforeConfirm, 'manual confirmation never reloads the project media catalog');
+    assert.equal(capabilityCounts.get('project.output.v2') || 0, outputCallsBeforeConfirm, 'manual confirmation never waits for project-output publication');
     const queuedDb = new DatabaseSync(databasePath);
     assert.equal(queuedDb.prepare(`SELECT completed FROM team_person_assignments WHERE photo_id='photo' AND base_version_id='base' AND person_index=1`).get().completed, 1);
     assert.equal(queuedDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 1);

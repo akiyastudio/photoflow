@@ -5,14 +5,15 @@ const { EventEmitter } = require('events');
 const { ComponentNotificationService, DURATION_MAX_MS, DURATION_MIN_MS, MESSAGE_MAX_LENGTH } = require('../electron/services/component-notification-service.cjs');
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
 const { ComponentViewManager } = require('../electron/services/component-view-manager.cjs');
-const { createComponentNotifyInvoker } = require('../electron/component-notify-bridge.cjs');
 const { normalizeComponentNotificationRendererEvent, subscribeComponentNotification } = require('../electron/contracts/component-notification-renderer-event.cjs');
+const mainPreloadSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'preload.cjs'), 'utf8');
+assert(!mainPreloadSource.includes("require('./contracts/component-notification-renderer-event.cjs')") && mainPreloadSource.includes('const subscribeComponentNotification = callback =>'), 'sandboxed main preload must inline notification validation instead of requiring a local CommonJS module');
 
 const sent = [];
 const mainWindow = { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (...args) => sent.push(args) } };
 let now = 10000;
 const service = new ComponentNotificationService({ mainWindow, now: () => now });
-service.setRendererReady(true);
+service.setRendererReady({ rendererToken: 'renderer-main', revision: 0, ready: true });
 const descriptor = componentId => ({ componentId, hostApiVersion: 4, service: { capabilities: ['notifications.v2'], permissions: ['notifications'] } });
 const project = { surface: 'project' };
 
@@ -33,6 +34,7 @@ for (const [payload, code] of [
   [{ tone: 'info', message: 'x', html: '<b>x</b>' }, 'NOTIFICATION_INVALID_PAYLOAD'],
 ]) assert.equal(service.publish(descriptor('validation'), payload, project).error.code, code);
 assert.equal(service.publish({ ...descriptor('old'), hostApiVersion: 3 }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_HOST_API_REQUIRED');
+for (const hostApiVersion of [undefined, Number.NaN, Number.POSITIVE_INFINITY, '4']) assert.equal(service.publish({ ...descriptor('invalid-host-api'), hostApiVersion }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_HOST_API_REQUIRED', `invalid host API ${String(hostApiVersion)} must fail closed`);
 assert.equal(service.publish({ ...descriptor('missing-cap'), service: { capabilities: [], permissions: ['notifications'] } }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_CAPABILITY_NOT_GRANTED');
 assert.equal(service.publish({ ...descriptor('missing-perm'), service: { capabilities: ['notifications.v2'], permissions: [] } }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_PERMISSION_DENIED');
 assert.equal(service.publish(descriptor('settings'), { tone: 'info', message: 'settings' }, { surface: 'application.settings' }).accepted, true);
@@ -51,29 +53,38 @@ assert.equal(service.publish(descriptor('rate'), { tone: 'info', message: 'after
 const unavailable = new ComponentNotificationService({ mainWindow: { isDestroyed: () => true } });
 assert.equal(unavailable.publish(descriptor('alpha'), { tone: 'error', message: 'failure' }, project).error.code, 'NOTIFICATION_HOST_UNAVAILABLE');
 const throwing = new ComponentNotificationService({ mainWindow: { isDestroyed: () => false, webContents: { isDestroyed: () => false, send() { throw new Error('destroyed-race'); } } } });
-throwing.setRendererReady(true);
+throwing.setRendererReady({ rendererToken: 'renderer-throwing', revision: 0, ready: true });
 assert.deepStrictEqual(throwing.publish(descriptor('throwing'), { tone: 'error', message: 'failure' }, project).error, { code: 'NOTIFICATION_HOST_UNAVAILABLE', message: 'Main notification host is unavailable', retryable: true });
 
 const bufferedSent = [];
 const buffered = new ComponentNotificationService({ mainWindow: { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (...args) => bufferedSent.push(args) } }, now: () => now });
 assert.equal(buffered.publish(descriptor('buffered'), { tone: 'info', message: 'before-ready' }, project).accepted, true);
 assert.equal(bufferedSent.length, 0, 'accepted notifications wait for renderer readiness');
-assert.deepStrictEqual(buffered.setRendererReady(true), { ready: true, flushed: 1 });
+assert.deepStrictEqual(buffered.setRendererReady({ rendererToken: 'renderer-buffered', revision: 0, ready: true }), { ready: true, flushed: 1 });
 assert.equal(bufferedSent[0][1].notification.message, 'before-ready');
 const reloadContents = new EventEmitter(); reloadContents.isDestroyed = () => false; reloadContents.send = (...args) => bufferedSent.push(args);
 const reloadBuffered = new ComponentNotificationService({ mainWindow: { isDestroyed: () => false, webContents: reloadContents }, now: () => now });
-reloadBuffered.setRendererReady(true); reloadContents.emit('did-start-loading');
+reloadBuffered.setRendererReady({ rendererToken: 'renderer-old', revision: 0, ready: true }); reloadContents.emit('did-start-loading');
 assert.equal(reloadBuffered.publish(descriptor('reload'), { tone: 'info', message: 'during-reload' }, project).accepted, true);
 assert.notEqual(bufferedSent.at(-1)[1].notification?.message, 'during-reload');
-assert.equal(reloadBuffered.setRendererReady(true).flushed, 1, 'renderer reload buffers until the new React subscriber acknowledges readiness');
+assert.equal(reloadBuffered.setRendererReady({ rendererToken: 'renderer-old', revision: 99, ready: true }).stale, true, 'reload retires the old token even when it claims a higher revision');
+assert.equal(reloadBuffered.setRendererReady({ rendererToken: 'renderer-new', revision: 0, ready: true }).flushed, 1, 'renderer reload buffers until the new React subscriber acknowledges readiness');
+assert.equal(reloadBuffered.setRendererReady({ rendererToken: 'renderer-old', revision: 100, ready: false }).stale, true, 'old document cleanup cannot overwrite new readiness');
+reloadContents.emit('render-process-gone');
+assert.equal(reloadBuffered.publish(descriptor('reload'), { tone: 'error', message: 'after-crash' }, project).accepted, true);
+assert.notEqual(bufferedSent.at(-1)[1].notification?.message, 'after-crash', 'renderer crash makes delivery unready before reload starts');
+assert.equal(reloadBuffered.setRendererReady({ rendererToken: 'renderer-after-crash', revision: 0, ready: true }).flushed, 1);
+reloadBuffered.destroy();
+assert.equal(reloadContents.listenerCount('did-start-loading'), 0); assert.equal(reloadContents.listenerCount('render-process-gone'), 0, 'destroy removes every renderer lifecycle listener');
 buffered.clearComponent('buffered');
 assert.equal(bufferedSent.at(-1)[1].type, 'purge', 'component cleanup purges already rendered notifications');
+const ttlSent = []; let ttlNow = 50000;
+const ttlBuffered = new ComponentNotificationService({ mainWindow: { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (...args) => ttlSent.push(args) } }, now: () => ttlNow });
+for (let index = 0; index < 32; index += 1) assert.equal(ttlBuffered.publish(descriptor(`ttl-${index}`), { tone: 'info', message: `queued-${index}` }, project).accepted, true);
+ttlNow += 15001;
+assert.equal(ttlBuffered.publish(descriptor('ttl-fresh'), { tone: 'info', message: 'fresh' }, project).accepted, true, 'expired unready entries are pruned before buffer-full admission');
+assert.equal(ttlBuffered.setRendererReady({ rendererToken: 'renderer-ttl', revision: 0, ready: true }).flushed, 1);
 
-let bridgeInvocations = 0;
-const bridge = createComponentNotifyInvoker(async payload => { bridgeInvocations += 1; return payload; });
-void bridge({ tone: 'info', message: `${' '.repeat(100000)}x` }).then(result => assert.equal(result.error.code, 'NOTIFICATION_INVALID_MESSAGE'));
-void bridge({ tone: { deep: { value: 'info' } }, message: 'x' }).then(result => assert.equal(result.error.code, 'NOTIFICATION_INVALID_TONE'));
-assert.equal(bridgeInvocations, 0, 'invalid renderer payloads never cross IPC');
 
 const broker = new ComponentCapabilityBroker();
 broker.register('notifications.v2', (payload, context, owned) => service.publish(owned, payload, context));
@@ -107,9 +118,11 @@ assert.deepStrictEqual(projectBounds.at(-1), { x: 10, y: 40, width: 800, height:
 manager.activeInstanceId = 'project'; projectInstance.logicalActive = true; settingsInstance.logicalActive = false;
 manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 1, bottom: 180 });
 assert.equal(projectBounds.at(-1).y, 180, 'multiple toast growth updates native geometry');
-manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 2, bottom: 0 });
+manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 2, bottom: 5000 });
+assert.equal(projectBounds.at(-1).height, 120, 'extreme combined toast/task geometry cannot collapse the active component surface');
+manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 3, bottom: 0 });
 assert.deepStrictEqual(projectBounds.at(-1), { x: 10, y: 40, width: 800, height: 600 }, 'dismissal/expiry restores exact requested bounds');
-assert.equal(manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 1, bottom: 300 }), false, 'stale revisions cannot reapply an overlay');
+assert.equal(manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 2, bottom: 300 }), false, 'stale revisions cannot reapply an overlay');
 
 assert.deepStrictEqual(normalizeComponentNotificationRendererEvent({ apiVersion: 2, type: 'notification', id: 'alpha:1', componentId: 'alpha', surface: 'project', notification: { tone: 'success', message: 'saved', durationMs: 3500 } }).notification, { tone: 'success', message: 'saved', durationMs: 3500 });
 assert.equal(normalizeComponentNotificationRendererEvent({ apiVersion: 2, type: 'notification', id: 'x', componentId: 'alpha', surface: 'project', notification: { tone: 'info', message: ' padded ', durationMs: 3500 } }), null);

@@ -1,4 +1,5 @@
 export type TopToastTone = 'info' | 'success' | 'warning' | 'error';
+export const hostNoticeTone = (message: string): TopToastTone => /失败|错误|异常|无法/.test(message) ? 'error' : 'info';
 
 export const topToastTonePresentation = (tone: TopToastTone) => ({
   tone,

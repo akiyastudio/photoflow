@@ -5,6 +5,7 @@ const { pathToFileURL } = require('url');
 
 (async () => {
   const source = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'components', 'VersionManager.tsx'), 'utf8');
+  const workspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
   const mediaIpcSource = fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'modules', 'media-ipc.cjs'), 'utf8');
   assert(/kind === 'raw'\s*\? window\.electronAPI\.getMediaOriginal/.test(source), 'RAW version previews must obtain the rendered source and orientation from the same IPC result');
   assert(source.includes('aria-expanded={open}') && source.includes('openMetadataGroups'), 'version metadata groups must use explicit controlled buttons');
@@ -17,6 +18,10 @@ const { pathToFileURL } = require('url');
     assert(index >= 0 && source.slice(index, index + 500).includes('pageGenerationIsCurrent(pageGeneration)'), `${marker} must check page generation after awaiting IPC`);
   }
   assert(source.includes("setBundle({ ...result, versions: [] })") && source.includes("setSelectedId('')") && source.includes("setCompareIds([])"), 'a failed version load must clear the prior entry instead of leaving stale media visible');
+  assert(source.includes('orientation="horizontal" label="调整主分支图片列表高度"') && source.includes("document.body.style.cursor = orientation === 'vertical' ? 'col-resize' : 'row-resize'") && source.includes("window.addEventListener('pointermove', move)"), 'version-manager splitters must support robust horizontal and vertical window-level dragging');
+  assert(source.includes('onSaveNote={note => updateVersion') && source.includes('保存说明') && !source.includes('编辑版本说明'), 'the selected version note must be editable directly in the details pane');
+  assert(!source.includes('版本管理不保存文件副本。被覆盖或永久删除的内容无法恢复。'), 'the redundant version-copy warning must not occupy the branch panel');
+  assert(workspaceSource.includes("const [versionProgressId, setVersionProgressId] = useState('')") && workspaceSource.includes('entry={renderedVersionEntry}') && workspaceSource.includes('progressId={versionProgressFolder?.id || versionProgressId}') && workspaceSource.includes('versionProgressId === existingProgress.id'), 'an open version page must retain its stable progress identity and render the media path remapped to the current folder');
   assert(source.includes('className="absolute inset-0 z-0 cursor-pointer rounded-xl'), 'each version card must expose a real full-card preview button');
   assert(mediaIpcSource.includes('const orientation = await rawOrientationCorrection(sourcePath, previewPath, stat);') && !mediaIpcSource.includes('orientationTimer = setTimeout'), 'slow RAW orientation reads must not silently fall back to an incorrect identity transform');
   const model = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'versioning', 'version-manager-model.ts')).href);
@@ -37,6 +42,7 @@ const { pathToFileURL } = require('url');
   const summaries = model.mainBranchPhotoSummaries(entries);
   assert.deepStrictEqual(new Set(summaries.map(item => item.photoId)), new Set(['photo-a', 'photo-b']));
   assert.strictEqual(summaries.find(item => item.photoId === 'photo-a').versionCount, 3);
+  assert.strictEqual(summaries[0].photoId, 'photo-a', 'photos with more versions must be sorted before single-version photos');
 
   const many = Array.from({ length: 1007 }, (_, index) => ({ photoId: `photo-${index}`, originalName: `${index}.jpg`, firstBranchIndex: 0, versionCount: 1, missing: false }));
   const firstPage = model.paginateMainBranchPhotos(many, 0, 48);

@@ -7,10 +7,9 @@ const os = require('os');
 const { exiftool, exiftoolPath } = require('exiftool-vendored');
 const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY, isThumbnailSizeSufficient } = require('./thumbnail-pipeline.cjs');
 const { createComponentRegistry } = require('./component-registry.cjs'); const { createComponentHostRegistry } = require('./component-host-contract.cjs');
-const { ComponentViewManager } = require('./services/component-view-manager.cjs'); const { ComponentCapabilityBroker } = require('./services/component-capability-broker.cjs'); const { ComponentNotificationService } = require('./services/component-notification-service.cjs');
+const { ComponentViewManager } = require('./services/component-view-manager.cjs'); const { createComponentHostCapabilityRuntime } = require('./services/component-host-capability-runtime.cjs');
 const { ComponentServiceManager } = require('./services/component-service-manager.cjs'); const { createConfigMutationService, readConfigFileWithRecovery, registerConfigDrainBeforeQuit } = require('./services/config-mutation-service.cjs');
-const { registerComponentProjectCapabilities } = require('./services/component-project-capabilities.cjs');
-const { COMPONENT_HOST_V1_RPC_REGISTRARS, registerDeprecatedComponentHostV1Capabilities } = require('./compatibility/component-host-v1.cjs');
+const { COMPONENT_HOST_V1_RPC_REGISTRARS } = require('./compatibility/component-host-v1.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
 const { LEGACY_PYTHON_TOOL_ENTRIES, legacyDatabasePath } = require('./compatibility/component-v1-metadata.cjs');
 const { registerComponentHostIpc } = require('./modules/component-host-ipc.cjs');
@@ -589,6 +588,19 @@ function createWindow(loadRenderer = true) {
     telemetryService?.reportCrash('renderer', new Error(`Renderer process exited: ${details.reason}`), {
       reason: details.reason,
       exit_code: details.exitCode,
+    });
+  });
+  mainWindow.webContents.on('preload-error', (_event, preloadPath, error) => {
+    writeLog('error', 'Main-window preload failed', { preloadPath, error: error?.stack || error?.message || String(error) });
+  });
+  mainWindow.webContents.on('did-fail-load', (_event, errorCode, errorDescription, validatedUrl, isMainFrame) => {
+    if (isMainFrame) writeLog('error', 'Main-window renderer failed to load', { errorCode, errorDescription, validatedUrl });
+  });
+  mainWindow.webContents.on('console-message', (_event, details) => {
+    if (details.level === 'error' || details.level === 3) writeLog('error', 'Renderer console error', {
+      message: details.message,
+      lineNumber: details.lineNumber,
+      sourceId: details.sourceId,
     });
   });
 
@@ -1836,10 +1848,7 @@ app.whenReady().then(async () => {
   // not load renderer code until every channel has been registered.
   createWindow(false);
 
-  const componentCapabilityBroker = new ComponentCapabilityBroker();
-  const componentNotificationService = new ComponentNotificationService({ mainWindow }); componentCapabilityBroker.register('notifications.v2', (payload, context, descriptor) => componentNotificationService.publish(descriptor, payload, context));
-  registerComponentProjectCapabilities({
-    broker: componentCapabilityBroker,
+  const { componentCapabilityBroker, componentNotificationService } = createComponentHostCapabilityRuntime({
     ensureWorkspace,
     getWorkspaceDataRoot,
     resolveProjectEntry,
@@ -1849,20 +1858,7 @@ app.whenReady().then(async () => {
     getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
     uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths,
     getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
-    RAW_EXTENSIONS, VIDEO_EXTENSIONS,
-  });
-  registerDeprecatedComponentHostV1Capabilities({
-    broker: componentCapabilityBroker,
-    ensureWorkspace,
-    getWorkspaceDataRoot,
-    resolveProjectEntry,
-    versionService,
-    IMAGE_EXTENSIONS,
-    path, fs, crypto, getConfigPath, readSavedConfig, readConfig: configMutationService.read, mutateConfig: configMutationService.mutate,
-    getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
-    uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths,
-    getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
-    RAW_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS,
+    RAW_EXTENSIONS, VIDEO_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS,
   });
   componentServiceManager = new ComponentServiceManager({
     registry: componentHostRegistry,

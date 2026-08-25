@@ -41,7 +41,7 @@ const run = async () => {
   try {
     const v2Public = await manager.open(request(v2));
     const v2Instance = manager.instances.get(componentPageKey(request(v2)));
-    const v2Mounted = await v2Instance.view.webContents.executeJavaScript(`({ api: !!window.photoFlowComponent, bridgeContract: window.photoFlowComponent?.contractVersion, root: document.getElementById('root')?.textContent })`);
+    const v2Mounted = await v2Instance.view.webContents.executeJavaScript(`({ api: !!window.photoFlowComponent, notify: typeof window.photoFlowComponent?.notify === 'function', bridgeContract: window.photoFlowComponent?.contractVersion, root: document.getElementById('root')?.textContent })`);
     v2Instance.context.emitComponentEvent('sample.changed.v2', { value: 'delivered-v2' });
     await new Promise(resolve => setTimeout(resolve, 50));
     const v2Event = await v2Instance.view.webContents.executeJavaScript(`window.receivedEvent`);

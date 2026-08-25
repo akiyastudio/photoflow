@@ -7,7 +7,7 @@ const { parseComponentHostManifest } = require('../electron/component-host-contr
 const root = path.resolve(__dirname, '..');
 const rendererOutput = path.join(root, 'artifacts', 'component-renderers', 'team-retouch');
 const template = JSON.parse(fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
-assert.equal(template.version, '26.8.25.2', 'host-toast release must use a new installable team-retouch business version');
+assert.equal(template.version, '26.8.25.3', 'host-toast hardening release must use a new installable team-retouch business version');
 assert.deepEqual(template.componentHost.compatibility, { minHostApiVersion: 4, maxHostApiVersion: 4 });
 assert(template.componentHost.service.capabilities.includes('notifications.v2') && template.componentHost.service.permissions.includes('notifications'), 'team-retouch explicitly grants the API4 notification capability and permission');
 const builder = fs.readFileSync(path.join(root, 'scripts', 'build-components.cjs'), 'utf8');

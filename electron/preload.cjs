@@ -1,5 +1,22 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
-const { subscribeComponentNotification } = require('./contracts/component-notification-renderer-event.cjs');
+// Sandboxed preloads only expose Electron's limited preload `require`; local
+// CommonJS modules are unavailable here even when the file exists on disk.
+const COMPONENT_NOTIFICATION_TONES = new Set(['info', 'success', 'warning', 'error']);
+const COMPONENT_NOTIFICATION_DEDUPE_KEY = /^[a-z0-9][a-z0-9._:-]{0,79}$/i;
+const normalizeComponentNotificationRendererEvent = value => {
+  if (!value || typeof value !== 'object' || value.apiVersion !== 2 || typeof value.componentId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(value.componentId)) return null;
+  if (value.type === 'purge') return Object.freeze({ apiVersion: 2, type: 'purge', componentId: value.componentId });
+  if (value.type !== 'notification' || typeof value.id !== 'string' || !['project', 'application.settings'].includes(value.surface)) return null;
+  const notification = value.notification;
+  if (!notification || !COMPONENT_NOTIFICATION_TONES.has(notification.tone) || typeof notification.message !== 'string' || notification.message !== notification.message.trim() || notification.message.length < 1 || notification.message.length > 360 || !Number.isInteger(notification.durationMs) || notification.durationMs < 1200 || notification.durationMs > 15000 || (notification.dedupeKey !== undefined && (typeof notification.dedupeKey !== 'string' || !COMPONENT_NOTIFICATION_DEDUPE_KEY.test(notification.dedupeKey)))) return null;
+  return Object.freeze({ apiVersion: 2, type: 'notification', id: value.id, componentId: value.componentId, surface: value.surface, notification: Object.freeze({ tone: notification.tone, message: notification.message, durationMs: notification.durationMs, ...(notification.dedupeKey ? { dedupeKey: notification.dedupeKey } : {}) }) });
+};
+const subscribeComponentNotification = callback => {
+  if (typeof callback !== 'function') throw new TypeError('Component notification callback must be a function');
+  const listener = (_event, value) => { const normalized = normalizeComponentNotificationRendererEvent(value); if (normalized) callback(normalized); };
+  ipcRenderer.on('component-host:notification.v2', listener);
+  return () => ipcRenderer.removeListener('component-host:notification.v2', listener);
+};
 
 for (const channel of ['workspace-screenshot-main-image-progress', 'workspace-selection-progress']) {
   ipcRenderer.on(channel, (_event, value) => ipcRenderer.send('background-task-external-progress', channel, value));
@@ -71,7 +88,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   activateComponentPage: instanceId => ipcRenderer.invoke('component-host-activate', instanceId),
   setHostSurfaceSuspended: update => ipcRenderer.invoke('component-host-set-suspended', update),
   setHostToastReservation: update => ipcRenderer.invoke('component-host-set-toast-reservation', update),
-  setComponentNotificationReady: ready => ipcRenderer.invoke('component-host-notifications-ready', ready === true),
+  setComponentNotificationReady: update => ipcRenderer.invoke('component-host-notifications-ready', update),
   setComponentPageBounds: (instanceId, bounds) => ipcRenderer.invoke('component-host-set-bounds', instanceId, bounds),
   closeComponentPage: instanceId => ipcRenderer.invoke('component-host-close', instanceId),
   closeProjectComponentPages: (workspacePath, projectId) => ipcRenderer.invoke('component-host-close-project', workspacePath, projectId),
@@ -261,7 +278,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   trackTelemetry: (eventName, properties) => ipcRenderer.send('telemetry-track', eventName, properties),
   onAppError: (callback) => { const subscription = (_event, message) => callback(message); ipcRenderer.on('app-error', subscription); return () => ipcRenderer.removeListener('app-error', subscription); },
   onComponentNotification: (callback) => {
-    return subscribeComponentNotification(ipcRenderer, callback);
+    return subscribeComponentNotification(callback);
   },
   getRawPreview: (filePath, cacheConfig) => ipcRenderer.invoke('media-raw-preview', filePath, cacheConfig),
   projectFileOperation: (workspacePath, status, projectName, operation, paths, targetRelativePath, nextName, options) => ipcRenderer.invoke('workspace-file-operation', workspacePath, status, projectName, operation, paths, targetRelativePath, nextName, options),
