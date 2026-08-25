@@ -5,3 +5,8 @@ export const historyLoadPresentation = (state: HistoryLoadView) => {
   return { phase: 'ready' as const, title: `团片协作 · ${state.entryCount} 张图片` };
 };
 export const createLatestHistoryLoadGuard = () => { let current = 0; return { begin: () => ++current, isCurrent: (requestId: number) => requestId === current, invalidate: () => { current += 1; } }; };
+export const historyMigrationDelayMs = (phase: string, waitCount: number) => phase === 'host-storage-adoption' ? Math.min(5_000, 750 * (2 ** Math.min(Math.max(0, waitCount), 3))) : 100;
+export const createActivationRefreshGate = () => {
+  let deactivated = false;
+  return { deactivate: () => { deactivated = true; }, activate: () => { if (!deactivated) return false; deactivated = false; return true; } };
+};

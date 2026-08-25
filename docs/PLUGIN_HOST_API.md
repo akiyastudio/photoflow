@@ -63,7 +63,7 @@ Large first-time V1 adoptions are asynchronous. While the verified copy is runni
 - `validate`: rejects empty, linked, escaped, missing, or oversized stages. A stage is limited to 2,000 files and 2 GiB.
 - `commit`: requires an ID-shaped idempotency key, refuses overwrite, atomically publishes files below the bound project, rolls back files created by a failed multi-file commit, and returns commit/artifact IDs. Retrying the same key returns the original result.
 - `rollback`: recursively removes only the component-private stage and is safe to call for abandoned work.
-- `adoptLegacyV1`: when `migrations.legacyOutputV1:true` is declared, creates a one-time ownership receipt for bounded, existing project-relative outputs from the same component's V1 installation.
+- `adoptLegacyV1`: one-time migration compatibility only. When `migrations.legacyOutputV1:true` is declared, a component may submit either a project-relative output or an absolute path already stored in its V1 database. The Host accepts only a normal non-symlink file whose canonical path is inside the bound project root, and returns a receipt with a project-relative path without echoing the submitted absolute path. This is not a general component filesystem API.
 - `materializeOwned`: verifies a committed output receipt/current digest and copies that artifact into component-private storage, allowing component-owned schema migration without retaining a project path.
 - `delete`: removes only a current output whose prior commit/artifact IDs and expected digest still match, and writes an idempotent deletion receipt.
 

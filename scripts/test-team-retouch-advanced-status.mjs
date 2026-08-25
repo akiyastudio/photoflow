@@ -2,13 +2,14 @@ import assert from 'node:assert/strict';
 import { pathToFileURL } from 'node:url';
 import path from 'node:path';
 
-let preflight = { success: true, advancedAvailable: true, available: true, installed: true, state: 'ready', advancedError: '' };
+let status = { success: true, advancedAvailable: true, available: true, installed: true, state: 'ready', advancedError: '' };
+const rpcMethods = [];
 globalThis.window = {
   photoFlowComponent: {
     contractVersion: 1,
     rpc: async method => {
-      assert.equal(method, 'team.advanced.preflight.v1');
-      return preflight;
+      rpcMethods.push(method); assert.equal(method, 'team.advanced.status.v1');
+      return status;
     },
     onEvent: () => () => undefined,
     onActivate: () => () => undefined,
@@ -21,7 +22,7 @@ const modulePath = pathToFileURL(path.resolve('extensions/team-retouch/renderer/
 const { componentStatusFromAdvancedPreflight, legacyApi } = await import(modulePath);
 
 assert.deepEqual(
-  componentStatusFromAdvancedPreflight(preflight),
+  componentStatusFromAdvancedPreflight(status),
   { id: 'team-retouch', installed: true, runtimeAvailable: true, identityAvailable: true, advancedAvailable: true, advancedState: 'ready', advancedError: '', provider: '内置人物检测' },
   'the explicit lifecycle status contract maps to an available advanced detector',
 );
@@ -33,10 +34,9 @@ assert.equal(componentStatusFromAdvancedPreflight({ success: true, installed: tr
 const listed = await legacyApi.getComponents();
 assert.equal(listed.components[0].advancedAvailable, true);
 assert.equal(listed.components[0].advancedState, 'ready');
-preflight = { success: true, preflightPassed: true, advancedAvailable: false, installed: true, state: 'repair-needed', advancedError: 'SAM service missing' };
+status = { success: true, advancedAvailable: false, installed: false, state: 'not-installed', advancedError: '增强人物检测尚未安装' };
 const repair = await legacyApi.getComponents();
-assert.deepEqual({ available: repair.components[0].advancedAvailable, state: repair.components[0].advancedState, error: repair.components[0].advancedError }, { available: false, state: 'repair-needed', error: 'SAM service missing' });
-preflight = { success: false, error: 'preflight timeout' };
-await assert.rejects(legacyApi.getComponents(), /preflight timeout/, 'status failures remain retryable errors instead of becoming not-installed');
+assert.deepEqual({ available: repair.components[0].advancedAvailable, state: repair.components[0].advancedState, error: repair.components[0].advancedError }, { available: false, state: 'not-installed', error: '增强人物检测尚未安装' });
+assert(rpcMethods.every(method => method === 'team.advanced.status.v1'), 'page-open advanced status must never invoke lifecycle preflight');
 
 console.log('Team-retouch advanced status contract tests passed');

@@ -51,7 +51,7 @@ assert.deepEqual(template.componentHost.service.rpcMethods, [
   'team.workflow.artifact.migrate.v1',
   'team.progress.list.v1', 'team.progress.create.v1',
   'team.settings.get.v1', 'team.settings.update.v1',
-  'team.advanced.preflight.v1', 'team.advanced.install.v1', 'team.advanced.uninstall.v1',
+  'team.advanced.status.v1', 'team.advanced.preflight.v1', 'team.advanced.install.v1', 'team.advanced.uninstall.v1',
 ]);
 const rendererAllowedBlock = rendererSdk.match(/const allowedMethods = new Set\(\[([\s\S]*?)\]\);/)?.[1] || '';
 const rendererAllowedMethods = [...rendererAllowedBlock.matchAll(/'(team\.[^']+\.v\d+)'/g)].map(match => match[1]);

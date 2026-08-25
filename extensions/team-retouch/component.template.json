@@ -55,7 +55,7 @@
         "team.workflow.artifact.migrate.v1",
         "team.progress.list.v1", "team.progress.create.v1",
         "team.settings.get.v1", "team.settings.update.v1",
-        "team.advanced.preflight.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1"
+        "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1"
       ],
       "capabilities": [
         "project.media.page.v2", "project.media.variants.v2", "project.input.tokens.v2",

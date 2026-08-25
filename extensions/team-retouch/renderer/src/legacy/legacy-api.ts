@@ -122,7 +122,7 @@ export const legacyApi = {
   onTeamPatchBatchProgress: (callback: (value: any) => void) => event('team.patch.detect-batch.progress.v1', callback),
   onTeamPatchReturnBatchProgress: (callback: (value: any) => void) => event('team.return.progress.v1', callback),
   onTeamWorkflowGenerationProgress: (callback: (value: any) => void) => event('team.workflow.progress.v1', callback),
-  getComponents: async () => { const state: Json = await ok('team.advanced.preflight.v1'); if (state.success === false) throw new Error(state.error || '高级人物检测状态检查失败'); return { success: true, components: [componentStatusFromAdvancedPreflight(state)] }; },
+  getComponents: async () => { const state: Json = await ok('team.advanced.status.v1'); return { success: true, components: [componentStatusFromAdvancedPreflight(state)] }; },
   getContext: (): Promise<ComponentContext> => window.photoFlowComponent.getContext(),
   setProjectEntries: (entries: Json[]) => { projectEntryPaths.clear(); for (const entry of entries || []) if (entry.relativePath && entry.path) projectEntryPaths.set(normalizedRelativePath(String(entry.relativePath)), String(entry.path)); },
 };

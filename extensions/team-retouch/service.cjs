@@ -15,6 +15,7 @@ const activeAlgorithms = new Set();
 const workflowJobs = new Map();
 const photoOperations = new Map();
 const activeRequestControls = new Map();
+let advancedRuntimeProbeCache = null;
 let nextCapabilityId = 1;
 
 const writeFrame = value => process.stdout.write(`${JSON.stringify(value)}\n`);
@@ -324,6 +325,10 @@ const fileSha256 = filePath => new Promise((resolve, reject) => {
   input.on('data', chunk => digest.update(chunk));
   input.on('end', () => resolve(digest.digest('hex')));
 });
+const capabilityError = frame => Object.assign(new Error(String(frame.error || 'Host capability failed')), {
+  code: String(frame.errorCode || 'COMPONENT_HOST_INTERNAL'),
+  retryable: frame.retryable === true,
+});
 const assertOrdinaryParentSegments = async (root, relative, verified = new Set()) => {
   let current = root;
   for (const segment of relative.split(path.sep).filter(Boolean).slice(0, -1)) {
@@ -422,6 +427,20 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
     else finish(resolve, result);
   });
 });
+const advancedRuntimeStatus = async (parentId, { refresh = false } = {}) => {
+  const now = Date.now();
+  if (!refresh && advancedRuntimeProbeCache?.expiresAt > now) return advancedRuntimeProbeCache.value;
+  try {
+    const probe = await runAlgorithm(parentId, ['probe-advanced-runtime'], { timeoutMs: 30 * 1000 });
+    const advancedAvailable = probe?.pairDetrReady === true && probe?.sam2Ready === true;
+    const value = { success: true, advancedAvailable, state: advancedAvailable ? 'ready' : 'repair-needed', pairDetrReady: probe?.pairDetrReady === true, sam2Ready: probe?.sam2Ready === true, message: advancedAvailable ? '增强人物检测运行时已就绪' : '增强人物检测未完全就绪；基础人物检测仍可正常使用' };
+    advancedRuntimeProbeCache = { expiresAt: now + 30_000, value }; return value;
+  } catch (error) {
+    const notInstalled = /运行时不存在|not found|ENOENT/i.test(String(error?.message || ''));
+    const value = { success: true, advancedAvailable: false, state: notInstalled ? 'not-installed' : 'repair-needed', pairDetrReady: false, sam2Ready: false, advancedError: notInstalled ? '增强人物检测尚未安装' : '增强人物检测运行时需要检查或修复', message: notInstalled ? '当前使用基础人物检测；可在设置中安装增强版' : '当前使用基础人物检测；可在设置中检查或修复增强版' };
+    advancedRuntimeProbeCache = { expiresAt: now + 10_000, value }; return value;
+  }
+};
 
 const taskRows = (db, photoId, baseVersionId) => db.prepare(`SELECT * FROM team_patch_tasks WHERE photo_id=? AND (?='' OR base_version_id=?) AND is_deleted=0 ORDER BY created_at,person_index`).all(String(photoId), String(baseVersionId || ''), String(baseVersionId || ''));
 const listTasks = (db, photoId, baseVersionId = '') => taskRows(db, photoId, baseVersionId).map(serializeTask);
@@ -1842,7 +1861,14 @@ const migrationStateFromDb = (db, projectId, fallback = {}) => {
   const stored = parseJson(db.prepare('SELECT value FROM meta WHERE key=?').get(projectMigrationMetaKey(projectId))?.value, {});
   const committed = db.prepare('SELECT value FROM meta WHERE key=?').get(projectMigrationCommittedKey(projectId))?.value === 'committed'
     || db.prepare("SELECT value FROM meta WHERE key='legacy_project_artifacts_v2'").get()?.value === 'committed';
-  return { state: committed ? 'committed' : String(stored.state || fallback.state || 'pending'), phase: String(stored.phase || fallback.phase || 'outputs'), processedCount: Math.max(0, Number(stored.processedCount) || 0), pendingCount: Math.max(0, Number(stored.pendingCount ?? fallback.pendingCount) || 0), attemptCount: Math.max(0, Number(stored.attemptCount) || 0), lastError: String(stored.lastError || ''), retryable: stored.retryable !== false, updatedAt: Math.max(0, Number(stored.updatedAt) || 0) };
+  return { state: committed ? 'committed' : String(stored.state || fallback.state || 'pending'), phase: String(stored.phase || fallback.phase || 'outputs'), processedCount: Math.max(0, Number(stored.processedCount) || 0), pendingCount: Math.max(0, Number(stored.pendingCount ?? fallback.pendingCount) || 0), attemptCount: Math.max(0, Number(stored.attemptCount) || 0), lastError: String(stored.lastError || ''), errorCategory: String(stored.errorCategory || ''), retryable: stored.retryable !== false, updatedAt: Math.max(0, Number(stored.updatedAt) || 0) };
+};
+const migrationErrorState = error => {
+  const code = String(error?.code || '');
+  if (code.includes('NOT_FOUND')) return { errorCategory: 'legacy-output-missing', lastError: '旧项目输出文件缺失；已暂停自动迁移，请恢复原文件后手动重试' };
+  if (code.includes('CONFLICT')) return { errorCategory: 'legacy-output-conflict', lastError: '旧项目输出已变化或存在冲突；已暂停自动迁移，请确认文件后手动重试' };
+  if (code.includes('PERMISSION') || code.includes('INVALID_REQUEST')) return { errorCategory: 'legacy-output-boundary', lastError: '旧项目输出不在当前项目安全边界内；已保留历史引用，请检查项目位置后手动重试' };
+  return { errorCategory: 'legacy-output-unavailable', lastError: '旧项目输出暂时不可用；已暂停自动迁移，请保留原文件后手动重试' };
 };
 const writeMigrationState = (db, projectId, state) => db.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(projectMigrationMetaKey(projectId), JSON.stringify({ ...state, updatedAt: Date.now() }));
 const pendingLegacyArtifactItems = (db, dataPath, projectId) => {
@@ -1908,11 +1934,8 @@ const migrateLegacyProjectArtifacts = async (parentId, context, control = {}) =>
       }
       const item = pending[0]; const { row, field, current } = item;
       try {
-        const described = await readMedia(parentId, { strict: true, mediaRefs: [{ photoId: row.photo_id, versionId: row.base_version_id }] });
-        const relativeBase = String(described.items?.[0]?.versions?.[0]?.relativePath || ''); const parsed = path.posix.parse(relativeBase.replace(/\\/g, '/'));
-        const relativePath = [parsed.dir, `${parsed.name}_裁切`, path.basename(current)].filter(Boolean).join('/');
-        const migrationId = `artifact-${sha256(`${row.id}\0${field}\0${relativePath}`).slice(0, 24)}`;
-        const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId, outputs: [{ relativePath }] });
+        const migrationId = `artifact-${sha256(`${row.id}\0${field}\0${current}`).slice(0, 24)}`;
+        const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId, outputs: [{ legacyAbsolutePath: current }] });
         const output = adopted.outputs?.[0]; if (!output) throw new Error('旧项目输出文件暂时缺失');
         const imported = await callHostV2(parentId, 'project.output.v2', { action: 'materializeOwned', commitId: adopted.commitId, artifactId: output.artifactId });
         if (control.signal?.aborted) return migrationStateFromDb(db, projectId);
@@ -1923,12 +1946,12 @@ const migrateLegacyProjectArtifacts = async (parentId, context, control = {}) =>
           db.prepare(`UPDATE team_patch_tasks SET ${field}=? WHERE id=? AND ${field}=?`).run(imported.privatePath, row.id, current);
           db.prepare('UPDATE team_person_assignments SET edited_patch_path=? WHERE task_id=? AND edited_patch_path=?').run(imported.privatePath, row.id, current);
           db.prepare('UPDATE team_task_artifacts SET artifact_path=? WHERE task_id=? AND artifact_path=?').run(imported.privatePath, row.id, current);
-          const prior = migrationStateFromDb(db, projectId); writeMigrationState(db, projectId, { state: 'pending', phase: 'outputs', processedCount: prior.processedCount + 1, pendingCount: Math.max(0, pending.length - 1), attemptCount: prior.attemptCount + 1, lastError: '', retryable: true });
+          const prior = migrationStateFromDb(db, projectId); writeMigrationState(db, projectId, { state: 'pending', phase: 'outputs', processedCount: prior.processedCount + 1, pendingCount: Math.max(0, pending.length - 1), attemptCount: prior.attemptCount + 1, lastError: '', errorCategory: '', retryable: true });
           db.exec('COMMIT');
         } catch (error) { db.exec('ROLLBACK'); throw error; }
         const state = migrationStateFromDb(db, projectId); migrationMetric('legacy-project-artifacts-v2', 'output-checkpoint', startedAt, { itemCount: 1, byteCount: targetStat.size, state: state.state }); return state;
       } catch (error) {
-        const prior = migrationStateFromDb(db, projectId); writeMigrationState(db, projectId, { ...prior, state: 'pending', phase: 'outputs', pendingCount: pending.length, attemptCount: prior.attemptCount + 1, lastError: '旧项目输出暂时缺失或不可用，请保留原文件后重试', retryable: true });
+        const prior = migrationStateFromDb(db, projectId); const diagnostic = migrationErrorState(error); writeMigrationState(db, projectId, { ...prior, state: 'pending', phase: 'paused', pendingCount: pending.length, attemptCount: prior.attemptCount + 1, ...diagnostic, retryable: true });
         migrationMetric('legacy-project-artifacts-v2', 'deferred', startedAt, { itemCount: 0, state: 'pending' });
         return migrationStateFromDb(db, projectId);
       }
@@ -2028,14 +2051,19 @@ const handlers = {
   'team.progress.create.v1': (parentId, payload) => createProjectProgress(parentId, payload),
   'team.settings.get.v1': parentId => componentSettings(parentId, { action: 'get' }),
   'team.settings.update.v1': (parentId, payload) => componentSettings(parentId, { action: 'update', settings: payload }),
-  'team.advanced.preflight.v1': parentId => lifecycleAction(parentId, 'preflight'),
+  'team.advanced.status.v1': parentId => advancedRuntimeStatus(parentId),
+  'team.advanced.preflight.v1': async parentId => {
+    try { return await lifecycleAction(parentId, 'preflight'); }
+    catch (error) { return { success: false, state: 'repair-needed', errorCategory: 'installation-prerequisite', message: String(error?.message || '增强人物检测安装条件未满足') }; }
+  },
   'team.advanced.install.v1': async (parentId, payload) => {
     const installed = await lifecycleAction(parentId, payload.repair === true ? 'repair' : 'install');
-    const probe = await runAlgorithm(parentId, ['probe-advanced-runtime'], { timeoutMs: 4 * 60 * 1000 });
-    if (!probe.pairDetrReady || !probe.sam2Ready) throw new Error('高级模型服务没有全部进入可用状态');
-    return installed;
+    advancedRuntimeProbeCache = null;
+    const probe = await advancedRuntimeStatus(parentId, { refresh: true });
+    if (!probe.advancedAvailable) return { ...installed, success: false, state: probe.state, error: probe.advancedError || probe.message };
+    return { ...installed, advancedAvailable: true, state: 'ready' };
   },
-  'team.advanced.uninstall.v1': parentId => lifecycleAction(parentId, 'uninstall'),
+  'team.advanced.uninstall.v1': async parentId => { const result = await lifecycleAction(parentId, 'uninstall'); advancedRuntimeProbeCache = null; return result; },
 };
 
 const startService = () => {
@@ -2047,7 +2075,7 @@ input.on('line', line => {
     const pending = pendingCapabilities.get(String(frame.id || ''));
     if (!pending) return;
     pendingCapabilities.delete(String(frame.id));
-    if (frame.ok === false) pending.reject(new Error(String(frame.error || 'Host capability failed')));
+    if (frame.ok === false) pending.reject(capabilityError(frame));
     else pending.resolve(frame.result);
     return;
   }
@@ -2074,4 +2102,4 @@ process.once('exit', () => { for (const child of activeAlgorithms) child.kill();
 };
 
 if (require.main === module) startService();
-module.exports = { ensureSchema, startService, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState };
+module.exports = { ensureSchema, startService, capabilityError, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, migrationErrorState, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState };

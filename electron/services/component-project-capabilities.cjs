@@ -93,12 +93,24 @@ const adoptLegacyOutputV1 = async ({ fs, path, crypto, componentRoot, componentI
   const receiptPath = path.join(componentRoot, 'receipts', 'commits', `${commitId}.json`);
   if (fs.existsSync(receiptPath)) return JSON.parse(await fs.promises.readFile(receiptPath, 'utf8'));
   const adopted = [];
+  const canonicalProjectRoot = await fs.promises.realpath(projectRoot).catch(() => null);
+  if (!canonicalProjectRoot) throw hostError(CODES.NOT_FOUND, 'Bound project root is unavailable');
   for (const item of outputs) {
-    const relativePath = assertRelativePath(path, item.relativePath, 'legacy output relativePath');
-    const filePath = path.resolve(projectRoot, relativePath);
+    if (!item || typeof item !== 'object' || Array.isArray(item)) throw hostError(CODES.INVALID_REQUEST, 'Invalid legacy output migration source');
+    const hasLegacyPath = Object.prototype.hasOwnProperty.call(item, 'legacyAbsolutePath');
+    const hasRelativePath = Object.prototype.hasOwnProperty.call(item, 'relativePath');
+    if (hasLegacyPath === hasRelativePath) throw hostError(CODES.INVALID_REQUEST, 'Legacy output must identify exactly one migration source');
+    const legacyAbsolutePath = typeof item.legacyAbsolutePath === 'string' ? item.legacyAbsolutePath : '';
+    if (hasLegacyPath && (!legacyAbsolutePath || legacyAbsolutePath.length > 4096 || legacyAbsolutePath.includes('\0'))) throw hostError(CODES.INVALID_REQUEST, 'Invalid legacy output migration source');
+    const requestedPath = hasLegacyPath ? legacyAbsolutePath : path.resolve(projectRoot, assertRelativePath(path, item.relativePath, 'legacy output relativePath'));
+    if (hasLegacyPath && !path.isAbsolute(requestedPath)) throw hostError(CODES.INVALID_REQUEST, 'Legacy output migration source must be absolute');
+    const filePath = path.resolve(requestedPath);
     if (!inside(path, projectRoot, filePath)) throw hostError(CODES.PERMISSION_DENIED, 'Legacy adopted output escapes project');
     const stat = await fs.promises.lstat(filePath).catch(() => null);
     if (!stat?.isFile() || stat.isSymbolicLink()) throw hostError(CODES.NOT_FOUND, 'Legacy adopted output is missing or unsafe');
+    const canonicalFilePath = await fs.promises.realpath(filePath).catch(() => null);
+    if (!canonicalFilePath || !inside(path, canonicalProjectRoot, canonicalFilePath)) throw hostError(CODES.PERMISSION_DENIED, 'Legacy adopted output escapes the physical project boundary');
+    const relativePath = assertRelativePath(path, path.relative(projectRoot, filePath), 'legacy output relativePath');
     adopted.push({ artifactId: String(item.artifactId || stableUuid(crypto, `${commitId}\0${relativePath}`)), relativePath, size: stat.size, sha256: await sha256File(fs, crypto, filePath), published: true });
   }
   const receipt = { schemaVersion: RECEIPT_SCHEMA_VERSION, kind: 'component-output-commit', state: 'committed', commitId, idempotencyKey: `legacy-${migrationId}`.slice(0, 80), componentId, projectId: String(projectId), scopeDigest: digest, stageId: stableUuid(crypto, `${commitId}\0adopted-stage`), createdAt: Date.now(), committedAt: Date.now(), adoptedFromHostApiVersion: 1, outputs: adopted };
@@ -426,7 +438,7 @@ const registerComponentProjectCapabilities = ({
     }));
     return receipt;
   };
-  const commitResponse = (scope, receipt) => ({ apiVersion: 2, commitId: receipt.commitId, idempotencyKey: receipt.idempotencyKey, outputs: receipt.outputs.map(item => ({ artifactId: item.artifactId, relativePath: item.relativePath, filePath: path.resolve(scope.projectRoot, item.relativePath), byteLength: item.size, sha256: item.sha256 })) });
+  const commitResponse = (scope, receipt, { includePhysicalPath = true } = {}) => ({ apiVersion: 2, commitId: receipt.commitId, idempotencyKey: receipt.idempotencyKey, outputs: receipt.outputs.map(item => ({ artifactId: item.artifactId, relativePath: item.relativePath, ...(includePhysicalPath ? { filePath: path.resolve(scope.projectRoot, item.relativePath) } : {}), byteLength: item.size, sha256: item.sha256 })) });
   const loadCommitReceipt = async (scope, commitId, idempotencyKey = null) => {
     if (!SAFE_STAGE_ID.test(commitId)) throw hostError(CODES.INVALID_REQUEST, 'Invalid commit id');
     const receipt = await readJson(fs, commitReceiptPath(scope, commitId));
@@ -563,7 +575,7 @@ const registerComponentProjectCapabilities = ({
     if (payload.action === 'adoptLegacyV1') {
       if (!descriptor.migrations?.legacyOutputV1) throw hostError(CODES.PERMISSION_DENIED, 'Legacy output adoption is not declared by this component');
       const receipt = await adoptLegacyOutputV1({ fs, path, crypto, componentRoot: scope.componentRoot, componentId: descriptor.componentId, projectId: String(scope.project.id), scopeDigest: scopeDigest(scope), projectRoot: scope.projectRoot, migrationId: payload.migrationId, outputs: payload.outputs });
-      const response = commitResponse(scope, receipt);
+      const response = commitResponse(scope, receipt, { includePhysicalPath: false });
       committedOutputs.set(receipt.commitId, { ...response, scope: scope.key });
       return response;
     }

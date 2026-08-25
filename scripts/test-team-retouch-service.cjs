@@ -107,7 +107,7 @@ broker.register('component.lifecycle.v2', payload => ({ apiVersion: 2, success: 
 broker.register('project.progress.v2', async (_payload, ctx) => { const listed = await broker.invoke(legacyDescriptor, 'project.output.authorize.v1', { operation: 'merge', photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'unused' }, ctx).catch(() => null); return { apiVersion: 2, progress: listed ? [{ id: listed.outputProgressId, mediaKind: 'image', contentRef: { relativeDirectory: path.relative(projectRoot, path.dirname(listed.outputPath)).replace(/\\/g, '/') } }] : [], edges: [] }; });
 broker.register('project.output.v2', async payload => {
   if (payload.action === 'stage') { const stageId = require('crypto').randomUUID(); const privatePath = path.join(dataRoot, 'team-retouch', 'v2-stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); return { apiVersion: 2, stageId, privatePath, expiresAt: Date.now() + 60000 }; }
-  if (payload.action === 'adoptLegacyV1') { const commitId = require('crypto').randomUUID(); const outputs = payload.outputs.filter(item => fs.existsSync(path.join(projectRoot, item.relativePath))).map(item => ({ artifactId: require('crypto').randomUUID(), relativePath: item.relativePath, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(path.join(projectRoot, item.relativePath))).digest('hex') })); const result = { apiVersion: 2, commitId, idempotencyKey: payload.migrationId, outputs }; outputReceipts.set(commitId, result); return result; }
+  if (payload.action === 'adoptLegacyV1') { const commitId = require('crypto').randomUUID(); const outputs = payload.outputs.map(item => { const source = item.legacyAbsolutePath || path.join(projectRoot, item.relativePath); return { source, relativePath: path.relative(projectRoot, source).replace(/\\/g, '/') }; }).filter(item => fs.existsSync(item.source)).map(item => ({ artifactId: require('crypto').randomUUID(), relativePath: item.relativePath, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(item.source)).digest('hex') })); const result = { apiVersion: 2, commitId, idempotencyKey: payload.migrationId, outputs }; outputReceipts.set(commitId, result); return result; }
   const stage = outputStages.get(payload.stageId);
   if (payload.action === 'write') { stage.files.push(payload); return { apiVersion: 2, stageId: payload.stageId, artifactId: require('crypto').randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, payload.sourceName)).size }; }
   if (payload.action === 'validate') return { apiVersion: 2, stageId: payload.stageId, valid: true, fileCount: stage.files.length, totalBytes: 1 };
@@ -166,13 +166,13 @@ const ready = new Promise((resolve, reject) => {
   try {
     await ready;
     const startupStartedAt = Date.now();
-    const [emptyStartupSnapshot, startupSettings, startupPreflight] = await Promise.all([
-      invoke('team.project.get.v1'), invoke('team.settings.get.v1'), invoke('team.advanced.preflight.v1'),
+    const [emptyStartupSnapshot, startupSettings, startupAdvancedStatus] = await Promise.all([
+      invoke('team.project.get.v1'), invoke('team.settings.get.v1'), invoke('team.advanced.status.v1'),
     ]);
     assert.equal(emptyStartupSnapshot.photos.length, 0);
     assert.deepEqual(startupSettings.settings, { useGpu: false, oversizeCropMode: 'expand' });
-    assert.equal(startupPreflight.action, 'preflight');
-    assert(Date.now() - startupStartedAt < 2000, 'project, settings, and preflight startup requests must not serialize into a self-wait');
+    assert.equal(startupAdvancedStatus.advancedAvailable, false); assert(['not-installed', 'repair-needed'].includes(startupAdvancedStatus.state));
+    assert(Date.now() - startupStartedAt < 2000, 'project, settings, and lightweight runtime status requests must not serialize into a self-wait');
     const registered = await invoke('team.project.register.v1', { relativePaths: ['one.jpg'], workspacePath: 'C:/escape' });
     assert.equal(registered.success, true);
     assert.equal(registered.photos.length, 1); assert.equal(registered.photos[0].photoId, 'photo-1');
