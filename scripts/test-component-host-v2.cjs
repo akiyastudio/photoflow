@@ -53,7 +53,7 @@ const repository = createMediaRepository(databaseClient);
 const versionService = createVersionService({ repository });
 assert.equal(typeof versionService.createVersion, 'function');
 assert.equal(versionService.completeTeamIdentity, undefined, 'the production media repository composition exposes only generic version operations');
-assert.equal(versionService.listTeamPatches, undefined, 'the production media repository composition must not pretend to expose component-owned tables');
+assert.equal(versionService.listComponentPrivateRows, undefined, 'the production media repository composition must not expose component-owned tables');
 
 const manifestRoot = path.join(sandbox, 'manifest');
 fs.mkdirSync(path.join(manifestRoot, 'ui'), { recursive: true });
@@ -66,7 +66,7 @@ const manifest = {
   apiVersion: 1, id: 'fixture-component', version: '1.0.0',
   componentHost: {
     contractVersion: 2, compatibility: { minHostApiVersion: 3, maxHostApiVersion: 3 },
-    migrations: { legacyStorageV1: true, legacyOutputV1: true },
+    adoptionGrants: ['component.storage.previous.v1', 'project.output.existing.v1'],
     contributions: [
       { type: 'workspace.toolbarAction', id: 'open', label: 'Fixture', pageId: 'main' },
       { type: 'component.fullPage', id: 'main', title: 'Fixture', entry: 'ui/index.html' },
@@ -352,20 +352,20 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert(!fs.existsSync(failedOutput) && !fs.existsSync(path.join(projectRoot, 'receipt-failure', 'failure-2.jpg')) && !fs.existsSync(path.join(dataRoot, 'components', descriptor.componentId, 'receipts', 'commits', `${failedCommitId}.json`)), 'final receipt failure rolls back every output and removes the unusable journal');
 
   const adoptedPath = path.join(projectRoot, 'legacy', 'adopted.jpg'); fs.mkdirSync(path.dirname(adoptedPath), { recursive: true }); fs.writeFileSync(adoptedPath, 'legacy-output');
-  const adopted = await broker.invoke(descriptor, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: 'migration-one', outputs: [{ relativePath: 'legacy/adopted.jpg' }] }, context);
+  const adopted = await broker.invoke(descriptor, 'project.output.v2', { action: 'adopt', migrationId: 'migration-one', outputs: [{ relativePath: 'legacy/adopted.jpg' }] }, context);
   assert(adopted.commitId && adopted.outputs.length === 1);
   assert((await broker.invoke(descriptor, 'dialogs.v2', { kind: 'openOutput', commitId: adopted.commitId, artifactId: adopted.outputs[0].artifactId }, context)).opened, 'one-time V1 adoption creates a receipt consumable by generic V2 output refs');
   const importedLegacy = await broker.invoke(descriptor, 'project.output.v2', { action: 'materializeOwned', commitId: adopted.commitId, artifactId: adopted.outputs[0].artifactId }, context);
   assert.equal(fs.readFileSync(importedLegacy.privatePath, 'utf8'), 'legacy-output', 'owned legacy project output can be safely copied into component-private storage');
-  const absoluteAdopted = await broker.invoke(descriptor, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: 'migration-absolute', outputs: [{ legacyAbsolutePath: adoptedPath }] }, context);
+  const absoluteAdopted = await broker.invoke(descriptor, 'project.output.v2', { action: 'adopt', migrationId: 'migration-absolute', outputs: [{ sourcePath: adoptedPath }] }, context);
   assert.equal(absoluteAdopted.outputs[0].relativePath, 'legacy/adopted.jpg');
   assert.equal(absoluteAdopted.outputs[0].filePath, undefined, 'one-time absolute migration input is never echoed as a public disk path');
   const outsideLegacyPath = path.join(externalRoot, 'outside-legacy.jpg'); fs.writeFileSync(outsideLegacyPath, 'outside-legacy');
-  await assert.rejects(broker.invoke(descriptor, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: 'migration-outside', outputs: [{ legacyAbsolutePath: outsideLegacyPath }] }, context), error => error.code === 'COMPONENT_HOST_PERMISSION_DENIED', 'absolute migration sources outside the bound project fail closed');
-  for (const legacyAbsolutePath of ['', `C:\\${'x'.repeat(4096)}`, `${adoptedPath}\0hidden`]) await assert.rejects(broker.invoke(descriptor, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: `migration-invalid-${legacyAbsolutePath.length}`, outputs: [{ legacyAbsolutePath }] }, context), error => error.code === 'COMPONENT_HOST_INVALID_REQUEST', 'malformed legacy absolute migration paths are rejected before filesystem resolution');
-  await assert.rejects(broker.invoke(descriptor, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: 'migration-ambiguous', outputs: [{ relativePath: 'legacy/adopted.jpg', legacyAbsolutePath: adoptedPath }] }, context), error => error.code === 'COMPONENT_HOST_INVALID_REQUEST', 'migration sources cannot mix relative and legacy absolute paths');
+  await assert.rejects(broker.invoke(descriptor, 'project.output.v2', { action: 'adopt', migrationId: 'migration-outside', outputs: [{ sourcePath: outsideLegacyPath }] }, context), error => error.code === 'COMPONENT_HOST_PERMISSION_DENIED', 'absolute migration sources outside the bound project fail closed');
+  for (const sourcePath of ['', `C:\\${'x'.repeat(4096)}`, `${adoptedPath}\0hidden`]) await assert.rejects(broker.invoke(descriptor, 'project.output.v2', { action: 'adopt', migrationId: `migration-invalid-${sourcePath.length}`, outputs: [{ sourcePath }] }, context), error => error.code === 'COMPONENT_HOST_INVALID_REQUEST', 'malformed legacy absolute migration paths are rejected before filesystem resolution');
+  await assert.rejects(broker.invoke(descriptor, 'project.output.v2', { action: 'adopt', migrationId: 'migration-ambiguous', outputs: [{ relativePath: 'legacy/adopted.jpg', sourcePath: adoptedPath }] }, context), error => error.code === 'COMPONENT_HOST_INVALID_REQUEST', 'migration sources cannot mix relative and legacy absolute paths');
   const junctionTarget = path.join(externalRoot, 'junction-target'); const junctionPath = path.join(projectRoot, 'legacy-junction'); fs.mkdirSync(junctionTarget, { recursive: true }); fs.writeFileSync(path.join(junctionTarget, 'linked.jpg'), 'linked'); fs.symlinkSync(junctionTarget, junctionPath, 'junction');
-  await assert.rejects(broker.invoke(descriptor, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: 'migration-symlink', outputs: [{ legacyAbsolutePath: path.join(junctionPath, 'linked.jpg') }] }, context), error => error.code === 'COMPONENT_HOST_PERMISSION_DENIED', 'symlinked parents cannot escape the physical bound project root');
+  await assert.rejects(broker.invoke(descriptor, 'project.output.v2', { action: 'adopt', migrationId: 'migration-symlink', outputs: [{ sourcePath: path.join(junctionPath, 'linked.jpg') }] }, context), error => error.code === 'COMPONENT_HOST_PERMISSION_DENIED', 'symlinked parents cannot escape the physical bound project root');
 
   const started = await broker.invoke(descriptor, 'tasks.v2', { action: 'start', operationId: 'fixture-task', title: 'Fixture' }, context);
   await broker.invoke(descriptor, 'tasks.v2', { action: 'report', operationId: 'fixture-task', progress: 25, checkpoint: { page: 1 } }, context);
@@ -400,8 +400,8 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   hangingBarrier.release(); finishHanging({ revision: 1, settings: {} }); await hangingInvocation;
 
   const genericSource = fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'services', 'component-project-capabilities.cjs'), 'utf8');
-  for (const forbidden of ['team-retouch', 'edited_patch_path', 'team_patch_tasks', '团片']) assert(!genericSource.includes(forbidden), `generic host source must not contain ${forbidden}`);
+  for (const forbidden of ['sample-component', 'edited_patch_path', 'component_patch_tasks']) assert(!genericSource.includes(forbidden), `generic host source must not contain ${forbidden}`);
   const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'package.json'), 'utf8'));
-  assert(!packageJson.scripts.build.includes('team-retouch') && !genericSource.includes('extensions/'), 'the main application build and V2 host must not require a component source package');
+  assert(!packageJson.scripts.build.includes('sample-component') && !genericSource.includes('extensions/'), 'the main application build and V2 host must not require a component source package');
   console.log('Component Host API V2 contract and integration tests passed');
 })().finally(() => fs.rmSync(sandbox, { recursive: true, force: true })).catch(error => { console.error(error); process.exitCode = 1; });

@@ -14,7 +14,6 @@ import { useTaskCenter } from './features/background-tasks/TaskCenter';
 import { useTopToastStack } from './features/app/useTopToastStack';
 import { rendererErrorFingerprint, rendererErrorNoticeSummary, shouldReportRendererError, type RendererErrorOccurrence } from './features/app/renderer-error-notice-model';
 import { DomainHealthBanner } from './features/app/DomainHealthBanner';
-import { migrateLegacyComponentSettings } from './compatibility/component-settings';
 import { ComponentPageSurface } from './features/components/ComponentPageSurface'; import { ComponentSettingsPageSurface } from './features/components/ComponentSettingsPageSurface';
 import { useComponentPages } from './features/components/useComponentPages';
 import { ComponentIcon } from './components/ComponentIcon';
@@ -339,8 +338,7 @@ const App: React.FC = () => {
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
             const savedSdPaths = (Array.isArray(fileConfig.smartImport?.sdPaths) && fileConfig.smartImport.sdPaths.length ? fileConfig.smartImport.sdPaths : fileConfig.smartImport?.sdPath ? [fileConfig.smartImport.sdPath] : []).map((drive: string) => isMac ? drive : drive.replace(/\\/g, '/').replace(/\/DCIM\/?$/i, '/'));
             const savedSdDevices = normalizeSavedSdDeviceRecords(fileConfig.smartImport?.sdDevices, savedSdPaths, fileConfig.smartImport?.sdDeviceIds, fileConfig.smartImport?.sdDriveTypes);
-            let componentSettings: AppConfig['componentSettings'] = { ...fileConfig.componentSettings };
-            componentSettings = migrateLegacyComponentSettings(fileConfig, componentSettings);
+            const componentSettings: AppConfig['componentSettings'] = { ...fileConfig.componentSettings };
             delete componentSettings['video-playback-mpv'];
             delete componentSettings['research-tools'];
             delete componentSettings['office-media-extractor'];

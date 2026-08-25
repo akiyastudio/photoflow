@@ -1,8 +1,6 @@
 const PLUGIN_API_VERSION = 1;
-const { LEGACY_PLUGIN_DEFINITIONS } = require('../compatibility/component-v1-metadata.cjs');
 
 const PLUGIN_DEFINITIONS = Object.freeze({
-  ...LEGACY_PLUGIN_DEFINITIONS,
   'video-playback-mpv': {
     id: 'video-playback-mpv',
     runtimeOnly: true,

@@ -14,7 +14,7 @@
 插件不能导入照片流 React 渲染层或 Electron 主进程代码，也不能取得任意 IPC、任意文件系统路径或宿主环境中的凭据。所有未在清单中声明的 RPC、能力、权限和事件都会默认拒绝。
 
 > [!IMPORTANT]
-> Host V1 仅用于已安装旧组件的兼容。新组件必须使用 `componentHost.contractVersion: 2` 和 Host API 2 或更高版本；贡献设置页需要 Host API 3，受控顶部通知需要 Host API 4。不要依赖 `electron/compatibility/` 下的旧业务适配器。
+> 所有组件必须使用 `componentHost.contractVersion: 2` 和 Host API 2 或更高版本；贡献设置页需要 Host API 3，受控顶部通知需要 Host API 4。旧数据只能通过版本化 adoption grant 迁入组件私有存储，不能请求旧宿主接口。
 
 ## 快速开始
 
@@ -197,7 +197,6 @@ npm run test:architecture
 - [插件开发教程](docs/PLUGIN_DEVELOPMENT.md)
 - [Component Host API V2](docs/PLUGIN_HOST_API.md)
 - [Component Service Protocol V1](docs/COMPONENT_SERVICE_PROTOCOL_V1.md)
-- [Component Host V1（仅兼容）](docs/COMPONENT_HOST_V1.md)
 - [架构边界](docs/ARCHITECTURE.md)
 - [源码边界](docs/SOURCE_BOUNDARIES.md)
 

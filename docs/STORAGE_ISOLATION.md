@@ -7,7 +7,7 @@ current physical layout is:
 | --- | --- | --- |
 | workspace/media/versioning | `workspace-data/<workspace-id>.sqlite3` | legacy shared core store |
 | file-operations | `workspace-data/<workspace-id>/databases/operations.sqlite3` | isolated |
-| team-retouch | `workspace-data/<workspace-id>/databases/team-retouch.sqlite3` | isolated |
+| sample-component | `workspace-data/<workspace-id>/databases/sample-component.sqlite3` | isolated |
 
 The next extraction order is media, versioning, and finally the workspace
 catalog. New domain-owned tables must not be added to the shared core store.
@@ -18,7 +18,7 @@ catalog. New domain-owned tables must not be added to the shared core store.
   writes a completion marker in the target database. The source table is left
   untouched as a rollback copy, but runtime reads and writes use only the owned
   store after migration.
-- `python/compatibility/team_retouch_v1/storage.py` creates the owned schema, copies all five legacy
+- `python/compatibility/sample_component_v1/storage.py` creates the owned schema, copies all five legacy
   team tables, and drops those tables from the core database in one attached
   SQLite transaction. A pre-schema-migration backup still contains the legacy
   layout if an older application must be restored.
@@ -29,14 +29,14 @@ catalog. New domain-owned tables must not be added to the shared core store.
 ## Backup and recovery
 
 Active SQLite files are never copied directly. Backup creates online snapshots
-for the core, operations, and team-retouch databases and stores the two domain
+for the core, operations, and sample-component databases and stores the two domain
 databases as `domain-database` manifest entries. Full-workspace restore restores
 all three stores and rebases owned paths. Project restore imports only the
 selected project's team rows; operations history remains workspace-scoped.
 
 Each owned database has an independent WAL and schema version. A corrupt or
 missing operations store affects undo history, while a corrupt or missing
-team-retouch store affects team workflow state; neither prevents the project
+sample-component store affects team workflow state; neither prevents the project
 catalog database from opening. Automated tests cover legacy import, physical
 table separation, deletion cleanup, online snapshot, workspace restore, and
 project-scoped team restore.

@@ -9,8 +9,8 @@ const registry = createDomainHealthService();
 const client = new PythonDatabaseClient({
   coordinator: new WorkspaceSqliteCoordinator(),
   getRunConfig: () => ({ command: 'unused', args: [] }), getDatabasePath: () => 'unused.sqlite3',
-  writeLog: () => undefined, domainId: 'team-retouch', circuitCooldownMs: 60000,
-  onHealthChange: state => registry.update('team-retouch', state),
+  writeLog: () => undefined, domainId: 'sample-component', circuitCooldownMs: 60000,
+  onHealthChange: state => registry.update('sample-component', state),
 });
 client.noteFailure(new Error('database disk image is malformed'));
 client.noteFailure(new Error('database disk image is malformed'));
@@ -18,7 +18,7 @@ assert.strictEqual(client.status().state, 'degraded');
 client.noteFailure(new Error('database disk image is malformed'));
 assert.strictEqual(client.status().state, 'unavailable');
 assert.throws(() => client.assertCircuitAvailable(), error => error.code === 'DOMAIN_UNAVAILABLE');
-assert.strictEqual(registry.get('team-retouch').state, 'unavailable');
+assert.strictEqual(registry.get('sample-component').state, 'unavailable');
 client.noteSuccess();
 assert.strictEqual(client.status().state, 'healthy');
 const root = path.resolve(__dirname, '..');

@@ -30,7 +30,7 @@
   "componentHost": {
     "contractVersion": 2,
     "compatibility": { "minHostApiVersion": 4, "maxHostApiVersion": 4 },
-    "migrations": { "legacyStorageV1": true, "legacyOutputV1": true },
+    "adoptionGrants": ["component.storage.previous.v1", "project.output.existing.v1"],
     "contributions": [
       { "type": "workspace.toolbarAction", "id": "open", "label": "团片协作", "pageId": "main" },
       { "type": "component.fullPage", "id": "main", "title": "团片协作", "entry": "ui/index.html" },

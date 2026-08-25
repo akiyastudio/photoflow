@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import type { ComponentStatus } from '../../types';
-import { legacyComponentIdForDomain } from '../../compatibility/component-domains';
 
 type DomainHealthSnapshot = Awaited<ReturnType<Window['electronAPI']['getDomainHealth']>>;
 
@@ -32,7 +31,7 @@ export const DomainHealthBanner = ({ components, onNotice }: { components: Compo
   const hasFailure = domains.some(domain => domain.state === 'unavailable') || commands.some(command => command.status === 'dead');
   const componentNames = new Map(components.map(component => [component.id, component.name]));
   const domainLabel = (domain: DomainHealthSnapshot['domains'][number]) => {
-    const componentId = domain.componentId || legacyComponentIdForDomain(domain.domainId);
+    const componentId = domain.componentId;
     return domain.displayName || (componentId ? componentNames.get(componentId) : undefined) || DOMAIN_LABELS[domain.domainId] || domain.domainId;
   };
   const retryDead = async () => {

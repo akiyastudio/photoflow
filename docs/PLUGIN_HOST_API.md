@@ -4,7 +4,7 @@
 
 ## 版本协商与弃用
 
-PhotoFlow 当前支持 Host API 1–4，并在组件声明的闭区间兼容范围中选择最高版本。`componentHost.contractVersion:2` 要求协商到 Host API 2 或更高版本，并显式声明权限。Host API 1 仅供已安装旧包使用；`application.settingsPage` 从 Host API 3 开始可用，受控通知从 Host API 4 开始可用。
+PhotoFlow 当前支持 Host API 2–4，并在组件声明的闭区间兼容范围中选择最高版本。`componentHost.contractVersion:2` 要求显式声明权限；`application.settingsPage` 从 Host API 3 开始可用，受控通知从 Host API 4 开始可用。
 
 RPC 方法、能力和事件都以 `.vN` 结尾。已发布语义不可修改；可以增加兼容字段，消费者必须忽略未知字段。破坏性变化使用新的方法/事件版本。弃用版本至少保留一个正常组件迁移窗口，并在移除前记录。`electron/compatibility/` 下的 V1 业务适配器已经弃用，不属于公开 API，也不再增加方法。
 
@@ -57,7 +57,7 @@ Host API 3 的 V2 清单可选声明 `application.settingsPage`，其 `id`、`la
 
 ### 私有存储与设置
 
-`component.storage.v2` 返回工作区应用数据下的组件专属位置，而不是项目内容写入授权。组件拥有自己的结构和迁移；宿主不检查组件业务表。V2 清单可以声明 `migrations.legacyStorageV1:true`；宿主随后事务式复制同 ID 已知 V1 数据根/数据库，保留 V1 来源供回滚和旧包兼容，并返回来源根与摘要采用收据，供组件安全重写自有路径。跨域引用使用稳定项目/媒体/版本 ID。
+`component.storage.v2` 返回工作区应用数据下的组件专属位置，而不是项目内容写入授权。组件拥有自己的结构和迁移；宿主不检查组件业务表。清单声明 `component.storage.previous.v1` adoption grant 后，宿主事务式复制同 ID 的上一代数据根/数据库，保留来源供回滚，并返回来源与摘要收据，供组件安全重写自有路径。跨域引用使用稳定项目/媒体/版本 ID。
 
 大型首次采用异步执行。校验复制进行时，`component.storage.v2` 返回带判别字段 `adoption.state:"pending"` 的结果，只包含采用身份和 `startedAt`；不会返回 `dataPath` 或 `databasePath`，也不能推断。组件可以显示只读状态，但所有存储读写和变更必须关闭。以 500–1000 ms 有界退避轮询。返回 `state:"committed"` 后，结果包含组件路径和完整同组件收据：采用标志、旧引用、数据库摘要、复制文件数与字节数。宿主保留 V1 来源，并使用采用日志在崩溃后丢弃或继续未完成树。
 
@@ -74,7 +74,7 @@ Host API 3 的 V2 清单可选声明 `application.settingsPage`，其 `id`、`la
 - `validate`：拒绝空、链接、越界、缺失或超限 stage。单 stage 最多 2,000 文件、2 GiB。
 - `commit`：要求 ID 形状幂等键，默认拒绝覆盖，原子发布绑定项目下文件；多文件失败会回滚已创建文件，并返回 commit/artifact ID。相同键重试返回原结果。
 - `rollback`：只递归删除组件私有 stage，可安全清理放弃任务。
-- `adoptLegacyV1`：仅供一次性迁移。声明 `migrations.legacyOutputV1:true` 后，可提交项目相对输出或已存于 V1 数据库的绝对路径。宿主只接受规范路径位于绑定项目根内、非符号链接的普通文件，并返回不回显绝对路径的项目相对收据。这不是通用文件系统 API。
+- `adopt`：仅供一次性迁移。声明 `project.output.existing.v1` adoption grant 后，可提交项目相对输出或组件旧记录中的绝对来源。宿主只接受规范路径位于绑定项目根内、非符号链接的普通文件，并返回不回显绝对路径的项目相对收据。这不是通用文件系统 API。
 - `materializeOwned`：校验已提交输出收据和当前摘要，将制品复制到组件私有存储，使组件迁移结构时无需保留项目路径。
 - `delete`：仅在旧 commit/artifact ID 和期望摘要仍匹配时删除当前输出，并写入幂等删除收据。
 

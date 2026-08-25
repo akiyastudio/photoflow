@@ -4,7 +4,7 @@ import reactHooks from 'eslint-plugin-react-hooks'
 import reactRefresh from 'eslint-plugin-react-refresh'
 import tseslint from 'typescript-eslint'
 
-const sourceFiles = ['src/**/*.{ts,tsx}', 'extensions/team-retouch/renderer/src/**/*.{ts,tsx}']
+const sourceFiles = ['src/**/*.{ts,tsx}']
 
 export default [
   { ignores: ['artifacts/**', '.cache/**', '.venv', 'node_modules'] },

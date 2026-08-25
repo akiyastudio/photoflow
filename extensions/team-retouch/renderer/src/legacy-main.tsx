@@ -17,7 +17,7 @@ import { workspaceSeedScopeKey } from './legacy/legacy-workspace-seed-model';
 import { canEnterWorkflowStage, normalizeWorkspace, workflowStageSummaries, type WorkflowStage } from './interaction-model';
 import { TeamSettingsContent } from './team-settings-content';
 import { createTeamSettingsController, type TeamSettingsState } from './team-settings-model';
-import '../../../../component-sdk/ui.css';
+import './host-api-ui.css';
 import './legacy-style.css';
 
 type Json = Record<string, any>;

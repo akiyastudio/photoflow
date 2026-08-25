@@ -583,12 +583,12 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
         mov_transcode = register("Project", project / "MOV Transcode", "video", "mov-transcode", "artifact", artifactKind="transcode")
         progress = register("Project", project / "Progress", "image", "1", "progress", parentProgressId=raw["id"], relationKind="main")
         selection = register("Project", project / "Selection", "image", "selection", "selection", parentProgressId=raw["id"], relationKind="auxiliary")
-        workflow = register("Project", project / "Workflow", "image", "workflow", "workflow", artifactKind="team_workspace")
+        workflow = register("Project", project / "Workflow", "image", "workflow", "workflow", artifactKind="component_workspace")
         video_progress = register("Project", project / "Video Progress", "video", "video-1", "progress", parentProgressId=mov["id"], relationKind="main")
         foreign_raw = register("Other", other_project / "Foreign RAW", "image", "foreign-raw", "original")
 
         assert mov_transcode["artifactKind"] == "transcode" and mov_transcode["parentProgressId"] is None
-        assert workflow["artifactKind"] == "team_workspace" and workflow["parentProgressId"] is None
+        assert workflow["artifactKind"] == "component_workspace" and workflow["parentProgressId"] is None
         for node in (mov_transcode, workflow, selection):
             assert not node["trackingEnabled"] and not node["renameFromParent"] and not node["copyMissingFromParent"]
 
@@ -831,7 +831,7 @@ def test_legacy_selection_relation_repair(root: Path) -> None:
 def test_version_tree_layout_persistence(root: Path) -> None:
     workspace = root / "layout-workspace"
     project = workspace / "Project"
-    for name in ("RAW", "P1", "团片协作", "Other"):
+    for name in ("RAW", "P1", "组件工作区", "Other"):
         (project / name).mkdir(parents=True, exist_ok=True)
     database = root / "layout.sqlite3"
     db = workspace_db.connect(str(workspace), str(database))
@@ -847,7 +847,7 @@ def test_version_tree_layout_persistence(root: Path) -> None:
             db, workspace, mediaKind="image", versionKey="p1", displayName="P1", folderPath=str(project / "P1"),
             nodeRole="progress", relationKind="main", parentProgressId=raw["id"], trackingEnabled=False, trackingState="disabled",
         )
-        workflow = workspace_db.team_project_workspace(str(workspace), db, {"projectName": "Project"})["workflowNode"]
+        workflow = workspace_db.component_project_workspace(str(workspace), db, {"projectName": "Project"})["workflowNode"]
         saved = workspace_db.version_tree_layout_save(db, {
             "projectName": "Project", "scopeKey": "", "expectedRevision": 0, "mode": "patch",
             "positions": [
@@ -1263,7 +1263,7 @@ def test_folder_purposes_and_legacy_orphan_survive_reload(root: Path) -> None:
         workflow = workspace_db.progress_register(str(workspace), db, {
             "projectName": "Project", "mediaKind": "image", "versionKey": "workflow",
             "displayName": "Workflow", "folderPath": str(workflow_folder), "nodeRole": "workflow",
-            "artifactKind": "team_workspace", "trackingEnabled": False,
+            "artifactKind": "component_workspace", "trackingEnabled": False,
         })["progressFolder"]
         progress = workspace_db.progress_register(str(workspace), db, {
             "projectName": "Project", "mediaKind": "image", "versionKey": "1",

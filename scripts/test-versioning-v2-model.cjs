@@ -48,7 +48,7 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'broll', trackingState: 'disabled' }), '花絮');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'artifact', artifactKind: 'preview', versionKey: 'legacy-preview-mov' }), '预览');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'artifact', artifactKind: 'transcode', versionKey: 'transcode-mov' }), '转码');
-  assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', artifactKind: 'team_workspace', versionKey: 'team-workspace' }), '协作');
+  assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', artifactKind: 'component_workspace', versionKey: 'team-workspace' }), '协作');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', sourceMetadata: { category: 'workflow', displayName: '云端校样', parentCapability: 'workflow-input' }, versionKey: 'opaque' }), '云端校样');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'progress', versionKey: '2' }), 'V2');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'broll', versionKey: 'adopt-internal' }), '花絮');
@@ -123,7 +123,7 @@ const { pathToFileURL } = require('url');
     { ...base, id: 'camera-jpg', nodeRole: 'original', artifactKind: 'companion', relationKind: undefined, folderMissing: false, displayName: 'RAW', versionKey: '1' },
     { ...base, id: 'generated-jpg', nodeRole: 'artifact', artifactKind: 'preview', relationKind: undefined, folderMissing: false, displayName: '图片后期_999', versionKey: '999' },
     { ...base, id: 'image-selection', nodeRole: 'selection', relationKind: 'auxiliary', parentProgressId: 'raw-semantic', folderMissing: false, displayName: '随意名称', versionKey: '0' },
-    { ...base, id: 'team-workflow', nodeRole: 'workflow', artifactKind: 'team_workspace', relationKind: undefined, folderMissing: false, displayName: '也不靠名称', versionKey: '0' },
+    { ...base, id: 'team-workflow', nodeRole: 'workflow', artifactKind: 'component_workspace', relationKind: undefined, folderMissing: false, displayName: '也不靠名称', versionKey: '0' },
     { ...base, id: 'broll-semantic', mediaKind: 'mixed', nodeRole: 'broll', relationKind: undefined, folderMissing: false, displayName: '幕后花絮', versionKey: 'adopt-broll' },
     { ...base, id: 'legacy-orphan', nodeRole: 'progress', relationKind: undefined, parentProgressId: undefined, folderMissing: false, displayName: '旧版 V1', versionKey: '1' },
   ];

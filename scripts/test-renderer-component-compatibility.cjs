@@ -11,23 +11,23 @@ const { pathToFileURL } = require('node:url');
   const legacyValue = { useGpu: false, oversizeCropMode: 'expand', unknownFutureValue: { keep: true } };
   const migrated = settings.migrateLegacyComponentSettings({ personDetection: legacyValue }, { other: { quality: 90 } });
   assert.deepEqual(migrated.other, { quality: 90 });
-  assert.deepEqual(migrated['team-retouch'], legacyValue, 'legacy settings must move losslessly into the opaque component namespace');
-  assert.notEqual(migrated['team-retouch'], legacyValue, 'migration must not share a mutable object with the loaded legacy config');
+  assert.deepEqual(migrated['sample-component'], legacyValue, 'legacy settings must move losslessly into the opaque component namespace');
+  assert.notEqual(migrated['sample-component'], legacyValue, 'migration must not share a mutable object with the loaded legacy config');
   assert.deepEqual(
-    settings.migrateLegacyComponentSettings({ personDetection: legacyValue }, { 'team-retouch': { owned: true } })['team-retouch'],
+    settings.migrateLegacyComponentSettings({ personDetection: legacyValue }, { 'sample-component': { owned: true } })['sample-component'],
     { owned: true },
     'a component-owned settings namespace must win over the legacy mirror',
   );
   assert.equal(
-    settings.migrateLegacyComponentSettings({ personDetection: legacyValue, componentSettingsRevisions: { 'team-retouch': 4 } }, {})['team-retouch'],
+    settings.migrateLegacyComponentSettings({ personDetection: legacyValue, componentSettingsRevisions: { 'sample-component': 4 } }, {})['sample-component'],
     undefined,
     'a nonzero component settings revision is a tombstone/ownership ledger and prevents legacy settings revival after restart',
   );
 
-  assert.equal(domains.legacyComponentIdForDomain('team-retouch'), 'team-retouch');
+  assert.equal(domains.legacyComponentIdForDomain('sample-component'), 'sample-component');
   assert.equal(domains.legacyComponentIdForDomain('media'), undefined);
-  assert.deepEqual(versions.legacyVersionSourceMetadata({ nodeRole: 'workflow', artifactKind: 'team_workspace' }), {
-    category: 'workflow', role: 'component-workspace', displayName: '协作', componentId: 'team-retouch', parentCapability: 'workflow-input',
+  assert.deepEqual(versions.legacyVersionSourceMetadata({ nodeRole: 'workflow', artifactKind: 'component_workspace' }), {
+    category: 'workflow', role: 'component-workspace', displayName: '协作', componentId: 'sample-component', parentCapability: 'workflow-input',
   });
   assert.equal(versions.legacyVersionSourceMetadata({ nodeRole: 'artifact', artifactKind: 'preview' }), undefined);
   console.log('renderer component compatibility tests passed');

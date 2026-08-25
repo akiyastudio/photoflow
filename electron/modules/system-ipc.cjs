@@ -2,7 +2,6 @@ const { validateRendererPythonInvocation } = require('../security-policy.cjs');
 const { listStorageDevices } = require('../services/storage-device-service.cjs');
 const { decideComponentStatusRefresh, nextComponentProbeTimestamps } = require('../services/component-status-refresh-policy.cjs');
 const { createComponentLifecycleService } = require('../services/component-lifecycle-service.cjs');
-const { resolveLegacyPackageForDeletion } = require('../compatibility/component-v1-metadata.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
 
@@ -348,17 +347,12 @@ const registerSystemIpc = context => {
   const resolvePackageForDeletion = async (kind, componentId = '') => {
     let archivePath;
     let allowedRoot;
-    const legacy = await resolveLegacyPackageForDeletion({ fs, path, pluginService, kind, resolvePreparedPackage });
-    if (legacy) {
-      ({ archivePath, allowedRoot } = legacy);
-    } else if (kind === 'component') {
+    if (kind === 'component') {
       const known = pluginService.list().find(component => component.id === componentId);
       if (!known) throw new Error(`未知组件：${componentId}`);
       archivePath = await resolveComponentPackage(componentId);
       allowedRoot = pluginService.installRoot;
-    } else {
-      throw new Error('不支持的安装包类型');
-    }
+    } else throw new Error('不支持的安装包类型');
     const resolvedRoot = path.resolve(allowedRoot);
     const resolvedArchive = path.resolve(archivePath);
     const relative = path.relative(resolvedRoot, resolvedArchive);

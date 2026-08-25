@@ -34,13 +34,14 @@ three assets are bundled into the team-retouch component ZIP and run on CPU,
 with DirectML used only as an optional accelerator. There is no smaller-model
 fallback or separate identity model package.
 
-- AdaFace upstream: `mk-minchul/AdaFace`. The reproducible conversion helper is
-  `scripts/export-team-retouch-adaface.py`.
+- AdaFace upstream: `mk-minchul/AdaFace`; the packaged IR-18 ONNX export is
+  published by `yakhyo/adaface-onnx`. The reproducible conversion helper is
+  `scripts/export-adaface.py`.
 - OSNet x1.0 upstream: the official `kaiyangzhou/osnet` Hugging Face repository.
-  It uses the same `scripts/export-team-retouch-osnet.py` conversion helper.
+  It uses `scripts/export-osnet.py`.
 
-Release builds read the prepared AdaFace and OSNet assets from `.cache/model-lab`
-and include them in `npm run build:components`. The engine also accepts explicit local paths through
+Release builds read all prepared assets from this directory's `models/` folder
+and include them through `npm run package`. The engine also accepts explicit local paths through
 `PHOTOFLOW_ADAFACE_MODEL` and `PHOTOFLOW_OSNET_MODEL`. This allows development
 and accuracy testing before the component ZIP is built.
 
@@ -57,7 +58,7 @@ WSL virtual disk is stored under
 The deployment package contains `manifest.json` and a prepared
 `PhotoFlowNative.vhdx`. Before importing it, PhotoFlow verifies the component
 version, architecture, archive path safety, free space, and VHDX SHA-256.
-`scripts/create-team-retouch-advanced-offline-package.ps1` exports a verified
+`scripts/create-advanced-offline-package.ps1` exports a verified
 environment into this package. The earlier `%LOCALAPPDATA%/PhotoFlow/wsl`
 location remains detectable so existing installations can be migrated safely.
 

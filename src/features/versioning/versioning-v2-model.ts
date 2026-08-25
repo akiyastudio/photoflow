@@ -1,5 +1,4 @@
 import type { BackgroundTask, ProgressFolder, VersionGraphEdge } from '../../types';
-import { legacyVersionSourceMetadata } from '../../compatibility/version-source.ts';
 
 export type VersionPanelKind = 'create' | 'create-next' | 'import' | 'modify' | 'confirm';
 export type VersionPanelState = 'ready' | 'move_confirm' | 'processing' | 'waiting_confirmation' | 'loading' | 'committing' | 'result' | 'failure';
@@ -14,7 +13,6 @@ export type VersionPanelTaskProgress = {
 };
 
 export const versionSourceMetadata = (folder: Pick<ProgressFolder, 'nodeRole' | 'artifactKind' | 'sourceMetadata'>) => folder.sourceMetadata
-  || legacyVersionSourceMetadata(folder)
   || {
     category: folder.nodeRole,
     role: folder.artifactKind,

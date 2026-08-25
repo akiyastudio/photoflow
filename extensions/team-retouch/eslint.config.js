@@ -1,0 +1,25 @@
+import js from '@eslint/js';
+import globals from 'globals';
+import reactHooks from 'eslint-plugin-react-hooks';
+import reactRefresh from 'eslint-plugin-react-refresh';
+import tseslint from 'typescript-eslint';
+
+const files = ['renderer/src/**/*.{ts,tsx}'];
+export default [
+  { ignores: ['dist/**', '.venv/**', 'node_modules/**'] },
+  { ...js.configs.recommended, files },
+  ...tseslint.configs.recommended.map(config => ({ ...config, files })),
+  {
+    files,
+    plugins: { 'react-hooks': reactHooks, 'react-refresh': reactRefresh },
+    languageOptions: { ecmaVersion: 2022, globals: globals.browser },
+    rules: {
+      ...reactHooks.configs.recommended.rules,
+      '@typescript-eslint/ban-ts-comment': 'off',
+      '@typescript-eslint/no-explicit-any': 'off',
+      '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_', varsIgnorePattern: '^_' }],
+      'react-hooks/exhaustive-deps': 'off',
+      'react-refresh/only-export-components': ['warn', { allowConstantExport: true }]
+    }
+  }
+];

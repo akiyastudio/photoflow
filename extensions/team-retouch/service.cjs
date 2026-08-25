@@ -234,7 +234,7 @@ const publishWorkingImageV2 = async (parentId, storage, sourcePath, baseRelative
   const ledgerPath = path.join(storage.dataPath, 'output-ownership', 'working-images.json'); const ledger = await readJson(ledgerPath, {});
   let previous = ledger[outputRelativePath] || null;
   if (!previous) {
-    try { const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: `working-${sha256(outputRelativePath).slice(0, 24)}`, outputs: [{ relativePath: outputRelativePath }] }); const output = adopted.outputs?.[0]; if (output) previous = { commitId: adopted.commitId, artifactId: output.artifactId, sha256: output.sha256 }; } catch { /* A new working image has no legacy target to adopt. */ }
+    try { const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adopt', migrationId: `working-${sha256(outputRelativePath).slice(0, 24)}`, outputs: [{ relativePath: outputRelativePath }] }); const output = adopted.outputs?.[0]; if (output) previous = { commitId: adopted.commitId, artifactId: output.artifactId, sha256: output.sha256 }; } catch { /* A new working image has no legacy target to adopt. */ }
   }
   const committed = await publishProjectFileV2(parentId, sourcePath, outputRelativePath, `working-${sha256(operationKey).slice(0, 24)}`, previous);
   const output = committed.outputs[0]; const imported = await callHostV2(parentId, 'project.output.v2', { action: 'materializeOwned', commitId: committed.commitId, artifactId: output.artifactId });
@@ -1563,7 +1563,7 @@ const generateWorkflow = async (parentId, payload, context) => {
       if (!replacements.size && previousManifest?.groups?.length) {
         const legacyOutputs = previousManifest.groups.flatMap(group => (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ relativePath: `团片协作/${String(item.relativePath).replace(/\\/g, '/')}` })));
         if (legacyOutputs.length) {
-          const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: `workflow-${sha256(String(context.projectId)).slice(0, 24)}`, outputs: legacyOutputs });
+          const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adopt', migrationId: `workflow-${sha256(String(context.projectId)).slice(0, 24)}`, outputs: legacyOutputs });
           for (const item of adopted.outputs || []) replacements.set(item.relativePath, { commitId: adopted.commitId, artifactId: item.artifactId, sha256: item.sha256 });
         }
       }
@@ -1840,7 +1840,7 @@ const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb 
     const ownership = { ...(scope.manifest.outputOwnership || {}) };
     for (const previous of priorOutputs) if (!previous.ownership) {
       try {
-        const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId: `relay-${sha256(`${task.id}\0${previous.relativePath}`).slice(0, 24)}`, outputs: [{ relativePath: previous.relativePath }] });
+        const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adopt', migrationId: `relay-${sha256(`${task.id}\0${previous.relativePath}`).slice(0, 24)}`, outputs: [{ relativePath: previous.relativePath }] });
         const output = adopted.outputs?.[0]; if (output) previous.ownership = { commitId: adopted.commitId, artifactId: output.artifactId, sha256: output.sha256 };
       } catch { /* A missing historical relay file is reconstructed below when active. */ }
     }
@@ -2093,7 +2093,7 @@ const migrateLegacyProjectArtifacts = async (parentId, context, control = {}) =>
       const item = pending[0]; const { row, field, current } = item;
       try {
         const migrationId = `artifact-${sha256(`${row.id}\0${field}\0${current}`).slice(0, 24)}`;
-        const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adoptLegacyV1', migrationId, outputs: [{ legacyAbsolutePath: current }] });
+        const adopted = await callHostV2(parentId, 'project.output.v2', { action: 'adopt', migrationId, outputs: [{ sourcePath: current }] });
         const output = adopted.outputs?.[0]; if (!output) throw new Error('旧项目输出文件暂时缺失');
         const imported = await callHostV2(parentId, 'project.output.v2', { action: 'materializeOwned', commitId: adopted.commitId, artifactId: output.artifactId });
         if (control.signal?.aborted) return migrationStateFromDb(db, projectId);

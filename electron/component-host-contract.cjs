@@ -1,16 +1,14 @@
 const fs = require('fs');
 const path = require('path');
-const { LEGACY_HOST_CAPABILITIES } = require('./compatibility/component-v1-metadata.cjs');
 
 const COMPONENT_HOST_CONTRACT_VERSION = 2;
 const COMPONENT_HOST_API_VERSION = 4;
-const COMPONENT_HOST_MIN_API_VERSION = 1;
+const COMPONENT_HOST_MIN_API_VERSION = 2;
 const COMPONENT_SERVICE_PROTOCOL_VERSION = 1;
 const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage', 'application.settingsPage']);
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const VERSIONED_METHOD = /^[a-z][a-z0-9.-]{0,119}\.v[1-9][0-9]*$/;
 const HOST_CAPABILITIES = new Set([
-  ...LEGACY_HOST_CAPABILITIES,
   'project.media.page.v2', 'project.media.variants.v2', 'project.input.tokens.v2',
   'project.output.v2', 'version.create.v2', 'tasks.v2', 'dialogs.v2',
   'component.storage.v2', 'component.settings.v2', 'component.events.v2',
@@ -138,33 +136,27 @@ const parseComponentIcon = (value, componentRoot, developmentOverride = null) =>
 
 const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = null) => {
   const host = manifest?.componentHost;
-  if (host === undefined) return null; // Existing native V1 components remain valid.
+  if (host === undefined) return null;
   if (Number(manifest.apiVersion) !== 1) throw new Error(`Unsupported component apiVersion: ${manifest.apiVersion}`);
   if (!host || typeof host !== 'object' || Array.isArray(host)) throw new Error('Invalid componentHost manifest');
   const contractVersion = Number(host.contractVersion);
-  if (![1, COMPONENT_HOST_CONTRACT_VERSION].includes(contractVersion)) throw new Error(`Unsupported component host contractVersion: ${host.contractVersion}`);
-  if (contractVersion === 2) rejectUnknownFields(host, ['contractVersion', 'compatibility', 'contributions', 'service', 'migrations'], 'component host');
+  if (contractVersion !== COMPONENT_HOST_CONTRACT_VERSION) throw new Error(`Unsupported component host contractVersion: ${host.contractVersion}`);
+  rejectUnknownFields(host, ['contractVersion', 'compatibility', 'contributions', 'service', 'adoptionGrants'], 'component host');
   const compatibility = host.compatibility;
   if (!compatibility || typeof compatibility !== 'object') throw new Error('Missing component host compatibility range');
-  if (contractVersion === 2) rejectUnknownFields(compatibility, ['minHostApiVersion', 'maxHostApiVersion'], 'component compatibility');
+  rejectUnknownFields(compatibility, ['minHostApiVersion', 'maxHostApiVersion'], 'component compatibility');
   const min = Number(compatibility.minHostApiVersion);
   const max = Number(compatibility.maxHostApiVersion);
   if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max < min) throw new Error('Invalid component host compatibility range');
   const negotiatedHostApiVersion = Math.min(COMPONENT_HOST_API_VERSION, max);
   if (negotiatedHostApiVersion < Math.max(COMPONENT_HOST_MIN_API_VERSION, min)) throw new Error(`Component host APIs ${COMPONENT_HOST_MIN_API_VERSION}-${COMPONENT_HOST_API_VERSION} do not overlap supported range ${min}-${max}`);
-  if (contractVersion === 2 && negotiatedHostApiVersion < 2) throw new Error('Component Host contractVersion 2 requires Host API 2 or newer');
+  if (negotiatedHostApiVersion < 2) throw new Error('Component Host contractVersion 2 requires Host API 2 or newer');
   if (!Array.isArray(host.contributions) || host.contributions.length < 2 || host.contributions.length > 32) throw new Error('Component host contributions must be a bounded array');
 
   const componentId = requiredId(manifest.id, 'component id');
-  let migrations = Object.freeze({ legacyStorageV1: false, legacyOutputV1: false });
-  if (host.migrations !== undefined) {
-    const raw = host.migrations;
-    if (contractVersion !== 2 || !raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component host migrations declaration');
-    rejectUnknownFields(raw, ['legacyStorageV1', 'legacyOutputV1'], 'component migrations');
-    if (raw.legacyStorageV1 !== undefined && raw.legacyStorageV1 !== true) throw new Error('legacyStorageV1 migration must be true when declared');
-    if (raw.legacyOutputV1 !== undefined && raw.legacyOutputV1 !== true) throw new Error('legacyOutputV1 migration must be true when declared');
-    migrations = Object.freeze({ legacyStorageV1: raw.legacyStorageV1 === true, legacyOutputV1: raw.legacyOutputV1 === true });
-  }
+  const allowedAdoptionGrants = new Set(['component.storage.previous.v1', 'project.output.existing.v1']);
+  const adoptionGrants = host.adoptionGrants === undefined ? [] : host.adoptionGrants;
+  if (!Array.isArray(adoptionGrants) || adoptionGrants.length > allowedAdoptionGrants.size || new Set(adoptionGrants).size !== adoptionGrants.length || adoptionGrants.some(grant => !allowedAdoptionGrants.has(grant))) throw new Error('Invalid component host adoption grants');
   const icon = parseComponentIcon(manifest.icon, componentRoot, developmentFiles?.icon || null);
   const seen = new Set();
   const pages = new Map();
@@ -178,15 +170,14 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     if (seen.has(key)) throw new Error(`Duplicate component host contribution: ${key}`);
     seen.add(key);
     if (raw.type === 'component.fullPage') {
-      if (contractVersion === 2) rejectUnknownFields(raw, ['type', 'id', 'title', 'entry'], 'component fullPage contribution');
+      rejectUnknownFields(raw, ['type', 'id', 'title', 'entry'], 'component fullPage contribution');
       const relativeEntry = requiredText(raw.entry, 'page entry', 512).replace(/\\/g, '/');
       const entry = resolvePackageFile({ relativeEntry, componentRoot, developmentOverride: developmentFiles?.page, label: 'Component page entry' });
       pages.set(id, { type: raw.type, id, title: requiredText(raw.title, 'page title'), entry, relativeEntry });
     } else if (raw.type === 'workspace.toolbarAction') {
-      if (contractVersion === 2) rejectUnknownFields(raw, ['type', 'id', 'label', 'pageId'], 'component toolbarAction contribution');
+      rejectUnknownFields(raw, ['type', 'id', 'label', 'pageId'], 'component toolbarAction contribution');
       actions.push({ type: raw.type, id, label: requiredText(raw.label, 'toolbar label', 80), pageId: requiredId(raw.pageId, 'toolbar pageId') });
     } else {
-      if (contractVersion !== 2) throw new Error('Application settings pages require Component Host V2');
       if (negotiatedHostApiVersion < 3) throw new Error('Application settings pages require Host API 3');
       if (min < 3) throw new Error('Application settings pages require minHostApiVersion 3 or newer');
       rejectUnknownFields(raw, ['type', 'id', 'label', 'title', 'entry', 'rpcMethods'], 'application settingsPage contribution');
@@ -201,16 +192,15 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     }
   }
   if (settingsPages.length > 16) throw new Error('Component settings page contributions must be bounded');
-  if (pages.size !== 1 || actions.length !== 1) throw new Error('Component Host V1 requires exactly one toolbar action and one full page');
-  if (contractVersion === 1 && host.contributions.length !== 2) throw new Error('Component Host V1 requires exactly two contributions');
+  if (pages.size !== 1 || actions.length !== 1) throw new Error('Component Host requires exactly one toolbar action and one full page');
   if (!pages.has(actions[0].pageId)) throw new Error(`Component toolbar action references an unknown page: ${actions[0].pageId}`);
   const page = pages.get(actions[0].pageId);
   let service = null;
-  if (contractVersion === 2 && host.service === undefined) throw new Error('Component Host V2 requires a service declaration');
+  if (host.service === undefined) throw new Error('Component Host V2 requires a service declaration');
   if (host.service !== undefined) {
     const raw = host.service;
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component service manifest');
-    if (contractVersion === 2) rejectUnknownFields(raw, ['protocolVersion', 'runtime', 'entrypoints', 'rpcMethods', 'capabilities', 'permissions', 'events', 'runtimeActions', 'lifecycleActions'], 'component service');
+    rejectUnknownFields(raw, ['protocolVersion', 'runtime', 'entrypoints', 'rpcMethods', 'capabilities', 'permissions', 'events', 'runtimeActions', 'lifecycleActions'], 'component service');
     if (Number(raw.protocolVersion) !== COMPONENT_SERVICE_PROTOCOL_VERSION) throw new Error(`Unsupported component service protocolVersion: ${raw.protocolVersion}`);
     if (!['node', 'executable'].includes(raw.runtime)) throw new Error('Invalid component service runtime');
     const entries = raw.entrypoints;
@@ -288,7 +278,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     contractVersion,
     hostApiVersion: negotiatedHostApiVersion,
     compatibility: { minHostApiVersion: min, maxHostApiVersion: max },
-    migrations,
+    adoptionGrants: Object.freeze([...adoptionGrants]),
     toolbarAction: Object.freeze({ ...actions[0], pageTitle: page.title }),
     fullPage: Object.freeze(page),
     settingsPages: Object.freeze(settingsPages),
@@ -298,15 +288,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   });
 };
 
-const normalizeDevelopmentAlgorithmRuntime = value => {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid development algorithm runtime descriptor');
-  const command = path.resolve(requiredText(value.command, 'development algorithm command', 2048));
-  const argsPrefix = Array.isArray(value.argsPrefix) ? value.argsPrefix.map(item => requiredText(item, 'development algorithm argument', 2048)) : [];
-  if (argsPrefix.length > 16) throw new Error('Development algorithm argument prefix is too large');
-  return Object.freeze({ command, argsPrefix: Object.freeze(argsPrefix) });
-};
-
-const createComponentHostRegistry = ({ roots, developmentRendererRoot = '', developmentAlgorithmRuntimes = {}, admitDescriptor = null }) => {
+const createComponentHostRegistry = ({ roots, admitDescriptor = null }) => {
   const candidates = () => {
     const values = [];
     for (const root of roots) {
@@ -319,32 +301,16 @@ const createComponentHostRegistry = ({ roots, developmentRendererRoot = '', deve
         const componentRoot = fs.existsSync(path.join(runtime, 'component.json')) ? runtime : container;
         const manifestPath = path.join(componentRoot, 'component.json');
         if (fs.existsSync(manifestPath)) values.push({ componentRoot, manifestPath, expectedId: entry.name, source: root.source });
-        else if (root.source === 'development' && developmentRendererRoot) {
-          const templatePath = path.join(container, 'component.template.json');
-          const templateStat = fs.lstatSync(templatePath, { throwIfNoEntry: false });
-          if (templateStat?.isFile() && !templateStat.isSymbolicLink()) values.push({ componentRoot: container, manifestPath: templatePath, expectedId: entry.name, source: root.source, developmentRendererRoot: path.join(developmentRendererRoot, entry.name) });
-        }
       }
     }
     return values;
   };
-  const inspectRoot = ({ componentRoot, manifestPath = path.join(componentRoot, 'component.json'), expectedId = '', source, developmentRendererRoot: developmentRoot }) => {
+  const inspectRoot = ({ componentRoot, manifestPath = path.join(componentRoot, 'component.json'), expectedId = '', source }) => {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     if (expectedId && manifest.id !== expectedId) throw new Error(`Component id does not match its directory: ${manifest.id || 'missing'}`);
-    const contributions = manifest.componentHost?.contributions || [];
-    const pageDeclaration = contributions.find(item => item?.type === 'component.fullPage')?.entry;
-    const iconDeclaration = manifest.icon;
-    const developmentFiles = developmentRoot ? {
-      page: { overrideRoot: developmentRoot, overrideEntry: path.join(developmentRoot, path.basename(String(pageDeclaration || ''))) },
-      settingsPages: Object.fromEntries(contributions.filter(item => item?.type === 'application.settingsPage').map(item => [item.id, { overrideRoot: developmentRoot, overrideEntry: path.join(developmentRoot, path.basename(String(item.entry || ''))) }])),
-      ...(iconDeclaration ? { icon: { overrideRoot: path.join(componentRoot, 'renderer'), overrideEntry: path.join(componentRoot, 'renderer', path.basename(String(iconDeclaration))) } } : {}),
-    } : null;
-    const descriptor = parseComponentHostManifest(manifest, componentRoot, developmentFiles);
-    const algorithmRuntime = developmentRoot && developmentAlgorithmRuntimes[manifest.id]
-      ? normalizeDevelopmentAlgorithmRuntime(developmentAlgorithmRuntimes[manifest.id])
-      : null;
+    const descriptor = parseComponentHostManifest(manifest, componentRoot);
     if (descriptor && admitDescriptor && admitDescriptor(descriptor, componentRoot, source) !== true) throw new Error(`Component host admission rejected: ${descriptor.componentId}`);
-    return descriptor ? { ...descriptor, componentRoot, source, ...(algorithmRuntime ? { algorithmRuntime } : {}) } : null;
+    return descriptor ? { ...descriptor, componentRoot, source } : null;
   };
   const list = () => {
     const byId = new Map();

@@ -18,7 +18,7 @@ or consume a versioned event; they do not update the owner's tables or files.
 | `media` | Media index, metadata, ratings, thumbnails and preview cache |
 | `versioning` | Version graph, progress relations and tracking sessions |
 | `backup-archive` | Backup snapshots, retention, restore plans and archive placement |
-| `team-retouch` | Team identities, assignments, patches and recomposition jobs |
+| `sample-component` | Team identities, assignments, patches and recomposition jobs |
 | `inspiration-tools` | Inspiration metadata and transient tool jobs |
 | `telemetry` | Consent-filtered telemetry, crashes and feedback queue |
 
@@ -51,7 +51,7 @@ caller -> versioned file command -> File Operations -> durable mutation
 Allowed commands are `copy`, `move`, `rename`, `trash`, `restore`,
 `create-directory`, `create-file`, `commit-import` and `commit-version`.
 Every command must have a stable `commandId` and be idempotent. Import,
-versioning, archive and team-retouch may prepare content in owned staging
+versioning, archive and sample-component may prepare content in owned staging
 directories but must use this entry to publish it into a project.
 
 The runtime command envelope is defined in

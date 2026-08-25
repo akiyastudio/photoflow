@@ -1,5 +1,3 @@
-const { legacyProjectArtifactPaths } = require('../../compatibility/component-v1-metadata.cjs');
-
 const createDeletedProjectCleanup = ({
   backgroundTasks, fs, getWorkspaceDataRoot, path, pathExists, recycleBinService,
   renameHistory, setTimeout, thumbnailService, workspaceRepository, writeLog,
@@ -30,7 +28,7 @@ const createDeletedProjectCleanup = ({
     const dataRoot = path.resolve(getWorkspaceDataRoot(root));
     const candidates = [
       ...(purgeResult.artifactPaths || []),
-      ...(purgeResult.photoIds || []).flatMap(photoId => [path.join(dataRoot, 'thumbnails', photoId), ...legacyProjectArtifactPaths(dataRoot, photoId)]),
+      ...(purgeResult.photoIds || []).map(photoId => path.join(dataRoot, 'thumbnails', photoId)),
     ];
     const safeCandidates = [...new Set(candidates)].flatMap(candidate => {
       if (!candidate) return [];

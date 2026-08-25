@@ -176,7 +176,7 @@ const directorySize = async root => {
 const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, platform = process.platform, arch = process.arch, integrityManifests = null }) => {
   if (isPackaged && !userComponentRoot) throw new Error('打包版本必须提供用户组件目录');
   const installRoot = isPackaged ? path.resolve(userComponentRoot) : path.join(projectRoot, 'components');
-  const roots = isPackaged ? [{ source: 'user', path: installRoot }] : [{ source: 'development', path: path.join(projectRoot, 'extensions') }, { source: 'development', path: installRoot }];
+  const roots = [{ source: isPackaged ? 'user' : 'development-install', path: installRoot }];
   const integrityCache = new Map(); const integrityPending = new Map(); const expectedIntegrity = new Map();
   const definitionFor = (id, manifest = null) => COMPONENT_DEFINITIONS[id] || { ...manifestIdentity(manifest), id, capability: manifest?.capabilities?.[0] || '', capabilities: manifest?.capabilities || [] };
   const getExpectedIntegrity = definition => {

@@ -1,10 +1,9 @@
 const path = require('path');
-const { LEGACY_DOMAIN } = require('../compatibility/component-v1-metadata.cjs');
 
 const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain, getMainWindow, shell, writeLog }) => {
   const assertDomain = value => {
     const domain = String(value || '');
-    if (!['media', 'versioning', 'operations', LEGACY_DOMAIN.id].includes(domain)) throw new Error('不支持的业务域');
+    if (!['media', 'versioning', 'operations'].includes(domain)) throw new Error('不支持的业务域');
     return domain;
   };
   ipcMain.handle('backup-choose-target', async (_event, currentPath = '') => {

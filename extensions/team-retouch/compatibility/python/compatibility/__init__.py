@@ -1,0 +1,1 @@
+"""Plugin-owned compatibility namespace."""

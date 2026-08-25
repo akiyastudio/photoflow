@@ -127,8 +127,4 @@ assert.equal(normalizedEvents.length, 1); unsubscribeRenderer();
 rendererEvents.emit('component-host:notification.v2', {}, { apiVersion: 2, type: 'purge', componentId: 'alpha' });
 assert.equal(normalizedEvents.length, 1, 'preload subscription cleanup removes the private listener');
 
-for (const file of ['legacy-main.tsx', 'settings-main.tsx', 'main.tsx']) {
-  const source = fs.readFileSync(path.join(__dirname, '..', 'extensions', 'team-retouch', 'renderer', 'src', file), 'utf8');
-  assert(!/fixed bottom-5 (?:left-1\/2|right-5).*\{notice\}/.test(source), `${file} must not render a local bottom notification`);
-}
 console.log('component notification tests passed');

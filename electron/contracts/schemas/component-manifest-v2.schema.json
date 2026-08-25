@@ -16,14 +16,7 @@
       "required": ["contractVersion", "compatibility", "contributions", "service"],
       "properties": {
         "contractVersion": { "const": 2 },
-        "migrations": {
-          "type": "object",
-          "additionalProperties": false,
-          "properties": {
-            "legacyStorageV1": { "const": true },
-            "legacyOutputV1": { "const": true }
-          }
-        },
+        "adoptionGrants": { "type": "array", "maxItems": 2, "uniqueItems": true, "items": { "enum": ["component.storage.previous.v1", "project.output.existing.v1"] } },
         "compatibility": {
           "type": "object",
           "additionalProperties": false,

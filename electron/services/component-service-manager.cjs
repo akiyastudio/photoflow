@@ -1,12 +1,9 @@
 const readline = require('readline');
 const path = require('path');
-const { LEGACY_COALESCED_READ_METHODS, LEGACY_LONG_RUNNING_METHODS } = require('../compatibility/component-v1-metadata.cjs');
 
 const MAX_LINE_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 60 * 1000;
-const LONG_RUNNING_METHODS = new Set(LEGACY_LONG_RUNNING_METHODS);
 const LONG_REQUEST_TIMEOUT_MS = 4 * 60 * 60 * 1000;
-const COALESCED_READ_METHODS = new Set(LEGACY_COALESCED_READ_METHODS);
 
 const cloneRequestPayload = payload => {
   if (payload === undefined || payload === null) return {};
@@ -29,11 +26,6 @@ const publicContext = context => Object.freeze({
   projectStatus: context.projectStatus,
 });
 
-const algorithmRuntimeArgs = descriptor => descriptor.algorithmRuntime ? [
-  '--photoflow-algorithm-command', descriptor.algorithmRuntime.command,
-  ...descriptor.algorithmRuntime.argsPrefix.flatMap(value => ['--photoflow-algorithm-arg-prefix', value]),
-] : [];
-
 const prepareReady = session => {
   session.readySettled = false;
   session.ready = new Promise((resolve, reject) => {
@@ -53,7 +45,6 @@ class ComponentServiceManager {
     this.longRequestTimeoutMs = longRequestTimeoutMs;
     this.sessions = new Map();
     this.sessionTransitions = new Map();
-    this.inflightReads = new Map();
     this.nextRequestId = 1;
     this.storageSnapshotBarrier = null;
     this.activeInvocations = 0;
@@ -76,16 +67,6 @@ class ComponentServiceManager {
     this.capabilityBroker.assertCapabilities(descriptor);
     const normalizedMethod = String(method || '');
     const normalizedPayload = cloneRequestPayload(payload);
-    if (COALESCED_READ_METHODS.has(normalizedMethod)) {
-      const key = JSON.stringify([descriptor.componentId, descriptor.componentVersion, normalizedMethod, path.resolve(String(boundContext.workspacePath || '.')).toLocaleLowerCase(), boundContext.projectId, boundContext.projectName, boundContext.projectStatus, normalizedPayload]);
-      const existing = this.inflightReads.get(key);
-      if (existing) return existing;
-      const operation = this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext).finally(() => {
-        if (this.inflightReads.get(key) === operation) this.inflightReads.delete(key);
-      });
-      this.inflightReads.set(key, operation);
-      return await operation;
-    }
     return await this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext);
     } finally {
       this.activeInvocations -= 1;
@@ -109,7 +90,7 @@ class ComponentServiceManager {
     } };
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
-      const pending = { resolve, reject, timer: null, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0, longTimeoutArmed: LONG_RUNNING_METHODS.has(String(method || '')), onTimeout: null };
+      const pending = { resolve, reject, timer: null, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0, longTimeoutArmed: false, onTimeout: null };
       pending.onTimeout = () => {
         if (session.pending.get(id) !== pending) return;
         session.pending.delete(id);
@@ -151,7 +132,7 @@ class ComponentServiceManager {
       const service = descriptor.service;
       const nodeRuntime = service.runtime === 'node';
       const command = nodeRuntime ? this.executablePath : service.entry;
-      const args = nodeRuntime ? [service.entry, ...algorithmRuntimeArgs(descriptor)] : [];
+      const args = nodeRuntime ? [service.entry] : [];
       const options = {
         cwd: path.dirname(service.entry),
         env: { ...serviceEnvironment(), ...(nodeRuntime ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
@@ -232,7 +213,7 @@ class ComponentServiceManager {
       parent.capabilityStartedAt = capabilityStartedAt;
       try {
         const invocation = this.capabilityBroker.invoke(session.descriptor, frame.method, frame.payload, parent.context);
-        if (frame.method === 'component.lifecycle.v2' && ['preflight', 'install', 'repair', 'uninstall'].includes(String(frame.payload?.action || '')) && !parent.longTimeoutArmed) {
+        if (((frame.method === 'component.lifecycle.v2' && ['preflight', 'install', 'repair', 'uninstall'].includes(String(frame.payload?.action || ''))) || frame.method === 'tasks.v2') && !parent.longTimeoutArmed) {
           clearTimeout(parent.timer);
           parent.longTimeoutArmed = true;
           parent.timer = setTimeout(parent.onTimeout, this.longRequestTimeoutMs);
@@ -334,4 +315,4 @@ class ComponentServiceManager {
   }
 }
 
-module.exports = { COALESCED_READ_METHODS, ComponentServiceManager, LONG_REQUEST_TIMEOUT_MS, MAX_LINE_BYTES, REQUEST_TIMEOUT_MS, cloneRequestPayload, prepareReady, publicContext, serviceEnvironment };
+module.exports = { ComponentServiceManager, LONG_REQUEST_TIMEOUT_MS, MAX_LINE_BYTES, REQUEST_TIMEOUT_MS, cloneRequestPayload, prepareReady, publicContext, serviceEnvironment };

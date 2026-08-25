@@ -17,14 +17,14 @@ const waitFor = async predicate => {
   const journalPath = path.join(temporary, 'journal.json');
   let attempts = 0;
   const journal = createDomainCommandJournal({ filePath: journalPath, backoffMs: [0, 0, 0], writeLog: () => undefined });
-  journal.register('team-retouch', 'team-retouch.project.purge.v1', async command => {
+  journal.register('sample-component', 'sample-component.project.purge.v1', async command => {
     attempts += 1;
     if (attempts < 3) throw new Error('injected team failure');
     return { projectId: command.payload.projectId };
   });
   const queued = journal.enqueue({
-    commandId: 'command-1', correlationId: 'correlation-1', target: 'team-retouch',
-    type: 'team-retouch.project.purge.v1', workspaceRoot: temporary, payload: { projectId: 'project-1' },
+    commandId: 'command-1', correlationId: 'correlation-1', target: 'sample-component',
+    type: 'sample-component.project.purge.v1', workspaceRoot: temporary, payload: { projectId: 'project-1' },
   });
   journal.enqueue({ ...queued, workspaceRoot: temporary });
   await waitFor(() => journal.status()[0]?.status === 'completed');

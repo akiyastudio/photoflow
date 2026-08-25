@@ -131,7 +131,7 @@ const { pathToFileURL } = require('url');
     nodes: [
       { ...node('source-root', 'original', 0), mediaKind: 'image' },
       { ...node('source-edit', 'progress', 1), mediaKind: 'image' },
-      { ...node('team', 'workflow', 2), mediaKind: 'image', artifactKind: 'team_workspace' },
+      { ...node('team', 'workflow', 2), mediaKind: 'image', artifactKind: 'component_workspace' },
     ],
     edges: [edge('source-root', 'source-edit', 'main'), edge('source-root', 'team', 'workflow_input'), edge('source-edit', 'team', 'workflow_input')],
   });

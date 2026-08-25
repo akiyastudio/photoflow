@@ -4,7 +4,6 @@ const path = require('path');
 const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { AsyncLocalStorage } = require('async_hooks');
-const { LEGACY_DOMAIN } = require('../compatibility/component-v1-metadata.cjs');
 const {
   MANAGED_EXTERNAL_FOLDER_PREFIX,
   MANAGED_EXTERNAL_FILE_PREFIX,
@@ -55,7 +54,6 @@ const createBackupService = context => {
     getManagedExternalLinks,
     getWorkspaceDatabasePath,
     getWorkspaceOperationsDatabasePath,
-    getLegacyComponentDatabasePath,
     getWorkspaceMediaDatabasePath,
     getWorkspaceVersioningDatabasePath,
     getWorkspaceDataRoot,
@@ -75,7 +73,6 @@ const createBackupService = context => {
     operations: getWorkspaceOperationsDatabasePath,
     media: getWorkspaceMediaDatabasePath,
     versioning: getWorkspaceVersioningDatabasePath,
-    [LEGACY_DOMAIN.id]: getLegacyComponentDatabasePath,
   };
   const recoveryDatabases = (workspaceRoot, domains) => domains.map(domain => {
     const databasePath = recoveryDatabaseGetters[domain]?.(workspaceRoot);
@@ -85,7 +82,7 @@ const createBackupService = context => {
   const recoveryLeaseContext = new AsyncLocalStorage();
   const runRecoveryPythonAction = async (scriptName, args, timeoutMs) => {
     const action = String(args?.[0] || '');
-    const restoreTool = ['backup_db.py', 'domain_recovery.py', LEGACY_DOMAIN.databaseScript].includes(scriptName)
+    const restoreTool = ['backup_db.py', 'domain_recovery.py'].includes(scriptName)
       && (action.startsWith('restore-') || action === 'reset');
     if (restoreTool) {
       const lease = recoveryLeaseContext.getStore();
@@ -579,15 +576,6 @@ const createBackupService = context => {
           'snapshot', '--source', liveOperationsDatabasePath, '--destination', operationsSnapshot,
         ], 30 * 60 * 1000);
       }
-      const liveLegacyComponentDatabasePath = getLegacyComponentDatabasePath?.(root);
-      let legacyComponentSnapshot = null;
-      let legacyComponentDatabaseInfo = null;
-      if (liveLegacyComponentDatabasePath && await exists(liveLegacyComponentDatabasePath)) {
-        legacyComponentSnapshot = path.join(stage, LEGACY_DOMAIN.databaseFile);
-        legacyComponentDatabaseInfo = await runPythonJsonAction(LEGACY_DOMAIN.databaseScript, [
-          'snapshot', '--source', liveLegacyComponentDatabasePath, '--destination', legacyComponentSnapshot,
-        ], 30 * 60 * 1000);
-      }
       const workspaceId = await readWorkspaceId(root);
       const previousManifest = (await listManifests(target)).find(manifest => manifest.workspace?.id === workspaceId);
       const previousByInput = new Map((previousManifest?.files || []).map(entry => [`${entry.scope}:${normalizeKey(entry.path)}`, entry]));
@@ -608,9 +596,6 @@ const createBackupService = context => {
       const operationsDatabaseRelative = liveOperationsDatabasePath
         ? normalizeKey(path.relative(workspaceDataRoot, liveOperationsDatabasePath))
         : '';
-      const legacyComponentDatabaseRelative = liveLegacyComponentDatabasePath
-        ? normalizeKey(path.relative(workspaceDataRoot, liveLegacyComponentDatabasePath))
-        : '';
       const mediaDatabaseRelative = liveMediaDatabasePath ? normalizeKey(path.relative(workspaceDataRoot, liveMediaDatabasePath)) : '';
       const versioningDatabaseRelative = liveVersioningDatabasePath ? normalizeKey(path.relative(workspaceDataRoot, liveVersioningDatabasePath)) : '';
       const workspaceDataFiles = await collectFiles(workspaceDataRoot, 'workspace-data', (relative, item) => {
@@ -623,9 +608,6 @@ const createBackupService = context => {
           || normalized === operationsDatabaseRelative
           || normalized === `${operationsDatabaseRelative}-wal`
           || normalized === `${operationsDatabaseRelative}-shm`
-          || normalized === legacyComponentDatabaseRelative
-          || normalized === `${legacyComponentDatabaseRelative}-wal`
-          || normalized === `${legacyComponentDatabaseRelative}-shm`
           || normalized === mediaDatabaseRelative
           || normalized === `${mediaDatabaseRelative}-wal`
           || normalized === `${mediaDatabaseRelative}-shm`
@@ -678,12 +660,6 @@ const createBackupService = context => {
           relative: 'operations.sqlite3',
           absolute: operationsSnapshot,
           schemaVersion: operationsDatabaseInfo?.schemaVersion || 0,
-        }] : []),
-        ...(legacyComponentSnapshot ? [{
-          scope: 'domain-database',
-          relative: LEGACY_DOMAIN.databaseFile,
-          absolute: legacyComponentSnapshot,
-          schemaVersion: legacyComponentDatabaseInfo?.schemaVersion || 0,
         }] : []),
       ];
       const totalBytes = (await Promise.all(inputs.map(item => fs.promises.stat(item.absolute).then(stat => stat.size)))).reduce((sum, size) => sum + size, 0);
@@ -991,7 +967,7 @@ const createBackupService = context => {
       }
       await withWorkspaceRecoveryLease({
         workspaceRoot: destination,
-        domains: ['core', 'operations', 'media', 'versioning', LEGACY_DOMAIN.id],
+        domains: ['core', 'operations', 'media', 'versioning'],
         signal: task.signal,
         deadlineAt: Date.now() + 30 * 60 * 1000,
       }, async () => {
@@ -999,7 +975,6 @@ const createBackupService = context => {
           ['operations', getWorkspaceOperationsDatabasePath],
           ['media', getWorkspaceMediaDatabasePath],
           ['versioning', getWorkspaceVersioningDatabasePath],
-          [LEGACY_DOMAIN.id, getLegacyComponentDatabasePath],
         ]) {
           const entry = manifest.files.find(item => item.scope === 'domain-database' && item.path === `${domain}.sqlite3`);
           if (!entry || !getter) continue;
@@ -1114,7 +1089,7 @@ const createBackupService = context => {
       }
       await withWorkspaceRecoveryLease({
         workspaceRoot: root,
-        domains: ['core', 'media', 'versioning', LEGACY_DOMAIN.id],
+        domains: ['core', 'media', 'versioning'],
         signal: task.signal,
         deadlineAt: Date.now() + 30 * 60 * 1000,
       }, async () => {
@@ -1140,15 +1115,6 @@ const createBackupService = context => {
             'restore-project', '--domain', 'versioning', '--source', objectPath(target, versioningEntry.hash),
             '--destination', getWorkspaceVersioningDatabasePath(root), '--project-id', project.id,
             '--peer-source', objectPath(target, mediaEntry.hash),
-            '--old-root', manifest.workspace.root, '--new-root', root,
-            '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
-          ], 30 * 60 * 1000);
-        }
-        const legacyComponentEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === LEGACY_DOMAIN.databaseFile);
-        if (legacyComponentEntry && getLegacyComponentDatabasePath) {
-          await runRecoveryPythonAction(LEGACY_DOMAIN.databaseScript, [
-            'restore-project', '--source', objectPath(target, legacyComponentEntry.hash),
-            '--destination', getLegacyComponentDatabasePath(root), '--project-id', project.id,
             '--old-root', manifest.workspace.root, '--new-root', root,
             '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
           ], 30 * 60 * 1000);
@@ -1216,7 +1182,6 @@ const createBackupService = context => {
     media: getWorkspaceMediaDatabasePath,
     versioning: getWorkspaceVersioningDatabasePath,
     operations: getWorkspaceOperationsDatabasePath,
-    [LEGACY_DOMAIN.id]: getLegacyComponentDatabasePath,
   })[domain]?.(path.resolve(workspaceRoot));
 
   const verifyDomain = async (workspaceRoot, domain) => {

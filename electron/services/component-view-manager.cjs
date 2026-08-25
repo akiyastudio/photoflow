@@ -1,5 +1,4 @@
 const path = require('path');
-const { LEGACY_VIEW_EVENT_CHANNELS } = require('../compatibility/component-v1-metadata.cjs');
 
 const PAGE_KEY_SEPARATOR = '\u001f';
 const normalizeIdentity = value => String(value || '').trim().replace(/\\/g, '/').toLocaleLowerCase();
@@ -25,10 +24,15 @@ const componentPageKey = ({ componentId, workspacePath, projectId }) => ['projec
 const componentSettingsPageKey = ({ componentId, pageId }) => ['application.settings', componentId, String(pageId || '').trim()].join(PAGE_KEY_SEPARATOR);
 const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
-const selectComponentPreload = (descriptor, { core, compatibilityV1 }) => {
+const MIN_COMPONENT_SURFACE_HEIGHT = 120;
+const componentViewBoundsWithHostOverlay = (bounds, reservedBottom) => {
+  const maximumReservedBottom = bounds.y + Math.max(0, bounds.height - Math.min(bounds.height, MIN_COMPONENT_SURFACE_HEIGHT));
+  const bottom = Math.max(bounds.y, Math.min(maximumReservedBottom, Number(reservedBottom) || 0));
+  return { x: Math.round(bounds.x), y: Math.round(bottom), width: Math.round(bounds.width), height: Math.round(Math.max(0, bounds.y + bounds.height - bottom)) };
+};
+const selectComponentPreload = (descriptor, { core }) => {
   const contractVersion = Number(descriptor?.contractVersion);
   const hostApiVersion = Number(descriptor?.hostApiVersion);
-  if (contractVersion === 1 && hostApiVersion >= 1) return compatibilityV1;
   if (contractVersion === 2 && hostApiVersion >= 2) return core;
   throw new Error(`Unsupported component preload contract: contract=${contractVersion || 'unknown'} hostApi=${hostApiVersion || 'unknown'}`);
 };
@@ -38,12 +42,11 @@ const diagnosticToken = value => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, compatibilityPreloadPath = path.join(path.dirname(preloadPath), 'compatibility', 'component-preload-v1.cjs'), ipcMain, serviceManager = null, notificationService = null, writeLog = () => undefined }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, notificationService = null, writeLog = () => undefined }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
     this.preloadPath = preloadPath;
-    this.compatibilityPreloadPath = compatibilityPreloadPath;
     this.ipcMain = ipcMain;
     this.writeLog = writeLog;
     this.serviceManager = serviceManager;
@@ -55,6 +58,7 @@ class ComponentViewManager {
     this.resolvedTheme = 'light';
     this.activeInstanceId = '';
     this.hostSurfaceState = { rendererToken: '', revision: -1, suspended: false };
+    this.hostToastReservation = { rendererToken: '', revision: -1, bottom: 0 };
     this.registerComponentSdkIpc();
   }
 
@@ -171,7 +175,7 @@ class ComponentViewManager {
       this.activate(existing.instanceId); return this.publicInstance(existing, leaseId);
     }
     const instanceId = `component-page-${Date.now()}-${Math.random().toString(36).slice(2)}`;
-    const selectedPreloadPath = selectComponentPreload(descriptor, { core: this.preloadPath, compatibilityV1: this.compatibilityPreloadPath });
+    const selectedPreloadPath = selectComponentPreload(descriptor, { core: this.preloadPath });
     const view = new this.WebContentsView({ webPreferences: {
       preload: selectedPreloadPath,
       nodeIntegration: false,
@@ -197,8 +201,6 @@ class ComponentViewManager {
         ...(surface === 'project' ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }),
         eventSender: view.webContents,
         emitComponentEvent: (topic, payload) => {
-          const channel = LEGACY_VIEW_EVENT_CHANNELS[String(topic || '')];
-          if (channel && !view.webContents.isDestroyed()) view.webContents.send(channel, payload);
           if (descriptor.service?.events?.includes(String(topic || '')) && !view.webContents.isDestroyed()) {
             view.webContents.send('component-sdk:event', { topic: String(topic), payload });
           }
@@ -308,6 +310,10 @@ class ComponentViewManager {
     if (rendererToken === this.hostSurfaceState.rendererToken && revision <= this.hostSurfaceState.revision) return false;
     const rendererReloaded = Boolean(this.hostSurfaceState.rendererToken && rendererToken !== this.hostSurfaceState.rendererToken);
     this.hostSurfaceState = { rendererToken, revision, suspended: update.suspended };
+    if (rendererReloaded && this.hostToastReservation.rendererToken !== rendererToken) {
+      this.hostToastReservation = { rendererToken, revision: -1, bottom: 0 };
+      for (const instance of this.instances.values()) this.applyBounds(instance);
+    }
     if (rendererReloaded) this.activeInstanceId = '';
     for (const instance of this.instances.values()) {
       if (rendererReloaded && instance.logicalActive) {
@@ -329,7 +335,21 @@ class ComponentViewManager {
   }
 
   applyBounds(instance) {
-    instance.view.setBounds({ x: Math.round(instance.requestedBounds.x), y: Math.round(instance.requestedBounds.y), width: Math.round(instance.requestedBounds.width), height: Math.round(instance.requestedBounds.height) });
+    const reservedBottom = instance.logicalActive && instance.instanceId === this.activeInstanceId ? this.hostToastReservation.bottom : 0;
+    instance.view.setBounds(componentViewBoundsWithHostOverlay(instance.requestedBounds, reservedBottom));
+  }
+
+  setHostToastReservation(update) {
+    const rendererToken = String(update?.rendererToken || '');
+    const revision = Number(update?.revision);
+    const bottom = Number(update?.bottom);
+    if (!rendererToken || rendererToken.length > 200 || !Number.isSafeInteger(revision) || revision < 0 || !Number.isSafeInteger(bottom) || bottom < 0 || bottom > 20000) throw new Error('Invalid host toast reservation');
+    if (rendererToken !== this.hostToastReservation.rendererToken) this.hostToastReservation = { rendererToken, revision: -1, bottom: 0 };
+    if (revision <= this.hostToastReservation.revision) return false;
+    const changed = bottom !== this.hostToastReservation.bottom;
+    this.hostToastReservation = { rendererToken, revision, bottom };
+    if (changed) for (const instance of this.instances.values()) this.applyBounds(instance);
+    return changed;
   }
 
   setNotificationRendererReady(ready) { return this.notificationService?.setRendererReady?.(ready) || { ready: false, flushed: 0 }; }
@@ -366,4 +386,4 @@ class ComponentViewManager {
   destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); this.notificationService?.destroy?.(); }
 }
 
-module.exports = { ComponentViewManager, componentPageKey, componentSettingsPageKey, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };
+module.exports = { MIN_COMPONENT_SURFACE_HEIGHT, ComponentViewManager, componentPageKey, componentSettingsPageKey, componentViewBoundsWithHostOverlay, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };

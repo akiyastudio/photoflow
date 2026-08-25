@@ -1,5 +1,3 @@
-const { normalizeLegacyExternalProgress } = require('../compatibility/component-v1-metadata.cjs');
-
 const normalizeExternalProgress = (channel, value = {}) => {
   const progress = Math.max(0, Math.min(100, Number(value.progress) || 0));
   const stateFor = phase => phase === 'failed' ? 'failed' : phase === 'cancelled' ? 'cancelled' : phase === 'complete' || progress >= 100 ? 'completed' : 'running';
@@ -9,7 +7,7 @@ const normalizeExternalProgress = (channel, value = {}) => {
     if (!operationId || !['copying', 'complete', 'cancelled', 'failed'].includes(value.phase)) return null;
     return { id: `external:selection:${operationId}`, type: 'selection-operation', title: '选片文件处理', state: stateFor(value.phase), progress, message: value.fileName || value.message || '正在处理选片文件', error: value.error, cancellable: true, metadata: { phase: value.phase, operationId, bytesCopied: value.bytesCopied, totalBytes: value.totalBytes, filesCopied: value.fileIndex, totalFiles: value.totalFiles } };
   }
-  return normalizeLegacyExternalProgress(channel, value, stateFor);
+  return null;
 };
 
 const registerBackgroundTasksIpc = ({ ipcMain, eventBus, backgroundTasks, getMainWindow }) => {

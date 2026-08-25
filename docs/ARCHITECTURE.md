@@ -14,7 +14,7 @@ file workflows.
 4. Repositories are the only code allowed to know SQLite table structure.
 5. Python and packaged component processes are workers, not sources of UI state.
 
-Optional UI components follow the separate [Component Host V1 contract](./COMPONENT_HOST_V1.md): the application owns the project-toolbar button and tab chrome, while an isolated, host-preloaded `WebContentsView` owns the component page. No component UI is injected into the main React DOM.
+Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_API.md): the application owns the project-toolbar button and tab chrome, while an isolated, host-preloaded `WebContentsView` owns the component page. No component UI is injected into the main React DOM.
 
 ## Current module boundaries
 
@@ -54,7 +54,7 @@ Optional UI components follow the separate [Component Host V1 contract](./COMPON
 - `python/operations_db.py`: the file-operations journal worker. It owns the
   persistent undo journal and imports legacy `undo_records` once. Deleted media
   bytes are never stored in SQLite.
-- `python/compatibility/team_retouch_v1/`: the deprecated V1 physical schema,
+- `python/compatibility/sample_component_v1/`: the deprecated V1 physical schema,
   legacy extraction, attached-store adapter, workspace actions, and snapshot /
   restore CLI. Development and packaged runtimes discover it through generic
   compatibility metadata and registries.
@@ -78,7 +78,7 @@ Optional UI components follow the separate [Component Host V1 contract](./COMPON
   `src/App.tsx` is the application shell rather than the previous 4,000-line
   feature container. Component actions are discovered only from `componentHost`
   manifests; component settings live inside component pages.
-- `extensions/team-retouch/renderer`: independent team-retouch application UI.
+- `extensions/sample-component/renderer`: independent sample-component application UI.
   It builds separately, ships in the component `ui/` directory, and calls only
   the owner-bound, versioned `photoFlowComponent` RPC allowlist. Existing team
   repositories and version IPC implementations remain a compatibility backend

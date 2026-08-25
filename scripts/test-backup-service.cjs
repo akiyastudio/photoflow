@@ -70,24 +70,24 @@ const prepareWorkspace = async (temporaryRoot, name, id) => {
   const dataRoot = path.join(temporaryRoot, 'workspace-data', id);
   const database = path.join(temporaryRoot, 'workspace-data', `${id}.sqlite3`);
   const operationsDatabase = path.join(dataRoot, 'databases', 'operations.sqlite3');
-  const teamRetouchDatabase = path.join(dataRoot, 'databases', 'team-retouch.sqlite3');
+  const sampleComponentDatabase = path.join(dataRoot, 'databases', 'sample-component.sqlite3');
   const mediaDatabase = path.join(dataRoot, 'databases', 'media.sqlite3');
   const versioningDatabase = path.join(dataRoot, 'databases', 'versioning.sqlite3');
   await fs.promises.mkdir(project, { recursive: true });
   await fs.promises.mkdir(dataRoot, { recursive: true });
-  await fs.promises.mkdir(path.join(dataRoot, 'team-retouch'), { recursive: true });
+  await fs.promises.mkdir(path.join(dataRoot, 'sample-component'), { recursive: true });
   await fs.promises.mkdir(path.join(dataRoot, 'components', 'sample-component', 'private'), { recursive: true });
   await fs.promises.writeFile(path.join(root, '.photoflow-workspace-id'), `${id}\n`, 'utf8');
   await fs.promises.writeFile(path.join(project, '原片.jpg'), `photo-${id}`, 'utf8');
-  await fs.promises.writeFile(path.join(dataRoot, 'team-retouch', 'shared.json'), `internal-${id}`, 'utf8');
+  await fs.promises.writeFile(path.join(dataRoot, 'sample-component', 'shared.json'), `internal-${id}`, 'utf8');
   await fs.promises.writeFile(path.join(dataRoot, 'components', 'sample-component', 'storage.sqlite3'), `opaque-database-${id}`, 'utf8');
   await fs.promises.writeFile(path.join(dataRoot, 'components', 'sample-component', 'private', 'state.json'), JSON.stringify({ id }), 'utf8');
   await runPython('workspace_db.py', ['catalog_sync', '--root', root, '--database', database, '--payload', '{}']);
-  await runPython('workspace_db.py', ['team_patch_list', '--root', root, '--database', database, '--payload', JSON.stringify({ photoId: 'missing' })]);
+  await runPython('workspace_db.py', ['component_patch_list', '--root', root, '--database', database, '--payload', JSON.stringify({ photoId: 'missing' })]);
   await runPython('operations_db.py', ['undo_record_add', '--database', operationsDatabase, '--payload', JSON.stringify({
     id: `${id}-undo`, kind: 'trash', payload: { items: [] }, legacyDatabase: database,
   })]);
-  return { root, project, dataRoot, database, operationsDatabase, teamRetouchDatabase, mediaDatabase, versioningDatabase };
+  return { root, project, dataRoot, database, operationsDatabase, sampleComponentDatabase, mediaDatabase, versioningDatabase };
 };
 
 const main = async () => {
@@ -152,7 +152,7 @@ const main = async () => {
       getManagedExternalLinks: () => currentWorkspace === first ? [{ linkId: 'backed-link' }] : [],
       getWorkspaceDatabasePath: () => currentWorkspace.database,
       getWorkspaceOperationsDatabasePath: () => currentWorkspace.operationsDatabase,
-      getLegacyComponentDatabasePath: () => currentWorkspace.teamRetouchDatabase,
+      getLegacyComponentDatabasePath: () => currentWorkspace.sampleComponentDatabase,
       getWorkspaceMediaDatabasePath: () => currentWorkspace.mediaDatabase,
       getWorkspaceVersioningDatabasePath: () => currentWorkspace.versioningDatabase,
       getWorkspaceDataRoot: () => currentWorkspace.dataRoot,
@@ -223,7 +223,7 @@ const main = async () => {
     const [firstRun] = await Promise.all([firstRunPromise, acceptedConfigMutation.then(() => null)]);
     assert.strictEqual(firstRun.task.state, 'completed');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'operations.sqlite3'), 'operations database must use a consistent online snapshot');
-    assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'team-retouch.sqlite3'), 'team-retouch database must use a consistent online snapshot');
+    assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'sample-component.sqlite3'), 'sample-component database must use a consistent online snapshot');
     const componentEntries = firstRun.result.files.filter(entry => entry.scope === 'component-storage');
     assert.deepStrictEqual(componentEntries.map(entry => entry.path).sort(), ['sample-component/private/state.json', 'sample-component/storage.sqlite3']);
     assert(componentEntries.every(entry => /^[a-f0-9]{64}$/.test(entry.hash)), 'component package entries must be content-addressed');
@@ -268,7 +268,7 @@ const main = async () => {
     projectBarrier.release();
     const [restoredProject] = await Promise.all([restoredProjectPromise, queuedMaintenance, queuedWriter]);
     assert.strictEqual(restoredProject.task.state, 'completed');
-    assert.equal(recoveryLeases.at(-1).databases.length, 4, 'project restore must lock core/media/versioning/team-retouch only');
+    assert.equal(recoveryLeases.at(-1).databases.length, 4, 'project restore must lock core/media/versioning/sample-component only');
     assert(recoveryLeases.at(-1).databases.every(database => database.mode === 'exclusive'));
     assert(recoveryActionOptions.some(options => options.signal && Number.isFinite(options.deadlineAt) && options.timeoutMs <= options.deadlineAt - Date.now() + 1000), 'recovery tools must receive the active AbortSignal and remaining deadline');
     const mediaBarrier = armRecoveryBarrier();
@@ -289,13 +289,13 @@ const main = async () => {
     versioningBarrier.release();
     await Promise.all([versioningRestore, versioningWrite]);
 
-    const teamBarrier = armRecoveryBarrier();
-    const teamRestore = service.restoreDomain(first.root, replacementRun.result.id, 'team-retouch');
-    await teamBarrier.admitted;
-    const teamWrite = physicalCoordinator.run({ databases: [{ path: first.teamRetouchDatabase, mode: 'write' }] }, async () => true);
+    const componentBarrier = armRecoveryBarrier();
+    const componentRestore = service.restoreDomain(first.root, replacementRun.result.id, 'sample-component');
+    await componentBarrier.admitted;
+    const componentWrite = physicalCoordinator.run({ databases: [{ path: first.sampleComponentDatabase, mode: 'write' }] }, async () => true);
     await waitForCoordinatorQueue(physicalCoordinator, 1);
-    teamBarrier.release();
-    await Promise.all([teamRestore, teamWrite]);
+    componentBarrier.release();
+    await Promise.all([componentRestore, componentWrite]);
 
     const operationsBarrier = armRecoveryBarrier();
     const operationsReset = service.resetDomain(first.root, 'operations');
@@ -308,7 +308,7 @@ const main = async () => {
     assert.deepStrictEqual(recoveryLeases.at(-1).databases, [{ path: path.resolve(first.operationsDatabase), mode: 'exclusive' }], 'domain reset must lock only its target database');
     assert.equal(databaseLogs.some(line => /SQLITE_BUSY|database is locked/i.test(line)), false, 'recovery concurrency logs must not contain SQLite lock failures');
     assert.deepStrictEqual(await Promise.all([
-      first.database, first.mediaDatabase, first.versioningDatabase, first.teamRetouchDatabase, first.operationsDatabase,
+      first.database, first.mediaDatabase, first.versioningDatabase, first.sampleComponentDatabase, first.operationsDatabase,
     ].map(quickCheck)), ['ok', 'ok', 'ok', 'ok', 'ok']);
     rejectRecoveryPause = true;
     let recoveryWorkerCalled = false;
@@ -359,10 +359,10 @@ const main = async () => {
     const restoredDataRoot = path.join(temporaryRoot, 'workspace-data', 'restored-id');
     const restoredDatabase = path.join(temporaryRoot, 'workspace-data', 'restored-id.sqlite3');
     const restoredOperationsDatabase = path.join(restoredDataRoot, 'databases', 'operations.sqlite3');
-    const restoredTeamRetouchDatabase = path.join(restoredDataRoot, 'databases', 'team-retouch.sqlite3');
+    const restoredSampleComponentDatabase = path.join(restoredDataRoot, 'databases', 'sample-component.sqlite3');
     const originalDataRoot = currentWorkspace.dataRoot;
     const originalDatabase = currentWorkspace.database;
-    currentWorkspace = { ...first, dataRoot: restoredDataRoot, database: restoredDatabase, operationsDatabase: restoredOperationsDatabase, teamRetouchDatabase: restoredTeamRetouchDatabase };
+    currentWorkspace = { ...first, dataRoot: restoredDataRoot, database: restoredDatabase, operationsDatabase: restoredOperationsDatabase, sampleComponentDatabase: restoredSampleComponentDatabase };
     await fs.promises.writeFile(externalLinksPath, JSON.stringify({ version: 1, links: { 'current-link': { target: 'E:/current-media', kind: 'folder', createdAt: 2 } } }), 'utf8');
     await configMutationService.mutate(current => ({ ...current, theme: 'dark', defaultFolderSort: 'size', componentSettings: { ...(current.componentSettings || {}), 'concurrent-fixture': { enabled: true } }, componentSettingsRevisions: { ...(current.componentSettingsRevisions || {}), 'concurrent-fixture': 10 } }));
     const restored = await service.restoreWorkspace(first.root, replacementRun.result.id, restoreRoot);
@@ -378,7 +378,7 @@ const main = async () => {
     assert.ok((await fs.promises.stat(restoredDatabase)).isFile());
     const restoredUndo = await runPython('operations_db.py', ['undo_record_latest', '--database', restoredOperationsDatabase, '--payload', '{}']);
     assert.strictEqual(restoredUndo.record.id, 'workspace-one-id-undo', 'workspace restore must restore the operations journal');
-    assert.ok((await fs.promises.stat(restoredTeamRetouchDatabase)).isFile(), 'workspace restore must restore the team-retouch store');
+    assert.ok((await fs.promises.stat(restoredSampleComponentDatabase)).isFile(), 'workspace restore must restore the sample-component store');
     assert.equal(await fs.promises.readFile(path.join(restoredDataRoot, 'components', 'sample-component', 'storage.sqlite3'), 'utf8'), 'opaque-database-workspace-one-id');
     assert.equal(JSON.parse(await fs.promises.readFile(path.join(restoredDataRoot, 'components', 'sample-component', 'private', 'state.json'), 'utf8')).id, 'workspace-one-id');
     const workspaceRestoredExternalLinks = JSON.parse(await fs.promises.readFile(externalLinksPath, 'utf8'));

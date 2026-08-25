@@ -91,7 +91,7 @@ const model = loadCommonJs(compile('src/features/versioning/versioning-v2-model.
 const sourceFixture = overrides => ({ id: 'node', projectId: 'project', mediaKind: 'image', versionKey: '1', nodeRole: 'progress', relationKind: 'main', parentProgressId: 'root', folderMissing: false, trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled', ...overrides });
 const ordinarySelection = sourceFixture({ id: 'selection', nodeRole: 'selection', relationKind: 'auxiliary', sourceMetadata: null });
 const ordinaryProgress = sourceFixture({ id: 'progress', sourceMetadata: null });
-const legacyWorkflow = sourceFixture({ id: 'legacy-workflow', nodeRole: 'workflow', relationKind: undefined, parentProgressId: undefined, artifactKind: 'team_workspace', sourceMetadata: null });
+const legacyWorkflow = sourceFixture({ id: 'legacy-workflow', nodeRole: 'workflow', relationKind: undefined, parentProgressId: undefined, artifactKind: 'component_workspace', sourceMetadata: null });
 const metadataWorkflow = sourceFixture({ id: 'metadata-workflow', nodeRole: 'workflow', relationKind: undefined, parentProgressId: undefined, artifactKind: 'vendor.workflow', sourceMetadata: { category: 'workflow', displayName: '供应商流程', componentId: 'vendor', parentCapability: 'workflow-input' } });
 assert.equal(model.workflowInputLabel(ordinarySelection), '图片选片');
 assert.equal(model.versionSourceMetadata(ordinaryProgress).parentCapability, 'structural');
@@ -405,7 +405,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const generatedArtifact = { ...selection, id: 'generated', displayName: 'generated JPG artifact', folderPath: 'C:/p/generated JPG artifact', nodeRole: 'artifact', artifactKind: 'preview', relationKind: undefined, parentProgressId: undefined };
   const companionArtifact = { ...generatedArtifact, id: 'camera-jpg', displayName: 'Camera JPG', folderPath: 'C:/p/Camera JPG', nodeRole: 'original', artifactKind: 'companion' };
   const ambiguousArtifact = { ...generatedArtifact, id: 'ambiguous-artifact', displayName: 'Ambiguous Artifact', folderPath: 'C:/p/Ambiguous Artifact', artifactKind: undefined };
-  const workflow = { ...selection, id: 'workflow', displayName: '团片协作节点', folderPath: 'C:/p/团片协作节点', nodeRole: 'workflow', artifactKind: 'team_workspace', relationKind: undefined, parentProgressId: undefined };
+  const workflow = { ...selection, id: 'workflow', displayName: '组件工作区节点', folderPath: 'C:/p/组件工作区节点', nodeRole: 'workflow', artifactKind: 'component_workspace', relationKind: undefined, parentProgressId: undefined };
   const broll = { ...freeProgress, id: 'broll', mediaKind: 'mixed', versionKey: 'adopt-broll', displayName: '幕后花絮', folderPath: 'C:/p/幕后花絮', nodeRole: 'broll', relationKind: undefined, parentProgressId: undefined, trackingEnabled: false, trackingState: 'disabled' };
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, {
     draft: draft('create'),
@@ -416,7 +416,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const parentOptionText = parentSelect.options.map(option => option.textContent).join('|');
   assert(parentOptionText.includes('RAW'), 'RAW must be present in the structural parent selector');
   assert(!parentOptionText.includes('generated JPG artifact'), 'generated JPG artifacts must not be structural parent options');
-  assert(!parentOptionText.includes('RAW_选片') && !parentOptionText.includes('团片协作节点'), 'selection and workflow nodes must not be structural parent options');
+  assert(!parentOptionText.includes('RAW_选片') && !parentOptionText.includes('组件工作区节点'), 'selection and workflow nodes must not be structural parent options');
   assert(!textContent(container).includes('工作流输入'), 'selection and collaboration creation must stay in their own components');
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, {
     draft: draft('modify'), folders, state: 'processing',
@@ -434,7 +434,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     { kind: 'folder', name: 'generated JPG artifact', relativePath: 'generated JPG artifact', path: 'C:/p/generated JPG artifact', extension: '', size: 0, createdAt: 5, updatedAt: 5 },
     { kind: 'folder', name: 'Camera JPG', relativePath: 'Camera JPG', path: 'C:/p/Camera JPG', extension: '', size: 0, createdAt: 6, updatedAt: 6 },
     { kind: 'folder', name: 'Ambiguous Artifact', relativePath: 'Ambiguous Artifact', path: 'C:/p/Ambiguous Artifact', extension: '', size: 0, createdAt: 7, updatedAt: 7 },
-    { kind: 'folder', name: '团片协作节点', relativePath: '团片协作节点', path: 'C:/p/团片协作节点', extension: '', size: 0, createdAt: 8, updatedAt: 8 },
+    { kind: 'folder', name: '组件工作区节点', relativePath: '组件工作区节点', path: 'C:/p/组件工作区节点', extension: '', size: 0, createdAt: 8, updatedAt: 8 },
     { kind: 'folder', name: 'Other', relativePath: 'Other', path: 'C:/p/Other', extension: '', size: 0, createdAt: 9, updatedAt: 9 },
     { kind: 'folder', name: '幕后花絮', relativePath: '幕后花絮', path: 'C:/p/幕后花絮', extension: '', size: 0, createdAt: 10, updatedAt: 10 },
     { kind: 'image', name: 'loose.jpg', relativePath: 'loose.jpg', path: 'C:/p/loose.jpg', extension: '.jpg', size: 100, createdAt: 11, updatedAt: 11 },

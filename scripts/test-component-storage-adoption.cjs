@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { adoptLegacyStorageV1, transactionPaths } = require('../electron/compatibility/component-storage-v1-adoption.cjs');
+const { adoptLegacyStorageV1, transactionPaths } = require('../electron/services/component-storage-adoption.cjs');
 
 const simulatedCrash = stage => {
   const error = new Error(`simulated crash ${stage}`);

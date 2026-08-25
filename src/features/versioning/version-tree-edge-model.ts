@@ -1,4 +1,3 @@
-import { legacyVersionSourceMetadata } from '../../compatibility/version-source.ts';
 
 export type VersionTreeEdgeKind = 'main' | 'auxiliary' | 'media_companion' | 'derived_preview' | 'derived_transcode' | 'workflow_input';
 export type VersionTreeEdgePort = 'left' | 'right' | 'top' | 'bottom';
@@ -43,7 +42,6 @@ export const allowedVersionTreeRelationKinds = (source: VersionTreeRelationNode,
   if (sourceIsMain && target.nodeRole === 'artifact'
     && (!target.artifactKind || target.artifactKind === 'transcode')) result.push('derived_transcode');
   const parentCapability = (node: VersionTreeRelationNode) => node.sourceMetadata?.parentCapability
-    || legacyVersionSourceMetadata(node)?.parentCapability
     || (node.nodeRole === 'selection' || node.nodeRole === 'workflow' ? 'workflow-input' : undefined);
   const sourceCapability = parentCapability(source);
   const targetCapability = parentCapability(target);

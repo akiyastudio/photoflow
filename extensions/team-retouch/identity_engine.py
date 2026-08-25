@@ -108,6 +108,7 @@ class IdentityRuntime:
         self.body_input_name = self.body_session.get_inputs()[0].name
         self.adaface_session = ort.InferenceSession(str(face_recognizer_path), sess_options=options, providers=providers)
         self.adaface_input_name = self.adaface_session.get_inputs()[0].name
+        self.adaface_output_count = len(self.adaface_session.get_outputs())
         self.provider = self.body_session.get_providers()[0]
         self.body_backend = "osnet-x1"
         self.face_backend = "adaface-ir18"
@@ -115,8 +116,10 @@ class IdentityRuntime:
     def _face_feature(self, aligned):
         tensor = aligned.astype(np.float32) / 127.5 - 1.0
         tensor = np.ascontiguousarray(tensor.transpose(2, 0, 1)[None])
-        embedding, feature_norm = self.adaface_session.run(None, {self.adaface_input_name: tensor})
-        norm_quality = float(np.clip((float(np.asarray(feature_norm).reshape(-1)[0]) - 5) / 20, 0, 1))
+        outputs = self.adaface_session.run(None, {self.adaface_input_name: tensor})
+        embedding = outputs[0]
+        feature_norm = outputs[1] if self.adaface_output_count > 1 else np.linalg.norm(embedding, axis=1, keepdims=True)
+        norm_quality = float(np.clip((float(np.asarray(feature_norm).reshape(-1)[0]) - 5) / 20, 0, 1)) if self.adaface_output_count > 1 else .5
         return _unit(embedding[0]), norm_quality
 
     def _detect_faces(self, source_bgr, region, target_edge, maximum_upscale):

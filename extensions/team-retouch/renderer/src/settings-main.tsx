@@ -6,7 +6,7 @@ import { LegacyDialogProvider } from './legacy/legacy-dialog';
 import { notify, rpc, type ComponentContext } from './sdk';
 import { TeamSettingsContent } from './team-settings-content';
 import { createTeamSettingsController, type TeamSettingsState } from './team-settings-model';
-import '../../../../component-sdk/ui.css';
+import './host-api-ui.css';
 import './legacy-style.css';
 
 type Json = Record<string, any>;

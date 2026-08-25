@@ -7,7 +7,7 @@ PhotoFlow 把可选扩展包称为 **组件（Component）**。文件名保留�
 1. 把 `examples/hello-component` 复制到以组件 ID 命名的目录。
 2. 普通 V2 组件可继续使用 Host API `2`；设置页需要 Host API `3`；声明顶部通知能力需要 Host API `4` 与 `minHostApiVersion:4`。
 3. 添加一个 `workspace.toolbarAction`、一个与之相连的 `component.fullPage`、包内 UI 入口和服务入口。需要全局设置时，可额外贡献 `application.settingsPage`。
-4. 声明全部服务 RPC、Host 能力、权限和发出的事件。未声明的访问会默认拒绝。从同 ID 的已安装 Host V1 包升级时，可以声明 `componentHost.migrations.legacyStorageV1` 和/或 `legacyOutputV1`；不要把组件业务表或路径字段加入宿主代码。
+4. 声明全部服务 RPC、Host 能力、权限和发出的事件。未声明的访问会默认拒绝。升级历史数据时，可声明 `component.storage.previous.v1` 和/或 `project.output.existing.v1` adoption grant；不要把组件业务表或路径字段加入宿主代码。
 5. 运行 `node scripts/mock-component-service.cjs path/to/service.cjs`，不启动 Electron 也能验证按行分隔的服务协议。
 6. 把目录放入 PhotoFlow 用户组件目录；源码开发时也可以放到 `extensions/`。发行包使用 `component.json`；源码开发可以使用 `component.template.json` 和现有组件构建流程。
 
@@ -101,4 +101,4 @@ stage 元数据与登记文件保留 24 小时，因此宿主重启后可以继�
 - 安装包只包含构建后的 UI、服务和运行资源；为清单声明的生命周期动作计算哈希；在干净用户配置中安装，测试取消、重启，再用真实 V1 数据测试升级与降级。
 - 每次发布提升组件业务版本。只有语义破坏性变化才提升 RPC/事件的 `.vN`；迁移期新增版本应与旧版本并存。
 
-Host V1 组件继续通过已弃用的兼容适配器运行。新组件不能请求 V1 团片/业务能力，也不能依赖兼容路径。
+旧宿主业务适配器已经移除。组件只能通过版本化 Host API 与 adoption grant 运行。

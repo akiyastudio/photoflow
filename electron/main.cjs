@@ -10,9 +10,7 @@ const { createComponentRegistry } = require('./component-registry.cjs'); const {
 const { ComponentViewManager } = require('./services/component-view-manager.cjs'); const { createComponentHostCapabilityRuntime } = require('./services/component-host-capability-runtime.cjs');
 const { ToastOverlayManager } = require('./services/toast-overlay-manager.cjs');
 const { ComponentServiceManager } = require('./services/component-service-manager.cjs'); const { createConfigMutationService, readConfigFileWithRecovery, registerConfigDrainBeforeQuit } = require('./services/config-mutation-service.cjs');
-const { COMPONENT_HOST_V1_RPC_REGISTRARS } = require('./compatibility/component-host-v1.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
-const { LEGACY_PYTHON_TOOL_ENTRIES, legacyDatabasePath } = require('./compatibility/component-v1-metadata.cjs');
 const { registerComponentHostIpc } = require('./modules/component-host-ipc.cjs');
 const { registerComponentIconProtocol } = require('./modules/component-icon-protocol.cjs');
 const { PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
@@ -61,7 +59,7 @@ const { findPythonJsonFailureMessage, parsePythonJsonMessages } = require('./ser
 const { createMediaRatingService } = require('./services/media-rating-service.cjs');
 const { createRawOrientationService } = require('./services/raw-orientation-service.cjs');
 const { createImageThumbnailRuntime } = require('./services/image-thumbnail-runtime.cjs');
-const { createDevelopmentAlgorithmRuntimes, createDevelopmentPythonResolver } = require('./services/python-environment-service.cjs');
+const { createDevelopmentPythonResolver } = require('./services/python-environment-service.cjs');
 const { createVersionService } = require('./domains/versioning/public.cjs');
 const { createVersionStaleDetectionService } = require('./services/version-stale-detection-service.cjs');
 const { createMediaTrackingScanScheduler } = require('./services/media-tracking-scan-scheduler.cjs');
@@ -118,7 +116,6 @@ const componentRegistry = createComponentRegistry({
 const componentHostRegistry = createComponentHostRegistry({
   roots: componentRegistry.roots,
   admitDescriptor: (descriptor, componentRoot) => { const component = componentRegistry.resolve(descriptor.componentId, { verifyIntegrity: true }); return Boolean(component && path.resolve(component.path) === path.resolve(componentRoot)); },
-  ...(app.isPackaged ? {} : { developmentRendererRoot: path.join(projectRoot, 'artifacts', 'component-renderers'), developmentAlgorithmRuntimes: createDevelopmentAlgorithmRuntimes({ projectRoot, definitions: PLUGIN_DEFINITIONS }) }),
 });
 let componentViewManager; let componentServiceManager; let configMutationService; let toastOverlayManager;
 
@@ -631,7 +628,7 @@ const loadMainWindowRenderer = () => {
 };
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'operations_db', 'backup_db', ...Object.keys(LEGACY_PYTHON_TOOL_ENTRIES)]);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'operations_db', 'backup_db']);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
 
 const getDevelopmentPython = createDevelopmentPythonResolver({ projectRoot });
@@ -669,10 +666,7 @@ const getRunConfig = (scriptName, args) => {
   } else {
     // 【开发环境】使用 python 解释器运行对应的 .py 脚本
     // 脚本路径: python/classify.py
-    const developmentEntry = LEGACY_PYTHON_TOOL_ENTRIES[baseName];
-    const scriptPath = developmentEntry
-      ? path.join(projectRoot, 'python', ...developmentEntry)
-      : path.join(projectRoot, 'python', `${baseName}.py`);
+    const scriptPath = path.join(projectRoot, 'python', `${baseName}.py`);
 
     return {
       command: getDevelopmentPython(),
@@ -935,7 +929,6 @@ const getWorkspaceOperationsDatabasePath = root => path.join(
   'operations.sqlite3',
 );
 
-const getLegacyComponentDatabasePath = root => legacyDatabasePath(getWorkspaceDataRoot, root);
 const getWorkspaceMediaDatabasePath = root => path.join(
   getWorkspaceDataRoot(root),
   'databases',
@@ -1888,7 +1881,7 @@ app.whenReady().then(async () => {
     writeLog,
   });
   registerComponentHostIpc({ ipcMain, manager: componentViewManager, mainWindow });
-  const componentRpcIpcMain = createComponentRpcIpcProxy({ ipcMain, manager: componentViewManager, compatibilityRegistrars: COMPONENT_HOST_V1_RPC_REGISTRARS });
+  const componentRpcIpcMain = createComponentRpcIpcProxy({ ipcMain, manager: componentViewManager });
 
   registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   for (const descriptor of componentHostRegistry.list()) componentCapabilityBroker.assertCapabilities(descriptor);
@@ -1937,7 +1930,7 @@ app.whenReady().then(async () => {
       if (failures.length) throw new AggregateError(failures, '数据库恢复完成，但部分 client 未能恢复');
     });
   });
-  const backupService = createBackupService({ app, backgroundTasks, credentialService, configMutationService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getLegacyComponentDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, workspaceSqliteCoordinator, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog, componentServiceManager });
+  const backupService = createBackupService({ app, backgroundTasks, credentialService, configMutationService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, workspaceSqliteCoordinator, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog, componentServiceManager });
   registerBackupIpc({ backupService, credentialService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
   const archiveService = createArchiveService({ backgroundTasks, movePathAtomic, readSavedConfig, workspaceRepository, writeLog });
   registerArchiveIpc({ archiveService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
