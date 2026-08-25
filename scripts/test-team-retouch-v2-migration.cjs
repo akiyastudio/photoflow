@@ -52,7 +52,7 @@ registerComponentProjectCapabilities({
   adoptionFaultInjector: phase => phase === 'before-journal' ? adoptionGate : undefined,
 });
 const manifest = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
-const descriptor = { componentId: 'team-retouch', componentVersion: manifest.version, contractVersion: 2, hostApiVersion: 2, migrations: manifest.componentHost.migrations, service: manifest.componentHost.service };
+const descriptor = { componentId: 'team-retouch', componentVersion: manifest.version, contractVersion: 2, hostApiVersion: 3, migrations: manifest.componentHost.migrations, service: manifest.componentHost.service };
 broker.register('component.lifecycle.v2', () => ({ apiVersion: 2, success: true, action: 'preflight', taskId: 'test', message: 'ok' }));
 assert.equal(broker.assertCapabilities(descriptor), true);
 const context = { workspacePath: workspace, projectId: 'project-1', projectName: 'Project', projectStatus: 'active', emitComponentEvent() {} };

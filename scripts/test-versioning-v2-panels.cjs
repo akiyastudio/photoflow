@@ -110,9 +110,12 @@ const canvasHook = loadCommonJs(compile('src/features/versioning/use-version-tre
 const canvasHookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/versioning/use-version-tree-canvas.ts'), 'utf8');
 const projectWorkspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/workspace/ProjectWorkspace.tsx'), 'utf8');
 assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next)'), 'version-tree layout reconciliation must skip identical maps to prevent effect update loops');
+const initialLayoutLoadSource = canvasHookSource.slice(canvasHookSource.indexOf('const loadServerLayout'), canvasHookSource.indexOf('useEffect(() => {\n    disposedRef.current = false'));
+assert(!initialLayoutLoadSource.includes('scrollTop = 0') && !initialLayoutLoadSource.includes('scrollLeft = 0'), 'an asynchronous saved-layout load must preserve a viewport the user already scrolled');
 assert(projectWorkspaceSource.includes('setFolderMarkSetup(createFolderMarkDraft') && projectWorkspaceSource.includes('<FolderMarkPanel'), 'ordinary folders must open the unified purpose-marking panel');
 assert(projectWorkspaceSource.includes("draft.purpose === 'progress'") && projectWorkspaceSource.includes('await submitProgressSetup(setup)')
   && projectWorkspaceSource.includes("draft.purpose === 'broll' ? 'mixed' : draft.mediaKind"), 'the unified panel must route progress through graph registration and original/broll through restricted purpose adoption');
+assert(projectWorkspaceSource.includes("[browserRootLabel, normalizeProjectRelativePath(fileImportTarget)]"), 'file-import destination labels must show the active browser name instead of an internal inspiration workspace name');
 const markSubmitSource = projectWorkspaceSource.slice(projectWorkspaceSource.indexOf("if (draft.mode === 'mark')"), projectWorkspaceSource.indexOf('const importOptions'));
 assert(markSubmitSource.includes('已登记，但跟踪启动失败') && markSubmitSource.includes('await loadProgressFolders()')
   && !markSubmitSource.includes("throw new Error(started.error || '无法启动版本跟踪任务')"), 'a persisted mark must report tracking-start failure as partial success and refresh the visible node');
@@ -184,6 +187,15 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const container = new TestNode(1, 'DIV', testDocument);
   const root = createRoot(container);
   const markCommon = { relativePath: '客户/素材', folderName: '素材' };
+  await React.act(async () => root.render(React.createElement(importSourceControls.ImportSourceControls, {
+    selectionTitle: '选择文件', selectionDescription: '选择文件', selectedCount: 0,
+    onChooseFiles() {}, deleteSourceAfterImport: false, onDeleteSourceAfterImportChange() {},
+    deleteSourceDescription: '保留源文件', importKind: 'files', onImportKindChange() {}, onStart() {},
+    disabledImportKinds: ['original', 'progress', 'broll'],
+  })));
+  const inspirationImportKindButtons = allNodes(container).filter(node => node.nodeName === 'BUTTON' && ['原始素材', '进度', '花絮', '其他文件'].includes(node.textContent));
+  assert.deepStrictEqual(inspirationImportKindButtons.filter(node => node.attributes.has('disabled')).map(node => node.textContent), ['原始素材', '进度', '花絮'], 'inspiration imports must disable project-only material kinds');
+  assert(!inspirationImportKindButtons.find(node => node.textContent === '其他文件').attributes.has('disabled'), 'inspiration imports must keep other-file import available');
   const secondOriginal = { ...folders[0], id: 'raw-two', versionKey: 'source-two', displayName: 'RAW 2', folderPath: 'C:/p/RAW 2' };
   const ambiguousOriginalDraft = folderMarkPanel.createFolderMarkDraft(markCommon, 'progress', [...folders, secondOriginal], 'image');
   assert.strictEqual(ambiguousOriginalDraft.progress.parentProgressId, '');
@@ -504,7 +516,11 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert(parseFloat(imageArea.style.top) + parseFloat(imageArea.style.height) <= parseFloat(otherArea.style.top), 'default semantic regions must not overlap');
   assert(!allNodes(imageArea).some(node => node.nodeName === 'BUTTON') && !/[▶▼]/u.test(textContent(imageArea)), 'semantic frames must be a separate passive layer without disclosure arrows');
   const imageAreaBeforeDrag = { left: imageArea.style.left, top: imageArea.style.top, width: imageArea.style.width, height: imageArea.style.height };
-  assert(!textContent(container).includes('loose.jpg'), 'loose media files must not become canvas nodes');
+  const looseFileNode = allNodes(container).find(node => node.attributes.get('data-version-tree-node') === 'true' && node.textContent.includes('loose.jpg'));
+  assert(looseFileNode, 'ordinary files must remain visible as version-tree canvas nodes');
+  assert(!looseFileNode.attributes.has('data-version-output-target-key'), 'ordinary files must stay passive instead of accepting version outputs');
+  assert(parseFloat(looseFileNode.style.top) >= parseFloat(otherArea.style.top)
+    && parseFloat(looseFileNode.style.top) < parseFloat(otherArea.style.top) + parseFloat(otherArea.style.height), 'ordinary files must render inside the Other region');
   assert(!textContent(container).includes('适应窗口') && !textContent(container).includes('100%') && !textContent(container).includes('剪线工具') && !textContent(container).includes('节点视图'), 'the version tree must not add a second top toolbar');
   const miniMap = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('title') === '小地图：点击显示全部');
   assert((miniMap?.attributes.get('class') || '').includes('fixed') && (miniMap?.attributes.get('class') || '').includes('bottom-4') && (miniMap?.attributes.get('class') || '').includes('right-4'), 'the mini map must remain fixed to the viewport bottom-right');
@@ -545,11 +561,19 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, entries: shelfEntries, structureEntries: shelfEntries }));
     await Promise.resolve(); await Promise.resolve();
   });
-  const shelfTops = ['entry:other', 'entry:other b', 'entry:other c'].map(key => allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === key)?.style.top);
-  assert.strictEqual(new Set(shelfTops).size, 1, 'ordinary folders in the Other region must prefer one horizontal row');
-  const shelfLefts = ['entry:other', 'entry:other b', 'entry:other c'].map(key => parseFloat(allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === key)?.style.left));
-  assert.strictEqual(shelfLefts[1] - shelfLefts[0], treeProps.gridIconSize + workspaceGridModel.FILE_GRID_GAP, 'ordinary folders must reuse the standard icon-grid gap');
-  assert.strictEqual(shelfLefts[2] - shelfLefts[1], treeProps.gridIconSize + workspaceGridModel.FILE_GRID_GAP, 'every ordinary folder must keep the standard icon-grid pitch');
+  const shelfNodes = [
+    allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'entry:other'),
+    allNodes(container).find(node => node.attributes.get('data-version-tree-node') === 'true' && node.textContent.includes('loose.jpg')),
+    allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'entry:other b'),
+    allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'entry:other c'),
+  ];
+  assert(shelfNodes.every(Boolean), 'the Other shelf must contain both ordinary files and folders');
+  const shelfTops = shelfNodes.map(node => node.style.top);
+  assert.strictEqual(new Set(shelfTops).size, 1, 'ordinary entries in the Other region must prefer one horizontal row');
+  const shelfLefts = shelfNodes.map(node => parseFloat(node.style.left));
+  shelfLefts.slice(1).forEach((left, index) => {
+    assert.strictEqual(left - shelfLefts[index], treeProps.gridIconSize + workspaceGridModel.FILE_GRID_GAP, 'every ordinary entry must keep the standard icon-grid pitch');
+  });
   assert(allNodes(container).some(node => node.attributes.get('data-version-output-target-key') === 'entry:external raw.lnk'), 'an untracked managed external folder must appear as a regular folder node in the version tree');
   const inferredLegacyOriginal = allNodes(container).find(node => node.attributes.get('data-version-output-target-key') === 'entry:raw.lnk');
   assert(inferredLegacyOriginal && allNodes(inferredLegacyOriginal).some(node => node.attributes.get('data-source-kind') === 'image'), 'an existing canonical RAW external link without historical role metadata must be inferred into the image original-material area instead of Other');

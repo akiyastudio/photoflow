@@ -5,6 +5,7 @@ const path = require('path');
 const readline = require('readline');
 const { spawn } = require('child_process');
 const { DatabaseSync } = require('node:sqlite');
+const { resolveWorkflowTaskBinding } = require('../extensions/team-retouch/service.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'team-retouch-reconcile-'));
 const dataRoot = path.join(sandbox, 'data', 'team-retouch');
@@ -151,9 +152,11 @@ const restoreManifestDirectory = () => {
     const db = new DatabaseSync(databasePath);
     db.exec('BEGIN IMMEDIATE');
     db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('photo', 'project', 'base', 1, 1);
+    db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('foreign-photo', 'other-project', 'foreign-base', 1, 1);
     const insertTask = db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
     insertTask.run('task-1', 'photo', 'base', 1, '任务一', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 1 }, { personIndex: 2 }]), 1, 1);
     insertTask.run('task-2', 'photo', 'base', 3, '任务二', '{}', '{}', taskTwoPatch, JSON.stringify([{ personIndex: 3 }, { personIndex: 4 }]), 1, 1);
+    insertTask.run('foreign-task', 'foreign-photo', 'foreign-base', 5, '外部项目任务', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 5 }]), 1, 1);
     const insertStage = db.prepare(`INSERT INTO team_task_stages(id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`);
     for (const [taskId, people] of [['task-1', [1, 2]], ['task-2', [3, 4]]]) for (const [index, personIndex] of people.entries()) insertStage.run(`${taskId}-stage-${personIndex}`, taskId, personIndex, index + 1, 'pending', 1, 1);
     const insertIdentity = db.prepare(`INSERT INTO team_person_identities(id,project_id,name,created_at,updated_at) VALUES(?,?,?,?,?)`);
@@ -164,6 +167,9 @@ const restoreManifestDirectory = () => {
       insertAssignment.run('project', 'photo', 'base', personIndex, `identity-${personIndex}`, 1, 'manual', 0, 1, taskId, `${taskId}-stage-${personIndex}`);
     }
     db.exec('COMMIT');
+    assert.throws(() => resolveWorkflowTaskBinding(db, 'project', 'foreign-task', [{ item: { photoId: 'legacy-photo', baseVersionId: 'foreign-base' } }]), /不属于当前项目/, 'a stable task id cannot rebind a workflow chain across projects');
+    assert.throws(() => resolveWorkflowTaskBinding(db, 'project', 'task-1', [{ item: { photoId: 'legacy-photo', baseVersionId: 'wrong-base' } }]), /错误的照片版本/, 'a legacy photo id never relaxes the exact base-version binding');
+    assert.deepEqual(resolveWorkflowTaskBinding(db, 'project', 'task-1', [{ item: { photoId: 'legacy-photo', baseVersionId: 'base' } }]).legacyPhotoIds, ['legacy-photo']);
     db.close();
 
     const generated = await invoke('team.workflow.generate.v1', {
@@ -182,6 +188,67 @@ const restoreManifestDirectory = () => {
     const taskTwoActive = assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
     assertInactive('task-1', 2);
     assertInactive('task-2', 4);
+
+    const legacyManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    for (const item of legacyManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1')) item.photoId = 'legacy-photo-id';
+    fs.writeFileSync(manifestPath, JSON.stringify(legacyManifest, null, 2));
+    const legacyPendingDb = new DatabaseSync(databasePath);
+    legacyPendingDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-1', 'legacy-photo-id', '工作流程 task 链跨越了错误的照片版本', 1);
+    legacyPendingDb.close();
+    const legacyStatus = await invoke('team.project.get.v1');
+    assert.deepEqual({ state: legacyStatus.migration.state, phase: legacyStatus.migration.phase, pending: legacyStatus.migration.maintenancePendingCount }, { state: 'pending', phase: 'workflow-reconcile', pending: 1 });
+    await invoke('team.project.migrate-step.v1');
+    assert(JSON.parse(fs.readFileSync(manifestPath, 'utf8')).groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1').every(item => item.photoId === 'photo'), 'all items in the stable task/base chain are atomically rewritten to the current project photo id');
+    const healedDb = new DatabaseSync(databasePath);
+    assert.equal(healedDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-1').count, 0, 'a healed legacy photo id clears its reconcile retry');
+    healedDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-1', 'photo', 'idempotency check', 2);
+    healedDb.close();
+    const auditPath = path.join(dataRoot, 'command-log', 'operations.ndjson');
+    const repairAuditCount = () => fs.readFileSync(auditPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)).filter(item => item.state === 'legacy-photo-id-repaired' && item.taskId === 'task-1').length;
+    assert.equal(repairAuditCount(), 1, 'the legacy id repair writes one auditable command record');
+    await invoke('team.project.migrate-step.v1');
+    assert.equal(repairAuditCount(), 1, 'repeating an already-healed reconciliation has no duplicate repair audit');
+
+    const conflictManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    for (const item of conflictManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-2')) { item.photoId = 'legacy-conflict-photo'; item.baseVersionId = 'wrong-base'; }
+    fs.writeFileSync(manifestPath, JSON.stringify(conflictManifest, null, 2));
+    const rejectedDb = new DatabaseSync(databasePath);
+    rejectedDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-2', 'legacy-conflict-photo', 'version conflict fixture', 3);
+    rejectedDb.close();
+    await invoke('team.project.migrate-step.v1');
+    const rejectedItems = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-2');
+    assert(rejectedItems.every(item => item.photoId === 'legacy-conflict-photo' && item.baseVersionId === 'wrong-base'), 'a base-version conflict rejects the whole chain without partially rewriting photo ids');
+    const rejectedStateDb = new DatabaseSync(databasePath);
+    assert.match(rejectedStateDb.prepare('SELECT error FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-2').error, /错误的照片版本/);
+    rejectedStateDb.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run('task-2');
+    rejectedStateDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('foreign-task', 'foreign-photo', 'cross-project fixture', 4);
+    rejectedStateDb.close();
+    await invoke('team.project.migrate-step.v1');
+    const crossProjectDb = new DatabaseSync(databasePath);
+    assert.equal(crossProjectDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id=?').get('foreign-task').count, 1, 'a foreign-project task id is never drained or rebound by the current project migration');
+    crossProjectDb.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run('foreign-task');
+    crossProjectDb.close();
+    const restoredConflictManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    for (const item of restoredConflictManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-2')) { item.photoId = 'photo'; item.baseVersionId = 'base'; }
+    fs.writeFileSync(manifestPath, JSON.stringify(restoredConflictManifest, null, 2));
+
+    const laterFailureManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    for (const item of laterFailureManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1')) item.photoId = 'legacy-photo-before-later-failure';
+    fs.writeFileSync(manifestPath, JSON.stringify(laterFailureManifest, null, 2));
+    const laterFailureDb = new DatabaseSync(databasePath);
+    laterFailureDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-1', 'legacy-photo-before-later-failure', 'retry after legacy id', 3);
+    laterFailureDb.close();
+    artifactScopeCount = 0;
+    breakManifestOnArtifactCall = 2;
+    await invoke('team.project.migrate-step.v1');
+    restoreManifestDirectory();
+    breakManifestOnArtifactCall = 0;
+    const repairedBeforeFailure = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1');
+    assert(repairedBeforeFailure.every(item => item.photoId === 'photo'), 'the safe photo-id repair is durable even when later artifact reconciliation fails');
+    const stillPendingDb = new DatabaseSync(databasePath);
+    assert.equal(stillPendingDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-1').count, 1, 'a later non-binding failure remains queued without rolling back the safe manifest repair');
+    stillPendingDb.close();
+    await invoke('team.project.migrate-step.v1');
 
     await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' });
     const taskOneB = assertActive('task-1', 2, 'ORIGINAL-TASK-ONE');
@@ -213,37 +280,42 @@ const restoreManifestDirectory = () => {
     assertInactive('task-2', 4);
 
     seedReview('concurrent-return', 'CONCURRENT-RETURN');
+    const confirmation = await invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'concurrent-return', returnId: 'concurrent-return', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
+    assert.equal(confirmation.success, true);
+    assert.equal(confirmation.reconcilePending, true, 'manual confirmation returns after durable archival instead of waiting for relay publication');
+    assert.match(confirmation.warning, /后台更新/);
+    const queuedDb = new DatabaseSync(databasePath);
+    assert.equal(queuedDb.prepare(`SELECT completed FROM team_person_assignments WHERE photo_id='photo' AND base_version_id='base' AND person_index=1`).get().completed, 1);
+    assert.equal(queuedDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 1);
+    queuedDb.close();
     holdSecondWorkflowScope = true;
     workflowScopeCount = 0;
     const held = waitForHeldWorkflow();
-    const confirmation = invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'concurrent-return', returnId: 'concurrent-return', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
+    const backgroundReconcile = invoke('team.project.migrate-step.v1');
     await held;
     let undoResolved = false;
     const concurrentUndo = invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false }).then(value => { undoResolved = true; return value; });
     await new Promise(resolve => setTimeout(resolve, 60));
-    assert.equal(undoResolved, false, 'same-photo completion cannot enter between return archival and reconciliation');
+    assert.equal(undoResolved, false, 'same-photo completion cannot enter while the queued relay update is running');
     releaseHeldWorkflow();
-    assert.equal((await confirmation).success, true);
+    await backgroundReconcile;
     await concurrentUndo;
     holdSecondWorkflowScope = false;
     assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
     assertInactive('task-1', 2);
 
     seedReview('recoverable-return', 'RECOVERABLE-RETURN');
-    breakManifestOnArtifactCall = 2;
     artifactScopeCount = 0;
     const recoverable = await invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'recoverable-return', returnId: 'recoverable-return', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
     assert.equal(recoverable.success, true, 'a committed return must not be reported as an upload failure');
     assert.equal(recoverable.reconcilePending, true);
-    assert.match(recoverable.warning, /无需重复操作/);
+    assert.match(recoverable.warning, /后台更新/);
     const pendingDb = new DatabaseSync(databasePath);
     const archived = pendingDb.prepare(`SELECT a.completed,a.artifact_id,r.artifact_path FROM team_person_assignments a JOIN team_task_artifacts r ON r.id=a.artifact_id WHERE a.photo_id='photo' AND a.base_version_id='base' AND a.person_index=1`).get();
     assert.equal(archived.completed, 1);
     assert.equal(fs.readFileSync(archived.artifact_path, 'utf8'), 'RECOVERABLE-RETURN');
     assert.equal(pendingDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 1);
     pendingDb.close();
-    restoreManifestDirectory();
-    breakManifestOnArtifactCall = 0;
     const reload = await invoke('team.project.get.v1'); assert.equal(reload.migration.state, 'pending'); await invoke('team.project.migrate-step.v1');
     const recoveredDb = new DatabaseSync(databasePath);
     assert.equal(recoveredDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 0, 'project reload clears a successfully reconciled pending task');

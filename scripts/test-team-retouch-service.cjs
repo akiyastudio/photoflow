@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const readline = require('readline');
 const { DatabaseSync } = require('node:sqlite');
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
+const { createConfigMutationService } = require('../electron/services/config-mutation-service.cjs');
 const { registerDeprecatedTeamRetouchV1Capabilities: registerComponentProjectCapabilities, versionProjectPath } = require('../electron/compatibility/component-team-retouch-v1-adapter.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-team-service-'));
@@ -31,6 +32,8 @@ assert.deepEqual(versionProjectPath({ version: { filePath: path.join(externalRoo
 assert(externalMappingUsed, 'online external media paths must use the existing managed virtual-path mapping');
 
 const broker = new ComponentCapabilityBroker();
+const readSavedConfig = () => JSON.parse(fs.readFileSync(configPath, 'utf8'));
+const configMutationService = createConfigMutationService({ fs, crypto: require('crypto'), getConfigPath: () => configPath, readSavedConfig });
 const bundles = new Map();
 const requestedPhotoIds = [];
 let unavailableProjectPreviewPhotoId = '';
@@ -76,7 +79,7 @@ registerComponentProjectCapabilities({
   fs,
   crypto: require('crypto'),
   getConfigPath: () => configPath,
-  readSavedConfig: () => JSON.parse(fs.readFileSync(configPath, 'utf8')),
+  readSavedConfig, readConfig: configMutationService.read, mutateConfig: configMutationService.mutate,
   getProjectPath: (_root, status, projectName) => path.join(workspace, status, projectName),
   dialog: { showOpenDialog: async () => ({ canceled: false, filePaths: [selectedReturn] }) }, mainWindow: {},
   mediaService: { grantPath: value => value, grantRoot: value => value, authorizeInput: async token => token.replace(/^media-token:/, ''), toUrl: value => `photoflow-media:${path.basename(value)}`, requestThumbnail: async () => ({ success: true, previewUrl: 'photoflow-media:generated-preview' }) },
@@ -88,7 +91,7 @@ broker.register('component.lifecycle.v1', payload => Object.keys(payload).every(
 const legacyDescriptor = { componentId: 'team-retouch', service: { runtimeActions: [], capabilities: ['component.storage.v1', 'project.media.read.v1', 'project.output.authorize.v1', 'version.register.v1', 'tasks.report.v1', 'dialogs.open.v1', 'project.media.access.v1', 'component.settings.v1', 'component.lifecycle.v1'] } };
 const inputTokens = new Map(); const outputStages = new Map(); const outputReceipts = new Map();
 broker.register('component.storage.v2', async (_payload, ctx) => { const legacy = await broker.invoke(legacyDescriptor, 'component.storage.v1', { namespace: 'domain' }, ctx); return { apiVersion: 2, dataPath: legacy.dataRoot, databasePath: legacy.databasePath, projectId: legacy.projectId, ownership: 'component-private' }; });
-broker.register('component.settings.v2', (payload, ctx) => broker.invoke(legacyDescriptor, 'component.settings.v1', payload.action === 'get' ? payload : { action: 'update', settings: payload.settings }, ctx).then(result => ({ apiVersion: 2, revision: 1, settings: result.settings })));
+broker.register('component.settings.v2', (payload, ctx) => broker.invoke(legacyDescriptor, 'component.settings.v1', payload.action === 'get' ? payload : { action: 'update', settings: payload.settings }, ctx).then(result => ({ apiVersion: 2, revision: result.revision, settings: result.settings })));
 broker.register('project.media.variants.v2', async (payload, ctx) => {
   const listed = await broker.invoke(legacyDescriptor, 'project.media.read.v1', payload.relativePath ? { relativePaths: [payload.relativePath] } : { photoIds: [payload.photoId] }, ctx);
   const bundle = listed.items[0]; const version = (bundle?.versions || []).find(item => !payload.versionId || String(item.id) === String(payload.versionId)) || bundle?.versions?.find(item => item.isCurrent) || bundle?.versions?.at(-1);
@@ -263,8 +266,17 @@ const ready = new Promise((resolve, reject) => {
     fs.mkdirSync(similarityDirectory, { recursive: true });
     fs.writeFileSync(path.join(similarityDirectory, `${require('crypto').createHash('sha256').update('Project').digest('hex')}.json`), JSON.stringify({ similarities: [{ left: 'a', right: 'b', score: .8 }] }));
     assert.equal((await invoke('team.identity.similarities.v1')).similarities[0].score, .8);
-    assert.deepEqual((await invoke('team.settings.get.v1')).settings, { useGpu: false, oversizeCropMode: 'expand' });
-    assert.deepEqual((await invoke('team.settings.update.v1', { useGpu: true, oversizeCropMode: 'face-centered' })).settings, { useGpu: true, oversizeCropMode: 'face-centered' });
+    const initialSettings = await invoke('team.settings.get.v1');
+    assert.deepEqual(initialSettings.settings, { useGpu: false, oversizeCropMode: 'expand' }); assert.equal(initialSettings.revision, 0);
+    const gpuPatch = await invoke('team.settings.update.v1', { useGpu: true });
+    assert.deepEqual(gpuPatch.settings, { useGpu: true, oversizeCropMode: 'expand' }); assert.equal(gpuPatch.revision, 1, 'V1 adapter writes share the monotonic revision ledger');
+    const cropPatch = await invoke('team.settings.update.v1', { oversizeCropMode: 'face-centered' });
+    assert.deepEqual(cropPatch.settings, { useGpu: true, oversizeCropMode: 'face-centered' }); assert.equal(cropPatch.revision, 2);
+    await configMutationService.mutate(current => { const componentSettings = { ...(current.componentSettings || {}) }; delete componentSettings['team-retouch']; return { ...current, personDetection: { useGpu: false, oversizeCropMode: 'expand' }, componentSettings, componentSettingsRevisions: { ...(current.componentSettingsRevisions || {}), 'team-retouch': 3 } }; });
+    const tombstoneRead = await invoke('team.settings.get.v1');
+    assert.deepEqual(tombstoneRead.settings, { useGpu: true, oversizeCropMode: 'face-centered' }, 'V1 adapter tombstones do not fall back to the legacy personDetection mirror');
+    const tombstonePatch = await invoke('team.settings.update.v1', { useGpu: false });
+    assert.deepEqual(tombstonePatch.settings, { useGpu: false, oversizeCropMode: 'face-centered' }, 'V1 updates after a tombstone start from runtime defaults rather than legacy values');
     const generated = await invoke('team.workflow.generate.v1', { operationId: 'workflow-real-process', replace: true, preferredIdentityOrder: [saved.identityId], groups: [{ week: 1, identityId: saved.identityId, identityName: '人物 A', items: [{ photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1, photoName: 'one' }] }] });
     assert.equal(generated.success, true, `a real supervised-style service process must generate workflow files: ${generated.error || ''}`);
     assert.equal(fs.existsSync(path.join(projectRoot, '团片协作', '第1周', '人物 A', 'one_人物1.png')), true);

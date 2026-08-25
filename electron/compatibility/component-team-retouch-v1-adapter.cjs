@@ -6,6 +6,7 @@
  * services/component-project-capabilities.cjs. Do not add new public methods.
  */
 const { DatabaseSync } = require('node:sqlite');
+const { nextComponentRevision, normalizeComponentRevision } = require('../services/config-mutation-service.cjs');
 
 const MAX_MEDIA_ITEMS = 2000;
 const componentTaskHandles = new Map();
@@ -54,7 +55,7 @@ const versionProjectPath = ({ version, projectRoot, projectVirtualPaths, externa
 
 const registerDeprecatedTeamRetouchV1Capabilities = ({
   broker, ensureWorkspace, getWorkspaceDataRoot,
-  resolveProjectEntry, versionService, IMAGE_EXTENSIONS, path, fs, crypto, getConfigPath, readSavedConfig,
+  resolveProjectEntry, versionService, IMAGE_EXTENSIONS, path, fs, crypto, getConfigPath, readSavedConfig, readConfig, mutateConfig,
   getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
   uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths = null, getBoundProject = null,
   RAW_EXTENSIONS = new Set(), IMAGE_PREVIEW_CONVERSION_EXTENSIONS = new Set(),
@@ -435,31 +436,25 @@ const registerDeprecatedTeamRetouchV1Capabilities = ({
   broker.register('component.settings.v1', async (payload, _context, descriptor) => {
     const componentId = String(descriptor.componentId || '');
     if (componentId !== 'team-retouch') throw new Error('Unknown component settings namespace');
-    const config = readSavedConfig() || {};
-    const legacy = config.personDetection || {};
-    const stored = config.componentSettings?.[componentId] || legacy;
-    const current = { useGpu: stored.useGpu !== false, oversizeCropMode: stored.oversizeCropMode === 'expand' ? 'expand' : 'face-centered' };
-    if (payload.action === 'get') return { success: true, settings: current };
-    if (payload.action !== 'update') throw new Error('Unknown component settings action');
-    const request = payload.settings && typeof payload.settings === 'object' && !Array.isArray(payload.settings) ? payload.settings : {};
-    const settings = { useGpu: request.useGpu !== false, oversizeCropMode: request.oversizeCropMode === 'expand' ? 'expand' : 'face-centered' };
-    const next = { ...config, componentSettings: { ...(config.componentSettings || {}), [componentId]: settings } };
-    const configPath = getConfigPath();
-    const token = crypto.randomUUID();
-    const pendingPath = `${configPath}.${token}.tmp`;
-    const backupPath = `${configPath}.${token}.backup`;
-    let backedUp = false;
-    try {
-      await fs.promises.writeFile(pendingPath, JSON.stringify(next, null, 2), 'utf8');
-      if (fs.existsSync(configPath)) { await fs.promises.rename(configPath, backupPath); backedUp = true; }
-      await fs.promises.rename(pendingPath, configPath);
-      if (backedUp) await fs.promises.rm(backupPath, { force: true });
-    } catch (error) {
-      await fs.promises.rm(pendingPath, { force: true }).catch(() => undefined);
-      if (backedUp && !fs.existsSync(configPath)) await fs.promises.rename(backupPath, configPath).catch(() => undefined);
-      throw error;
+    if (payload.action === 'get') {
+      const config = readConfig ? await readConfig() : readSavedConfig() || {};
+      const revision = normalizeComponentRevision(config.componentSettingsRevisions?.[componentId]);
+      const stored = config.componentSettings?.[componentId] || (revision > 0 ? {} : config.personDetection || {});
+      return { success: true, revision, settings: { useGpu: stored.useGpu !== false, oversizeCropMode: stored.oversizeCropMode === 'expand' ? 'expand' : 'face-centered' } };
     }
-    return { success: true, settings };
+    if (payload.action !== 'update') throw new Error('Unknown component settings action');
+    if (typeof mutateConfig !== 'function') throw new Error('Legacy component settings require the shared config mutation service');
+    const request = payload.settings && typeof payload.settings === 'object' && !Array.isArray(payload.settings) ? payload.settings : {};
+    let result;
+    await mutateConfig(config => {
+      const stored = config.componentSettings?.[componentId] || (normalizeComponentRevision(config.componentSettingsRevisions?.[componentId]) > 0 ? {} : config.personDetection || {});
+      const current = { useGpu: stored.useGpu !== false, oversizeCropMode: stored.oversizeCropMode === 'expand' ? 'expand' : 'face-centered' };
+      const settings = { ...current, ...(Object.hasOwn(request, 'useGpu') ? { useGpu: request.useGpu !== false } : {}), ...(Object.hasOwn(request, 'oversizeCropMode') ? { oversizeCropMode: request.oversizeCropMode === 'expand' ? 'expand' : 'face-centered' } : {}) };
+      const revision = nextComponentRevision(config.componentSettingsRevisions?.[componentId]);
+      result = { success: true, revision, settings };
+      return { ...config, componentSettings: { ...(config.componentSettings || {}), [componentId]: settings }, componentSettingsRevisions: { ...(config.componentSettingsRevisions || {}), [componentId]: revision } };
+    });
+    return result;
   });
 
 };

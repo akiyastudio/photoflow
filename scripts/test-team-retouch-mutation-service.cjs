@@ -26,7 +26,7 @@ fs.writeFileSync(returnedInputPath, 'returned');
 fs.writeFileSync(enginePath, `
 const fs = require('fs'); const path = require('path');
 const args = process.argv.slice(2); const value = name => args[args.indexOf(name) + 1];
-if (args[0] === 'match-batch') { const manifest = JSON.parse(fs.readFileSync(value('--manifest'), 'utf8')); const returned = manifest.returned[0]; const candidate = manifest.candidates[0]; console.log(JSON.stringify({ matches: [{ ...returned, ...candidate, confidence: 'high', matchConfidence: 'high', editEvidence: { reallyModified: true }, returnWarnings: [] }] })); process.exit(0); }
+if (args[0] === 'match-batch') { const manifest = JSON.parse(fs.readFileSync(value('--manifest'), 'utf8')); const returned = manifest.returned[0]; const candidate = manifest.candidates[0]; console.log(JSON.stringify({ type: 'progress', progress: 12, message: '读取返图 1/1' })); console.log(JSON.stringify({ type: 'progress', progress: 67, message: '比对图片 1/1' })); console.log(JSON.stringify({ matches: [{ ...returned, ...candidate, confidence: 'high', matchConfidence: 'high', editEvidence: { reallyModified: true }, returnWarnings: [] }] })); process.exit(0); }
 if (args[0] === 'merge') { fs.mkdirSync(path.dirname(value('--output')), { recursive: true }); fs.writeFileSync(value('--output'), 'merged'); console.log(JSON.stringify({ mergedCount: 1, conflictPixels: 0, seamScore: 1, width: 100, height: 100, metrics: [] })); process.exit(0); }
 if (args[0] === 'identify') { const manifest = JSON.parse(fs.readFileSync(value('--manifest'), 'utf8')); console.log(JSON.stringify({ clusters: [], similarities: [], unmatchedCount: manifest.subjects.length, method: 'fixture' })); process.exit(0); }
 if (args[0] === 'detect-batch') {
@@ -52,10 +52,15 @@ console.log(JSON.stringify({ detector: 'fake-child', personCount: 1, tasks: [{ i
 let currentBasePath = basePath;
 let materializeCount = 0;
 const emittedTopics = new Set();
+const emittedEvents = [];
 const outputStages = new Map(); const outputReceipts = new Map(); const outputByIdempotencyKey = new Map(); const versionsByIdempotencyKey = new Map(); const projectOutputRoot = path.join(sandbox, 'project-output');
 let controlledReplacementWrites = 0;
-const child = spawn(process.execPath, [path.join(__dirname, '..', 'extensions', 'team-retouch', 'service.cjs')], {
-  env: { SystemRoot: process.env.SystemRoot, PHOTOFLOW_TEAM_TEST_ENGINE: enginePath, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
+const child = spawn(process.execPath, [
+  path.join(__dirname, '..', 'extensions', 'team-retouch', 'service.cjs'),
+  '--photoflow-algorithm-command', process.execPath,
+  '--photoflow-algorithm-arg-prefix', enginePath,
+], {
+  env: { SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
 });
 const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
 const pending = new Map(); let nextId = 1;
@@ -74,7 +79,7 @@ const ready = new Promise((resolve, reject) => {
       try {
         if (frame.method === 'component.storage.v2') result = { apiVersion: 2, dataPath: dataRoot, databasePath, projectId: 'project-1', ownership: 'component-private' };
         else if (frame.method === 'component.settings.v2') result = { apiVersion: 2, revision: 1, settings: { useGpu: false, oversizeCropMode: 'expand' } };
-        else if (frame.method === 'component.events.v2') { emittedTopics.add(frame.payload.topic); result = { apiVersion: 2, emitted: true }; }
+        else if (frame.method === 'component.events.v2') { emittedTopics.add(frame.payload.topic); emittedEvents.push(frame.payload); result = { apiVersion: 2, emitted: true }; }
         else if (frame.method === 'tasks.v2') result = { apiVersion: 2, task: null, cancelled: false };
         else if (frame.method === 'dialogs.v2') result = { apiVersion: 2, cancelled: false, inputs: [{ name: path.basename(returnedInputPath), token: `test-input:${returnedInputPath}`, expiresAt: Date.now() + 1000 }] };
         else if (frame.method === 'project.input.tokens.v2') { materializeCount += 1; const source = frame.payload.token.slice('test-input:'.length); const inputId = crypto.randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 2, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
@@ -139,9 +144,16 @@ const ready = new Promise((resolve, reject) => {
     assert.equal(materializeCount - beforeIdentityMaterialize, 2, 'identity batching materializes each unique photo/version exactly once');
     assert.equal(fs.readdirSync(path.join(dataRoot, 'inputs')).length, 0, 'identity batch inputs are removed after the operation');
     const selectedReturns = await invoke('team.patch.select-returns.v1');
-    const returned = await invoke('team.patch.return-batch.v1', { returnedFiles: selectedReturns.files, relativePaths: ['one.jpg'] });
+    const returned = await invoke('team.patch.return-batch.v1', { operationId: 'return-progress-test', returnedFiles: selectedReturns.files, relativePaths: ['one.jpg'] });
     assert.equal(returned.acceptedCount, 1, `return matching consumes V2 selector tokens and archives into component-private storage: ${JSON.stringify(returned)}`);
     assert(emittedTopics.has('team.return.progress.v1'), 'return progress reaches the declared V2 event topic');
+    const returnProgress = emittedEvents.filter(item => item.topic === 'team.return.progress.v1').map(item => item.event);
+    assert(returnProgress.length >= 8, `return processing must report real multi-phase progress: ${JSON.stringify(returnProgress)}`);
+    assert(returnProgress.every(item => item.operationId === 'return-progress-test'), 'every return progress event is scoped to its renderer operation');
+    assert(returnProgress.some(item => item.phase === 'reading' && item.progress > 0), 'return progress covers input reading');
+    assert(returnProgress.some(item => item.phase === 'matching' && item.progress > 40 && item.progress < 82 && /\u6bd4\u5bf9\u56fe\u7247/.test(item.message)), 'matcher stdout progress is forwarded continuously instead of discarded');
+    assert(returnProgress.some(item => item.phase === 'importing' && item.progress > 82), 'return progress covers archive writes');
+    assert.deepEqual({ state: returnProgress.at(-1).state, phase: returnProgress.at(-1).phase, progress: returnProgress.at(-1).progress }, { state: 'completed', phase: 'complete', progress: 100 }, 'return progress terminates at a real 100% completion event');
     const faultDb = new DatabaseSync(databasePath); faultDb.exec(`CREATE TRIGGER fail_merge_db_update BEFORE UPDATE OF status ON team_patch_tasks WHEN NEW.status='merged' BEGIN SELECT RAISE(ABORT,'injected merge DB failure'); END;`); faultDb.close();
     await assert.rejects(invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2' }), /injected merge DB failure/);
     const repairDb = new DatabaseSync(databasePath); repairDb.exec('DROP TRIGGER fail_merge_db_update'); repairDb.close();

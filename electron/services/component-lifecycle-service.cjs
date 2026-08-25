@@ -132,14 +132,17 @@ const createComponentLifecycleService = ({ app, backgroundTasks, pluginService, 
     }
     return { success: true, message, taskId: execution.task.id };
   };
-  const invokeV2 = async (payload, _context, descriptor) => {
+  const invokeV2 = (payload, _context, descriptor) => {
     const action = String(payload.action || '');
+    if (Object.keys(payload).some(field => field !== 'action')) throw new Error('Component lifecycle action does not accept commands, arguments, or paths');
     if (action === 'describe') return { apiVersion: 2, componentId: descriptor.componentId, componentVersion: descriptor.componentVersion, negotiatedHostApiVersion: descriptor.hostApiVersion, permissions: descriptor.service?.permissions || [], events: descriptor.service?.events || [], lifecycleActions: Object.keys(descriptor.service?.lifecycleActions || {}), state: 'active' };
     if (!['preflight', 'install', 'repair', 'uninstall'].includes(action)) throw new Error('Unknown Component Host V2 lifecycle action');
     if (!descriptor.service?.permissions?.includes('component.lifecycle.manage')) throw new Error('Component lifecycle management permission is not granted');
-    if (Object.keys(payload).some(field => field !== 'action')) throw new Error('Component lifecycle action does not accept commands, arguments, or paths');
+    const declaration = descriptor?.service?.lifecycleActions?.[action];
+    if (!declaration) throw new Error(`Component lifecycle action is not declared: ${action}`);
+    if (path.extname(declaration.entry).toLowerCase() !== '.ps1') throw new Error('Component lifecycle V2 currently accepts only verified PowerShell actions');
+    return (async () => {
     const { component, entry } = await resolveAction(descriptor, action);
-    if (path.extname(entry).toLowerCase() !== '.ps1') throw new Error('Component lifecycle V2 currently accepts only verified PowerShell actions');
     const title = { preflight: '检查组件环境', install: '安装组件环境', repair: '修复组件环境', uninstall: '卸载组件环境' }[action];
     const execution = await backgroundTasks.run({ type: 'component-lifecycle', title, dedupeKey: `component-lifecycle:${descriptor.componentId}`, cancellable: false, resumePolicy: 'atomic', metadata: { componentId: descriptor.componentId, action } }, async task => {
       task.report(1, `${title}已启动`, { phase: 'starting' });
@@ -151,6 +154,7 @@ const createComponentLifecycleService = ({ app, backgroundTasks, pluginService, 
     invalidateComponentStatus();
     writeLog('info', 'Component Host V2 lifecycle action completed', { componentId: descriptor.componentId, action });
     return { apiVersion: 2, success: true, action, taskId: execution.task.id, message: `${title}完成` };
+    })();
   };
   return { invoke, invokeV2, resolveAction };
 };

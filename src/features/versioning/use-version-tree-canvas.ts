@@ -124,10 +124,9 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
     });
     const dimensions = dimensionsRef.current;
     applyPositions(reconcileVersionTreeCanvasPositions({ nodes: currentNodes, previous: saved, nodeWidth: dimensions.nodeWidth, nodeHeight: dimensions.nodeHeight, horizontalGap: dimensions.collisionHorizontalGap }));
-    if (viewportRef.current) {
-      viewportRef.current.scrollLeft = 0;
-      viewportRef.current.scrollTop = 0;
-    }
+    // Loading persisted positions is asynchronous. The user may already have
+    // panned or scrolled while the request was in flight, so keep the current
+    // viewport instead of snapping it back to the canvas origin.
   }, [applyPositions, projectName, scopeKey, workspacePath]);
 
   useEffect(() => {
@@ -155,6 +154,13 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
     serverPositionsRef.current = new Map();
     appliedServerNodeKeysRef.current = new Set();
     applyPositions(defaultPositions());
+    // A genuinely different project/scope starts at its origin. Do this before
+    // the asynchronous read begins so a late response cannot override any
+    // scrolling the user performs afterward.
+    if (viewportRef.current) {
+      viewportRef.current.scrollLeft = 0;
+      viewportRef.current.scrollTop = 0;
+    }
     void loadServerLayout(generation);
     return () => { loadSequenceRef.current += 1; generationRef.current += 1; saveEpochRef.current += 1; saveQueueRef.current = Promise.resolve(); };
   }, [applyPositions, defaultPositions, loadServerLayout]);

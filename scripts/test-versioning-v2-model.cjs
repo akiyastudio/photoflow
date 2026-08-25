@@ -10,6 +10,10 @@ const { pathToFileURL } = require('url');
   assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS.import.states], ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']);
   assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS.modify.states], ['ready', 'move_confirm', 'processing', 'waiting_confirmation', 'result', 'failure']);
   assert.deepStrictEqual([...model.VERSION_PANEL_DEFINITIONS.confirm.states], ['loading', 'waiting_confirmation', 'committing', 'result', 'failure']);
+  assert.strictEqual(model.exportedImageFolderCandidate('工作目录/JPG/one.jpg'), '工作目录/JPG');
+  assert.strictEqual(model.exportedImageFolderCandidate('工作目录/jpeg/one.jpg'), '工作目录/jpeg');
+  assert.strictEqual(model.exportedImageFolderCandidate('工作目录/客户_导出/one.jpg'), '工作目录/客户_导出');
+  assert.strictEqual(model.exportedImageFolderCandidate('工作目录/普通文件夹/one.jpg'), '', 'ordinary folders must not trigger export-version onboarding');
   const queuedTreeTask = {
     type: 'version-tree-update', state: 'queued', progress: 0,
     message: '等待“完善版本文件校验信息”完成',
@@ -43,6 +47,7 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'progress', trackingState: 'needs_repair' }), '版本关系需要修复');
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'broll', trackingState: 'disabled' }), '花絮');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'artifact', artifactKind: 'preview', versionKey: 'legacy-preview-mov' }), '预览');
+  assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'artifact', artifactKind: 'transcode', versionKey: 'transcode-mov' }), '转码');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', artifactKind: 'team_workspace', versionKey: 'team-workspace' }), '协作');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', sourceMetadata: { category: 'workflow', displayName: '云端校样', parentCapability: 'workflow-input' }, versionKey: 'opaque' }), '云端校样');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'progress', versionKey: '2' }), 'V2');
@@ -146,11 +151,11 @@ const { pathToFileURL } = require('url');
   assert(!model.selectableVersionParents(semanticNodes, { mediaKind: 'image', relationKind: 'main' }).some(node => node.id === 'legacy-orphan'), 'a preserved legacy orphan must not become the parent of new progress');
   assert.strictEqual(model.defaultMainParentId(semanticNodes, semanticEdges, 'image'), 'raw-semantic', 'RAW/JPG companion semantics select the graph source without reading names or version keys');
   const videoNodes = [
-    { ...base, id: 'mov-semantic', mediaKind: 'video', nodeRole: 'original', relationKind: undefined, folderMissing: false, displayName: '不是 MOV', versionKey: 'preview' },
-    { ...base, id: 'mov-preview', mediaKind: 'video', nodeRole: 'artifact', artifactKind: 'preview', relationKind: undefined, folderMissing: false, displayName: 'MOV', versionKey: '0' },
+    { ...base, id: 'mov-semantic', mediaKind: 'video', nodeRole: 'original', relationKind: undefined, folderMissing: false, displayName: '不是 MOV', versionKey: 'transcode-source' },
+    { ...base, id: 'mov-transcode', mediaKind: 'video', nodeRole: 'artifact', artifactKind: 'transcode', relationKind: undefined, folderMissing: false, displayName: 'MOV_转码', versionKey: 'transcode-mov' },
   ];
-  const videoEdges = [{ id: 'video-preview-edge', projectId: 'p', sourceProgressId: 'mov-semantic', targetProgressId: 'mov-preview', edgeKind: 'derived_preview', createdAt: 0, updatedAt: 0 }];
-  assert.strictEqual(model.defaultMainParentId(videoNodes, videoEdges, 'video'), 'mov-semantic', 'MOV/preview semantics select MOV through roles and graph edges');
+  const videoEdges = [{ id: 'video-transcode-edge', projectId: 'p', sourceProgressId: 'mov-semantic', targetProgressId: 'mov-transcode', edgeKind: 'derived_transcode', createdAt: 0, updatedAt: 0 }];
+  assert.strictEqual(model.defaultMainParentId(videoNodes, videoEdges, 'video'), 'mov-semantic', 'MOV/transcode semantics select MOV through roles and graph edges');
   assert.deepStrictEqual(model.defaultWorkflowInputIds(semanticNodes, semanticEdges, 'raw-semantic'), ['image-selection'], 'the first post-production progress defaults to the source selection');
   const v1 = { ...base, id: 'v1', nodeRole: 'progress', relationKind: 'main', parentProgressId: 'raw-semantic', folderMissing: false, displayName: '无版本名称', versionKey: 'not-a-number' };
   assert.strictEqual(model.defaultMainParentId([...semanticNodes, v1], semanticEdges, 'image'), 'v1', 'the unique main progress leaf becomes the next default parent');

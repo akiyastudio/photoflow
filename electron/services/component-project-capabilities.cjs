@@ -1,5 +1,6 @@
 const { COMPONENT_HOST_ERROR_CODES: CODES, hostError } = require('../contracts/component-host-errors.cjs');
 const { adoptLegacyStorageV1 } = require('../compatibility/component-storage-v1-adoption.cjs');
+const { nextComponentRevision, normalizeComponentRevision } = require('./config-mutation-service.cjs');
 
 const MAX_MEDIA_PAGE_SIZE = 200;
 const MAX_INPUT_TOKENS = 2000;
@@ -126,7 +127,7 @@ const registerComponentProjectCapabilities = ({
   IMAGE_EXTENSIONS, VIDEO_EXTENSIONS = new Set(), RAW_EXTENSIONS = new Set(),
   path, fs, crypto, getConfigPath, readSavedConfig, getProjectPath, dialog, mainWindow, shell,
   mediaService, backgroundTasks, ensureTrackedVersionThumbnail, getBoundProject = null, projectVirtualPaths = null,
-  replaceJson = replaceJsonAtomic, now = Date.now, adoptionInteractiveBudgetMs = 25, adoptionFaultInjector = () => undefined,
+  replaceJson = replaceJsonAtomic, readConfig = null, mutateConfig = null, now = Date.now, adoptionInteractiveBudgetMs = 25, adoptionFaultInjector = () => undefined,
 }) => {
   const bound = (context, descriptor) => {
     const workspaceRoot = ensureWorkspace(context.workspacePath);
@@ -329,17 +330,24 @@ const registerComponentProjectCapabilities = ({
 
   broker.register('component.settings.v2', async (payload, _context, descriptor) => {
     const componentId = String(descriptor.componentId || '');
-    const config = readSavedConfig() || {};
-    const current = boundedObject(config.componentSettings?.[componentId] || {}, MAX_SETTINGS_BYTES, 'Stored component settings');
-    if (payload.action === 'get') return { apiVersion: 2, revision: Number(config.componentSettingsRevisions?.[componentId]) || 0, settings: current };
+    if (payload.action === 'get') {
+      const config = readConfig ? await readConfig() : readSavedConfig() || {};
+      return { apiVersion: 2, revision: normalizeComponentRevision(config.componentSettingsRevisions?.[componentId]), settings: boundedObject(config.componentSettings?.[componentId] || {}, MAX_SETTINGS_BYTES, 'Stored component settings') };
+    }
     if (!['replace', 'merge'].includes(payload.action)) throw hostError(CODES.INVALID_REQUEST, 'Unknown component settings action');
+    if (typeof mutateConfig !== 'function') throw new Error('Component settings require the shared config mutation service');
     const request = boundedObject(payload.settings || {}, MAX_SETTINGS_BYTES, 'Component settings');
-    const settings = payload.action === 'merge' ? { ...current, ...request } : request;
-    boundedObject(settings, MAX_SETTINGS_BYTES, 'Component settings');
-    const revision = (Number(config.componentSettingsRevisions?.[componentId]) || 0) + 1;
-    const next = { ...config, componentSettings: { ...(config.componentSettings || {}), [componentId]: settings }, componentSettingsRevisions: { ...(config.componentSettingsRevisions || {}), [componentId]: revision } };
-    await replaceJson({ fs, crypto, filePath: getConfigPath(), value: next });
-    return { apiVersion: 2, revision, settings };
+    let result;
+    const update = latest => {
+      const latestSettings = boundedObject(latest.componentSettings?.[componentId] || {}, MAX_SETTINGS_BYTES, 'Stored component settings');
+      const settings = payload.action === 'merge' ? { ...latestSettings, ...request } : request;
+      boundedObject(settings, MAX_SETTINGS_BYTES, 'Component settings');
+      const revision = nextComponentRevision(latest.componentSettingsRevisions?.[componentId]);
+      result = { apiVersion: 2, revision, settings };
+      return { ...latest, componentSettings: { ...(latest.componentSettings || {}), [componentId]: settings }, componentSettingsRevisions: { ...(latest.componentSettingsRevisions || {}), [componentId]: revision } };
+    };
+    await mutateConfig(update);
+    return result;
   });
 
   const scopeDigest = scope => crypto.createHash('sha256').update(scope.key).digest('hex');
@@ -830,6 +838,7 @@ const registerComponentProjectCapabilities = ({
   });
 
   broker.register('dialogs.v2', async (payload, context, descriptor) => {
+    if (context?.surface === 'application.settings' && payload.kind !== 'confirm') throw hostError(CODES.PERMISSION_DENIED, 'Only confirmation dialogs are available on the application settings surface');
     if (['openOutput', 'revealOutput'].includes(payload.kind)) {
       const scope = { ...bound(context, descriptor), componentId: descriptor.componentId };
       const receipt = await loadCommitReceipt(scope, String(payload.commitId || ''));

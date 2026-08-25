@@ -16,6 +16,7 @@ export const ensureComponentPage = (
   const page: ComponentPageInstance = {
     identity,
     componentId: action.componentId,
+    componentVersion: action.componentVersion,
     pageId: action.pageId,
     title: action.pageTitle,
     workspacePath,
@@ -32,6 +33,12 @@ export const bindComponentPageInstance = (pages: ComponentPageInstance[], identi
   pages.map(page => page.identity === identity ? { ...page, instanceId } : page);
 
 export const closeComponentPage = (pages: ComponentPageInstance[], identity: string) => pages.filter(page => page.identity !== identity);
+
+export const componentPageIsAvailable = (page: ComponentPageInstance, components: Array<{ id: string; version: string; installed: boolean; compatible: boolean; status?: string }>) => {
+  const component = components.find(item => item.id === page.componentId);
+  return Boolean(component?.installed && component.compatible && component.version === page.componentVersion && !['invalid', 'integrity-invalid', 'incompatible'].includes(String(component.status || '')));
+};
+export const componentPageActivationSucceeded = (result: { success?: boolean } | null | undefined) => result?.success === true;
 
 export const closeProjectComponentPages = (pages: ComponentPageInstance[], workspacePath: string, projectId: string) => {
   const normalizedWorkspace = workspacePath.replace(/\\/g, '/').toLocaleLowerCase();

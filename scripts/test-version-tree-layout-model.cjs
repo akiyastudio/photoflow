@@ -81,17 +81,17 @@ const { pathToFileURL } = require('url');
       { ...node('jpg', 'original', 1), mediaKind: 'image', artifactKind: 'companion' },
       { ...node('image-v1', 'progress', 2), mediaKind: 'image' },
       { ...node('mov', 'original', 0), mediaKind: 'video' },
-      { ...node('mov-preview', 'artifact', 1), mediaKind: 'video', artifactKind: 'preview' },
+      { ...node('mov-transcode', 'artifact', 1), mediaKind: 'video', artifactKind: 'transcode' },
       { ...node('video-selection', 'selection', 2, 'auxiliary'), mediaKind: 'video' },
     ],
     edges: [
       edge('raw', 'jpg', 'media_companion'), edge('raw', 'image-v1', 'main'),
-      edge('mov', 'mov-preview', 'derived_preview'), edge('mov', 'video-selection', 'auxiliary'),
+      edge('mov', 'mov-transcode', 'derived_transcode'), edge('mov', 'video-selection', 'auxiliary'),
     ],
   });
   const mediaById = new Map(mediaBands.nodes.map(item => [item.id, item]));
   assert.strictEqual(mediaById.get('raw').x, mediaById.get('jpg').x, 'RAW and its companion JPG must share a source column');
-  assert.strictEqual(mediaById.get('mov').x, mediaById.get('mov-preview').x, 'MOV and its preview must share a source column');
+  assert.strictEqual(mediaById.get('mov').x, mediaById.get('mov-transcode').x, 'MOV and its transcode must share a source column');
   assert(mediaById.get('image-v1').x > mediaById.get('raw').x, 'main progress must advance from left to right');
   const imageBandBottom = Math.max(...mediaBands.nodes.filter(item => item.mediaKind === 'image').map(item => item.y + base.nodeHeight));
   const videoBandTop = Math.min(...mediaBands.nodes.filter(item => item.mediaKind === 'video').map(item => item.y));
@@ -110,12 +110,12 @@ const { pathToFileURL } = require('url');
     ...base,
     nodes: [
       { ...node('mov-source', 'original', 0), mediaKind: 'video' },
-      { ...node('mov-preview-canonical', 'artifact', 1), mediaKind: 'video', artifactKind: 'preview' },
+      { ...node('mov-transcode-canonical', 'artifact', 1), mediaKind: 'video', artifactKind: 'transcode' },
       { ...node('video-v1', 'progress', 2, 'main'), mediaKind: 'video' },
       { ...node('video-pick', 'selection', 3, 'auxiliary'), mediaKind: 'video' },
     ],
     edges: [
-      edge('mov-source', 'mov-preview-canonical', 'derived_preview'),
+      edge('mov-source', 'mov-transcode-canonical', 'derived_transcode'),
       edge('mov-source', 'video-v1', 'main'),
       edge('mov-source', 'video-pick', 'auxiliary'),
       edge('video-pick', 'video-v1', 'workflow_input'),
@@ -125,7 +125,7 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(canonicalVideoById.get('video-v1').y, canonicalVideoById.get('mov-source').y, 'MOV and video progress 1 must form the horizontal solid mainline');
   assert.strictEqual(canonicalVideoById.get('video-v1').x, canonicalVideoById.get('video-pick').x, 'video selection must branch below the first progress column');
   assert(canonicalVideoById.get('video-pick').y > canonicalVideoById.get('video-v1').y, 'video selection must not displace the mainline into a lower row');
-  assert.strictEqual(canonicalVideoById.get('mov-preview-canonical').x, canonicalVideoById.get('mov-source').x, 'MOV preview must stay below MOV in the source column');
+  assert.strictEqual(canonicalVideoById.get('mov-transcode-canonical').x, canonicalVideoById.get('mov-source').x, 'MOV transcode must stay below MOV in the source column');
   const workflowBranch = layoutVersionTree({
     ...base,
     nodes: [
@@ -140,17 +140,18 @@ const { pathToFileURL } = require('url');
   assert(workflowById.get('team').y > workflowById.get('source-edit').y, 'team workflow must render as a branch below its source lane');
 
   assert.strictEqual(edgeModel.versionTreeEdgePresentation('main').strokeDasharray, undefined, 'main relations must use solid lines');
-  for (const kind of ['main', 'auxiliary', 'media_companion', 'derived_preview', 'workflow_input']) {
+  for (const kind of ['main', 'auxiliary', 'media_companion', 'derived_preview', 'derived_transcode', 'workflow_input']) {
     assert.strictEqual(edgeModel.versionTreeEdgePresentation(kind).strokeDasharray, undefined, `${kind} relations must use solid lines`);
   }
-  assert.deepStrictEqual(['main', 'auxiliary', 'media_companion', 'derived_preview', 'workflow_input'].map(edgeModel.versionTreeRelationLabel), ['版本关系', '选片关联', '配套素材', '预览产物', '工作流输入']);
+  assert.deepStrictEqual(['main', 'auxiliary', 'media_companion', 'derived_preview', 'derived_transcode', 'workflow_input'].map(edgeModel.versionTreeRelationLabel), ['版本关系', '选片关联', '配套素材', '预览产物', '转码产物', '工作流输入']);
   const relationNode = (id, nodeRole, artifactKind) => ({ id, projectId: 'p', mediaKind: 'image', nodeRole, artifactKind, folderMissing: false, ...(nodeRole === 'progress' ? { parentProgressId: 'raw', relationKind: 'main' } : {}) });
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('raw', 'original'), relationNode('jpg', 'artifact', 'companion')), ['media_companion']);
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('raw', 'original'), relationNode('preview', 'artifact', 'preview')), ['derived_preview']);
+  assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('mov', 'original'), relationNode('transcode', 'artifact', 'transcode')), ['derived_transcode']);
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('selection', 'selection'), relationNode('v1', 'progress')), ['workflow_input']);
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('selection', 'selection'), { ...relationNode('orphan', 'progress'), parentProgressId: undefined, relationKind: undefined }), [], 'legacy orphan progress must be repaired before accepting workflow inputs');
   assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('artifact', 'artifact', 'preview'), relationNode('v1', 'progress')), [], 'illegal role pairs must not expose a relation type');
-  assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('raw', 'original'), relationNode('ambiguous', 'artifact')), ['media_companion', 'derived_preview'], 'ambiguous artifacts must require an explicit finite type choice');
+  assert.deepStrictEqual(edgeModel.allowedVersionTreeRelationKinds(relationNode('raw', 'original'), relationNode('ambiguous', 'artifact')), ['media_companion', 'derived_preview', 'derived_transcode'], 'ambiguous artifacts must require an explicit finite type choice');
   assert.match(edgeModel.versionTreeEdgePath(0, 0, 100, 100), /^M /);
   const parentRect = { x: 100, y: 100, width: 120, height: 80 };
   const directionCases = [

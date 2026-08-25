@@ -32,6 +32,17 @@ const task = (id, state = 'failed', updatedAt = 1, extra = {}) => ({
 });
 const delta = (revision, upserts = [], removeIds = []) => ({ revision, upserts, removeIds });
 
+const localTimestamp = (year, month, day, hour, minute) => new Date(year, month - 1, day, hour, minute).getTime();
+const referenceTime = localTimestamp(2026, 8, 25, 18, 0);
+assert.equal(toastModel.formatBackgroundTaskStartedAt(localTimestamp(2026, 8, 25, 9, 5), referenceTime), '09:05', 'tasks started today must show only the local clock time');
+assert.equal(toastModel.formatBackgroundTaskStartedAt(localTimestamp(2026, 8, 24, 23, 7), referenceTime), '08/24 23:07', 'tasks started on another day this year must include month and day');
+assert.equal(toastModel.formatBackgroundTaskStartedAt(localTimestamp(2025, 12, 31, 23, 59), referenceTime), '2025/12/31 23:59', 'tasks started in another year must include the year');
+assert.equal(toastModel.formatBackgroundTaskStartedAt(0, referenceTime), '', 'queued tasks and legacy records without a start time must not render a fake date');
+assert.equal(toastModel.formatBackgroundTaskStartedAt(Number.NaN, referenceTime), '', 'invalid start times must be ignored safely');
+
+const indicatorSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'background-tasks', 'BackgroundTaskIndicator.tsx'), 'utf8');
+assert((indicatorSource.match(/formatBackgroundTaskStartedAt\(task\.startedAt\)/g) || []).length >= 2 && !indicatorSource.includes('开始时间'), 'every task card must render its start timestamp beside the status without an extra label');
+
 let state = streamModel.initialBackgroundTaskStreamState();
 state = streamModel.receiveBackgroundTaskDelta(state, delta(5, [task('new', 'running', 5)]));
 assert.equal(state.hydrated, false);

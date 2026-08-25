@@ -7,6 +7,8 @@ const { parseComponentHostManifest } = require('../electron/component-host-contr
 const root = path.resolve(__dirname, '..');
 const rendererOutput = path.join(root, 'artifacts', 'component-renderers', 'team-retouch');
 const template = JSON.parse(fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
+assert.equal(template.version, '26.8.25.1', 'settings-page release must use a new installable team-retouch business version');
+assert.deepEqual(template.componentHost.compatibility, { minHostApiVersion: 3, maxHostApiVersion: 3 });
 const builder = fs.readFileSync(path.join(root, 'scripts', 'build-components.cjs'), 'utf8');
 const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8');
 const workspace = fs.readFileSync(path.join(root, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
@@ -25,14 +27,18 @@ for (const name of lifecycleScripts) {
 }
 
 assert(fs.existsSync(path.join(rendererOutput, 'index.html')), 'independent team-retouch renderer must be built before this test');
+assert(fs.existsSync(path.join(rendererOutput, 'settings.html')), 'independent team-retouch settings renderer must be built before this test');
 const outputFiles = fs.readdirSync(path.join(rendererOutput, 'assets'));
 assert(outputFiles.some(file => file.endsWith('.js')) && outputFiles.some(file => file.endsWith('.css')), 'renderer output must include self-contained JS and CSS assets');
 const outputText = [fs.readFileSync(path.join(rendererOutput, 'index.html'), 'utf8'), ...outputFiles.filter(file => file.endsWith('.js')).map(file => fs.readFileSync(path.join(rendererOutput, 'assets', file), 'utf8'))].join('\n');
 assert(!outputText.includes('/src/') && !outputText.includes('src/components/TeamRetouch') && !outputText.includes('electronAPI'), 'production renderer output must not reference repository or application renderer sources');
 assert(template.componentHost.contributions.some(item => item.type === 'component.fullPage' && item.entry === 'ui/index.html'));
-assert(template.requiredFiles.includes('ui/index.html') && template.requiredFiles.includes('ui/team-retouch.svg'), 'installation must reject a component missing its renderer or icon');
+const settingsPage = template.componentHost.contributions.find(item => item.type === 'application.settingsPage');
+assert.deepEqual(settingsPage, { type: 'application.settingsPage', id: 'settings', label: '团片协作', title: '团片协作设置', entry: 'ui/settings.html', rpcMethods: ['team.settings.get.v1', 'team.settings.update.v1', 'team.advanced.status.v1', 'team.advanced.preflight.v1', 'team.advanced.install.v1', 'team.advanced.uninstall.v1'] });
+assert(template.requiredFiles.includes('ui/index.html') && template.requiredFiles.includes('ui/settings.html') && template.requiredFiles.includes('ui/team-retouch.svg'), 'installation must reject a component missing either renderer or icon');
 assert(template.requiredFiles.includes('service.cjs'), 'installation must reject a component missing its backend service');
-assert(template.requiredFiles.includes('workflow-generation.cjs') && template.requiredFiles.includes('workflow-artifact.cjs'), 'installation must reject a component missing workflow orchestration modules');
+assert(template.requiredFiles.includes('workflow-generation.cjs') && template.requiredFiles.includes('workflow-artifact.cjs') && template.requiredFiles.includes('workflow-manifest.cjs'), 'installation must reject a component missing workflow orchestration modules');
+assert(builder.includes("workflow-manifest.cjs'), path.join(target, 'workflow-manifest.cjs')"), 'the component builder must copy the workflow manifest resolver required by service.cjs');
 assert.equal(template.componentHost.service.lifecycleActions.preflight.sha256, sha256(path.join(root, 'scripts', 'setup-team-retouch-advanced.ps1')));
 assert.equal(template.componentHost.service.lifecycleActions.uninstall.sha256, sha256(path.join(root, 'scripts', 'uninstall-team-retouch-advanced.ps1')));
 assert.deepEqual(template.componentHost.service.rpcMethods, [
@@ -80,6 +86,7 @@ assert.equal((versionsIpc.match(/ipcMain\.handle\('workspace-team-/g) || []).len
 assert(!versionsIpc.includes('shell.openPath'), 'versions IPC must not retain arbitrary team path-opening code');
 assert(builder.indexOf('buildRenderer(id)') < builder.indexOf("if (id === 'team-retouch' && !probeModule('onnxruntime'))"), 'renderer must build before native runtime packaging starts');
 assert(builder.includes('fs.cpSync(rendererOutput, uiRoot, { recursive: true })') && builder.includes("path.join(target, 'ui')"), 'component package must receive the renderer output');
+assert(builder.includes("path.join(rendererOutput, 'settings.html')") && builder.includes('settings renderer output is missing'), 'component packaging must explicitly require the settings renderer entry');
 assert(!preload.includes('workspace-team-') && !workspace.includes('TeamRetouch') && !workspace.includes('团片协作') && !settings.includes("activeSection === 'team-retouch'"), 'application renderer boundaries must remain free of legacy team UI and APIs');
 assert(Object.keys(COMPONENT_RPC_METHODS).every(method => method.endsWith('.v1')), 'every component RPC capability must be explicitly versioned');
 assert.deepEqual(sanitizePayload({ relativePaths: ['a.jpg'], workspacePath: 'C:/escape', channel: 'arbitrary' }, ['relativePaths']), { relativePaths: ['a.jpg'] }, 'unknown fields, workspace identities, and arbitrary channels must be discarded');
@@ -111,11 +118,16 @@ try {
   fs.copyFileSync(path.join(root, 'extensions', 'team-retouch', 'service.cjs'), path.join(staged, 'service.cjs'));
   fs.copyFileSync(path.join(root, 'extensions', 'team-retouch', 'workflow-generation.cjs'), path.join(staged, 'workflow-generation.cjs'));
   fs.copyFileSync(path.join(root, 'extensions', 'team-retouch', 'workflow-artifact.cjs'), path.join(staged, 'workflow-artifact.cjs'));
+  fs.copyFileSync(path.join(root, 'extensions', 'team-retouch', 'workflow-manifest.cjs'), path.join(staged, 'workflow-manifest.cjs'));
   fs.writeFileSync(path.join(staged, 'component.json'), JSON.stringify(template));
   const descriptor = parseComponentHostManifest(template, staged);
   assert.equal(descriptor.componentId, 'team-retouch');
+  assert.equal(descriptor.hostApiVersion, 3);
   assert.equal(descriptor.fullPage.entry, path.join(staged, 'ui', 'index.html'));
+  assert.equal(descriptor.settingsPages[0].entry, path.join(staged, 'ui', 'settings.html'));
+  assert.deepEqual(descriptor.settingsPages[0].rpcMethods, settingsPage.rpcMethods);
   assert.equal(descriptor.service.entry, path.join(staged, 'service.cjs'));
+  assert.doesNotThrow(() => require(path.join(staged, 'service.cjs')), 'the staged component service must load with every declared sibling module present');
   assert.equal(descriptor.advancedRuntime.apiVersion, 1);
   assert.deepEqual(descriptor.advancedRuntime.compatibleLegacyComponentVersions, ['26.7.30.1']);
   assert.deepEqual(descriptor.service.runtimeActions, []);

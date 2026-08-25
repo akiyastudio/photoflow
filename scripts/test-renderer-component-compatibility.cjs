@@ -18,6 +18,11 @@ const { pathToFileURL } = require('node:url');
     { owned: true },
     'a component-owned settings namespace must win over the legacy mirror',
   );
+  assert.equal(
+    settings.migrateLegacyComponentSettings({ personDetection: legacyValue, componentSettingsRevisions: { 'team-retouch': 4 } }, {})['team-retouch'],
+    undefined,
+    'a nonzero component settings revision is a tombstone/ownership ledger and prevents legacy settings revival after restart',
+  );
 
   assert.equal(domains.legacyComponentIdForDomain('team-retouch'), 'team-retouch');
   assert.equal(domains.legacyComponentIdForDomain('media'), undefined);

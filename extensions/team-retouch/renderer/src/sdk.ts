@@ -1,6 +1,7 @@
 export type ComponentContext = {
   componentId: string;
   componentVersion: string;
+  surface: 'project' | 'application.settings';
   projectId: string;
   projectName: string;
   projectStatus: string;

@@ -59,7 +59,7 @@ assert.equal('relations' in camera, false, 'renderer-facing manifest must not ca
 assert.equal('nodeRole' in camera.artifacts[0], false, 'renderer-facing manifest must not carry node roles');
 assert.equal(runCase('generated').artifacts.find(item => item.relativePath === 'slot-b').importSlot, 'generated_jpg');
 assert.equal(runCase('jpg-only').artifacts[0].importSlot, 'camera_jpg');
-assert.equal(runCase('video').artifacts.find(item => item.relativePath === 'rendered-video')?.importSlot, 'video_preview');
+assert.equal(runCase('video').artifacts.find(item => item.relativePath === 'rendered-video')?.importSlot, 'video_transcode');
 assert.deepEqual(runCase('mixed-jpg').artifacts.map(item => item.importSlot), ['camera_jpg']);
 const receiptFixture = runCase('receipt');
 assert.equal(receiptFixture.exists, true, 'receipt must be atomically durable before success is emitted');

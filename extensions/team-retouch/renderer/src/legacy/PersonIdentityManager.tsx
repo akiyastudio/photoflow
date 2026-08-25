@@ -13,7 +13,7 @@ import { TeamOutputProgressPicker } from './TeamRetouchOutputProgress';
 import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputProgress';
 import { ensureFaceRecognitionConsent } from './legacy-privacy';
 import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
-import { mergeAudit, relayChainForItems, returnMatchAssessment, returnModificationAssessment } from '../interaction-model';
+import { beginWorkflowReturnProgress, mergeAudit, relayChainForItems, returnMatchAssessment, returnModificationAssessment, updateWorkflowReturnProgress, type WorkflowReturnProgressState } from '../interaction-model';
 import { createWorkspaceSeedGate, isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
 
 type Props = {
@@ -415,7 +415,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     onNotice('已放弃本批次未确认返图；已经确认完成的返图不受影响');
   };
   useEscapeLayer(Boolean(workflowReturnResult) && workflowReturnReviewOpen, () => void requestCloseWorkflowReturnReview(), !busy.startsWith('workflow-'));
-  const [workflowReturnProgress, setWorkflowReturnProgress] = useState({ progress: 0, message: '' });
+  const [workflowReturnProgress, setWorkflowReturnProgress] = useState<WorkflowReturnProgressState | null>(null);
   const [workflowGeneration, setWorkflowGeneration] = useState<TeamWorkflowGenerationProgress | null>(null);
   const [similarities, setSimilarities] = useState<NonNullable<TeamIdentityWorkspace['similarities']>>([]);
   const [showAllSubjects, setShowAllSubjects] = useState(false);
@@ -464,7 +464,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     return () => { active = false; };
   }, [workspacePath, project.name, project.status]);
   useEffect(() => legacyApi.onTeamPatchReturnBatchProgress(value => {
-    setWorkflowReturnProgress({ progress: value.progress, message: value.message });
+    setWorkflowReturnProgress(current => current ? updateWorkflowReturnProgress(current, value) : current);
   }), []);
   useEffect(() => {
     let active = true;
@@ -874,15 +874,18 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!result.success) onNotice(`打开任务文件夹失败：${result.error || '未知错误'}`); else if (result.path) void legacyApi.openTeamPatchFolder(result.path);
   };
   const receiveWorkflowBatch = async (items: WorkflowItem[]) => {
+    const operationId = crypto.randomUUID();
     setBusy('workflow-return');
     setWorkflowReturnResult(null);
     setWorkflowReturnReviewOpen(false);
-    setWorkflowReturnProgress({ progress: 0, message: '请选择本轮收到的全部返图' });
+    setWorkflowReturnProgress(beginWorkflowReturnProgress(operationId));
     try {
       const selected = await legacyApi.selectTeamPatchReturns(project.name);
       if (!selected.success) throw new Error(selected.error || '无法选择返图');
-      if (selected.cancelled || !selected.files?.length) { setBusy(''); return; }
+      if (selected.cancelled || !selected.files?.length) return;
+      setWorkflowReturnProgress(current => current ? updateWorkflowReturnProgress(current, { operationId, phase: 'reading', progress: 4, message: `已选择 ${selected.files.length} 张返图，正在读取内容` }) : current);
       const result = await legacyApi.returnTeamWorkflowBatch(workspacePath, project.name, {
+        operationId,
         status: project.status,
         returnedFiles: selected.files,
         items: items.map(item => ({
@@ -896,7 +899,6 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
             .map(candidate => candidate.personIndex),
         })),
       });
-      setBusy('');
       if (!result.success) { onNotice(`批量导入返图失败：${result.error || '未知错误'}`); return; }
       if ((result.reviewCount || 0) > 0) {
         setWorkflowReturnResult(result);
@@ -906,8 +908,10 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       onProjectChanged();
       onNotice(result.warning || `批量返图完成：自动识别并标记完成 ${result.acceptedCount || 0} 张，${result.reviewCount || 0} 张需要单独确认`);
     } catch (error) {
-      setBusy('');
       onNotice(`批量导入返图失败：${error instanceof Error ? error.message : String(error)}`);
+    } finally {
+      setBusy('');
+      setWorkflowReturnProgress(null);
     }
   };
   const confirmWorkflowReturn = async (match: TeamPatchReturnMatch, candidate: ReturnCandidate) => {
@@ -1163,7 +1167,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         </button>
       </div>
     </div>}
-    {busy === 'workflow-return' && <div className="border-b border-emerald-100 bg-emerald-50 px-5 py-3"><div className="flex items-center justify-between gap-4 text-xs"><span className="font-bold text-emerald-700">{workflowReturnProgress.message}</span><span className="tabular-nums text-emerald-600">{Math.round(workflowReturnProgress.progress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-emerald-100"><div className="h-full rounded-full bg-emerald-600 transition-[width] duration-500" style={{ width: `${workflowReturnProgress.progress}%` }}/></div></div>}
+    {workflowReturnProgress?.active && <div className="w-full border-b border-emerald-100 bg-emerald-50 px-5 py-3" data-workflow-return-progress data-phase={workflowReturnProgress.phase}><div className="flex w-full items-center justify-between gap-4 text-xs"><span className="min-w-0 flex-1 truncate font-bold text-emerald-700">{workflowReturnProgress.message}</span><span className="shrink-0 tabular-nums text-emerald-600">{Math.round(workflowReturnProgress.progress)}%</span></div><div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-emerald-100" role="progressbar" aria-label="批量导入返图进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(workflowReturnProgress.progress)}><div className="h-full rounded-full bg-emerald-600 transition-[width] duration-300" style={{ width: `${workflowReturnProgress.progress}%` }}/></div></div>}
     {loading ? <div className="flex flex-1 items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 animate-spin"/>正在读取团片历史人物…</div> : workspaceLoadError ? <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"><AlertTriangle size={28} className="text-red-500"/><h3 className="font-bold text-red-700">团片历史人物读取失败</h3><p className="max-w-2xl text-xs leading-5 text-slate-500">{workspaceLoadError}</p><button type="button" className="dialog-primary" onClick={() => void load(true)}>重新读取团片历史</button></div> : !workspace.photos.length ? <div className="flex flex-1 flex-col items-center justify-center text-center"><UsersRound size={42} className="text-slate-300"/><h3 className="mt-4 font-bold text-slate-700">尚未识别人物</h3><p className="mt-2 text-sm text-slate-500">请先加入图片并识别人物。</p><button onClick={() => onStepChange('detect')} className="dialog-primary mt-5">返回人物识别</button></div> : <main ref={peopleScrollRef} className="min-h-0 flex-1 overflow-y-auto p-6"><div className="mx-auto min-h-full max-w-[1800px]"><div className="workflow-board-view">
       {activeStep === 'review' ? <div className="grid gap-5 lg:grid-cols-[minmax(280px,.7fr)_minmax(0,1.3fr)]" data-merge-audit><section className="rounded-xl border border-slate-200 bg-white p-5"><h3 className="font-bold text-slate-800">合并前阻断清单</h3><p className="mt-1 text-xs text-slate-500">阻断归零后才能输出；未知证据仍需人工核对。</p><div className="mt-4 space-y-2">{mergeReport.blockers.length ? mergeReport.blockers.map(item => <div key={item.code} className="flex items-center justify-between rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800"><span>{item.label}</span><span>{item.count}</span></div>) : <div className="rounded-lg bg-emerald-50 px-3 py-3 text-xs font-bold text-emerald-700">没有阻断项，可以合并</div>}</div></section><section className="rounded-xl border border-slate-200 bg-white p-5"><h3 className="font-bold text-slate-800">质量指标与目标进度</h3><div className="mt-4 grid gap-3 sm:grid-cols-3"><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">任务匹配</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.taskMatchRate === undefined ? '未知 · 需核对' : `${Math.round(workspace.qualityMetrics.taskMatchRate * 100)}%`}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">修改有效性</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.effectiveEditRate === undefined ? '未知 · 需核对' : `${Math.round(workspace.qualityMetrics.effectiveEditRate * 100)}%`}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">逐图结果</p><p className="mt-1 font-bold text-slate-800">{mergeablePhotos.length} 待合并 · {mergeReport.completedPhotoCount} 已输出</p></div></div><div className="mt-5 space-y-2">{workspace.photos.map(photo => { const tasks = photo.tasks || []; const mergedCount = tasks.filter(task => task.status === 'merged').length; return <div key={`${photo.photoId}:${photo.baseVersionId}`} className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-2 text-xs"><span className="truncate font-bold text-slate-700">{photo.name || photo.displayName || photo.photoId}</span><span className={mergedCount === tasks.length && tasks.length ? 'text-emerald-700' : 'text-slate-500'}>{mergedCount === tasks.length && tasks.length ? '已输出' : `${tasks.filter(task => Boolean(task.editedPatchPath)).length}/${tasks.length} 返图就绪`}</span></div>; })}</div></section></div> : <>{activeStep === 'relay' && <section className="mb-5 rounded-xl border border-slate-200 bg-white p-4" data-relay-chains><div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-bold text-slate-800">接力链</h3><span className="text-xs text-slate-500">原始裁图 → 前一位返图 → 下一位；每条链明确当前持有人和等待原因。</span></div><div className="mt-4 grid gap-3 xl:grid-cols-2">{relayChains.map(chain => <article key={chain.key} className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="mb-2 truncate text-xs font-bold text-slate-700">{chain.items[0]?.photo.name} · 工作图 {chain.items[0]?.task.taskOrder || chain.items[0]?.task.id}</p><ol className="flex min-w-0 items-stretch gap-1 overflow-x-auto" aria-label="修图接力链">{chain.nodes.map((node, index) => <li key={node.key} className="flex shrink-0 items-center gap-1">{index > 0 && <span aria-hidden className="text-slate-300">→</span>}<div className={`min-w-28 rounded-md border px-2.5 py-2 text-[11px] ${node.state === 'current' ? 'border-blue-300 bg-blue-50 text-blue-800' : node.state === 'warning' ? 'border-red-300 bg-red-50 text-red-700' : node.state === 'done' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'}`}><strong className="block truncate">{node.label}</strong><span className="mt-0.5 block truncate">{node.reason || (node.state === 'done' ? '已就绪' : '等待')}</span></div></li>)}</ol></article>)}</div></section>}
       {tab === 'people' ? <><div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4"><div className="min-w-0 flex-1"><h3 className="text-sm font-bold text-blue-800">请确认自动分组</h3><p className="mt-1 text-xs leading-5 text-blue-700">系统会结合人脸和外观分组，无法确认的人保持未标注。请点击缩略图核对。</p></div>{subjects.length > 18 && <button onClick={() => setShowAllSubjects(current => !current)} className="dialog-secondary">{showAllSubjects ? '每组只显示前 18 张' : '显示全部人物图'}</button>}<button disabled={Boolean(busy)} onClick={() => void suggest()} className="dialog-primary inline-flex items-center gap-2">{busy === 'suggest' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动识别同一个人</button><button onClick={() => void createIdentity()} className="dialog-secondary">新建人物</button></div>

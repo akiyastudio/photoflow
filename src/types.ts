@@ -236,6 +236,7 @@ export interface AppConfig {
   defaultFolderSort: ProjectFileSortField;
   itemOpenMode: 'single' | 'double';
   folderAlphabetFilterEnabled: boolean;
+  versionTreeEnabled: boolean;
   favoriteDisplayMode: 'stars' | 'binary';
   usagePreferencesVersion: number;
   projectToolbar: ProjectToolbarSettings;
@@ -243,6 +244,8 @@ export interface AppConfig {
   birthdayEnabled: boolean;
   pinInspirationLibrary: boolean;
   componentSettings: ComponentSettingsMap;
+  /** Host-owned optimistic concurrency revisions for opaque component settings. */
+  componentSettingsRevisions: Record<string, number>;
   /** Built-in controls for the native video player. */
   videoPlayback: VideoPlaybackSettings;
   mediaCache: {
@@ -546,7 +549,7 @@ export interface MediaWorkflowImportManifest {
   artifacts: Array<{
     relativePath: string;
     mediaKind: 'image' | 'video';
-    importSlot: 'raw' | 'camera_jpg' | 'generated_jpg' | 'mov' | 'video_preview';
+    importSlot: 'raw' | 'camera_jpg' | 'generated_jpg' | 'mov' | 'video_transcode';
     displayName: string;
   }>;
 }
@@ -556,7 +559,7 @@ export interface VersionGraphEdge {
   projectId: string;
   sourceProgressId: string;
   targetProgressId: string;
-  edgeKind: 'media_companion' | 'derived_preview' | 'workflow_input';
+  edgeKind: 'media_companion' | 'derived_preview' | 'derived_transcode' | 'workflow_input';
   createdAt: number;
   updatedAt: number;
 }
@@ -716,13 +719,24 @@ export interface ComponentStatus {
 export interface ComponentHostAction {
   componentId: string;
   componentVersion: string;
-  contractVersion: 1;
-  hostApiVersion: 1;
+  contractVersion: 1 | 2;
+  hostApiVersion: 1 | 2 | 3;
   actionId: string;
   label: string;
   pageId: string;
   pageTitle: string;
   /** Host-issued URL for a validated package-local icon. */
+  iconUrl?: string;
+}
+
+export interface ComponentSettingsPageContribution {
+  componentId: string;
+  componentVersion: string;
+  contractVersion: 2;
+  hostApiVersion: 3;
+  pageId: string;
+  label: string;
+  pageTitle: string;
   iconUrl?: string;
 }
 
@@ -738,6 +752,7 @@ export interface ComponentPageOpenScope {
 export interface ComponentPageInstance {
   identity: string;
   componentId: string;
+  componentVersion: string;
   pageId: string;
   title: string;
   workspacePath: string;
@@ -848,6 +863,13 @@ export interface BackgroundTaskDelta {
   removeIds: string[];
 }
 
+export interface AppUpdateInfo {
+  version: string;
+  url: string;
+  notes: string;
+  mandatory: boolean;
+}
+
 export interface IElectronAPI {
   readonly apiContractVersion: number;
   onPythonEvent: any;
@@ -857,19 +879,22 @@ export interface IElectronAPI {
   saveBirthdays: (data: Record<string, string>) => Promise<{success: boolean, error?: string}>;
   loadConfig: () => Promise<AppConfig | null>;
   loadStartupSnapshot?: () => Promise<{ config: AppConfig | null; birthdays: Record<string, string> }>;
-  saveConfig: (config: AppConfig) => Promise<{success: boolean, error?: string}>;
+  saveConfig: (config: AppConfig) => Promise<{success: boolean, savedConfig?: AppConfig, error?: string}>;
   getPrivacyConsentState: () => Promise<PrivacyConsentState>;
   savePrivacyConsent: (request: { acceptCore?: boolean; revokeCore?: boolean; faceRecognitionGranted?: boolean }) => Promise<{ success: boolean; state?: PrivacyConsentState; error?: string }>;
   openLegalDocument: (documentId: LegalDocumentId) => Promise<{ success: boolean; path?: string; error?: string }>;
   clearTelemetryLocalData: () => Promise<{ success: boolean; error?: string }>;
   getUserPath: () => Promise<string>;
-  onUpdateAvailable: (callback: (info: { version: string; url: string; notes: string }) => void) => () => void;
+  onUpdateAvailable: (callback: (info: AppUpdateInfo) => void) => () => void;
   openExternal: (url: string) => void;
-  checkForUpdates: () => Promise<{ success: boolean; updateAvailable?: boolean; currentVersion?: string; latestVersion?: string; url?: string; notes?: string; sha256?: string; error?: string }>;
+  checkForUpdates: () => Promise<{ success: boolean; updateAvailable?: boolean; currentVersion?: string; latestVersion?: string; url?: string; notes?: string; sha256?: string; mandatory?: boolean; error?: string }>;
   submitFeedback: (message: string) => Promise<{ success: boolean; error?: string }>;
   getComponents: (force?: boolean) => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
   getComponentHostActions: () => Promise<{ success: boolean; actions: ComponentHostAction[]; error?: string }>;
+  getComponentSettingsPages: () => Promise<{ success: boolean; pages: ComponentSettingsPageContribution[]; error?: string }>;
   openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus; scopeRelativePath?: string; selectedRelativePaths?: string[]; sourcePageId?: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
+  openComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string; surface: 'application.settings'; leaseId: string }; error?: string }>;
+  releaseComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean }>;
   activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
   setHostSurfaceSuspended: (update: { rendererToken: string; revision: number; suspended: boolean }) => Promise<{ success: boolean }>;
   setComponentPageBounds: (instanceId: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<{ success: boolean }>;
@@ -883,7 +908,7 @@ export interface IElectronAPI {
   getCursorScreenPoint: () => Promise<{ x: number; y: number }>;
   installComponent: (componentId: string) => Promise<{ success: boolean; cancelled?: boolean; packageSizeBytes?: number; error?: string }>;
   deleteComponentPackage: (kind: 'component' | 'advanced', componentId?: string) => Promise<{ success: boolean; deletedBytes?: number; error?: string }>;
-  uninstallComponent: (componentId: string) => Promise<{ success: boolean; error?: string }>;
+  uninstallComponent: (componentId: string, options: { clearUserData: boolean }) => Promise<{ success: boolean; dataCleared?: boolean; cleanupWarnings?: string[]; error?: string }>;
   getStorageDevices: () => Promise<StorageDeviceInventoryResult>;
   getDomainHealth: () => Promise<{ success: boolean; domains: Array<{ domainId: string; componentId?: string; displayName?: string; state: 'healthy' | 'degraded' | 'unavailable' | 'recovering'; failures: number; lastError: string; updatedAt: number }>; commands: Array<{ commandId: string; target: string; type: string; status: 'pending' | 'processing' | 'dead'; attempts: number; error: string }> }>;
   retryDomainCommand: (commandId: string) => Promise<{ success: boolean; error?: string }>;
@@ -989,7 +1014,7 @@ export interface IElectronAPI {
   setMediaRating: (workspacePath: string, filePath: string, rating: number) => Promise<{ success: boolean; rating: number; error?: string }>;
   createProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
   registerProgressWithGraph: (workspacePath: string, status: ProjectStatus, request: { projectName: string; progress: { progressId?: string; relativePath?: string; mediaKind?: 'image' | 'video'; versionKey?: string; parentProgressId?: string; displayName?: string; trackingEnabled?: boolean; trackingState?: ProgressFolder['trackingState']; renameFromParent?: boolean; copyMissingFromParent?: boolean; moveToRoot?: boolean }; workflowInputProgressIds: string[] }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; edges?: VersionGraphEdge[]; relativePath?: string; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
-  adoptVersionTreeFolder: (workspacePath: string, status: ProjectStatus, request: { projectName: string; relativePath: string; mode: 'original' | 'companion' | 'preview' | 'broll'; mediaKind: 'image' | 'video' | 'mixed'; sourceProgressId?: string }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; edge?: VersionGraphEdge | null; error?: string }>;
+  adoptVersionTreeFolder: (workspacePath: string, status: ProjectStatus, request: { projectName: string; relativePath: string; mode: 'original' | 'companion' | 'preview' | 'transcode' | 'broll'; mediaKind: 'image' | 'video' | 'mixed'; sourceProgressId?: string }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; edge?: VersionGraphEdge | null; error?: string }>;
   registerProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { relativePath: string; mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string; trackingEnabled: boolean; renameFromParent?: boolean; copyMissingFromParent?: boolean; trackingState?: ProgressFolder['trackingState']; progressId?: string; moveToRoot?: boolean }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; relativePath?: string; error?: string }>;
   updateProgressFolder: (workspacePath: string, status: ProjectStatus, projectName: string, request: { progressId: string; mediaKind: 'image' | 'video'; versionKey: string; parentProgressId?: string; displayName: string; trackingEnabled: boolean; trackingState?: ProgressFolder['trackingState']; preserveFolderPath?: boolean }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; progressFolders?: ProgressFolder[]; folder?: { name: string; path: string; relativePath: string; updatedAt: number }; error?: string }>;
   updateProgressRelation: (workspacePath: string, projectName: string, request: { childProgressId: string; parentProgressId: string | null; expectedUpdatedAt?: number }) => Promise<{ success: boolean; progressFolder?: ProgressFolder; error?: string }>;
@@ -1096,7 +1121,7 @@ export interface IElectronAPI {
   runDomainBackup: (workspacePath: string, domain: ComponentDataDomainId) => Promise<{ success: boolean; path?: string; error?: string }>;
   restoreDomainBackup: (workspacePath: string, snapshotId: string, domain: ComponentDataDomainId) => Promise<{ success: boolean; error?: string }>;
   resetDomainStorage: (workspacePath: string, domain: ComponentDataDomainId) => Promise<{ success: boolean; quarantine?: string; requiresReindex?: boolean; error?: string }>;
-  restoreBackupWorkspace: (workspacePath: string, snapshotId: string) => Promise<{ success: boolean; cancelled?: boolean; workspacePath?: string; error?: string }>;
+  restoreBackupWorkspace: (workspacePath: string, snapshotId: string) => Promise<{ success: boolean; cancelled?: boolean; workspacePath?: string; savedConfig?: AppConfig; error?: string }>;
   restoreBackupProject: (workspacePath: string, snapshotId: string, projectId: string) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }>;
   openBackupTarget: () => Promise<{ success: boolean; error?: string }>;
   chooseArchiveTarget: (currentPath?: string) => Promise<{ cancelled: boolean; path?: string }>;

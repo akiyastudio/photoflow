@@ -4,7 +4,7 @@ const RESERVED_PROJECT_FOLDER_NAMES = new Set([
   'raw',
   'jpg',
   'mov',
-  'mov_预览',
+  'mov_转码',
   '图片选片',
   '视频选片',
   '策划',

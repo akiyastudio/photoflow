@@ -3,10 +3,10 @@ const path = require('path');
 const { LEGACY_HOST_CAPABILITIES } = require('./compatibility/component-v1-metadata.cjs');
 
 const COMPONENT_HOST_CONTRACT_VERSION = 2;
-const COMPONENT_HOST_API_VERSION = 2;
+const COMPONENT_HOST_API_VERSION = 3;
 const COMPONENT_HOST_MIN_API_VERSION = 1;
 const COMPONENT_SERVICE_PROTOCOL_VERSION = 1;
-const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage']);
+const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage', 'application.settingsPage']);
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const VERSIONED_METHOD = /^[a-z][a-z0-9.-]{0,119}\.v[1-9][0-9]*$/;
 const HOST_CAPABILITIES = new Set([
@@ -50,6 +50,19 @@ const requiredText = (value, field, maxLength = 160) => {
   if (!text || text.length > maxLength) throw new Error(`Invalid component host ${field}`);
   return text;
 };
+const requiredStringText = (value, field, maxLength = 160) => {
+  if (typeof value !== 'string') throw new Error(`Invalid component host ${field}`);
+  return requiredText(value, field, maxLength);
+};
+const requiredExactStringText = (value, field, maxLength = 160) => {
+  if (typeof value !== 'string' || value !== value.trim() || !value || value.length > maxLength) throw new Error(`Invalid component host ${field}`);
+  return value;
+};
+const requiredExactId = (value, field) => {
+  const id = requiredExactStringText(value, field, 80);
+  if (!IDENTIFIER.test(id)) throw new Error(`Invalid component host ${field}`);
+  return id;
+};
 
 const requiredId = (value, field) => {
   const id = requiredText(value, field, 80);
@@ -72,6 +85,18 @@ const resolveDevelopmentFile = ({ declaredEntry, componentRoot, overrideRoot, ov
   if (!rootStat?.isDirectory() || rootStat.isSymbolicLink() || !entryStat?.isFile() || entryStat.isSymbolicLink()) throw new Error(`${label} development override is missing or unsafe`);
   const realRoot = fs.realpathSync(resolvedOverrideRoot); const realEntry = fs.realpathSync(resolvedOverride);
   if (!isInside(realRoot, realEntry)) throw new Error(`${label} development override escapes its approved root through a linked path`);
+  return realEntry;
+};
+const resolvePackageFile = ({ relativeEntry, componentRoot, developmentOverride = null, label }) => {
+  const declaredEntry = path.resolve(componentRoot, relativeEntry);
+  if (!isInside(componentRoot, declaredEntry)) throw new Error(`${label} escapes component root`);
+  if (developmentOverride) return resolveDevelopmentFile({ declaredEntry: relativeEntry, componentRoot, ...developmentOverride, label });
+  const rootStat = fs.lstatSync(componentRoot, { throwIfNoEntry: false });
+  const entryStat = fs.lstatSync(declaredEntry, { throwIfNoEntry: false });
+  if (!rootStat?.isDirectory() || rootStat.isSymbolicLink() || !entryStat?.isFile() || entryStat.isSymbolicLink()) throw new Error(`${label} is missing or unsafe: ${relativeEntry}`);
+  const realRoot = fs.realpathSync(componentRoot);
+  const realEntry = fs.realpathSync(declaredEntry);
+  if (!isInside(realRoot, realEntry)) throw new Error(`${label} escapes component root through a linked path`);
   return realEntry;
 };
 
@@ -124,7 +149,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max < min) throw new Error('Invalid component host compatibility range');
   const negotiatedHostApiVersion = Math.min(COMPONENT_HOST_API_VERSION, max);
   if (negotiatedHostApiVersion < Math.max(COMPONENT_HOST_MIN_API_VERSION, min)) throw new Error(`Component host APIs ${COMPONENT_HOST_MIN_API_VERSION}-${COMPONENT_HOST_API_VERSION} do not overlap supported range ${min}-${max}`);
-  if (contractVersion === 2 && negotiatedHostApiVersion !== 2) throw new Error('Component Host contractVersion 2 requires Host API 2');
+  if (contractVersion === 2 && negotiatedHostApiVersion < 2) throw new Error('Component Host contractVersion 2 requires Host API 2 or newer');
   if (!Array.isArray(host.contributions) || host.contributions.length < 2 || host.contributions.length > 32) throw new Error('Component host contributions must be a bounded array');
 
   const componentId = requiredId(manifest.id, 'component id');
@@ -141,28 +166,40 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   const seen = new Set();
   const pages = new Map();
   const actions = [];
+  const settingsPages = [];
   for (const raw of host.contributions) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component host contribution');
     if (!CONTRIBUTION_TYPES.has(raw.type)) throw new Error(`Unknown component host contribution type: ${raw.type || 'missing'}`);
-    const id = requiredId(raw.id, `${raw.type} id`);
+    const id = raw.type === 'application.settingsPage' ? requiredExactId(raw.id, 'application settings page id') : requiredId(raw.id, `${raw.type} id`);
     const key = `${raw.type}:${id}`;
     if (seen.has(key)) throw new Error(`Duplicate component host contribution: ${key}`);
     seen.add(key);
     if (raw.type === 'component.fullPage') {
       if (contractVersion === 2) rejectUnknownFields(raw, ['type', 'id', 'title', 'entry'], 'component fullPage contribution');
       const relativeEntry = requiredText(raw.entry, 'page entry', 512).replace(/\\/g, '/');
-      const declaredEntry = path.resolve(componentRoot, relativeEntry);
-      if (!isInside(componentRoot, declaredEntry)) throw new Error('Component page entry escapes component root');
-      const entry = developmentFiles?.page ? resolveDevelopmentFile({ declaredEntry: relativeEntry, componentRoot, ...developmentFiles.page, label: 'Component page entry' }) : declaredEntry;
-      const stat = fs.statSync(entry, { throwIfNoEntry: false });
-      if (!stat?.isFile() || stat.isSymbolicLink()) throw new Error(`Component page entry is missing or unsafe: ${relativeEntry}`);
+      const entry = resolvePackageFile({ relativeEntry, componentRoot, developmentOverride: developmentFiles?.page, label: 'Component page entry' });
       pages.set(id, { type: raw.type, id, title: requiredText(raw.title, 'page title'), entry, relativeEntry });
-    } else {
+    } else if (raw.type === 'workspace.toolbarAction') {
       if (contractVersion === 2) rejectUnknownFields(raw, ['type', 'id', 'label', 'pageId'], 'component toolbarAction contribution');
       actions.push({ type: raw.type, id, label: requiredText(raw.label, 'toolbar label', 80), pageId: requiredId(raw.pageId, 'toolbar pageId') });
+    } else {
+      if (contractVersion !== 2) throw new Error('Application settings pages require Component Host V2');
+      if (negotiatedHostApiVersion < 3) throw new Error('Application settings pages require Host API 3');
+      if (min < 3) throw new Error('Application settings pages require minHostApiVersion 3 or newer');
+      rejectUnknownFields(raw, ['type', 'id', 'label', 'title', 'entry', 'rpcMethods'], 'application settingsPage contribution');
+      const relativeEntry = requiredExactStringText(raw.entry, 'settings page entry', 512).replace(/\\/g, '/');
+      const entry = resolvePackageFile({ relativeEntry, componentRoot, developmentOverride: developmentFiles?.settingsPages?.[id], label: 'Component settings page entry' });
+      if (!Array.isArray(raw.rpcMethods) || raw.rpcMethods.length < 1 || raw.rpcMethods.length > 32 || raw.rpcMethods.some(method => typeof method !== 'string')) throw new Error('Component settings page RPC methods must be a bounded versioned allowlist');
+      const rpcMethods = raw.rpcMethods.map(value => requiredExactStringText(value, 'settings page RPC method', 128));
+      if (new Set(rpcMethods).size !== rpcMethods.length) throw new Error('Component settings page RPC methods must not contain duplicates');
+      if (rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error('Component settings page RPC methods must be a bounded versioned allowlist');
+      const label = requiredExactStringText(raw.label, 'settings page label', 80);
+      settingsPages.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, 'settings page title'), entry, relativeEntry, rpcMethods: Object.freeze(rpcMethods) }));
     }
   }
+  if (settingsPages.length > 16) throw new Error('Component settings page contributions must be bounded');
   if (pages.size !== 1 || actions.length !== 1) throw new Error('Component Host V1 requires exactly one toolbar action and one full page');
+  if (contractVersion === 1 && host.contributions.length !== 2) throw new Error('Component Host V1 requires exactly two contributions');
   if (!pages.has(actions[0].pageId)) throw new Error(`Component toolbar action references an unknown page: ${actions[0].pageId}`);
   const page = pages.get(actions[0].pageId);
   let service = null;
@@ -220,6 +257,10 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       runtimeActions: Object.freeze(runtimeActions),
       lifecycleActions: Object.freeze(lifecycleActions),
     });
+    for (const settingsPage of settingsPages) {
+      const unknownMethod = settingsPage.rpcMethods.find(method => !rpcMethods.includes(method));
+      if (unknownMethod) throw new Error(`Component settings page RPC method is not declared by the service: ${unknownMethod}`);
+    }
   }
   let advancedRuntime = null;
   if (manifest.advancedRuntime !== undefined) {
@@ -242,13 +283,22 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     migrations,
     toolbarAction: Object.freeze({ ...actions[0], pageTitle: page.title }),
     fullPage: Object.freeze(page),
+    settingsPages: Object.freeze(settingsPages),
     icon,
     service,
     advancedRuntime,
   });
 };
 
-const createComponentHostRegistry = ({ roots, developmentRendererRoot = '' }) => {
+const normalizeDevelopmentAlgorithmRuntime = value => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid development algorithm runtime descriptor');
+  const command = path.resolve(requiredText(value.command, 'development algorithm command', 2048));
+  const argsPrefix = Array.isArray(value.argsPrefix) ? value.argsPrefix.map(item => requiredText(item, 'development algorithm argument', 2048)) : [];
+  if (argsPrefix.length > 16) throw new Error('Development algorithm argument prefix is too large');
+  return Object.freeze({ command, argsPrefix: Object.freeze(argsPrefix) });
+};
+
+const createComponentHostRegistry = ({ roots, developmentRendererRoot = '', developmentAlgorithmRuntimes = {}, admitDescriptor = null }) => {
   const candidates = () => {
     const values = [];
     for (const root of roots) {
@@ -273,14 +323,20 @@ const createComponentHostRegistry = ({ roots, developmentRendererRoot = '' }) =>
   const inspectRoot = ({ componentRoot, manifestPath = path.join(componentRoot, 'component.json'), expectedId = '', source, developmentRendererRoot: developmentRoot }) => {
     const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     if (expectedId && manifest.id !== expectedId) throw new Error(`Component id does not match its directory: ${manifest.id || 'missing'}`);
-    const pageDeclaration = manifest.componentHost?.contributions?.find(item => item?.type === 'component.fullPage')?.entry;
+    const contributions = manifest.componentHost?.contributions || [];
+    const pageDeclaration = contributions.find(item => item?.type === 'component.fullPage')?.entry;
     const iconDeclaration = manifest.icon;
     const developmentFiles = developmentRoot ? {
       page: { overrideRoot: developmentRoot, overrideEntry: path.join(developmentRoot, path.basename(String(pageDeclaration || ''))) },
+      settingsPages: Object.fromEntries(contributions.filter(item => item?.type === 'application.settingsPage').map(item => [item.id, { overrideRoot: developmentRoot, overrideEntry: path.join(developmentRoot, path.basename(String(item.entry || ''))) }])),
       ...(iconDeclaration ? { icon: { overrideRoot: path.join(componentRoot, 'renderer'), overrideEntry: path.join(componentRoot, 'renderer', path.basename(String(iconDeclaration))) } } : {}),
     } : null;
     const descriptor = parseComponentHostManifest(manifest, componentRoot, developmentFiles);
-    return descriptor ? { ...descriptor, componentRoot, source } : null;
+    const algorithmRuntime = developmentRoot && developmentAlgorithmRuntimes[manifest.id]
+      ? normalizeDevelopmentAlgorithmRuntime(developmentAlgorithmRuntimes[manifest.id])
+      : null;
+    if (descriptor && admitDescriptor && admitDescriptor(descriptor, componentRoot, source) !== true) throw new Error(`Component host admission rejected: ${descriptor.componentId}`);
+    return descriptor ? { ...descriptor, componentRoot, source, ...(algorithmRuntime ? { algorithmRuntime } : {}) } : null;
   };
   const list = () => {
     const byId = new Map();
@@ -309,5 +365,6 @@ module.exports = {
   MAX_COMPONENT_ICON_BYTES,
   createComponentHostRegistry,
   parseComponentIcon,
+  resolvePackageFile,
   parseComponentHostManifest,
 };

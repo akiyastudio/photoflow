@@ -30,7 +30,7 @@ def make_project(root: Path, db, name: str):
 def artifact(relative_path: str, slot: str, display_name: str | None = None):
     return {
         "relativePath": relative_path,
-        "mediaKind": "video" if slot in ("mov", "video_preview") else "image",
+        "mediaKind": "video" if slot in ("mov", "video_transcode") else "image",
         "importSlot": slot,
         "displayName": display_name or relative_path,
     }
@@ -66,7 +66,7 @@ def test_idempotency_and_session_conflict(root: Path, db):
         artifact("source-a", "raw", "RAW"),
         artifact("source-b", "camera_jpg", "JPG"),
         artifact("source-c", "mov", "MOV"),
-        artifact("source-d", "video_preview", "预览"),
+        artifact("source-d", "video_transcode", "转码"),
     ]
     first = commit(root, db, "idempotent", "same-session", items)
     second = commit(root, db, "idempotent", "same-session", list(reversed(items)))
@@ -74,7 +74,7 @@ def test_idempotency_and_session_conflict(root: Path, db):
     assert db.execute("SELECT COUNT(*) FROM progress_folders WHERE project_id=?", (project_id,)).fetchone()[0] == 4
     assert db.execute("SELECT COUNT(*) FROM media_import_artifact_slots WHERE project_id=?", (project_id,)).fetchone()[0] == 4
     assert edge_count(db, project_id, "media_companion") == 1
-    assert edge_count(db, project_id, "derived_preview") == 1
+    assert edge_count(db, project_id, "derived_transcode") == 1
     changed = copy.deepcopy(items)
     changed[0]["displayName"] = "changed"
     try:
@@ -125,16 +125,16 @@ def test_existing_progress_is_never_overwritten(root: Path, db):
 
 def test_cross_batch_relations(root: Path, db):
     project, project_id = make_project(root, db, "cross-batch")
-    for name in ("image-source", "camera-output", "video-source", "preview-output"):
+    for name in ("image-source", "camera-output", "video-source", "transcode-output"):
         (project / name).mkdir()
     commit(root, db, "cross-batch", "raw-only", [artifact("image-source", "raw")])
     assert edge_count(db, project_id, "media_companion") == 0
     commit(root, db, "cross-batch", "camera-later", [artifact("camera-output", "camera_jpg")])
     assert edge_count(db, project_id, "media_companion") == 1
     commit(root, db, "cross-batch", "mov-only", [artifact("video-source", "mov")])
-    assert edge_count(db, project_id, "derived_preview") == 0
-    commit(root, db, "cross-batch", "preview-later", [artifact("preview-output", "video_preview")])
-    assert edge_count(db, project_id, "derived_preview") == 1
+    assert edge_count(db, project_id, "derived_transcode") == 0
+    commit(root, db, "cross-batch", "transcode-later", [artifact("transcode-output", "video_transcode")])
+    assert edge_count(db, project_id, "derived_transcode") == 1
 
 
 def test_generated_camera_promotion(root: Path, db):
@@ -186,7 +186,7 @@ def test_atomic_rollback_and_retry(root: Path, db):
 
 def test_legacy_canonical_graph_migration(root: Path, db):
     project, project_id = make_project(root, db, "legacy-canonical")
-    for name in ("raw", "jpg", "mov", "mov_预览", "团片协作", "ordinary-folder", "edit-source"):
+    for name in ("raw", "jpg", "mov", "mov_转码", "团片协作", "ordinary-folder", "edit-source"):
         (project / name).mkdir()
     raw_source = workspace_db.progress_register(str(root), db, {
         "projectName": "legacy-canonical", "mediaKind": "image", "versionKey": "raw-source",
@@ -228,12 +228,12 @@ def test_legacy_canonical_graph_migration(root: Path, db):
     first = workspace_db.progress_list(str(root), db, {"projectName": "legacy-canonical"})
     by_name = {node["displayName"].casefold(): node for node in first["progressFolders"]}
     assert by_name["jpg"]["artifactKind"] == "companion"
-    assert by_name["mov_预览"]["nodeRole"] == "artifact" and by_name["mov_预览"]["artifactKind"] == "preview"
+    assert by_name["mov_转码"]["nodeRole"] == "artifact" and by_name["mov_转码"]["artifactKind"] == "transcode"
     assert by_name["团片协作"]["nodeRole"] == "workflow" and by_name["团片协作"]["artifactKind"] == "team_workspace"
     assert "ordinary-folder" not in by_name, "ordinary folders must never be inferred into the graph"
     edges = {(edge["sourceProgressId"], edge["targetProgressId"], edge["edgeKind"]) for edge in first["graphEdges"]}
     assert any(kind == "media_companion" for _source, _target, kind in edges)
-    assert any(kind == "derived_preview" for _source, _target, kind in edges)
+    assert any(kind == "derived_transcode" for _source, _target, kind in edges)
     assert (source["id"], by_name["团片协作"]["id"], "workflow_input") in edges
     second = workspace_db.progress_list(str(root), db, {"projectName": "legacy-canonical"})
     assert len(second["progressFolders"]) == len(first["progressFolders"])
@@ -289,7 +289,7 @@ def test_import_mapping_follows_external_rename(root: Path, db):
 
 def test_manual_media_adoption(root: Path, db):
     project, project_id = make_project(root, db, "manual-adopt")
-    for name in ("camera-master", "camera-jpeg", "manual-preview", "ordinary-progress", "manual-broll"):
+    for name in ("camera-master", "camera-jpeg", "manual-preview", "video-master", "mov_转码", "ordinary-progress", "manual-broll"):
         (project / name).mkdir()
     (project / "manual-broll" / "behind-scenes.jpg").write_bytes(b"jpg")
     (project / "manual-broll" / "behind-scenes.mp4").write_bytes(b"mp4")
@@ -308,6 +308,16 @@ def test_manual_media_adoption(root: Path, db):
     assert companion["artifactKind"] == "companion" and preview["artifactKind"] == "preview"
     assert edge_count(db, project_id, "media_companion") == 1
     assert edge_count(db, project_id, "derived_preview") == 1
+    video_original = workspace_db.progress_adopt_media(str(root), db, {
+        "projectName": "manual-adopt", "folderPath": str(project / "video-master"),
+        "mode": "original", "mediaKind": "video",
+    })["progressFolder"]
+    transcode = workspace_db.progress_adopt_media(str(root), db, {
+        "projectName": "manual-adopt", "folderPath": str(project / "mov_转码"),
+        "mode": "transcode", "mediaKind": "video", "sourceProgressId": video_original["id"],
+    })["progressFolder"]
+    assert transcode["artifactKind"] == "transcode"
+    assert edge_count(db, project_id, "derived_transcode") == 1
     broll_result = workspace_db.progress_adopt_media(str(root), db, {
         "projectName": "manual-adopt", "folderPath": str(project / "manual-broll"),
         "mode": "broll", "mediaKind": "mixed",
@@ -317,6 +327,7 @@ def test_manual_media_adoption(root: Path, db):
     assert broll.get("parentProgressId") is None and broll.get("relationKind") is None and broll.get("artifactKind") is None
     assert not broll["trackingEnabled"] and broll["trackingState"] == "disabled"
     assert edge_count(db, project_id, "media_companion") == 1 and edge_count(db, project_id, "derived_preview") == 1
+    assert edge_count(db, project_id, "derived_transcode") == 1
     repeated_broll = workspace_db.progress_adopt_media(str(root), db, {
         "projectName": "manual-adopt", "folderPath": str(project / "manual-broll"),
         "mode": "broll", "mediaKind": "mixed",

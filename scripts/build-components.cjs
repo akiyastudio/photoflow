@@ -168,11 +168,13 @@ const build = id => {
     const rendererOutput = path.join(root, 'artifacts', 'component-renderers', id);
     const uiRoot = path.join(target, 'ui');
     if (!fs.existsSync(path.join(rendererOutput, 'index.html'))) throw new Error('Team-retouch renderer output is missing');
+    if (!fs.existsSync(path.join(rendererOutput, 'settings.html'))) throw new Error('Team-retouch settings renderer output is missing');
     fs.cpSync(rendererOutput, uiRoot, { recursive: true });
     fs.copyFileSync(path.join(root, 'extensions', id, 'renderer', 'team-retouch.svg'), path.join(uiRoot, 'team-retouch.svg'));
     fs.copyFileSync(path.join(root, 'extensions', id, 'service.cjs'), path.join(target, 'service.cjs'));
     fs.copyFileSync(path.join(root, 'extensions', id, 'workflow-generation.cjs'), path.join(target, 'workflow-generation.cjs'));
     fs.copyFileSync(path.join(root, 'extensions', id, 'workflow-artifact.cjs'), path.join(target, 'workflow-artifact.cjs'));
+    fs.copyFileSync(path.join(root, 'extensions', id, 'workflow-manifest.cjs'), path.join(target, 'workflow-manifest.cjs'));
   }
   fs.copyFileSync(definition.template, path.join(target, 'component.json'));
   console.log(`Component ready: ${target}`);

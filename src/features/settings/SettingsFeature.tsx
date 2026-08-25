@@ -1,21 +1,25 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, Loader2, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X, FileImage, Pencil } from 'lucide-react';
 import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from '../../types';
-import type { AppConfig, BackupSpaceStatus, BackupStatus, ComponentStatus, LegalDocumentId, PrivacyConsentState, ProjectToolbarActionId, StorageUsageOverview, WorkspaceProject } from '../../types';
+import type { AppConfig, BackupSpaceStatus, BackupStatus, ComponentSettingsPageContribution, ComponentStatus, LegalDocumentId, PrivacyConsentState, ProjectToolbarActionId, StorageUsageOverview, WorkspaceProject } from '../../types';
+import { ComponentIcon } from '../../components/ComponentIcon';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { FORMAL_MODEL_LICENSES } from '../../licenses/modelLicenses';
 import { THIRD_PARTY_SOFTWARE_LICENSES } from '../../licenses/softwareLicenses';
 import { VideoSplitView, VideoTranscodeView } from '../tools/ToolViews';
 import { normalizeConfiguredSdDeviceRecords, removeConfiguredSdDevice, syncLegacySdMirrors } from '../tools/sd-startup-import-model';
 import { MAX_SUBTITLE_FONT_SIZE, MIN_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../app/video-player-settings';
+import { componentSettingsSectionKey, type ComponentSettingsSection } from './component-settings-page-model';
+import { restoredWorkspaceConfig } from './restored-workspace-config';
 
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
-export type SettingsSection = 'general' | 'project' | 'privacy' | 'storage' | 'backup' | 'components' | 'import' | 'video' | 'about' | 'feedback';
+export type BuiltInSettingsSection = 'general' | 'project' | 'privacy' | 'storage' | 'backup' | 'components' | 'import' | 'video' | 'about' | 'feedback';
+export type SettingsSection = BuiltInSettingsSection | ComponentSettingsSection;
 
-const SETTINGS_SECTION_LABELS: Record<SettingsSection, string> = {
+const SETTINGS_SECTION_LABELS: Record<BuiltInSettingsSection, string> = {
   general: '界面',
   project: '项目',
   import: '导入',
@@ -90,7 +94,6 @@ const WorkspaceFoldersPicker = ({ primary, values, onChange }: { primary: string
 const WorkspaceSetupPage = ({ config, onSave }: { config: AppConfig; onSave: (config: AppConfig) => void | Promise<void> }) => {
   const [workspacePath, setWorkspacePath] = useState(config.workspacePath);
   const [recoveryStatus, setRecoveryStatus] = useState<BackupStatus>();
-  const [recoveryBackupPath, setRecoveryBackupPath] = useState(config.backup.targetPath);
   const [restoringSnapshot, setRestoringSnapshot] = useState('');
   const confirm = async () => {
     const selectedPath = workspacePath.trim();
@@ -100,16 +103,15 @@ const WorkspaceSetupPage = ({ config, onSave }: { config: AppConfig; onSave: (co
     const selected = await window.electronAPI.chooseBackupTarget(config.backup.targetPath);
     if (selected.cancelled || !selected.path) return;
     await onSave({ ...config, backup: { ...config.backup, enabled: true, targetType: selected.path.startsWith('\\\\') ? 'nas' : 'local', targetPath: selected.path } });
-    setRecoveryBackupPath(selected.path);
     setRecoveryStatus(await window.electronAPI.getBackupStatus(''));
   };
   const restore = async (snapshotId: string) => {
     setRestoringSnapshot(snapshotId);
     try {
       const result = await window.electronAPI.restoreBackupWorkspace('', snapshotId);
-      if (result.success && result.workspacePath) {
+      if (result.success && result.workspacePath && result.savedConfig) {
         setWorkspacePath(result.workspacePath);
-        await onSave({ ...config, workspacePath: result.workspacePath, workspacePaths: [result.workspacePath], backup: { ...config.backup, enabled: true, targetType: recoveryBackupPath.startsWith('\\\\') ? 'nas' : 'local', targetPath: recoveryBackupPath } });
+        await onSave(restoredWorkspaceConfig(result.savedConfig, result.workspacePath));
       }
     } finally { setRestoringSnapshot(''); }
   };
@@ -248,7 +250,7 @@ const LogSettings = ({ onNotice }: { onNotice: (message: string, duration?: numb
   return <SettingsRow title="应用日志" description="用于排查运行异常，默认仅保留最近 7 天；清空只删除照片流生成的日志文件。"><div className="ml-auto flex w-fit flex-wrap gap-2"><button type="button" onClick={() => void openFolder()} className="dialog-secondary inline-flex items-center gap-2"><FolderOpen size={15}/>打开</button><button type="button" onClick={() => void clear()} disabled={clearing} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-sm font-bold text-red-600 hover:bg-red-50 disabled:opacity-50">{clearing ? <Loader2 size={15} className="animate-spin"/> : <Trash2 size={15}/>} {clearing ? '正在清空…' : '清空日志'}</button></div></SettingsRow>;
 };
 
-const ComponentSettings = ({ components, installPath, loading, onRefresh, onComponentsChanged, onNotice }: { components: ComponentStatus[]; installPath: string; loading: boolean; onRefresh: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onNotice: (message: string, duration?: number) => void }) => {
+const ComponentSettings = ({ components, installPath, loading, onRefresh, onComponentsChanged, onComponentDataCleared, onNotice }: { components: ComponentStatus[]; installPath: string; loading: boolean; onRefresh: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onComponentDataCleared: (componentId: string) => void | Promise<void>; onNotice: (message: string, duration?: number) => void }) => {
   const appDialog = useAppDialog();
   const [busyId, setBusyId] = useState('');
   const openFolder = async (componentId?: string) => {
@@ -268,17 +270,29 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     } finally { setBusyId(''); }
   };
   const uninstall = async (component: ComponentStatus) => {
-    if (busyId || !await appDialog.confirm({
+    if (busyId) return;
+    const choice = await appDialog.choice({
       title: `确定卸载“${component.name}”吗？`,
-      message: '组件文件夹会移入系统回收站。',
-      confirmLabel: '卸载组件',
-      tone: 'danger',
-    })) return;
+      message: '是否同时清空该组件的用户数据和相关缓存？',
+      detail: '保留数据便于以后重新安装后继续使用；清空后，组件设置、私有数据和相关缓存将移入系统回收站。',
+      choices: [
+        { value: 'keep', label: '保留数据并卸载' },
+        { value: 'clear', label: '清空数据并卸载', tone: 'danger' },
+      ],
+      cancelLabel: '取消',
+      defaultValue: 'keep',
+    });
+    if (!choice) return;
+    const clearUserData = choice === 'clear';
     setBusyId(component.id);
     try {
-      const result = await window.electronAPI.uninstallComponent(component.id);
+      const result = await window.electronAPI.uninstallComponent(component.id, { clearUserData });
       if (!result.success) { onNotice(`卸载“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
-      onNotice(`已卸载“${component.name}”`);
+      if (clearUserData) await onComponentDataCleared(component.id);
+      const cleanupWarning = result.cleanupWarnings?.filter(Boolean).join('；');
+      onNotice(cleanupWarning
+        ? `已卸载“${component.name}”，但部分数据未能清理：${cleanupWarning}`
+        : clearUserData ? `已卸载“${component.name}”并清空用户数据和相关缓存` : `已卸载“${component.name}”，用户数据已保留`, cleanupWarning ? 7000 : 4000);
       await onComponentsChanged();
     } finally { setBusyId(''); }
   };
@@ -301,7 +315,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
   </SettingsPageGroup>;
 };
 
-const SettingsNavigator = ({ activeSection, onSelect }: { activeSection: SettingsSection; onSelect: (section: SettingsSection) => void }) => {
+const SettingsNavigator = ({ activeSection, componentPages, onSelect }: { activeSection: SettingsSection; componentPages: ComponentSettingsPageContribution[]; onSelect: (section: SettingsSection) => void }) => {
   const items: Array<{ id: SettingsSection; label: string; description: string; icon: React.ReactNode }> = [
     { id: 'general', label: '界面', description: '配色、标签与首页', icon: <Palette size={18}/> },
     { id: 'project', label: '项目', description: '新建项目与分类', icon: <FolderOpen size={18}/> },
@@ -309,6 +323,7 @@ const SettingsNavigator = ({ activeSection, onSelect }: { activeSection: Setting
     { id: 'video', label: '视频', description: '播放按键与视频工具', icon: <Video size={18}/> },
     { id: 'backup', label: '存储', description: '工作目录、归档与工作区备份', icon: <HardDrive size={18}/> },
     { id: 'components', label: '组件管理', description: '安装与卸载可选组件', icon: <Puzzle size={18}/> },
+    ...componentPages.map(page => ({ id: componentSettingsSectionKey(page), label: page.label, description: page.pageTitle, icon: <ComponentIcon src={page.iconUrl} size={18}/> })),
   ];
   const renderItem = (item: typeof items[number]) => <button key={item.id} type="button" aria-current={activeSection === item.id ? 'page' : undefined} onClick={() => onSelect(item.id)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition ${activeSection === item.id ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'}`}><span className={`shrink-0 ${activeSection === item.id ? 'text-blue-600' : 'text-slate-400'}`}>{item.icon}</span><span className="min-w-0 truncate text-sm font-bold">{item.label}</span></button>;
   return <nav aria-label="设置分类" className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain border-r border-slate-200 p-3">
@@ -460,7 +475,7 @@ const SettingsPanel = ({ title, onClose, children }: { title: string; onClose: (
   </section>
 </div>;
 
-const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectFocus, config, components, componentInstallPath, componentsLoading, onRefreshComponents, onComponentsChanged, onSave, getDefaultSettings, onNotice }: { activeSection: SettingsSection; backupProjectFocus?: WorkspaceProject | null; onClearBackupProjectFocus?: () => void; config: AppConfig; components: ComponentStatus[]; componentInstallPath: string; componentsLoading: boolean; onRefreshComponents: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onSave: (config: AppConfig) => boolean | Promise<boolean>; getDefaultSettings: () => AppConfig | Promise<AppConfig>; onNotice: (message: string, duration?: number) => void }) => {
+const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectFocus, config, components, componentInstallPath, componentsLoading, onRefreshComponents, onComponentsChanged, onSave, onConfigRestored, getDefaultSettings, onNotice }: { activeSection: BuiltInSettingsSection; backupProjectFocus?: WorkspaceProject | null; onClearBackupProjectFocus?: () => void; config: AppConfig; components: ComponentStatus[]; componentInstallPath: string; componentsLoading: boolean; onRefreshComponents: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onSave: (config: AppConfig) => boolean | Promise<boolean>; onConfigRestored: (config: AppConfig) => void; getDefaultSettings: () => AppConfig | Promise<AppConfig>; onNotice: (message: string, duration?: number) => void }) => {
   const appDialog = useAppDialog();
   const [draft, setDraft] = useState(config);
   const [backupStatus, setBackupStatus] = useState<BackupStatus>({ success: true, enabled: false, state: 'unconfigured', snapshots: [] });
@@ -486,6 +501,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const pendingSaveRef = useRef<AppConfig | null>(null);
   const savingRef = useRef(false);
   const backupSnapshotsRef = useRef<HTMLDivElement>(null);
+  useEffect(() => { setDraft(current => ({ ...current, componentSettings: config.componentSettings, componentSettingsRevisions: config.componentSettingsRevisions })); }, [config.componentSettings, config.componentSettingsRevisions]);
   useEffect(() => {
     if (!backupProjectFocus) return;
     const frame = window.requestAnimationFrame(() => backupSnapshotsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
@@ -733,14 +749,15 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   };
   const restoreWorkspace = async (snapshotId: string) => {
     if (!await appDialog.confirm({ title: '恢复整个工作区？', message: '软件会要求选择一个空文件夹，并把这个快照恢复为新的工作区。当前工作区不会被覆盖。', confirmLabel: '选择恢复位置' })) return;
+    while (savingRef.current) await new Promise(resolve => window.setTimeout(resolve, 10));
+    pendingSaveRef.current = null;
     setBackupAction(`workspace:${snapshotId}`);
     try {
       const result = await window.electronAPI.restoreBackupWorkspace(draft.workspacePath, snapshotId);
       if (result.cancelled) return;
-      if (!result.success || !result.workspacePath) { onNotice(result.error || '工作区恢复失败', 6000); return; }
-      const workspacePaths = normalizeWorkspacePaths(result.workspacePath, [...draft.workspacePaths, result.workspacePath]);
-      const next = { ...draft, workspacePath: result.workspacePath, workspacePaths };
-      commitSettings(next);
+      if (!result.success || !result.workspacePath || !result.savedConfig) { onNotice(result.error || '工作区恢复失败', 6000); return; }
+      const next = restoredWorkspaceConfig(result.savedConfig, result.workspacePath);
+      pendingSaveRef.current = null; setDraft(next); onConfigRestored(next);
       onNotice('工作区恢复完成，已切换到恢复位置', 6000);
       window.dispatchEvent(new Event('workspace-projects-changed'));
     } finally { setBackupAction(''); }
@@ -766,11 +783,11 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const restoreDefaults = async () => {
     if (!await appDialog.confirm({
       title: '恢复默认设置吗？',
-      message: '除当前工作目录外，界面、导入、存储、灵感库和组件偏好都会恢复为默认值。更改会立即生效。',
+      message: '保留当前工作目录和组件设置，将其他应用设置恢复为默认值。更改会立即生效。',
       confirmLabel: '恢复默认设置',
     })) return;
     const defaults = await getDefaultSettings();
-    commitSettings({ ...defaults, workspacePath: draft.workspacePath.trim() || defaults.workspacePath, workspacePaths: normalizeWorkspacePaths(draft.workspacePath, draft.workspacePaths) });
+    commitSettings({ ...defaults, workspacePath: draft.workspacePath.trim() || defaults.workspacePath, workspacePaths: normalizeWorkspacePaths(draft.workspacePath, draft.workspacePaths), componentSettings: draft.componentSettings, componentSettingsRevisions: draft.componentSettingsRevisions });
   };
   return <section className="min-h-full w-full bg-white"><div className="mx-auto w-full max-w-6xl space-y-10 px-8 py-10 lg:px-12">
     <h2 className="text-2xl font-bold text-slate-900">{SETTINGS_SECTION_LABELS[activeSection]}</h2>
@@ -781,6 +798,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="显示角色生日" description="在首页显示角色生日提醒。"><SettingsToggle label="显示角色生日" checked={draft.birthdayEnabled} onChange={checked => update('birthdayEnabled', checked)}/></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="文件浏览">
+      <SettingsRow title="开启版本树功能" description="开启后，包含版本数据的项目根目录会默认进入版本树，并显示版本树入口。关闭会隐藏入口并停用导出文件夹提示，不会删除或修改已有版本数据。"><SettingsToggle label="开启版本树功能" checked={draft.versionTreeEnabled} onChange={checked => update('versionTreeEnabled', checked)}/></SettingsRow>
       <SettingsRow title="打开文件与文件夹" description="选择文件时同步更新预览和详细信息。"><select value={draft.itemOpenMode} onChange={event => update('itemOpenMode', event.target.value as AppConfig['itemOpenMode'])} className="form-input ml-auto max-w-sm"><option value="single">单击打开（默认）</option><option value="double">双击打开</option></select></SettingsRow>
       <SettingsRow title="图片评分显示" description="两种界面都直接读写图片自身的 XMP 星级；喜欢模式会把任意星级视为喜欢，点喜欢时写入五星。"><select value={draft.favoriteDisplayMode} onChange={event => update('favoriteDisplayMode', event.target.value as AppConfig['favoriteDisplayMode'])} className="form-input ml-auto max-w-sm"><option value="binary">喜欢 / 不喜欢</option><option value="stars">一星到五星</option></select></SettingsRow>
       <SettingsRow title="文件夹默认排序方式" description=""><select value={draft.defaultFolderSort} onChange={event => update('defaultFolderSort', event.target.value as AppConfig['defaultFolderSort'])} className="form-input ml-auto max-w-sm"><option value="date">修改日期（最新优先）</option><option value="name">文件名（A–Z）</option><option value="size">大小（从大到小）</option></select></SettingsRow>
@@ -788,7 +806,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     </SettingsPageGroup>
     <section><h3 className="text-sm font-bold text-slate-800">项目工具栏</h3><p className="mt-1 text-xs leading-5 text-slate-500">设置项目工具栏按钮及顺序。</p><ProjectToolbarSettingsEditor value={draft.projectToolbar} onChange={projectToolbar => update('projectToolbar', projectToolbar)}/></section>
     <SettingsPageGroup title="设置">
-      <SettingsRow title="恢复默认设置" description="保留当前工作目录，将其他全部应用设置恢复为初始值。"><button type="button" onClick={() => void restoreDefaults()} className="dialog-secondary ml-auto flex w-fit items-center gap-2"><RotateCcw size={15}/>恢复默认设置</button></SettingsRow>
+      <SettingsRow title="恢复默认设置" description="保留当前工作目录和组件设置，将其他应用设置恢复为初始值。"><button type="button" onClick={() => void restoreDefaults()} className="dialog-secondary ml-auto flex w-fit items-center gap-2"><RotateCcw size={15}/>恢复默认设置</button></SettingsRow>
     </SettingsPageGroup>
     </>}
     {activeSection === 'project' && <SettingsPageGroup title="进度名称预设">
@@ -854,7 +872,11 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
         <LogSettings onNotice={onNotice}/>
       </SettingsPageGroup>
     </>}
-    {activeSection === 'components' && <ComponentSettings components={components} installPath={componentInstallPath} loading={componentsLoading} onRefresh={onRefreshComponents} onComponentsChanged={onComponentsChanged} onNotice={onNotice}/>}
+    {activeSection === 'components' && <ComponentSettings components={components} installPath={componentInstallPath} loading={componentsLoading} onRefresh={onRefreshComponents} onComponentsChanged={onComponentsChanged} onComponentDataCleared={componentId => {
+      const componentSettings = { ...draft.componentSettings };
+      delete componentSettings[componentId];
+      commitSettings({ ...draft, componentSettings });
+    }} onNotice={onNotice}/>}
     {activeSection === 'video' && <>
     <SettingsPageGroup title="视频浏览">
       <SettingsRow title="左右方向键行为" description="设置视频播放器的左右方向键用于快进快退或切换视频。"><select value={videoPlaybackSettings.arrowKeyAction} onChange={event => updateVideoPlaybackSettings({ ...videoPlaybackSettings, arrowKeyAction: event.target.value as 'seek' | 'navigate' })} className="form-input ml-auto max-w-sm"><option value="seek">快退 / 快进 5 秒（默认）</option><option value="navigate">切换上一个 / 下一个视频</option></select></SettingsRow>

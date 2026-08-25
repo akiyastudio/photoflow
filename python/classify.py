@@ -1305,7 +1305,7 @@ def build_import_graph_manifest(dest_path, target_folder, project_name, import_s
     artifacts_by_path = {}
     display_names = {
         'raw': 'RAW', 'camera_jpg': 'JPG', 'generated_jpg': 'JPG',
-        'mov': 'MOV', 'video_preview': 'MOV_预览',
+        'mov': 'MOV', 'video_transcode': 'MOV_转码',
     }
 
     def add(file_path, media_kind, import_slot):
@@ -1341,7 +1341,7 @@ def build_import_graph_manifest(dest_path, target_folder, project_name, import_s
     for file_path in generated_jpg:
         add(file_path, 'image', 'generated_jpg')
     for file_path in generated_preview:
-        add(file_path, 'video', 'video_preview')
+        add(file_path, 'video', 'video_transcode')
     return {
         'schemaVersion': 2,
         'projectName': project_name,
@@ -1456,7 +1456,7 @@ def generate_video_previews(target_folder, quality='medium', on_generated=None, 
     if not video_files:
         return 0, 0
 
-    output_dir = os.path.join(target_folder, 'mov_预览')
+    output_dir = os.path.join(target_folder, 'mov_转码')
     os.makedirs(output_dir, exist_ok=True)
     announced_encoder = ''
     succeeded = 0
@@ -1839,7 +1839,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                     source_paths=imported_paths_by_target.get(target_folder, []),
                 )
                 if video_count:
-                    log_info(f"视频预览完成：{preview_count}/{video_count} 个文件已保存到 mov_预览")
+                    log_info(f"视频转码完成：{preview_count}/{video_count} 个文件已保存到 mov_转码")
             log_progress(
                 f"正在完成导入后处理：{target_index + 1}/{len(processed_target_list)}",
                 94 + int(((target_index + 1) / max(1, len(processed_target_list))) * 2),

@@ -79,6 +79,7 @@ export const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   defaultFolderSort: 'date',
   itemOpenMode: 'single',
   folderAlphabetFilterEnabled: true,
+  versionTreeEnabled: true,
   favoriteDisplayMode: 'binary',
   usagePreferencesVersion: 0,
   projectToolbar: normalizeProjectToolbar(undefined),
@@ -86,6 +87,7 @@ export const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   birthdayEnabled: true,
   pinInspirationLibrary: false,
   componentSettings: {},
+  componentSettingsRevisions: {},
   videoPlayback: { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: ['zh', 'chi', 'zho'], subtitleSize: DEFAULT_SUBTITLE_FONT_SIZE, subtitleStyle: 'standard' },
   mediaCache: { maxSizeGB: 50, directory: '', autoCleanup30Days: false },
   backup: {

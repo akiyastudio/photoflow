@@ -351,7 +351,7 @@ export const InspirationLibraryNavigator = ({
     <div ref={treeScrollRef} onScroll={event => writeInspirationNavigatorScroll(rootPath, event.currentTarget.scrollTop)} className="inspiration-navigator-scroll min-h-0 flex-1 space-y-1 overflow-y-auto px-3">
       {rootPath ? <div className="space-y-0.5">{treeRow('灵感库文件夹', '', 0, folders.length > 0)}{loading && !folders.length ? <p className="flex items-center gap-2 px-3 py-3 text-xs text-slate-400"><Loader2 size={14} className="animate-spin"/>正在读取目录…</p> : visibleFolders.map(folder => treeRow(folder.name, folder.relativePath, folder.depth + 1, parentPaths.has(folder.relativePath))) }{treeError && <p className="px-3 py-2 text-xs leading-5 text-amber-600">{treeError}</p>}</div> : <p className="px-3 py-4 text-xs leading-5 text-slate-400">首次进入灵感库时请选择文件夹。</p>}
     </div>
-    <div className="border-t border-slate-200 p-4"><div className="flex flex-col overflow-hidden rounded-lg border border-slate-200 bg-white"><button type="button" onClick={onOpenSettings} className="flex w-full items-center gap-3 p-3 text-sm font-medium text-slate-600 transition-all hover:bg-slate-50 hover:text-slate-900"><Settings size={18} className="text-slate-400"/>设置</button></div></div>
+    <div className="border-t border-slate-200 px-4 py-2"><button type="button" onClick={onOpenSettings} className="flex w-full items-center gap-3 rounded-lg p-3 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"><Settings size={18} className="text-slate-400"/>设置</button></div>
   </nav>;
 };
 

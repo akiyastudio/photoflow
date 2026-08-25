@@ -19,6 +19,30 @@ const activeRequestControls = new Map();
 let advancedRuntimeProbeCache = null;
 let nextCapabilityId = 1;
 
+const hostAlgorithmRuntime = (() => {
+  const values = process.argv.slice(2);
+  const commandIndex = values.indexOf('--photoflow-algorithm-command');
+  if (commandIndex < 0) return null;
+  const command = String(values[commandIndex + 1] || '').trim();
+  const argsPrefix = [];
+  for (let index = 0; index < values.length; index += 1) {
+    if (values[index] === '--photoflow-algorithm-arg-prefix') argsPrefix.push(String(values[index + 1] || ''));
+  }
+  return command ? Object.freeze({ command, argsPrefix: Object.freeze(argsPrefix) }) : null;
+})();
+
+const resolveAlgorithmRuntime = () => {
+  const runtime = hostAlgorithmRuntime || { command: path.join(__dirname, process.platform === 'win32' ? 'team-retouch.exe' : 'team-retouch'), argsPrefix: [] };
+  const stat = fs.statSync(runtime.command, { throwIfNoEntry: false });
+  if (!stat?.isFile()) throw new Error(`团片组件算法不可用：运行时不存在（${hostAlgorithmRuntime ? '开发 Python 环境' : '组件完整性运行时'}）`);
+  for (const argument of runtime.argsPrefix) {
+    const candidate = path.resolve(argument);
+    const argumentStat = fs.statSync(candidate, { throwIfNoEntry: false });
+    if (!argumentStat?.isFile()) throw new Error('团片组件算法不可用：开发算法入口不存在');
+  }
+  return runtime;
+};
+
 const writeFrame = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const migrationMetric = (migration, phase, startedAt, values = {}) => writeFrame({
   type: 'metric', migration, phase, elapsedMs: Date.now() - startedAt,
@@ -390,10 +414,9 @@ const appendCommand = async (storage, operation) => {
 };
 
 const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', progress = {} } = {}) => new Promise((resolve, reject) => {
-  const testEngine = String(process.env.PHOTOFLOW_TEAM_TEST_ENGINE || '');
-  const executable = testEngine ? process.execPath : path.join(__dirname, process.platform === 'win32' ? 'team-retouch.exe' : 'team-retouch');
-  if ((!testEngine && !fs.existsSync(executable)) || (testEngine && !fs.existsSync(testEngine))) { reject(new Error('团片组件算法运行时不存在')); return; }
-  const child = spawn(executable, [...(testEngine ? [testEngine] : []), ...args.map(value => String(value))], {
+  let runtime;
+  try { runtime = resolveAlgorithmRuntime(); } catch (error) { reject(error); return; }
+  const child = spawn(runtime.command, [...runtime.argsPrefix, ...args.map(value => String(value))], {
     cwd: __dirname, env: Object.fromEntries(['SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL'].filter(key => process.env[key]).map(key => [key, process.env[key]])),
     stdio: ['ignore', 'pipe', 'pipe'], windowsHide: true,
   });
@@ -1214,7 +1237,24 @@ const createProjectProgress = async (parentId, payload) => {
 };
 const listProjectMediaPage = async (parentId, payload) => { const value = await callHostV2(parentId, 'project.media.page.v2', { pageSize: Math.min(200, Math.max(1, Number(payload.pageSize) || 200)), ...(payload.cursor ? { cursor: payload.cursor } : {}), kinds: ['image', 'raw'] }); return { success: true, items: value.items || [], hasMore: Boolean(value.page?.hasMore), cursor: value.page?.cursor || null }; };
 
-const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomain(parentId, async db => {
+const archiveReturnedFile = async (source, destination, storageRoot) => {
+  if (storageRoot && isInside(storageRoot, source)) {
+    try {
+      await fs.promises.link(source, destination);
+      return 'linked';
+    } catch (error) {
+      if (error?.code === 'EEXIST') throw error;
+    }
+  }
+  await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+  return 'copied';
+};
+
+const markWorkflowReconcilePending = (db, payload, error) => db.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)
+  ON CONFLICT(task_id) DO UPDATE SET photo_id=excluded.photo_id,error=excluded.error,updated_at=excluded.updated_at`)
+  .run(String(payload.taskId), String(payload.photoId), error?.message || String(error || '等待后台更新接力任务'), Date.now());
+
+const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomain(parentId, async (db, storage) => {
   const source = path.resolve(sourcePath);
   const sourceStat = await fs.promises.stat(source).catch(() => null);
   const extension = path.extname(source).toLowerCase();
@@ -1225,7 +1265,7 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
   const authorized = await artifactsScope(parentId, { photoId: row.photo_id, baseVersionId: row.base_version_id });
   const destination = path.join(authorized.uploadDirectory, `${row.id}-${crypto.randomUUID()}${path.extname(source).toLowerCase()}`);
   await fs.promises.mkdir(authorized.uploadDirectory, { recursive: true });
-  await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+  await archiveReturnedFile(source, destination, storage.dataPath);
   try {
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -1238,9 +1278,15 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
         db.prepare(upsertAssignmentSql).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, existingAssignment?.identity_id || null, 1, 'manual', 1, Date.now());
         db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=?,edited_patch_path=?,completed=1,completion_kind='returned',return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, artifact.stageId, artifact.id, destination, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
       }
+      if (payload.deferReconcile) markWorkflowReconcilePending(db, { taskId: row.id, photoId: row.photo_id }, new Error('返图已确认，等待后台更新接力任务'));
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
-    return { success: true, artifactPath: destination };
+    if (payload.deferReconcile) await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: row.id, photoId: row.photo_id, error: '返图已确认，等待后台更新接力任务' }).catch(() => undefined);
+    return {
+      success: true,
+      artifactPath: destination,
+      ...(payload.deferReconcile ? { reconcilePending: true, warning: '返图已确认；下一位接力任务正在后台更新，可以继续核对其他返图' } : {}),
+    };
   } catch (error) {
     await fs.promises.rm(destination, { force: true }).catch(() => undefined);
     throw error;
@@ -1450,7 +1496,7 @@ const workflowDirectoryResolver = createWorkflowManifestResolver({ crypto, fs, p
 const workflowScope = async (parentId, context) => workflowDirectoryResolver(await hostStorage(parentId), context);
 const readWorkflowManifest = (parentId, context) => workflowScope(parentId, context);
 
-const reportTask = async (parentId, operationId, action, update = {}, topic = '') => hostTask(parentId, operationId, action, { title: '生成团片协作工作流', ...update }, topic);
+const reportTask = async (parentId, operationId, action, update = {}, topic = '') => hostTask(parentId, operationId, action, { title: '生成团片协作工作流', operationId, ...update }, topic);
 
 const generateWorkflow = async (parentId, payload, context) => {
   const operationId = String(payload.operationId || crypto.randomUUID());
@@ -1631,28 +1677,42 @@ const readyWorkflowCandidates = (snapshot, requested = []) => {
   return candidates.filter(item => item.patchPath && fs.existsSync(item.patchPath));
 };
 
-const runMatcher = async (returned, candidates) => {
-  const testEngine = String(process.env.PHOTOFLOW_TEAM_TEST_ENGINE || '');
-  const runtime = testEngine ? process.execPath : path.join(__dirname, process.platform === 'win32' ? 'team-retouch.exe' : 'team-retouch');
-  if ((!testEngine && !fs.existsSync(runtime)) || (testEngine && !fs.existsSync(testEngine))) {
-    return { matches: returned.map((item, index) => ({ ...item, ...(candidates[index] || {}), confidence: candidates[index] ? 'review' : 'unmatched', matchConfidence: 'unknown', score: 0, needsReview: true, editEvidence: { reallyModified: false }, returnWarnings: ['返图匹配算法不可用，必须人工确认'] })) };
-  }
+const runMatcher = async (returned, candidates, onProgress = () => undefined) => {
+  const runtime = resolveAlgorithmRuntime();
   const manifestPath = path.join(path.dirname(returned[0].path), `match-${crypto.randomUUID()}.json`);
   await fs.promises.writeFile(manifestPath, JSON.stringify({ returned, candidates }), 'utf8');
   try {
     return await new Promise((resolve, reject) => {
-      const child = spawn(runtime, [...(testEngine ? [testEngine] : []), 'match-batch', '--manifest', manifestPath], { cwd: __dirname, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
-      let stdout = '';
+      const child = spawn(runtime.command, [...runtime.argsPrefix, 'match-batch', '--manifest', manifestPath], { cwd: __dirname, windowsHide: true, shell: false, stdio: ['ignore', 'pipe', 'pipe'] });
       let stderr = '';
-      child.stdout.on('data', chunk => { stdout += chunk; });
+      let result;
+      const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
+      lines.on('line', line => {
+        let message;
+        try { message = JSON.parse(line); } catch { return; }
+        if (message?.type === 'progress') onProgress(message);
+        else if (message?.type === 'result') result = message.result;
+        else if (message && typeof message === 'object') result = message;
+      });
       child.stderr.on('data', chunk => { stderr += chunk; });
       child.once('error', reject);
       child.once('exit', code => {
+        lines.close();
         if (code !== 0) { reject(new Error(stderr.trim() || `返图匹配进程退出：${code}`)); return; }
-        try { resolve(JSON.parse(stdout.trim().split(/\r?\n/).filter(Boolean).at(-1) || '{}')); } catch (error) { reject(error); }
+        if (!result) { reject(new Error('返图匹配进程没有返回结果')); return; }
+        resolve(result);
       });
     });
   } finally { await fs.promises.rm(manifestPath, { force: true }).catch(() => undefined); }
+};
+
+const resolveWorkflowTaskBinding = (db, projectId, taskId, chain) => {
+  const task = db.prepare(`SELECT task.* FROM team_patch_tasks task
+    JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+    WHERE task.id=? AND task.is_deleted=0 AND registered.project_id=?`).get(String(taskId), String(projectId));
+  if (!task) throw new Error('工作流程引用的修图任务不属于当前项目');
+  if (chain.some(entry => String(entry.item.baseVersionId) !== String(task.base_version_id))) throw new Error('工作流程 task 链跨越了错误的照片版本');
+  return { task, legacyPhotoIds: uniqueText(chain.map(entry => entry.item.photoId).filter(photoId => String(photoId) !== String(task.photo_id))) };
 };
 
 const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb = null) => {
@@ -1663,9 +1723,15 @@ const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb 
   chain.sort((a, b) => Number(a.group.week) - Number(b.group.week) || a.groupIndex - b.groupIndex || a.itemIndex - b.itemIndex);
   if (!chain.length) return { reconciled: false, reason: 'task-not-in-workflow' };
   const reconcile = async db => {
-    const task = db.prepare('SELECT * FROM team_patch_tasks WHERE id=? AND is_deleted=0').get(String(taskId));
-    if (!task) throw new Error('工作流程引用的修图任务不存在');
-    if (chain.some(entry => String(entry.item.photoId) !== String(task.photo_id) || String(entry.item.baseVersionId) !== String(task.base_version_id))) throw new Error('工作流程 task 链跨越了错误的照片版本');
+    const { task, legacyPhotoIds } = resolveWorkflowTaskBinding(db, context.projectId, taskId, chain);
+    if (legacyPhotoIds.length) {
+      for (const entry of chain) entry.item.photoId = task.photo_id;
+      await writeJsonAtomic(scope.manifestPath, scope.manifest);
+      try {
+        const storage = await hostStorage(parentId);
+        await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'legacy-photo-id-repaired', taskId: task.id, projectId: String(context.projectId), baseVersionId: task.base_version_id, previousPhotoIds: legacyPhotoIds, photoId: task.photo_id, itemCount: chain.length });
+      } catch { /* The canonical repair is already durable; audit logging is best effort. */ }
+    }
     const artifactGrant = await artifactsScope(parentId, { photoId: task.photo_id, baseVersionId: task.base_version_id });
     const artifactRoots = [artifactGrant.dataDirectory, artifactGrant.deliveryDirectory, artifactGrant.legacyDataRoot].filter(Boolean);
     const assertSource = sourcePath => {
@@ -1764,7 +1830,7 @@ const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb 
 const queueWorkflowReconcile = async (parentId, payload, error) => {
   const storage = await hostStorage(parentId);
   const db = ensureSchema(storage.databasePath);
-  try { db.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET photo_id=excluded.photo_id,error=excluded.error,updated_at=excluded.updated_at`).run(String(payload.taskId), String(payload.photoId), error.message || String(error), Date.now()); }
+  try { markWorkflowReconcilePending(db, payload, error); }
   finally { db.close(); }
   await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: payload.taskId, photoId: payload.photoId, error: error.message || String(error) }).catch(() => undefined);
 };
@@ -1786,6 +1852,13 @@ const storeReturnedAndReconcile = (parentId, sourcePath, payload, context) => wi
   return finalizeReconcile(parentId, context, payload, registered);
 });
 
+// Manual review confirmation only archives the return and persists the reconcile
+// job here. The renderer's host-bound refresh drains that job without keeping the
+// confirmation button blocked on hashing and project-output publication.
+const storeReturnedAndQueueReconcile = (parentId, sourcePath, payload, context) => withPhotoOperation(payload.photoId, () => (
+  storeReturnedPatch(parentId, sourcePath, { ...payload, deferReconcile: true }, context)
+));
+
 const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1) => {
   const pending = await withDomain(parentId, db => db.prepare(`SELECT pending.task_id,pending.photo_id FROM team_workflow_reconcile_pending pending
     JOIN team_patch_tasks task ON task.id=pending.task_id
@@ -1805,37 +1878,65 @@ const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1) =
 };
 
 const returnBatch = async (parentId, payload, context, workflowMode) => {
-  const existing = workflowMode ? await readReview(parentId, context) : null;
-  if (existing?.session) throw new Error('还有一批返图等待确认，请先继续处理或放弃');
-  const snapshot = await workspaceSnapshot(parentId, context);
-  const requestedPaths = new Set(uniqueText(payload.relativePaths));
-  let candidates = workflowMode ? readyWorkflowCandidates(snapshot, payload.items) : (snapshot.photos || []).filter(photo => !requestedPaths.size || requestedPaths.has(String(photo.relativePath || ''))).flatMap(photo => (photo.tasks || []).map(task => ({ taskId: task.id, photoId: photo.photoId, baseVersionId: photo.baseVersionId, personIndex: task.personIndex, photoName: photo.name, personName: task.personName, patchPath: task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath })).filter(item => item.patchPath && fs.existsSync(item.patchPath)));
-  if (!candidates.length) throw new Error('当前没有可接收返图的任务');
-  const materialized = await materializeMediaForOperation(parentId, candidates.map(item => ({ photoId: item.photoId, versionId: item.baseVersionId })));
-  const originals = new Map(materialized.items.map(item => [`${item.photo.id}:${item.versions[0]?.id}`, item.versions[0]?.filePath]));
-  candidates = candidates.map(item => ({ ...item, originalPath: originals.get(`${item.photoId}:${item.baseVersionId}`) }));
-  const staged = await materializeInputStage(parentId, payload.returnedFiles || []).catch(async error => { await materialized.cleanup(); throw error; });
+  const returnOperationId = String(payload.operationId || `returns-${crypto.randomUUID()}`);
+  let lastProgress = 0;
+  let materialized;
+  let staged;
+  let matcherProgressReports = Promise.resolve();
+  const progressUpdate = (phase, progress, message, extra = {}) => ({ state: 'running', phase, progress, message, ...extra });
+  const report = async (action, update) => {
+    lastProgress = Math.max(lastProgress, Number(update.progress) || 0);
+    return reportTask(parentId, returnOperationId, action, update, 'patch.return-batch.progress');
+  };
+  const throwIfCancelled = () => {
+    if (context.signal?.aborted) throw Object.assign(new Error('返图处理已取消'), { code: CANCELLED_CODE });
+  };
   try {
-    const returnOperationId = `returns-${staged.stageId}`;
-    await reportTask(parentId, returnOperationId, 'start', { kind: 'team-return-batch', title: '批量处理协作返图', message: '正在识别返图' }, 'patch.return-batch.progress');
+    await report('start', { kind: 'team-return-batch', title: '批量处理协作返图', ...progressUpdate('reading', 6, '正在读取协作任务') });
+    const existing = workflowMode ? await readReview(parentId, context) : null;
+    if (existing?.session) throw new Error('还有一批返图等待确认，请先继续处理或放弃');
+    const snapshot = await workspaceSnapshot(parentId, context);
+    throwIfCancelled();
+    await report('report', progressUpdate('reading', 14, '正在整理可匹配的协作任务'));
+    const requestedPaths = new Set(uniqueText(payload.relativePaths));
+    let candidates = workflowMode ? readyWorkflowCandidates(snapshot, payload.items) : (snapshot.photos || []).filter(photo => !requestedPaths.size || requestedPaths.has(String(photo.relativePath || ''))).flatMap(photo => (photo.tasks || []).map(task => ({ taskId: task.id, photoId: photo.photoId, baseVersionId: photo.baseVersionId, personIndex: task.personIndex, photoName: photo.name, personName: task.personName, patchPath: task.editedPatchPath && fs.existsSync(task.editedPatchPath) ? task.editedPatchPath : task.patchPath })).filter(item => item.patchPath && fs.existsSync(item.patchPath)));
+    if (!candidates.length) throw new Error('当前没有可接收返图的任务');
+    await report('report', progressUpdate('reading', 20, `正在读取 ${candidates.length} 个任务的原图`));
+    materialized = await materializeMediaForOperation(parentId, candidates.map(item => ({ photoId: item.photoId, versionId: item.baseVersionId })));
+    const originals = new Map(materialized.items.map(item => [`${item.photo.id}:${item.versions[0]?.id}`, item.versions[0]?.filePath]));
+    candidates = candidates.map(item => ({ ...item, originalPath: originals.get(`${item.photoId}:${item.baseVersionId}`) }));
+    throwIfCancelled();
+    await report('report', progressUpdate('reading', 28, '正在读取已选择的返图'));
+    staged = await materializeInputStage(parentId, payload.returnedFiles || []);
+    if (!staged.items.length) throw new Error('未收到可处理的返图');
+    throwIfCancelled();
+    await report('report', progressUpdate('matching', 38, `已读取 ${staged.items.length} 张返图，正在准备内容匹配`));
     const returned = staged.items.map((item, index) => ({ returnId: `${workflowMode ? 'workflow-' : ''}return-${index + 1}`, path: item.path, sourceName: item.name, inputName: path.basename(item.path) }));
     const stagedSources = new Set(staged.items.map(item => path.resolve(item.path)));
-    const matched = await runMatcher(returned, candidates);
+    const matched = await runMatcher(returned, candidates, message => {
+      const matcherProgress = Math.max(0, Math.min(100, Number(message.progress) || 0));
+      matcherProgressReports = matcherProgressReports.catch(() => undefined).then(() => report('report', progressUpdate('matching', 40 + matcherProgress * 0.42, String(message.message || '正在比对返图内容')))).catch(() => undefined);
+    });
+    await matcherProgressReports;
+    throwIfCancelled();
+    await report('report', progressUpdate('matching', 82, '内容匹配完成，正在整理结果'));
     const accepted = [];
     const high = (matched.matches || []).filter(item => item.confidence === 'high' && item.taskId);
     for (const [index, match] of high.entries()) {
+      throwIfCancelled();
       if (!stagedSources.has(path.resolve(match.path))) throw new Error('Matched return escaped its component staging grant');
       const registered = await storeReturnedAndReconcile(parentId, match.path, { photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode, matchConfidence: match.matchConfidence, editEvidence: match.editEvidence, returnWarnings: match.returnWarnings }, context);
       accepted.push({ ...match, path: undefined, patchPath: undefined, accepted: true, reconcilePending: Boolean(registered.reconcilePending), warning: registered.warning });
-      await reportTask(parentId, returnOperationId, 'report', { phase: 'importing', progress: 82 + 18 * (index + 1) / Math.max(1, high.length), message: `正在归档返图 ${index + 1}/${high.length}` }, 'patch.return-batch.progress').catch(() => undefined);
+      await report('report', progressUpdate('importing', 82 + 12 * (index + 1) / Math.max(1, high.length), `正在归档返图 ${index + 1}/${high.length}`));
     }
     const acceptedById = new Map(accepted.map(item => [String(item.returnId), item]));
     let matches = (matched.matches || []).map(item => acceptedById.get(String(item.returnId)) || { ...item, path: undefined, patchPath: undefined, accepted: false });
     matches = matches.map(publicMatch);
     const reconcilePending = accepted.some(item => item.reconcilePending);
     const result = { success: true, matches, merges: [], returnedCount: returned.length, candidateCount: candidates.length, acceptedCount: accepted.length, reviewCount: matches.filter(item => !item.accepted).length, missingTaskCount: Math.max(0, candidates.length - accepted.length), mergedCount: 0, reconcilePending, warning: reconcilePending ? '部分返图已安全归档，工作流程目录将在下次加载时自动修复，无需重复上传' : undefined };
-    await reportTask(parentId, returnOperationId, 'complete', { state: 'completed', phase: 'complete', progress: 100, message: '返图处理完成' }, 'patch.return-batch.progress');
+    let finalResult = result;
     if (workflowMode && result.reviewCount) {
+      await report('report', progressUpdate('review', 96, `正在保存 ${result.reviewCount} 张待确认返图`));
       const target = await reviewTarget(parentId, context);
       const reviewId = crypto.randomUUID();
       const pending = `${target.directory}.staging-${reviewId}`;
@@ -1851,11 +1952,19 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
         const session = { version: 2, id: reviewId, projectId: String(context.projectId), projectName: context.projectName, status: context.projectStatus, createdAt: Date.now(), updatedAt: Date.now(), result: { ...result, reviewSessionId: reviewId, matches } };
         await fs.promises.writeFile(path.join(pending, 'session.json'), JSON.stringify(session, null, 2), 'utf8');
         await fs.promises.rename(pending, target.directory);
-        return presentReview(session);
+        finalResult = presentReview(session);
       } catch (error) { await fs.promises.rm(pending, { recursive: true, force: true }).catch(() => undefined); throw error; }
     }
-    return result;
-  } finally { await discardInputStage(staged.stageId).catch(() => undefined); await materialized.cleanup(); }
+    await report('complete', { state: 'completed', phase: 'complete', progress: 100, message: '返图处理完成' });
+    return finalResult;
+  } catch (error) {
+    const cancelled = context.signal?.aborted || error?.code === CANCELLED_CODE;
+    await report(cancelled ? 'cancel' : 'failed', { state: cancelled ? 'cancelled' : 'failed', phase: cancelled ? 'cancelled' : 'failed', progress: lastProgress, message: cancelled ? '返图处理已取消' : `返图处理失败：${error.message || String(error)}`, error: cancelled ? '' : error.message || String(error) }).catch(() => undefined);
+    throw error;
+  } finally {
+    if (staged) await discardInputStage(staged.stageId).catch(() => undefined);
+    if (materialized) await materialized.cleanup();
+  }
 };
 
 const reviewGet = async (parentId, _payload, context) => {
@@ -1988,7 +2097,7 @@ const returnConfirm = async (parentId, payload, context) => {
   const candidate = readyWorkflowCandidates(await workspaceSnapshot(parentId, context), [payload])[0];
   if (!candidate || String(candidate.taskId) !== String(payload.taskId)) throw new Error('候选任务当前不可确认');
   if (!match.path || !isInside(target.directory, match.path)) throw new Error('Reviewed return escaped its component review grant');
-  const registered = await storeReturnedAndReconcile(parentId, match.path, { photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true }, context);
+  const registered = await storeReturnedAndQueueReconcile(parentId, match.path, { photoId: candidate.photoId, baseVersionId: candidate.baseVersionId, taskId: candidate.taskId, personIndex: candidate.personIndex, complete: true }, context);
   match.accepted = true; match.confidence = 'manual'; match.photoId = candidate.photoId; match.baseVersionId = candidate.baseVersionId; match.taskId = candidate.taskId; match.personIndex = candidate.personIndex;
   target.session.result.reviewCount = target.session.result.matches.filter(item => !item.accepted).length;
   target.session.result.acceptedCount = target.session.result.matches.filter(item => item.accepted).length;
@@ -2123,4 +2232,4 @@ process.once('exit', () => { for (const child of activeAlgorithms) child.kill();
 };
 
 if (require.main === module) startService();
-module.exports = { ensureSchema, startService, capabilityError, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, migrationErrorState, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState };
+module.exports = { ensureSchema, startService, capabilityError, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, migrationErrorState, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState, resolveAlgorithmRuntime, resolveWorkflowTaskBinding, runMatcher };

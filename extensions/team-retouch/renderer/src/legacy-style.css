@@ -3,6 +3,8 @@
 @tailwind utilities;
 
 html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--pf-canvas); color: var(--pf-text); }
+body.component-settings-root { overflow-y: auto; }
+body.component-settings-root #app { height: auto; min-height: 100%; overflow: visible; }
 body { min-width: 0; font-family: Inter, "Segoe UI", system-ui, sans-serif; }
 button, input, select, textarea { font: inherit; }
 .legacy-root { width: 100%; min-width: 0; min-height: 100%; background: var(--pf-canvas); color: var(--pf-text); }

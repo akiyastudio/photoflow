@@ -12,6 +12,17 @@ export const panelTaskRestoreDetail = (ownerPageId: string, panelKind: string): 
 
 export const isPanelTaskRestoreForPage = (ownerPageId: string, detail?: PanelTaskRestoreDetail) => detail?.ownerPageId === ownerPageId;
 
+export const nextPanelTaskStartedAt = (
+  previous: { state?: string; startedAt?: number } | undefined,
+  nextState: string,
+  now = Date.now(),
+) => {
+  const retained = Number(previous?.startedAt);
+  const retainedStartedAt = Number.isFinite(retained) && retained > 0 ? retained : 0;
+  if (nextState !== 'running') return retainedStartedAt;
+  return previous?.state === 'running' && retainedStartedAt ? retainedStartedAt : now;
+};
+
 export const removePanelTasksByOwnerPageId = <T extends { ownerPageId: string }>(tasks: Record<string, T>, ownerPageId: string) => {
   let changed = false;
   const remaining = Object.fromEntries(Object.entries(tasks).filter(([, task]) => {

@@ -39,8 +39,7 @@ env/
 # Electron 和 前端构建文件 (常规建议一起加上)
 node_modules/
 /artifacts/*
-!/artifacts/set-version.bat
-!/artifacts/generate-release-json.bat
+!/artifacts/publish-release.bat
 out/
 electron/bin/
 media-runtime/vendor/

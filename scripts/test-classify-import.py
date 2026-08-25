@@ -361,6 +361,11 @@ class ClassifyImportTests(unittest.TestCase):
                 event['type'] == 'log' and f'{source_folder} → {Path(temporary) / "素材_转码_2"}' in event['message']
                 for event in events
             ))
+            success = next(event for event in events if event['type'] == 'success')
+            self.assertEqual(success['folderOutputs'], [{
+                'sourceFolder': str(source_folder),
+                'outputFolder': str(Path(temporary) / '素材_转码_2'),
+            }])
 
             replace_output = io.StringIO()
             with contextlib.redirect_stdout(replace_output):

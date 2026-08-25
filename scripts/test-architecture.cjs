@@ -73,6 +73,7 @@ const componentRenderer = read('extensions/team-retouch/renderer/src/legacy-main
 const componentSdk = read('extensions/team-retouch/renderer/src/sdk.ts');
 const publicComponentSdkTypes = read('component-sdk/index.d.ts');
 const componentHostApiSchema = read('electron/contracts/schemas/component-host-api-v2.schema.json');
+const componentHostContract = read('electron/component-host-contract.cjs');
 const pluginHostApiDocs = read('docs/PLUGIN_HOST_API.md');
 const fileEntryInteractionModel = read('src/features/workspace/file-entry-interaction-model.ts');
 const fileEntrySortModel = read('src/features/workspace/file-entry-sort-model.ts');
@@ -106,6 +107,7 @@ const mediaCacheNamespace = read('electron/services/media-cache-namespace.cjs');
 const recycleBinFailure = read('src/utils/recycleBinFailure.ts');
 const recycleBinService = read('electron/services/recycle-bin-service.cjs');
 assert(main.includes("mainWindow.webContents.on('before-input-event'") && main.includes("input.key !== 'F11'") && main.includes('mainWindow.setFullScreen(!mainWindow.isFullScreen())'), 'F11 must toggle the main application window between fullscreen and its previous window state');
+assert(main.includes('mandatory: result.mandatory') && types.includes('mandatory: boolean') && appEntry.includes('if (updateInfo?.mandatory) return <StartupWindowFrame><UpdateModal') && appChrome.includes('useEscapeLayer(true, onClose, !mandatory, true)') && appChrome.includes('{!mandatory && <button onClick={onClose}'), 'mandatory application updates must propagate to the renderer, swallow dismissal, and replace the main interface until updated');
 const filesIpc = read('electron/modules/files-ipc.cjs');
 const fileTransferService = read('electron/services/file-transfer-service.cjs');
 const projectFileTaskService = read('electron/services/project-file-task-service.cjs');
@@ -128,6 +130,7 @@ const selectionIpc = read('electron/modules/selection-ipc.cjs');
 const selectionService = read('electron/services/selection-service.cjs');
 const systemIpc = read('electron/modules/system-ipc.cjs');
 const backupService = read('electron/services/backup-service.cjs');
+const backupIpc = read('electron/modules/backup-ipc.cjs');
 const legacyStorageAdoption = read('electron/compatibility/component-storage-v1-adoption.cjs');
 const backupDb = read('python/backup_db.py');
 const domainRecovery = read('python/domain_recovery.py');
@@ -154,10 +157,13 @@ assert(componentProjectCapabilities.includes("'component.media.v2'") && componen
   && componentProjectCapabilities.includes("kind: 'component-output-commit'") && componentProjectCapabilities.includes("state: 'prepared'")
   && systemIpc.includes("register('component.lifecycle.v2'") && read('electron/services/component-lifecycle-service.cjs').includes("'component.lifecycle.manage'"),
 'Component Host V2 infrastructure must retain persistent output journals, private media/progress capabilities, and separately authorized lifecycle management');
+assert(componentHostContract.includes('COMPONENT_HOST_API_VERSION = 3') && componentHostContract.includes('Application settings pages require Host API 3')
+  && componentTemplate.componentHost.compatibility.minHostApiVersion === 3 && componentTemplate.componentHost.compatibility.maxHostApiVersion === 3,
+'application settings pages must negotiate the explicit Host API 3 feature level while older V2 components remain supported');
 assert(publicComponentSdkTypes.includes('sourceMetadata?: VersionSourceMetadata')
   && componentHostApiSchema.includes('"versionSourceMetadata"')
   && componentProjectCapabilities.includes("parentCapability: 'structural'")
-  && pluginHostApiDocs.includes('omitted or `{}` metadata'),
+  && (pluginHostApiDocs.includes('omitted or `{}` metadata') || pluginHostApiDocs.includes('省略或 `{}` 默认')),
 'project progress source metadata defaults and constraints must stay aligned across Host, schema, SDK, and documentation');
 assert(!read('electron/services/version-service.cjs').includes('Team') && !read('electron/services/version-service.cjs').includes('team'), 'generic version service must not expose component-owned business operations');
 assert.equal((versionsIpc.match(/ipcMain\.handle\('workspace-team-/g) || []).length, 0, 'versions IPC must not retain legacy team handlers');
@@ -366,6 +372,14 @@ assert(classifyImport.includes('from ffmpeg_transcode import (') && !classifyImp
 assert(ffmpegTranscode.includes('build_general_transcode_command') && ffmpegTranscode.includes('H265_GPU_VIDEO_ENCODERS = ("hevc_nvenc", "hevc_qsv", "hevc_amf", "hevc_mf")') && ffmpegTranscode.includes('SOFTWARE_H265_VIDEO_ENCODER = "libx265"') && ffmpegTranscode.includes('encoder_candidates = general_transcode_encoder_candidates(ffmpeg_exe, video_mode)') && ffmpegTranscode.includes('GPU 编码器 {encoder} 不可用') && ffmpegTranscode.includes('.photoflow-transcode') && ffmpegTranscode.includes('os.replace(temporary, destination)') && toolViews.includes('<option value="h265">H.265 · 节省空间</option>'), 'general video transcoding must support H.264/H.265, prefer GPU encoders, safely fall back to CPU, and commit validated temporary outputs atomically');
 assert(ffmpegTranscode.includes('正在编码（{active_backend}）：{name}{item_count}') && toolViews.includes('statusMessage={sourcesLoading'), 'video transcoding progress must prioritize the active backend, file name, and batch count over encoder diagnostics');
 assert(workspaceIpc.includes('folderPaths') && projectWorkspace.includes('initialSourceFolders={videoTranscodeSourceFolders}') && toolViews.includes("'--source-folder', folder") && ffmpegTranscode.includes('def _create_unique_transcode_folder') && ffmpegTranscode.includes('文件夹转码任务不能替换原视频'), 'folder-based video transcoding must preserve source-folder identity and write into a new sibling output folder');
+assert(ffmpegTranscode.includes('folderOutputs=[')
+  && toolViews.includes('onFolderTranscodeComplete')
+  && projectWorkspace.includes("mode: 'transcode'")
+  && workspaceDb.includes('"derived_transcode"')
+  && projectWorkspace.includes("artifactKind === 'transcode'")
+  && !projectWorkspace.includes('mov_预览')
+  && classifyImport.includes("'mov_转码'")
+  && protectedProjectFolderService.includes("'mov_转码'"), 'folder transcodes must register a dedicated transcode artifact and persistent MOV relation without the retired mov preview folder');
 assert(toolViews.includes('已选择 {paths.length} 个视频') && toolViews.includes('批量粘贴路径') && toolViews.includes('removeVideoPath(item.path)') && toolViews.includes("label: '编码中'") && toolViews.includes("label: '失败'"), 'video transcoding inputs must use a grouped queue with removable items and per-file task states while keeping raw path entry available');
 assert(projectWorkspace.includes("const VideoTrimTimeline") && projectWorkspace.includes("onChange={changeVideoTrimEdge}") && projectWorkspace.includes('另存为新视频') && projectWorkspace.includes('替换原视频') && !projectWorkspace.includes('fixed inset-0 z-[540]') && workspaceIpc.includes("request.saveMode === 'replace'") && workspaceIpc.includes('replaceVideoFileWithRollback') && workspaceIpc.includes('.photoflow-trim'), 'video trimming must use an in-preview dual-handle timeline and offer save-as-new or rollback-safe source replacement');
 assert(cutVideo.includes('def trim_video_fast') && cutVideo.includes('"-c", "copy"') && cutVideo.includes('def trim_video_exactly') && cutVideo.includes('"-c:v", "libx264"') && cutVideo.includes('"-crf", "16"'), 'video trimming must provide fast stream-copy and exact re-encode modes');
@@ -445,12 +459,12 @@ assert(projectWorkspace.includes("kind: 'files' | 'version-tree-layout'")
   && !restoreVersionTreeLayoutBody.includes('refresh(')
   && !projectVersionTree.includes('aria-label="刷新版本树布局"')
   && /saveVersionTreeLayout[\s\S]*?if \(result\.success\) \{[\s\S]*?if \(applyOnSuccess \|\| mergedAfterConflict\) \{[\s\S]*?applyPositions\(applyOnSuccess \|\| mergedAfterConflict!\)/.test(versionTreeCanvas), 'blank root version-tree context refresh must stay isolated from tracking/files and only publish default coordinates after atomic replace succeeds');
-assert(projectWorkspace.includes("projectWorkflows && (!scopePath || hasVersionTreeFor(foldersToCheck, scopePath))")
+assert(projectWorkspace.includes("versionTreeEnabled && projectWorkflows && (!scopePath || hasVersionTreeFor(foldersToCheck, scopePath))")
   && projectWorkspace.includes("remembered === 'version-tree' && !versionTreeModeAvailableFor(foldersToCheck, normalizedPath)")
-  && projectWorkspace.includes("return hasVersionTreeFor(foldersToCheck, normalizedPath) ? 'version-tree' : 'grid'")
+  && projectWorkspace.includes("return versionTreeEnabled && hasVersionTreeFor(foldersToCheck, normalizedPath) ? 'version-tree' : 'grid'")
   && projectWorkspace.includes('const projectVersionTreeAvailable = versionTreeModeAvailableFor()')
   && projectWorkspace.includes('window.sessionStorage.getItem(folderBrowseModeStorageKey)')
-  && projectWorkspace.includes('window.sessionStorage.setItem(folderBrowseModeStorageKey'), 'the project root must always expose version-tree mode while automatic entry remains gated by a real visible tree and the current window remembers explicit view choices');
+  && projectWorkspace.includes('window.sessionStorage.setItem(folderBrowseModeStorageKey'), 'the version-tree setting must gate automatic entry and its icon without changing persisted version data or explicit per-folder view choices');
 assert(projectWorkspace.includes('const folderGridIconSizeStorageKey = `photoflow:folder-grid-icon-sizes:')
   && projectWorkspace.includes('window.sessionStorage.getItem(folderGridIconSizeStorageKey)')
   && projectWorkspace.includes('window.sessionStorage.setItem(folderGridIconSizeStorageKey')
@@ -480,7 +494,7 @@ assert(/TARGET_SCHEMA_VERSION = \d+/.test(workspaceDb)
   && projectVersionTree.includes('nodeKey: `progress:${node.id}`')
   && !projectVersionTree.includes("team-workspace:primary"), 'version-tree coordinates must use persisted progress/workflow node keys and a constrained preload/API boundary');
 assert(workspaceDb.includes('CREATE TABLE IF NOT EXISTS version_graph_edges')
-  && workspaceDb.includes("VERSION_GRAPH_EDGE_KINDS = (\"media_companion\", \"derived_preview\", \"workflow_input\")")
+  && workspaceDb.includes("VERSION_GRAPH_EDGE_KINDS = (\"media_companion\", \"derived_preview\", \"derived_transcode\", \"workflow_input\")")
   && workspaceDb.includes("PROGRESS_NODE_ROLES = (\"original\", \"progress\", \"selection\", \"artifact\", \"workflow\", \"broll\")")
   && workspaceDb.includes('artifact_kind TEXT')
   && workspaceDb.includes('def version_graph_edge_create')
@@ -526,13 +540,32 @@ assert.strictEqual((app.match(/electronAPI\.getComponents\(/g) || []).length, 1,
 assert(!app.includes('shrink-0 font-mono text-[10px] text-slate-400">v'), 'the title-bar brand must not display the application version');
 assert(!settingsFeature.includes('electronAPI.getComponents('), 'settings must consume App component state instead of fetching it');
 assert(settingsFeature.includes("title: '删除已使用的安装包吗？'") && settingsFeature.includes('删除并释放 ${size}') && settingsFeature.includes("kind: 'component'") && !settingsFeature.includes("kind: 'advanced'"), 'generic component installation may offer package cleanup while advanced controls stay outside app settings');
+assert(settingsFeature.includes('保留当前工作目录和组件设置') && settingsFeature.includes('componentSettings: draft.componentSettings'), 'restore defaults must explicitly preserve opaque component settings');
+assert(systemIpc.includes('return { success: true, savedConfig }') && app.includes('result.savedConfig || newConfig') && app.includes('componentSettingsRevisions: savedConfig.componentSettingsRevisions'), 'ordinary saves must return and consume the canonical opaque settings snapshot');
+assert(!read('electron/compatibility/component-team-retouch-v1-adapter.cjs').includes('fs.promises.writeFile(pendingPath')
+  && !backupService.includes('writeFile(getConfigPath()')
+  && !systemIpc.includes('writeFile(getConfigPath()'), 'every photoflow_config writer must use the shared mutation boundary');
+assert(componentBuilder.includes("path.join(rendererOutput, 'settings.html')"), 'component packaging must explicitly validate the settings renderer entry');
+assert(backupService.includes('return { workspacePath: destination, savedConfig }') && backupIpc.includes('savedConfig: result?.result?.savedConfig')
+  && settingsFeature.includes('onConfigRestored(next)') && settingsFeature.includes('restoredWorkspaceConfig(result.savedConfig')
+  && !/const next = \{ \.\.\.draft, workspacePath: result\.workspacePath/.test(settingsFeature), 'workspace restore must apply the canonical restored config instead of immediately saving a stale renderer draft');
+assert(main.includes('readConfigFileWithRecovery(fs, getConfigPath())'), 'all direct config reads must see the fixed recovery snapshot during atomic replacement');
+assert(systemIpc.includes('configMutationService.hasSnapshot()') && !systemIpc.includes('if (!fs.existsSync(configPath)) return null'), 'loadConfig and startup snapshots must not bypass the recovery-aware config presence check');
+assert(main.includes('registerConfigDrainBeforeQuit({ app') && read('electron/services/config-mutation-service.cjs').includes("state = 'draining'") && read('electron/services/config-mutation-service.cjs').includes("state = 'ready'; app.quit()"), 'before-quit must perform one bounded config drain and guard against re-entry');
+assert(read('scripts/check-project.cjs').includes("['component package catalog', ['run', 'test:component-catalog']]"), 'default project checks must validate final component ZIP settings entries');
 assert(!projectWorkspace.includes('electronAPI.getComponents('), 'project workspace must consume App component state instead of fetching it');
 assert(!preload.includes('checkScript') && !read('electron/modules/system-ipc.cjs').includes("ipcMain.handle('check-script'") && !fs.existsSync(path.join(root, 'src', 'features', 'plugins', 'RequirePlugin.tsx')), 'bundled Python tools must not retain optional-plugin existence checks or missing-plugin UI');
 assert(app.includes("DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'inspiration']") && app.includes("requestInspirationPath(config.inspirationLibrary.rootPath.trim(), '')") && !app.includes('openResearchTab') && !app.includes('openConverterTab') && !app.includes("setActiveTab('video_transcode')"), 'the home page must request an inspiration root page without standalone storyboard, PNG, or video-transcode tools');
 assert(app.includes('整理和浏览灵感素材') && !app.includes('识别视频转场并提取清晰分镜帧') && !app.includes('批量转换图片格式') && !app.includes('<HomePanel title="灵感库"'), 'the home page must keep only the direct inspiration launcher');
 assert(!app.includes("installedComponentIds.has('research-tools')"), 'the inspiration library must not be gated by a component install');
 assert(!projectWorkspace.includes('teamRetouch') && !projectWorkspace.includes('团片协作'), 'project workspace must not retain a team-retouch context menu, toolbar, panel, or loading flow');
-assert(!settingsFeature.includes('componentItems') && settingsFeature.includes("id: 'components', label: '组件管理'"), 'application settings must expose only generic component management, not component-owned pages');
+assert(settingsFeature.includes("id: 'components', label: '组件管理'")
+  && settingsFeature.indexOf("id: 'components', label: '组件管理'") < settingsFeature.indexOf('...componentPages.map')
+  && settingsFeature.includes('componentSettingsSectionKey(page)')
+  && app.includes('getComponentSettingsPages()')
+  && app.includes('<ComponentSettingsPageSurface')
+  && !settingsFeature.includes('team-retouch') && !settingsFeature.includes('团片'),
+'application settings must place opaque manifest-derived component pages immediately after generic component management');
 assert(app.includes("delete componentSettings['research-tools']") && app.includes('const researchSettings:') && app.includes('const inspirationLibrary:'), 'legacy research component config must migrate into the built-in storyboard panel defaults');
 assert(inspirationLibrary.includes('FileBrowserWorkspace') && inspirationLibrary.includes('INSPIRATION_FILE_BROWSER_CONTEXT') && inspirationLibrary.includes('InspirationLibraryNavigator') && browserContext.includes('PROJECT_FILE_BROWSER_CONTEXT') && browserContext.includes('INSPIRATION_FILE_BROWSER_CONTEXT'), 'project and inspiration shells must compose the shared file browser through explicit contexts');
 assert(inspirationLibrary.includes('const createdRelativePath =')
@@ -715,7 +748,7 @@ assert(projectWorkspace.includes('entryPointerModifiersRef.current')
   && projectWorkspace.includes('fileEntryClickIntent({ openMode: itemOpenMode, selectionCount: selectedPaths.length, range, additive, clickCount })')
   && fileEntryInteractionModel.includes("if (additive || selectionCount > 0) return 'toggle-select'")
   && projectWorkspace.includes("if (intent === 'toggle-select')"), 'Ctrl-click must preserve pointer modifiers and toggle selection instead of opening an entry');
-assert(projectWorkspace.includes('directoryEntryToSelectOnReturn(currentRelativePathRef.current, normalizedPath)') && projectWorkspace.includes('pendingDirectoryReturnSelectionRef') && projectWorkspace.includes('setSelectedPaths([returnedFolder.relativePath])') && projectWorkspace.includes('requestFileReveal(returnedFolder.relativePath)'), 'returning to an ancestor directory must select and reveal the child folder that was just left');
+assert(projectWorkspace.includes('directoryEntryToRevealOnReturn(currentRelativePathRef.current, normalizedPath)') && projectWorkspace.includes('pendingDirectoryReturnRevealRef') && projectWorkspace.includes('setDirectoryReturnHighlightPath(returnedFolder.relativePath)') && !projectWorkspace.includes('setSelectedPaths([returnedFolder.relativePath])') && projectWorkspace.includes('requestFileReveal(returnedFolder.relativePath)'), 'returning to an ancestor directory must highlight and reveal the child folder that was just left without selecting it');
 assert(projectWorkspace.includes('const selectAndRevealFileEntry =')
   && projectWorkspace.includes("setFolderAlphabetFilter('')")
   && projectWorkspace.includes('setPendingMutationSelection({')
@@ -737,6 +770,7 @@ assert(workspaceIpc.includes("path.relative(root, entryPath).replace(/\\\\/g, '/
   && workspaceIpc.includes('suppressWorkspaceWatchPath?.(folderPath)')
   && workspaceIpc.includes('releaseWorkspaceWatchPath?.(suppressedFolderPath)'), 'nested browse paths must be slash-stable and local folder creation must suppress its delayed watcher echo');
 assert(types.includes('folderAlphabetFilterEnabled: boolean') && app.includes('folderAlphabetFilterEnabled: true') && app.includes('fileConfig.folderAlphabetFilterEnabled !== false') && settingsFeature.includes('文件夹首字母筛选') && inspirationLibrary.includes('folderAlphabetFilterEnabled={config.folderAlphabetFilterEnabled}') && app.includes('folderAlphabetFilterEnabled={config.folderAlphabetFilterEnabled}'), 'folder alphabet filtering must be enabled by default, configurable in general settings, migrated, and shared by project and inspiration browsers');
+assert(types.includes('versionTreeEnabled: boolean') && app.includes('versionTreeEnabled: true') && app.includes('fileConfig.versionTreeEnabled !== false') && settingsFeature.includes('开启版本树功能') && app.includes('versionTreeEnabled={config.versionTreeEnabled}') && projectWorkspace.includes("title: jpegFolder ? '发现新的 JPEG 导出文件夹' : '发现新的“_导出”文件夹'") && projectWorkspace.includes("if (!active || !versionTreeEnabled || !projectWorkflows) return"), 'version-tree UI and export-folder onboarding must share one default-enabled, migration-safe interface preference');
 assert(folderAlphabetFilterModel.includes('FOLDER_ALPHABET_FILTER_THRESHOLD = 30') && folderAlphabetFilterModel.includes("zh-CN-u-co-pinyin") && projectWorkspace.includes('currentDirectoryFolders.length > FOLDER_ALPHABET_FILTER_THRESHOLD') && projectWorkspace.includes('folderAlphabetKey(entry.name) === folderAlphabetFilter') && projectWorkspace.includes('aria-label="按文件夹首字母筛选"'), 'large grid folders must expose a pinyin-aware A-Z folder filter above the icon grid');
 assert(projectWorkspace.includes("active && activeView === 'project' && (viewportStatus || folderOnlyGridCount > 0)") && projectWorkspace.includes(': folderOnlyGridCount}</span>') && projectWorkspace.includes("browseMode === 'grid' && filesInCurrentDirectory.length === 0") && projectWorkspace.includes("if (browseMode !== 'grid' || !viewportCurrentEntry"), 'the active project grid must keep one bottom-right viewport status and show only the folder count when the directory contains no files');
 assert(projectWorkspace.includes('data-inline-rename-input="true"') && projectWorkspace.includes("if (pointerTarget.closest('[data-inline-rename-input]')) return;") && (projectWorkspace.match(/onPointerDownCapture=\{handleFileSurfacePointerDownCapture\}/g) || []).length === 2, 'clicking the inline rename input must not let the file-surface capture handler move focus back to the entry');
@@ -758,7 +792,7 @@ const marqueeStartSource = projectWorkspace.slice(projectWorkspace.indexOf('cons
 const marqueeFinishSource = projectWorkspace.slice(projectWorkspace.indexOf('const finishSelectionDrag ='), projectWorkspace.indexOf('const cancelFileCut ='));
 assert(!marqueeStartSource.includes('setPreviewPaneOpen(false)') && !marqueeStartSource.includes('setMetadataPaneOpen(false)') && marqueeFinishSource.includes('clearPreviewAfterSelectionDrag(drag)') && marqueeStartSource.includes('viewportPointToContentPoint') && marqueeStartSource.includes('startContentY: start.y') && !marqueeStartSource.includes('startContentY: clampNumber'), 'marquee selection must keep the file-column layout and content-space drag origin stable until pointer release');
 assert(projectWorkspace.includes('hitMarqueeIndices(selection, displayedFileEntries.length, layout)') && projectWorkspace.includes('finiteLogicalCanvasSize(displayedFileEntries.length, layout') && !projectWorkspace.includes('measuredEntryRects'), 'ordinary grid and list marquee selection must hit every logical entry and size a finite logical canvas instead of relying on rendered DOM nodes');
-assert(projectWorkspace.includes('const rebuildMarqueeLayoutRegistry') && projectWorkspace.includes('groupedResultsActive || versionTreeOpen') && projectWorkspace.includes('marqueeLayoutRegistryRef.current = registry'), 'non-formula grouped and version-tree layouts must explicitly register their complete entry geometry');
+assert(projectWorkspace.includes('const rebuildMarqueeLayoutRegistry') && projectWorkspace.includes('groupedResultsActive || versionTreeOpen') && projectWorkspace.includes('marqueeLayoutRegistryRef.current = registry') && projectWorkspace.includes('if (rect.width <= 0 || rect.height <= 0) continue;'), 'non-formula grouped and version-tree layouts must register visible entry geometry without letting hidden duplicate nodes overwrite it');
 assert(projectWorkspace.includes('advanceMarqueeAutoScroll(container') && projectWorkspace.includes('if (!result.edgeActive) return') && projectWorkspace.indexOf('window.requestAnimationFrame(runSelectionAutoScroll)', projectWorkspace.indexOf('const runSelectionAutoScroll =')) > projectWorkspace.indexOf('if (result.scrolled)', projectWorkspace.indexOf('const runSelectionAutoScroll =')) && marqueeAutoScroll.includes('scrollHeight - container.clientHeight') && marqueeAutoScroll.includes('scrollWidth - container.clientWidth'), 'marquee selection must retry edge auto-scroll while delayed logical-canvas DOM dimensions are being committed');
 assert(projectWorkspace.includes('marquee-logical-canvas') && marqueeSelectionModel.includes('Math.max(content.width, nonNegative(viewport.width)') && marqueeSelectionModel.includes('Math.max(content.height, nonNegative(viewport.height)'), 'the marquee must render on a finite logical canvas at least as large as the viewport, complete content, and current selection');
 assert((projectWorkspace.match(/onPointerDown=\{startSelectionDrag\}/g) || []).length === 1 && /ref=\{filesColumnRef\}[^>]*onPointerDown=\{startSelectionDrag\}[^>]*onLostPointerCapture=\{cancelSelectionDrag\}/.test(projectWorkspace) && marqueeStartSource.includes('event.clientY < surfaceRect.top') && !marqueeStartSource.includes('event.clientY > surfaceRect.bottom'), 'marquee selection must start from the full-height file-column side gutters while excluding the toolbar above the file surface');
@@ -788,6 +822,7 @@ assert(shellNewService.includes("shell-new-types-cache.json") && shellNewService
 assert(projectWorkspace.includes('createProjectShellNewFile') && projectWorkspace.includes('Windows 文件类型'), 'the top New menu must expose supported Windows ShellNew file types');
 assert(shellNewService.includes("app.getFileIcon(iconSource, { size: 'normal' })") && projectWorkspace.includes('type.iconDataUrl'), 'the top New menu must display Windows-associated file type icons');
 assert(read('src/index.css').includes('.project-create-menu .project-menu-item { display:flex; align-items:center; gap:.5rem; }') && projectWorkspace.includes('project-create-menu') && projectWorkspace.includes('重新扫描 Windows 新建文件类型'), 'ShellNew menu rows must place text beside the icon and expose manual refresh');
+assert(/project-create-menu[\s\S]{0,500}?新建进度[\s\S]{0,250}?<Folder size=\{14\}\/>文件夹<\/button>\s*<div className="my-1 border-t border-slate-100"\/>\s*<div className="flex items-center justify-between px-2 pb-1 pt-2">/.test(projectWorkspace), 'toolbar create menu must place its divider after the folder action, matching the context-menu submenu');
 assert(projectWorkspace.includes('setProgressSetup({ ...makeProgressDraft') && projectWorkspace.includes('void loadProgressFolders();'), 'the progress editor must open from cached state before refreshing progress folders');
 assert(settingsFeature.includes('overflow-y-auto overscroll-contain'), 'the settings navigator must scroll when its component list exceeds the viewport');
 assert(main.includes('isInternalWorkspaceChange(fileName)') && main.includes("normalized.includes('.photoflow-transcode')") && workspaceIpc.includes("normalized.includes('.photoflow-transcode')") && thumbnailDb.includes('is_internal_transient_media_path'), 'workspace watching, browsing, and media indexing must ignore in-progress transcode files');

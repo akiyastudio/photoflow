@@ -1,9 +1,10 @@
 const assert = require('assert');
+const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
 (async () => {
-  const { directoryEntryToSelectOnReturn, fileEntryClickIntent, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, renamedEntryDestinationPath } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
+  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, renamedEntryDestinationPath } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
   const { availableFolderAlphabetKeys, folderAlphabetKey } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'folder-alphabet-filter-model.ts')).href);
   const intent = overrides => fileEntryClickIntent({
     openMode: 'single',
@@ -21,11 +22,15 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(intent({ range: true, selectionCount: 2 }), 'range-select', 'Shift click retains range selection precedence');
   assert.strictEqual(intent({ selectionCount: 2, clickCount: 2 }), 'ignore-repeat', 'the second click in a double click must not undo the first selection change');
 
-  assert.strictEqual(directoryEntryToSelectOnReturn('客户/婚礼/精修', '客户/婚礼'), '客户/婚礼/精修', 'returning one level selects the folder that was just left');
-  assert.strictEqual(directoryEntryToSelectOnReturn('客户/婚礼/精修', '客户'), '客户/婚礼', 'returning through a breadcrumb selects the direct child leading to the previous directory');
-  assert.strictEqual(directoryEntryToSelectOnReturn('客户/婚礼', ''), '客户', 'returning to the root selects the top-level folder that was just left');
-  assert.strictEqual(directoryEntryToSelectOnReturn('客户', '客户/婚礼'), '', 'entering a child directory does not request a return selection');
-  assert.strictEqual(directoryEntryToSelectOnReturn('客户/婚礼', '归档'), '', 'navigating to an unrelated directory does not request a return selection');
+  assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼/精修', '客户/婚礼'), '客户/婚礼/精修', 'returning one level reveals the folder that was just left');
+  assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼/精修', '客户'), '客户/婚礼', 'returning through a breadcrumb reveals the direct child leading to the previous directory');
+  assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼', ''), '客户', 'returning to the root reveals the top-level folder that was just left');
+  assert.strictEqual(directoryEntryToRevealOnReturn('客户', '客户/婚礼'), '', 'entering a child directory does not request a return reveal');
+  assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼', '归档'), '', 'navigating to an unrelated directory does not request a return reveal');
+  const workspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
+  assert(workspaceSource.includes('setDirectoryReturnHighlightPath(returnedFolder.relativePath)'), 'returning must mark the folder with a dedicated location highlight');
+  assert(!workspaceSource.includes('setSelectedPaths([returnedFolder.relativePath])'), 'returning must not add the folder to the file-operation selection');
+  assert(workspaceSource.includes('requestFileReveal(returnedFolder.relativePath)'), 'returning must scroll the folder back into view');
 
   assert.strictEqual(renamedEntryDestinationPath('客户/旧文件夹', '新文件夹', [{
     sourceRelativePath: '客户\\旧文件夹',

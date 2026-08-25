@@ -1,10 +1,10 @@
 import { legacyVersionSourceMetadata } from '../../compatibility/version-source.ts';
 
-export type VersionTreeEdgeKind = 'main' | 'auxiliary' | 'media_companion' | 'derived_preview' | 'workflow_input';
+export type VersionTreeEdgeKind = 'main' | 'auxiliary' | 'media_companion' | 'derived_preview' | 'derived_transcode' | 'workflow_input';
 export type VersionTreeEdgePort = 'left' | 'right' | 'top' | 'bottom';
 export type VersionTreeEdgeRect = { x: number; y: number; width: number; height: number };
 export type VersionTreeEdgePoint = { x: number; y: number };
-export type VersionTreeSupplementalEdgeKind = 'media_companion' | 'derived_preview' | 'workflow_input';
+export type VersionTreeSupplementalEdgeKind = 'media_companion' | 'derived_preview' | 'derived_transcode' | 'workflow_input';
 export type VersionTreeRelationNode = {
   id: string;
   projectId: string;
@@ -22,6 +22,7 @@ const VERSION_TREE_RELATION_LABELS: Record<VersionTreeEdgeKind, string> = {
   auxiliary: '选片关联',
   media_companion: '配套素材',
   derived_preview: '预览产物',
+  derived_transcode: '转码产物',
   workflow_input: '工作流输入',
 };
 
@@ -39,6 +40,8 @@ export const allowedVersionTreeRelationKinds = (source: VersionTreeRelationNode,
     && (!target.artifactKind || target.artifactKind === 'companion')) result.push('media_companion');
   if (sourceIsMain && target.nodeRole === 'artifact'
     && (!target.artifactKind || target.artifactKind === 'preview')) result.push('derived_preview');
+  if (sourceIsMain && target.nodeRole === 'artifact'
+    && (!target.artifactKind || target.artifactKind === 'transcode')) result.push('derived_transcode');
   const parentCapability = (node: VersionTreeRelationNode) => node.sourceMetadata?.parentCapability
     || legacyVersionSourceMetadata(node)?.parentCapability
     || (node.nodeRole === 'selection' || node.nodeRole === 'workflow' ? 'workflow-input' : undefined);
@@ -109,6 +112,7 @@ export const versionTreeEdgePresentation = (kind: VersionTreeEdgeKind, selected 
     : kind === 'workflow_input' ? '#0ea5e9'
       : kind === 'auxiliary' ? '#8b5cf6'
         : kind === 'media_companion' ? '#14b8a6'
+          : kind === 'derived_transcode' ? '#2563eb'
           : kind === 'derived_preview' ? '#f59e0b'
             : '#94a3b8',
   strokeWidth: selected ? 3 : kind === 'main' ? 2 : 1.7,

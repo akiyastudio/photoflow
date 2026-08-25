@@ -63,11 +63,13 @@ const createBackupService = context => {
     credentialService,
     prepareDomainRecovery,
     readSavedConfig,
+    configMutationService,
     runPythonJsonAction,
     shell,
     writeLog,
     componentServiceManager,
   } = context;
+  if (!configMutationService?.read || !configMutationService?.mutate) throw new Error('Backup service requires the shared config mutation service');
   const recoveryDatabaseGetters = {
     core: getWorkspaceDatabasePath,
     operations: getWorkspaceOperationsDatabasePath,
@@ -518,7 +520,7 @@ const createBackupService = context => {
   };
 
   const runBackup = async (workspaceRoot, reason = 'manual', resumeTask = null) => {
-    const config = readSavedConfig();
+    const config = await configMutationService.read();
     const backupConfig = config?.backup || {};
     const target = String(backupConfig.targetPath || '').trim();
     if (!backupConfig.enabled || !target) throw new Error('请先在设置中启用备份并选择备份位置');
@@ -636,7 +638,9 @@ const createBackupService = context => {
       // or assumes a database/schema layout.
       const componentStorageFiles = await snapshotComponentStorage(workspaceDataRoot, stage);
       const appFiles = [];
-      for (const [relative, absolute] of [['photoflow_config.json', getConfigPath()], ['birthdays.json', getUserBirthdaysPath()]]) {
+      const linearizedConfigPath = path.join(stage, 'photoflow-config-snapshot.json');
+      await fs.promises.writeFile(linearizedConfigPath, JSON.stringify(config, null, 2), 'utf8');
+      for (const [relative, absolute] of [['photoflow_config.json', linearizedConfigPath], ['birthdays.json', getUserBirthdaysPath()]]) {
         if (await exists(absolute)) appFiles.push({ scope: 'app-config', relative, absolute });
       }
       const externalRegistryPath = getManagedExternalLinkRegistryPath?.();
@@ -914,7 +918,7 @@ const createBackupService = context => {
   };
 
   const restoreWorkspace = async (workspaceRoot, snapshot, targetRoot, resumeTask = null) => {
-    const config = readSavedConfig();
+    const config = await configMutationService.read();
     const target = String(config?.backup?.targetPath || '').trim();
     if (!isApprovedTarget(target)) throw new Error('备份位置未经授权');
     const destination = path.resolve(targetRoot);
@@ -1039,10 +1043,9 @@ const createBackupService = context => {
         workspaceEntries.filter(entry => path.extname(entry.path).toLowerCase() === '.lnk').map(entry => safeDestination(destination, entry.path)),
         task,
       );
-      const savedConfig = readSavedConfig();
-      await fs.promises.writeFile(getConfigPath(), JSON.stringify({ ...savedConfig, ...restoredConfig, workspacePath: destination, backup: savedConfig?.backup || restoredConfig.backup }, null, 2), 'utf8');
+      const savedConfig = await configMutationService.mutate(currentConfig => configMutationService.mergeRestoredConfig(currentConfig, restoredConfig, destination));
       task.report(100, '工作区恢复完成');
-      return { workspacePath: destination };
+      return { workspacePath: destination, savedConfig };
     }, run);
     const execution = await run();
     if (execution.task?.state === 'completed' && backgroundTasks.flush?.() !== false) await fs.promises.rm(incompleteMarker, { force: true });

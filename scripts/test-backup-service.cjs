@@ -11,7 +11,10 @@ const { createWorkspaceRepository } = require('../electron/repositories/workspac
 const { createMediaRepository } = require('../electron/repositories/media-repository.cjs');
 const { createOperationsRepository } = require('../electron/repositories/operations-repository.cjs');
 const { createBackupService, safeDestination, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
+const { createConfigMutationService } = require('../electron/services/config-mutation-service.cjs');
 const { LEGACY_PYTHON_TOOL_ENTRIES } = require('../electron/compatibility/component-v1-metadata.cjs');
+const VENV_PYTHON = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
+const TEST_PYTHON = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : process.env.PYTHON || 'python';
 
 const waitForCoordinatorQueue = async (coordinator, minimum, timeoutMs = 5000) => {
   const deadline = Date.now() + timeoutMs;
@@ -22,7 +25,7 @@ const waitForCoordinatorQueue = async (coordinator, minimum, timeoutMs = 5000) =
 };
 
 const runPython = (script, args, timeoutMs = 120000) => new Promise((resolve, reject) => {
-  const executable = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
+  const executable = TEST_PYTHON;
   const baseName = path.basename(script, '.py');
   const developmentEntry = LEGACY_PYTHON_TOOL_ENTRIES[baseName];
   const scriptPath = developmentEntry ? path.join(__dirname, '..', 'python', ...developmentEntry) : path.join(__dirname, '..', 'python', script);
@@ -47,7 +50,7 @@ const runPython = (script, args, timeoutMs = 120000) => new Promise((resolve, re
 });
 
 const quickCheck = databasePath => new Promise((resolve, reject) => {
-  const executable = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
+  const executable = TEST_PYTHON;
   const child = spawn(executable, ['-c', 'import sqlite3,sys; c=sqlite3.connect(sys.argv[1]); print(c.execute("PRAGMA quick_check").fetchone()[0]); c.close()', databasePath], {
     windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'],
   });
@@ -112,10 +115,14 @@ const main = async () => {
     const second = await prepareWorkspace(temporaryRoot, 'workspace-two', 'workspace-two-id');
     let currentWorkspace = first;
     const config = {
+      theme: 'light', defaultFolderSort: 'name', workspacePaths: [first.root], componentSettings: {}, componentSettingsRevisions: {},
       workspacePath: first.root,
       backup: { enabled: true, targetPath: target, mode: 'latest', automaticDaily: true, afterImport: true, retention: { daily: 7, weekly: 4, monthly: 12 } },
     };
     await fs.promises.writeFile(configPath, JSON.stringify(config), 'utf8');
+    const readSavedConfig = () => JSON.parse(fs.readFileSync(configPath, 'utf8'));
+    const configMutationService = createConfigMutationService({ fs, crypto: require('crypto'), getConfigPath: () => configPath, readSavedConfig });
+    await configMutationService.ready;
     const backgroundTasks = createBackgroundTaskService({ eventBus: new EventEmitter() });
     const physicalCoordinator = new WorkspaceSqliteCoordinator();
     const recoveryLeases = [];
@@ -138,6 +145,7 @@ const main = async () => {
     const service = createBackupService({
       app: { getVersion: () => 'test' },
       backgroundTasks,
+      configMutationService,
       getConfigPath: () => configPath,
       getUserBirthdaysPath: () => birthdaysPath,
       getManagedExternalLinkRegistryPath: () => externalLinksPath,
@@ -169,7 +177,7 @@ const main = async () => {
           recoveryEvents.push('resumed');
         };
       },
-      readSavedConfig: () => config,
+      readSavedConfig,
       runPythonJsonAction: (...args) => {
         if (args.length >= 6) recoveryActionOptions.push({ timeoutMs: args[2], signal: args[4], deadlineAt: args[5] });
         return runPython(...args);
@@ -189,7 +197,7 @@ const main = async () => {
     const createClient = (getDatabasePath, scriptName = 'workspace_db.py', id = scriptName) => new PythonDatabaseClient({
       coordinator: physicalCoordinator,
       getRunConfig: (requestedScript, args) => ({
-        command: path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe'),
+        command: TEST_PYTHON,
         args: [path.join(__dirname, '..', 'python', requestedScript), ...args],
       }),
       getDatabasePath,
@@ -207,7 +215,12 @@ const main = async () => {
     const mediaRepository = createMediaRepository(domainWriterClient);
     const operationsRepository = createOperationsRepository(operationsClient, () => first.database);
 
-    const firstRun = await service.runBackup(first.root, 'manual');
+    let releaseConfigMutation;
+    const configGate = new Promise(resolve => { releaseConfigMutation = resolve; });
+    const acceptedConfigMutation = configMutationService.mutate(async current => { await configGate; return { ...current, linearizedBackupMarker: 'committed-before-snapshot' }; });
+    const firstRunPromise = service.runBackup(first.root, 'manual');
+    await new Promise(resolve => setImmediate(resolve)); releaseConfigMutation();
+    const [firstRun] = await Promise.all([firstRunPromise, acceptedConfigMutation.then(() => null)]);
     assert.strictEqual(firstRun.task.state, 'completed');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'operations.sqlite3'), 'operations database must use a consistent online snapshot');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'team-retouch.sqlite3'), 'team-retouch database must use a consistent online snapshot');
@@ -217,6 +230,9 @@ const main = async () => {
     assert.equal(componentServicesActive, true, 'component services must resume after the immutable package is staged');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'media.sqlite3'), 'media database must use a consistent online snapshot');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'versioning.sqlite3'), 'versioning database must use a consistent online snapshot');
+    const backedConfigEntry = firstRun.result.files.find(entry => entry.scope === 'app-config' && entry.path === 'photoflow_config.json');
+    const backedConfigObject = path.join(target, STORE_DIRECTORY, 'objects', backedConfigEntry.hash.slice(0, 2), backedConfigEntry.hash.slice(2));
+    assert.equal(JSON.parse(await fs.promises.readFile(backedConfigObject, 'utf8')).linearizedBackupMarker, 'committed-before-snapshot', 'backup creation reads a linearized config snapshot after earlier mutations');
     assert.strictEqual((await service.status(first.root)).snapshotCount, 1);
     await service.verify(first.root, firstRun.result.id);
 
@@ -348,8 +364,13 @@ const main = async () => {
     const originalDatabase = currentWorkspace.database;
     currentWorkspace = { ...first, dataRoot: restoredDataRoot, database: restoredDatabase, operationsDatabase: restoredOperationsDatabase, teamRetouchDatabase: restoredTeamRetouchDatabase };
     await fs.promises.writeFile(externalLinksPath, JSON.stringify({ version: 1, links: { 'current-link': { target: 'E:/current-media', kind: 'folder', createdAt: 2 } } }), 'utf8');
+    await configMutationService.mutate(current => ({ ...current, theme: 'dark', defaultFolderSort: 'size', componentSettings: { ...(current.componentSettings || {}), 'concurrent-fixture': { enabled: true } }, componentSettingsRevisions: { ...(current.componentSettingsRevisions || {}), 'concurrent-fixture': 10 } }));
     const restored = await service.restoreWorkspace(first.root, replacementRun.result.id, restoreRoot);
     assert.strictEqual(restored.task.state, 'completed');
+    assert.equal(restored.result.savedConfig.theme, 'light'); assert.equal(restored.result.savedConfig.defaultFolderSort, 'name', 'workspace restore returns the canonical ordinary settings from the snapshot');
+    assert.equal(restored.result.savedConfig.workspacePath, path.resolve(restoreRoot));
+    assert.deepEqual(readSavedConfig().theme, 'light'); assert.equal(readSavedConfig().defaultFolderSort, 'name', 'restored ordinary settings remain on disk instead of being overwritten by the pre-restore draft');
+    assert.deepEqual(restored.result.savedConfig.backup, config.backup, 'the current backup connection policy remains preserved');
     assert.equal(recoveryLeases.at(-1).databases.length, 5, 'workspace restore must also lock operations');
     assert(recoveryEvents.every((event, index) => event === (index % 2 === 0 ? 'suspended' : 'resumed')), 'every recovery lease must suspend and then resume all clients');
     assert.strictEqual(await fs.promises.readFile(path.join(restoreRoot, '待处理', 'workspace-one-项目', '新增文件.txt'), 'utf8'), 'incremental-content');
@@ -364,6 +385,9 @@ const main = async () => {
     assert.ok(workspaceRestoredExternalLinks.links['backed-link'], 'workspace restore must restore identities referenced by restored shortcuts');
     assert.ok(workspaceRestoredExternalLinks.links['current-link'], 'workspace restore must preserve current identities');
     assert.strictEqual(workspaceRestoredExternalLinks.links['unrelated-link'], undefined, 'workspace restore must not restore unrelated global identities');
+    const canonicalRestoredConfig = readSavedConfig();
+    assert.deepEqual(canonicalRestoredConfig.componentSettings['concurrent-fixture'], { enabled: true });
+    assert.equal(canonicalRestoredConfig.componentSettingsRevisions['concurrent-fixture'], 10, 'workspace restore preserves newer opaque component settings through the shared mutation queue');
     assert.ok((await fs.promises.readdir(path.join(target, STORE_DIRECTORY, 'objects'))).length > 0);
     assert.equal(componentQuiesceCount, componentResumeCount, 'every component storage quiesce must resume even across the complete backup suite');
     currentWorkspace = { ...first, dataRoot: originalDataRoot, database: originalDatabase };

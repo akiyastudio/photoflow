@@ -23,10 +23,16 @@ const serviceEnvironment = (source = process.env) => Object.fromEntries([
 const publicContext = context => Object.freeze({
   componentId: context.componentId,
   componentVersion: context.componentVersion,
+  surface: context.surface || 'project',
   projectId: context.projectId,
   projectName: context.projectName,
   projectStatus: context.projectStatus,
 });
+
+const algorithmRuntimeArgs = descriptor => descriptor.algorithmRuntime ? [
+  '--photoflow-algorithm-command', descriptor.algorithmRuntime.command,
+  ...descriptor.algorithmRuntime.argsPrefix.flatMap(value => ['--photoflow-algorithm-arg-prefix', value]),
+] : [];
 
 const prepareReady = session => {
   session.readySettled = false;
@@ -97,13 +103,15 @@ class ComponentServiceManager {
     const message = { type: 'request', id, method, payload, context: {
       ...publicContext(boundContext),
       hostApiVersion: descriptor.hostApiVersion,
-      permissions: descriptor.service.permissions || [],
+      permissions: boundContext.surface === 'application.settings'
+        ? (descriptor.service.permissions || []).filter(permission => ['component.settings', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs'].includes(permission))
+        : descriptor.service.permissions || [],
     } };
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
-      const timer = setTimeout(() => {
-        const pending = session.pending.get(id);
-        if (!pending) return;
+      const pending = { resolve, reject, timer: null, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0, longTimeoutArmed: LONG_RUNNING_METHODS.has(String(method || '')), onTimeout: null };
+      pending.onTimeout = () => {
+        if (session.pending.get(id) !== pending) return;
         session.pending.delete(id);
         let cancelError = null;
         try { this.writeFrame(session, { type: 'cancel', id, reason: 'deadline-exceeded' }); }
@@ -117,11 +125,12 @@ class ComponentServiceManager {
         reject(error);
         try { this.writeLog('warn', 'Component service request timed out', { componentId: descriptor.componentId, method, elapsedMs, lastCapability: pending.lastCapability || '', pendingCount: session.pending.size }); } catch { /* Timeout rejection must not depend on logging. */ }
         if (cancelError) try { this.writeLog('warn', 'Component service timeout cancellation could not be delivered', { componentId: descriptor.componentId, method, error: cancelError.message || String(cancelError) }); } catch { /* Best effort only. */ }
-      }, LONG_RUNNING_METHODS.has(String(method || '')) ? this.longRequestTimeoutMs : this.requestTimeoutMs);
-      timer.unref?.();
-      session.pending.set(id, { resolve, reject, timer, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0 });
+      };
+      pending.timer = setTimeout(pending.onTimeout, pending.longTimeoutArmed ? this.longRequestTimeoutMs : this.requestTimeoutMs);
+      pending.timer.unref?.();
+      session.pending.set(id, pending);
       try { this.writeFrame(session, message); }
-      catch (error) { clearTimeout(timer); session.pending.delete(id); reject(error); }
+      catch (error) { clearTimeout(pending.timer); session.pending.delete(id); reject(error); }
     });
   }
 
@@ -142,7 +151,7 @@ class ComponentServiceManager {
       const service = descriptor.service;
       const nodeRuntime = service.runtime === 'node';
       const command = nodeRuntime ? this.executablePath : service.entry;
-      const args = nodeRuntime ? [service.entry] : [];
+      const args = nodeRuntime ? [service.entry, ...algorithmRuntimeArgs(descriptor)] : [];
       const options = {
         cwd: path.dirname(service.entry),
         env: { ...serviceEnvironment(), ...(nodeRuntime ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },
@@ -222,7 +231,14 @@ class ComponentServiceManager {
       const capabilityStartedAt = Date.now();
       parent.capabilityStartedAt = capabilityStartedAt;
       try {
-        const result = await this.capabilityBroker.invoke(session.descriptor, frame.method, frame.payload, parent.context);
+        const invocation = this.capabilityBroker.invoke(session.descriptor, frame.method, frame.payload, parent.context);
+        if (frame.method === 'component.lifecycle.v2' && ['preflight', 'install', 'repair', 'uninstall'].includes(String(frame.payload?.action || '')) && !parent.longTimeoutArmed) {
+          clearTimeout(parent.timer);
+          parent.longTimeoutArmed = true;
+          parent.timer = setTimeout(parent.onTimeout, this.longRequestTimeoutMs);
+          parent.timer.unref?.();
+        }
+        const result = await invocation;
         this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: true, result });
       } catch (error) {
         this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: false, error: error.message || String(error), errorCode: error.code || 'COMPONENT_HOST_INTERNAL', retryable: error.retryable === true });

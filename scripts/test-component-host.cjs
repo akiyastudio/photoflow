@@ -38,7 +38,7 @@ try {
   assert.equal(parseComponentHostManifest({ id: 'legacy', version: '1' }, componentRoot), null, 'legacy native V1 components remain accepted outside the UI host');
   assert.throws(() => parseComponentHostManifest({ ...manifest, apiVersion: 2 }, componentRoot), /Unsupported component apiVersion/);
   assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: [{ type: 'media.previewButton', id: 'bad' }, manifest.componentHost.contributions[1]] } }, componentRoot), /Unknown component host contribution type/);
-  assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 3, maxHostApiVersion: 4 } } }, componentRoot), /do not overlap/);
+  assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 5 } } }, componentRoot), /do not overlap/);
   assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: [manifest.componentHost.contributions[0], { ...manifest.componentHost.contributions[1], entry: '../escape.html' }] } }, componentRoot), /escapes component root/);
   assert.throws(() => parseComponentHostManifest({ ...manifest, icon: 'https://example.com/icon.svg' }, componentRoot), /package-local/);
   assert.throws(() => parseComponentHostManifest({ ...manifest, icon: '../escape.svg' }, componentRoot), /escapes component root/);
@@ -51,12 +51,16 @@ try {
   assert.equal(parseComponentHostManifest({ ...manifest, icon: undefined }, componentRoot).icon, null, 'icons are optional so the renderer can use the generic fallback');
   const registry = createComponentHostRegistry({ roots: [{ source: 'user', path: sandbox }] });
   assert.deepEqual(registry.list().map(item => item.componentId), ['sample-component'], 'host registration discovers manifests dynamically without a business-component catalog entry');
+  assert.deepEqual(createComponentHostRegistry({ roots: [{ source: 'user', path: sandbox }], admitDescriptor: () => false }).list(), [], 'components rejected by installation/integrity admission cannot contribute host UI');
   const repositoryRoot = path.resolve(__dirname, '..');
   const teamSourceRoot = path.join(repositoryRoot, 'extensions', 'team-retouch');
   assert(fs.existsSync(path.join(teamSourceRoot, 'component.template.json')) && !fs.existsSync(path.join(teamSourceRoot, 'component.json')), 'the source checkout intentionally contains only the development template');
   const developmentRegistry = createComponentHostRegistry({
     roots: [{ source: 'development', path: path.join(repositoryRoot, 'extensions') }],
     developmentRendererRoot: path.join(repositoryRoot, 'artifacts', 'component-renderers'),
+    developmentAlgorithmRuntimes: {
+      'team-retouch': { command: path.join(repositoryRoot, '.venv', 'Scripts', 'python.exe'), argsPrefix: [path.join(teamSourceRoot, 'team_retouch.py')] },
+    },
   });
   const developmentTeam = developmentRegistry.resolve('team-retouch');
   assert(developmentTeam, 'the real team-retouch source template must register with Component Host');
@@ -64,6 +68,7 @@ try {
   assert.equal(developmentTeam.fullPage.entry, path.join(repositoryRoot, 'artifacts', 'component-renderers', 'team-retouch', 'index.html'));
   assert.equal(developmentTeam.icon.entry, path.join(teamSourceRoot, 'renderer', 'team-retouch.svg'));
   assert.equal(developmentTeam.service.entry, path.join(teamSourceRoot, 'service.cjs'));
+  assert.deepEqual(developmentTeam.algorithmRuntime, { command: path.join(repositoryRoot, '.venv', 'Scripts', 'python.exe'), argsPrefix: [path.join(teamSourceRoot, 'team_retouch.py')] }, 'development Host descriptor explicitly pins the repository Python algorithm runtime');
   assert.deepEqual(developmentTeam.advancedRuntime, { apiVersion: 1, compatibleLegacyComponentVersions: ['26.7.30.1'] }, 'development template registration must preserve the reviewed legacy advanced-runtime compatibility policy');
 
   const packagedTemplateRoot = path.join(sandbox, 'packaged-template-root');
@@ -131,7 +136,7 @@ try {
   const handlers = new Map();
   const rawIpc = { handle: (channel, handler) => handlers.set(channel, handler) };
   const componentLogs = [];
-  let activeSampleDescriptor = { ...registry.resolve('sample-component'), service: { events: ['sample.changed.v1'] } };
+  let activeSampleDescriptor = { ...registry.resolve('sample-component'), service: { events: ['sample.changed.v1', 'team.return.progress.v1'] } };
   const liveRegistry = {
     list: () => registry.list().map(item => item.componentId === 'sample-component' ? activeSampleDescriptor : item),
     resolve: componentId => componentId === 'sample-component' ? activeSampleDescriptor : registry.resolve(componentId),
@@ -182,6 +187,8 @@ try {
     assert.equal(view.webContents.sent.some(item => item.channel === 'component-sdk:event' && item.payload.topic === 'sample.undeclared.v1'), false, 'undeclared component event topics are not forwarded');
     boundInstance.context.emitComponentEvent('sample.changed.v1', { value: 9 });
     assert.deepStrictEqual(view.webContents.sent.find(item => item.channel === 'component-sdk:event' && item.payload.topic === 'sample.changed.v1')?.payload, { topic: 'sample.changed.v1', payload: { value: 9 } }, 'manifest-declared event topics forward their payload through the single component event channel');
+    boundInstance.context.emitComponentEvent('team.return.progress.v1', { operationId: 'return-1', phase: 'matching', progress: 61, message: '正在比对返图' });
+    assert.deepStrictEqual(view.webContents.sent.find(item => item.channel === 'component-sdk:event' && item.payload.topic === 'team.return.progress.v1')?.payload, { topic: 'team.return.progress.v1', payload: { operationId: 'return-1', phase: 'matching', progress: 61, message: '正在比对返图' } }, 'Host V2 routes the declared team return progress event and payload to the component page');
     assert.deepEqual(view.options.webPreferences, { preload: 'host-preload-v1.cjs', nodeIntegration: false, contextIsolation: true, sandbox: true, webviewTag: false });
     view.webContents.emit('preload-error', {}, 'C:\\private\\component-preload.cjs', Object.assign(new Error('failed at C:\\private\\secret.txt'), { code: 'ERR_PRELOAD' }));
     view.webContents.emit('did-fail-load', {}, -6, 'ERR_FILE_NOT_FOUND', 'file:///C:/private/component.html', true);
@@ -219,7 +226,9 @@ try {
     assert.equal(manager.close(first.instanceId), false, 'destroy is idempotent');
     assert.equal(componentPageKey(request), componentPageKey({ ...request, workspacePath: 'c:/work' }));
 
-    const developmentManager = new ComponentViewManager({ WebContentsView: FakeView, mainWindow, registry: developmentRegistry, preloadPath: 'host-preload.cjs', ipcMain: { handle() {} } });
+    const developmentHandlers = new Map();
+    const invokedSettingsMethods = [];
+    const developmentManager = new ComponentViewManager({ WebContentsView: FakeView, mainWindow, registry: developmentRegistry, preloadPath: 'host-preload.cjs', ipcMain: { handle: (channel, handler) => developmentHandlers.set(channel, handler) }, serviceManager: { supports: () => true, invoke: (_componentId, method, _payload, context) => { invokedSettingsMethods.push({ method, surface: context.surface }); return { success: true }; } } });
     const developmentAction = developmentManager.listToolbarActions().find(item => item.componentId === 'team-retouch');
     assert.match(developmentAction.iconUrl, /^photoflow-component:\/\/icon\/team-retouch\?v=/, 'the development toolbar action uses the component-owned icon protocol URL');
     const developmentPage = await developmentManager.open({ ...request, componentId: 'team-retouch', pageId: 'main' });
@@ -227,7 +236,56 @@ try {
     assert.equal(developmentView.options.webPreferences.preload, 'host-preload.cjs', 'Host API V2 selects the core preload without changing its bridge ABI');
     assert.equal(developmentView.webContents.loadedEntry, path.join(repositoryRoot, 'artifacts', 'component-renderers', 'team-retouch', 'index.html'), 'clicking the development toolbar action loads the prepared independent renderer');
     assert.equal(developmentPage.componentId, 'team-retouch');
+    developmentManager.activate('');
+    assert.equal(developmentView.visible, false, 'entering application settings hides the active project component before the settings entry starts loading');
+    const settingsContribution = developmentManager.listSettingsPages().find(item => item.componentId === 'team-retouch');
+    assert.equal(settingsContribution.label, '团片协作');
+    const developmentSettingsPage = await developmentManager.openSettings({ componentId: 'team-retouch', pageId: 'settings', leaseId: 'settings-lease-primary' });
+    const developmentSettingsView = FakeView.created.at(-1);
+    assert.equal(developmentSettingsView.webContents.loadedEntry, path.join(repositoryRoot, 'artifacts', 'component-renderers', 'team-retouch', 'settings.html'));
+    const settingsContext = await developmentHandlers.get('component-sdk:get-context')({ sender: developmentSettingsView.webContents });
+    assert.equal(developmentSettingsPage.surface, 'application.settings');
+    assert.deepEqual({ surface: settingsContext.surface, projectId: settingsContext.projectId, projectName: settingsContext.projectName, projectStatus: settingsContext.projectStatus, scopeRelativePath: settingsContext.scopeRelativePath, selectedRelativePaths: settingsContext.selectedRelativePaths, events: settingsContext.events }, { surface: 'application.settings', projectId: '', projectName: '', projectStatus: '', scopeRelativePath: '', selectedRelativePaths: [], events: [] });
+    await developmentHandlers.get('component-sdk:rpc')({ sender: developmentSettingsView.webContents }, 'team.settings.get.v1', {});
+    assert.deepEqual(invokedSettingsMethods, [{ method: 'team.settings.get.v1', surface: 'application.settings' }]);
+    assert.throws(() => developmentHandlers.get('component-sdk:rpc')({ sender: developmentSettingsView.webContents }, 'team.project.get.v1', {}), /not allowed on the application settings surface/);
+    assert(developmentManager.releaseSettings({ componentId: 'team-retouch', pageId: 'settings', leaseId: 'settings-lease-primary' }));
+    await new Promise(resolve => setImmediate(resolve));
+
+    let resolveDelayedSettings;
+    const originalLoadFile = FakeWebContents.prototype.loadFile;
+    FakeWebContents.prototype.loadFile = function delayedLoadFile(entry) { this.loadedEntry = entry; return new Promise(resolve => { resolveDelayedSettings = resolve; }); };
+    const firstLeaseOpen = developmentManager.openSettings({ componentId: 'team-retouch', pageId: 'settings', leaseId: 'settings-lease-strict-a' });
+    assert(developmentManager.releaseSettings({ componentId: 'team-retouch', pageId: 'settings', leaseId: 'settings-lease-strict-a' }), 'StrictMode cleanup releases the first pending lease before load resolves');
+    const secondLeaseOpen = developmentManager.openSettings({ componentId: 'team-retouch', pageId: 'settings', leaseId: 'settings-lease-strict-b' });
+    await new Promise(resolve => setImmediate(resolve));
+    const delayedView = FakeView.created.at(-1);
+    assert.equal(delayedView.webContents.destroyed, false, 'a replacement lease acquired in the same turn keeps the loading singleton alive');
+    resolveDelayedSettings();
+    await assert.rejects(firstLeaseOpen, /lease was released/);
+    const secondLeasePage = await secondLeaseOpen;
+    assert.strictEqual(developmentManager.instancesById.get(secondLeasePage.instanceId)?.view, delayedView, 'the surviving lease resolves to the delayed singleton');
+    assert(developmentManager.releaseSettings({ componentId: 'team-retouch', pageId: 'settings', leaseId: 'settings-lease-strict-b' }));
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(delayedView.webContents.destroyed, true, 'the final settings lease destroys the shared view');
+    FakeWebContents.prototype.loadFile = originalLoadFile;
     developmentManager.destroy();
+
+    const replacementLoads = [];
+    FakeWebContents.prototype.loadFile = function generationLoadFile(entry) { this.loadedEntry = entry; let resolve; const promise = new Promise(done => { resolve = done; }); replacementLoads.push({ resolve, view: this }); return promise; };
+    let replacementDescriptor = { ...developmentTeam, componentVersion: 'generation-a' };
+    const replacementManager = new ComponentViewManager({ WebContentsView: FakeView, mainWindow, registry: { list: () => [replacementDescriptor], resolve: () => replacementDescriptor }, preloadPath: 'host-preload.cjs', ipcMain: { handle() {} } });
+    const replacementRequest = { ...request, componentId: 'team-retouch', pageId: 'main', projectId: 'generation-project' };
+    const staleGenerationOpen = replacementManager.open(replacementRequest);
+    await new Promise(resolve => setImmediate(resolve));
+    replacementDescriptor = { ...replacementDescriptor, componentVersion: 'generation-b' };
+    const currentGenerationOpen = replacementManager.open(replacementRequest);
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(replacementLoads.length, 2); replacementLoads[0].resolve();
+    await assert.rejects(staleGenerationOpen, /superseded/);
+    replacementLoads[1].resolve(); const currentGeneration = await currentGenerationOpen;
+    assert.equal(replacementManager.instancesById.get(currentGeneration.instanceId)?.descriptor.componentVersion, 'generation-b', 'a stale load completion cannot delete the newer same-key instance');
+    replacementManager.destroy(); FakeWebContents.prototype.loadFile = originalLoadFile;
 
     const suspensionManager = new ComponentViewManager({ WebContentsView: FakeView, mainWindow, registry: liveRegistry, preloadPath: 'host-preload.cjs', ipcMain: { handle() {} } });
     assert(suspensionManager.setHostSurfaceSuspended({ rendererToken: 'renderer-a', revision: 1, suspended: true }));
@@ -258,6 +316,11 @@ try {
     assert.match(action.iconUrl, /^photoflow-component:\/\/icon\/sample-component\?v=3\.4\.6$/, 'the renderer only receives a host-issued component icon URL for the active component version');
     const project = { id: 'project-1', name: '项目一', path: 'C:/Work/项目一', status: '后期中', updatedAt: 1 };
     const one = pageModel.ensureComponentPage([], action, project, 'C:/Work', 'project-page:active');
+    assert.equal(one.page.componentVersion, action.componentVersion);
+    assert(pageModel.componentPageIsAvailable(one.page, [{ id: action.componentId, version: action.componentVersion, installed: true, compatible: true, status: 'installed' }]));
+    assert.equal(pageModel.componentPageIsAvailable(one.page, [{ id: action.componentId, version: '99.0.0', installed: true, compatible: true, status: 'installed' }]), false, 'upgraded components invalidate stale project page instances');
+    assert.equal(pageModel.componentPageIsAvailable(one.page, [{ id: action.componentId, version: action.componentVersion, installed: true, compatible: false, status: 'invalid' }]), false);
+    assert.equal(pageModel.componentPageActivationSucceeded({ success: false }), false, 'failed native activation is treated as a stale page instead of a successful blank tab');
     const focused = pageModel.ensureComponentPage(one.pages, action, project, 'c:/work', 'home');
     assert.equal(focused.created, false);
     assert.strictEqual(focused.pages, one.pages, 'duplicate toolbar clicks preserve component tab identity');

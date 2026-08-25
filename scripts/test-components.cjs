@@ -170,6 +170,7 @@ try {
   const settingsFeature = fs.readFileSync(path.join(repositoryRoot, 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
   const projectPreload = fs.readFileSync(path.join(repositoryRoot, 'electron', 'preload.cjs'), 'utf8');
   const teamRenderer = fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy-main.tsx'), 'utf8')
+    + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'team-settings-content.tsx'), 'utf8')
     + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'PersonIdentityManager.tsx'), 'utf8')
     + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'TeamRetouchManager.tsx'), 'utf8')
     + fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'renderer', 'src', 'legacy', 'legacy-api.ts'), 'utf8')
@@ -348,8 +349,12 @@ try {
   }
 
   const systemIpc = fs.readFileSync(path.join(repositoryRoot, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
+  const componentViewManager = fs.readFileSync(path.join(repositoryRoot, 'electron', 'services', 'component-view-manager.cjs'), 'utf8');
   assert(systemIpc.includes("component.source !== 'user'"), 'only user-data components may be removed');
-  assert(systemIpc.includes('await shell.trashItem(containerPath)'), 'component uninstall must recycle the complete component container');
+  assert(systemIpc.includes("options?.clearUserData === true") && systemIpc.includes("componentServiceManager?.stop?.(componentId, 'component-uninstall')"), 'component uninstall must explicitly select data cleanup and stop the component service before removal');
+  assert(systemIpc.includes("path.join(root, 'components', componentId)") && systemIpc.includes('componentSettingsRevisions'), 'confirmed component data cleanup must cover private workspace storage and settings');
+  assert(settingsFeature.includes("value: 'keep'") && settingsFeature.includes("value: 'clear'") && settingsFeature.includes('是否同时清空该组件的用户数据和相关缓存'), 'component uninstall must ask whether to preserve or clear user data and related caches');
+  assert(componentViewManager.includes('closeComponent(componentId)') && systemIpc.includes('componentViewManager?.closeComponent?.(componentId)'), 'uninstall must close every live page owned by the component before removing its files');
   assert(!systemIpc.includes("ipcMain.handle('team-retouch-advanced-install'") && !systemIpc.includes("ipcMain.handle('team-retouch-advanced-preflight'") && !systemIpc.includes("ipcMain.handle('team-retouch-advanced-uninstall'"), 'advanced environment actions must not retain system IPC routes');
   const lifecycleTemplate = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
   assert(lifecycleTemplate.componentHost.service.capabilities.includes('component.lifecycle.v2')

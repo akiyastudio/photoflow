@@ -909,7 +909,16 @@ def run(args_list=None) -> int:
             )
             outputs.append(output)
             _emit_cli("log", f"已生成：{output}")
-        _emit_cli("success", f"视频转码完成，共处理 {len(outputs)} 个文件", 100, outputs=outputs)
+        _emit_cli(
+            "success",
+            f"视频转码完成，共处理 {len(outputs)} 个文件",
+            100,
+            outputs=outputs,
+            folderOutputs=[
+                {"sourceFolder": source_folder, "outputFolder": output_folder}
+                for source_folder, output_folder in folder_destinations.items()
+            ],
+        )
         return 0
     except TranscodeCancelled as error:
         _emit_cli("cancelled", str(error), outputs=outputs)

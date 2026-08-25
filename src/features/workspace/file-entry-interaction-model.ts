@@ -77,7 +77,7 @@ export const renamedEntryDestinationPath = (
   return name ? [parent, name].filter(Boolean).join('/') : '';
 };
 
-export const directoryEntryToSelectOnReturn = (currentPath: string, targetPath: string) => {
+export const directoryEntryToRevealOnReturn = (currentPath: string, targetPath: string) => {
   const current = normalizeDirectoryPath(currentPath);
   const target = normalizeDirectoryPath(targetPath);
   if (!current || current === target || target && !current.startsWith(`${target}/`)) return '';

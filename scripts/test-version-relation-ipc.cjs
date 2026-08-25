@@ -7,6 +7,7 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   const workspaceRoot = 'trusted-workspace-root';
   const child = { id: 'child', nodeRole: 'progress' };
   const parent = { id: 'parent', nodeRole: 'original', mediaKind: 'image', folderMissing: false };
+  const videoParent = { id: 'video-parent', nodeRole: 'original', mediaKind: 'video', folderMissing: false };
   let repositoryPayload;
   let repairPayload;
   let layoutGetPayload;
@@ -258,7 +259,7 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     },
     shell: { readShortcutLink: shortcutPath => ({ target: 'D:\\external-originals', description: `PhotoFlow 外链文件夹：${path.basename(shortcutPath, '.lnk')}` }) },
     versionService: {
-      listProgress: async () => ({ progressFolders: [parent] }),
+      listProgress: async () => ({ progressFolders: [parent, videoParent] }),
       adoptMediaFolder: async (root, payload) => { assert.strictEqual(root, workspaceRoot); adoptionPayload = payload; return { success: true, progressFolder: { id: 'adopted' } }; },
     },
   });
@@ -278,6 +279,16 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     projectName: 'Trusted Project', folderPath: path.join('C:\\trusted-project', 'manual', 'source'),
     mode: 'preview', mediaKind: 'image', sourceProgressId: parent.id,
   }, 'repository must receive only the main-process-resolved path and derived adoption fields');
+  adoptionPayload = undefined;
+  const adoptedTranscode = await adoptionHandler(null, workspaceRoot, '后期中', {
+    projectName: 'Trusted Project', relativePath: 'mov_转码', mode: 'transcode', mediaKind: 'video',
+    sourceProgressId: videoParent.id,
+  });
+  assert.strictEqual(adoptedTranscode.success, true);
+  assert.deepStrictEqual(adoptionPayload, {
+    projectName: 'Trusted Project', folderPath: path.join('C:\\trusted-project', 'mov_转码'),
+    mode: 'transcode', mediaKind: 'video', sourceProgressId: videoParent.id,
+  }, 'video transcode adoption must preserve the dedicated transcode purpose and source node');
   adoptionPayload = undefined;
   const adoptedExternalOriginal = await adoptionHandler(null, workspaceRoot, '后期中', {
     projectName: 'Trusted Project', relativePath: 'RAW.lnk', mode: 'original', mediaKind: 'image',

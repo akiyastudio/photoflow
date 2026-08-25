@@ -27,14 +27,14 @@ const baseManifest = {
     ],
     service: {
       protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' },
-      rpcMethods: ['sample.echo.v1', 'sample.crash.v1', 'sample.hang.v1', 'team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1'], capabilities: ['project.media.list.v1'],
+      rpcMethods: ['sample.echo.v1', 'sample.crash.v1', 'sample.hang.v1', 'sample.lifecycle.v1', 'sample.unauthorized-lifecycle.v1', 'team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1'], capabilities: ['project.media.list.v1', 'component.lifecycle.v2'], permissions: ['component.lifecycle.read', 'component.lifecycle.manage'],
     },
   },
 };
 
 const descriptor = parseComponentHostManifest(baseManifest, sandbox);
 assert.equal(descriptor.service.entry, serviceEntry);
-assert.deepEqual(descriptor.service.rpcMethods, ['sample.echo.v1', 'sample.crash.v1', 'sample.hang.v1', 'team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1']);
+assert.deepEqual(descriptor.service.rpcMethods, ['sample.echo.v1', 'sample.crash.v1', 'sample.hang.v1', 'sample.lifecycle.v1', 'sample.unauthorized-lifecycle.v1', 'team.project.get.v1', 'component.settings.get.v1', 'component.advanced.preflight.v1']);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, rpcMethods: ['unversioned'] } } }, sandbox), /versioned allowlist/);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, capabilities: ['ipc.any.v1'] } } }, sandbox), /unknown host capability/);
 assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, entrypoints: { default: '../escape.cjs' } } } }, sandbox), /escapes component root/);
@@ -43,10 +43,11 @@ assert.throws(() => parseComponentHostManifest({ ...baseManifest, componentHost:
 
 const broker = new ComponentCapabilityBroker();
 broker.register('project.media.list.v1', (payload, context) => ({ cursor: payload.cursor, workspace: context.workspacePath }));
+broker.register('component.lifecycle.v2', (payload, _context, ownedDescriptor) => { if (!ownedDescriptor.service.permissions.includes('component.lifecycle.manage')) throw new Error('Component lifecycle management permission is not granted'); return (async () => { await new Promise(resolve => setTimeout(resolve, 180)); return { action: payload.action, success: true }; })(); });
 assert.equal(broker.assertCapabilities(descriptor), true);
 assert.throws(() => broker.assertCapabilities({ componentId: 'broken', service: { capabilities: ['project.media.access.v1'] } }), /declares unavailable host capabilities.*project\.media\.access\.v1/, 'allowlisting a capability without a broker implementation must fail registration consistency checks');
 const boundContext = { componentId: 'sample-component', componentVersion: '1.0.0', workspacePath: 'C:/private/workspace', projectId: 'p1', projectName: 'One', projectStatus: 'active' };
-assert.deepEqual(publicContext(boundContext), { componentId: 'sample-component', componentVersion: '1.0.0', projectId: 'p1', projectName: 'One', projectStatus: 'active' });
+assert.deepEqual(publicContext(boundContext), { componentId: 'sample-component', componentVersion: '1.0.0', surface: 'project', projectId: 'p1', projectName: 'One', projectStatus: 'active' });
 assert.throws(() => broker.invoke(descriptor, 'dialogs.open.v1', {}, boundContext), /not granted/);
 assert.throws(() => cloneRequestPayload({ value: 'x'.repeat(2 * 1024 * 1024) }), /too large/);
 assert.deepEqual(serviceEnvironment({ SystemRoot: 'C:/Windows', SECRET_TOKEN: 'must-not-leak' }), { SystemRoot: 'C:/Windows' });
@@ -75,12 +76,13 @@ const fakeSupervisor = {
         if (frame.method === 'sample.crash.v1') { process.nextTick(() => target.emit('exit', 9, null)); return true; }
         if (frame.method === 'sample.hang.v1') { requestFrames.set(frame.id, frame); if (disableStdinAfterHang) process.nextTick(() => { target.stdin.writable = false; }); return true; }
         requestFrames.set(frame.id, frame);
-        target.stdout.write(`${JSON.stringify({ type: 'capability', id: `cap-${frame.id}`, parentId: frame.id, method: 'project.media.list.v1', payload: { cursor: 'next' } })}\n`);
+        target.stdout.write(`${JSON.stringify({ type: 'capability', id: `cap-${frame.id}`, parentId: frame.id, method: frame.method.includes('lifecycle') ? 'component.lifecycle.v2' : 'project.media.list.v1', payload: frame.method.includes('lifecycle') ? { action: 'install' } : { cursor: 'next' } })}\n`);
       } else if (frame.type === 'cancel') {
         cancelledRequestIds.push(frame.id); requestFrames.delete(frame.id);
       } else if (frame.type === 'capability-response') {
         const requestId = String(frame.id).replace(/^cap-/, '');
         const requestFrame = requestFrames.get(requestId);
+        if (requestFrame?.method === 'sample.unauthorized-lifecycle.v1' && frame.ok === false) return true;
         requestFrames.delete(requestId);
         target.stdout.write(`${JSON.stringify({ type: 'response', id: requestFrame.id, ok: true, result: { capability: frame.result, context: requestFrame.context } })}\n`);
       }
@@ -100,20 +102,28 @@ const fakeSupervisor = {
   },
 };
 
-let activeDescriptor = descriptor;
+let activeDescriptor = { ...descriptor, algorithmRuntime: { command: 'trusted-python.exe', argsPrefix: ['trusted-team-retouch.py'] } };
 const registry = { resolve: id => id === activeDescriptor.componentId ? activeDescriptor : null };
-const manager = new ComponentServiceManager({ registry, processSupervisor: fakeSupervisor, capabilityBroker: broker, executablePath: 'electron.exe', requestTimeoutMs: 100 });
+const manager = new ComponentServiceManager({ registry, processSupervisor: fakeSupervisor, capabilityBroker: broker, executablePath: 'electron.exe', requestTimeoutMs: 100, longRequestTimeoutMs: 500 });
 const keepAlive = setInterval(() => undefined, 1000);
 
 (async () => {
   const result = await manager.invoke('sample-component', 'sample.echo.v1', { value: 1 }, boundContext);
   assert.equal(launched.length, 1);
   assert.equal(launched[0].spec.command, 'electron.exe');
+  assert.deepEqual(launched[0].spec.args, [serviceEntry, '--photoflow-algorithm-command', 'trusted-python.exe', '--photoflow-algorithm-arg-prefix', 'trusted-team-retouch.py'], 'the Host passes only its reviewed development algorithm descriptor to the service');
   assert.equal(launched[0].spec.options.env.ELECTRON_RUN_AS_NODE, '1');
   assert.equal(launched[0].spec.options.env.SECRET_TOKEN, undefined, 'the component service process must not inherit arbitrary host secrets');
   assert.equal(result.capability.workspace, boundContext.workspacePath, 'the host retains the private workspace path while serving an authorized capability');
   assert.equal(result.context.workspacePath, undefined, 'raw workspace paths are never sent to the component service');
   assert.equal(result.context.projectId, 'p1');
+  const lifecycleResult = await manager.invoke('sample-component', 'sample.lifecycle.v1', {}, boundContext);
+  assert.equal(lifecycleResult.capability.action, 'install', 'a lifecycle capability upgrades its parent request to the long timeout');
+  activeDescriptor = parseComponentHostManifest({ ...baseManifest, version: '1.1.0', componentHost: { ...baseManifest.componentHost, service: { ...baseManifest.componentHost.service, permissions: ['component.lifecycle.read'] } } }, sandbox);
+  const unauthorizedStartedAt = Date.now();
+  await assert.rejects(manager.invoke('sample-component', 'sample.unauthorized-lifecycle.v1', {}, { ...boundContext, componentVersion: '1.1.0' }), /timed out/);
+  assert(Date.now() - unauthorizedStartedAt < 300, 'an unauthorized lifecycle frame retains the ordinary request timeout');
+  activeDescriptor = parseComponentHostManifest({ ...baseManifest, version: '1.2.0' }, sandbox);
 
   const beforeCoalesced = serviceRequestCount;
   const snapshots = await Promise.all(Array.from({ length: 3 }, () => manager.invoke('sample-component', 'team.project.get.v1', {}, boundContext)));
@@ -125,9 +135,10 @@ const keepAlive = setInterval(() => undefined, 1000);
     manager.invoke('sample-component', 'component.advanced.preflight.v1', {}, boundContext),
   ]);
   assert.equal(serviceRequestCount - beforeIndependentReads, 2, 'different startup reads remain concurrent without waiting on each other');
+  const cancelledBeforeHang = cancelledRequestIds.length;
   const hanging = manager.invoke('sample-component', 'sample.hang.v1', {}, boundContext);
   await assert.rejects(hanging, /timed out/);
-  assert.equal(cancelledRequestIds.length, 1, 'a timed-out host request cooperatively cancels service work');
+  assert.equal(cancelledRequestIds.length, cancelledBeforeHang + 1, 'a timed-out host request cooperatively cancels service work');
   disableStdinAfterHang = true;
   const unavailableStdin = manager.invoke('sample-component', 'sample.hang.v1', {}, boundContext);
   await assert.rejects(unavailableStdin, /timed out/, 'timeout still rejects normally when the cancellation frame cannot be written');

@@ -64,6 +64,16 @@ try {
   fs.rmSync(path.join(componentRoot, 'third-party-tool'), { recursive: true, force: true });
   assert.strictEqual(registry.list().length, 0, 'entry disappears when package and installation are both absent');
 
+  const settingsManifest = { ...manifest('1.0.0'), id: 'settings-fixture', componentHost: { contractVersion: 2, compatibility: { minHostApiVersion: 3, maxHostApiVersion: 3 }, contributions: [{ type: 'workspace.toolbarAction', id: 'open', label: 'Fixture', pageId: 'main' }, { type: 'component.fullPage', id: 'main', title: 'Fixture', entry: 'ui/index.html' }, { type: 'application.settingsPage', id: 'settings', label: 'Fixture', entry: 'ui/settings.html', rpcMethods: ['fixture.settings.v1'] }], service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.settings.v1'], capabilities: [], permissions: [], events: [] } } };
+  const missingSettingsArchive = path.join(componentRoot, 'settings-missing.zip');
+  writeZip(missingSettingsArchive, { 'component.json': JSON.stringify(settingsManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>' });
+  assert.match(registry.list().find(item => item.id === 'settings-fixture').error, /ui\/settings\.html/, 'final component ZIP validation requires the declared settings entry path');
+  fs.unlinkSync(missingSettingsArchive);
+  const completeSettingsArchive = path.join(componentRoot, 'settings-complete.zip');
+  writeZip(completeSettingsArchive, { 'component.json': JSON.stringify(settingsManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>', 'ui/settings.html': '<!doctype html>' });
+  assert.equal(registry.list().find(item => item.id === 'settings-fixture').status, 'pending-install', 'a final component ZIP containing the declared settings entry remains installable');
+  fs.unlinkSync(completeSettingsArchive);
+
   const incompatible = path.join(componentRoot, 'incompatible.zip');
   writeZip(incompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), platforms: ['linux'] }) });
   assert.strictEqual(registry.list().find(item => item.id === 'third-party-tool').status, 'incompatible');
@@ -71,7 +81,7 @@ try {
   fs.unlinkSync(incompatible);
 
   const hostIncompatible = path.join(componentRoot, 'host-incompatible.zip');
-  writeZip(hostIncompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), componentHost: { contractVersion: 1, compatibility: { minHostApiVersion: 3, maxHostApiVersion: 4 }, contributions: [{ type: 'workspace.toolbarAction' }, { type: 'component.fullPage' }] } }), 'tool.exe': 'binary' });
+  writeZip(hostIncompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), componentHost: { contractVersion: 1, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 5 }, contributions: [{ type: 'workspace.toolbarAction' }, { type: 'component.fullPage' }] } }), 'tool.exe': 'binary' });
   assert.match(registry.list().find(item => item.id === 'third-party-tool').error, /不重叠/);
   fs.unlinkSync(hostIncompatible);
 

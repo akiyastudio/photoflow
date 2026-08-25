@@ -49,6 +49,7 @@ LEGACY_SELECTION_INDEPENDENT_KEY_PREFIX = "legacy_selection_independent:"
 SELECTION_MAINLINE_REPAIR_REVISION = "1"
 VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
 PROGRESS_PURPOSE_CONSTRAINT_REVISION = "1"
+TRANSCODE_GRAPH_SCHEMA_REVISION = "1"
 LEGACY_PROGRESS_PARENT_REPAIR_REVISION = "1"
 TARGET_SCHEMA_VERSION = 32
 MEDIA_INCREMENTAL_BATCH_SIZE = 64
@@ -56,14 +57,14 @@ MEDIA_INCREMENTAL_COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 PROGRESS_NODE_ROLES = ("original", "progress", "selection", "artifact", "workflow", "broll")
 PROGRESS_RELATION_KINDS = ("main", "auxiliary")
 OPAQUE_ARTIFACT_KIND = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-VERSION_GRAPH_EDGE_KINDS = ("media_companion", "derived_preview", "workflow_input")
-IMPORT_ARTIFACT_SLOTS = ("raw", "camera_jpg", "generated_jpg", "mov", "video_preview")
+VERSION_GRAPH_EDGE_KINDS = ("media_companion", "derived_preview", "derived_transcode", "workflow_input")
+IMPORT_ARTIFACT_SLOTS = ("raw", "camera_jpg", "generated_jpg", "mov", "video_transcode")
 IMPORT_ARTIFACT_SLOT_SHAPES = {
     "raw": ("image", "original", None),
     "camera_jpg": ("image", "original", "companion"),
     "generated_jpg": ("image", "artifact", "preview"),
     "mov": ("video", "original", None),
-    "video_preview": ("video", "artifact", "preview"),
+    "video_transcode": ("video", "artifact", "transcode"),
 }
 PROGRESS_TRACKING_STATES = (
     "disabled", "pending_compare", "pending_confirm", "committing", "ready", "stale", "needs_repair",
@@ -859,7 +860,7 @@ def _migration_24(db):
           project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
           source_progress_id TEXT NOT NULL REFERENCES progress_folders(id) ON DELETE CASCADE,
           target_progress_id TEXT NOT NULL REFERENCES progress_folders(id) ON DELETE CASCADE,
-          edge_kind TEXT NOT NULL CHECK(edge_kind IN ('media_companion','derived_preview','workflow_input')),
+          edge_kind TEXT NOT NULL CHECK(edge_kind IN ('media_companion','derived_preview','derived_transcode','workflow_input')),
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
           UNIQUE(project_id, source_progress_id, target_progress_id, edge_kind)
@@ -905,7 +906,7 @@ def _migration_24(db):
           OR (NEW.node_role='progress' AND ((NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind!='main') OR NEW.artifact_kind IS NOT NULL))
           OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NULL)
           OR (NEW.node_role='progress' AND NEW.media_kind NOT IN ('image','video'))
-          OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview')))
+          OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview','transcode')))
           OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NULL))
           OR (NEW.node_role='broll' AND (NEW.media_kind!='mixed' OR NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NOT NULL))
           OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
@@ -954,7 +955,7 @@ def _migration_24(db):
           OR (NEW.node_role='progress' AND ((NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind!='main') OR NEW.artifact_kind IS NOT NULL))
           OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NULL)
           OR (NEW.node_role='progress' AND NEW.media_kind NOT IN ('image','video'))
-          OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview')))
+          OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview','transcode')))
           OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NULL))
           OR (NEW.node_role='broll' AND (NEW.media_kind!='mixed' OR NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NOT NULL))
           OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
@@ -1016,6 +1017,7 @@ def _migration_24(db):
               AND (
                 (NEW.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (NEW.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                OR (NEW.edge_kind='derived_transcode' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='transcode')
                 OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
               )
           )
@@ -1042,6 +1044,7 @@ def _migration_24(db):
               AND (
                 (NEW.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (NEW.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                OR (NEW.edge_kind='derived_transcode' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='transcode')
                 OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
               )
           )
@@ -1066,6 +1069,7 @@ def _migration_24(db):
               AND NEW.media_kind=target.media_kind AND (
                 (edge.edge_kind='media_companion' AND NEW.node_role='original' AND NEW.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (edge.edge_kind='derived_preview' AND (NEW.node_role='original' AND NEW.artifact_kind IS NULL OR NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                OR (edge.edge_kind='derived_transcode' AND (NEW.node_role='original' AND NEW.artifact_kind IS NULL OR NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='transcode')
                 OR (edge.edge_kind='workflow_input' AND ((NEW.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
               )
             )
@@ -1077,6 +1081,7 @@ def _migration_24(db):
               AND source.media_kind=NEW.media_kind AND (
                 (edge.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND NEW.node_role='original' AND NEW.artifact_kind='companion')
                 OR (edge.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND NEW.node_role='artifact' AND NEW.artifact_kind='preview')
+                OR (edge.edge_kind='derived_transcode' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND NEW.node_role='artifact' AND NEW.artifact_kind='transcode')
                 OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND NEW.node_role='workflow' AND json_extract(NEW.source_metadata_json,'$.parentCapability')='workflow-input')))
               )
             )
@@ -1124,7 +1129,7 @@ def _install_progress_purpose_constraints(db):
               OR (NEW.node_role='progress' AND ((NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind!='main') OR NEW.artifact_kind IS NOT NULL))
               OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NULL)
               OR (NEW.node_role='progress' AND NEW.media_kind NOT IN ('image','video'))
-              OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview')))
+              OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview','transcode')))
               OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NULL))
               OR (NEW.node_role='broll' AND (NEW.media_kind!='mixed' OR NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NOT NULL))
               OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
@@ -1140,7 +1145,7 @@ def _install_progress_purpose_constraints(db):
               OR (NEW.node_role='progress' AND ((NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind!='main') OR NEW.artifact_kind IS NOT NULL))
               OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NULL)
               OR (NEW.node_role='progress' AND NEW.media_kind NOT IN ('image','video'))
-              OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview')))
+              OR (NEW.node_role='artifact' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind NOT IN ('companion','preview','transcode')))
               OR (NEW.node_role='workflow' AND (NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NULL))
               OR (NEW.node_role='broll' AND (NEW.media_kind!='mixed' OR NEW.parent_progress_id IS NOT NULL OR NEW.relation_kind IS NOT NULL OR NEW.artifact_kind IS NOT NULL))
               OR (NEW.relation_kind='auxiliary' AND NEW.node_role!='selection')
@@ -1215,6 +1220,7 @@ def _install_progress_purpose_constraints(db):
                 AND source.media_kind=target.media_kind AND (
                   (NEW.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                   OR (NEW.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                  OR (NEW.edge_kind='derived_transcode' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='transcode')
                   OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
                 )
             ) OR EXISTS(
@@ -1232,6 +1238,7 @@ def _install_progress_purpose_constraints(db):
                 AND source.media_kind=target.media_kind AND (
                   (NEW.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                   OR (NEW.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                  OR (NEW.edge_kind='derived_transcode' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='transcode')
                   OR (NEW.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
                 )
             ) OR EXISTS(
@@ -1250,6 +1257,7 @@ def _install_progress_purpose_constraints(db):
                   NEW.project_id=edge.project_id AND target.project_id=edge.project_id AND NEW.media_kind=target.media_kind AND (
                     (edge.edge_kind='media_companion' AND NEW.node_role='original' AND NEW.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                     OR (edge.edge_kind='derived_preview' AND (NEW.node_role='original' AND NEW.artifact_kind IS NULL OR NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                    OR (edge.edge_kind='derived_transcode' AND (NEW.node_role='original' AND NEW.artifact_kind IS NULL OR NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='transcode')
                     OR (edge.edge_kind='workflow_input' AND ((NEW.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input')))
                   )
                 )
@@ -1259,6 +1267,7 @@ def _install_progress_purpose_constraints(db):
                   NEW.project_id=edge.project_id AND source.project_id=edge.project_id AND source.media_kind=NEW.media_kind AND (
                     (edge.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND NEW.node_role='original' AND NEW.artifact_kind='companion')
                     OR (edge.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND NEW.node_role='artifact' AND NEW.artifact_kind='preview')
+                    OR (edge.edge_kind='derived_transcode' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND NEW.node_role='artifact' AND NEW.artifact_kind='transcode')
                     OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND NEW.node_role='progress' AND NEW.parent_progress_id IS NOT NULL AND NEW.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND NEW.node_role='workflow' AND json_extract(NEW.source_metadata_json,'$.parentCapability')='workflow-input')))
                   )
                 )
@@ -1417,6 +1426,11 @@ def _repair_legacy_progress_structural_roots(db):
                                OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL
                                   AND source.relation_kind='main')
                               AND target.node_role='artifact' AND target.artifact_kind='preview')
+                            OR (edge.edge_kind='derived_transcode' AND
+                              (source.node_role='original' AND source.artifact_kind IS NULL
+                               OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL
+                                  AND source.relation_kind='main')
+                              AND target.node_role='artifact' AND target.artifact_kind='transcode')
                             OR (edge.edge_kind='workflow_input' AND
                               ((source.node_role IN ('selection','workflow') AND target.node_role='progress'
                                 AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main')
@@ -1483,7 +1497,7 @@ def _migration_25(db):
         CREATE TABLE IF NOT EXISTS media_import_artifact_slots (
           project_id TEXT NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
           progress_id TEXT NOT NULL REFERENCES progress_folders(id) ON DELETE CASCADE,
-          import_slot TEXT NOT NULL CHECK(import_slot IN ('raw','camera_jpg','generated_jpg','mov','video_preview')),
+          import_slot TEXT NOT NULL CHECK(import_slot IN ('raw','camera_jpg','generated_jpg','mov','video_transcode')),
           relative_path_key TEXT NOT NULL,
           created_at INTEGER NOT NULL,
           updated_at INTEGER NOT NULL,
@@ -1544,12 +1558,12 @@ def _migration_25(db):
             if relation.get("edgeKind") == "media_companion":
                 slots_by_path[source_key] = "raw"
                 slots_by_path[target_key] = "camera_jpg"
-            elif relation.get("edgeKind") == "derived_preview":
+            elif relation.get("edgeKind") in ("derived_preview", "derived_transcode"):
                 target_artifact = next((item for item in artifacts if isinstance(item, dict)
                                         and str(item.get("relativePath") or "").replace("\\", "/").strip("/").casefold() == target_key), None)
                 if target_artifact and target_artifact.get("mediaKind") == "video":
                     slots_by_path[source_key] = "mov"
-                    slots_by_path[target_key] = "video_preview"
+                    slots_by_path[target_key] = "video_transcode"
                 elif target_artifact and target_artifact.get("mediaKind") == "image":
                     slots_by_path[source_key] = "raw"
                     slots_by_path[target_key] = "generated_jpg"
@@ -1701,6 +1715,106 @@ def _migration_32(db):
     return False
 
 
+def _ensure_transcode_graph_schema(db):
+    """Upgrade graph CHECK constraints without preserving retired video-preview slots."""
+    changed = False
+    for schema in (row[1] for row in db.execute("PRAGMA database_list").fetchall()):
+        quoted_schema = schema.replace('"', '""')
+        edge_row = db.execute(
+            f'SELECT sql FROM "{quoted_schema}".sqlite_master WHERE type=\'table\' AND name=\'version_graph_edges\''
+        ).fetchone()
+        if edge_row is not None and "derived_transcode" not in str(edge_row["sql"] or ""):
+            references = schema == "main"
+            graph_trigger_names = [row[0] for row in db.execute(
+                f'''SELECT name FROM "{quoted_schema}".sqlite_master
+                    WHERE type='trigger' AND lower(sql) LIKE '%version_graph_edges%' AND sql IS NOT NULL'''
+            ).fetchall()]
+            for trigger_name in graph_trigger_names:
+                quoted_trigger = trigger_name.replace('"', '""')
+                db.execute(f'DROP TRIGGER IF EXISTS "{quoted_schema}"."{quoted_trigger}"')
+            db.execute(f'DROP TABLE IF EXISTS "{quoted_schema}"."version_graph_edges_transcode_next"')
+            db.execute(
+                f'''CREATE TABLE "{quoted_schema}"."version_graph_edges_transcode_next"(
+                  id TEXT PRIMARY KEY,
+                  project_id TEXT NOT NULL {"REFERENCES projects(id) ON DELETE CASCADE" if references else ""},
+                  source_progress_id TEXT NOT NULL {"REFERENCES progress_folders(id) ON DELETE CASCADE" if references else ""},
+                  target_progress_id TEXT NOT NULL {"REFERENCES progress_folders(id) ON DELETE CASCADE" if references else ""},
+                  edge_kind TEXT NOT NULL CHECK(edge_kind IN ('media_companion','derived_preview','derived_transcode','workflow_input')),
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL,
+                  UNIQUE(project_id,source_progress_id,target_progress_id,edge_kind)
+                )'''
+            )
+            db.execute(
+                f'''INSERT INTO "{quoted_schema}"."version_graph_edges_transcode_next"(
+                     id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
+                   SELECT id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at
+                   FROM "{quoted_schema}"."version_graph_edges"'''
+            )
+            db.execute(f'DROP TABLE "{quoted_schema}"."version_graph_edges"')
+            db.execute(f'ALTER TABLE "{quoted_schema}"."version_graph_edges_transcode_next" RENAME TO "version_graph_edges"')
+            db.execute(f'CREATE INDEX IF NOT EXISTS "{quoted_schema}"."version_graph_edges_source" ON "version_graph_edges"(project_id,source_progress_id,edge_kind)')
+            db.execute(f'CREATE INDEX IF NOT EXISTS "{quoted_schema}"."version_graph_edges_target" ON "version_graph_edges"(project_id,target_progress_id,edge_kind)')
+            changed = True
+
+        slot_row = db.execute(
+            f'SELECT sql FROM "{quoted_schema}".sqlite_master WHERE type=\'table\' AND name=\'media_import_artifact_slots\''
+        ).fetchone()
+        if slot_row is not None and "video_transcode" not in str(slot_row["sql"] or ""):
+            references = schema == "main"
+            db.execute(f'DROP TABLE IF EXISTS "{quoted_schema}"."media_import_artifact_slots_transcode_next"')
+            db.execute(
+                f'''CREATE TABLE "{quoted_schema}"."media_import_artifact_slots_transcode_next"(
+                  project_id TEXT NOT NULL {"REFERENCES projects(id) ON DELETE CASCADE" if references else ""},
+                  progress_id TEXT NOT NULL {"REFERENCES progress_folders(id) ON DELETE CASCADE" if references else ""},
+                  import_slot TEXT NOT NULL CHECK(import_slot IN ('raw','camera_jpg','generated_jpg','mov','video_transcode')),
+                  relative_path_key TEXT NOT NULL,
+                  created_at INTEGER NOT NULL,
+                  updated_at INTEGER NOT NULL,
+                  PRIMARY KEY(project_id,progress_id),
+                  UNIQUE(project_id,relative_path_key)
+                )'''
+            )
+            db.execute(
+                f'''INSERT INTO "{quoted_schema}"."media_import_artifact_slots_transcode_next"(
+                     project_id,progress_id,import_slot,relative_path_key,created_at,updated_at)
+                   SELECT project_id,progress_id,import_slot,relative_path_key,created_at,updated_at
+                   FROM "{quoted_schema}"."media_import_artifact_slots"
+                   WHERE import_slot IN ('raw','camera_jpg','generated_jpg','mov')'''
+            )
+            db.execute(f'DROP TABLE "{quoted_schema}"."media_import_artifact_slots"')
+            db.execute(f'ALTER TABLE "{quoted_schema}"."media_import_artifact_slots_transcode_next" RENAME TO "media_import_artifact_slots"')
+            db.execute(f'CREATE INDEX IF NOT EXISTS "{quoted_schema}"."media_import_artifact_slots_kind" ON "media_import_artifact_slots"(project_id,import_slot,updated_at,progress_id)')
+            db.execute(f'DROP TRIGGER IF EXISTS "{quoted_schema}"."media_import_artifact_slots_validate_insert"')
+            db.execute(f'DROP TRIGGER IF EXISTS "{quoted_schema}"."media_import_artifact_slots_validate_update"')
+            db.execute(
+                f'''CREATE TRIGGER "{quoted_schema}"."media_import_artifact_slots_validate_insert"
+                    BEFORE INSERT ON "media_import_artifact_slots" WHEN NOT EXISTS(
+                      SELECT 1 FROM progress_folders progress
+                      WHERE progress.id=NEW.progress_id AND progress.project_id=NEW.project_id
+                    ) BEGIN SELECT RAISE(ABORT,'import artifact slot project mismatch'); END'''
+            )
+            db.execute(
+                f'''CREATE TRIGGER "{quoted_schema}"."media_import_artifact_slots_validate_update"
+                    BEFORE UPDATE OF project_id,progress_id ON "media_import_artifact_slots" WHEN NOT EXISTS(
+                      SELECT 1 FROM progress_folders progress
+                      WHERE progress.id=NEW.progress_id AND progress.project_id=NEW.project_id
+                    ) BEGIN SELECT RAISE(ABORT,'import artifact slot project mismatch'); END'''
+            )
+            changed = True
+    if changed:
+        _install_progress_purpose_constraints(db)
+    return changed
+
+
+def _can_run_full_integrity_check(db) -> bool:
+    """Return whether every table referenced by the cross-domain checks is mounted."""
+    if not _meta_value(db, "domain_storage_revision"):
+        return True
+    attached = {row[1] for row in db.execute("PRAGMA database_list").fetchall()}
+    return set(DOMAIN_TABLES).issubset(attached)
+
+
 MIGRATIONS = {
     11: _migration_11,
     12: _migration_12,
@@ -1751,7 +1865,7 @@ def _check_integrity(db, force: bool = False):
           OR (node_role='selection' AND (relation_kind!='auxiliary' OR artifact_kind IS NOT NULL))
           OR (node_role='progress' AND ((parent_progress_id IS NOT NULL AND relation_kind!='main') OR artifact_kind IS NOT NULL))
           OR (node_role='progress' AND media_kind NOT IN ('image','video'))
-          OR (node_role='artifact' AND (parent_progress_id IS NOT NULL OR relation_kind IS NOT NULL OR artifact_kind NOT IN ('companion','preview')))
+          OR (node_role='artifact' AND (parent_progress_id IS NOT NULL OR relation_kind IS NOT NULL OR artifact_kind NOT IN ('companion','preview','transcode')))
           OR (node_role='workflow' AND (parent_progress_id IS NOT NULL OR relation_kind IS NOT NULL OR artifact_kind IS NULL))
           OR (node_role='broll' AND (media_kind!='mixed' OR parent_progress_id IS NOT NULL OR relation_kind IS NOT NULL OR artifact_kind IS NOT NULL))""",
         "progress_folders.v2_policy": """SELECT COUNT(*) FROM progress_folders WHERE
@@ -1767,12 +1881,13 @@ def _check_integrity(db, force: bool = False):
               AND ((parent.node_role='original' AND parent.artifact_kind IS NULL)
                 OR (parent.node_role='progress' AND parent.parent_progress_id IS NOT NULL AND parent.relation_kind='main')))""",
         "version_graph_edges.owner_kind": """SELECT COUNT(*) FROM version_graph_edges edge
-          WHERE edge.edge_kind NOT IN ('media_companion','derived_preview','workflow_input') OR NOT EXISTS(
+          WHERE edge.edge_kind NOT IN ('media_companion','derived_preview','derived_transcode','workflow_input') OR NOT EXISTS(
             SELECT 1 FROM progress_folders source JOIN progress_folders target ON target.id=edge.target_progress_id
             WHERE source.id=edge.source_progress_id AND source.project_id=edge.project_id
               AND target.project_id=edge.project_id AND source.media_kind=target.media_kind
               AND ((edge.edge_kind='media_companion' AND source.node_role='original' AND source.artifact_kind IS NULL AND target.node_role='original' AND target.artifact_kind='companion')
                 OR (edge.edge_kind='derived_preview' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='preview')
+                OR (edge.edge_kind='derived_transcode' AND (source.node_role='original' AND source.artifact_kind IS NULL OR source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main') AND target.node_role='artifact' AND target.artifact_kind='transcode')
                 OR (edge.edge_kind='workflow_input' AND ((source.node_role IN ('selection','workflow') AND target.node_role='progress' AND target.parent_progress_id IS NOT NULL AND target.relation_kind='main') OR (source.node_role='progress' AND source.parent_progress_id IS NOT NULL AND source.relation_kind='main' AND target.node_role='workflow' AND json_extract(target.source_metadata_json,'$.parentCapability')='workflow-input'))))
           )""",
         "media_import_artifact_slots.owner_kind": """SELECT COUNT(*) FROM media_import_artifact_slots slot
@@ -1782,7 +1897,7 @@ def _check_integrity(db, force: bool = False):
               OR (slot.import_slot='camera_jpg' AND progress.media_kind='image' AND progress.node_role='original' AND progress.artifact_kind='companion')
               OR (slot.import_slot='generated_jpg' AND progress.media_kind='image' AND progress.node_role='artifact' AND progress.artifact_kind='preview')
               OR (slot.import_slot='mov' AND progress.media_kind='video' AND progress.node_role='original' AND progress.artifact_kind IS NULL)
-              OR (slot.import_slot='video_preview' AND progress.media_kind='video' AND progress.node_role='artifact' AND progress.artifact_kind='preview')
+              OR (slot.import_slot='video_transcode' AND progress.media_kind='video' AND progress.node_role='artifact' AND progress.artifact_kind='transcode')
             ))""",
         "batch_items.owner": """SELECT COUNT(*) FROM batch_items item WHERE NOT EXISTS(SELECT 1 FROM version_batches batch JOIN photos ON photos.project_id=batch.project_id JOIN versions ON versions.photo_id=photos.id WHERE batch.id=item.batch_id AND photos.id=item.photo_id AND versions.id=item.version_id)""",
     }
@@ -1845,6 +1960,7 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
         and _meta_value(db, "progress_purpose_constraint_revision") == PROGRESS_PURPOSE_CONSTRAINT_REVISION
         and _meta_value(db, "selection_mainline_repair_revision") == SELECTION_MAINLINE_REPAIR_REVISION
         and _meta_value(db, "version_tree_default_layout_revision") == VERSION_TREE_DEFAULT_LAYOUT_REVISION
+        and _meta_value(db, "transcode_graph_schema_revision") == TRANSCODE_GRAPH_SCHEMA_REVISION
         and _meta_value(db, "workspace_root") == root
     )
     if include_compatibility or include_domains is True:
@@ -1858,6 +1974,7 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
     if schema_is_current:
         domain_migrated = False
         purpose_constraints_migrated = False
+        transcode_graph_migrated = False
         legacy_parent_revision_recorded = False
         try:
             run_compatibility_hooks("prepare_connection", db, database, False)
@@ -1868,6 +1985,11 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
                 _migration_32(db)
             if include_compatibility:
                 run_compatibility_hooks("prepare_connection", db, database, True)
+            # The catalog connection can record the global revision before the
+            # detached versioning database is attached. Always inspect the
+            # actual mounted graph tables so that marker ordering cannot leave
+            # their CHECK constraints on the retired edge/import-slot values.
+            transcode_graph_migrated = _ensure_transcode_graph_schema(db)
             if _meta_value(db, "legacy_progress_parent_repair_revision") != LEGACY_PROGRESS_PARENT_REPAIR_REVISION:
                 found_versioning, _repairs = _repair_legacy_progress_structural_roots(db)
                 if found_versioning:
@@ -1880,9 +2002,10 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
         except Exception:
             db.close()
             raise
-        if domain_migrated or purpose_constraints_migrated or legacy_parent_revision_recorded:
+        if domain_migrated or purpose_constraints_migrated or transcode_graph_migrated or legacy_parent_revision_recorded:
             db.commit()
-            _check_integrity(db, force=True)
+            if _can_run_full_integrity_check(db):
+                _check_integrity(db, force=True)
         return db
     db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     db.commit()
@@ -2162,6 +2285,8 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
         db.close()
         raise
     with db:
+        _ensure_transcode_graph_schema(db)
+        _set_meta(db, "transcode_graph_schema_revision", TRANSCODE_GRAPH_SCHEMA_REVISION)
         if _meta_value(db, "legacy_progress_parent_repair_revision") != LEGACY_PROGRESS_PARENT_REPAIR_REVISION:
             found_versioning, _repairs = _repair_legacy_progress_structural_roots(db)
             if found_versioning:
@@ -2180,7 +2305,7 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
     # Routine daily maintenance is dispatched by Electron on a separate worker
     # so opening the project list never waits for a full integrity scan/backup.
     if backup_path or is_fresh:
-        if requested_domains or (_table_exists(db, "tracking_sessions") and _table_exists(db, "version_graph_edges")):
+        if _can_run_full_integrity_check(db):
             _check_integrity(db, force=True)
         elif db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RuntimeError("目录数据库完整性检查失败")
@@ -3759,14 +3884,14 @@ def migrate_legacy_media_workflow_graph_once(root: str, db, project):
             add_edge(raw, jpg, "media_companion")
 
         mov = node_for_path(directories.get("mov"))
-        preview_path = directories.get("mov_预览")
-        if mov is not None and mov["node_role"] == "original" and preview_path:
-            preview = insert_artifact(
-                preview_path, os.path.basename(preview_path), "video",
-                "legacy-preview-mov", "artifact", "preview",
+        transcode_path = directories.get("mov_转码")
+        if mov is not None and mov["node_role"] == "original" and transcode_path:
+            transcode = insert_artifact(
+                transcode_path, os.path.basename(transcode_path), "video",
+                "transcode-mov", "artifact", "transcode",
             )
-            if preview["node_role"] == "artifact" and preview["artifact_kind"] == "preview":
-                add_edge(mov, preview, "derived_preview")
+            if transcode["node_role"] == "artifact" and transcode["artifact_kind"] == "transcode":
+                add_edge(mov, transcode, "derived_transcode")
 
         run_compatibility_hooks("migrate_workflow_graph", db, project, directories, timestamp, node_for_path, insert_artifact, add_edge)
         db.execute(
@@ -4321,8 +4446,8 @@ def progress_register(root: str, db, payload: dict, commit: bool = True, sync_lo
         raise ValueError("progress_parent_required: 版本进度必须选择有效父节点")
     if node_role == "progress" and media_kind not in ("image", "video"):
         raise ValueError("进度节点只支持图片或视频媒体类型")
-    if node_role == "artifact" and (parent_id or relation_kind or artifact_kind not in ("companion", "preview")):
-        raise ValueError("产物节点不能使用结构父关系，且必须指定 companion 或 preview 类型")
+    if node_role == "artifact" and (parent_id or relation_kind or artifact_kind not in ("companion", "preview", "transcode")):
+        raise ValueError("产物节点不能使用结构父关系，且必须指定 companion、preview 或 transcode 类型")
     if node_role == "workflow" and (parent_id or relation_kind or artifact_kind is None):
         raise ValueError("工作流节点不能使用结构父关系，且必须指定合法的产物类型")
     if node_role == "broll" and (media_kind != "mixed" or parent_id or relation_kind or artifact_kind is not None):
@@ -4749,6 +4874,8 @@ def _validated_version_graph_edge(db, payload: dict, exclude_edge_id: str | None
         and target["artifact_kind"] == "companion"
         or edge_kind == "derived_preview" and (source["node_role"] == "original" or source_is_main_progress)
         and target["node_role"] == "artifact" and target["artifact_kind"] == "preview"
+        or edge_kind == "derived_transcode" and (source["node_role"] == "original" or source_is_main_progress)
+        and target["node_role"] == "artifact" and target["artifact_kind"] == "transcode"
         or edge_kind == "workflow_input" and (
             source["node_role"] in ("selection", "workflow") and target_is_main_progress
             or source_is_main_progress and target["node_role"] == "workflow"
@@ -4984,8 +5111,10 @@ def media_workflow_import_commit(root: str, db, payload: dict):
                             # downgrade it into a generated preview.
                             compatible = True
                             compatible_slot = "camera_jpg"
-                        elif item["importSlot"] in ("generated_jpg", "video_preview"):
+                        elif item["importSlot"] == "generated_jpg":
                             compatible = existing["node_role"] == "artifact" and existing["artifact_kind"] == "preview"
+                        elif item["importSlot"] == "video_transcode":
+                            compatible = existing["node_role"] == "artifact" and existing["artifact_kind"] == "transcode"
                     if not compatible:
                         raise ValueError(f"import_graph_role_conflict: {item['relativePath']} is not safely adoptable")
                     adopted_shape = slot_shapes[compatible_slot]
@@ -5087,7 +5216,7 @@ def media_workflow_import_commit(root: str, db, payload: dict):
         for group_key in group_keys:
             add_slot_relation(group_key, "raw", "camera_jpg", "media_companion")
             add_slot_relation(group_key, "raw", "generated_jpg", "derived_preview")
-            add_slot_relation(group_key, "mov", "video_preview", "derived_preview")
+            add_slot_relation(group_key, "mov", "video_transcode", "derived_transcode")
         committed_edges = []
         for source, target, edge_kind in desired_relations:
             edge_payload = {
@@ -5141,7 +5270,7 @@ def progress_adopt_media(root: str, db, payload: dict):
     mode = str(payload.get("mode") or "").strip()
     media_kind = str(payload.get("mediaKind") or "").strip()
     source_id = str(payload.get("sourceProgressId") or "").strip()
-    if not project_name or mode not in ("original", "companion", "preview", "broll"):
+    if not project_name or mode not in ("original", "companion", "preview", "transcode", "broll"):
         raise ValueError("media_adopt_payload_invalid: 素材类型或接管方式无效")
     if mode == "broll":
         if media_kind != "mixed":
@@ -5150,7 +5279,9 @@ def progress_adopt_media(root: str, db, payload: dict):
         raise ValueError("media_adopt_payload_invalid: 素材类型或接管方式无效")
     if mode == "companion" and media_kind != "image":
         raise ValueError("media_adopt_payload_invalid: 配套素材只适用于图片")
-    source_required = mode in ("companion", "preview")
+    if mode == "transcode" and media_kind != "video":
+        raise ValueError("media_adopt_payload_invalid: 转码产物只适用于视频")
+    source_required = mode in ("companion", "preview", "transcode")
     if (source_required and not source_id) or (not source_required and source_id):
         raise ValueError("media_adopt_payload_invalid: 来源节点无效")
     project = project_row(db, project_name)
@@ -5178,8 +5309,8 @@ def progress_adopt_media(root: str, db, payload: dict):
             raise ValueError("media_adopt_source_invalid: 来源和目标不能相同")
 
     target_role = "broll" if mode == "broll" else "original" if mode in ("original", "companion") else "artifact"
-    artifact_kind = "companion" if mode == "companion" else "preview" if mode == "preview" else None
-    edge_kind = "media_companion" if mode == "companion" else "derived_preview" if mode == "preview" else None
+    artifact_kind = "companion" if mode == "companion" else "preview" if mode == "preview" else "transcode" if mode == "transcode" else None
+    edge_kind = "media_companion" if mode == "companion" else "derived_preview" if mode == "preview" else "derived_transcode" if mode == "transcode" else None
     if existing is not None and external_link_relative_path:
         same_external_adoption = mode in ("original", "broll") \
             and existing["node_role"] == target_role \
@@ -8441,7 +8572,7 @@ def cleanup_media_workflow_graph(root: str, db, session_cutoff: int | None = Non
                  OR (slot.import_slot='camera_jpg' AND progress.media_kind='image' AND progress.node_role='original' AND progress.artifact_kind='companion')
                  OR (slot.import_slot='generated_jpg' AND progress.media_kind='image' AND progress.node_role='artifact' AND progress.artifact_kind='preview')
                  OR (slot.import_slot='mov' AND progress.media_kind='video' AND progress.node_role='original' AND progress.artifact_kind IS NULL)
-                 OR (slot.import_slot='video_preview' AND progress.media_kind='video' AND progress.node_role='artifact' AND progress.artifact_kind='preview')
+                 OR (slot.import_slot='video_transcode' AND progress.media_kind='video' AND progress.node_role='artifact' AND progress.artifact_kind='transcode')
                )
            )"""
     ).rowcount
@@ -8465,6 +8596,9 @@ def cleanup_media_workflow_graph(root: str, db, session_cutoff: int | None = Non
             or row["edge_kind"] == "derived_preview" and (row["source_role"] == "original" and row["source_artifact_kind"] is None
                 or row["source_role"] == "progress" and row["source_parent_id"] is not None and row["source_relation_kind"] == "main")
             and row["target_role"] == "artifact" and row["target_artifact_kind"] == "preview"
+            or row["edge_kind"] == "derived_transcode" and (row["source_role"] == "original" and row["source_artifact_kind"] is None
+                or row["source_role"] == "progress" and row["source_parent_id"] is not None and row["source_relation_kind"] == "main")
+            and row["target_role"] == "artifact" and row["target_artifact_kind"] == "transcode"
             or row["edge_kind"] == "workflow_input" and (
                 row["source_role"] in ("selection", "workflow") and row["target_role"] == "progress"
                 and row["target_parent_id"] is not None and row["target_relation_kind"] == "main"

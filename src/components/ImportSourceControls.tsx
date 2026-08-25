@@ -20,6 +20,7 @@ type ImportSourceControlsProps = {
   onLinkOnlyChange?: (value: boolean) => void;
   importKind?: ImportMaterialKind;
   onImportKindChange?: (kind: ImportMaterialKind) => void;
+  disabledImportKinds?: readonly ImportMaterialKind[];
   statusText?: string;
   startLabel?: string;
   busyLabel?: string;
@@ -44,6 +45,7 @@ export const ImportSourceControls = ({
   onLinkOnlyChange,
   importKind,
   onImportKindChange,
+  disabledImportKinds = [],
   statusText,
   startLabel = '开始导入',
   busyLabel = '正在导入…',
@@ -104,14 +106,18 @@ export const ImportSourceControls = ({
   {importKind && onImportKindChange && <fieldset>
     <legend className="mb-2 text-xs font-semibold text-slate-600">导入的内容</legend>
     <div className="grid grid-cols-2 gap-2 sm:grid-cols-4">
-      {importKinds.map(item => <button
-        key={item.kind}
-        type="button"
-        aria-pressed={importKind === item.kind}
-        disabled={busy}
-        onClick={() => onImportKindChange(item.kind)}
-        className={`flex min-h-10 items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${importKind === item.kind ? 'border-blue-500 bg-blue-50 text-blue-700 ring-1 ring-blue-100' : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:bg-blue-50/40'}`}
-      >{item.icon}{item.label}</button>)}
+      {importKinds.map(item => {
+        const unavailable = disabledImportKinds.includes(item.kind);
+        return <button
+          key={item.kind}
+          type="button"
+          aria-pressed={importKind === item.kind}
+          disabled={busy || unavailable}
+          title={unavailable ? '当前目录不支持此导入类型' : undefined}
+          onClick={() => onImportKindChange(item.kind)}
+          className={`flex min-h-10 items-center justify-center gap-2 rounded-lg border px-3 py-2 text-sm font-semibold transition disabled:cursor-not-allowed disabled:opacity-50 ${importKind === item.kind ? 'border-blue-500 bg-blue-50 text-blue-700 ring-1 ring-blue-100' : 'border-slate-200 bg-white text-slate-600 hover:border-blue-300 hover:bg-blue-50/40'}`}
+        >{item.icon}{item.label}</button>;
+      })}
     </div>
   </fieldset>}
 

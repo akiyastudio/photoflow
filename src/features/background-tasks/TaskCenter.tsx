@@ -1,7 +1,7 @@
 /* eslint-disable react-refresh/only-export-components */
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useState } from 'react';
 import type { BackgroundTask, LogEntry } from '../../types';
-import { panelTaskSessionKey, removePanelTasksByOwnerPageId } from './panel-task-session-model';
+import { nextPanelTaskStartedAt, panelTaskSessionKey, removePanelTasksByOwnerPageId } from './panel-task-session-model';
 import { pruneFinishedTaskToastIds, setTaskToastMinimized } from './task-toast-model';
 import { initialBackgroundTaskStreamState, receiveBackgroundTaskDelta, receiveBackgroundTaskSnapshot, type BackgroundTaskStreamState } from './background-task-stream-model';
 
@@ -16,10 +16,11 @@ export interface PanelTaskSnapshot {
   progress: number;
   message: string;
   logs: LogEntry[];
+  startedAt: number;
   updatedAt: number;
 }
 
-type PanelTaskReport = Omit<PanelTaskSnapshot, 'key' | 'ownerPageId' | 'panelKind' | 'title' | 'updatedAt'>;
+type PanelTaskReport = Omit<PanelTaskSnapshot, 'key' | 'ownerPageId' | 'panelKind' | 'title' | 'startedAt' | 'updatedAt'>;
 
 interface TaskCenterValue {
   backgroundTasks: BackgroundTask[];
@@ -98,10 +99,12 @@ export const TaskCenterProvider = ({ children }: { children: React.ReactNode }) 
     setPanelTasks(current => {
       const previous = current[identity.key];
       const progress = previous?.state === 'running' && report.state === 'running' ? Math.max(previous.progress, report.progress) : report.progress;
-      if (previous && previous.state === report.state && previous.progress === progress && previous.message === report.message && sameLogs(previous.logs, report.logs)) return current;
+      const updatedAt = Date.now();
+      const startedAt = nextPanelTaskStartedAt(previous, report.state, updatedAt);
+      if (previous && previous.state === report.state && previous.progress === progress && previous.message === report.message && previous.startedAt === startedAt && sameLogs(previous.logs, report.logs)) return current;
       return {
         ...current,
-        [identity.key]: { ...identity, ...report, progress, updatedAt: Date.now() },
+        [identity.key]: { ...identity, ...report, progress, startedAt, updatedAt },
       };
     });
   }, []);

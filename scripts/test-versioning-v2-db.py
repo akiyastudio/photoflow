@@ -542,7 +542,7 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
     workspace = root / "schema-24-graph-workspace"
     project = workspace / "Project"
     other_project = workspace / "Other"
-    for name in ("RAW", "Camera JPG", "MOV", "MOV Preview", "Selection", "Workflow", "Progress", "Video Progress"):
+    for name in ("RAW", "Camera JPG", "MOV", "MOV Transcode", "Selection", "Workflow", "Progress", "Video Progress"):
         (project / name).mkdir(parents=True, exist_ok=True)
     (other_project / "Foreign RAW").mkdir(parents=True, exist_ok=True)
     db = workspace_db.connect(str(workspace), str(root / "schema-24-graph.sqlite3"))
@@ -580,32 +580,32 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
         raw = register("Project", project / "RAW", "image", "raw", "original")
         camera_jpg = register("Project", project / "Camera JPG", "image", "camera-jpg", "original", artifactKind="companion")
         mov = register("Project", project / "MOV", "video", "mov", "original")
-        mov_preview = register("Project", project / "MOV Preview", "video", "mov-preview", "artifact", artifactKind="preview")
+        mov_transcode = register("Project", project / "MOV Transcode", "video", "mov-transcode", "artifact", artifactKind="transcode")
         progress = register("Project", project / "Progress", "image", "1", "progress", parentProgressId=raw["id"], relationKind="main")
         selection = register("Project", project / "Selection", "image", "selection", "selection", parentProgressId=raw["id"], relationKind="auxiliary")
         workflow = register("Project", project / "Workflow", "image", "workflow", "workflow", artifactKind="team_workspace")
         video_progress = register("Project", project / "Video Progress", "video", "video-1", "progress", parentProgressId=mov["id"], relationKind="main")
         foreign_raw = register("Other", other_project / "Foreign RAW", "image", "foreign-raw", "original")
 
-        assert mov_preview["artifactKind"] == "preview" and mov_preview["parentProgressId"] is None
+        assert mov_transcode["artifactKind"] == "transcode" and mov_transcode["parentProgressId"] is None
         assert workflow["artifactKind"] == "team_workspace" and workflow["parentProgressId"] is None
-        for node in (mov_preview, workflow, selection):
+        for node in (mov_transcode, workflow, selection):
             assert not node["trackingEnabled"] and not node["renameFromParent"] and not node["copyMissingFromParent"]
 
         companion = workspace_db.version_graph_edge_create(db, {
             "projectId": "graph-project", "sourceProgressId": raw["id"],
             "targetProgressId": camera_jpg["id"], "edgeKind": "media_companion",
         })["edge"]
-        preview_edge = workspace_db.version_graph_edge_create(db, {
+        transcode_edge = workspace_db.version_graph_edge_create(db, {
             "projectId": "graph-project", "sourceProgressId": mov["id"],
-            "targetProgressId": mov_preview["id"], "edgeKind": "derived_preview",
+            "targetProgressId": mov_transcode["id"], "edgeKind": "derived_transcode",
         })["edge"]
         workflow_edge = workspace_db.version_graph_edge_create(db, {
             "projectId": "graph-project", "sourceProgressId": selection["id"],
             "targetProgressId": progress["id"], "edgeKind": "workflow_input",
         })["edge"]
         assert {item["id"] for item in workspace_db.version_graph_edge_list(db, {"projectId": "graph-project"})["edges"]} == {
-            companion["id"], preview_edge["id"], workflow_edge["id"],
+            companion["id"], transcode_edge["id"], workflow_edge["id"],
         }
         assert db.execute("SELECT COUNT(*) FROM version_graph_edges WHERE edge_kind IN ('main','auxiliary')").fetchone()[0] == 0
         assert db.execute("SELECT parent_progress_id FROM progress_folders WHERE id=?", (progress["id"],)).fetchone()[0] == raw["id"]
@@ -626,7 +626,7 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
         }), "project_mismatch")
         rejected(lambda: workspace_db.version_graph_edge_create(db, {
             "projectId": "graph-project", "sourceProgressId": raw["id"],
-            "targetProgressId": mov_preview["id"], "edgeKind": "derived_preview",
+            "targetProgressId": mov_transcode["id"], "edgeKind": "derived_transcode",
         }), "media_mismatch")
         rejected(lambda: workspace_db.version_graph_edge_create(db, {
             "projectId": "graph-project", "sourceProgressId": raw["id"],
@@ -652,11 +652,11 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
         ), "invalid version graph edge")
         rejected(lambda: db.execute(
             "UPDATE progress_folders SET tracking_enabled=1,tracking_state='ready' WHERE id=?",
-            (mov_preview["id"],),
+            (mov_transcode["id"],),
         ), "invalid V3 tracking policy")
         rejected(lambda: db.execute(
             "UPDATE progress_folders SET node_role='progress',artifact_kind=NULL WHERE id=?",
-            (mov_preview["id"],),
+            (mov_transcode["id"],),
         ), "invalid version graph endpoint update")
         rejected(lambda: workspace_db.progress_register(str(workspace), db, {
             "projectName": "Project", "mediaKind": "image", "versionKey": "bad-artifact",
@@ -668,7 +668,7 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
             """INSERT INTO media_import_artifact_slots(
                  project_id,progress_id,import_slot,relative_path_key,created_at,updated_at)
                VALUES(?,?,?,?,?,?)""",
-            ("graph-project", mov_preview["id"], "video_preview", "explicit-preview-slot", now, now),
+            ("graph-project", mov_transcode["id"], "video_transcode", "explicit-transcode-slot", now, now),
         )
         rejected(lambda: db.execute(
             """INSERT INTO media_import_artifact_slots(
@@ -730,10 +730,10 @@ def test_schema_24_supplemental_graph_edges(root: Path) -> None:
         ).fetchone() is None, "explicit unregister must remove derived selection inputs"
         assert db.execute("SELECT 1 FROM tracking_sessions WHERE id=?", (tracking["sessionId"],)).fetchone() is None
 
-        db.execute("DELETE FROM progress_folders WHERE id=?", (mov_preview["id"],))
+        db.execute("DELETE FROM progress_folders WHERE id=?", (mov_transcode["id"],))
         db.commit()
-        assert db.execute("SELECT 1 FROM version_graph_edges WHERE id=?", (preview_edge["id"],)).fetchone() is None
-        assert db.execute("SELECT 1 FROM media_import_artifact_slots WHERE progress_id=?", (mov_preview["id"],)).fetchone() is None
+        assert db.execute("SELECT 1 FROM version_graph_edges WHERE id=?", (transcode_edge["id"],)).fetchone() is None
+        assert db.execute("SELECT 1 FROM media_import_artifact_slots WHERE progress_id=?", (mov_transcode["id"],)).fetchone() is None
         workspace_db.version_graph_edge_delete(db, {
             "projectId": "graph-project", "sourceProgressId": raw["id"],
             "targetProgressId": camera_jpg["id"], "edgeKind": "media_companion",

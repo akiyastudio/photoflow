@@ -9,6 +9,9 @@ const people = read('extensions/team-retouch/renderer/src/legacy/PersonIdentityM
 const comparison = read('extensions/team-retouch/renderer/src/legacy/ImageComparisonView.tsx');
 const adapter = read('extensions/team-retouch/renderer/src/legacy/legacy-api.ts');
 const entry = read('extensions/team-retouch/renderer/src/legacy-main.tsx');
+const settingsEntry = read('extensions/team-retouch/renderer/src/settings-main.tsx');
+const settingsContent = read('extensions/team-retouch/renderer/src/team-settings-content.tsx');
+const settingsHtml = read('extensions/team-retouch/renderer/settings.html');
 const html = read('extensions/team-retouch/renderer/index.html');
 const legacyStyle = read('extensions/team-retouch/renderer/src/legacy-style.css');
 const style = read('extensions/team-retouch/renderer/src/legacy-style.css');
@@ -41,7 +44,12 @@ assert(entry.includes('initialWorkspace: managerWorkspaceSeed') && entry.include
 for (const [source, label] of [[manager, 'detection'], [people, 'workflow']]) assert(source.includes('initialWorkspace') && source.includes('createWorkspaceSeedGate') && source.includes('isSeeded(seedScopeKey)'), `${label} manager must consume the root snapshot before considering its own project RPC`);
 assert(manager.indexOf('isSeeded(seedScopeKey)') < manager.indexOf('void loadIdentities()') && people.indexOf('isSeeded(seedScopeKey)') < people.indexOf('void load(true)'), 'manager mount effects must test the initial seed before issuing project reads');
 assert(!manager.includes('window.electronAPI') && !people.includes('window.electronAPI'), 'legacy UI may only use the component adapter');
-for (const method of ['team.project.get.v1', 'team.patch.get.v1', 'team.media.authorize.v1', 'team.identity.confirm-group.v1', 'team.workflow.generate.v1', 'team.workflow.return-confirm.v1', 'team.patch.merge.v1', 'team.progress.create.v1', 'team.settings.update.v1']) assert(adapter.includes(`'${method}'`) || entry.includes(`'${method}'`), `versioned adapter route missing: ${method}`);
+for (const method of ['team.project.get.v1', 'team.patch.get.v1', 'team.media.authorize.v1', 'team.identity.confirm-group.v1', 'team.workflow.generate.v1', 'team.workflow.return-confirm.v1', 'team.patch.merge.v1', 'team.progress.create.v1', 'team.settings.update.v1']) assert(adapter.includes(`'${method}'`) || entry.includes(`'${method}'`) || settingsContent.includes(`'${method}'`), `versioned adapter route missing: ${method}`);
+assert(settingsEntry.includes("context.surface !== 'application.settings'") && settingsEntry.includes('<TeamSettingsContent') && !settingsEntry.includes('pf-modal-backdrop') && !settingsEntry.includes('aria-label="关闭设置"'), 'the application settings entry must render the shared content as a non-modal root');
+assert(settingsHtml.includes('class="component-settings-root"') && legacyStyle.includes('body.component-settings-root { overflow-y: auto; }') && legacyStyle.includes('body.component-settings-root #app { height: auto; min-height: 100%; overflow: visible; }'), 'the independent settings root must scroll in a small WebContentsView');
+assert(settingsContent.includes('aria-label="优先使用 GPU"') && settingsContent.includes('aria-label="超大人物裁剪方式"'), 'team settings controls must expose explicit accessible names');
+assert(settingsContent.includes('window.photoFlowComponent.onActivate') && settingsContent.includes('refreshEnvironment()') && settingsContent.includes('statusGuardRef.current.invalidate()'), 'advanced environment status must refresh on every surface activation and reject stale status responses');
+assert(entry.includes('<TeamSettingsContent') && !entry.includes('PairDETR + SAM 2.1'), 'the compatibility dialog must be a thin shell over the shared settings implementation');
 assert(adapter.includes("['photoflow-ref', kind") && !adapter.includes('sourcePath: task.') && !adapter.includes('returnedPath:'), 'media compatibility must use opaque IDs instead of exposing or submitting paths');
 for (const topic of ['team.patch.detect.progress.v1', 'team.patch.detect-batch.progress.v1', 'team.return.progress.v1', 'team.workflow.progress.v1']) {
   assert(manifest.componentHost.service.events.includes(topic), `manifest event allowlist missing: ${topic}`);

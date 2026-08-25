@@ -42,7 +42,7 @@ const { converterTriggerAction } = projectPanelLifecycleModule.exports;
 const compiledPanelTaskSessionModel = ts.transpileModule(panelTaskSessionModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const panelTaskSessionModelModule = { exports: {} };
 new Function('module', 'exports', compiledPanelTaskSessionModel)(panelTaskSessionModelModule, panelTaskSessionModelModule.exports);
-const { isPanelTaskRestoreForPage, panelTaskRestoreDetail, panelTaskSessionKey, removePanelTasksByOwnerPageId } = panelTaskSessionModelModule.exports;
+const { isPanelTaskRestoreForPage, nextPanelTaskStartedAt, panelTaskRestoreDetail, panelTaskSessionKey, removePanelTasksByOwnerPageId } = panelTaskSessionModelModule.exports;
 const compiledTopToastNoticeModel = ts.transpileModule(topToastNoticeModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const topToastNoticeModelModule = { exports: {} };
 new Function('module', 'exports', compiledTopToastNoticeModel)(topToastNoticeModelModule, topToastNoticeModelModule.exports);
@@ -62,6 +62,12 @@ assert.strictEqual(converterTriggerAction(false, false), 'inspect', 'the first P
 assert.strictEqual(converterTriggerAction(true, false), 'close', 'an already-open idle converter must toggle closed');
 assert.strictEqual(converterTriggerAction(true, true), 'restore', 'an open running converter must remain active');
 assert.strictEqual(converterTriggerAction(false, true), 'restore', 'a minimized running converter must be restored without starting another inspection');
+
+assert.equal(nextPanelTaskStartedAt(undefined, 'idle', 100), 0, 'an idle panel must not claim a start time');
+assert.equal(nextPanelTaskStartedAt(undefined, 'running', 100), 100, 'the first running report must capture the panel task start time');
+assert.equal(nextPanelTaskStartedAt({ state: 'running', startedAt: 100 }, 'running', 200), 100, 'progress reports must preserve the first start time');
+assert.equal(nextPanelTaskStartedAt({ state: 'running', startedAt: 100 }, 'completed', 200), 100, 'completion must retain the original start time');
+assert.equal(nextPanelTaskStartedAt({ state: 'completed', startedAt: 100 }, 'running', 300), 300, 'a new run using the same panel must receive a new start time');
 
 const makeTask = (id, operation, state, createdAt) => ({ id, type: 'project-file-operation', title: id, state, progress: 0, message: '', cancellable: true, retryable: false, resumable: false, resumeAvailable: false, restartAvailable: false, capabilities: { cancellable: true, pausable: false, resumable: false, retryable: false }, resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', metadata: { operation }, createdAt, updatedAt: createdAt, startedAt: 0, finishedAt: 0 });
 const moveTask = makeTask('move', 'move', 'running', 20);
@@ -182,6 +188,7 @@ assert(trackingConfirmation.includes('useHostSurfaceSuspension(active)') && work
 assert(versionManager.includes('useEscapeLayer(active && Boolean(editing)') && workspace.includes('<VersionManager active={active && activeView === \'version\'}'), 'the inline version editor must release suspension outside its active version tab');
 assert(projectToolModal.includes('createPortal(') && projectToolModal.includes('useEscapeLayer(open, onClose, true, true)') && workspace.includes('useEscapeLayer(Boolean(gatherPickerPaths)'), 'body-portal project tools remain globally visible and continue suspending host surfaces across tab switches');
 assert(indicator.includes('visiblePanelTasks') && indicator.includes('恢复面板') && workspace.includes('photoflow:restore-panel-task'), 'minimized component tasks must restore through the single global task center');
+assert(taskCenter.includes('const startedAt = nextPanelTaskStartedAt(previous, report.state, updatedAt)') && taskCenter.includes('progress, startedAt, updatedAt') && (indicator.match(/formatBackgroundTaskStartedAt\(task\.startedAt\)/g) || []).length >= 2, 'both panel tasks and main-process background tasks must display their captured start time');
 assert(taskCenter.includes('minimizedToastTaskIds') && taskCenter.includes('minimizeTaskToast') && taskCenter.includes('restoreTaskToast') && taskCenter.includes('isTaskToastMinimized') && !taskCenter.includes('localStorage'), 'file-transfer toast minimization must be session-only shared task-center state');
 assert(taskCenter.includes('pruneFinishedTaskToastIds(current, backgroundTasks)'), 'terminal background tasks must be removed from the minimized-toast set');
 assert(indicator.includes('isTaskToastMinimized(task.id)') && indicator.includes('显示进度') && indicator.includes('restoreTaskToast(task.id)'), 'the background task indicator must restore the current minimized file-transfer task');

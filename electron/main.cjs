@@ -6,11 +6,9 @@ const crypto = require('crypto');
 const os = require('os');
 const { exiftool, exiftoolPath } = require('exiftool-vendored');
 const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY, isThumbnailSizeSufficient } = require('./thumbnail-pipeline.cjs');
-const { createComponentRegistry } = require('./component-registry.cjs');
-const { createComponentHostRegistry } = require('./component-host-contract.cjs');
-const { ComponentViewManager } = require('./services/component-view-manager.cjs');
-const { ComponentCapabilityBroker } = require('./services/component-capability-broker.cjs');
-const { ComponentServiceManager } = require('./services/component-service-manager.cjs');
+const { createComponentRegistry } = require('./component-registry.cjs'); const { createComponentHostRegistry } = require('./component-host-contract.cjs');
+const { ComponentViewManager } = require('./services/component-view-manager.cjs'); const { ComponentCapabilityBroker } = require('./services/component-capability-broker.cjs');
+const { ComponentServiceManager } = require('./services/component-service-manager.cjs'); const { createConfigMutationService, readConfigFileWithRecovery, registerConfigDrainBeforeQuit } = require('./services/config-mutation-service.cjs');
 const { registerComponentProjectCapabilities } = require('./services/component-project-capabilities.cjs');
 const { COMPONENT_HOST_V1_RPC_REGISTRARS, registerDeprecatedComponentHostV1Capabilities } = require('./compatibility/component-host-v1.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
@@ -63,7 +61,7 @@ const { findPythonJsonFailureMessage, parsePythonJsonMessages } = require('./ser
 const { createMediaRatingService } = require('./services/media-rating-service.cjs');
 const { createRawOrientationService } = require('./services/raw-orientation-service.cjs');
 const { createImageThumbnailRuntime } = require('./services/image-thumbnail-runtime.cjs');
-const { createDevelopmentPythonResolver } = require('./services/python-environment-service.cjs');
+const { createDevelopmentAlgorithmRuntimes, createDevelopmentPythonResolver } = require('./services/python-environment-service.cjs');
 const { createVersionService } = require('./domains/versioning/public.cjs');
 const { createVersionStaleDetectionService } = require('./services/version-stale-detection-service.cjs');
 const { createMediaTrackingScanScheduler } = require('./services/media-tracking-scan-scheduler.cjs');
@@ -119,10 +117,10 @@ const componentRegistry = createComponentRegistry({
 });
 const componentHostRegistry = createComponentHostRegistry({
   roots: componentRegistry.roots,
-  ...(app.isPackaged ? {} : { developmentRendererRoot: path.join(projectRoot, 'artifacts', 'component-renderers') }),
+  admitDescriptor: (descriptor, componentRoot) => { const component = componentRegistry.resolve(descriptor.componentId, { verifyIntegrity: true }); return Boolean(component && path.resolve(component.path) === path.resolve(componentRoot)); },
+  ...(app.isPackaged ? {} : { developmentRendererRoot: path.join(projectRoot, 'artifacts', 'component-renderers'), developmentAlgorithmRuntimes: createDevelopmentAlgorithmRuntimes({ projectRoot, definitions: PLUGIN_DEFINITIONS }) }),
 });
-let componentViewManager;
-let componentServiceManager;
+let componentViewManager; let componentServiceManager; let configMutationService;
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
@@ -769,6 +767,7 @@ const checkForUpdates = async () => {
       version: result.latestVersion,
       url: result.url,
       notes: result.notes,
+      mandatory: result.mandatory,
     });
     return result;
   } catch (error) {
@@ -808,8 +807,7 @@ const getConfigPath = () => {
 
 const readSavedConfig = () => {
   try {
-    const configPath = getConfigPath();
-    const config = fs.existsSync(configPath) ? JSON.parse(fs.readFileSync(configPath, 'utf8')) : {};
+    const config = readConfigFileWithRecovery(fs, getConfigPath());
     return {
       ...(config && typeof config === 'object' ? config : {}),
       telemetry: privacyService.hasCoreConsent()
@@ -1625,10 +1623,10 @@ mediaService = createMediaService({ accessService: mediaAccessService, thumbnail
 const findImportedVideoPreview = async sourcePath => {
   const sourceDir = path.dirname(sourcePath);
   const sourceFolder = path.basename(sourceDir).toLocaleLowerCase();
-  if (sourceFolder === 'mov_预览'.toLocaleLowerCase()) return sourcePath;
+  if (sourceFolder === 'mov_转码'.toLocaleLowerCase()) return sourcePath;
   if (sourceFolder !== 'mov') return null;
 
-  const previewDir = path.join(path.dirname(sourceDir), 'mov_预览');
+  const previewDir = path.join(path.dirname(sourceDir), 'mov_转码');
   if (!await pathExists(previewDir)) return null;
   const sourceStem = path.parse(sourcePath).name;
   const exactPath = path.join(previewDir, `${sourceStem}.mp4`);
@@ -1797,6 +1795,7 @@ registerBrollImportIpc({
 });
 registerBackgroundTasksIpc({ ipcMain, eventBus, backgroundTasks, getMainWindow: () => mainWindow });
 app.whenReady().then(async () => {
+  configMutationService = createConfigMutationService({ fs, crypto, getConfigPath, readSavedConfig }); await configMutationService.ready;
   registerComponentIconProtocol({ protocol, registry: componentHostRegistry, fs, writeLog });
   protocol.handle('photoflow-media', async request => {
     try {
@@ -1845,7 +1844,7 @@ app.whenReady().then(async () => {
     resolveProjectEntry,
     versionService,
     IMAGE_EXTENSIONS,
-    path, fs, crypto, getConfigPath, readSavedConfig,
+    path, fs, crypto, getConfigPath, readSavedConfig, readConfig: configMutationService.read, mutateConfig: configMutationService.mutate,
     getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
     uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths,
     getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
@@ -1858,7 +1857,7 @@ app.whenReady().then(async () => {
     resolveProjectEntry,
     versionService,
     IMAGE_EXTENSIONS,
-    path, fs, crypto, getConfigPath, readSavedConfig,
+    path, fs, crypto, getConfigPath, readSavedConfig, readConfig: configMutationService.read, mutateConfig: configMutationService.mutate,
     getProjectPath, dialog, mainWindow, mediaService, shell, backgroundTasks,
     uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths,
     getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
@@ -1882,7 +1881,7 @@ app.whenReady().then(async () => {
   registerComponentHostIpc({ ipcMain, manager: componentViewManager, mainWindow });
   const componentRpcIpcMain = createComponentRpcIpcProxy({ ipcMain, manager: componentViewManager, compatibilityRegistrars: COMPONENT_HOST_V1_RPC_REGISTRARS });
 
-  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, componentCapabilityBroker, componentViewManager, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
+  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   for (const descriptor of componentHostRegistry.list()) componentCapabilityBroker.assertCapabilities(descriptor);
   const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
@@ -1929,7 +1928,7 @@ app.whenReady().then(async () => {
       if (failures.length) throw new AggregateError(failures, '数据库恢复完成，但部分 client 未能恢复');
     });
   });
-  const backupService = createBackupService({ app, backgroundTasks, credentialService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getLegacyComponentDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, workspaceSqliteCoordinator, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog, componentServiceManager });
+  const backupService = createBackupService({ app, backgroundTasks, credentialService, configMutationService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getLegacyComponentDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, workspaceSqliteCoordinator, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog, componentServiceManager });
   registerBackupIpc({ backupService, credentialService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
   const archiveService = createArchiveService({ backgroundTasks, movePathAtomic, readSavedConfig, workspaceRepository, writeLog });
   registerArchiveIpc({ archiveService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
@@ -1957,7 +1956,7 @@ app.whenReady().then(async () => {
   });
 });
 
-app.on('before-quit', () => {
+registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutationService, writeLog, onQuit: () => {
   componentViewManager?.destroy();
   void componentServiceManager?.destroy();
   telemetryService?.stop();
@@ -1979,7 +1978,7 @@ app.on('before-quit', () => {
   processSupervisor.stopAll();
   eventBus.clear();
   void exiftool.end().catch(() => undefined);
-});
+} });
 
 app.on('window-all-closed', () => {
   writeLog('info', 'All application windows closed');

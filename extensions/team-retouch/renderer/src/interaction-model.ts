@@ -8,6 +8,40 @@ export type CompareMode = 'side-by-side' | 'overlay' | 'blink' | 'difference' | 
 export type WorkflowStage = 'detect' | 'assignment' | 'relay' | 'review';
 export type StageState = 'complete' | 'current' | 'available' | 'blocked';
 
+export type WorkflowReturnProgressState = {
+  active: boolean;
+  operationId: string;
+  phase: string;
+  progress: number;
+  message: string;
+};
+
+const terminalReturnStates = new Set(['complete', 'completed', 'failed', 'cancelled', 'canceled']);
+const boundedProgress = (value: unknown) => Math.max(0, Math.min(100, Number(value) || 0));
+
+export const beginWorkflowReturnProgress = (operationId: string): WorkflowReturnProgressState => ({
+  active: true,
+  operationId,
+  phase: 'selecting',
+  progress: 0,
+  message: '请选择本轮收到的全部返图',
+});
+
+export const updateWorkflowReturnProgress = (current: WorkflowReturnProgressState, update: Json): WorkflowReturnProgressState => {
+  const operationId = String(update.operationId || current.operationId);
+  if (current.operationId && operationId !== current.operationId) return current;
+  const phase = String(update.phase || current.phase);
+  const state = String(update.state || '').toLowerCase();
+  const terminal = terminalReturnStates.has(state) || terminalReturnStates.has(phase.toLowerCase());
+  return {
+    active: !terminal,
+    operationId,
+    phase,
+    progress: Math.max(current.progress, boundedProgress(update.progress ?? update.percent)),
+    message: String(update.message || current.message || '正在处理返图'),
+  };
+};
+
 export type StageSummary = {
   id: WorkflowStage;
   number: number;

@@ -109,7 +109,9 @@ const normalizeProgressNamePresets = value => {
 };
 
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, componentCapabilityBroker, componentViewManager, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
+  if (!configMutationService?.mutate) throw new Error('System IPC requires the shared config mutation service');
+  const mutateConfig = configMutationService.mutate;
   ipcMain.handle('domain-health-status', () => ({
     success: true,
     domains: domainHealthService?.status?.() || [],
@@ -617,6 +619,8 @@ const registerSystemIpc = context => {
       const cleanupPaths = [backupPath, packageStagePath].filter(Boolean);
       backupPath = '';
       packageStagePath = '';
+      componentViewManager?.closeComponent?.(componentId);
+      await componentServiceManager?.stop?.(componentId, 'component-upgrade');
       queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
       invalidateComponentStatus();
       writeLog('info', 'Component installed', { componentId, destination });
@@ -643,9 +647,10 @@ const registerSystemIpc = context => {
     }
   });
 
-  ipcMain.handle('components-uninstall', async (_event, componentId) => {
+  ipcMain.handle('components-uninstall', async (_event, componentId, options = {}) => {
     try {
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，不能在应用内卸载');
+      const clearUserData = options?.clearUserData === true;
       const component = pluginService.list().find(item => item.id === componentId);
       if (!component?.installed) throw new Error('组件尚未安装');
       if (component.source !== 'user') throw new Error('此组件不在用户组件目录中，不能通过组件管理卸载');
@@ -654,10 +659,47 @@ const registerSystemIpc = context => {
       const containerPath = path.basename(componentPath) === 'runtime' ? path.dirname(componentPath) : componentPath;
       const relative = path.relative(installRoot, containerPath);
       if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || path.basename(containerPath) !== componentId) throw new Error('组件目录校验失败');
-      await shell.trashItem(containerPath);
+      const capabilityBarrier = componentCapabilityBroker.blockComponent(componentId);
+      try {
+      componentViewManager?.closeComponent?.(componentId);
+      await componentServiceManager?.stop?.(componentId, 'component-uninstall');
+      await capabilityBarrier.drain({ timeoutMs: 7500 });
+      const uninstallPath = clearUserData || componentPath === containerPath ? containerPath : componentPath;
+      await shell.trashItem(uninstallPath);
+
+      const cleanupWarnings = [];
+      if (clearUserData) {
+        const recycle = async target => {
+          const stat = await fs.promises.lstat(target).catch(() => null);
+          if (!stat) return;
+          try { await shell.trashItem(target); }
+          catch (error) { cleanupWarnings.push(`${path.basename(target)}：${error.message || String(error)}`); }
+        };
+        const workspaceDataRoot = path.join(app.getPath('userData'), 'workspace-data');
+        const workspaceEntries = await fs.promises.readdir(workspaceDataRoot, { withFileTypes: true }).catch(() => []);
+        for (const entry of workspaceEntries) {
+          if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+          const root = path.join(workspaceDataRoot, entry.name);
+          await recycle(path.join(root, 'components', componentId));
+          await recycle(path.join(root, componentId));
+          for (const suffix of ['', '-wal', '-shm']) await recycle(path.join(root, 'databases', `${componentId}.sqlite3${suffix}`));
+        }
+        try {
+          await mutateConfig(config => {
+            const componentSettings = { ...(config.componentSettings || {}) };
+            const componentSettingsRevisions = { ...(config.componentSettingsRevisions || {}) };
+            delete componentSettings[componentId];
+            componentSettingsRevisions[componentId] = configMutationService.nextRevision(componentSettingsRevisions[componentId]);
+            return { ...config, componentSettings, componentSettingsRevisions };
+          });
+        } catch (error) {
+          cleanupWarnings.push(`组件设置：${error.message || String(error)}`);
+        }
+      }
       invalidateComponentStatus();
-      writeLog('info', 'Component uninstalled', { componentId, componentPath: containerPath });
-      return { success: true };
+      writeLog('info', 'Component uninstalled', { componentId, componentPath: uninstallPath, clearUserData, cleanupWarnings });
+      return { success: true, dataCleared: clearUserData && cleanupWarnings.length === 0, cleanupWarnings };
+      } finally { capabilityBarrier.release(); }
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -1097,11 +1139,10 @@ const registerSystemIpc = context => {
         throw new Error('缓存目录必须通过系统文件夹选择器授权');
       }
       if (requestedCacheDirectory) approvedMediaCacheDirectories.add(path.resolve(requestedCacheDirectory));
-      const configPath = getConfigPath();
-      await fs.promises.writeFile(configPath, JSON.stringify(normalizedConfig, null, 2), 'utf-8');
-      telemetryService?.syncConsent(normalizedConfig.telemetry);
-      console.log('✅ Config saved to:', configPath);
-      return { success: true };
+      const savedConfig = await mutateConfig(current => configMutationService.mergeRendererConfig(normalizedConfig, current));
+      telemetryService?.syncConsent(savedConfig.telemetry);
+      console.log('✅ Config saved to:', getConfigPath());
+      return { success: true, savedConfig };
     } catch (error) {
       console.error('❌ Failed to save config:', error);
       return { success: false, error: String(error) };
@@ -1127,7 +1168,7 @@ const registerSystemIpc = context => {
 
   const loadConfigSnapshot = () => {
     const configPath = getConfigPath();
-    if (!fs.existsSync(configPath)) return null;
+    if (!configMutationService.hasSnapshot()) return null;
     console.log('✅ Config loaded from:', configPath);
     const config = readSavedConfig();
     if (config?.mediaCache?.directory) approvedMediaCacheDirectories.add(path.resolve(config.mediaCache.directory));

@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "team-retouch",
-  "version": "26.8.24.5",
+  "version": "26.8.25.1",
   "displayName": "团片协作",
   "description": "人物检测、身份确认、工作流、返图与合并",
   "icon": "ui/team-retouch.svg",
@@ -16,10 +16,12 @@
   },
   "requiredFiles": [
     "ui/index.html",
+    "ui/settings.html",
     "ui/team-retouch.svg",
     "service.cjs",
     "workflow-generation.cjs",
     "workflow-artifact.cjs",
+    "workflow-manifest.cjs",
     "_internal/models/rtmdet-ins_m_640x640.onnx",
     "_internal/models/face_detection_yunet_2023mar.onnx",
     "_internal/models/adaface_ir18_webface4m.onnx",
@@ -27,11 +29,12 @@
   ],
   "componentHost": {
     "contractVersion": 2,
-    "compatibility": { "minHostApiVersion": 2, "maxHostApiVersion": 2 },
+    "compatibility": { "minHostApiVersion": 3, "maxHostApiVersion": 3 },
     "migrations": { "legacyStorageV1": true, "legacyOutputV1": true },
     "contributions": [
       { "type": "workspace.toolbarAction", "id": "open", "label": "团片协作", "pageId": "main" },
-      { "type": "component.fullPage", "id": "main", "title": "团片协作", "entry": "ui/index.html" }
+      { "type": "component.fullPage", "id": "main", "title": "团片协作", "entry": "ui/index.html" },
+      { "type": "application.settingsPage", "id": "settings", "label": "团片协作", "title": "团片协作设置", "entry": "ui/settings.html", "rpcMethods": ["team.settings.get.v1", "team.settings.update.v1", "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1"] }
     ],
     "service": {
       "protocolVersion": 1,

@@ -1063,9 +1063,103 @@ def test_schema_31_detached_repairs_deleted_project_and_clean_db_is_stable(temp_
         reopened.close()
 
 
+def test_transcode_graph_constraint_upgrade():
+    db = sqlite3.connect(":memory:")
+    db.row_factory = sqlite3.Row
+    db.executescript(
+        """
+        PRAGMA foreign_keys=ON;
+        CREATE TABLE projects(id TEXT PRIMARY KEY);
+        CREATE TABLE progress_folders(id TEXT PRIMARY KEY,project_id TEXT NOT NULL);
+        INSERT INTO projects(id) VALUES('project');
+        INSERT INTO progress_folders(id,project_id) VALUES('source','project'),('target','project');
+        CREATE TABLE version_graph_edges(
+          id TEXT PRIMARY KEY,project_id TEXT NOT NULL,source_progress_id TEXT NOT NULL,
+          target_progress_id TEXT NOT NULL,
+          edge_kind TEXT NOT NULL CHECK(edge_kind IN ('media_companion','derived_preview','workflow_input')),
+          created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+          UNIQUE(project_id,source_progress_id,target_progress_id,edge_kind)
+        );
+        CREATE TABLE media_import_artifact_slots(
+          project_id TEXT NOT NULL,progress_id TEXT NOT NULL,
+          import_slot TEXT NOT NULL CHECK(import_slot IN ('raw','camera_jpg','generated_jpg','mov','video_preview')),
+          relative_path_key TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+          PRIMARY KEY(project_id,progress_id),UNIQUE(project_id,relative_path_key)
+        );
+        INSERT INTO media_import_artifact_slots VALUES('project','target','video_preview','mov_preview',1,1);
+        """
+    )
+    original_installer = workspace_db._install_progress_purpose_constraints
+    workspace_db._install_progress_purpose_constraints = lambda _db: True
+    try:
+        assert workspace_db._ensure_transcode_graph_schema(db) is True
+    finally:
+        workspace_db._install_progress_purpose_constraints = original_installer
+    assert "derived_transcode" in db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='version_graph_edges'"
+    ).fetchone()[0]
+    assert "video_transcode" in db.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='media_import_artifact_slots'"
+    ).fetchone()[0]
+    assert db.execute("SELECT COUNT(*) FROM media_import_artifact_slots").fetchone()[0] == 0
+    db.execute("INSERT INTO version_graph_edges VALUES('edge','project','source','target','derived_transcode',1,1)")
+    db.execute("INSERT INTO media_import_artifact_slots VALUES('project','target','video_transcode','mov_transcode',1,1)")
+    db.close()
+
+
+def test_current_catalog_rechecks_detached_transcode_graph(temp_root):
+    workspace_root = os.path.join(temp_root, "transcode-marker-order-workspace")
+    os.makedirs(workspace_root)
+    database = os.path.join(temp_root, "transcode-marker-order.sqlite3")
+    project_path = os.path.join(workspace_root, "Project")
+    os.makedirs(os.path.join(project_path, "mov"))
+    os.makedirs(os.path.join(project_path, "mov_转码"))
+    initial = workspace_db.connect(workspace_root, database, include_domains=True)
+    now = int(time.time() * 1000)
+    initial.execute(
+        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+        ("transcode-project", "Project", "后期中", "Project", now, now),
+    )
+    initial.commit()
+    initial.close()
+    versioning_database = os.path.join(
+        os.path.splitext(database)[0], "databases", "versioning.sqlite3",
+    )
+    versioning = sqlite3.connect(versioning_database)
+    versioning.executescript(
+        """
+        DROP TABLE version_graph_edges;
+        CREATE TABLE version_graph_edges(
+          id TEXT PRIMARY KEY,project_id TEXT NOT NULL,source_progress_id TEXT NOT NULL,
+          target_progress_id TEXT NOT NULL,
+          edge_kind TEXT NOT NULL CHECK(edge_kind IN ('media_companion','derived_preview','workflow_input')),
+          created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,
+          UNIQUE(project_id,source_progress_id,target_progress_id,edge_kind)
+        );
+        """
+    )
+    versioning.commit()
+    versioning.close()
+
+    reopened = workspace_db.connect(workspace_root, database, include_domains=("versioning",))
+    try:
+        assert "media" not in {row[1] for row in reopened.execute("PRAGMA database_list").fetchall()}
+        edge_sql = reopened.execute(
+            "SELECT sql FROM versioning.sqlite_master WHERE type='table' AND name='version_graph_edges'"
+        ).fetchone()[0]
+        assert "derived_transcode" in edge_sql
+        snapshot = workspace_db.progress_list(workspace_root, reopened, {"projectName": "Project"})
+        assert any(node.get("artifactKind") == "transcode" for node in snapshot["progressFolders"])
+        assert any(edge.get("edgeKind") == "derived_transcode" for edge in snapshot["graphEdges"])
+    finally:
+        reopened.close()
+
+
 def main():
     temp_root = tempfile.mkdtemp(prefix="photoflow-db-migration-")
     try:
+        test_transcode_graph_constraint_upgrade()
+        test_current_catalog_rechecks_detached_transcode_graph(temp_root)
         test_fresh_catalog_records_purpose_constraint_revision(temp_root)
         test_schema_17_old_shape_repairs_legacy_parentless_progress_parent(temp_root)
         test_schema_30_repairs_legacy_parentless_progress_parent(temp_root)

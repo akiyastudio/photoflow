@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { assignmentKey, canEnterWorkflowStage, clampCrop, clampZoom, expandCrop, fitCropToMembers, isIdentityConfirmed, mergeAudit, normalizeRotation, normalizeWorkspace, progressCandidates, rankIdentityCandidates, relayChainForItems, resizeCrop, returnCandidates, returnMatchAssessment, returnModificationAssessment, returnReviewItems, shouldBlink, subjectsFromWorkspace, workflowGroups, workflowLayoutMode, workflowStageSummaries, workingImageMetrics } from '../extensions/team-retouch/renderer/src/interaction-model.ts';
+import { assignmentKey, beginWorkflowReturnProgress, canEnterWorkflowStage, clampCrop, clampZoom, expandCrop, fitCropToMembers, isIdentityConfirmed, mergeAudit, normalizeRotation, normalizeWorkspace, progressCandidates, rankIdentityCandidates, relayChainForItems, resizeCrop, returnCandidates, returnMatchAssessment, returnModificationAssessment, returnReviewItems, shouldBlink, subjectsFromWorkspace, updateWorkflowReturnProgress, workflowGroups, workflowLayoutMode, workflowStageSummaries, workingImageMetrics } from '../extensions/team-retouch/renderer/src/interaction-model.ts';
 
 const workspace = {
   identities: [{ id: 'alice', name: 'Alice' }, { id: 'pending', name: '待确认人物 2' }],
@@ -11,6 +11,15 @@ const workspace = {
 };
 
 assert.equal(assignmentKey('p1', 'v1', 2), 'p1:v1:2');
+const selectingReturns = beginWorkflowReturnProgress('return-operation-1');
+assert.deepEqual({ active: selectingReturns.active, phase: selectingReturns.phase, progress: selectingReturns.progress }, { active: true, phase: 'selecting', progress: 0 });
+const matchingReturns = updateWorkflowReturnProgress(selectingReturns, { operationId: 'return-operation-1', phase: 'matching', progress: 63, message: '比对图片 2/4' });
+assert.deepEqual({ active: matchingReturns.active, phase: matchingReturns.phase, progress: matchingReturns.progress, message: matchingReturns.message }, { active: true, phase: 'matching', progress: 63, message: '比对图片 2/4' }, 'return progress keeps the real matching phase visible');
+assert.equal(updateWorkflowReturnProgress(matchingReturns, { operationId: 'stale-operation', phase: 'matching', progress: 99 }).progress, 63, 'a stale return operation cannot overwrite the active batch');
+assert.equal(updateWorkflowReturnProgress(matchingReturns, { operationId: 'return-operation-1', phase: 'reading', progress: 12 }).progress, 63, 'out-of-order events cannot move return progress backwards');
+assert.equal(updateWorkflowReturnProgress(matchingReturns, { operationId: 'return-operation-1', state: 'completed', phase: 'complete', progress: 100 }).active, false, 'completed return progress collapses');
+assert.equal(updateWorkflowReturnProgress(matchingReturns, { operationId: 'return-operation-1', state: 'failed', phase: 'failed' }).active, false, 'failed return progress collapses');
+assert.equal(updateWorkflowReturnProgress(matchingReturns, { operationId: 'return-operation-1', state: 'cancelled', phase: 'cancelled' }).active, false, 'cancelled return progress collapses');
 const subjects = subjectsFromWorkspace(workspace);
 assert.equal(subjects.length, 2, 'multi-person tasks must expose one manually confirmable subject per member');
 assert.equal(subjects[0].identity.name, 'Alice');

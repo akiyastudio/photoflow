@@ -2,13 +2,24 @@ const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
 
+const developmentPythonPath = projectRoot => path.join(
+  projectRoot,
+  '.venv',
+  ...(process.platform === 'win32' ? ['Scripts', 'python.exe'] : ['bin', 'python']),
+);
+
+const createDevelopmentAlgorithmRuntimes = ({ projectRoot, definitions }) => Object.fromEntries(Object.values(definitions)
+  .filter(definition => Array.isArray(definition.developmentAlgorithmEntry))
+  .map(definition => [definition.id, {
+    command: developmentPythonPath(projectRoot),
+    argsPrefix: [path.join(projectRoot, ...definition.developmentAlgorithmEntry)],
+  }]));
+
 const createDevelopmentPythonResolver = ({ projectRoot }) => {
   let validatedFingerprint = '';
   return () => {
     const venvRoot = path.join(projectRoot, '.venv');
-    const venvPython = process.platform === 'win32'
-      ? path.join(venvRoot, 'Scripts', 'python.exe')
-      : path.join(venvRoot, 'bin', 'python');
+    const venvPython = developmentPythonPath(projectRoot);
     const venvConfig = path.join(venvRoot, 'pyvenv.cfg');
     const venvLibrary = path.join(venvRoot, process.platform === 'win32' ? 'Lib' : 'lib');
     if (!fs.existsSync(venvPython) || !fs.existsSync(venvConfig) || !fs.existsSync(venvLibrary)) {
@@ -37,4 +48,4 @@ const createDevelopmentPythonResolver = ({ projectRoot }) => {
   };
 };
 
-module.exports = { createDevelopmentPythonResolver };
+module.exports = { createDevelopmentAlgorithmRuntimes, createDevelopmentPythonResolver, developmentPythonPath };

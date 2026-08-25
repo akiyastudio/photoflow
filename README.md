@@ -1,243 +1,206 @@
 <div align="center">
   <img src="public/app-logo.svg" alt="照片流图标" width="60" />
-  <h1>照片流 PhotoFlow</h1>
-  <p>面向摄影师的本地项目管理与素材工作流工具</p>
+  <h1>PhotoFlow 插件开发</h1>
+  <p>使用 Component Host V2 制作隔离、可安装、可独立升级的照片流插件</p>
   <p>
-    <a href="https://github.com/akiyastudio/photoflow/releases/latest">下载最新版</a>
-    · <a href="https://github.com/akiyastudio/photoflow/issues">反馈问题</a>
-    · <a href="docs/ARCHITECTURE.md">架构说明</a>
+    <a href="docs/PLUGIN_DEVELOPMENT.md">开发教程</a>
+    · <a href="docs/PLUGIN_HOST_API.md">Host API V2</a>
+    · <a href="examples/hello-component">完整示例</a>
   </p>
 </div>
 
-照片流把拍摄项目、SD 卡导入、素材浏览、选片、后期版本和交付归档放进同一个桌面工作区。它主要服务于摄影工作中重复且容易出错的文件操作：整理 RAW、JPG 和视频，跟踪多轮后期文件，快速找回选中的素材，以及在多人修图中自动裁小分发和安全地合回原图。
+照片流把可选扩展包称为“组件（Component）”，在面向使用者的页面中也称为“插件”。新插件统一使用 **Component Host V2**：界面运行在独立沙箱页面中，业务后端作为受监管子进程运行，项目媒体、输出、版本、任务和设置只能通过显式授权的 Host API 访问。
 
-目前只有windows的版本。
+插件不能导入照片流 React 渲染层或 Electron 主进程代码，也不能取得任意 IPC、任意文件系统路径或宿主环境中的凭据。所有未在清单中声明的 RPC、能力、权限和事件都会默认拒绝。
 
-> [!WARNING]
-> 项目仍处于个人开发和持续迭代阶段，尚未经过大规模设备与素材兼容性测试。首次使用前请备份重要数据，并先用副本验证自己的工作流。文件导入默认可能移动源文件；如需保留源文件，请先在 **设置 → 导入 → 导入后保留原始文件** 中开启复制模式。
+> [!IMPORTANT]
+> Host V1 仅用于已安装旧组件的兼容。新组件必须使用 `componentHost.contractVersion: 2` 和 Host API 2 或更高版本；贡献设置页需要 Host API 3。不要依赖 `electron/compatibility/` 下的旧业务适配器。
 
-## 主要特性
+## 快速开始
 
-### 摄影项目工作区
+1. 复制 `examples/hello-component`，并把目录改成自己的组件 ID。
+2. 在 `component.json` 中将 `contractVersion`、`minHostApiVersion`、`maxHostApiVersion` 都设为 `2`。
+3. 声明一个 `workspace.toolbarAction`、一个相连的 `component.fullPage`、包内 UI 入口和服务入口。
+4. 显式列出服务 RPC、Host 能力、权限和事件。
+5. 用服务模拟器验证 JSON Lines 协议：
 
-- 按 **策划中、待拍摄、后期中、已归档** 管理项目状态。
-- 以标签页同时打开多个项目，在网格或列表中浏览文件。
-- 为普通图片、RAW 和视频生成缩略图，提供快速预览、全屏查看与技术元数据。
-- 支持新建、导入、复制、移动、重命名和删除文件；长任务显示进度并可取消。
-- 可识别 Photoshop，并将选中的图片直接交给 Photoshop 打开。
-- 使用本地 SQLite 记录项目、文件身份、后期版本和可恢复操作，不把数据库写进项目目录。
+```powershell
+node scripts/mock-component-service.cjs examples/hello-component/service.cjs
+```
 
-### SD 卡导入与素材整理
+6. 将插件目录放入照片流用户组件目录；源码开发时也可以放入 `extensions/` 并使用现有组件构建流程。
 
-- 识别多个存储卡盘符，可分别指定为工作素材或花絮素材后批量导入。
-- 自动把素材整理到 `raw`、`jpg`、`mov` 等项目目录。
-- 可为大型视频生成 H.264 预览文件，减少工作区播放压力。
-- 可把超过 4 GB 的视频无损分段，兼容 FAT32 或有单文件限制的存储服务。
-- 文件复制先写入临时文件，再原子发布到目标位置；跨盘移动完成校验后才处理源文件。
+## 最小包结构
 
-### 选片、后期版本与交付
+```text
+hello-component/
+  component.json
+  service.cjs
+  ui/index.html
+  ui/icon.svg          # 可选；只允许 PNG 或被动 SVG
+```
 
-- 根据客户给出的文件名，从指定图片和视频目录中批量找回素材。
-- 图片和视频分别输出到 `图片选片`、`视频选片`，避免混在原始素材中。
-- 可新建、导入或标记“图片后期 / 视频后期”进度目录。
-- 对比两轮后期文件并建立版本关系，记录备注、作者、当前版本与喜爱状态。
-- 任意项目图片都可标记为喜爱，并可在项目顶部汇总查看和整理。
+清单中的路径都是包内相对路径。符号链接、路径穿越、远程页面/图标、主动 SVG、缺失文件、未知贡献类型或包外入口都会使整套组件注册失败。组件不能选择自己的 preload。
 
-### 团片协作
+## 清单骨架
 
-安装 `团片协作` 组件后，可以把一张高分辨率合照拆成适合多人协作的小图：
+```json
+{
+  "apiVersion": 1,
+  "id": "hello-component",
+  "version": "0.1.0",
+  "componentHost": {
+    "contractVersion": 2,
+    "compatibility": {
+      "minHostApiVersion": 3,
+      "maxHostApiVersion": 3
+    },
+    "contributions": [
+      {
+        "type": "workspace.toolbarAction",
+        "id": "open",
+        "label": "示例插件",
+        "pageId": "main"
+      },
+      {
+        "type": "component.fullPage",
+        "id": "main",
+        "title": "示例插件",
+        "entry": "ui/index.html"
+      },
+      {
+        "type": "application.settingsPage",
+        "id": "settings",
+        "label": "示例插件",
+        "title": "示例插件设置",
+        "entry": "ui/settings.html",
+        "rpcMethods": ["hello.settings.get.v1", "hello.settings.update.v1"]
+      }
+    ],
+    "service": {
+      "protocolVersion": 1,
+      "runtime": "node",
+      "entrypoints": { "default": "service.cjs" },
+      "rpcMethods": ["hello.load.v1", "hello.settings.get.v1", "hello.settings.update.v1"],
+      "capabilities": ["project.media.page.v2", "component.settings.v2"],
+      "permissions": ["project.media.read", "component.settings"],
+      "events": []
+    }
+  }
+}
+```
 
-1. AI 检测画面中的人物并规划裁切范围。
-2. 为每个人填写名称和接收人，导出修图小图。
-3. 收到手机或其他软件修好的图片后批量回传。
-4. 对齐、匹配颜色、处理重叠区域，并自动合回原始尺寸。
+实际字段和机器约束以 `electron/contracts/schemas/component-manifest-v2.schema.json` 为准。
 
-该功能主要面对团片情况中传一圈之后画质受损和质量不可控的问题，因此这个功能可以裁剪图片之后降低分辨率让大家在手机处理，而避免手机后期软件导出后分辨率受损，并且重新拼回原分辨率图片。
+## 运行模型
 
-### 日常工具
+```text
+插件 UI（沙箱 WebContentsView）
+        │ window.photoFlowComponent.rpc()
+        ▼
+组件桥接与 RPC 白名单
+        │ 私有 JSON Lines
+        ▼
+插件服务（受监管子进程）
+        │ 已声明 Host capability
+        ▼
+PhotoFlow 项目 / 媒体 / 输出 / 版本 / 任务
+```
 
-- **PNG 转 JPG**：批量转换并设置 JPG 输出质量。
-- **视频切割**：可输入文件夹、单个视频或多个视频，批量按约 3.95 GB 无损分段。
-- **提取分镜帧**：可输入文件夹、单个视频或多个视频执行转场检测，提取清晰、非黑画面，并可整理同层数据文件。
-- **Office 图片提取**：从 DOCX、PPTX 和 XLSX 中提取内嵌图片。
-- **角色生日**：可选的首页角色生日提醒，也可以完全关闭。
+### 插件界面
 
-## 安装
+界面只使用 `window.photoFlowComponent`：
 
-目前主要发布和验证的平台是 **Windows x64**。
+```ts
+import { host, assertHostApiV2 } from '../../component-sdk/index.js';
 
-1. 前往 [Releases](https://github.com/akiyastudio/photoflow/releases/latest) 下载最新版 `照片流 Setup <版本>.exe`。
-2. 运行安装程序并启动照片流。
-3. 第一次启动时选择工作文件夹。若选择磁盘根目录，照片流会在该磁盘下创建 `照片流` 文件夹。
-4. 如需可选功能，再下载对应的 `PhotoFlow-<组件>-<版本>-win32-x64.zip`，通过 **设置 → 组件管理** 安装。
+const context = await host.getContext();
+assertHostApiV2(context);
+const page = await host.rpc('my-component.load.v1', { cursor: null });
+const stop = host.onEvent('my-component.progress.v1', update => render(update));
+window.addEventListener('pagehide', stop, { once: true });
+```
 
-### 安装或更新可选组件
+页面运行时关闭 Node 集成、WebView、任意导航、新窗口和浏览器权限。界面应跟随宿主主题，支持键盘与可见焦点，页面停用或销毁时释放订阅和计时器。
 
-当前提供两个独立组件：
+### 插件服务
 
-| 组件 | 功能 | 支持平台 |
+服务通过 UTF-8 JSON Lines 使用 stdin/stdout：
+
+1. 初始化后发送 `{"type":"ready","protocolVersion":1}`。
+2. 接收带不透明 ID、版本化方法、JSON 载荷和无路径项目上下文的 `request`。
+3. 需要宿主资源时发送绑定父请求的 `capability`，等待 `capability-response`。
+4. 最终返回 `response`。stdout 只用于协议帧，日志写 stderr。
+
+普通同步请求 60 秒超时，单帧与载荷上限为 2 MiB。长任务使用 `tasks.v2`，定期保存检查点并支持取消、重启后恢复。
+
+## 常用 Host 能力
+
+| 能力 | 权限 | 用途 |
 | --- | --- | --- |
-| `team-retouch` | 人物检测、裁切、对齐与合回 | Windows x64 |
-| `video-playback-mpv` | 使用独立 libmpv 进程播放相机原始视频 | Windows x64 |
+| `project.media.page.v2` | `project.media.read` | 分页读取项目媒体 |
+| `project.media.variants.v2` | `project.media.read` | 解析缩略图、预览或原图 |
+| `project.input.tokens.v2` | `project.input.read` | 把受限输入复制进私有存储 |
+| `project.output.v2` | `project.output.write` | 暂存、写入、校验、提交、回滚 |
+| `version.create.v2` | `project.version.create` | 从已提交制品创建版本 |
+| `component.storage.v2` | `component.storage` | 插件私有数据和 SQLite 位置 |
+| `component.settings.v2` | `component.settings` | 私有 JSON 设置 |
+| `tasks.v2` | `tasks` | 进度、检查点、取消与恢复 |
+| `dialogs.v2` | `dialogs` | 宿主管理的确认与文件选择 |
+| `component.events.v2` | `events` | 发送清单声明的版本化事件 |
+| `component.lifecycle.v2` | `component.lifecycle.read` | 读取版本、授权与生命周期状态 |
+| `component.media.v2` | `component.media` | 访问插件私有媒体 |
+| `project.progress.v2` | `project.progress` | 管理进度节点和来源关系 |
 
-视频分镜整理和 Office 图片提取已内置于主程序，不需要单独安装组件。可选组件 ZIP 通过 **设置 → 组件管理** 安装；组件运行时统一保存在：
+完整参数、限制、错误码和迁移规则见 [Host API V2 参考](docs/PLUGIN_HOST_API.md)。
 
-```text
-%LOCALAPPDATA%\PhotoFlow\components
-```
+## 安全的“媒体 → 输出 → 版本”流程
 
-不要把组件解压到照片流安装目录；打包和目录约定见 [extensions/README.md](extensions/README.md)。
+1. 使用 `project.media.page.v2` 分页读取媒体。
+2. 先用 `variants: []` 只取稳定元数据；需要像素时再请求 `thumbnail`、`preview` 或 `original`。
+3. 原图请求返回短时、一次性输入令牌，通过 `project.input.tokens.v2` 物化到插件私有存储。
+4. 调用 `project.output.v2` 的 `stage`，在私有阶段中生成文件，然后 `write` 登记并 `validate`。
+5. 使用稳定幂等键 `commit`。宿主只会把已声明的相对目标原子发布到绑定项目。
+6. 可选：用返回的 `commitId` 与 `artifactId` 调用 `version.create.v2`。
+7. 对放弃的阶段调用 `rollback`。
 
-## 快速上手
+stage 元数据和登记文件保留 24 小时，宿主重启后仍可继续校验、提交或回滚。持久化时保存 PhotoFlow ID 与插件自己的业务元数据，不要把项目路径当成业务身份。
 
-### 1. 设置工作目录与导入方式
+## 数据归属
 
-首次启动后选择一个专门存放工作项目的工作目录。正式导入前建议先检查：
+- **宿主负责**：项目、媒体索引与变体、版本、文件安全、任务中心、组件生命周期和权限账本。
+- **插件负责**：私有存储、设置结构、算法、UI 状态和业务实体。
+- 只有宿主可以把内容发布进项目；双方都不能直接修改对方数据库。
+- 卸载插件只删除代码，不自动删除插件数据。
 
-- **设置 → 导入 → 导入后保留原始文件**：开启后使用复制导入；关闭时可能移动源文件。
-- **超过 4 GB 的视频自动分割**：需要兼容 FAT32 或云盘限制时开启。
-- **生成视频预览**：大型视频较多、希望提升软件内预览速度时开启。
-- **设置 → 存储与转换**：调整缩略图缓存位置、容量和 JPG 输出质量。
-
-### 2. 创建并推进项目
-
-点击左侧 **新建项目**，填写日期、项目名称或两者。新项目默认进入“策划中”。在项目右键菜单中可以：
-
-- 切换到待拍摄、后期中或已归档；
-- 从 SD 卡导入工作素材；
-- 导入花絮；
-- 根据文件名选片；
-- 重命名或移入系统回收站。
-
-### 3. 导入拍摄素材
-
-在首页的 **从 SD 卡导入** 中选择一个或多个盘符，为每张卡指定“工作文件”或“花絮”，然后开始导入。也可以在项目工作区中直接导入普通文件、图片进度、视频进度或花絮。
-
-导入期间请不要拔出存储卡。任务可以取消，但应等待界面显示已经取消或完成后再断开设备。
-
-### 4. 选片
-
-选片存在两个方式。
-第一个方式是在项目右键菜单选择 **从文件名选片**：
-
-1. 设置图片来源目录（通常为 `raw`）和视频来源目录（通常为 `mov`）。
-2. 粘贴客户给出的文件名或编号。
-3. 开始选片，结果分别进入 `图片选片` 和 `视频选片`。
-
-第二个方式是选择图片后直接通过右键菜单选择 **选片**：
-
-图片会被自动加入到选片文件夹中。
-
-### 5. 管理后期版本
-
-在项目空白处的菜单中新建或导入图片/视频进度。开启版本跟踪后，可把新一轮后期目录与上一轮进行匹配，随后在单个素材的 **版本管理** 中查看历史、对比版本、填写说明并标记喜爱。
-
-### 6. 归档交付
-
-需要重点保留的图片可以标记为喜爱，在项目顶部集中查看和整理。项目完成后把状态移到“已归档”，工作目录中的实际文件仍保持普通文件夹结构，可继续使用资源管理器或其他软件访问。
-
-## 数据与文件安全
-
-- 所有核心项目数据均在本机处理；项目素材不会因使用本软件自动上传到网络。
-- 普通复制、移动和大型视频导入使用临时文件与完成校验，避免把不完整文件伪装成最终文件。
-- Windows 删除操作优先进入系统回收站，并记录轻量恢复信息；数据库不会保存一份完整的被删媒体副本。
-- 撤销操作会检查文件身份，避免同路径出现新文件后误删或误覆盖。
-- 缩略图和版本预览保存在应用数据/缓存目录，不污染客户项目目录。
-
-这些保护不能替代独立备份。网络盘、移动硬盘断连、磁盘空间不足和第三方文件同步仍可能造成操作失败。
-
-## 从源码运行
-
-### 环境
-
-- Windows 10/11 x64（当前主要开发平台）
-- 较新的 Node.js LTS 与 npm
-- Python 3.12 环境（推荐使用项目根目录下的 `.venv`）
-- Windows .NET Framework C# 编译器，用于构建 Shell 缩略图与回收站辅助程序
-
-### 开发启动
+## 测试
 
 ```powershell
-npm install
-npm run setup:python
-npm run electron:dev
-```
-
-`setup:python` 会创建或同步 `.venv`，安装根目录 `requirements.txt`，并验证所有
-Python worker 都能导入。仅用于导出团片 ONNX 模型的 CUDA PyTorch 依赖单独位于
-`requirements-model-export.txt`，不会进入日常开发或主程序打包环境。
-
-完整媒体与组件构建还需要相应的 FFmpeg、OpenCV、ONNX Runtime / DirectML 依赖。团片协作开发环境可通过以下命令准备：
-
-```powershell
-npm run setup:team-retouch
-```
-
-### 构建
-
-```powershell
-# 仅构建 React 渲染层
-npm run build
-
-# 构建主程序、Python worker、可选组件和 Windows 安装包
-npm run electron:build
-```
-
-构建结果统一输出到 `artifacts/`；安装包和可选组件位于 `artifacts/installers/`，不会强制把可选组件塞进主安装包。
-
-### 检查与测试
-
-```powershell
-npm run lint
-npm run check:python
+npm run test:component-host-v2
+npm run test:component-host
+npm run test:component-service
+npm run test:electron-security
 npm run test:architecture
-npm run test:file-transfer
-npm run test:filesystem-safety
-npm run test:thumbnail-pipeline
-npm run test:components
 ```
 
-仓库还包含选片、数据维护、Office 图片提取、分镜帧提取和团片协作等专项测试，具体命令见 `package.json`。
+## 发布检查清单
 
-## 技术架构
+- 用 `component-manifest-v2.schema.json` 校验清单。
+- 安装包只包含构建后的 UI、服务和运行资源。
+- 为清单声明的生命周期脚本计算并填写 SHA-256。
+- 在干净用户配置中测试安装、取消、宿主重启、升级和降级。
+- 使用真实 V1 数据验证迁移，并保留 V1 来源。
+- 每次发布提升组件业务版本；只有破坏语义兼容时才提升 RPC 或事件的 `.vN`。
 
-照片流是一个模块化的本地桌面单体应用：
+## 文档索引
 
-```text
-React + TypeScript
-        ↓ preload API
-Electron IPC 模块
-        ↓
-业务服务 / 文件服务 / 媒体服务
-        ↓
-SQLite worker · Python 工具 · FFmpeg · ONNX · Windows C# 辅助程序
-```
+- [插件开发教程](docs/PLUGIN_DEVELOPMENT.md)
+- [Component Host API V2](docs/PLUGIN_HOST_API.md)
+- [Component Service Protocol V1](docs/COMPONENT_SERVICE_PROTOCOL_V1.md)
+- [Component Host V1（仅兼容）](docs/COMPONENT_HOST_V1.md)
+- [架构边界](docs/ARCHITECTURE.md)
+- [源码边界](docs/SOURCE_BOUNDARIES.md)
 
-- `src/`：React 界面、项目工作区、设置与工具页面。
-- `electron/modules/`：按领域划分的 IPC 入口。
-- `electron/services/`：文件、媒体、缩略图、版本和后台任务工作流。
-- `electron/repositories/`：SQLite 访问边界。
-- `python/`：导入、选片、转换、媒体处理和数据库 worker。
-- `extensions/`：可独立分发的高级功能组件源码。
-- `services/`：CloudBase 等独立后端服务源码。
-- `packaging/`：安装器脚本和应用图标。
-- `artifacts/`：前端、Python、安装包和验证产物（不提交 Git）。
-- `.cache/`：模型、编译工具及媒体运行库构建缓存（不提交 Git）。
+## 许可
 
-更详细的模块边界和依赖规则见 [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)，文件操作风险与恢复策略见 [docs/FILESYSTEM_AUDIT.md](docs/FILESYSTEM_AUDIT.md)。
-
-## 版权与许可
-
-照片流自主代码属于专有软件，Copyright (c) 2026 秋也，保留所有权利。未经版权所有者明确书面授权，不得复制、修改、分发或再许可。完整条款见 [LICENSE](LICENSE)。
-
-仓库及发行包包含的第三方软件和模型继续适用各自的许可证；照片流的专有许可不覆盖或限制第三方许可证已经授予的权利。相关说明见 [开源软件与模型许可说明](docs/legal/OPEN_SOURCE_NOTICES.html)。
-
-## 反馈
-
-遇到问题时，请在 [GitHub Issues](https://github.com/akiyastudio/photoflow/issues) 中说明系统版本、照片流版本、操作步骤和错误提示。请勿上传包含客户隐私的原片；如需提供日志，请先检查并移除个人路径、文件名等敏感信息。
-
-也可以通过邮件联系：`akiyastudio@qq.com`。
-
-### 待开发
-
-项目备份盘功能。以及归档后的项目可以储存在不同的磁盘里面。
+照片流自主代码属于专有软件，Copyright (c) 2026 秋也，保留所有权利。插件作者仍需遵守 [LICENSE](LICENSE) 和所使用第三方依赖的许可证。

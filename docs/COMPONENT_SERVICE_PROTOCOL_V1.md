@@ -1,12 +1,12 @@
 # Component Service Protocol V1
 
-Component renderer code remains sandboxed in a host-owned `WebContentsView`. A component may additionally declare a supervised service in `componentHost.service`; Electron main launches that entry as a child process and never `require`s or imports component code.
+组件渲染代码继续运行在宿主管理的沙箱 `WebContentsView` 中。组件还可以在 `componentHost.service` 声明受监管服务；Electron 主进程把入口作为子进程启动，绝不 `require` 或导入组件代码。
 
-## Manifest boundary
+## 清单边界
 
-The service declaration contains a protocol version, runtime, platform entrypoint, versioned RPC method allowlist, and requested host-capability allowlist. Entries must resolve to regular, non-symlink files inside the installed component root. Unknown capabilities, unversioned methods, path traversal, absolute external paths, and unsupported runtimes are rejected while discovering the component.
+服务声明包含协议版本、运行时、平台入口、版本化 RPC 白名单和请求的 Host 能力白名单。入口必须解析为已安装组件根目录内的普通非符号链接文件。发现阶段会拒绝未知能力、无版本方法、路径穿越、外部绝对路径和不支持的运行时。
 
-The currently supported host capability vocabulary is intentionally small:
+V1 支持的 Host 能力词汇有意保持很小：
 
 - `project.media.list.v1`
 - `project.media.read.v1`
@@ -18,20 +18,22 @@ The currently supported host capability vocabulary is intentionally small:
 - `dialogs.open.v1`
 - `component.lifecycle.v1`
 
-Declaring a capability does not make it available automatically. Electron main must register a generic implementation, and the broker checks both the installed manifest grant and the bound component-page request before every call.
+声明能力不会自动使其可用。Electron 主进程必须注册通用实现；每次调用前，代理同时检查已安装清单授权和绑定组件页面请求。
 
-## Process protocol
+## 进程协议
 
-Transport is newline-delimited JSON over private stdin/stdout pipes. The service first emits `ready`, then accepts `request` frames. A service may issue a `capability` frame only while handling a known parent request. The host replies with `capability-response`; the service completes the renderer invocation with `response`.
+传输使用私有 stdin/stdout 管道上的按行 JSON。服务先发送 `ready`，再接收 `request` 帧。服务只能在处理已知父请求时发送 `capability` 帧；宿主回复 `capability-response`；服务最后以 `response` 完成渲染层调用。
 
-Raw workspace paths are retained in the host-bound context and are not sent in a service request. The service receives stable project identity only and must use an explicitly granted host capability for media, output, version, task, setting, storage, picker, or lifecycle access. Arbitrary renderer IPC channels do not exist in this protocol.
+原始工作区路径保留在宿主绑定上下文中，不会发送给服务。服务只接收稳定项目身份，并且必须通过显式授权的 Host 能力访问媒体、输出、版本、任务、设置、存储、选择器或生命周期。该协议没有任意渲染 IPC 通道。
 
-Frames and payloads are capped at 2 MiB. The launched process receives a minimal OS environment rather than the host environment, preventing unrelated credentials from being inherited. Unexpected, invalid, or oversized frames recycle the process. In-flight requests fail on exit instead of being replayed, which preserves at-most-once mutation semantics; callers must retry through an operation-specific idempotency key once a component domain defines one.
+帧和载荷上限 2 MiB。启动进程只得到最小 OS 环境，而非宿主完整环境，避免继承无关凭据。意外、无效或超限帧会触发进程回收。进程退出时，进行中的请求失败而不会自动重放，从而保持变更最多一次语义；定义组件领域幂等键后，调用方必须通过操作专属幂等键重试。
 
-## Data and migration rule
+## 数据与迁移规则
 
-Service extraction does not authorize moving or deleting component data. A domain may keep its existing physical database location during migration, but only one service generation may own the writer. Component uninstall removes code only. Snapshot, restore, health, and legacy-database adoption remain explicit host lifecycle capabilities until the generic domain lifecycle contract is complete.
+把业务抽取到服务并不授权移动或删除组件数据。迁移期可以保留旧物理数据库位置，但同时只能有一个服务代际拥有写入权。卸载组件只移除代码。快照、恢复、健康检查和旧数据库采用在通用领域生命周期合约完成前仍是显式 Host 生命周期能力。
 
-## Current migration status
+## 当前迁移状态
 
-The protocol, manifest validation, capability broker, service launcher, renderer routing fallback, supervision, and boundary tests are implemented. Team-retouch declares a Node service and owns project snapshot/registration/removal, identity save/assignment/group confirmation/deletion, person exclusion, detection, patch CRUD/upload, and merge. Those routes no longer have main-process compatibility handlers or mappings. Detection and merge execute only through the component-owned algorithm runtime; file mutations use authorization, staging/compensation, and a component command log, while merged versions are registered through the generic host capability. Identity suggestion/completion, workflow, return, and advanced-runtime routes remain on their compatibility handlers and must not be described as extracted.
+协议、清单验证、能力代理、服务启动器、渲染路由回退、监管和边界测试已经实现。团片协作声明 Node 服务，并拥有项目快照/登记/删除、身份保存/分配/分组确认/删除、人物排除、检测、patch 增删改查/上传和合并。对应路由不再有主进程兼容处理器或映射。
+
+检测与合并只通过组件自有算法运行时执行；文件变更使用授权、暂存/补偿和组件命令日志，合并版本通过通用 Host 能力登记。身份建议/完成、工作流、回传和高级运行时路由仍走兼容处理器，不能描述为已经抽取。

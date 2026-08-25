@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 const readline = require('readline/promises');
 const { stdin, stdout } = require('process');
+const releaseConfig = require('./release-config.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const releaseRoot = path.join(repositoryRoot, 'artifacts', 'installers');
@@ -49,24 +50,31 @@ const findInstaller = version => {
   return candidates[0].path;
 };
 
-const findPreviousDownloadUrl = () => {
-  if (!fs.existsSync(outputRoot)) return '';
-  const candidates = fs.readdirSync(outputRoot)
-    .filter(name => /^app-release-.*\.json$/i.test(name))
-    .map(name => {
-      const filePath = path.join(outputRoot, name);
-      try {
-        const record = JSON.parse(fs.readFileSync(filePath, 'utf8'));
-        const downloadUrl = String(record.downloadUrl || '').trim();
-        if (new URL(downloadUrl).protocol !== 'https:') return undefined;
-        return { downloadUrl, publishedAt: Date.parse(record.publishedAt) || fs.statSync(filePath).mtimeMs };
-      } catch {
-        return undefined;
-      }
-    })
-    .filter(Boolean)
-    .sort((left, right) => right.publishedAt - left.publishedAt);
-  return candidates[0]?.downloadUrl || '';
+const publishRelease = async record => {
+  const token = String(process.env.PHOTOFLOW_ADMIN_TOKEN || '').trim();
+  if (!token) throw new Error('缺少 PHOTOFLOW_ADMIN_TOKEN 环境变量，无法写入 release 数据库');
+  const apiBaseUrl = String(releaseConfig.apiBaseUrl || '').trim().replace(/\/+$/, '');
+  if (!/^https:\/\//i.test(apiBaseUrl)) throw new Error('electron/cloud-config.cjs 中缺少有效的 HTTPS apiBaseUrl');
+
+  const response = await fetch(`${apiBaseUrl}/v1/admin/releases`, {
+    method: 'POST',
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json; charset=utf-8',
+    },
+    body: JSON.stringify(record),
+    signal: AbortSignal.timeout(15_000),
+  });
+  const text = await response.text();
+  let body;
+  try { body = text ? JSON.parse(text) : {}; }
+  catch { body = { raw: text.slice(0, 500) }; }
+  if (!response.ok) {
+    const detail = body.error || body.raw || `${response.status} ${response.statusText}`;
+    throw new Error(`写入 release 数据库失败：${detail}`);
+  }
+  if (body.saved !== true || body.id !== record._id) throw new Error('release 数据库返回了无法确认的写入结果');
+  return body;
 };
 
 const run = async () => {
@@ -81,8 +89,8 @@ const run = async () => {
   try {
     const installerPath = path.resolve(args.installer || findInstaller(version));
     if (!fs.statSync(installerPath).isFile()) throw new Error(`安装包不存在：${installerPath}`);
-    const downloadUrl = String(args.url || findPreviousDownloadUrl()).trim();
-    if (!downloadUrl) throw new Error('没有找到可沿用的 HTTPS 下载链接；请首次运行时使用 --url 指定');
+    const downloadUrl = String(args.url || releaseConfig.downloadUrl || '').trim();
+    if (!downloadUrl) throw new Error('scripts/release-config.cjs 中没有配置固定下载链接');
     let parsedUrl;
     try { parsedUrl = new URL(downloadUrl); } catch { throw new Error('下载链接格式无效'); }
     if (parsedUrl.protocol !== 'https:') throw new Error('下载链接必须使用 HTTPS');
@@ -92,10 +100,7 @@ const run = async () => {
     if (!notes) notes = '修复了若干问题并提升稳定性。';
     if (notes.length > 4000) throw new Error('更新说明不能超过 4000 个字符');
 
-    const interactiveMandatory = args.mandatory === undefined
-      ? await terminal.question('是否强制更新？[y/N]：')
-      : args.mandatory;
-    const mandatory = booleanValue(interactiveMandatory, false);
+    const mandatory = booleanValue(args.mandatory, false);
     const published = booleanValue(args.published, true);
     const sha256 = await sha256File(installerPath);
     const versionCode = versionParts[0] * 10_000 + versionParts[1] * 100 + versionParts[2];
@@ -120,10 +125,14 @@ const run = async () => {
     JSON.parse(fs.readFileSync(temporaryPath, 'utf8'));
     fs.renameSync(temporaryPath, outputPath);
 
+    const shouldPublish = booleanValue(args.publish, false);
+    if (shouldPublish) await publishRelease(record);
+
     console.log('\n发布 JSON 已生成：');
     console.log(outputPath);
     console.log(`安装包：${installerPath}`);
     console.log(`SHA-256：${sha256}`);
+    if (shouldPublish) console.log(`release 数据库：已写入 ${record._id}`);
     console.log('\n可导入 CloudBase 的内容：\n');
     console.log(JSON.stringify(record, null, 2));
   } finally {

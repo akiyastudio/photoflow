@@ -410,11 +410,12 @@ const registerVersionIpc = context => {
       const mediaKind = String(request.mediaKind || '');
       const sourceProgressId = String(request.sourceProgressId || '').trim();
       if (!projectName || !relativePath || relativePath.split('/').some(part => !part || part === '.' || part === '..')
-        || !['original', 'companion', 'preview', 'broll'].includes(mode)
-        || (mode === 'broll' ? mediaKind !== 'mixed' : !['image', 'video'].includes(mediaKind))) {
+        || !['original', 'companion', 'preview', 'transcode', 'broll'].includes(mode)
+        || (mode === 'broll' ? mediaKind !== 'mixed' : !['image', 'video'].includes(mediaKind))
+        || mode === 'transcode' && mediaKind !== 'video') {
         throw new Error('media_adopt_payload_invalid: 项目内相对路径和素材类型必填');
       }
-      if ((mode === 'original' || mode === 'broll') && sourceProgressId || (mode === 'companion' || mode === 'preview') && !sourceProgressId) {
+      if ((mode === 'original' || mode === 'broll') && sourceProgressId || (mode === 'companion' || mode === 'preview' || mode === 'transcode') && !sourceProgressId) {
         throw new Error('media_adopt_payload_invalid: 来源节点无效');
       }
       const resolution = projectVirtualPaths.resolve(path.resolve(getProjectPath(workspacePath, status, projectName)), relativePath, { externalRootMode: 'target' });
@@ -471,7 +472,7 @@ const registerVersionIpc = context => {
     const targetProgressId = String(request?.targetProgressId || '');
     const edgeKind = String(request?.edgeKind || '');
     if (!projectId || !sourceProgressId || !targetProgressId
-      || !['media_companion', 'derived_preview', 'workflow_input'].includes(edgeKind)) {
+      || !['media_companion', 'derived_preview', 'derived_transcode', 'workflow_input'].includes(edgeKind)) {
       throw new Error('version_graph_edge_payload_invalid: 项目、节点或关系类型无效');
     }
     return mutation(workspaceRoot, { projectId, sourceProgressId, targetProgressId, edgeKind });

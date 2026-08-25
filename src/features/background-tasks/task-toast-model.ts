@@ -5,6 +5,23 @@ const RESULT_TOAST_MS = 6_000;
 const TERMINAL_TASK_STATES = new Set<BackgroundTask['state']>(['completed', 'failed', 'cancelled', 'interrupted']);
 const ACTIVE_TASK_STATES = new Set<BackgroundTask['state']>(['queued', 'running', 'pausing', 'paused', 'resuming']);
 
+const twoDigits = (value: number) => String(value).padStart(2, '0');
+
+export const formatBackgroundTaskStartedAt = (value: number, now = Date.now()) => {
+  const timestamp = Number(value);
+  if (!Number.isFinite(timestamp) || timestamp <= 0) return '';
+  const startedAt = new Date(timestamp);
+  if (Number.isNaN(startedAt.getTime())) return '';
+
+  const reference = new Date(now);
+  const time = `${twoDigits(startedAt.getHours())}:${twoDigits(startedAt.getMinutes())}`;
+  const sameYear = !Number.isNaN(reference.getTime()) && startedAt.getFullYear() === reference.getFullYear();
+  if (sameYear && startedAt.getMonth() === reference.getMonth() && startedAt.getDate() === reference.getDate()) return time;
+
+  const date = `${twoDigits(startedAt.getMonth() + 1)}/${twoDigits(startedAt.getDate())}`;
+  return sameYear ? `${date} ${time}` : `${startedAt.getFullYear()}/${date} ${time}`;
+};
+
 export const normalizeBackgroundTaskSnapshots = (tasks: BackgroundTask[], limit = 200) => {
   const retained = tasks.filter(task => task.historyPolicy !== 'ephemeral' && !TERMINAL_TASK_STATES.has(task.state));
   const history = tasks

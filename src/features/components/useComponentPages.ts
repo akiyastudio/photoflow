@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ComponentHostAction, ComponentPageInstance, ComponentPageOpenScope, ComponentStatus, WorkspaceProject } from '../../types';
-import { bindComponentPageInstance, closeComponentPage, closeProjectComponentPages, ensureComponentPage } from './component-page-model';
+import { bindComponentPageInstance, closeComponentPage, closeProjectComponentPages, componentPageActivationSucceeded, componentPageIsAvailable, ensureComponentPage } from './component-page-model';
 
 type ComponentHostBrowserPage = { id: string; projectId: string; project?: WorkspaceProject | null };
 
@@ -22,11 +22,39 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     return () => { active = false; };
   }, [components]);
 
-  const deactivate = useCallback(() => { void window.electronAPI.activateComponentPage(''); }, []);
-  const activate = useCallback((page: ComponentPageInstance) => {
-    setActiveIdentity(page.identity);
-    if (page.instanceId) void window.electronAPI.activateComponentPage(page.instanceId);
-  }, []);
+  useEffect(() => {
+    const installedIds = new Set(components.filter(component => component.installed).map(component => component.id));
+    const unavailablePages = pages.filter(page => !installedIds.has(page.componentId));
+    if (!unavailablePages.length) return;
+    unavailablePages.forEach(page => { if (page.instanceId) void window.electronAPI.closeComponentPage(page.instanceId).catch(() => undefined); });
+    setPages(current => current.filter(page => installedIds.has(page.componentId)));
+    if (unavailablePages.some(page => page.identity === activeIdentity)) setActiveIdentity('');
+  }, [activeIdentity, components, pages]);
+
+  useEffect(() => {
+    const unavailablePages = pages.filter(page => !componentPageIsAvailable(page, components));
+    if (!unavailablePages.length) return;
+    unavailablePages.forEach(page => { if (page.instanceId) void window.electronAPI.closeComponentPage(page.instanceId).catch(() => undefined); });
+    setPages(current => current.filter(page => componentPageIsAvailable(page, components)));
+    const activeUnavailable = unavailablePages.find(page => page.identity === activeIdentity);
+    if (activeUnavailable) {
+      setActiveIdentity('');
+      const projectPage = browserPages.find(candidate => candidate.projectId === activeUnavailable.projectId && candidate.project);
+      if (projectPage) onProjectFallback(projectPage); else onHomeFallback();
+    }
+  }, [activeIdentity, browserPages, components, onHomeFallback, onProjectFallback, pages]);
+
+  const deactivate = useCallback(() => window.electronAPI.activateComponentPage('').catch(() => ({ success: false })), []);
+  const activate = useCallback(async (page: ComponentPageInstance) => {
+    const result = page.instanceId ? await window.electronAPI.activateComponentPage(page.instanceId).catch(() => ({ success: false })) : { success: false };
+    if (componentPageActivationSucceeded(result)) { setActiveIdentity(page.identity); return true; }
+    setPages(current => closeComponentPage(current, page.identity));
+    setActiveIdentity(current => current === page.identity ? '' : current);
+    onNotice('组件页已失效，请重新打开', 5000);
+    const projectPage = browserPages.find(candidate => candidate.projectId === page.projectId && candidate.project);
+    if (projectPage) onProjectFallback(projectPage); else onHomeFallback();
+    return false;
+  }, [browserPages, onHomeFallback, onNotice, onProjectFallback]);
   const open = useCallback(async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string, insertAfterTabId = 'home', scope?: ComponentPageOpenScope) => {
     const ensured = ensureComponentPage(pages, action, project, workspacePath, insertAfterTabId);
     setPages(current => ensureComponentPage(current, action, project, workspacePath, insertAfterTabId).pages);

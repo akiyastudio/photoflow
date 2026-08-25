@@ -121,11 +121,15 @@ const manifestCompatibilityError = (manifest, platform, arch) => {
     if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max < min) return '组件 Host API 兼容范围无效';
     const negotiated = Math.min(COMPONENT_HOST_API_VERSION, max);
     if (negotiated < Math.max(COMPONENT_HOST_MIN_API_VERSION, min)) return `组件 Host API ${COMPONENT_HOST_MIN_API_VERSION}-${COMPONENT_HOST_API_VERSION} 与支持范围 ${min}-${max} 不重叠`;
-    if (Number(host.contractVersion) === 2 && negotiated !== 2) return '组件 Host V2 需要 Host API 2';
+    if (Number(host.contractVersion) === 2 && negotiated < 2) return '组件 Host V2 需要 Host API 2 或更高版本';
     const contributions = Array.isArray(host.contributions) ? host.contributions : [];
     const toolbarCount = contributions.filter(item => item?.type === 'workspace.toolbarAction').length;
     const pageCount = contributions.filter(item => item?.type === 'component.fullPage').length;
-    if (toolbarCount !== 1 || pageCount !== 1 || contributions.length !== 2) return '页面组件必须贡献一个 toolbarAction 和一个 fullPage';
+    const settingsPageCount = contributions.filter(item => item?.type === 'application.settingsPage').length;
+    if (Number(host.contractVersion) === 1 && settingsPageCount) return '设置页贡献需要 Component Host V2';
+    if (settingsPageCount && negotiated < 3) return '设置页贡献需要 Host API 3';
+    if (settingsPageCount && min < 3) return '设置页贡献需要 minHostApiVersion 3 或更高版本';
+    if (toolbarCount !== 1 || pageCount !== 1 || settingsPageCount > 16 || contributions.length !== 2 + settingsPageCount) return '页面组件必须贡献一个 toolbarAction、一个 fullPage，并可选贡献设置页';
   }
   const entrypoints = manifest.entrypoints || {};
   const relativeEntry = entrypoints[`${platform}-${arch}`] || entrypoints[platform] || entrypoints.default;
@@ -142,7 +146,7 @@ const packageContentsError = (packageManifest, platform, arch) => {
   const required = [
     entrypoints[`${platform}-${arch}`] || entrypoints[platform] || entrypoints.default,
     ...(Array.isArray(packageManifest.manifest.requiredFiles) ? packageManifest.manifest.requiredFiles : []),
-    ...(Array.isArray(host?.contributions) ? host.contributions.filter(item => item?.type === 'component.fullPage').map(item => item.entry) : []),
+    ...(Array.isArray(host?.contributions) ? host.contributions.filter(item => ['component.fullPage', 'application.settingsPage'].includes(item?.type)).map(item => item.entry) : []),
     ...(host?.service ? [serviceEntries[`${platform}-${arch}`] || serviceEntries[platform] || serviceEntries.default] : []),
     ...Object.values(host?.service?.lifecycleActions || {}).map(action => action?.entry),
   ].filter(Boolean);
@@ -189,7 +193,15 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     if (manifest.id !== id) throw new Error(`组件 ID 不匹配：${manifest.id || '未填写'}`);
     const entrypoints = manifest.entrypoints || {};
     const relativeEntry = entrypoints[`${platform}-${arch}`] || entrypoints[platform] || entrypoints.default;
-    const files = [...new Set(['component.json', relativeEntry, ...(Array.isArray(manifest.requiredFiles) ? manifest.requiredFiles : [])].filter(Boolean).map(normalizeRelativeFile))].sort();
+    const host = manifest.componentHost || {};
+    const serviceEntries = host.service?.entrypoints || {};
+    const serviceEntry = serviceEntries[`${platform}-${arch}`] || serviceEntries[platform] || serviceEntries.default;
+    const declaredEntries = [
+      ...(Array.isArray(host.contributions) ? host.contributions.map(item => item?.entry) : []),
+      serviceEntry,
+      ...Object.values(host.service?.lifecycleActions || {}).map(action => action?.entry),
+    ];
+    const files = [...new Set(['component.json', relativeEntry, ...declaredEntries, ...(Array.isArray(manifest.requiredFiles) ? manifest.requiredFiles : [])].filter(Boolean).map(normalizeRelativeFile))].sort();
     return files.map(file => {
       const absolute = path.resolve(componentRoot, file); const stat = fs.lstatSync(absolute, { throwIfNoEntry: false });
       if (!validArchivePath(file) || !isInside(componentRoot, absolute) || !stat?.isFile() || stat.isSymbolicLink()) throw new Error(`组件文件不存在或类型不安全：${file}`);

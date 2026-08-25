@@ -5,6 +5,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
 const { advancedStateFromProbe, componentDataRoot, createComponentLifecycleService } = require('../electron/services/component-lifecycle-service.cjs');
+const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-component-lifecycle-'));
 const componentRoot = path.join(sandbox, 'component');
@@ -58,8 +59,13 @@ const descriptor = {
     assert.equal((await service.invokeV2({ action: 'describe' }, {}, v2Descriptor)).negotiatedHostApiVersion, 2);
     assert.equal((await service.invokeV2({ action: 'preflight' }, {}, v2Descriptor)).success, true, 'V2 executes only the declared and hash-verified lifecycle entry');
     assert(componentDataRoot(component).endsWith(path.join('PhotoFlow', 'components', 'team-retouch')), 'Host derives one controlled component data root from the verified install root');
-    await assert.rejects(service.invokeV2({ action: 'preflight', path: 'C:/escape.ps1' }, {}, v2Descriptor), /does not accept commands/);
-    await assert.rejects(service.invokeV2({ action: 'preflight' }, {}, { ...v2Descriptor, service: { ...v2Descriptor.service, permissions: ['component.lifecycle.read'] } }), /permission is not granted/);
+    assert.throws(() => service.invokeV2({ action: 'preflight', path: 'C:/escape.ps1' }, {}, v2Descriptor), /does not accept commands/);
+    const deniedDescriptor = { ...v2Descriptor, service: { ...v2Descriptor.service, capabilities: ['component.lifecycle.v2'], permissions: ['component.lifecycle.read'] } };
+    assert.throws(() => service.invokeV2({ action: 'preflight' }, {}, deniedDescriptor), /permission is not granted/);
+    const lifecycleBroker = new ComponentCapabilityBroker(); lifecycleBroker.register('component.lifecycle.v2', service.invokeV2);
+    assert.throws(() => lifecycleBroker.invoke(deniedDescriptor, 'component.lifecycle.v2', { action: 'preflight' }, {}), /permission is not granted/, 'real broker + lifecycle handler denial must throw synchronously before the manager can long-arm');
+    const acceptedLifecycle = lifecycleBroker.invoke({ ...v2Descriptor, service: { ...v2Descriptor.service, capabilities: ['component.lifecycle.v2'] } }, 'component.lifecycle.v2', { action: 'preflight' }, {});
+    assert(acceptedLifecycle instanceof Promise, 'an authorized manage action returns the accepted async invocation'); await acceptedLifecycle;
     const escaped = { ...descriptor, service: { lifecycleActions: { 'advanced.preflight': { entry: scriptPath, relativeEntry: '../actions/fixture-action.ps1', sha256: digest } } } };
     component.source = 'user';
     await assert.rejects(service.resolveAction(escaped, 'advanced.preflight'), /escapes verified component root/);

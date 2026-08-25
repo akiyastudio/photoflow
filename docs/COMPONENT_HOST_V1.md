@@ -1,12 +1,12 @@
 # Component Host V1
 
-> Deprecated for new development. Installed V1 components continue through the isolated compatibility adapters. Use [PLUGIN_DEVELOPMENT.md](PLUGIN_DEVELOPMENT.md) and [PLUGIN_HOST_API.md](PLUGIN_HOST_API.md) for Component Host V2.
+> 新开发已弃用。已安装 V1 组件继续通过隔离兼容适配器运行。新组件请使用 [插件开发教程](PLUGIN_DEVELOPMENT.md) 和 [Host API V2](PLUGIN_HOST_API.md)。
 
-Component Host V1 is the only supported path for optional component UI. PhotoFlow reads a component's `component.json`, renders one host-owned button in the dedicated **UI 组件** group at the top of a project folder workspace, and opens one independent full-page component tab. A component cannot contribute React code to PhotoFlow's renderer.
+Component Host V1 是旧版可选组件 UI 路径。PhotoFlow 读取组件 `component.json`，在项目目录工作区顶部的 **UI 组件** 分组渲染一个宿主管理按钮，并打开独立全页组件标签。组件不能向 PhotoFlow 渲染层贡献 React 代码。
 
-V1 deliberately does not support file-list decorations, context-menu items, media-preview overlays, ordinary settings pages, DOM injection, or advanced-video playback. Existing native `apiVersion: 1` components remain on the legacy process-capability path when `componentHost` is absent.
+V1 不支持文件列表装饰、右键菜单、媒体预览覆盖层、普通设置页、DOM 注入或高级视频播放。缺少 `componentHost` 的旧原生 `apiVersion:1` 组件继续走旧进程能力路径。
 
-## Manifest contract
+## 清单合约
 
 ```json
 {
@@ -37,31 +37,26 @@ V1 deliberately does not support file-list decorations, context-menu items, medi
 }
 ```
 
-The host discovers manifests under component roots dynamically; UI component IDs and business versions are not compiled into the host catalog. V1 requires exactly one toolbar action linked to exactly one full page. Unknown contribution types, incompatible API ranges, malformed IDs, duplicate contributions, missing files, symlinks, and entries outside the component root reject the complete UI registration.
+宿主在组件根目录下动态发现清单；UI 组件 ID 和业务版本不会编译进宿主目录。V1 要求恰好一个工具栏动作连接恰好一个全页。未知贡献、API 范围不兼容、ID 格式错误、重复贡献、缺失文件、符号链接和组件根外入口都会使整套 UI 注册失败。
 
-## Isolation and lifecycle
+## 隔离与生命周期
 
-Every page runs in a host-owned `WebContentsView` with `nodeIntegration:false`, `contextIsolation:true`, `sandbox:true`, and `webviewTag:false`. Window creation, navigation, webviews, and permissions are denied. The component entry never chooses its preload.
+每个页面运行在宿主管理的 `WebContentsView` 中，设置 `nodeIntegration:false`、`contextIsolation:true`、`sandbox:true`、`webviewTag:false`。新窗口、导航、WebView 和权限均被拒绝，组件不能选择 preload。
 
-The host binds each SDK request to the exact component `webContents` sender. `window.photoFlowComponent` exposes only `contractVersion`, `getContext()`, `rpc()`, `onEvent()`, `onActivate()`, and `onDeactivate()`. RPC methods are versioned, owned by one component ID, registered from an explicit mapping, and filter payload fields before dispatch. Workspace and project identity come from the bound page instance. Unknown methods, event topics, fields, senders, and component owners fail closed. The SDK never exposes `ipcRenderer`, arbitrary channels, arbitrary filesystem primitives, or the main renderer's `electronAPI`.
+宿主把每个 SDK 请求绑定到准确的组件 `webContents` 发送方。`window.photoFlowComponent` 只暴露 `contractVersion`、`getContext()`、`rpc()`、`onEvent()`、`onActivate()`、`onDeactivate()`。RPC 必须版本化、属于单一组件 ID、来自显式映射，并在调度前过滤字段。工作区和项目身份来自绑定页面。未知方法、事件主题、字段、发送方和组件所有者默认拒绝。SDK 不暴露 `ipcRenderer`、任意通道、任意文件系统原语或主渲染层 `electronAPI`。
 
-The page key is `componentId + normalized workspace path + projectId`. Repeated toolbar clicks focus the existing page. Closing a page destroys its view; closing the last page for a project or deleting/closing the project closes every component view for that project. Bounds are supplied by a host-owned empty surface in the application renderer; component DOM is never mounted into PhotoFlow's React tree.
+页面键为 `componentId + 规范化工作区路径 + projectId`。重复点击工具栏会聚焦已有页面。关闭页面会销毁 view；关闭项目最后页面或删除/关闭项目会关闭该项目全部组件 view。组件 DOM 永不挂载进 PhotoFlow React 树。
 
-## First-party team-retouch package
+## 一方团片协作包
 
-`extensions/team-retouch` is the first first-party UI package. Its manifest, copy, icon, independent renderer source, Python backend, models, algorithms, and advanced-environment scripts live with the component package inputs. `npm run build:team-retouch-renderer` emits a standalone static renderer. `scripts/build-components.cjs` always builds it before the native runtime and copies it into the package's `ui/` directory. Production `component.json` points only to `ui/index.html` inside the installed component.
+`extensions/team-retouch` 是首个一方 UI 包。清单、文案、图标、独立渲染源码、Python 后端、模型、算法和高级环境脚本都位于组件包输入中。`npm run build:team-retouch-renderer` 生成独立静态渲染层；`scripts/build-components.cjs` 在原生运行时前构建并复制到包的 `ui/`。生产清单只指向已安装组件内的 `ui/index.html`。
 
-The main React renderer contains no team-retouch manager, identity manager, step UI, toolbar action, context-menu action, embedded panel, settings contribution, or `workspace-team-*` preload API. It renders only the manifest-derived toolbar button and host-owned page chrome. The component page owns detection, identity, workflow, return, merge, and settings UI.
+主 React 渲染层不包含团片管理器、身份管理器、步骤 UI、工具栏/右键动作、嵌入面板、设置贡献或 `workspace-team-*` preload API。它只渲染清单生成的按钮和宿主管理页面外壳；检测、身份、工作流、回传、合并和设置 UI 都由组件页面拥有。
 
-Every manifest-declared `team.*` RPC is implemented by `extensions/team-retouch/service.cjs`; none maps to a `workspace-team-*` renderer IPC handler. Detection, identity inference, recropping, merging, return ingestion, and post-install advanced-runtime probing run inside the component service. The application process does not compose a team-retouch repository, database worker, project-purge command handler, or algorithm invocation.
+清单声明的 `team.*` RPC 均由 `extensions/team-retouch/service.cjs` 实现，不映射到 `workspace-team-*` 渲染 IPC。检测、身份推断、重新裁切、合并、回传导入和安装后高级运行时探测都在组件服务内运行。
 
-The advanced WSL environment has its own `advancedRuntime.apiVersion`, independent from the component release version. New offline packages are accepted when that API version matches. Packages created before the API field existed are accepted only when their component version appears in the reviewed `compatibleLegacyComponentVersions` manifest list, so UI/service releases do not force a multi-gigabyte WSL rebuild without weakening compatibility checks.
+高级 WSL 环境有独立 `advancedRuntime.apiVersion`，不等同组件发行版本。新离线包必须匹配该 API；旧包只在组件版本进入已审查 `compatibleLegacyComponentVersions` 时兼容，从而避免 UI/服务发布强制重建多 GB 环境。
 
-The remaining host references are compatibility and trust-boundary identifiers, not business implementations:
+宿主中剩余团片引用只用于兼容和信任边界：备份/恢复保留旧数据库；系统模块验证安装包发现与清理；生命周期服务验证高级包和路径；项目能力服务把存储、媒体/输出、对话框、设置和任务事件绑定到已安装清单和当前项目，不实现团片算法或持久化。
 
-- `electron/main.cjs` and `electron/services/backup-service.cjs` retain the `team-retouch.sqlite3` path/domain name so backup, restore, reset, and recovery continue to preserve existing component data.
-- `electron/modules/system-ipc.cjs` retains the component package root and advanced-package filename pattern for validated install-package discovery and cleanup.
-- `electron/services/component-lifecycle-service.cjs` retains the signed advanced-package pattern and lifecycle path policy; the component service performs the runtime probe.
-- `electron/services/component-project-capabilities.cjs` retains the `team-retouch` owner checks that bind storage, project media/output, dialogs, settings, and task events to the installed manifest and current project. These checks grant bounded host resources and do not implement team algorithms or persistence.
-
-Uninstalling the component does not delete data; a missing or malformed component only removes its dynamic action.
+卸载组件不会删除数据；组件缺失或清单错误只会移除动态入口。

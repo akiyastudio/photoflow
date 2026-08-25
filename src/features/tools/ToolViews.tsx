@@ -26,7 +26,12 @@ interface PythonEvent {
   progress?: number;
   scriptName?: string;
   requestId?: string;
+  outputs?: string[];
+  folderOutputs?: VideoTranscodeFolderOutput[];
 }
+
+export type VideoTranscodeFolderOutput = { sourceFolder: string; outputFolder: string };
+type PythonTaskCompletion = { requestId: string; event: PythonEvent };
 
 type ImportTransferStats = {
   bytesCopied: number;
@@ -61,11 +66,13 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState(initialStatus);
   const [preview, setPreview] = useState<Record<string, any> | null>(null);
+  const [completion, setCompletion] = useState<PythonTaskCompletion | null>(null);
   const requestIdRef = React.useRef('');
   const taskHadErrorRef = React.useRef(false);
   const taskHadSuccessRef = React.useRef(false);
   const taskCancelledRef = React.useRef(false);
   const taskAwaitingPreviewRef = React.useRef(false);
+  const successEventRef = React.useRef<PythonEvent | null>(null);
   const pendingLogsRef = React.useRef<LogEntry[]>([]);
   const logFlushTimerRef = React.useRef<number | null>(null);
   const appendLog = React.useCallback((message: string, type: LogEntry['type']) => {
@@ -93,6 +100,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
         appendLog(event.message, type);
         if (event.type === 'success') {
           taskHadSuccessRef.current = true;
+          successEventRef.current = event;
           setProgress(100);
           setStatusMsg('正在结束任务…');
         } else if (event.type === 'error') {
@@ -128,6 +136,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
         } else {
           setProgress(100);
           setStatusMsg('处理完成');
+          setCompletion({ requestId: event.requestId || requestIdRef.current, event: successEventRef.current || event });
         }
       }
     });
@@ -143,6 +152,8 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
     taskHadSuccessRef.current = false;
     taskCancelledRef.current = false;
     taskAwaitingPreviewRef.current = false;
+    successEventRef.current = null;
+    setCompletion(null);
     setPreview(null);
     setProgress(0);
     setIsRunning(true);
@@ -170,7 +181,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
     return result.success;
   };
 
-  return { logs, isRunning, isCancelling, progress, statusMsg, preview, clearPreview: () => setPreview(null), start, cancel };
+  return { logs, isRunning, isCancelling, progress, statusMsg, preview, completion, clearPreview: () => setPreview(null), start, cancel };
 };
 
 const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, startupAutoImportRequest = null, startupAutoImportReady = false, startupAutoImportError = null, startupAutoImportSelections = [], importKind, onImportKindChange, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitVideosOnImport = false, transcodeVideosOnImport = false, splitBrollVideosOnImport = false, transcodeBrollVideosOnImport = false, transcodeSettings, onChooseSourceFiles, onChooseSourceFolder, onDropSourcePaths, onLinkOnlyImport, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], storageDevices?: StorageDevice[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, startupAutoImportRequest?: StartupSdAutoImportRequest | null, startupAutoImportReady?: boolean, startupAutoImportError?: string | null, startupAutoImportSelections?: Array<{ path: string; type: 'work' | 'broll' }>, importKind?: ImportMaterialKind, onImportKindChange?: (kind: ImportMaterialKind, sourcePaths: string[]) => void, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitVideosOnImport?: boolean, transcodeVideosOnImport?: boolean, splitBrollVideosOnImport?: boolean, transcodeBrollVideosOnImport?: boolean, transcodeSettings?: VideoTranscodeSettings, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onDropSourcePaths?: (paths: string[]) => void, onLinkOnlyImport?: (paths: string[]) => void | Promise<void>, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
@@ -2127,6 +2138,7 @@ type VideoTranscodeViewProps = {
   initialSettings?: VideoTranscodeSettings;
   onSettingsChange?: (settings: VideoTranscodeSettings) => void;
   settingsOnly?: boolean;
+  onFolderTranscodeComplete?: (folderOutputs: VideoTranscodeFolderOutput[]) => void | Promise<void>;
 };
 
 const normalizedWindowsPath = (value: string) => value.replace(/\//g, '\\').replace(/\\+$/g, '');
@@ -2145,7 +2157,7 @@ const videoPathIsInside = (value: string, folder: string) => {
   return normalizedValue === normalizedFolder || normalizedValue.startsWith(`${normalizedFolder}\\`);
 };
 
-const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initialSourceFolders = [], sourcesLoading = false, initialSettings, onSettingsChange, settingsOnly = false }: VideoTranscodeViewProps) => {
+const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initialSourceFolders = [], sourcesLoading = false, initialSettings, onSettingsChange, settingsOnly = false, onFolderTranscodeComplete }: VideoTranscodeViewProps) => {
   const initialTargetKey = initialTargetPaths.join('\n');
   const initialSourceFolderKey = initialSourceFolders.join('\n');
   const [pathsText, setPathsText] = useState(initialTargetKey);
@@ -2159,7 +2171,8 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   const [audioMode, setAudioMode] = useState<VideoTranscodeSettings['audioMode']>(initialSettings?.audioMode ?? 'aac');
   const [outputMode, setOutputMode] = useState<'new' | 'replace'>('new');
   const onSettingsChangeRef = React.useRef(onSettingsChange);
-  const { logs, isRunning, isCancelling, progress, statusMsg, start, cancel } = usePythonTask('ffmpeg_transcode.py', '等待选择视频');
+  const { logs, isRunning, isCancelling, progress, statusMsg, completion, start, cancel } = usePythonTask('ffmpeg_transcode.py', '等待选择视频');
+  const handledCompletionRef = React.useRef('');
   const paths = useMemo(() => [...new Set(pathsText.split(/\r?\n/).map(value => value.trim().replace(/^"|"$/g, '')).filter(Boolean))], [pathsText]);
   const activeSourceFolders = useMemo(() => sourceFolders.filter(folder => paths.some(path => videoPathIsInside(path, folder))), [paths, sourceFolders]);
   const videoGroups = useMemo(() => {
@@ -2220,6 +2233,12 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   useEffect(() => {
     if ((paths.length !== 1 || activeSourceFolders.length) && outputMode === 'replace') setOutputMode('new');
   }, [activeSourceFolders.length, paths.length, outputMode]);
+  useEffect(() => {
+    if (!completion || handledCompletionRef.current === completion.requestId) return;
+    handledCompletionRef.current = completion.requestId;
+    const folderOutputs = Array.isArray(completion.event.folderOutputs) ? completion.event.folderOutputs : [];
+    if (folderOutputs.length) void onFolderTranscodeComplete?.(folderOutputs);
+  }, [completion, onFolderTranscodeComplete]);
 
   const addDroppedFiles = (event: React.DragEvent) => {
     event.preventDefault();

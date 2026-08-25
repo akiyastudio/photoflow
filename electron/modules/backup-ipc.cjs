@@ -130,7 +130,7 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain, 
       });
       if (selected.canceled || !selected.filePaths[0]) return { success: false, cancelled: true };
       const result = await backupService.restoreWorkspace(workspacePath, snapshotId, selected.filePaths[0]);
-      return { success: true, workspacePath: result?.result?.workspacePath || path.resolve(selected.filePaths[0]) };
+      return { success: true, workspacePath: result?.result?.workspacePath || path.resolve(selected.filePaths[0]), savedConfig: result?.result?.savedConfig };
     } catch (error) {
       writeLog('error', 'Workspace restore failed', error);
       return { success: false, error: error.message || String(error) };

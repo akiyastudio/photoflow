@@ -58,29 +58,51 @@ assert.equal(versionService.listTeamPatches, undefined, 'the production media re
 const manifestRoot = path.join(sandbox, 'manifest');
 fs.mkdirSync(path.join(manifestRoot, 'ui'), { recursive: true });
 fs.writeFileSync(path.join(manifestRoot, 'ui', 'index.html'), '<!doctype html>');
+fs.writeFileSync(path.join(manifestRoot, 'ui', 'settings.html'), '<!doctype html>');
 fs.writeFileSync(path.join(manifestRoot, 'service.cjs'), '');
 const allV2Capabilities = [...HOST_CAPABILITIES].filter(value => value.endsWith('.v2'));
 const allPermissions = ['project.media.read', 'project.input.read', 'project.output.write', 'project.version.create', 'component.storage', 'component.settings', 'tasks', 'dialogs', 'events', 'component.lifecycle.read', 'component.lifecycle.manage', 'component.media', 'project.progress'];
 const manifest = {
   apiVersion: 1, id: 'fixture-component', version: '1.0.0',
   componentHost: {
-    contractVersion: 2, compatibility: { minHostApiVersion: 2, maxHostApiVersion: 3 },
+    contractVersion: 2, compatibility: { minHostApiVersion: 3, maxHostApiVersion: 3 },
     migrations: { legacyStorageV1: true, legacyOutputV1: true },
     contributions: [
       { type: 'workspace.toolbarAction', id: 'open', label: 'Fixture', pageId: 'main' },
       { type: 'component.fullPage', id: 'main', title: 'Fixture', entry: 'ui/index.html' },
+      { type: 'application.settingsPage', id: 'settings', label: 'Fixture settings', title: 'Fixture settings page', entry: 'ui/settings.html', rpcMethods: ['fixture.settings.v1'] },
     ],
     service: {
-      protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1'],
+      protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1', 'fixture.settings.v1'],
       capabilities: allV2Capabilities, permissions: allPermissions, events: ['fixture.progress.v1'], runtimeActions: [],
     },
   },
 };
 const descriptor = parseComponentHostManifest(manifest, manifestRoot);
-assert.equal(descriptor.hostApiVersion, 2);
+assert.equal(descriptor.hostApiVersion, 3);
+const hostApi2Descriptor = parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 2, maxHostApiVersion: 2 }, contributions: manifest.componentHost.contributions.filter(item => item.type !== 'application.settingsPage') } }, manifestRoot);
+assert.equal(hostApi2Descriptor.hostApiVersion, 2, 'existing Component Host V2 components without settings pages continue to negotiate Host API 2');
+assert.deepEqual(descriptor.settingsPages.map(page => ({ id: page.id, label: page.label, relativeEntry: page.relativeEntry, rpcMethods: page.rpcMethods })), [{ id: 'settings', label: 'Fixture settings', relativeEntry: 'ui/settings.html', rpcMethods: ['fixture.settings.v1'] }]);
 assert.deepEqual(descriptor.service.permissions, allPermissions);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: manifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { ...item, rpcMethods: ['fixture.undeclared.v1'] } : item) } }, manifestRoot), /not declared by the service/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: manifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { ...item, entry: '..\/escape.html' } : item) } }, manifestRoot), /escapes component root/);
+for (const invalid of [
+  { id: 42 }, { id: ' settings' }, { label: 42 }, { label: ` ${'x'.repeat(80)}` }, { title: { bad: true } }, { title: 'Fixture ' }, { entry: ' ui/settings.html' }, { entry: `${'x'.repeat(513)}` }, { rpcMethods: 'fixture.settings.v1' }, { rpcMethods: [] },
+  { rpcMethods: [' fixture.settings.v1'] }, { rpcMethods: [`${'x'.repeat(129)}.v1`] },
+  { rpcMethods: ['fixture.settings.v1', 'fixture.settings.v1'] }, { rpcMethods: ['fixture.settings.v1', 3] },
+  { rpcMethods: Array.from({ length: 33 }, (_value, index) => `fixture.settings-${index}.v1`) },
+]) assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: manifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { ...item, ...invalid } : item), service: { ...manifest.componentHost.service, rpcMethods: [...manifest.componentHost.service.rpcMethods, ...Array.from({ length: 33 }, (_value, index) => `fixture.settings-${index}.v1`)] } } }, manifestRoot), /settings page/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 2, maxHostApiVersion: 2 } } }, manifestRoot), /require Host API 3/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 2, maxHostApiVersion: 3 } } }, manifestRoot), /minHostApiVersion 3/);
+const outsideSettingsRoot = path.join(sandbox, 'outside-settings');
+fs.mkdirSync(outsideSettingsRoot, { recursive: true }); fs.writeFileSync(path.join(outsideSettingsRoot, 'settings.html'), '<!doctype html>');
+const linkedSettings = path.join(manifestRoot, 'linked-settings');
+try {
+  fs.symlinkSync(outsideSettingsRoot, linkedSettings, process.platform === 'win32' ? 'junction' : 'dir');
+  assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: manifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { ...item, entry: 'linked-settings/settings.html' } : item) } }, manifestRoot), /linked path/);
+} catch (error) { if (!['EPERM', 'EACCES'].includes(error?.code)) throw error; }
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: allPermissions.filter(value => value !== 'project.output.write') } } }, manifestRoot), /requires permission project\.output\.write/);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 3, maxHostApiVersion: 4 } } }, manifestRoot), /do not overlap/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 5 } } }, manifestRoot), /do not overlap/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, unsafeExtension: true } }, manifestRoot), /Unknown component host field/);
 for (const schema of ['component-manifest-v2.schema.json', 'component-host-api-v2.schema.json', 'component-service-protocol-v1.schema.json']) JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', schema), 'utf8'));
 const capabilitySchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api-v2.schema.json'), 'utf8'));
@@ -154,6 +176,8 @@ const registrationOptions = overrides => ({
   resolveProjectEntry: (_workspace, _status, _name, relative) => projectVirtualPaths.resolve(projectRoot, relative, { externalRootMode: 'target' }).physicalPath,
   versionService, IMAGE_EXTENSIONS: new Set(['.jpg']), VIDEO_EXTENSIONS: new Set(['.mp4']), RAW_EXTENSIONS: new Set(['.cr3']),
   path, fs, crypto, getConfigPath: () => configPath, readSavedConfig: () => config,
+  readConfig: async () => config,
+  mutateConfig: async mutator => { config = await mutator(config); await atomicJson({ filePath: configPath, value: config }); return config; },
   getProjectPath: () => projectRoot,
   dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }), showMessageBox: async () => ({ response: 1 }) }, mainWindow: {},
   mediaService, backgroundTasks, ensureTrackedVersionThumbnail: async () => undefined, shell,
@@ -162,7 +186,7 @@ const registrationOptions = overrides => ({
   ...overrides,
 });
 registerComponentProjectCapabilities(registrationOptions());
-broker.register('component.lifecycle.v2', (payload, _context, ownedDescriptor) => ({ apiVersion: 2, componentId: ownedDescriptor.componentId, componentVersion: ownedDescriptor.componentVersion, negotiatedHostApiVersion: 2, permissions: ownedDescriptor.service.permissions, events: ownedDescriptor.service.events, lifecycleActions: [], state: payload.action === 'describe' ? 'active' : 'active' }));
+broker.register('component.lifecycle.v2', (payload, _context, ownedDescriptor) => ({ apiVersion: 2, componentId: ownedDescriptor.componentId, componentVersion: ownedDescriptor.componentVersion, negotiatedHostApiVersion: ownedDescriptor.hostApiVersion, permissions: ownedDescriptor.service.permissions, events: ownedDescriptor.service.events, lifecycleActions: [], state: payload.action === 'describe' ? 'active' : 'active' }));
 assert(broker.assertCapabilities(descriptor));
 const context = { componentId: descriptor.componentId, componentVersion: descriptor.componentVersion, workspacePath: workspaceRoot, projectId: 'project-1', projectName: 'Project', projectStatus: 'active', emitComponentEvent: (topic, event) => { context.lastEvent = { topic, event }; } };
 
@@ -224,8 +248,17 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
     );
     assert(!fs.existsSync(path.join(projectRoot, relativePath)), 'invalid metadata must be rejected before directory creation');
   }
+  for (const invalidRevision of [-1, 1.25, Number.MAX_SAFE_INTEGER + 1]) {
+    config = { componentSettings: { [descriptor.componentId]: {} }, componentSettingsRevisions: { [descriptor.componentId]: invalidRevision } };
+    assert.equal((await broker.invoke(descriptor, 'component.settings.v2', { action: 'get' }, context)).revision, 0, 'invalid stored revisions never enter API responses');
+  }
+  config = {};
   const saved = await broker.invoke(descriptor, 'component.settings.v2', { action: 'replace', settings: { quality: 90 } }, context);
   assert.equal(saved.revision, 1); config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+  const orderingBroker = new ComponentCapabilityBroker(); let orderingReadCount = 0; let orderingMutateCount = 0;
+  registerComponentProjectCapabilities(registrationOptions({ broker: orderingBroker, readConfig: () => { orderingReadCount += 1; return new Promise(() => undefined); }, mutateConfig: async mutator => { orderingMutateCount += 1; return mutator({ componentSettings: {}, componentSettingsRevisions: {} }); } }));
+  const orderedWrite = await orderingBroker.invoke(descriptor, 'component.settings.v2', { action: 'merge', settings: { queued: true } }, context);
+  assert.equal(orderedWrite.revision, 1); assert.equal(orderingMutateCount, 1); assert.equal(orderingReadCount, 0, 'settings writes enter the mutation queue without awaiting a stale pre-read');
   assert.equal(config.componentSettings[descriptor.componentId].quality, 90);
 
   const stage = await broker.invoke(descriptor, 'project.output.v2', { action: 'stage' }, context);
@@ -336,7 +369,28 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert((await broker.invoke(descriptor, 'dialogs.v2', { kind: 'confirm', title: 'Confirm', message: 'Continue?' }, context)).confirmed);
   await broker.invoke(descriptor, 'component.events.v2', { topic: 'fixture.progress.v1', event: { progress: 50 } }, context);
   assert.deepEqual(context.lastEvent, { topic: 'fixture.progress.v1', event: { progress: 50 } });
-  assert.equal((await broker.invoke(descriptor, 'component.lifecycle.v2', { action: 'describe' }, context)).negotiatedHostApiVersion, 2);
+  assert.equal((await broker.invoke(descriptor, 'component.lifecycle.v2', { action: 'describe' }, context)).negotiatedHostApiVersion, 3);
+  const applicationSettingsContext = { ...context, surface: 'application.settings', workspacePath: '', projectId: '', projectName: '', projectStatus: '' };
+  assert.equal((await broker.invoke(descriptor, 'component.settings.v2', { action: 'get' }, applicationSettingsContext)).revision, 1, 'application settings surface may read owner settings');
+  assert.equal((await broker.invoke(descriptor, 'component.lifecycle.v2', { action: 'describe' }, applicationSettingsContext)).state, 'active', 'application settings surface may inspect declared lifecycle state');
+  assert((await broker.invoke(descriptor, 'dialogs.v2', { kind: 'confirm', title: 'Confirm' }, applicationSettingsContext)).confirmed, 'application settings surface may use confirmation dialogs');
+  await assert.rejects(broker.invoke(descriptor, 'dialogs.v2', { kind: 'openFiles' }, applicationSettingsContext), error => error.code === 'COMPONENT_HOST_PERMISSION_DENIED', 'application settings surface cannot mint project input tokens');
+  assert.throws(() => broker.invoke(descriptor, 'project.media.page.v2', { pageSize: 10 }, applicationSettingsContext), /not available on the application settings surface/, 'project capabilities fail closed on an application surface');
+  assert.throws(() => broker.invoke(descriptor, 'component.storage.v2', {}, applicationSettingsContext), /not available on the application settings surface/, 'project-scoped component storage fails closed on an application surface');
+  const drainBroker = new ComponentCapabilityBroker(); let finishAcceptedCapability;
+  drainBroker.register('component.settings.v2', () => new Promise(resolve => { finishAcceptedCapability = resolve; }));
+  const drainDescriptor = { componentId: 'drain-fixture', service: { capabilities: ['component.settings.v2'], permissions: ['component.settings'] } };
+  const acceptedCapability = drainBroker.invoke(drainDescriptor, 'component.settings.v2', { action: 'get' }, {});
+  const barrier = drainBroker.blockComponent('drain-fixture'); let drained = false; const drain = barrier.drain().then(() => { drained = true; });
+  assert.throws(() => drainBroker.invoke(drainDescriptor, 'component.settings.v2', { action: 'get' }, {}), /quiesced/, 'new capabilities are rejected after component quiesce begins');
+  await new Promise(resolve => setImmediate(resolve)); assert.equal(drained, false, 'quiesce waits for an already accepted capability side effect');
+  finishAcceptedCapability({ revision: 1, settings: {} }); await acceptedCapability; await drain; barrier.release(); assert.equal(drained, true);
+  const hangingBroker = new ComponentCapabilityBroker(); let finishHanging;
+  hangingBroker.register('component.settings.v2', () => new Promise(resolve => { finishHanging = resolve; }));
+  const hangingInvocation = hangingBroker.invoke(drainDescriptor, 'component.settings.v2', { action: 'get' }, {});
+  const hangingBarrier = hangingBroker.blockComponent('drain-fixture');
+  await assert.rejects(hangingBarrier.drain({ timeoutMs: 10 }), error => error.code === 'COMPONENT_BUSY', 'a hung accepted capability aborts bounded drain instead of allowing destructive cleanup');
+  hangingBarrier.release(); finishHanging({ revision: 1, settings: {} }); await hangingInvocation;
 
   const genericSource = fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'services', 'component-project-capabilities.cjs'), 'utf8');
   for (const forbidden of ['team-retouch', 'edited_patch_path', 'team_patch_tasks', '团片']) assert(!genericSource.includes(forbidden), `generic host source must not contain ${forbidden}`);

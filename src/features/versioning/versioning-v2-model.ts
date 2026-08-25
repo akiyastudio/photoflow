@@ -61,6 +61,12 @@ export const versionTreeTaskPanelProgress = (
 
 export const normalizeVersionPath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
 
+export const exportedImageFolderCandidate = (relativePath: string) => {
+  const parts = normalizeVersionPath(relativePath).split('/').filter(Boolean);
+  const exportIndex = parts.findIndex(part => /^(?:jpg|jpeg)$/iu.test(part) || part.endsWith('导出'));
+  return exportIndex < 0 ? '' : parts.slice(0, exportIndex + 1).join('/');
+};
+
 export const isUserVersionKey = (value: string) => /^\d+(?:_\d+)*$/.test(value);
 
 export const versionKeyWithFinalIndex = (suggestedVersionKey: string, value: string) => {
@@ -189,6 +195,7 @@ export const versionTreeNodeBadgeLabel = (folder: Pick<ProgressFolder, 'nodeRole
   if (folder.nodeRole === 'broll') return '花絮';
   if (folder.nodeRole === 'selection' || folder.relationKind === 'auxiliary') return '选片';
   if (folder.nodeRole === 'artifact' && folder.artifactKind === 'preview') return '预览';
+  if (folder.nodeRole === 'artifact' && folder.artifactKind === 'transcode') return '转码';
   if (folder.nodeRole === 'artifact') return '派生产物';
   if (folder.nodeRole === 'workflow') return '工作流';
   return `V${folder.versionKey}`;
@@ -261,7 +268,7 @@ export const defaultMainParentId = (
 
   const originals = candidates.filter(folder => folder.nodeRole === 'original');
   const companionTargets = new Set(graphEdges
-    .filter(edge => edge.edgeKind === 'media_companion' || edge.edgeKind === 'derived_preview')
+    .filter(edge => edge.edgeKind === 'media_companion' || edge.edgeKind === 'derived_preview' || edge.edgeKind === 'derived_transcode')
     .map(edge => edge.targetProgressId));
   const semanticSources = originals.filter(folder => !companionTargets.has(folder.id));
   return semanticSources.length === 1 ? semanticSources[0].id : '';

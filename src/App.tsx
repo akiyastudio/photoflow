@@ -15,26 +15,24 @@ import { useTopToastStack } from './features/app/useTopToastStack';
 import { rendererErrorFingerprint, rendererErrorNoticeSummary, shouldReportRendererError, type RendererErrorOccurrence } from './features/app/renderer-error-notice-model';
 import { DomainHealthBanner } from './features/app/DomainHealthBanner';
 import { migrateLegacyComponentSettings } from './compatibility/component-settings';
-import { ComponentPageSurface } from './features/components/ComponentPageSurface';
+import { ComponentPageSurface } from './features/components/ComponentPageSurface'; import { ComponentSettingsPageSurface } from './features/components/ComponentSettingsPageSurface';
 import { useComponentPages } from './features/components/useComponentPages';
 import { ComponentIcon } from './components/ComponentIcon';
-import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature';
+import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature'; import { componentSettingsSectionKey } from './features/settings/component-settings-page-model';
 import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './features/settings/UsagePreferencesOnboarding';
-import type { SettingsSection } from './features/settings/SettingsFeature';
+import type { BuiltInSettingsSection, SettingsSection } from './features/settings/SettingsFeature';
 import { DashboardView, MatchView, VideoSplitView, type ImportCompletion } from './features/tools/ToolViews';
 import { useStartupSdAutoImport } from './features/tools/use-startup-sd-auto-import';
 import { normalizeSavedSdDeviceRecords } from './features/tools/sd-startup-import-model';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
 import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
-import type { AppConfig, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
+import type { AppConfig, AppUpdateInfo, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentSettingsPageContribution, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
 import { ColumnResizeHandle } from './features/app/AppShellLayout';
 import { clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
 import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, IMAGE_SELECTION_FOLDER_NAME, VIDEO_SELECTION_FOLDER_NAME, isMac, localDateKey, normalizeHomeOrder, normalizeMediaCacheSize, normalizeProjectCategories, normalizeProjectToolbar, normalizeVideoPreviewQuality } from './features/app/app-config';
 import { normalizeSubtitleFontSize } from './features/app/video-player-settings';
-type WorkspaceToolKind = 'version';
-type WorkspaceToolTab = { ownerPageId: string; projectId: string; projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
-interface PythonEvent {
-  type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview';
+type WorkspaceToolKind = 'version'; type WorkspaceToolTab = { ownerPageId: string; projectId: string; projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
+interface PythonEvent { type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview';
   message: string;
   data?: any;
   progress?: number;
@@ -53,7 +51,7 @@ const App: React.FC = () => {
   const [configLoaded, setConfigLoaded] = useState(false);
   const [privacyStateLoaded, setPrivacyStateLoaded] = useState(false);
   const [privacyConsentRequired, setPrivacyConsentRequired] = useState(true);
-  const [updateInfo, setUpdateInfo] = useState<{version: string, url: string, notes: string} | null>(null);
+  const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
   const [selectedProject, setSelectedProject] = useState<WorkspaceProject | null>(null);
   const { pages: projectPages, activePageId, createPage, activatePage, updatePagePath, closePage, updateProject, closeProject, selectSidebarProject, requestInspirationPath, ensureInspirationRoot, resetInspirationPages } = useWorkspaceTabs();
   const { dismissPanelTasksByOwnerPageId } = useTaskCenter(); const openPageIds = useMemo(() => new Set(projectPages.map(page => page.id)), [projectPages]);
@@ -100,6 +98,9 @@ const App: React.FC = () => {
   });
   const [componentInstallPath, setComponentInstallPath] = useState('');
   const [componentsLoading, setComponentsLoading] = useState(true);
+  const [componentSettingsPages, setComponentSettingsPages] = useState<ComponentSettingsPageContribution[]>([]);
+  const selectedComponentSettingsPage = useMemo(() => componentSettingsPages.find(page => componentSettingsSectionKey(page) === settingsSection), [componentSettingsPages, settingsSection]);
+  const reportComponentSettingsError = useCallback((message: string) => showNotice(`打开组件设置页失败：${message}`, 5000), [showNotice]);
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed).map(component => component.id)), [components]);
   const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); }, onNotice: showNotice });
   const { actions: componentHostActions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
@@ -108,7 +109,18 @@ const App: React.FC = () => {
     window.localStorage.setItem('photoflow:sidebar-width', String(Math.round(sidebarWidth)));
   }, [sidebarWidth]);
 
-  useEffect(() => { if (activeTab !== 'component') componentHost.deactivate(); }, [activeTab, componentHost.deactivate]);
+  useEffect(() => { if (activeTab !== 'component') void componentHost.deactivate(); }, [activeTab, componentHost.deactivate]);
+
+  useEffect(() => {
+    let active = true;
+    void window.electronAPI.getComponentSettingsPages().then(result => {
+      if (!active) return;
+      const pages = result.success ? result.pages || [] : [];
+      setComponentSettingsPages(pages);
+      setSettingsSection(current => current.startsWith('component:') && !pages.some(page => componentSettingsSectionKey(page) === current) ? 'components' : current);
+    }).catch(() => { if (active) setComponentSettingsPages([]); });
+    return () => { active = false; };
+  }, [components]);
 
   useEffect(() => { window.localStorage.setItem('photoflow:sidebar-collapsed', String(sidebarCollapsed)); }, [sidebarCollapsed]);
   const previousInspirationRootRef = useRef<string>(); const previousInspirationPinnedRef = useRef<boolean>();
@@ -341,8 +353,9 @@ const App: React.FC = () => {
             const customProjectCategories = normalizeProjectCategories(fileConfig.customProjectCategories);
             const configuredWorkspacePaths = normalizeWorkspacePaths(fileConfig.workspacePath, fileConfig.workspacePaths);
             let normalizedConfig = { ...legacyConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, customProjectCategories, projectCategoryOrder: normalizeProjectCategoryOrder(fileConfig.projectCategoryOrder, customProjectCategories), defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', itemOpenMode: fileConfig.itemOpenMode === 'double' || legacyFolderOpenMode === 'double' ? 'double' : 'single', favoriteDisplayMode: fileConfig.favoriteDisplayMode === 'stars' ? 'stars' : 'binary', usagePreferencesVersion: Number(fileConfig.usagePreferencesVersion) || 0, projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, pinInspirationLibrary: fileConfig.pinInspirationLibrary === true, componentSettings, videoPlayback, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, backup: { enabled: fileConfig.backup?.enabled === true, targetType: fileConfig.backup?.targetType === 'nas' || (fileConfig.backup?.targetType === undefined && fileConfig.backup?.targetPath?.startsWith('\\\\')) ? 'nas' : 'local', targetPath: fileConfig.backup?.targetPath ?? '', mode: fileConfig.backup?.mode === 'latest' ? 'latest' : 'history', automaticDaily: fileConfig.backup?.automaticDaily ?? true, afterImport: fileConfig.backup?.afterImport ?? true, retention: { daily: Math.max(1, Number(fileConfig.backup?.retention?.daily) || 7), weekly: Math.max(0, Number(fileConfig.backup?.retention?.weekly) || 4), monthly: Math.max(0, Number(fileConfig.backup?.retention?.monthly) || 12) }, nas: { credentialRef: fileConfig.backup?.nas?.credentialRef ?? '', limitEnabled: fileConfig.backup?.nas?.limitEnabled === true, bandwidthLimitMBps: Math.max(1, Number(fileConfig.backup?.nas?.bandwidthLimitMBps) || 20), limitStart: fileConfig.backup?.nas?.limitStart || '09:00', limitEnd: fileConfig.backup?.nas?.limitEnd || '18:00' } }, archive: { enabled: fileConfig.archive?.enabled === true, targetPath: fileConfig.archive?.targetPath ?? '' }, importDefaults: { deleteSourceAfterImport: fileConfig.importDefaults?.deleteSourceAfterImport ?? !(legacyFileImport?.preserveOriginal ?? false), generateJpgFromRaw: fileConfig.importDefaults?.generateJpgFromRaw ?? true, splitVideosOnImport: fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.smartImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, videoTools: { transcode: { container: fileConfig.videoTools?.transcode?.container ?? 'mp4', videoMode: fileConfig.videoTools?.transcode?.videoMode ?? 'h264', quality: fileConfig.videoTools?.transcode?.quality ?? 'balanced', resolution: fileConfig.videoTools?.transcode?.resolution ?? 'original', frameRate: fileConfig.videoTools?.transcode?.frameRate ?? 'original', audioMode: fileConfig.videoTools?.transcode?.audioMode ?? 'aac' } }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, sdDeviceIds: fileConfig.smartImport?.sdDeviceIds ?? {}, sdDevices: savedSdDevices, backupEnabled: false, generateVideoPreview: false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: false, dateFilter: fileConfig.smartImport?.dateFilter === 'today' || fileConfig.smartImport?.dateFilter === 'today_yesterday' ? fileConfig.smartImport.dateFilter : 'all' }, brollImport: { splitVideosOnImport: fileConfig.brollImport?.splitVideosOnImport ?? fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.brollImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.brollImport?.transcodeVideosOnImport ?? fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, inspirationLibrary, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: configuredImageSource === undefined || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: configuredVideoSource === undefined || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
-            normalizedConfig.videoTools.trim = { exportMode: fileConfig.videoTools?.trim?.exportMode === 'exact' ? 'exact' : 'fast' };
+            normalizedConfig.componentSettingsRevisions = { ...(fileConfig.componentSettingsRevisions || {}) }; normalizedConfig.videoTools.trim = { exportMode: fileConfig.videoTools?.trim?.exportMode === 'exact' ? 'exact' : 'fast' };
             normalizedConfig.folderAlphabetFilterEnabled = fileConfig.folderAlphabetFilterEnabled !== false;
+            normalizedConfig.versionTreeEnabled = fileConfig.versionTreeEnabled !== false;
             normalizedConfig.progressNamePresets = normalizeProgressNamePresets(fileConfig.progressNamePresets);
             normalizedConfig.smartImport.autoMoveProjectAfterSdImport = fileConfig.smartImport?.autoMoveProjectAfterSdImport ?? true;
             normalizedConfig.smartMatch.sourceFolderRelativePath = fileConfig.smartMatch?.sourceFolderRelativePath;
@@ -350,7 +363,7 @@ const App: React.FC = () => {
             if (!normalizedConfig.workspacePaths.length) setShowWorkspaceSetup(true);
             setStartupSdAutoStart(normalizedConfig.smartImport.autoStart === true); setConfig(normalizedConfig);
             if (fileConfig.videoTools?.trim?.exportMode !== normalizedConfig.videoTools.trim.exportMode && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
-            if ((JSON.stringify(fileConfig.workspacePaths) !== JSON.stringify(normalizedConfig.workspacePaths) || fileConfig.smartImport?.autoMoveProjectAfterSdImport === undefined || JSON.stringify(fileConfig.smartImport?.sdDevices) !== JSON.stringify(savedSdDevices) || fileConfig.folderAlphabetFilterEnabled === undefined || JSON.stringify(fileConfig.progressNamePresets) !== JSON.stringify(normalizedConfig.progressNamePresets)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((JSON.stringify(fileConfig.workspacePaths) !== JSON.stringify(normalizedConfig.workspacePaths) || fileConfig.smartImport?.autoMoveProjectAfterSdImport === undefined || JSON.stringify(fileConfig.smartImport?.sdDevices) !== JSON.stringify(savedSdDevices) || fileConfig.folderAlphabetFilterEnabled === undefined || fileConfig.versionTreeEnabled === undefined || JSON.stringify(fileConfig.progressNamePresets) !== JSON.stringify(normalizedConfig.progressNamePresets)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || JSON.stringify(fileConfig.customProjectCategories) !== JSON.stringify(normalizedConfig.customProjectCategories) || JSON.stringify(fileConfig.projectCategoryOrder) !== JSON.stringify(normalizedConfig.projectCategoryOrder) || fileConfig.defaultFolderSort === undefined || fileConfig.itemOpenMode !== normalizedConfig.itemOpenMode || fileConfig.favoriteDisplayMode !== normalizedConfig.favoriteDisplayMode || fileConfig.usagePreferencesVersion !== normalizedConfig.usagePreferencesVersion || legacyFolderOpenMode !== undefined || fileConfig.birthdayEnabled === undefined || fileConfig.pinInspirationLibrary === undefined || !fileConfig.backup || fileConfig.backup?.targetType === undefined || !fileConfig.backup?.nas || !fileConfig.archive || !fileConfig.importDefaults || fileConfig.importDefaults?.splitVideosOnImport === undefined || fileConfig.importDefaults?.transcodeVideosOnImport === undefined || !fileConfig.videoTools?.transcode || legacyFileImport !== undefined || legacyBrollClearSource !== undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || !fileConfig.smartImport?.sdDeviceIds || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || fileConfig.smartImport?.dateFilter !== normalizedConfig.smartImport.dateFilter || !fileConfig.brollImport || fileConfig.brollImport?.splitVideosOnImport === undefined || fileConfig.brollImport?.transcodeVideosOnImport === undefined || !fileConfig.inspirationLibrary || JSON.stringify(fileConfig.research) !== JSON.stringify(researchSettings) || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.projectToolbar) !== JSON.stringify(normalizedConfig.projectToolbar) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
@@ -440,9 +453,9 @@ const App: React.FC = () => {
   }, [config?.theme]);
   useEffect(() => {
     if (window.electronAPI?.onUpdateAvailable) {
-      const cleanup = window.electronAPI.onUpdateAvailable((info: any) => {
+      const cleanup = window.electronAPI.onUpdateAvailable(info => {
         console.log("Update available:", info);
-        setUpdateInfo(info);
+        setUpdateInfo({ ...info, mandatory: info.mandatory === true });
       });
       return cleanup;
     }
@@ -504,7 +517,9 @@ const App: React.FC = () => {
       if (window.electronAPI?.saveConfig) {
         const result = await window.electronAPI.saveConfig(newConfig);
         if (result.success) {
-          if (options?.applyAfterSave) setConfig(newConfig);
+          const savedConfig = result.savedConfig || newConfig;
+          if (options?.applyAfterSave) setConfig(savedConfig);
+          else setConfig(current => current ? { ...current, componentSettings: savedConfig.componentSettings, componentSettingsRevisions: savedConfig.componentSettingsRevisions } : savedConfig);
           console.log('✅ Configuration saved successfully');
           return true;
         } else {
@@ -657,8 +672,8 @@ const App: React.FC = () => {
     setActiveTab('inspiration');
   };
   const { navigationRequests: browserNavigationRequests, openInNewTab: openInspirationDirectoryPage, navigateCurrent: navigateInspiration, dropActive: folderTabDropActive, sourceDragActive: folderTabSourceDragActive, dropProps: folderTabDropProps } = useFolderTabNavigation({ rootPath: config?.inspirationLibrary.rootPath.trim() || '', pages: projectPages, activePageId, createPage, requestInspirationPath, activateInspiration, openProjectInNewTab: project => openProjectDirectoryPage(project, '') });
-  const openSettingsTab = () => {
-    setSettingsTabOpen(true);
+  const openSettingsTab = async () => {
+    if (activeTab === 'component') await componentHost.deactivate(); setSettingsTabOpen(true);
     setActiveTab('settings');
   };
   const openBackupSettings = (project?: WorkspaceProject) => {
@@ -735,6 +750,8 @@ const App: React.FC = () => {
     );
   }
 
+  if (updateInfo?.mandatory) return <StartupWindowFrame><UpdateModal {...updateInfo} onClose={() => undefined}/></StartupWindowFrame>;
+
   if (privacyConsentRequired) return <StartupWindowFrame><PrivacyConsentPage onAccept={acceptInternalBetaPrivacy}/></StartupWindowFrame>;
 
   if (config.usagePreferencesVersion < USAGE_PREFERENCES_VERSION) return <StartupWindowFrame><UsagePreferencesOnboarding config={config} onSave={nextConfig => handleConfigUpdate(nextConfig, { applyAfterSave: true })}/></StartupWindowFrame>;
@@ -748,6 +765,7 @@ const App: React.FC = () => {
           version={updateInfo.version}
           url={updateInfo.url}
           notes={updateInfo.notes}
+          mandatory={updateInfo.mandatory}
           onClose={() => setUpdateInfo(null)}
         />
       )}
@@ -802,7 +820,9 @@ const App: React.FC = () => {
       {showWorkspaceSetup ? <WorkspaceSetupPage config={config} onSave={handleWorkspaceSetup}/> : <div className="flex min-h-0 flex-1">
       {/* Sidebar */}
       <aside style={{ width: sidebarCollapsed ? 0 : renderedSidebarWidth }} className="relative z-30 flex min-w-0 shrink-0 flex-col overflow-hidden bg-white transition-[width] duration-200">
-        {activeTab === 'settings' && <SettingsNavigator activeSection={settingsSection} onSelect={section => { setSettingsSection(section); if (section === 'backup' || section === 'storage') setBackupProjectFocus(null); }}/>}
+        {activeTab === 'settings' && <SettingsNavigator activeSection={settingsSection} componentPages={componentSettingsPages}
+          onSelect={section => { setSettingsSection(section); if (section === 'backup' || section === 'storage') setBackupProjectFocus(null); }}/>
+        }
         {projectPages.some(page => page.kind === 'inspiration') && <div className={activeTab === 'inspiration' ? 'contents' : 'hidden'}><InspirationLibraryNavigator active={activeTab === 'inspiration'} rootPath={config.inspirationLibrary.rootPath} targetWorkspacePath={config.workspacePath} currentRelativePath={projectPages.find(page => page.id === activePageId && page.kind === 'inspiration')?.currentRelativePath || ''} onNavigate={navigateInspiration} onOpenInNewTab={openInspirationDirectoryPage} onOpenSettings={openSettingsTab} onNotice={showNotice}/></div>}
         {activeTab !== 'settings' && activeTab !== 'inspiration' && <><ProjectNavigator
           workspacePath={config.workspacePath}
@@ -821,16 +841,14 @@ const App: React.FC = () => {
           onOpenBackup={openBackupSettings}
 
         />
-        <div className="p-4 border-t border-slate-200">
-          <div className="flex flex-col overflow-hidden rounded-lg border border-slate-200 bg-white">
-            <button onClick={openSettingsTab} className="w-full flex items-center gap-3 p-3 hover:bg-slate-50 text-slate-600 hover:text-slate-900 transition-all group"><Settings size={18} className="text-slate-400"/><span className="font-medium text-sm">设置</span></button>
-          </div>
+        <div className="border-t border-slate-200 px-4 py-2">
+          <button onClick={openSettingsTab} className="flex w-full items-center gap-3 rounded-lg p-3 text-slate-600 transition-colors hover:bg-slate-100 hover:text-slate-900"><Settings size={18} className="text-slate-400"/><span className="text-sm font-medium">设置</span></button>
         </div></>}
       </aside>
       {!sidebarCollapsed && <ColumnResizeHandle label="调整项目栏宽度" onDrag={deltaX => setSidebarWidth(width => clampNumber(width + deltaX, 128, 420))}/>}
 
       {/* Main Content */}
-      <main className={`relative min-w-0 flex-1 bg-slate-50 ${activeTab.startsWith('project') || activeTab === 'inspiration' || activeTab === 'component' ? 'overflow-hidden p-0' : activeTab === 'settings' ? 'overflow-auto p-0' : 'overflow-auto p-8'}`}>
+      <main className={`relative min-w-0 flex-1 bg-slate-50 ${activeTab.startsWith('project') || activeTab === 'inspiration' || activeTab === 'component' || (activeTab === 'settings' && selectedComponentSettingsPage) ? 'overflow-hidden p-0' : activeTab === 'settings' ? 'overflow-auto p-0' : 'overflow-auto p-8'}`}>
         <div className={activeTab === 'home' ? 'mx-auto max-w-6xl space-y-4' : 'hidden'}>{homeOrder.filter(card => card !== 'birthday' || config.birthdayEnabled).map(card => {
           const dragProps = {
             draggable: true,
@@ -858,7 +876,8 @@ const App: React.FC = () => {
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>
         {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} navigationRequest={browserNavigationRequests[page.id]} config={config} components={components} onUpdateConfig={handleConfigUpdate} onDirectoryChange={updatePagePath} onOpenDirectoryPage={openInspirationDirectoryPage} onNotice={showNotice}/></div>; })}
-        {activeTab === 'settings' && <SettingsPage activeSection={settingsSection} backupProjectFocus={backupProjectFocus} onClearBackupProjectFocus={() => setBackupProjectFocus(null)} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={() => refreshComponents(true)} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} getDefaultSettings={getDefaultSettings} onNotice={showNotice}/>}
+        {activeTab === 'settings' && !selectedComponentSettingsPage && <SettingsPage activeSection={settingsSection as BuiltInSettingsSection} backupProjectFocus={backupProjectFocus} onClearBackupProjectFocus={() => setBackupProjectFocus(null)} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={() => refreshComponents(true)} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} onConfigRestored={setConfig} getDefaultSettings={getDefaultSettings} onNotice={showNotice}/>}
+        {activeTab === 'settings' && selectedComponentSettingsPage && <ComponentSettingsPageSurface key={`${selectedComponentSettingsPage.componentId}:${selectedComponentSettingsPage.pageId}:${selectedComponentSettingsPage.componentVersion}`} page={selectedComponentSettingsPage} onError={reportComponentSettingsError}/>}
         {componentPages.map(page => <ComponentPageSurface key={page.identity} page={page} active={activeTab === 'component' && activeComponentPageIdentity === page.identity}/>)}
         {projectPages.filter(page => page.project).map(page => { const project = page.project!;
           const active = activeTab.startsWith('project') && activePageId === page.id;
@@ -890,6 +909,7 @@ const App: React.FC = () => {
             defaultFolderSort={config.defaultFolderSort}
             itemOpenMode={config.itemOpenMode}
             folderAlphabetFilterEnabled={config.folderAlphabetFilterEnabled}
+            versionTreeEnabled={config.versionTreeEnabled}
             favoriteDisplayMode={config.favoriteDisplayMode}
             onOpenInspirationPath={navigateInspiration}
             onOpenDirectoryPage={relativePath => openProjectDirectoryPage(project, relativePath)}

@@ -1,6 +1,6 @@
 import { versionTreeEdgePath } from './version-tree-edge-model.ts';
 
-export type VersionTreeLayoutRelationKind = 'main' | 'auxiliary' | 'media_companion' | 'derived_preview' | 'workflow_input';
+export type VersionTreeLayoutRelationKind = 'main' | 'auxiliary' | 'media_companion' | 'derived_preview' | 'derived_transcode' | 'workflow_input';
 
 export type VersionTreeLayoutNode = {
   id: string;
@@ -54,7 +54,7 @@ export type VersionTreeLayoutResult = {
 };
 
 const roleOrder = { original: 0, workflow: 1, artifact: 2, progress: 3, selection: 4, broll: 5 } as const;
-const relationOrder: Record<VersionTreeLayoutRelationKind, number> = { main: 0, auxiliary: 1, workflow_input: 2, media_companion: 3, derived_preview: 4 };
+const relationOrder: Record<VersionTreeLayoutRelationKind, number> = { main: 0, auxiliary: 1, workflow_input: 2, media_companion: 3, derived_preview: 4, derived_transcode: 5 };
 const compareNodes = (left: VersionTreeLayoutNode, right: VersionTreeLayoutNode) =>
   roleOrder[left.nodeRole] - roleOrder[right.nodeRole]
   || relationOrder[left.relationKind || 'main'] - relationOrder[right.relationKind || 'main']
@@ -122,7 +122,7 @@ const layoutVersionTreeDag = (input: VersionTreeLayoutInput): VersionTreeLayoutR
     for (const edge of outgoing.get(id) || []) {
       const target = nodeById.get(edge.childId);
       const targetHasStructuralMain = (incoming.get(edge.childId) || []).some(candidate => candidate.relationKind === 'main');
-      const depthStep = edge.relationKind === 'media_companion' || edge.relationKind === 'derived_preview'
+      const depthStep = edge.relationKind === 'media_companion' || edge.relationKind === 'derived_preview' || edge.relationKind === 'derived_transcode'
         || edge.relationKind === 'workflow_input' && target?.nodeRole === 'progress' && targetHasStructuralMain
         ? 0
         : 1;

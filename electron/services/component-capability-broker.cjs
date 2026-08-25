@@ -1,6 +1,7 @@
 const { CAPABILITY_PERMISSIONS, HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 
 const MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
+const APPLICATION_SETTINGS_CAPABILITIES = new Set(['component.settings.v2', 'component.lifecycle.v2', 'dialogs.v2']);
 
 const clonePayload = payload => {
   if (payload === undefined || payload === null) return {};
@@ -11,7 +12,41 @@ const clonePayload = payload => {
 };
 
 class ComponentCapabilityBroker {
-  constructor() { this.handlers = new Map(); }
+  constructor() { this.handlers = new Map(); this.activeByComponent = new Map(); this.blockedComponents = new Map(); this.drainWaiters = new Map(); }
+
+  finishInvocation(componentId) {
+    const active = Math.max(0, (this.activeByComponent.get(componentId) || 1) - 1);
+    if (active) this.activeByComponent.set(componentId, active);
+    else {
+      this.activeByComponent.delete(componentId);
+      for (const resolve of this.drainWaiters.get(componentId) || []) resolve();
+      this.drainWaiters.delete(componentId);
+    }
+  }
+
+  blockComponent(componentId) {
+    const id = String(componentId || '');
+    this.blockedComponents.set(id, (this.blockedComponents.get(id) || 0) + 1);
+    let released = false;
+    return {
+      drain: ({ timeoutMs = 7500 } = {}) => {
+        if (!this.activeByComponent.get(id)) return Promise.resolve();
+        return new Promise((resolve, reject) => {
+          const waiters = this.drainWaiters.get(id) || new Set();
+          let timer;
+          const finish = () => { clearTimeout(timer); waiters.delete(finish); resolve(); };
+          waiters.add(finish); this.drainWaiters.set(id, waiters);
+          timer = setTimeout(() => { waiters.delete(finish); if (!waiters.size) this.drainWaiters.delete(id); const error = new Error(`Component capability drain timed out: ${id}`); error.code = 'COMPONENT_BUSY'; reject(error); }, Math.max(1, Math.min(60000, Number(timeoutMs) || 7500)));
+        });
+      },
+      release: () => {
+        if (released) return;
+        released = true;
+        const remaining = Math.max(0, (this.blockedComponents.get(id) || 1) - 1);
+        if (remaining) this.blockedComponents.set(id, remaining); else this.blockedComponents.delete(id);
+      },
+    };
+  }
 
   register(method, handler) {
     if (!HOST_CAPABILITIES.has(method)) throw new Error(`Unknown host capability: ${method}`);
@@ -28,13 +63,27 @@ class ComponentCapabilityBroker {
 
   invoke(descriptor, method, payload, boundContext) {
     const normalized = String(method || '');
+    const componentId = String(descriptor?.componentId || '');
+    if (this.blockedComponents.has(componentId)) throw new Error(`Component capabilities are quiesced: ${componentId}`);
+    if (boundContext?.surface === 'application.settings' && !APPLICATION_SETTINGS_CAPABILITIES.has(normalized)) {
+      throw new Error(`Component capability is not available on the application settings surface: ${normalized}`);
+    }
     if (!descriptor?.service?.capabilities.includes(normalized)) throw new Error(`Component capability is not granted: ${normalized}`);
     const permission = CAPABILITY_PERMISSIONS[normalized];
     if (permission && !descriptor.service.permissions?.includes(permission)) throw new Error(`Component capability permission is not granted: ${permission}`);
     const handler = this.handlers.get(normalized);
     if (!handler) throw new Error(`Host capability is unavailable: ${normalized}`);
-    return handler(clonePayload(payload), boundContext, descriptor);
+    this.activeByComponent.set(componentId, (this.activeByComponent.get(componentId) || 0) + 1);
+    try {
+      const result = handler(clonePayload(payload), boundContext, descriptor);
+      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => this.finishInvocation(componentId));
+      this.finishInvocation(componentId);
+      return result;
+    } catch (error) {
+      this.finishInvocation(componentId);
+      throw error;
+    }
   }
 }
 
-module.exports = { ComponentCapabilityBroker, MAX_PAYLOAD_BYTES, clonePayload };
+module.exports = { APPLICATION_SETTINGS_CAPABILITIES, ComponentCapabilityBroker, MAX_PAYLOAD_BYTES, clonePayload };

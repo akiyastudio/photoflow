@@ -136,9 +136,9 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   const visibleEdges = useMemo(() => graph.edges.filter(edge => visibleIds.has(edge.parentId) && visibleIds.has(edge.childId)), [graph.edges, visibleIds]);
   const trackedEntryPaths = useMemo(() => new Set(versionItems.map(item => normalizePath(item.entry.relativePath))), [versionItems]);
   const selectedPathSet = useMemo(() => new Set(selectedRelativePaths.map(normalizePath)), [selectedRelativePaths]);
-  // The canvas represents folders and version relations, not every loose media
-  // file in the current directory. This keeps large shoots usable.
-  const ordinaryEntries = useMemo(() => entries.filter(entry => isVersionFolderEntry(entry) && !trackedEntryPaths.has(normalizePath(entry.relativePath))), [entries, trackedEntryPaths]);
+  // Keep every untracked entry visible. Folders can still accept version
+  // outputs, while ordinary files remain passive nodes in the Other area.
+  const ordinaryEntries = useMemo(() => entries.filter(entry => !trackedEntryPaths.has(normalizePath(entry.relativePath))), [entries, trackedEntryPaths]);
   const selectedNodeIds = useMemo(() => new Set([
     ...versionItems.filter(item => selectedPathSet.has(normalizePath(item.entry.relativePath))).map(item => `entry:${normalizePath(item.entry.relativePath)}`),
     ...ordinaryEntries.filter(entry => selectedPathSet.has(normalizePath(entry.relativePath))).map(entry => `entry:${normalizePath(entry.relativePath)}`),
@@ -230,7 +230,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
         { x: parent.x, y: parent.y, width: nodeWidth, height: nodeHeight },
         { x: child.x, y: child.y, width: nodeWidth, height: nodeHeight },
       );
-      const directAssociation = edge.kind === 'media_companion' || edge.kind === 'derived_preview';
+      const directAssociation = edge.kind === 'media_companion' || edge.kind === 'derived_preview' || edge.kind === 'derived_transcode';
       const path = directAssociation
         ? `M ${geometry.start.x} ${geometry.start.y} L ${geometry.end.x} ${geometry.end.y}`
         : geometry.path;
@@ -521,7 +521,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
       onRequestRelationChange?.(targetId, sourceId);
       return;
     }
-    if (kind === 'media_companion' || kind === 'derived_preview' || kind === 'workflow_input') {
+    if (kind === 'media_companion' || kind === 'derived_preview' || kind === 'derived_transcode' || kind === 'workflow_input') {
       if (onRequestSupplementalEdgeCreate) onRequestSupplementalEdgeCreate(sourceId, targetId, kind);
       else onNotice(`当前页面无法创建${versionTreeRelationLabel(kind)}关系`, 5000);
     }
@@ -547,7 +547,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   const selectedChild = selectedEdge?.childId ? visibleFolderById.get(selectedEdge.childId) : undefined;
   const selectedParent = selectedEdge?.parentId ? visibleFolderById.get(selectedEdge.parentId) : undefined;
   const selectedBusy = Boolean(selectedChild && mutatingIds.has(selectedChild.id));
-  const selectedSupplementalEdge = selectedEdge && ['media_companion', 'derived_preview', 'workflow_input'].includes(selectedEdge.kind)
+  const selectedSupplementalEdge = selectedEdge && ['media_companion', 'derived_preview', 'derived_transcode', 'workflow_input'].includes(selectedEdge.kind)
     ? graphEdges.find(edge => edge.id === selectedEdge.id)
     : undefined;
   const selectedDeletionError = selectedChild && !selectedSupplementalEdge ? relationError(selectedChild.id, null) : '';
@@ -555,7 +555,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
     if (!edge.childId) return;
     const child = visibleFolderById.get(edge.childId);
     if (!child || mutatingIds.has(child.id)) return;
-    const supplemental = ['media_companion', 'derived_preview', 'workflow_input'].includes(edge.kind) ? graphEdges.find(candidate => candidate.id === edge.id) : undefined;
+    const supplemental = ['media_companion', 'derived_preview', 'derived_transcode', 'workflow_input'].includes(edge.kind) ? graphEdges.find(candidate => candidate.id === edge.id) : undefined;
     if (supplemental) { onRequestSupplementalEdgeDelete?.(supplemental); return; }
     const error = progressRelationChangeError(graph.folders, child.id, null);
     if (error) { onNotice(error, 5000); return; }
@@ -600,7 +600,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
       onNotice('该节点当前没有可断开的输入连接');
       return;
     }
-    if (edge.kind === 'media_companion' || edge.kind === 'derived_preview' || edge.kind === 'workflow_input') {
+    if (edge.kind === 'media_companion' || edge.kind === 'derived_preview' || edge.kind === 'derived_transcode' || edge.kind === 'workflow_input') {
       const supplemental = graphEdges.find(candidate => candidate.id === edge.id);
       if (supplemental) onRequestSupplementalEdgeDelete?.(supplemental);
       else onNotice('没有找到要断开的补充关系，请刷新后重试');
@@ -621,7 +621,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
     {blankOutputSourceId && <div role="dialog" aria-modal="true" aria-label="从输出端创建节点" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/40 p-4"><section className="w-full max-w-xs rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">从 V{visibleFolderById.get(blankOutputSourceId)?.versionKey} 创建</h3><p className="mt-1 text-xs text-slate-500">输出线放到空白处时，可直接新建兼容节点。</p><div className="mt-4 grid gap-2"><button type="button" onClick={() => { const source = visibleFolderById.get(blankOutputSourceId); setBlankOutputSourceId(''); if (source) onRequestCreateEmptyVersion?.(source, false); }} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-left text-sm font-semibold text-blue-700">新建下一版本</button><button type="button" onClick={() => { const source = visibleFolderById.get(blankOutputSourceId); setBlankOutputSourceId(''); if (source) onRequestCreateEmptyVersion?.(source, true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm text-slate-700">新建可跟踪版本分支</button></div><button type="button" onClick={() => setBlankOutputSourceId('')} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
       {hasGraphItems && <div className="relative min-h-0 flex-1"><div ref={canvas.viewportRef} data-version-tree-viewport="true" className="h-full min-h-[360px] overflow-auto"><div className="relative min-h-full min-w-full" style={{ width: framedLayoutWidth * zoom, height: Math.max(360, framedLayoutHeight * zoom, viewportBounds.height) }}><div data-version-tree-canvas="true" data-drag-state={dragState?.type} onPointerDown={event => { canvas.canvasPointerHandlers.onPointerDown(event); if (!(event.target as Element).closest('[data-version-tree-node],[data-edge-id],button')) { cancelRelationSelection(); setSelectedNodeKey(''); } }} onPointerMove={canvas.canvasPointerHandlers.onPointerMove} onPointerUp={canvas.canvasPointerHandlers.onPointerUp} onPointerCancel={canvas.canvasPointerHandlers.onPointerCancel} className="absolute left-0 top-0 cursor-default" style={{ width: framedLayoutWidth, height: framedLayoutHeight, minWidth: `${100 / zoom}%`, minHeight: Math.max(360, viewportBounds.height / zoom), touchAction: 'none', transform: `scale(${zoom})`, transformOrigin: 'left top', backgroundImage: 'radial-gradient(circle, rgb(148 163 184 / 0.025) 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
       {areaBands.map(area => <div key={area.areaKind} aria-label={`${area.label}区域`} className={`pointer-events-none absolute rounded-2xl border ${area.areaKind === 'image' ? 'border-sky-300/30 bg-sky-500/[0.035]' : area.areaKind === 'video' ? 'border-violet-300/30 bg-violet-500/[0.035]' : 'border-slate-300/40 bg-slate-500/[0.035]'}`} style={{ left: area.left - 16, top: area.top - 28, width: area.right - area.left + 32, height: area.bottom - area.top + 44 }}><span className={`absolute left-3 top-2 px-1 text-[10px] font-semibold tracking-[0.16em] ${area.areaKind === 'image' ? 'text-sky-600/70' : area.areaKind === 'video' ? 'text-violet-600/70' : 'text-slate-600/65'}`}>{area.label} · {defaultLayout.positioned.filter(item => item.areaKind === area.areaKind).length}</span><span role="separator" aria-orientation="vertical" aria-label={`调整${area.label}区域宽度`} title="拖动调整宽度" onPointerDown={event => beginAreaResize(event, area, 'x')} onPointerMove={updateAreaResize} onPointerUp={endAreaResize} onPointerCancel={endAreaResize} className="pointer-events-auto absolute -right-1 top-8 bottom-3 z-30 w-2 cursor-ew-resize bg-transparent"/><span role="separator" aria-orientation="horizontal" aria-label={`调整${area.label}区域高度`} title="拖动调整高度" onPointerDown={event => beginAreaResize(event, area, 'y')} onPointerMove={updateAreaResize} onPointerUp={endAreaResize} onPointerCancel={endAreaResize} className="pointer-events-auto absolute -bottom-1 left-3 right-3 z-30 h-2 cursor-ns-resize bg-transparent"/><span role="separator" aria-label={`调整${area.label}区域大小`} title="拖动调整大小" onPointerDown={event => beginAreaResize(event, area, 'both')} onPointerMove={updateAreaResize} onPointerUp={endAreaResize} onPointerCancel={endAreaResize} className="pointer-events-auto absolute -bottom-2 -right-2 z-30 h-5 w-5 cursor-nwse-resize bg-transparent"/></div>)}
-      <svg aria-label="版本关系连线" className="absolute inset-0 z-10 h-full w-full overflow-visible"><defs><marker id={arrowMarkerId} markerWidth="8" markerHeight="8" refX="0" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 8 4 L 0 8 z" fill="context-stroke"/></marker></defs>{layout.edges.map(edge => { const presentation = versionTreeEdgePresentation(edge.kind, selectedEdgeId === edge.id); const directAssociation = edge.kind === 'media_companion' || edge.kind === 'derived_preview'; return <g key={edge.id}>
+      <svg aria-label="版本关系连线" className="absolute inset-0 z-10 h-full w-full overflow-visible"><defs><marker id={arrowMarkerId} markerWidth="8" markerHeight="8" refX="0" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 8 4 L 0 8 z" fill="context-stroke"/></marker></defs>{layout.edges.map(edge => { const presentation = versionTreeEdgePresentation(edge.kind, selectedEdgeId === edge.id); const directAssociation = edge.kind === 'media_companion' || edge.kind === 'derived_preview' || edge.kind === 'derived_transcode'; return <g key={edge.id}>
         <path data-edge-id={edge.id} data-relation-kind={edge.kind} role={edge.childId ? 'button' : undefined} tabIndex={edge.childId ? 0 : undefined} aria-label={edge.childId ? `选择${versionTreeRelationLabel(edge.kind)}关系线` : undefined} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); selectEdge(edge); }} onClick={event => { event.stopPropagation(); selectEdge(edge); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectEdge(edge); } }} d={edge.path} fill="none" stroke="transparent" strokeWidth="14" pointerEvents="stroke" className={edge.childId ? 'cursor-pointer' : undefined}/>
         <path aria-hidden data-relation-kind={edge.kind} d={edge.path} fill="none" stroke={presentation.stroke} strokeWidth={presentation.strokeWidth} opacity={presentation.opacity} markerEnd={directAssociation ? undefined : `url(#${arrowMarkerId})`} pointerEvents="none"/>
         {selectedEdgeId === edge.id && edge.childId && !mutatingIds.has(edge.childId) && <circle data-edge-child-handle={edge.childId} role="button" tabIndex={0} aria-label={`拖动${versionTreeRelationLabel(edge.kind)}终点以重新连接`} cx={edge.endX} cy={edge.endY} r="7" fill="white" stroke="#2563eb" strokeWidth="2" className="cursor-grab" onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} onPointerDown={event => { beginRelationDrag(event, edge.childId!, { x: edge.endX, y: edge.endY }, selectedSupplementalEdge); }} onPointerMove={event => { if (event.currentTarget.hasPointerCapture(event.pointerId)) updatePointerCandidate(event.clientX, event.clientY, event.currentTarget); }} onPointerUp={event => endRelationDrag(event, edge.childId!)} onPointerCancel={cancelRelationDrag}/>} {null}

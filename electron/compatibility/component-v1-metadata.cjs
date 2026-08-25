@@ -7,11 +7,12 @@ const path = require('path');
 const LEGACY_PLUGIN_DEFINITIONS = Object.freeze({
   'team-retouch': Object.freeze({
     id: 'team-retouch',
-    version: '26.8.24.5',
+    version: '26.8.25.1',
     name: '团片协作',
     description: 'AI识别人后规划可合并的工作图，支持人物标记、确定性任务重建并自动合回原尺寸。',
     capabilities: Object.freeze(['team-retouch.detect', 'team-retouch.identify', 'team-retouch.merge']),
     developmentEntry: Object.freeze(['extensions', 'team-retouch', 'team_retouch.py']),
+    developmentAlgorithmEntry: Object.freeze(['extensions', 'team-retouch', 'team_retouch.py']),
     requiredAssets: Object.freeze([Object.freeze(['models', 'rtmdet-ins_m_640x640.onnx'])]),
   }),
 });

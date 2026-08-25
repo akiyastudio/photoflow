@@ -13,6 +13,9 @@ export const migrateLegacyComponentSettings = (
   settings: ComponentSettingsMap,
 ): ComponentSettingsMap => {
   if (!isJsonObject(config) || settings[LEGACY_COMPONENT_ID] !== undefined) return settings;
+  const revisions = isJsonObject(config.componentSettingsRevisions) ? config.componentSettingsRevisions : {};
+  const revision = revisions[LEGACY_COMPONENT_ID];
+  if (Number.isSafeInteger(revision) && Number(revision) > 0) return settings;
   const legacySettings = config[LEGACY_SETTINGS_KEY];
   return isJsonObject(legacySettings)
     ? { ...settings, [LEGACY_COMPONENT_ID]: { ...legacySettings } }
