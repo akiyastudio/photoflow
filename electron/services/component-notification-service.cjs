@@ -1,0 +1,116 @@
+const NOTIFICATION_API_VERSION = 2;
+const NOTIFICATION_CAPABILITY = 'notifications.v2';
+const NOTIFICATION_PERMISSION = 'notifications';
+const NOTIFICATION_TONES = new Set(['info', 'success', 'warning', 'error']);
+const MESSAGE_MAX_LENGTH = 360;
+const DURATION_MIN_MS = 1200;
+const DURATION_MAX_MS = 15000;
+const DEFAULT_DURATION_MS = 3500;
+const DEDUPE_KEY = /^[a-z0-9][a-z0-9._:-]{0,79}$/i;
+const BURST_WINDOW_MS = 1000;
+const BURST_LIMIT = 3;
+const RATE_WINDOW_MS = 10000;
+const RATE_LIMIT = 8;
+const ERROR_BURST_LIMIT = 2;
+const ERROR_RATE_LIMIT = 4;
+const CONTENT_DEDUPE_WINDOW_MS = 1200;
+const BUFFER_LIMIT = 32;
+const BUFFER_TTL_MS = 15000;
+
+const failure = (code, message, retryable = false) => Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, accepted: false, error: Object.freeze({ code, message, retryable }) });
+
+const normalizeNotificationPayload = value => {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return failure('NOTIFICATION_INVALID_PAYLOAD', 'Notification payload must be an object');
+  const unknown = Object.keys(value).find(key => !['tone', 'message', 'durationMs', 'dedupeKey'].includes(key));
+  if (unknown) return failure('NOTIFICATION_INVALID_PAYLOAD', `Unknown notification field: ${unknown}`);
+  if (!NOTIFICATION_TONES.has(value.tone)) return failure('NOTIFICATION_INVALID_TONE', 'Notification tone is invalid');
+  if (typeof value.message !== 'string') return failure('NOTIFICATION_INVALID_MESSAGE', 'Notification message must be text');
+  if (value.message.length > MESSAGE_MAX_LENGTH) return failure('NOTIFICATION_INVALID_MESSAGE', `Notification message must contain 1-${MESSAGE_MAX_LENGTH} characters`);
+  const message = value.message.trim();
+  if (!message || message.length > MESSAGE_MAX_LENGTH) return failure('NOTIFICATION_INVALID_MESSAGE', `Notification message must contain 1-${MESSAGE_MAX_LENGTH} characters`);
+  let durationMs = DEFAULT_DURATION_MS;
+  if (value.durationMs !== undefined) {
+    if (!Number.isInteger(value.durationMs) || value.durationMs < DURATION_MIN_MS || value.durationMs > DURATION_MAX_MS) return failure('NOTIFICATION_INVALID_DURATION', `Notification duration must be an integer from ${DURATION_MIN_MS} to ${DURATION_MAX_MS}`);
+    durationMs = value.durationMs;
+  }
+  let dedupeKey;
+  if (value.dedupeKey !== undefined) {
+    if (typeof value.dedupeKey !== 'string' || !DEDUPE_KEY.test(value.dedupeKey)) return failure('NOTIFICATION_INVALID_DEDUPE_KEY', 'Notification dedupeKey is invalid');
+    dedupeKey = value.dedupeKey;
+  }
+  return Object.freeze({ tone: value.tone, message, durationMs, ...(dedupeKey ? { dedupeKey } : {}) });
+};
+
+class ComponentNotificationService {
+  constructor({ mainWindow, now = Date.now }) {
+    this.mainWindow = mainWindow; this.now = now; this.stateByComponent = new Map(); this.sequence = 0; this.rendererReady = false; this.buffer = [];
+    this.handleRendererReload = () => { this.rendererReady = false; };
+    mainWindow?.webContents?.on?.('did-start-loading', this.handleRendererReload);
+  }
+
+  deliver(event) {
+    const target = this.mainWindow;
+    if (!target || target.isDestroyed?.() || !target.webContents || target.webContents.isDestroyed?.()) return false;
+    try { target.webContents.send('component-host:notification.v2', event); return true; } catch { return false; }
+  }
+
+  setRendererReady(ready) {
+    this.rendererReady = ready === true;
+    if (!this.rendererReady) return { ready: false, flushed: 0 };
+    const now = this.now();
+    const pending = this.buffer.filter(item => now - item.queuedAt <= BUFFER_TTL_MS);
+    this.buffer = [];
+    let flushed = 0;
+    for (let index = 0; index < pending.length; index += 1) {
+      if (!this.deliver(pending[index].event)) { this.buffer = pending.slice(index); break; }
+      flushed += 1;
+    }
+    return { ready: true, flushed };
+  }
+
+  publish(descriptor, payload, context = {}) {
+    if (Number(descriptor?.hostApiVersion) < 4) return failure('NOTIFICATION_HOST_API_REQUIRED', 'Notifications require Host API 4');
+    if (!descriptor?.service?.capabilities?.includes(NOTIFICATION_CAPABILITY)) return failure('NOTIFICATION_CAPABILITY_NOT_GRANTED', 'Notification capability is not granted');
+    if (!descriptor?.service?.permissions?.includes(NOTIFICATION_PERMISSION)) return failure('NOTIFICATION_PERMISSION_DENIED', 'Notification permission is not granted');
+    if (!['project', 'application.settings'].includes(context.surface)) return failure('NOTIFICATION_CONTEXT_INVALID', 'Notification surface is not bound');
+    const normalized = normalizeNotificationPayload(payload);
+    if (normalized.accepted === false) return normalized;
+    const componentId = String(descriptor.componentId || '');
+    if (!componentId) return failure('NOTIFICATION_CONTEXT_INVALID', 'Notification owner is not bound');
+    const target = this.mainWindow;
+    if (!target || target.isDestroyed?.() || !target.webContents || target.webContents.isDestroyed?.()) return failure('NOTIFICATION_HOST_UNAVAILABLE', 'Main notification host is unavailable', true);
+    const now = this.now();
+    const state = this.stateByComponent.get(componentId) || { normalTimestamps: [], errorTimestamps: [], recent: new Map() };
+    state.normalTimestamps = state.normalTimestamps.filter(timestamp => now - timestamp < RATE_WINDOW_MS);
+    state.errorTimestamps = state.errorTimestamps.filter(timestamp => now - timestamp < RATE_WINDOW_MS);
+    for (const [key, timestamp] of state.recent) if (now - timestamp >= CONTENT_DEDUPE_WINDOW_MS) state.recent.delete(key);
+    const timestamps = normalized.tone === 'error' ? state.errorTimestamps : state.normalTimestamps;
+    const burstLimit = normalized.tone === 'error' ? ERROR_BURST_LIMIT : BURST_LIMIT;
+    const rateLimit = normalized.tone === 'error' ? ERROR_RATE_LIMIT : RATE_LIMIT;
+    const burstCount = timestamps.filter(timestamp => now - timestamp < BURST_WINDOW_MS).length;
+    if (burstCount >= burstLimit || timestamps.length >= rateLimit) { this.stateByComponent.set(componentId, state); return failure('NOTIFICATION_RATE_LIMITED', 'Notification rate limit exceeded', true); }
+    const contentKey = normalized.dedupeKey ? `key:${normalized.dedupeKey}` : `content:${normalized.tone}:${normalized.message}`;
+    if (state.recent.has(contentKey)) { this.stateByComponent.set(componentId, state); return Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, accepted: false, deduplicated: true, code: 'NOTIFICATION_DEDUPLICATED' }); }
+    timestamps.push(now); state.recent.set(contentKey, now); this.stateByComponent.set(componentId, state);
+    const id = `${componentId}:${++this.sequence}`;
+    const event = Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, type: 'notification', id, componentId, surface: context.surface, notification: normalized });
+    if (this.rendererReady) {
+      if (!this.deliver(event)) { timestamps.pop(); state.recent.delete(contentKey); return failure('NOTIFICATION_HOST_UNAVAILABLE', 'Main notification host is unavailable', true); }
+    } else {
+      if (this.buffer.length >= BUFFER_LIMIT) { timestamps.pop(); state.recent.delete(contentKey); return failure('NOTIFICATION_BUFFER_FULL', 'Notification renderer buffer is full', true); }
+      this.buffer.push({ event, queuedAt: now });
+    }
+    return Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, accepted: true, id });
+  }
+
+  clearComponent(componentId) {
+    const id = String(componentId || '');
+    const removed = this.stateByComponent.delete(id);
+    this.buffer = this.buffer.filter(item => item.event.componentId !== id);
+    if (id && this.rendererReady) this.deliver(Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, type: 'purge', componentId: id }));
+    return removed;
+  }
+  destroy() { this.mainWindow?.webContents?.removeListener?.('did-start-loading', this.handleRendererReload); this.stateByComponent.clear(); this.buffer = []; this.rendererReady = false; }
+}
+
+module.exports = { BUFFER_LIMIT, BUFFER_TTL_MS, BURST_LIMIT, BURST_WINDOW_MS, CONTENT_DEDUPE_WINDOW_MS, DEFAULT_DURATION_MS, DEDUPE_KEY, DURATION_MAX_MS, DURATION_MIN_MS, ERROR_BURST_LIMIT, ERROR_RATE_LIMIT, MESSAGE_MAX_LENGTH, NOTIFICATION_API_VERSION, NOTIFICATION_CAPABILITY, NOTIFICATION_PERMISSION, RATE_LIMIT, RATE_WINDOW_MS, ComponentNotificationService, failure, normalizeNotificationPayload };

@@ -31,6 +31,9 @@ const { pathToFileURL } = require('url');
   assert(workspaceSource.includes('setDirectoryReturnHighlightPath(returnedFolder.relativePath)'), 'returning must mark the folder with a dedicated location highlight');
   assert(!workspaceSource.includes('setSelectedPaths([returnedFolder.relativePath])'), 'returning must not add the folder to the file-operation selection');
   assert(workspaceSource.includes('requestFileReveal(returnedFolder.relativePath)'), 'returning must scroll the folder back into view');
+  const focusEntrySource = workspaceSource.slice(workspaceSource.indexOf('const focusEntry'), workspaceSource.indexOf('const activateMediaPreview'));
+  assert(focusEntrySource.includes('setPreviewPath(entry.relativePath)') && !focusEntrySource.includes('setSelectedPaths') && !focusEntrySource.includes('selectionAnchorPathRef'), 'opening a preview must not silently select the previously previewed file');
+  assert(workspaceSource.includes("querySelectorAll<HTMLElement>('[data-entry-path]')") && workspaceSource.includes('entryNode.focus({ preventScroll: true })'), 'preview navigation must move the real entry focus so only the native focus outline follows the preview');
 
   assert.strictEqual(renamedEntryDestinationPath('客户/旧文件夹', '新文件夹', [{
     sourceRelativePath: '客户\\旧文件夹',

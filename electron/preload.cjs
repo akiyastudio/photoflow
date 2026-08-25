@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
+const { subscribeComponentNotification } = require('./contracts/component-notification-renderer-event.cjs');
 
 for (const channel of ['workspace-screenshot-main-image-progress', 'workspace-selection-progress']) {
   ipcRenderer.on(channel, (_event, value) => ipcRenderer.send('background-task-external-progress', channel, value));
@@ -69,6 +70,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   releaseComponentSettingsPage: request => ipcRenderer.invoke('component-host-settings-release', request),
   activateComponentPage: instanceId => ipcRenderer.invoke('component-host-activate', instanceId),
   setHostSurfaceSuspended: update => ipcRenderer.invoke('component-host-set-suspended', update),
+  setHostToastReservation: update => ipcRenderer.invoke('component-host-set-toast-reservation', update),
+  setComponentNotificationReady: ready => ipcRenderer.invoke('component-host-notifications-ready', ready === true),
   setComponentPageBounds: (instanceId, bounds) => ipcRenderer.invoke('component-host-set-bounds', instanceId, bounds),
   closeComponentPage: instanceId => ipcRenderer.invoke('component-host-close', instanceId),
   closeProjectComponentPages: (workspacePath, projectId) => ipcRenderer.invoke('component-host-close-project', workspacePath, projectId),
@@ -257,6 +260,9 @@ contextBridge.exposeInMainWorld('electronAPI', {
   reportRendererError: (message, details) => ipcRenderer.send('renderer-error-log', message, details),
   trackTelemetry: (eventName, properties) => ipcRenderer.send('telemetry-track', eventName, properties),
   onAppError: (callback) => { const subscription = (_event, message) => callback(message); ipcRenderer.on('app-error', subscription); return () => ipcRenderer.removeListener('app-error', subscription); },
+  onComponentNotification: (callback) => {
+    return subscribeComponentNotification(ipcRenderer, callback);
+  },
   getRawPreview: (filePath, cacheConfig) => ipcRenderer.invoke('media-raw-preview', filePath, cacheConfig),
   projectFileOperation: (workspacePath, status, projectName, operation, paths, targetRelativePath, nextName, options) => ipcRenderer.invoke('workspace-file-operation', workspacePath, status, projectName, operation, paths, targetRelativePath, nextName, options),
   getProjectFileClipboardStatus: () => ipcRenderer.invoke('workspace-file-clipboard-status'),

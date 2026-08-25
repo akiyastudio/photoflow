@@ -74,12 +74,19 @@ const manifest = {
     ],
     service: {
       protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1', 'fixture.settings.v1'],
-      capabilities: allV2Capabilities, permissions: allPermissions, events: ['fixture.progress.v1'], runtimeActions: [],
+      capabilities: allV2Capabilities.filter(value => value !== 'notifications.v2'), permissions: allPermissions, events: ['fixture.progress.v1'], runtimeActions: [],
     },
   },
 };
 const descriptor = parseComponentHostManifest(manifest, manifestRoot);
 assert.equal(descriptor.hostApiVersion, 3);
+const hostApi4Descriptor = parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 4 }, service: { ...manifest.componentHost.service, capabilities: allV2Capabilities, permissions: [...allPermissions, 'notifications'] } } }, manifestRoot);
+assert.equal(hostApi4Descriptor.hostApiVersion, 4, 'notifications negotiate Host API 4');
+assert(hostApi4Descriptor.service.capabilities.includes('notifications.v2') && hostApi4Descriptor.service.permissions.includes('notifications'));
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, capabilities: [...manifest.componentHost.service.capabilities, 'notifications.v2'], permissions: [...allPermissions, 'notifications'] } } }, manifestRoot), /minHostApiVersion 4/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: [...allPermissions, 'notifications'] } } }, manifestRoot), /minHostApiVersion 4/, 'permission-only notification declarations also require API4');
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 4 }, service: { ...manifest.componentHost.service, capabilities: [...allV2Capabilities, ' notifications.v2'], permissions: [...allPermissions, 'notifications'] } } }, manifestRoot), /exact and unique/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 4 }, service: { ...manifest.componentHost.service, capabilities: allV2Capabilities, permissions: [...allPermissions, 'notifications', 'notifications'] } } }, manifestRoot), /exact and unique/);
 const hostApi2Descriptor = parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 2, maxHostApiVersion: 2 }, contributions: manifest.componentHost.contributions.filter(item => item.type !== 'application.settingsPage') } }, manifestRoot);
 assert.equal(hostApi2Descriptor.hostApiVersion, 2, 'existing Component Host V2 components without settings pages continue to negotiate Host API 2');
 assert.deepEqual(descriptor.settingsPages.map(page => ({ id: page.id, label: page.label, relativeEntry: page.relativeEntry, rpcMethods: page.rpcMethods })), [{ id: 'settings', label: 'Fixture settings', relativeEntry: 'ui/settings.html', rpcMethods: ['fixture.settings.v1'] }]);
@@ -102,7 +109,7 @@ try {
   assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: manifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { ...item, entry: 'linked-settings/settings.html' } : item) } }, manifestRoot), /linked path/);
 } catch (error) { if (!['EPERM', 'EACCES'].includes(error?.code)) throw error; }
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: allPermissions.filter(value => value !== 'project.output.write') } } }, manifestRoot), /requires permission project\.output\.write/);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 5 } } }, manifestRoot), /do not overlap/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 5, maxHostApiVersion: 6 } } }, manifestRoot), /do not overlap/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, unsafeExtension: true } }, manifestRoot), /Unknown component host field/);
 for (const schema of ['component-manifest-v2.schema.json', 'component-host-api-v2.schema.json', 'component-service-protocol-v1.schema.json']) JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', schema), 'utf8'));
 const capabilitySchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api-v2.schema.json'), 'utf8'));

@@ -187,6 +187,10 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const container = new TestNode(1, 'DIV', testDocument);
   const root = createRoot(container);
   const markCommon = { relativePath: '客户/素材', folderName: '素材' };
+  assert.strictEqual(folderMarkPanel.defaultFolderMarkPurpose('RAW', true), 'original', 'a project-root folder containing RAW files must default to original material');
+  assert.strictEqual(folderMarkPanel.defaultFolderMarkPurpose('JPEG', false), 'progress', 'a project-root folder without RAW files must default to progress');
+  assert.strictEqual(folderMarkPanel.defaultFolderMarkPurpose('客户/RAW', true), 'progress', 'a nested folder must default to progress even when it contains RAW files');
+  assert.strictEqual(folderMarkPanel.defaultFolderMarkPurpose('客户\\RAW', true), 'progress', 'Windows-style nested paths must also default to progress');
   await React.act(async () => root.render(React.createElement(importSourceControls.ImportSourceControls, {
     selectionTitle: '选择文件', selectionDescription: '选择文件', selectedCount: 0,
     onChooseFiles() {}, deleteSourceAfterImport: false, onDeleteSourceAfterImportChange() {},

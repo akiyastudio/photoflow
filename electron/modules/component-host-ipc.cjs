@@ -9,6 +9,14 @@ const registerComponentHostIpc = ({ ipcMain, manager, mainWindow }) => {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) throw new Error('Unauthorized host surface sender');
     return { success: manager.setHostSurfaceSuspended(update) };
   });
+  ipcMain.handle('component-host-set-toast-reservation', (event, update) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) throw new Error('Unauthorized host toast reservation sender');
+    return { success: manager.setHostToastReservation(update) };
+  });
+  ipcMain.handle('component-host-notifications-ready', (event, ready) => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents || typeof ready !== 'boolean') throw new Error('Unauthorized component notification readiness sender');
+    return manager.setNotificationRendererReady(ready);
+  });
   ipcMain.handle('component-host-set-bounds', (_event, instanceId, bounds) => ({ success: manager.setBounds(String(instanceId || ''), bounds) }));
   ipcMain.handle('component-host-close', (_event, instanceId) => ({ success: manager.close(String(instanceId || '')) }));
   ipcMain.handle('component-host-close-project', (_event, workspacePath, projectId) => ({ success: true, closedCount: manager.closeProject(workspacePath, projectId) }));

@@ -74,6 +74,12 @@ try {
   assert.equal(registry.list().find(item => item.id === 'settings-fixture').status, 'pending-install', 'a final component ZIP containing the declared settings entry remains installable');
   fs.unlinkSync(completeSettingsArchive);
 
+  const notificationArchive = path.join(componentRoot, 'notification-api3.zip');
+  const notificationManifest = { ...settingsManifest, id: 'notification-fixture', componentHost: { ...settingsManifest.componentHost, contributions: settingsManifest.componentHost.contributions.filter(item => item.type !== 'application.settingsPage'), service: { ...settingsManifest.componentHost.service, capabilities: [], permissions: ['notifications'] } } };
+  writeZip(notificationArchive, { 'component.json': JSON.stringify(notificationManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>' });
+  assert.match(registry.list().find(item => item.id === 'notification-fixture').error, /minHostApiVersion 4/, 'catalog preflight rejects notification grants below API4 before installation');
+  fs.unlinkSync(notificationArchive);
+
   const incompatible = path.join(componentRoot, 'incompatible.zip');
   writeZip(incompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), platforms: ['linux'] }) });
   assert.strictEqual(registry.list().find(item => item.id === 'third-party-tool').status, 'incompatible');
@@ -81,7 +87,7 @@ try {
   fs.unlinkSync(incompatible);
 
   const hostIncompatible = path.join(componentRoot, 'host-incompatible.zip');
-  writeZip(hostIncompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), componentHost: { contractVersion: 1, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 5 }, contributions: [{ type: 'workspace.toolbarAction' }, { type: 'component.fullPage' }] } }), 'tool.exe': 'binary' });
+  writeZip(hostIncompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), componentHost: { contractVersion: 1, compatibility: { minHostApiVersion: 5, maxHostApiVersion: 6 }, contributions: [{ type: 'workspace.toolbarAction' }, { type: 'component.fullPage' }] } }), 'tool.exe': 'binary' });
   assert.match(registry.list().find(item => item.id === 'third-party-tool').error, /不重叠/);
   fs.unlinkSync(hostIncompatible);
 

@@ -7,7 +7,7 @@ const os = require('os');
 const { exiftool, exiftoolPath } = require('exiftool-vendored');
 const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY, isThumbnailSizeSufficient } = require('./thumbnail-pipeline.cjs');
 const { createComponentRegistry } = require('./component-registry.cjs'); const { createComponentHostRegistry } = require('./component-host-contract.cjs');
-const { ComponentViewManager } = require('./services/component-view-manager.cjs'); const { ComponentCapabilityBroker } = require('./services/component-capability-broker.cjs');
+const { ComponentViewManager } = require('./services/component-view-manager.cjs'); const { ComponentCapabilityBroker } = require('./services/component-capability-broker.cjs'); const { ComponentNotificationService } = require('./services/component-notification-service.cjs');
 const { ComponentServiceManager } = require('./services/component-service-manager.cjs'); const { createConfigMutationService, readConfigFileWithRecovery, registerConfigDrainBeforeQuit } = require('./services/config-mutation-service.cjs');
 const { registerComponentProjectCapabilities } = require('./services/component-project-capabilities.cjs');
 const { COMPONENT_HOST_V1_RPC_REGISTRARS, registerDeprecatedComponentHostV1Capabilities } = require('./compatibility/component-host-v1.cjs');
@@ -1837,6 +1837,7 @@ app.whenReady().then(async () => {
   createWindow(false);
 
   const componentCapabilityBroker = new ComponentCapabilityBroker();
+  const componentNotificationService = new ComponentNotificationService({ mainWindow }); componentCapabilityBroker.register('notifications.v2', (payload, context, descriptor) => componentNotificationService.publish(descriptor, payload, context));
   registerComponentProjectCapabilities({
     broker: componentCapabilityBroker,
     ensureWorkspace,
@@ -1875,7 +1876,7 @@ app.whenReady().then(async () => {
     registry: componentHostRegistry,
     preloadPath: path.join(__dirname, 'component-preload.cjs'),
     ipcMain: electronIpcMain,
-    serviceManager: componentServiceManager,
+    serviceManager: componentServiceManager, notificationService: componentNotificationService,
     writeLog,
   });
   registerComponentHostIpc({ ipcMain, manager: componentViewManager, mainWindow });

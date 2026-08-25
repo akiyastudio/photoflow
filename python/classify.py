@@ -1525,6 +1525,7 @@ def split_large_videos(target_folder, on_split=None, source_paths=None):
 def transcode_imported_videos(target_folder, settings, on_transcoded=None, source_paths=None):
     """Apply the shared video-transcode panel settings to this import batch."""
     source_dir = os.path.join(target_folder, 'mov')
+    output_dir = os.path.join(target_folder, 'mov_转码')
     candidates = [
         os.path.abspath(file_path) for file_path in (source_paths or [])
         if os.path.isfile(file_path)
@@ -1545,6 +1546,7 @@ def transcode_imported_videos(target_folder, settings, on_transcoded=None, sourc
                 frame_rate=settings.get('frameRate', 'original'),
                 audio_mode=settings.get('audioMode', 'aac'),
                 output_mode='new',
+                destination_directory=output_dir,
                 on_log=log_info,
                 cancel_check=ensure_not_cancelled,
             )
@@ -1765,7 +1767,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
         processed_target_list = list(processed_targets)
         generated_jpg_count = 0
         generated_jpg_paths_by_target = {}
-        generated_preview_paths_by_target = {}
+        generated_video_paths_by_target = {}
         raw_without_jpg_count = 0
         if generate_jpg_from_raw:
             all_candidates = [
@@ -1818,19 +1820,22 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                 if split_count:
                     log_info(f'大文件分割完成：共处理 {split_count} 个视频')
             if transcode_import_videos:
-                transcode_count, video_count, transcode_outputs = transcode_imported_videos(
+                def record_transcode_output(output_path, target=target_folder):
+                    imported_output_paths.add(output_path)
+                    generated_video_paths_by_target.setdefault(target, []).append(output_path)
+
+                transcode_count, video_count, _transcode_outputs = transcode_imported_videos(
                     target_folder,
                     transcode_settings or {},
-                    on_transcoded=lambda output_path: imported_output_paths.add(output_path),
+                    on_transcoded=record_transcode_output,
                     source_paths=imported_paths_by_target.get(target_folder, []),
                 )
-                imported_paths_by_target.setdefault(target_folder, []).extend(transcode_outputs)
                 if video_count:
-                    log_info(f'视频转码完成：{transcode_count}/{video_count} 个文件')
+                    log_info(f'视频转码完成：{transcode_count}/{video_count} 个文件已保存到 mov_转码')
             if generate_video_preview:
                 def record_generated_preview(generated_path, target=target_folder):
                     imported_output_paths.add(generated_path)
-                    generated_preview_paths_by_target.setdefault(target, []).append(generated_path)
+                    generated_video_paths_by_target.setdefault(target, []).append(generated_path)
 
                 preview_count, video_count = generate_video_previews(
                     target_folder,
@@ -1853,7 +1858,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                     dest_path, target_folder, os.path.basename(target_folder), import_session,
                     imported_paths_by_target.get(target_folder, []),
                     generated_jpg_paths_by_target.get(target_folder, []),
-                    generated_preview_paths_by_target.get(target_folder, []),
+                    generated_video_paths_by_target.get(target_folder, []),
                 )
                 for target_folder in sorted(processed_target_list)
             ]

@@ -7,8 +7,9 @@ const { parseComponentHostManifest } = require('../electron/component-host-contr
 const root = path.resolve(__dirname, '..');
 const rendererOutput = path.join(root, 'artifacts', 'component-renderers', 'team-retouch');
 const template = JSON.parse(fs.readFileSync(path.join(root, 'extensions', 'team-retouch', 'component.template.json'), 'utf8'));
-assert.equal(template.version, '26.8.25.1', 'settings-page release must use a new installable team-retouch business version');
-assert.deepEqual(template.componentHost.compatibility, { minHostApiVersion: 3, maxHostApiVersion: 3 });
+assert.equal(template.version, '26.8.25.2', 'host-toast release must use a new installable team-retouch business version');
+assert.deepEqual(template.componentHost.compatibility, { minHostApiVersion: 4, maxHostApiVersion: 4 });
+assert(template.componentHost.service.capabilities.includes('notifications.v2') && template.componentHost.service.permissions.includes('notifications'), 'team-retouch explicitly grants the API4 notification capability and permission');
 const builder = fs.readFileSync(path.join(root, 'scripts', 'build-components.cjs'), 'utf8');
 const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8');
 const workspace = fs.readFileSync(path.join(root, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
@@ -122,7 +123,7 @@ try {
   fs.writeFileSync(path.join(staged, 'component.json'), JSON.stringify(template));
   const descriptor = parseComponentHostManifest(template, staged);
   assert.equal(descriptor.componentId, 'team-retouch');
-  assert.equal(descriptor.hostApiVersion, 3);
+  assert.equal(descriptor.hostApiVersion, 4);
   assert.equal(descriptor.fullPage.entry, path.join(staged, 'ui', 'index.html'));
   assert.equal(descriptor.settingsPages[0].entry, path.join(staged, 'ui', 'settings.html'));
   assert.deepEqual(descriptor.settingsPages[0].rpcMethods, settingsPage.rpcMethods);

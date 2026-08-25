@@ -1,4 +1,5 @@
 const { contextBridge, ipcRenderer } = require('electron');
+const { createComponentNotifyInvoker } = require('./component-notify-bridge.cjs');
 
 const subscribe = (channel, callback) => {
   if (typeof callback !== 'function') throw new TypeError('Component lifecycle callback must be a function');
@@ -11,6 +12,7 @@ contextBridge.exposeInMainWorld('photoFlowComponent', Object.freeze({
   // Bridge ABI version; Host API negotiation is reported by getContext().
   contractVersion: 1,
   getContext: () => ipcRenderer.invoke('component-sdk:get-context'),
+  notify: createComponentNotifyInvoker(payload => ipcRenderer.invoke('component-sdk:notify', payload)),
   rpc: (method, payload) => ipcRenderer.invoke('component-sdk:rpc', String(method || ''), payload),
   onEvent: (topic, callback) => {
     const normalizedTopic = String(topic || '');

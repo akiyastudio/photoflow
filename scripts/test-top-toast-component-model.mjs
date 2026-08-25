@@ -1,0 +1,32 @@
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import { pathToFileURL } from 'node:url';
+
+const root = path.resolve(import.meta.dirname, '..');
+const model = await import(pathToFileURL(path.join(root, 'src/features/app/top-toast-notice-model.ts')).href);
+const toneModel = await import(pathToFileURL(path.join(root, 'src/features/app/top-toast-tone-model.ts')).href);
+const reservationModel = await import(pathToFileURL(path.join(root, 'src/features/app/top-toast-host-reservation-model.ts')).href);
+let notices = [];
+let lastEvictions = [];
+for (let id = 1; id <= 7; id += 1) { const result = model.enqueueTopToastNoticeWithEvictions(notices, { id, message: `notice-${id}`, persistent: false, count: 1, tone: 'info', sourceComponentId: id % 2 ? 'alpha' : 'beta' }); notices = result.notices; lastEvictions = result.evictedIds; }
+assert.equal(notices.length, model.MAX_TRANSIENT_NOTICES);
+assert.deepEqual(notices.map(item => item.id), [3, 4, 5, 6, 7], 'oldest transient notices are deterministically evicted');
+assert.deepEqual(lastEvictions, [2], 'hook receives exact evicted IDs for timer cleanup');
+const timers = new Map([[2, 202], [7, 707]]); const clearedTimers = [];
+model.clearTopToastNoticeTimers(timers, lastEvictions, timer => clearedTimers.push(timer));
+assert.deepEqual(clearedTimers, [202]); assert.deepEqual([...timers], [[7, 707]], 'evicted timer cleanup is scoped and deterministic');
+notices = model.enqueueTopToastNotice(notices, { id: 8, message: 'critical', persistent: false, count: 1, tone: 'error', sourceComponentId: 'alpha' });
+assert(notices.some(item => item.id === 8) && !notices.some(item => item.id === 3), 'critical errors displace ordinary transient status');
+notices = model.purgeComponentTopToastNotices(notices, 'alpha');
+assert.deepEqual(notices.map(item => item.id), [4, 6], 'component purge preserves other component notices');
+assert.deepEqual(toneModel.topToastTonePresentation('success'), { tone: 'success', role: 'status', ariaLive: 'polite', icon: 'check' });
+assert.deepEqual(toneModel.topToastTonePresentation('warning'), { tone: 'warning', role: 'status', ariaLive: 'polite', icon: 'warning' });
+assert.deepEqual(toneModel.topToastTonePresentation('error'), { tone: 'error', role: 'alert', ariaLive: 'assertive', icon: 'error' });
+assert.equal(reservationModel.hostToastReservationBottom({ querySelector: () => ({}), getBoundingClientRect: () => ({ bottom: 143.2 }) }), 156, 'measured stack bottom reserves a non-overlapping native-view boundary');
+assert.equal(reservationModel.hostToastReservationBottom({ querySelector: () => null, getBoundingClientRect: () => ({ bottom: 40 }) }), 0, 'empty stack restores native view geometry');
+const css = fs.readFileSync(path.join(root, 'src/index.css'), 'utf8');
+for (const tone of ['info', 'success', 'warning', 'error']) assert(css.includes(`[data-toast-tone="${tone}"]`), `${tone} must have a visible CSS mapping`);
+const hook = fs.readFileSync(path.join(root, 'src/features/app/useTopToastStack.tsx'), 'utf8');
+assert(!/className="top-toast-stack"[^>]*aria-live/.test(hook), 'the stack container must not nest a live region around status/alert children');
+console.log('top toast component model tests passed');

@@ -3,7 +3,7 @@ const path = require('path');
 const { LEGACY_HOST_CAPABILITIES } = require('./compatibility/component-v1-metadata.cjs');
 
 const COMPONENT_HOST_CONTRACT_VERSION = 2;
-const COMPONENT_HOST_API_VERSION = 3;
+const COMPONENT_HOST_API_VERSION = 4;
 const COMPONENT_HOST_MIN_API_VERSION = 1;
 const COMPONENT_SERVICE_PROTOCOL_VERSION = 1;
 const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage', 'application.settingsPage']);
@@ -15,12 +15,14 @@ const HOST_CAPABILITIES = new Set([
   'project.output.v2', 'version.create.v2', 'tasks.v2', 'dialogs.v2',
   'component.storage.v2', 'component.settings.v2', 'component.events.v2',
   'component.lifecycle.v2', 'component.media.v2', 'project.progress.v2',
+  'notifications.v2',
 ]);
 const HOST_PERMISSIONS = new Set([
   'project.media.read', 'project.input.read', 'project.output.write',
   'project.version.create', 'component.storage', 'component.settings',
   'tasks', 'dialogs', 'events', 'component.lifecycle.read', 'component.lifecycle.manage',
   'component.media', 'project.progress',
+  'notifications',
 ]);
 const CAPABILITY_PERMISSIONS = Object.freeze({
   'project.media.page.v2': 'project.media.read',
@@ -36,6 +38,7 @@ const CAPABILITY_PERMISSIONS = Object.freeze({
   'component.lifecycle.v2': 'component.lifecycle.read',
   'component.media.v2': 'component.media',
   'project.progress.v2': 'project.progress',
+  'notifications.v2': 'notifications',
 });
 const COMPONENT_ICON_MIME_TYPES = new Map([['.png', 'image/png'], ['.svg', 'image/svg+xml']]);
 const MAX_COMPONENT_ICON_BYTES = 512 * 1024;
@@ -228,6 +231,11 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     for (const capability of capabilities) {
       const permission = CAPABILITY_PERMISSIONS[capability];
       if (permission && !permissions.includes(permission)) throw new Error(`Component capability ${capability} requires permission ${permission}`);
+    }
+    if (capabilities.includes('notifications.v2') || permissions.includes('notifications')) {
+      if (min < 4) throw new Error('Notifications require minHostApiVersion 4 or newer');
+      if (raw.capabilities.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.capabilities).size !== raw.capabilities.length) throw new Error('Host API 4 capabilities must be exact and unique');
+      if (raw.permissions.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.permissions).size !== raw.permissions.length) throw new Error('Host API 4 permissions must be exact and unique');
     }
     const events = [...new Set((raw.events || []).map(value => requiredText(value, 'service event', 128)))];
     if (events.length > 32 || events.some(event => !VERSIONED_METHOD.test(event))) throw new Error('Component service events must be a bounded versioned allowlist');

@@ -25,6 +25,10 @@ const componentPageKey = ({ componentId, workspacePath, projectId }) => ['projec
 const componentSettingsPageKey = ({ componentId, pageId }) => ['application.settings', componentId, String(pageId || '').trim()].join(PAGE_KEY_SEPARATOR);
 const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
+const componentViewBoundsWithHostOverlay = (bounds, reservedBottom) => {
+  const bottom = Math.max(bounds.y, Math.min(bounds.y + bounds.height, Number(reservedBottom) || 0));
+  return { x: Math.round(bounds.x), y: Math.round(bottom), width: Math.round(bounds.width), height: Math.round(Math.max(0, bounds.y + bounds.height - bottom)) };
+};
 const selectComponentPreload = (descriptor, { core, compatibilityV1 }) => {
   const contractVersion = Number(descriptor?.contractVersion);
   const hostApiVersion = Number(descriptor?.hostApiVersion);
@@ -38,7 +42,7 @@ const diagnosticToken = value => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, compatibilityPreloadPath = path.join(path.dirname(preloadPath), 'compatibility', 'component-preload-v1.cjs'), ipcMain, serviceManager = null, writeLog = () => undefined }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, compatibilityPreloadPath = path.join(path.dirname(preloadPath), 'compatibility', 'component-preload-v1.cjs'), ipcMain, serviceManager = null, notificationService = null, writeLog = () => undefined }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
@@ -47,6 +51,7 @@ class ComponentViewManager {
     this.ipcMain = ipcMain;
     this.writeLog = writeLog;
     this.serviceManager = serviceManager;
+    this.notificationService = notificationService;
     this.instances = new Map();
     this.instancesById = new Map();
     this.senderBindings = new Map();
@@ -54,6 +59,7 @@ class ComponentViewManager {
     this.resolvedTheme = 'light';
     this.activeInstanceId = '';
     this.hostSurfaceState = { rendererToken: '', revision: -1, suspended: false };
+    this.hostToastReservation = { rendererToken: '', revision: -1, bottom: 0 };
     this.registerComponentSdkIpc();
   }
 
@@ -78,6 +84,12 @@ class ComponentViewManager {
         return this.serviceManager.invoke(instance.context.componentId, normalizedMethod, payload, instance.context);
       }
       throw new Error(`Unknown component RPC method: ${normalizedMethod}`);
+    });
+    this.ipcMain.handle('component-sdk:notify', (event, payload) => {
+      const instance = this.senderBindings.get(event.sender.id);
+      if (!instance || instance.view.webContents !== event.sender) { const error = new Error('Unauthorized component sender'); error.code = 'NOTIFICATION_UNAUTHORIZED_SENDER'; throw error; }
+      if (!this.notificationService) { const error = new Error('Component notification service is unavailable'); error.code = 'NOTIFICATION_HOST_UNAVAILABLE'; throw error; }
+      return this.notificationService.publish(instance.descriptor, payload, instance.context);
     });
   }
 
@@ -178,6 +190,7 @@ class ComponentViewManager {
       settingsLeases: new Set(surface === 'application.settings' ? [leaseId] : []),
       leaseGeneration: 1,
       logicalActive: false,
+      requestedBounds: { x: 0, y: 0, width: 0, height: 0 },
       context: Object.freeze({
         componentId: descriptor.componentId,
         componentVersion: descriptor.componentVersion,
@@ -230,6 +243,7 @@ class ComponentViewManager {
       this.senderBindings.delete(senderId);
       if (this.instances.get(key) === instance) this.instances.delete(key);
       if (this.instancesById.get(instanceId) === instance) this.instancesById.delete(instanceId);
+      if (![...this.senderBindings.values()].some(bound => bound.context.componentId === descriptor.componentId)) this.notificationService?.clearComponent?.(descriptor.componentId);
     });
     this.mainWindow.contentView.addChildView(view);
     view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
@@ -252,7 +266,7 @@ class ComponentViewManager {
     const { workspacePath: _privateWorkspacePath, eventSender: _privateEventSender, emitComponentEvent: _privateEmit, ...publicContext } = instance.context;
     const applicationSettings = instance.context.surface === 'application.settings';
     const permissions = applicationSettings
-      ? (instance.descriptor.service?.permissions || []).filter(permission => ['component.settings', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs'].includes(permission))
+      ? (instance.descriptor.service?.permissions || []).filter(permission => ['component.settings', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs', 'notifications'].includes(permission))
       : instance.descriptor.service?.permissions || [];
     return {
       ...publicContext,
@@ -283,6 +297,7 @@ class ComponentViewManager {
         if (!instance.view.webContents.isDestroyed()) instance.view.webContents.send(active ? 'component-sdk:activate' : 'component-sdk:deactivate');
       }
       this.applyVisibility(instance);
+      this.applyBounds(instance);
     }
     return Boolean(instanceId);
   }
@@ -298,6 +313,10 @@ class ComponentViewManager {
     if (rendererToken === this.hostSurfaceState.rendererToken && revision <= this.hostSurfaceState.revision) return false;
     const rendererReloaded = Boolean(this.hostSurfaceState.rendererToken && rendererToken !== this.hostSurfaceState.rendererToken);
     this.hostSurfaceState = { rendererToken, revision, suspended: update.suspended };
+    if (rendererReloaded && this.hostToastReservation.rendererToken !== rendererToken) {
+      this.hostToastReservation = { rendererToken, revision: -1, bottom: 0 };
+      for (const instance of this.instances.values()) this.applyBounds(instance);
+    }
     if (rendererReloaded) this.activeInstanceId = '';
     for (const instance of this.instances.values()) {
       if (rendererReloaded && instance.logicalActive) {
@@ -313,9 +332,30 @@ class ComponentViewManager {
     if (!validBounds(bounds)) throw new Error('Invalid component page bounds');
     const instance = [...this.instances.values()].find(item => item.instanceId === instanceId);
     if (!instance) return false;
-    instance.view.setBounds({ x: Math.round(bounds.x), y: Math.round(bounds.y), width: Math.round(bounds.width), height: Math.round(bounds.height) });
+    instance.requestedBounds = { x: bounds.x, y: bounds.y, width: bounds.width, height: bounds.height };
+    this.applyBounds(instance);
     return true;
   }
+
+  applyBounds(instance) {
+    const reservedBottom = instance.logicalActive && instance.instanceId === this.activeInstanceId ? this.hostToastReservation.bottom : 0;
+    instance.view.setBounds(componentViewBoundsWithHostOverlay(instance.requestedBounds, reservedBottom));
+  }
+
+  setHostToastReservation(update) {
+    const rendererToken = String(update?.rendererToken || '');
+    const revision = Number(update?.revision);
+    const bottom = Number(update?.bottom);
+    if (!rendererToken || rendererToken.length > 200 || !Number.isSafeInteger(revision) || revision < 0 || !Number.isSafeInteger(bottom) || bottom < 0 || bottom > 20000) throw new Error('Invalid host toast reservation');
+    if (rendererToken !== this.hostToastReservation.rendererToken) this.hostToastReservation = { rendererToken, revision: -1, bottom: 0 };
+    if (revision <= this.hostToastReservation.revision) return false;
+    const changed = bottom !== this.hostToastReservation.bottom;
+    this.hostToastReservation = { rendererToken, revision, bottom };
+    if (changed) for (const instance of this.instances.values()) this.applyBounds(instance);
+    return changed;
+  }
+
+  setNotificationRendererReady(ready) { return this.notificationService?.setRendererReady?.(ready) || { ready: false, flushed: 0 }; }
 
   close(instanceId) {
     const instance = this.instancesById.get(instanceId);
@@ -342,10 +382,11 @@ class ComponentViewManager {
       .filter(instance => instance.descriptor.componentId === normalizedId)
       .map(instance => instance.instanceId);
     ids.forEach(id => this.close(id));
+    this.notificationService?.clearComponent?.(normalizedId);
     return ids.length;
   }
 
-  destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); }
+  destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); this.notificationService?.destroy?.(); }
 }
 
-module.exports = { ComponentViewManager, componentPageKey, componentSettingsPageKey, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };
+module.exports = { ComponentViewManager, componentPageKey, componentSettingsPageKey, componentViewBoundsWithHostOverlay, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };

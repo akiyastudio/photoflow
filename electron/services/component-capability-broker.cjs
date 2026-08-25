@@ -1,7 +1,7 @@
 const { CAPABILITY_PERMISSIONS, HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 
 const MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
-const APPLICATION_SETTINGS_CAPABILITIES = new Set(['component.settings.v2', 'component.lifecycle.v2', 'dialogs.v2']);
+const APPLICATION_SETTINGS_CAPABILITIES = new Set(['component.settings.v2', 'component.lifecycle.v2', 'dialogs.v2', 'notifications.v2']);
 
 const clonePayload = payload => {
   if (payload === undefined || payload === null) return {};
@@ -68,9 +68,9 @@ class ComponentCapabilityBroker {
     if (boundContext?.surface === 'application.settings' && !APPLICATION_SETTINGS_CAPABILITIES.has(normalized)) {
       throw new Error(`Component capability is not available on the application settings surface: ${normalized}`);
     }
-    if (!descriptor?.service?.capabilities.includes(normalized)) throw new Error(`Component capability is not granted: ${normalized}`);
+    if (!descriptor?.service?.capabilities.includes(normalized)) { const error = new Error(`Component capability is not granted: ${normalized}`); error.code = 'COMPONENT_HOST_PERMISSION_DENIED'; throw error; }
     const permission = CAPABILITY_PERMISSIONS[normalized];
-    if (permission && !descriptor.service.permissions?.includes(permission)) throw new Error(`Component capability permission is not granted: ${permission}`);
+    if (permission && !descriptor.service.permissions?.includes(permission)) { const error = new Error(`Component capability permission is not granted: ${permission}`); error.code = 'COMPONENT_HOST_PERMISSION_DENIED'; throw error; }
     const handler = this.handlers.get(normalized);
     if (!handler) throw new Error(`Host capability is unavailable: ${normalized}`);
     this.activeByComponent.set(componentId, (this.activeByComponent.get(componentId) || 0) + 1);

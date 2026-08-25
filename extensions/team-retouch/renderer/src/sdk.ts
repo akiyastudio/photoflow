@@ -10,11 +10,13 @@ export type ComponentContext = {
   sourcePageId: string;
   themeContractVersion: 1;
   resolvedTheme: 'light' | 'dark';
+  hostApiVersion: 1 | 2 | 3 | 4;
 };
 
 export type ComponentSdk = {
   contractVersion: 1;
   getContext(): Promise<ComponentContext>;
+  notify?: (payload: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; durationMs?: number; dedupeKey?: string }) => Promise<{ apiVersion: 2; accepted: boolean; deduplicated?: boolean; error?: { code: string; message: string; retryable: boolean } }>;
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>;
   onEvent(topic: string, callback: (value: unknown) => void): () => void;
   onActivate(callback: () => void): () => void;
@@ -24,6 +26,21 @@ export type ComponentSdk = {
 };
 
 declare global { interface Window { photoFlowComponent: ComponentSdk } }
+
+export type NoticeTone = 'info' | 'success' | 'warning' | 'error';
+const inferredNoticeTone = (message: string): NoticeTone => /失败|错误|异常|无法|未通过/.test(message) ? 'error' : /警告|注意|请先|已暂停|缺少/.test(message) ? 'warning' : /完成|成功|已保存|已安装|已卸载|已更新|已删除|已添加|已生成|已识别|已恢复/.test(message) ? 'success' : 'info';
+export const notify = (message: string, tone: NoticeTone = inferredNoticeTone(message)) => {
+  const cleanMessage = String(message || '').trim().slice(0, 360);
+  if (!cleanMessage) return;
+  const api = window.photoFlowComponent?.notify;
+  if (typeof api !== 'function') {
+    (tone === 'error' ? console.error : console.warn)(`团片通知宿主不可用：${cleanMessage}`);
+    return;
+  }
+  void api({ tone, message: cleanMessage, durationMs: tone === 'error' ? 6000 : 3500 }).then(result => {
+    if (!result.accepted && !result.deduplicated) (tone === 'error' ? console.error : console.warn)(`团片通知未显示（${result.error?.code || 'UNKNOWN'}）：${cleanMessage}`);
+  }).catch(error => (tone === 'error' ? console.error : console.warn)('团片通知调用失败', error));
+};
 
 const allowedMethods = new Set([
   'team.media.page.v1', 'team.progress.list.v1', 'team.progress.create.v1',

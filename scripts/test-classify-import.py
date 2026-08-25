@@ -20,6 +20,7 @@ sys.path.insert(0, str(ROOT / 'python'))
 
 import classify  # noqa: E402
 import ffmpeg_transcode  # noqa: E402
+import workspace_db  # noqa: E402
 
 
 class ClassifyImportTests(unittest.TestCase):
@@ -1139,6 +1140,105 @@ class ClassifyImportTests(unittest.TestCase):
             root = Path(temporary)
             with self.assertRaisesRegex(ValueError, 'import_session_required'):
                 classify.build_import_graph_manifest(str(root), str(root), 'project', '', [], [], [])
+
+    def test_work_import_transcode_keeps_mov_and_registers_transcode_artifact(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dcim = root / 'card' / 'DCIM'
+            project = root / 'project'
+            dcim.mkdir(parents=True)
+            project.mkdir()
+            (dcim / 'clip.mov').write_bytes(b'original-video')
+
+            def fake_transcode(input_path, **kwargs):
+                destination = Path(kwargs['destination_directory']) / 'clip.mp4'
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b'transcoded-video')
+                self.assertEqual(kwargs['output_mode'], 'new')
+                return str(destination)
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), mock.patch.object(
+                classify, 'transcode_video', side_effect=fake_transcode,
+            ):
+                classify.stage_import_and_organize(
+                    str(root / 'card'), str(project), direct_project=True,
+                    transcode_import_videos=True, import_session='import-transcode',
+                )
+
+            self.assertEqual((project / 'mov' / 'clip.mov').read_bytes(), b'original-video')
+            self.assertEqual((project / 'mov_转码' / 'clip.mp4').read_bytes(), b'transcoded-video')
+            events = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith('{')]
+            self.assertTrue(any('已保存到 mov_转码' in event.get('message', '') for event in events))
+            success = next(event for event in events if event.get('type') == 'success')
+            manifest = success['data']['importManifests'][0]
+            slots = {item['relativePath']: item['importSlot'] for item in manifest['artifacts']}
+            self.assertEqual(slots, {'mov': 'mov', 'mov_转码': 'video_transcode'})
+            self.assertIn(str(project / 'mov_转码' / 'clip.mp4'), success['data']['importedPaths'])
+
+            db = workspace_db.connect(str(root), str(root / 'workspace.db'))
+            try:
+                now = int(time.time() * 1000)
+                db.execute(
+                    'INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)',
+                    ('project-id', project.name, '后期中', project.name, now, now),
+                )
+                db.commit()
+                workspace_db.media_workflow_import_commit(str(root), db, manifest)
+                edge = db.execute(
+                    "SELECT edge_kind FROM version_graph_edges WHERE project_id=? AND edge_kind='derived_transcode'",
+                    ('project-id',),
+                ).fetchone()
+                self.assertIsNotNone(edge)
+            finally:
+                db.close()
+
+    def test_import_transcode_uses_numbered_destination_and_tolerates_partial_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            source_dir = target / 'mov'
+            output_dir = target / 'mov_转码'
+            source_dir.mkdir()
+            output_dir.mkdir()
+            sources = [source_dir / 'clip.mov', source_dir / 'broken.mov']
+            for source in sources:
+                source.write_bytes(b'video')
+            (output_dir / 'clip.mp4').write_bytes(b'existing')
+
+            def fake_transcode(input_path, **kwargs):
+                self.assertEqual(Path(kwargs['destination_directory']), output_dir)
+                if Path(input_path).name == 'broken.mov':
+                    raise classify.FFmpegTranscodeError('simulated failure')
+                destination = output_dir / 'clip (1).mp4'
+                destination.write_bytes(b'new')
+                return str(destination)
+
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(
+                classify, 'transcode_video', side_effect=fake_transcode,
+            ):
+                result = classify.transcode_imported_videos(
+                    str(target), {}, source_paths=[str(path) for path in sources],
+                )
+
+            self.assertEqual(result, (1, 2, [str(output_dir / 'clip (1).mp4')]))
+            self.assertTrue(all(path.is_file() for path in sources))
+            self.assertEqual((output_dir / 'clip.mp4').read_bytes(), b'existing')
+
+    def test_import_transcode_cancellation_propagates_and_keeps_original(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            target = Path(temporary)
+            source = target / 'mov' / 'clip.mov'
+            source.parent.mkdir()
+            source.write_bytes(b'original')
+
+            def cancel_transcode(_input_path, **kwargs):
+                raise classify.ImportCancelled('cancelled')
+
+            with mock.patch.object(classify, 'transcode_video', side_effect=cancel_transcode):
+                with self.assertRaises(classify.ImportCancelled):
+                    classify.transcode_imported_videos(str(target), {}, source_paths=[str(source)])
+            self.assertEqual(source.read_bytes(), b'original')
+            self.assertFalse((target / 'mov_转码').exists())
 
     def test_video_preview_only_processes_current_import_paths(self):
         with tempfile.TemporaryDirectory() as temporary:

@@ -7,7 +7,7 @@ import { TeamRetouchManager } from './legacy/TeamRetouchManager';
 import { PersonIdentityManager } from './legacy/PersonIdentityManager';
 import { LegacyDialogProvider } from './legacy/legacy-dialog';
 import type { TeamRetouchStep } from './legacy/TeamRetouchSteps';
-import { rpc, type ComponentContext } from './sdk';
+import { notify, rpc, type ComponentContext } from './sdk';
 import { hydrateLegacyWorkspace, legacyApi } from './legacy/legacy-api';
 import type { TeamIdentityWorkspace } from './legacy/legacy-types';
 import { resolveTeamRetouchEntriesForOpen } from './legacy/legacy-entry-scope';
@@ -45,10 +45,10 @@ const TeamSettingsDialog = ({ state, patch, retry, close, notice }: { state: Tea
 };
 
 const App = () => {
-  const [context, setContext] = useState<ComponentContext>(); const [entries, setEntries] = useState<Json[]>([]); const [step, setStep] = useState<TeamRetouchStep>('detect'); const [settingsOpen, setSettingsOpen] = useState(false); const [notice, setNotice] = useState('');
+  const [context, setContext] = useState<ComponentContext>(); const [entries, setEntries] = useState<Json[]>([]); const [step, setStep] = useState<TeamRetouchStep>('detect'); const [settingsOpen, setSettingsOpen] = useState(false);
   const [settingsState, setSettingsState] = useState<TeamSettingsState>({ loaded: false, loading: false, error: '' });
   const settingsControllerRef = useRef<ReturnType<typeof createTeamSettingsController>>();
-  if (!settingsControllerRef.current) settingsControllerRef.current = createTeamSettingsController({ read: () => rpc<Json>('team.settings.get.v1'), merge: patch => rpc<Json>('team.settings.update.v1', patch), notice: setNotice });
+  if (!settingsControllerRef.current) settingsControllerRef.current = createTeamSettingsController({ read: () => rpc<Json>('team.settings.get.v1'), merge: patch => rpc<Json>('team.settings.update.v1', patch), notice: notify });
   const settingsController = settingsControllerRef.current;
   const [componentActive, setComponentActive] = useState(true);
   const [initialLoading, setInitialLoading] = useState(true); const [loadError, setLoadError] = useState(''); const [entriesLoaded, setEntriesLoaded] = useState(false);
@@ -182,11 +182,11 @@ const App = () => {
   const stageSummaries = workflowStageSummaries(workspaceSnapshot, step);
   const changeStep = (next: WorkflowStage) => {
     const guard = canEnterWorkflowStage(workspaceSnapshot, next);
-    if (!guard.allowed) { setNotice(guard.reason); return; }
+    if (!guard.allowed) { notify(guard.reason, 'warning'); return; }
     setStep(next);
   };
   const openSettings = () => { setSettingsOpen(true); void settingsController.refresh(); };
-  const common = { workspacePath: context?.projectId || '', project, initialWorkspace: managerWorkspaceSeed?.scopeKey === currentManagerScopeKey ? managerWorkspaceSeed.workspace : undefined, initialWorkspacePending: managerWorkspaceLoadingScopeKey === currentManagerScopeKey, cacheConfig: { directory: '', maxSizeGB: 0 }, componentActive, activeStep: step, onStepChange: changeStep, stageSummaries, onBlockedStage: setNotice, onClose: () => undefined, onOpenSettings: openSettings, onNotice: setNotice, onProjectChanged: () => { if (contextRef.current) void loadEntries(contextRef.current, { force: true }); } };
+  const common = { workspacePath: context?.projectId || '', project, initialWorkspace: managerWorkspaceSeed?.scopeKey === currentManagerScopeKey ? managerWorkspaceSeed.workspace : undefined, initialWorkspacePending: managerWorkspaceLoadingScopeKey === currentManagerScopeKey, cacheConfig: { directory: '', maxSizeGB: 0 }, componentActive, activeStep: step, onStepChange: changeStep, stageSummaries, onBlockedStage: notify, onClose: () => undefined, onOpenSettings: openSettings, onNotice: notify, onProjectChanged: () => { if (contextRef.current) void loadEntries(contextRef.current, { force: true }); } };
   const retryHistory = () => {
     if (contextRef.current) { void loadEntries(contextRef.current, { force: true, manualMigrationRetry: true }); return; }
     setInitialLoading(true); setLoadError('');
@@ -196,8 +196,7 @@ const App = () => {
     {!entriesLoaded ? <TeamHistoryLoadSurface initialLoading={initialLoading} loadError={loadError} entriesLoaded={entriesLoaded} entryCount={entries.length} retry={retryHistory} openSettings={common.onOpenSettings}/> : step !== 'detect' ? <PersonIdentityManager {...common} onClose={common.onOpenSettings} activeStep={step}/> : <TeamRetouchManager {...common} historyRecordCount={historyRecordCount} historyOwnershipPendingCount={historyOwnershipPendingCount} entries={entries as any} onEntriesChange={value => setEntries(value)} />}
     {historyPathWarning && entriesLoaded && <div role="status" aria-live="polite" className="pf-banner team-banner fixed left-1/2 top-20 z-[819] flex max-w-3xl -translate-x-1/2 items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-700 shadow-xl"><AlertTriangle size={16}/><span>{historyPathWarning}</span>{migrationPaused && <button type="button" className="rounded-md border border-amber-400 px-2 py-1" onClick={retryHistory}>重新尝试整理</button>}<button type="button" aria-label="关闭路径提示" onClick={() => setHistoryPathWarning('')}>×</button></div>}
     {loadError && entriesLoaded && <div role="alert" className="pf-banner team-banner fixed left-1/2 top-20 z-[820] flex max-w-3xl -translate-x-1/2 items-center gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-xs font-bold text-red-700 shadow-xl"><AlertTriangle size={16}/><span>{loadError}</span><button type="button" className="rounded-md border border-red-300 px-2 py-1" onClick={retryHistory}>重试</button><button type="button" aria-label="关闭加载错误" onClick={() => setLoadError('')}>×</button></div>}
-    {notice && <div role="status" aria-live="polite" className="pf-banner team-banner fixed bottom-5 left-1/2 z-[820] flex max-w-2xl -translate-x-1/2 items-center gap-3 rounded-lg bg-slate-900 px-4 py-3 text-sm font-bold text-white shadow-xl"><UsersRound size={16}/><span>{notice}</span><button className="ml-2 text-slate-300" onClick={() => setNotice('')}>×</button></div>}
-    {settingsOpen && <TeamSettingsDialog state={settingsState} patch={settingsController.patch} retry={() => void settingsController.refresh()} close={() => setSettingsOpen(false)} notice={setNotice}/>}
+    {settingsOpen && <TeamSettingsDialog state={settingsState} patch={settingsController.patch} retry={() => void settingsController.refresh()} close={() => setSettingsOpen(false)} notice={notify}/>}
   </div></LegacyDialogProvider>;
 };
 createRoot(document.getElementById('app')!).render(<StrictMode><App/></StrictMode>);

@@ -15,7 +15,7 @@ const normalizedSettings = (value: unknown, fallback: TeamSettings = { useGpu: t
 export const createTeamSettingsController = ({ read, merge, notice = () => undefined }: {
   read: () => Promise<{ settings?: unknown }>;
   merge: (patch: TeamSettingsPatch) => Promise<{ settings?: unknown }>;
-  notice?: (message: string) => void;
+  notice?: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
 }) => {
   let authoritative: TeamSettings | undefined;
   let pending: Array<{ id: number; patch: TeamSettingsPatch }> = [];
@@ -68,7 +68,7 @@ export const createTeamSettingsController = ({ read, merge, notice = () => undef
         try { authoritative = normalizedSettings((await read()).settings); }
         catch { /* retain the last authoritative snapshot */ }
         publish({ loaded: Boolean(authoritative), error: message });
-        notice(`保存团片协作设置失败：${message}`);
+        notice(`保存团片协作设置失败：${message}`, 'error');
         throw error;
       }
     });
@@ -84,9 +84,8 @@ export const createTeamSettingsController = ({ read, merge, notice = () => undef
   };
 };
 
-export const runNotifiedAction = async (label: string, action: () => Promise<boolean | void>, notice: (message: string) => void) => {
+export const runNotifiedAction = async (label: string, action: () => Promise<boolean | void>, notice: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void) => {
   const completed = await action();
-  if (completed !== false) notice(`${label}完成`);
+  if (completed !== false) notice(`${label}完成`, 'success');
   return completed !== false;
 };
-

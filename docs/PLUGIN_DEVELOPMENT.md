@@ -5,7 +5,7 @@ PhotoFlow 把可选扩展包称为 **组件（Component）**。文件名保留�
 ## 快速开始
 
 1. 把 `examples/hello-component` 复制到以组件 ID 命名的目录。
-2. 普通 V2 组件可继续使用 Host API `2`；声明 `application.settingsPage` 时必须将兼容范围覆盖 Host API `3`（新组件建议使用 `minHostApiVersion:3,maxHostApiVersion:3`）。
+2. 普通 V2 组件可继续使用 Host API `2`；设置页需要 Host API `3`；声明顶部通知能力需要 Host API `4` 与 `minHostApiVersion:4`。
 3. 添加一个 `workspace.toolbarAction`、一个与之相连的 `component.fullPage`、包内 UI 入口和服务入口。需要全局设置时，可额外贡献 `application.settingsPage`。
 4. 声明全部服务 RPC、Host 能力、权限和发出的事件。未声明的访问会默认拒绝。从同 ID 的已安装 Host V1 包升级时，可以声明 `componentHost.migrations.legacyStorageV1` 和/或 `legacyOutputV1`；不要把组件业务表或路径字段加入宿主代码。
 5. 运行 `node scripts/mock-component-service.cjs path/to/service.cjs`，不启动 Electron 也能验证按行分隔的服务协议。
@@ -28,18 +28,22 @@ hello-component/
 ## UI 教程
 
 ```ts
-import { host, assertHostApiV2 } from '../../component-sdk/index.js';
+import { host, assertHostApiV2, assertHostApiV4 } from '../../component-sdk/index.js';
 
 const context = await host.getContext();
 assertHostApiV2(context);
 const page = await host.rpc('my-component.load.v1', { cursor: null });
 const stop = host.onEvent('my-component.progress.v1', update => render(update));
+if (host.notify) {
+  assertHostApiV4(context);
+  await host.notify({ tone: 'success', message: '设置已保存', dedupeKey: 'settings.saved' });
+}
 window.addEventListener('pagehide', stop, { once: true });
 ```
 
 UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航、新窗口和浏览器权限都被关闭。使用上下文中解析后的明暗主题，并监听主题/上下文变化。控件应支持键盘操作、显示可见焦点、为表单提供标签、尊重“减少动态效果”，并且不能假设宿主页面始终激活。页面停用或销毁时释放计时器和订阅。
 
-渲染层调用的是组件自有 RPC，而不是直接调用 Host 能力。组件服务是后端协议端点，只能请求清单授权的 Host 能力。
+渲染层通常调用组件自有 RPC，而不是直接调用 Host 能力。唯一的受控 UI 快捷桥是 API4 `notify`：它只接受严格的纯文本结构，不能携带 HTML、回调、URL、路径或任意 channel。组件服务是后端协议端点，只能请求清单授权的 Host 能力；只有后端自身产生短状态时才使用 `notifications.v2`。长任务和确认仍分别使用 `tasks.v2` 与 `dialogs.v2`。
 
 ### 可选的应用设置页
 
@@ -56,7 +60,7 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 }
 ```
 
-`rpcMethods` 必须是 `service.rpcMethods` 的子集，且只有这些方法能从设置页调用。设置 surface 的服务再向 Host 请求时，默认拒绝所有项目、媒体、存储、任务和事件能力；只允许清单已授权的 `component.settings.v2`、`component.lifecycle.v2` 和确认对话框。不要在此 surface 调用项目 RPC。
+`rpcMethods` 必须是 `service.rpcMethods` 的子集，且只有这些方法能从设置页调用。设置 surface 的服务再向 Host 请求时，默认拒绝所有项目、媒体、存储、任务和事件能力；只允许清单已授权的 `component.settings.v2`、`component.lifecycle.v2`、确认对话框和 API4 通知。不要在此 surface 调用项目 RPC。
 
 ## 后端服务教程
 

@@ -24,7 +24,7 @@ export const teamWorkflowSourcePaths = (photos: TeamProjectPhoto[]) => photos
   .filter(photo => photo.tasks.length > 0)
   .map(photo => photo.sourcePath);
 
-export const useTeamOutputProgress = (sourceFilePaths: string | string[], workspacePath: string, project: WorkspaceProject, onNotice: (message: string) => void) => {
+export const useTeamOutputProgress = (sourceFilePaths: string | string[], workspacePath: string, project: WorkspaceProject, onNotice: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void) => {
   const normalizedSourcePaths = useMemo(
     () => [...new Set((Array.isArray(sourceFilePaths) ? sourceFilePaths : [sourceFilePaths]).filter(Boolean))],
     [Array.isArray(sourceFilePaths) ? sourceFilePaths.join('|') : sourceFilePaths],

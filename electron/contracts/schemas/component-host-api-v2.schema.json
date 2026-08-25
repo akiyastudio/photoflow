@@ -16,7 +16,8 @@
     { "$ref": "#/$defs/events" },
     { "$ref": "#/$defs/lifecycle" },
     { "$ref": "#/$defs/componentMedia" },
-    { "$ref": "#/$defs/projectProgress" }
+    { "$ref": "#/$defs/projectProgress" },
+    { "$ref": "#/$defs/notifications" }
   ],
   "$defs": {
     "id": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$" },
@@ -70,6 +71,11 @@
       "method": { "const": "component.media.v2" },
       "payload": { "type": "object", "additionalProperties": false, "required": ["action", "relativePath"], "properties": { "action": { "enum": ["variants", "open", "reveal"] }, "relativePath": { "$ref": "#/$defs/relativePath" }, "variants": { "type": "array", "items": { "enum": ["thumbnail", "preview", "original"] } } } },
       "result": { "allOf": [{ "$ref": "#/$defs/apiResult" }, { "type": "object", "required": ["opaqueRef"] }] }
+    } },
+    "notifications": { "type": "object", "additionalProperties": false, "required": ["method", "payload", "result"], "properties": {
+      "method": { "const": "notifications.v2" },
+      "payload": { "type": "object", "additionalProperties": false, "required": ["tone", "message"], "properties": { "tone": { "enum": ["info", "success", "warning", "error"] }, "message": { "type": "string", "minLength": 1, "maxLength": 360 }, "durationMs": { "type": "integer", "minimum": 1200, "maximum": 15000 }, "dedupeKey": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$" } } },
+      "result": { "type": "object", "required": ["apiVersion", "accepted"], "properties": { "apiVersion": { "const": 2 }, "accepted": { "type": "boolean" } } }
     } },
     "projectProgress": { "type": "object", "additionalProperties": false, "required": ["method", "payload", "result"], "properties": {
       "method": { "const": "project.progress.v2" },

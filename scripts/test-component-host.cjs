@@ -38,7 +38,7 @@ try {
   assert.equal(parseComponentHostManifest({ id: 'legacy', version: '1' }, componentRoot), null, 'legacy native V1 components remain accepted outside the UI host');
   assert.throws(() => parseComponentHostManifest({ ...manifest, apiVersion: 2 }, componentRoot), /Unsupported component apiVersion/);
   assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: [{ type: 'media.previewButton', id: 'bad' }, manifest.componentHost.contributions[1]] } }, componentRoot), /Unknown component host contribution type/);
-  assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 5 } } }, componentRoot), /do not overlap/);
+  assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 5, maxHostApiVersion: 6 } } }, componentRoot), /do not overlap/);
   assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: [manifest.componentHost.contributions[0], { ...manifest.componentHost.contributions[1], entry: '../escape.html' }] } }, componentRoot), /escapes component root/);
   assert.throws(() => parseComponentHostManifest({ ...manifest, icon: 'https://example.com/icon.svg' }, componentRoot), /package-local/);
   assert.throws(() => parseComponentHostManifest({ ...manifest, icon: '../escape.svg' }, componentRoot), /escapes component root/);
@@ -98,7 +98,8 @@ try {
     Object, String, TypeError, Error,
     require: requestPath => requestPath === 'electron'
       ? { contextBridge: { exposeInMainWorld: (name, value) => exposedWorlds.set(name, value) }, ipcRenderer: preloadIpc }
-      : requestPath === './compatibility/component-v1-metadata.cjs' ? { LEGACY_PRELOAD_EVENTS: Object.freeze({}) } : require(requestPath),
+      : requestPath === './compatibility/component-v1-metadata.cjs' ? { LEGACY_PRELOAD_EVENTS: Object.freeze({}) }
+        : requestPath === './component-notify-bridge.cjs' ? require('../electron/component-notify-bridge.cjs') : require(requestPath),
   });
   assert.equal(exposedWorlds.has('electronAPI'), false, 'component preload behavior must not expose the application bridge');
   const restrictedSdk = exposedWorlds.get('photoFlowComponent');

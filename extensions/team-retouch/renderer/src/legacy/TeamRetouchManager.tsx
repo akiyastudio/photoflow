@@ -35,7 +35,7 @@ type Props = {
   onBlockedStage?: (reason: string) => void;
   onClose: () => void;
   onOpenSettings: () => void;
-  onNotice: (message: string) => void;
+  onNotice: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
   onEntriesChange?: (entries: ProjectFileEntry[]) => void;
   onProjectChanged?: () => void;
   onBusyChange?: (busy: boolean) => void;
@@ -785,11 +785,11 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     setIdentityPickerBusy(true);
     const result = await legacyApi.saveTeamIdentity(workspacePath, { projectName: project.name, identityId: identity.id, name });
     setIdentityPickerBusy(false);
-    if (!result.success) { onNotice(`修改人物姓名失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`修改人物姓名失败：${result.error || '未知错误'}`, 'error'); return; }
     const nextState = { ...identityState, identities: identityState.identities.map(item => item.id === identity.id ? { ...item, name, updatedAt: Date.now() } : item) };
     setIdentityState(nextState);
     void syncTaskLabels(workspacePath, nextState).catch(() => undefined);
-    onNotice(`人物姓名已修改为“${name}”`);
+    onNotice(`人物姓名已修改为“${name}”`, 'success');
   };
 
   const deleteIdentityFromPicker = async (identity: TeamIdentity) => {

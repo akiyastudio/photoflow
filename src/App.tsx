@@ -735,6 +735,7 @@ const App: React.FC = () => {
   const startupSdImportRequest = useStartupSdAutoImport({ enabledAtLaunch: startupSdAutoStart, enabledNow: config?.smartImport.autoStart === true, ready: Boolean(configLoaded && privacyStateLoaded && !privacyConsentRequired && config && !showWorkspaceSetup && config.usagePreferencesVersion >= USAGE_PREFERENCES_VERSION), onStart: showHomeTab });
   if (!configLoaded || !config || !privacyStateLoaded) {
     return (
+      <>{topToastStack}
       <StartupWindowFrame>
       <div className="flex h-screen w-full items-center justify-center overflow-hidden bg-slate-950 text-white">
         <div className="flex flex-col items-center gap-6 text-center">
@@ -747,14 +748,12 @@ const App: React.FC = () => {
         </div>
       </div>
       </StartupWindowFrame>
+      </>
     );
   }
-
-  if (updateInfo?.mandatory) return <StartupWindowFrame><UpdateModal {...updateInfo} onClose={() => undefined}/></StartupWindowFrame>;
-
-  if (privacyConsentRequired) return <StartupWindowFrame><PrivacyConsentPage onAccept={acceptInternalBetaPrivacy}/></StartupWindowFrame>;
-
-  if (config.usagePreferencesVersion < USAGE_PREFERENCES_VERSION) return <StartupWindowFrame><UsagePreferencesOnboarding config={config} onSave={nextConfig => handleConfigUpdate(nextConfig, { applyAfterSave: true })}/></StartupWindowFrame>;
+  if (updateInfo?.mandatory) return <>{topToastStack}<StartupWindowFrame><UpdateModal {...updateInfo} onClose={() => undefined}/></StartupWindowFrame></>;
+  if (privacyConsentRequired) return <>{topToastStack}<StartupWindowFrame><PrivacyConsentPage onAccept={acceptInternalBetaPrivacy}/></StartupWindowFrame></>;
+  if (config.usagePreferencesVersion < USAGE_PREFERENCES_VERSION) return <>{topToastStack}<StartupWindowFrame><UsagePreferencesOnboarding config={config} onSave={nextConfig => handleConfigUpdate(nextConfig, { applyAfterSave: true })}/></StartupWindowFrame></>;
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden bg-slate-50 text-slate-900 font-sans selection:bg-blue-500/30">

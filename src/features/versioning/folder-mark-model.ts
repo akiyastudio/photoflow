@@ -5,6 +5,11 @@ import { defaultMainParentId, nextVersionKeys, selectableVersionParents } from '
 export type FolderMarkPurpose = 'original' | 'progress' | 'broll';
 export type FolderMarkMediaKind = 'image' | 'video';
 
+export const defaultFolderMarkPurpose = (relativePath: string, hasRawFiles: boolean): FolderMarkPurpose => {
+  const normalizedPath = relativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+  return normalizedPath && !normalizedPath.includes('/') && hasRawFiles ? 'original' : 'progress';
+};
+
 export type FolderMarkCommon = {
   relativePath: string;
   folderName: string;

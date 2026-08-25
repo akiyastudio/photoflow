@@ -104,7 +104,7 @@ class ComponentServiceManager {
       ...publicContext(boundContext),
       hostApiVersion: descriptor.hostApiVersion,
       permissions: boundContext.surface === 'application.settings'
-        ? (descriptor.service.permissions || []).filter(permission => ['component.settings', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs'].includes(permission))
+        ? (descriptor.service.permissions || []).filter(permission => ['component.settings', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs', 'notifications'].includes(permission))
         : descriptor.service.permissions || [],
     } };
     return new Promise((resolve, reject) => {

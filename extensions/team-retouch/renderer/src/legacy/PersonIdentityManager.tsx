@@ -28,7 +28,7 @@ type Props = {
   stageSummaries?: import('../interaction-model').StageSummary[];
   onBlockedStage?: (reason: string) => void;
   onClose: () => void;
-  onNotice: (message: string) => void;
+  onNotice: (message: string, tone?: 'info' | 'success' | 'warning' | 'error') => void;
   onProjectChanged: () => void;
   onBusyChange?: (busy: boolean) => void;
 };
@@ -614,7 +614,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const renameIdentity = async (identity: TeamIdentity, name: string) => {
     if (!name.trim() || name.trim() === identity.name) return;
     const result = await legacyApi.saveTeamIdentity(workspacePath, { projectName: project.name, identityId: identity.id, name: name.trim() });
-    if (!result.success) onNotice(`保存姓名失败：${result.error || '未知错误'}`); else void load(false);
+    if (!result.success) onNotice(`保存姓名失败：${result.error || '未知错误'}`, 'error'); else { onNotice('人物姓名已更新', 'success'); void load(false); }
   };
   const assign = async (subject: Subject, identityId: string) => {
     const nextIdentityId = identityId || undefined;
@@ -847,7 +847,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     setBusy(`upload:${item.key}`);
     const result = await legacyApi.uploadTeamPatch(workspacePath, { photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex, projectName: project.name, status: project.status });
     setBusy('');
-    if (!result.success) onNotice(`上传返图失败：${result.error || '未知错误'}`); else if (!result.cancelled) { onNotice(result.warning || '返图已上传，下一位可以开始。'); void load(false); onProjectChanged(); }
+    if (!result.success) onNotice(`上传返图失败：${result.error || '未知错误'}`, 'error'); else if (!result.cancelled) { onNotice(result.warning || '返图已上传，下一位可以开始。', result.warning ? 'warning' : 'success'); void load(false); onProjectChanged(); }
   };
   const removeUpload = async (item: WorkflowItem) => {
     if (!await appDialog.confirm({ title: '删除这张返图？', message: '会删除团片协作中的返图副本、撤销任务完成状态，并重新阻塞后续接力；不会删除你选择的原始返图文件。', confirmLabel: '删除返图', tone: 'danger' })) return;
@@ -932,7 +932,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       taskOrder,
     });
     setBusy('');
-    if (!result.success) { onNotice(`确认返图失败：${result.error || '未知错误'}`); return; }
+    if (!result.success) { onNotice(`确认返图失败：${result.error || '未知错误'}`, 'error'); return; }
     setWorkflowReturnResult(current => current ? {
       ...current,
       reviewSessionId: result.reviewSessionCompleted ? undefined : current.reviewSessionId,
@@ -952,7 +952,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     } : current);
     await load(false);
     onProjectChanged();
-    onNotice(result.warning || `已确认返图匹配：${candidate.photoName || '任务图'} · ${candidate.personName || '人物'}`);
+    onNotice(result.warning || `已确认返图匹配：${candidate.photoName || '任务图'} · ${candidate.personName || '人物'}`, result.warning ? 'warning' : 'success');
   };
   const ignoreWorkflowReturn = async (match: TeamPatchReturnMatch) => {
     const reviewSessionId = workflowReturnResult?.reviewSessionId;

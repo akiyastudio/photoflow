@@ -122,6 +122,7 @@ broker.register('project.output.v2', async payload => {
 });
 broker.register('version.create.v2', async (payload, ctx) => { const output = outputReceipts.get(payload.commitId)?.outputs.find(item => item.artifactId === payload.artifactId); const versionId = require('crypto').randomUUID(); const result = await broker.invoke(legacyDescriptor, 'version.register.v1', { versionId, photoId: payload.photoId, parentVersionId: payload.parentVersionId, versionName: payload.name, versionType: payload.type, note: payload.note, status: payload.status, isFinal: payload.isFinal, filePath: output.filePath }, ctx); return { apiVersion: 2, versionId, result }; });
 const teamManifestService = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'extensions', 'team-retouch', 'component.template.json'), 'utf8')).componentHost.service;
+broker.register('notifications.v2', () => ({ apiVersion: 2, accepted: true, id: 'test-notification' }));
 const manifestCapabilities = teamManifestService.capabilities;
 const descriptor = { componentId: 'team-retouch', migrations: { legacyStorageV1: true, legacyOutputV1: true }, service: { runtimeActions: [], capabilities: manifestCapabilities, permissions: teamManifestService.permissions, events: teamManifestService.events } };
 assert.equal(broker.assertCapabilities(descriptor), true, 'every capability declared by the real team service manifest must have a registered broker implementation');

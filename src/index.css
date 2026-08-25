@@ -378,6 +378,13 @@ html.dark .workflow-task-card { border-color: #273244; background: #090c12; }
 .file-list-row:hover .file-select-box, .file-list-row .file-select-box.is-selected { opacity:1; }
 .file-grid-select { opacity:0; transition:opacity .15s; }
 .group:hover .file-grid-select, .file-grid-select.is-selected { opacity:1; }
+.project-file-entry-preview {
+  border-color:transparent !important;
+  background:transparent !important;
+  box-shadow:none !important;
+}
+.project-file-entry-preview .file-grid-select,
+.project-file-entry-preview .file-select-box { visibility:hidden; }
 .file-list-table { width:100%; }
 .file-list-row { display:grid; grid-template-columns:var(--file-list-name-width, minmax(260px, 1.7fr)) var(--file-list-modified-width, minmax(150px, .9fr)) var(--file-list-type-width, minmax(130px, .7fr)) var(--file-list-size-width, minmax(90px, .45fr)); align-items:center; min-height:3rem; column-gap:16px; padding:0 10px; }
 .file-list-heading { min-height:2rem; background:#f8fafc; }
@@ -747,7 +754,17 @@ html.dark .usage-onboarding__panel { box-shadow:0 30px 90px rgba(0,0,0,.42),0 0 
   box-shadow:0 10px 25px -5px rgb(15 23 42 / .22),0 8px 10px -6px rgb(15 23 42 / .16);
   pointer-events:auto;
   transition:transform .2s ease,opacity .16s ease;
+  border:1px solid rgb(100 116 139 / .7);
+  border-left-width:4px;
 }
+.app-notice-toast[data-toast-tone="info"] { border-left-color:rgb(96 165 250); }
+.app-notice-toast[data-toast-tone="success"] { border-left-color:rgb(52 211 153); }
+.app-notice-toast[data-toast-tone="warning"] { border-left-color:rgb(251 191 36); }
+.app-notice-toast[data-toast-tone="error"] { border-left-color:rgb(248 113 113); }
+.app-notice-toast[data-toast-tone="info"] .app-notice-toast__tone-icon { color:rgb(147 197 253); }
+.app-notice-toast[data-toast-tone="success"] .app-notice-toast__tone-icon { color:rgb(110 231 183); }
+.app-notice-toast[data-toast-tone="warning"] .app-notice-toast__tone-icon { color:rgb(252 211 77); }
+.app-notice-toast[data-toast-tone="error"] .app-notice-toast__tone-icon { color:rgb(252 165 165); }
 .file-transfer-toast {
   width:100%;
   min-height:5.5rem;

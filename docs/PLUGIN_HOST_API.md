@@ -4,7 +4,7 @@
 
 ## 版本协商与弃用
 
-PhotoFlow 当前支持 Host API 1–3，并在组件声明的闭区间兼容范围中选择最高版本。`componentHost.contractVersion:2` 要求协商到 Host API 2 或更高版本，并显式声明权限。Host API 1 仅供已安装旧包使用；`application.settingsPage` 从 Host API 3 开始可用。
+PhotoFlow 当前支持 Host API 1–4，并在组件声明的闭区间兼容范围中选择最高版本。`componentHost.contractVersion:2` 要求协商到 Host API 2 或更高版本，并显式声明权限。Host API 1 仅供已安装旧包使用；`application.settingsPage` 从 Host API 3 开始可用，受控通知从 Host API 4 开始可用。
 
 RPC 方法、能力和事件都以 `.vN` 结尾。已发布语义不可修改；可以增加兼容字段，消费者必须忽略未知字段。破坏性变化使用新的方法/事件版本。弃用版本至少保留一个正常组件迁移窗口，并在移除前记录。`electron/compatibility/` 下的 V1 业务适配器已经弃用，不属于公开 API，也不再增加方法。
 
@@ -29,12 +29,21 @@ V2 必须声明合约版本、兼容范围、贡献项、服务协议/运行时/
 | `component.lifecycle.v2` | `component.lifecycle.read` | 协商版本、授权和生命周期状态 |
 | `component.media.v2` | `component.media` | 私有存储下的媒体变体/打开/显示 |
 | `project.progress.v2` | `project.progress` | 列出/创建进度节点并登记来源关系 |
+| `notifications.v2` | `notifications` | 向主程序顶部 Toast 提交短暂纯文本状态 |
 
 执行已声明的生命周期动作还需要 `component.lifecycle.manage`。代理对 `describe` 仍检查 `component.lifecycle.read`；生命周期服务在执行 `preflight`、`install`、`repair` 或 `uninstall` 前检查更强权限。
 
 权限在解析清单时检查一次，每次能力调用时再次检查。组件 ID/版本、项目 ID/名称/状态和作用域来自绑定的宿主页面，载荷不能覆盖这些身份。
 
-Host API 3 的 V2 清单可选声明 `application.settingsPage`，其 `id`、`label`、可选 `title`、包内 `entry` 和 `rpcMethods` 都经严格校验。设置页上下文的 `surface` 是 `application.settings`，没有项目身份；页面只能调用 contribution 列出且同时存在于 `service.rpcMethods` 的方法。服务在该 surface 下仅能使用已授权的组件设置、生命周期和确认对话框；其他 Host 能力全部默认拒绝。
+Host API 3 的 V2 清单可选声明 `application.settingsPage`，其 `id`、`label`、可选 `title`、包内 `entry` 和 `rpcMethods` 都经严格校验。设置页上下文的 `surface` 是 `application.settings`，没有项目身份；页面只能调用 contribution 列出且同时存在于 `service.rpcMethods` 的方法。服务在该 surface 下仅能使用已授权的组件设置、生命周期、确认对话框和 API4 通知；其他 Host 能力全部默认拒绝。
+
+### 顶部短通知（Host API 4）
+
+声明 `notifications.v2` 和 `notifications` 的组件必须设置 `minHostApiVersion >= 4`。renderer 优先 feature-detect `window.photoFlowComponent.notify`，提交 `{tone,message,durationMs?,dedupeKey?}`；后端 service 仅在处理既有请求时使用同语义的 `notifications.v2` capability。renderer 不应为了通知绕到 service，service 也不能借此获得任意 renderer channel。
+
+宿主只接受 `info|success|warning|error`、raw 与 trim 后均不超过 360 字的非空纯文本，时长为 1200–15000 ms，`dedupeKey` 为最多 80 字的 ASCII ID。组件 preload 在复制到主进程前执行同一硬边界；未知字段、HTML、URL、路径、回调和命令均拒绝。发送方绑定到已通过完整性准入的组件 `webContents`；清单能力与权限在每次调用时复核。宿主按组件执行普通状态和 error 各自有界的 burst/10 秒速率限制、1.2 秒内容/键去重，并在 renderer 销毁或组件卸载/升级时清理状态。主窗口不可用或发送竞态失败时返回 retryable 的 `NOTIFICATION_HOST_UNAVAILABLE`，而不是创建 Electron 原生提示。
+
+结果固定为 `apiVersion:2`：成功为 `{accepted:true,id}`，重复为 `{accepted:false,deduplicated:true,code:"NOTIFICATION_DEDUPLICATED"}`，失败包含 `{accepted:false,error:{code,message,retryable}}`。主进程在 React subscriber 完成 ready 握手前使用有界缓冲，reload 后重新握手并 flush；卸载/升级发送组件作用域 purge。事件经主 preload 再校验后进入有总量上限的现有 `useTopToastStack`，tone 使用统一图标/色条和单层 live-region 语义。组件原生 View 在 Toast 存在时按实测 Toast 底边临时裁剪，project 与 settings surface 都不会遮住宿主通知，清空后恢复原 bounds。长任务继续使用 `tasks.v2`；需要用户决定继续使用 `dialogs.v2`。
 
 ## 能力合约
 

@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "team-retouch",
-  "version": "26.8.25.1",
+  "version": "26.8.25.2",
   "displayName": "团片协作",
   "description": "人物检测、身份确认、工作流、返图与合并",
   "icon": "ui/team-retouch.svg",
@@ -29,7 +29,7 @@
   ],
   "componentHost": {
     "contractVersion": 2,
-    "compatibility": { "minHostApiVersion": 3, "maxHostApiVersion": 3 },
+    "compatibility": { "minHostApiVersion": 4, "maxHostApiVersion": 4 },
     "migrations": { "legacyStorageV1": true, "legacyOutputV1": true },
     "contributions": [
       { "type": "workspace.toolbarAction", "id": "open", "label": "团片协作", "pageId": "main" },
@@ -64,12 +64,12 @@
         "project.media.page.v2", "project.media.variants.v2", "project.input.tokens.v2",
         "project.output.v2", "version.create.v2", "project.progress.v2",
         "tasks.v2", "dialogs.v2", "component.storage.v2", "component.settings.v2",
-        "component.events.v2", "component.lifecycle.v2", "component.media.v2"
+        "component.events.v2", "component.lifecycle.v2", "component.media.v2", "notifications.v2"
       ],
       "permissions": [
         "project.media.read", "project.input.read", "project.output.write", "project.version.create", "project.progress",
         "tasks", "dialogs", "component.storage", "component.settings", "events",
-        "component.lifecycle.read", "component.lifecycle.manage", "component.media"
+        "component.lifecycle.read", "component.lifecycle.manage", "component.media", "notifications"
       ],
       "events": [
         "team.patch.detect.progress.v1", "team.patch.detect-batch.progress.v1",

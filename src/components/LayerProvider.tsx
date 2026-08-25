@@ -15,6 +15,7 @@ type LayerContextValue = {
   register: (layer: LayerRegistration) => () => void;
   acquireHostSurfaceSuspension: (token: string) => () => void;
   hostSurfaceState: HostSurfaceState;
+  rendererToken: string;
 };
 
 const LayerContext = createContext<LayerContextValue | null>(null);
@@ -58,6 +59,7 @@ const LayerProvider = ({ children }: { children: ReactNode }) => {
     register,
     acquireHostSurfaceSuspension: hostLayerRegistry.acquire,
     hostSurfaceState,
+    rendererToken: rendererTokenRef.current,
   }), [hostLayerRegistry, hostSurfaceState, register]);
 
   return <LayerContext.Provider value={contextValue}>{children}</LayerContext.Provider>;
@@ -80,6 +82,12 @@ const useHostSurfaceState = () => {
   return context.hostSurfaceState;
 };
 
+const useHostRendererToken = () => {
+  const context = useContext(LayerContext);
+  if (!context) throw new Error('useHostRendererToken must be used inside LayerProvider');
+  return context.rendererToken;
+};
+
 const useEscapeLayer = (open: boolean, onEscape: () => void, enabled = true, suspendExternalSurfaces = false) => {
   const context = useContext(LayerContext);
   if (!context) throw new Error('useEscapeLayer must be used inside LayerProvider');
@@ -97,4 +105,4 @@ const useEscapeLayer = (open: boolean, onEscape: () => void, enabled = true, sus
 
 // Provider and hook intentionally share the same private layer registry.
 // eslint-disable-next-line react-refresh/only-export-components
-export { LayerProvider, useEscapeLayer, useHostSurfaceState, useHostSurfaceSuspension };
+export { LayerProvider, useEscapeLayer, useHostRendererToken, useHostSurfaceState, useHostSurfaceSuspension };

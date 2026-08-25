@@ -2,11 +2,11 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export interface JsonObject { [key: string]: JsonValue }
 export type VersionedName = `${string}.v${number}`;
-export type HostApiVersion = 2 | 3;
-export type ComponentPermission = 'project.media.read' | 'project.input.read' | 'project.output.write' | 'project.version.create' | 'project.progress' | 'component.storage' | 'component.settings' | 'component.media' | 'tasks' | 'dialogs' | 'events' | 'component.lifecycle.read' | 'component.lifecycle.manage';
+export type HostApiVersion = 2 | 3 | 4;
+export type ComponentPermission = 'project.media.read' | 'project.input.read' | 'project.output.write' | 'project.version.create' | 'project.progress' | 'component.storage' | 'component.settings' | 'component.media' | 'tasks' | 'dialogs' | 'events' | 'component.lifecycle.read' | 'component.lifecycle.manage' | 'notifications';
 export type ComponentHostErrorCode = 'COMPONENT_HOST_INVALID_REQUEST' | 'COMPONENT_HOST_PERMISSION_DENIED' | 'COMPONENT_HOST_NOT_FOUND' | 'COMPONENT_HOST_TOKEN_EXPIRED' | 'COMPONENT_HOST_TOKEN_SCOPE' | 'COMPONENT_HOST_LIMIT_EXCEEDED' | 'COMPONENT_HOST_VARIANT_UNAVAILABLE' | 'COMPONENT_HOST_CONFLICT' | 'COMPONENT_HOST_CANCELLED' | 'COMPONENT_HOST_TIMEOUT' | 'COMPONENT_HOST_SERVICE_EXITED' | 'COMPONENT_HOST_INTERNAL';
 export interface ComponentHostError extends Error { code: ComponentHostErrorCode | `COMPONENT_SERVICE_${string}`; retryable: boolean; details?: JsonValue }
-export interface ComponentContext { componentId: string; componentVersion: string; hostApiVersion: 1 | 2 | 3; surface: 'project' | 'application.settings'; projectId: string; projectName: string; projectStatus: string; scopeRelativePath: string; selectedRelativePaths: string[]; permissions: ComponentPermission[]; events: VersionedName[]; resolvedTheme: 'light' | 'dark' }
+export interface ComponentContext { componentId: string; componentVersion: string; hostApiVersion: 1 | 2 | 3 | 4; surface: 'project' | 'application.settings'; projectId: string; projectName: string; projectStatus: string; scopeRelativePath: string; selectedRelativePaths: string[]; permissions: ComponentPermission[]; events: VersionedName[]; resolvedTheme: 'light' | 'dark' }
 export type MediaKind = 'image' | 'raw' | 'video';
 export interface MediaPageRequest { pageSize?: number; cursor?: string | null; kinds?: MediaKind[] }
 export interface MediaPageItem { mediaRef: { relativePath: string }; relativePath: string; name: string; kind: MediaKind; extension: string; size: number; updatedAt: number; viaExternalLink?: true }
@@ -51,7 +51,10 @@ export type DialogsResponse = { apiVersion: 2; confirmed: boolean } | { apiVersi
 export interface ComponentEventRequest<T extends JsonObject = JsonObject> { topic: VersionedName; event: T }
 export interface ComponentEventResponse { apiVersion: 2; emitted: true }
 export type ComponentLifecycleRequest = { action: 'describe' } | { action: 'preflight' | 'install' | 'repair' | 'uninstall' };
-export type ComponentLifecycleResponse = { apiVersion: 2; componentId: string; componentVersion: string; negotiatedHostApiVersion: 2 | 3; permissions: ComponentPermission[]; events: VersionedName[]; lifecycleActions: string[]; state: 'active' } | { apiVersion: 2; success: true; action: 'preflight' | 'install' | 'repair' | 'uninstall'; taskId: string; message: string };
+export type ComponentLifecycleResponse = { apiVersion: 2; componentId: string; componentVersion: string; negotiatedHostApiVersion: 2 | 3 | 4; permissions: ComponentPermission[]; events: VersionedName[]; lifecycleActions: string[]; state: 'active' } | { apiVersion: 2; success: true; action: 'preflight' | 'install' | 'repair' | 'uninstall'; taskId: string; message: string };
+export type NotificationTone = 'info' | 'success' | 'warning' | 'error';
+export interface NotificationRequest { tone: NotificationTone; message: string; durationMs?: number; dedupeKey?: string }
+export type NotificationResult = { apiVersion: 2; accepted: true; id: string } | { apiVersion: 2; accepted: false; deduplicated: true; code: 'NOTIFICATION_DEDUPLICATED' } | { apiVersion: 2; accepted: false; error: { code: string; message: string; retryable: boolean } };
 export interface ComponentMediaRequest { action: 'variants' | 'open' | 'reveal'; relativePath: string; variants?: MediaVariantName[] }
 export type ComponentMediaResponse = { apiVersion: 2; opaqueRef: string; variants: MediaVariantsResponse['variants'] } | { apiVersion: 2; opaqueRef: string; action: 'open' | 'reveal'; opened: true };
 export interface VersionSourceMetadata { category?: string; role?: string; displayName?: string; componentId?: string; parentCapability?: 'structural' | 'workflow-input' | 'none' }
@@ -71,6 +74,7 @@ export interface HostCapabilityMap {
   'component.lifecycle.v2': { request: ComponentLifecycleRequest; response: ComponentLifecycleResponse };
   'component.media.v2': { request: ComponentMediaRequest; response: ComponentMediaResponse };
   'project.progress.v2': { request: ProjectProgressRequest; response: ProjectProgressResponse };
+  'notifications.v2': { request: NotificationRequest; response: NotificationResult };
 }
 export type HostCapability = keyof HostCapabilityMap;
 export type HostCapabilityRequest<K extends HostCapability> = HostCapabilityMap[K]['request'];
@@ -84,7 +88,8 @@ export type CapabilityRequestFrame<K extends HostCapability = HostCapability> = 
 export type CapabilityResponseFrame<K extends HostCapability = HostCapability> = { type: 'capability-response'; id: string; ok: true; result: HostCapabilityResponse<K> } | { type: 'capability-response'; id: string; ok: false; error: string; errorCode: ComponentHostErrorCode; retryable?: boolean };
 export type ComponentServiceInboundFrame = ServiceRequestFrame | CapabilityResponseFrame;
 export type ComponentServiceOutboundFrame = ReadyFrame | ServiceSuccessFrame | ServiceFailureFrame | CapabilityRequestFrame;
-export interface ComponentSdk { readonly contractVersion: 1; getContext(): Promise<ComponentContext>; rpc<T = unknown>(method: VersionedName, payload?: Record<string, unknown>): Promise<T>; onEvent<T = JsonObject>(topic: VersionedName, callback: (payload: T) => void): () => void; onActivate(callback: () => void): () => void; onDeactivate(callback: () => void): () => void; onThemeChange(callback: (value: { contractVersion: 1; resolvedTheme: 'light' | 'dark' }) => void): () => void; onContextChange(callback: (context: ComponentContext) => void): () => void }
+export interface ComponentSdk { readonly contractVersion: 1; getContext(): Promise<ComponentContext>; readonly notify?: (payload: NotificationRequest) => Promise<NotificationResult>; rpc<T = unknown>(method: VersionedName, payload?: Record<string, unknown>): Promise<T>; onEvent<T = JsonObject>(topic: VersionedName, callback: (payload: T) => void): () => void; onActivate(callback: () => void): () => void; onDeactivate(callback: () => void): () => void; onThemeChange(callback: (value: { contractVersion: 1; resolvedTheme: 'light' | 'dark' }) => void): () => void; onContextChange(callback: (context: ComponentContext) => void): () => void }
 declare global { interface Window { photoFlowComponent: ComponentSdk } }
 export const host: ComponentSdk;
-export function assertHostApiV2(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 2 | 3 };
+export function assertHostApiV2(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 2 | 3 | 4 };
+export function assertHostApiV4(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 4 };

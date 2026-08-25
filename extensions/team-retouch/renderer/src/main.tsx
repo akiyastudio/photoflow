@@ -3,11 +3,10 @@ import { StrictMode, useCallback, useEffect, useMemo, useRef, useState, type Poi
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import './style.css';
-import { rpc, type ComponentContext } from './sdk';
+import { notify, rpc, type ComponentContext } from './sdk';
 import { clampCrop, clampZoom, expandCrop, fitCropToMembers, normalizeRotation, progressCandidates, rankIdentityCandidates, resizeCrop, returnCandidates, returnReviewItems, shouldBlink, subjectsFromWorkspace, taskMembers, workflowGroups, type CompareMode, type Crop, type CropHandle, type Json, type Tab } from './interaction-model';
 
 type Settings = { useGpu: boolean; oversizeCropMode: 'face-centered' | 'expand' };
-type Notice = { text: string; error?: boolean };
 type Progress = { progress: number; message: string; operationId?: string };
 const EMPTY_WORKSPACE = { photos: [], identities: [], assignments: [] };
 const TABS: Array<[Tab, string, string]> = [['detect', '检测与裁剪', '1'], ['people', '人物身份', '2'], ['workflow', '工作流', '3'], ['returns', '返图审核', '4'], ['merge', '合并输出', '5'], ['settings', '设置', '6']];
@@ -266,7 +265,6 @@ function App() {
   const [workspace, setWorkspace] = useState<Json>(EMPTY_WORKSPACE);
   const [files, setFiles] = useState<Json[]>([]);
   const [settings, setSettings] = useState<Settings>({ useGpu: true, oversizeCropMode: 'face-centered' });
-  const [notice, setNotice] = useState<Notice>();
   const [busy, setBusy] = useState(false);
   const [active, setActive] = useState(true);
   const [progress, setProgress] = useState<Progress>();
@@ -281,9 +279,9 @@ function App() {
   }, []);
   const run = useCallback(async (label: string, action: () => Promise<void>) => {
     if (busyRef.current) return;
-    busyRef.current = true; setBusy(true); setNotice({ text: label });
-    try { await action(); setNotice({ text: `${label}完成` }); await refresh(); }
-    catch (error) { setNotice({ text: error instanceof Error ? error.message : String(error), error: true }); }
+    busyRef.current = true; setBusy(true); notify(label, 'info');
+    try { await action(); notify(`${label}完成`, 'success'); await refresh(); }
+    catch (error) { notify(error instanceof Error ? error.message : String(error), 'error'); }
     finally { busyRef.current = false; setBusy(false); }
   }, [refresh]);
   useEffect(() => {
@@ -297,7 +295,7 @@ function App() {
   const common = { workspace, active, busy, run };
   return <div className="shell" data-theme="system"><header className="topbar"><div className="brand"><span className="logo">团</span><div><h1>团片协作</h1><p>{context?.projectName || '正在连接项目'}</p></div></div><nav className="tabs" aria-label="团片协作步骤">{TABS.map(([id, label, shortcut]) => <button key={id} className={`tab ${tab === id ? 'active' : ''}`} aria-current={tab === id ? 'page' : undefined} title={`Alt+${shortcut}`} onClick={() => setTab(id)}>{label}</button>)}</nav><span className="state">{active ? (busy ? '处理中…' : `组件 ${context?.componentVersion || ''}`) : '页面已暂停'}</span></header>
     {progress?.message && <aside className="task-progress" role="status"><span>{progress.message}</span><div className="progress"><i style={{ width: `${progress.progress}%` }}/></div><b>{Math.round(progress.progress)}%</b></aside>}
-    <main className="main">{notice && <div className={`notice ${notice.error ? 'error' : ''}`} role={notice.error ? 'alert' : 'status'}>{notice.text}<button className="icon-btn" aria-label="关闭通知" onClick={() => setNotice(undefined)}>×</button></div>}{tab === 'detect' && <DetectionPanel {...common} files={files} refresh={refresh}/>} {tab === 'people' && <PeoplePanel {...common}/>} {tab === 'workflow' && <WorkflowPanel {...common}/>} {tab === 'returns' && <ReturnsPanel {...common}/>} {tab === 'merge' && <MergePanel {...common}/>} {tab === 'settings' && <SettingsPanel {...common} settings={settings} setSettings={setSettings}/>}</main>
+    <main className="main">{tab === 'detect' && <DetectionPanel {...common} files={files} refresh={refresh}/>} {tab === 'people' && <PeoplePanel {...common}/>} {tab === 'workflow' && <WorkflowPanel {...common}/>} {tab === 'returns' && <ReturnsPanel {...common}/>} {tab === 'merge' && <MergePanel {...common}/>} {tab === 'settings' && <SettingsPanel {...common} settings={settings} setSettings={setSettings}/>}</main>
   </div>;
 }
 

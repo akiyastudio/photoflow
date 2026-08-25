@@ -41,6 +41,7 @@ const TOOL_MODAL_DETAILS: Record<string, { description: string; icon: React.Reac
   'version-create-next': { description: '从当前版本创建下一版本或可跟踪分支。', icon: <ArrowRight size={18}/> },
   'version-import': { description: '将已有项目文件夹登记为可跟踪版本。', icon: <FolderInput size={18}/> },
   'version-modify': { description: '修改版本信息与跟踪策略。', icon: <GitBranch size={18}/> },
+  'folder-mark': { description: '将文件夹标记为原始素材、进度或花絮。', icon: <GitBranch size={18}/> },
 };
 
 export const ToolModal = ({ title, ownerPageId, panelKind, open, busy = false, onClose, children }: { title: string; ownerPageId: string; panelKind: string; open: boolean; busy?: boolean; onClose: () => void; children: React.ReactNode }) => {
