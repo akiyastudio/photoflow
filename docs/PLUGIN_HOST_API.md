@@ -39,11 +39,11 @@ Host API 3 的 V2 清单可选声明 `application.settingsPage`，其 `id`、`la
 
 ### 顶部短通知（Host API 4）
 
-声明 `notifications.v2` 和 `notifications` 的组件必须设置 `minHostApiVersion >= 4`。renderer 优先 feature-detect `window.photoFlowComponent.notify`，提交 `{tone,message,durationMs?,dedupeKey?}`；后端 service 仅在处理既有请求时使用同语义的 `notifications.v2` capability。renderer 不应为了通知绕到 service，service 也不能借此获得任意 renderer channel。
+声明 `notifications.v2` 和 `notifications` 的组件必须设置 `minHostApiVersion >= 4`。renderer 优先 feature-detect `window.photoFlowComponent.notify`，只提交 `{tone,message,dedupeKey?}`；后端 service 仅在处理既有请求时使用同语义的 `notifications.v2` capability。renderer 不应为了通知绕到 service，service 也不能借此获得任意 renderer channel。`durationMs` 已从契约删除，出现该字段会作为未知字段被明确拒绝；组件不能控制通知生命周期。
 
 宿主只接受 `info|success|warning|error`、raw 与 trim 后均不超过 360 字的非空纯文本，时长为 1200–15000 ms，`dedupeKey` 为最多 80 字的 ASCII ID。组件 preload 在复制到主进程前执行同一硬边界；未知字段、HTML、URL、路径、回调和命令均拒绝。发送方绑定到已通过完整性准入的组件 `webContents`；清单能力与权限在每次调用时复核。宿主按组件执行普通状态和 error 各自有界的 burst/10 秒速率限制、1.2 秒内容/键去重，并在 renderer 销毁或组件卸载/升级时清理状态。主窗口不可用或发送竞态失败时返回 retryable 的 `NOTIFICATION_HOST_UNAVAILABLE`，而不是创建 Electron 原生提示。
 
-结果固定为 `apiVersion:2`：成功为 `{accepted:true,id}`，重复为 `{accepted:false,deduplicated:true,code:"NOTIFICATION_DEDUPLICATED"}`，失败包含 `{accepted:false,error:{code,message,retryable}}`。主进程在 React subscriber 完成 ready 握手前使用有界缓冲，reload 后重新握手并 flush；卸载/升级发送组件作用域 purge。事件经主 preload 再校验后进入有总量上限的现有 `useTopToastStack`，tone 使用统一图标/色条和单层 live-region 语义。组件原生 View 在 Toast 存在时按实测 Toast 底边临时裁剪，project 与 settings surface 都不会遮住宿主通知，清空后恢复原 bounds。长任务继续使用 `tasks.v2`；需要用户决定继续使用 `dialogs.v2`。
+结果固定为 `apiVersion:2`：成功为 `{accepted:true,id}`，重复为 `{accepted:false,deduplicated:true,code:"NOTIFICATION_DEDUPLICATED"}`，失败包含 `{accepted:false,error:{code,message,retryable}}`。主进程在 React subscriber 完成 ready 握手前使用有界缓冲，reload 后重新握手并 flush；卸载/升级发送组件作用域 purge。事件经主 preload 再校验后进入有总量上限的现有 `useTopToastStack`，四种 tone 与宿主普通 Toast 共用图标、颜色、生命周期、去重/堆叠、关闭及单层 live-region 策略；error 始终保持到手动关闭，其余 tone 使用宿主统一自动消失时间。Toast 由宿主透明原生 overlay 窗口呈现，始终位于 project 与 settings 的组件 `WebContentsView` 之上，组件 View bounds 不会因 Toast 改变。overlay 空白区域鼠标穿透，卡片与按钮可交互。长任务继续使用 `tasks.v2`；需要用户决定继续使用 `dialogs.v2`。
 
 ## 能力合约
 

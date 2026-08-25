@@ -53,7 +53,7 @@ export interface ComponentEventResponse { apiVersion: 2; emitted: true }
 export type ComponentLifecycleRequest = { action: 'describe' } | { action: 'preflight' | 'install' | 'repair' | 'uninstall' };
 export type ComponentLifecycleResponse = { apiVersion: 2; componentId: string; componentVersion: string; negotiatedHostApiVersion: 2 | 3 | 4; permissions: ComponentPermission[]; events: VersionedName[]; lifecycleActions: string[]; state: 'active' } | { apiVersion: 2; success: true; action: 'preflight' | 'install' | 'repair' | 'uninstall'; taskId: string; message: string };
 export type NotificationTone = 'info' | 'success' | 'warning' | 'error';
-export interface NotificationRequest { tone: NotificationTone; message: string; durationMs?: number; dedupeKey?: string }
+export interface NotificationRequest { tone: NotificationTone; message: string; dedupeKey?: string }
 export type NotificationResult = { apiVersion: 2; accepted: true; id: string } | { apiVersion: 2; accepted: false; deduplicated: true; code: 'NOTIFICATION_DEDUPLICATED' } | { apiVersion: 2; accepted: false; error: { code: string; message: string; retryable: boolean } };
 export interface ComponentMediaRequest { action: 'variants' | 'open' | 'reveal'; relativePath: string; variants?: MediaVariantName[] }
 export type ComponentMediaResponse = { apiVersion: 2; opaqueRef: string; variants: MediaVariantsResponse['variants'] } | { apiVersion: 2; opaqueRef: string; action: 'open' | 'reveal'; opened: true };

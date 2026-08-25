@@ -49,11 +49,11 @@ export const FileTransferToastItem = ({ task, onMinimize, onDismiss }: { task: B
       </div>
       <div className="flex shrink-0 items-center gap-1">
         {failed || completed
-          ? <button type="button" onClick={() => onDismiss(task.id)} aria-label="关闭通知" title="关闭通知" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"><X size={15}/></button>
-          : <button type="button" onClick={() => onMinimize(task.id)} aria-label="收起到任务中心" title="收起到任务中心，任务会继续运行" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-blue-200 bg-white/70 text-blue-700 transition hover:border-blue-300 hover:bg-blue-100"><Minimize2 size={15}/></button>}
-        {(task.state === 'running' || task.state === 'resuming') && task.capabilities.pausable && <button type="button" onClick={() => void window.electronAPI.pauseBackgroundTask(task.id)} aria-label="暂停任务" title="暂停任务" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-amber-700 transition hover:bg-amber-50"><Pause size={15}/></button>}
-        {(paused || pausing) && task.capabilities.pausable && <button type="button" onClick={() => void window.electronAPI.continueBackgroundTask(task.id)} aria-label="继续任务" title="继续任务" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-blue-700 transition hover:bg-blue-50"><Play size={15}/></button>}
-        {task.cancellable && <button type="button" onClick={() => void cancelTask()} aria-label="取消任务" title="取消任务" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-red-600 transition hover:bg-red-50"><X size={16}/></button>}
+          ? <button type="button" data-toast-overlay-action="task-dismiss" data-toast-overlay-id={task.id} onClick={() => onDismiss(task.id)} aria-label="关闭通知" title="关闭通知" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-slate-500 transition hover:bg-slate-100 hover:text-slate-700"><X size={15}/></button>
+          : <button type="button" data-toast-overlay-action="task-minimize" data-toast-overlay-id={task.id} onClick={() => onMinimize(task.id)} aria-label="收起到任务中心" title="收起到任务中心，任务会继续运行" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-blue-200 bg-white/70 text-blue-700 transition hover:border-blue-300 hover:bg-blue-100"><Minimize2 size={15}/></button>}
+        {(task.state === 'running' || task.state === 'resuming') && task.capabilities.pausable && <button type="button" data-toast-overlay-action="task-pause" data-toast-overlay-id={task.id} onClick={() => void window.electronAPI.pauseBackgroundTask(task.id)} aria-label="暂停任务" title="暂停任务" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-amber-700 transition hover:bg-amber-50"><Pause size={15}/></button>}
+        {(paused || pausing) && task.capabilities.pausable && <button type="button" data-toast-overlay-action="task-continue" data-toast-overlay-id={task.id} onClick={() => void window.electronAPI.continueBackgroundTask(task.id)} aria-label="继续任务" title="继续任务" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-blue-700 transition hover:bg-blue-50"><Play size={15}/></button>}
+        {task.cancellable && <button type="button" data-toast-overlay-action="task-cancel" data-toast-overlay-id={task.id} onClick={() => void cancelTask()} aria-label="取消任务" title="取消任务" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-red-600 transition hover:bg-red-50"><X size={16}/></button>}
       </div>
     </div>
   </div>;
@@ -65,6 +65,20 @@ export const FileTransferToast = ({ stackRef }: { stackRef: React.RefObject<HTML
   const previousPositionsRef = useRef(new Map<string, number>());
   const minimizedTaskIds = new Set(backgroundTasks.filter(task => isTaskToastMinimized(task.id)).map(task => task.id));
   const { visible: visibleTasks, overflowCount } = selectProjectFileTaskToasts(backgroundTasks, minimizedTaskIds, 4, clock);
+
+  useEffect(() => window.electronAPI.onToastOverlayAction(value => {
+    if (!value.action.startsWith('task-')) return;
+    const task = backgroundTasks.find(item => item.id === value.id);
+    if (!task) return;
+    if (value.action === 'task-dismiss') void dismissBackgroundTask(task.id);
+    else if (value.action === 'task-minimize') minimizeTaskToast(task.id);
+    else if (value.action === 'task-pause' && task.capabilities.pausable) void window.electronAPI.pauseBackgroundTask(task.id);
+    else if (value.action === 'task-continue' && task.capabilities.pausable) void window.electronAPI.continueBackgroundTask(task.id);
+    else if (value.action === 'task-cancel' && task.cancellable) {
+      if (task.type === 'selection-operation') void window.electronAPI.cancelSelectionOperation(String(task.metadata?.operationId || ''));
+      else void window.electronAPI.cancelBackgroundTask(task.id);
+    }
+  }), [backgroundTasks, dismissBackgroundTask, minimizeTaskToast]);
 
   useEffect(() => {
     const currentTime = Date.now();

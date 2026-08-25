@@ -74,7 +74,7 @@
     } },
     "notifications": { "type": "object", "additionalProperties": false, "required": ["method", "payload", "result"], "properties": {
       "method": { "const": "notifications.v2" },
-      "payload": { "type": "object", "additionalProperties": false, "required": ["tone", "message"], "properties": { "tone": { "enum": ["info", "success", "warning", "error"] }, "message": { "type": "string", "minLength": 1, "maxLength": 360 }, "durationMs": { "type": "integer", "minimum": 1200, "maximum": 15000 }, "dedupeKey": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$" } } },
+      "payload": { "type": "object", "additionalProperties": false, "required": ["tone", "message"], "properties": { "tone": { "enum": ["info", "success", "warning", "error"] }, "message": { "type": "string", "minLength": 1, "maxLength": 360 }, "dedupeKey": { "type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,79}$" } } },
       "result": { "type": "object", "required": ["apiVersion", "accepted"], "properties": { "apiVersion": { "const": 2 }, "accepted": { "type": "boolean" } } }
     } },
     "projectProgress": { "type": "object", "additionalProperties": false, "required": ["method", "payload", "result"], "properties": {

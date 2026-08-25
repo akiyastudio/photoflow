@@ -108,7 +108,7 @@ try {
   restrictedSdk.notify({ tone: 'info', message: `${' '.repeat(100000)}x` }).then(result => assert.equal(result.error.code, 'NOTIFICATION_INVALID_MESSAGE')).catch(error => { throw error; });
   assert.equal(preloadInvocations.length, 0, 'oversized renderer notifications are rejected before IPC');
   void restrictedSdk.notify({ tone: 'success', message: 'saved' });
-  assert.equal(JSON.stringify(preloadInvocations[0]), JSON.stringify(['component-sdk:notify', { tone: 'success', message: 'saved', durationMs: 3500 }]));
+  assert.equal(JSON.stringify(preloadInvocations[0]), JSON.stringify(['component-sdk:notify', { tone: 'success', message: 'saved' }]));
   assert.throws(() => restrictedSdk.onEvent('invalid-topic', () => undefined), /Invalid component event topic/, 'preload rejects non-versioned topics');
   const receivedEvents = [];
   const unsubscribeEvent = restrictedSdk.onEvent('sample.changed.v1', payload => receivedEvents.push(payload));

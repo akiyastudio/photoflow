@@ -16,7 +16,7 @@ export type ComponentContext = {
 export type ComponentSdk = {
   contractVersion: 1;
   getContext(): Promise<ComponentContext>;
-  notify?: (payload: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; durationMs?: number; dedupeKey?: string }) => Promise<{ apiVersion: 2; accepted: boolean; deduplicated?: boolean; error?: { code: string; message: string; retryable: boolean } }>;
+  notify?: (payload: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; dedupeKey?: string }) => Promise<{ apiVersion: 2; accepted: boolean; deduplicated?: boolean; error?: { code: string; message: string; retryable: boolean } }>;
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>;
   onEvent(topic: string, callback: (value: unknown) => void): () => void;
   onActivate(callback: () => void): () => void;
@@ -36,7 +36,7 @@ export const notify = (message: string, tone: NoticeTone) => {
     (tone === 'error' ? console.error : console.warn)(`团片通知宿主不可用：${cleanMessage}`);
     return;
   }
-  void api({ tone, message: cleanMessage, durationMs: tone === 'error' ? 6000 : 3500 }).then(result => {
+  void api({ tone, message: cleanMessage }).then(result => {
     if (!result.accepted && !result.deduplicated) (tone === 'error' ? console.error : console.warn)(`团片通知未显示（${result.error?.code || 'UNKNOWN'}）：${cleanMessage}`);
   }).catch(error => (tone === 'error' ? console.error : console.warn)('团片通知调用失败', error));
 };

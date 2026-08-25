@@ -784,6 +784,9 @@ html.dark .usage-onboarding__panel { box-shadow:0 30px 90px rgba(0,0,0,.42),0 0 
   overscroll-behavior:contain;
   padding-right:.25rem;
 }
+.top-toast-stack[data-host-toast-model] { visibility:hidden; }
+.top-toast-stack--overlay { visibility:visible; }
+html:has(.top-toast-stack--overlay), html:has(.top-toast-stack--overlay) body { background:transparent!important; }
 .app-notice-toast {
   display:flex;
   align-self:center;

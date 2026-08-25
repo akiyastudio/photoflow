@@ -9,10 +9,6 @@ const registerComponentHostIpc = ({ ipcMain, manager, mainWindow }) => {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) throw new Error('Unauthorized host surface sender');
     return { success: manager.setHostSurfaceSuspended(update) };
   });
-  ipcMain.handle('component-host-set-toast-reservation', (event, update) => {
-    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) throw new Error('Unauthorized host toast reservation sender');
-    return { success: manager.setHostToastReservation(update) };
-  });
   ipcMain.handle('component-host-notifications-ready', (event, update) => {
     if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) throw new Error('Unauthorized component notification readiness sender');
     return manager.setNotificationRendererReady(update);

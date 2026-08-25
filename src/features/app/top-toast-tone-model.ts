@@ -7,3 +7,8 @@ export const topToastTonePresentation = (tone: TopToastTone) => ({
   ariaLive: tone === 'error' ? 'assertive' as const : 'polite' as const,
   icon: tone === 'success' ? 'check' as const : tone === 'warning' ? 'warning' as const : tone === 'error' ? 'error' as const : 'info' as const,
 });
+
+export const topToastTonePolicy = (tone: TopToastTone) => ({
+  persistent: tone === 'error',
+  durationMs: tone === 'error' ? null : 3500,
+});

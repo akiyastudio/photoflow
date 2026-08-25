@@ -8,8 +8,8 @@ const normalizeComponentNotificationRendererEvent = value => {
   if (value.type === 'purge') return Object.freeze({ apiVersion: 2, type: 'purge', componentId: value.componentId });
   if (value.type !== 'notification' || typeof value.id !== 'string' || !['project', 'application.settings'].includes(value.surface)) return null;
   const notification = value.notification;
-  if (!notification || !COMPONENT_NOTIFICATION_TONES.has(notification.tone) || typeof notification.message !== 'string' || notification.message !== notification.message.trim() || notification.message.length < 1 || notification.message.length > 360 || !Number.isInteger(notification.durationMs) || notification.durationMs < 1200 || notification.durationMs > 15000 || (notification.dedupeKey !== undefined && (typeof notification.dedupeKey !== 'string' || !COMPONENT_NOTIFICATION_DEDUPE_KEY.test(notification.dedupeKey)))) return null;
-  return Object.freeze({ apiVersion: 2, type: 'notification', id: value.id, componentId: value.componentId, surface: value.surface, notification: Object.freeze({ tone: notification.tone, message: notification.message, durationMs: notification.durationMs, ...(notification.dedupeKey ? { dedupeKey: notification.dedupeKey } : {}) }) });
+  if (!notification || Object.keys(notification).some(key => !['tone', 'message', 'dedupeKey'].includes(key)) || !COMPONENT_NOTIFICATION_TONES.has(notification.tone) || typeof notification.message !== 'string' || notification.message !== notification.message.trim() || notification.message.length < 1 || notification.message.length > 360 || (notification.dedupeKey !== undefined && (typeof notification.dedupeKey !== 'string' || !COMPONENT_NOTIFICATION_DEDUPE_KEY.test(notification.dedupeKey)))) return null;
+  return Object.freeze({ apiVersion: 2, type: 'notification', id: value.id, componentId: value.componentId, surface: value.surface, notification: Object.freeze({ tone: notification.tone, message: notification.message, ...(notification.dedupeKey ? { dedupeKey: notification.dedupeKey } : {}) }) });
 };
 const subscribeComponentNotification = callback => {
   if (typeof callback !== 'function') throw new TypeError('Component notification callback must be a function');
@@ -87,7 +87,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
   releaseComponentSettingsPage: request => ipcRenderer.invoke('component-host-settings-release', request),
   activateComponentPage: instanceId => ipcRenderer.invoke('component-host-activate', instanceId),
   setHostSurfaceSuspended: update => ipcRenderer.invoke('component-host-set-suspended', update),
-  setHostToastReservation: update => ipcRenderer.invoke('component-host-set-toast-reservation', update),
+  updateToastOverlay: snapshot => ipcRenderer.invoke('toast-overlay:update', snapshot),
+  onToastOverlayAction: callback => {
+    if (typeof callback !== 'function') throw new TypeError('Toast overlay action callback must be a function');
+    const actions = new Set(['notice-dismiss', 'task-dismiss', 'task-minimize', 'task-pause', 'task-continue', 'task-cancel']);
+    const listener = (_event, value) => { if (value && actions.has(value.action) && typeof value.id === 'string' && value.id.length >= 1 && value.id.length <= 200) callback(Object.freeze({ action: value.action, id: value.id })); };
+    ipcRenderer.on('toast-overlay:action', listener); return () => ipcRenderer.removeListener('toast-overlay:action', listener);
+  },
   setComponentNotificationReady: update => ipcRenderer.invoke('component-host-notifications-ready', update),
   setComponentPageBounds: (instanceId, bounds) => ipcRenderer.invoke('component-host-set-bounds', instanceId, bounds),
   closeComponentPage: instanceId => ipcRenderer.invoke('component-host-close', instanceId),

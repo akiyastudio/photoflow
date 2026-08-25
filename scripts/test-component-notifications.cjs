@@ -2,7 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const { EventEmitter } = require('events');
-const { ComponentNotificationService, DURATION_MAX_MS, DURATION_MIN_MS, MESSAGE_MAX_LENGTH } = require('../electron/services/component-notification-service.cjs');
+const { ComponentNotificationService, MESSAGE_MAX_LENGTH } = require('../electron/services/component-notification-service.cjs');
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
 const { ComponentViewManager } = require('../electron/services/component-view-manager.cjs');
 const { normalizeComponentNotificationRendererEvent, subscribeComponentNotification } = require('../electron/contracts/component-notification-renderer-event.cjs');
@@ -19,7 +19,7 @@ const project = { surface: 'project' };
 
 let result = service.publish(descriptor('alpha'), { tone: 'success', message: '  saved  ' }, project);
 assert.deepStrictEqual(result, { apiVersion: 2, accepted: true, id: 'alpha:1' });
-assert.deepStrictEqual(sent[0][1].notification, { tone: 'success', message: 'saved', durationMs: 3500 });
+assert.deepStrictEqual(sent[0][1].notification, { tone: 'success', message: 'saved' });
 assert.equal(sent[0][0], 'component-host:notification.v2');
 assert.equal(service.publish(descriptor('alpha'), { tone: 'success', message: 'saved' }, project).code, 'NOTIFICATION_DEDUPLICATED');
 assert.equal(service.publish(descriptor('beta'), { tone: 'success', message: 'saved' }, project).accepted, true, 'dedupe is isolated by component');
@@ -28,8 +28,7 @@ for (const [payload, code] of [
   [{ tone: 'other', message: 'x' }, 'NOTIFICATION_INVALID_TONE'],
   [{ tone: 'info', message: ' ' }, 'NOTIFICATION_INVALID_MESSAGE'],
   [{ tone: 'info', message: 'x'.repeat(MESSAGE_MAX_LENGTH + 1) }, 'NOTIFICATION_INVALID_MESSAGE'],
-  [{ tone: 'info', message: 'x', durationMs: DURATION_MIN_MS - 1 }, 'NOTIFICATION_INVALID_DURATION'],
-  [{ tone: 'info', message: 'x', durationMs: DURATION_MAX_MS + 1 }, 'NOTIFICATION_INVALID_DURATION'],
+  [{ tone: 'info', message: 'x', durationMs: 3500 }, 'NOTIFICATION_INVALID_PAYLOAD'],
   [{ tone: 'info', message: 'x', dedupeKey: '../bad' }, 'NOTIFICATION_INVALID_DEDUPE_KEY'],
   [{ tone: 'info', message: 'x', html: '<b>x</b>' }, 'NOTIFICATION_INVALID_PAYLOAD'],
 ]) assert.equal(service.publish(descriptor('validation'), payload, project).error.code, code);
@@ -110,26 +109,20 @@ projectInstance.logicalActive = true; settingsInstance.logicalActive = false; ma
 manager.instancesById.set('project', projectInstance); manager.instancesById.set('settings', settingsInstance);
 manager.instances.set('project', projectInstance); manager.instances.set('settings', settingsInstance);
 manager.setBounds('project', projectInstance.requestedBounds); manager.setBounds('settings', settingsInstance.requestedBounds);
-manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 0, bottom: 112 });
-assert.deepStrictEqual(projectBounds.at(-1), { x: 10, y: 112, width: 800, height: 528 });
+assert.deepStrictEqual(projectBounds.at(-1), { x: 10, y: 40, width: 800, height: 600 });
 manager.activeInstanceId = 'settings'; projectInstance.logicalActive = false; settingsInstance.logicalActive = true; manager.applyBounds(projectInstance); manager.applyBounds(settingsInstance);
-assert.deepStrictEqual(settingsBounds.at(-1), { x: 0, y: 112, width: 1000, height: 628 }, 'settings surface uses the same visible host reservation');
-assert.deepStrictEqual(projectBounds.at(-1), { x: 10, y: 40, width: 800, height: 600 }, 'switching tabs restores inactive component geometry');
+assert.deepStrictEqual(settingsBounds.at(-1), { x: 0, y: 40, width: 1000, height: 700 }, 'settings surface retains its exact requested geometry');
+assert.deepStrictEqual(projectBounds.at(-1), { x: 10, y: 40, width: 800, height: 600 }, 'switching surfaces never changes component geometry');
 manager.activeInstanceId = 'project'; projectInstance.logicalActive = true; settingsInstance.logicalActive = false;
-manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 1, bottom: 180 });
-assert.equal(projectBounds.at(-1).y, 180, 'multiple toast growth updates native geometry');
-manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 2, bottom: 5000 });
-assert.equal(projectBounds.at(-1).height, 120, 'extreme combined toast/task geometry cannot collapse the active component surface');
-manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 3, bottom: 0 });
-assert.deepStrictEqual(projectBounds.at(-1), { x: 10, y: 40, width: 800, height: 600 }, 'dismissal/expiry restores exact requested bounds');
-assert.equal(manager.setHostToastReservation({ rendererToken: 'renderer-a', revision: 2, bottom: 300 }), false, 'stale revisions cannot reapply an overlay');
+manager.applyBounds(projectInstance);
+assert.deepStrictEqual(projectBounds.at(-1), { x: 10, y: 40, width: 800, height: 600 }, 'toast activity has no bounds mutation path');
 
-assert.deepStrictEqual(normalizeComponentNotificationRendererEvent({ apiVersion: 2, type: 'notification', id: 'alpha:1', componentId: 'alpha', surface: 'project', notification: { tone: 'success', message: 'saved', durationMs: 3500 } }).notification, { tone: 'success', message: 'saved', durationMs: 3500 });
-assert.equal(normalizeComponentNotificationRendererEvent({ apiVersion: 2, type: 'notification', id: 'x', componentId: 'alpha', surface: 'project', notification: { tone: 'info', message: ' padded ', durationMs: 3500 } }), null);
+assert.deepStrictEqual(normalizeComponentNotificationRendererEvent({ apiVersion: 2, type: 'notification', id: 'alpha:1', componentId: 'alpha', surface: 'project', notification: { tone: 'success', message: 'saved' } }).notification, { tone: 'success', message: 'saved' });
+assert.equal(normalizeComponentNotificationRendererEvent({ apiVersion: 2, type: 'notification', id: 'x', componentId: 'alpha', surface: 'project', notification: { tone: 'info', message: 'padded', durationMs: 3500 } }), null, 'legacy durationMs is rejected at the renderer boundary');
 assert.deepStrictEqual(normalizeComponentNotificationRendererEvent({ apiVersion: 2, type: 'purge', componentId: 'alpha' }), { apiVersion: 2, type: 'purge', componentId: 'alpha' });
 const rendererEvents = new EventEmitter(); const normalizedEvents = [];
 const unsubscribeRenderer = subscribeComponentNotification(rendererEvents, value => normalizedEvents.push(value));
-rendererEvents.emit('component-host:notification.v2', {}, { apiVersion: 2, type: 'notification', id: 'alpha:2', componentId: 'alpha', surface: 'application.settings', notification: { tone: 'warning', message: 'review', durationMs: 3500 } });
+rendererEvents.emit('component-host:notification.v2', {}, { apiVersion: 2, type: 'notification', id: 'alpha:2', componentId: 'alpha', surface: 'application.settings', notification: { tone: 'warning', message: 'review' } });
 assert.equal(normalizedEvents.length, 1); unsubscribeRenderer();
 rendererEvents.emit('component-host:notification.v2', {}, { apiVersion: 2, type: 'purge', componentId: 'alpha' });
 assert.equal(normalizedEvents.length, 1, 'preload subscription cleanup removes the private listener');

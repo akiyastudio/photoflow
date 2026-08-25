@@ -8,6 +8,7 @@ const { exiftool, exiftoolPath } = require('exiftool-vendored');
 const { ThumbnailPipeline, THUMBNAIL_VERSION, PRIORITY, isThumbnailSizeSufficient } = require('./thumbnail-pipeline.cjs');
 const { createComponentRegistry } = require('./component-registry.cjs'); const { createComponentHostRegistry } = require('./component-host-contract.cjs');
 const { ComponentViewManager } = require('./services/component-view-manager.cjs'); const { createComponentHostCapabilityRuntime } = require('./services/component-host-capability-runtime.cjs');
+const { ToastOverlayManager } = require('./services/toast-overlay-manager.cjs');
 const { ComponentServiceManager } = require('./services/component-service-manager.cjs'); const { createConfigMutationService, readConfigFileWithRecovery, registerConfigDrainBeforeQuit } = require('./services/config-mutation-service.cjs');
 const { COMPONENT_HOST_V1_RPC_REGISTRARS } = require('./compatibility/component-host-v1.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
@@ -119,7 +120,7 @@ const componentHostRegistry = createComponentHostRegistry({
   admitDescriptor: (descriptor, componentRoot) => { const component = componentRegistry.resolve(descriptor.componentId, { verifyIntegrity: true }); return Boolean(component && path.resolve(component.path) === path.resolve(componentRoot)); },
   ...(app.isPackaged ? {} : { developmentRendererRoot: path.join(projectRoot, 'artifacts', 'component-renderers'), developmentAlgorithmRuntimes: createDevelopmentAlgorithmRuntimes({ projectRoot, definitions: PLUGIN_DEFINITIONS }) }),
 });
-let componentViewManager; let componentServiceManager; let configMutationService;
+let componentViewManager; let componentServiceManager; let configMutationService; let toastOverlayManager;
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
@@ -398,6 +399,7 @@ const databaseHealthOptions = domainId => ({
 });
 
 const rendererEntryFile = path.join(__dirname, '../artifacts/web/index.html');
+const toastOverlayRendererFile = path.join(__dirname, '../artifacts/web/toast-overlay.html');
 const isDevelopmentRenderer = () => process.env.NODE_ENV === 'development';
 const developmentRendererUrl = isDevelopmentRenderer() ? normalizeDevelopmentRendererUrl(process.env.PHOTOFLOW_DEV_SERVER_URL) : '';
 const { configureWindowSecurity, ipcMain, openAllowedExternalUrl } = createElectronSecurity({
@@ -602,6 +604,16 @@ function createWindow(loadRenderer = true) {
       lineNumber: details.lineNumber,
       sourceId: details.sourceId,
     });
+  });
+
+  toastOverlayManager = new ToastOverlayManager({
+    BrowserWindow,
+    mainWindow,
+    ipcMain: electronIpcMain,
+    preloadPath: path.join(__dirname, 'toast-overlay-preload.cjs'),
+    rendererFile: toastOverlayRendererFile,
+    developmentRendererUrl,
+    writeLog,
   });
 
   if (loadRenderer) loadMainWindowRenderer();
@@ -1954,6 +1966,7 @@ app.whenReady().then(async () => {
 });
 
 registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutationService, writeLog, onQuit: () => {
+  toastOverlayManager?.destroy();
   componentViewManager?.destroy();
   void componentServiceManager?.destroy();
   telemetryService?.stop();

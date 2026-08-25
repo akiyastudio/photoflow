@@ -1,6 +1,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 
 const packageVersion = JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version
 
@@ -32,5 +33,6 @@ export default defineConfig({
   build: {
     outDir: 'artifacts/web',
     emptyOutDir: true,
+    rollupOptions: { input: { main: resolve(import.meta.dirname, 'index.html'), toastOverlay: resolve(import.meta.dirname, 'toast-overlay.html') } },
   },
 })

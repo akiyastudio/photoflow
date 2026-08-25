@@ -100,7 +100,7 @@ const App: React.FC = () => {
   const [componentsLoading, setComponentsLoading] = useState(true);
   const [componentSettingsPages, setComponentSettingsPages] = useState<ComponentSettingsPageContribution[]>([]);
   const selectedComponentSettingsPage = useMemo(() => componentSettingsPages.find(page => componentSettingsSectionKey(page) === settingsSection), [componentSettingsPages, settingsSection]);
-  const reportComponentSettingsError = useCallback((message: string) => showNotice(`打开组件设置页失败：${message}`, 5000), [showNotice]);
+  const reportComponentSettingsError = useCallback((message: string) => showNotice(`打开组件设置页失败：${message}`), [showNotice]);
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed).map(component => component.id)), [components]);
   const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); }, onNotice: showNotice });
   const { actions: componentHostActions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
@@ -257,7 +257,7 @@ const App: React.FC = () => {
       setComponentInstallPath(result.installPath || '');
     } catch (error) {
       setComponents([]);
-      showNotice(`读取组件状态失败：${error instanceof Error ? error.message : String(error)}`, 5000);
+      showNotice(`读取组件状态失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       setComponentsLoading(false);
     }
@@ -281,7 +281,7 @@ const App: React.FC = () => {
   useEffect(() => {
     const report = (message: string, details?: string) => {
       const now = Date.now(); if (!shouldReportRendererError(lastRendererErrorRef.current, message, now)) return;
-      lastRendererErrorRef.current = { fingerprint: rendererErrorFingerprint(message), reportedAt: now }; showNotice(`发生错误：${rendererErrorNoticeSummary(message)}`, 5000);
+      lastRendererErrorRef.current = { fingerprint: rendererErrorFingerprint(message), reportedAt: now }; showNotice(`发生错误：${rendererErrorNoticeSummary(message)}`);
       window.electronAPI?.reportRendererError?.(message, details);
     };
     const originalConsoleError = console.error;
@@ -400,7 +400,7 @@ const App: React.FC = () => {
     if (window.electronAPI?.apiContractVersion !== 1 || typeof getConsentState !== 'function') {
       setPrivacyConsentRequired(true);
       setPrivacyStateLoaded(true);
-      showNotice('组件版本不一致。请重启软件，仍无效时重新安装。', 10000);
+      showNotice('组件版本不一致。请重启软件，仍无效时重新安装。');
       return;
     }
     void getConsentState().then(state => {
@@ -421,7 +421,7 @@ const App: React.FC = () => {
 
   useEffect(() => {
     if (!configLoaded || !config?.workspacePath) return;
-    void window.electronAPI.recoverMediaWorkflowImports(config.workspacePath).then(result => { if (result.failures.length) showNotice('媒体已导入，部分关系将在下次启动时重试恢复。', 8000); }).catch(() => undefined); void refreshBackupStatus();
+    void window.electronAPI.recoverMediaWorkflowImports(config.workspacePath).then(result => { if (result.failures.length) showNotice('媒体已导入，部分关系将在下次启动时重试恢复。'); }).catch(() => undefined); void refreshBackupStatus();
     if (config.backup.enabled && config.backup.automaticDaily) void window.electronAPI.runBackupIfDue(config.workspacePath);
   }, [configLoaded, config?.workspacePath, config?.backup.enabled, config?.backup.automaticDaily, config?.backup.targetPath, refreshBackupStatus, showNotice]);
 
@@ -489,7 +489,7 @@ const App: React.FC = () => {
         if (policy !== 'rename' && policy !== 'overwrite') { showNotice('已取消撤销'); return; }
         result = await window.electronAPI.undoLastRename(undoWorkspacePath, { restoreConflictPolicy: policy });
       }
-      showNotice(result.success ? (result.message || '\u5df2\u64a4\u9500\u4e0a\u4e00\u6b21\u91cd\u547d\u540d') : (result.error || '\u6682\u65e0\u53ef\u64a4\u9500\u7684\u91cd\u547d\u540d'), 3500, result.success ? 'success' : 'error');
+      showNotice(result.success ? (result.message || '\u5df2\u64a4\u9500\u4e0a\u4e00\u6b21\u91cd\u547d\u540d') : (result.error || '\u6682\u65e0\u53ef\u64a4\u9500\u7684\u91cd\u547d\u540d'), result.success ? 'success' : 'error');
       if (result.success) {
         if (result.project) {
           openProjectTab(result.project, null, selectedProject?.path);
@@ -524,7 +524,7 @@ const App: React.FC = () => {
           return true;
         } else {
           window.electronAPI.reportRendererError('保存设置失败', result.error);
-          showNotice(`保存设置失败：${result.error || '未知错误'}`, 5000);
+          showNotice(`保存设置失败：${result.error || '未知错误'}`);
           return false;
         }
       }
@@ -532,7 +532,7 @@ const App: React.FC = () => {
       return true;
     } catch (error) {
       window.electronAPI.reportRendererError('保存设置异常', error instanceof Error ? error.stack : String(error));
-      showNotice(`保存设置失败：${error instanceof Error ? error.message : String(error)}`, 5000);
+      showNotice(`保存设置失败：${error instanceof Error ? error.message : String(error)}`);
       return false;
     }
   };
@@ -551,7 +551,7 @@ const App: React.FC = () => {
     if (!config) return;
     const consent = await window.electronAPI.savePrivacyConsent({ acceptCore: true });
     if (!consent.success) {
-      showNotice(`保存隐私确认失败：${consent.error || '未知错误'}`, 6000);
+      showNotice(`保存隐私确认失败：${consent.error || '未知错误'}`);
       return;
     }
     const saved = await handleConfigUpdate({ ...config, telemetry: { enabled: true, crashReports: true } });
@@ -722,8 +722,8 @@ const App: React.FC = () => {
   };
   const handleHomeImportComplete = async (completion: ImportCompletion) => { if (!config) return;
     const result = await window.electronAPI.finalizeSdImportedProjects(config.workspacePath, completion.projectNames, { moveProjectAfterImport: config.smartImport.autoMoveProjectAfterSdImport, workProjectNames: completion.workProjectNames, importedPathsByProject: completion.importedPathsByProject });
-    if (!result.success) { showNotice(`整理导入项目失败：${result.error || '未知错误'}`, 5000); return; }
-    if (result.failures.length) showNotice(`导入已完成，但有 ${result.failures.length} 个项目的分类更新失败。`, 7000);
+    if (!result.success) { showNotice(`整理导入项目失败：${result.error || '未知错误'}`); return; }
+    if (result.failures.length) showNotice(`导入已完成，但有 ${result.failures.length} 个项目的分类更新失败。`);
     else if (result.movedProjects.length) showNotice('导入完成，项目已移入“后期中”。');
     else showNotice('导入完成，项目分类保持不变。');
     if (result.projects.length === 1) openProjectTab(result.projects[0]); window.dispatchEvent(new Event('workspace-projects-changed'));
@@ -870,7 +870,7 @@ const App: React.FC = () => {
                     <span className="min-w-0 flex-1"><span className="block text-base font-bold text-slate-800">灵感库</span><span className="mt-1 block truncate text-xs text-slate-500">整理和浏览灵感素材</span></span>
                     <ChevronRight size={19} className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500"/>
                   </button>
-                  <BackupHomeCard status={backupStatus} onOpen={openBackupSettings} onRun={() => { void window.electronAPI.runBackup(config.workspacePath, 'manual').then(result => { if (!result.success) showNotice(result.error || '无法开始备份', 5000, 'error'); else { showNotice('手动备份已开始', 3500, 'success'); void refreshBackupStatus(); } }); }}/>
+                  <BackupHomeCard status={backupStatus} onOpen={openBackupSettings} onRun={() => { void window.electronAPI.runBackup(config.workspacePath, 'manual').then(result => { if (!result.success) showNotice(result.error || '无法开始备份', 'error'); else { showNotice('手动备份已开始', 'success'); void refreshBackupStatus(); } }); }}/>
                 </div>;
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>

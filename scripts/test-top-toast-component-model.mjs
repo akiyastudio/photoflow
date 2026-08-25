@@ -6,7 +6,6 @@ import { pathToFileURL } from 'node:url';
 const root = path.resolve(import.meta.dirname, '..');
 const model = await import(pathToFileURL(path.join(root, 'src/features/app/top-toast-notice-model.ts')).href);
 const toneModel = await import(pathToFileURL(path.join(root, 'src/features/app/top-toast-tone-model.ts')).href);
-const reservationModel = await import(pathToFileURL(path.join(root, 'src/features/app/top-toast-host-reservation-model.ts')).href);
 let notices = [];
 let lastEvictions = [];
 for (let id = 1; id <= 7; id += 1) { const result = model.enqueueTopToastNoticeWithEvictions(notices, { id, message: `notice-${id}`, persistent: false, count: 1, tone: 'info', sourceComponentId: id % 2 ? 'alpha' : 'beta' }); notices = result.notices; lastEvictions = result.evictedIds; }
@@ -24,9 +23,8 @@ assert.deepEqual(toneModel.topToastTonePresentation('success'), { tone: 'success
 assert.deepEqual(toneModel.topToastTonePresentation('warning'), { tone: 'warning', role: 'status', ariaLive: 'polite', icon: 'warning' });
 assert.deepEqual(toneModel.topToastTonePresentation('error'), { tone: 'error', role: 'alert', ariaLive: 'assertive', icon: 'error' });
 assert.equal(toneModel.hostNoticeTone('保存失败：磁盘已满'), 'error'); assert.equal(toneModel.hostNoticeTone('保存完成'), 'info', 'host failure persistence and error semantics share one tested tone mapping');
-assert.equal(reservationModel.hostToastReservationBottom({ querySelector: () => ({}), getBoundingClientRect: () => ({ bottom: 143.2 }) }), 156, 'measured stack bottom reserves a non-overlapping native-view boundary');
-assert.equal(reservationModel.hostToastReservationBottom({ querySelector: () => ({}), getBoundingClientRect: () => ({ bottom: 900 }) }, 12, 240, 120), 120, 'narrow, short viewport clamps reservation and preserves usable surface height');
-assert.equal(reservationModel.hostToastReservationBottom({ querySelector: () => null, getBoundingClientRect: () => ({ bottom: 40 }) }), 0, 'empty stack restores native view geometry');
+for (const tone of ['info', 'success', 'warning']) assert.deepEqual(toneModel.topToastTonePolicy(tone), { persistent: false, durationMs: 3500 }, `${tone} shares the host lifecycle`);
+assert.deepEqual(toneModel.topToastTonePolicy('error'), { persistent: true, durationMs: null }, 'component and host errors share the persistent lifecycle');
 let errorOnly = [];
 for (let id = 20; id < 25; id += 1) errorOnly = model.enqueueTopToastNotice(errorOnly, { id, message: `error-${id}`, persistent: false, count: 1, tone: 'error' });
 const selfEvicted = model.enqueueTopToastNoticeWithEvictions(errorOnly, { id: 25, message: 'ordinary', persistent: false, count: 1, tone: 'info' });
@@ -44,7 +42,9 @@ const taskToastModel = await import(pathToFileURL(path.join(root, 'src/features/
 assert.equal(taskToastModel.taskToastLiveRole('running'), undefined); assert.equal(taskToastModel.taskToastLiveRole('paused'), undefined); assert.equal(taskToastModel.taskToastLiveRole('completed'), 'status'); assert.equal(taskToastModel.taskToastLiveRole('failed'), 'alert', 'only terminal task cards are live regions');
 assert(taskToast.includes('role={taskToastLiveRole(task.state)}'), 'rendered task cards consume the terminal-only accessibility model');
 assert(css.includes('.file-transfer-toast * { animation:none!important; transition:none!important; }'), 'reduced motion disables spinner animation and progress-width transitions for task descendants');
-assert(hook.includes("explicitTone || hostNoticeTone(cleanMessage)"), 'host notices accept an explicit tone while retaining legacy inference');
+assert(hook.includes("typeof durationOrTone === 'string'") && hook.includes('hostNoticeTone(cleanMessage)'), 'host notices accept an explicit tone while retaining legacy inference');
+assert(hook.includes('topToastTonePolicy(value.notification.tone)') && !hook.includes('value.notification.durationMs'), 'component notifications use the same tone policy and cannot control duration');
+assert(!hook.slice(hook.indexOf('notices.map(')).includes('sourceComponentId ==='), 'source ownership never forks toast presentation');
 const app = fs.readFileSync(path.join(root, 'src/App.tsx'), 'utf8');
-assert(app.includes("result.success ? 'success' : 'error'") && app.includes("showNotice(result.error || '无法开始备份', 5000, 'error')") && app.includes("showNotice('手动备份已开始', 3500, 'success')"), 'undo and manual backup branches pass explicit success/error tones');
+assert(app.includes("result.success ? 'success' : 'error'") && app.includes("showNotice(result.error || '无法开始备份', 'error')") && app.includes("showNotice('手动备份已开始', 'success')"), 'undo and manual backup branches pass explicit success/error tones');
 console.log('top toast component model tests passed');

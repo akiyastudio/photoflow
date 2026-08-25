@@ -6,8 +6,8 @@ const normalizeComponentNotificationRendererEvent = value => {
   if (value.type === 'purge') return Object.freeze({ apiVersion: 2, type: 'purge', componentId: value.componentId });
   if (value.type !== 'notification' || typeof value.id !== 'string' || !['project', 'application.settings'].includes(value.surface)) return null;
   const notification = value.notification;
-  if (!notification || !TONES.has(notification.tone) || typeof notification.message !== 'string' || notification.message !== notification.message.trim() || notification.message.length < 1 || notification.message.length > 360 || !Number.isInteger(notification.durationMs) || notification.durationMs < 1200 || notification.durationMs > 15000 || (notification.dedupeKey !== undefined && (typeof notification.dedupeKey !== 'string' || !DEDUPE_KEY.test(notification.dedupeKey)))) return null;
-  return Object.freeze({ apiVersion: 2, type: 'notification', id: value.id, componentId: value.componentId, surface: value.surface, notification: Object.freeze({ tone: notification.tone, message: notification.message, durationMs: notification.durationMs, ...(notification.dedupeKey ? { dedupeKey: notification.dedupeKey } : {}) }) });
+  if (!notification || Object.keys(notification).some(key => !['tone', 'message', 'dedupeKey'].includes(key)) || !TONES.has(notification.tone) || typeof notification.message !== 'string' || notification.message !== notification.message.trim() || notification.message.length < 1 || notification.message.length > 360 || (notification.dedupeKey !== undefined && (typeof notification.dedupeKey !== 'string' || !DEDUPE_KEY.test(notification.dedupeKey)))) return null;
+  return Object.freeze({ apiVersion: 2, type: 'notification', id: value.id, componentId: value.componentId, surface: value.surface, notification: Object.freeze({ tone: notification.tone, message: notification.message, ...(notification.dedupeKey ? { dedupeKey: notification.dedupeKey } : {}) }) });
 };
 
 const subscribeComponentNotification = (ipcRenderer, callback) => {
