@@ -11,7 +11,7 @@ import type { TeamRetouchStep } from './legacy/TeamRetouchSteps';
 import { rpc, type ComponentContext } from './sdk';
 import { legacyApi } from './legacy/legacy-api';
 import { resolveTeamRetouchEntriesForOpen } from './legacy/legacy-entry-scope';
-import { createActivationRefreshGate, createLatestHistoryLoadGuard, historyLoadPresentation, historyMigrationDelayMs } from './legacy/legacy-history-load-model';
+import { createActivationRefreshGate, createHistoryContextLoadCoordinator, createLatestHistoryLoadGuard, historyLoadPresentation, historyMigrationDelayMs } from './legacy/legacy-history-load-model';
 import { canEnterWorkflowStage, normalizeWorkspace, workflowStageSummaries, type WorkflowStage } from './interaction-model';
 import '../../../../component-sdk/ui.css';
 import './legacy-style.css';
@@ -59,7 +59,7 @@ const App = () => {
   const entriesRef = useRef<Json[]>([]);
   const entriesLoadedRef = useRef(false);
   const loadGuardRef = useRef(createLatestHistoryLoadGuard());
-  const loadOperationRef = useRef<Promise<void> | null>(null);
+  const loadCoordinatorRef = useRef<ReturnType<typeof createHistoryContextLoadCoordinator<ComponentContext>> | null>(null);
   const activationRefreshGateRef = useRef(createActivationRefreshGate());
   useEffect(() => { entriesRef.current = entries; }, [entries]);
   const performLoadEntries = useCallback(async (hostContext: ComponentContext, manualMigrationRetry = false) => {
@@ -156,11 +156,8 @@ const App = () => {
       setInitialLoading(false); setLoadError(error instanceof Error ? error.message : String(error));
     }
   }, []);
-  const loadEntries = useCallback((hostContext: ComponentContext, manualMigrationRetry = false) => {
-    if (loadOperationRef.current) return loadOperationRef.current;
-    const operation = performLoadEntries(hostContext, manualMigrationRetry).finally(() => { if (loadOperationRef.current === operation) loadOperationRef.current = null; });
-    loadOperationRef.current = operation; return operation;
-  }, [performLoadEntries]);
+  if (!loadCoordinatorRef.current) loadCoordinatorRef.current = createHistoryContextLoadCoordinator(performLoadEntries);
+  const loadEntries = useCallback((hostContext: ComponentContext, options: { force?: boolean; manualMigrationRetry?: boolean } = {}) => loadCoordinatorRef.current!.request(hostContext, options), []);
   useEffect(() => {
     let mounted = true;
     const acceptContext = (nextContext: ComponentContext) => { if (!mounted) return; contextRef.current = nextContext; setContext(nextContext); applyResolvedTheme(nextContext.resolvedTheme); void loadEntries(nextContext); };
@@ -168,7 +165,7 @@ const App = () => {
     void rpc<Json>('team.settings.get.v1').then(saved => { if (mounted && saved.success !== false && saved.settings) setSettings(saved.settings as TeamSettings); }).catch(error => { if (mounted) setNotice(`读取团片设置失败：${error instanceof Error ? error.message : String(error)}`); });
     const stopTheme = window.photoFlowComponent.onThemeChange(value => { if (mounted && value.contractVersion === 1) applyResolvedTheme(value.resolvedTheme); });
     const stopContext = window.photoFlowComponent.onContextChange(acceptContext);
-    const stopActivate = window.photoFlowComponent.onActivate(() => { if (mounted) { setComponentActive(true); if (activationRefreshGateRef.current.activate() && contextRef.current) void loadEntries(contextRef.current); } });
+    const stopActivate = window.photoFlowComponent.onActivate(() => { if (mounted) { setComponentActive(true); if (activationRefreshGateRef.current.activate() && contextRef.current) void loadEntries(contextRef.current, { force: true }); } });
     const stopDeactivate = window.photoFlowComponent.onDeactivate(() => { if (mounted) { activationRefreshGateRef.current.deactivate(); setComponentActive(false); } });
     return () => { mounted = false; loadGuardRef.current.invalidate(); stopTheme(); stopContext(); stopActivate(); stopDeactivate(); };
   }, [loadEntries]);
@@ -179,9 +176,9 @@ const App = () => {
     if (!guard.allowed) { setNotice(guard.reason); return; }
     setStep(next);
   };
-  const common = { workspacePath: context?.projectId || '', project, cacheConfig: { directory: '', maxSizeGB: 0 }, componentActive, activeStep: step, onStepChange: changeStep, stageSummaries, onBlockedStage: setNotice, onClose: () => undefined, onOpenSettings: () => setSettingsOpen(true), onNotice: setNotice, onProjectChanged: () => { if (contextRef.current) void loadEntries(contextRef.current); } };
+  const common = { workspacePath: context?.projectId || '', project, cacheConfig: { directory: '', maxSizeGB: 0 }, componentActive, activeStep: step, onStepChange: changeStep, stageSummaries, onBlockedStage: setNotice, onClose: () => undefined, onOpenSettings: () => setSettingsOpen(true), onNotice: setNotice, onProjectChanged: () => { if (contextRef.current) void loadEntries(contextRef.current, { force: true }); } };
   const retryHistory = () => {
-    if (contextRef.current) { void loadEntries(contextRef.current, true); return; }
+    if (contextRef.current) { void loadEntries(contextRef.current, { force: true, manualMigrationRetry: true }); return; }
     setInitialLoading(true); setLoadError('');
     void window.photoFlowComponent.getContext().then(nextContext => { contextRef.current = nextContext; setContext(nextContext); applyResolvedTheme(nextContext.resolvedTheme); void loadEntries(nextContext); }).catch(error => { setInitialLoading(false); setLoadError(error instanceof Error ? error.message : String(error)); });
   };
