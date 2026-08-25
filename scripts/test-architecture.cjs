@@ -11,7 +11,23 @@ const walk = directory => fs.readdirSync(directory,{withFileTypes:true}).flatMap
   if(path.resolve(absolute)===path.resolve(pluginRoot)) return [];
   return entry.isDirectory()?walk(absolute):[absolute];
 });
-const forbidden = new RegExp([isolatedId, ['team','retouch'].join('_'), ['team','Retouch'].join(''), ['Team','Retouch'].join(''), ['workspace','team'].join('-'), ['team','patch'].join('_'), ['team','person'].join('_'), ['team','workspace'].join('_'), '\\u56e2\\u7247'].join('|'), 'iu');
+const forbidden = new RegExp([
+  isolatedId,
+  ['team','retouch'].join('_'),
+  ['team','\\s+','retouch'].join(''),
+  ['team','Retouch'].join(''),
+  ['workspace','team'].join('-'),
+  ['team','patch'].join('_'),
+  ['team','person'].join('_'),
+  ['team','workspace'].join('_'),
+  ['component','identity'].join('_'),
+  ['component','patch'].join('_'),
+  ['component','person'].join('_'),
+  ['edited','patch','path'].join('_'),
+  ['sample','component','photos'].join('_'),
+  ['person','Detection'].join(''),
+  '\\u56e2\\u7247',
+].join('|'), 'iu');
 const leaks=[];
 for(const file of walk(root)){
   if(!/\.(?:cjs|mjs|js|ts|tsx|py|json|md|txt|html|ps1|sh|toml|yml|yaml)$/.test(file)) continue;

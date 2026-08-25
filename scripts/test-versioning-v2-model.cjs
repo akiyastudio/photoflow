@@ -48,7 +48,7 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(model.trackingStateLabel({ nodeRole: 'broll', trackingState: 'disabled' }), '花絮');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'artifact', artifactKind: 'preview', versionKey: 'legacy-preview-mov' }), '预览');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'artifact', artifactKind: 'transcode', versionKey: 'transcode-mov' }), '转码');
-  assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', artifactKind: 'component_workspace', versionKey: 'team-workspace' }), '协作');
+  assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', artifactKind: 'component_workspace', versionKey: 'plugin-workspace' }), '协作');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'workflow', sourceMetadata: { category: 'workflow', displayName: '云端校样', parentCapability: 'workflow-input' }, versionKey: 'opaque' }), '云端校样');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'progress', versionKey: '2' }), 'V2');
   assert.strictEqual(model.versionTreeNodeBadgeLabel({ nodeRole: 'broll', versionKey: 'adopt-internal' }), '花絮');

@@ -186,7 +186,7 @@ def test_atomic_rollback_and_retry(root: Path, db):
 
 def test_legacy_canonical_graph_migration(root: Path, db):
     project, project_id = make_project(root, db, "legacy-canonical")
-    for name in ("raw", "jpg", "mov", "mov_转码", "组件工作区", "ordinary-folder", "edit-source"):
+    for name in ("raw", "jpg", "mov", "mov_转码", "ordinary-folder", "edit-source"):
         (project / name).mkdir()
     raw_source = workspace_db.progress_register(str(root), db, {
         "projectName": "legacy-canonical", "mediaKind": "image", "versionKey": "raw-source",
@@ -219,22 +219,16 @@ def test_legacy_canonical_graph_migration(root: Path, db):
            VALUES(?,?,?,?,?,?,?,?)""",
         (version_id, photo_id, 1, "V1", str(source_file), str(source_file).casefold(), now, now),
     )
-    db.execute(
-        "INSERT INTO sample_component_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)",
-        (photo_id, project_id, version_id, now, now),
-    )
     db.commit()
 
     first = workspace_db.progress_list(str(root), db, {"projectName": "legacy-canonical"})
     by_name = {node["displayName"].casefold(): node for node in first["progressFolders"]}
     assert by_name["jpg"]["artifactKind"] == "companion"
     assert by_name["mov_转码"]["nodeRole"] == "artifact" and by_name["mov_转码"]["artifactKind"] == "transcode"
-    assert by_name["组件工作区"]["nodeRole"] == "workflow" and by_name["组件工作区"]["artifactKind"] == "component_workspace"
     assert "ordinary-folder" not in by_name, "ordinary folders must never be inferred into the graph"
     edges = {(edge["sourceProgressId"], edge["targetProgressId"], edge["edgeKind"]) for edge in first["graphEdges"]}
     assert any(kind == "media_companion" for _source, _target, kind in edges)
     assert any(kind == "derived_transcode" for _source, _target, kind in edges)
-    assert (source["id"], by_name["组件工作区"]["id"], "workflow_input") in edges
     second = workspace_db.progress_list(str(root), db, {"projectName": "legacy-canonical"})
     assert len(second["progressFolders"]) == len(first["progressFolders"])
     assert len(second["graphEdges"]) == len(first["graphEdges"]), "legacy graph migration must be idempotent"

@@ -138,7 +138,7 @@ def test_existing_v1_can_receive_v0(temp_root):
         output.write(b"returned-jpeg-v1")
 
     database = os.path.join(temp_root, "merge-workspace.sqlite3")
-    db = workspace_db.connect(workspace_root, database, include_compatibility=True)
+    db = workspace_db.connect(workspace_root, database)
     now = int(time.time() * 1000)
     project_id = "merge-project-id"
     db.execute(
@@ -153,30 +153,6 @@ def test_existing_v1_can_receive_v0(temp_root):
     v1 = workspace_db.ensure_source_version(db, project, v1_path)
     source_photo_id = v1["photo_id"]
 
-    db.execute(
-        "INSERT INTO sample_component_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)",
-        (source_photo_id, project_id, v1["id"], now, now),
-    )
-    db.execute(
-        """INSERT INTO component_patch_tasks(id,photo_id,base_version_id,person_index,person_name,assignee,
-           detector,bbox_json,crop_json,patch_path,status,created_at,updated_at,is_deleted)
-           VALUES('merge-task',?,?,1,'人物 1','修图师','test','{}','{}',?,'exported',?,?,0)""",
-        (source_photo_id, v1["id"], os.path.join(v1_folder, "patch.png"), now, now),
-    )
-    db.execute(
-        "INSERT INTO component_person_identities(id,project_id,name,color,created_at,updated_at) VALUES('merge-person',?,'人物 1','#2563eb',?,?)",
-        (project_id, now, now),
-    )
-    db.execute(
-        """INSERT INTO component_person_assignments(project_id,photo_id,base_version_id,person_index,
-           identity_id,confidence,source,completed,updated_at) VALUES(?,?,?,1,'merge-person',1,'manual',1,?)""",
-        (project_id, source_photo_id, v1["id"], now),
-    )
-    db.execute(
-        """INSERT INTO component_person_exclusions(id,project_id,photo_id,base_version_id,bbox_json,reason,created_at)
-           VALUES('merge-exclusion',?,?,?,'{}','false-positive',?)""",
-        (project_id, source_photo_id, v1["id"], now),
-    )
     db.execute(
         """INSERT INTO version_compare_history(id,photo_id,left_version_id,right_version_id,compare_mode,created_at)
            VALUES('merge-compare',?,?,?,'side',?)""",
@@ -198,10 +174,9 @@ def test_existing_v1_can_receive_v0(temp_root):
         workspace_db.mutate(workspace_root, database, "batch_commit_compare", payload)
     except ValueError:
         failed = True
-    db = workspace_db.connect(workspace_root, database, include_compatibility=True)
+    db = workspace_db.connect(workspace_root, database)
     assert failed, "a bad later match must fail the batch"
     assert db.execute("SELECT photo_id FROM versions WHERE id=?", (v1["id"],)).fetchone()[0] == source_photo_id
-    assert db.execute("SELECT photo_id FROM component_patch_tasks WHERE id='merge-task'").fetchone()[0] == source_photo_id
     failed_batch = db.execute("SELECT id,status FROM version_batches WHERE import_key='merge-existing-v1'").fetchone()
     assert failed_batch["status"] == "failed"
     assert db.execute("SELECT COUNT(*) FROM batch_items WHERE batch_id=?", (failed_batch["id"],)).fetchone()[0] == 0
@@ -209,7 +184,7 @@ def test_existing_v1_can_receive_v0(temp_root):
     payload["matches"] = payload["matches"][:1]
     db.close()
     result = workspace_db.mutate(workspace_root, database, "batch_commit_compare", payload)
-    db = workspace_db.connect(workspace_root, database, include_compatibility=True)
+    db = workspace_db.connect(workspace_root, database)
     assert result["success"] is True
     moved_v1 = db.execute("SELECT * FROM versions WHERE id=?", (v1["id"],)).fetchone()
     assert moved_v1["photo_id"] == v0["photo_id"]
@@ -217,10 +192,6 @@ def test_existing_v1_can_receive_v0(temp_root):
     assert moved_v1["version_number"] == 1
     assert moved_v1["version_name"] == "retouch-v1"
     assert db.execute("SELECT COUNT(*) FROM photos WHERE id=?", (source_photo_id,)).fetchone()[0] == 0
-    assert db.execute("SELECT photo_id,base_version_id FROM component_patch_tasks WHERE id='merge-task'").fetchone()[:] == (v0["photo_id"], v1["id"])
-    assert db.execute("SELECT photo_id,base_version_id FROM sample_component_photos WHERE photo_id=?", (v0["photo_id"],)).fetchone()[:] == (v0["photo_id"], v1["id"])
-    assert db.execute("SELECT photo_id,base_version_id FROM component_person_assignments WHERE identity_id='merge-person'").fetchone()[:] == (v0["photo_id"], v1["id"])
-    assert db.execute("SELECT photo_id FROM component_person_exclusions WHERE id='merge-exclusion'").fetchone()[0] == v0["photo_id"]
     assert db.execute("SELECT photo_id FROM version_compare_history WHERE id='merge-compare'").fetchone()[0] == v0["photo_id"]
     assert db.execute("SELECT current_version_id FROM photos WHERE id=?", (v0["photo_id"],)).fetchone()[0] == v1["id"]
 
@@ -783,7 +754,7 @@ def _drop_progress_purpose_triggers(db, schema="main"):
 def _insert_legacy_parentless_chain(db, project_id, prefix, folder_root, include_graph=False):
     now = int(time.time() * 1000)
     folders = {}
-    for name in ("root", "child", "leaf", "preview", "workflow"):
+    for name in ("root", "child", "leaf", "preview"):
         folder = os.path.join(folder_root, f"{prefix}-{name}")
         os.makedirs(folder, exist_ok=True)
         folders[name] = folder
@@ -792,7 +763,6 @@ def _insert_legacy_parentless_chain(db, project_id, prefix, folder_root, include
         (f"{prefix}-child", "2", f"{prefix}-root", "progress", None, "main", 1, "ready", folders["child"]),
         (f"{prefix}-leaf", "leaf", None, "progress", None, None, 1, "ready", folders["leaf"]),
         (f"{prefix}-preview", "preview", None, "artifact", "preview", None, 0, "disabled", folders["preview"]),
-        (f"{prefix}-workflow", "workflow", None, "workflow", "component_workspace", None, 0, "disabled", folders["workflow"]),
     )
     for node_id, version_key, parent_id, role, artifact_kind, relation_kind, tracking_enabled, state, folder in rows:
         db.execute(
@@ -811,12 +781,6 @@ def _insert_legacy_parentless_chain(db, project_id, prefix, folder_root, include
                  id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
                VALUES(?,?,?,?,?,?,?)""",
             (f"{prefix}-preview-edge", project_id, f"{prefix}-root", f"{prefix}-preview", "derived_preview", now, now),
-        )
-        db.execute(
-            """INSERT INTO version_graph_edges(
-                 id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at)
-               VALUES(?,?,?,?,?,?,?)""",
-            (f"{prefix}-workflow-edge", project_id, f"{prefix}-root", f"{prefix}-workflow", "workflow_input", now, now),
         )
 
 
@@ -952,9 +916,6 @@ def test_schema_30_repairs_legacy_parentless_progress_parent(temp_root):
         assert leaf["node_role"] == "progress" and leaf["parent_progress_id"] is None
         assert leaf["tracking_enabled"] == 0 and leaf["tracking_state"] == "disabled"
         assert upgraded.execute("SELECT source_progress_id FROM version_graph_edges WHERE id='schema30-preview-edge'").fetchone()[0] == "schema30-root"
-        assert upgraded.execute("SELECT source_progress_id FROM version_graph_edges WHERE id='schema30-workflow-edge'").fetchone()[0] == "schema30-child"
-        workflow_metadata = json.loads(upgraded.execute("SELECT source_metadata_json FROM progress_folders WHERE id='schema30-workflow'").fetchone()[0])
-        assert workflow_metadata["parentCapability"] == "workflow-input" and workflow_metadata["componentId"] == "sample-component"
         assert upgraded.execute("SELECT value FROM meta WHERE key='legacy_progress_parent_repair_revision'").fetchone()[0] == workspace_db.LEGACY_PROGRESS_PARENT_REPAIR_REVISION
         workspace_db._check_integrity(upgraded, force=True)
         snapshot = [tuple(row) for row in upgraded.execute("SELECT * FROM progress_folders ORDER BY id")]
@@ -1048,16 +1009,12 @@ def test_schema_31_detached_repairs_deleted_project_and_clean_db_is_stable(temp_
         assert leaf["node_role"] == "progress" and leaf["parent_progress_id"] is None
         assert repaired.execute("SELECT is_deleted FROM projects WHERE id='deleted-parent-project'").fetchone()[0] == 1
         assert repaired.execute("SELECT 1 FROM versioning.sqlite_master WHERE type='trigger' AND name='progress_folders_parent_validate_insert'").fetchone()
-        workflow_metadata_json = repaired.execute("SELECT source_metadata_json FROM progress_folders WHERE id='detached31-workflow'").fetchone()[0]
-        workflow_metadata = json.loads(workflow_metadata_json)
-        assert workflow_metadata["parentCapability"] == "workflow-input" and workflow_metadata["componentId"] == "sample-component"
         workspace_db._check_integrity(repaired, force=True)
     finally:
         repaired.close()
 
     reopened = workspace_db.connect(workspace_root, database, include_domains=True)
     try:
-        assert reopened.execute("SELECT source_metadata_json FROM progress_folders WHERE id='detached31-workflow'").fetchone()[0] == workflow_metadata_json
         assert reopened.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == str(workspace_db.TARGET_SCHEMA_VERSION)
     finally:
         reopened.close()

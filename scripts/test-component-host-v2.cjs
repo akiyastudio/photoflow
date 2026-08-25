@@ -400,7 +400,12 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   hangingBarrier.release(); finishHanging({ revision: 1, settings: {} }); await hangingInvocation;
 
   const genericSource = fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'services', 'component-project-capabilities.cjs'), 'utf8');
-  for (const forbidden of ['sample-component', 'edited_patch_path', 'component_patch_tasks']) assert(!genericSource.includes(forbidden), `generic host source must not contain ${forbidden}`);
+  const privateSchemaNames = [
+    ['sample', 'component'].join('-'),
+    ['edited', 'patch', 'path'].join('_'),
+    ['component', 'patch', 'tasks'].join('_'),
+  ];
+  for (const forbidden of privateSchemaNames) assert(!genericSource.includes(forbidden), `generic host source must not contain ${forbidden}`);
   const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'package.json'), 'utf8'));
   assert(!packageJson.scripts.build.includes('sample-component') && !genericSource.includes('extensions/'), 'the main application build and V2 host must not require a component source package');
   console.log('Component Host API V2 contract and integration tests passed');

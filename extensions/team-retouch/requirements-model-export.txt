@@ -3,4 +3,4 @@
 # workers use ONNX Runtime and do not need the multi-gigabyte CUDA PyTorch SDK.
 --extra-index-url https://download.pytorch.org/whl/cu126
 torch==2.9.1+cu126
-onnx>=1.17,<2
+onnx==1.19.1

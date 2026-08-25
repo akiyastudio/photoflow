@@ -40,8 +40,10 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
 - `electron/repositories`: the only JavaScript modules that know Python
   database action names. IPC and services call domain methods instead.
 - `electron/plugins`: the optional-plugin catalog and capability mapping.
-  Team retouch is resolved through `PluginService`. Inspiration-library scene
-  analysis and Office image extraction are bundled core workers.
+  Optional capabilities are resolved through `PluginService`; plugin-owned
+  workflows, storage and UI remain outside the core application. The
+  inspiration-library scene analysis and Office image extraction are bundled
+  core workers.
 - `electron/native/RecycleBinService.cs`: Windows-only operating-system adapter
   for verified recycle, exact-item restore, and recycle capability probing.
 - `electron/thumbnail-pipeline.cjs`: thumbnail scheduling and cache domain.
@@ -123,8 +125,8 @@ Child-process ownership and recovery policy are documented in
 4. Workspace reconciliation, thumbnail generation and cache cleanup publish
    observable task state through an in-process event bus. The renderer can list,
    cancel and retry supported tasks.
-5. Team retouch remains an optional capability-based plugin. The inspiration
-   library, scene organizer and Office image extractor are bundled core
+5. Optional capability-based plugins are discovered through manifests and run
+   behind versioned host contracts. Bundled visual tools remain core
    capabilities and use a dedicated visual-tools worker.
 
 `npm run check` is the supported local and Windows-CI gate: lint, TypeScript,

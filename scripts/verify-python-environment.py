@@ -137,17 +137,15 @@ def main() -> None:
     root_requirements = read_requirements(ROOT / "requirements.txt")
     failures = verify_installed(root_requirements)
     if not quick:
-        export_requirements = read_requirements(ROOT / "requirements-model-export.txt")
-
         python_paths = sorted((ROOT / "python").rglob("*.py"))
         script_paths = sorted((ROOT / "scripts").glob("*.py"))
-        all_local_paths = sorted(ROOT.rglob("*.py"))
+        all_local_paths = python_paths + script_paths
 
         failures += audit_scope("主 Python worker", python_paths, root_requirements)
         failures += audit_scope(
             "开发与测试脚本",
             script_paths,
-            root_requirements | export_requirements,
+            root_requirements,
             local_paths=all_local_paths,
         )
         failures += verify_worker_imports()

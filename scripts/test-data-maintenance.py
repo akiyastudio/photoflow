@@ -32,12 +32,6 @@ from workspace_db import (  # noqa: E402
     progress_relation_update,
     progress_update_tree,
     version_graph_edge_create,
-    component_identity_complete,
-    component_identity_save,
-    component_patch_cleanup,
-    component_patch_replace,
-    component_patch_update,
-    component_project_workspace,
 )
 
 
@@ -600,7 +594,7 @@ def test_media_workflow_graph_cleanup(root: Path) -> None:
     progress_path.mkdir()
     component_path.mkdir()
     import_path.mkdir()
-    db = connect(str(workspace), str(root / "workflow-cleanup.sqlite3"), include_compatibility=True)
+    db = connect(str(workspace), str(root / "workflow-cleanup.sqlite3"))
     db.execute(
         "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
         ("workflow-cleanup-project", "Project", "后期中", "Project", 1, 1),
@@ -616,7 +610,16 @@ def test_media_workflow_graph_cleanup(root: Path) -> None:
         "displayName": "图片后期_1", "folderPath": str(progress_path),
         "nodeRole": "progress", "parentProgressId": original["id"], "relationKind": "main", "trackingEnabled": False,
     })["progressFolder"]
-    workflow = component_project_workspace(str(workspace), db, {"projectName": "Project"})["workflowNode"]
+    workflow = progress_register(str(workspace), db, {
+        "projectName": "Project", "mediaKind": "image", "versionKey": "plugin-workflow",
+        "displayName": "组件工作区", "folderPath": str(component_path),
+        "nodeRole": "workflow", "artifactKind": "component_workspace",
+        "sourceMetadata": {
+            "category": "workflow", "componentId": "test-plugin",
+            "parentCapability": "workflow-input",
+        },
+        "trackingEnabled": False,
+    })["progressFolder"]
     imported = media_workflow_import_commit(str(workspace), db, {
         "schemaVersion": 2,
         "projectName": "Project",
@@ -705,65 +708,6 @@ def test_thumbnail_tool_sources_limit_png_to_direct_children(root: Path) -> None
         assert [value.casefold() for value in direct_file["pngPaths"]] == [str(nested_png.resolve()).casefold()]
     finally:
         database.close()
-
-
-def test_component_return_missing_reconciliation(root: Path) -> None:
-    workspace = root / "team-return-workspace"
-    project = workspace / "Project"
-    original = project / "original.jpg"
-    patch = root / "workspace-data" / "sample-component" / "patch.png"
-    returned = root / "workspace-data" / "sample-component" / "uploads" / "returned.jpg"
-    for file_path, content in ((original, b"original"), (patch, b"patch"), (returned, b"returned")):
-        write_media(file_path, content)
-    db = connect(str(workspace), str(root / "team-return.sqlite3"), include_compatibility=True)
-    now = 1
-    db.execute(
-        "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-        ("team-project", "Project", "未分类", "Project", now, now),
-    )
-    db.commit()
-    bundle = media_get(str(workspace), db, {"projectName": "Project", "filePath": str(original)})
-    photo = bundle["photo"]
-    base = bundle["versions"][0]
-    component_patch_replace(db, {"photoId": photo["id"], "baseVersionId": base["id"], "tasks": [{
-        "id": "team-task", "personIndex": 1, "personName": "人物 1", "assignee": "",
-        "detector": "test", "bbox": {"x": 0, "y": 0, "width": 10, "height": 10},
-        "crop": {"x": 0, "y": 0, "width": 10, "height": 10},
-        "patchPath": str(patch), "status": "exported",
-    }]})
-    saved = component_identity_save(db, {"projectName": "Project", "name": "测试人物", "assignments": [{
-        "photoId": photo["id"], "baseVersionId": base["id"], "personIndex": 1,
-    }]})
-    assert saved["success"]
-    component_identity_complete(db, {
-        "photoId": photo["id"], "baseVersionId": base["id"], "personIndex": 1,
-        "completed": True, "completionKind": "returned", "editedPatchPath": str(returned),
-    })
-    component_patch_update(db, {"taskId": "team-task", "editedPatchPath": str(returned), "status": "uploaded"})
-
-    active = component_project_workspace(str(workspace), db, {"projectName": "Project"})
-    assert active["missingReturnCount"] == 0 and active["assignments"][0]["completed"]
-    assert not active["assignments"][0]["returnMissing"]
-
-    returned.unlink()
-    missing = component_project_workspace(str(workspace), db, {"projectName": "Project"})
-    assert missing["missingReturnCount"] == 1
-    assert missing["assignments"][0]["returnMissing"] and not missing["assignments"][0]["completed"]
-    stored = db.execute(
-        "SELECT completed,return_missing,return_missing_since FROM component_person_assignments WHERE photo_id=?",
-        (photo["id"],),
-    ).fetchone()
-    assert stored[0] == 1 and stored[1] == 1 and stored[2]
-    task = db.execute("SELECT edited_patch_path,status FROM component_patch_tasks WHERE id='team-task'").fetchone()
-    assert task[0] is None and task[1] == "exported"
-
-    write_media(returned, b"restored")
-    restored = component_project_workspace(str(workspace), db, {"projectName": "Project"})
-    assert restored["missingReturnCount"] == 0
-    assert restored["assignments"][0]["completed"] and not restored["assignments"][0]["returnMissing"]
-    task = db.execute("SELECT edited_patch_path,status FROM component_patch_tasks WHERE id='team-task'").fetchone()
-    assert Path(task[0]).resolve() == returned.resolve() and task[1] == "uploaded"
-    db.close()
 
 
 def test_missing_progress_replacement(root: Path) -> None:
@@ -1043,13 +987,13 @@ def test_missing_progress_removal_is_safe(root: Path) -> None:
         db.close()
 
 
-def test_version_and_component_cleanup(root: Path) -> None:
+def test_version_cleanup(root: Path) -> None:
     workspace = root / "workspace"
     project = workspace / "Project"
     originals = [project / "one.jpg", project / "two.jpg"]
     for index, original in enumerate(originals):
         write_media(original, f"original-{index}".encode())
-    db = connect(str(workspace), str(root / "workspace.sqlite3"), include_compatibility=True)
+    db = connect(str(workspace), str(root / "workspace.sqlite3"))
     now = 1
     db.execute(
         "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)",
@@ -1072,31 +1016,17 @@ def test_version_and_component_cleanup(root: Path) -> None:
         thumbnail = root / "workspace-data" / "thumbnails" / photo["id"] / f"{version['id']}.jpg"
         write_media(thumbnail, b"preview")
         media_set_thumbnail(db, {"versionId": version["id"], "thumbnailPath": str(thumbnail)})
-        patch = root / "workspace-data" / "sample-component" / photo["id"] / version["id"] / "patch.png"
-        mask = patch.with_name("mask.png")
-        edited = patch.with_name("edited.png")
-        for item in (patch, mask, edited):
-            write_media(item, item.name.encode())
-        component_patch_replace(db, {"photoId": photo["id"], "baseVersionId": version["id"], "tasks": [{
-            "id": f"task-{index}", "personIndex": 1, "personName": "人物 1", "assignee": "",
-            "detector": "test", "bbox": {"x": 0, "y": 0, "width": 10, "height": 10},
-            "crop": {"x": 0, "y": 0, "width": 10, "height": 10},
-            "patchPath": str(patch), "maskPath": str(mask), "editedPatchPath": str(edited),
-            "status": "merged",
-        }]})
-        component_patch_update(db, {"taskId": f"task-{index}", "editedPatchPath": str(edited), "status": "merged"})
         version_file.unlink()
         media_get(str(workspace), db, {"projectName": "Project", "filePath": str(original)})
-        created.append((photo, base, version, thumbnail, patch, mask, edited))
+        created.append((photo, base, version, thumbnail))
 
     scope = media_version_delete_scope(db, {"versionId": created[0][2]["id"]})
     assert scope["versionCount"] == 2 and scope["allMissing"] and scope["childCount"] == 0
     deleted = media_delete_project_missing_version(db, {"versionId": created[0][2]["id"]})
     assert deleted["deletedCount"] == 2
     assert len(deleted["deletedVersions"]) == 2
-    assert len(deleted["componentArtifactPaths"]) == 6
     next_versions = []
-    for photo, base, _version, _thumbnail, _patch, _mask, _edited in created:
+    for photo, base, _version, _thumbnail in created:
         remaining = media_get_photo(db, {"photoId": photo["id"]})
         assert [item["versionNumber"] for item in remaining["versions"]] == [0]
         next_file = project / f"next-{photo['id']}.jpg"
@@ -1125,21 +1055,7 @@ def test_version_and_component_cleanup(root: Path) -> None:
     assert first_remaining[-1]["parentVersionId"] == created[0][1]["id"]
     assert any(item["id"] == next_versions[1]["id"] for item in media_get_photo(db, {"photoId": created[1][0]["id"]})["versions"])
 
-    first_photo, first_base = created[0][0], created[0][1]
-    completed_patch = root / "completed" / "patch.png"
-    write_media(completed_patch, b"completed")
-    component_patch_replace(db, {"photoId": first_photo["id"], "baseVersionId": first_base["id"], "tasks": [{
-        "id": "completed-task", "personIndex": 1, "personName": "人物 1", "assignee": "",
-        "detector": "test", "bbox": {"x": 0, "y": 0, "width": 10, "height": 10},
-        "crop": {"x": 0, "y": 0, "width": 10, "height": 10},
-        "patchPath": str(completed_patch), "status": "merged",
-    }]})
-    try:
-        cleaned = component_patch_cleanup(db, {"photoId": first_photo["id"], "baseVersionId": first_base["id"]})
-        assert cleaned["cleanedCount"] == 1
-        assert str(completed_patch.resolve()).casefold() in {str(Path(item).resolve()).casefold() for item in cleaned["artifactPaths"]}
-    finally:
-        db.close()
+    db.close()
 
 
 def main() -> None:
@@ -1155,12 +1071,11 @@ def main() -> None:
         test_thumbnail_startup_recovery_contract(root)
         test_media_workflow_graph_cleanup(root)
         test_thumbnail_tool_sources_limit_png_to_direct_children(root)
-        test_component_return_missing_reconciliation(root)
         test_missing_progress_replacement(root)
         test_incremental_progress_append_preserves_existing_items(root)
         test_modify_progress_replaces_missing_version(root)
         test_missing_progress_removal_is_safe(root)
-        test_version_and_component_cleanup(root)
+        test_version_cleanup(root)
     print("Data maintenance tests passed.")
 
 

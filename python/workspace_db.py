@@ -7699,7 +7699,7 @@ def batch_commit_compare(root: str, db, payload: dict):
     if not os.path.isdir(folder_a) or not os.path.isdir(folder_b):
         raise ValueError("批次文件夹不存在")
     if folder_a.casefold() == folder_b.casefold():
-        raise ValueError("对照批次和新返图不能是同一个文件夹")
+        raise ValueError("对照批次的来源和目标不能是同一个文件夹")
     set_progress_tracking_state_for_folder(db, project["id"], folder_b, "committing")
     db.commit()
 

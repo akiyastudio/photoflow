@@ -26,7 +26,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--source", required=True, type=Path, help="Torchreid torchreid/models/osnet.py")
     parser.add_argument("--weights", required=True, type=Path, help="Official OSNet checkpoint")
-    parser.add_argument("--architecture", default="osnet_x0_25", choices=("osnet_x0_25", "osnet_x0_5", "osnet_x0_75", "osnet_x1_0"))
+    parser.add_argument("--architecture", default="osnet_x1_0", choices=("osnet_x0_25", "osnet_x0_5", "osnet_x0_75", "osnet_x1_0"))
     parser.add_argument("--output", required=True, type=Path)
     args = parser.parse_args()
 

@@ -11,21 +11,21 @@ fallback.
 - Upstream: OpenMMLab MMDetection / MMDeploy
 - Model family: RTMDet-Ins-m
 - Input: 640 × 640 letterboxed BGR image
-- Local SHA-256: run `Get-FileHash models/rtmdet-ins_m_640x640.onnx`
+- Local SHA-256: `4773FC4106666366FFD6E61F7CAADAF4D1876D503E71382B5DD780A0D65D1055`.
 
 ## Cross-photo identity models
 
 Identity suggestions run locally and use three fixed model assets:
 
 - `face_detection_yunet_2023mar.onnx` from OpenCV Zoo's YuNet face detector.
-  The model directory is MIT licensed. Local SHA-256:
-  `8F2383E4DD3CFBB4553EA8718107FC0423210DC964F9F4280604804ED2552FA4`.
+  OpenCV Zoo is Apache-2.0 licensed. Local SHA-256:
+  `0B6CECCB83E3D6CB38AE9A92499469937EB210E0267F26F7E68C5A13B53818C3`.
 - `adaface_ir18_webface4m.onnx`, exported from the MIT-licensed AdaFace IR-18
   WebFace4M checkpoint. Local SHA-256:
-  `F67C21148795C4B10F3063DEE16A0E9BFBB008BD94FCF0C0DAD7B16C2CFA1A54`.
+  `24AAF990F7BD73BBEC31DDB7C052FFF5190271867DFAA6B7830304DFB3A3866E`.
 - `osnet_x1_0_msmt17.onnx`, exported from Kaiyang Zhou's MIT-licensed Torchreid
   `osnet_x1_0_msmt17_combineall` checkpoint. Local SHA-256:
-  `725DFAF07872CB5348E041F0B7C4CB5EF77259BAF385833A4CB1AB4BD04AF287`.
+  `878AB6A6686B61496FE0FC06853EEE379DEA65E1A1A381358334582976578EBE`.
 
 YuNet supplies five facial landmarks, AdaFace supplies aligned face embeddings,
 and OSNet x1.0 supplies 512-dimensional full-body appearance embeddings. OSNet
@@ -34,11 +34,27 @@ three assets are bundled into the team-retouch component ZIP and run on CPU,
 with DirectML used only as an optional accelerator. There is no smaller-model
 fallback or separate identity model package.
 
-- AdaFace upstream: `mk-minchul/AdaFace`; the packaged IR-18 ONNX export is
-  published by `yakhyo/adaface-onnx`. The reproducible conversion helper is
-  `scripts/export-adaface.py`.
-- OSNet x1.0 upstream: the official `kaiyangzhou/osnet` Hugging Face repository.
-  It uses `scripts/export-osnet.py`.
+- AdaFace source and checkpoint: `https://github.com/mk-minchul/AdaFace`
+  (`net.py`) and its official R18 WebFace4M checkpoint linked from that
+  repository (Google Drive file `1J17_QW1Oq00EhSWObISnhWEYr2NNrg2y`).
+  Export with `scripts/export-adaface.py --source <AdaFace/net.py> --weights
+  <AdaFaceWebFace4M.ckpt> --architecture ir_18 --output
+  models/adaface_ir18_webface4m.onnx`.
+- OSNet source and checkpoint: `https://github.com/KaiyangZhou/deep-person-reid`
+  (`torchreid/models/osnet.py`) and the official Hugging Face file
+  `osnet_x1_0_msmt17_combineall_256x128_amsgrad_ep150_stp60_lr0.0015_b64_fb10_softmax_labelsmooth_flip_jitter.pth`
+  (upstream SHA-256
+  `48DF972F72887B95CF3B43B3A07C3A7D2398381AEA0F9CAE64A7EF11D512B727`).
+  Export with `scripts/export-osnet.py --source <deep-person-reid/torchreid/models/osnet.py>
+  --weights <checkpoint.pth> --architecture osnet_x1_0 --output
+  models/osnet_x1_0_msmt17.onnx`.
+
+Create the export environment with
+`python -m pip install -r requirements-model-export.txt`. PyTorch/ONNX export
+bytes can vary across tool versions, so release preparation must compare every
+result with the fixed SHA-256 values above; a mismatch is not silently accepted.
+All ONNX files under `models/` are tracked by Git LFS through `.gitattributes`.
+License and attribution details are recorded in `LICENSES.md`.
 
 Release builds read all prepared assets from this directory's `models/` folder
 and include them through `npm run package`. The engine also accepts explicit local paths through

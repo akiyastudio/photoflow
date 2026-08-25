@@ -833,7 +833,7 @@ const registerVersionIpc = context => {
       };
       const folderA = resolveBatchFolder(request.folderA);
       const folderB = resolveBatchFolder(request.folderB);
-      if (folderA.toLocaleLowerCase() === folderB.toLocaleLowerCase()) throw new Error('对照批次和新返图不能是同一个文件夹');
+      if (folderA.toLocaleLowerCase() === folderB.toLocaleLowerCase()) throw new Error('对照批次的来源和目标不能是同一个文件夹');
       const importKey = await buildVersionBatchImportKey(folderA, folderB);
       const matches = (Array.isArray(request.matches) ? request.matches : []).slice(0, 20000).map(match => {
         const reference = String(match.reference || '');
