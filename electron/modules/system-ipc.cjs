@@ -2,8 +2,16 @@ const { validateRendererPythonInvocation } = require('../security-policy.cjs');
 const { listStorageDevices } = require('../services/storage-device-service.cjs');
 const { decideComponentStatusRefresh, nextComponentProbeTimestamps } = require('../services/component-status-refresh-policy.cjs');
 const { createComponentLifecycleService } = require('../services/component-lifecycle-service.cjs');
+const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
+
+const registerHostCapabilities = (componentCapabilityBroker, registrations) => {
+  for (const [method, handler] of registrations) {
+    if (!HOST_CAPABILITIES.has(method)) throw new Error(`System IPC cannot register undeclared host capability: ${method}`);
+    componentCapabilityBroker.register(method, handler);
+  }
+};
 
 const PYTHON_BACKGROUND_TASK_PROFILES = Object.freeze({
   'png_to_jpg.py': Object.freeze({ title: 'PNG 转 JPG', type: 'python-tool', concurrencyGroup: 'disk-io', concurrencyLimit: 3, concurrencyWriteLimit: 2 }),
@@ -282,8 +290,9 @@ const registerSystemIpc = context => {
     developmentActionRoot: path.resolve(__dirname, '..', '..', 'scripts'),
     invalidateComponentStatus, writeLog,
   });
-  componentCapabilityBroker.register('component.lifecycle.v1', componentLifecycleService.invoke);
-  componentCapabilityBroker.register('component.lifecycle.v2', componentLifecycleService.invokeV2);
+  registerHostCapabilities(componentCapabilityBroker, [
+    ['component.lifecycle.v2', componentLifecycleService.invokeV2],
+  ]);
 
   backgroundTasks?.registerTypeRestartFactory?.('component-status-refresh', task => {
     componentStatusRefreshActive = true;
@@ -1285,4 +1294,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { normalizeSdImportAutoMove, pythonToolResourcePaths, registerSystemIpc };
+module.exports = { normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc };

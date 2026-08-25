@@ -9,6 +9,16 @@ const { registerComponentProjectCapabilities, resetComponentHostCapabilityStateF
 const { createServiceHostClient } = require('../component-sdk/service.cjs');
 const { createMediaRepository } = require('../electron/domains/media/public.cjs');
 const { createVersionService } = require('../electron/services/version-service.cjs');
+const { registerHostCapabilities } = require('../electron/modules/system-ipc.cjs');
+
+const systemCapabilityRegistrations = [];
+registerHostCapabilities({ register: (method, handler) => systemCapabilityRegistrations.push([method, handler]) }, [
+  ['component.lifecycle.v2', () => undefined],
+]);
+assert.deepEqual(systemCapabilityRegistrations.map(([method]) => method), ['component.lifecycle.v2'], 'system IPC registers the supported lifecycle capability');
+assert.throws(() => registerHostCapabilities({ register: () => assert.fail('undeclared capability reached the broker') }, [
+  ['component.lifecycle.invalid', () => undefined],
+]), /undeclared host capability/, 'system IPC capability registration is constrained by the Host contract');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-host-v2-'));
 const workspaceRoot = path.join(sandbox, 'workspace');

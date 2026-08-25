@@ -16,7 +16,6 @@ V1 支持的 Host 能力词汇有意保持很小：
 - `component.settings.v1`
 - `component.storage.v1`
 - `dialogs.open.v1`
-- `component.lifecycle.v1`
 
 声明能力不会自动使其可用。Electron 主进程必须注册通用实现；每次调用前，代理同时检查已安装清单授权和绑定组件页面请求。
 
