@@ -14,11 +14,14 @@ import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputP
 import { ensureFaceRecognitionConsent } from './legacy-privacy';
 import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
 import { mergeAudit, relayChainForItems, returnMatchAssessment, returnModificationAssessment } from '../interaction-model';
+import { createWorkspaceSeedGate, isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
 
 type Props = {
   componentActive?: boolean;
   workspacePath: string;
   project: WorkspaceProject;
+  initialWorkspace?: TeamIdentityWorkspace;
+  initialWorkspacePending?: boolean;
   cacheConfig: AppConfig['mediaCache'];
   activeStep: Extract<TeamRetouchStep, 'assignment' | 'relay' | 'review'>;
   onStepChange: (step: TeamRetouchStep) => void;
@@ -358,10 +361,13 @@ const buildWorkflow = (subjects: Subject[], identities: TeamIdentity[], preferre
   return items.sort((left, right) => left.week - right.week || orderOf(left) - orderOf(right) || left.photo.name.localeCompare(right.photo.name));
 };
 
-export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, componentActive = true, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onNotice, onProjectChanged, onBusyChange }: Props) => {
+export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace, initialWorkspacePending = false, cacheConfig, componentActive = true, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onNotice, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
-  const [workspace, setWorkspace] = useState<TeamIdentityWorkspace>({ success: true, photos: [], identities: [], assignments: [] });
-  const [loading, setLoading] = useState(true);
+  const initialSeed = isUsableWorkspaceSeed(initialWorkspace) ? initialWorkspace : undefined;
+  const seedScopeKey = workspaceSeedScopeKey(workspacePath, project);
+  const workspaceSeedGateRef = useRef(createWorkspaceSeedGate(seedScopeKey, Boolean(initialSeed)));
+  const [workspace, setWorkspace] = useState<TeamIdentityWorkspace>(() => initialSeed || { success: true, photos: [], identities: [], assignments: [] });
+  const [loading, setLoading] = useState(!initialSeed);
   const [workspaceLoadError, setWorkspaceLoadError] = useState('');
   const workspaceLoadSequenceRef = useRef(0);
   const [busy, setBusy] = useState('');
@@ -434,7 +440,12 @@ export const PersonIdentityManager = ({ workspacePath, project, cacheConfig, com
       setWorkspaceLoadError(message); onNotice(`读取人物识别失败：${message}`);
     } finally { if (showLoading && sequence === workspaceLoadSequenceRef.current) setLoading(false); }
   };
-  useEffect(() => { void load(true); return () => { workspaceLoadSequenceRef.current += 1; }; }, [workspacePath, project.name]);
+  useEffect(() => {
+    if (workspaceSeedGateRef.current.isSeeded(seedScopeKey)) { setLoading(false); return () => { workspaceLoadSequenceRef.current += 1; }; }
+    if (initialWorkspacePending) return () => { workspaceLoadSequenceRef.current += 1; };
+    if (workspaceSeedGateRef.current.consume(seedScopeKey, isUsableWorkspaceSeed(initialWorkspace))) { setWorkspace(initialWorkspace); setWorkspaceLoadError(''); setLoading(false); return () => { workspaceLoadSequenceRef.current += 1; }; }
+    void load(true); return () => { workspaceLoadSequenceRef.current += 1; };
+  }, [workspacePath, project.id, project.name, project.status, initialWorkspace, initialWorkspacePending]);
   useEffect(() => {
     let active = true;
     setWorkflowReturnResult(null);

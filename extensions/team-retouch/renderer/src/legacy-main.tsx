@@ -9,9 +9,11 @@ import { LegacyDialogProvider } from './legacy/legacy-dialog';
 import { useAppDialog } from './legacy/legacy-dialog-context';
 import type { TeamRetouchStep } from './legacy/TeamRetouchSteps';
 import { rpc, type ComponentContext } from './sdk';
-import { legacyApi } from './legacy/legacy-api';
+import { hydrateLegacyWorkspace, legacyApi } from './legacy/legacy-api';
+import type { TeamIdentityWorkspace } from './legacy/legacy-types';
 import { resolveTeamRetouchEntriesForOpen } from './legacy/legacy-entry-scope';
 import { createActivationRefreshGate, createHistoryContextLoadCoordinator, createLatestHistoryLoadGuard, historyLoadPresentation, historyMigrationDelayMs } from './legacy/legacy-history-load-model';
+import { workspaceSeedScopeKey } from './legacy/legacy-workspace-seed-model';
 import { canEnterWorkflowStage, normalizeWorkspace, workflowStageSummaries, type WorkflowStage } from './interaction-model';
 import '../../../../component-sdk/ui.css';
 import './legacy-style.css';
@@ -55,6 +57,8 @@ const App = () => {
   const [migrationPaused, setMigrationPaused] = useState(false);
   const [historyRecordCount, setHistoryRecordCount] = useState(0); const [historyOwnershipPendingCount, setHistoryOwnershipPendingCount] = useState(0);
   const [workspaceSnapshot, setWorkspaceSnapshot] = useState<Json>(() => normalizeWorkspace(undefined));
+  const [managerWorkspaceSeed, setManagerWorkspaceSeed] = useState<{ scopeKey: string; workspace: TeamIdentityWorkspace }>();
+  const [managerWorkspaceLoadingScopeKey, setManagerWorkspaceLoadingScopeKey] = useState('');
   const contextRef = useRef<ComponentContext>();
   const entriesRef = useRef<Json[]>([]);
   const entriesLoadedRef = useRef(false);
@@ -63,6 +67,8 @@ const App = () => {
   const activationRefreshGateRef = useRef(createActivationRefreshGate());
   useEffect(() => { entriesRef.current = entries; }, [entries]);
   const performLoadEntries = useCallback(async (hostContext: ComponentContext, manualMigrationRetry = false) => {
+    const managerScopeKey = workspaceSeedScopeKey(hostContext.projectId, { id: hostContext.projectId, name: hostContext.projectName, status: hostContext.projectStatus });
+    setManagerWorkspaceLoadingScopeKey(managerScopeKey);
     const requestId = loadGuardRef.current.begin();
     if (!entriesLoadedRef.current) setInitialLoading(true);
     setLoadError(''); setHistoryPathWarning(''); setMigrationPaused(false);
@@ -105,6 +111,7 @@ const App = () => {
             setWorkspaceSnapshot(normalizeWorkspace(refreshed));
             const refreshedResolution = resolveTeamRetouchEntriesForOpen(refreshed, entriesRef.current.map(entry => String(entry.relativePath || '')).filter(Boolean));
             legacyApi.setProjectEntries(refreshedResolution.entries); entriesRef.current = refreshedResolution.entries; setEntries(refreshedResolution.entries);
+            setManagerWorkspaceSeed({ scopeKey: managerScopeKey, workspace: hydrateLegacyWorkspace(refreshed) });
             setHistoryRecordCount(refreshedResolution.historyPhotoCount); setHistoryOwnershipPendingCount(refreshedResolution.ownershipPendingCount);
             entriesLoadedRef.current = true; setEntriesLoaded(true); setInitialLoading(false);
             setHistoryPathWarning('团片旧项目文件整理完成。');
@@ -131,7 +138,7 @@ const App = () => {
       if (historyResolution.ownershipPendingCount) historyWarnings.push(`已找到 ${historyResolution.returnedPhotoCount}/${historyResolution.historyPhotoCount} 张，${historyResolution.ownershipPendingCount} 条历史归属待恢复`);
       if (historyResolution.missingHistoryCount) historyWarnings.push(`${historyResolution.missingHistoryCount} 张图片缺少可用路径，已保留为“缺失 / 需重新关联”卡片`);
       if (historyWarnings.length) setHistoryPathWarning(historyWarnings.join('；'));
-      legacyApi.setProjectEntries(historyEntries); entriesRef.current = historyEntries; setEntries(historyEntries); entriesLoadedRef.current = true; setEntriesLoaded(true); setInitialLoading(false);
+      legacyApi.setProjectEntries(historyEntries); entriesRef.current = historyEntries; setEntries(historyEntries);
       if (selectedRelativePaths.length) {
         try {
           const registered = assertSuccess(await rpc<Json>('team.project.register.v1', { relativePaths: selectedRelativePaths }), '无法登记所选团片图片');
@@ -151,10 +158,12 @@ const App = () => {
           setLoadError(`所选图片登记失败：${message}。已保留上次成功读取的团片历史。`);
         }
       }
+      setManagerWorkspaceSeed({ scopeKey: managerScopeKey, workspace: hydrateLegacyWorkspace(workspace) });
+      entriesLoadedRef.current = true; setEntriesLoaded(true); setInitialLoading(false);
     } catch (error) {
       if (!loadGuardRef.current.isCurrent(requestId)) return;
       setInitialLoading(false); setLoadError(error instanceof Error ? error.message : String(error));
-    }
+    } finally { setManagerWorkspaceLoadingScopeKey(current => current === managerScopeKey ? '' : current); }
   }, []);
   if (!loadCoordinatorRef.current) loadCoordinatorRef.current = createHistoryContextLoadCoordinator(performLoadEntries);
   const loadEntries = useCallback((hostContext: ComponentContext, options: { force?: boolean; manualMigrationRetry?: boolean } = {}) => loadCoordinatorRef.current!.request(hostContext, options), []);
@@ -170,13 +179,14 @@ const App = () => {
     return () => { mounted = false; loadGuardRef.current.invalidate(); stopTheme(); stopContext(); stopActivate(); stopDeactivate(); };
   }, [loadEntries]);
   const project = { id: context?.projectId || '', name: context?.projectName || '', status: context?.projectStatus || '', path: '' };
+  const currentManagerScopeKey = workspaceSeedScopeKey(context?.projectId || '', project);
   const stageSummaries = workflowStageSummaries(workspaceSnapshot, step);
   const changeStep = (next: WorkflowStage) => {
     const guard = canEnterWorkflowStage(workspaceSnapshot, next);
     if (!guard.allowed) { setNotice(guard.reason); return; }
     setStep(next);
   };
-  const common = { workspacePath: context?.projectId || '', project, cacheConfig: { directory: '', maxSizeGB: 0 }, componentActive, activeStep: step, onStepChange: changeStep, stageSummaries, onBlockedStage: setNotice, onClose: () => undefined, onOpenSettings: () => setSettingsOpen(true), onNotice: setNotice, onProjectChanged: () => { if (contextRef.current) void loadEntries(contextRef.current, { force: true }); } };
+  const common = { workspacePath: context?.projectId || '', project, initialWorkspace: managerWorkspaceSeed?.scopeKey === currentManagerScopeKey ? managerWorkspaceSeed.workspace : undefined, initialWorkspacePending: managerWorkspaceLoadingScopeKey === currentManagerScopeKey, cacheConfig: { directory: '', maxSizeGB: 0 }, componentActive, activeStep: step, onStepChange: changeStep, stageSummaries, onBlockedStage: setNotice, onClose: () => undefined, onOpenSettings: () => setSettingsOpen(true), onNotice: setNotice, onProjectChanged: () => { if (contextRef.current) void loadEntries(contextRef.current, { force: true }); } };
   const retryHistory = () => {
     if (contextRef.current) { void loadEntries(contextRef.current, { force: true, manualMigrationRetry: true }); return; }
     setInitialLoading(true); setLoadError('');

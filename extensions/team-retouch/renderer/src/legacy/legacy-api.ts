@@ -38,7 +38,7 @@ export const hydrateLegacyBundle = (bundle: Json, registrationBaseVersionId = ''
     tasks: (bundle.tasks || []).map((task: Json) => hydrateTask(task, photoId || String(task.photoId || ''), String(task.baseVersionId || baseVersionId))),
   };
 };
-const hydrateWorkspace = (workspace: Json) => {
+export const hydrateLegacyWorkspace = (workspace: Json) => {
   const photos = (workspace.photos || []).map((photo: Json) => {
     const reference = mediaRef('original', String(photo.photoId), String(photo.baseVersionId));
     const sourcePath = projectEntryPaths.get(normalizedRelativePath(String(photo.relativePath || ''))) || reference;
@@ -83,18 +83,18 @@ export const componentStatusFromAdvancedPreflight = (state: Json) => {
 
 export const legacyApi = {
   getTeamPatches: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.get.v1', { relativePath: String(args[3] || '') }), String(args[4] || '')),
-  getTeamProjectWorkspace: async () => hydrateWorkspace(await ok('team.project.get.v1')),
+  getTeamProjectWorkspace: async () => hydrateLegacyWorkspace(await ok('team.project.get.v1')),
   detectTeamPatchPeople: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.detect.v1', payload(args))),
   detectTeamPatchBatch: (...args: any[]) => ok('team.patch.detect-batch.v1', payload(args)),
   updateTeamPatch: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.update.v1', payload(args))),
   deleteTeamPatch: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.delete.v1', payload(args))),
   removeProjectTeamPhoto: (...args: any[]) => ok('team.project.remove-photo.v1', payload(args)),
-  excludeTeamPerson: async (...args: any[]) => hydrateWorkspace(await ok('team.person.exclude.v1', payload(args))),
-  saveTeamIdentity: async (...args: any[]) => hydrateWorkspace(await ok('team.identity.save.v1', payload(args))),
-  assignTeamIdentity: async (...args: any[]) => hydrateWorkspace(await ok('team.identity.assign.v1', payload(args))),
-  confirmTeamIdentityGroup: async (...args: any[]) => hydrateWorkspace(await ok('team.identity.confirm-group.v1', payload(args))),
-  deleteTeamIdentity: async (...args: any[]) => hydrateWorkspace(await ok('team.identity.delete.v1', payload(args))),
-  suggestTeamIdentities: async () => hydrateWorkspace(await ok('team.identity.suggest.v1')),
+  excludeTeamPerson: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.person.exclude.v1', payload(args))),
+  saveTeamIdentity: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.save.v1', payload(args))),
+  assignTeamIdentity: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.assign.v1', payload(args))),
+  confirmTeamIdentityGroup: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.confirm-group.v1', payload(args))),
+  deleteTeamIdentity: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.delete.v1', payload(args))),
+  suggestTeamIdentities: async () => hydrateLegacyWorkspace(await ok('team.identity.suggest.v1')),
   getTeamIdentitySimilarities: () => ok('team.identity.similarities.v1'),
   completeTeamIdentity: (...args: any[]) => ok('team.identity.complete.v1', payload(args)),
   uploadTeamPatch: (...args: any[]) => ok('team.patch.upload.v1', payload(args)),

@@ -13,6 +13,7 @@ import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
 import { ensureFaceRecognitionConsent } from './legacy-privacy';
 import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputProgress';
 import { workingImageMetrics } from '../interaction-model';
+import { createWorkspaceSeedGate, isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
 
 type Props = {
   componentActive?: boolean;
@@ -21,6 +22,8 @@ type Props = {
   historyOwnershipPendingCount?: number;
   workspacePath: string;
   project: WorkspaceProject;
+  initialWorkspace?: TeamIdentityWorkspace;
+  initialWorkspacePending?: boolean;
   cacheConfig: AppConfig['mediaCache'];
   componentStatus?: ComponentStatus;
   advancedStatusLoading?: boolean;
@@ -609,15 +612,18 @@ const syncTaskLabels = async (workspacePath: string, workspace: TeamIdentityWork
   })));
 };
 
-const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, historyOwnershipPendingCount = 0, workspacePath, project, cacheConfig, componentStatus, advancedStatusLoading = false, advancedStatusError = '', onRetryAdvancedStatus, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onOpenSettings, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
+const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, historyOwnershipPendingCount = 0, workspacePath, project, initialWorkspace, initialWorkspacePending = false, cacheConfig, componentStatus, advancedStatusLoading = false, advancedStatusError = '', onRetryAdvancedStatus, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onOpenSettings, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<BatchResult[]>([]);
   const [progress, setProgress] = useState({ itemIndex: 0, itemCount: entries.length, progress: 0, itemName: '', message: '准备批量识别' });
   const [refreshToken, setRefreshToken] = useState(0);
-  const [identityLoading, setIdentityLoading] = useState(true);
+  const initialSeed = isUsableWorkspaceSeed(initialWorkspace) ? initialWorkspace : undefined;
+  const seedScopeKey = workspaceSeedScopeKey(workspacePath, project);
+  const workspaceSeedGateRef = useRef(createWorkspaceSeedGate(seedScopeKey, Boolean(initialSeed)));
+  const [identityLoading, setIdentityLoading] = useState(!initialSeed);
   const [identityLoadError, setIdentityLoadError] = useState('');
-  const [identityState, setIdentityState] = useState<IdentityState>({ success: true, photos: [], identities: [], assignments: [] });
+  const [identityState, setIdentityState] = useState<IdentityState>(() => initialSeed || { success: true, photos: [], identities: [], assignments: [] });
   const [identityPickerKey, setIdentityPickerKey] = useState('');
   const [includedIdentityKeys, setIncludedIdentityKeys] = useState<Set<string>>(new Set());
   const [identityPickerBusy, setIdentityPickerBusy] = useState(false);
@@ -669,10 +675,13 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     }
   };
   useEffect(() => {
+    if (workspaceSeedGateRef.current.isSeeded(seedScopeKey)) { setIdentityLoading(false); return () => { identityLoadSequenceRef.current += 1; }; }
+    if (initialWorkspacePending) return () => { identityLoadSequenceRef.current += 1; };
+    if (workspaceSeedGateRef.current.consume(seedScopeKey, isUsableWorkspaceSeed(initialWorkspace))) { setIdentityState(initialWorkspace); setIdentityLoadError(''); setIdentityLoading(false); return () => { identityLoadSequenceRef.current += 1; }; }
     setIdentityLoading(true);
     void loadIdentities();
     return () => { identityLoadSequenceRef.current += 1; };
-  }, [workspacePath, project.name]);
+  }, [workspacePath, project.id, project.name, project.status, initialWorkspace, initialWorkspacePending]);
   useEffect(() => legacyApi.onTeamPatchBatchProgress(value => setProgress({ itemIndex: value.itemIndex, itemCount: value.itemCount, progress: value.progress, itemName: value.itemName, message: value.message })), []);
   useEffect(() => {
     if (!identityState.workflowNode?.id) return;
