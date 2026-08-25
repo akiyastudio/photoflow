@@ -55,13 +55,18 @@ const coordinator = createHistoryContextLoadCoordinator(context => { contextLoad
 const firstContextLoad = coordinator.request(contextA);
 coordinator.request({ ...contextA }); coordinator.request({ ...contextA, resolvedTheme: 'dark' });
 assert.equal(contextLoads.length, 1); assert.equal(coordinator.hasQueuedLoad(), false, 'getContext plus identical context-changed events share the first in-flight project load');
+activationGate.deactivate(); if (activationGate.activate() && !coordinator.isLoading()) coordinator.request(contextA, { force: true });
+assert.equal(contextLoads.length, 1); assert.equal(coordinator.hasQueuedLoad(), false, 'a transient deactivate-activate during the initial load restores active UI without queuing a duplicate refresh');
 coordinator.request(contextB); coordinator.request({ ...contextB });
 assert.equal(contextLoads.length, 1); assert.equal(coordinator.hasQueuedLoad(), true, 'a real context change is queued once while the initial load is in flight');
+activationGate.deactivate(); if (activationGate.activate() && !coordinator.isLoading()) coordinator.request(contextB, { force: true });
+assert.equal(contextLoads.length, 1); assert.equal(coordinator.hasQueuedLoad(), true, 'transient activation never clears or replaces a real context change already queued behind the active load');
 loadReleases.shift()(); await firstContextLoad;
 assert.deepEqual(contextLoads.map(value => value.scopeRelativePath), ['raw', '图片后期_1'], 'the latest changed context refreshes exactly once after the active load');
 const secondContextLoad = coordinator.request(contextB); loadReleases.shift()(); await secondContextLoad;
 await coordinator.request({ ...contextB, resolvedTheme: 'light' }); assert.equal(contextLoads.length, 2, 'identical context remains deduplicated after the queued refresh commits');
-const forcedRefresh = coordinator.request(contextB, { force: true }); assert.equal(contextLoads.length, 3, 'deactivate-reactivate and explicit retries can force exactly one same-context refresh'); loadReleases.shift()(); await forcedRefresh;
+activationGate.deactivate(); const completedReactivationRefresh = activationGate.activate() && !coordinator.isLoading() ? coordinator.request(contextB, { force: true }) : Promise.resolve();
+assert.equal(contextLoads.length, 3, 'deactivate-reactivate after history is idle forces exactly one same-context refresh'); loadReleases.shift()(); await completedReactivationRefresh;
 assert.deepEqual(Array.from({ length: 12 }, (_, index) => historyMigrationDelayMs('host-storage-adoption', index)), [750, 1500, 3000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000, 5000], 'multi-gigabyte Host adoption remains patiently polled beyond 30 seconds without high frequency');
 assert.deepEqual(legacyAdvancedStatusPresentation(undefined, true), { state: 'checking', text: '正在检查高级人物检测…' });
 assert.equal(legacyAdvancedStatusPresentation(undefined, false, '超时').state, 'error');
@@ -82,7 +87,7 @@ assert(entry.includes('waitingForHostStorage && selectedRelativePaths.length'), 
 assert(entry.indexOf('setEntries(historyEntries)') < entry.lastIndexOf("rpc<Json>('team.project.register.v1'"), 'registration failure must preserve the successfully restored history');
 assert(entry.includes('重新读取团片历史') && entry.includes('retryHistory') && entry.includes('entriesLoaded') && entry.includes('loadGuardRef'), 'loading failure exposes retry and latest-request state');
 assert(entry.includes('migrationPaused &&') && entry.includes('重新尝试整理') && entry.includes('loadCoordinatorRef.current'), 'paused output migration exposes one visible manual retry and shares an in-flight history load');
-assert(entry.includes('createHistoryContextLoadCoordinator') && entry.includes('{ force: true }'), 'active entry deduplicates Host context events while explicit lifecycle refreshes remain available');
+assert(entry.includes('createHistoryContextLoadCoordinator') && entry.includes('!loadCoordinatorRef.current?.isLoading()') && entry.includes('{ force: true }'), 'active entry suppresses lifecycle bounce during a load while preserving explicit idle refreshes');
 assert(!entry.includes("setMigrationPaused(true); setHistoryPathWarning(`${migration.lastError}") || !entry.includes("setLoadError('旧项目文件整理"), 'paused output migration must not render a second overlapping error banner');
 assert(entry.includes('团片历史路径恢复失败') && entry.includes('resolvedHistoryCount === 0') && entry.includes('historyPathWarning'), 'all-missing and partially-missing paths have distinct diagnostic states');
 assert(!entry.includes('整个项目'), 'team history loading copy must not imply recursive project scope');

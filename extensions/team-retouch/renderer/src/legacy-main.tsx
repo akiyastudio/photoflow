@@ -165,7 +165,7 @@ const App = () => {
     void rpc<Json>('team.settings.get.v1').then(saved => { if (mounted && saved.success !== false && saved.settings) setSettings(saved.settings as TeamSettings); }).catch(error => { if (mounted) setNotice(`读取团片设置失败：${error instanceof Error ? error.message : String(error)}`); });
     const stopTheme = window.photoFlowComponent.onThemeChange(value => { if (mounted && value.contractVersion === 1) applyResolvedTheme(value.resolvedTheme); });
     const stopContext = window.photoFlowComponent.onContextChange(acceptContext);
-    const stopActivate = window.photoFlowComponent.onActivate(() => { if (mounted) { setComponentActive(true); if (activationRefreshGateRef.current.activate() && contextRef.current) void loadEntries(contextRef.current, { force: true }); } });
+    const stopActivate = window.photoFlowComponent.onActivate(() => { if (mounted) { setComponentActive(true); if (activationRefreshGateRef.current.activate() && !loadCoordinatorRef.current?.isLoading() && contextRef.current) void loadEntries(contextRef.current, { force: true }); } });
     const stopDeactivate = window.photoFlowComponent.onDeactivate(() => { if (mounted) { activationRefreshGateRef.current.deactivate(); setComponentActive(false); } });
     return () => { mounted = false; loadGuardRef.current.invalidate(); stopTheme(); stopContext(); stopActivate(); stopDeactivate(); };
   }, [loadEntries]);
