@@ -6,6 +6,7 @@ const { spawn } = require('child_process');
 const { DatabaseSync } = require('node:sqlite');
 const { CANCELLED_CODE, buildWorkflowPlan, copyWorkflowPlan } = require('./workflow-generation.cjs');
 const { createTeamWorkflowArtifactService } = require('./workflow-artifact.cjs');
+const { createWorkflowManifestResolver } = require('./workflow-manifest.cjs');
 
 const MAX_ITEMS = 2000;
 const DB_BUSY_TIMEOUT_MS = 750;
@@ -148,10 +149,6 @@ const hostStorage = async parentId => {
 const readMedia = (parentId, payload) => readMediaV2(parentId, payload);
 const artifactsScope = (parentId, payload) => artifactGrantV2(parentId, payload);
 const hostSettings = (parentId, settings) => callHostV2(parentId, 'component.settings.v2', settings === undefined ? { action: 'get' } : { action: 'merge', settings });
-const workflowPrivateScope = async parentId => {
-  const storage = await hostStorage(parentId); const key = sha256(String(storage.projectId));
-  return { outputDirectory: path.join(storage.dataPath, 'workflow-content', key), manifestPath: path.join(storage.dataPath, 'workflows', `${key}.json`), reviewDirectory: path.join(storage.dataPath, 'workflow-return-reviews', key) };
-};
 const selectInputFiles = (parentId, { title = '选择图片', multiple = true } = {}) => callHostV2(parentId, 'dialogs.v2', { kind: 'openFiles', title, extensions: [...RETURN_IMAGE_EXTENSIONS].map(value => value.slice(1)), multiple });
 const materializeInputStage = async (parentId, tokens) => {
   const stageId = crypto.randomUUID(); const items = [];
@@ -1412,11 +1409,12 @@ const workspaceSnapshot = async (parentId, context) => {
     const preferredIdentityOrder = uniqueText(settings.preferredIdentityOrder).filter(id => identityIds.has(id));
     const requestedSameWeek = new Set(uniqueText(settings.sameWeekIdentityIds));
     const sameWeekIdentityIds = preferredIdentityOrder.slice(1).filter(id => requestedSameWeek.has(id));
-    const manifest = readJsonFile(path.join(storage.dataRoot, 'workflows', `${sha256(`${context.projectStatus}\0${context.projectName}`)}.json`));
+    const { manifest } = await workflowDirectoryResolver(storage, context);
     const generatedSettings = manifest?.workflowSettings;
     const generatedOrder = uniqueText(generatedSettings?.preferredIdentityOrder);
     const generatedSameWeek = new Set(uniqueText(generatedSettings?.sameWeekIdentityIds));
-    const workflowAvailableItems = (manifest?.groups || []).flatMap(group => group.items || []).filter(item => item.available && item.relativePath);
+    const workflowItems = (manifest?.groups || []).flatMap(group => group.items || []);
+    const workflowAvailableItems = workflowItems.filter(item => item.available && item.relativePath);
     return {
       success: true, photos, identities, assignments: normalizedAssignments,
       workflowGenerated: Boolean(manifest && Number(manifest.version) >= 2),
@@ -1424,16 +1422,13 @@ const workspaceSnapshot = async (parentId, context) => {
         || JSON.stringify(generatedOrder.slice(1).filter(id => generatedSameWeek.has(id))) !== JSON.stringify(sameWeekIdentityIds))),
       workflowAvailableKeys: workflowAvailableItems.map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`),
       workflowAvailableSubjectKeys: workflowAvailableItems.map(item => `${item.baseVersionId}:${Number(item.personIndex)}`),
+      workflowParticipantKeys: workflowItems.map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`),
+      workflowParticipantSubjectKeys: workflowItems.map(item => `${item.baseVersionId}:${Number(item.personIndex)}`),
       workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds },
     };
   } finally { db.close(); }
 };
 
-const workflowScope = parentId => workflowPrivateScope(parentId);
-const readWorkflowManifest = async parentId => {
-  const scope = await workflowScope(parentId);
-  return { ...scope, manifest: await readJson(scope.manifestPath, null) };
-};
 const writeJsonAtomic = async (target, value) => {
   const pending = `${target}.${crypto.randomUUID()}.tmp`;
   const backup = `${target}.${crypto.randomUUID()}.backup`;
@@ -1450,6 +1445,10 @@ const writeJsonAtomic = async (target, value) => {
     throw error;
   }
 };
+
+const workflowDirectoryResolver = createWorkflowManifestResolver({ crypto, fs, path, writeJsonAtomic });
+const workflowScope = async (parentId, context) => workflowDirectoryResolver(await hostStorage(parentId), context);
+const readWorkflowManifest = (parentId, context) => workflowScope(parentId, context);
 
 const reportTask = async (parentId, operationId, action, update = {}, topic = '') => hostTask(parentId, operationId, action, { title: '生成团片协作工作流', ...update }, topic);
 
@@ -1474,8 +1473,8 @@ const generateWorkflow = async (parentId, payload, context) => {
   let checkpointReady = false;
   try {
     await reportTask(parentId, operationId, 'start', { message: job.message, checkpoint: { projectId: context.projectId, operationId } }, 'workflow.progress');
-    const scope = await workflowScope(parentId);
-    const previousManifest = await readJson(scope.manifestPath, null);
+    const scope = await workflowScope(parentId, context);
+    const previousManifest = scope.manifest;
     if ((fs.existsSync(scope.outputDirectory) || previousManifest) && !payload.replace) return { success: true, requiresConfirmation: true, operationId };
     const snapshot = await workspaceSnapshot(parentId, context);
     const projectDirectory = path.dirname(scope.outputDirectory);
@@ -1502,7 +1501,7 @@ const generateWorkflow = async (parentId, payload, context) => {
       onProgress: update => { void publish({ ...update, message: update.phase === 'resuming' ? '正在复用已完成的工作图…' : update.phase === 'finalizing' ? '正在提交工作流程…' : '正在复制工作图…' }); },
     });
     if (job.cancelled) throw Object.assign(new Error('工作流程生成已取消'), { code: CANCELLED_CODE });
-    const manifest = { version: 2, projectName: context.projectName, status: context.projectStatus, generatedAt: Date.now(), workflowSettings, groups: plan.manifestGroups };
+    const manifest = { version: 2, projectId: String(context.projectId), projectName: context.projectName, status: context.projectStatus, generatedAt: Date.now(), workflowSettings, groups: plan.manifestGroups };
     if (fs.existsSync(scope.outputDirectory)) {
       backupDirectory = path.join(projectDirectory, `.photoflow-team-workflow-previous-${crypto.randomUUID()}`);
       await fs.promises.rename(scope.outputDirectory, backupDirectory);
@@ -1542,7 +1541,7 @@ const generateWorkflow = async (parentId, payload, context) => {
     await persistJob().catch(() => undefined);
     await reportTask(parentId, operationId, cancelled ? 'cancel' : 'failed', { ...job, error: cancelled ? '' : job.message }, 'workflow.progress').catch(() => undefined);
     if (backupDirectory && fs.existsSync(backupDirectory)) {
-      const scope = await workflowScope(parentId).catch(() => null);
+      const scope = await workflowScope(parentId, context).catch(() => null);
       if (scope && !fs.existsSync(scope.outputDirectory)) await fs.promises.rename(backupDirectory, scope.outputDirectory).catch(() => undefined);
     }
     if (stagingDirectory && !checkpointReady) await fs.promises.rm(stagingDirectory, { recursive: true, force: true }).catch(() => undefined);
@@ -1570,13 +1569,21 @@ const cancelWorkflow = async (parentId, payload) => {
   return { success: true, cancelled: Boolean(job) };
 };
 
-const exportWorkflow = async (parentId, payload, open = false) => {
-  const { outputDirectory, manifest } = await readWorkflowManifest(parentId);
+const exportWorkflow = async (parentId, payload, context, open = false) => {
+  let { outputDirectory, manifest } = await readWorkflowManifest(parentId, context);
   if (!manifest) throw new Error('请先生成工作流程');
-  const group = (manifest.groups || []).find(item => Number(item.week) === Number(payload.week) && String(item.identityId || '') === String(payload.identityId || ''));
-  const directory = path.resolve(outputDirectory, String(group?.relativePath || ''));
-  if (!group?.relativePath || !isInside(outputDirectory, directory) || !fs.existsSync(directory)) throw new Error('任务文件夹不存在，请重新生成工作流程');
-  const count = (group.items || []).filter(item => item.available && item.relativePath && isInside(outputDirectory, path.resolve(outputDirectory, item.relativePath)) && fs.existsSync(path.resolve(outputDirectory, item.relativePath))).length;
+  let group = (manifest.groups || []).find(item => Number(item.week) === Number(payload.week) && String(item.identityId || '') === String(payload.identityId || ''));
+  const availableCount = () => (group?.items || []).filter(item => item.available && item.relativePath && isInside(outputDirectory, path.resolve(outputDirectory, item.relativePath)) && fs.existsSync(path.resolve(outputDirectory, item.relativePath))).length;
+  let directory = path.resolve(outputDirectory, String(group?.relativePath || ''));
+  const expectedAvailable = (group?.items || []).some(item => item.available);
+  if (group?.relativePath && isInside(outputDirectory, directory) && (expectedAvailable && (!fs.existsSync(directory) || !availableCount()))) {
+    for (const taskId of uniqueText((group.items || []).map(item => item.taskId))) await reconcileWorkflowTaskChain(parentId, context, taskId);
+    ({ outputDirectory, manifest } = await readWorkflowManifest(parentId, context));
+    group = (manifest?.groups || []).find(item => Number(item.week) === Number(payload.week) && String(item.identityId || '') === String(payload.identityId || ''));
+    directory = path.resolve(outputDirectory, String(group?.relativePath || ''));
+  }
+  if (!group?.relativePath || !isInside(outputDirectory, directory) || !fs.existsSync(directory)) throw new Error('任务文件夹不存在，且无法从当前工作图与返图记录安全重建');
+  const count = availableCount();
   if (!count) throw new Error('本周任务仍在等待上一位返图');
   if (open) {
     const first = (group.items || []).find(item => item.available && item.relativePath);
@@ -1587,12 +1594,12 @@ const exportWorkflow = async (parentId, payload, open = false) => {
   return { success: true, count };
 };
 
-const reviewTarget = async parentId => {
-  const scope = await workflowScope(parentId);
+const reviewTarget = async (parentId, context) => {
+  const scope = await workflowScope(parentId, context);
   return { directory: scope.reviewDirectory, sessionPath: path.join(scope.reviewDirectory, 'session.json') };
 };
-const readReview = async parentId => {
-  const target = await reviewTarget(parentId);
+const readReview = async (parentId, context) => {
+  const target = await reviewTarget(parentId, context);
   let session = await readJson(target.sessionPath, null);
   if (session && Number(session.version || 1) < 2) {
     session = { ...session, version: 2, updatedAt: Date.now(), result: { ...session.result, matches: (session.result?.matches || []).map(match => ({ matchConfidence: match.matchConfidence || match.confidence || 'unknown', editEvidence: match.editEvidence || { reallyModified: false, legacyUnknown: true }, returnWarnings: match.returnWarnings || ['旧版返图审核记录缺少修改证据，请人工确认'], needsReview: match.accepted !== true, ...match })) } };
@@ -1649,7 +1656,7 @@ const runMatcher = async (returned, candidates) => {
 };
 
 const reconcileWorkflowTaskChain = async (parentId, context, taskId, existingDb = null) => {
-  const scope = await readWorkflowManifest(parentId);
+  const scope = await readWorkflowManifest(parentId, context);
   if (!scope.manifest) return { reconciled: false, reason: 'workflow-missing' };
   const chain = [];
   for (const [groupIndex, group] of (scope.manifest.groups || []).entries()) for (const [itemIndex, item] of (group.items || []).entries()) if (String(item.taskId) === String(taskId)) chain.push({ group, item, groupIndex, itemIndex });
@@ -1798,7 +1805,7 @@ const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1) =
 };
 
 const returnBatch = async (parentId, payload, context, workflowMode) => {
-  const existing = workflowMode ? await readReview(parentId) : null;
+  const existing = workflowMode ? await readReview(parentId, context) : null;
   if (existing?.session) throw new Error('还有一批返图等待确认，请先继续处理或放弃');
   const snapshot = await workspaceSnapshot(parentId, context);
   const requestedPaths = new Set(uniqueText(payload.relativePaths));
@@ -1829,7 +1836,7 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
     const result = { success: true, matches, merges: [], returnedCount: returned.length, candidateCount: candidates.length, acceptedCount: accepted.length, reviewCount: matches.filter(item => !item.accepted).length, missingTaskCount: Math.max(0, candidates.length - accepted.length), mergedCount: 0, reconcilePending, warning: reconcilePending ? '部分返图已安全归档，工作流程目录将在下次加载时自动修复，无需重复上传' : undefined };
     await reportTask(parentId, returnOperationId, 'complete', { state: 'completed', phase: 'complete', progress: 100, message: '返图处理完成' }, 'patch.return-batch.progress');
     if (workflowMode && result.reviewCount) {
-      const target = await reviewTarget(parentId);
+      const target = await reviewTarget(parentId, context);
       const reviewId = crypto.randomUUID();
       const pending = `${target.directory}.staging-${reviewId}`;
       await fs.promises.mkdir(path.dirname(target.directory), { recursive: true });
@@ -1841,7 +1848,7 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
           await fs.promises.copyFile(source, path.join(pending, storedName), fs.constants.COPYFILE_EXCL);
           return { ...match, path: path.join(target.directory, storedName), patchPath: undefined, accepted: Boolean(acceptedById.get(String(match.returnId))) };
         }));
-        const session = { version: 2, id: reviewId, projectName: context.projectName, status: context.projectStatus, createdAt: Date.now(), updatedAt: Date.now(), result: { ...result, reviewSessionId: reviewId, matches } };
+        const session = { version: 2, id: reviewId, projectId: String(context.projectId), projectName: context.projectName, status: context.projectStatus, createdAt: Date.now(), updatedAt: Date.now(), result: { ...result, reviewSessionId: reviewId, matches } };
         await fs.promises.writeFile(path.join(pending, 'session.json'), JSON.stringify(session, null, 2), 'utf8');
         await fs.promises.rename(pending, target.directory);
         return presentReview(session);
@@ -1852,17 +1859,17 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
 };
 
 const reviewGet = async (parentId, _payload, context) => {
-  const { session } = await readReview(parentId);
-  return { success: true, review: session && String(session.status) === String(context.projectStatus) ? presentReview(session) : null };
+  const { session } = await readReview(parentId, context);
+  return { success: true, review: session && (!session.projectId || String(session.projectId) === String(context.projectId)) && String(session.status) === String(context.projectStatus) ? presentReview(session) : null };
 };
-const reviewDiscard = async (parentId, payload) => {
-  const target = await readReview(parentId);
+const reviewDiscard = async (parentId, payload, context) => {
+  const target = await readReview(parentId, context);
   if (target.session && String(target.session.id) !== String(payload.reviewSessionId)) throw new Error('待确认返图批次已经变化');
   if (target.session) await fs.promises.rm(target.directory, { recursive: true, force: true });
   return { success: true, discarded: Boolean(target.session) };
 };
-const reviewIgnore = async (parentId, payload) => {
-  const target = await readReview(parentId);
+const reviewIgnore = async (parentId, payload, context) => {
+  const target = await readReview(parentId, context);
   if (!target.session || String(target.session.id) !== String(payload.reviewSessionId)) throw new Error('待确认返图批次已经变化');
   const match = target.session.result.matches.find(item => String(item.returnId) === String(payload.returnId));
   if (!match || match.accepted) throw new Error('这张返图已经处理');
@@ -1929,12 +1936,7 @@ const migrateLegacyProjectArtifacts = async (parentId, context, control = {}) =>
       if (control.signal?.aborted || Date.now() >= Number(control.deadlineAt || Infinity)) return migrationStateFromDb(db, projectId);
       const pending = pendingLegacyArtifactItems(db, storage.dataPath, projectId);
       if (!pending.length) {
-        const oldManifestDirectory = path.join(storage.dataPath, 'workflows');
-        const target = await workflowPrivateScope(parentId); const manifests = await fs.promises.readdir(oldManifestDirectory).catch(() => []);
-        if (!fs.existsSync(target.manifestPath)) for (const name of manifests.filter(value => value.endsWith('.json'))) {
-          const candidate = await readJson(path.join(oldManifestDirectory, name), null);
-          if (candidate && String(candidate.projectName || '') === String(context.projectName) && String(candidate.status || '') === String(context.projectStatus)) { await writeJsonAtomic(target.manifestPath, candidate); break; }
-        }
+        const target = await workflowScope(parentId, context);
         const legacyReview = path.join(storage.dataPath, 'workflow-return-reviews', sha256(context.projectName));
         const legacyReviewSource = storage.adoption?.legacyDataRoot ? path.join(storage.adoption.legacyDataRoot, 'workflow-return-reviews', sha256(context.projectName)) : legacyReview;
         if (!fs.existsSync(target.reviewDirectory) && fs.existsSync(legacyReview)) await fs.promises.cp(legacyReview, target.reviewDirectory, { recursive: true, errorOnExist: true, force: false });
@@ -1979,7 +1981,7 @@ const migrateLegacyProjectArtifacts = async (parentId, context, control = {}) =>
   legacyProjectMigrationOperations.set(key, operation); return operation;
 };
 const returnConfirm = async (parentId, payload, context) => {
-  const target = await readReview(parentId);
+  const target = await readReview(parentId, context);
   if (!target.session || String(target.session.id) !== String(payload.reviewSessionId)) throw new Error('待确认返图批次已经变化');
   const match = target.session.result.matches.find(item => String(item.returnId) === String(payload.returnId));
   if (!match || match.accepted) throw new Error('这张返图已经处理');
@@ -2056,8 +2058,8 @@ const handlers = {
   'team.workflow.status.v1': workflowStatus,
   'team.workflow.cancel.v1': cancelWorkflow,
   'team.workflow.generate.v1': generateWorkflow,
-  'team.workflow.export.v1': (parentId, payload) => exportWorkflow(parentId, payload, false),
-  'team.workflow.open-export.v1': (parentId, payload) => exportWorkflow(parentId, payload, true),
+  'team.workflow.export.v1': (parentId, payload, context) => exportWorkflow(parentId, payload, context, false),
+  'team.workflow.open-export.v1': (parentId, payload, context) => exportWorkflow(parentId, payload, context, true),
   'team.workflow.return-review.get.v1': reviewGet,
   'team.workflow.return-review.discard.v1': reviewDiscard,
   'team.workflow.return-review.ignore.v1': reviewIgnore,

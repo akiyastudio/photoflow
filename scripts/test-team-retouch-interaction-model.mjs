@@ -69,11 +69,43 @@ assert.equal(canEnterWorkflowStage(guardedWorkspace, 'assignment').allowed, fals
 const confirmedWorkspace = { ...guardedWorkspace, assignments: [{ photoId: 'p1', baseVersionId: 'v1', personIndex: 1, identityId: 'alice', source: 'manual' }] };
 assert.equal(canEnterWorkflowStage(confirmedWorkspace, 'assignment').allowed, true);
 assert.equal(canEnterWorkflowStage(confirmedWorkspace, 'relay').allowed, false, 'stage 3 must wait for generated assignment workflow');
-const generatedWorkspace = { ...confirmedWorkspace, workflowGenerated: true, workflowNeedsRegeneration: false };
+const generatedWorkspace = { ...confirmedWorkspace, workflowGenerated: true, workflowNeedsRegeneration: false, workflowParticipantKeys: ['p1:v1:1'] };
 assert.equal(canEnterWorkflowStage(generatedWorkspace, 'relay').allowed, true);
 const stageStates = workflowStageSummaries(generatedWorkspace, 'relay');
 assert.equal(stageStates.find(item => item.id === 'detect').complete, true);
 assert.equal(stageStates.find(item => item.id === 'relay').state, 'current');
+
+const historicalProjects = [
+  { photoCount: 21, taskCount: 64, identityCount: 9, assignmentCount: 140, completedCount: 60, returnedCount: 57 },
+  { photoCount: 23, taskCount: 63, identityCount: 10, assignmentCount: 196, completedCount: 171, returnedCount: 110 },
+  { photoCount: 27, taskCount: 79, identityCount: 11, assignmentCount: 296, completedCount: 162, returnedCount: 141 },
+];
+for (const [fixtureIndex, fixture] of historicalProjects.entries()) {
+  const identities = Array.from({ length: fixture.identityCount }, (_, index) => ({ id: `legacy-${fixtureIndex}-identity-${index}`, name: `历史人物 ${index + 1}` }));
+  const assignments = Array.from({ length: fixture.assignmentCount }, (_, index) => ({
+    photoId: `legacy-${fixtureIndex}-photo-${(index % fixture.taskCount) % fixture.photoCount}`, baseVersionId: `legacy-${fixtureIndex}-version-${(index % fixture.taskCount) % fixture.photoCount}`,
+    personIndex: index + 1, identityId: identities[index % identities.length].id, source: index % 3 ? 'suggested' : 'manual',
+    completed: index < fixture.completedCount, completionKind: index < fixture.returnedCount ? 'returned' : index < fixture.completedCount ? 'no-retouch' : '',
+  }));
+  const photos = Array.from({ length: fixture.photoCount }, (_, photoIndex) => ({
+    photoId: `legacy-${fixtureIndex}-photo-${photoIndex}`, baseVersionId: `legacy-${fixtureIndex}-version-${photoIndex}`,
+    tasks: Array.from({ length: fixture.taskCount }, (_, taskIndex) => taskIndex).filter(taskIndex => taskIndex % fixture.photoCount === photoIndex).map(taskIndex => ({
+      id: `legacy-task-${fixtureIndex}-${taskIndex}`, needsReview: true,
+      members: assignments.filter((_, assignmentIndex) => assignmentIndex % fixture.taskCount === taskIndex).map(item => ({ personIndex: item.personIndex })),
+    })),
+  }));
+  assert.equal(photos.flatMap(photo => photo.tasks).length, fixture.taskCount);
+  const subjectAssignments = new Set(photos.flatMap(photo => photo.tasks.flatMap(task => task.members.map(member => `${photo.photoId}:${photo.baseVersionId}:${member.personIndex}`))));
+  const historical = { photos, identities, assignments, workflowGenerated: true, workflowNeedsRegeneration: false, workflowParticipantKeys: [...subjectAssignments] };
+  const stages = workflowStageSummaries(historical, 'relay');
+  assert.equal(canEnterWorkflowStage(historical, 'relay').allowed, true, 'verified historical workflows may enter relay despite suggested identity sources');
+  assert.equal(stages.find(item => item.id === 'detect').complete, true);
+  const eligibleAssignments = assignments.filter(item => subjectAssignments.has(`${item.photoId}:${item.baseVersionId}:${item.personIndex}`));
+  assert.equal(stages.find(item => item.id === 'relay').count, `${eligibleAssignments.filter(item => item.completed).length}/${eligibleAssignments.length} 已完成 · ${eligibleAssignments.filter(item => item.completionKind === 'returned').length} 已返图`, 'relay counts include suggested assignments proven by the manifest');
+  assert.equal(mergeAudit(historical).ready, false, 'historical stage compatibility never relaxes merge confirmation and completion blockers');
+}
+const forgedGenerated = { ...guardedWorkspace, workflowGenerated: true, workflowNeedsRegeneration: false };
+assert.equal(canEnterWorkflowStage(forgedGenerated, 'relay').allowed, false, 'a renderer boolean without verified manifest participants cannot bypass identity confirmation');
 
 const relay = relayChainForItems([
   { key: 'a', week: 1, personIndex: 1, identity: { name: 'A' }, ready: true, assignment: { completed: true, completionKind: 'returned' } },
