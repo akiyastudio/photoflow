@@ -445,9 +445,11 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const createVersionRequests = [];
   const nativeFileDragRequests = [];
   const layoutNotices = [];
+  const viewportScrollStates = [];
   let canvasController = null;
   let entryOpenClicks = 0;
   const treeProps = {
+    active: true,
     progressFolders: [...folders, tracked, freeProgress, selection, generatedArtifact, companionArtifact, ambiguousArtifact, workflow, broll],
     graphEdges: [
       { id: 'preview-edge', projectId: 'p', sourceProgressId: 'raw', targetProgressId: 'generated', edgeKind: 'derived_preview', createdAt: 1, updatedAt: 1 },
@@ -473,6 +475,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     onCancelRelationEdit() {},
     onNotice(message) { layoutNotices.push(message); },
     onCanvasControllerChange(controller) { canvasController = controller; },
+    onViewportScrollChange(scrolled) { viewportScrollStates.push(scrolled); },
   };
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, treeProps)));
   const brollCanvasNodes = allNodes(container).filter(node => node.attributes.get('data-version-progress-id') === 'broll');
@@ -510,6 +513,19 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const canvasNode = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-version-tree-canvas') === 'true');
   const canvasViewport = allNodes(container).find(node => node.nodeName === 'DIV' && node.attributes.get('data-version-tree-viewport') === 'true');
   assert((canvasViewport.attributes.get('class') || '').includes('h-full') && (canvasViewport.attributes.get('class') || '').includes('overflow-auto'), 'the version-tree viewport must fill and scroll inside the complete file region');
+  await React.act(async () => dispatch(canvasViewport, 'wheel', { deltaY: 120 }));
+  assert.strictEqual(viewportScrollStates.at(-1), true, 'downward wheel intent must collapse the project overview before the canvas scroll position changes');
+  await React.act(async () => dispatch(canvasViewport, 'scroll'));
+  assert.strictEqual(viewportScrollStates.at(-1), true, 'a zero-position scroll event must not immediately undo the wheel-triggered collapse');
+  await React.act(async () => dispatch(canvasViewport, 'wheel', { deltaY: -120 }));
+  assert.strictEqual(viewportScrollStates.at(-1), false, 'upward wheel intent at an already-zero scroll position must reveal the project overview');
+  await React.act(async () => dispatch(canvasViewport, 'wheel', { deltaY: 120 }));
+  canvasViewport.scrollTop = 40;
+  await React.act(async () => dispatch(canvasViewport, 'scroll'));
+  assert.strictEqual(viewportScrollStates.at(-1), true, 'scrolling down the version tree must keep the project overview collapsed');
+  canvasViewport.scrollTop = 0;
+  await React.act(async () => dispatch(canvasViewport, 'scroll'));
+  assert.strictEqual(viewportScrollStates.at(-1), false, 'returning upward to the top of the version tree must reveal the project overview');
   assert.strictEqual(canvasNode.style.minWidth, '100%', 'the interactive dotted canvas must fill the viewport instead of shrinking to graph content');
   assert(!textContent(container).includes('图片工作流') && !textContent(container).includes('视频工作流'), 'legacy workflow headings must be removed');
   assert(allNodes(container).some(node => node.attributes.get('aria-label') === '图片区域'), 'the mounted graph must expose a Blender-like image region');
@@ -709,15 +725,35 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   });
   assert.strictEqual(canvasViewport.scrollLeft, 130, 'middle-button canvas pan must update horizontal scroll');
   assert.strictEqual(canvasViewport.scrollTop, 130, 'middle-button canvas pan must update vertical scroll');
+  let spaceKeyDown;
   await React.act(async () => {
-    dispatch(testWindow, 'keydown', { code: 'Space', key: ' ', target: testDocument.body });
-    dispatch(canvasNode, 'pointerdown', { pointerId: 45, button: 0, clientX: 150, clientY: 130 });
+    spaceKeyDown = dispatch(testWindow, 'keydown', { code: 'Space', key: ' ', target: testDocument.body });
+    const panPointerDown = dispatch(canvasNode, 'pointerdown', { pointerId: 45, button: 0, clientX: 150, clientY: 130 });
+    assert(panPointerDown.cancelBubble, 'a claimed canvas pan must not bubble into the outer file-surface marquee interaction');
+  });
+  assert(spaceKeyDown.defaultPrevented, 'version-tree Space handling must suppress native downward page scrolling');
+  assert.strictEqual(canvasNode.attributes.get('data-drag-state'), 'pan', 'Space plus left-button drag must enter canvas panning');
+  assert((canvasNode.attributes.get('class') || '').includes('cursor-grabbing'), 'an active canvas pan must show the grabbing cursor');
+  let spaceKeyUp;
+  await React.act(async () => {
     dispatch(canvasNode, 'pointermove', { pointerId: 45, button: 0, clientX: 120, clientY: 100 });
-    dispatch(canvasNode, 'pointerup', { pointerId: 45, button: 0, clientX: 120, clientY: 100 });
-    dispatch(testWindow, 'keyup', { code: 'Space', key: ' ', target: testDocument.body });
+    spaceKeyUp = dispatch(testWindow, 'keyup', { code: 'Space', key: ' ', target: testDocument.body });
+  });
+  assert(spaceKeyUp.defaultPrevented, 'releasing Space after a version-tree pan must also suppress its native scroll action');
+  assert(!canvasNode.hasPointerCapture(45), 'releasing Space must release the active canvas pointer');
+  assert(!canvasNode.attributes.has('data-drag-state'), 'releasing Space must end canvas panning immediately');
+  assert(!(canvasNode.attributes.get('class') || '').includes('cursor-grabbing'), 'the grabbing cursor must clear when Space is released');
+  await React.act(async () => {
+    dispatch(canvasNode, 'pointermove', { pointerId: 45, button: 0, clientX: 80, clientY: 60 });
+    dispatch(canvasNode, 'pointerup', { pointerId: 45, button: 0, clientX: 80, clientY: 60 });
   });
   assert.strictEqual(canvasViewport.scrollLeft, 160, 'Space plus left-button drag must pan the canvas');
   assert.strictEqual(canvasViewport.scrollTop, 160, 'Space plus left-button drag must pan vertically');
+  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, active: false })));
+  const inactiveTreeSpace = dispatch(testWindow, 'keydown', { code: 'Space', key: ' ', target: testDocument.body });
+  assert(!inactiveTreeSpace.defaultPrevented, 'an inactive version-tree page must preserve the normal Space scroll behavior elsewhere');
+  dispatch(testWindow, 'keyup', { code: 'Space', key: ' ', target: testDocument.body });
+  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, treeProps)));
   assert(canvasController?.hasManualLayout, 'moving a node must mark the current layout as manual');
   const savesBeforeStaleRefresh = layoutRequests.saves.length;
   const loadsBeforeStaleRefresh = layoutRequests.loads;

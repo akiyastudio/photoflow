@@ -291,11 +291,18 @@ const copySmallFileAtomic = async (entry, options = {}) => {
     throwIfCancelled(isCancelled);
     const written = await fs.promises.stat(temporary);
     if (written.size !== entry.size) throw new Error(`文件复制不完整：${path.basename(entry.source)}`);
+    const originalMode = Number.isInteger(entry.mode) ? entry.mode : written.mode;
+    // copyFile preserves the Windows read-only attribute. Keep the staging
+    // file writable for durable sync and atomic commit, then restore the
+    // source mode on the published target below.
+    await fs.promises.chmod(temporary, originalMode | 0o200).catch(error => {
+      throw attachTransferContext(error, 'sync-temporary', entry.source, target);
+    });
     await fs.promises.utimes(temporary, entry.atime, entry.mtime).catch(() => undefined);
     if (durable) await syncTemporaryFile(temporary, entry.source, target);
     throwIfCancelled(isCancelled);
     const commit = await commitTemporaryFile(temporary, target).catch(error => { throw attachTransferContext(error, 'commit-target', entry.source, target); });
-    await fs.promises.chmod(target, entry.mode).catch(() => undefined);
+    await fs.promises.chmod(target, originalMode).catch(() => undefined);
     return { source: entry.source, destination: target, bytes: entry.size, copied: true, commitStrategy: commit.strategy };
   } catch (error) {
     await fs.promises.rm(temporary, { force: true }).catch(() => undefined);

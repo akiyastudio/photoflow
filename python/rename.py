@@ -22,11 +22,11 @@ VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.crm')
 RAW_EXTENSIONS = ('.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw')
 FFMPEG_IMAGE_EXTENSIONS = RAW_EXTENSIONS
 JPG_PROXY_EXTENSIONS = ('.jpg', '.jpeg')
-JPG_PROXY_FOLDER_NAMES = {'jpg', 'jpeg', 'preview', 'previews', 'proxy', 'proxies', '预览', '代理', 'jpg预览'}
+JPG_PROXY_FOLDER_NAMES = {'jpg'}
 
 
 def find_selection_jpg_proxy_folder(reference_folder):
-    """Find a unique sibling JPG/proxy folder for any imported version folder."""
+    """Find the canonical sibling ``jpg`` folder for an imported version folder."""
     reference_folder = os.path.abspath(reference_folder)
     project_folder = os.path.dirname(reference_folder)
     try:
@@ -195,8 +195,8 @@ def copy_unmatched_a_files(unmatched_files_a, folder_a):
 def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_only=False, move_unmatched=False, source_files=None):
     media_extensions = IMAGE_EXTENSIONS + FFMPEG_IMAGE_EXTENSIONS + VIDEO_EXTENSIONS
     jpg_proxy_folder = find_selection_jpg_proxy_folder(folder_a)
-    # Companion JPGs may live beside the RAW files or in a sibling JPG/proxy
-    # folder. They are visual adapters, not separate version assets.
+    # Companion JPGs may live beside the RAW files or in the canonical sibling
+    # jpg folder. They are visual adapters, not separate version assets.
     jpg_proxy_index = build_jpg_proxy_index([folder_a, *([jpg_proxy_folder] if jpg_proxy_folder else [])])
     proxy_count = 0
     list_a = [f for f in os.listdir(folder_a) if f.lower().endswith(media_extensions)]

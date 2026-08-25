@@ -364,10 +364,12 @@ def main():
         nested_jpg_directory = jpg_directory / "second-card"
         nested_jpg_directory.mkdir()
         Image.new("RGB", (32, 24), (38, 91, 143)).save(nested_jpg_directory / "IMG_1234.jpg")
+        for retired_alias in ("jpeg", "preview", "proxy", "预览", "代理", "jpg预览"):
+            (project_directory / retired_alias).mkdir()
         proxy_index = build_jpg_proxy_index(str(jpg_directory))
         assert "img_1234" not in proxy_index, "duplicate camera names must not select an unsafe V0 proxy"
-        assert find_selection_jpg_proxy_folder(str(reference_directory)) == str(jpg_directory)
-        assert find_selection_jpg_proxy_folder(str(source_directory)) == str(jpg_directory)
+        assert find_selection_jpg_proxy_folder(str(reference_directory)) == str(jpg_directory), "only the canonical jpg folder may act as a sibling proxy"
+        assert find_selection_jpg_proxy_folder(str(source_directory)) == str(jpg_directory), "retired alias folders must be ignored"
         assert visual_reference_path(str(reference_directory / "IMG_1234.CR3"), proxy_index).endswith("IMG_1234.CR3")
     print("Research worker regression tests passed")
 

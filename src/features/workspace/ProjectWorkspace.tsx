@@ -400,6 +400,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const viewMode: 'list' | 'grid' = browseMode === 'list' ? 'list' : 'grid';
   const recursiveFlatOpen = browseMode === 'recent';
   const versionTreeOpen = browseMode === 'version-tree';
+  const [versionTreeHeaderCollapsed, setVersionTreeHeaderCollapsed] = useState(false);
   const [gridIconSize, setGridIconSize] = useState(DEFAULT_FOLDER_GRID_ICON_SIZE);
   const initialGridThumbnailSize = DEFAULT_FOLDER_GRID_ICON_SIZE * Math.min(2, window.devicePixelRatio || 1) <= 320 ? 320 : 640;
   const [gridThumbnailSize, setGridThumbnailSize] = useState(initialGridThumbnailSize);
@@ -410,6 +411,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const timer = window.setTimeout(() => setGridThumbnailSize(current => Math.max(current, desiredSize)), 320);
     return () => window.clearTimeout(timer);
   }, [gridIconSize, gridThumbnailSize]);
+  useEffect(() => {
+    setVersionTreeHeaderCollapsed(false);
+  }, [currentRelativePath, versionTreeOpen]);
   const [sortField, setSortField] = useState<ProjectFileSortField>(defaultFolderSort);
   const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>(defaultProjectFileSortDirection(defaultFolderSort));
   useEffect(() => {
@@ -5656,6 +5660,15 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     targetFolderLocked: Boolean(progressSetup.preserveFolderName),
   } : null;
   const finalExportParentOptions = selectableVersionParents(progressFolders, { mediaKind: 'image', relationKind: 'main' });
+  const handleFilesColumnWheelCapture = (event: React.WheelEvent<HTMLDivElement>) => {
+    if (!versionTreeOpen || event.ctrlKey || event.deltaY === 0) return;
+    if (event.deltaY > 0) {
+      setVersionTreeHeaderCollapsed(true);
+      return;
+    }
+    const viewport = event.currentTarget.querySelector<HTMLElement>('[data-version-tree-viewport="true"]');
+    if (!viewport || viewport.scrollTop <= 2) setVersionTreeHeaderCollapsed(false);
+  };
 
   return (
     <div ref={projectWorkspaceRef} className="flex h-full w-full min-w-0 flex-col animate-in fade-in duration-300">
@@ -5703,7 +5716,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         {projectWorkflows && <><div className="my-1 border-t border-slate-100"/><button className="project-menu-item project-menu-danger" onClick={() => { setSurfaceMenu(null); setPanel('trash'); }}><Trash2 size={14}/>将项目移入回收站</button></>}
       </ViewportContextMenu>, document.body)}
       <div ref={projectColumnLayoutRef} className="flex min-h-0 min-w-0 flex-1 overflow-hidden">
-      <div ref={filesColumnRef} style={previewPaneOpen || metadataPaneOpen ? { width: displayedColumnWidths.files } : undefined} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={cancelSelectionDrag} onLostPointerCapture={cancelSelectionDrag} className={`relative flex min-h-0 flex-col gap-3 overscroll-contain [overflow-anchor:none] px-6 ${versionTreeOpen ? 'overflow-hidden pb-0' : 'overflow-auto pb-6'} ${previewPaneOpen || metadataPaneOpen ? 'shrink-0' : 'flex-1'}`}>
+      <div ref={filesColumnRef} style={previewPaneOpen || metadataPaneOpen ? { width: displayedColumnWidths.files } : undefined} onWheelCapture={handleFilesColumnWheelCapture} onPointerDown={startSelectionDrag} onPointerMove={updateSelectionDrag} onPointerUp={finishSelectionDrag} onPointerCancel={cancelSelectionDrag} onLostPointerCapture={cancelSelectionDrag} className={`relative flex min-h-0 flex-col overscroll-contain [overflow-anchor:none] px-6 ${versionTreeOpen ? 'gap-0 overflow-hidden pb-0' : 'gap-3 overflow-auto pb-6'} ${previewPaneOpen || metadataPaneOpen ? 'shrink-0' : 'flex-1'}`}>
         {selectionBox && <div aria-hidden className="marquee-logical-canvas pointer-events-none absolute left-0 top-0 z-20" style={{ width: selectionCanvasSize.width, height: selectionCanvasSize.height }}><div className="absolute border border-blue-500 bg-blue-400/15" style={selectionBox}/></div>}
       {active && activeView === 'project' && (viewportStatus || folderOnlyGridCount > 0) && createPortal(<div role="status" className="pointer-events-none fixed bottom-2 z-[35] flex max-w-[calc(100vw-3rem)] items-center gap-3 rounded-lg border border-white/10 bg-slate-950/80 px-3.5 py-2 text-xs font-medium text-white shadow-xl backdrop-blur-md" style={{ right: Math.max(12, projectLayoutWidth - displayedColumnWidths.files + 12) }}>
         {viewportStatus?.captureDateTime && <>
@@ -5712,7 +5725,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         </>}
         <span className="shrink-0 font-mono font-bold tabular-nums">{viewportStatus ? `${viewportStatus.fileNumber}/${viewportStatus.total}` : folderOnlyGridCount}</span>
       </div>, document.body)}
-      <div className="flex flex-wrap items-start justify-between gap-3 pt-6">
+      <div data-project-overview-shell="true" className={versionTreeOpen ? `grid transition-[grid-template-rows,margin-bottom] duration-200 ${versionTreeHeaderCollapsed ? 'grid-rows-[0fr]' : 'mb-3 grid-rows-[1fr]'}` : 'contents'}>
+      <div className={versionTreeOpen ? 'min-h-0 overflow-hidden' : 'contents'}>
+      <div data-project-overview="true" className="flex flex-wrap items-start justify-between gap-3 pt-6">
         <div className="flex flex-wrap items-center gap-3">
           <h2 className="text-2xl font-bold text-slate-800">{browserRootLabel}</h2>
           {projectWorkflows && <div className="relative" onClick={event => event.stopPropagation()}>
@@ -5721,6 +5736,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           </div>}
         </div>
         <div className="flex items-center gap-2"><button onClick={() => openFolder()} className="flex items-center gap-2 rounded-lg border border-slate-200 bg-white px-3 py-2 text-sm font-bold text-slate-600 hover:bg-slate-50"><ExternalLink size={16}/>打开{browserContext.title}文件夹</button>{projectWorkflows && <button onClick={() => setConfirmDelete(true)} title="删除项目" className="flex h-9 w-9 items-center justify-center rounded-lg border border-red-200 text-red-500 hover:bg-red-50"><Trash2 size={16}/></button>}</div>
+      </div>
+      </div>
       </div>
 
       <div className="project-toolbar-wrap sticky top-0 z-30 -mx-6 w-[calc(100%+3rem)] bg-slate-50">
@@ -6119,6 +6136,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             onCancelRelationEdit={cancelRelationEdit}
             onNotice={onNotice}
             onCanvasControllerChange={setVersionTreeCanvasController}
+            onViewportScrollChange={setVersionTreeHeaderCollapsed}
           /></>}
         </div> : <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={handleFileSurfacePointerDownCapture} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING, paddingInline: FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-[220px] flex-1 select-none outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
           {groupedResultsActive && (groupedLoading ? <p className="py-12 text-center text-sm text-slate-400"><Loader2 size={17} className="mr-2 inline animate-spin"/>{projectRootFilterActive ? '正在分页读取全部文件…' : searchQuery.trim() ? `正在搜索${recursiveScopeLabel}…` : '正在读取所有文件…'}</p> : groupedError ? <p className="py-8 text-center text-sm text-red-600">读取文件失败：{groupedError}</p> : searchResultGroups.length ? <div className="pb-4">

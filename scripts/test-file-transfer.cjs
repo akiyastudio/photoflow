@@ -67,6 +67,24 @@ const run = async () => {
     await copyFileAtomic(durableSource, durableTarget, { durable: true });
     assert.deepStrictEqual(fs.readFileSync(durableTarget), fs.readFileSync(durableSource));
 
+    const readOnlySource = path.join(root, 'read-only-source.xmp');
+    const readOnlyTarget = path.join(root, 'read-only-target.xmp');
+    fs.writeFileSync(readOnlySource, '<xmpmeta>read-only</xmpmeta>');
+    fs.chmodSync(readOnlySource, 0o444);
+    const readOnlyStat = fs.statSync(readOnlySource);
+    try {
+      await copyPlannedFiles([{
+        kind: 'file', source: readOnlySource, destination: readOnlyTarget,
+        size: readOnlyStat.size, mode: readOnlyStat.mode,
+        atime: readOnlyStat.atime, mtime: readOnlyStat.mtime,
+      }], { destinationRoot: root, durable: true });
+      assert.strictEqual(fs.readFileSync(readOnlyTarget, 'utf8'), '<xmpmeta>read-only</xmpmeta>');
+      assert.strictEqual(fs.statSync(readOnlyTarget).mode & 0o222, readOnlyStat.mode & 0o222, 'the published file must preserve the source read-only mode');
+    } finally {
+      fs.chmodSync(readOnlySource, 0o666);
+      if (fs.existsSync(readOnlyTarget)) fs.chmodSync(readOnlyTarget, 0o666);
+    }
+
     const moveSource = path.join(root, 'move-source.bin');
     const moveTarget = path.join(root, 'move-target.bin');
     fs.writeFileSync(moveSource, 'move');

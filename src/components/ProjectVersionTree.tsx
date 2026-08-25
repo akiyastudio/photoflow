@@ -38,6 +38,7 @@ type ProjectVersionTreeProps = {
   onCancelRelationEdit?: () => void;
   onNotice: (message: string, duration?: number) => void;
   onCanvasControllerChange?: (controller: VersionTreeCanvasController | null) => void;
+  onViewportScrollChange?: (scrolled: boolean) => void;
 };
 
 export type VersionTreeCanvasController = {
@@ -72,7 +73,7 @@ const afterVersionTreePaint = (callback: () => void) => typeof window.requestAni
   ? window.requestAnimationFrame(callback)
   : globalThis.setTimeout(callback, 0);
 
-export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onRequestCreateVersion, onRequestCreateEmptyVersion, onStartFileDrag, canUndoRelation = false, canRedoRelation = false, onUndoRelation, onRedoRelation, onCancelRelationEdit, onNotice, onCanvasControllerChange }: ProjectVersionTreeProps) => {
+export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onRequestCreateVersion, onRequestCreateEmptyVersion, onStartFileDrag, canUndoRelation = false, canRedoRelation = false, onUndoRelation, onRedoRelation, onCancelRelationEdit, onNotice, onCanvasControllerChange, onViewportScrollChange }: ProjectVersionTreeProps) => {
   const [pointerPoint, setPointerPoint] = useState<{ x: number; y: number } | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState('');
   const [dragState, setDragState] = useState<VersionTreeDragState>(null);
@@ -211,7 +212,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   }, [auxiliaryGap, columnGap, nodeHeight, nodeWidth, ordinaryEntries, otherColumnGap, rootGap, rowGap, versionItems, visibleEdges]);
   const canvasNodes = useMemo(() => defaultLayout.positioned.map(item => ({ id: item.key, nodeKey: item.nodeKey, fallbackNodeKeys: item.folder ? [item.key] : undefined, x: item.x, y: item.y })), [defaultLayout]);
   const canvas = useVersionTreeCanvas({
-    nodes: canvasNodes,
+    active, nodes: canvasNodes,
     workspacePath, projectName, scopeKey: activeRelativePath, nodeWidth, nodeHeight, collisionHorizontalGap: otherColumnGap, coordinateScale: zoom, onNotice,
     selectedNodeIds, dragStateRef, onDragStateChange: changeDragState,
   });
@@ -318,22 +319,34 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   useEffect(() => {
     const viewport = canvas.viewportRef.current;
     if (!viewport) return;
-    const updateBounds = () => setViewportBounds(current => {
-      const next = {
-        left: viewport.scrollLeft / zoom,
-        top: viewport.scrollTop / zoom,
-        width: (viewport.clientWidth || 1600) / zoom,
-        height: (viewport.clientHeight || 1000) / zoom,
-      };
-      return current.left === next.left && current.top === next.top && current.width === next.width && current.height === next.height
-        ? current
-        : next;
-    });
+    let previousScrollTop = viewport.scrollTop;
+    const updateBounds = () => {
+      const nextScrollTop = viewport.scrollTop;
+      if (nextScrollTop > 1) onViewportScrollChange?.(true);
+      else if (nextScrollTop < previousScrollTop) onViewportScrollChange?.(false);
+      previousScrollTop = nextScrollTop;
+      setViewportBounds(current => {
+        const next = {
+          left: viewport.scrollLeft / zoom,
+          top: viewport.scrollTop / zoom,
+          width: (viewport.clientWidth || 1600) / zoom,
+          height: (viewport.clientHeight || 1000) / zoom,
+        };
+        return current.left === next.left && current.top === next.top && current.width === next.width && current.height === next.height
+          ? current
+          : next;
+      });
+    };
+    const updateHeaderForWheel = (event: WheelEvent) => {
+      if (event.deltaY > 0) onViewportScrollChange?.(true);
+      else if (event.deltaY < 0 && viewport.scrollTop <= 1) onViewportScrollChange?.(false);
+    };
     updateBounds();
     viewport.addEventListener('scroll', updateBounds, { passive: true });
+    viewport.addEventListener('wheel', updateHeaderForWheel, { passive: true });
     window.addEventListener('resize', updateBounds);
-    return () => { viewport.removeEventListener('scroll', updateBounds); window.removeEventListener('resize', updateBounds); };
-  }, [canvas.viewportRef, zoom]);
+    return () => { viewport.removeEventListener('scroll', updateBounds); viewport.removeEventListener('wheel', updateHeaderForWheel); window.removeEventListener('resize', updateBounds); };
+  }, [canvas.viewportRef, onViewportScrollChange, zoom]);
   const refreshAndFit = useCallback(async () => {
     const refreshed = await canvas.refreshLayout();
     if (refreshed) {
@@ -619,7 +632,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
     {graph.cycleNodeIds.length > 0 && <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">版本关系需要修复：{graph.cycleNodeIds.join('、')}</div>}
     {relationChoice && <div role="dialog" aria-modal="true" aria-label="选择关系类型" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><section className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">选择关系类型</h3><p className="mt-1 text-xs text-slate-500">两端节点支持多种合法关系，请明确选择本次连线语义。</p><div className="mt-4 grid gap-2">{relationChoice.kinds.map(kind => <button key={kind} type="button" onClick={() => submitNewRelation(relationChoice.sourceId, relationChoice.targetId, kind)} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm hover:border-blue-400 hover:bg-blue-50">{versionTreeRelationLabel(kind)}</button>)}</div><button type="button" onClick={() => { setRelationChoice(null); onCancelRelationEdit?.(); }} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
     {blankOutputSourceId && <div role="dialog" aria-modal="true" aria-label="从输出端创建节点" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/40 p-4"><section className="w-full max-w-xs rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">从 V{visibleFolderById.get(blankOutputSourceId)?.versionKey} 创建</h3><p className="mt-1 text-xs text-slate-500">输出线放到空白处时，可直接新建兼容节点。</p><div className="mt-4 grid gap-2"><button type="button" onClick={() => { const source = visibleFolderById.get(blankOutputSourceId); setBlankOutputSourceId(''); if (source) onRequestCreateEmptyVersion?.(source, false); }} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-left text-sm font-semibold text-blue-700">新建下一版本</button><button type="button" onClick={() => { const source = visibleFolderById.get(blankOutputSourceId); setBlankOutputSourceId(''); if (source) onRequestCreateEmptyVersion?.(source, true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm text-slate-700">新建可跟踪版本分支</button></div><button type="button" onClick={() => setBlankOutputSourceId('')} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
-      {hasGraphItems && <div className="relative min-h-0 flex-1"><div ref={canvas.viewportRef} data-version-tree-viewport="true" className="h-full min-h-[360px] overflow-auto"><div className="relative min-h-full min-w-full" style={{ width: framedLayoutWidth * zoom, height: Math.max(360, framedLayoutHeight * zoom, viewportBounds.height) }}><div data-version-tree-canvas="true" data-drag-state={dragState?.type} onPointerDown={event => { canvas.canvasPointerHandlers.onPointerDown(event); if (!(event.target as Element).closest('[data-version-tree-node],[data-edge-id],button')) { cancelRelationSelection(); setSelectedNodeKey(''); } }} onPointerMove={canvas.canvasPointerHandlers.onPointerMove} onPointerUp={canvas.canvasPointerHandlers.onPointerUp} onPointerCancel={canvas.canvasPointerHandlers.onPointerCancel} className="absolute left-0 top-0 cursor-default" style={{ width: framedLayoutWidth, height: framedLayoutHeight, minWidth: `${100 / zoom}%`, minHeight: Math.max(360, viewportBounds.height / zoom), touchAction: 'none', transform: `scale(${zoom})`, transformOrigin: 'left top', backgroundImage: 'radial-gradient(circle, rgb(148 163 184 / 0.025) 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
+      {hasGraphItems && <div className="relative min-h-0 flex-1"><div ref={canvas.viewportRef} data-version-tree-viewport="true" className="h-full min-h-[360px] overflow-auto"><div className="relative min-h-full min-w-full" style={{ width: framedLayoutWidth * zoom, height: Math.max(360, framedLayoutHeight * zoom, viewportBounds.height) }}><div data-version-tree-canvas="true" data-drag-state={dragState?.type} onPointerDown={event => { canvas.canvasPointerHandlers.onPointerDown(event); if (!(event.target as Element).closest('[data-version-tree-node],[data-edge-id],button')) { cancelRelationSelection(); setSelectedNodeKey(''); } }} onPointerMove={canvas.canvasPointerHandlers.onPointerMove} onPointerUp={canvas.canvasPointerHandlers.onPointerUp} onPointerCancel={canvas.canvasPointerHandlers.onPointerCancel} className={`absolute left-0 top-0 ${dragState?.type === 'pan' ? 'cursor-grabbing' : 'cursor-default'}`} style={{ width: framedLayoutWidth, height: framedLayoutHeight, minWidth: `${100 / zoom}%`, minHeight: Math.max(360, viewportBounds.height / zoom), touchAction: 'none', transform: `scale(${zoom})`, transformOrigin: 'left top', backgroundImage: 'radial-gradient(circle, rgb(148 163 184 / 0.025) 1px, transparent 1px)', backgroundSize: '20px 20px' }}>
       {areaBands.map(area => <div key={area.areaKind} aria-label={`${area.label}区域`} className={`pointer-events-none absolute rounded-2xl border ${area.areaKind === 'image' ? 'border-sky-300/30 bg-sky-500/[0.035]' : area.areaKind === 'video' ? 'border-violet-300/30 bg-violet-500/[0.035]' : 'border-slate-300/40 bg-slate-500/[0.035]'}`} style={{ left: area.left - 16, top: area.top - 28, width: area.right - area.left + 32, height: area.bottom - area.top + 44 }}><span className={`absolute left-3 top-2 px-1 text-[10px] font-semibold tracking-[0.16em] ${area.areaKind === 'image' ? 'text-sky-600/70' : area.areaKind === 'video' ? 'text-violet-600/70' : 'text-slate-600/65'}`}>{area.label} · {defaultLayout.positioned.filter(item => item.areaKind === area.areaKind).length}</span><span role="separator" aria-orientation="vertical" aria-label={`调整${area.label}区域宽度`} title="拖动调整宽度" onPointerDown={event => beginAreaResize(event, area, 'x')} onPointerMove={updateAreaResize} onPointerUp={endAreaResize} onPointerCancel={endAreaResize} className="pointer-events-auto absolute -right-1 top-8 bottom-3 z-30 w-2 cursor-ew-resize bg-transparent"/><span role="separator" aria-orientation="horizontal" aria-label={`调整${area.label}区域高度`} title="拖动调整高度" onPointerDown={event => beginAreaResize(event, area, 'y')} onPointerMove={updateAreaResize} onPointerUp={endAreaResize} onPointerCancel={endAreaResize} className="pointer-events-auto absolute -bottom-1 left-3 right-3 z-30 h-2 cursor-ns-resize bg-transparent"/><span role="separator" aria-label={`调整${area.label}区域大小`} title="拖动调整大小" onPointerDown={event => beginAreaResize(event, area, 'both')} onPointerMove={updateAreaResize} onPointerUp={endAreaResize} onPointerCancel={endAreaResize} className="pointer-events-auto absolute -bottom-2 -right-2 z-30 h-5 w-5 cursor-nwse-resize bg-transparent"/></div>)}
       <svg aria-label="版本关系连线" className="absolute inset-0 z-10 h-full w-full overflow-visible"><defs><marker id={arrowMarkerId} markerWidth="8" markerHeight="8" refX="0" refY="4" orient="auto" markerUnits="userSpaceOnUse"><path d="M 0 0 L 8 4 L 0 8 z" fill="context-stroke"/></marker></defs>{layout.edges.map(edge => { const presentation = versionTreeEdgePresentation(edge.kind, selectedEdgeId === edge.id); const directAssociation = edge.kind === 'media_companion' || edge.kind === 'derived_preview' || edge.kind === 'derived_transcode'; return <g key={edge.id}>
         <path data-edge-id={edge.id} data-relation-kind={edge.kind} role={edge.childId ? 'button' : undefined} tabIndex={edge.childId ? 0 : undefined} aria-label={edge.childId ? `选择${versionTreeRelationLabel(edge.kind)}关系线` : undefined} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); selectEdge(edge); }} onClick={event => { event.stopPropagation(); selectEdge(edge); }} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectEdge(edge); } }} d={edge.path} fill="none" stroke="transparent" strokeWidth="14" pointerEvents="stroke" className={edge.childId ? 'cursor-pointer' : undefined}/>

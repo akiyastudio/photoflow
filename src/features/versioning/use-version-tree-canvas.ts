@@ -11,6 +11,7 @@ export type VersionTreeDragState =
   | null;
 
 type UseVersionTreeCanvasInput = {
+  active: boolean;
   nodes: readonly VersionTreeCanvasItem[];
   workspacePath: string;
   projectName: string;
@@ -37,7 +38,7 @@ type NodeDrag = {
   dragged: boolean;
 };
 
-type CanvasPan = { element: Element; pointerId: number; clientX: number; clientY: number; scrollLeft: number; scrollTop: number };
+type CanvasPan = { element: Element; pointerId: number; clientX: number; clientY: number; scrollLeft: number; scrollTop: number; requiresSpace: boolean };
 type LayoutHistoryEntry = { before: Map<string, VersionTreeCanvasPosition>; after: Map<string, VersionTreeCanvasPosition> };
 const DRAG_THRESHOLD = 5;
 const SNAP_SIZE = 20;
@@ -52,7 +53,7 @@ const sameCanvasPositions = (
     && Boolean(candidate.manual) === Boolean(position.manual);
 });
 
-export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeKey, nodeWidth, nodeHeight, collisionHorizontalGap, coordinateScale = 1, onNotice, selectedNodeIds = new Set(), dragStateRef, onDragStateChange }: UseVersionTreeCanvasInput) => {
+export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName, scopeKey, nodeWidth, nodeHeight, collisionHorizontalGap, coordinateScale = 1, onNotice, selectedNodeIds = new Set(), dragStateRef, onDragStateChange }: UseVersionTreeCanvasInput) => {
   const nodesRef = useRef(nodes);
   const onNoticeRef = useRef(onNotice);
   const selectedNodeIdsRef = useRef(selectedNodeIds);
@@ -183,14 +184,35 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
   }, [applyPositions, collisionHorizontalGap, nodeHeight, nodeLayoutKey, nodeWidth]);
 
   useEffect(() => {
+    const finishCanvasPan = (spaceOnly: boolean) => {
+      const pan = canvasPanRef.current;
+      if (!pan || spaceOnly && !pan.requiresSpace) return;
+      if (pan.element.hasPointerCapture(pan.pointerId)) pan.element.releasePointerCapture(pan.pointerId);
+      canvasPanRef.current = null;
+      if (dragStateRef.current?.type === 'pan' && dragStateRef.current.pointerId === pan.pointerId) onDragStateChange(null);
+    };
     const onKeyDown = (event: KeyboardEvent) => { if (event.code === 'Space' && !(event.target as Element | null)?.closest?.('input,select,textarea')) { spacePressedRef.current = true; event.preventDefault(); } };
-    const onKeyUp = (event: KeyboardEvent) => { if (event.code === 'Space') spacePressedRef.current = false; };
-    const onBlur = () => { spacePressedRef.current = false; };
-    window.addEventListener('keydown', onKeyDown);
-    window.addEventListener('keyup', onKeyUp);
+    const onKeyUp = (event: KeyboardEvent) => {
+      if (event.code !== 'Space') return;
+      const wasPressed = spacePressedRef.current;
+      spacePressedRef.current = false;
+      finishCanvasPan(true);
+      if (wasPressed) event.preventDefault();
+    };
+    const onBlur = () => {
+      spacePressedRef.current = false;
+      finishCanvasPan(false);
+    };
+    if (!active) {
+      spacePressedRef.current = false;
+      finishCanvasPan(false);
+      return;
+    }
+    window.addEventListener('keydown', onKeyDown, true);
+    window.addEventListener('keyup', onKeyUp, true);
     window.addEventListener('blur', onBlur);
-    return () => { window.removeEventListener('keydown', onKeyDown); window.removeEventListener('keyup', onKeyUp); window.removeEventListener('blur', onBlur); };
-  }, []);
+    return () => { window.removeEventListener('keydown', onKeyDown, true); window.removeEventListener('keyup', onKeyUp, true); window.removeEventListener('blur', onBlur); };
+  }, [active, dragStateRef, onDragStateChange]);
 
   const enqueueSave = useCallback((mode: 'patch' | 'replace', savedPositions: Map<string, VersionTreeCanvasPosition>, before: Map<string, VersionTreeCanvasPosition>, applyOnSuccess?: Map<string, VersionTreeCanvasPosition>, requiredHistoryEpoch?: number) => {
     if (disposedRef.current) return Promise.resolve(false);
@@ -370,14 +392,19 @@ export const useVersionTreeCanvas = ({ nodes, workspacePath, projectName, scopeK
       const viewport = viewportRef.current;
       if (!viewport) return;
       event.preventDefault();
+      // The version tree lives inside the file surface, whose blank-area
+      // pointer handler starts marquee selection and edge auto-scroll. Once
+      // canvas panning claims this pointer, keep that unrelated interaction
+      // from starting on the same gesture.
+      event.stopPropagation();
       event.currentTarget.setPointerCapture(event.pointerId);
       onDragStateChange({ type: 'pan', pointerId: event.pointerId });
-      canvasPanRef.current = { element: event.currentTarget, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, scrollLeft: viewport.scrollLeft, scrollTop: viewport.scrollTop };
+      canvasPanRef.current = { element: event.currentTarget, pointerId: event.pointerId, clientX: event.clientX, clientY: event.clientY, scrollLeft: viewport.scrollLeft, scrollTop: viewport.scrollTop, requiresSpace: event.button === 0 };
     },
     onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => {
       const pan = canvasPanRef.current;
       const viewport = viewportRef.current;
-      if (!pan || !viewport || pan.pointerId !== event.pointerId) return;
+      if (!pan || !viewport || pan.pointerId !== event.pointerId || pan.requiresSpace && !spacePressedRef.current) return;
       viewport.scrollLeft = pan.scrollLeft - (event.clientX - pan.clientX);
       viewport.scrollTop = pan.scrollTop - (event.clientY - pan.clientY);
     },
