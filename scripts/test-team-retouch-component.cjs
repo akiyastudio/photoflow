@@ -83,9 +83,11 @@ assert(builder.includes('fs.cpSync(rendererOutput, uiRoot, { recursive: true })'
 assert(!preload.includes('workspace-team-') && !workspace.includes('TeamRetouch') && !workspace.includes('团片协作') && !settings.includes("activeSection === 'team-retouch'"), 'application renderer boundaries must remain free of legacy team UI and APIs');
 assert(Object.keys(COMPONENT_RPC_METHODS).every(method => method.endsWith('.v1')), 'every component RPC capability must be explicitly versioned');
 assert.deepEqual(sanitizePayload({ relativePaths: ['a.jpg'], workspacePath: 'C:/escape', channel: 'arbitrary' }, ['relativePaths']), { relativePaths: ['a.jpg'] }, 'unknown fields, workspace identities, and arbitrary channels must be discarded');
+assert.deepEqual(sanitizePayload({ variant: 'preview', filePath: 'C:/escape' }, ['variant']), { variant: 'preview' }, 'compatibility sanitization retains only the declared media variant intent');
 assert.throws(() => sanitizePayload('bad', []), /payload must be an object/);
 assert.throws(() => sanitizePayload({ value: 'x'.repeat(2 * 1024 * 1024) }, ['value']), /too large/);
 for (const method of ['team.media.authorize.v1', 'team.patch.open.v1']) assert(template.componentHost.service.rpcMethods.includes(method) && !COMPONENT_RPC_METHODS[method], `${method} must be service-owned without a legacy mapping`);
+assert(rendererSdk.includes("export type TeamMediaVariant = 'preview' | 'original'") && rendererSdk.includes('variant: TeamMediaVariant'), 'renderer SDK documents the strict media authorization variant allowlist');
 const safeWorkspace = stripWorkspacePaths({ photos: [{ photoId: 'p1', sourcePath: 'C:/secret.jpg', tasks: [{ id: 't1', patchPath: 'C:/patch.png', editedPatchPath: 'C:/return.png' }] }] });
 assert(!JSON.stringify(safeWorkspace).includes('C:/'), 'component workspace responses must not disclose host file paths');
 const safeReview = stripReturnPaths({ path: 'C:/return.jpg', matches: [{ returnId: 'r1', path: 'C:/return.jpg', mediaPath: 'media-token:secret', alternatives: [{ taskId: 't1', patchPath: 'C:/patch.png' }] }] });

@@ -4,7 +4,7 @@
 
 | 原页面能力 | 外置 renderer 对应实现 | RPC / 宿主边界 |
 | --- | --- | --- |
-| 原图、工作图懒加载和失败重试 | `legacy/TeamRetouchManager.tsx` 的 `useLazyPreview`、`PatchPreview` | `team.media.authorize.v1`，只传照片/版本/任务 ID |
+| 原图、工作图懒加载和失败重试 | `legacy/TeamRetouchManager.tsx` 的 `useLazyPreview`、`PatchPreview` | `team.media.authorize.v1`，只传照片/版本/任务 ID 与严格 `preview`/`original` 意图；缩略图不回退原图 |
 | 人物框叠加、多人颜色和点击标记 | `PatchPreview`、`PhotoPersonOverlay` | 工作区公开任务数据，不传文件路径 |
 | 全窗口浏览 | `FullscreenImageViewer`、`ImageZoomButton` | 授权媒体 URL |
 | 裁剪拖动、四边/四角缩放和数值调整 | `CropEditor` | `team.patch.update.v1` |

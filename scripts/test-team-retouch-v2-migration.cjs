@@ -93,10 +93,10 @@ const ready = new Promise((resolve, reject) => { child.once('exit', code => reje
     assert.equal(migrated.prepare(`SELECT COUNT(*) count FROM team_patch_tasks WHERE (patch_path IS NOT NULL AND patch_path NOT LIKE ?) OR (edited_patch_path IS NOT NULL AND edited_patch_path NOT LIKE ?)`).get(`${storage.dataPath}%`, `${storage.dataPath}%`).count, 0, 'all 75 legacy project output references checkpoint into component-private materializations');
     migrated.close();
     fs.renameSync(legacyRoot, `${legacyRoot}.removed`); fs.renameSync(legacyProjectReturn, `${legacyProjectReturn}.removed`);
-    assert((await invoke('team.media.authorize.v1', { kind: 'working', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' })).url);
-    assert((await invoke('team.media.authorize.v1', { kind: 'returned', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1 })).url);
+    assert((await invoke('team.media.authorize.v1', { kind: 'working', variant: 'preview', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' })).url);
+    assert((await invoke('team.media.authorize.v1', { kind: 'returned', variant: 'preview', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1 })).url);
     assert((await invoke('team.workflow.return-review.get.v1')).review, 'legacy review session remains readable after V2 adoption');
-    assert((await invoke('team.media.authorize.v1', { kind: 'review-return', reviewSessionId: 'review-1', returnId: 'return-1' })).url, 'legacy review media is served only from adopted private storage');
+    assert((await invoke('team.media.authorize.v1', { kind: 'review-return', variant: 'preview', reviewSessionId: 'review-1', returnId: 'return-1' })).url, 'legacy review media is served only from adopted private storage');
     await invoke('team.identity.complete.v1', { photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1, completed: false });
     assert(fs.existsSync(path.join(projectRoot, '团片协作', '第1周', '人物 A', 'one_人物1.png')), 'reconcile republishes the relay file through V2 output ownership');
     console.log(`Team-retouch V1 storage/output to Host V2 migration regression passed; first 2400-file unadopted snapshot ${firstSnapshotElapsedMs}ms`);

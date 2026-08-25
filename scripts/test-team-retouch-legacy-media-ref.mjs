@@ -9,7 +9,7 @@ globalThis.window = {
     contractVersion: 1,
     rpc: async (method, payload) => {
       calls.push({ method, payload });
-      if (method === 'team.media.authorize.v1' && payload.taskId === failedTaskId) throw new Error('工作图授权失败：任务版本不存在');
+      if (method === 'team.media.authorize.v1' && payload.taskId === failedTaskId) return { success: false, state: 'MISSING', category: 'history-reference-missing', error: '工作图任务不存在或文件缺失' };
       if (method === 'team.patch.get.v1') return { success: true, baseVersionId: 'registration-base', photo: { id: 'bundle-photo', currentVersionId: 'new-current' }, versions: [{ id: 'registration-base' }, { id: 'new-current', isCurrent: true }], tasks: [{ id: 'bundle-task', baseVersionId: 'registration-base' }] };
       return { success: true, url: `photoflow-media:test/${calls.length}` };
     },
@@ -39,10 +39,10 @@ assert.equal((await legacyApi.getMediaThumbnail(cases[2].ref)).previewUrl, 'phot
 assert.equal((await legacyApi.getMediaOriginal(cases[3].ref)).mediaUrl, 'photoflow-media:test/4');
 assert.equal((await legacyApi.openTeamPatch(cases[1].ref)).success, true);
 assert.deepEqual(calls, [
-  { method: 'team.media.authorize.v1', payload: cases[0].value },
-  { method: 'team.media.authorize.v1', payload: cases[1].value },
-  { method: 'team.media.authorize.v1', payload: cases[2].value },
-  { method: 'team.media.authorize.v1', payload: cases[3].value },
+  { method: 'team.media.authorize.v1', payload: { ...cases[0].value, variant: 'original' } },
+  { method: 'team.media.authorize.v1', payload: { ...cases[1].value, variant: 'preview' } },
+  { method: 'team.media.authorize.v1', payload: { ...cases[2].value, variant: 'preview' } },
+  { method: 'team.media.authorize.v1', payload: { ...cases[3].value, variant: 'original' } },
   { method: 'team.patch.open.v1', payload: cases[1].value },
 ]);
 const rejected = await legacyApi.openTeamPatch(cases[2].ref);

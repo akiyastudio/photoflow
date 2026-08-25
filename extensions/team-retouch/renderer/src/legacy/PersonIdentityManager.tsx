@@ -223,10 +223,6 @@ const ReturnImage = ({ filePath, cacheConfig, active: componentActive = true, ea
       } else {
         const thumbnail = await legacyApi.getMediaThumbnail(filePath, 'image', cacheConfig, 480, 1, 0);
         nextUrl = thumbnail.previewUrl || '';
-        if (!nextUrl) {
-          const original = await legacyApi.getMediaOriginal(filePath, 'image', cacheConfig);
-          if (original.success && original.mediaUrl) nextUrl = original.mediaUrl;
-        }
       }
       if (!active || !nextUrl) return;
       returnImageUrls.set(key, nextUrl);

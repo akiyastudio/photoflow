@@ -39,15 +39,15 @@ function ConfirmDialog({ title, message, confirmLabel = '确认', danger = false
   return <Dialog title={title} close={close}><div className="dialog-body"><p>{message}</p></div><footer><button className="btn" onClick={close}>取消</button><button className={`btn ${danger ? 'danger-solid' : 'primary'}`} onClick={confirm}>{confirmLabel}</button></footer></Dialog>;
 }
 
-function useAuthorizedMedia(media: MediaRef | undefined, enabled: boolean) {
+function useAuthorizedMedia(media: MediaRef | undefined, enabled: boolean, variant: 'preview' | 'original' = 'preview') {
   const [source, setSource] = useState('');
   const key = JSON.stringify(media || {});
   useEffect(() => {
     let mounted = true; setSource('');
     if (!enabled || !media) return () => { mounted = false; };
-    void rpc<Json>('team.media.authorize.v1', media).then(result => { if (mounted && result.success !== false && /^photoflow-media:/i.test(String(result.url || ''))) setSource(String(result.url)); }).catch(() => undefined);
+    void rpc<Json>('team.media.authorize.v1', { ...media, variant }).then(result => { if (mounted && result.success !== false && /^photoflow-media:/i.test(String(result.url || ''))) setSource(String(result.url)); }).catch(() => undefined);
     return () => { mounted = false; };
-  }, [enabled, key]);
+  }, [enabled, key, variant]);
   return source;
 }
 
@@ -69,7 +69,7 @@ function ImagePreview({ media, alt, enabled, overlay, imageStyle }: { media?: Me
 function CropEditor({ photo, task, active, close, save }: { photo: Json; task: Json; active: boolean; close: () => void; save: (crop: Crop) => void }) {
   const bounds = { width: Number(task.sourceWidth || task.maskWidth || photo.width || Number(task.mask?.width || 0) * Number(task.mask?.scale || 0) || task.crop?.width || 1), height: Number(task.sourceHeight || task.maskHeight || photo.height || Number(task.mask?.height || 0) * Number(task.mask?.scale || 0) || task.crop?.height || 1) };
   const [crop, setCrop] = useState<Crop>(() => clampCrop(task.crop || { x: 0, y: 0, ...bounds }, bounds));
-  const source = useAuthorizedMedia({ kind: 'original', photoId: photo.photoId, baseVersionId: photo.baseVersionId }, active);
+  const source = useAuthorizedMedia({ kind: 'original', photoId: photo.photoId, baseVersionId: photo.baseVersionId }, active, 'original');
   const drag = useRef<{ x: number; y: number; crop: Crop; handle: CropHandle }>();
   const move = (event: ReactPointerEvent<SVGSVGElement>) => {
     if (!drag.current) return;

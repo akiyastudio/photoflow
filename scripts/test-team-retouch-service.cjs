@@ -33,6 +33,7 @@ assert(externalMappingUsed, 'online external media paths must use the existing m
 const broker = new ComponentCapabilityBroker();
 const bundles = new Map();
 const requestedPhotoIds = [];
+let unavailableProjectPreviewPhotoId = '';
 let hostIdentityCompletionCalls = 0;
 const taskHandles = new Map();
 const backgroundTasks = {
@@ -92,14 +93,15 @@ broker.register('project.media.variants.v2', async (payload, ctx) => {
   const listed = await broker.invoke(legacyDescriptor, 'project.media.read.v1', payload.relativePath ? { relativePaths: [payload.relativePath] } : { photoIds: [payload.photoId] }, ctx);
   const bundle = listed.items[0]; const version = (bundle?.versions || []).find(item => !payload.versionId || String(item.id) === String(payload.versionId)) || bundle?.versions?.find(item => item.isCurrent) || bundle?.versions?.at(-1);
   if (!bundle?.photo || !version) throw new Error('Media was not found');
+  if (payload.photoId === unavailableProjectPreviewPhotoId && payload.variants?.includes('preview')) throw Object.assign(new Error('Preview variant could not be generated for C:\\private\\source.jpg'), { code: 'COMPONENT_HOST_VARIANT_UNAVAILABLE', retryable: true });
   const token = `component-input:v2:${require('crypto').randomUUID()}`; inputTokens.set(token, version.filePath);
   const original = `photoflow-media:${path.basename(version.filePath)}`;
   const preview = ['.dng', '.heic'].includes(path.extname(version.filePath).toLowerCase()) ? 'photoflow-media:generated-preview' : original;
-  return { apiVersion: 2, mediaRef: { photoId: bundle.photo.id, versionId: version.id, relativePath: version.relativePath || bundle.relativePath }, metadata: { photoId: bundle.photo.id, versionId: version.id, currentVersionId: bundle.photo.currentVersionId || version.id, displayName: bundle.photo.displayName || '', originalName: bundle.photo.originalName || path.basename(version.filePath), relativePath: version.relativePath || bundle.relativePath || path.basename(version.filePath), isCurrent: Boolean(version.isCurrent), fileMissing: Boolean(version.fileMissing) }, variants: { preview: { url: preview, maxEdge: 1600, derived: true }, original: { url: original, byteLength: fs.existsSync(version.filePath) ? fs.statSync(version.filePath).size : 0, derived: false } }, input: { token, expiresAt: Date.now() + 60000 } };
+  return { apiVersion: 2, mediaRef: { photoId: bundle.photo.id, versionId: version.id, relativePath: version.relativePath || bundle.relativePath }, metadata: { photoId: bundle.photo.id, versionId: version.id, currentVersionId: bundle.photo.currentVersionId || version.id, displayName: bundle.photo.displayName || '', originalName: bundle.photo.originalName || path.basename(version.filePath), relativePath: version.relativePath || bundle.relativePath || path.basename(version.filePath), isCurrent: Boolean(version.isCurrent), fileMissing: Boolean(version.fileMissing) }, variants: { ...(payload.variants?.includes('preview') ? { preview: { url: preview, maxEdge: 1600, derived: true } } : {}), ...(payload.variants?.includes('original') ? { original: { url: original, byteLength: fs.existsSync(version.filePath) ? fs.statSync(version.filePath).size : 0, derived: false } } : {}) }, ...(payload.variants?.includes('original') ? { input: { token, expiresAt: Date.now() + 60000 } } : {}) };
 });
 broker.register('project.media.page.v2', () => ({ apiVersion: 2, items: [], page: { hasMore: false, cursor: null, pageSize: 100 } }));
 broker.register('project.input.tokens.v2', payload => { const source = inputTokens.get(payload.token); if (!source) throw new Error('Input token expired'); const inputId = require('crypto').randomUUID(); const directory = path.join(componentDataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); return { apiVersion: 2, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; });
-broker.register('component.media.v2', async payload => { const filePath = path.join(dataRoot, 'team-retouch', payload.relativePath); if (!fs.existsSync(filePath)) throw new Error('Component private media is missing'); const url = `photoflow-media:${path.basename(filePath)}`; return payload.action === 'variants' ? { apiVersion: 2, opaqueRef: `component-media:v2:${payload.relativePath}`, variants: { preview: { url, maxEdge: 1600, derived: true }, original: { url, byteLength: fs.statSync(filePath).size, derived: false } } } : { apiVersion: 2, opaqueRef: `component-media:v2:${payload.relativePath}`, action: payload.action, opened: true, success: true }; });
+broker.register('component.media.v2', async payload => { const filePath = path.join(dataRoot, 'team-retouch', payload.relativePath); if (!fs.existsSync(filePath)) throw Object.assign(new Error('Component private media is missing'), { code: 'COMPONENT_HOST_NOT_FOUND' }); const url = `photoflow-media:${path.basename(filePath)}`; return payload.action === 'variants' ? { apiVersion: 2, opaqueRef: `component-media:v2:${payload.relativePath}`, variants: { ...(payload.variants?.includes('preview') ? { preview: { url, maxEdge: 1600, derived: true } } : {}), ...(payload.variants?.includes('original') ? { original: { url, byteLength: fs.statSync(filePath).size, derived: false } } : {}) } } : { apiVersion: 2, opaqueRef: `component-media:v2:${payload.relativePath}`, action: payload.action, opened: true, success: true }; });
 broker.register('dialogs.v2', async (payload, ctx) => { const legacy = await broker.invoke(legacyDescriptor, 'dialogs.open.v1', payload.multiple === false ? { kind: 'image', title: payload.title } : { action: 'select-images' }, ctx); const paths = legacy.filePath ? [legacy.filePath] : (legacy.tokens || []).map(token => token.replace(/^media-token:/, '')); const inputs = paths.map(filePath => { const token = `component-input:v2:${require('crypto').randomUUID()}`; inputTokens.set(token, filePath); return { name: path.basename(filePath), token, expiresAt: Date.now() + 60000 }; }); return { apiVersion: 2, cancelled: Boolean(legacy.cancelled), inputs }; });
 broker.register('tasks.v2', async (payload, ctx) => { const legacy = await broker.invoke(legacyDescriptor, 'tasks.report.v1', { ...payload, kind: 'workspace-team-workflow' }, ctx); return { apiVersion: 2, task: legacy.task || null, cancelled: Boolean(legacy.cancelled) }; });
 broker.register('component.events.v2', () => ({ apiVersion: 2, emitted: true }));
@@ -150,7 +152,7 @@ const ready = new Promise((resolve, reject) => {
       assert(frame.method.endsWith('.v2'), `service emitted a non-V2 host capability frame: ${frame.method}`);
       Promise.resolve().then(() => broker.invoke(descriptor, frame.method, frame.payload, context)).then(
         result => child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: true, result })}\n`),
-        error => child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: false, error: error.message })}\n`),
+        error => child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: false, error: error.message, errorCode: error.code, retryable: error.retryable === true })}\n`),
       );
       return;
     }
@@ -214,30 +216,41 @@ const ready = new Promise((resolve, reject) => {
     const markerDb = new DatabaseSync(databasePath); const markerHash = value => require('crypto').createHash('sha256').update(value).digest('hex').slice(0, 24);
     assert.equal(markerDb.prepare('SELECT value FROM meta WHERE key=?').get(`legacy_project_artifacts_v2:${markerHash('project-1')}`)?.value, 'committed');
     assert.equal(markerDb.prepare('SELECT value FROM meta WHERE key=?').get(`legacy_project_artifacts_v2:${markerHash('project-other')}`), undefined, 'project A marker must not hide project B migration'); markerDb.close();
-    const originalAccess = await invoke('team.media.authorize.v1', { kind: 'original', photoId: 'photo-1', baseVersionId: 'version-1' });
+    capabilityFrames.length = 0;
+    const originalAccess = await invoke('team.media.authorize.v1', { kind: 'original', variant: 'original', photoId: 'photo-1', baseVersionId: 'version-1' });
     assert.equal(originalAccess.url, 'photoflow-media:one.jpg');
-    assert.equal((await invoke('team.media.authorize.v1', { kind: 'working', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', filePath: 'C:/escape' })).url, 'photoflow-media:authorized-patch.png');
+    assert.deepEqual(capabilityFrames.find(frame => frame.method === 'project.media.variants.v2')?.payload.variants, ['original']); assert.equal(originalAccess.previewUrl, undefined, 'explicit original authorization never carries an unrequested preview URL');
+    assert.equal((await invoke('team.media.authorize.v1', { kind: 'working', variant: 'preview', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', filePath: 'C:/escape' })).url, 'photoflow-media:authorized-patch.png');
+    assert.deepEqual(capabilityFrames.filter(frame => frame.method === 'component.media.v2').at(-1)?.payload.variants, ['preview'], 'working thumbnails request only the preview variant');
+    const authorizedPatchPath = path.join(componentDataRoot, 'authorized-patch.png'); const unavailablePatchPath = `${authorizedPatchPath}.missing`; fs.renameSync(authorizedPatchPath, unavailablePatchPath);
+    const missingWorkingPreview = await invoke('team.media.authorize.v1', { kind: 'working', variant: 'preview', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' }); fs.renameSync(unavailablePatchPath, authorizedPatchPath);
+    assert.deepEqual({ success: missingWorkingPreview.success, state: missingWorkingPreview.state, category: missingWorkingPreview.category, url: missingWorkingPreview.url }, { success: false, state: 'MISSING', category: 'history-reference-missing', url: undefined }, 'missing historical component media is a normal placeholder state');
+    unavailableProjectPreviewPhotoId = 'photo-1'; const unavailablePreview = await invoke('team.media.authorize.v1', { kind: 'original', variant: 'preview', photoId: 'photo-1', baseVersionId: 'version-1' }); unavailableProjectPreviewPhotoId = '';
+    assert.deepEqual({ success: unavailablePreview.success, state: unavailablePreview.state, category: unavailablePreview.category, url: unavailablePreview.url, originalUrl: unavailablePreview.originalUrl }, { success: false, state: 'MISSING', category: 'variant-unavailable', url: undefined, originalUrl: undefined }, 'preview generation failure is a normal path-free media state and never falls back to original');
+    assert(!JSON.stringify(unavailablePreview).includes('private') && !JSON.stringify(unavailablePreview).includes('source.jpg'));
+    assert.deepEqual(capabilityFrames.filter(frame => frame.method === 'project.media.variants.v2').at(-1)?.payload.variants, ['preview'], 'failed preview capability requests never include original');
+    await assert.rejects(invoke('team.media.authorize.v1', { kind: 'original', variant: 'thumbnail', photoId: 'photo-1', baseVersionId: 'version-1' }), /Unsupported team media variant/, 'unknown media variants fail the strict service allowlist');
     assert.equal((await invoke('team.patch.open.v1', { photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' })).success, true);
     const returnedPath = path.join(componentDataRoot, 'returned-patch.png'); fs.writeFileSync(returnedPath, 'returned');
     const returnedDb = new DatabaseSync(databasePath); returnedDb.prepare('UPDATE team_patch_tasks SET edited_patch_path=?,status=? WHERE id=?').run(returnedPath, 'uploaded', 'task-1'); returnedDb.close();
-    assert.equal((await invoke('team.media.authorize.v1', { kind: 'returned', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' })).url, 'photoflow-media:returned-patch.png');
-    const returnedAuthorizations = await Promise.all(Array.from({ length: 141 }, () => invoke('team.media.authorize.v1', { kind: 'returned', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' })));
+    assert.equal((await invoke('team.media.authorize.v1', { kind: 'returned', variant: 'preview', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' })).url, 'photoflow-media:returned-patch.png');
+    const returnedAuthorizations = await Promise.all(Array.from({ length: 141 }, () => invoke('team.media.authorize.v1', { kind: 'returned', variant: 'preview', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1' })));
     assert.equal(returnedAuthorizations.filter(result => result.url === 'photoflow-media:returned-patch.png').length, 141, 'returned media authorization remains stable for production assignment fan-out');
     const reviewDirectory = path.join(dataRoot, 'team-retouch', 'workflow-return-reviews', require('crypto').createHash('sha256').update('project-1').digest('hex'));
     fs.mkdirSync(reviewDirectory, { recursive: true }); const reviewPath = path.join(reviewDirectory, 'return-1.jpg'); fs.writeFileSync(reviewPath, 'review');
     fs.writeFileSync(path.join(reviewDirectory, 'session.json'), JSON.stringify({ id: 'review-session', projectName: 'Project', result: { matches: [{ returnId: 'return-1', path: reviewPath }] } }));
-    assert.equal((await invoke('team.media.authorize.v1', { kind: 'review-return', reviewSessionId: 'review-session', returnId: 'return-1' })).url, 'photoflow-media:return-1.jpg');
+    assert.equal((await invoke('team.media.authorize.v1', { kind: 'review-return', variant: 'preview', reviewSessionId: 'review-session', returnId: 'return-1' })).url, 'photoflow-media:return-1.jpg');
     fs.rmSync(reviewDirectory, { recursive: true, force: true });
     const resetReturnedDb = new DatabaseSync(databasePath); resetReturnedDb.prepare('UPDATE team_patch_tasks SET edited_patch_path=NULL,status=? WHERE id=?').run('exported', 'task-1'); resetReturnedDb.close();
     const rawPath = path.join(projectRoot, 'camera.dng'); fs.writeFileSync(rawPath, 'raw');
     bundles.set('photo-raw', { success: true, photo: { id: 'photo-raw', projectId: 'project-1', currentVersionId: 'version-raw' }, versions: [{ id: 'version-raw', filePath: rawPath, isCurrent: true }] });
-    const rawAccess = await invoke('team.media.authorize.v1', { kind: 'original', photoId: 'photo-raw', baseVersionId: 'version-raw' });
-    assert.deepEqual({ url: rawAccess.url, previewUrl: rawAccess.previewUrl, originalUrl: rawAccess.originalUrl }, { url: 'photoflow-media:generated-preview', previewUrl: 'photoflow-media:generated-preview', originalUrl: 'photoflow-media:camera.dng' }, 'RAW originals use a generated display preview while retaining a distinct original URL');
+    const rawAccess = await invoke('team.media.authorize.v1', { kind: 'original', variant: 'original', photoId: 'photo-raw', baseVersionId: 'version-raw' });
+    assert.deepEqual({ url: rawAccess.url, previewUrl: rawAccess.previewUrl, originalUrl: rawAccess.originalUrl }, { url: 'photoflow-media:camera.dng', previewUrl: undefined, originalUrl: 'photoflow-media:camera.dng' }, 'explicit RAW original access receives only the original URL');
     const heicPath = path.join(projectRoot, 'unsupported.heic'); fs.writeFileSync(heicPath, 'not-decodable');
     bundles.set('photo-heic', { success: true, photo: { id: 'photo-heic', projectId: 'project-1', currentVersionId: 'version-heic' }, versions: [{ id: 'version-heic', filePath: heicPath, isCurrent: true }] });
     await assert.rejects(invoke('team.patch.detect.v1', { photoId: 'photo-heic', baseVersionId: 'version-heic' }), /HEIC\/HEIF.*转换为 JPEG/, 'HEIC must be rejected with an actionable conversion error when no verified decoder is available');
     await assert.rejects(invoke('team.patch.open.v1', { photoId: 'photo-other', baseVersionId: 'version-other', taskId: 'task-other' }), /outside the bound project/, 'cross-project photo IDs must fail through the real service process');
-    await assert.rejects(invoke('team.media.authorize.v1', { kind: 'working', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-other' }), /outside the bound photo version/, 'a task from another photo must not authorize media');
+    await assert.rejects(invoke('team.media.authorize.v1', { kind: 'working', variant: 'preview', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-other' }), /outside the bound photo version/, 'a task from another photo must not authorize media');
     await assert.rejects(invoke('team.identity.complete.v1', { photoId: 'photo-1', baseVersionId: 'other-version', personIndex: 1 }), /outside the bound photo/, 'cross-version completion must fail through the real service process');
     assert.equal((await invoke('team.advanced.preflight.v1')).action, 'preflight');
     const saved = await invoke('team.identity.save.v1', { name: '人物 A', assignments: [] });
@@ -340,9 +353,9 @@ const ready = new Promise((resolve, reject) => {
     assert.equal(capabilityFrames.filter(frame => frame.method === 'project.input.tokens.v2').length, 0, 'repeated project loads do not grow component-private inputs');
     assert.equal(new Set(scaledSnapshot.photos.map(photo => photo.relativePath)).size, 27, 'every registered photo keeps one unique project-relative base path');
     assert(scaledSnapshot.photos.every(photo => photo.relativePath && !path.isAbsolute(photo.relativePath) && !photo.relativePath.split(/[\\/]/).includes('..')), 'all snapshot paths remain non-empty and inside the project namespace');
-    const originalAuthorizations = await Promise.all(scaledSnapshot.photos.map(photo => invoke('team.media.authorize.v1', { kind: 'original', photoId: photo.photoId, baseVersionId: photo.baseVersionId })));
+    const originalAuthorizations = await Promise.all(scaledSnapshot.photos.map(photo => invoke('team.media.authorize.v1', { kind: 'original', variant: 'preview', photoId: photo.photoId, baseVersionId: photo.baseVersionId })));
     assert.equal(originalAuthorizations.filter(result => result.url).length, 27, 'all production-sized original previews receive a loadable URL');
-    const workingRequests = scaledSnapshot.photos.flatMap(photo => photo.tasks.map(task => ({ kind: 'working', photoId: photo.photoId, baseVersionId: photo.baseVersionId, taskId: task.id })));
+    const workingRequests = scaledSnapshot.photos.flatMap(photo => photo.tasks.map(task => ({ kind: 'working', variant: 'preview', photoId: photo.photoId, baseVersionId: photo.baseVersionId, taskId: task.id })));
     const workingAuthorizations = await Promise.all(workingRequests.map(request => invoke('team.media.authorize.v1', request)));
     assert.equal(workingAuthorizations.filter(result => result.url).length, 80, 'all production-sized working previews receive a loadable URL');
     assert.equal(scaledSnapshot.photos.reduce((total, photo) => total + photo.tasks.length, 0), 80, 'a production-sized snapshot retains all bound project tasks');
@@ -355,7 +368,7 @@ const ready = new Promise((resolve, reject) => {
     console.log(`Production-sized team snapshot: ${scaledSnapshot.photos.length} photos / ${scaledSnapshot.photos.reduce((total, photo) => total + photo.tasks.length, 0)} tasks / ${snapshotMediaReadCount} snapshot media reads / ${scaleBytes} bytes / ${scaleElapsedMs}ms`);
     const assignmentReturnedPath = path.join(componentDataRoot, 'assignment-returned.png'); fs.writeFileSync(assignmentReturnedPath, 'assignment-returned');
     const assignmentReturnedDb = new DatabaseSync(databasePath); assignmentReturnedDb.prepare('UPDATE team_person_assignments SET edited_patch_path=?,completed=1,completion_kind=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?').run(assignmentReturnedPath, 'returned', 'project-1', 'photo-1', 'version-1', 1); assignmentReturnedDb.close();
-    assert.equal((await invoke('team.media.authorize.v1', { kind: 'returned', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1 })).url, 'photoflow-media:assignment-returned.png', 'person-scoped returned references resolve the assignment artifact instead of the shared task return');
+    assert.equal((await invoke('team.media.authorize.v1', { kind: 'returned', variant: 'preview', photoId: 'photo-1', baseVersionId: 'version-1', taskId: 'task-1', personIndex: 1 })).url, 'photoflow-media:assignment-returned.png', 'person-scoped returned references resolve the assignment artifact instead of the shared task return');
     await invoke('team.identity.delete.v1', { identityId: saved.identityId });
     assert.equal((await invoke('team.project.get.v1')).identities.length, 0);
     console.log('Team-retouch component service integration tests passed');

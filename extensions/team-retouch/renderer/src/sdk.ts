@@ -56,6 +56,8 @@ export const readableComponentRpcError = (method: string, error: unknown) => {
   return firstLine && /[\u3400-\u9fff]/.test(firstLine) && !/[A-Z]:\\|localhost|ipc/i.test(firstLine)
     ? firstLine.slice(0, 180) : '团片操作暂时失败，请重试；若持续发生，请重启应用。';
 };
+export type TeamMediaVariant = 'preview' | 'original';
+export type TeamMediaAuthorizeRequest = { kind: 'original' | 'working' | 'returned' | 'review-return'; variant: TeamMediaVariant; photoId?: string; baseVersionId?: string; taskId?: string; personIndex?: number; reviewSessionId?: string; returnId?: string };
 
 export const rpc = async <T = unknown>(method: string, payload?: unknown) => {
   if (!allowedMethods.has(method)) throw new Error(`组件未声明此能力：${method}`);

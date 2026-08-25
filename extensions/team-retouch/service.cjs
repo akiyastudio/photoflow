@@ -1249,12 +1249,26 @@ const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomai
     throw error;
   }
 });
-const mediaRequest = payload => Object.fromEntries(['kind', 'photoId', 'baseVersionId', 'taskId', 'personIndex', 'reviewSessionId', 'returnId'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
+const TEAM_MEDIA_VARIANTS = new Set(['preview', 'original']);
+const mediaRequest = payload => Object.fromEntries(['kind', 'variant', 'photoId', 'baseVersionId', 'taskId', 'personIndex', 'reviewSessionId', 'returnId'].filter(field => Object.hasOwn(payload || {}, field)).map(field => [field, payload[field]]));
+const unavailableMedia = (variant, category) => ({ success: false, state: 'MISSING', category, variant, error: category === 'variant-unavailable' ? (variant === 'preview' ? '预览暂时无法生成，可重试或明确打开原图' : '原图暂时无法读取，请检查历史文件后重试') : '历史媒体引用缺失或文件暂时不可用' });
+const expectedMediaError = (error, variant) => {
+  const code = String(error?.code || '');
+  if (code === 'COMPONENT_HOST_VARIANT_UNAVAILABLE') return unavailableMedia(variant, 'variant-unavailable');
+  if (code === 'COMPONENT_HOST_NOT_FOUND') return unavailableMedia(variant, 'history-reference-missing');
+  return null;
+};
 const componentMediaV2 = async (parentId, payload, action = 'variants') => {
+  const variant = String(payload.variant || '');
+  if (action === 'variants' && !TEAM_MEDIA_VARIANTS.has(variant)) throw new Error('Unsupported team media variant; expected preview or original');
   if (payload.kind === 'original') {
     if (action !== 'variants') return { success: false, error: '原图由项目媒体查看器打开' };
-    const media = await callHostV2(parentId, 'project.media.variants.v2', { photoId: payload.photoId, versionId: payload.baseVersionId, variants: ['preview', 'original'] });
-    return { success: true, url: media.variants.preview?.url || media.variants.original?.url, previewUrl: media.variants.preview?.url, originalUrl: media.variants.original?.url, opaqueRef: media.mediaRef };
+    let media;
+    try { media = await callHostV2(parentId, 'project.media.variants.v2', { photoId: payload.photoId, versionId: payload.baseVersionId, variants: [variant] }); }
+    catch (error) { const expected = expectedMediaError(error, variant); if (expected) return expected; throw error; }
+    const url = media.variants?.[variant]?.url;
+    if (!url) return unavailableMedia(variant, 'variant-unavailable');
+    return { success: true, variant, url, ...(variant === 'preview' ? { previewUrl: url } : { originalUrl: url }), opaqueRef: media.mediaRef };
   }
   const storage = await hostStorage(parentId);
   let candidate = '';
@@ -1277,11 +1291,16 @@ const componentMediaV2 = async (parentId, payload, action = 'variants') => {
       }
     } finally { db.close(); }
   }
-  if (!candidate || !isInside(storage.dataPath, candidate)) throw new Error('组件媒体引用已失效');
+  if (!candidate) return unavailableMedia(variant, 'history-reference-missing');
+  if (!isInside(storage.dataPath, candidate)) throw new Error('组件媒体 outside the bound component storage');
   const relativePath = path.relative(storage.dataPath, candidate).replace(/\\/g, '/');
   if (action === 'open') return callHostV2(parentId, 'component.media.v2', { action: 'open', relativePath });
-  const media = await callHostV2(parentId, 'component.media.v2', { action: 'variants', relativePath, variants: ['preview', 'original'] });
-  return { success: true, url: media.variants.preview?.url || media.variants.original?.url, previewUrl: media.variants.preview?.url, originalUrl: media.variants.original?.url, opaqueRef: media.opaqueRef };
+  let media;
+  try { media = await callHostV2(parentId, 'component.media.v2', { action: 'variants', relativePath, variants: [variant] }); }
+  catch (error) { const expected = expectedMediaError(error, variant); if (expected) return expected; throw error; }
+  const url = media.variants?.[variant]?.url;
+  if (!url) return unavailableMedia(variant, 'variant-unavailable');
+  return { success: true, variant, url, ...(variant === 'preview' ? { previewUrl: url } : { originalUrl: url }), opaqueRef: media.opaqueRef };
 };
 const completeIdentity = (parentId, payload, context) => withDomain(parentId, async db => {
   const photoId = String(payload.photoId || '');
