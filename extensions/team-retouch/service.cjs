@@ -2450,7 +2450,6 @@ const assertExpectedRevision = async (parentId, payload, context) => {
   const actual = await readDomainRevision(parentId, context);
   if (String(payload.expectedRevision) !== actual) throw Object.assign(new Error('团片数据已被其他操作更新，请刷新后重试'), { code: 'COMPONENT_HOST_CONFLICT', retryable: true });
 };
-
 const handlers = {
   'team.project.get.v1': async (parentId, _payload, context) => {
     const startedAt = Date.now();
