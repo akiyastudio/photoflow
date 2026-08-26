@@ -5,13 +5,13 @@ PhotoFlow 把可选扩展包称为 **组件（Component）**。文件名保留�
 ## 快速开始
 
 1. 把 `examples/hello-component` 复制到以组件 ID 命名的目录。
-2. 普通 V2 组件可继续使用 Host API `2`；设置页需要 API `3`，通知需要 API `4`，项目只读扩展需要 API `5`，项目写入扩展需要 API `6`；secrets、network 和新 contribution 需要 Host API `7` 与 `minHostApiVersion:7`。
+2. 所有组件只使用 Host API `7`，并同时设置 `minHostApiVersion:7` 与 `maxHostApiVersion:7`；旧 Host 2–6 清单和能力名均会拒绝。
 3. 添加一个 `workspace.toolbarAction`、一个与之相连的 `component.fullPage`、包内 UI 入口和服务入口。需要全局设置时，可额外贡献 `application.settingsPage`。
 4. 声明全部服务 RPC、Host 能力、权限和发出的事件。未声明的访问会默认拒绝。升级历史数据时，可声明 `component.storage.previous.v1` 和/或 `project.output.existing.v1` adoption grant；不要把组件业务表或路径字段加入宿主代码。
 5. 运行 `node scripts/mock-component-service.cjs path/to/service.cjs`，不启动 Electron 也能验证按行分隔的服务协议。
 6. 把目录放入 PhotoFlow 用户组件目录；源码开发时也可以放到 `extensions/`。发行包使用 `component.json`；源码开发可以使用 `component.template.json` 和现有组件构建流程。
 
-完整示例包含静态页面和 Node 服务。页面只调用 `window.photoFlowComponent`，服务向宿主请求一页媒体。`component-sdk/index.d.ts` 提供全部 V2 能力的请求、结果、错误、事件和 JSONL 帧映射；`component-sdk/service.cjs` 为服务后端提供 `callHost`、`acceptFrame` 和 `failAll`。
+完整示例包含静态页面和 Node 服务。页面只调用 `window.photoFlowComponent`，服务向宿主请求一页媒体。`component-sdk/index.d.ts` 提供全部 Host API V7 能力的请求、结果、错误、事件和 JSONL 帧映射；`component-sdk/service.cjs` 为服务后端提供 `callHost`、`acceptFrame` 和 `failAll`。
 
 ## 包结构
 
@@ -28,14 +28,13 @@ hello-component/
 ## UI 教程
 
 ```ts
-import { host, assertHostApiV2, assertHostApiV4 } from '../../component-sdk/index.js';
+import { host, assertHostApiV7 } from '../../component-sdk/index.js';
 
 const context = await host.getContext();
-assertHostApiV2(context);
+assertHostApiV7(context);
 const page = await host.rpc('my-component.load.v1', { cursor: null });
 const stop = host.onEvent('my-component.progress.v1', update => render(update));
 if (host.notify) {
-  assertHostApiV4(context);
   await host.notify({ tone: 'success', message: '设置已保存', dedupeKey: 'settings.saved' });
 }
 window.addEventListener('pagehide', stop, { once: true });
@@ -43,11 +42,11 @@ window.addEventListener('pagehide', stop, { once: true });
 
 UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航、新窗口和浏览器权限都被关闭。使用上下文中解析后的明暗主题，并监听主题/上下文变化。控件应支持键盘操作、显示可见焦点、为表单提供标签、尊重“减少动态效果”，并且不能假设宿主页面始终激活。页面停用或销毁时释放计时器和订阅。
 
-渲染层通常调用组件自有 RPC，而不是直接调用 Host 能力。唯一的受控 UI 快捷桥是 API4 `notify`：它只接受严格的纯文本结构，不能携带 HTML、回调、URL、路径或任意 channel。组件服务是后端协议端点，只能请求清单授权的 Host 能力；只有后端自身产生短状态时才使用 `notifications.v7`。长任务和确认仍分别使用 `tasks.v7` 与 `dialogs.v7`。
+渲染层通常调用组件自有 RPC，而不是直接调用 Host 能力。唯一的受控 UI 快捷桥是 Host API 7 `notify`：它只接受严格的纯文本结构，不能携带 HTML、回调、URL、路径或任意 channel。组件服务是后端协议端点，只能请求清单授权的 Host 能力；只有后端自身产生短状态时才使用 `notifications.v7`。长任务和确认仍分别使用 `tasks.v7` 与 `dialogs.v7`。
 
 ### 可选的应用设置页
 
-`application.settingsPage` 是 Host API 3 特性，会在已安装且校验成功后动态出现在“组件管理”之后。它与项目整页一样使用独立的 sandboxed `WebContentsView` 和组件 preload，但 `context.surface` 为 `application.settings`，项目字段为空。
+`application.settingsPage` 是 Host API 7 特性，会在已安装且校验成功后动态出现在“组件管理”之后。它与项目整页一样使用独立的 sandboxed `WebContentsView` 和组件 preload，但 `context.surface` 为 `application.settings`，项目字段为空。
 
 ```json
 {
@@ -60,7 +59,7 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 }
 ```
 
-`rpcMethods` 必须是 `service.rpcMethods` 的子集，且只有这些方法能从设置页调用。设置 surface 的服务再向 Host 请求时，默认拒绝所有项目、媒体、存储、任务和事件能力；只允许清单已授权的 `component.settings.v7`、`component.lifecycle.v7`、确认对话框和 API4 通知。不要在此 surface 调用项目 RPC。
+`rpcMethods` 必须是 `service.rpcMethods` 的子集，且只有这些方法能从设置页调用。设置 surface 的服务再向 Host 请求时，默认拒绝所有项目、媒体、存储、任务和事件能力；只允许清单已授权的 `component.settings.v7`、`component.lifecycle.v7`、确认对话框和 Host API 7 通知。不要在此 surface 调用项目 RPC。
 
 ## 后端服务教程
 
@@ -73,9 +72,9 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 
 完整实现见 `examples/hello-component/service.cjs`。普通同步请求 60 秒超时，帧和载荷上限 2 MiB。长任务应启动 `tasks.v7` 操作，频繁保存检查点，把控制权还给 UI，并在取消或重启后从最后检查点恢复。
 
-Host API 5 服务可在清单显式声明后调用只读扩展，例如 `callHost(parentId, 'project.files.search.v7', { query:'xmp', pageSize:50 })`。同时声明 `project.files.read`；媒体元数据复用 `project.media.read`，版本与评分分别声明 `project.versions.read`、`project.media.ratings.read`。这些结果只含项目虚拟相对路径和稳定 ID，不要尝试从游标、媒体引用或图节点推导绝对路径。
+Host API 7 服务可在清单显式声明后调用只读扩展，例如 `callHost(parentId, 'project.files.search.v7', { query:'xmp', pageSize:50 })`。同时声明 `project.files.read`；媒体元数据复用 `project.media.read`，版本与评分分别声明 `project.versions.read`、`project.media.ratings.read`。这些结果只含项目虚拟相对路径和稳定 ID，不要尝试从游标、媒体引用或图节点推导绝对路径。
 
-Host API 6 提供按能力拆分权限的项目写入扩展。参考 `examples/project-write-v6`：评分使用逐项语义，checked 与旧评分 outbox 共用 ExifTool per-file 队列；版本/进度使用数据库 CAS，并在 DB 内再次验证 scope；导入 reservation 不延长一次性 input token 的原始寿命；所有恢复重新验证物理 canonical scope、链接、摘要和 owner/identity。文件变更及 undo 都使用逐项 intent/applied 日志；目录 move 限同卷，trash/restore 的未知 OS 结果会安全停止并要求人工恢复。Office 空输出先在私有 stage 写 owner marker，再原子发布。媒体长调用当前会 await 完成，可用相同幂等键调用 `status`/`cancel`；receipt 恢复会同步 task 为 completed，卸载会取消活动 import/process。所有幂等键、plan、token 和收据都绑定 component/workspace/project/scope，设置页 surface 默认拒绝。
+Host API 7 提供按能力拆分权限的项目写入扩展。参考 `examples/project-write-v7`：评分使用逐项语义，checked 与旧评分 outbox 共用 ExifTool per-file 队列；版本/进度使用数据库 CAS，并在 DB 内再次验证 scope；导入 reservation 不延长一次性 input token 的原始寿命；所有恢复重新验证物理 canonical scope、链接、摘要和 owner/identity。文件变更及 undo 都使用逐项 intent/applied 日志；目录 move 限同卷，trash/restore 的未知 OS 结果会安全停止并要求人工恢复。Office 空输出先在私有 stage 写 owner marker，再原子发布。媒体长调用当前会 await 完成，可用相同幂等键调用 `status`/`cancel`；receipt 恢复会同步 task 为 completed，卸载会取消活动 import/process。所有幂等键、plan、token 和收据都绑定 component/workspace/project/scope，设置页 surface 默认拒绝。
 
 ## 安全的“媒体 → 版本”流程
 
@@ -99,7 +98,7 @@ stage 元数据与登记文件保留 24 小时，因此宿主重启后可以继�
 
 ## 测试与发布
 
-- `npm run test:component-host-v2` 先检查 SDK 类型，再检查 Host API 2–6 协商、权限、读写 scope、stage/导入恢复、CAS、幂等、文件 undo、进度、任务、媒体处理、对话框、事件和服务模拟器。
+- `npm run test:component-host-v7` 先检查 SDK 类型，再检查 Host API 7 一致性与旧 Host 2–6 拒绝、权限、读写 scope、stage/导入恢复、CAS、幂等、文件 undo、进度、任务、媒体处理、对话框、事件和服务模拟器。
 - `npm run test:component-host`、`npm run test:component-service`、`npm run test:electron-security` 和 `npm run test:architecture` 覆盖隔离与兼容性。
 - 打包前用 `electron/contracts/schemas/component-manifest-v2.schema.json` 校验清单。
 - 安装包只包含构建后的 UI、服务和运行资源；为清单声明的生命周期动作计算哈希；在干净用户配置中安装，测试取消、重启，再用真实 V1 数据测试升级与降级。

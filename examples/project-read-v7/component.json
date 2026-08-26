@@ -1,13 +1,13 @@
 {
   "apiVersion": 1,
-  "id": "project-read-v5",
+  "id": "project-read-v7",
   "version": "1.0.0",
   "componentHost": {
     "contractVersion": 2,
-    "compatibility": { "minHostApiVersion": 5, "maxHostApiVersion": 5 },
+    "compatibility": { "minHostApiVersion": 7, "maxHostApiVersion": 7 },
     "contributions": [
-      { "type": "workspace.toolbarAction", "id": "open", "label": "Project Read V5", "pageId": "main" },
-      { "type": "component.fullPage", "id": "main", "title": "Project Read V5", "entry": "ui/index.html" }
+      { "type": "workspace.toolbarAction", "id": "open", "label": "Project Read V7", "pageId": "main" },
+      { "type": "component.fullPage", "id": "main", "title": "Project Read V7", "entry": "ui/index.html" }
     ],
     "service": {
       "protocolVersion": 1,

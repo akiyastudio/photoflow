@@ -1,13 +1,13 @@
 {
   "apiVersion": 1,
-  "id": "project-write-v6",
+  "id": "project-write-v7",
   "version": "0.1.0",
   "componentHost": {
     "contractVersion": 2,
-    "compatibility": { "minHostApiVersion": 6, "maxHostApiVersion": 6 },
+    "compatibility": { "minHostApiVersion": 7, "maxHostApiVersion": 7 },
     "contributions": [
-      { "type": "workspace.toolbarAction", "id": "open", "label": "V6 写入示例", "pageId": "main" },
-      { "type": "component.fullPage", "id": "main", "title": "V6 写入示例", "entry": "ui/index.html" }
+      { "type": "workspace.toolbarAction", "id": "open", "label": "V7 写入示例", "pageId": "main" },
+      { "type": "component.fullPage", "id": "main", "title": "V7 写入示例", "entry": "ui/index.html" }
     ],
     "service": {
       "protocolVersion": 1,

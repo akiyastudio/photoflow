@@ -1,10 +1,10 @@
-# PhotoFlow Component Host API V2 规范
+# PhotoFlow Host API V7 规范
 
 本文档是新组件的规范性说明。运行时清单校验器位于 `electron/component-host-contract.cjs`，机器可读约束位于 `electron/contracts/schemas/`，公开类型位于 `component-sdk/index.d.ts`。
 
 ## 版本协商与弃用
 
-PhotoFlow 当前支持 Host API 2–7，并在组件声明的闭区间兼容范围中选择最高版本。`componentHost.contractVersion:2` 要求显式声明权限；`application.settingsPage` 从 Host API 3 开始可用，受控通知从 Host API 4 开始可用，项目只读扩展从 Host API 5 开始可用，项目写入扩展从 Host API 6 开始可用，安全 secrets、受控网络和新 contribution 从 Host API 7 开始可用。
+PhotoFlow 只支持 Host API 7。组件必须声明 `componentHost.contractVersion:2`、`minHostApiVersion:7` 和 `maxHostApiVersion:7`，并显式列出权限、能力、RPC 与事件；旧 Host 2–6 清单和能力名均默认拒绝。
 
 RPC 方法、能力和事件都以 `.vN` 结尾。已发布语义不可修改；可以增加兼容字段，消费者必须忽略未知字段。破坏性变化使用新的方法/事件版本。弃用版本至少保留一个正常组件迁移窗口，并在移除前记录。`electron/compatibility/` 下的 V1 业务适配器已经弃用，不属于公开 API，也不再增加方法。
 
@@ -12,7 +12,7 @@ RPC 方法、能力和事件都以 `.vN` 结尾。已发布语义不可修改；
 
 ## 清单与权限
 
-V2 必须声明合约版本、兼容范围、贡献项、服务协议/运行时/入口、版本化 RPC 白名单、Host 能力白名单和权限白名单；无事件时也要显式写空数组。能力需要匹配权限：
+Component Host contractVersion 2 必须声明合约版本、兼容范围、贡献项、服务协议/运行时/入口、版本化 RPC 白名单、Host 能力白名单和权限白名单；无事件时也要显式写空数组。能力需要匹配权限：
 
 | 能力 | 权限 | 用途 |
 | --- | --- | --- |
@@ -48,27 +48,27 @@ V2 必须声明合约版本、兼容范围、贡献项、服务协议/运行时/
 
 权限在解析清单时检查一次，每次能力调用时再次检查。组件 ID/版本、项目 ID/名称/状态和作用域来自绑定的宿主页面，载荷不能覆盖这些身份。
 
-Host API 3 的 V2 清单可选声明 `application.settingsPage`，其 `id`、`label`、可选 `title`、包内 `entry` 和 `rpcMethods` 都经严格校验。设置页上下文的 `surface` 是 `application.settings`，没有项目身份；页面只能调用 contribution 列出且同时存在于 `service.rpcMethods` 的方法。服务在该 surface 下仅能使用已授权的组件设置、生命周期、确认对话框和 API4 通知；其他 Host 能力全部默认拒绝。
+Host API 7 清单可选声明 `application.settingsPage`，其 `id`、`label`、可选 `title`、包内 `entry` 和 `rpcMethods` 都经严格校验。设置页上下文的 `surface` 是 `application.settings`，没有项目身份；页面只能调用 contribution 列出且同时存在于 `service.rpcMethods` 的方法。服务在该 surface 下仅能使用已授权的组件设置、生命周期、确认对话框和 Host API 7 通知；其他 Host 能力全部默认拒绝。
 
-### 顶部短通知（Host API 4）
+### 顶部短通知（Host API 7）
 
-声明 `notifications.v7` 和 `notifications` 的组件必须设置 `minHostApiVersion >= 4`。renderer 优先 feature-detect `window.photoFlowComponent.notify`，只提交 `{tone,message,dedupeKey?}`；后端 service 仅在处理既有请求时使用同语义的 `notifications.v7` capability。renderer 不应为了通知绕到 service，service 也不能借此获得任意 renderer channel。`durationMs` 已从契约删除，出现该字段会作为未知字段被明确拒绝；组件不能控制通知生命周期。
+声明 `notifications.v7` 和 `notifications` 的组件必须设置 `minHostApiVersion = 7`。renderer 优先 feature-detect `window.photoFlowComponent.notify`，只提交 `{tone,message,dedupeKey?}`；后端 service 仅在处理既有请求时使用同语义的 `notifications.v7` capability。renderer 不应为了通知绕到 service，service 也不能借此获得任意 renderer channel。`durationMs` 已从契约删除，出现该字段会作为未知字段被明确拒绝；组件不能控制通知生命周期。
 
 宿主只接受 `info|success|warning|error`、raw 与 trim 后均不超过 360 字的非空纯文本，`dedupeKey` 为最多 80 字的 ASCII ID。生命周期完全由宿主按 tone 决定：`error` 常驻至手动关闭，`info`、`success`、`warning` 统一在 3500 ms 后自动消失；组件不能提交 `durationMs`。组件 preload 在复制到主进程前执行同一硬边界；未知字段、HTML、URL、路径、回调和命令均拒绝。发送方绑定到已通过完整性准入的组件 `webContents`；清单能力与权限在每次调用时复核。宿主按组件执行普通状态和 error 各自有界的 burst/10 秒速率限制、1.2 秒内容/键去重，并在 renderer 销毁或组件卸载/升级时清理状态。主窗口不可用或发送竞态失败时返回 retryable 的 `NOTIFICATION_HOST_UNAVAILABLE`，而不是创建 Electron 原生提示。
 
-结果固定为 `apiVersion:2`：成功为 `{accepted:true,id}`，重复为 `{accepted:false,deduplicated:true,code:"NOTIFICATION_DEDUPLICATED"}`，失败包含 `{accepted:false,error:{code,message,retryable}}`。主进程在 React subscriber 完成 ready 握手前使用有界缓冲，reload 后重新握手并 flush；卸载/升级发送组件作用域 purge。事件经主 preload 再校验后进入有总量上限的现有 `useTopToastStack`，四种 tone 与宿主普通 Toast 共用图标、颜色、生命周期、去重/堆叠、关闭及单层 live-region 策略；error 始终保持到手动关闭，其余 tone 使用宿主统一自动消失时间。Toast 由宿主透明原生 overlay 窗口呈现，始终位于 project 与 settings 的组件 `WebContentsView` 之上，组件 View bounds 不会因 Toast 改变。overlay 空白区域鼠标穿透，卡片与按钮可交互。长任务继续使用 `tasks.v7`；需要用户决定继续使用 `dialogs.v7`。
+结果固定为 `apiVersion:7`：成功为 `{accepted:true,id}`，重复为 `{accepted:false,deduplicated:true,code:"NOTIFICATION_DEDUPLICATED"}`，失败包含 `{accepted:false,error:{code,message,retryable}}`。主进程在 React subscriber 完成 ready 握手前使用有界缓冲，reload 后重新握手并 flush；卸载/升级发送组件作用域 purge。事件经主 preload 再校验后进入有总量上限的现有 `useTopToastStack`，四种 tone 与宿主普通 Toast 共用图标、颜色、生命周期、去重/堆叠、关闭及单层 live-region 策略；error 始终保持到手动关闭，其余 tone 使用宿主统一自动消失时间。Toast 由宿主透明原生 overlay 窗口呈现，始终位于 project 与 settings 的组件 `WebContentsView` 之上，组件 View bounds 不会因 Toast 改变。overlay 空白区域鼠标穿透，卡片与按钮可交互。长任务继续使用 `tasks.v7`；需要用户决定继续使用 `dialogs.v7`。
 
 ## 能力合约
 
 ### 项目媒体
 
-Host API 5 的项目只读扩展要求 `minHostApiVersion >= 5`。`project.files.page.v7` 只返回目录、非媒体普通文件与识别的 sidecar；`project.files.search.v7` 额外要求 1–160 字符查询。两者每页 1–200 项，单次快照最多检查 5,000 个目录项，搜索最多保留 500 个结果，游标 5 分钟过期并绑定组件、项目与 scope。返回值只有虚拟相对路径；符号链接、`.photoflow-*` 内部项、绝对路径与越界路径拒绝。
+Host API 7 的项目只读扩展要求 `minHostApiVersion = 7`。`project.files.page.v7` 只返回目录、非媒体普通文件与识别的 sidecar；`project.files.search.v7` 额外要求 1–160 字符查询。两者每页 1–200 项，单次快照最多检查 5,000 个目录项，搜索最多保留 500 个结果，游标 5 分钟过期并绑定组件、项目与 scope。返回值只有虚拟相对路径；符号链接、`.photoflow-*` 内部项、绝对路径与越界路径拒绝。
 
 `project.media.metadata.v7` 只接受绑定 scope 内的媒体相对路径。宿主向 ExifTool 请求固定字段白名单，返回实际可得的尺寸、色彩空间/配置、相机、镜头、拍摄参数，以及视频编码、音频编码、时长、帧率和旋转；不可得字段为 `null`，绝不回显 `SourceFile`、目录或绝对路径。
 
 `project.versions.page.v7` 使用单次有界只读 SQL 快照读取当前/父版本、状态、备注、final/current 和时间戳，每页最多 200 项、快照最多 5,000 个版本，并用 `truncated` 明示边界。它不会调用会同步或回填索引的 `media_get`。`project.version.graph.v7` 使用只读 `progress_snapshot` 返回版本父边和持久化进度来源边，不执行迁移、baseline 注册、repair 或位置同步，也不返回文件夹路径。普通进度节点必须有可验证的物理目录且 canonical 路径位于当前 scope；`includeMissing:true` 还允许 lexical 路径位于 scope、最近存在祖先 canonical 安全且真实标记 `folderMissing` 的节点。缺少可靠绝对路径、外链或越界节点始终排除，来源边仅在两端节点均可见时返回。宿主最多扫描 5,000 个进度记录，再公开其中最多 1,000 个可见节点；任一边界截断都会返回 `truncated:true`。`project.media.ratings.v7` 一次接受 1–100 个媒体引用，返回评分及文件修订时间；当前宿主没有统一标签/选择状态存储，因此 `supported.labels`、`supported.selectionState` 为 `false` 且对应字段为 `null`，不会伪造数据。
 
-这些 P0 能力当前仅覆盖项目物理目录，不解析宿主管理的外链虚拟路径。组件必须 feature-detect 并保留旧媒体分页方案处理外链，不能把外链物理路径提交给新能力。
+这些 P0 能力当前仅覆盖项目物理目录，不解析宿主管理的外链虚拟路径。组件不得调用旧媒体分页能力；外链未被 Host API 7 当前能力公开时应明确显示不可用，不能提交其物理路径。
 
 `project.media.page.v7` 接受 `pageSize`（1–200）、不透明 `cursor` 和 `kinds`（`image`、`raw`、`video`）。游标 5 分钟过期，绑定单一组件/项目，不得解码或持久化。每页最多检查 1,000 个条目，不跟随符号链接。宿主管理的外部文件/目录以虚拟相对路径参与；未管理外部路径继续拒绝。
 
@@ -96,7 +96,7 @@ Host API 5 的项目只读扩展要求 `minHostApiVersion >= 5`。`project.files
 
 Host API 7 contribution 为 `component.sidePanel`、`media.contextAction`、`project.contextAction`、`project.importProvider`、`project.exportProvider`、`application.command`。每项声明 `id`、`label`、`pageId` 和独立 `rpcMethods` allowlist；pageId 必须引用包内 fullPage，RPC 必须属于 service。项目入口绑定触发时的 scope 与 selection；跨目录媒体选择以共同祖先为 scope。application command 使用无项目 application context，且只有实际含命令的全局 Dock 注册 `Ctrl/Cmd+Shift+P`。宿主 UI 分别在项目工具栏/可调侧面板、媒体与项目右键菜单、导入/导出菜单及可搜索命令入口发现并打开这些 contribution。所有 surface 使用同一 sandbox preload，禁止导航、新窗口和 Node 集成；组件卸载、升级或项目关闭会关闭对应 view。
 
-Host API 6 的七项写能力必须设置 `minHostApiVersion >= 6`，且各自声明上表中的最小权限。评分批量限制为 1–100，采用逐项语义；只支持图片/RAW 的 `rating`，视频、标签和选择状态写入拒绝。checked CAS 与宿主旧评分 outbox 共用同一 per-file 队列；ExifTool 成功后的索引指纹刷新是非致命维护步骤，不会把已发生的评分副作用报告成失败。版本更新/删除、进度节点与边变更均使用 `expectedUpdatedAt` CAS；删除权限独立。progress 的项目/scope 路径会在数据库事务内再次以 Windows case-insensitive path-key 语义验证，所有图端点必须在当前物理 scope 内、不得是 external link，并继续复用数据库角色和循环约束。
+Host API 7 的七项写能力必须设置 `minHostApiVersion = 7`，且各自声明上表中的最小权限。评分批量限制为 1–100，采用逐项语义；只支持图片/RAW 的 `rating`，视频、标签和选择状态写入拒绝。checked CAS 与宿主旧评分 outbox 共用同一 per-file 队列；ExifTool 成功后的索引指纹刷新是非致命维护步骤，不会把已发生的评分副作用报告成失败。版本更新/删除、进度节点与边变更均使用 `expectedUpdatedAt` CAS；删除权限独立。progress 的项目/scope 路径会在数据库事务内再次以 Windows case-insensitive path-key 语义验证，所有图端点必须在当前物理 scope 内、不得是 external link，并继续复用数据库角色和循环约束。
 
 `project.import.v7` 先保留同 component/workspace/project/scope 的一次性 input token，再执行 stage→validate→commit；reservation 只暂停清理，不延长原 10 分钟授权，释放时恢复原到期并立即删除已过期 token。同幂等键并发调用共享一个 active owner，取消、冲突或失败会释放令牌并回滚已发布且摘要未变的文件。任何 import/file/process 恢复都重新执行 `lstat`、拒绝链接、验证 `realpath` 位于当前 canonical scope，并复核文件 SHA-256 或目录 identity/owner marker；目标被其他主体替换时既不认领成功，也不移动替换内容。
 
@@ -133,7 +133,7 @@ stage 状态不只存在内存中。宿主在可写载荷子目录外原子持�
 
 `tasks.v7` 动作为 `start`、`report`、`status`、`cancel`、`resume`、`complete`、`fail`。`operationId` 稳定并绑定组件/项目，进度为 0–100，报告可保存 JSON 检查点。取消为协作式：返回 `cancelled:true` 后服务停止工作、保持项目内容不变，并回滚 stage 或只保留私有可恢复数据。`resume` 使用提供或返回的检查点启动/重新绑定。重复终态转换无害。
 
-不要让同步服务请求长时间保持打开。普通超时 60 秒。已审查的 V1 长方法保留旧版 4 小时兼容超时；该例外不适用于新 API。
+不要让同步服务请求长时间保持打开。普通超时 60 秒。`project.media.process.v7` 使用受监管长请求租约；其他 Host API 7 调用不获得兼容超时。
 
 ### 安全对话框、事件与生命周期
 
@@ -145,7 +145,7 @@ stage 状态不只存在内存中。宿主在可写载荷子目录外原子持�
 
 ## 协议、限制与错误
 
-UI RPC 与服务 JSONL 帧都是 JSON 对象，上限 2 MiB。方法/事件名有界且版本化。未知方法、严格清单边界字段、发送方、能力、权限、stage、token 和事件主题全部默认拒绝。服务 stdout 每行一个 JSON 帧，日志写 stderr。`component-host-api-v2.schema.json` 为每个能力提供按方法区分的请求/结果分支；`component-service-protocol-v1.schema.json` 定义 JSONL 帧。
+UI RPC 与服务 JSONL 帧都是 JSON 对象，上限 2 MiB。方法/事件名有界且版本化。未知方法、严格清单边界字段、发送方、能力、权限、stage、token 和事件主题全部默认拒绝。服务 stdout 每行一个 JSON 帧，日志写 stderr。`component-host-api-v7.schema.json` 为每个能力提供按方法区分的请求/结果分支；`component-service-protocol-v1.schema.json` 定义 JSONL 帧。
 
 稳定错误码：
 
@@ -160,4 +160,4 @@ UI RPC 与服务 JSONL 帧都是 JSON 对象，上限 2 MiB。方法/事件名�
 
 宿主拥有项目、媒体索引/变体、版本、文件安全、任务中心、组件生命周期和权限账本。组件拥有私有存储、设置结构、算法、UI 状态和业务实体。只有宿主发布项目内容；双方都不能更新对方数据库。
 
-V1 组件数据和协议继续保留。已弃用适配器只翻译已审查旧路由，并可能访问旧组件自有存储；V2 代码不能导入它们。删除组件源码目录不能导致宿主、SDK、schema、示例或通用测试无法构建。新代码必须通过架构断言：通用组件宿主文件中不得出现组件业务表或字段名。
+只保留显式 adoption grant 所引用的上一代数据来源；旧公共 Host 路由、alias、adapter 和 fallback 已删除。组件自有 RPC/事件版本以及 service protocol v1 不属于公共 Host capability。删除组件源码目录不能导致宿主、SDK、schema、示例或通用测试无法构建。新代码必须通过架构断言：通用组件宿主文件中不得出现组件业务表或字段名。

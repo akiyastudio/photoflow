@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { parseComponentHostManifest, HOST_CAPABILITIES } = require('../electron/component-host-contract.cjs');
+const { parseComponentHostManifest, HOST_CAPABILITIES, CAPABILITY_PERMISSIONS, COMPONENT_HOST_MIN_API_VERSION, COMPONENT_HOST_MAX_API_VERSION } = require('../electron/component-host-contract.cjs');
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
 const { registerComponentProjectCapabilities, resetComponentHostCapabilityStateForTest, stableUuid, STAGE_TTL_MS } = require('../electron/services/component-project-capabilities.cjs');
 const { createServiceHostClient } = require('../component-sdk/service.cjs');
@@ -12,6 +12,8 @@ const { createVersionService } = require('../electron/services/version-service.c
 const { registerHostCapabilities } = require('../electron/modules/system-ipc.cjs');
 
 const systemCapabilityRegistrations = [];
+assert.equal(COMPONENT_HOST_MIN_API_VERSION, 7);
+assert.equal(COMPONENT_HOST_MAX_API_VERSION, 7);
 registerHostCapabilities({ register: (method, handler) => systemCapabilityRegistrations.push([method, handler]) }, [
   ['component.lifecycle.v7', () => undefined],
 ]);
@@ -20,7 +22,7 @@ assert.throws(() => registerHostCapabilities({ register: () => assert.fail('unde
   ['component.lifecycle.invalid', () => undefined],
 ]), /undeclared host capability/, 'system IPC capability registration is constrained by the Host contract');
 
-const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-host-v2-'));
+const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-host-v7-'));
 const workspaceRoot = path.join(sandbox, 'workspace');
 const projectRoot = path.join(workspaceRoot, 'active', 'Project');
 const dataRoot = path.join(workspaceRoot, '.data');
@@ -70,12 +72,12 @@ fs.mkdirSync(path.join(manifestRoot, 'ui'), { recursive: true });
 fs.writeFileSync(path.join(manifestRoot, 'ui', 'index.html'), '<!doctype html>');
 fs.writeFileSync(path.join(manifestRoot, 'ui', 'settings.html'), '<!doctype html>');
 fs.writeFileSync(path.join(manifestRoot, 'service.cjs'), '');
-const allV2Capabilities = [...HOST_CAPABILITIES].filter(value => value.endsWith('.v2'));
-const allPermissions = ['project.media.read', 'project.input.read', 'project.output.write', 'project.version.create', 'component.storage', 'component.settings', 'tasks', 'dialogs', 'events', 'component.lifecycle.read', 'component.lifecycle.manage', 'component.media', 'project.progress'];
+const coreCapabilities = [...HOST_CAPABILITIES].slice(0, 13);
+const allPermissions = [...new Set(coreCapabilities.map(capability => CAPABILITY_PERMISSIONS[capability])), 'component.lifecycle.manage'];
 const manifest = {
   apiVersion: 1, id: 'fixture-component', version: '1.0.0',
   componentHost: {
-    contractVersion: 2, compatibility: { minHostApiVersion: 3, maxHostApiVersion: 3 },
+    contractVersion: 2, compatibility: { minHostApiVersion: 7, maxHostApiVersion: 7 },
     adoptionGrants: ['component.storage.previous.v1', 'project.output.existing.v1'],
     contributions: [
       { type: 'workspace.toolbarAction', id: 'open', label: 'Fixture', pageId: 'main' },
@@ -84,21 +86,19 @@ const manifest = {
     ],
     service: {
       protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1', 'fixture.settings.v1'],
-      capabilities: allV2Capabilities.filter(value => value !== 'notifications.v7'), permissions: allPermissions, events: ['fixture.progress.v1'], runtimeActions: [],
+      capabilities: coreCapabilities, permissions: allPermissions, events: ['fixture.progress.v1'], runtimeActions: [],
     },
   },
 };
 const descriptor = parseComponentHostManifest(manifest, manifestRoot);
-assert.equal(descriptor.hostApiVersion, 3);
-const hostApi4Descriptor = parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 4 }, service: { ...manifest.componentHost.service, capabilities: allV2Capabilities, permissions: [...allPermissions, 'notifications'] } } }, manifestRoot);
-assert.equal(hostApi4Descriptor.hostApiVersion, 4, 'notifications negotiate Host API 4');
-assert(hostApi4Descriptor.service.capabilities.includes('notifications.v7') && hostApi4Descriptor.service.permissions.includes('notifications'));
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, capabilities: [...manifest.componentHost.service.capabilities, 'notifications.v7'], permissions: [...allPermissions, 'notifications'] } } }, manifestRoot), /minHostApiVersion 4/);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: [...allPermissions, 'notifications'] } } }, manifestRoot), /minHostApiVersion 4/, 'permission-only notification declarations also require API4');
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 4 }, service: { ...manifest.componentHost.service, capabilities: [...allV2Capabilities, ' notifications.v7'], permissions: [...allPermissions, 'notifications'] } } }, manifestRoot), /exact and unique/);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 4 }, service: { ...manifest.componentHost.service, capabilities: allV2Capabilities, permissions: [...allPermissions, 'notifications', 'notifications'] } } }, manifestRoot), /exact and unique/);
-const hostApi2Descriptor = parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 2, maxHostApiVersion: 2 }, contributions: manifest.componentHost.contributions.filter(item => item.type !== 'application.settingsPage') } }, manifestRoot);
-assert.equal(hostApi2Descriptor.hostApiVersion, 2, 'existing Component Host V2 components without settings pages continue to negotiate Host API 2');
+assert.equal(descriptor.hostApiVersion, 7);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, capabilities: [...coreCapabilities, ' notifications.v7'] } } }, manifestRoot), /exact and unique/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: [...allPermissions, allPermissions[0]] } } }, manifestRoot), /exact and unique/);
+for (let legacyVersion = 2; legacyVersion <= 6; legacyVersion += 1) {
+  assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: legacyVersion, maxHostApiVersion: legacyVersion } } }, manifestRoot), /only Host API 7/);
+  const legacyMethod = 'project.media.page.v7'.replace(/v7$/, `v${legacyVersion}`);
+  assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, capabilities: [legacyMethod], permissions: ['project.media.read'] } } }, manifestRoot), /unknown host capability/);
+}
 assert.deepEqual(descriptor.settingsPages.map(page => ({ id: page.id, label: page.label, relativeEntry: page.relativeEntry, rpcMethods: page.rpcMethods })), [{ id: 'settings', label: 'Fixture settings', relativeEntry: 'ui/settings.html', rpcMethods: ['fixture.settings.v1'] }]);
 assert.deepEqual(descriptor.service.permissions, allPermissions);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: manifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { ...item, rpcMethods: ['fixture.undeclared.v1'] } : item) } }, manifestRoot), /not declared by the service/);
@@ -109,8 +109,6 @@ for (const invalid of [
   { rpcMethods: ['fixture.settings.v1', 'fixture.settings.v1'] }, { rpcMethods: ['fixture.settings.v1', 3] },
   { rpcMethods: Array.from({ length: 33 }, (_value, index) => `fixture.settings-${index}.v1`) },
 ]) assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: manifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { ...item, ...invalid } : item), service: { ...manifest.componentHost.service, rpcMethods: [...manifest.componentHost.service.rpcMethods, ...Array.from({ length: 33 }, (_value, index) => `fixture.settings-${index}.v1`)] } } }, manifestRoot), /settings page/);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 2, maxHostApiVersion: 2 } } }, manifestRoot), /require Host API 3/);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 2, maxHostApiVersion: 3 } } }, manifestRoot), /minHostApiVersion 3/);
 const outsideSettingsRoot = path.join(sandbox, 'outside-settings');
 fs.mkdirSync(outsideSettingsRoot, { recursive: true }); fs.writeFileSync(path.join(outsideSettingsRoot, 'settings.html'), '<!doctype html>');
 const linkedSettings = path.join(manifestRoot, 'linked-settings');
@@ -119,12 +117,29 @@ try {
   assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: manifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { ...item, entry: 'linked-settings/settings.html' } : item) } }, manifestRoot), /linked path/);
 } catch (error) { if (!['EPERM', 'EACCES'].includes(error?.code)) throw error; }
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: allPermissions.filter(value => value !== 'project.output.write') } } }, manifestRoot), /requires permission project\.output\.write/);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 8, maxHostApiVersion: 9 } } }, manifestRoot), /do not overlap/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 8, maxHostApiVersion: 9 } } }, manifestRoot), /only Host API 7/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, unsafeExtension: true } }, manifestRoot), /Unknown component host field/);
-for (const schema of ['component-manifest-v2.schema.json', 'component-host-api-v2.schema.json', 'component-service-protocol-v1.schema.json']) JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', schema), 'utf8'));
-const capabilitySchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api-v2.schema.json'), 'utf8'));
+for (const schema of ['component-manifest-v2.schema.json', 'component-host-api-v7.schema.json', 'component-service-protocol-v1.schema.json']) JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', schema), 'utf8'));
+const capabilitySchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api-v7.schema.json'), 'utf8'));
 const schemaMethods = Object.values(capabilitySchema.$defs).map(value => value?.properties?.method?.const).filter(Boolean).sort();
 assert.deepEqual(schemaMethods, [...HOST_CAPABILITIES].sort(), 'machine-readable schema must discriminate every supported capability method');
+const runtimeSources = [
+  'electron/services/component-project-capabilities.cjs',
+  'electron/services/component-project-read-capabilities.cjs',
+  'electron/services/component-project-write-capabilities.cjs',
+  'electron/services/component-host-capability-runtime.cjs',
+  'electron/modules/system-ipc.cjs',
+].map(relative => fs.readFileSync(path.resolve(__dirname, '..', relative), 'utf8')).join('\n');
+const runtimeMethods = [...new Set([...runtimeSources.matchAll(/(?:\.register\(|\[)\s*'([a-z][a-z0-9.-]*\.v7)'/g)].map(match => match[1]))].sort();
+assert.deepEqual(runtimeMethods, [...HOST_CAPABILITIES].sort(), 'runtime registrations must implement exactly the 29 Host API V7 capabilities');
+const nonV7Responses = [];
+const inspectSchema = value => {
+  if (!value || typeof value !== 'object') return;
+  if (value.properties?.apiVersion?.const !== undefined && value.properties.apiVersion.const !== 7) nonV7Responses.push(value.properties.apiVersion.const);
+  for (const child of Object.values(value)) inspectSchema(child);
+};
+inspectSchema(capabilitySchema);
+assert.deepEqual(nonV7Responses, [], 'every Host capability response schema uses apiVersion 7');
 const storageVariants = capabilitySchema.$defs.storage.properties.result.oneOf;
 const pendingStorageSchema = storageVariants.find(value => value.properties?.adoption?.properties?.state?.const === 'pending');
 const committedStorageSchema = storageVariants.find(value => value.properties?.adoption?.properties?.state?.const === 'committed');
@@ -134,7 +149,7 @@ for (const field of ['adoptedDataRoot', 'adoptedDatabase', 'legacyDataRoot', 'le
 const writtenFrames = [];
 const typedHostClient = createServiceHostClient({ writeFrame: frame => writtenFrames.push(frame) });
 const typedCall = typedHostClient.callHost('parent-1', 'component.lifecycle.v7', { action: 'describe' });
-assert(typedHostClient.acceptFrame({ type: 'capability-response', id: writtenFrames[0].id, ok: true, result: { apiVersion: 2, state: 'active' } }));
+assert(typedHostClient.acceptFrame({ type: 'capability-response', id: writtenFrames[0].id, ok: true, result: { apiVersion: 7, state: 'active' } }));
 
 const broker = new ComponentCapabilityBroker();
 const thumbnailRequests = [];
@@ -203,7 +218,7 @@ const registrationOptions = overrides => ({
   ...overrides,
 });
 const projectDomain = registerComponentProjectCapabilities(registrationOptions());
-broker.register('component.lifecycle.v7', (payload, _context, ownedDescriptor) => ({ apiVersion: 2, componentId: ownedDescriptor.componentId, componentVersion: ownedDescriptor.componentVersion, negotiatedHostApiVersion: ownedDescriptor.hostApiVersion, permissions: ownedDescriptor.service.permissions, events: ownedDescriptor.service.events, lifecycleActions: [], state: payload.action === 'describe' ? 'active' : 'active' }));
+broker.register('component.lifecycle.v7', (payload, _context, ownedDescriptor) => ({ apiVersion: 7, componentId: ownedDescriptor.componentId, componentVersion: ownedDescriptor.componentVersion, negotiatedHostApiVersion: ownedDescriptor.hostApiVersion, permissions: ownedDescriptor.service.permissions, events: ownedDescriptor.service.events, lifecycleActions: [], state: payload.action === 'describe' ? 'active' : 'active' }));
 assert(broker.assertCapabilities(descriptor));
 const context = { componentId: descriptor.componentId, componentVersion: descriptor.componentVersion, workspacePath: workspaceRoot, projectId: 'project-1', projectName: 'Project', projectStatus: 'active', emitComponentEvent: (topic, event) => { context.lastEvent = { topic, event }; } };
 
@@ -211,7 +226,7 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert.equal((await typedCall).state, 'active', 'service-side Host helper correlates capability responses');
   const firstPage = await broker.invoke(descriptor, 'project.media.page.v7', { pageSize: 10, kinds: ['image'] }, context);
   assert(firstPage.items.some(item => item.relativePath === 'images/one.jpg'));
-  assert(firstPage.items.some(item => item.relativePath === 'External/outside.jpg' && item.viaExternalLink), 'managed external media participates in V2 pagination');
+  assert(firstPage.items.some(item => item.relativePath === 'External/outside.jpg' && item.viaExternalLink), 'managed external media participates in V7 pagination');
   const grantsBeforeMetadata = mediaGrants.length; const thumbnailsBeforeMetadata = thumbnailRequests.length;
   const metadataOnly = await broker.invoke(descriptor, 'project.media.variants.v7', { photoId: 'photo-1', versionId: 'version-1', variants: [] }, context);
   assert.equal(metadataOnly.input, undefined, 'metadata-only media descriptions do not mint input grants');
@@ -251,7 +266,7 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   const privateMediaPath = path.join(storage.dataPath, 'previews', 'private.jpg');
   fs.mkdirSync(path.dirname(privateMediaPath), { recursive: true }); fs.writeFileSync(privateMediaPath, 'private-media');
   const privateMedia = await broker.invoke(descriptor, 'component.media.v7', { action: 'variants', relativePath: 'previews/private.jpg', variants: ['thumbnail', 'original'] }, context);
-  assert(privateMedia.opaqueRef.startsWith('component-media:v2:') && privateMedia.variants.thumbnail.derived);
+  assert(privateMedia.opaqueRef.startsWith('component-media:v7:') && privateMedia.variants.thumbnail.derived);
   await broker.invoke(descriptor, 'component.media.v7', { action: 'reveal', relativePath: 'previews/private.jpg' }, context);
   assert(openedPaths.includes(privateMediaPath));
   const listedProgress = await broker.invoke(descriptor, 'project.progress.v7', { action: 'list' }, context);
@@ -365,7 +380,7 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
     if (options.value?.kind === 'component-output-commit' && options.value?.state === 'committed') throw new Error('simulated committed receipt failure');
     return atomicJson(options);
   } }));
-  failingBroker.register('component.lifecycle.v7', () => ({ apiVersion: 2, state: 'active' }));
+  failingBroker.register('component.lifecycle.v7', () => ({ apiVersion: 7, state: 'active' }));
   const failingStage = await failingBroker.invoke(descriptor, 'project.output.v7', { action: 'stage' }, context);
   await failingBroker.invoke(descriptor, 'project.output.v7', { action: 'write', stageId: failingStage.stageId, name: 'failure.jpg', outputRelativePath: 'receipt-failure/failure.jpg', base64: Buffer.from('failure-output').toString('base64') }, context);
   await failingBroker.invoke(descriptor, 'project.output.v7', { action: 'write', stageId: failingStage.stageId, name: 'failure-2.jpg', outputRelativePath: 'receipt-failure/failure-2.jpg', base64: Buffer.from('failure-output-2').toString('base64') }, context);
@@ -376,7 +391,7 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   const adoptedPath = path.join(projectRoot, 'legacy', 'adopted.jpg'); fs.mkdirSync(path.dirname(adoptedPath), { recursive: true }); fs.writeFileSync(adoptedPath, 'legacy-output');
   const adopted = await broker.invoke(descriptor, 'project.output.v7', { action: 'adopt', migrationId: 'migration-one', outputs: [{ relativePath: 'legacy/adopted.jpg' }] }, context);
   assert(adopted.commitId && adopted.outputs.length === 1);
-  assert((await broker.invoke(descriptor, 'dialogs.v7', { kind: 'openOutput', commitId: adopted.commitId, artifactId: adopted.outputs[0].artifactId }, context)).opened, 'one-time V1 adoption creates a receipt consumable by generic V2 output refs');
+  assert((await broker.invoke(descriptor, 'dialogs.v7', { kind: 'openOutput', commitId: adopted.commitId, artifactId: adopted.outputs[0].artifactId }, context)).opened, 'one-time V1 adoption creates a receipt consumable by generic V7 output refs');
   const importedLegacy = await broker.invoke(descriptor, 'project.output.v7', { action: 'materializeOwned', commitId: adopted.commitId, artifactId: adopted.outputs[0].artifactId }, context);
   assert.equal(fs.readFileSync(importedLegacy.privatePath, 'utf8'), 'legacy-output', 'owned legacy project output can be safely copied into component-private storage');
   const absoluteAdopted = await broker.invoke(descriptor, 'project.output.v7', { action: 'adopt', migrationId: 'migration-absolute', outputs: [{ sourcePath: adoptedPath }] }, context);
@@ -398,7 +413,7 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert((await broker.invoke(descriptor, 'dialogs.v7', { kind: 'confirm', title: 'Confirm', message: 'Continue?' }, context)).confirmed);
   await broker.invoke(descriptor, 'component.events.v7', { topic: 'fixture.progress.v1', event: { progress: 50 } }, context);
   assert.deepEqual(context.lastEvent, { topic: 'fixture.progress.v1', event: { progress: 50 } });
-  assert.equal((await broker.invoke(descriptor, 'component.lifecycle.v7', { action: 'describe' }, context)).negotiatedHostApiVersion, 3);
+  assert.equal((await broker.invoke(descriptor, 'component.lifecycle.v7', { action: 'describe' }, context)).negotiatedHostApiVersion, 7);
   const applicationSettingsContext = { ...context, surface: 'application.settings', workspacePath: '', projectId: '', projectName: '', projectStatus: '' };
   assert.equal((await broker.invoke(descriptor, 'component.settings.v7', { action: 'get' }, applicationSettingsContext)).revision, 1, 'application settings surface may read owner settings');
   assert.equal((await broker.invoke(descriptor, 'component.lifecycle.v7', { action: 'describe' }, applicationSettingsContext)).state, 'active', 'application settings surface may inspect declared lifecycle state');
@@ -429,6 +444,6 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   ];
   for (const forbidden of privateSchemaNames) assert(!genericSource.includes(forbidden), `generic host source must not contain ${forbidden}`);
   const packageJson = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'package.json'), 'utf8'));
-  assert(!packageJson.scripts.build.includes('sample-component') && !genericSource.includes('extensions/'), 'the main application build and V2 host must not require a component source package');
-  console.log('Component Host API V2 contract and integration tests passed');
+  assert(!packageJson.scripts.build.includes('sample-component') && !genericSource.includes('extensions/'), 'the main application build and V7 host must not require a component source package');
+  console.log('Component Host API V7 contract and integration tests passed');
 })().finally(() => fs.rmSync(sandbox, { recursive: true, force: true })).catch(error => { console.error(error); process.exitCode = 1; });

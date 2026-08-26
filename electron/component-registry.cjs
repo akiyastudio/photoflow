@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 const zlib = require('zlib');
 const { PLUGIN_API_VERSION, PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
-const { COMPONENT_HOST_API_VERSION, COMPONENT_HOST_CONTRACT_VERSION, COMPONENT_HOST_MIN_API_VERSION, parseComponentHostManifest } = require('./component-host-contract.cjs');
+const { COMPONENT_HOST_API_VERSION, COMPONENT_HOST_CONTRACT_VERSION, parseComponentHostManifest } = require('./component-host-contract.cjs');
 const { listIntegrityFiles, readPinnedComponentIntegrity, validateComponentIntegrity, validateComponentIntegrityAsync } = require('./component-integrity.cjs');
 const { discoverDevelopmentComponents, safeFile } = require('./component-development.cjs');
 
@@ -118,22 +118,13 @@ const manifestCompatibilityError = (manifest, platform, arch) => {
     const host = manifest.componentHost;
     const compatibility = host?.compatibility;
     const min = Number(compatibility?.minHostApiVersion); const max = Number(compatibility?.maxHostApiVersion);
-    if (!host || ![1, COMPONENT_HOST_CONTRACT_VERSION].includes(Number(host.contractVersion))) return `组件 Host 协议不兼容：${host?.contractVersion || '未填写'}`;
-    if (!Number.isInteger(min) || !Number.isInteger(max) || min < 1 || max < min) return '组件 Host API 兼容范围无效';
-    const negotiated = Math.min(COMPONENT_HOST_API_VERSION, max);
-    if (negotiated < Math.max(COMPONENT_HOST_MIN_API_VERSION, min)) return `组件 Host API ${COMPONENT_HOST_MIN_API_VERSION}-${COMPONENT_HOST_API_VERSION} 与支持范围 ${min}-${max} 不重叠`;
-    if (Number(host.contractVersion) === 2 && negotiated < 2) return '组件 Host V2 需要 Host API 2 或更高版本';
+    if (!host || Number(host.contractVersion) !== COMPONENT_HOST_CONTRACT_VERSION) return `组件 Host 协议不兼容：${host?.contractVersion || '未填写'}`;
+    if (min !== COMPONENT_HOST_API_VERSION || max !== COMPONENT_HOST_API_VERSION) return `组件 Host 仅支持 API ${COMPONENT_HOST_API_VERSION}，minHostApiVersion 与 maxHostApiVersion 必须均为 ${COMPONENT_HOST_API_VERSION}`;
     const contributions = Array.isArray(host.contributions) ? host.contributions : [];
     const toolbarCount = contributions.filter(item => item?.type === 'workspace.toolbarAction').length;
     const pageCount = contributions.filter(item => item?.type === 'component.fullPage').length;
     const settingsPageCount = contributions.filter(item => item?.type === 'application.settingsPage').length;
-    if (Number(host.contractVersion) === 1 && settingsPageCount) return '设置页贡献需要 Component Host V2';
-    if (settingsPageCount && negotiated < 3) return '设置页贡献需要 Host API 3';
-    if (settingsPageCount && min < 3) return '设置页贡献需要 minHostApiVersion 3 或更高版本';
-    const notificationDeclared = (host.service?.capabilities || []).map(String).includes('notifications.v7') || (host.service?.permissions || []).map(String).includes('notifications');
-    if (notificationDeclared && min < 4) return '通知能力需要 minHostApiVersion 4 或更高版本';
     const api7Count = contributions.filter(item => ['component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(item?.type)).length;
-    if (api7Count && min < 7) return '新组件贡献需要 minHostApiVersion 7 或更高版本';
     if (toolbarCount !== 1 || pageCount < 1 || pageCount > 16 || settingsPageCount > 16 || contributions.length !== toolbarCount + pageCount + settingsPageCount + api7Count) return '页面组件必须贡献一个 toolbarAction、1-16 个 fullPage，并可选贡献设置页或 Host API 7 入口';
   }
   const entrypoints = manifest.entrypoints || {};

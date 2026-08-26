@@ -2,6 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react'
 import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { ProgressFolder, ProjectFileEntry, VersionGraphEdge } from '../types';
 import { layoutVersionTree, DEFAULT_VERSION_TREE_SPACING, versionTreeAreaSize, versionTreeCanvasBounds, allowedVersionTreeRelationKinds, versionTreeEdgeGeometry, versionTreeEdgePath, versionTreeEdgePresentation, versionTreeRelationLabel, type VersionTreeEdgeKind, type VersionTreeSupplementalEdgeKind, useVersionTreeCanvas, type VersionTreeDragState, progressRelationChangeError, projectVisibleVersionGraph, trackingStateLabel } from '../features/versioning/public';
+import { resolveVersionTreeEntryMapping } from '../features/versioning/project-version-tree-entry-model';
 import { FILE_GRID_GAP } from '../features/workspace/marquee-selection-model';
 import { useHostSurfaceSuspension } from './LayerProvider';
 
@@ -56,9 +57,7 @@ type VersionTreeAreaSize = { width: number; height: number };
 type PositionedItem = { key: string; nodeKey: string; areaKind: VersionTreeAreaKind; folder?: ProgressFolder; sourceKind?: 'image' | 'video'; entry: ProjectFileEntry; x: number; y: number };
 type LayoutRelation = { id: string; kind: VersionTreeEdgeKind; parentId: string; childId: string; selectable: boolean };
 type DrawnEdge = { id: string; kind: VersionTreeEdgeKind; path: string; parentId?: string; childId?: string; startX: number; startY: number; endX: number; endY: number; menuX: number; menuY: number };
-
 const normalizePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLocaleLowerCase('zh-CN');
-const parentPath = (value: string) => normalizePath(value).split('/').slice(0, -1).join('/');
 const inferredExternalOriginalKind = (entry: ProjectFileEntry): 'image' | 'video' | undefined => {
   if (!entry.externalLink || entry.externalLinkTargetKind === 'file') return undefined;
   const name = entry.name.replace(/\.lnk$/i, '').trim().toLocaleLowerCase('zh-CN');
@@ -121,25 +120,16 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   }, []);
   const scopePath = normalizePath(activeRelativePath);
   const graph = useMemo(() => projectVisibleVersionGraph(progressFolders, graphEdges), [graphEdges, progressFolders]);
-  const entryByPath = useMemo(() => new Map(structureEntries.map(entry => [normalizePath(entry.relativePath), entry])), [structureEntries]);
-  const externalEntryByTarget = useMemo(() => new Map(structureEntries
-    .filter(entry => entry.externalLink && entry.externalLinkTarget)
-    .map(entry => [normalizePath(entry.externalLinkTarget!), entry])), [structureEntries]);
-  const versionItems = useMemo(() => graph.folders.flatMap(folder => {
-    const relativePath = normalizePath(folder.externalLinkRelativePath || projectRelativePath(folder.folderPath));
-    const foundEntry = externalEntryByTarget.get(normalizePath(folder.folderPath)) || entryByPath.get(normalizePath(relativePath));
-    const entry: ProjectFileEntry | undefined = foundEntry || folder.folderMissing ? foundEntry || {
-      kind: 'folder', name: folder.displayName, path: folder.folderPath, relativePath, extension: '', size: 0, createdAt: folder.createdAt, updatedAt: folder.updatedAt,
-    } : undefined;
-    return entry && parentPath(relativePath) === scopePath ? [{ folder, entry }] : [];
-  }), [entryByPath, externalEntryByTarget, graph.folders, projectRelativePath, scopePath]);
+  const resolvedEntryMapping = useMemo(() => resolveVersionTreeEntryMapping({
+    folders: graph.folders, entries, structureEntries, scopePath, projectRelativePath,
+  }), [entries, graph.folders, projectRelativePath, scopePath, structureEntries]);
+  const versionItems = resolvedEntryMapping.versionItems;
   const visibleIds = useMemo(() => new Set(versionItems.map(item => item.folder.id)), [versionItems]);
   const visibleEdges = useMemo(() => graph.edges.filter(edge => visibleIds.has(edge.parentId) && visibleIds.has(edge.childId)), [graph.edges, visibleIds]);
-  const trackedEntryPaths = useMemo(() => new Set(versionItems.map(item => normalizePath(item.entry.relativePath))), [versionItems]);
   const selectedPathSet = useMemo(() => new Set(selectedRelativePaths.map(normalizePath)), [selectedRelativePaths]);
   // Keep every untracked entry visible. Folders can still accept version
   // outputs, while ordinary files remain passive nodes in the Other area.
-  const ordinaryEntries = useMemo(() => entries.filter(entry => !trackedEntryPaths.has(normalizePath(entry.relativePath))), [entries, trackedEntryPaths]);
+  const ordinaryEntries = resolvedEntryMapping.ordinaryEntries;
   const selectedNodeIds = useMemo(() => new Set([
     ...versionItems.filter(item => selectedPathSet.has(normalizePath(item.entry.relativePath))).map(item => `entry:${normalizePath(item.entry.relativePath)}`),
     ...ordinaryEntries.filter(entry => selectedPathSet.has(normalizePath(entry.relativePath))).map(entry => `entry:${normalizePath(entry.relativePath)}`),

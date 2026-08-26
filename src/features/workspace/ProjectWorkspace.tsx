@@ -3748,12 +3748,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!entry || !nextName || nextName === entry.name) { cancelInlineRename(); return; }
     if (isProtectedRenameEntry(entry)) { cancelInlineRename(); onNotice('该文件夹由项目工作流管理，不能普通重命名。'); return; }
     const progressFolder = registeredProgressFolderForEntry(entry);
-    const optimisticRelativePath = normalizeProjectRelativePath(`${sourceDirectoryPath}/${nextName}`);
     const pathSeparatorIndex = Math.max(entry.path.lastIndexOf('/'), entry.path.lastIndexOf('\\'));
+    const optimisticName = entry.externalLink && entry.path.toLocaleLowerCase().endsWith('.lnk') && !nextName.toLocaleLowerCase().endsWith('.lnk') ? `${nextName}.lnk` : nextName;
+    const optimisticRelativePath = normalizeProjectRelativePath(`${sourceDirectoryPath}/${optimisticName}`);
+    const optimisticPhysicalPath = `${pathSeparatorIndex >= 0 ? entry.path.slice(0, pathSeparatorIndex + 1) : ''}${optimisticName}`;
     const pendingOperation = startPendingFileOperation({
       kind: 'rename', label: '正在重命名…', lockedPaths: [sourcePath, optimisticRelativePath], affectedDirectories: [sourceDirectoryPath],
       tombstonePaths: [sourcePath],
-      optimisticEntries: [{ ...entry, name: nextName, relativePath: optimisticRelativePath }],
+      optimisticEntries: [{ ...entry, name: optimisticName, path: optimisticPhysicalPath, relativePath: optimisticRelativePath, pendingSourceRelativePath: sourcePath }],
     });
     if (!pendingOperation) return;
     cancelInlineRename();
@@ -3891,9 +3893,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const sourcePaths = [...selectedPaths];
     const requestedNames = [...batchRenameNames];
     const optimisticEntries = batchRenameEntries.map((entry, index) => {
-      const name = requestedNames[index];
+      const requestedName = requestedNames[index];
+      const name = entry.externalLink && entry.path.toLocaleLowerCase().endsWith('.lnk') && !requestedName.toLocaleLowerCase().endsWith('.lnk') ? `${requestedName}.lnk` : requestedName;
       const relativePath = normalizeProjectRelativePath(`${currentRelativePath}/${name}`);
-      return { ...entry, name, relativePath };
+      const separatorIndex = Math.max(entry.path.lastIndexOf('/'), entry.path.lastIndexOf('\\'));
+      return { ...entry, name, path: `${separatorIndex >= 0 ? entry.path.slice(0, separatorIndex + 1) : ''}${name}`, relativePath, pendingSourceRelativePath: batchRenameEntries[index].relativePath };
     });
     const pendingOperation = startPendingFileOperation({
       kind: 'rename', label: '正在批量重命名…', lockedPaths: [...sourcePaths, ...optimisticEntries.map(entry => entry.relativePath)],

@@ -14,13 +14,13 @@ const mainWindow = { isDestroyed: () => false, webContents: { isDestroyed: () =>
 let now = 10000;
 const service = new ComponentNotificationService({ mainWindow, now: () => now });
 service.setRendererReady({ rendererToken: 'renderer-main', revision: 0, ready: true });
-const descriptor = componentId => ({ componentId, hostApiVersion: 4, service: { capabilities: ['notifications.v7'], permissions: ['notifications'] } });
+const descriptor = componentId => ({ componentId, hostApiVersion: 7, service: { capabilities: ['notifications.v7'], permissions: ['notifications'] } });
 const project = { surface: 'project' };
 
 let result = service.publish(descriptor('alpha'), { tone: 'success', message: '  saved  ' }, project);
-assert.deepStrictEqual(result, { apiVersion: 2, accepted: true, id: 'alpha:1' });
+assert.deepStrictEqual(result, { apiVersion: 7, accepted: true, id: 'alpha:1' });
 assert.deepStrictEqual(sent[0][1].notification, { tone: 'success', message: 'saved' });
-assert.equal(sent[0][0], 'component-host:notification.v2');
+assert.equal(sent[0][0], 'component-host:notification.v7');
 assert.equal(service.publish(descriptor('alpha'), { tone: 'success', message: 'saved' }, project).code, 'NOTIFICATION_DEDUPLICATED');
 assert.equal(service.publish(descriptor('beta'), { tone: 'success', message: 'saved' }, project).accepted, true, 'dedupe is isolated by component');
 
@@ -55,8 +55,8 @@ for (const [payload, code] of [
   [{ tone: 'info', message: 'x', dedupeKey: '../bad' }, 'NOTIFICATION_INVALID_DEDUPE_KEY'],
   [{ tone: 'info', message: 'x', html: '<b>x</b>' }, 'NOTIFICATION_INVALID_PAYLOAD'],
 ]) assert.equal(service.publish(descriptor('validation'), payload, project).error.code, code);
-assert.equal(service.publish({ ...descriptor('old'), hostApiVersion: 3 }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_HOST_API_REQUIRED');
-for (const hostApiVersion of [undefined, Number.NaN, Number.POSITIVE_INFINITY, '4']) assert.equal(service.publish({ ...descriptor('invalid-host-api'), hostApiVersion }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_HOST_API_REQUIRED', `invalid host API ${String(hostApiVersion)} must fail closed`);
+assert.equal(service.publish({ ...descriptor('old'), hostApiVersion: 6 }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_HOST_API_REQUIRED');
+for (const hostApiVersion of [undefined, Number.NaN, Number.POSITIVE_INFINITY, '7']) assert.equal(service.publish({ ...descriptor('invalid-host-api'), hostApiVersion }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_HOST_API_REQUIRED', `invalid host API ${String(hostApiVersion)} must fail closed`);
 assert.equal(service.publish({ ...descriptor('missing-cap'), service: { capabilities: [], permissions: ['notifications'] } }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_CAPABILITY_NOT_GRANTED');
 assert.equal(service.publish({ ...descriptor('missing-perm'), service: { capabilities: ['notifications.v7'], permissions: [] } }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_PERMISSION_DENIED');
 assert.equal(service.publish(descriptor('settings'), { tone: 'info', message: 'settings' }, { surface: 'application.settings' }).accepted, true);
@@ -116,7 +116,7 @@ assert.throws(() => broker.invoke({ ...descriptor('broker-denied'), service: { c
 const handlers = new Map();
 const ipcMain = { handle: (channel, handler) => handlers.set(channel, handler) };
 const directCalls = [];
-const manager = new ComponentViewManager({ WebContentsView: function unused() {}, mainWindow: {}, registry: {}, preloadPath: 'component-preload.cjs', ipcMain, notificationService: { publish: (...args) => { directCalls.push(args); return { apiVersion: 2, accepted: true, id: 'direct' }; } } });
+const manager = new ComponentViewManager({ WebContentsView: function unused() {}, mainWindow: {}, registry: {}, preloadPath: 'component-preload.cjs', ipcMain, notificationService: { publish: (...args) => { directCalls.push(args); return { apiVersion: 7, accepted: true, id: 'direct' }; } } });
 const notifyHandler = handlers.get('component-sdk:notify');
 const sender = { id: 42 }; const otherSender = { id: 43 };
 const instance = { view: { webContents: sender }, descriptor: descriptor('owner'), context: { componentId: 'owner', surface: 'project' } };
@@ -140,14 +140,14 @@ manager.activeInstanceId = 'project'; projectInstance.logicalActive = true; sett
 manager.applyBounds(projectInstance);
 assert.deepStrictEqual(projectBounds.at(-1), { x: 10, y: 40, width: 800, height: 600 }, 'toast activity has no bounds mutation path');
 
-assert.deepStrictEqual(normalizeComponentNotificationRendererEvent({ apiVersion: 2, type: 'notification', id: 'alpha:1', componentId: 'alpha', surface: 'project', notification: { tone: 'success', message: 'saved' } }).notification, { tone: 'success', message: 'saved' });
-assert.equal(normalizeComponentNotificationRendererEvent({ apiVersion: 2, type: 'notification', id: 'x', componentId: 'alpha', surface: 'project', notification: { tone: 'info', message: 'padded', durationMs: 3500 } }), null, 'legacy durationMs is rejected at the renderer boundary');
-assert.deepStrictEqual(normalizeComponentNotificationRendererEvent({ apiVersion: 2, type: 'purge', componentId: 'alpha' }), { apiVersion: 2, type: 'purge', componentId: 'alpha' });
+assert.deepStrictEqual(normalizeComponentNotificationRendererEvent({ apiVersion: 7, type: 'notification', id: 'alpha:1', componentId: 'alpha', surface: 'project', notification: { tone: 'success', message: 'saved' } }).notification, { tone: 'success', message: 'saved' });
+assert.equal(normalizeComponentNotificationRendererEvent({ apiVersion: 7, type: 'notification', id: 'x', componentId: 'alpha', surface: 'project', notification: { tone: 'info', message: 'padded', durationMs: 3500 } }), null, 'legacy durationMs is rejected at the renderer boundary');
+assert.deepStrictEqual(normalizeComponentNotificationRendererEvent({ apiVersion: 7, type: 'purge', componentId: 'alpha' }), { apiVersion: 7, type: 'purge', componentId: 'alpha' });
 const rendererEvents = new EventEmitter(); const normalizedEvents = [];
 const unsubscribeRenderer = subscribeComponentNotification(rendererEvents, value => normalizedEvents.push(value));
-rendererEvents.emit('component-host:notification.v2', {}, { apiVersion: 2, type: 'notification', id: 'alpha:2', componentId: 'alpha', surface: 'application.settings', notification: { tone: 'warning', message: 'review' } });
+rendererEvents.emit('component-host:notification.v7', {}, { apiVersion: 7, type: 'notification', id: 'alpha:2', componentId: 'alpha', surface: 'application.settings', notification: { tone: 'warning', message: 'review' } });
 assert.equal(normalizedEvents.length, 1); unsubscribeRenderer();
-rendererEvents.emit('component-host:notification.v2', {}, { apiVersion: 2, type: 'purge', componentId: 'alpha' });
+rendererEvents.emit('component-host:notification.v7', {}, { apiVersion: 7, type: 'purge', componentId: 'alpha' });
 assert.equal(normalizedEvents.length, 1, 'preload subscription cleanup removes the private listener');
 
 console.log('component notification tests passed');

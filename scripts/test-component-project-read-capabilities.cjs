@@ -7,7 +7,7 @@ const { ComponentCapabilityBroker } = require('../electron/services/component-ca
 const { parseComponentHostManifest, COMPONENT_HOST_API_VERSION } = require('../electron/component-host-contract.cjs');
 const { MAX_PROGRESS_ITEMS, MAX_PROGRESS_SCAN, registerComponentProjectReadCapabilities, resetComponentProjectReadCapabilityStateForTest } = require('../electron/services/component-project-read-capabilities.cjs');
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-host-v5-'));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-host-v7-read-'));
 const componentRoot = path.join(root, 'component'); const workspaceRoot = path.join(root, 'workspace'); const projectRoot = path.join(workspaceRoot, 'active', 'Project');
 fs.mkdirSync(path.join(componentRoot, 'ui'), { recursive: true }); fs.mkdirSync(path.join(projectRoot, 'nested'), { recursive: true });
 fs.writeFileSync(path.join(componentRoot, 'ui', 'index.html'), '<!doctype html>'); fs.writeFileSync(path.join(componentRoot, 'service.cjs'), '');
@@ -17,16 +17,14 @@ fs.writeFileSync(path.join(projectRoot, 'missing-metadata.jpg'), 'image'); const
 
 const capabilities = ['project.files.page.v7', 'project.files.search.v7', 'project.media.metadata.v7', 'project.versions.page.v7', 'project.version.graph.v7', 'project.media.ratings.v7'];
 const permissions = ['project.files.read', 'project.media.read', 'project.versions.read', 'project.media.ratings.read'];
-const manifest = { apiVersion: 1, id: 'host-v5-fixture', version: '1.0.0', componentHost: { contractVersion: 2,
-  compatibility: { minHostApiVersion: 5, maxHostApiVersion: 5 }, contributions: [
+const manifest = { apiVersion: 1, id: 'host-v7-read-fixture', version: '1.0.0', componentHost: { contractVersion: 2,
+  compatibility: { minHostApiVersion: 7, maxHostApiVersion: 7 }, contributions: [
     { type: 'workspace.toolbarAction', id: 'open', label: 'Open', pageId: 'main' },
     { type: 'component.fullPage', id: 'main', title: 'Fixture', entry: 'ui/index.html' },
   ], service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1'], capabilities, permissions, events: [] } } };
 
 const descriptor = parseComponentHostManifest(manifest, componentRoot);
-assert.equal(COMPONENT_HOST_API_VERSION, 7); assert.equal(descriptor.hostApiVersion, 5);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 5 } } }, componentRoot), /minHostApiVersion 5/);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 5 }, service: { ...manifest.componentHost.service, capabilities: [], permissions: ['project.files.read'] } } }, componentRoot), /minHostApiVersion 5/);
+assert.equal(COMPONENT_HOST_API_VERSION, 7); assert.equal(descriptor.hostApiVersion, 7);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: permissions.filter(item => item !== 'project.files.read') } } }, componentRoot), /requires permission project.files.read/);
 
 const photoBundle = { photo: { id: 'photo-1', projectId: 'project-1' }, versions: [
@@ -130,10 +128,10 @@ const context = { surface: 'project', workspacePath: workspaceRoot, projectId: '
       fs.symlinkSync(outside, path.join(projectRoot, 'nested', 'escape-link'), process.platform === 'win32' ? 'junction' : 'dir');
       await assert.rejects(broker.invoke(descriptor, 'project.files.page.v7', {}, context), error => error.code === 'COMPONENT_HOST_PERMISSION_DENIED');
     } catch (error) { if (!['EPERM', 'EACCES'].includes(error?.code)) throw error; }
-    const schema = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api-v2.schema.json'), 'utf8'));
+    const schema = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api-v7.schema.json'), 'utf8'));
     for (const name of ['publicVersion', 'progressNode', 'graphEdge']) assert.equal(schema.$defs[name].additionalProperties, false, `${name} is closed`);
     for (const name of ['dimensions', 'camera', 'capture']) assert.equal(schema.$defs.projectMediaMetadata.properties.result.properties[name].additionalProperties, false, `${name} metadata is closed`);
     assert.equal(schema.$defs.projectMediaRatings.properties.result.additionalProperties, false); assert.equal(schema.$defs.projectMediaRatings.properties.result.properties.items.items.additionalProperties, false);
-    console.log('Component Host API V5 project read capability tests passed');
+    console.log('Component Host API V7 project read capability tests passed');
   } finally { resetComponentProjectReadCapabilityStateForTest(); fs.rmSync(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

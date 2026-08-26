@@ -2,6 +2,11 @@ import type { ProjectFileEntry } from '../../types';
 
 export type PendingFileOperationKind = 'rename' | 'create' | 'delete' | 'move' | 'paste' | 'import' | 'copy' | 'cut' | 'project';
 
+export type PendingProjectFileEntry = ProjectFileEntry & {
+  pendingOperationId?: string;
+  pendingSourceRelativePath?: string;
+};
+
 export type PendingFileOperation = {
   id: string;
   kind: PendingFileOperationKind;
@@ -10,11 +15,7 @@ export type PendingFileOperation = {
   lockedPaths: string[];
   affectedDirectories: string[];
   tombstonePaths?: string[];
-  optimisticEntries?: ProjectFileEntry[];
-};
-
-export type PendingProjectFileEntry = ProjectFileEntry & {
-  pendingOperationId?: string;
+  optimisticEntries?: PendingProjectFileEntry[];
 };
 
 const normalizePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLocaleLowerCase('zh-CN');
@@ -68,7 +69,10 @@ export const applyPendingFileOperations = (
   const visiblePaths = new Set(visible.map(entry => normalizePath(entry.relativePath)));
   for (const operation of operations) {
     if (operation.kind !== 'rename') continue;
+    const operationTombstones = new Set((operation.tombstonePaths || []).map(normalizePath));
     for (const optimisticEntry of operation.optimisticEntries || []) {
+      const sourceKey = normalizePath(optimisticEntry.pendingSourceRelativePath || '');
+      if (!sourceKey || !operationTombstones.has(sourceKey)) continue;
       if (normalizedDirectory !== undefined && parentPath(optimisticEntry.relativePath) !== normalizedDirectory) continue;
       const key = normalizePath(optimisticEntry.relativePath);
       if (visiblePaths.has(key)) continue;

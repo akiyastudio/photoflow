@@ -79,7 +79,7 @@ assert(entry.includes('<TeamSettingsContent') && !entry.includes('PairDETR + SAM
 assert(adapter.includes("['photoflow-ref', kind") && !adapter.includes('sourcePath: task.') && !adapter.includes('returnedPath:'), 'media compatibility must use opaque IDs instead of exposing or submitting paths');
 for (const topic of ['team.patch.detect.progress.v1', 'team.patch.detect-batch.progress.v1', 'team.return.progress.v1', 'team.workflow.progress.v1']) {
   assert(manifest.componentHost.service.events.includes(topic), `manifest event allowlist missing: ${topic}`);
-  assert(adapter.includes(`'${topic}'`), `legacy renderer subscription missing V2 event topic: ${topic}`);
+  assert(adapter.includes(`'${topic}'`), `legacy renderer subscription missing plugin event topic: ${topic}`);
   assert(service.includes(`'${topic}'`), `service event mapping missing: ${topic}`);
 }
 const workflowCssMarker = '/* Weeks stack vertically. Each person gets one compact horizontal task lane. */';

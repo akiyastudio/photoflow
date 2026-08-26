@@ -34,7 +34,7 @@ const componentViewBoundsWithHostOverlay = (bounds, reservedBottom) => {
 const selectComponentPreload = (descriptor, { core }) => {
   const contractVersion = Number(descriptor?.contractVersion);
   const hostApiVersion = Number(descriptor?.hostApiVersion);
-  if (contractVersion === 2 && hostApiVersion >= 2) return core;
+  if (contractVersion === 2 && hostApiVersion === 7) return core;
   throw new Error(`Unsupported component preload contract: contract=${contractVersion || 'unknown'} hostApi=${hostApiVersion || 'unknown'}`);
 };
 const diagnosticToken = value => {

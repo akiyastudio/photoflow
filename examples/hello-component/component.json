@@ -4,7 +4,7 @@
   "version": "1.0.0",
   "componentHost": {
     "contractVersion": 2,
-    "compatibility": { "minHostApiVersion": 2, "maxHostApiVersion": 2 },
+    "compatibility": { "minHostApiVersion": 7, "maxHostApiVersion": 7 },
     "contributions": [
       { "type": "workspace.toolbarAction", "id": "open", "label": "Hello Component", "pageId": "main" },
       { "type": "component.fullPage", "id": "main", "title": "Hello Component", "entry": "ui/index.html" }

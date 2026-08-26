@@ -291,7 +291,7 @@ const registerSystemIpc = context => {
     invalidateComponentStatus, writeLog,
   });
   registerHostCapabilities(componentCapabilityBroker, [
-    ['component.lifecycle.v7', componentLifecycleService.invokeV2],
+    ['component.lifecycle.v7', componentLifecycleService.invokeV7],
   ]);
 
   backgroundTasks?.registerTypeRestartFactory?.('component-status-refresh', task => {

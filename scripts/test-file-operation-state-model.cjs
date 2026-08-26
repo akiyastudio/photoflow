@@ -7,8 +7,8 @@ const { pathToFileURL } = require('node:url');
   const model = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-operation-state-model.ts')).href);
   const identity = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'file-operation-identity-model.ts')).href);
   const entry = (relativePath, kind = 'file') => ({ name: relativePath.split('/').pop(), path: `D:/project/${relativePath}`, relativePath, kind, extension: '', size: 1, createdAt: 1, updatedAt: 1 });
-  const renameSource = entry('a.txt');
-  const rename = { id: 'rename', kind: 'rename', label: '正在重命名', lockedPaths: ['a.txt', 'b.txt'], affectedDirectories: [''], tombstonePaths: ['a.txt'], optimisticEntries: [{ ...entry('b.txt'), path: renameSource.path }] };
+  const renameSource = { ...entry('a.txt'), previewUrl: 'safe-preview://a' };
+  const rename = { id: 'rename', kind: 'rename', label: '正在重命名', lockedPaths: ['a.txt', 'b.txt'], affectedDirectories: [''], tombstonePaths: ['a.txt'], optimisticEntries: [{ ...renameSource, name: 'b.txt', path: 'D:/project/b.txt', relativePath: 'b.txt', pendingSourceRelativePath: 'a.txt' }] };
   assert.equal(model.pendingPathConflicts([rename], ['a.txt']), true, 'the source path is locked');
   assert.equal(model.pendingPathConflicts([rename], ['folder/a.txt']), false, 'unrelated paths remain available');
   assert.equal(model.addPendingFileOperation([rename], { ...rename, id: 'conflict' }).length, 1, 'conflicting operations are rejected');
@@ -20,7 +20,22 @@ const { pathToFileURL } = require('node:url');
   assert.equal(renamedEntry.pendingOperationLabel, undefined, 'rename exposes no processing label');
   assert.equal(renamedEntry.pendingOperationKind, undefined, 'rename exposes no processing kind to visual rendering');
   assert.equal(renamedEntry.pendingPlaceholder, undefined, 'rename is never rendered as a placeholder');
-  assert.equal(renamedEntry.path, renameSource.path, 'rename keeps the original icon and thumbnail source until authority refreshes');
+  assert.equal(renamedEntry.path, 'D:/project/b.txt', 'rename predicts the final physical path instead of asking the icon loader for the tombstoned source');
+  assert.equal(renamedEntry.previewUrl, renameSource.previewUrl, 'rename retains reusable preview metadata while predicting the final physical path');
+  assert.equal(renamedEntry.pendingSourceRelativePath, 'a.txt', 'rename retains an internal stable-identity alias for the source entry');
+  const malformedRename = { ...rename, id: 'malformed', optimisticEntries: [{ ...entry('c.txt'), pendingSourceRelativePath: 'not-the-tombstone.txt' }] };
+  assert.deepEqual(model.applyPendingFileOperations([renameSource], '', [malformedRename]), [], 'an optimistic rename is admitted only by an explicit source-to-tombstone mapping');
+  const batchSources = [entry('first.txt'), entry('second.txt')];
+  const batchRename = {
+    id: 'batch-rename', kind: 'rename', label: '正在批量重命名',
+    lockedPaths: ['first.txt', 'second.txt', 'renamed-1.txt', 'renamed-2.txt'], affectedDirectories: [''], tombstonePaths: ['first.txt', 'second.txt'],
+    optimisticEntries: [
+      { ...batchSources[0], name: 'renamed-1.txt', path: 'D:/project/renamed-1.txt', relativePath: 'renamed-1.txt', pendingSourceRelativePath: batchSources[0].relativePath },
+      { ...batchSources[1], name: 'renamed-2.txt', path: 'D:/project/renamed-2.txt', relativePath: 'renamed-2.txt', pendingSourceRelativePath: batchSources[1].relativePath },
+    ],
+  };
+  const batchRenamed = model.applyPendingFileOperations(batchSources, '', [batchRename]);
+  assert.deepEqual(batchRenamed.map(item => [item.relativePath, item.pendingSourceRelativePath]), [['renamed-1.txt', 'first.txt'], ['renamed-2.txt', 'second.txt']], 'batch rename preserves the explicit source alias at each index and emits one entry per source');
 
   const deletion = { id: 'delete', kind: 'delete', label: '正在移入回收站', lockedPaths: ['a.txt', 'b.txt'], affectedDirectories: [''], tombstonePaths: ['a.txt', 'b.txt'] };
   assert.deepEqual(model.applyPendingFileOperations([entry('a.txt'), entry('b.txt'), entry('c.txt')], '', [deletion]).map(item => item.relativePath), ['c.txt']);

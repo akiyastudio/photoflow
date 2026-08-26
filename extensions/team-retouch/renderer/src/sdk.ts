@@ -10,13 +10,13 @@ export type ComponentContext = {
   sourcePageId: string;
   themeContractVersion: 1;
   resolvedTheme: 'light' | 'dark';
-  hostApiVersion: 1 | 2 | 3 | 4;
+  hostApiVersion: 7;
 };
 
 export type ComponentSdk = {
   contractVersion: 1;
   getContext(): Promise<ComponentContext>;
-  notify?: (payload: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; dedupeKey?: string }) => Promise<{ apiVersion: 2; accepted: boolean; deduplicated?: boolean; error?: { code: string; message: string; retryable: boolean } }>;
+  notify?: (payload: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; dedupeKey?: string }) => Promise<{ apiVersion: 7; accepted: boolean; deduplicated?: boolean; error?: { code: string; message: string; retryable: boolean } }>;
   rpc<T = unknown>(method: string, payload?: unknown): Promise<T>;
   onEvent(topic: string, callback: (value: unknown) => void): () => void;
   onActivate(callback: () => void): () => void;

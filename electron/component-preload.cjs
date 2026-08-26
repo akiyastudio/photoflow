@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
-const notificationFailure = (code, message) => Object.freeze({ apiVersion: 2, accepted: false, error: Object.freeze({ code, message, retryable: false }) });
+const notificationFailure = (code, message) => Object.freeze({ apiVersion: 7, accepted: false, error: Object.freeze({ code, message, retryable: false }) });
 const normalizeNotification = value => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return notificationFailure('NOTIFICATION_INVALID_PAYLOAD', 'Notification payload must be an object');
   const unknown = Object.keys(value).find(key => !['tone', 'message', 'dedupeKey'].includes(key));

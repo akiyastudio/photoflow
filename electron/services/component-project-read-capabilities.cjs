@@ -164,7 +164,7 @@ const registerComponentProjectReadCapabilities = ({
     const items = cursor.items.slice(cursor.offset, cursor.offset + pageSize); const nextOffset = cursor.offset + items.length;
     if (payload.cursor) { cursor.offset = nextOffset; cursor.expiresAt = Date.now() + CURSOR_TTL_MS; if (nextOffset >= cursor.items.length) cursors.delete(String(payload.cursor)); }
     const nextCursor = payload.cursor ? (nextOffset < cursor.items.length ? String(payload.cursor) : null) : issueCursor(scope, search ? 'files-search' : 'files-page', cursor.items, nextOffset, { truncated, query: cursor.query, pageSize });
-    return { apiVersion: 1, items, page: { cursor: nextCursor, hasMore: Boolean(nextCursor), pageSize, truncated } };
+    return { apiVersion: 7, items, page: { cursor: nextCursor, hasMore: Boolean(nextCursor), pageSize, truncated } };
   };
   broker.register('project.files.page.v7', (payload, context, descriptor) => filePage(payload, context, descriptor, false));
   broker.register('project.files.search.v7', (payload, context, descriptor) => filePage(payload, context, descriptor, true));
@@ -187,7 +187,7 @@ const registerComponentProjectReadCapabilities = ({
       const value = Number(raw);
       return Number.isFinite(value) ? value : null;
     };
-    return { apiVersion: 1, mediaRef: { relativePath: media.relativePath }, kind: media.kind, size: media.stat.size, updatedAt: media.stat.mtimeMs,
+    return { apiVersion: 7, mediaRef: { relativePath: media.relativePath }, kind: media.kind, size: media.stat.size, updatedAt: media.stat.mtimeMs,
       dimensions: { width: number('ImageWidth'), height: number('ImageHeight') }, colorSpace: pick('ColorSpace', 'ColorProfileDescription'),
       camera: { make: pick('Make'), model: pick('Model'), lens: pick('LensModel', 'LensID') },
       capture: { aperture: number('FNumber'), exposureTime: pick('ExposureTime'), iso: number('ISO'), focalLength: number('FocalLength'), takenAt: pick('DateTimeOriginal') },
@@ -210,7 +210,7 @@ const registerComponentProjectReadCapabilities = ({
     const items = cursor.items.slice(cursor.offset, cursor.offset + pageSize); const nextOffset = cursor.offset + items.length;
     if (payload.cursor) { cursor.offset = nextOffset; cursor.expiresAt = Date.now() + CURSOR_TTL_MS; if (nextOffset >= cursor.items.length) cursors.delete(String(payload.cursor)); }
     const nextCursor = payload.cursor ? (nextOffset < cursor.items.length ? String(payload.cursor) : null) : issueCursor(scope, 'versions-page', cursor.items, nextOffset, { truncated, pageSize });
-    return { apiVersion: 1, items, page: { cursor: nextCursor, hasMore: Boolean(nextCursor), pageSize, truncated } };
+    return { apiVersion: 7, items, page: { cursor: nextCursor, hasMore: Boolean(nextCursor), pageSize, truncated } };
   });
   broker.register('project.version.graph.v7', async (payload, context, descriptor) => {
     assertObjectFields(payload, ['includeMissing']); if (payload.includeMissing !== undefined && typeof payload.includeMissing !== 'boolean') throw hostError(CODES.INVALID_REQUEST, 'includeMissing must be boolean');
@@ -252,7 +252,7 @@ const registerComponentProjectReadCapabilities = ({
     }));
     const versionIds = new Set(versions.items.map(item => item.id));
     const versionEdges = versions.items.filter(item => item.parentVersionId && versionIds.has(item.parentVersionId)).map(item => ({ sourceId: item.parentVersionId, targetId: item.id, kind: 'parent' }));
-    return { apiVersion: 1, progress, versions: versions.items, edges: [...progressEdges, ...versionEdges], truncated: versions.truncated || allProgress.length > MAX_PROGRESS_SCAN || progressOverflow || edgeOverflow };
+    return { apiVersion: 7, progress, versions: versions.items, edges: [...progressEdges, ...versionEdges], truncated: versions.truncated || allProgress.length > MAX_PROGRESS_SCAN || progressOverflow || edgeOverflow };
   });
 
   broker.register('project.media.ratings.v7', async (payload, context, descriptor) => {
@@ -272,7 +272,7 @@ const registerComponentProjectReadCapabilities = ({
       }
       items.push({ mediaRef: { relativePath: media.relativePath }, revision: media.stat.mtimeMs, rating, labels: null, selectionState: null });
     }
-    return { apiVersion: 1, supported: { rating: true, labels: false, selectionState: false }, items };
+    return { apiVersion: 7, supported: { rating: true, labels: false, selectionState: false }, items };
   });
 };
 

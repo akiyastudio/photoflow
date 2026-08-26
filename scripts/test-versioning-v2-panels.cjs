@@ -165,6 +165,7 @@ assert(!beginRenameSource.includes("if (finalViewOpen)") && !beginRenameSource.i
 assert(beginRenameSource.includes('registeredProgressEntries.length && targetPaths.length > 1'), 'registered progress folders must allow one local or external alias rename while still rejecting batch rename');
 const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
 const versioningPublic = { ...model, ...layoutModel, ...canvasModel, ...edgeModel, ...canvasHook };
+const versionTreeEntryModel = loadCommonJs(compile('src/features/versioning/project-version-tree-entry-model.ts'));
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {
   if (request === '../features/versioning/public') return versioningPublic;
   if (request === '../features/versioning/versioning-v2-model') return model;
@@ -172,10 +173,40 @@ const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), requ
   if (request === '../features/versioning/version-tree-canvas-model') return canvasModel;
   if (request === '../features/versioning/version-tree-edge-model') return edgeModel;
   if (request === '../features/versioning/use-version-tree-canvas') return canvasHook;
+  if (request === '../features/versioning/project-version-tree-entry-model') return versionTreeEntryModel;
   if (request === '../features/workspace/marquee-selection-model') return workspaceGridModel;
   if (request === './LayerProvider') return { useHostSurfaceSuspension: () => undefined };
   return require(request);
 });
+const mappingEntry = (name, overrides = {}) => ({ kind: 'folder', name, relativePath: name, path: `C:/p/${name}`, extension: '', size: 0, createdAt: 1, updatedAt: 1, ...overrides });
+const stableProgress = sourceFixture({ id: 'stable-progress', displayName: 'Old progress', folderPath: 'C:/p/Old progress' });
+const oldProgressEntry = mappingEntry('Old progress');
+const optimisticProgressEntry = mappingEntry('New progress', { pendingSourceRelativePath: 'Old progress', previewUrl: 'safe-preview://progress' });
+const progressRenameMapping = versionTreeEntryModel.resolveVersionTreeEntryMapping({
+  folders: [stableProgress], entries: [optimisticProgressEntry], structureEntries: [oldProgressEntry], scopePath: '', projectRelativePath: value => value.split('/').pop(),
+});
+assert.strictEqual(progressRenameMapping.versionItems.length, 1, 'old structure plus a renamed optimistic progress folder must resolve to one version item');
+assert.strictEqual(progressRenameMapping.versionItems[0].folder.id, 'stable-progress', 'optimistic rename must retain the registered progress identity');
+assert.deepStrictEqual({
+  name: progressRenameMapping.versionItems[0].entry.name,
+  relativePath: progressRenameMapping.versionItems[0].entry.relativePath,
+  path: progressRenameMapping.versionItems[0].entry.path,
+}, { name: 'New progress', relativePath: 'New progress', path: 'C:/p/New progress' }, 'the stable version item must render the optimistic final name and paths');
+assert.deepStrictEqual(progressRenameMapping.ordinaryEntries, [], 'the optimistic progress entry must not be duplicated in Other');
+const ordinaryRenameEntry = mappingEntry('New ordinary', { pendingSourceRelativePath: 'Old ordinary' });
+const ordinaryRenameMapping = versionTreeEntryModel.resolveVersionTreeEntryMapping({
+  folders: [], entries: [ordinaryRenameEntry], structureEntries: [mappingEntry('Old ordinary')], scopePath: '', projectRelativePath: value => value.split('/').pop(),
+});
+assert.deepStrictEqual(ordinaryRenameMapping.versionItems, []);
+assert.deepStrictEqual(ordinaryRenameMapping.ordinaryEntries, [ordinaryRenameEntry], 'an unregistered folder rename must remain one ordinary entry');
+const externalProgress = sourceFixture({ id: 'stable-external-progress', displayName: 'External old', folderPath: 'D:/shoot/RAW', externalLinkRelativePath: 'External old.lnk' });
+const optimisticExternalEntry = mappingEntry('External new.lnk', { kind: 'shortcut', extension: '.lnk', pendingSourceRelativePath: 'External old.lnk', externalLink: true, externalLinkTarget: 'D:/shoot/RAW' });
+const externalRenameMapping = versionTreeEntryModel.resolveVersionTreeEntryMapping({
+  folders: [externalProgress], entries: [optimisticExternalEntry], structureEntries: [mappingEntry('External old.lnk', { kind: 'shortcut', extension: '.lnk', externalLink: true, externalLinkTarget: 'D:/shoot/RAW' })], scopePath: '', projectRelativePath: () => '',
+});
+assert.strictEqual(externalRenameMapping.versionItems.length, 1, 'an external registered progress rename must retain one stable version item');
+assert.strictEqual(externalRenameMapping.versionItems[0].entry.relativePath, 'External new.lnk');
+assert.deepStrictEqual(externalRenameMapping.ordinaryEntries, [], 'an optimistic external progress alias must not be duplicated in Other');
 const legacyRepairNotice = loadCommonJs(compile('src/features/versioning/LegacySelectionRepairNotice.tsx'));
 const mutationQueue = loadCommonJs(compile('src/features/versioning/progress-relation-mutation-queue.ts'));
 const React = require('react');

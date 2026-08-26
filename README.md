@@ -4,7 +4,7 @@
   <p>使用 Component Host V2 制作隔离、可安装、可独立升级的照片流插件</p>
   <p>
     <a href="docs/PLUGIN_DEVELOPMENT.md">开发教程</a>
-    · <a href="docs/PLUGIN_HOST_API.md">Host API V2</a>
+    · <a href="docs/PLUGIN_HOST_API.md">Host API V7</a>
     · <a href="examples/hello-component">完整示例</a>
   </p>
 </div>
@@ -14,12 +14,12 @@
 插件不能导入照片流 React 渲染层或 Electron 主进程代码，也不能取得任意 IPC、任意文件系统路径或宿主环境中的凭据。所有未在清单中声明的 RPC、能力、权限和事件都会默认拒绝。
 
 > [!IMPORTANT]
-> 所有组件必须使用 `componentHost.contractVersion: 2` 和 Host API 2 或更高版本；设置页需要 API 3，通知需要 API 4，项目只读扩展需要 API 5，项目写入扩展需要 API 6，secrets、受控网络和新 UI contribution 需要 API 7。旧数据只能通过版本化 adoption grant 迁入组件私有存储。
+> 所有组件必须使用 `componentHost.contractVersion: 2`，并将 `minHostApiVersion` 与 `maxHostApiVersion` 均设为 `7`。Host 只协商 API 7。旧数据只能通过版本化 adoption grant 迁入组件私有存储。
 
 ## 快速开始
 
 1. 复制 `examples/hello-component`，并把目录改成自己的组件 ID。
-2. 在 `component.json` 中将 `contractVersion`、`minHostApiVersion`、`maxHostApiVersion` 都设为 `2`。
+2. 在 `component.json` 中将 `contractVersion` 设为 `2`，并将 `minHostApiVersion`、`maxHostApiVersion` 都设为 `7`。
 3. 声明一个 `workspace.toolbarAction`、一个相连的 `component.fullPage`、包内 UI 入口和服务入口。
 4. 显式列出服务 RPC、Host 能力、权限和事件。
 5. 用服务模拟器验证 JSON Lines 协议：
@@ -52,8 +52,8 @@ hello-component/
   "componentHost": {
     "contractVersion": 2,
     "compatibility": {
-      "minHostApiVersion": 3,
-      "maxHostApiVersion": 3
+      "minHostApiVersion": 7,
+      "maxHostApiVersion": 7
     },
     "contributions": [
       {
@@ -112,10 +112,10 @@ PhotoFlow 项目 / 媒体 / 输出 / 版本 / 任务
 界面只使用 `window.photoFlowComponent`：
 
 ```ts
-import { host, assertHostApiV2 } from '../../component-sdk/index.js';
+import { host, assertHostApiV7 } from '../../component-sdk/index.js';
 
 const context = await host.getContext();
-assertHostApiV2(context);
+assertHostApiV7(context);
 const page = await host.rpc('my-component.load.v1', { cursor: null });
 const stop = host.onEvent('my-component.progress.v1', update => render(update));
 window.addEventListener('pagehide', stop, { once: true });
@@ -151,14 +151,14 @@ window.addEventListener('pagehide', stop, { once: true });
 | `component.lifecycle.v7` | `component.lifecycle.read` | 读取版本、授权与生命周期状态 |
 | `component.media.v7` | `component.media` | 访问插件私有媒体 |
 | `project.progress.v7` | `project.progress` | 管理进度节点和来源关系 |
-| `project.files.page.v7` / `project.files.search.v7` | `project.files.read` | Host API 5：只读分页/搜索非媒体文件、目录与 sidecar |
-| `project.media.metadata.v7` | `project.media.read` | Host API 5：读取白名单媒体元数据 |
-| `project.versions.page.v7` / `project.version.graph.v7` | `project.versions.read` | Host API 5：只读版本快照与来源图 |
-| `project.media.ratings.v7` | `project.media.ratings.read` | Host API 5：批量读取实际评分支持 |
+| `project.files.page.v7` / `project.files.search.v7` | `project.files.read` | Host API 7：只读分页/搜索非媒体文件、目录与 sidecar |
+| `project.media.metadata.v7` | `project.media.read` | Host API 7：读取白名单媒体元数据 |
+| `project.versions.page.v7` / `project.version.graph.v7` | `project.versions.read` | Host API 7：只读版本快照与来源图 |
+| `project.media.ratings.v7` | `project.media.ratings.read` | Host API 7：批量读取实际评分支持 |
 
-完整参数、限制、错误码和迁移规则见 [Host API V2 参考](docs/PLUGIN_HOST_API.md)。
+完整参数、限制、错误码和迁移规则见 [Host API V7 参考](docs/PLUGIN_HOST_API.md)。
 
-Host API 5 的 P0 能力使用只读数据库快照，不触发媒体索引、迁移、baseline、repair 或路径同步写入。当前只覆盖项目物理目录；宿主管理的外链虚拟路径尚未开放。
+Host API 7 的 P0 能力使用只读数据库快照，不触发媒体索引、迁移、baseline、repair 或路径同步写入。当前只覆盖项目物理目录；宿主管理的外链虚拟路径尚未开放。
 
 ## 安全的“媒体 → 输出 → 版本”流程
 
@@ -182,7 +182,7 @@ stage 元数据和登记文件保留 24 小时，宿主重启后仍可继续校�
 ## 测试
 
 ```powershell
-npm run test:component-host-v2
+npm run test:component-host-v7
 npm run test:component-host
 npm run test:component-service
 npm run test:electron-security
@@ -201,7 +201,7 @@ npm run test:architecture
 ## 文档索引
 
 - [插件开发教程](docs/PLUGIN_DEVELOPMENT.md)
-- [Component Host API V2](docs/PLUGIN_HOST_API.md)
+- [Component Host API V7](docs/PLUGIN_HOST_API.md)
 - [Component Service Protocol V1](docs/COMPONENT_SERVICE_PROTOCOL_V1.md)
 - [架构边界](docs/ARCHITECTURE.md)
 - [源码边界](docs/SOURCE_BOUNDARIES.md)

@@ -195,7 +195,7 @@ const registerComponentProjectCapabilities = ({
   const grantInput = (filePath, descriptor, context) => {
     pruneExpiringMaps(Date.now());
     if (inputGrants.size >= MAX_INPUT_TOKENS) throw hostError(CODES.LIMIT_EXCEEDED, 'Too many active component input grants');
-    const token = `component-input:v2:${crypto.randomUUID()}`;
+    const token = `component-input:v7:${crypto.randomUUID()}`;
     const expiresAt = Date.now() + INPUT_TOKEN_TTL_MS;
     inputGrants.set(token, { filePath, scope: scopeKey(descriptor, context), expiresAt, usesRemaining: 1 });
     return { token, expiresAt };
@@ -265,7 +265,7 @@ const registerComponentProjectCapabilities = ({
     const hasMore = session.pending.length > 0 || Boolean(session.externalFiles?.length);
     session.expiresAt = Date.now() + CURSOR_TTL_MS;
     if (!hasMore) listSessions.delete(session.cursor);
-    return { apiVersion: 2, items, page: { hasMore, cursor: hasMore ? session.cursor : null, pageSize } };
+    return { apiVersion: 7, items, page: { hasMore, cursor: hasMore ? session.cursor : null, pageSize } };
   });
 
   broker.register('project.media.variants.v7', async (payload, context, descriptor) => {
@@ -288,7 +288,7 @@ const registerComponentProjectCapabilities = ({
     if (requested.has('original')) result.original = { url: originalUrl, byteLength: stat.size, derived: false };
     const input = requested.has('original') ? grantInput(media.filePath, descriptor, context) : null;
     return {
-      apiVersion: 2,
+      apiVersion: 7,
       mediaRef: { photoId: media.bundle?.photo?.id, versionId: media.version?.id, relativePath: media.relativePath },
       metadata: {
         photoId: String(media.bundle?.photo?.id || ''), versionId: String(media.version?.id || ''),
@@ -309,7 +309,7 @@ const registerComponentProjectCapabilities = ({
     await fs.promises.mkdir(directory, { recursive: true });
     const destination = path.join(directory, path.basename(source));
     await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
-    return { apiVersion: 2, inputId: path.basename(directory), privatePath: destination, byteLength: (await fs.promises.stat(destination)).size };
+    return { apiVersion: 7, inputId: path.basename(directory), privatePath: destination, byteLength: (await fs.promises.stat(destination)).size };
   });
 
   broker.register('component.storage.v7', async (payload, context, descriptor) => {
@@ -327,18 +327,18 @@ const registerComponentProjectCapabilities = ({
       }
       if (record.state === 'pending' && adoptionInteractiveBudgetMs > 0) await Promise.race([record.promise, new Promise(resolve => setTimeout(resolve, adoptionInteractiveBudgetMs))]);
       if (record.state === 'failed') { storageAdoptions.delete(key); throw record.error; }
-      if (record.state === 'pending') return { apiVersion: 2, projectId: String(scope.project.id), ownership: 'component-private', adoption: { schemaVersion: 1, kind: 'component-storage-adoption', state: 'pending', componentId: descriptor.componentId, fromHostApiVersion: 1, toHostApiVersion: 2, startedAt: record.startedAt } };
+      if (record.state === 'pending') return { apiVersion: 7, projectId: String(scope.project.id), ownership: 'component-private', adoption: { schemaVersion: 1, kind: 'component-storage-adoption', state: 'pending', componentId: descriptor.componentId, fromHostApiVersion: 1, toHostApiVersion: 2, startedAt: record.startedAt } };
       adoption = record.receipt;
     }
     await fs.promises.mkdir(scope.componentRoot, { recursive: true });
-    return { apiVersion: 2, dataPath: scope.componentRoot, databasePath: path.join(scope.componentRoot, 'storage.sqlite3'), projectId: String(scope.project.id), ownership: 'component-private', ...(adoption ? { adoption: { schemaVersion: adoption.schemaVersion, kind: adoption.kind, state: adoption.state, componentId: adoption.componentId, fromHostApiVersion: adoption.fromHostApiVersion, toHostApiVersion: adoption.toHostApiVersion, adoptedDataRoot: adoption.adoptedDataRoot === true, adoptedDatabase: adoption.adoptedDatabase === true, legacyDataRoot: adoption.legacyDataRoot || '', legacyDatabasePath: adoption.legacyDatabasePath || '', databaseSha256: adoption.databaseSha256 || '', copiedFileCount: Number(adoption.copiedFileCount) || 0, copiedByteCount: Number(adoption.copiedByteCount) || 0 } } : {}) };
+    return { apiVersion: 7, dataPath: scope.componentRoot, databasePath: path.join(scope.componentRoot, 'storage.sqlite3'), projectId: String(scope.project.id), ownership: 'component-private', ...(adoption ? { adoption: { schemaVersion: adoption.schemaVersion, kind: adoption.kind, state: adoption.state, componentId: adoption.componentId, fromHostApiVersion: adoption.fromHostApiVersion, toHostApiVersion: adoption.toHostApiVersion, adoptedDataRoot: adoption.adoptedDataRoot === true, adoptedDatabase: adoption.adoptedDatabase === true, legacyDataRoot: adoption.legacyDataRoot || '', legacyDatabasePath: adoption.legacyDatabasePath || '', databaseSha256: adoption.databaseSha256 || '', copiedFileCount: Number(adoption.copiedFileCount) || 0, copiedByteCount: Number(adoption.copiedByteCount) || 0 } } : {}) };
   });
 
   broker.register('component.settings.v7', async (payload, _context, descriptor) => {
     const componentId = String(descriptor.componentId || '');
     if (payload.action === 'get') {
       const config = readConfig ? await readConfig() : readSavedConfig() || {};
-      return { apiVersion: 2, revision: normalizeComponentRevision(config.componentSettingsRevisions?.[componentId]), settings: boundedObject(config.componentSettings?.[componentId] || {}, MAX_SETTINGS_BYTES, 'Stored component settings') };
+      return { apiVersion: 7, revision: normalizeComponentRevision(config.componentSettingsRevisions?.[componentId]), settings: boundedObject(config.componentSettings?.[componentId] || {}, MAX_SETTINGS_BYTES, 'Stored component settings') };
     }
     if (!['replace', 'merge'].includes(payload.action)) throw hostError(CODES.INVALID_REQUEST, 'Unknown component settings action');
     if (typeof mutateConfig !== 'function') throw new Error('Component settings require the shared config mutation service');
@@ -349,7 +349,7 @@ const registerComponentProjectCapabilities = ({
       const settings = payload.action === 'merge' ? { ...latestSettings, ...request } : request;
       boundedObject(settings, MAX_SETTINGS_BYTES, 'Component settings');
       const revision = nextComponentRevision(latest.componentSettingsRevisions?.[componentId]);
-      result = { apiVersion: 2, revision, settings };
+      result = { apiVersion: 7, revision, settings };
       return { ...latest, componentSettings: { ...(latest.componentSettings || {}), [componentId]: settings }, componentSettingsRevisions: { ...(latest.componentSettingsRevisions || {}), [componentId]: revision } };
     };
     await mutateConfig(update);
@@ -452,7 +452,7 @@ const registerComponentProjectCapabilities = ({
     }));
     return receipt;
   };
-  const commitResponse = (scope, receipt, { includePhysicalPath = true } = {}) => ({ apiVersion: 2, commitId: receipt.commitId, idempotencyKey: receipt.idempotencyKey, outputs: receipt.outputs.map(item => ({ artifactId: item.artifactId, relativePath: item.relativePath, ...(includePhysicalPath ? { filePath: path.resolve(scope.projectRoot, item.relativePath) } : {}), byteLength: item.size, sha256: item.sha256 })) });
+  const commitResponse = (scope, receipt, { includePhysicalPath = true } = {}) => ({ apiVersion: 7, commitId: receipt.commitId, idempotencyKey: receipt.idempotencyKey, outputs: receipt.outputs.map(item => ({ artifactId: item.artifactId, relativePath: item.relativePath, ...(includePhysicalPath ? { filePath: path.resolve(scope.projectRoot, item.relativePath) } : {}), byteLength: item.size, sha256: item.sha256 })) });
   const loadCommitReceipt = async (scope, commitId, idempotencyKey = null) => {
     if (!SAFE_STAGE_ID.test(commitId)) throw hostError(CODES.INVALID_REQUEST, 'Invalid commit id');
     const receipt = await readJson(fs, commitReceiptPath(scope, commitId));
@@ -600,7 +600,7 @@ const registerComponentProjectCapabilities = ({
       const deletionId = stableUuid(crypto, `component-output-delete\0${scope.key}\0${idempotencyKey}`);
       const deletionReceiptPath = path.join(scope.componentRoot, 'receipts', 'deletions', `${deletionId}.json`);
       const existingDeletion = await readJson(fs, deletionReceiptPath);
-      if (existingDeletion?.state === 'committed') return { apiVersion: 2, deletionId, deleted: true, relativePath: existingDeletion.relativePath };
+      if (existingDeletion?.state === 'committed') return { apiVersion: 7, deletionId, deleted: true, relativePath: existingDeletion.relativePath };
       const receipt = await loadCommitReceipt(scope, previousCommitId);
       const output = receipt?.outputs?.find(item => item.artifactId === previousArtifactId);
       if (!output || output.sha256 !== expectedDigest) throw hostError(CODES.TOKEN_SCOPE, 'Controlled deletion ownership does not match');
@@ -612,7 +612,7 @@ const registerComponentProjectCapabilities = ({
         await replaceJson({ fs, crypto, filePath: deletionReceiptPath, value: { schemaVersion: RECEIPT_SCHEMA_VERSION, kind: 'component-output-deletion', state: 'committed', deletionId, idempotencyKey, componentId: descriptor.componentId, projectId: String(scope.project.id), scopeDigest: scopeDigest(scope), previousCommitId, previousArtifactId, relativePath: output.relativePath, sha256: expectedDigest, deletedAt: Date.now() } });
         await fs.promises.rm(backup, { force: true });
       } catch (error) { if (!fs.existsSync(destination)) await fs.promises.rename(backup, destination).catch(() => undefined); throw error; }
-      return { apiVersion: 2, deletionId, deleted: true, relativePath: output.relativePath };
+      return { apiVersion: 7, deletionId, deleted: true, relativePath: output.relativePath };
     }
     if (payload.action === 'materializeOwned') {
       const commitId = String(payload.commitId || ''); const artifactId = String(payload.artifactId || '');
@@ -627,7 +627,7 @@ const registerComponentProjectCapabilities = ({
         if (!await fileMatchesDigest(pending, output.size, output.sha256)) { await fs.promises.rm(pending, { force: true }); throw hostError(CODES.CONFLICT, 'Owned output digest changed during private materialization'); }
         await fs.promises.rm(privatePath, { force: true }); await fs.promises.rename(pending, privatePath);
       }
-      return { apiVersion: 2, importId, privatePath, byteLength: output.size, sha256: output.sha256, outputRef: { commitId, artifactId } };
+      return { apiVersion: 7, importId, privatePath, byteLength: output.size, sha256: output.sha256, outputRef: { commitId, artifactId } };
     }
     if (payload.action === 'stage') {
       const createdAt = now(); const stageId = `${createdAt.toString(16)}-${crypto.randomUUID()}`;
@@ -635,7 +635,7 @@ const registerComponentProjectCapabilities = ({
       await fs.promises.mkdir(payloadRoot, { recursive: true });
       const stage = { id: stageId, scope: scope.key, scopeDigest: scopeDigest(scope), root, payloadRoot, projectRoot: scope.projectRoot, componentRoot: scope.componentRoot, componentId: descriptor.componentId, projectId: String(scope.project.id), createdAt, expiresAt: createdAt + STAGE_TTL_MS, files: [] };
       await persistStage(stage); outputStages.set(stageId, stage);
-      return { apiVersion: 2, stageId, privatePath: payloadRoot, expiresAt: stage.expiresAt };
+      return { apiVersion: 7, stageId, privatePath: payloadRoot, expiresAt: stage.expiresAt };
     }
     if (payload.action === 'commit') {
       const idempotencyKey = String(payload.idempotencyKey || '');
@@ -643,7 +643,7 @@ const registerComponentProjectCapabilities = ({
       return withOperation(commitOperations, `${scope.key}\0${idempotencyKey}`, () => commitStage(payload, scope, descriptor));
     }
     const stageId = String(payload.stageId || '');
-    if (payload.action === 'rollback' && SAFE_STAGE_ID.test(stageId) && !outputStages.has(stageId) && !fs.existsSync(stageRootFor(scope, stageId))) return { apiVersion: 2, stageId, rolledBack: true };
+    if (payload.action === 'rollback' && SAFE_STAGE_ID.test(stageId) && !outputStages.has(stageId) && !fs.existsSync(stageRootFor(scope, stageId))) return { apiVersion: 7, stageId, rolledBack: true };
     const stage = await resolveStage(payload, scope, descriptor);
     if (payload.action === 'write') {
       if (stage.files.length >= 2000) throw hostError(CODES.LIMIT_EXCEEDED, 'Too many staged output files');
@@ -669,10 +669,10 @@ const registerComponentProjectCapabilities = ({
       stage.files.push(file);
       try { await persistStage(stage); }
       catch (error) { stage.files.pop(); if (hostCreated) await fs.promises.rm(stagePath, { force: true }).catch(() => undefined); throw error; }
-      return { apiVersion: 2, stageId: stage.id, artifactId: file.artifactId, byteLength: stagedStat.size };
+      return { apiVersion: 7, stageId: stage.id, artifactId: file.artifactId, byteLength: stagedStat.size };
     }
-    if (payload.action === 'validate') { const inspected = await inspectStage(stage); return { apiVersion: 2, stageId: stage.id, valid: true, fileCount: inspected.fileCount, totalBytes: inspected.totalBytes }; }
-    if (payload.action === 'rollback') { await rollbackPreparedReceiptsForStage(scope, stage.id); await cleanupStage(stage); return { apiVersion: 2, stageId: stage.id, rolledBack: true }; }
+    if (payload.action === 'validate') { const inspected = await inspectStage(stage); return { apiVersion: 7, stageId: stage.id, valid: true, fileCount: inspected.fileCount, totalBytes: inspected.totalBytes }; }
+    if (payload.action === 'rollback') { await rollbackPreparedReceiptsForStage(scope, stage.id); await cleanupStage(stage); return { apiVersion: 7, stageId: stage.id, rolledBack: true }; }
     throw hostError(CODES.INVALID_REQUEST, 'Unknown output action');
   });
 
@@ -701,7 +701,7 @@ const registerComponentProjectCapabilities = ({
     if (existing) {
       const expectedFilePath = path.resolve(scope.projectRoot, artifact.relativePath);
       if (String(existing.parentVersionId || '') !== String(payload.parentVersionId) || path.resolve(String(existing.filePath || '')) !== expectedFilePath) throw hostError(CODES.CONFLICT, 'Stable component version id is already bound to different content');
-      const response = { apiVersion: 2, versionId, result: { success: true, ...bundle } };
+      const response = { apiVersion: 7, versionId, result: { success: true, ...bundle } };
       createdVersions.set(versionKey, response);
       if (!versionReceipt || versionReceipt.state !== 'committed') await replaceJson({ fs, crypto, filePath: receiptPath, value: { ...(versionReceipt || {}), schemaVersion: RECEIPT_SCHEMA_VERSION, kind: 'component-version', state: 'committed', versionId, idempotencyKey, componentId: scope.componentId, projectId: String(scope.project.id), scopeDigest: scopeDigest(scope), photoId: String(payload.photoId), parentVersionId: String(payload.parentVersionId), commitId, artifactId: artifact.artifactId, committedAt: Date.now() } }).catch(() => undefined);
       return response;
@@ -712,7 +712,7 @@ const registerComponentProjectCapabilities = ({
     }
     const filePath = path.resolve(scope.projectRoot, artifact.relativePath);
     const result = await versionService.createVersion(scope.workspaceRoot, { photoId: String(payload.photoId), parentVersionId: String(payload.parentVersionId), versionId, filePath, versionName: String(payload.name || '组件输出').slice(0, 120), versionType: String(payload.type || 'component').slice(0, 40), note: String(payload.note || '').slice(0, 2000), isFinal: payload.isFinal === true, status: String(payload.status || 'draft').slice(0, 40) });
-    const response = { apiVersion: 2, versionId, result };
+    const response = { apiVersion: 7, versionId, result };
     versionReceipt.state = 'committed'; versionReceipt.committedAt = Date.now();
     try { await replaceJson({ fs, crypto, filePath: receiptPath, value: versionReceipt }); }
     catch (error) { createdVersions.delete(versionKey); throw error; }
@@ -734,11 +734,11 @@ const registerComponentProjectCapabilities = ({
     if (!inside(path, scope.componentRoot, filePath)) throw hostError(CODES.PERMISSION_DENIED, 'Component media escapes private storage');
     const stat = await fs.promises.lstat(filePath).catch(() => null);
     if (!stat?.isFile() || stat.isSymbolicLink() || !inside(path, await fs.promises.realpath(scope.componentRoot), await fs.promises.realpath(filePath))) throw hostError(CODES.NOT_FOUND, 'Component private media is missing or unsafe');
-    const opaqueRef = `component-media:v2:${stableUuid(crypto, `${scope.key}\0${relativePath}`)}`;
+    const opaqueRef = `component-media:v7:${stableUuid(crypto, `${scope.key}\0${relativePath}`)}`;
     if (['open', 'reveal'].includes(payload.action)) {
       const error = payload.action === 'reveal' && typeof shell.showItemInFolder === 'function' ? (shell.showItemInFolder(filePath), '') : await shell.openPath(payload.action === 'reveal' ? path.dirname(filePath) : filePath);
       if (error) throw hostError(CODES.INTERNAL, String(error));
-      return { apiVersion: 2, opaqueRef, action: payload.action, opened: true };
+      return { apiVersion: 7, opaqueRef, action: payload.action, opened: true };
     }
     if (payload.action !== 'variants') throw hostError(CODES.INVALID_REQUEST, 'Unknown component media action');
     mediaService.grantPath(filePath);
@@ -753,7 +753,7 @@ const registerComponentProjectCapabilities = ({
       variants[name] = { url, maxEdge: requestedSize, derived: true };
     }
     if (requested.has('original')) variants.original = { url: originalUrl, byteLength: stat.size, derived: false };
-    return { apiVersion: 2, opaqueRef, variants };
+    return { apiVersion: 7, opaqueRef, variants };
   });
 
   const stripProgressPaths = value => Object.fromEntries(Object.entries(value || {}).filter(([field]) => !/(?:path|url)$/i.test(field)));
@@ -783,11 +783,11 @@ const registerComponentProjectCapabilities = ({
     const scope = bound(context, descriptor);
     if (payload.action === 'list') {
       const listed = await versionService.listProgress(scope.workspaceRoot, context.projectName, payload.includeMissing === true);
-      return { apiVersion: 2, progress: (listed.progressFolders || []).map(item => publicProgress(scope, item)), edges: (listed.edges || listed.graphEdges || []).map(stripProgressPaths) };
+      return { apiVersion: 7, progress: (listed.progressFolders || []).map(item => publicProgress(scope, item)), edges: (listed.edges || listed.graphEdges || []).map(stripProgressPaths) };
     }
     if (payload.action === 'relate') {
       const result = await versionService.updateProgressRelation(scope.workspaceRoot, { childProgressId: String(payload.childProgressId || ''), parentProgressId: String(payload.parentProgressId || ''), expectedUpdatedAt: payload.expectedUpdatedAt });
-      return { apiVersion: 2, result };
+      return { apiVersion: 7, result };
     }
     if (payload.action !== 'create') throw hostError(CODES.INVALID_REQUEST, 'Unknown project progress action');
     const mediaKind = String(payload.mediaKind || '');
@@ -813,7 +813,7 @@ const registerComponentProjectCapabilities = ({
       });
     } catch (error) { if (createdDirectory) await fs.promises.rmdir(folderPath).catch(() => undefined); throw error; }
     if (!registered?.success || !registered.progressFolder?.id) throw hostError(CODES.INTERNAL, registered?.error || 'Progress registration failed');
-    return { apiVersion: 2, progress: publicProgress(scope, registered.progressFolder), edges: (registered.edges || []).map(stripProgressPaths) };
+    return { apiVersion: 7, progress: publicProgress(scope, registered.progressFolder), edges: (registered.edges || []).map(stripProgressPaths) };
   });
 
   broker.register('tasks.v7', async (payload, context, descriptor) => {
@@ -840,7 +840,7 @@ const registerComponentProjectCapabilities = ({
     else if (payload.action === 'cancel') { if (handle && !handle.isFinished()) backgroundTasks.cancel(handle.task.id); }
     else if (payload.action !== 'status') throw hostError(CODES.INVALID_REQUEST, 'Unknown component task action');
     const task = handle ? backgroundTasks.get(handle.task.id) || handle.snapshot() : null;
-    return { apiVersion: 2, task, cancelled: Boolean(handle?.context.signal.aborted), checkpoint: task?.checkpoint };
+    return { apiVersion: 7, task, cancelled: Boolean(handle?.context.signal.aborted), checkpoint: task?.checkpoint };
   });
 
   broker.register('dialogs.v7', async (payload, context, descriptor) => {
@@ -856,16 +856,16 @@ const registerComponentProjectCapabilities = ({
       if (payload.kind === 'revealOutput' && typeof shell.showItemInFolder === 'function') shell.showItemInFolder(filePath);
       else error = await shell.openPath(payload.kind === 'revealOutput' ? path.dirname(filePath) : filePath);
       if (error) throw hostError(CODES.INTERNAL, String(error));
-      return { apiVersion: 2, opened: true, outputRef: { commitId: receipt.commitId, artifactId: output.artifactId } };
+      return { apiVersion: 7, opened: true, outputRef: { commitId: receipt.commitId, artifactId: output.artifactId } };
     }
     if (payload.kind === 'confirm') {
       const response = await dialog.showMessageBox(mainWindow, { type: 'question', title: String(payload.title || '组件确认').slice(0, 120), message: String(payload.message || '').slice(0, 1000), buttons: ['取消', '继续'], defaultId: 0, cancelId: 0, noLink: true });
-      return { apiVersion: 2, confirmed: response.response === 1 };
+      return { apiVersion: 7, confirmed: response.response === 1 };
     }
     if (payload.kind !== 'openFiles') throw hostError(CODES.INVALID_REQUEST, 'Unknown safe dialog kind');
     const extensions = [...new Set((payload.extensions || []).map(value => String(value).replace(/^\./, '').toLowerCase()).filter(value => /^[a-z0-9]{1,12}$/.test(value)))].slice(0, 64);
     const choice = await dialog.showOpenDialog(mainWindow, { title: String(payload.title || '选择输入文件').slice(0, 120), properties: ['openFile', ...(payload.multiple === false ? [] : ['multiSelections'])], ...(extensions.length ? { filters: [{ name: '允许的文件', extensions }] } : {}) });
-    if (choice.canceled) return { apiVersion: 2, cancelled: true, inputs: [] };
+    if (choice.canceled) return { apiVersion: 7, cancelled: true, inputs: [] };
     const inputs = [];
     for (const selected of choice.filePaths.slice(0, MAX_INPUT_TOKENS)) {
       const filePath = path.resolve(selected);
@@ -874,7 +874,7 @@ const registerComponentProjectCapabilities = ({
       if (extensions.length && !extensions.includes(path.extname(filePath).slice(1).toLowerCase())) continue;
       inputs.push({ name: path.basename(filePath), ...grantInput(filePath, descriptor, context) });
     }
-    return { apiVersion: 2, cancelled: false, inputs };
+    return { apiVersion: 7, cancelled: false, inputs };
   });
 
   broker.register('component.events.v7', async (payload, context, descriptor) => {
@@ -882,7 +882,7 @@ const registerComponentProjectCapabilities = ({
     if (!EVENT_TOPIC.test(topic) || !descriptor.service?.events?.includes(topic)) throw hostError(CODES.PERMISSION_DENIED, 'Component event topic is not declared');
     const event = boundedObject(payload.event || {}, MAX_SETTINGS_BYTES, 'Component event');
     context.emitComponentEvent?.(topic, event);
-    return { apiVersion: 2, emitted: true };
+    return { apiVersion: 7, emitted: true };
   });
   return {
     consumeInput: (token, descriptor, context) => consumeInput(token, descriptor, context, true),
