@@ -78,20 +78,20 @@ const ready = new Promise((resolve, reject) => {
       let result;
       let error;
       try {
-        if (frame.method === 'component.storage.v2') result = { apiVersion: 2, dataPath: dataRoot, databasePath, projectId: 'project-1', ownership: 'component-private' };
-        else if (frame.method === 'component.settings.v2') result = { apiVersion: 2, revision: 1, settings: { useGpu: false, oversizeCropMode: 'expand' } };
-        else if (frame.method === 'component.events.v2') { emittedTopics.add(frame.payload.topic); emittedEvents.push(frame.payload); result = { apiVersion: 2, emitted: true }; }
-        else if (frame.method === 'tasks.v2') result = { apiVersion: 2, task: null, cancelled: false };
-        else if (frame.method === 'dialogs.v2') result = { apiVersion: 2, cancelled: false, inputs: [{ name: path.basename(returnedInputPath), token: `test-input:${returnedInputPath}`, expiresAt: Date.now() + 1000 }] };
-        else if (frame.method === 'project.input.tokens.v2') { materializeCount += 1; const source = frame.payload.token.slice('test-input:'.length); const inputId = crypto.randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 2, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
-        else if (frame.method === 'project.media.variants.v2') {
+        if (frame.method === 'component.storage.v7') result = { apiVersion: 2, dataPath: dataRoot, databasePath, projectId: 'project-1', ownership: 'component-private' };
+        else if (frame.method === 'component.settings.v7') result = { apiVersion: 2, revision: 1, settings: { useGpu: false, oversizeCropMode: 'expand' } };
+        else if (frame.method === 'component.events.v7') { emittedTopics.add(frame.payload.topic); emittedEvents.push(frame.payload); result = { apiVersion: 2, emitted: true }; }
+        else if (frame.method === 'tasks.v7') result = { apiVersion: 2, task: null, cancelled: false };
+        else if (frame.method === 'dialogs.v7') result = { apiVersion: 2, cancelled: false, inputs: [{ name: path.basename(returnedInputPath), token: `test-input:${returnedInputPath}`, expiresAt: Date.now() + 1000 }] };
+        else if (frame.method === 'project.input.tokens.v7') { materializeCount += 1; const source = frame.payload.token.slice('test-input:'.length); const inputId = crypto.randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 2, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
+        else if (frame.method === 'project.media.variants.v7') {
           const requested = frame.payload.relativePath;
           let photoId = frame.payload.photoId || (requested === 'two.jpg' ? 'photo-2' : 'photo-1');
           if (!['photo-1', 'photo-2'].includes(photoId)) throw new Error('outside the bound project');
           const versionId = frame.payload.versionId || (photoId === 'photo-2' ? 'version-2' : 'version-1');
           const filePath = requested ? (requested === 'two.jpg' ? secondBasePath : basePath) : currentBasePath;
           result = { apiVersion: 2, mediaRef: { photoId, versionId, relativePath: requested || 'one.jpg' }, metadata: { photoId, versionId, currentVersionId: versionId, displayName: photoId === 'photo-2' ? 'Second' : 'Base', originalName: path.basename(filePath), relativePath: requested || 'one.jpg', isCurrent: true, fileMissing: false }, variants: { original: { url: 'test', byteLength: 4, derived: false } }, input: { token: `test-input:${filePath}`, expiresAt: Date.now() + 1000 } };
-        } else if (frame.method === 'project.output.v2') {
+        } else if (frame.method === 'project.output.v7') {
           if (frame.payload.action === 'stage') { const stageId = crypto.randomUUID(); const privatePath = path.join(dataRoot, 'stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); result = { apiVersion: 2, stageId, privatePath, expiresAt: Date.now() + 60000 }; }
           else if (frame.payload.action === 'adopt') throw new Error('legacy output missing');
           else if (frame.payload.action === 'write') { if (frame.payload.replace) controlledReplacementWrites += 1; const stage = outputStages.get(frame.payload.stageId); stage.files.push(frame.payload); result = { apiVersion: 2, stageId: frame.payload.stageId, artifactId: crypto.randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, frame.payload.sourceName)).size }; }
@@ -100,8 +100,8 @@ const ready = new Promise((resolve, reject) => {
           else if (frame.payload.action === 'materializeOwned') { const output = outputReceipts.get(frame.payload.commitId).outputs.find(item => item.artifactId === frame.payload.artifactId); const importId = crypto.randomUUID(); const directory = path.join(dataRoot, 'imported-outputs', importId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(output.filePath)); fs.copyFileSync(output.filePath, privatePath); result = { apiVersion: 2, importId, privatePath, byteLength: fs.statSync(privatePath).size, sha256: output.sha256, outputRef: { commitId: frame.payload.commitId, artifactId: frame.payload.artifactId } }; }
           else if (frame.payload.action === 'rollback') { const stage = outputStages.get(frame.payload.stageId); if (stage) fs.rmSync(stage.privatePath, { recursive: true, force: true }); outputStages.delete(frame.payload.stageId); result = { apiVersion: 2, stageId: frame.payload.stageId, rolledBack: true }; }
           else throw new Error(`unexpected output action ${frame.payload.action}`);
-        } else if (frame.method === 'project.progress.v2') result = { apiVersion: 2, progress: [{ id: 'progress-2', mediaKind: 'image', contentRef: { relativeDirectory: 'merged' } }], edges: [] };
-        else if (frame.method === 'version.create.v2') { result = versionsByIdempotencyKey.get(frame.payload.idempotencyKey); if (!result) { result = { apiVersion: 2, versionId: crypto.randomUUID(), result: { success: true, photo: { id: frame.payload.photoId }, versions: [] } }; versionsByIdempotencyKey.set(frame.payload.idempotencyKey, result); } }
+        } else if (frame.method === 'project.progress.v7') result = { apiVersion: 2, progress: [{ id: 'progress-2', mediaKind: 'image', contentRef: { relativeDirectory: 'merged' } }], edges: [] };
+        else if (frame.method === 'version.create.v7') { result = versionsByIdempotencyKey.get(frame.payload.idempotencyKey); if (!result) { result = { apiVersion: 2, versionId: crypto.randomUUID(), result: { success: true, photo: { id: frame.payload.photoId }, versions: [] } }; versionsByIdempotencyKey.set(frame.payload.idempotencyKey, result); } }
         else throw new Error(`unexpected capability ${frame.method}`);
       } catch (value) { error = value; }
       child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: !error, result, error: error?.message })}\n`);

@@ -130,7 +130,7 @@ const manifestCompatibilityError = (manifest, platform, arch) => {
     if (Number(host.contractVersion) === 1 && settingsPageCount) return '设置页贡献需要 Component Host V2';
     if (settingsPageCount && negotiated < 3) return '设置页贡献需要 Host API 3';
     if (settingsPageCount && min < 3) return '设置页贡献需要 minHostApiVersion 3 或更高版本';
-    const notificationDeclared = (host.service?.capabilities || []).map(String).includes('notifications.v2') || (host.service?.permissions || []).map(String).includes('notifications');
+    const notificationDeclared = (host.service?.capabilities || []).map(String).includes('notifications.v7') || (host.service?.permissions || []).map(String).includes('notifications');
     if (notificationDeclared && min < 4) return '通知能力需要 minHostApiVersion 4 或更高版本';
     const api7Count = contributions.filter(item => ['component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(item?.type)).length;
     if (api7Count && min < 7) return '新组件贡献需要 minHostApiVersion 7 或更高版本';

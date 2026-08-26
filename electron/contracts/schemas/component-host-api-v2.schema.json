@@ -1,6 +1,6 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://photoflow.local/schemas/component-host-api-v2.schema.json",
+  "$id": "https://photoflow.local/schemas/component-host-api-v7.schema.json",
   "title": "PhotoFlow Host Capability V2 Calls",
   "description": "A method-discriminated request/result pair used for contract validation and SDK generation.",
   "oneOf": [

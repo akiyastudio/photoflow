@@ -14,7 +14,7 @@
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
       "rpcMethods": ["sample.context.v1", "sample.media-page.v1"],
-      "capabilities": ["project.media.page.v2", "component.media.v2", "project.progress.v2", "component.lifecycle.v2"],
+      "capabilities": ["project.media.page.v7", "component.media.v7", "project.progress.v7", "component.lifecycle.v7"],
       "permissions": ["project.media.read", "component.media", "project.progress", "component.lifecycle.read"],
       "events": [],
       "runtimeActions": []

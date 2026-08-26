@@ -1,5 +1,5 @@
 const NOTIFICATION_API_VERSION = 2;
-const NOTIFICATION_CAPABILITY = 'notifications.v2';
+const NOTIFICATION_CAPABILITY = 'notifications.v7';
 const NOTIFICATION_PERMISSION = 'notifications';
 const NOTIFICATION_TONES = new Set(['info', 'success', 'warning', 'error']);
 const MESSAGE_MAX_LENGTH = 360;

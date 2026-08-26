@@ -14,7 +14,7 @@ lines.on('line', line => {
     assert.equal(frame.protocolVersion, 1); ready = true;
     child.stdin.write(`${JSON.stringify({ type: 'request', id: '1', method: 'sample.media-page.v1', payload: {}, context: { componentId: 'hello-component', componentVersion: '1.0.0', hostApiVersion: 2, permissions: ['project.media.read'], projectId: 'project-1', projectName: 'Fixture', projectStatus: 'active' } })}\n`);
   } else if (frame.type === 'capability') {
-    assert(ready); assert.equal(frame.method, 'project.media.page.v2');
+    assert(ready); assert.equal(frame.method, 'project.media.page.v7');
     child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: true, result: { apiVersion: 2, items: [], page: { hasMore: false, cursor: null, pageSize: 20 } } })}\n`);
   } else if (frame.type === 'response') {
     clearTimeout(timeout); assert(frame.ok); assert.equal(frame.result.apiVersion, 2);

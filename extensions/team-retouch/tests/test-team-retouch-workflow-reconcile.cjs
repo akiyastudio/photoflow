@@ -75,7 +75,7 @@ const ready = new Promise((resolve, reject) => {
       let result;
       let error;
       try {
-        if (frame.method === 'component.storage.v2') {
+        if (frame.method === 'component.storage.v7') {
           artifactScopeCount += 1;
           workflowScopeCount += 1;
           if (holdSecondWorkflowScope && workflowScopeCount === 1) {
@@ -84,14 +84,14 @@ const ready = new Promise((resolve, reject) => {
             return;
           }
           result = { apiVersion: 2, dataPath: dataRoot, databasePath, projectId: 'project', ownership: 'component-private' };
-        } else if (frame.method === 'project.media.variants.v2') {
+        } else if (frame.method === 'project.media.variants.v7') {
           const token = `test-input:${bundle.versions[0].filePath}`; inputTokens.set(token, bundle.versions[0].filePath);
           result = { apiVersion: 2, mediaRef: { photoId: 'photo', versionId: 'base', relativePath: 'photo.jpg' }, metadata: { photoId: 'photo', versionId: 'base', currentVersionId: 'base', displayName: '接力照片', originalName: 'photo.jpg', relativePath: 'photo.jpg', isCurrent: true, fileMissing: false }, variants: { original: { url: 'test', byteLength: 4, derived: false } }, input: { token, expiresAt: Date.now() + 1000 } };
-        } else if (frame.method === 'project.input.tokens.v2') { const source = inputTokens.get(frame.payload.token) || frame.payload.token.slice('test-input:'.length); const inputId = require('crypto').randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 2, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
-        else if (frame.method === 'tasks.v2') result = { apiVersion: 2, task: frame.payload.action === 'complete' ? { state: 'completed' } : null, cancelled: false };
-        else if (frame.method === 'component.events.v2') { emittedTopics.add(frame.payload.topic); result = { apiVersion: 2, emitted: true }; }
-        else if (frame.method === 'dialogs.v2') { const token = `test-input:${returnedSource}`; inputTokens.set(token, returnedSource); result = { apiVersion: 2, cancelled: false, inputs: [{ name: path.basename(returnedSource), token, expiresAt: Date.now() + 1000 }] }; }
-        else if (frame.method === 'project.output.v2') {
+        } else if (frame.method === 'project.input.tokens.v7') { const source = inputTokens.get(frame.payload.token) || frame.payload.token.slice('test-input:'.length); const inputId = require('crypto').randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 2, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
+        else if (frame.method === 'tasks.v7') result = { apiVersion: 2, task: frame.payload.action === 'complete' ? { state: 'completed' } : null, cancelled: false };
+        else if (frame.method === 'component.events.v7') { emittedTopics.add(frame.payload.topic); result = { apiVersion: 2, emitted: true }; }
+        else if (frame.method === 'dialogs.v7') { const token = `test-input:${returnedSource}`; inputTokens.set(token, returnedSource); result = { apiVersion: 2, cancelled: false, inputs: [{ name: path.basename(returnedSource), token, expiresAt: Date.now() + 1000 }] }; }
+        else if (frame.method === 'project.output.v7') {
           if (breakManifestOnArtifactCall && !outputFaultInjected && frame.payload.action === 'stage') {
             const manifestDirectory = path.dirname(manifestPath); manifestDirectoryBackup = `${manifestDirectory}.backup`;
             fs.renameSync(manifestDirectory, manifestDirectoryBackup); fs.writeFileSync(manifestDirectory, 'block manifest writes'); outputFaultInjected = true;
@@ -420,15 +420,15 @@ const restoreManifestDirectory = () => {
     await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     seedReview('concurrent-return', 'CONCURRENT-RETURN');
     workflowScopeCount = 0;
-    const mediaReadsBeforeConfirm = capabilityCounts.get('project.media.variants.v2') || 0;
-    const outputCallsBeforeConfirm = capabilityCounts.get('project.output.v2') || 0;
+    const mediaReadsBeforeConfirm = capabilityCounts.get('project.media.variants.v7') || 0;
+    const outputCallsBeforeConfirm = capabilityCounts.get('project.output.v7') || 0;
     const confirmation = await invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'concurrent-return', returnId: 'concurrent-return', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
     assert.equal(confirmation.success, true);
     assert.equal(confirmation.reconcilePending, true, 'manual confirmation returns after durable archival instead of waiting for relay publication');
     assert.match(confirmation.warning, /后台更新/);
     assert.equal(workflowScopeCount, 1, 'manual confirmation resolves component storage only once');
-    assert.equal(capabilityCounts.get('project.media.variants.v2') || 0, mediaReadsBeforeConfirm, 'manual confirmation never reloads the project media catalog');
-    assert.equal(capabilityCounts.get('project.output.v2') || 0, outputCallsBeforeConfirm, 'manual confirmation never waits for project-output publication');
+    assert.equal(capabilityCounts.get('project.media.variants.v7') || 0, mediaReadsBeforeConfirm, 'manual confirmation never reloads the project media catalog');
+    assert.equal(capabilityCounts.get('project.output.v7') || 0, outputCallsBeforeConfirm, 'manual confirmation never waits for project-output publication');
     const queuedDb = new DatabaseSync(databasePath);
     assert.equal(queuedDb.prepare(`SELECT completed FROM team_person_assignments WHERE photo_id='photo' AND base_version_id='base' AND person_index=1`).get().completed, 1);
     assert.equal(queuedDb.prepare("SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id='task-1'").get().count, 1);

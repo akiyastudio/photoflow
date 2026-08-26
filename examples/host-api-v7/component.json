@@ -20,7 +20,7 @@
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
       "rpcMethods": ["example.run.v1"],
-      "capabilities": ["component.secrets.v1", "network.fetch.v1"],
+      "capabilities": ["component.secrets.v7", "network.fetch.v7"],
       "permissions": ["component.secrets", "network.fetch"],
       "events": [],
       "networkOrigins": ["https://api.example.com"],

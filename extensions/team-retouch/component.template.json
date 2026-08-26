@@ -62,10 +62,10 @@
         "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1"
       ],
       "capabilities": [
-        "project.media.page.v2", "project.media.variants.v2", "project.input.tokens.v2",
-        "project.output.v2", "version.create.v2", "project.progress.v2",
-        "tasks.v2", "dialogs.v2", "component.storage.v2", "component.settings.v2",
-        "component.events.v2", "component.lifecycle.v2", "component.media.v2", "notifications.v2"
+        "project.media.page.v7", "project.media.variants.v7", "project.input.tokens.v7",
+        "project.output.v7", "version.create.v7", "project.progress.v7",
+        "tasks.v7", "dialogs.v7", "component.storage.v7", "component.settings.v7",
+        "component.events.v7", "component.lifecycle.v7", "component.media.v7", "notifications.v7"
       ],
       "permissions": [
         "project.media.read", "project.input.read", "project.output.write", "project.version.create", "project.progress",

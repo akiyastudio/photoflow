@@ -43,7 +43,7 @@ window.addEventListener('pagehide', stop, { once: true });
 
 UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航、新窗口和浏览器权限都被关闭。使用上下文中解析后的明暗主题，并监听主题/上下文变化。控件应支持键盘操作、显示可见焦点、为表单提供标签、尊重“减少动态效果”，并且不能假设宿主页面始终激活。页面停用或销毁时释放计时器和订阅。
 
-渲染层通常调用组件自有 RPC，而不是直接调用 Host 能力。唯一的受控 UI 快捷桥是 API4 `notify`：它只接受严格的纯文本结构，不能携带 HTML、回调、URL、路径或任意 channel。组件服务是后端协议端点，只能请求清单授权的 Host 能力；只有后端自身产生短状态时才使用 `notifications.v2`。长任务和确认仍分别使用 `tasks.v2` 与 `dialogs.v2`。
+渲染层通常调用组件自有 RPC，而不是直接调用 Host 能力。唯一的受控 UI 快捷桥是 API4 `notify`：它只接受严格的纯文本结构，不能携带 HTML、回调、URL、路径或任意 channel。组件服务是后端协议端点，只能请求清单授权的 Host 能力；只有后端自身产生短状态时才使用 `notifications.v7`。长任务和确认仍分别使用 `tasks.v7` 与 `dialogs.v7`。
 
 ### 可选的应用设置页
 
@@ -60,7 +60,7 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 }
 ```
 
-`rpcMethods` 必须是 `service.rpcMethods` 的子集，且只有这些方法能从设置页调用。设置 surface 的服务再向 Host 请求时，默认拒绝所有项目、媒体、存储、任务和事件能力；只允许清单已授权的 `component.settings.v2`、`component.lifecycle.v2`、确认对话框和 API4 通知。不要在此 surface 调用项目 RPC。
+`rpcMethods` 必须是 `service.rpcMethods` 的子集，且只有这些方法能从设置页调用。设置 surface 的服务再向 Host 请求时，默认拒绝所有项目、媒体、存储、任务和事件能力；只允许清单已授权的 `component.settings.v7`、`component.lifecycle.v7`、确认对话框和 API4 通知。不要在此 surface 调用项目 RPC。
 
 ## 后端服务教程
 
@@ -71,27 +71,27 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 3. 返回 `response`；需要宿主资源时，发送绑定请求 `parentId` 的 `capability`，并等待 `capability-response`。
 4. 日志写 stderr；stdout 只输出协议帧。
 
-完整实现见 `examples/hello-component/service.cjs`。普通同步请求 60 秒超时，帧和载荷上限 2 MiB。长任务应启动 `tasks.v2` 操作，频繁保存检查点，把控制权还给 UI，并在取消或重启后从最后检查点恢复。
+完整实现见 `examples/hello-component/service.cjs`。普通同步请求 60 秒超时，帧和载荷上限 2 MiB。长任务应启动 `tasks.v7` 操作，频繁保存检查点，把控制权还给 UI，并在取消或重启后从最后检查点恢复。
 
-Host API 5 服务可在清单显式声明后调用只读扩展，例如 `callHost(parentId, 'project.files.search.v1', { query:'xmp', pageSize:50 })`。同时声明 `project.files.read`；媒体元数据复用 `project.media.read`，版本与评分分别声明 `project.versions.read`、`project.media.ratings.read`。这些结果只含项目虚拟相对路径和稳定 ID，不要尝试从游标、媒体引用或图节点推导绝对路径。
+Host API 5 服务可在清单显式声明后调用只读扩展，例如 `callHost(parentId, 'project.files.search.v7', { query:'xmp', pageSize:50 })`。同时声明 `project.files.read`；媒体元数据复用 `project.media.read`，版本与评分分别声明 `project.versions.read`、`project.media.ratings.read`。这些结果只含项目虚拟相对路径和稳定 ID，不要尝试从游标、媒体引用或图节点推导绝对路径。
 
 Host API 6 提供按能力拆分权限的项目写入扩展。参考 `examples/project-write-v6`：评分使用逐项语义，checked 与旧评分 outbox 共用 ExifTool per-file 队列；版本/进度使用数据库 CAS，并在 DB 内再次验证 scope；导入 reservation 不延长一次性 input token 的原始寿命；所有恢复重新验证物理 canonical scope、链接、摘要和 owner/identity。文件变更及 undo 都使用逐项 intent/applied 日志；目录 move 限同卷，trash/restore 的未知 OS 结果会安全停止并要求人工恢复。Office 空输出先在私有 stage 写 owner marker，再原子发布。媒体长调用当前会 await 完成，可用相同幂等键调用 `status`/`cancel`；receipt 恢复会同步 task 为 completed，卸载会取消活动 import/process。所有幂等键、plan、token 和收据都绑定 component/workspace/project/scope，设置页 surface 默认拒绝。
 
 ## 安全的“媒体 → 版本”流程
 
-1. 使用 `project.media.page.v2` 分页读取媒体。
+1. 使用 `project.media.page.v7` 分页读取媒体。
 2. 使用 `variants:[]` 取得稳定媒体元数据。只有真正需要像素或 URL 时，才解析 `thumbnail`、`preview` 或 `original`。
-3. 服务需要私有文件副本时，用 `project.input.tokens.v2` 交换返回的短时、一次性输入令牌。
-4. 调用 `project.output.v2` 的 `stage`；在返回的私有 stage 目录下写入文件；通过 `write` 登记每个文件，然后 `validate`。
+3. 服务需要私有文件副本时，用 `project.input.tokens.v7` 交换返回的短时、一次性输入令牌。
+4. 调用 `project.output.v7` 的 `stage`；在返回的私有 stage 目录下写入文件；通过 `write` 登记每个文件，然后 `validate`。
 5. 使用稳定幂等键调用 `commit`。宿主只会把已声明的相对目标发布到绑定项目下。
-6. 可选：使用返回的 commit/artifact ID 和另一个稳定幂等键调用 `version.create.v2`。
+6. 可选：使用返回的 commit/artifact ID 和另一个稳定幂等键调用 `version.create.v7`。
 7. 对放弃的 stage 调用 `rollback`。
 
-stage 元数据与登记文件保留 24 小时，因此宿主重启后可以继续 `validate`、`commit` 或 `rollback`。保存返回的 `stageId`、`commitId` 和 artifact ID，而不是私有路径。已提交制品可以通过 `dialogs.v2` 打开或显示；迁移时可用 `materializeOwned` 校验并导入私有存储。系统从不接受任意输出路径。
+stage 元数据与登记文件保留 24 小时，因此宿主重启后可以继续 `validate`、`commit` 或 `rollback`。保存返回的 `stageId`、`commitId` 和 artifact ID，而不是私有路径。已提交制品可以通过 `dialogs.v7` 打开或显示；迁移时可用 `materializeOwned` 校验并导入私有存储。系统从不接受任意输出路径。
 
-插件私有存储下的媒体使用 `component.media.v2`；项目进度节点及来源关系使用 `project.progress.v2`。进度创建可以携带扁平 `sourceMetadata`：`category`、`role`、`displayName` 和 `parentCapability`。文本最多 128 字符；`parentCapability` 只允许 `structural`、`workflow-input` 或 `none`。宿主写入绑定的 `componentId`，省略或空元数据默认采用结构化进度，并拒绝未知或嵌套字段。
+插件私有存储下的媒体使用 `component.media.v7`；项目进度节点及来源关系使用 `project.progress.v7`。进度创建可以携带扁平 `sourceMetadata`：`category`、`role`、`displayName` 和 `parentCapability`。文本最多 128 字符；`parentCapability` 只允许 `structural`、`workflow-input` 或 `none`。宿主写入绑定的 `componentId`，省略或空元数据默认采用结构化进度，并拒绝未知或嵌套字段。
 
-如果 `component.storage.v2` 返回 `adoption.state === "pending"`，尚未授予任何组件存储路径。显示迁移状态，以 500–1000 ms 有界退避轮询，并拒绝所有依赖存储的读写和变更。不要创建公布的组件目录、猜测 `dataPath`/`databasePath` 或启动第二次复制。提交后先验证同组件收据再重写私有路径；项目输出迁移应单独记录并增量执行。宿主保留 V1 来源，并能在中断后恢复复制日志。
+如果 `component.storage.v7` 返回 `adoption.state === "pending"`，尚未授予任何组件存储路径。显示迁移状态，以 500–1000 ms 有界退避轮询，并拒绝所有依赖存储的读写和变更。不要创建公布的组件目录、猜测 `dataPath`/`databasePath` 或启动第二次复制。提交后先验证同组件收据再重写私有路径；项目输出迁移应单独记录并增量执行。宿主保留 V1 来源，并能在中断后恢复复制日志。
 
 替换项目输出必须显式提供 `replace:true`、`previousCommitId`、`previousArtifactId` 和 `expectedDigest`。宿主只替换由旧提交收据拥有、且当前字节仍匹配的目标，并在多文件事务期间记录旧内容。不要通过自行删除目标实现覆盖。
 

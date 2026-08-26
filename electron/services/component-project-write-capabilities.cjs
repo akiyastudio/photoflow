@@ -103,7 +103,7 @@ const registerComponentProjectWriteCapabilities = ({
     return { nodes: result, edges: snapshot.graphEdges || [] };
   };
 
-  broker.register('project.media.ratings.write.v1', async (payload, context, descriptor) => {
+  broker.register('project.media.ratings.write.v7', async (payload, context, descriptor) => {
     assertFields(payload, ['idempotencyKey', 'items'], ['idempotencyKey', 'items']); if (!Array.isArray(payload.items) || !payload.items.length || payload.items.length > 100) throw hostError(CODES.INVALID_REQUEST, 'items must contain 1 to 100 ratings');
     const scope = await bound(context, descriptor); const normalized = []; const seen = new Set();
     for (const item of payload.items) { assertFields(item, ['relativePath', 'rating', 'expectedRevision'], ['relativePath', 'rating', 'expectedRevision']); const mediaFile = await resolveExisting(scope, item.relativePath, { media: true }); const extension = path.extname(mediaFile.filePath).toLowerCase(); if (!IMAGE_EXTENSIONS.has(extension) && !RAW_EXTENSIONS.has(extension)) throw hostError(CODES.INVALID_REQUEST, 'Ratings write supports image and raw media only'); if (seen.has(mediaFile.relativePath)) throw hostError(CODES.INVALID_REQUEST, 'Duplicate rating path'); seen.add(mediaFile.relativePath); if (!Number.isInteger(item.rating) || item.rating < 0 || item.rating > 5 || typeof item.expectedRevision !== 'number' || !Number.isFinite(item.expectedRevision)) throw hostError(CODES.INVALID_REQUEST, 'Invalid rating or expectedRevision'); normalized.push({ ...mediaFile, rating: item.rating, expectedRevision: item.expectedRevision }); }
@@ -135,10 +135,10 @@ const registerComponentProjectWriteCapabilities = ({
       } catch (error) { if (/stale/i.test(String(error?.message || ''))) throw hostError(CODES.CONFLICT, 'Version revision changed'); throw error; }
     });
   };
-  broker.register('project.version.update.v1', (payload, context, descriptor) => versionMutation(payload, context, descriptor, false));
-  broker.register('project.version.delete.v1', (payload, context, descriptor) => versionMutation(payload, context, descriptor, true));
+  broker.register('project.version.update.v7', (payload, context, descriptor) => versionMutation(payload, context, descriptor, false));
+  broker.register('project.version.delete.v7', (payload, context, descriptor) => versionMutation(payload, context, descriptor, true));
 
-  broker.register('project.progress.manage.v1', async (payload, context, descriptor) => {
+  broker.register('project.progress.manage.v7', async (payload, context, descriptor) => {
     const common = ['action', 'idempotencyKey', 'expectedUpdatedAt']; const action = String(payload?.action || ''); const actionFields = { update: ['progressId', 'displayName', 'trackingEnabled'], unregister: ['progressId'], edgeCreate: ['sourceProgressId', 'targetProgressId', 'edgeKind'], edgeDelete: ['sourceProgressId', 'targetProgressId', 'edgeKind'], edgeReplaceSource: ['sourceProgressId', 'targetProgressId', 'newSourceProgressId', 'edgeKind'] }[action];
     if (!actionFields) throw hostError(CODES.INVALID_REQUEST, 'Unknown progress action'); assertFields(payload, [...common, ...actionFields], ['action', 'idempotencyKey', 'expectedUpdatedAt']); if (!Number.isInteger(payload.expectedUpdatedAt) || payload.expectedUpdatedAt < 0) throw hostError(CODES.INVALID_REQUEST, 'expectedUpdatedAt is required');
     const scope = await bound(context, descriptor);
@@ -158,7 +158,7 @@ const registerComponentProjectWriteCapabilities = ({
     if (path.resolve(candidate) === path.resolve(scope.projectRoot) || getProtectedProjectFolderRegistry().isProtectedProjectFolderName(rootName) || protectedPaths.some(protectedPath => insideOrEqual(path, candidate, protectedPath) || insideOrEqual(path, protectedPath, candidate))) throw hostError(CODES.PERMISSION_DENIED, 'System, workflow, or progress directories are protected');
   };
 
-  broker.register('project.files.mutate.v1', async (payload, context, descriptor) => {
+  broker.register('project.files.mutate.v7', async (payload, context, descriptor) => {
     const scope = await bound(context, descriptor); prunePlans(); const phase = String(payload?.phase || '');
     if (phase === 'preflight') {
       assertFields(payload, ['phase', 'action', 'relativePaths', 'targetRelativePath', 'newName'], ['phase', 'action']); if (!['rename', 'move', 'mkdir', 'trash'].includes(payload.action)) throw hostError(CODES.INVALID_REQUEST, 'Unknown file mutation');
@@ -226,7 +226,7 @@ const registerComponentProjectWriteCapabilities = ({
     });
   });
 
-  broker.register('project.import.v1', async (payload, context, descriptor) => {
+  broker.register('project.import.v7', async (payload, context, descriptor) => {
     const scope = await bound(context, descriptor); const action = String(payload?.action || '');
     if (action === 'cancel') { assertFields(payload, ['action', 'idempotencyKey'], ['action', 'idempotencyKey']); const key = assertIdempotencyKey(payload.idempotencyKey); const operationId = stableUuid(crypto, `component-import\0${scope.key}\0${key}`); const active = activeImports.get(operationId); if (active) active.cancelled = true; return { apiVersion: 1, operationId, cancelled: Boolean(active) }; }
     assertFields(payload, ['action', 'idempotencyKey', 'items'], ['action', 'idempotencyKey', 'items']); if (action !== 'commit' || !Array.isArray(payload.items) || !payload.items.length || payload.items.length > 100) throw hostError(CODES.INVALID_REQUEST, 'Import items must contain 1 to 100 entries'); const key = assertIdempotencyKey(payload.idempotencyKey); const operationId = stableUuid(crypto, `component-import\0${scope.key}\0${key}`); let active = activeImports.get(operationId); if (!active) { active = { cancelled: false, componentId: descriptor.componentId, owners: 0 }; activeImports.set(operationId, active); } active.owners += 1; const reservationId = `import:${operationId}`;
@@ -249,7 +249,7 @@ const registerComponentProjectWriteCapabilities = ({
     }); } finally { active.owners -= 1; if (active.owners <= 0 && activeImports.get(operationId) === active) activeImports.delete(operationId); }
   });
 
-  broker.register('project.media.process.v1', async (payload, context, descriptor) => {
+  broker.register('project.media.process.v7', async (payload, context, descriptor) => {
     const action = String(payload?.action || ''); const scope = await bound(context, descriptor);
     if (['status', 'cancel'].includes(action)) {
       assertFields(payload, ['action', 'idempotencyKey', 'processAction'], ['action', 'idempotencyKey', 'processAction']);

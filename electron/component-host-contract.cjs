@@ -9,16 +9,16 @@ const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPa
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const VERSIONED_METHOD = /^[a-z][a-z0-9.-]{0,119}\.v[1-9][0-9]*$/;
 const HOST_CAPABILITIES = new Set([
-  'project.media.page.v2', 'project.media.variants.v2', 'project.input.tokens.v2',
-  'project.output.v2', 'version.create.v2', 'tasks.v2', 'dialogs.v2',
-  'component.storage.v2', 'component.settings.v2', 'component.events.v2',
-  'component.lifecycle.v2', 'component.media.v2', 'project.progress.v2',
-  'notifications.v2',
-  'project.files.page.v1', 'project.files.search.v1', 'project.media.metadata.v1',
-  'project.versions.page.v1', 'project.version.graph.v1', 'project.media.ratings.v1',
-  'project.media.ratings.write.v1', 'project.version.update.v1', 'project.version.delete.v1',
-  'project.progress.manage.v1', 'project.import.v1', 'project.files.mutate.v1', 'project.media.process.v1',
-  'component.secrets.v1', 'network.fetch.v1',
+  'project.media.page.v7', 'project.media.variants.v7', 'project.input.tokens.v7',
+  'project.output.v7', 'version.create.v7', 'tasks.v7', 'dialogs.v7',
+  'component.storage.v7', 'component.settings.v7', 'component.events.v7',
+  'component.lifecycle.v7', 'component.media.v7', 'project.progress.v7',
+  'notifications.v7',
+  'project.files.page.v7', 'project.files.search.v7', 'project.media.metadata.v7',
+  'project.versions.page.v7', 'project.version.graph.v7', 'project.media.ratings.v7',
+  'project.media.ratings.write.v7', 'project.version.update.v7', 'project.version.delete.v7',
+  'project.progress.manage.v7', 'project.import.v7', 'project.files.mutate.v7', 'project.media.process.v7',
+  'component.secrets.v7', 'network.fetch.v7',
 ]);
 const HOST_PERMISSIONS = new Set([
   'project.media.read', 'project.input.read', 'project.output.write',
@@ -32,35 +32,35 @@ const HOST_PERMISSIONS = new Set([
   'component.secrets', 'network.fetch',
 ]);
 const CAPABILITY_PERMISSIONS = Object.freeze({
-  'project.media.page.v2': 'project.media.read',
-  'project.media.variants.v2': 'project.media.read',
-  'project.input.tokens.v2': 'project.input.read',
-  'project.output.v2': 'project.output.write',
-  'version.create.v2': 'project.version.create',
-  'tasks.v2': 'tasks',
-  'dialogs.v2': 'dialogs',
-  'component.storage.v2': 'component.storage',
-  'component.settings.v2': 'component.settings',
-  'component.events.v2': 'events',
-  'component.lifecycle.v2': 'component.lifecycle.read',
-  'component.media.v2': 'component.media',
-  'project.progress.v2': 'project.progress',
-  'notifications.v2': 'notifications',
-  'project.files.page.v1': 'project.files.read',
-  'project.files.search.v1': 'project.files.read',
-  'project.media.metadata.v1': 'project.media.read',
-  'project.versions.page.v1': 'project.versions.read',
-  'project.version.graph.v1': 'project.versions.read',
-  'project.media.ratings.v1': 'project.media.ratings.read',
-  'project.media.ratings.write.v1': 'project.media.ratings.write',
-  'project.version.update.v1': 'project.version.write',
-  'project.version.delete.v1': 'project.version.delete',
-  'project.progress.manage.v1': 'project.progress.manage',
-  'project.import.v1': 'project.import',
-  'project.files.mutate.v1': 'project.files.write',
-  'project.media.process.v1': 'project.media.process',
-  'component.secrets.v1': 'component.secrets',
-  'network.fetch.v1': 'network.fetch',
+  'project.media.page.v7': 'project.media.read',
+  'project.media.variants.v7': 'project.media.read',
+  'project.input.tokens.v7': 'project.input.read',
+  'project.output.v7': 'project.output.write',
+  'version.create.v7': 'project.version.create',
+  'tasks.v7': 'tasks',
+  'dialogs.v7': 'dialogs',
+  'component.storage.v7': 'component.storage',
+  'component.settings.v7': 'component.settings',
+  'component.events.v7': 'events',
+  'component.lifecycle.v7': 'component.lifecycle.read',
+  'component.media.v7': 'component.media',
+  'project.progress.v7': 'project.progress',
+  'notifications.v7': 'notifications',
+  'project.files.page.v7': 'project.files.read',
+  'project.files.search.v7': 'project.files.read',
+  'project.media.metadata.v7': 'project.media.read',
+  'project.versions.page.v7': 'project.versions.read',
+  'project.version.graph.v7': 'project.versions.read',
+  'project.media.ratings.v7': 'project.media.ratings.read',
+  'project.media.ratings.write.v7': 'project.media.ratings.write',
+  'project.version.update.v7': 'project.version.write',
+  'project.version.delete.v7': 'project.version.delete',
+  'project.progress.manage.v7': 'project.progress.manage',
+  'project.import.v7': 'project.import',
+  'project.files.mutate.v7': 'project.files.write',
+  'project.media.process.v7': 'project.media.process',
+  'component.secrets.v7': 'component.secrets',
+  'network.fetch.v7': 'network.fetch',
 });
 const COMPONENT_ICON_MIME_TYPES = new Map([['.png', 'image/png'], ['.svg', 'image/svg+xml']]);
 const MAX_COMPONENT_ICON_BYTES = 512 * 1024;
@@ -258,19 +258,19 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       const permission = CAPABILITY_PERMISSIONS[capability];
       if (permission && !permissions.includes(permission)) throw new Error(`Component capability ${capability} requires permission ${permission}`);
     }
-    if (capabilities.includes('notifications.v2') || permissions.includes('notifications')) {
+    if (capabilities.includes('notifications.v7') || permissions.includes('notifications')) {
       if (min < 4) throw new Error('Notifications require minHostApiVersion 4 or newer');
       if (raw.capabilities.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.capabilities).size !== raw.capabilities.length) throw new Error('Host API 4 capabilities must be exact and unique');
       if (raw.permissions.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.permissions).size !== raw.permissions.length) throw new Error('Host API 4 permissions must be exact and unique');
     }
-    const hostApi5Declaration = capabilities.some(value => ['project.files.page.v1', 'project.files.search.v1', 'project.media.metadata.v1', 'project.versions.page.v1', 'project.version.graph.v1', 'project.media.ratings.v1'].includes(value))
+    const hostApi5Declaration = capabilities.some(value => ['project.files.page.v7', 'project.files.search.v7', 'project.media.metadata.v7', 'project.versions.page.v7', 'project.version.graph.v7', 'project.media.ratings.v7'].includes(value))
       || permissions.some(value => ['project.files.read', 'project.versions.read', 'project.media.ratings.read'].includes(value));
     if (hostApi5Declaration) {
       if (min < 5) throw new Error('Project read extensions require minHostApiVersion 5 or newer');
       if (raw.capabilities.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.capabilities).size !== raw.capabilities.length) throw new Error('Host API 5 capabilities must be exact and unique');
       if (raw.permissions.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.permissions).size !== raw.permissions.length) throw new Error('Host API 5 permissions must be exact and unique');
     }
-    const hostApi6Declaration = capabilities.some(value => ['project.media.ratings.write.v1', 'project.version.update.v1', 'project.version.delete.v1', 'project.progress.manage.v1', 'project.import.v1', 'project.files.mutate.v1', 'project.media.process.v1'].includes(value))
+    const hostApi6Declaration = capabilities.some(value => ['project.media.ratings.write.v7', 'project.version.update.v7', 'project.version.delete.v7', 'project.progress.manage.v7', 'project.import.v7', 'project.files.mutate.v7', 'project.media.process.v7'].includes(value))
       || permissions.some(value => ['project.media.ratings.write', 'project.version.write', 'project.version.delete', 'project.progress.manage', 'project.import', 'project.files.write', 'project.media.process'].includes(value));
     if (hostApi6Declaration) {
       if (min < 6) throw new Error('Project write extensions require minHostApiVersion 6 or newer');
@@ -284,9 +284,9 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     if (raw.secretBindings !== undefined && (!raw.secretBindings || typeof raw.secretBindings !== 'object' || Array.isArray(raw.secretBindings))) throw new Error('Component secretBindings must be an object');
     for (const [bindingId, binding] of Object.entries(raw.secretBindings || {})) { const id = requiredExactId(bindingId, 'secret binding id'); if (!binding || typeof binding !== 'object' || Array.isArray(binding)) throw new Error('Invalid component secret binding'); rejectUnknownFields(binding, ['origin', 'header', 'prefix'], 'component secret binding'); const origin = requiredExactStringText(binding.origin, 'secret binding origin', 512); const header = requiredExactStringText(binding.header, 'secret binding header', 64); const prefix = binding.prefix === undefined ? '' : binding.prefix; if (typeof prefix !== 'string' || prefix.length > 128 || !networkOrigins.includes(origin) || header !== header.toLowerCase() || !/^[a-z0-9-]+$/.test(header) || dangerousSecretHeaders.test(header) || /[\r\n]/.test(prefix)) throw new Error('Invalid component secret binding policy'); secretBindings[id] = Object.freeze({ origin, header, prefix }); }
     if (Object.keys(secretBindings).length > 16) throw new Error('Component secret bindings must be bounded');
-    const hostApi7Declaration = capabilities.some(value => ['component.secrets.v1', 'network.fetch.v1'].includes(value)) || permissions.some(value => ['component.secrets', 'network.fetch'].includes(value)) || api7Contributions.length || networkOrigins.length || Object.keys(secretBindings).length;
+    const hostApi7Declaration = capabilities.some(value => ['component.secrets.v7', 'network.fetch.v7'].includes(value)) || permissions.some(value => ['component.secrets', 'network.fetch'].includes(value)) || api7Contributions.length || networkOrigins.length || Object.keys(secretBindings).length;
     if (hostApi7Declaration) { const declaredCapabilities = raw.capabilities || []; const declaredPermissions = raw.permissions || []; if (min < 7) throw new Error('Host API 7 features require minHostApiVersion 7 or newer'); if (declaredCapabilities.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(declaredCapabilities).size !== declaredCapabilities.length) throw new Error('Host API 7 capabilities must be exact and unique'); if (declaredPermissions.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(declaredPermissions).size !== declaredPermissions.length) throw new Error('Host API 7 permissions must be exact and unique'); }
-    if (capabilities.includes('network.fetch.v1') && !networkOrigins.length) throw new Error('network.fetch.v1 requires declared networkOrigins');
+    if (capabilities.includes('network.fetch.v7') && !networkOrigins.length) throw new Error('network.fetch.v7 requires declared networkOrigins');
     const events = [...new Set((raw.events || []).map(value => requiredText(value, 'service event', 128)))];
     if (events.length > 32 || events.some(event => !VERSIONED_METHOD.test(event))) throw new Error('Component service events must be a bounded versioned allowlist');
     const runtimeActions = [...new Set((raw.runtimeActions || []).map(value => requiredId(value, 'runtime action')))];

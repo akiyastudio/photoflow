@@ -14,7 +14,7 @@ const mainWindow = { isDestroyed: () => false, webContents: { isDestroyed: () =>
 let now = 10000;
 const service = new ComponentNotificationService({ mainWindow, now: () => now });
 service.setRendererReady({ rendererToken: 'renderer-main', revision: 0, ready: true });
-const descriptor = componentId => ({ componentId, hostApiVersion: 4, service: { capabilities: ['notifications.v2'], permissions: ['notifications'] } });
+const descriptor = componentId => ({ componentId, hostApiVersion: 4, service: { capabilities: ['notifications.v7'], permissions: ['notifications'] } });
 const project = { surface: 'project' };
 
 let result = service.publish(descriptor('alpha'), { tone: 'success', message: '  saved  ' }, project);
@@ -58,7 +58,7 @@ for (const [payload, code] of [
 assert.equal(service.publish({ ...descriptor('old'), hostApiVersion: 3 }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_HOST_API_REQUIRED');
 for (const hostApiVersion of [undefined, Number.NaN, Number.POSITIVE_INFINITY, '4']) assert.equal(service.publish({ ...descriptor('invalid-host-api'), hostApiVersion }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_HOST_API_REQUIRED', `invalid host API ${String(hostApiVersion)} must fail closed`);
 assert.equal(service.publish({ ...descriptor('missing-cap'), service: { capabilities: [], permissions: ['notifications'] } }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_CAPABILITY_NOT_GRANTED');
-assert.equal(service.publish({ ...descriptor('missing-perm'), service: { capabilities: ['notifications.v2'], permissions: [] } }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_PERMISSION_DENIED');
+assert.equal(service.publish({ ...descriptor('missing-perm'), service: { capabilities: ['notifications.v7'], permissions: [] } }, { tone: 'info', message: 'x' }, project).error.code, 'NOTIFICATION_PERMISSION_DENIED');
 assert.equal(service.publish(descriptor('settings'), { tone: 'info', message: 'settings' }, { surface: 'application.settings' }).accepted, true);
 assert.equal(service.publish(descriptor('validation-space'), { tone: 'info', message: `${' '.repeat(100000)}x` }, project).error.code, 'NOTIFICATION_INVALID_MESSAGE', 'raw length is bounded before trim');
 
@@ -109,9 +109,9 @@ assert.equal(ttlBuffered.setRendererReady({ rendererToken: 'renderer-ttl', revis
 
 
 const broker = new ComponentCapabilityBroker();
-broker.register('notifications.v2', (payload, context, owned) => service.publish(owned, payload, context));
-assert.equal(broker.invoke(descriptor('broker'), 'notifications.v2', { tone: 'info', message: 'broker' }, { surface: 'application.settings' }).accepted, true);
-assert.throws(() => broker.invoke({ ...descriptor('broker-denied'), service: { capabilities: [], permissions: [] } }, 'notifications.v2', { tone: 'info', message: 'x' }, project), /not granted/);
+broker.register('notifications.v7', (payload, context, owned) => service.publish(owned, payload, context));
+assert.equal(broker.invoke(descriptor('broker'), 'notifications.v7', { tone: 'info', message: 'broker' }, { surface: 'application.settings' }).accepted, true);
+assert.throws(() => broker.invoke({ ...descriptor('broker-denied'), service: { capabilities: [], permissions: [] } }, 'notifications.v7', { tone: 'info', message: 'x' }, project), /not granted/);
 
 const handlers = new Map();
 const ipcMain = { handle: (channel, handler) => handlers.set(channel, handler) };

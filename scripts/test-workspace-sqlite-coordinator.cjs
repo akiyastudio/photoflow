@@ -64,7 +64,7 @@ const run = async () => {
   const componentStoragePath = 'C:/Data/components/fixture-component/projects/project-1/storage.sqlite3';
   let isolatedComponentEntered = false;
   await componentStorageCoordinator.run({ databases: [{ path: componentStoragePath, mode: 'write' }] }, () => { isolatedComponentEntered = true; });
-  assert.equal(isolatedComponentEntered, true, 'component.storage.v2 remains independent from core workspace database leases');
+  assert.equal(isolatedComponentEntered, true, 'component.storage.v7 remains independent from core workspace database leases');
   releaseCore.resolve(); await coreWrite;
 
   const componentStarted = deferred(); const releaseComponent = deferred(); const componentOrder = [];

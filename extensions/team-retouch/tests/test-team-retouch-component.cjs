@@ -14,7 +14,7 @@ assert(manifest.componentHost.service.rpcMethods.every(method => method.startsWi
 const allowed = [...(sdk.match(/const allowedMethods = new Set\(\[([\s\S]*?)\]\);/)?.[1] || '').matchAll(/'(team\.[^']+\.v\d+)'/g)].map(match => match[1]);
 assert.deepEqual([...allowed].sort(), [...manifest.componentHost.service.rpcMethods].sort());
 assert(!service.includes("'project.output.authorize.v1'") && !service.includes("'version.register.v1'"));
-for (const capability of ['project.media.page.v2','project.output.v2','version.create.v2','tasks.v2','component.storage.v2','component.settings.v2','component.lifecycle.v2']) assert(service.includes(`'${capability}'`));
+for (const capability of ['project.media.page.v7','project.output.v7','version.create.v7','tasks.v7','component.storage.v7','component.settings.v7','component.lifecycle.v7']) assert(service.includes(`'${capability}'`));
 assert(packageScript.includes("path.join(root,'models'") && packageScript.includes('PyInstaller') && packageScript.includes('component.json'));
 assert(packageScript.includes("require.resolve('vite/package.json'") && packageScript.includes('packagedEntrypoint') && packageScript.includes('fs.renameSync(generatedExecutable, declaredExecutable)'), 'production packaging must resolve hoisted build tools and publish the manifest-declared executable');
 for (const action of Object.values(manifest.componentHost.service.lifecycleActions)) assert.equal(action.sha256, sha256(path.join(root, action.entry)));

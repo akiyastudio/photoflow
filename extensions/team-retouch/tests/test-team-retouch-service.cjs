@@ -12,13 +12,13 @@ const simulator = createHostSimulator({
   service: path.join(__dirname, '..', 'service.cjs'),
   context: { componentId: 'team-retouch', componentVersion: 'test', surface: 'project', projectId: 'project-1', projectName: 'Project', projectStatus: 'active' },
   capabilities: {
-    'component.storage.v2': ok({ apiVersion: 2, dataPath, databasePath: path.join(dataPath, 'storage.sqlite3'), projectId: 'project-1', ownership: 'component-private' }),
-    'component.settings.v2': payload => payload.action === 'get' ? { apiVersion: 2, revision: 0, settings: {} } : { apiVersion: 2, revision: 1, settings: payload.settings || {} },
-    'project.media.page.v2': ok({ apiVersion: 2, items: [], page: { hasMore: false, cursor: null, pageSize: 100 } }),
-    'project.progress.v2': ok({ apiVersion: 2, progress: [], edges: [] }),
-    'tasks.v2': ok({ apiVersion: 2, task: null, cancelled: false }),
-    'component.events.v2': ok({ apiVersion: 2, emitted: true }),
-    'notifications.v2': ok({ apiVersion: 2, accepted: true })
+    'component.storage.v7': ok({ apiVersion: 2, dataPath, databasePath: path.join(dataPath, 'storage.sqlite3'), projectId: 'project-1', ownership: 'component-private' }),
+    'component.settings.v7': payload => payload.action === 'get' ? { apiVersion: 2, revision: 0, settings: {} } : { apiVersion: 2, revision: 1, settings: payload.settings || {} },
+    'project.media.page.v7': ok({ apiVersion: 2, items: [], page: { hasMore: false, cursor: null, pageSize: 100 } }),
+    'project.progress.v7': ok({ apiVersion: 2, progress: [], edges: [] }),
+    'tasks.v7': ok({ apiVersion: 2, task: null, cancelled: false }),
+    'component.events.v7': ok({ apiVersion: 2, emitted: true }),
+    'notifications.v7': ok({ apiVersion: 2, accepted: true })
   }
 });
 (async () => {

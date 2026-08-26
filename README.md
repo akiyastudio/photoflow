@@ -82,7 +82,7 @@ hello-component/
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
       "rpcMethods": ["hello.load.v1", "hello.settings.get.v1", "hello.settings.update.v1"],
-      "capabilities": ["project.media.page.v2", "component.settings.v2"],
+      "capabilities": ["project.media.page.v7", "component.settings.v7"],
       "permissions": ["project.media.read", "component.settings"],
       "events": []
     }
@@ -132,29 +132,29 @@ window.addEventListener('pagehide', stop, { once: true });
 3. 需要宿主资源时发送绑定父请求的 `capability`，等待 `capability-response`。
 4. 最终返回 `response`。stdout 只用于协议帧，日志写 stderr。
 
-普通同步请求 60 秒超时，单帧与载荷上限为 2 MiB。长任务使用 `tasks.v2`，定期保存检查点并支持取消、重启后恢复。
+普通同步请求 60 秒超时，单帧与载荷上限为 2 MiB。长任务使用 `tasks.v7`，定期保存检查点并支持取消、重启后恢复。
 
 ## 常用 Host 能力
 
 | 能力 | 权限 | 用途 |
 | --- | --- | --- |
-| `project.media.page.v2` | `project.media.read` | 分页读取项目媒体 |
-| `project.media.variants.v2` | `project.media.read` | 解析缩略图、预览或原图 |
-| `project.input.tokens.v2` | `project.input.read` | 把受限输入复制进私有存储 |
-| `project.output.v2` | `project.output.write` | 暂存、写入、校验、提交、回滚 |
-| `version.create.v2` | `project.version.create` | 从已提交制品创建版本 |
-| `component.storage.v2` | `component.storage` | 插件私有数据和 SQLite 位置 |
-| `component.settings.v2` | `component.settings` | 私有 JSON 设置 |
-| `tasks.v2` | `tasks` | 进度、检查点、取消与恢复 |
-| `dialogs.v2` | `dialogs` | 宿主管理的确认与文件选择 |
-| `component.events.v2` | `events` | 发送清单声明的版本化事件 |
-| `component.lifecycle.v2` | `component.lifecycle.read` | 读取版本、授权与生命周期状态 |
-| `component.media.v2` | `component.media` | 访问插件私有媒体 |
-| `project.progress.v2` | `project.progress` | 管理进度节点和来源关系 |
-| `project.files.page.v1` / `project.files.search.v1` | `project.files.read` | Host API 5：只读分页/搜索非媒体文件、目录与 sidecar |
-| `project.media.metadata.v1` | `project.media.read` | Host API 5：读取白名单媒体元数据 |
-| `project.versions.page.v1` / `project.version.graph.v1` | `project.versions.read` | Host API 5：只读版本快照与来源图 |
-| `project.media.ratings.v1` | `project.media.ratings.read` | Host API 5：批量读取实际评分支持 |
+| `project.media.page.v7` | `project.media.read` | 分页读取项目媒体 |
+| `project.media.variants.v7` | `project.media.read` | 解析缩略图、预览或原图 |
+| `project.input.tokens.v7` | `project.input.read` | 把受限输入复制进私有存储 |
+| `project.output.v7` | `project.output.write` | 暂存、写入、校验、提交、回滚 |
+| `version.create.v7` | `project.version.create` | 从已提交制品创建版本 |
+| `component.storage.v7` | `component.storage` | 插件私有数据和 SQLite 位置 |
+| `component.settings.v7` | `component.settings` | 私有 JSON 设置 |
+| `tasks.v7` | `tasks` | 进度、检查点、取消与恢复 |
+| `dialogs.v7` | `dialogs` | 宿主管理的确认与文件选择 |
+| `component.events.v7` | `events` | 发送清单声明的版本化事件 |
+| `component.lifecycle.v7` | `component.lifecycle.read` | 读取版本、授权与生命周期状态 |
+| `component.media.v7` | `component.media` | 访问插件私有媒体 |
+| `project.progress.v7` | `project.progress` | 管理进度节点和来源关系 |
+| `project.files.page.v7` / `project.files.search.v7` | `project.files.read` | Host API 5：只读分页/搜索非媒体文件、目录与 sidecar |
+| `project.media.metadata.v7` | `project.media.read` | Host API 5：读取白名单媒体元数据 |
+| `project.versions.page.v7` / `project.version.graph.v7` | `project.versions.read` | Host API 5：只读版本快照与来源图 |
+| `project.media.ratings.v7` | `project.media.ratings.read` | Host API 5：批量读取实际评分支持 |
 
 完整参数、限制、错误码和迁移规则见 [Host API V2 参考](docs/PLUGIN_HOST_API.md)。
 
@@ -162,12 +162,12 @@ Host API 5 的 P0 能力使用只读数据库快照，不触发媒体索引、�
 
 ## 安全的“媒体 → 输出 → 版本”流程
 
-1. 使用 `project.media.page.v2` 分页读取媒体。
+1. 使用 `project.media.page.v7` 分页读取媒体。
 2. 先用 `variants: []` 只取稳定元数据；需要像素时再请求 `thumbnail`、`preview` 或 `original`。
-3. 原图请求返回短时、一次性输入令牌，通过 `project.input.tokens.v2` 物化到插件私有存储。
-4. 调用 `project.output.v2` 的 `stage`，在私有阶段中生成文件，然后 `write` 登记并 `validate`。
+3. 原图请求返回短时、一次性输入令牌，通过 `project.input.tokens.v7` 物化到插件私有存储。
+4. 调用 `project.output.v7` 的 `stage`，在私有阶段中生成文件，然后 `write` 登记并 `validate`。
 5. 使用稳定幂等键 `commit`。宿主只会把已声明的相对目标原子发布到绑定项目。
-6. 可选：用返回的 `commitId` 与 `artifactId` 调用 `version.create.v2`。
+6. 可选：用返回的 `commitId` 与 `artifactId` 调用 `version.create.v7`。
 7. 对放弃的阶段调用 `rollback`。
 
 stage 元数据和登记文件保留 24 小时，宿主重启后仍可继续校验、提交或回滚。持久化时保存 PhotoFlow ID 与插件自己的业务元数据，不要把项目路径当成业务身份。

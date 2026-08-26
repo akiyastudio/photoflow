@@ -14,7 +14,7 @@
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
       "rpcMethods": ["project-write.rate.v1"],
-      "capabilities": ["project.media.ratings.write.v1"],
+      "capabilities": ["project.media.ratings.write.v7"],
       "permissions": ["project.media.ratings.write"],
       "events": []
     }
