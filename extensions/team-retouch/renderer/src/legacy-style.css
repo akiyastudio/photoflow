@@ -1,7 +1,3 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
-
 html, body, #app { width: 100%; height: 100%; margin: 0; overflow: hidden; background: var(--pf-canvas); color: var(--pf-text); }
 body.component-settings-root { overflow-y: auto; }
 body.component-settings-root #app { height: auto; min-height: 100%; overflow: visible; }

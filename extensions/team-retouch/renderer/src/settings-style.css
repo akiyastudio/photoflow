@@ -1,0 +1,55 @@
+html, body, #app { width:100%; min-width:0; min-height:100%; margin:0; background:var(--pf-surface); color:var(--pf-text); }
+body.component-settings-root { overflow-x:hidden; overflow-y:auto; font-family:Inter,"Segoe UI","Microsoft YaHei",system-ui,sans-serif; }
+body.component-settings-root #app { height:auto; min-height:100%; overflow:visible; }
+*, *::before, *::after { box-sizing:border-box; }
+button, input, select, textarea { font:inherit; }
+button { cursor:pointer; }
+
+/* Official Host settings contract. Keep dimensions synchronized with
+   SettingsFeature SettingsPageGroup/SettingsRow when the Host contract changes. */
+.team-settings-page { min-height:100vh; width:100%; overflow-x:hidden; background:var(--pf-surface); }
+.team-settings-container { width:100%; max-width:72rem; margin:0 auto; padding:2.5rem 2rem; }
+.team-settings-title { margin:0 0 2.5rem; color:var(--pf-text-strong); font-size:1.5rem; line-height:2rem; font-weight:700; }
+.team-settings-groups { display:flex; min-width:0; flex-direction:column; gap:2.5rem; }
+.team-settings-group { min-width:0; }
+.team-settings-group-title { margin:0 0 .75rem; color:var(--pf-text); font-size:.875rem; line-height:1.25rem; font-weight:700; }
+.team-settings-card { min-width:0; overflow:hidden; border:1px solid var(--pf-border-subtle); border-radius:var(--pf-radius-lg); background:var(--pf-surface); }
+.team-settings-row { display:grid; min-width:0; gap:1rem; padding:.875rem 1rem; }
+.team-settings-row + .team-settings-row { border-top:1px solid var(--pf-border-subtle); }
+.team-settings-copy, .team-settings-control { min-width:0; }
+.team-settings-row-title { margin:0; color:var(--pf-text); font-size:.875rem; line-height:1.25rem; font-weight:700; }
+.team-settings-description { margin:.25rem 0 0; color:var(--pf-muted); font-size:.75rem; line-height:1.25rem; }
+.team-settings-control { width:100%; }
+.team-settings-select { display:block; width:100%; min-height:var(--pf-control-md); border:1px solid var(--pf-border); border-radius:var(--pf-radius-sm); padding:0 var(--pf-space-3); background:var(--pf-surface); color:var(--pf-text); font-size:.875rem; outline:none; }
+.team-settings-toggle { display:flex; width:max-content; margin-left:auto; cursor:pointer; align-items:center; }
+.team-settings-toggle input { width:1rem; height:1rem; margin:0; accent-color:var(--pf-primary); }
+.team-settings-badge { display:inline-flex; width:max-content; max-width:100%; align-items:center; border-radius:999px; padding:.25rem .625rem; font-size:.75rem; line-height:1rem; font-weight:700; white-space:nowrap; }
+.team-settings-status { display:flex; min-width:0; flex-direction:column; gap:.75rem; }
+.team-settings-banner { display:flex; min-width:0; align-items:flex-start; gap:.5rem; border:1px solid var(--pf-border); border-radius:var(--pf-radius-md); padding:.75rem; font-size:.75rem; line-height:1.25rem; }
+.team-settings-banner svg { flex:none; margin-top:.125rem; }
+.team-settings-actions { display:flex; min-width:0; flex-wrap:wrap; justify-content:flex-end; gap:.5rem; }
+.team-settings-button { display:inline-flex; min-height:var(--pf-control-md); align-items:center; justify-content:center; gap:.5rem; border-radius:var(--pf-radius-sm); padding:0 var(--pf-space-3); font-size:.75rem; font-weight:700; transition:background-color .15s,border-color .15s,color .15s; }
+.team-settings-button:disabled { cursor:not-allowed; opacity:.48; }
+.team-settings-button-secondary { border:1px solid var(--pf-border); background:var(--pf-surface); color:var(--pf-text); }
+.team-settings-button-secondary:hover:not(:disabled) { background:var(--pf-subtle); }
+.team-settings-button-primary { border:1px solid var(--pf-primary); background:var(--pf-primary); color:#fff; }
+.team-settings-button-primary:hover:not(:disabled) { border-color:var(--pf-primary-hover); background:var(--pf-primary-hover); }
+.team-settings-button-danger { border:1px solid color-mix(in srgb,var(--pf-danger) 45%,transparent); background:var(--pf-surface); color:var(--pf-danger); }
+.team-settings-button-danger:hover:not(:disabled) { background:var(--pf-danger-soft); }
+.team-settings-loading { display:flex; min-height:13rem; flex-direction:column; align-items:center; justify-content:center; gap:.75rem; padding:1.5rem; text-align:center; }
+.team-settings-error { margin:0; color:var(--pf-danger); font-size:.75rem; line-height:1.25rem; }
+
+@media (min-width:768px) {
+  .team-settings-row { grid-template-columns:minmax(220px,1fr) minmax(280px,1.25fr); align-items:center; }
+  .team-settings-row[data-align="start"] { align-items:start; }
+  .team-settings-select { max-width:24rem; margin-left:auto; }
+}
+@media (min-width:1024px) { .team-settings-container { padding-right:3rem; padding-left:3rem; } }
+@media (max-width:767px) {
+  .team-settings-container { padding:1.5rem 1rem; }
+  .team-settings-title { margin-bottom:2rem; }
+  .team-settings-groups { gap:2rem; }
+  .team-settings-toggle { margin-left:0; }
+  .team-settings-actions { justify-content:flex-start; }
+  .team-settings-button { flex:1 1 auto; }
+}

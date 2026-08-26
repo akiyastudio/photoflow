@@ -1,6 +1,17 @@
 export type TeamSettings = { useGpu: boolean; oversizeCropMode: 'face-centered' | 'expand' };
 export type TeamSettingsPatch = Partial<TeamSettings>;
 export type TeamSettingsState = { settings?: TeamSettings; loaded: boolean; loading: boolean; error: string };
+export type AdvancedEnvironmentState = 'loading' | 'ready' | 'not-installed' | 'repair-needed' | 'unavailable' | 'error';
+export type AdvancedEnvironmentPresentation = { state: AdvancedEnvironmentState; label: string; description: string; tone: 'primary' | 'success' | 'warning' | 'danger' };
+export const advancedEnvironmentPresentation = (value: unknown, loading: boolean, failed: boolean): AdvancedEnvironmentPresentation => {
+  if (loading) return { state: 'loading', label: '正在检查', description: '正在确认增强人物检测的安装与运行状态。', tone: 'primary' };
+  if (failed) return { state: 'error', label: '检查失败', description: '暂时无法读取增强版状态；基础人物检测仍可正常使用。', tone: 'danger' };
+  const status = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
+  if (status.advancedAvailable === true || status.state === 'ready') return { state: 'ready', label: '可用', description: '增强人物检测已就绪，将自动用于多人、遮挡和精细分割场景。', tone: 'success' };
+  if (status.state === 'not-installed' || status.installed === false) return { state: 'not-installed', label: '未安装', description: '当前使用基础人物检测；可通过离线安装包安装增强版。', tone: 'primary' };
+  if (status.state === 'repair-needed') return { state: 'repair-needed', label: '需修复', description: '增强版运行环境不完整；当前已安全回退到基础人物检测。', tone: 'warning' };
+  return { state: 'unavailable', label: '不可用', description: '此设备当前无法启用增强版；基础人物检测仍可正常使用。', tone: 'warning' };
+};
 export const createLatestRequestGuard = () => { let generation = 0; return { begin: () => ++generation, isCurrent: (value: number) => value === generation, invalidate: () => { generation += 1; } }; };
 
 const normalizedSettings = (value: unknown, fallback: TeamSettings = { useGpu: true, oversizeCropMode: 'face-centered' }): TeamSettings => {

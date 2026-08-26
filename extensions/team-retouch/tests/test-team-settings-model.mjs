@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 // Plugin-owned regression test.
-import { createLatestRequestGuard, createTeamSettingsController, runNotifiedAction } from '../renderer/src/team-settings-model.ts';
+import { advancedEnvironmentPresentation, createLatestRequestGuard, createTeamSettingsController, runNotifiedAction } from '../renderer/src/team-settings-model.ts';
 
 const deferred = () => { let resolve; let reject; const promise = new Promise((ok, fail) => { resolve = ok; reject = fail; }); return { promise, resolve, reject }; };
 const tick = () => new Promise(resolve => setImmediate(resolve));
@@ -83,10 +83,25 @@ let uninstallRpcCalls = 0;
 assert.equal(await runNotifiedAction('卸载增强版', async () => { const confirmed = false; if (!confirmed) return false; uninstallRpcCalls += 1; }, message => actionNotices.push(message)), false);
 assert.deepEqual(actionNotices, [], 'cancelled lifecycle confirmation emits no success notice');
 assert.equal(uninstallRpcCalls, 0);
+await assert.rejects(runNotifiedAction('安装增强版', async () => { throw new Error('failed'); }, message => actionNotices.push(message)), /failed/);
+assert.deepEqual(actionNotices, [], 'a failed lifecycle action leaves the single error Toast to its caller');
 
 const statusGuard = createLatestRequestGuard(); const oldStatus = statusGuard.begin(); statusGuard.invalidate();
 assert.equal(statusGuard.isCurrent(oldStatus), false, 'a lifecycle result invalidates older advanced-status reads');
 const activatedStatus = statusGuard.begin(); assert(statusGuard.isCurrent(activatedStatus), 'component activation starts the newest advanced-status generation');
+
+for (const [value, loading, failed, expected] of [
+  [undefined, true, false, 'loading'],
+  [{ advancedAvailable: true, state: 'ready' }, false, false, 'ready'],
+  [{ state: 'not-installed', installed: false }, false, false, 'not-installed'],
+  [{ state: 'repair-needed' }, false, false, 'repair-needed'],
+  [{ success: false, message: 'raw backend detail' }, false, false, 'unavailable'],
+  [undefined, false, true, 'error'],
+]) {
+  const presentation = advancedEnvironmentPresentation(value, loading, failed);
+  assert.equal(presentation.state, expected, `advanced environment state maps to ${expected}`);
+  assert(!presentation.description.includes('raw backend detail'), 'advanced status never renders backend payload text');
+}
 
 console.log('Team settings state-machine tests passed');
 

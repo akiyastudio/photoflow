@@ -9,6 +9,9 @@ export default defineConfig({
   root: rendererRoot,
   base: './',
   plugins: [react()],
+  // Vite otherwise starts its PostCSS search at rendererRoot. Keep the build
+  // completely plugin-owned even after this directory is copied elsewhere.
+  css: { postcss: pluginRoot },
   build: {
     outDir: resolve(pluginRoot, 'dist/ui'),
     emptyOutDir: true,

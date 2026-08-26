@@ -18,6 +18,7 @@ import { canEnterWorkflowStage, normalizeWorkspace, workflowStageSummaries, type
 import { TeamSettingsContent } from './team-settings-content';
 import { createTeamSettingsController, type TeamSettingsState } from './team-settings-model';
 import './host-api-ui.css';
+import './tailwind.css';
 import './legacy-style.css';
 
 type Json = Record<string, any>;
