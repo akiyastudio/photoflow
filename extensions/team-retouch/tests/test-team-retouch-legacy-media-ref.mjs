@@ -5,11 +5,18 @@ import path from 'node:path';
 
 const calls = [];
 let failedTaskId = '';
+let sharedAuthorizationCount = 0;
+let resolveProjectA;
 globalThis.window = {
   photoFlowComponent: {
     contractVersion: 1,
     rpc: async (method, payload) => {
       calls.push({ method, payload });
+      if (method === 'team.media.authorize.v1' && payload.photoId === 'shared-photo') {
+        sharedAuthorizationCount += 1;
+        if (sharedAuthorizationCount === 1) return new Promise(resolve => { resolveProjectA = resolve; });
+        return { success: true, url: 'photoflow-media:project-b' };
+      }
       if (method === 'team.media.authorize.v1' && payload.taskId === failedTaskId) return { success: false, state: 'MISSING', category: 'history-reference-missing', error: '工作图任务不存在或文件缺失' };
       if (method === 'team.patch.get.v1') return { success: true, baseVersionId: 'registration-base', photo: { id: 'bundle-photo', currentVersionId: 'new-current' }, versions: [{ id: 'registration-base' }, { id: 'new-current', isCurrent: true }], tasks: [{ id: 'bundle-task', baseVersionId: 'registration-base' }] };
       return { success: true, url: `photoflow-media:test/${calls.length}` };
@@ -70,5 +77,17 @@ assert.deepEqual({ total: summary.total, succeeded: summary.succeeded, failed: s
 assert.match(summary.failures[0].error, /历史版本不存在|工作图任务不存在|历史预览文件缺失/, 'the failed item keeps a visible actionable diagnostic');
 const missingCard = await legacyApi.getMediaThumbnail(legacyMediaRef('working', 'fixture-photo-14', 'fixture-base-14', failedTaskId));
 assert.deepEqual({ success: missingCard.success, state: missingCard.state }, { success: false, state: 'MISSING' }, 'expired historical component media degrades to one missing card instead of rejecting the stage');
+
+const sharedRef = legacyMediaRef('working', 'shared-photo', 'shared-version', 'shared-task');
+legacyApi.setMediaAuthorizationScope('project-a');
+const projectARequest = legacyApi.getMediaThumbnail(sharedRef);
+await new Promise(resolve => setTimeout(resolve, 0));
+legacyApi.setMediaAuthorizationScope('project-b');
+const projectBResult = await legacyApi.getMediaThumbnail(sharedRef);
+resolveProjectA({ success: true, url: 'photoflow-media:project-a' });
+const projectAResult = await projectARequest;
+assert.equal(projectBResult.previewUrl, 'photoflow-media:project-b', 'project B reauthorizes an identical media ref instead of reusing project A URL/inflight');
+assert.equal(projectAResult.previewUrl, undefined, 'a late project A authorization cannot write back after scope changes');
+assert.equal(sharedAuthorizationCount, 2, 'identical IDs in A and B create independent scoped authorizations');
 
 console.log('Team-retouch legacy media reference round-trip tests passed');

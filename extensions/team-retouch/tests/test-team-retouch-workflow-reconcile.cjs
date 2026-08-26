@@ -5,7 +5,10 @@ const os = require('os');
 const path = require('path');
 const readline = require('readline');
 const { spawn } = require('child_process');
-const { DatabaseSync } = require('node:sqlite');
+const { DatabaseSync: NativeDatabaseSync } = require('node:sqlite');
+class DatabaseSync extends NativeDatabaseSync {
+  constructor(databasePath) { super(databasePath); this.function('team_request_id', () => ''); }
+}
 const { resolveWorkflowTaskBinding } = require('../service.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'team-retouch-reconcile-'));
@@ -59,7 +62,7 @@ const releaseHeldWorkflow = () => {
 };
 const invoke = (method, payload = {}) => new Promise((resolve, reject) => {
   const id = String(nextId++);
-  pending.set(id, { resolve, reject });
+  pending.set(id, { resolve, reject, method, payload });
   child.stdin.write(`${JSON.stringify({ type: 'request', id, method, payload, context: { componentId: 'team-retouch', componentVersion: 'test', projectId: 'project', projectName: 'Project', projectStatus: 'active' } })}\n`);
 });
 const ready = new Promise((resolve, reject) => {
@@ -108,7 +111,7 @@ const ready = new Promise((resolve, reject) => {
     if (frame.type === 'response') {
       const request = pending.get(frame.id);
       pending.delete(frame.id);
-      if (frame.ok) request.resolve(frame.result); else request.reject(new Error(frame.error));
+      if (frame.ok) request.resolve(frame.result); else request.reject(new Error(`${request.method} ${JSON.stringify(request.payload)}: ${frame.error}`));
     }
   });
 });

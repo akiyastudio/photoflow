@@ -10,6 +10,7 @@ export type LegacyMediaReference =
 const projectEntryPaths = new Map<string, string>();
 const mediaAliases = new Map<string, string>();
 let mediaAuthorizationScope = '';
+let mediaAuthorizationGeneration = 0;
 const normalizedRelativePath = (value: string) => value.replace(/\\/g, '/').replace(/^\.\//, '').toLocaleLowerCase();
 const mediaRef = (kind: MediaKind, photoId = '', baseVersionId = '', taskId = '', reviewSessionId = '', returnId = '', personIndex = '') =>
   ['photoflow-ref', kind, photoId, baseVersionId, taskId, reviewSessionId, returnId, personIndex].map((part, index) => index < 2 ? part : encodeURIComponent(part)).join(':');
@@ -63,12 +64,14 @@ const hydrateReviewResult = (result: Json) => {
   return { ...result, matches };
 };
 const payload = (args: any[]) => { for (let index = args.length - 1; index >= 0; index -= 1) { const value = args[index]; if (value && typeof value === 'object' && !Array.isArray(value)) return value; } return {}; };
-let workspaceRevision = '';
+const workspaceRevisions = new Map<string, string>();
+const currentRevisionScope = () => mediaAuthorizationScope || '__default__';
 const revisionMutations = new Set(['team.project.register.v1','team.project.remove-photo.v1','team.identity.save.v1','team.identity.assign.v1','team.identity.confirm-group.v1','team.identity.delete.v1','team.identity.suggest.v1','team.person.exclude.v1','team.patch.detect.v1','team.patch.detect-batch.v1','team.patch.update.v1','team.patch.delete.v1','team.patch.cleanup.v1','team.patch.upload.v1','team.patch.remove-upload.v1','team.patch.merge.v1','team.identity.complete.v1','team.workflow.settings.save.v1','team.workflow.generate.v1','team.workflow.return-batch.v1','team.workflow.return-confirm.v1','team.patch.return-batch.v1']);
 const ok = async (method: string, value?: Json) => {
+  const revisionScope = currentRevisionScope(); const workspaceRevision = workspaceRevisions.get(revisionScope) || '';
   const request = revisionMutations.has(method) && workspaceRevision ? { ...(value || {}), expectedRevision: value?.expectedRevision || workspaceRevision } : value;
   const result = await rpc<Json>(method, request);
-  if (result?.revision) workspaceRevision = String(result.revision);
+  if (result?.revision) workspaceRevisions.set(revisionScope, String(result.revision));
   return result;
 };
 const durable = async (method: string, value: Json) => {
@@ -89,6 +92,16 @@ const readProgressCached = () => {
   progressQuery = { expiresAt: Date.now() + 2_000, promise };
   return promise;
 };
+const authorizeMedia = async (ref: LegacyMediaReference, variant: 'preview' | 'original', priority: number) => {
+  const scope = mediaAuthorizationScope; const generation = mediaAuthorizationGeneration;
+  const result = await scheduleLegacyMedia(`${scope}:${JSON.stringify(ref)}:${variant}`, async () => {
+    const value = await ok('team.media.authorize.v1', { ...ref, variant });
+    if (scope !== mediaAuthorizationScope || generation !== mediaAuthorizationGeneration) return { success: false, state: 'MISSING', error: '项目已切换，旧媒体授权已失效' };
+    return value;
+  }, priority);
+  if (scope !== mediaAuthorizationScope || generation !== mediaAuthorizationGeneration) return { success: false, state: 'MISSING', error: '项目已切换，旧媒体授权已失效' };
+  return result;
+};
 export const componentStatusFromAdvancedPreflight = (state: Json) => {
   const advancedAvailable = state.advancedAvailable !== undefined
     ? state.advancedAvailable === true
@@ -107,8 +120,9 @@ export const legacyApi = {
   setMediaAuthorizationScope: (scope: string) => {
     const next = String(scope || '');
     if (next === mediaAuthorizationScope) return;
-    expireLegacyMedia(); mediaAliases.clear(); mediaAuthorizationScope = next;
+    mediaAuthorizationGeneration += 1; expireLegacyMedia(); mediaAliases.clear(); mediaAuthorizationScope = next;
   },
+  getMediaAuthorizationScope: () => mediaAuthorizationScope,
   getTeamPatches: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.get.v1', { relativePath: String(args[3] || '') }), String(args[4] || '')),
   getTeamProjectWorkspace: async () => hydrateLegacyWorkspace(await ok('team.project.get.v1')),
   calibrateTeamProjectWorkspace: (maxItems = 24) => ok('team.project.calibrate-step.v1', { maxItems }),
@@ -148,8 +162,8 @@ export const legacyApi = {
     return result;
   },
   openTeamPatch: async (reference: string) => { const ref = parseLegacyMediaRef(reference); return ref?.kind === 'working' ? ok('team.patch.open.v1', ref) : { success: false, error: '工作图引用已失效' }; },
-  getMediaThumbnail: async (...args: any[]): Promise<Json> => { const value = String(args[0] || ''); const ref = parseLegacyMediaRef(value) || parseLegacyMediaRef(mediaAliases.get(value) || ''); if (!ref) return { success: false, state: 'MISSING', error: '预览引用尚未建立' }; try { return await scheduleLegacyMedia(`${mediaAuthorizationScope}:${JSON.stringify(ref)}:preview`, async () => { const result = await ok('team.media.authorize.v1', { ...ref, variant: 'preview' }); if (result.success === false) return { ...result, state: result.state || 'MISSING' }; return { ...result, state: 'READY', previewUrl: result.url, previewUrls: { small: result.url, medium: result.url, large: result.url } }; }, Number(args[4]) || 0); } catch { return missingMediaResult('thumbnail'); } },
-  getMediaOriginal: async (...args: any[]): Promise<Json> => { const value = String(args[0] || ''); const ref = parseLegacyMediaRef(value) || parseLegacyMediaRef(mediaAliases.get(value) || ''); if (!ref) return { success: false, state: 'MISSING', error: '原图引用尚未建立' }; try { return await scheduleLegacyMedia(`${mediaAuthorizationScope}:${JSON.stringify(ref)}:original`, async () => { const result = await ok('team.media.authorize.v1', { ...ref, variant: 'original' }); if (result.success === false) return { ...result, state: result.state || 'MISSING' }; return { ...result, state: 'READY', mediaUrl: result.url, orientation: { matrix: [1, 0, 0, 1] } }; }, 100); } catch { return missingMediaResult('original'); } },
+  getMediaThumbnail: async (...args: any[]): Promise<Json> => { const value = String(args[0] || ''); const ref = parseLegacyMediaRef(value) || parseLegacyMediaRef(mediaAliases.get(value) || ''); if (!ref) return { success: false, state: 'MISSING', error: '预览引用尚未建立' }; try { const result = await authorizeMedia(ref, 'preview', Number(args[4]) || 0); if (result.success === false) return { ...result, state: result.state || 'MISSING' }; return { ...result, state: 'READY', previewUrl: result.url, previewUrls: { small: result.url, medium: result.url, large: result.url } }; } catch { return missingMediaResult('thumbnail'); } },
+  getMediaOriginal: async (...args: any[]): Promise<Json> => { const value = String(args[0] || ''); const ref = parseLegacyMediaRef(value) || parseLegacyMediaRef(mediaAliases.get(value) || ''); if (!ref) return { success: false, state: 'MISSING', error: '原图引用尚未建立' }; try { const result = await authorizeMedia(ref, 'original', 100); if (result.success === false) return { ...result, state: result.state || 'MISSING' }; return { ...result, state: 'READY', mediaUrl: result.url, orientation: { matrix: [1, 0, 0, 1] } }; } catch { return missingMediaResult('original'); } },
   onThumbnailStateChanged: (_callback: (value: any) => void) => () => undefined,
   onTeamPatchDetectionProgress: (callback: (value: any) => void) => event('team.patch.detect.progress.v1', callback),
   onTeamPatchBatchProgress: (callback: (value: any) => void) => event('team.patch.detect-batch.progress.v1', callback),

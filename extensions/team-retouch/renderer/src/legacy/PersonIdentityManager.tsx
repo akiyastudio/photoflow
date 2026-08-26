@@ -4,7 +4,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'rea
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, CheckCircle2, FolderOutput, GripVertical, Image as ImageIcon, Loader2, Settings, Trash2, Upload, UserRound, UsersRound, Wand2, X } from 'lucide-react';
-import type { AppConfig, TeamIdentity, TeamIdentityWorkspace, TeamPatchReturnBatchResult, TeamPatchReturnMatch, TeamPatchTask, TeamPersonAssignment, TeamProjectPhoto, TeamWorkflowGenerationProgress, ThumbnailState, WorkspaceProject } from './legacy-types';
+import type { AppConfig, TeamIdentity, TeamIdentityWorkspace, TeamPatchReturnBatchResult, TeamPatchReturnMatch, TeamPatchTask, TeamPersonAssignment, TeamProjectPhoto, TeamWorkflowGenerationProgress, WorkspaceProject } from './legacy-types';
 import { scheduleWorkflowWeeks } from '../workflow-schedule';
 import { useAppDialog } from './legacy-dialog-context';
 import { useEscapeLayer } from './legacy-layer';
@@ -51,34 +51,6 @@ const similarityPairKey = (left: string, right: string) => left < right ? `${lef
 const formatWorkflowBytes = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
 
 const IDENTITY_THUMBNAIL_SIZE = 384;
-type IdentityThumbnailListener = (state: ThumbnailState, url?: string) => void;
-const identityThumbnailListeners = new Map<string, Set<IdentityThumbnailListener>>();
-const identityThumbnailRequests = new Map<string, ReturnType<typeof legacyApi.getMediaThumbnail>>();
-const identityThumbnailUrls = new Map<string, string>();
-let stopIdentityThumbnailUpdates: (() => void) | undefined;
-const identityThumbnailKey = (filePath: string) => filePath.toLocaleLowerCase();
-const subscribeIdentityThumbnail = (filePath: string, listener: IdentityThumbnailListener) => {
-  const key = identityThumbnailKey(filePath);
-  const listeners = identityThumbnailListeners.get(key) || new Set<IdentityThumbnailListener>();
-  listeners.add(listener);
-  identityThumbnailListeners.set(key, listeners);
-  if (!stopIdentityThumbnailUpdates) {
-    stopIdentityThumbnailUpdates = legacyApi.onThumbnailStateChanged(update => {
-      const subscribers = identityThumbnailListeners.get(identityThumbnailKey(update.filePath));
-      if (!subscribers) return;
-      const url = update.previewUrls?.medium;
-      for (const callback of subscribers) callback(update.state, url);
-    });
-  }
-  return () => {
-    listeners.delete(listener);
-    if (!listeners.size) identityThumbnailListeners.delete(key);
-    if (!identityThumbnailListeners.size) {
-      stopIdentityThumbnailUpdates?.();
-      stopIdentityThumbnailUpdates = undefined;
-    }
-  };
-};
 
 const subjectsFromWorkspace = (workspace: TeamIdentityWorkspace): Subject[] => {
   const assignments = new Map(workspace.assignments.map(item => [assignmentKey(item.photoId, item.baseVersionId, item.personIndex), item]));
@@ -100,38 +72,28 @@ const subjectsFromWorkspace = (workspace: TeamIdentityWorkspace): Subject[] => {
 const SubjectThumb = memo(({ subject, cacheConfig, active: componentActive = true, interactive = true, sourcePath }: { subject: Subject; cacheConfig: AppConfig['mediaCache']; active?: boolean; interactive?: boolean; sourcePath?: string }) => {
   const container = useRef<HTMLDivElement>(null);
   const imagePath = sourcePath || subject.task.patchPath;
-  const [url, setUrl] = useState(() => identityThumbnailUrls.get(identityThumbnailKey(imagePath)) || '');
+  const mediaScope = legacyApi.getMediaAuthorizationScope();
+  const [url, setUrl] = useState('');
   const [loadFailed, setLoadFailed] = useState(false);
   useEffect(() => {
     let active = true;
     if (!componentActive) return () => undefined;
-    setUrl(identityThumbnailUrls.get(identityThumbnailKey(imagePath)) || '');
+    setUrl('');
     setLoadFailed(false);
-    const unsubscribe = subscribeIdentityThumbnail(imagePath, (state, nextUrl) => {
-      if (!active) return;
-      if (state === 'READY' && nextUrl) { identityThumbnailUrls.set(identityThumbnailKey(imagePath), nextUrl); setUrl(nextUrl); }
-      else if (state === 'FAILED' || state === 'MISSING') setLoadFailed(true);
-    });
     const node = container.current;
     const observer = node ? new IntersectionObserver(([entry]) => {
       if (!entry.isIntersecting) return;
       observer?.disconnect();
-      const key = identityThumbnailKey(imagePath);
-      let request = identityThumbnailRequests.get(key);
-      if (!request) {
-        request = legacyApi.getMediaThumbnail(imagePath, 'image', cacheConfig, IDENTITY_THUMBNAIL_SIZE, 1, 0);
-        identityThumbnailRequests.set(key, request);
-        void request.finally(() => identityThumbnailRequests.delete(key));
-      }
+      const request = legacyApi.getMediaThumbnail(imagePath, 'image', cacheConfig, IDENTITY_THUMBNAIL_SIZE, 1, 0);
       void request.then(result => {
         if (!active) return;
-        if (result.previewUrl) { identityThumbnailUrls.set(key, result.previewUrl); setUrl(result.previewUrl); }
+        if (result.previewUrl) setUrl(result.previewUrl);
         else if (!result.success || result.state === 'FAILED' || result.state === 'MISSING') setLoadFailed(true);
       }).catch(() => { if (active) setLoadFailed(true); });
     }, { rootMargin: '320px' }) : null;
     if (node) observer?.observe(node);
-    return () => { active = false; observer?.disconnect(); unsubscribe(); };
-  }, [imagePath, componentActive, cacheConfig.directory, cacheConfig.maxSizeGB]);
+    return () => { active = false; observer?.disconnect(); };
+  }, [imagePath, componentActive, cacheConfig.directory, cacheConfig.maxSizeGB, mediaScope]);
   const x = Math.max(0, subject.bbox.x - subject.task.crop.x);
   const y = Math.max(0, subject.bbox.y - subject.task.crop.y);
   const boxWidth = Math.max(1, Math.min(subject.bbox.width, subject.task.crop.width - x));
@@ -189,13 +151,11 @@ type ReturnCandidate = {
   score: number;
 };
 
-const returnImageUrls = new Map<string, string>();
-const returnImageCacheKey = (filePath: string, eager: boolean) => `${identityThumbnailKey(filePath)}|${eager ? 'original' : 'preview'}`;
-
 const ReturnImage = ({ filePath, cacheConfig, active: componentActive = true, eager = false, className = '', style }: { filePath?: string; cacheConfig: AppConfig['mediaCache']; active?: boolean; eager?: boolean; className?: string; style?: React.CSSProperties }) => {
   const container = useRef<HTMLDivElement>(null);
   const [visible, setVisible] = useState(eager);
-  const [url, setUrl] = useState(() => filePath ? returnImageUrls.get(returnImageCacheKey(filePath, eager)) || '' : '');
+  const mediaScope = legacyApi.getMediaAuthorizationScope();
+  const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
   useEffect(() => {
     if (!componentActive) { setVisible(false); return; }
@@ -213,10 +173,8 @@ const ReturnImage = ({ filePath, cacheConfig, active: componentActive = true, ea
   useEffect(() => {
     let active = true;
     if (!componentActive || !filePath) { if (!filePath) setUrl(''); setLoading(false); return () => { active = false; }; }
-    const key = returnImageCacheKey(filePath, eager);
-    const cached = returnImageUrls.get(key);
-    setUrl(cached || '');
-    if (!visible || cached) return () => { active = false; };
+    setUrl('');
+    if (!visible) return () => { active = false; };
     setLoading(true);
     const loadImage = async () => {
       let nextUrl = '';
@@ -228,12 +186,11 @@ const ReturnImage = ({ filePath, cacheConfig, active: componentActive = true, ea
         nextUrl = thumbnail.previewUrl || '';
       }
       if (!active || !nextUrl) return;
-      returnImageUrls.set(key, nextUrl);
       setUrl(nextUrl);
     };
     void loadImage().catch(() => undefined).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [filePath, visible, componentActive, eager, cacheConfig.directory, cacheConfig.maxSizeGB]);
+  }, [filePath, visible, componentActive, eager, cacheConfig.directory, cacheConfig.maxSizeGB, mediaScope]);
   return <div ref={container} className={`relative flex items-center justify-center overflow-hidden bg-slate-950 ${className}`}>
     {url ? <img src={url} alt="" draggable={false} style={style} className="h-full w-full object-contain"/> : <ImageIcon size={24} className="text-slate-500"/>}
     {loading && <span className="absolute rounded-full bg-black/65 p-2 text-white"><Loader2 size={15} className="animate-spin"/></span>}

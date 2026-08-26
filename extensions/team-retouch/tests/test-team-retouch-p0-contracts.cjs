@@ -47,8 +47,8 @@ const { createHostSimulator } = require('./host-simulator.cjs');
     const identityMutation = await simulator.request('team.identity.save.v1', { name: 'Revision Contract', assignments: [] });
     const identityMutationMs = performance.now() - identityMutationStartedAt;
     assert(identityMutationMs < 1000, `lightweight revision-checked mutation exceeded 1s: ${identityMutationMs.toFixed(1)}ms`);
-    assert.match(identityMutation.revision, /^\d+:\d+:\d+$/, 'mutations return the authoritative workspace revision');
-    await assert.rejects(simulator.request('team.identity.save.v1', { name: 'Stale Mutation', assignments: [], expectedRevision: '0:0:0' }), /已被其他操作更新/, 'stale mutations fail before changing domain state');
+    assert.match(identityMutation.revision, /^\d+$/, 'mutations return the authoritative monotonic workspace revision');
+    await assert.rejects(simulator.request('team.identity.save.v1', { name: 'Stale Mutation', assignments: [], expectedRevision: '0' }), /已被其他操作更新/, 'stale mutations fail inside the public write transaction');
     const durableKinds = [
       ['team.patch.detect.v1', 'detect', { photoId: 'photo', baseVersionId: 'version' }],
       ['team.patch.detect-batch.v1', 'detect-batch', { relativePaths: ['images/one.jpg'] }],

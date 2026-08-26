@@ -3,6 +3,7 @@ const path = require('path');
 const crypto = require('crypto');
 const readline = require('readline');
 const { spawn } = require('child_process');
+const { AsyncLocalStorage } = require('async_hooks');
 const { DatabaseSync } = require('node:sqlite');
 const { CANCELLED_CODE, buildWorkflowPlan, copyWorkflowPlan } = require('./workflow-generation.cjs');
 const { createTeamWorkflowArtifactService } = require('./workflow-artifact.cjs');
@@ -27,6 +28,7 @@ const schemaReadyPaths = new Set();
 let advancedRuntimeProbeCache = null;
 let nextCapabilityId = 1;
 const metricSamples = new Map();
+const revisionRequestContext = new AsyncLocalStorage();
 
 const hostAlgorithmRuntime = (() => {
   const values = process.argv.slice(2);
@@ -268,10 +270,13 @@ const ensureSchema = databasePath => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
   const schemaAlreadyReady = schemaReadyPaths.has(databasePath) && fs.existsSync(databasePath);
   const db = new DatabaseSync(databasePath);
+  db.function('team_request_id', () => String(revisionRequestContext.getStore()?.requestId || ''));
   db.exec(`PRAGMA busy_timeout=${DB_BUSY_TIMEOUT_MS}; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`);
   if (schemaAlreadyReady) return db;
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    CREATE TABLE IF NOT EXISTS team_project_revisions (project_id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0);
+    CREATE TABLE IF NOT EXISTS team_revision_guards (request_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, expected_revision INTEGER NOT NULL, bumped INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL);
     CREATE TABLE IF NOT EXISTS team_patch_tasks (
       id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, base_version_id TEXT NOT NULL,
       person_index INTEGER NOT NULL, person_name TEXT NOT NULL, assignee TEXT NOT NULL DEFAULT '',
@@ -358,7 +363,30 @@ const ensureSchema = databasePath => {
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS team_operation_project_state ON team_durable_operations(project_id,state,updated_at);
+    CREATE TABLE IF NOT EXISTS team_workflow_settings (
+      project_id TEXT PRIMARY KEY, settings_json TEXT NOT NULL DEFAULT '{}', updated_at INTEGER NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS team_workflow_state (
+      project_id TEXT PRIMARY KEY, generated_at INTEGER NOT NULL, fingerprint TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL
+    );
   `);
+  for (const table of ['team_retouch_photos','team_person_identities','team_person_assignments','team_person_exclusions','team_patch_tasks','team_task_stages','team_task_artifacts','team_workflow_reconcile_pending','team_workflow_review_confirmations','team_workflow_settings','team_workflow_state']) {
+    for (const action of ['INSERT', 'UPDATE', 'DELETE']) {
+      db.exec(`CREATE TRIGGER IF NOT EXISTS ${table}_revision_guard_${action.toLowerCase()} BEFORE ${action} ON ${table} BEGIN
+        SELECT CASE WHEN EXISTS(SELECT 1 FROM team_revision_guards guard WHERE guard.request_id=team_request_id() AND guard.bumped=0)
+          AND (SELECT expected_revision FROM team_revision_guards WHERE request_id=team_request_id()) >= 0
+          AND (SELECT expected_revision FROM team_revision_guards WHERE request_id=team_request_id()) <> COALESCE((SELECT revision FROM team_project_revisions WHERE project_id=(SELECT project_id FROM team_revision_guards WHERE request_id=team_request_id())),0)
+          THEN RAISE(ABORT,'TEAM_REVISION_CONFLICT') END;
+      END;
+      CREATE TRIGGER IF NOT EXISTS ${table}_revision_${action.toLowerCase()} AFTER ${action} ON ${table} BEGIN
+        INSERT INTO team_project_revisions(project_id,revision)
+          SELECT project_id,0 FROM team_revision_guards WHERE request_id=team_request_id() ON CONFLICT(project_id) DO NOTHING;
+        UPDATE team_project_revisions SET revision=revision+1 WHERE project_id=(SELECT project_id FROM team_revision_guards WHERE request_id=team_request_id())
+          AND EXISTS(SELECT 1 FROM team_revision_guards WHERE request_id=team_request_id() AND bumped=0);
+        UPDATE team_revision_guards SET bumped=1 WHERE request_id=team_request_id();
+      END;`);
+    }
+  }
   addColumn('team_workflow_reconcile_pending', 'attempt_count', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('team_workflow_reconcile_pending', 'next_attempt_at', 'INTEGER NOT NULL DEFAULT 0');
   addColumn('team_workflow_reconcile_pending', 'last_error', "TEXT NOT NULL DEFAULT ''");
@@ -389,7 +417,7 @@ const ensureSchema = databasePath => {
       }
     }
   }
-  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','7') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
+  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','8') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
   schemaReadyPaths.add(databasePath);
   return db;
 };
@@ -1304,7 +1332,13 @@ const saveWorkflowSettings = async (parentId, payload, context) => {
     sameWeekIdentityIds,
   };
   const storage = await hostStorage(parentId);
-  await replaceJsonAtomic(path.join(storage.dataRoot, 'workflow-settings', `${sha256(context.projectName)}.json`), { updatedAt: Date.now(), ...workflowSettings });
+  const db = ensureSchema(storage.databasePath); const now = Date.now();
+  try {
+    db.exec('BEGIN IMMEDIATE');
+    try { db.prepare('INSERT INTO team_workflow_settings(project_id,settings_json,updated_at) VALUES(?,?,?) ON CONFLICT(project_id) DO UPDATE SET settings_json=excluded.settings_json,updated_at=excluded.updated_at').run(String(context.projectId), JSON.stringify(workflowSettings), now); db.exec('COMMIT'); }
+    catch (error) { db.exec('ROLLBACK'); throw error; }
+  } finally { db.close(); }
+  await replaceJsonAtomic(path.join(storage.dataRoot, 'workflow-settings', `${sha256(context.projectName)}.json`), { updatedAt: now, ...workflowSettings }).catch(() => undefined);
   return { success: true, workflowSettings };
 };
 
@@ -1479,11 +1513,7 @@ const publicWorkspace = value => ({
   assignments: (value?.assignments || []).map(assignment => Object.fromEntries(Object.entries(assignment).filter(([field]) => !['editedPatchPath', 'returnedPath'].includes(field)))),
 });
 const domainRevision = (db, projectId) => {
-  const maxima = db.prepare(`SELECT
-    (SELECT COALESCE(MAX(updated_at),0) FROM team_retouch_photos WHERE project_id=?) photos_at,
-    (SELECT COALESCE(MAX(updated_at),0) FROM team_person_assignments WHERE project_id=?) assignments_at,
-    (SELECT COALESCE(MAX(updated_at),0) FROM team_person_identities WHERE project_id=?) identities_at`).get(projectId, projectId, projectId);
-  return `${Number(maxima.photos_at) || 0}:${Number(maxima.assignments_at) || 0}:${Number(maxima.identities_at) || 0}`;
+  return String(Number(db.prepare('SELECT revision FROM team_project_revisions WHERE project_id=?').get(String(projectId))?.revision) || 0);
 };
 
 const migrateWorkflowArtifacts = async (parentId, payload) => {
@@ -1548,12 +1578,15 @@ const workspaceSnapshot = async (parentId, context) => {
       editedPatchPath: row.edited_patch_path, returnMissing: Boolean(row.return_missing),
       returnMissingSince: row.return_missing_since, completedAt: row.completed_at, updatedAt: row.updated_at,
     }));
-    const settings = readJsonFile(path.join(storage.dataRoot, 'workflow-settings', `${sha256(context.projectName)}.json`)) || {};
+    const settings = parseJson(db.prepare('SELECT settings_json FROM team_workflow_settings WHERE project_id=?').get(projectId)?.settings_json, null)
+      || readJsonFile(path.join(storage.dataRoot, 'workflow-settings', `${sha256(context.projectName)}.json`)) || {};
     const identityIds = new Set(identities.map(identity => String(identity.id)));
     const preferredIdentityOrder = uniqueText(settings.preferredIdentityOrder).filter(id => identityIds.has(id));
     const requestedSameWeek = new Set(uniqueText(settings.sameWeekIdentityIds));
     const sameWeekIdentityIds = preferredIdentityOrder.slice(1).filter(id => requestedSameWeek.has(id));
-    const { manifest } = await workflowDirectoryResolver(storage, context);
+    const { manifest: resolvedManifest } = await workflowDirectoryResolver(storage, context);
+    const workflowState = db.prepare('SELECT generated_at FROM team_workflow_state WHERE project_id=?').get(projectId);
+    const manifest = workflowState && Number(workflowState.generated_at) !== Number(resolvedManifest?.generatedAt) ? null : resolvedManifest;
     const generatedSettings = manifest?.workflowSettings;
     const generatedOrder = uniqueText(generatedSettings?.preferredIdentityOrder);
     const generatedSameWeek = new Set(uniqueText(generatedSettings?.sameWeekIdentityIds));
@@ -1705,6 +1738,11 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
       const committed = await publishProjectFilesV2(parentId, outputFiles, `workflow-${sha256(fingerprint).slice(0, 24)}`, replacements);
       manifest.outputOwnership = Object.fromEntries((committed.outputs || []).map(item => [item.relativePath, { commitId: committed.commitId, artifactId: item.artifactId, sha256: item.sha256 }]));
       await writeJsonAtomic(scope.manifestPath, manifest);
+      await withDomain(parentId, db => {
+        db.exec('BEGIN IMMEDIATE');
+        try { db.prepare('INSERT INTO team_workflow_state(project_id,generated_at,fingerprint,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET generated_at=excluded.generated_at,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at').run(String(context.projectId), Number(manifest.generatedAt), fingerprint, Date.now()); db.exec('COMMIT'); }
+        catch (error) { db.exec('ROLLBACK'); throw error; }
+      });
     }
     catch (error) {
       await fs.promises.rm(scope.outputDirectory, { recursive: true, force: true }).catch(() => undefined);
@@ -2388,7 +2426,7 @@ const runDurableOperationUnlocked = async (parentId, payload, context) => {
   const request = parseJson(row.request_json, {});
   durableOperationParentIds.set(operationId, String(parentId));
   try {
-    await assertExpectedRevision(parentId, request, context);
+    await updateRevisionGuardExpected(parentId, context, request.expectedRevision);
     if (row.kind === 'return-batch' && Date.now() - Number(row.created_at) > 30_000) throw Object.assign(new Error('返图选择授权已过期；为避免缓存越权输入，请重新选择返图后重试'), { code: 'COMPONENT_INPUT_RESELECTION_REQUIRED', retryable: true });
     let result;
     if (row.kind === 'workflow-generate') result = await generateWorkflow(parentId, request, context);
@@ -2440,15 +2478,35 @@ const cancelDurableOperation = async (parentId, payload, context) => {
 };
 
 const MUTATING_METHODS = new Set([
+  'team.project.migrate-step.v1','team.project.calibrate-step.v1','team.workflow.reconcile-drain.v1',
   'team.project.register.v1','team.project.remove-photo.v1','team.identity.save.v1','team.identity.assign.v1','team.identity.confirm-group.v1','team.identity.delete.v1','team.identity.suggest.v1',
   'team.person.exclude.v1','team.patch.detect.v1','team.patch.detect-batch.v1','team.patch.update.v1','team.patch.delete.v1','team.patch.cleanup.v1','team.patch.upload.v1','team.patch.remove-upload.v1','team.patch.merge.v1',
   'team.identity.complete.v1','team.workflow.settings.save.v1','team.workflow.generate.v1','team.workflow.return-batch.v1','team.workflow.return-confirm.v1','team.patch.return-batch.v1','team.operation.run.v1',
+  'team.workflow.return-review.discard.v1','team.workflow.return-review.ignore.v1',
 ]);
 const readDomainRevision = (parentId, context) => withDomain(parentId, db => domainRevision(db, String(context.projectId)));
-const assertExpectedRevision = async (parentId, payload, context) => {
-  if (!payload.expectedRevision) return;
-  const actual = await readDomainRevision(parentId, context);
-  if (String(payload.expectedRevision) !== actual) throw Object.assign(new Error('团片数据已被其他操作更新，请刷新后重试'), { code: 'COMPONENT_HOST_CONFLICT', retryable: true });
+const prepareRevisionGuard = (parentId, payload, context, requestId) => withDomain(parentId, db => {
+  const projectId = String(context.projectId);
+  const expected = payload.expectedRevision === undefined || payload.expectedRevision === '' ? -1 : Number(payload.expectedRevision);
+  if (!Number.isSafeInteger(expected) || expected < -1) throw Object.assign(new Error('团片 revision 无效，请刷新后重试'), { code: 'COMPONENT_HOST_CONFLICT', retryable: true });
+  db.prepare('INSERT OR REPLACE INTO team_revision_guards(request_id,project_id,expected_revision,bumped,created_at) VALUES(?,?,?,?,?)').run(String(requestId), projectId, expected, 0, Date.now());
+});
+const updateRevisionGuardExpected = (parentId, context, expectedRevision) => {
+  if (expectedRevision === undefined || expectedRevision === '') return Promise.resolve();
+  const requestId = String(revisionRequestContext.getStore()?.requestId || '');
+  return withDomain(parentId, db => {
+    const expected = Number(expectedRevision); const actual = Number(domainRevision(db, String(context.projectId)));
+    if (!Number.isSafeInteger(expected) || expected !== actual) throw Object.assign(new Error('团片数据已被其他操作更新，请刷新后重试'), { code: 'COMPONENT_HOST_CONFLICT', retryable: true });
+    db.prepare('UPDATE team_revision_guards SET expected_revision=? WHERE request_id=? AND project_id=?').run(expected, requestId, String(context.projectId));
+  });
+};
+const finishRevisionGuard = (parentId, context, requestId) => withDomain(parentId, db => {
+  db.prepare('DELETE FROM team_revision_guards WHERE request_id=?').run(String(requestId));
+  return domainRevision(db, String(context.projectId));
+});
+const normalizeRevisionError = error => {
+  if (/TEAM_REVISION_CONFLICT/.test(String(error?.message || ''))) return Object.assign(new Error('团片数据已被其他操作更新，请刷新后重试'), { code: 'COMPONENT_HOST_CONFLICT', retryable: true });
+  return error;
 };
 const handlers = {
   'team.project.get.v1': async (parentId, _payload, context) => {
@@ -2579,9 +2637,18 @@ input.on('line', line => {
   const control = new AbortController(); activeRequestControls.set(id, control);
   const requestContext = { ...(frame.context || {}), signal: control.signal };
   const method = String(frame.method || '');
-  Promise.resolve(handler ? assertExpectedRevision(id, frame.payload || {}, requestContext).then(() => handler(id, frame.payload || {}, requestContext)) : Promise.reject(new Error('Unknown team-retouch service method')))
+  let finalRevision = '';
+  const executeRequest = async () => {
+    if (!handler) throw new Error('Unknown team-retouch service method');
+    const guarded = MUTATING_METHODS.has(method);
+    if (guarded) await prepareRevisionGuard(id, frame.payload || {}, requestContext, id);
+    try { return await revisionRequestContext.run({ requestId: id }, () => handler(id, frame.payload || {}, requestContext)); }
+    catch (error) { throw normalizeRevisionError(error); }
+    finally { if (guarded) finalRevision = await finishRevisionGuard(id, requestContext, id); }
+  };
+  Promise.resolve(executeRequest())
     .then(async result => {
-      if (MUTATING_METHODS.has(method) && result && typeof result === 'object') result = { ...result, revision: await readDomainRevision(id, requestContext) };
+      if (MUTATING_METHODS.has(method) && result && typeof result === 'object') result = { ...result, revision: finalRevision || await readDomainRevision(id, requestContext) };
       const itemCount = Array.isArray(result?.photos) ? result.photos.length : Array.isArray(result?.results) ? result.results.length : Array.isArray(result?.matches) ? result.matches.length : Number(result?.count) || 0;
       migrationMetric('team-rpc', String(frame.method || 'unknown'), rpcStartedAt, { ackMs: Date.now() - rpcStartedAt, itemCount, cacheHit: result?.cacheHit === true, fallback: result?.fallback === true, outcome: result?.state || 'completed' });
       writeFrame({ type: 'response', id, ok: true, result });
@@ -2595,4 +2662,4 @@ process.once('exit', () => { for (const child of activeAlgorithms) child.kill();
 };
 
 if (require.main === module) startService();
-module.exports = { ensureSchema, startService, capabilityError, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, migrationErrorState, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState, resolveAlgorithmRuntime, resolveWorkflowTaskBinding, runMatcher };
+module.exports = { ensureSchema, startService, capabilityError, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, migrationErrorState, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState, resolveAlgorithmRuntime, resolveWorkflowTaskBinding, runMatcher, revisionRequestContext };
