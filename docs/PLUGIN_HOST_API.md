@@ -4,7 +4,7 @@
 
 ## 版本协商与弃用
 
-PhotoFlow 当前支持 Host API 2–4，并在组件声明的闭区间兼容范围中选择最高版本。`componentHost.contractVersion:2` 要求显式声明权限；`application.settingsPage` 从 Host API 3 开始可用，受控通知从 Host API 4 开始可用。
+PhotoFlow 当前支持 Host API 2–5，并在组件声明的闭区间兼容范围中选择最高版本。`componentHost.contractVersion:2` 要求显式声明权限；`application.settingsPage` 从 Host API 3 开始可用，受控通知从 Host API 4 开始可用，项目只读扩展从 Host API 5 开始可用。
 
 RPC 方法、能力和事件都以 `.vN` 结尾。已发布语义不可修改；可以增加兼容字段，消费者必须忽略未知字段。破坏性变化使用新的方法/事件版本。弃用版本至少保留一个正常组件迁移窗口，并在移除前记录。`electron/compatibility/` 下的 V1 业务适配器已经弃用，不属于公开 API，也不再增加方法。
 
@@ -30,6 +30,10 @@ V2 必须声明合约版本、兼容范围、贡献项、服务协议/运行时/
 | `component.media.v2` | `component.media` | 私有存储下的媒体变体/打开/显示 |
 | `project.progress.v2` | `project.progress` | 列出/创建进度节点并登记来源关系 |
 | `notifications.v2` | `notifications` | 向主程序顶部 Toast 提交短暂纯文本状态 |
+| `project.files.page.v1` / `project.files.search.v1` | `project.files.read` | 非媒体文件、目录和 sidecar 的有界分页/搜索 |
+| `project.media.metadata.v1` | `project.media.read` | 白名单 EXIF、尺寸、色彩、相机/镜头与视频元数据 |
+| `project.versions.page.v1` / `project.version.graph.v1` | `project.versions.read` | 有界版本分页与只读版本/进度来源图 |
+| `project.media.ratings.v1` | `project.media.ratings.read` | 批量读取宿主实际支持的评分字段 |
 
 执行已声明的生命周期动作还需要 `component.lifecycle.manage`。代理对 `describe` 仍检查 `component.lifecycle.read`；生命周期服务在执行 `preflight`、`install`、`repair` 或 `uninstall` 前检查更强权限。
 
@@ -48,6 +52,14 @@ Host API 3 的 V2 清单可选声明 `application.settingsPage`，其 `id`、`la
 ## 能力合约
 
 ### 项目媒体
+
+Host API 5 的项目只读扩展要求 `minHostApiVersion >= 5`。`project.files.page.v1` 只返回目录、非媒体普通文件与识别的 sidecar；`project.files.search.v1` 额外要求 1–160 字符查询。两者每页 1–200 项，单次快照最多检查 5,000 个目录项，搜索最多保留 500 个结果，游标 5 分钟过期并绑定组件、项目与 scope。返回值只有虚拟相对路径；符号链接、`.photoflow-*` 内部项、绝对路径与越界路径拒绝。
+
+`project.media.metadata.v1` 只接受绑定 scope 内的媒体相对路径。宿主向 ExifTool 请求固定字段白名单，返回实际可得的尺寸、色彩空间/配置、相机、镜头、拍摄参数，以及视频编码、音频编码、时长、帧率和旋转；不可得字段为 `null`，绝不回显 `SourceFile`、目录或绝对路径。
+
+`project.versions.page.v1` 使用单次有界只读 SQL 快照读取当前/父版本、状态、备注、final/current 和时间戳，每页最多 200 项、快照最多 5,000 个版本，并用 `truncated` 明示边界。它不会调用会同步或回填索引的 `media_get`。`project.version.graph.v1` 使用只读 `progress_snapshot` 返回版本父边和持久化进度来源边，不执行迁移、baseline 注册、repair 或位置同步，也不返回文件夹路径。普通进度节点必须有可验证的物理目录且 canonical 路径位于当前 scope；`includeMissing:true` 还允许 lexical 路径位于 scope、最近存在祖先 canonical 安全且真实标记 `folderMissing` 的节点。缺少可靠绝对路径、外链或越界节点始终排除，来源边仅在两端节点均可见时返回。宿主最多扫描 5,000 个进度记录，再公开其中最多 1,000 个可见节点；任一边界截断都会返回 `truncated:true`。`project.media.ratings.v1` 一次接受 1–100 个媒体引用，返回评分及文件修订时间；当前宿主没有统一标签/选择状态存储，因此 `supported.labels`、`supported.selectionState` 为 `false` 且对应字段为 `null`，不会伪造数据。
+
+这些 P0 能力当前仅覆盖项目物理目录，不解析宿主管理的外链虚拟路径。组件必须 feature-detect 并保留旧媒体分页方案处理外链，不能把外链物理路径提交给新能力。
 
 `project.media.page.v2` 接受 `pageSize`（1–200）、不透明 `cursor` 和 `kinds`（`image`、`raw`、`video`）。游标 5 分钟过期，绑定单一组件/项目，不得解码或持久化。每页最多检查 1,000 个条目，不跟随符号链接。宿主管理的外部文件/目录以虚拟相对路径参与；未管理外部路径继续拒绝。
 

@@ -8,6 +8,7 @@ export interface TopToastNotice {
   persistent: boolean;
   count: number;
   tone?: 'info' | 'success' | 'warning' | 'error';
+  dedupeKey?: string;
   sourceComponentId?: string;
 }
 
@@ -41,6 +42,14 @@ export const enqueueTopToastNoticeWithEvictions = (current: TopToastNotice[], in
 export const enqueueTopToastNotice = (current: TopToastNotice[], incoming: TopToastNotice) => enqueueTopToastNoticeWithEvictions(current, incoming).notices;
 
 export const removeTopToastNotice = (current: TopToastNotice[], id: number) => current.filter(notice => notice.id !== id);
+export const upsertTopToastNotice = (current: TopToastNotice[], incoming: TopToastNotice) => {
+  const existing = incoming.dedupeKey
+    ? current.find(notice => notice.dedupeKey === incoming.dedupeKey)
+    : current.find(notice => notice.id === incoming.id);
+  if (!existing) return enqueueTopToastNoticeWithEvictions(current, incoming);
+  const replacement = { ...incoming, id: existing.id, count: existing.count };
+  return { notices: current.map(notice => notice.id === existing.id ? replacement : notice), evictedIds: incoming.id === existing.id ? [] : [incoming.id] };
+};
 export const purgeComponentTopToastNotices = (current: TopToastNotice[], componentId: string) => current.filter(notice => notice.sourceComponentId !== componentId);
 export const clearTopToastNoticeTimers = (timers: Map<number, number>, ids: Iterable<number>, clearTimer: (timer: number) => void) => {
   for (const id of ids) { const timer = timers.get(id); if (timer !== undefined) clearTimer(timer); timers.delete(id); }

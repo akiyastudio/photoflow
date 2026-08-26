@@ -4,6 +4,7 @@ import App from './App.tsx'
 import { AppDialogProvider } from './components/AppDialogProvider.tsx'
 import { LayerProvider } from './components/LayerProvider.tsx'
 import { TaskCenterProvider } from './features/background-tasks/TaskCenter.tsx'
+import { TopToastProvider, TopToastViewport } from './features/app/useTopToastStack.tsx'
 import './index.css'
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
@@ -11,7 +12,10 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     <LayerProvider>
       <AppDialogProvider>
         <TaskCenterProvider>
-          <App />
+          <TopToastProvider>
+            <TopToastViewport />
+            <App />
+          </TopToastProvider>
         </TaskCenterProvider>
       </AppDialogProvider>
     </LayerProvider>

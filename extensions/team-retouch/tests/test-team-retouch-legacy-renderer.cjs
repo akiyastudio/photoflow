@@ -11,7 +11,6 @@ const people = read('renderer/src/legacy/PersonIdentityManager.tsx');
 const comparison = read('renderer/src/legacy/ImageComparisonView.tsx');
 const adapter = read('renderer/src/legacy/legacy-api.ts');
 const entry = read('renderer/src/legacy-main.tsx');
-const modernEntry = read('renderer/src/main.tsx');
 const settingsEntry = read('renderer/src/settings-main.tsx');
 const settingsContent = read('renderer/src/team-settings-content.tsx');
 const settingsHtml = read('renderer/settings.html');
@@ -22,13 +21,14 @@ const style = read('renderer/src/legacy-style.css');
 const compactStyle = style.replace(/\s+/g, '');
 const manifest = JSON.parse(read('component.template.json'));
 const service = read('service.cjs');
-for (const [source, file] of [[entry, 'legacy-main.tsx'], [modernEntry, 'main.tsx'], [settingsEntry, 'settings-main.tsx'], [manager, 'TeamRetouchManager.tsx'], [people, 'PersonIdentityManager.tsx'], [settingsContent, 'team-settings-content.tsx']]) {
+for (const [source, file] of [[entry, 'legacy-main.tsx'], [settingsEntry, 'settings-main.tsx'], [manager, 'TeamRetouchManager.tsx'], [people, 'PersonIdentityManager.tsx'], [settingsContent, 'team-settings-content.tsx']]) {
   const parsed = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TSX);
   const visit = node => { if (ts.isCallExpression(node) && ts.isIdentifier(node.expression) && ['notify', 'onNotice'].includes(node.expression.text)) assert(node.arguments.length >= 2, `${file} notification calls must pass an explicit tone`); ts.forEachChild(node, visit); };
   visit(parsed);
 }
 
 assert(html.includes('/src/legacy-main.tsx'), 'packaged renderer must enter the source-faithful legacy migration');
+assert(!fs.existsSync(path.join(root, 'renderer/src/main.tsx')) && !fs.existsSync(path.join(root, 'renderer/src/style.css')), 'retired renderer entry must not preserve a second sticky task-notification surface');
 assert(!manager.includes('legacy-photo-card') && !people.includes('legacy-photo-card'), 'legacy page must not be replaced by a hand-built lookalike');
 for (const marker of ['FullscreenImageViewer', 'ImageZoomButton', 'PatchPreview', 'IdentitySubjectThumb', 'InteractiveCropEditor', 'IdentityPicker', 'onPointerMove']) assert(manager.includes(marker), `detection/identity migration lost ${marker}`);
 for (const copy of ['点击人物框或人物行确认身份，可应用到整组。', '自动标记候选', '调整范围', '全窗口浏览图片']) assert(manager.includes(copy), `legacy detection interaction copy missing: ${copy}`);
@@ -51,6 +51,11 @@ assert(!people.includes('if (!nextUrl) {\n          const original = await legac
 for (const retiredCache of ['identityThumbnailRequests', 'identityThumbnailUrls', 'returnImageUrls', 'identityThumbnailListeners']) assert(!people.includes(retiredCache), `renderer must not retain project-unscoped media cache: ${retiredCache}`);
 assert(adapter.includes('mediaAuthorizationGeneration') && adapter.includes('项目已切换，旧媒体授权已失效'), 'late media authorization responses must be generation-scoped and ignored after project switches');
 assert(manager.includes('advancedStatusLoading') && manager.includes('advancedStatusError') && manager.includes('onRetryAdvancedStatus'), 'advanced status must distinguish checking, failure/retry, and resolved states');
+assert(!entry.includes('fixed left-1/2 top-20') && entry.includes("dedupeKey: 'team-retouch:history-migration'") && entry.includes("dedupeKey: 'team-retouch:history-load'"), 'history warnings and errors must update the host toast stack instead of rendering fixed banners');
+assert(entry.includes('historyToastTransition') && entry.includes('historyLoadInFlight') && entry.includes("recoveredMessage: '团片历史已恢复'") && entry.includes("recoveredMessage: '团片历史迁移已恢复'"), 'settled history recovery must replace persistent host toasts with same-key transient success notices');
+assert(!manager.includes('team-banner flex') && !manager.includes('style={{ width: `${overallProgress}%` }}') && manager.includes('历史恢复需重试') && manager.includes('重新检查高级能力'), 'detection page status belongs in the title bar and keeps recovery actions');
+assert(!people.includes('border-b border-blue-100 bg-blue-50 px-5 py-3') && !people.includes('aria-label="批量导入返图进度"') && people.includes('停止生成') && people.includes('data-workflow-return-progress'), 'workflow and return progress belong in the title bar while stop and progress semantics remain available');
+assert(manager.includes("presentation: 'silent', outcome: 'failed'") && manager.includes("batchTaskVisibleRef.current ? 'visible' : 'none'") && people.includes("workflowReturnVisibleTaskIdsRef.current.has(operationId) ? 'visible' : 'none'") && people.includes("workflowGenerationVisibleTaskIdsRef.current.has(requestedOperationId) ? 'visible' : 'none'"), 'renderer operations must derive terminal feedback ownership from observed visible-task progress while preserving silent and non-task paths');
 assert(entry.includes('initialWorkspace: managerWorkspaceSeed') && entry.includes('hydrateLegacyWorkspace'), 'legacy-main must pass its hydrated project snapshot into every mounted manager');
 for (const [source, label] of [[manager, 'detection'], [people, 'workflow']]) assert(source.includes('initialWorkspace') && source.includes('createWorkspaceSeedGate') && source.includes('isSeeded(seedScopeKey)'), `${label} manager must consume the root snapshot before considering its own project RPC`);
 assert(manager.indexOf('isSeeded(seedScopeKey)') < manager.indexOf('void loadIdentities()') && people.indexOf('isSeeded(seedScopeKey)') < people.indexOf('void load(true)'), 'manager mount effects must test the initial seed before issuing project reads');

@@ -8,6 +8,7 @@ import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../utils/recycleBinFailure';
 import { useTaskCenter } from '../features/background-tasks/TaskCenter';
 import { getWorkspaceCatalog, readWorkspaceCatalogSnapshot, workspaceCatalogEventMatches } from '../platform/workspace-catalog-client';
+import { useToast } from '../features/app/useTopToastStack';
 
 type Action = 'import' | 'broll' | 'match';
 type ExistingProjectCandidate = {
@@ -176,7 +177,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const setName = (value: string) => setEditor(current => ({ ...current, name: value }));
   const [renameProject, setRenameProject] = useState<WorkspaceProject | null>(null);
   const [newProjectError, setNewProjectError] = useState('');
-  const [createNotice, setCreateNotice] = useState('');
+  const toast = useToast();
   const [isCreating, setIsCreating] = useState(false);
   const resetProjectDate = () => {
     const value = initialProjectDate();
@@ -197,8 +198,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       const result = await window.electronAPI.chooseExistingProject();
       if (result.cancelled) return;
       if (!result.success || !result.sourcePath || !result.name) {
-        setCreateNotice(result.error || '无法读取已有项目');
-        window.setTimeout(() => setCreateNotice(''), 4000);
+        toast.show(result.error || '无法读取已有项目', { tone: 'error', dedupeKey: 'project-import-inspection' });
         return;
       }
       const draft: ExistingProjectDraft = {
@@ -480,8 +480,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       setExpanded(current => ({ ...current, 策划中: true }));
       onSelectProject({ ...result.project, workspacePath: result.project.workspacePath || workspacePath });
       refresh();
-      setCreateNotice(`项目“${createdName}”已创建成功`);
-      window.setTimeout(() => setCreateNotice(''), 2000);
+      toast.show(`项目“${createdName}”已创建成功`, { tone: 'success', dedupeKey: 'project-created' });
     } catch (createError) {
       setNewProjectError(createError instanceof Error ? createError.message : '新建项目失败');
     } finally {
@@ -530,8 +529,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
         if (!choice) return;
         if (choice === 'move') {
           const result = await window.electronAPI.archiveWorkspaceProject(projectWorkspacePath, project.name);
-          setCreateNotice(result.success ? '归档任务已开始；完成后请再确认独立备份' : result.error || '无法开始归档');
-          window.setTimeout(() => setCreateNotice(''), result.success ? 4500 : 6000);
+          if (!result.success) toast.show(result.error || '无法开始归档', { tone: 'error', dedupeKey: `project-archive:${project.id}` });
           return;
         }
       }
@@ -565,8 +563,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const moveBack = async (project: WorkspaceProject, statusAfter: Exclude<ProjectStatus, '已归档'> = '后期中') => {
     if (!await appDialog.confirm({ title: `将“${project.name}”移回工作盘？`, message: `项目将从归档盘移回原工作区位置，并更改为“${projectStatusLabel(statusAfter)}”。`, confirmLabel: '移回工作盘' })) return;
     const result = await window.electronAPI.moveArchivedProjectBack(workspaceFor(project), project.name, statusAfter);
-    setCreateNotice(result.success ? '移回工作盘任务已开始' : result.error || '无法移回项目');
-    window.setTimeout(() => setCreateNotice(''), result.success ? 3500 : 6000);
+    if (!result.success) toast.show(result.error || '无法移回项目', { tone: 'error', dedupeKey: `project-unarchive:${project.id}` });
   };
   const trash = async (project: WorkspaceProject) => {
     if (!await appDialog.confirm({
@@ -580,8 +577,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       if (isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
       else setError(result.error || '删除项目失败');
     } else if (result.permanent) {
-      setCreateNotice(`项目“${project.name}”已按 Windows 确认永久删除`);
-      window.setTimeout(() => setCreateNotice(''), 3000);
+      toast.show(`项目“${project.name}”已按 Windows 确认永久删除`, { tone: 'success', dedupeKey: `project-deleted:${project.id}` });
     }
     if (result.success) onProjectDeleted(project);
     refresh();
@@ -595,7 +591,6 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     if (!result.success) setError(result.error || '无法打开文件夹');
   };
   return <>
-    {createNotice && <div className="fixed left-1/2 top-10 z-[400] -translate-x-1/2 rounded-lg bg-emerald-600 px-4 py-2.5 text-sm font-bold text-white shadow-xl animate-in fade-in slide-in-from-top-2">{createNotice}</div>}
     <div className="relative px-4 pt-4" onClick={event => event.stopPropagation()}>
       <div className="flex w-full shadow-md shadow-blue-500/20">
         <button onClick={openNewProject} className="min-w-0 flex-1 rounded-l-lg bg-blue-600 px-3 py-2.5 text-sm font-bold text-white hover:bg-blue-500"><span className="flex items-center justify-center gap-2"><FolderPlus size={17}/>新建项目</span></button>

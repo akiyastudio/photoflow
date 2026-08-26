@@ -14,7 +14,7 @@
 插件不能导入照片流 React 渲染层或 Electron 主进程代码，也不能取得任意 IPC、任意文件系统路径或宿主环境中的凭据。所有未在清单中声明的 RPC、能力、权限和事件都会默认拒绝。
 
 > [!IMPORTANT]
-> 所有组件必须使用 `componentHost.contractVersion: 2` 和 Host API 2 或更高版本；贡献设置页需要 Host API 3，受控顶部通知需要 Host API 4。旧数据只能通过版本化 adoption grant 迁入组件私有存储，不能请求旧宿主接口。
+> 所有组件必须使用 `componentHost.contractVersion: 2` 和 Host API 2 或更高版本；贡献设置页需要 Host API 3，受控顶部通知需要 Host API 4，项目只读扩展需要 Host API 5。旧数据只能通过版本化 adoption grant 迁入组件私有存储，不能请求旧宿主接口。
 
 ## 快速开始
 
@@ -151,8 +151,14 @@ window.addEventListener('pagehide', stop, { once: true });
 | `component.lifecycle.v2` | `component.lifecycle.read` | 读取版本、授权与生命周期状态 |
 | `component.media.v2` | `component.media` | 访问插件私有媒体 |
 | `project.progress.v2` | `project.progress` | 管理进度节点和来源关系 |
+| `project.files.page.v1` / `project.files.search.v1` | `project.files.read` | Host API 5：只读分页/搜索非媒体文件、目录与 sidecar |
+| `project.media.metadata.v1` | `project.media.read` | Host API 5：读取白名单媒体元数据 |
+| `project.versions.page.v1` / `project.version.graph.v1` | `project.versions.read` | Host API 5：只读版本快照与来源图 |
+| `project.media.ratings.v1` | `project.media.ratings.read` | Host API 5：批量读取实际评分支持 |
 
 完整参数、限制、错误码和迁移规则见 [Host API V2 参考](docs/PLUGIN_HOST_API.md)。
+
+Host API 5 的 P0 能力使用只读数据库快照，不触发媒体索引、迁移、baseline、repair 或路径同步写入。当前只覆盖项目物理目录；宿主管理的外链虚拟路径尚未开放。
 
 ## 安全的“媒体 → 输出 → 版本”流程
 

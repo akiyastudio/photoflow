@@ -400,12 +400,17 @@ const run = async () => {
         assert.strictEqual(terminal?.operationId, operationId, `${channel} 的终态必须沿用原 operationId`);
         assert.strictEqual(terminal?.phase, outcome, `${channel} 必须发送 ${outcome} 终态`);
         assert.strictEqual(terminal?.progress, outcome === 'complete' ? 100 : 0, `${channel} 的终态进度必须规范化`);
+        assert.strictEqual(result.operationId, operationId, `${channel} 必须把实际发布终态的 operationId 返回给页面`);
+        assert.strictEqual(result.taskNotificationOwned, true, `${channel} 发布可见终态后必须显式移交通知所有权`);
         if (outcome === 'failed') {
           assert.strictEqual(result.success, false);
           assert.match(terminal.error, /injected IPC selection failure/);
         }
       }
     }
+    const undelivered = await handlers.get('workspace-selection-manual-execute')({ sender: {} }, projectRoot, { operationId: 'manual-undelivered', outcome: 'failed' });
+    assert.strictEqual(undelivered.success, false);
+    assert.strictEqual(undelivered.taskNotificationOwned, undefined, '终态事件未实际发送时页面仍拥有失败反馈');
 
     console.log('selection V2 behavior tests passed');
   } finally {

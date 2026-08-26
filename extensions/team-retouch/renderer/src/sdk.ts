@@ -28,7 +28,8 @@ export type ComponentSdk = {
 declare global { interface Window { photoFlowComponent: ComponentSdk } }
 
 export type NoticeTone = 'info' | 'success' | 'warning' | 'error';
-export const notify = (message: string, tone: NoticeTone) => {
+export type NoticeOptions = { dedupeKey?: string };
+export const notify = (message: string, tone: NoticeTone, options: NoticeOptions = {}) => {
   const cleanMessage = String(message || '').trim().slice(0, 360);
   if (!cleanMessage) return;
   const api = window.photoFlowComponent?.notify;
@@ -36,7 +37,8 @@ export const notify = (message: string, tone: NoticeTone) => {
     (tone === 'error' ? console.error : console.warn)(`团片通知宿主不可用：${cleanMessage}`);
     return;
   }
-  void api({ tone, message: cleanMessage }).then(result => {
+  const dedupeKey = String(options.dedupeKey || '').trim().slice(0, 80) || undefined;
+  void api({ tone, message: cleanMessage, dedupeKey }).then(result => {
     if (!result.accepted && !result.deduplicated) (tone === 'error' ? console.error : console.warn)(`团片通知未显示（${result.error?.code || 'UNKNOWN'}）：${cleanMessage}`);
   }).catch(error => (tone === 'error' ? console.error : console.warn)('团片通知调用失败', error));
 };

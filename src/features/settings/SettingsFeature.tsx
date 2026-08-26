@@ -11,6 +11,7 @@ import { normalizeConfiguredSdDeviceRecords, removeConfiguredSdDevice, syncLegac
 import { MAX_SUBTITLE_FONT_SIZE, MIN_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../app/video-player-settings';
 import { componentSettingsSectionKey, type ComponentSettingsSection } from './component-settings-page-model';
 import { restoredWorkspaceConfig } from './restored-workspace-config';
+import { useToast } from '../app/useTopToastStack';
 
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
@@ -476,7 +477,9 @@ const SettingsPanel = ({ title, onClose, children }: { title: string; onClose: (
   </section>
 </div>;
 
-const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectFocus, config, components, componentInstallPath, componentsLoading, onRefreshComponents, onComponentsChanged, onSave, onConfigRestored, getDefaultSettings, onNotice }: { activeSection: BuiltInSettingsSection; backupProjectFocus?: WorkspaceProject | null; onClearBackupProjectFocus?: () => void; config: AppConfig; components: ComponentStatus[]; componentInstallPath: string; componentsLoading: boolean; onRefreshComponents: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onSave: (config: AppConfig) => boolean | Promise<boolean>; onConfigRestored: (config: AppConfig) => void; getDefaultSettings: () => AppConfig | Promise<AppConfig>; onNotice: (message: string, duration?: number) => void }) => {
+const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectFocus, config, components, componentInstallPath, componentsLoading, onRefreshComponents, onComponentsChanged, onSave, onConfigRestored, getDefaultSettings }: { activeSection: BuiltInSettingsSection; backupProjectFocus?: WorkspaceProject | null; onClearBackupProjectFocus?: () => void; config: AppConfig; components: ComponentStatus[]; componentInstallPath: string; componentsLoading: boolean; onRefreshComponents: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onSave: (config: AppConfig) => boolean | Promise<boolean>; onConfigRestored: (config: AppConfig) => void; getDefaultSettings: () => AppConfig | Promise<AppConfig> }) => {
+  const toast = useToast();
+  const onNotice = useCallback((message: string, duration?: number) => { toast.show(message, duration); }, [toast]);
   const appDialog = useAppDialog();
   const [draft, setDraft] = useState(config);
   const [backupStatus, setBackupStatus] = useState<BackupStatus>({ success: true, enabled: false, state: 'unconfigured', snapshots: [] });
@@ -724,7 +727,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     const reclaimable = backupSpace.estimatedReclaimableBytes || 0;
     if (!await appDialog.confirm({ title: '清理过期备份？', message: `预计删除 ${expired} 个过期快照，释放约 ${formatStorageSize(reclaimable)}。只会回收不再被任何保留快照使用的数据；不会删除工作区原文件、归档项目或仍保留的快照。`, confirmLabel: '清理过期备份' })) return;
     const result = await window.electronAPI.cleanupBackup(draft.workspacePath);
-    onNotice(result.success ? '备份清理任务已开始' : result.error || '无法开始清理', result.success ? 3500 : 6000);
+    if (!result.success) onNotice(result.error || '无法开始清理', 6000);
   };
   const chooseArchiveTarget = async () => {
     const selected = await window.electronAPI.chooseArchiveTarget(draft.archive.targetPath);
@@ -737,7 +740,6 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     try {
       const result = await window.electronAPI.runBackup(draft.workspacePath, 'manual');
       if (!result.success) onNotice(result.error || '无法开始备份', 5000);
-      else onNotice('备份任务已开始');
       await refreshBackup();
     } finally { setBackupAction(''); }
   };
@@ -745,7 +747,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     setBackupAction(`verify:${snapshotId}`);
     try {
       const result = await window.electronAPI.verifyBackup(draft.workspacePath, snapshotId);
-      onNotice(result.success ? '备份验证已开始' : result.error || '无法开始验证', result.success ? 3500 : 5000);
+      if (!result.success) onNotice(result.error || '无法开始验证', 5000);
     } finally { setBackupAction(''); }
   };
   const restoreWorkspace = async (snapshotId: string) => {

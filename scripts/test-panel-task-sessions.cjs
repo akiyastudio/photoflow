@@ -118,7 +118,7 @@ assert(!notices.some(notice => notice.id === 13), 'timer expiry must remove only
 const nextToastId = notices[1].id;
 notices = removeTopToastNotice(notices, notices[0].id);
 assert.strictEqual(notices[0].id, nextToastId, 'after the leading toast is dismissed, the following toast must move into its stack position');
-assert(topToastStack.includes('return () => dismissNotice(id)'), 'callers must be able to dismiss a completed loading notice immediately');
+assert(topToastStack.includes('dismiss: () => dismiss(id)') && topToastStack.includes('update: value => update(id, value)'), 'typed handles must let callers update or dismiss an activity immediately');
 
 const triggerTarget = {};
 const panelTarget = {};
@@ -196,7 +196,7 @@ assert(fileTransferToast.includes('Minimize2') && fileTransferToast.includes('ar
 assert(indicator.includes('aria-expanded={open}') && indicator.includes('onOpenChange(!open)') && indicator.includes('useEscapeLayer(open') && indicator.includes('aria-label="关闭后台任务抽屉"') && indicator.includes('triggerRef.current?.focus()'), 'the controlled background task drawer must toggle accessibly, retain Escape handling, and restore trigger focus when dismissed');
 assert(indicator.includes('drawerHostRef.current') && indicator.includes('createPortal(') && app.includes('backgroundTaskDrawerHostRef') && app.includes("'w-80 shrink-0 overflow-hidden border-l"), 'the task center must dock beside the host content so native child surfaces receive smaller layout bounds');
 assert(!indicator.includes('document.body') && !indicator.includes('z-[600]'), 'the docked task drawer must not depend on a global numeric stacking override');
-assert(main.includes('<TaskCenterProvider>') && !main.includes('<FileTransferToast') && app.includes('useTopToastStack()') && topToastStack.includes('className="top-toast-stack"') && topToastStack.includes('<FileTransferToast stackRef={stackRef}/>') && topToastStack.includes('notices.map('), 'ordinary notices and file task progress must render in one shared top stack');
+assert(main.includes('<TaskCenterProvider>') && main.includes('<TopToastProvider>') && main.includes('<TopToastViewport />') && !main.includes('<FileTransferToast') && !app.includes('topToastStack') && topToastStack.includes('className="top-toast-stack"') && topToastStack.includes('<FileTransferToast stackRef={stackRef}/>') && topToastStack.includes('notices.map('), 'ordinary notices and file task progress must render in the one root viewport');
 assert(projectToolModal.includes("const reportBusyAsPanelTask = !panelKind.startsWith('version-')") && workspace.includes('progressSubmittingRef.current'), 'version operations must not create a duplicate panel task and must synchronously reject repeated submissions');
 const closePngConverter = workspace.slice(workspace.indexOf('const closePngConverterPanel'), workspace.indexOf('const openPngConverter'));
 assert(closePngConverter.includes('conversionInspectionSequenceRef.current += 1') && closePngConverter.includes('setConversionCollecting(false)') && closePngConverter.includes('setPanel(null)'), 'closing an idle converter must invalidate source inspection and clear its collecting state');

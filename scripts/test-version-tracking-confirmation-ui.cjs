@@ -70,7 +70,7 @@ const { pathToFileURL } = require('url');
   assert(panelSource.includes('actionGenerationRef') && workspaceSource.includes('key={`${workspacePath}:${trackingConfirmationSessionId}`}'), 'session switches must isolate pagination, optimistic decisions, and late async completions');
   const commitSource = panelSource.slice(panelSource.indexOf('const commit = () =>'), panelSource.indexOf('const release = async'));
   assert(commitSource.indexOf('onClose();') < commitSource.indexOf('await window.electronAPI.commitProgressTracking'), 'submitting confirmation must close immediately before waiting for background commit');
-  assert(commitSource.includes("onNotice('已转入后台提交，可以继续操作。')"), 'detached confirmation commit must explain that work continues in the background');
+  assert(commitSource.includes('window.electronAPI.commitProgressTracking') && !commitSource.includes('已转入后台提交') && !commitSource.includes('提交跟踪结果失败') && !commitSource.includes('跟踪结果已提交。'), 'the BackgroundTask card must be the sole started, failed, and completed notification for detached commit');
 
   const pagedState = {
     sessionId: 'paged',

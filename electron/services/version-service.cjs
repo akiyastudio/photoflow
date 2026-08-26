@@ -3,6 +3,7 @@ const createVersionService = ({ repository }) => ({
   syncChangedPaths: (root, projectName, changes, externalRoots = [], options = {}) => repository.syncChangedPaths(root, projectName, changes, externalRoots, options),
   setThumbnail: (root, payload) => repository.setThumbnail(root, payload),
   getMedia: (root, payload) => repository.getMedia(root, payload),
+  snapshotProjectVersions: (root, payload) => repository.snapshotProjectVersions(root, payload),
   getPhoto: (root, photoId) => repository.getPhoto(root, photoId),
   createVersion: (root, payload) => repository.createVersion(root, payload),
   updateVersion: (root, payload) => repository.updateVersion(root, payload),

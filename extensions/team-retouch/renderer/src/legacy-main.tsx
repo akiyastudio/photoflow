@@ -17,6 +17,7 @@ import { workspaceSeedScopeKey } from './legacy/legacy-workspace-seed-model';
 import { canEnterWorkflowStage, normalizeWorkspace, workflowStageSummaries, type WorkflowStage } from './interaction-model';
 import { TeamSettingsContent } from './team-settings-content';
 import { createTeamSettingsController, type TeamSettingsState } from './team-settings-model';
+import { historyToastTransition, type HistoryToastSnapshot } from './history-toast-model';
 import './host-api-ui.css';
 import './tailwind.css';
 import './legacy-style.css';
@@ -67,6 +68,7 @@ const App = () => {
   const [initialLoading, setInitialLoading] = useState(true); const [loadError, setLoadError] = useState(''); const [entriesLoaded, setEntriesLoaded] = useState(false);
   const [historyPathWarning, setHistoryPathWarning] = useState('');
   const [migrationPaused, setMigrationPaused] = useState(false);
+  const [historyLoadInFlight, setHistoryLoadInFlight] = useState(false);
   const [historyRecordCount, setHistoryRecordCount] = useState(0); const [historyOwnershipPendingCount, setHistoryOwnershipPendingCount] = useState(0);
   const [workspaceSnapshot, setWorkspaceSnapshot] = useState<Json>(() => normalizeWorkspace(undefined));
   const [managerWorkspaceSeed, setManagerWorkspaceSeed] = useState<{ scopeKey: string; workspace: TeamIdentityWorkspace }>();
@@ -79,8 +81,23 @@ const App = () => {
   const activationRefreshGateRef = useRef(createActivationRefreshGate());
   const calibrationBusyRef = useRef(false);
   const reconcileStartedRef = useRef('');
+  const migrationToastRef = useRef<HistoryToastSnapshot>();
+  const loadToastRef = useRef<HistoryToastSnapshot>();
   useEffect(() => { entriesRef.current = entries; }, [entries]);
+  useEffect(() => {
+    if (!entriesLoaded) return;
+    const transition = historyToastTransition({ previous: migrationToastRef.current, currentMessage: historyPathWarning, currentTone: migrationPaused ? 'warning' : /完成/.test(historyPathWarning) ? 'success' : 'info', inFlight: historyLoadInFlight, recoveredMessage: '团片历史迁移已恢复', dedupeKey: 'team-retouch:history-migration' });
+    migrationToastRef.current = transition.next;
+    if (transition.notice) notify(transition.notice.message, transition.notice.tone, { dedupeKey: transition.notice.dedupeKey });
+  }, [entriesLoaded, historyLoadInFlight, historyPathWarning, migrationPaused]);
+  useEffect(() => {
+    if (!entriesLoaded) return;
+    const transition = historyToastTransition({ previous: loadToastRef.current, currentMessage: loadError, currentTone: 'error', inFlight: historyLoadInFlight, recoveredMessage: '团片历史已恢复', dedupeKey: 'team-retouch:history-load' });
+    loadToastRef.current = transition.next;
+    if (transition.notice) notify(transition.notice.message, transition.notice.tone, { dedupeKey: transition.notice.dedupeKey });
+  }, [entriesLoaded, historyLoadInFlight, loadError]);
   const performLoadEntries = useCallback(async (hostContext: ComponentContext, manualMigrationRetry = false) => {
+    setHistoryLoadInFlight(true);
     const managerScopeKey = workspaceSeedScopeKey(hostContext.projectId, { id: hostContext.projectId, name: hostContext.projectName, status: hostContext.projectStatus });
     setManagerWorkspaceLoadingScopeKey(managerScopeKey);
     const requestId = loadGuardRef.current.begin();
@@ -179,7 +196,7 @@ const App = () => {
     } catch (error) {
       if (!loadGuardRef.current.isCurrent(requestId)) return;
       setInitialLoading(false); setLoadError(error instanceof Error ? error.message : String(error));
-    } finally { setManagerWorkspaceLoadingScopeKey(current => current === managerScopeKey ? '' : current); }
+    } finally { setManagerWorkspaceLoadingScopeKey(current => current === managerScopeKey ? '' : current); setHistoryLoadInFlight(false); }
   }, []);
   if (!loadCoordinatorRef.current) loadCoordinatorRef.current = createHistoryContextLoadCoordinator(performLoadEntries);
   const loadEntries = useCallback((hostContext: ComponentContext, options: { force?: boolean; manualMigrationRetry?: boolean } = {}) => loadCoordinatorRef.current!.request(hostContext, options), []);
@@ -248,9 +265,7 @@ const App = () => {
     void window.photoFlowComponent.getContext().then(nextContext => { contextRef.current = nextContext; setContext(nextContext); applyResolvedTheme(nextContext.resolvedTheme); void loadEntries(nextContext); }).catch(error => { setInitialLoading(false); setLoadError(error instanceof Error ? error.message : String(error)); });
   };
   return <LegacyDialogProvider><div className="legacy-root pf-canvas">
-    {!entriesLoaded ? <TeamHistoryLoadSurface initialLoading={initialLoading} loadError={loadError} entriesLoaded={entriesLoaded} entryCount={entries.length} retry={retryHistory} openSettings={common.onOpenSettings}/> : step !== 'detect' ? <PersonIdentityManager {...common} onClose={common.onOpenSettings} activeStep={step}/> : <TeamRetouchManager {...common} historyRecordCount={historyRecordCount} historyOwnershipPendingCount={historyOwnershipPendingCount} entries={entries as any} onEntriesChange={value => setEntries(value)} />}
-    {historyPathWarning && entriesLoaded && <div role="status" aria-live="polite" className="pf-banner team-banner fixed left-1/2 top-20 z-[819] flex max-w-3xl -translate-x-1/2 items-center gap-3 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-700 shadow-xl"><AlertTriangle size={16}/><span>{historyPathWarning}</span>{migrationPaused && <button type="button" className="rounded-md border border-amber-400 px-2 py-1" onClick={retryHistory}>重新尝试整理</button>}<button type="button" aria-label="关闭路径提示" onClick={() => setHistoryPathWarning('')}>×</button></div>}
-    {loadError && entriesLoaded && <div role="alert" className="pf-banner team-banner fixed left-1/2 top-20 z-[820] flex max-w-3xl -translate-x-1/2 items-center gap-3 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-xs font-bold text-red-700 shadow-xl"><AlertTriangle size={16}/><span>{loadError}</span><button type="button" className="rounded-md border border-red-300 px-2 py-1" onClick={retryHistory}>重试</button><button type="button" aria-label="关闭加载错误" onClick={() => setLoadError('')}>×</button></div>}
+    {!entriesLoaded ? <TeamHistoryLoadSurface initialLoading={initialLoading} loadError={loadError} entriesLoaded={entriesLoaded} entryCount={entries.length} retry={retryHistory} openSettings={common.onOpenSettings}/> : step !== 'detect' ? <PersonIdentityManager {...common} onClose={common.onOpenSettings} activeStep={step} historyIssue={loadError || (migrationPaused ? historyPathWarning : '')} onRetryHistory={retryHistory}/> : <TeamRetouchManager {...common} historyRecordCount={historyRecordCount} historyOwnershipPendingCount={historyOwnershipPendingCount} entries={entries as any} onEntriesChange={value => setEntries(value)} historyIssue={loadError || (migrationPaused ? historyPathWarning : '')} onRetryHistory={retryHistory}/>}
     {settingsOpen && <TeamSettingsDialog state={settingsState} patch={settingsController.patch} retry={() => void settingsController.refresh()} close={() => setSettingsOpen(false)} notice={notify}/>}
   </div></LegacyDialogProvider>;
 };

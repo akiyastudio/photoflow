@@ -1,92 +1,182 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
+import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { useHostRendererToken } from '../../components/LayerProvider';
 import { FileTransferToast } from '../background-tasks/FileTransferToast';
-import { clearTopToastNoticeTimers, enqueueTopToastNoticeWithEvictions, purgeComponentTopToastNotices, removeTopToastNotice, type TopToastNotice } from './top-toast-notice-model';
+import { clearTopToastNoticeTimers, purgeComponentTopToastNotices, removeTopToastNotice, upsertTopToastNotice, type TopToastNotice } from './top-toast-notice-model';
 import { hostNoticeTone, topToastTonePolicy, topToastTonePresentation } from './top-toast-tone-model';
 
-export const useTopToastStack = () => {
+export type ToastTone = NonNullable<TopToastNotice['tone']>;
+export type ToastLifecycle = 'auto' | 'persistent';
+export interface ToastOptions { tone?: ToastTone; dedupeKey?: string; lifecycle?: ToastLifecycle; durationMs?: number }
+export interface ToastUpdate extends ToastOptions { message?: string }
+export interface ToastHandle { readonly id: number; update: (update: string | ToastUpdate) => void; dismiss: () => void }
+export interface ToastActivityHandle extends ToastHandle {
+  succeed: (message: string, options?: Omit<ToastOptions, 'dedupeKey'>) => void;
+  fail: (message: string, options?: Omit<ToastOptions, 'dedupeKey'>) => void;
+}
+export interface ToastApi {
+  show: (message: string, options?: ToastOptions | ToastTone | number) => ToastHandle;
+  update: (idOrKey: number | string, update: string | ToastUpdate) => void;
+  dismiss: (idOrKey: number | string) => void;
+  activity: (message: string, options?: Omit<ToastOptions, 'tone'>) => ToastActivityHandle;
+}
+
+type ToastContextValue = { api: ToastApi; notices: TopToastNotice[]; stackRef: React.RefObject<HTMLDivElement> };
+const ToastContext = createContext<ToastContextValue | null>(null);
+
+const normalizeOptions = (message: string, options?: ToastOptions | ToastTone | number): ToastOptions => {
+  if (typeof options === 'string') return { tone: options };
+  if (typeof options === 'number') return { durationMs: options };
+  return options || { tone: hostNoticeTone(message) };
+};
+
+export const TopToastProvider = ({ children }: { children: ReactNode }) => {
   const [notices, setNotices] = useState<TopToastNotice[]>([]);
+  const noticesRef = useRef<TopToastNotice[]>([]);
   const timersRef = useRef(new Map<number, number>());
   const sequenceRef = useRef(0);
-  const lastNoticeRef = useRef({ message: '', shownAt: 0 });
   const stackRef = useRef<HTMLDivElement>(null);
   const rendererToken = useHostRendererToken();
   const readinessRevisionRef = useRef(0);
 
-  const enqueueNotice = useCallback((notice: TopToastNotice) => {
-    setNotices(current => {
-      const result = enqueueTopToastNoticeWithEvictions(current, notice);
-      clearTopToastNoticeTimers(timersRef.current, result.evictedIds, timer => window.clearTimeout(timer));
-      return result.notices;
-    });
+  const commit = useCallback((updater: (current: TopToastNotice[]) => TopToastNotice[]) => {
+    const next = updater(noticesRef.current);
+    noticesRef.current = next;
+    setNotices(next);
   }, []);
-
-  const dismissNotice = useCallback((id: number) => {
+  const clearTimer = useCallback((id: number) => {
     const timer = timersRef.current.get(id);
     if (timer !== undefined) window.clearTimeout(timer);
     timersRef.current.delete(id);
-    setNotices(current => removeTopToastNotice(current, id));
   }, []);
-
-  const showNotice = useCallback((message: string, durationOrTone?: number | TopToastNotice['tone'], explicitTone?: TopToastNotice['tone']) => {
-    const cleanMessage = message.trim() || '发生未知错误';
-    const tone = explicitTone || (typeof durationOrTone === 'string' ? durationOrTone : undefined) || hostNoticeTone(cleanMessage);
-    const policy = topToastTonePolicy(tone);
-    const isFailure = policy.persistent;
-    const now = Date.now();
-    if (!isFailure && lastNoticeRef.current.message === cleanMessage && now - lastNoticeRef.current.shownAt < 800) return () => undefined;
-    lastNoticeRef.current = { message: cleanMessage, shownAt: now };
-    const id = ++sequenceRef.current;
-    if (policy.durationMs !== null) timersRef.current.set(id, window.setTimeout(() => dismissNotice(id), policy.durationMs));
-    enqueueNotice({ id, message: cleanMessage, persistent: policy.persistent, count: 1, tone });
-    return () => dismissNotice(id);
-  }, [dismissNotice, enqueueNotice]);
-
-  const showComponentNotification = useCallback((value: { type: 'notification'; id: string; componentId: string; notification: { tone: 'info' | 'success' | 'warning' | 'error'; message: string } } | { type: 'purge'; componentId: string }) => {
-    if (value.type === 'purge') {
-      setNotices(current => {
-        const removed = current.filter(notice => notice.sourceComponentId === value.componentId);
-        clearTopToastNoticeTimers(timersRef.current, removed.map(notice => notice.id), timer => window.clearTimeout(timer));
-        return purgeComponentTopToastNotices(current, value.componentId);
-      });
-      return;
+  const dismiss = useCallback((idOrKey: number | string) => {
+    const target = typeof idOrKey === 'number' ? noticesRef.current.find(notice => notice.id === idOrKey) : noticesRef.current.find(notice => notice.dedupeKey === idOrKey);
+    if (!target) return;
+    clearTimer(target.id);
+    commit(current => removeTopToastNotice(current, target.id));
+  }, [clearTimer, commit]);
+  const schedule = useCallback((id: number, options: ToastOptions, tone: ToastTone) => {
+    clearTimer(id);
+    const durationMs = options.lifecycle === 'persistent' ? null : options.durationMs ?? topToastTonePolicy(tone).durationMs;
+    if (durationMs !== null) timersRef.current.set(id, window.setTimeout(() => dismiss(id), Math.max(500, durationMs)));
+    return { persistent: durationMs === null };
+  }, [clearTimer, dismiss]);
+  const update = useCallback((idOrKey: number | string, value: string | ToastUpdate) => {
+    const target = typeof idOrKey === 'number' ? noticesRef.current.find(notice => notice.id === idOrKey) : noticesRef.current.find(notice => notice.dedupeKey === idOrKey);
+    if (!target) return;
+    const patch = typeof value === 'string' ? { message: value } : value;
+    const message = (patch.message ?? target.message).trim() || '发生未知错误';
+    const tone = patch.tone || target.tone || hostNoticeTone(message);
+    const lifecycle = patch.lifecycle || (target.persistent ? 'persistent' : 'auto');
+    const policy = schedule(target.id, { ...patch, lifecycle }, tone);
+    commit(current => current.map(notice => notice.id === target.id ? { ...notice, ...policy, message, tone, dedupeKey: patch.dedupeKey ?? notice.dedupeKey } : notice));
+  }, [commit, schedule]);
+  const show = useCallback((rawMessage: string, rawOptions?: ToastOptions | ToastTone | number): ToastHandle => {
+    const message = rawMessage.trim() || '发生未知错误';
+    const options = normalizeOptions(message, rawOptions);
+    const tone = options.tone || hostNoticeTone(message);
+    const existing = options.dedupeKey ? noticesRef.current.find(notice => notice.dedupeKey === options.dedupeKey) : undefined;
+    if (existing) {
+      update(existing.id, { ...options, message, tone, lifecycle: options.lifecycle || 'auto' });
+      return { id: existing.id, update: value => update(existing.id, value), dismiss: () => dismiss(existing.id) };
     }
-    const cleanMessage = value.notification.message.trim();
-    if (!cleanMessage) return;
+    const defaultDuration = topToastTonePolicy(tone).durationMs;
+    const persistentDuplicate = !options.dedupeKey && (options.lifecycle === 'persistent' || (options.durationMs === undefined && defaultDuration === null))
+      ? noticesRef.current.find(notice => notice.persistent && notice.message === message)
+      : undefined;
+    if (persistentDuplicate) {
+      commit(current => current.map(notice => notice.id === persistentDuplicate.id ? { ...notice, count: notice.count + 1 } : notice));
+      return { id: persistentDuplicate.id, update: value => update(persistentDuplicate.id, value), dismiss: () => dismiss(persistentDuplicate.id) };
+    }
     const id = ++sequenceRef.current;
-    const policy = topToastTonePolicy(value.notification.tone);
-    if (policy.durationMs !== null) timersRef.current.set(id, window.setTimeout(() => dismissNotice(id), policy.durationMs));
-    enqueueNotice({ id, message: cleanMessage, persistent: policy.persistent, count: 1, tone: value.notification.tone, sourceComponentId: value.componentId });
-  }, [dismissNotice, enqueueNotice]);
+    const incoming: TopToastNotice = { id, message, tone, dedupeKey: options.dedupeKey, count: 1, ...schedule(id, options, tone) };
+    commit(current => {
+      const result = upsertTopToastNotice(current, incoming);
+      clearTopToastNoticeTimers(timersRef.current, result.evictedIds, timer => window.clearTimeout(timer));
+      return result.notices;
+    });
+    return { id, update: value => update(id, value), dismiss: () => dismiss(id) };
+  }, [commit, dismiss, schedule, update]);
+  const activity = useCallback((message: string, options: Omit<ToastOptions, 'tone'> = {}): ToastActivityHandle => {
+    const handle = show(message, { ...options, tone: 'info', lifecycle: options.lifecycle || 'persistent' });
+    return { ...handle,
+      succeed: (next, nextOptions = {}) => update(handle.id, { ...nextOptions, message: next, tone: 'success', lifecycle: nextOptions.lifecycle || 'auto' }),
+      fail: (next, nextOptions = {}) => update(handle.id, { ...nextOptions, message: next, tone: 'error', lifecycle: nextOptions.lifecycle || 'persistent' }),
+    };
+  }, [show, update]);
+  const api = useMemo<ToastApi>(() => ({ show, update, dismiss, activity }), [activity, dismiss, show, update]);
 
   useEffect(() => {
-    const unsubscribe = window.electronAPI.onComponentNotification(showComponentNotification);
+    const unsubscribe = window.electronAPI.onComponentNotification(value => {
+      if (value.type === 'purge') {
+        commit(current => {
+          const removed = current.filter(notice => notice.sourceComponentId === value.componentId);
+          clearTopToastNoticeTimers(timersRef.current, removed.map(notice => notice.id), timer => window.clearTimeout(timer));
+          return purgeComponentTopToastNotices(current, value.componentId);
+        });
+        return;
+      }
+      const dedupeKey = `component:${value.componentId}:${value.notification.dedupeKey || value.id}`;
+      const existing = noticesRef.current.find(notice => notice.dedupeKey === dedupeKey);
+      const handle = show(value.notification.message, { tone: value.notification.tone, dedupeKey });
+      if (!existing) commit(current => current.map(notice => notice.id === handle.id ? { ...notice, sourceComponentId: value.componentId } : notice));
+    });
     void window.electronAPI.setComponentNotificationReady({ rendererToken, revision: readinessRevisionRef.current++, ready: true });
     return () => { void window.electronAPI.setComponentNotificationReady({ rendererToken, revision: readinessRevisionRef.current++, ready: false }); unsubscribe(); };
-  }, [rendererToken, showComponentNotification]);
+  }, [commit, rendererToken, show]);
+  useEffect(() => () => { for (const timer of timersRef.current.values()) window.clearTimeout(timer); timersRef.current.clear(); }, []);
 
+  return <ToastContext.Provider value={{ api, notices, stackRef }}>{children}</ToastContext.Provider>;
+};
+
+// Provider, viewport, and hook deliberately share the same private Context so
+// consumers cannot import or mount a second notification state container.
+// eslint-disable-next-line react-refresh/only-export-components
+export const useToast = () => {
+  const context = useContext(ToastContext);
+  if (!context) throw new Error('useToast must be used inside TopToastProvider');
+  return context.api;
+};
+
+export const TopToastViewport = () => {
+  const context = useContext(ToastContext);
+  if (!context) throw new Error('TopToastViewport must be used inside TopToastProvider');
+  const { notices, stackRef } = context;
+  const lastNotice = notices.at(-1);
+  const overlayFrameRef = useRef<number | null>(null);
+  const flushOverlay = useCallback(() => {
+    overlayFrameRef.current = null;
+    const stack = stackRef.current;
+    if (stack) void window.electronAPI.updateToastOverlay({ html: stack.innerHTML, dark: document.documentElement.classList.contains('dark') }).catch(() => undefined);
+  }, [stackRef]);
+  const scheduleOverlaySync = useCallback(() => {
+    if (overlayFrameRef.current !== null) return;
+    overlayFrameRef.current = window.requestAnimationFrame(flushOverlay);
+  }, [flushOverlay]);
   useLayoutEffect(() => {
+    scheduleOverlaySync();
+  }, [notices, scheduleOverlaySync]);
+  useEffect(() => {
     const stack = stackRef.current;
     if (!stack) return;
-    void window.electronAPI.updateToastOverlay({ html: stack.innerHTML, dark: document.documentElement.classList.contains('dark') }).catch(() => undefined);
-  });
-
-  useEffect(() => window.electronAPI.onToastOverlayAction(value => {
-    if (value.action === 'notice-dismiss' && /^\d+$/.test(value.id)) dismissNotice(Number(value.id));
-  }), [dismissNotice]);
-
+    const observer = new MutationObserver(scheduleOverlaySync);
+    observer.observe(stack, { attributes: true, childList: true, characterData: true, subtree: true });
+    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    return () => observer.disconnect();
+  }, [scheduleOverlaySync, stackRef]);
   useEffect(() => () => {
-    for (const timer of timersRef.current.values()) window.clearTimeout(timer);
-    timersRef.current.clear();
+    if (overlayFrameRef.current !== null) window.cancelAnimationFrame(overlayFrameRef.current);
   }, []);
-
-  const topToastStack = <div ref={stackRef} className="top-toast-stack" data-host-toast-model aria-label="通知" aria-hidden="true">
-    {notices.map(notice => { const presentation = topToastTonePresentation(notice.tone || 'info'); const ToneIcon = presentation.icon === 'check' ? CheckCircle2 : presentation.icon === 'warning' ? AlertTriangle : presentation.icon === 'error' ? XCircle : Info; return <div key={notice.id} data-top-toast-id={`notice:${notice.id}`} data-toast-tone={presentation.tone} role={presentation.role} aria-live={presentation.ariaLive} className="app-notice-toast animate-in fade-in slide-in-from-top-2">
-      <ToneIcon size={16} aria-hidden="true" className="app-notice-toast__tone-icon shrink-0"/><span className="app-notice-toast__message">{notice.message}{notice.count > 1 && <span className="ml-2 text-xs font-bold text-slate-300">×{notice.count}</span>}</span><button data-toast-overlay-action="notice-dismiss" data-toast-overlay-id={String(notice.id)} onClick={() => dismissNotice(notice.id)} aria-label="关闭提示" className="rounded p-0.5 text-slate-300 hover:bg-white/15 hover:text-white"><X size={15}/></button>
-    </div>; })}
-    <FileTransferToast stackRef={stackRef}/>
-  </div>;
-
-  return { showNotice, topToastStack };
+  useEffect(() => window.electronAPI.onToastOverlayAction(value => {
+    if (value.action === 'notice-dismiss' && /^\d+$/.test(value.id)) context.api.dismiss(Number(value.id));
+  }), [context.api]);
+  return <>
+    <div ref={stackRef} className="top-toast-stack" data-host-toast-model aria-label="通知" aria-hidden="true">
+      {notices.map(notice => { const presentation = topToastTonePresentation(notice.tone || 'info'); const ToneIcon = presentation.icon === 'check' ? CheckCircle2 : presentation.icon === 'warning' ? AlertTriangle : presentation.icon === 'error' ? XCircle : Info; return <div key={notice.id} data-top-toast-id={`notice:${notice.id}`} data-toast-tone={presentation.tone} role={presentation.role} aria-live={presentation.ariaLive} className="app-notice-toast animate-in fade-in slide-in-from-top-2">
+        <ToneIcon size={16} aria-hidden="true" className="app-notice-toast__tone-icon shrink-0"/><span className="app-notice-toast__message">{notice.message}{notice.count > 1 && <span className="ml-2 text-xs font-bold text-slate-300">×{notice.count}</span>}</span><button data-toast-overlay-action="notice-dismiss" data-toast-overlay-id={String(notice.id)} onClick={() => context.api.dismiss(notice.id)} aria-label="关闭提示" className="rounded p-0.5 text-slate-300 hover:bg-white/15 hover:text-white"><X size={15}/></button>
+      </div>; })}
+      <FileTransferToast stackRef={stackRef}/>
+    </div>
+    <div className="sr-only" role={lastNotice?.tone === 'error' ? 'alert' : 'status'} aria-live={lastNotice?.tone === 'error' ? 'assertive' : 'polite'} aria-atomic="true">{lastNotice?.message || ''}</div>
+  </>;
 };

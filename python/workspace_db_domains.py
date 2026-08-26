@@ -10,7 +10,7 @@ CATALOG_ACTIONS = (
 MEDIA_ACTIONS = (
     "media_sync_prepare", "media_sync_apply_batch", "media_sync_finalize",
     "media_sync_paths_prepare", "media_sync_paths_apply_batch", "media_sync_paths_finalize",
-    "media_get", "media_get_photo", "media_create_version", "media_update_version",
+    "media_get", "media_get_photo", "media_versions_snapshot", "media_create_version", "media_update_version",
     "media_refresh_metadata_fingerprint", "final_version_list", "media_set_thumbnail", "media_relocate_version",
     "media_delete_version", "media_version_delete_scope", "media_delete_project_missing_version", "media_record_compare",
     "media_workflow_import_commit",
@@ -41,7 +41,7 @@ UNDO_ACTIONS = ("undo_record_add", "undo_record_latest", "undo_record_remove", "
 
 ALL_ACTIONS = ("init", *CATALOG_ACTIONS, *MEDIA_ACTIONS, *PROGRESS_ACTIONS, *TRACKING_ACTIONS, *compatibility_action_names(), *UNDO_ACTIONS)
 READ_ONLY_ACTIONS = frozenset((
-    "progress_snapshot", "tracking_session_get", "tracking_commit_resources", "version_tree_layout_get",
+    "progress_snapshot", "media_versions_snapshot", "tracking_session_get", "tracking_commit_resources", "version_tree_layout_get",
     "media_sync_prepare", "progress_stale_prepare",
 ))
 

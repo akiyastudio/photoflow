@@ -15,3 +15,11 @@ export const assertHostApiV4 = context => {
     throw error;
   }
 };
+
+export const assertHostApiV5 = context => {
+  if (!Number.isInteger(context?.hostApiVersion) || context.hostApiVersion < 5) {
+    const error = new Error(`PhotoFlow Host API 5 project read extensions are required; negotiated ${context?.hostApiVersion || 'unknown'}`);
+    error.code = 'COMPONENT_HOST_API_UNSUPPORTED';
+    throw error;
+  }
+};

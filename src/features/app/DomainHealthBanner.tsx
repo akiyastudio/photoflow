@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import type { ComponentStatus } from '../../types';
+import { useToast } from './useTopToastStack';
 
 type DomainHealthSnapshot = Awaited<ReturnType<Window['electronAPI']['getDomainHealth']>>;
 
@@ -10,7 +11,8 @@ const DOMAIN_LABELS: Record<string, string> = {
   'tracking-scan': '版本跟踪', components: '组件数据',
 };
 
-export const DomainHealthBanner = ({ components, onNotice }: { components: ComponentStatus[]; onNotice: (message: string, duration?: number) => void }) => {
+export const DomainHealthBanner = ({ components }: { components: ComponentStatus[] }) => {
+  const toast = useToast();
   const [snapshot, setSnapshot] = useState<DomainHealthSnapshot>({ success: true, domains: [], commands: [] });
   const refresh = useCallback(async () => {
     try {
@@ -38,12 +40,12 @@ export const DomainHealthBanner = ({ components, onNotice }: { components: Compo
     const dead = commands.filter(command => command.status === 'dead');
     const results = await Promise.all(dead.map(command => window.electronAPI.retryDomainCommand(command.commandId)));
     const failed = results.filter(result => !result.success);
-    onNotice(failed.length ? `${failed.length} 个跨域任务无法重试` : `已重新提交 ${dead.length} 个跨域任务`, 5000);
+    toast.show(failed.length ? `${failed.length} 个跨域任务无法重试` : `已重新提交 ${dead.length} 个跨域任务`, { tone: failed.length ? 'error' : 'success', dedupeKey: 'domain-health-retry' });
     await refresh();
   };
-  return <div role="status" className={`relative z-40 flex shrink-0 items-center gap-3 border-b px-4 py-2 text-xs ${hasFailure ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
+  return <div role="status" title={domains.map(domainLabel).join('、')} className={`app-titlebar-control flex h-8 max-w-sm shrink-0 items-center gap-2 rounded-md border px-2 text-[11px] ${hasFailure ? 'border-red-200 bg-red-50 text-red-800' : 'border-amber-200 bg-amber-50 text-amber-800'}`}>
     <AlertTriangle size={15} className="shrink-0"/>
-    <span className="min-w-0 flex-1 truncate"><strong>部分功能已隔离：</strong>{domains.map(domain => `${domainLabel(domain)}${domain.state === 'recovering' ? '正在恢复' : domain.state === 'degraded' ? '已降级' : '暂不可用'}`).join('、') || '跨域任务等待处理'}。其他功能仍可继续使用。</span>
-    {commands.some(command => command.status === 'dead') && <button type="button" onClick={() => void retryDead()} className="shrink-0 rounded-md border border-current px-2.5 py-1 font-bold hover:bg-white/60">重试失败任务</button>}
+    <span className="min-w-0 flex-1 truncate"><strong>部分功能已隔离</strong> · {domains.map(domain => domainLabel(domain)).join('、') || '跨域任务'}</span>
+    {commands.some(command => command.status === 'dead') && <button type="button" onClick={() => void retryDead()} className="shrink-0 rounded border border-current px-1.5 py-0.5 font-bold hover:bg-white/60">重试</button>}
   </div>;
 };

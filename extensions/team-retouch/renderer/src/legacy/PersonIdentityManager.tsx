@@ -15,6 +15,7 @@ import { ensureFaceRecognitionConsent } from './legacy-privacy';
 import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
 import { beginWorkflowReturnProgress, mergeAudit, relayChainForItems, returnMatchAssessment, returnModificationAssessment, updateWorkflowReturnProgress, type WorkflowReturnProgressState } from '../interaction-model';
 import { createWorkspaceSeedGate, isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
+import { shouldEmitTerminalToast } from '../task-terminal-notice-model';
 
 type Props = {
   componentActive?: boolean;
@@ -22,6 +23,8 @@ type Props = {
   project: WorkspaceProject;
   initialWorkspace?: TeamIdentityWorkspace;
   initialWorkspacePending?: boolean;
+  historyIssue?: string;
+  onRetryHistory?: () => void;
   cacheConfig: AppConfig['mediaCache'];
   activeStep: Extract<TeamRetouchStep, 'assignment' | 'relay' | 'review'>;
   onStepChange: (step: TeamRetouchStep) => void;
@@ -48,7 +51,6 @@ type Subject = {
 const assignmentKey = (photoId: string, baseVersionId: string, personIndex: number) => `${photoId}:${baseVersionId}:${personIndex}`;
 const isGeneratedIdentity = (identity: TeamIdentity) => /^\u5f85\u786e\u8ba4\u4eba\u7269\s+\d+$/.test(identity.name);
 const similarityPairKey = (left: string, right: string) => left < right ? `${left}|${right}` : `${right}|${left}`;
-const formatWorkflowBytes = (bytes: number) => bytes >= 1024 ** 3 ? `${(bytes / 1024 ** 3).toFixed(1)} GB` : `${(bytes / 1024 ** 2).toFixed(bytes >= 100 * 1024 ** 2 ? 0 : 1)} MB`;
 
 const IDENTITY_THUMBNAIL_SIZE = 384;
 
@@ -318,7 +320,7 @@ const buildWorkflow = (subjects: Subject[], identities: TeamIdentity[], preferre
   return items.sort((left, right) => left.week - right.week || orderOf(left) - orderOf(right) || left.photo.name.localeCompare(right.photo.name));
 };
 
-export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace, initialWorkspacePending = false, cacheConfig, componentActive = true, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onNotice, onProjectChanged, onBusyChange }: Props) => {
+export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace, initialWorkspacePending = false, historyIssue, onRetryHistory, cacheConfig, componentActive = true, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onNotice, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const initialSeed = isUsableWorkspaceSeed(initialWorkspace) ? initialWorkspace : undefined;
   const seedScopeKey = workspaceSeedScopeKey(workspacePath, project);
@@ -379,6 +381,8 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   };
   useEscapeLayer(Boolean(workflowReturnResult) && workflowReturnReviewOpen, () => void requestCloseWorkflowReturnReview(), !busy.startsWith('workflow-'));
   const [workflowReturnProgress, setWorkflowReturnProgress] = useState<WorkflowReturnProgressState | null>(null);
+  const workflowReturnVisibleTaskIdsRef = useRef(new Set<string>());
+  const workflowGenerationVisibleTaskIdsRef = useRef(new Set<string>());
   const [workflowGeneration, setWorkflowGeneration] = useState<TeamWorkflowGenerationProgress | null>(null);
   const [similarities, setSimilarities] = useState<NonNullable<TeamIdentityWorkspace['similarities']>>([]);
   const [subjectPageSize, setSubjectPageSize] = useState(18);
@@ -431,12 +435,18 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     return () => { active = false; };
   }, [workspacePath, project.name, project.status]);
   useEffect(() => legacyApi.onTeamPatchReturnBatchProgress(value => {
-    if (!value.projectId || value.projectId === project.id) setWorkflowReturnProgress(current => current ? updateWorkflowReturnProgress(current, value) : current);
+    if (!value.projectId || value.projectId === project.id) {
+      if (value.operationId) workflowReturnVisibleTaskIdsRef.current.add(value.operationId);
+      setWorkflowReturnProgress(current => current ? updateWorkflowReturnProgress(current, value) : current);
+    }
   }), [project.id]);
   useEffect(() => {
     let active = true;
     const unsubscribe = legacyApi.onTeamWorkflowGenerationProgress(value => {
-      if ((!value.projectId || value.projectId === project.id) && value.projectName === project.name) setWorkflowGeneration(value);
+      if ((!value.projectId || value.projectId === project.id) && value.projectName === project.name) {
+        if (value.operationId) workflowGenerationVisibleTaskIdsRef.current.add(value.operationId);
+        setWorkflowGeneration(value);
+      }
     });
     void legacyApi.getTeamWorkflowGenerationStatus(workspacePath, project.status, project.name).then(result => {
       if (active && result.success && result.job) setWorkflowGeneration(result.job);
@@ -826,7 +836,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     try {
       const selected = await legacyApi.selectTeamPatchReturns(project.name);
       if (!selected.success) throw new Error(selected.error || '无法选择返图');
-      if (selected.cancelled || !selected.files?.length) return;
+      if (selected.cancelled || !selected.files?.length) { if (selected.cancelled) onNotice('已取消选择返图', 'info'); return; }
       setWorkflowReturnProgress(current => current ? updateWorkflowReturnProgress(current, { operationId, phase: 'reading', progress: 4, message: `已选择 ${selected.files.length} 张返图，正在读取内容` }) : current);
       const result = await legacyApi.returnTeamWorkflowBatch(workspacePath, project.name, {
         operationId,
@@ -843,16 +853,24 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
             .map(candidate => candidate.personIndex),
         })),
       });
-      if (!result.success) { onNotice(`批量导入返图失败：${result.error || '未知错误'}`, 'error'); return; }
+      const presentation = workflowReturnVisibleTaskIdsRef.current.has(operationId) ? 'visible' : 'none';
+      if (!result.success) {
+        if (shouldEmitTerminalToast({ presentation, outcome: result.cancelled ? 'cancelled' : 'failed' })) onNotice(result.cancelled ? '批量导入返图已取消' : `批量导入返图失败：${result.error || '未知错误'}`, result.cancelled ? 'info' : 'error');
+        return;
+      }
       if ((result.reviewCount || 0) > 0) {
         setWorkflowReturnResult(result);
         setWorkflowReturnReviewOpen(true);
       }
       await load(false);
-      onNotice(result.warning || `批量返图完成：自动识别并标记完成 ${result.acceptedCount || 0} 张，${result.reviewCount || 0} 张需要单独确认`, result.warning || result.reviewCount ? 'warning' : 'success');
+      onProjectChanged();
     } catch (error) {
-      onNotice(`批量导入返图失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+      const message = error instanceof Error ? error.message : String(error);
+      const cancelled = /取消|cancel/i.test(message);
+      const presentation = workflowReturnVisibleTaskIdsRef.current.has(operationId) ? 'visible' : 'none';
+      if (shouldEmitTerminalToast({ presentation, outcome: cancelled ? 'cancelled' : 'failed' })) onNotice(cancelled ? '批量导入返图已取消' : `批量导入返图失败：${message}`, cancelled ? 'info' : 'error');
     } finally {
+      workflowReturnVisibleTaskIdsRef.current.delete(operationId);
       setBusy('');
       setWorkflowReturnProgress(null);
     }
@@ -983,8 +1001,10 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
           photoName: item.photo.name,
       })),
     }));
+    let requestedOperationId = '';
     const run = (replace = false) => {
       const operationId = crypto.randomUUID();
+      requestedOperationId = operationId;
       setWorkflowGeneration({ operationId, projectName: project.name, state: 'running', phase: 'preparing', progress: 0, completedFiles: 0, totalFiles: 0, copiedBytes: 0, totalBytes: 0, currentName: '', message: '正在准备协作流程…' });
       return legacyApi.generateTeamWorkflow(workspacePath, project.status, project.name, { operationId, preferredIdentityOrder, sameWeekIdentityIds, groups, replace });
     };
@@ -1001,12 +1021,14 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       result = await run(true);
     }
     if (result.alreadyRunning) return;
+    const presentation = workflowGenerationVisibleTaskIdsRef.current.has(requestedOperationId) ? 'visible' : 'none';
     if (!result.success) {
-      if (result.cancelled) onNotice(result.resumable ? '已停止生成；下次会从现有进度继续' : '已停止生成协作流程', 'info');
-      else onNotice(`生成协作流程失败：${result.error || '未知错误'}`, 'error');
+      if (shouldEmitTerminalToast({ presentation, outcome: result.cancelled ? 'cancelled' : 'failed' })) onNotice(result.cancelled ? result.resumable ? '已停止生成；下次会从现有进度继续' : '已停止生成协作流程' : `生成协作流程失败：${result.error || '未知错误'}`, result.cancelled ? 'info' : 'error');
+      workflowGenerationVisibleTaskIdsRef.current.delete(requestedOperationId);
       return;
     }
-    onNotice(`协作流程已保存：${result.groupCount || 0} 个批次，${result.count || 0} 张任务图`, 'success');
+    if (shouldEmitTerminalToast({ presentation, outcome: 'completed' })) onNotice(`协作流程已保存：${result.groupCount || 0} 个批次，${result.count || 0} 张任务图`, 'success');
+    workflowGenerationVisibleTaskIdsRef.current.delete(requestedOperationId);
     await load(false);
   };
   const cancelWorkflowGeneration = async () => {
@@ -1065,10 +1087,12 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const stageDescription = activeStep === 'assignment' ? '阶段 2 · 自动排期为默认；接收人、顺序和高级同周选项在此确认。' : activeStep === 'relay' ? '阶段 3 · 按接力链分发工作图并接收返图。' : '阶段 4 · 同时核对匹配度与修改有效性，再合并输出。';
 
   return <div className="team-shell pf-canvas fixed inset-x-0 bottom-0 top-10 z-[315] flex flex-col">
-    <header className="team-workflow-header team-toolbar pf-toolbar flex min-h-16 flex-wrap items-center gap-3 px-5 py-3"><span className="team-icon-tile pf-icon-tile p-2"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">团片协作</h2><p className="mt-0.5 text-xs text-slate-500">{stageDescription}</p></div><TeamRetouchSteps value={activeStep} onChange={onStepChange} summaries={stageSummaries} onBlocked={onBlockedStage}/><button type="button" onClick={onClose} title="团片协作设置" aria-label="团片协作设置" className="ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100"><Settings size={20}/></button></header>
+    <header className="team-workflow-header team-toolbar pf-toolbar flex min-h-16 flex-wrap items-center gap-3 px-5 py-3"><span className="team-icon-tile pf-icon-tile p-2"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">团片协作</h2><p className="mt-0.5 text-xs text-slate-500">{stageDescription}</p></div><TeamRetouchSteps value={activeStep} onChange={onStepChange} summaries={stageSummaries} onBlocked={onBlockedStage}/>{historyIssue && <button type="button" className="dialog-secondary ml-auto text-amber-700" title={historyIssue} onClick={onRetryHistory}>历史恢复需重试</button>}<button type="button" onClick={onClose} title="团片协作设置" aria-label="团片协作设置" className={historyIssue ? 'rounded-md p-2 text-slate-500 hover:bg-slate-100' : 'ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100'}><Settings size={20}/></button></header>
     {!loading && Boolean(workspace.photos.length) && <>
       <div className="team-toolbar pf-toolbar flex min-h-14 flex-wrap items-center gap-3 px-5 py-2.5">
         <span className="text-xs font-bold text-slate-700">{activeStep === 'assignment' ? '任务分配' : activeStep === 'relay' ? '接力进度' : '审核输出'}</span><span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-bold text-violet-700">{weeks.length} 周</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{personWeekCount} 个批次</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{splitIdentityCount} 人跨周</span>{Boolean(workspace.missingReturnCount) && <span title="返图文件已被外部删除或移动；恢复原路径后会自动重新连接" className="rounded-full bg-red-50 px-2.5 py-1 text-xs font-bold text-red-700">返图缺失 {workspace.missingReturnCount}</span>}
+        {workflowGenerating && workflowGeneration && <><span role="status" aria-live="polite" className="max-w-72 truncate text-xs font-bold text-blue-700" title={`${workflowGeneration.message} · ${workflowGeneration.currentName}`}>{workflowGeneration.message} · {Math.round(workflowGeneration.progress)}% · {workflowGeneration.completedFiles}/{workflowGeneration.totalFiles || '—'} 张</span><button type="button" disabled={workflowGeneration.phase === 'cancelling'} onClick={() => void cancelWorkflowGeneration()} className="dialog-secondary text-blue-700">{workflowGeneration.phase === 'cancelling' ? '正在停止…' : '停止生成'}</button></>}
+        {workflowReturnProgress?.active && <span role="status" aria-live="polite" data-workflow-return-progress data-phase={workflowReturnProgress.phase} className="max-w-72 truncate text-xs font-bold text-emerald-700" title={workflowReturnProgress.message}>{workflowReturnProgress.message} · {Math.round(workflowReturnProgress.progress)}%</span>}
         {activeStep === 'assignment' && <><span className="text-xs text-slate-500">默认自动排期 · {workspace.workflowGenerated && !workspace.workflowNeedsRegeneration ? '已生成' : '待生成'}</span><button disabled={!workflowGroups.size || Boolean(busy) || workflowGenerating} onClick={() => void generateWorkflow()} className="dialog-primary ml-auto inline-flex items-center gap-2">{workflowGenerating ? <Loader2 size={15} className="animate-spin"/> : <FolderOutput size={15}/>} {workflowGenerating ? `生成中 ${Math.round(workflowGeneration.progress)}%` : workspace.workflowGenerated ? '按当前分配重新生成' : '确认分配并生成流程'}</button></>}
         {activeStep === 'relay' && <><span className="text-xs text-slate-500">可分发 {readyWorkflowItems.length} · 当前审核 {pendingWorkflowReturnReviewCount}</span>{workflowReturnResult?.reviewSessionId && !workflowReturnReviewOpen && <button disabled={Boolean(busy)} onClick={() => setWorkflowReturnReviewOpen(true)} className="dialog-secondary ml-auto inline-flex items-center gap-2"><CheckCircle2 size={15}/>恢复返图批次（{pendingWorkflowReturnReviewCount}）</button>}<button disabled={!workflowReady || !readyWorkflowItems.length || Boolean(busy) || Boolean(workflowReturnResult?.reviewSessionId)} title={workflowReturnResult?.reviewSessionId ? '请先恢复或放弃当前返图批次' : undefined} onClick={() => void receiveWorkflowBatch(readyWorkflowItems)} className="dialog-primary ml-auto inline-flex items-center gap-2">{busy === 'workflow-return' ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>}批量导入返图</button></>}
         {activeStep === 'review' && <><span className="text-xs text-slate-500">{mergeReport.blockers.length} 项阻断 · {mergeReport.completedPhotoCount}/{mergeReport.photoCount} 已输出</span><TeamOutputProgressPicker controller={outputProgress} disabled={Boolean(busy)}/>{workflowReturnResult?.reviewSessionId && <button disabled={Boolean(busy)} onClick={() => setWorkflowReturnReviewOpen(true)} className="dialog-secondary ml-auto inline-flex items-center gap-2"><CheckCircle2 size={15}/>继续返图审核（{pendingWorkflowReturnReviewCount}）</button>}<button disabled={!mergeablePhotos.length || Boolean(busy) || mergeReport.blockers.some(item => item.code !== 'incomplete-task')} onClick={() => void mergeCompletedPhotos()} className="dialog-primary ml-auto inline-flex items-center gap-2">{busy === 'merge-workflow' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}审核通过并合并（{mergeablePhotos.length}）</button></>}
@@ -1105,28 +1129,6 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       </div>} {!preferredWorkflowIdentities.length && <span className="text-[11px] text-violet-600">当前全部使用自动排期。</span>}</div></details>}
     </>}
     {!!pendingResources.size && <div role="status" aria-live="polite" className="border-b border-emerald-100 bg-emerald-50 px-5 py-2 text-xs font-bold text-emerald-700">正在安全保存 {pendingResources.size} 个任务；其他照片仍可操作</div>}
-    {workflowGenerating && workflowGeneration && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3">
-      <div className="flex items-center gap-4 text-xs">
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center justify-between gap-4 font-bold text-blue-700">
-            <span className="truncate">{workflowGeneration.message}{workflowGeneration.currentName ? ` · ${workflowGeneration.currentName}` : ''}</span>
-            <span className="shrink-0 tabular-nums">{Math.round(workflowGeneration.progress)}%</span>
-          </div>
-          <div className="mt-1 flex flex-wrap gap-x-4 gap-y-1 text-blue-600">
-            <span>{workflowGeneration.completedFiles}/{workflowGeneration.totalFiles || '—'} 张</span>
-            <span>{formatWorkflowBytes(workflowGeneration.copiedBytes)}{workflowGeneration.totalBytes ? ` / ${formatWorkflowBytes(workflowGeneration.totalBytes)}` : ''}</span>
-            <span>可继续查看和标记人物；离开页面后任务仍会继续</span>
-          </div>
-          <div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100">
-            <div className="h-full rounded-full bg-blue-600 transition-[width] duration-300" style={{ width: `${workflowGeneration.progress}%` }}/>
-          </div>
-        </div>
-        <button type="button" disabled={workflowGeneration.phase === 'cancelling'} onClick={() => void cancelWorkflowGeneration()} className="shrink-0 rounded-md border border-blue-200 bg-white px-3 py-2 font-bold text-blue-700 hover:bg-blue-100 disabled:opacity-50">
-          {workflowGeneration.phase === 'cancelling' ? '正在停止…' : '停止'}
-        </button>
-      </div>
-    </div>}
-    {workflowReturnProgress?.active && <div className="w-full border-b border-emerald-100 bg-emerald-50 px-5 py-3" data-workflow-return-progress data-phase={workflowReturnProgress.phase}><div className="flex w-full items-center justify-between gap-4 text-xs"><span className="min-w-0 flex-1 truncate font-bold text-emerald-700">{workflowReturnProgress.message}</span><span className="shrink-0 tabular-nums text-emerald-600">{Math.round(workflowReturnProgress.progress)}%</span></div><div className="mt-2 h-2 w-full overflow-hidden rounded-full bg-emerald-100" role="progressbar" aria-label="批量导入返图进度" aria-valuemin={0} aria-valuemax={100} aria-valuenow={Math.round(workflowReturnProgress.progress)}><div className="h-full rounded-full bg-emerald-600 transition-[width] duration-300" style={{ width: `${workflowReturnProgress.progress}%` }}/></div></div>}
     {loading ? <div className="flex flex-1 items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 animate-spin"/>正在读取团片历史人物…</div> : workspaceLoadError ? <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"><AlertTriangle size={28} className="text-red-500"/><h3 className="font-bold text-red-700">团片历史人物读取失败</h3><p className="max-w-2xl text-xs leading-5 text-slate-500">{workspaceLoadError}</p><button type="button" className="dialog-primary" onClick={() => void load(true)}>重新读取团片历史</button></div> : !workspace.photos.length ? <div className="flex flex-1 flex-col items-center justify-center text-center"><UsersRound size={42} className="text-slate-300"/><h3 className="mt-4 font-bold text-slate-700">尚未识别人物</h3><p className="mt-2 text-sm text-slate-500">请先加入图片并识别人物。</p><button onClick={() => onStepChange('detect')} className="dialog-primary mt-5">返回人物识别</button></div> : <main ref={peopleScrollRef} className="min-h-0 flex-1 overflow-y-auto p-6"><div className="mx-auto min-h-full max-w-[1800px]"><div className="workflow-board-view">
       {activeStep === 'review' ? <div className="grid gap-5 lg:grid-cols-[minmax(280px,.7fr)_minmax(0,1.3fr)]" data-merge-audit><section className="rounded-xl border border-slate-200 bg-white p-5"><h3 className="font-bold text-slate-800">合并前阻断清单</h3><p className="mt-1 text-xs text-slate-500">阻断归零后才能输出；未知证据仍需人工核对。</p><div className="mt-4 space-y-2">{mergeReport.blockers.length ? mergeReport.blockers.map(item => <div key={item.code} className="flex items-center justify-between rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800"><span>{item.label}</span><span>{item.count}</span></div>) : <div className="rounded-lg bg-emerald-50 px-3 py-3 text-xs font-bold text-emerald-700">没有阻断项，可以合并</div>}</div></section><section className="rounded-xl border border-slate-200 bg-white p-5"><h3 className="font-bold text-slate-800">质量指标与目标进度</h3><div className="mt-4 grid gap-3 sm:grid-cols-3"><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">任务匹配</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.taskMatchRate === undefined ? '未知 · 需核对' : `${Math.round(workspace.qualityMetrics.taskMatchRate * 100)}%`}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">修改有效性</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.effectiveEditRate === undefined ? '未知 · 需核对' : `${Math.round(workspace.qualityMetrics.effectiveEditRate * 100)}%`}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">逐图结果</p><p className="mt-1 font-bold text-slate-800">{mergeablePhotos.length} 待合并 · {mergeReport.completedPhotoCount} 已输出</p></div></div><div className="mt-5 space-y-2">{workspace.photos.map(photo => { const tasks = photo.tasks || []; const mergedCount = tasks.filter(task => task.status === 'merged').length; return <div key={`${photo.photoId}:${photo.baseVersionId}`} className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-2 text-xs"><span className="truncate font-bold text-slate-700">{photo.name || photo.displayName || photo.photoId}</span><span className={mergedCount === tasks.length && tasks.length ? 'text-emerald-700' : 'text-slate-500'}>{mergedCount === tasks.length && tasks.length ? '已输出' : `${tasks.filter(task => Boolean(task.editedPatchPath)).length}/${tasks.length} 返图就绪`}</span></div>; })}</div></section></div> : <>{activeStep === 'relay' && <section className="mb-5 rounded-xl border border-slate-200 bg-white p-4" data-relay-chains><div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-bold text-slate-800">接力链</h3><span className="text-xs text-slate-500">原始裁图 → 前一位返图 → 下一位；每条链明确当前持有人和等待原因。</span></div><div className="mt-4 grid gap-3 xl:grid-cols-2">{relayChains.map(chain => <article key={chain.key} className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="mb-2 truncate text-xs font-bold text-slate-700">{chain.items[0]?.photo.name} · 工作图 {chain.items[0]?.task.taskOrder || chain.items[0]?.task.id}</p><ol className="flex min-w-0 items-stretch gap-1 overflow-x-auto" aria-label="修图接力链">{chain.nodes.map((node, index) => <li key={node.key} className="flex shrink-0 items-center gap-1">{index > 0 && <span aria-hidden className="text-slate-300">→</span>}<div className={`min-w-28 rounded-md border px-2.5 py-2 text-[11px] ${node.state === 'current' ? 'border-blue-300 bg-blue-50 text-blue-800' : node.state === 'warning' ? 'border-red-300 bg-red-50 text-red-700' : node.state === 'done' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'}`}><strong className="block truncate">{node.label}</strong><span className="mt-0.5 block truncate">{node.reason || (node.state === 'done' ? '已就绪' : '等待')}</span></div></li>)}</ol></article>)}</div></section>}
       {tab === 'people' ? <><div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4"><div className="min-w-0 flex-1"><h3 className="text-sm font-bold text-blue-800">请确认自动分组</h3><p className="mt-1 text-xs leading-5 text-blue-700">系统会结合人脸和外观分组，无法确认的人保持未标注。请点击缩略图核对。</p></div>{subjects.length > subjectPageSize && <button onClick={() => setSubjectPageSize(current => current + 18)} className="dialog-secondary" aria-label="加载更多人物实例">再加载 18 张</button>}<button disabled={Boolean(busy)} onClick={() => void suggest()} className="dialog-primary inline-flex items-center gap-2">{busy === 'suggest' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动识别同一个人</button><button onClick={() => void createIdentity()} className="dialog-secondary">新建人物</button></div>

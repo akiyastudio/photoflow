@@ -13,6 +13,7 @@ import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
 import { ensureFaceRecognitionConsent } from './legacy-privacy';
 import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputProgress';
 import { workingImageMetrics } from '../interaction-model';
+import { shouldEmitTerminalToast } from '../task-terminal-notice-model';
 import { createWorkspaceSeedGate, isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
 
 type Props = {
@@ -20,6 +21,8 @@ type Props = {
   entries: ProjectFileEntry[];
   historyRecordCount?: number;
   historyOwnershipPendingCount?: number;
+  historyIssue?: string;
+  onRetryHistory?: () => void;
   workspacePath: string;
   project: WorkspaceProject;
   initialWorkspace?: TeamIdentityWorkspace;
@@ -500,12 +503,12 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, comp
     setDetectionProgress({ progress: 1, message: '正在启动 AI 识别进程…' });
     try {
       const result = await legacyApi.detectTeamPatchPeople(workspacePath, project.status, project.name, { photoId: bundle.photo.id, baseVersionId: baseVersion.id, restoreExcluded });
-      if (!result.success) { onNotice(`AI 识别失败：${result.error || '未知错误'}`, 'error'); return; }
+      if (!result.success) { if (shouldEmitTerminalToast({ presentation: 'silent', outcome: 'failed' })) onNotice(`AI 识别失败：${result.error || '未知错误'}`, 'error'); return; }
       setBundle(normalizeBundle(result));
       await onDetectionComplete();
       const personCount = result.detection?.personCount || result.tasks.reduce((total, task) => total + membersOf(task).length, 0);
       onNotice(restoreExcluded ? `已恢复人工排除记录并重新识别 ${personCount} 个人物` : `已识别 ${personCount} 个人物，并自动尝试匹配项目中的人物身份`, 'success');
-    } catch (error) { onNotice(`AI 识别失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    } catch (error) { if (shouldEmitTerminalToast({ presentation: 'silent', outcome: 'failed' })) onNotice(`AI 识别失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
     finally { setBusy(''); }
   };
 
@@ -602,7 +605,7 @@ const syncTaskLabels = async (workspacePath: string, workspace: TeamIdentityWork
   })));
 };
 
-const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, historyOwnershipPendingCount = 0, workspacePath, project, initialWorkspace, initialWorkspacePending = false, cacheConfig, componentStatus, advancedStatusLoading = false, advancedStatusError = '', onRetryAdvancedStatus, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onOpenSettings, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
+const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, historyOwnershipPendingCount = 0, historyIssue, onRetryHistory, workspacePath, project, initialWorkspace, initialWorkspacePending = false, cacheConfig, componentStatus, advancedStatusLoading = false, advancedStatusError = '', onRetryAdvancedStatus, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onOpenSettings, onNotice, onEntriesChange, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const [running, setRunning] = useState(false);
   const [results, setResults] = useState<BatchResult[]>([]);
@@ -623,6 +626,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
   const [photoProcessingMessages, setPhotoProcessingMessages] = useState<Record<string, string>>({});
   const teamGraph = useTeamOutputProgress(teamWorkflowSourcePaths(identityState.photos), workspacePath, project, onNotice);
   const identifyingRef = useRef(false);
+  const batchTaskVisibleRef = useRef(false);
   const lastUnmarkedSubjectKeyRef = useRef('');
   const identityLoadSequenceRef = useRef(0);
   const onBusyChangeRef = useRef(onBusyChange);
@@ -674,7 +678,12 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     void loadIdentities();
     return () => { identityLoadSequenceRef.current += 1; };
   }, [workspacePath, project.id, project.name, project.status, initialWorkspace, initialWorkspacePending]);
-  useEffect(() => legacyApi.onTeamPatchBatchProgress(value => { if (!value.projectId || value.projectId === project.id) setProgress({ itemIndex: value.itemIndex, itemCount: value.itemCount, progress: value.progress, itemName: value.itemName, message: value.message }); }), [project.id]);
+  useEffect(() => legacyApi.onTeamPatchBatchProgress(value => {
+    if (!value.projectId || value.projectId === project.id) {
+      batchTaskVisibleRef.current = true;
+      setProgress({ itemIndex: value.itemIndex, itemCount: value.itemCount, progress: value.progress, itemName: value.itemName, message: value.message });
+    }
+  }), [project.id]);
   useEffect(() => {
     if (!identityState.workflowNode?.id) return;
     void teamGraph.ensureWorkflowInputs(identityState.workflowNode.id).then(() => onProjectChanged?.()).catch(error => {
@@ -847,16 +856,21 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
   const runBatch = async () => {
     if (identityLoading) return;
     const targetEntries = unrecognizedPaths.length ? entries.filter(entry => unrecognizedPaths.includes(entry.relativePath)) : entries;
+    batchTaskVisibleRef.current = false;
     setRunning(true);
     setResults([]);
     try {
       const result = await legacyApi.detectTeamPatchBatch(workspacePath, project.status, project.name, { relativePaths: targetEntries.map(entry => entry.relativePath) });
       setResults(result.results || []);
       setRefreshToken(current => current + 1);
-      if (!result.success) { onNotice(`识别图片失败：${result.error || '未知错误'}`, 'error'); return; }
+      const presentation = batchTaskVisibleRef.current ? 'visible' : 'none';
+      if (!result.success) { if (shouldEmitTerminalToast({ presentation, outcome: 'failed' })) onNotice(`识别图片失败：${result.error || '未知错误'}`, 'error'); return; }
       await identifyAndSync();
-      onNotice(`识别完成：${result.results.filter(item => item.success).length}/${targetEntries.length} 张成功，并已自动尝试标记人物`, 'success');
-    } catch (error) { onNotice(`识别图片失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+      if (shouldEmitTerminalToast({ presentation, outcome: 'completed' })) onNotice(`识别完成：${result.results.filter(item => item.success).length}/${targetEntries.length} 张成功，并已自动尝试标记人物`, 'success');
+    } catch (error) {
+      const presentation = batchTaskVisibleRef.current ? 'visible' : 'none';
+      if (shouldEmitTerminalToast({ presentation, outcome: 'failed' })) onNotice(`识别图片失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+    }
     finally { setRunning(false); }
   };
 
@@ -868,10 +882,8 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
   const unmarkedIdentityCount = identitySubjects.filter(isUnmarkedIdentitySubject).length;
 
   const stageOneReady = Boolean(identitySubjects.length && confirmedIdentityCount === identitySubjects.length && !identityState.photos.flatMap(photo => photo.tasks || []).some(task => task.needsReview || task.patchMissing));
-  return <div className="team-shell pf-canvas fixed inset-x-0 bottom-0 top-10 z-[310] flex flex-col"><header className="team-workflow-header team-toolbar pf-toolbar flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><span className="team-icon-tile pf-icon-tile p-2"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">{historyOwnershipPendingCount ? `团片协作 · 已找到 ${entries.length}/${historyRecordCount} 张图片` : `团片协作 · ${entries.length} 张图片`}</h2><p className="mt-0.5 text-xs text-slate-500">阶段 1 · 识别与裁剪，并在本阶段人工确认人物。</p></div><TeamRetouchSteps value={activeStep} onChange={onStepChange} summaries={stageSummaries} onBlocked={onBlockedStage} disabled={running}/><div className="team-stage-actions ml-auto flex items-center gap-2"><button disabled={running || identityLoading} onClick={() => void runBatch()} className="dialog-secondary inline-flex items-center gap-2">{running || identityLoading ? <Loader2 size={15} className="animate-spin"/> : <ScanFace size={15}/>} {identityLoading ? '读取团片历史…' : unrecognizedPaths.length ? `识别新增图片（${unrecognizedPaths.length} 张）` : entries.length > 1 ? '重新识别全部图片' : '重新识别图片'}</button><button disabled={running || identityLoading || identityState.identifying} onClick={() => void identifyAndSync()} className="dialog-secondary inline-flex items-center gap-2">{identityState.identifying ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动标记候选</button><button type="button" disabled={!stageOneReady || running} onClick={() => onStepChange('assignment')} className="dialog-primary" title={stageOneReady ? '进入任务分配' : '需先完成识别、裁剪复核和人物人工确认'}>继续设置任务</button><button type="button" onClick={onOpenSettings} title="团片协作设置" aria-label="团片协作设置" className="rounded-md p-2 text-slate-500 hover:bg-slate-100"><Settings size={20}/></button></div></header>
-    <div className={`team-banner flex items-center gap-2 border-b px-5 py-2 text-xs ${advancedPresentation.state === 'ready' ? 'border-violet-100 bg-violet-50 text-violet-700' : advancedPresentation.state === 'repair-needed' || advancedPresentation.state === 'error' ? 'border-amber-100 bg-amber-50 text-amber-700' : 'border-blue-100 bg-blue-50 text-blue-700'}`}>{advancedPresentation.state === 'checking' && <Loader2 size={13} className="animate-spin"/>}<span className="font-bold">{advancedPresentation.text}</span>{advancedPresentation.state === 'error' && <button type="button" className="ml-auto rounded-md border border-amber-300 px-2 py-1 font-bold" onClick={onRetryAdvancedStatus}>重新检查</button>}</div>
+  return <div className="team-shell pf-canvas fixed inset-x-0 bottom-0 top-10 z-[310] flex flex-col"><header className="team-workflow-header team-toolbar pf-toolbar flex min-h-16 flex-wrap items-center gap-3 border-b border-slate-200 bg-white px-5 py-3"><span className="team-icon-tile pf-icon-tile p-2"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">{historyOwnershipPendingCount ? `团片协作 · 已找到 ${entries.length}/${historyRecordCount} 张图片` : `团片协作 · ${entries.length} 张图片`}</h2><p className="mt-0.5 text-xs text-slate-500">阶段 1 · 识别与裁剪 · {advancedPresentation.text}</p></div><TeamRetouchSteps value={activeStep} onChange={onStepChange} summaries={stageSummaries} onBlocked={onBlockedStage} disabled={running}/><div className="team-stage-actions ml-auto flex items-center gap-2">{historyIssue && <button type="button" className="dialog-secondary text-amber-700" title={historyIssue} onClick={onRetryHistory}>历史恢复需重试</button>}{running && <span role="status" aria-live="polite" className="max-w-64 truncate text-xs font-bold text-blue-700" title={progress.message}>{progress.itemIndex ? `${progress.itemIndex}/${progress.itemCount} · ` : ''}{progress.message} · {Math.round(overallProgress)}%</span>}{advancedPresentation.state === 'error' && <button type="button" className="dialog-secondary" onClick={onRetryAdvancedStatus}>重新检查高级能力</button>}<button disabled={running || identityLoading} onClick={() => void runBatch()} className="dialog-secondary inline-flex items-center gap-2">{running || identityLoading ? <Loader2 size={15} className="animate-spin"/> : <ScanFace size={15}/>} {identityLoading ? '读取团片历史…' : unrecognizedPaths.length ? `识别新增图片（${unrecognizedPaths.length} 张）` : entries.length > 1 ? '重新识别全部图片' : '重新识别图片'}</button><button disabled={running || identityLoading || identityState.identifying} onClick={() => void identifyAndSync()} className="dialog-secondary inline-flex items-center gap-2">{identityState.identifying ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动标记候选</button><button type="button" disabled={!stageOneReady || running} onClick={() => onStepChange('assignment')} className="dialog-primary" title={stageOneReady ? '进入任务分配' : '需先完成识别、裁剪复核和人物人工确认'}>继续设置任务</button><button type="button" onClick={onOpenSettings} title="团片协作设置" aria-label="团片协作设置" className="rounded-md p-2 text-slate-500 hover:bg-slate-100"><Settings size={20}/></button></div></header>
     {!!identitySubjects.length && <div className="flex flex-wrap items-center gap-2 border-b border-slate-200 bg-white px-5 py-2 text-xs"><span className="font-bold text-slate-700">人物标记</span><span className="rounded-full bg-emerald-50 px-2.5 py-1 font-bold text-emerald-700">已确认 {confirmedIdentityCount}</span>{candidateIdentityCount > 0 && <span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">自动候选 {candidateIdentityCount}</span>}<button type="button" disabled={!unmarkedIdentityCount || identityLoading || identityState.identifying} onClick={openNextUnmarkedIdentity} title="打开下一个未标记人物" className="rounded-full bg-slate-100 px-2.5 py-1 font-bold text-slate-600 transition hover:bg-blue-50 hover:text-blue-700 disabled:cursor-default disabled:opacity-50">未标记 {unmarkedIdentityCount}{unmarkedIdentityCount ? ' · 下一个' : ''}</button><span className="ml-auto text-slate-500">点击“未标记”查看下一处，或直接选择人物。</span></div>}
-    {running && <div className="border-b border-blue-100 bg-blue-50 px-5 py-3"><div className="flex justify-between text-xs font-bold text-blue-700"><span>{progress.itemIndex ? `${progress.itemIndex}/${progress.itemCount} · ${progress.itemName} · ` : ''}{progress.message}</span><span>{Math.round(overallProgress)}%</span></div><div className="mt-2 h-2 overflow-hidden rounded-full bg-blue-100"><div className="h-full bg-blue-600" style={{ width: `${overallProgress}%` }}/></div></div>}
     <main className="min-h-0 flex-1 overflow-y-auto p-6"><div className="mx-auto max-w-[1600px] space-y-6">{!entries.length && !identityLoading && <div className="flex min-h-52 items-center justify-center rounded-xl border border-dashed border-slate-300 bg-white text-sm font-bold text-slate-500">当前项目没有团片协作图片，可从项目文件中重新打开团片协作。</div>}{identityLoading
       ? <div className="flex min-h-52 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-bold text-slate-600"><Loader2 size={18} className="mr-2 animate-spin text-blue-600"/>正在读取团片历史中的人物与工作图…</div>
       : identityLoadError

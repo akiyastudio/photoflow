@@ -5,7 +5,7 @@ PhotoFlow 把可选扩展包称为 **组件（Component）**。文件名保留�
 ## 快速开始
 
 1. 把 `examples/hello-component` 复制到以组件 ID 命名的目录。
-2. 普通 V2 组件可继续使用 Host API `2`；设置页需要 Host API `3`；声明顶部通知能力需要 Host API `4` 与 `minHostApiVersion:4`。
+2. 普通 V2 组件可继续使用 Host API `2`；设置页需要 Host API `3`；声明顶部通知能力需要 Host API `4`；项目文件、元数据、版本图和评分只读扩展需要 Host API `5` 与 `minHostApiVersion:5`。
 3. 添加一个 `workspace.toolbarAction`、一个与之相连的 `component.fullPage`、包内 UI 入口和服务入口。需要全局设置时，可额外贡献 `application.settingsPage`。
 4. 声明全部服务 RPC、Host 能力、权限和发出的事件。未声明的访问会默认拒绝。升级历史数据时，可声明 `component.storage.previous.v1` 和/或 `project.output.existing.v1` adoption grant；不要把组件业务表或路径字段加入宿主代码。
 5. 运行 `node scripts/mock-component-service.cjs path/to/service.cjs`，不启动 Electron 也能验证按行分隔的服务协议。
@@ -72,6 +72,8 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 4. 日志写 stderr；stdout 只输出协议帧。
 
 完整实现见 `examples/hello-component/service.cjs`。普通同步请求 60 秒超时，帧和载荷上限 2 MiB。长任务应启动 `tasks.v2` 操作，频繁保存检查点，把控制权还给 UI，并在取消或重启后从最后检查点恢复。
+
+Host API 5 服务可在清单显式声明后调用只读扩展，例如 `callHost(parentId, 'project.files.search.v1', { query:'xmp', pageSize:50 })`。同时声明 `project.files.read`；媒体元数据复用 `project.media.read`，版本与评分分别声明 `project.versions.read`、`project.media.ratings.read`。这些结果只含项目虚拟相对路径和稳定 ID，不要尝试从游标、媒体引用或图节点推导绝对路径。
 
 ## 安全的“媒体 → 版本”流程
 

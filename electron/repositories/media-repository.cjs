@@ -92,6 +92,7 @@ const createMediaRepository = client => {
   finalizeChangedPaths,
   setThumbnail: (root, payload) => client.call(root, 'media_set_thumbnail', payload),
   getMedia: (root, payload) => client.call(root, 'media_get', payload),
+  snapshotProjectVersions: (root, payload) => client.call(root, 'media_versions_snapshot', payload),
   getPhoto: (root, photoId) => client.call(root, 'media_get_photo', { photoId }),
   createVersion: (root, payload) => client.call(root, 'media_create_version', payload),
   updateVersion: (root, payload) => client.call(root, 'media_update_version', payload),

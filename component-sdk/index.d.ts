@@ -2,11 +2,11 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export interface JsonObject { [key: string]: JsonValue }
 export type VersionedName = `${string}.v${number}`;
-export type HostApiVersion = 2 | 3 | 4;
-export type ComponentPermission = 'project.media.read' | 'project.input.read' | 'project.output.write' | 'project.version.create' | 'project.progress' | 'component.storage' | 'component.settings' | 'component.media' | 'tasks' | 'dialogs' | 'events' | 'component.lifecycle.read' | 'component.lifecycle.manage' | 'notifications';
+export type HostApiVersion = 2 | 3 | 4 | 5;
+export type ComponentPermission = 'project.media.read' | 'project.input.read' | 'project.output.write' | 'project.version.create' | 'project.progress' | 'project.files.read' | 'project.versions.read' | 'project.media.ratings.read' | 'component.storage' | 'component.settings' | 'component.media' | 'tasks' | 'dialogs' | 'events' | 'component.lifecycle.read' | 'component.lifecycle.manage' | 'notifications';
 export type ComponentHostErrorCode = 'COMPONENT_HOST_INVALID_REQUEST' | 'COMPONENT_HOST_PERMISSION_DENIED' | 'COMPONENT_HOST_NOT_FOUND' | 'COMPONENT_HOST_TOKEN_EXPIRED' | 'COMPONENT_HOST_TOKEN_SCOPE' | 'COMPONENT_HOST_LIMIT_EXCEEDED' | 'COMPONENT_HOST_VARIANT_UNAVAILABLE' | 'COMPONENT_HOST_CONFLICT' | 'COMPONENT_HOST_CANCELLED' | 'COMPONENT_HOST_TIMEOUT' | 'COMPONENT_HOST_SERVICE_EXITED' | 'COMPONENT_HOST_INTERNAL';
 export interface ComponentHostError extends Error { code: ComponentHostErrorCode | `COMPONENT_SERVICE_${string}`; retryable: boolean; details?: JsonValue }
-export interface ComponentContext { componentId: string; componentVersion: string; hostApiVersion: 1 | 2 | 3 | 4; surface: 'project' | 'application.settings'; projectId: string; projectName: string; projectStatus: string; scopeRelativePath: string; selectedRelativePaths: string[]; permissions: ComponentPermission[]; events: VersionedName[]; resolvedTheme: 'light' | 'dark' }
+export interface ComponentContext { componentId: string; componentVersion: string; hostApiVersion: 1 | 2 | 3 | 4 | 5; surface: 'project' | 'application.settings'; projectId: string; projectName: string; projectStatus: string; scopeRelativePath: string; selectedRelativePaths: string[]; permissions: ComponentPermission[]; events: VersionedName[]; resolvedTheme: 'light' | 'dark' }
 export type MediaKind = 'image' | 'raw' | 'video';
 export interface MediaPageRequest { pageSize?: number; cursor?: string | null; kinds?: MediaKind[] }
 export interface MediaPageItem { mediaRef: { relativePath: string }; relativePath: string; name: string; kind: MediaKind; extension: string; size: number; updatedAt: number; viaExternalLink?: true }
@@ -60,6 +60,19 @@ export type ComponentMediaResponse = { apiVersion: 2; opaqueRef: string; variant
 export interface VersionSourceMetadata { category?: string; role?: string; displayName?: string; componentId?: string; parentCapability?: 'structural' | 'workflow-input' | 'none' }
 export type ProjectProgressRequest = { action: 'list'; includeMissing?: boolean } | { action: 'create'; relativePath: string; mediaKind: 'image' | 'video'; versionKey: string; parentProgressId: string; displayName?: string; trackingEnabled?: boolean; sourceMetadata?: VersionSourceMetadata; sourceProgressIds?: string[] } | { action: 'relate'; childProgressId: string; parentProgressId: string; expectedUpdatedAt?: number };
 export type ProjectProgressResponse = { apiVersion: 2; progress: JsonObject[]; edges: JsonObject[] } | { apiVersion: 2; progress: JsonObject; edges: JsonObject[] } | { apiVersion: 2; result: JsonObject };
+export interface BoundedPage { cursor: string | null; hasMore: boolean; pageSize: number; truncated: boolean }
+export interface ProjectFileItem { relativePath: string; name: string; kind: 'directory' | 'file' | 'sidecar'; extension?: string; size?: number; updatedAt?: number }
+export interface ProjectFilesPageRequest { pageSize?: number; cursor?: string | null }
+export interface ProjectFilesSearchRequest extends ProjectFilesPageRequest { query: string }
+export interface ProjectFilesPageResponse { apiVersion: 1; items: ProjectFileItem[]; page: BoundedPage }
+export interface ProjectMediaMetadataRequest { relativePath: string }
+export interface ProjectMediaMetadataResponse { apiVersion: 1; mediaRef: { relativePath: string }; kind: MediaKind; size: number; updatedAt: number; dimensions: { width: number | null; height: number | null }; colorSpace: JsonValue; camera: { make: JsonValue; model: JsonValue; lens: JsonValue }; capture: { aperture: number | null; exposureTime: JsonValue; iso: number | null; focalLength: number | null; takenAt: JsonValue }; video: { codec: JsonValue; audioCodec: JsonValue; durationSeconds: number | null; frameRate: number | null; rotation: number | null } | null }
+export interface ProjectVersion { id: string; photoId: string; parentVersionId: string | null; versionNumber: number; name: string; type: string; status: string; note: string; isCurrent: boolean; isFinal: boolean; fileMissing: boolean; contentChanged: boolean; createdAt: number; updatedAt: number }
+export interface ProjectVersionsPageResponse { apiVersion: 1; items: ProjectVersion[]; page: BoundedPage }
+export interface ProjectVersionGraphResponse { apiVersion: 1; progress: JsonObject[]; versions: ProjectVersion[]; edges: Array<{ sourceId: string; targetId: string; kind: string }>; truncated: boolean }
+export interface ProjectMediaRatingsRequest { mediaRefs: Array<{ relativePath: string }> }
+export interface ProjectMediaRating { mediaRef: { relativePath: string }; revision: number; rating: number | null; labels: null; selectionState: null }
+export interface ProjectMediaRatingsResponse { apiVersion: 1; supported: { rating: true; labels: false; selectionState: false }; items: ProjectMediaRating[] }
 export interface HostCapabilityMap {
   'project.media.page.v2': { request: MediaPageRequest; response: MediaPageResponse };
   'project.media.variants.v2': { request: MediaVariantsRequest; response: MediaVariantsResponse };
@@ -75,6 +88,12 @@ export interface HostCapabilityMap {
   'component.media.v2': { request: ComponentMediaRequest; response: ComponentMediaResponse };
   'project.progress.v2': { request: ProjectProgressRequest; response: ProjectProgressResponse };
   'notifications.v2': { request: NotificationRequest; response: NotificationResult };
+  'project.files.page.v1': { request: ProjectFilesPageRequest; response: ProjectFilesPageResponse };
+  'project.files.search.v1': { request: ProjectFilesSearchRequest; response: ProjectFilesPageResponse };
+  'project.media.metadata.v1': { request: ProjectMediaMetadataRequest; response: ProjectMediaMetadataResponse };
+  'project.versions.page.v1': { request: ProjectFilesPageRequest; response: ProjectVersionsPageResponse };
+  'project.version.graph.v1': { request: { includeMissing?: boolean }; response: ProjectVersionGraphResponse };
+  'project.media.ratings.v1': { request: ProjectMediaRatingsRequest; response: ProjectMediaRatingsResponse };
 }
 export type HostCapability = keyof HostCapabilityMap;
 export type HostCapabilityRequest<K extends HostCapability> = HostCapabilityMap[K]['request'];
@@ -91,5 +110,6 @@ export type ComponentServiceOutboundFrame = ReadyFrame | ServiceSuccessFrame | S
 export interface ComponentSdk { readonly contractVersion: 1; getContext(): Promise<ComponentContext>; readonly notify?: (payload: NotificationRequest) => Promise<NotificationResult>; rpc<T = unknown>(method: VersionedName, payload?: Record<string, unknown>): Promise<T>; onEvent<T = JsonObject>(topic: VersionedName, callback: (payload: T) => void): () => void; onActivate(callback: () => void): () => void; onDeactivate(callback: () => void): () => void; onThemeChange(callback: (value: { contractVersion: 1; resolvedTheme: 'light' | 'dark' }) => void): () => void; onContextChange(callback: (context: ComponentContext) => void): () => void }
 declare global { interface Window { photoFlowComponent: ComponentSdk } }
 export const host: ComponentSdk;
-export function assertHostApiV2(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 2 | 3 | 4 };
-export function assertHostApiV4(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 4 };
+export function assertHostApiV2(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 2 | 3 | 4 | 5 };
+export function assertHostApiV4(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 4 | 5 };
+export function assertHostApiV5(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 5 };

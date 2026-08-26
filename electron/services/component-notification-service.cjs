@@ -93,15 +93,26 @@ class ComponentNotificationService {
     const rateLimit = normalized.tone === 'error' ? ERROR_RATE_LIMIT : RATE_LIMIT;
     const burstCount = timestamps.filter(timestamp => now - timestamp < BURST_WINDOW_MS).length;
     if (burstCount >= burstLimit || timestamps.length >= rateLimit) { this.stateByComponent.set(componentId, state); return failure('NOTIFICATION_RATE_LIMITED', 'Notification rate limit exceeded', true); }
-    const contentKey = normalized.dedupeKey ? `key:${normalized.dedupeKey}` : `content:${normalized.tone}:${normalized.message}`;
+    // dedupeKey identifies a renderer card, while this fingerprint identifies
+    // only an identical repeat of its current content. A tone/message change
+    // must be delivered so the renderer can replace a persistent card.
+    const dedupePrefix = normalized.dedupeKey ? `key:${normalized.dedupeKey}:` : '';
+    const contentKey = dedupePrefix ? `${dedupePrefix}${normalized.tone}:${normalized.message}` : `content:${normalized.tone}:${normalized.message}`;
     if (state.recent.has(contentKey)) { this.stateByComponent.set(componentId, state); return Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, accepted: false, deduplicated: true, code: 'NOTIFICATION_DEDUPLICATED' }); }
-    timestamps.push(now); state.recent.set(contentKey, now); this.stateByComponent.set(componentId, state);
+    timestamps.push(now);
+    const replacedRecent = [];
+    if (dedupePrefix) for (const [key, timestamp] of state.recent) if (key.startsWith(dedupePrefix)) { replacedRecent.push([key, timestamp]); state.recent.delete(key); }
+    state.recent.set(contentKey, now); this.stateByComponent.set(componentId, state);
+    const rollbackContentFingerprint = () => {
+      state.recent.delete(contentKey);
+      for (const [key, timestamp] of replacedRecent) state.recent.set(key, timestamp);
+    };
     const id = `${componentId}:${++this.sequence}`;
     const event = Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, type: 'notification', id, componentId, surface: context.surface, notification: normalized });
     if (this.rendererReady) {
-      if (!this.deliver(event)) { timestamps.pop(); state.recent.delete(contentKey); return failure('NOTIFICATION_HOST_UNAVAILABLE', 'Main notification host is unavailable', true); }
+      if (!this.deliver(event)) { timestamps.pop(); rollbackContentFingerprint(); return failure('NOTIFICATION_HOST_UNAVAILABLE', 'Main notification host is unavailable', true); }
     } else {
-      if (this.buffer.length >= BUFFER_LIMIT) { timestamps.pop(); state.recent.delete(contentKey); return failure('NOTIFICATION_BUFFER_FULL', 'Notification renderer buffer is full', true); }
+      if (this.buffer.length >= BUFFER_LIMIT) { timestamps.pop(); rollbackContentFingerprint(); return failure('NOTIFICATION_BUFFER_FULL', 'Notification renderer buffer is full', true); }
       this.buffer.push({ event, queuedAt: now });
     }
     return Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, accepted: true, id });

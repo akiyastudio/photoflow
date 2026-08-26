@@ -5,8 +5,10 @@ import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { FileBrowserWorkspace } from '../workspace/ProjectWorkspace';
 import { renamedEntryDestinationPath } from '../workspace/file-entry-interaction-model';
+import { pageOwnsFileOperationNotification } from '../workspace/file-operation-notification-model';
 import { INSPIRATION_FILE_BROWSER_CONTEXT } from '../file-browser/browser-context';
 import type { AppConfig, ComponentStatus, WorkspaceProject } from '../../types';
+import { useToast } from '../app/useTopToastStack';
 
 export const INSPIRATION_PROJECT_NAME = '.__photoflow_inspiration__';
 const inspirationCollapsedPathsStorageKey = (rootPath: string) => {
@@ -56,7 +58,6 @@ export const InspirationLibraryNavigator = ({
   onNavigate,
   onOpenInNewTab,
   onOpenSettings,
-  onNotice,
 }: {
   active: boolean;
   rootPath: string;
@@ -65,8 +66,9 @@ export const InspirationLibraryNavigator = ({
   onNavigate: (relativePath: string) => void;
   onOpenInNewTab: (relativePath: string) => void;
   onOpenSettings: () => void;
-  onNotice: (message: string, duration?: number) => void;
 }) => {
+  const toast = useToast();
+  const onNotice = useCallback((message: string, duration?: number) => { toast.show(message, duration); }, [toast]);
   type InspirationFolder = { name: string; relativePath: string; parentRelativePath: string; depth: number };
   const appDialog = useAppDialog();
   const [folders, setFolders] = useState<InspirationFolder[]>([]);
@@ -317,7 +319,8 @@ export const InspirationLibraryNavigator = ({
     setBusyPath(folder.relativePath);
     try {
       const result = await window.electronAPI.projectFileOperation(rootPath, '未分类', INSPIRATION_PROJECT_NAME, 'trash', [folder.relativePath]);
-      if (!result.success) { onNotice(`删除文件夹失败：${result.error || '未知错误'}`, 6000); return; }
+      const pageOwnsNotice = pageOwnsFileOperationNotification(result);
+      if (!result.success) { if (pageOwnsNotice) onNotice(`删除文件夹失败：${result.error || '未知错误'}`, 6000); return; }
       const normalizedCurrent = currentRelativePath.replace(/\\/g, '/');
       if (normalizedCurrent === folder.relativePath || normalizedCurrent.startsWith(`${folder.relativePath}/`)) onNavigate(folder.parentRelativePath);
       setCollapsedPaths(current => {
@@ -326,7 +329,9 @@ export const InspirationLibraryNavigator = ({
         return next;
       });
       await loadFolders();
-      onNotice(result.warning || `已将文件夹“${folder.name}”移入回收站`, result.warning ? 8000 : undefined);
+      if (pageOwnsNotice) onNotice(result.warning || `已将文件夹“${folder.name}”移入回收站`, result.warning ? 8000 : undefined);
+    } catch (error) {
+      onNotice(`删除文件夹失败：${error instanceof Error ? error.message : String(error || '未知错误')}`, 6000);
     } finally {
       setBusyPath('');
     }
@@ -365,7 +370,6 @@ export const InspirationLibraryPage = ({
   onDirectoryChange,
   navigationRequest,
   onOpenDirectoryPage,
-  onNotice,
 }: {
   pageId: string;
   active: boolean;
@@ -376,8 +380,9 @@ export const InspirationLibraryPage = ({
   onDirectoryChange: (pageId: string, relativePath: string) => void;
   navigationRequest?: { path: string; id: number };
   onOpenDirectoryPage: (relativePath: string) => void;
-  onNotice: (message: string, duration?: number) => void;
 }) => {
+  const toast = useToast();
+  const onNotice = useCallback((message: string, duration?: number) => { toast.show(message, duration); }, [toast]);
   const rootPath = config.inspirationLibrary.rootPath.trim();
   const [choosingRoot, setChoosingRoot] = useState(false);
   const attemptedInitialChoiceRef = useRef(false);

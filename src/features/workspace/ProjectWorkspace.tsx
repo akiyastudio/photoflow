@@ -33,12 +33,14 @@ import { metadataGroupDependencyKey, previewMetadataFieldsForEntry, reconcileExp
 import { projectWorkspaceClient } from '../../platform/project-workspace-client';
 import { useProjectFileSelection } from './useProjectFileSelection';
 import { defaultProjectFileSortDirection, isFolderLikeEntry, sortProjectFileEntries } from './file-entry-sort-model';
+import { pageOwnsFileOperationNotification } from './file-operation-notification-model';
 import { ImportCompletionNotice, ToolModal } from './ProjectToolModal';
 import { ColumnResizeHandle, ComponentToolbarActions, FileListColumnResizeHandle, ViewportContextMenu } from './ProjectWorkspaceLayout';
 import { deleteMediaThumbnailPreview, findCachedMediaThumbnailPreview, forgetMediaThumbnailPreviews, getMediaThumbnailPreview, mediaThumbnailPreviewKey, rememberMediaThumbnailPreview, requestThumbnail, useThumbnailUpdates } from './useProjectThumbnail';
 import { formatShutterSpeed, isOfficeOpenXmlEntry, isPhotoshopOpenEntry, isScreenshotMainImageEntry, pickCaptureDate, pickMetadataValue, requestCaptureDateTime } from './project-workspace-media-metadata';
 import { DEFAULT_FILE_LIST_COLUMN_WIDTHS, FILE_LIST_COLUMN_KEYS, FILE_LIST_GRID_CHROME_WIDTH, clampNumber, fitFileListColumnWidths, fitProjectColumnWidths, readStoredBoolean, readStoredNumber, resizeFileListColumnBoundary, scheduleAfterProjectPaint, type FileListColumnBoundary, type FileListColumnWidths } from './project-workspace-layout-model';
 import { PhotoshopIcon } from './PhotoshopIcon';
+import { useToast, type ToastActivityHandle } from '../app/useTopToastStack';
 const FILE_VIRTUAL_OVERSCAN_ROWS = 10;
 const RECENT_FILES_PAGE_SIZE = 240;
 const RECENT_FILES_LOAD_AHEAD_PX = 900;
@@ -315,6 +317,7 @@ const backgroundTaskPathKey = (value: unknown) => String(value || '').replace(/\
 const handledVideoTrimTaskIds = new Set<string>();
 
 const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePath, inspirationTargetWorkspacePath, inspirationLibraryRootPath, installedComponentIds: _installedComponentIds, componentHostActions = [], onOpenComponentPage = () => undefined, videoPlaybackSettings, projectToolbar = { order: [...PROJECT_TOOLBAR_ACTION_IDS], hidden: [], onlyShowAvailable: false }, customProjectCategories = [], projectCategoryOrder = [], progressNamePresets = [], initialPanel, initialRelativePath = '', importConfig, importDefaults, brollConfig, videoTools, matchConfig, researchConfig, mediaCacheConfig, defaultFolderSort, itemOpenMode, folderAlphabetFilterEnabled = true, versionTreeEnabled = true, favoriteDisplayMode = 'binary', browserContext, navigationRequest, onDirectoryChange, onOpenInspirationPath, onOpenDirectoryPage, onOpenToolTab = () => undefined, onCloseToolTab = () => undefined, onImportConfigChange, onMatchConfigChange, onResearchConfigChange, onNotice, onProjectMoved = () => undefined, onDeleted = () => undefined }: FileBrowserWorkspaceProps) => {
+  const toast = useToast();
   const appDialog = useAppDialog();
   const projectStatuses = useMemo<Array<WorkspaceProject['status']>>(() => {
     const values = [...normalizeProjectCategoryOrder(projectCategoryOrder, customProjectCategories), project.status];
@@ -688,7 +691,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [trackingConfirmationProgressId, setTrackingConfirmationProgressId] = useState('');
   const [progressCompareFilter, setProgressCompareFilter] = useState<ProgressCompareFilter>('recognized');
   const [activeProgressCompareItemKey, setActiveProgressCompareItemKey] = useState('');
-  const [progressTask, setProgressTask] = useState('');
+  const [workspaceActivityMessage, setWorkspaceActivityMessage] = useState('');
+  const workspaceActivityRef = useRef<ToastActivityHandle | null>(null);
+  useEffect(() => {
+    if (!workspaceActivityMessage) { workspaceActivityRef.current?.dismiss(); workspaceActivityRef.current = null; return; }
+    if (workspaceActivityRef.current) workspaceActivityRef.current.update(workspaceActivityMessage);
+    else workspaceActivityRef.current = toast.activity(workspaceActivityMessage, { dedupeKey: `workspace-activity:${pageId}` });
+  }, [pageId, toast, workspaceActivityMessage]);
+  useEffect(() => () => workspaceActivityRef.current?.dismiss(), []);
   const [progressSubmitting, setProgressSubmitting] = useState(false);
   const [progressImportStatus, setProgressImportStatus] = useState<ProjectFileOperationProgress | null>(null);
   const progressSubmittingRef = useRef(false);
@@ -1665,7 +1675,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setProgressSetup(null);
     setFolderMarkSetup(null);
     setProgressCompare(null);
-    setProgressTask('');
+    setWorkspaceActivityMessage('');
     setPanel(initialPanel);
     setResearchTargetPath('');
     setResearchTargetKind('file');
@@ -2452,15 +2462,18 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setPanelImportBusy('broll');
     try {
       const result = await projectWorkspaceClient.importBroll(workspacePath, project.status, project.name, { splitVideosOnImport: brollConfig.splitVideosOnImport, transcodeVideosOnImport: brollConfig.transcodeVideosOnImport, transcodeSettings: videoTools.transcode, deleteSourceAfterImport: deleteBrollSources, linkOnly: linkBrollSources, sourcePaths: brollSourcePaths });
-      if (!result.success) { onNotice(`导入花絮失败：${result.error || '未知错误'}`); return; }
-      if (result.cancelled) { onNotice('已取消选择花絮文件。'); return; }
+      const pageOwnsNotice = pageOwnsFileOperationNotification(result);
+      if (!result.success) { if (pageOwnsNotice) onNotice(`导入花絮失败：${result.error || '未知错误'}`); return; }
+      if (result.cancelled) { if (pageOwnsNotice) onNotice('已取消选择花絮文件。'); return; }
       setPanelImportResult({ kind: 'broll', count: result.count || 0, sourceDeleted: deleteBrollSources });
-      onNotice(`已导入 ${result.count || 0} 个花絮文件，源文件${deleteBrollSources ? '已删除' : '已保留'}。`);
+      if (pageOwnsNotice) onNotice(`已导入 ${result.count || 0} 个花絮文件，源文件${deleteBrollSources ? '已删除' : '已保留'}。`);
       if (result.warning) {
         if (isRecycleBinFailure(result.warning)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
-        else onNotice(result.warning, 6000);
+        else if (pageOwnsNotice) onNotice(result.warning, 6000);
       }
       refresh();
+    } catch (error) {
+      onNotice(`导入花絮失败：${error instanceof Error ? error.message : String(error || '未知错误')}`);
     } finally {
       setPanelImportBusy('');
     }
@@ -2479,7 +2492,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     await Promise.all([refresh(''), projectWorkflows ? loadProgressFolders() : Promise.resolve([])]);
     const cleanupSummary = result.recovery?.cleanupErrors.length ? `\n\n仍有 ${result.recovery.cleanupErrors.length} 项未能自动清理。` : '';
     await appDialog.alert({ title: '导入结果已保留，需要恢复处理', message: `软件已刷新目录和版本树。保留的外链或文件仍然有效，请勿直接重复导入同一来源。${cleanupSummary}`, detail: result.error, confirmLabel: '我知道了' });
-    onNotice('已刷新保留的导入结果；请先处理现有外链或文件，勿重复导入。', 10_000);
+    if (pageOwnsFileOperationNotification(result)) onNotice('已刷新保留的导入结果；请先处理现有外链或文件，勿重复导入。', 10_000);
     return true;
   };
   const importFiles = async () => {
@@ -2490,13 +2503,16 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     try {
       const result = await projectWorkspaceClient.importProjectFiles(workspacePath, project.status, project.name, targetRelativePath, { deleteSourceAfterImport: deleteFileSources, linkOnly: linkFileSources, sourcePaths: fileImportSourcePaths });
       if (await handleProjectImportRecovery(result)) return;
-      if (!result.success) { onNotice(`导入失败：${result.error || '未知错误'}`); return; }
-      if (result.cancelled) { onNotice('已取消导入。'); return; }
+      const pageOwnsNotice = pageOwnsFileOperationNotification(result);
+      if (!result.success) { if (pageOwnsNotice) onNotice(`导入失败：${result.error || '未知错误'}`); return; }
+      if (result.cancelled) { if (pageOwnsNotice) onNotice('已取消导入。'); return; }
       if (result.watchDegraded) setRootWatchFailed(true);
       setPanelImportResult({ kind: 'files', count: result.count || 0, sourceDeleted: deleteFileSources });
-      onNotice(`已导入 ${result.count || 0} 个文件，源文件${deleteFileSources ? '已删除' : '已保留'}。`);
+      if (pageOwnsNotice) onNotice(`已导入 ${result.count || 0} 个文件，源文件${deleteFileSources ? '已删除' : '已保留'}。`);
       refresh();
       refreshRecursiveResults(targetRelativePath);
+    } catch (error) {
+      onNotice(`导入失败：${error instanceof Error ? error.message : String(error || '未知错误')}`);
     } finally {
       setPanelImportBusy('');
     }
@@ -2883,7 +2899,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         if (candidate.includes('/')) {
           const moved = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'move', [candidate], '');
           if (!moved.success || !moved.movedItems?.[0]?.destinationRelativePath) {
-            onNotice(`移动导出文件夹失败：${moved.error || '未知错误'}`);
+            if (pageOwnsFileOperationNotification(moved)) onNotice(`移动导出文件夹失败：${moved.error || '未知错误'}`);
             return;
           }
           targetRelativePath = normalizeProjectRelativePath(moved.movedItems[0].destinationRelativePath);
@@ -3015,7 +3031,34 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     progressImportOperationIdRef.current = '';
     progressSubmittingRef.current = true;
     setProgressSubmitting(true);
+    let taskOwnedImportFailure = false;
     try {
+      if (draft.mode === 'create') {
+        if (progressNameHasConflict(draft)) { onNotice('生成的版本文件夹名称已存在，请修改版本号或名称。'); return; }
+        const generatedName = resolvedProgressFolderName(draft);
+        const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
+        const registered = await registerProgressWithWorkflow({
+          mediaKind: draft.mediaKind,
+          versionKey: draft.versionKey,
+          parentProgressId: draft.parentProgressId || undefined,
+          displayName: generatedName,
+          ...policy,
+          trackingState: policy.trackingEnabled ? 'pending_compare' : 'disabled',
+        }, draft.workflowInputProgressIds);
+        if (!registered.success || !registered.progressFolder || !registered.folder) throw new Error(registered.error || '无法原子创建进度和版本 V2 关系');
+        setProgressSetup(null);
+        setProgressFolders(current => current.some(folder => folder.id === registered.progressFolder!.id) ? current.map(folder => folder.id === registered.progressFolder!.id ? registered.progressFolder! : folder) : [...current, registered.progressFolder!]);
+        directoryEntriesCacheRef.current.delete('');
+        if (!currentRelativePathRef.current) {
+          const folderEntry: ProjectFileEntry = { ...registered.folder, kind: 'folder', extension: '', size: 0, createdAt: registered.folder.updatedAt };
+          setFileEntries(current => current.some(entry => entry.relativePath === folderEntry.relativePath) ? current : [...current, folderEntry]);
+        }
+        onNotice(`已创建${draft.mediaKind === 'image' ? '图片' : '视频'}进度“${generatedName}”（版本 V${draft.versionKey}）`);
+        void loadProgressFolders();
+        void refresh('');
+        return;
+      }
+
       if (draft.mode === 'mark' && draft.existingProgressId) {
         const existingProgress = progressFolders.find(folder => folder.id === draft.existingProgressId);
         if (!existingProgress) throw new Error('没有找到要修改的版本节点');
@@ -3058,7 +3101,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${updated.progressFolder.id}`, started.sessionId);
           setTrackingConfirmationProgressId(updated.progressFolder.id);
           if (started.sessionStatus === 'pending_confirm' || started.sessionStatus === 'committing' || started.sessionStatus === 'failed') setTrackingConfirmationSessionId(started.sessionId);
-          onNotice('修改已保存，正在后台比较版本。');
         } else {
           onNotice(`已修改进度“${updated.progressFolder.displayName}”。`);
         }
@@ -3066,38 +3108,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         return;
       }
 
-      if (progressNameHasConflict(draft)) { onNotice('生成的版本文件夹名称已存在，请修改版本号或名称。'); return; }
-      const generatedName = resolvedProgressFolderName(draft);
-      if (draft.mode === 'create') {
-        const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
-        const registered = await registerProgressWithWorkflow({
-          mediaKind: draft.mediaKind,
-          versionKey: draft.versionKey,
-          parentProgressId: draft.parentProgressId || undefined,
-          displayName: generatedName,
-          ...policy,
-          trackingState: policy.trackingEnabled ? 'pending_compare' : 'disabled',
-        }, draft.workflowInputProgressIds);
-        if (!registered.success || !registered.progressFolder || !registered.folder) throw new Error(registered.error || '无法原子创建进度和版本 V2 关系');
-        setProgressSetup(null);
-        setProgressFolders(current => current.some(folder => folder.id === registered.progressFolder!.id) ? current.map(folder => folder.id === registered.progressFolder!.id ? registered.progressFolder! : folder) : [...current, registered.progressFolder!]);
-        directoryEntriesCacheRef.current.delete('');
-        if (!currentRelativePathRef.current) {
-          const folderEntry: ProjectFileEntry = { ...registered.folder, kind: 'folder', extension: '', size: 0, createdAt: registered.folder.updatedAt };
-          setFileEntries(current => current.some(entry => entry.relativePath === folderEntry.relativePath) ? current : [...current, folderEntry]);
-        }
-        onNotice(`已创建${draft.mediaKind === 'image' ? '图片' : '视频'}进度“${generatedName}”（版本 V${draft.versionKey}）`);
-        void loadProgressFolders();
-        void refresh('');
-        return;
-      }
-
       if (draft.mode === 'mark') {
+        if (progressNameHasConflict(draft)) { onNotice('生成的版本文件夹名称已存在，请修改版本号或名称。'); return; }
+        const generatedName = resolvedProgressFolderName(draft);
         if (!draft.targetRelativePath) throw new Error('没有找到要标记的文件夹');
         let targetRelativePath = draft.targetRelativePath;
         const moveToRoot = draft.relationKind === 'main' && targetRelativePath.includes('/');
-        if (moveToRoot) setProgressTask('正在安全移动文件夹到项目根目录…');
-        setProgressTask(`正在标记${draft.mediaKind === 'image' ? '图片' : '视频'}进度…`);
+        if (moveToRoot) setWorkspaceActivityMessage('正在安全移动文件夹到项目根目录…');
+        setWorkspaceActivityMessage(`正在标记${draft.mediaKind === 'image' ? '图片' : '视频'}进度…`);
         const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
         const registered = await registerProgressWithWorkflow({
           relativePath: targetRelativePath,
@@ -3141,17 +3159,17 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         setSelectedPaths([targetRelativePath]);
 
         if (!policy.trackingEnabled || draft.relationKind === 'auxiliary') {
-          setProgressTask('');
+          setWorkspaceActivityMessage('');
           onNotice(`已将“${generatedName}”登记为${draft.relationKind === 'auxiliary' ? '选片辅助节点' : '版本进度'}。`);
           openCreatedProgressEditor();
           return;
         }
         if (!parentFolder) {
-          setProgressTask('正在建立首个版本的跟踪记录…');
+          setWorkspaceActivityMessage('正在建立首个版本的跟踪记录…');
           const baseline = await projectWorkspaceClient.registerVersionBaseline(workspacePath, project.status, project.name, targetRelativePath);
           if (!baseline.success) throw new Error(baseline.error || '无法建立首版跟踪');
           await loadProgressFolders();
-          setProgressTask('');
+          setWorkspaceActivityMessage('');
           onNotice(`已标记并建立首版跟踪：${progressFolder.displayName}`);
           openCreatedProgressEditor();
           return;
@@ -3159,7 +3177,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
 
         const started = await projectWorkspaceClient.startProgressTracking(workspacePath, project.name, { progressId: progressFolder.id, mode: 'compare' });
         if (!started.success || !started.sessionId) {
-          setProgressTask('');
+          setWorkspaceActivityMessage('');
           await loadProgressFolders();
           directoryEntriesCacheRef.current.clear();
           await refresh('');
@@ -3170,13 +3188,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${progressFolder.id}`, started.sessionId);
         setTrackingConfirmationProgressId(progressFolder.id);
         if (started.sessionStatus === 'pending_confirm' || started.sessionStatus === 'committing' || started.sessionStatus === 'failed') setTrackingConfirmationSessionId(started.sessionId);
-        setProgressTask('');
-        onNotice('已开始后台比较，完成后可确认版本匹配。');
+        setWorkspaceActivityMessage('');
         openCreatedProgressEditor();
         return;
       }
 
-      setProgressTask('');
+      if (progressNameHasConflict(draft)) { onNotice('生成的版本文件夹名称已存在，请修改版本号或名称。'); return; }
+      const generatedName = resolvedProgressFolderName(draft);
+      setWorkspaceActivityMessage('');
       const importOptions: Parameters<typeof projectWorkspaceClient.importProgressFiles>[4] = {
         deleteSourceAfterImport: draft.deleteSourceAfterImport,
         linkOnly: draft.linkOnly,
@@ -3204,7 +3223,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           cancelDefault: true,
         });
         if (policy !== 'skip' && policy !== 'keep-both') {
-          setProgressTask('');
+          setWorkspaceActivityMessage('');
           setProgressSetup(null);
           return;
         }
@@ -3215,14 +3234,17 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         });
       }
       if (await handleProjectImportRecovery(imported)) {
-        setProgressTask('');
+        setWorkspaceActivityMessage('');
         setProgressSetup(null);
         return;
       }
-      if (!imported.success) throw new Error(imported.error || '导入失败');
+      if (!imported.success) {
+        taskOwnedImportFailure = !pageOwnsFileOperationNotification(imported);
+        throw new Error(imported.error || '导入失败');
+      }
       if (imported.watchDegraded) setRootWatchFailed(true);
       if (imported.cancelled || !imported.folder) {
-        setProgressTask('');
+        setWorkspaceActivityMessage('');
         setProgressSetup(null);
         return;
       }
@@ -3245,24 +3267,24 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
 
       const skippedSummary = imported.skippedCount ? `；已跳过 ${imported.skippedCount} 个重复或冲突文件` : '';
       if (appendTarget && !(imported.count || 0)) {
-        setProgressTask('');
+        setWorkspaceActivityMessage('');
         setProgressImportCompletion(`没有向“${progressFolder.displayName}”追加新文件${skippedSummary}。`);
         return;
       }
 
       if (!trackingEnabled) {
-        setProgressTask('');
+        setWorkspaceActivityMessage('');
         setProgressImportCompletion(appendTarget
           ? `已向“${progressFolder.displayName}”追加 ${imported.count || 0} 个文件${skippedSummary}；沿用未开启版本跟踪的设置。`
           : `已导入 ${imported.count || 0} 个文件；此项目未开启版本跟踪。`);
         return;
       }
       if (!parentFolder) {
-        setProgressTask(appendTarget ? '正在把本次追加文件写入首版跟踪记录…' : '正在建立首个版本的跟踪记录…');
+        setWorkspaceActivityMessage(appendTarget ? '正在把本次追加文件写入首版跟踪记录…' : '正在建立首个版本的跟踪记录…');
         const baseline = await projectWorkspaceClient.registerVersionBaseline(workspacePath, project.status, project.name, imported.folder.relativePath);
         if (!baseline.success) throw new Error(baseline.error || '无法建立首版跟踪');
         await loadProgressFolders();
-        setProgressTask('');
+        setWorkspaceActivityMessage('');
         setProgressImportCompletion(appendTarget
           ? `已向“${progressFolder.displayName}”追加 ${imported.count || 0} 个文件并更新首版跟踪${skippedSummary}。`
           : `已导入并建立首版跟踪：${progressFolder.displayName}`);
@@ -3272,7 +3294,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       setProgressSetup(null);
       const started = await projectWorkspaceClient.startProgressTracking(workspacePath, project.name, { progressId: progressFolder.id, mode: appendTarget ? 'refresh' : 'compare' });
       if (!started.success || !started.sessionId) {
-        setProgressTask('');
+        setWorkspaceActivityMessage('');
         await loadProgressFolders();
         directoryEntriesCacheRef.current.clear();
         await refresh('');
@@ -3284,12 +3306,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${progressFolder.id}`, started.sessionId);
       setTrackingConfirmationProgressId(progressFolder.id);
       if (started.sessionStatus === 'pending_confirm' || started.sessionStatus === 'committing' || started.sessionStatus === 'failed') setTrackingConfirmationSessionId(started.sessionId);
-      setProgressTask('');
-      onNotice('导入完成，正在后台比较版本。');
+      setWorkspaceActivityMessage('');
     } catch (error) {
-      setProgressTask('');
+      setWorkspaceActivityMessage('');
       const action = draft.mode === 'create' ? '创建' : draft.mode === 'import' ? '导入' : draft.existingProgressId ? '修改' : '标记';
-      onNotice(`${action}版本进度失败：${error instanceof Error ? error.message : String(error)}`);
+      if (!taskOwnedImportFailure) onNotice(`${action}版本进度失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
       progressSubmittingRef.current = false;
       setProgressSubmitting(false);
@@ -3365,9 +3386,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const progressTrackingRefreshLabel = (progressFolder: ProgressFolder) => progressTrackingActionLabel(progressFolder);
   const openProgressRepair = async (progressFolder: ProgressFolder) => {
     if (!progressFolder.repairBatchId) { onNotice('没有找到可修复的版本批次，请刷新版本跟踪。'); return; }
-    setProgressTask('正在读取失败的文件操作…');
+    setWorkspaceActivityMessage('正在读取失败的文件操作…');
     const result = await projectWorkspaceClient.getVersionBatchOperations(workspacePath, progressFolder.repairBatchId);
-    setProgressTask('');
+    setWorkspaceActivityMessage('');
     if (!result.success) { onNotice(`读取修复任务失败：${result.error || '未知错误'}`); return; }
     setProgressRepair({ progressFolder, batchId: progressFolder.repairBatchId, operations: result.operations });
   };
@@ -3389,7 +3410,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     onNotice(`仍有 ${retried.renameErrors?.length || 0} 个文件操作需要处理：${retried.error || retried.renameErrors?.[0]?.error || '请检查文件占用或目标名称冲突'}`, 7000);
   };
   const refreshProgressTracking = async (requestedProgress: ProgressFolder) => {
-    if (progressSubmitting || progressTask) return;
+    if (progressSubmitting || workspaceActivityMessage) return;
     if (!progressTrackingAction(requestedProgress)) { onNotice('选片、预览和协作内容不参与版本跟踪。'); return; }
     if (requestedProgress.trackingState === 'needs_repair' && requestedProgress.repairBatchId) { await openProgressRepair(requestedProgress); return; }
     setProgressSubmitting(true);
@@ -3400,7 +3421,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       const parentFolder = trackingParentForProgress(progressFolder, latestFolders.length ? latestFolders : progressFolders);
       const relativePath = progressFolderRelativePath(progressFolder);
       if (!parentFolder) {
-        setProgressTask('正在重新扫描首个版本并更新项目跟踪…');
+        setWorkspaceActivityMessage('正在重新扫描首个版本并更新项目跟踪…');
         const baseline = await projectWorkspaceClient.registerVersionBaseline(workspacePath, project.status, project.name, relativePath);
         if (!baseline.success) throw new Error(baseline.error || '无法更新项目跟踪');
         await loadProgressFolders();
@@ -3431,14 +3452,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     } catch (error) {
       onNotice(`刷新版本跟踪失败：${error instanceof Error ? error.message : String(error)}`, 7000);
     } finally {
-      setProgressTask('');
+      setWorkspaceActivityMessage('');
       setProgressSubmitting(false);
     }
   };
   const commitProgressCompare = async () => {
     if (!progressCompare || progressSubmitting) return;
     setProgressSubmitting(true);
-    setProgressTask('正在确认版本关系并写入素材历史…');
+    setWorkspaceActivityMessage('正在确认版本关系并写入素材历史…');
     const accepted = new Set(progressCompare.acceptedSources);
     const candidates = [...progressCompare.matches, ...progressCompare.suggestions];
     const acceptedMatches = candidates.filter(match => accepted.has(match.source));
@@ -3456,13 +3477,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     });
     if (!result.success) {
       setProgressSubmitting(false);
-      setProgressTask('');
+      setWorkspaceActivityMessage('');
       onNotice(`建立版本跟踪失败：${result.error || '未知错误'}`);
       return;
     }
     const committedProgressFolder = progressCompare.progressFolder;
     setProgressSubmitting(false);
-    setProgressTask('');
+    setWorkspaceActivityMessage('');
     setProgressCompare(null);
     const latestProgressFolders = await loadProgressFolders();
     directoryEntriesCacheRef.current.clear();
@@ -4347,7 +4368,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         setClipboardHasFiles(previousClipboardHasFiles);
         setClipboardPending(false);
       }
-      onNotice('粘贴已取消'); refresh(); return;
+      if (pageOwnsFileOperationNotification(result)) onNotice('粘贴已取消');
+      refresh(); return;
     }
     if (!result.success) {
       if (isClipboardSelection && clipboardOperationSequenceRef.current === clipboardOperationSequence) {
@@ -4362,7 +4384,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         if (projectWorkflows) await loadProgressFolders();
       }
       if (operation === 'trash' && isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
-      else onNotice(`操作失败：${result.error || '未知错误'}`);
+      else if (pageOwnsFileOperationNotification(result)) onNotice(`操作失败：${result.error || '未知错误'}`);
       return;
     }
     if (operation === 'copy' || operation === 'cut') {
@@ -4377,19 +4399,21 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         && cutPaths.length === pasteCutPathsSnapshot.length
         && pasteCutPathsSnapshot.every(path => cutPaths.includes(path))) setCutPaths([]);
       if (operation === 'trash') setCutPaths(current => current.filter(path => !targetPaths.includes(path)));
-      onNotice(operation === 'trash' && result.warning ? result.warning : operation === 'trash'
-        ? result.permanentCount
-          ? `已删除 ${result.count} 个项目，其中 ${result.permanentCount} 个已按 Windows 确认永久删除`
-          : `已移入回收站 ${result.count} 个项目`
-        : operation === 'paste'
-          ? result.replacedCount
-            ? result.replacedRetainedCount
-              ? `已粘贴 ${result.count} 个项目；替换了 ${result.replacedCount} 个同名项目，其中 ${result.replacedRetainedCount} 个原项目因回收站操作失败而保留为安全恢复副本${result.replacedPermanentCount ? `，另有 ${result.replacedPermanentCount} 个已按 Windows 确认永久删除，此次替换无法撤销` : ''}`
-              : result.replacedPermanentCount
-              ? `已粘贴 ${result.count} 个项目；替换了 ${result.replacedCount} 个同名项目，其中 ${result.replacedPermanentCount} 个原项目已按 Windows 确认永久删除，此次替换无法撤销`
-              : `已粘贴 ${result.count} 个项目；${result.replacedCount} 个同名项目的原内容已移入回收站`
-            : `已粘贴 ${result.count} 个项目`
-          : '操作完成', result.warning ? 8000 : undefined);
+      if (pageOwnsFileOperationNotification(result)) {
+        onNotice(operation === 'trash' && result.warning ? result.warning : operation === 'trash'
+          ? result.permanentCount
+            ? `已删除 ${result.count} 个项目，其中 ${result.permanentCount} 个已按 Windows 确认永久删除`
+            : `已移入回收站 ${result.count} 个项目`
+          : operation === 'paste'
+            ? result.replacedCount
+              ? result.replacedRetainedCount
+                ? `已粘贴 ${result.count} 个项目；替换了 ${result.replacedCount} 个同名项目，其中 ${result.replacedRetainedCount} 个原项目因回收站操作失败而保留为安全恢复副本${result.replacedPermanentCount ? `，另有 ${result.replacedPermanentCount} 个已按 Windows 确认永久删除，此次替换无法撤销` : ''}`
+                : result.replacedPermanentCount
+                ? `已粘贴 ${result.count} 个项目；替换了 ${result.replacedCount} 个同名项目，其中 ${result.replacedPermanentCount} 个原项目已按 Windows 确认永久删除，此次替换无法撤销`
+                : `已粘贴 ${result.count} 个项目；${result.replacedCount} 个同名项目的原内容已移入回收站`
+              : `已粘贴 ${result.count} 个项目`
+            : '操作完成', result.warning ? 8000 : undefined);
+      }
       setSelectedPaths([]);
       if (projectWorkflows && (operation === 'trash' || operation === 'paste')) await loadProgressFolders();
       scheduleDirectoryRefresh(result.affectedDirectories);
@@ -4477,9 +4501,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const normalizedPath = normalizeProjectRelativePath(entry.relativePath);
     if (!normalizedPath || normalizedPath.includes('/')) return false;
     const normalizedName = entry.name.toLocaleLowerCase('zh-CN');
-    const registeredFolder = registeredProgressFolderForEntry(entry);
-    return PROTECTED_PROJECT_FOLDER_NAMES.has(normalizedName)
-      || Boolean(registeredFolder && registeredFolder.nodeRole !== 'progress');
+    return PROTECTED_PROJECT_FOLDER_NAMES.has(normalizedName);
   };
   const selectedContainsProtectedRenameEntry = selectedEntries.some(isProtectedRenameEntry);
   const selectedRegisteredProgressRenameEntries = selectedEntries.filter(entry => registeredProgressFolderForEntry(entry)?.nodeRole === 'progress');
@@ -4640,14 +4662,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     // resolves the original IPC request with the completed file instead.
     if (task.state === 'completed' && !result) return;
     handledVideoTrimTaskIds.add(task.id);
-    if (task.state === 'cancelled') {
-      onNotice('已取消视频导出');
-      return;
-    }
-    if (task.state === 'failed') {
-      onNotice(`视频剪辑失败：${task.error || task.message || '未知错误'}`, 7000);
-      return;
-    }
+    if (task.state === 'cancelled' || task.state === 'failed') return;
     void showCompletedVideoTrim(result || {}, String(task.metadata?.sourceRelativePath || ''));
   }, [active, backgroundTasks, project.name, project.status, showCompletedVideoTrim, workspacePath]);
   const loadPreviewVideoTimelineFrames = useCallback((times: number[]) => {
@@ -5058,9 +5073,18 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       cancelDefault: true,
     });
     if (decision !== 'execute') return;
-    const result = await projectWorkspaceClient.executeManualSelection(project.path, { sourceFolderRelativePath, relativePaths: targetPaths, expectedSignature: preflight.signature, operationId: crypto.randomUUID() });
-    if (!result.success || result.cancelled) { onNotice(`选片失败：${result.error || (result.cancelled ? '已取消并回滚本次创建内容' : '未知错误')}`); return; }
-    onNotice(`已向“${result.targetFolderRelativePath || result.outputFolderName || '选片输出'}”追加 ${result.copiedCount || 0} 个媒体；附属节点已登记。`);
+    let result: Awaited<ReturnType<typeof projectWorkspaceClient.executeManualSelection>>;
+    try {
+      result = await projectWorkspaceClient.executeManualSelection(project.path, { sourceFolderRelativePath, relativePaths: targetPaths, expectedSignature: preflight.signature, operationId: crypto.randomUUID() });
+    } catch (error) {
+      onNotice(`选片失败：${error instanceof Error ? error.message : String(error || '未知错误')}`);
+      return;
+    }
+    if (!result.success || result.cancelled) {
+      if (pageOwnsFileOperationNotification(result)) onNotice(`选片失败：${result.error || (result.cancelled ? '已取消并回滚本次创建内容' : '未知错误')}`);
+      return;
+    }
+    if (pageOwnsFileOperationNotification(result)) onNotice(`已向“${result.targetFolderRelativePath || result.outputFolderName || '选片输出'}”追加 ${result.copiedCount || 0} 个媒体；附属节点已登记。`);
     setSelectedPaths([]);
     await loadProgressFolders();
     directoryEntriesCacheRef.current.clear();
@@ -5197,7 +5221,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (pointerTarget.closest('[data-inline-rename-input]')) return;
     const target = pointerTarget.closest<HTMLElement>('[data-entry-path]');
     target?.focus({ preventScroll: true });
-    if (target?.dataset.entryPath) entryPointerModifiersRef.current = { path: target.dataset.entryPath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey };
+    if (target?.dataset.entryPath) {
+      const relativePath = target.dataset.entryPath;
+      entryPointerModifiersRef.current = { path: relativePath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey };
+      const requestedPaths = selectedPaths.includes(relativePath) ? selectedPaths : [relativePath];
+      const dragPaths = requestedPaths.filter(path => !activeFileEntries.some(candidate => candidate.relativePath === path && isUnsupportedShortcutContent(candidate)));
+      if (event.button === 0 && dragPaths.length) void projectWorkspaceClient.prepareProjectFileDrag(workspacePath, project.status, project.name, dragPaths).catch(() => undefined);
+    }
   };
   const getEntryDisplayName = (entry: ProjectFileEntry) => (entry.kind === 'shortcut' || entry.externalLink) && entry.name.toLocaleLowerCase().endsWith('.lnk')
     ? entry.name.slice(0, -4)
@@ -5217,7 +5247,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     onPointerDown={event => event.stopPropagation()}
     onClick={event => event.stopPropagation()}
     onChange={event => setInlineRenameValue(event.target.value)}
-    onBlur={cancelInlineRename}
+    onBlur={() => { void commitInlineRename(); }}
     onKeyDown={event => {
       event.stopPropagation();
       if (event.key === 'Enter') { event.preventDefault(); void commitInlineRename(); }
@@ -5318,12 +5348,19 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       onNotice('已标记为版本节点的外链不能普通移动；请使用版本管理功能，或先移动外链到项目内');
       return;
     }
-    const result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, operation, paths, targetRelativePath);
-    if (result.cancelled) { onNotice('导入已取消'); return; }
-    if (!result.success) { onNotice(`${operation === 'move' ? '移动' : '导入'}失败：${result.error || '未知错误'}`); return; }
+    let result: Awaited<ReturnType<typeof projectWorkspaceClient.projectFileOperation>>;
+    try {
+      result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, operation, paths, targetRelativePath);
+    } catch (error) {
+      onNotice(`${operation === 'move' ? '移动' : '导入'}失败：${error instanceof Error ? error.message : String(error || '未知错误')}`);
+      return;
+    }
+    const pageOwnsNotice = pageOwnsFileOperationNotification(result);
+    if (result.cancelled) { if (pageOwnsNotice) onNotice(operation === 'move' ? '移动已取消' : '导入已取消'); return; }
+    if (!result.success) { if (pageOwnsNotice) onNotice(`${operation === 'move' ? '移动' : '导入'}失败：${result.error || '未知错误'}`); return; }
     if (operation === 'move') setCutPaths(current => current.filter(path => !paths.includes(path)));
     setSelectedPaths([]);
-    onNotice(`已${operation === 'move' ? '移动' : '导入'} ${result.count} 个项目到 ${targetName}`);
+    if (pageOwnsNotice) onNotice(`已${operation === 'move' ? '移动' : '导入'} ${result.count} 个项目到 ${targetName}`);
     if (operation === 'import' && projectWorkflows) {
       const folders = trackingSuggestionsForCreatedItems(result.createdItems || []);
       if (folders.length) setPendingProgressFolders(folders);
@@ -5430,6 +5467,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       internalDropHandledRef.current = false;
       return;
     }
+    if (result.nativeDrag?.status === 'failed' || result.nativeDrag?.status === 'failed-fast') return;
     if (!result.insideWindow || !dragPaths.length) return;
     const element = document.elementFromPoint(result.clientX, result.clientY);
     const titlebarDropZone = element?.closest<HTMLElement>('[data-folder-tab-drop-zone="true"]');
@@ -5465,10 +5503,17 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setSurfaceDropActive(false);
     if (!externalPaths.length) { onNotice('无法读取拖入文件的系统路径，请重新拖入'); return; }
     if (finalViewOpen) { onNotice('喜爱图片浏览是只读视图，不能导入文件'); return; }
-    const result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'import', externalPaths, currentRelativePath);
-    if (result.cancelled) { onNotice('导入已取消'); return; }
-    if (!result.success) { onNotice(`导入失败：${result.error || '未知错误'}`); return; }
-    onNotice(`已导入 ${result.count} 个项目`);
+    let result: Awaited<ReturnType<typeof projectWorkspaceClient.projectFileOperation>>;
+    try {
+      result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'import', externalPaths, currentRelativePath);
+    } catch (error) {
+      onNotice(`导入失败：${error instanceof Error ? error.message : String(error || '未知错误')}`);
+      return;
+    }
+    const pageOwnsNotice = pageOwnsFileOperationNotification(result);
+    if (result.cancelled) { if (pageOwnsNotice) onNotice('导入已取消'); return; }
+    if (!result.success) { if (pageOwnsNotice) onNotice(`导入失败：${result.error || '未知错误'}`); return; }
+    if (pageOwnsNotice) onNotice(`已导入 ${result.count} 个项目`);
     if (projectWorkflows) {
       const folders = trackingSuggestionsForCreatedItems(result.createdItems || []);
       if (folders.length) setPendingProgressFolders(folders);
@@ -5593,7 +5638,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       {progressFolder && (progressFolder.nodeRole === 'progress' ? <button type="button" onPointerDown={event => event.stopPropagation()} onKeyDown={event => event.stopPropagation()} onClick={event => { event.stopPropagation(); openMarkProgress(entry); }} title={`编辑 V${progressFolder.versionKey} 进度`} aria-label={`编辑 V${progressFolder.versionKey} 进度`} className="absolute right-3 top-3 z-10 rounded-full bg-blue-600 px-2 py-1 text-[10px] font-bold text-white shadow-sm transition hover:bg-blue-500 focus:outline-none focus:ring-2 focus:ring-blue-300">{versionTreeNodeBadgeLabel(progressFolder)}</button> : <span className={`absolute right-3 top-3 z-10 rounded-full px-2 py-1 text-[10px] font-bold shadow-sm ${progressFolder.nodeRole === 'selection' || progressFolder.relationKind === 'auxiliary' || workflow ? 'bg-violet-600 text-white' : previewArtifact ? 'bg-amber-500 text-white' : transcodeArtifact ? 'bg-blue-600 text-white' : 'bg-slate-700 text-white'}`}>{versionTreeNodeBadgeLabel(progressFolder)}</span>)}
       {!progressFolder && sourceKind && <span className="absolute right-3 top-3 z-10 rounded-full bg-slate-700 px-2 py-1 text-[10px] font-bold text-white shadow-sm">原始素材</span>}
       <div className={`relative flex aspect-square items-center justify-center ${previewArtifact ? 'rounded-xl bg-amber-500/[0.035]' : transcodeArtifact ? 'rounded-xl bg-blue-500/[0.035]' : ''}`}>{renderEntryIcon(entry, true)}</div>
-      {progressFolder ? <p className="mt-1 truncate text-xs font-medium text-slate-700" title={displayName}>{displayName}</p> : renderEntryName(entry, true)}
+      {progressFolder && inlineRenamePath !== entry.relativePath ? <p className="mt-1 truncate text-xs font-medium text-slate-700" title={displayName}>{displayName}</p> : renderEntryName(entry, true)}
       <p className={`mt-0.5 truncate text-[10px] ${progressFolder?.trackingState === 'needs_repair' ? 'font-bold text-amber-600' : 'text-slate-400'}`}><span aria-hidden className="mr-1">●</span>{statusLabel}</p>
     </div>;
   };
@@ -5692,7 +5737,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       {fileMenu && createPortal(<ViewportContextMenu x={fileMenu.x} y={fileMenu.y} widthClass="w-52" allowSubmenus>
         {isFolderLikeEntry(fileMenu.entry) && !isUnsupportedShortcutContent(fileMenu.entry) && onOpenDirectoryPage && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); onOpenDirectoryPage(entry.relativePath); }}><FolderPlus size={14}/>在新标签页打开</button><div className="my-1 border-t border-slate-100"/></>}
         {projectWorkflows && isFolderLikeEntry(fileMenu.entry) && !fileMenuVersionTreeFolder && <><button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>标记…</button><div className="my-1 border-t border-slate-100"/></>}
-        {projectWorkflows && fileMenuRegisteredProgressFolder && <><button disabled={fileMenuRegisteredProgressFolder.trackingState === 'committing' || fileMenuRegisteredProgressFolder.trackingState === 'needs_repair'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>修改进度</button>{!fileMenuRegisteredProgressFolder.parentProgressId && <button className="project-menu-item" onClick={() => { const progressFolder = fileMenuRegisteredProgressFolder; setFileMenu(null); void unregisterLegacyOrphanProgress(progressFolder); }}><X size={14}/>取消旧版游离进度登记</button>}{progressTrackingAction(fileMenuRegisteredProgressFolder) && <button disabled={progressSubmitting || Boolean(progressTask) || fileMenuRegisteredProgressFolder.trackingState === 'committing'} title="按已持久化策略刷新当前主分支版本跟踪" className="project-menu-item" onClick={() => { const progressFolder = fileMenuRegisteredProgressFolder; setFileMenu(null); void refreshProgressTracking(progressFolder); }}><RefreshCw size={14}/>{progressTrackingRefreshLabel(fileMenuRegisteredProgressFolder)}</button>}<div className="my-1 border-t border-slate-100"/></>}
+        {projectWorkflows && fileMenuRegisteredProgressFolder && <><button disabled={fileMenuRegisteredProgressFolder.trackingState === 'committing' || fileMenuRegisteredProgressFolder.trackingState === 'needs_repair'} className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openMarkProgress(entry); }}><GitBranch size={14}/>修改进度</button>{!fileMenuRegisteredProgressFolder.parentProgressId && <button className="project-menu-item" onClick={() => { const progressFolder = fileMenuRegisteredProgressFolder; setFileMenu(null); void unregisterLegacyOrphanProgress(progressFolder); }}><X size={14}/>取消旧版游离进度登记</button>}{progressTrackingAction(fileMenuRegisteredProgressFolder) && <button disabled={progressSubmitting || Boolean(workspaceActivityMessage) || fileMenuRegisteredProgressFolder.trackingState === 'committing'} title="按已持久化策略刷新当前主分支版本跟踪" className="project-menu-item" onClick={() => { const progressFolder = fileMenuRegisteredProgressFolder; setFileMenu(null); void refreshProgressTracking(progressFolder); }}><RefreshCw size={14}/>{progressTrackingRefreshLabel(fileMenuRegisteredProgressFolder)}</button>}<div className="my-1 border-t border-slate-100"/></>}
         {gatherToProject && <><button disabled={fileMenuContainsShortcutContent || gatheringInspiration || !inspirationProjects.length} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); startGatherInspiration(targets); }}><FolderInput size={14}/>添加到项目{inspirationTargetProject ? `“${inspirationTargetProject.name}”` : '…'}</button>{inspirationTargetProject && <button disabled={fileMenuContainsShortcutContent || gatheringInspiration} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); setGatherPickerPaths(targets); }}><ChevronDown size={14}/>选择其他项目…</button>}<div className="my-1 border-t border-slate-100"/></>}
         {projectWorkflows && canSelectFileMenuMedia && <><button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><div className="my-1 border-t border-slate-100"/></>}
         {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; const restoreSelection = fileMenuSelectionWasImplicitRef.current ? fileMenuSelectionSnapshotRef.current : null; setFileMenu(null); if (restoreSelection) { selectionAnchorPathRef.current = fileMenuSelectionAnchorSnapshotRef.current; setSelectedPaths(restoreSelection); } openPreviewFromMenu(entry); }}><PanelLeftOpen size={14}/>预览</button>}
@@ -5909,9 +5954,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
               if (result.watchDegraded) setRootWatchFailed(true);
               directoryEntriesCacheRef.current.clear();
               await Promise.all([refresh(''), loadProgressFolders()]);
-              onNotice(result.watchDegraded
-                ? `已创建 ${result.count || 0} 个原始素材外链；部分位置无法实时监听，已启用低频补扫。`
-                : `已创建 ${result.count || 0} 个原始素材外链`);
+              if (pageOwnsFileOperationNotification(result)) {
+                onNotice(result.watchDegraded
+                  ? `已创建 ${result.count || 0} 个原始素材外链；部分位置无法实时监听，已启用低频补扫。`
+                  : `已创建 ${result.count || 0} 个原始素材外链`);
+              }
             }}
             onBusyChange={setNegativeImportBusy}
             onImportConfigChange={onImportConfigChange}
@@ -6002,7 +6049,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       </ToolModal>}
       {mountedPanels.has('trash') && <ToolModal title={PROJECT_PANEL_TITLES.trash} ownerPageId={pageId} panelKind="trash" open={panel === 'trash'} onClose={() => setPanel(null)}><p className="text-sm text-slate-500">项目“{project.name}”及其全部内容将移入系统回收站。</p><button onClick={moveToTrash} className="mt-4 rounded-lg bg-red-600 px-4 py-2 text-sm font-bold text-white hover:bg-red-500">确认移入回收站</button></ToolModal>}
       {gatherPickerPaths && createPortal(<div role="dialog" aria-modal="true" aria-label="选择灵感汇聚项目" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><section className="w-full max-w-md rounded-2xl border border-slate-200 bg-white p-5 shadow-2xl"><div className="flex items-center justify-between gap-3"><div><h3 className="text-lg font-bold text-slate-900">选择目标项目</h3><p className="mt-1 text-sm text-slate-500">所选灵感将会出现在目录项目下的“策划”文件夹。</p></div><button type="button" disabled={gatheringInspiration} onClick={() => setGatherPickerPaths(null)} title="关闭" className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100"><X size={17}/></button></div><div className="mt-4 max-h-80 space-y-1 overflow-y-auto">{inspirationProjects.map(targetProject => <button key={targetProject.path} type="button" disabled={gatheringInspiration} onClick={() => void gatherInspiration(targetProject, gatherPickerPaths)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-3 text-left text-sm hover:bg-blue-50 ${targetProject.path === inspirationTargetProject?.path ? 'bg-blue-50 font-bold text-blue-700' : 'text-slate-700'}`}><Folder size={17} className="shrink-0 text-blue-500"/><span className="min-w-0 flex-1 truncate">{targetProject.name}</span><span className="shrink-0 text-xs text-slate-400">{targetProject.status}</span></button>)}{!inspirationProjects.length && <p className="rounded-lg bg-slate-50 px-3 py-5 text-center text-sm text-slate-500">当前工作目录中没有可用项目。</p>}</div></section></div>, document.body)}
-      {progressTask && createPortal(<div role="status" aria-live="polite" className="fixed left-1/2 top-14 z-[390] flex w-[min(92vw,520px)] -translate-x-1/2 items-center gap-3 rounded-xl bg-slate-900 px-4 py-3 text-sm font-medium text-white shadow-2xl"><Loader2 size={18} className="shrink-0 animate-spin text-blue-300"/><span>{progressTask}</span></div>, document.body)}
       {folderMarkSetup && <ToolModal title="标记文件夹用途" ownerPageId={pageId} panelKind="folder-mark" open busy={progressSubmitting} onClose={() => setFolderMarkSetup(null)}><FolderMarkPanel
         draft={folderMarkSetup}
         folders={progressFolders}
@@ -7335,20 +7381,22 @@ const MediaThumbnail = ({ entry, cacheConfig, requestedSize, queueOrder, large =
   </span>;
 };
 
-type ProjectWorkspaceProps = Omit<FileBrowserWorkspaceProps, 'browserContext' | 'onDirectoryChange' | 'onOpenToolTab' | 'onCloseToolTab'> & {
+type ProjectWorkspaceProps = Omit<FileBrowserWorkspaceProps, 'browserContext' | 'onDirectoryChange' | 'onOpenToolTab' | 'onCloseToolTab' | 'onNotice'> & {
   pageId: string;
   onDirectoryChange?: (pageId: string, relativePath: string) => void;
   onOpenToolTab?: (pageId: string, kind: 'version', label: string) => void;
   onCloseToolTab?: (pageId: string, kind: 'version') => void;
 };
 const ProjectWorkspace = ({ pageId, onDirectoryChange, onOpenToolTab, onCloseToolTab, ...props }: ProjectWorkspaceProps) => {
+  const toast = useToast();
+  const onNotice = useCallback((message: string, duration?: number) => { toast.show(message, duration); }, [toast]);
   const bridgeRef = useRef({ onDirectoryChange, onOpenToolTab, onCloseToolTab });
   bridgeRef.current = { onDirectoryChange, onOpenToolTab, onCloseToolTab };
   const browserContext = useMemo(() => ({ ...PROJECT_FILE_BROWSER_CONTEXT, title: props.project.name }), [props.project.name]);
   const handleDirectoryChange = useCallback((relativePath: string) => bridgeRef.current.onDirectoryChange?.(pageId, relativePath), [pageId]);
   const handleOpenToolTab = useCallback((kind: 'version', label: string) => bridgeRef.current.onOpenToolTab?.(pageId, kind, label), [pageId]);
   const handleCloseToolTab = useCallback((kind: 'version') => bridgeRef.current.onCloseToolTab?.(pageId, kind), [pageId]);
-  return <FileBrowserWorkspace {...props} pageId={pageId} onDirectoryChange={handleDirectoryChange} onOpenToolTab={handleOpenToolTab} onCloseToolTab={handleCloseToolTab} browserContext={browserContext}/>;
+  return <FileBrowserWorkspace {...props} pageId={pageId} onDirectoryChange={handleDirectoryChange} onOpenToolTab={handleOpenToolTab} onCloseToolTab={handleCloseToolTab} browserContext={browserContext} onNotice={onNotice}/>;
 };
 
 export { FileBrowserWorkspace, ProjectWorkspace };

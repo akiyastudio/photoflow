@@ -85,9 +85,7 @@ global.window = testWindow; global.document = testDocument; global.navigator = {
 
 const compile = relativePath => ts.transpileModule(fs.readFileSync(path.resolve(__dirname, '..', relativePath), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
 const loadCommonJs = (source, localRequire = require) => { const module = { exports: {} }; new Function('module', 'exports', 'require', source)(module, module.exports, localRequire); return module.exports; };
-const versionSourceCompatibility = loadCommonJs(compile('src/compatibility/version-source.ts'));
-const compatibilityRequire = request => request === '../../compatibility/version-source.ts' ? versionSourceCompatibility : require(request);
-const model = loadCommonJs(compile('src/features/versioning/versioning-v2-model.ts'), compatibilityRequire);
+const model = loadCommonJs(compile('src/features/versioning/versioning-v2-model.ts'));
 const sourceFixture = overrides => ({ id: 'node', projectId: 'project', mediaKind: 'image', versionKey: '1', nodeRole: 'progress', relationKind: 'main', parentProgressId: 'root', folderMissing: false, trackingEnabled: false, renameFromParent: false, copyMissingFromParent: false, trackingState: 'disabled', ...overrides });
 const ordinarySelection = sourceFixture({ id: 'selection', nodeRole: 'selection', relationKind: 'auxiliary', sourceMetadata: null });
 const ordinaryProgress = sourceFixture({ id: 'progress', sourceMetadata: null });
@@ -95,7 +93,7 @@ const legacyWorkflow = sourceFixture({ id: 'legacy-workflow', nodeRole: 'workflo
 const metadataWorkflow = sourceFixture({ id: 'metadata-workflow', nodeRole: 'workflow', relationKind: undefined, parentProgressId: undefined, artifactKind: 'vendor.workflow', sourceMetadata: { category: 'workflow', displayName: '供应商流程', componentId: 'vendor', parentCapability: 'workflow-input' } });
 assert.equal(model.workflowInputLabel(ordinarySelection), '图片选片');
 assert.equal(model.versionSourceMetadata(ordinaryProgress).parentCapability, 'structural');
-assert.equal(model.workflowInputLabel(legacyWorkflow), '协作');
+assert.equal(model.workflowInputLabel(legacyWorkflow), '组件工作流');
 assert.equal(model.workflowInputLabel(metadataWorkflow), '供应商流程');
 assert.deepEqual(model.selectableWorkflowInputs([ordinarySelection, ordinaryProgress, legacyWorkflow, metadataWorkflow], 'image').map(item => item.id), ['selection', 'legacy-workflow', 'metadata-workflow']);
 const panelSwitch = loadCommonJs(compile('src/components/PanelSwitch.tsx'));
@@ -104,7 +102,7 @@ const panel = loadCommonJs(compile('src/features/versioning/VersionProgressPanel
 const folderMarkModel = loadCommonJs(compile('src/features/versioning/folder-mark-model.ts'), request => request === './versioning-v2-model' ? model : request === './VersionProgressPanel' ? panel : require(request));
 const folderMarkPanel = { ...folderMarkModel, ...loadCommonJs(compile('src/features/versioning/FolderMarkPanel.tsx'), request => request === './versioning-v2-model' ? model : request === './VersionProgressPanel' ? panel : request === './folder-mark-model' ? folderMarkModel : require(request)) };
 const canvasModel = loadCommonJs(compile('src/features/versioning/version-tree-canvas-model.ts'));
-const edgeModel = loadCommonJs(compile('src/features/versioning/version-tree-edge-model.ts'), compatibilityRequire);
+const edgeModel = loadCommonJs(compile('src/features/versioning/version-tree-edge-model.ts'));
 const layoutModel = loadCommonJs(compile('src/features/versioning/version-tree-layout-model.ts'), request => request === './version-tree-edge-model.ts' ? edgeModel : require(request));
 const canvasHook = loadCommonJs(compile('src/features/versioning/use-version-tree-canvas.ts'), request => request === './version-tree-canvas-model' ? canvasModel : require(request));
 const canvasHookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/versioning/use-version-tree-canvas.ts'), 'utf8');
@@ -146,6 +144,13 @@ const purposeAdoptionSource = projectWorkspaceSource.slice(
   projectWorkspaceSource.indexOf('const renderVersionTreeEntry'),
 );
 assert(purposeAdoptionSource.includes("mode: 'original' | 'broll'") && !purposeAdoptionSource.includes("'companion'") && !purposeAdoptionSource.includes("'preview'"), 'the unified mark submit path must create only original or broll standalone purposes');
+const versionTreeEntryRendererStart = projectWorkspaceSource.indexOf('const renderVersionTreeEntry');
+const versionTreeEntryRendererSource = projectWorkspaceSource.slice(
+  versionTreeEntryRendererStart,
+  projectWorkspaceSource.indexOf('const progressCompareCandidates =', versionTreeEntryRendererStart),
+);
+assert(versionTreeEntryRendererSource.includes('progressFolder && inlineRenamePath !== entry.relativePath')
+  && versionTreeEntryRendererSource.includes('renderEntryName(entry, true)'), 'a registered progress node must render the shared inline rename input inside the version-tree canvas');
 const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
 const versioningPublic = { ...model, ...layoutModel, ...canvasModel, ...edgeModel, ...canvasHook };
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {

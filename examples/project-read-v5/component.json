@@ -1,0 +1,22 @@
+{
+  "apiVersion": 1,
+  "id": "project-read-v5",
+  "version": "1.0.0",
+  "componentHost": {
+    "contractVersion": 2,
+    "compatibility": { "minHostApiVersion": 5, "maxHostApiVersion": 5 },
+    "contributions": [
+      { "type": "workspace.toolbarAction", "id": "open", "label": "Project Read V5", "pageId": "main" },
+      { "type": "component.fullPage", "id": "main", "title": "Project Read V5", "entry": "ui/index.html" }
+    ],
+    "service": {
+      "protocolVersion": 1,
+      "runtime": "node",
+      "entrypoints": { "default": "service.cjs" },
+      "rpcMethods": ["sample.project-files.v1"],
+      "capabilities": ["project.files.page.v1"],
+      "permissions": ["project.files.read"],
+      "events": []
+    }
+  }
+}

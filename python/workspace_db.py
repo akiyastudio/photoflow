@@ -2577,6 +2577,35 @@ def media_bundle(db, photo_id: str):
     }
 
 
+def media_versions_snapshot(db, payload: dict):
+    """Bounded, side-effect-free version rows for a single registered project and physical scope."""
+    project = project_row(db, payload["projectName"])
+    scope_path_key = canonical_path(str(payload.get("scopePath") or "")).casefold()
+    project_path_key = canonical_path(str(payload.get("projectPath") or "")).casefold()
+    if not scope_path_key or not project_path_key or not (scope_path_key == project_path_key or scope_path_key.startswith(project_path_key + os.sep)):
+        raise ValueError("version_snapshot_scope_invalid: 查询范围无效")
+    requested_limit = int(payload.get("limit") or 5000)
+    if requested_limit < 1 or requested_limit > 5000:
+        raise ValueError("version_snapshot_limit_invalid: 查询上限无效")
+    like_prefix = scope_path_key.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + os.sep.replace("\\", "\\\\") + "%"
+    rows = db.execute(
+        """SELECT version.* FROM versions AS version
+             JOIN photos AS photo ON photo.id=version.photo_id
+            WHERE photo.project_id=? AND photo.is_deleted=0 AND version.is_deleted=0
+              AND (version.file_path_key=? OR version.file_path_key LIKE ? ESCAPE '\\')
+            ORDER BY version.created_at DESC,version.id LIMIT ?""",
+        (project["id"], scope_path_key, like_prefix, requested_limit + 1),
+    ).fetchall()
+    items = [{
+        "id": row["id"], "photoId": row["photo_id"], "parentVersionId": row["parent_version_id"],
+        "versionNumber": row["version_number"], "versionName": row["version_name"], "versionType": row["version_type"],
+        "status": row["status"], "note": row["note"], "isCurrent": bool(row["is_current"]), "isFinal": bool(row["is_final"]),
+        "fileMissing": bool(row["file_missing"]), "contentChanged": bool(row["content_changed"]),
+        "createdAt": row["created_at"], "updatedAt": row["updated_at"],
+    } for row in rows[:requested_limit]]
+    return {"success": True, "versions": items, "truncated": len(rows) > requested_limit}
+
+
 def upsert_file_record(db, owner_id: str, file_path: str, stat: os.stat_result, identity: str | None,
                        fingerprint: str, full_hash: str | None = None):
     timestamp = int(time.time() * 1000)
@@ -9291,6 +9320,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "media_get":
         result = media_get(root, db, payload)
+        db.close()
+        return result
+    elif action == "media_versions_snapshot":
+        result = media_versions_snapshot(db, payload)
         db.close()
         return result
     elif action == "media_create_version":

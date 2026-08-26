@@ -24,6 +24,29 @@ assert.equal(sent[0][0], 'component-host:notification.v2');
 assert.equal(service.publish(descriptor('alpha'), { tone: 'success', message: 'saved' }, project).code, 'NOTIFICATION_DEDUPLICATED');
 assert.equal(service.publish(descriptor('beta'), { tone: 'success', message: 'saved' }, project).accepted, true, 'dedupe is isolated by component');
 
+const transitionSent = [];
+let transitionNow = 20000;
+const transitions = new ComponentNotificationService({ mainWindow: { isDestroyed: () => false, webContents: { isDestroyed: () => false, send: (...args) => transitionSent.push(args) } }, now: () => transitionNow });
+transitions.setRendererReady({ rendererToken: 'renderer-transitions', revision: 0, ready: true });
+const persistentFailure = transitions.publish(descriptor('transition-alpha'), { tone: 'error', message: '历史读取失败', dedupeKey: 'history-load' }, project);
+assert.equal(persistentFailure.accepted, true);
+const identicalFailure = transitions.publish(descriptor('transition-alpha'), { tone: 'error', message: '历史读取失败', dedupeKey: 'history-load' }, project);
+assert.equal(identicalFailure.code, 'NOTIFICATION_DEDUPLICATED', 'same component/key/tone/message is suppressed inside the content window');
+const recovered = transitions.publish(descriptor('transition-alpha'), { tone: 'success', message: '历史已恢复', dedupeKey: 'history-load' }, project);
+assert.equal(recovered.accepted, true, 'same card key with error→success must be delivered inside 1200ms');
+const updatedRecovery = transitions.publish(descriptor('transition-alpha'), { tone: 'success', message: '迁移已恢复', dedupeKey: 'history-load' }, project);
+assert.equal(updatedRecovery.accepted, true, 'same card key with a changed message must be delivered inside 1200ms');
+assert.deepStrictEqual(transitionSent.map(([, event]) => event.notification), [
+  { tone: 'error', message: '历史读取失败', dedupeKey: 'history-load' },
+  { tone: 'success', message: '历史已恢复', dedupeKey: 'history-load' },
+  { tone: 'success', message: '迁移已恢复', dedupeKey: 'history-load' },
+]);
+const failedAgain = transitions.publish(descriptor('transition-alpha'), { tone: 'error', message: '历史读取失败', dedupeKey: 'history-load' }, project);
+assert.equal(failedAgain.accepted, true, 'returning to an earlier payload after an intervening update is a new card transition, not a duplicate');
+const isolatedTransition = transitions.publish(descriptor('transition-beta'), { tone: 'error', message: '历史读取失败', dedupeKey: 'history-load' }, project);
+assert.equal(isolatedTransition.accepted, true, 'same dedupe key and content remains isolated between components');
+assert.equal(transitionNow, 20000, 'all transition assertions execute within the same controlled 1200ms window');
+
 for (const [payload, code] of [
   [{ tone: 'other', message: 'x' }, 'NOTIFICATION_INVALID_TONE'],
   [{ tone: 'info', message: ' ' }, 'NOTIFICATION_INVALID_MESSAGE'],

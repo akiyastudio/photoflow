@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const COMPONENT_HOST_CONTRACT_VERSION = 2;
-const COMPONENT_HOST_API_VERSION = 4;
+const COMPONENT_HOST_API_VERSION = 5;
 const COMPONENT_HOST_MIN_API_VERSION = 2;
 const COMPONENT_SERVICE_PROTOCOL_VERSION = 1;
 const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage', 'application.settingsPage']);
@@ -14,6 +14,8 @@ const HOST_CAPABILITIES = new Set([
   'component.storage.v2', 'component.settings.v2', 'component.events.v2',
   'component.lifecycle.v2', 'component.media.v2', 'project.progress.v2',
   'notifications.v2',
+  'project.files.page.v1', 'project.files.search.v1', 'project.media.metadata.v1',
+  'project.versions.page.v1', 'project.version.graph.v1', 'project.media.ratings.v1',
 ]);
 const HOST_PERMISSIONS = new Set([
   'project.media.read', 'project.input.read', 'project.output.write',
@@ -21,6 +23,7 @@ const HOST_PERMISSIONS = new Set([
   'tasks', 'dialogs', 'events', 'component.lifecycle.read', 'component.lifecycle.manage',
   'component.media', 'project.progress',
   'notifications',
+  'project.files.read', 'project.versions.read', 'project.media.ratings.read',
 ]);
 const CAPABILITY_PERMISSIONS = Object.freeze({
   'project.media.page.v2': 'project.media.read',
@@ -37,6 +40,12 @@ const CAPABILITY_PERMISSIONS = Object.freeze({
   'component.media.v2': 'component.media',
   'project.progress.v2': 'project.progress',
   'notifications.v2': 'notifications',
+  'project.files.page.v1': 'project.files.read',
+  'project.files.search.v1': 'project.files.read',
+  'project.media.metadata.v1': 'project.media.read',
+  'project.versions.page.v1': 'project.versions.read',
+  'project.version.graph.v1': 'project.versions.read',
+  'project.media.ratings.v1': 'project.media.ratings.read',
 });
 const COMPONENT_ICON_MIME_TYPES = new Map([['.png', 'image/png'], ['.svg', 'image/svg+xml']]);
 const MAX_COMPONENT_ICON_BYTES = 512 * 1024;
@@ -228,6 +237,13 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       if (min < 4) throw new Error('Notifications require minHostApiVersion 4 or newer');
       if (raw.capabilities.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.capabilities).size !== raw.capabilities.length) throw new Error('Host API 4 capabilities must be exact and unique');
       if (raw.permissions.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.permissions).size !== raw.permissions.length) throw new Error('Host API 4 permissions must be exact and unique');
+    }
+    const hostApi5Declaration = capabilities.some(value => ['project.files.page.v1', 'project.files.search.v1', 'project.media.metadata.v1', 'project.versions.page.v1', 'project.version.graph.v1', 'project.media.ratings.v1'].includes(value))
+      || permissions.some(value => ['project.files.read', 'project.versions.read', 'project.media.ratings.read'].includes(value));
+    if (hostApi5Declaration) {
+      if (min < 5) throw new Error('Project read extensions require minHostApiVersion 5 or newer');
+      if (raw.capabilities.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.capabilities).size !== raw.capabilities.length) throw new Error('Host API 5 capabilities must be exact and unique');
+      if (raw.permissions.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.permissions).size !== raw.permissions.length) throw new Error('Host API 5 permissions must be exact and unique');
     }
     const events = [...new Set((raw.events || []).map(value => requiredText(value, 'service event', 128)))];
     if (events.length > 32 || events.some(event => !VERSIONED_METHOD.test(event))) throw new Error('Component service events must be a bounded versioned allowlist');

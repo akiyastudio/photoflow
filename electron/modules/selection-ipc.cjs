@@ -16,9 +16,15 @@ const registerSelectionIpc = ({ ipcMain, path, fs, selectionService, workspaceCa
     throw new Error('项目未在当前工作区登记');
   };
   const requestFor = (projectPath, request) => ({ ...request, ...resolveRegisteredProject(projectPath) });
-  const publishProgress = (event, progress) => event?.sender?.send?.('workspace-selection-progress', progress);
+  const publishProgress = (event, progress) => {
+    if (typeof event?.sender?.send !== 'function') return false;
+    event.sender.send('workspace-selection-progress', progress);
+    return true;
+  };
   const handle = (method, options = {}) => async (event, projectPath, request = {}) => {
     let trustedRequest;
+    let terminalOperationId = '';
+    let taskNotificationOwned = false;
     try {
       trustedRequest = requestFor(projectPath, request);
       trustedRequest.onProgress = progress => publishProgress(event, progress);
@@ -28,19 +34,27 @@ const registerSelectionIpc = ({ ipcMain, path, fs, selectionService, workspaceCa
         if (operationId) {
           const phase = result?.cancelled ? 'cancelled' : result?.success === false ? 'failed' : 'complete';
           const message = phase === 'complete' ? '选片文件处理完成' : phase === 'cancelled' ? '选片文件处理已取消' : result?.error || '选片文件处理失败';
-          publishProgress(event, { operationId, phase, progress: phase === 'complete' ? 100 : 0, message, ...(phase === 'failed' ? { error: message } : {}) });
+          if (publishProgress(event, { operationId, phase, progress: phase === 'complete' ? 100 : 0, message, ...(phase === 'failed' ? { error: message } : {}) })) {
+            terminalOperationId = operationId;
+            taskNotificationOwned = true;
+          }
         }
       }
-      return result;
+      return options.publishTerminal
+        ? { ...result, ...(terminalOperationId ? { operationId: terminalOperationId } : {}), ...(taskNotificationOwned ? { taskNotificationOwned: true } : {}) }
+        : result;
     } catch (error) {
       if (options.publishTerminal) {
         const operationId = String(trustedRequest?.operationId || request?.operationId || '');
         if (operationId) {
           const message = error.message || String(error);
-          publishProgress(event, { operationId, phase: 'failed', progress: 0, message, error: message });
+          if (publishProgress(event, { operationId, phase: 'failed', progress: 0, message, error: message })) {
+            terminalOperationId = operationId;
+            taskNotificationOwned = true;
+          }
         }
       }
-      return { success: false, error: error.message || String(error) };
+      return { success: false, error: error.message || String(error), ...(terminalOperationId ? { operationId: terminalOperationId } : {}), ...(taskNotificationOwned ? { taskNotificationOwned: true } : {}) };
     }
   };
 

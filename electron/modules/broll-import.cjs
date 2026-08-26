@@ -199,6 +199,7 @@ const registerBrollImportIpc = ({
 
   ipcMain.handle('workspace-import-broll', async (event, workspacePath, status, projectName, options = {}) => {
     const operationId = crypto.randomUUID();
+    let taskNotificationOwned = false;
     let job = { cancelled: false, finishing: false };
     let task = null;
     const publish = payload => task?.publish(payload);
@@ -271,6 +272,7 @@ const registerBrollImportIpc = ({
       job = task.job;
       job.cancel = task.cancel;
       activeOperations.set(operationId, job);
+      taskNotificationOwned = true;
       await task.start();
       publish({ phase: 'scanning', progress: 0, totalBytes, bytesCopied: 0, totalFiles: sources.length, filesCopied: 0 });
 
@@ -385,7 +387,7 @@ const registerBrollImportIpc = ({
         source: 'broll',
         media_kind: 'mixed',
       });
-      return { success: true, operationId, count: sources.length, splitCount, transcodeCount, clearedCount, warning: warning || undefined };
+      return { success: true, operationId, taskNotificationOwned: true, count: sources.length, splitCount, transcodeCount, clearedCount, warning: warning || undefined };
     } catch (error) {
       if (createdManagedLinkIds.length) {
         try { projectVirtualPaths.revokeManagedExternalLinkIds(createdManagedLinkIds); }
@@ -404,7 +406,7 @@ const registerBrollImportIpc = ({
       if (cancelled) task?.cancelled();
       else task?.fail(error);
       if (!cancelled) writeLog('error', 'B-roll import failed', { projectName, error: error.message || String(error) });
-      return cancelled ? { success: true, cancelled: true, count: 0, splitCount: 0, clearedCount: 0 } : { success: false, error: error.message || String(error) };
+      return cancelled ? { success: true, cancelled: true, operationId, taskNotificationOwned, count: 0, splitCount: 0, clearedCount: 0 } : { success: false, operationId, taskNotificationOwned, error: error.message || String(error) };
     } finally {
       activeOperations.delete(operationId);
     }

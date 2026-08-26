@@ -2537,6 +2537,7 @@ const registerWorkspaceIpc = context => {
   
   ipcMain.handle('workspace-import-files', async (event, workspacePath, status, projectName, relativePath = '', options = {}) => {
     const operationId = crypto.randomUUID();
+    let taskNotificationOwned = false;
     let job = { cancelled: false, finishing: false };
     let task = null;
     const publish = payload => task?.publish(payload);
@@ -2637,6 +2638,7 @@ const registerWorkspaceIpc = context => {
       job = task.job;
       job.cancel = task.cancel;
       activeProjectFileOperations.set(operationId, job);
+      taskNotificationOwned = true;
       await task.start();
       const totalBytes = sourceInfos.reduce((sum, source) => sum + source.size, 0);
       const totalFiles = sourceInfos.reduce((sum, source) => sum + source.fileCount, 0);
@@ -2701,7 +2703,7 @@ const registerWorkspaceIpc = context => {
       });
       publish({ phase: 'complete', progress: 100, currentName: '文件导入完成', bytesCopied: totalBytes, totalBytes, filesCopied: totalFiles, totalFiles });
       task.complete('文件导入完成');
-      return { success: true, operationId, count: sourcePaths.length };
+      return { success: true, operationId, taskNotificationOwned: true, count: sourcePaths.length };
     } catch (error) {
       if (importUndoToken) removeUndoOperation(importUndoToken);
       let preserveCreatedExternalLinks = false;
@@ -2742,8 +2744,8 @@ const registerWorkspaceIpc = context => {
       else task?.fail(error);
       if (!cancelled) writeLog('error', 'Project file import failed', error);
       return cancelled
-        ? { success: true, cancelled: true, operationId, count: 0, ...(recoveryRequired ? { recoveryRequired: true, recovery: { operationId, leftoverPaths, cleanupErrors, preservedProgressIds: [...adoptedProgressIds] } } : {}) }
-        : { success: false, operationId, error: failureMessage, ...(recoveryRequired ? { recoveryRequired: true, recovery: { operationId, leftoverPaths, cleanupErrors, preservedProgressIds: [...adoptedProgressIds] } } : {}) };
+        ? { success: true, cancelled: true, operationId, taskNotificationOwned, count: 0, ...(recoveryRequired ? { recoveryRequired: true, recovery: { operationId, leftoverPaths, cleanupErrors, preservedProgressIds: [...adoptedProgressIds] } } : {}) }
+        : { success: false, operationId, taskNotificationOwned, error: failureMessage, ...(recoveryRequired ? { recoveryRequired: true, recovery: { operationId, leftoverPaths, cleanupErrors, preservedProgressIds: [...adoptedProgressIds] } } : {}) };
     } finally {
       activeProjectFileOperations.delete(operationId);
     }
@@ -2751,6 +2753,7 @@ const registerWorkspaceIpc = context => {
   
   ipcMain.handle('workspace-import-progress-files', async (event, workspacePath, status, projectName, folderName, options = {}) => {
     const operationId = crypto.randomUUID();
+    let taskNotificationOwned = false;
     let job = { cancelled: false, finishing: false };
     let task = null;
     const publish = payload => task?.publish(payload);
@@ -2884,6 +2887,7 @@ const registerWorkspaceIpc = context => {
       job = task.job;
       job.cancel = task.cancel;
       activeProjectFileOperations.set(operationId, job);
+      taskNotificationOwned = true;
       await task.start();
       let totalBytes = sourceInfos.reduce((sum, source) => sum + source.stat.size, 0);
       publish({ phase: 'scanning', progress: 0, currentName: '正在检查重复文件', bytesCopied: 0, totalBytes, filesCopied: 0, totalFiles: sourceInfos.length });
@@ -3035,6 +3039,7 @@ const registerWorkspaceIpc = context => {
       return {
         success: true,
         operationId,
+        taskNotificationOwned: true,
         count: sourceInfos.length,
         skippedCount,
         skippedNames,
@@ -3082,7 +3087,7 @@ const registerWorkspaceIpc = context => {
       else task?.fail(error);
       if (!cancelled) writeLog('error', 'Progress version import failed', { projectName, folderName, error: error.message || String(error) });
       const recovery = recoveryRequired ? { recoveryRequired: true, recovery: { operationId, leftoverPaths, cleanupErrors, preservedProgressIds: createdExternalProgressId ? [createdExternalProgressId] : [] } } : {};
-      return cancelled ? { success: true, cancelled: true, operationId, count: 0, ...recovery } : { success: false, operationId, error: failureMessage, ...recovery };
+      return cancelled ? { success: true, cancelled: true, operationId, taskNotificationOwned, count: 0, ...recovery } : { success: false, operationId, taskNotificationOwned, error: failureMessage, ...recovery };
     } finally {
       activeProjectFileOperations.delete(operationId);
     }

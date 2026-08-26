@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useState } from 'react';
 import type { ComponentHostAction, ComponentPageInstance, ComponentPageOpenScope, ComponentStatus, WorkspaceProject } from '../../types';
 import { bindComponentPageInstance, closeComponentPage, closeProjectComponentPages, componentPageActivationSucceeded, componentPageIsAvailable, ensureComponentPage } from './component-page-model';
+import { useToast } from '../app/useTopToastStack';
 
 type ComponentHostBrowserPage = { id: string; projectId: string; project?: WorkspaceProject | null };
 
-export const useComponentPages = ({ browserPages, components, onProjectFallback, onHomeFallback, onNotice }: {
+export const useComponentPages = ({ browserPages, components, onProjectFallback, onHomeFallback }: {
   browserPages: ComponentHostBrowserPage[];
   components: ComponentStatus[];
   onProjectFallback: (page: ComponentHostBrowserPage) => void;
   onHomeFallback: () => void;
-  onNotice: (message: string, duration?: number) => void;
 }) => {
+  const toast = useToast();
   const [actions, setActions] = useState<ComponentHostAction[]>([]);
   const [pages, setPages] = useState<ComponentPageInstance[]>([]);
   const [activeIdentity, setActiveIdentity] = useState('');
@@ -50,11 +51,11 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     if (componentPageActivationSucceeded(result)) { setActiveIdentity(page.identity); return true; }
     setPages(current => closeComponentPage(current, page.identity));
     setActiveIdentity(current => current === page.identity ? '' : current);
-    onNotice('组件页已失效，请重新打开', 5000);
+    toast.show('组件页已失效，请重新打开', { tone: 'warning', dedupeKey: 'component-page-stale' });
     const projectPage = browserPages.find(candidate => candidate.projectId === page.projectId && candidate.project);
     if (projectPage) onProjectFallback(projectPage); else onHomeFallback();
     return false;
-  }, [browserPages, onHomeFallback, onNotice, onProjectFallback]);
+  }, [browserPages, onHomeFallback, onProjectFallback, toast]);
   const open = useCallback(async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string, insertAfterTabId = 'home', scope?: ComponentPageOpenScope) => {
     const ensured = ensureComponentPage(pages, action, project, workspacePath, insertAfterTabId);
     setPages(current => ensureComponentPage(current, action, project, workspacePath, insertAfterTabId).pages);
@@ -63,11 +64,11 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     if (!result.success || !result.page) {
       if (ensured.created) setPages(current => closeComponentPage(current, ensured.page.identity));
       setActiveIdentity(ensured.created ? '' : ensured.page.identity);
-      onNotice(`打开组件页失败：${result.error || '未知错误'}`, 5000); return false;
+      toast.show(`打开组件页失败：${result.error || '未知错误'}`, { tone: 'error', dedupeKey: `component-page-open:${action.componentId}:${action.pageId}` }); return false;
     }
     setPages(current => bindComponentPageInstance(current, ensured.page.identity, result.page!.instanceId));
     return true;
-  }, [onNotice, pages]);
+  }, [pages, toast]);
   const close = useCallback(async (page: ComponentPageInstance) => {
     if (page.instanceId) await window.electronAPI.closeComponentPage(page.instanceId).catch(() => undefined);
     setPages(current => closeComponentPage(current, page.identity));

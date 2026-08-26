@@ -1,9 +1,11 @@
 const { getProtectedProjectFolderRegistry } = require('../services/protected-project-folder.cjs');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
+const { createNativeFileDragService } = require('../services/native-file-drag-service.cjs');
 
 const registerFileOperationsIpc = context => {
   const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
+  const nativeFileDrag = createNativeFileDragService({ app, BrowserWindow, Date, nativeImage, process, writeLog });
   const resolveVirtual = (root, relativePath, options = {}) => projectVirtualPaths
     ? projectVirtualPaths.resolve(root, relativePath, options)
     : (() => {
@@ -216,29 +218,39 @@ const registerFileOperationsIpc = context => {
     return { success: true };
   });
   
-  ipcMain.on('workspace-start-file-drag', async (event, workspacePath, status, projectName, relativePaths = []) => {
-    let validatedRelativePaths = [];
+  const resolveFileDragSources = (workspacePath, status, projectName, relativePaths) => {
+    if (!Array.isArray(relativePaths) || !relativePaths.length) throw new Error('没有可拖动的文件');
+    const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const sources = Array.from(new Set(relativePaths.map(relativePath => {
+      if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的文件路径');
+      const source = resolveVirtual(root, relativePath, { externalRootMode: 'target' }).physicalPath;
+      if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
+      return source;
+    })));
+    return {
+      sources,
+      relativePaths: relativePaths.map(relativePath => String(relativePath).replace(/\\/g, '/')),
+    };
+  };
+
+  ipcMain.handle('workspace-prepare-file-drag', async (_event, workspacePath, status, projectName, relativePaths = []) => {
     try {
-      if (!Array.isArray(relativePaths) || !relativePaths.length) throw new Error('没有可拖动的文件');
-      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const sources = Array.from(new Set(relativePaths.map(relativePath => {
-        if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的文件路径');
-        const source = resolveVirtual(root, relativePath, { externalRootMode: 'target' }).physicalPath;
-        if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
-        return source;
-      })));
-      validatedRelativePaths = relativePaths.map(relativePath => String(relativePath).replace(/\\/g, '/'));
-  
-      let icon = nativeImage.createEmpty();
-      try {
-        icon = await app.getFileIcon(sources[0], { size: 'normal' });
-      } catch (error) {
-        writeLog('warn', 'Unable to create native file drag icon', error);
-      }
-      if (event.sender.isDestroyed()) return;
-      event.sender.startDrag({ file: sources[0], files: sources, icon });
-      writeLog('info', 'Native project file drag started', { count: sources.length });
+      const { sources } = resolveFileDragSources(workspacePath, status, projectName, relativePaths);
+      return await nativeFileDrag.prepare(sources[0]);
     } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.on('workspace-start-file-drag', (event, workspacePath, status, projectName, relativePaths = []) => {
+    let validatedRelativePaths = [];
+    let nativeDrag = { attempted: false, durationMs: 0, status: 'failed' };
+    try {
+      const resolved = resolveFileDragSources(workspacePath, status, projectName, relativePaths);
+      validatedRelativePaths = resolved.relativePaths;
+      nativeDrag = nativeFileDrag.start(event.sender, resolved.sources);
+    } catch (error) {
+      if (error?.nativeDrag) nativeDrag = error.nativeDrag;
       writeLog('error', 'Unable to start native project file drag', error);
       if (!event.sender.isDestroyed()) event.sender.send('app-error', error.message || String(error));
     } finally {
@@ -249,7 +261,7 @@ const registerFileOperationsIpc = context => {
         const clientX = contentBounds ? cursor.x - contentBounds.x : -1;
         const clientY = contentBounds ? cursor.y - contentBounds.y : -1;
         const insideWindow = Boolean(contentBounds && clientX >= 0 && clientY >= 0 && clientX < contentBounds.width && clientY < contentBounds.height);
-        event.sender.send('workspace-file-drag-ended', { paths: validatedRelativePaths, clientX, clientY, insideWindow });
+        event.sender.send('workspace-file-drag-ended', { paths: validatedRelativePaths, clientX, clientY, insideWindow, nativeDrag });
       }
     }
   });
@@ -305,7 +317,7 @@ const registerFileOperationsIpc = context => {
   
   ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, projectName, operation, relativePaths = [], targetRelativePath = '', nextName = '', options = {}) => {
     let suppressedProjectRoot = '';
-    const responseContext = { operationId: '', affectedDirectories: [], count: 0 };
+    const responseContext = { operationId: '', taskNotificationOwned: false, affectedDirectories: [], count: 0 };
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
       const projectLinkHints = projectVirtualPaths?.listManagedExternalLinks(root) || [];
@@ -355,6 +367,8 @@ const registerFileOperationsIpc = context => {
         job.cancel = task.cancel;
         activeProjectFileOperations.set(operationId, job);
         try {
+          responseContext.operationId = operationId;
+          responseContext.taskNotificationOwned = true;
           await task.start();
           const plan = [];
           publish({ phase: 'scanning', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: 0, totalFiles: 0 });
@@ -403,6 +417,7 @@ const registerFileOperationsIpc = context => {
             success: true,
             count: importPlan.length,
             operationId,
+            taskNotificationOwned: true,
             createdItems: importPlan.map(item => ({
               name: path.basename(item.destination),
               relativePath: virtualPathFor(root, item.destination, [destinationResolution]),
@@ -415,7 +430,7 @@ const registerFileOperationsIpc = context => {
           publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, currentName: '', error: error.message || String(error) });
           if (cancelled) task.cancelled();
           else task.fail(error);
-          if (cancelled) return { success: false, cancelled: true, count: 0, operationId, error: '导入已取消' };
+          if (cancelled) return { success: false, cancelled: true, count: 0, operationId, taskNotificationOwned: true, error: '导入已取消' };
           throw error;
         } finally {
           activeProjectFileOperations.delete(operationId);
@@ -463,6 +478,7 @@ const registerFileOperationsIpc = context => {
         const moved = [];
         activeProjectFileOperations.set(operationId, job);
         try {
+          responseContext.taskNotificationOwned = true;
           await task.start();
           let discoveredCount = 0;
           let lastScanPublishedAt = 0;
@@ -494,6 +510,7 @@ const registerFileOperationsIpc = context => {
             errorCode: undefined,
             count: moved.length,
             operationId,
+            taskNotificationOwned: true,
             affectedDirectories,
             movedItems: moved.map(entry => ({
               sourceRelativePath: virtualPathFor(root, entry.source, [...sourceResolutions, ...projectLinkHints]),
@@ -512,7 +529,7 @@ const registerFileOperationsIpc = context => {
           const reportedError = rollbackError ? new Error(`${error.message || String(error)}；回滚失败：${rollbackError.message || String(rollbackError)}`) : error;
           task.publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, currentName: '', processedCount: 0, totalCount: movePlan.length, error: reportedError.message || String(reportedError) });
           if (cancelled) task.cancelled(); else task.fail(reportedError);
-          return { success: false, cancelled, count: 0, operationId, affectedDirectories, error: cancelled ? '移动已取消' : reportedError.message || String(reportedError), errorCode: cancelled ? CANCELLED_CODE : reportedError.code };
+          return { success: false, cancelled, count: 0, operationId, taskNotificationOwned: true, affectedDirectories, error: cancelled ? '移动已取消' : reportedError.message || String(reportedError), errorCode: cancelled ? CANCELLED_CODE : reportedError.code };
         } finally {
           activeProjectFileOperations.delete(operationId);
         }
@@ -586,6 +603,7 @@ const registerFileOperationsIpc = context => {
               job = task.job;
               job.cancel = task.cancel;
               activeProjectFileOperations.set(operationId, job);
+              responseContext.taskNotificationOwned = true;
               await task.start();
               publish({ phase: 'copying', progress: 10, currentName: screenshotName, bytesCopied: 0, totalBytes: png.length, filesCopied: 0, totalFiles: 1 });
               throwIfCancelled(() => job.cancelled);
@@ -609,6 +627,7 @@ const registerFileOperationsIpc = context => {
                 errorCode: undefined,
                 count: 1,
                 operationId,
+                taskNotificationOwned: true,
                 affectedDirectories,
                 createdItems: [{ name: path.basename(destination), relativePath: virtualPathFor(root, destination, [destinationResolution]) }],
               };
@@ -649,6 +668,7 @@ const registerFileOperationsIpc = context => {
           job = task.job;
           job.cancel = task.cancel;
           activeProjectFileOperations.set(operationId, job);
+          responseContext.taskNotificationOwned = true;
           await task.start();
           publish({ phase: 'scanning', progress: 0, currentName: '正在检查文件', bytesCopied: 0, totalBytes: 0 });
           if (clipboardSnapshot.operation === 'cut') {
@@ -821,7 +841,7 @@ const registerFileOperationsIpc = context => {
             publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: count, totalFiles: count, count });
             task.complete('文件移动完成');
             writeLog('info', 'Project files moved by same-volume rename', { projectName, targetRelativePath, count, operationId });
-            return { success: true, cancelled: false, errorCode: undefined, count, operationId, affectedDirectories, consumedCutClipboard: true, movedItems: topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })), replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
+            return { success: true, cancelled: false, errorCode: undefined, count, operationId, taskNotificationOwned: true, affectedDirectories, consumedCutClipboard: true, movedItems: topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })), replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
           }
 
           const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
@@ -897,7 +917,7 @@ const registerFileOperationsIpc = context => {
           publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
           task.complete('文件粘贴完成');
           writeLog('info', 'Project files pasted', { projectName, targetRelativePath, count, operationId, ...transferStats });
-          return { success: true, cancelled: false, errorCode: undefined, count, operationId, affectedDirectories, consumedCutClipboard: clipboardSnapshot.operation === 'cut', createdItems: clipboardSnapshot.operation === 'copy' ? topLevelTargets.map(item => ({ name: path.basename(item.destination), relativePath: virtualPathFor(root, item.destination, [destinationResolution]), isDirectory: item.isDirectory })) : undefined, movedItems: clipboardSnapshot.operation === 'cut' ? topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })) : undefined, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
+          return { success: true, cancelled: false, errorCode: undefined, count, operationId, taskNotificationOwned: true, affectedDirectories, consumedCutClipboard: clipboardSnapshot.operation === 'cut', createdItems: clipboardSnapshot.operation === 'copy' ? topLevelTargets.map(item => ({ name: path.basename(item.destination), relativePath: virtualPathFor(root, item.destination, [destinationResolution]), isDirectory: item.isDirectory })) : undefined, movedItems: clipboardSnapshot.operation === 'cut' ? topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })) : undefined, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
         } catch (error) {
           // Once cut finalization starts, keeping the completed copies is the only
           // data-safe fallback if removing a source fails partway through.
@@ -931,7 +951,7 @@ const registerFileOperationsIpc = context => {
             publish({ phase: 'cancelled', progress: 0, currentName: '' });
             task?.cancelled();
             writeLog('info', 'Project file paste cancelled', { projectName, operationId });
-            return { success: false, cancelled: true, operationId, affectedDirectories, error: '粘贴已取消', errorCode: CANCELLED_CODE };
+            return { success: false, cancelled: true, operationId, taskNotificationOwned: true, affectedDirectories, error: '粘贴已取消', errorCode: CANCELLED_CODE };
           }
           publish({ phase: 'failed', progress: 0, currentName: '', error: error.message || String(error) });
           task?.fail(error);
@@ -983,6 +1003,7 @@ const registerFileOperationsIpc = context => {
           await pushUndoOperation({ kind: 'trash', workspaceRoot, persistentId: persistedTrashRecord.id, items: [...undoItems] });
         };
         try {
+          responseContext.taskNotificationOwned = true;
           await task.start();
           publish({ phase: 'trashing', progress: 0, currentName: '', processedCount, totalCount });
           if (useBatchTrash) {
@@ -1055,7 +1076,7 @@ const registerFileOperationsIpc = context => {
           const warning = undoUnavailable
             ? '文件已移入回收站，但应用内撤销记录未能保存；如需恢复，请使用系统回收站。'
             : watchRefreshDegraded ? '文件已移入回收站，但目录监听刷新失败；页面会在后续核对时更新。' : undefined;
-          return { success: true, cancelled: false, errorCode: undefined, count: processedCount, permanentCount, operationId, affectedDirectories, undoUnavailable, warning };
+          return { success: true, cancelled: false, errorCode: undefined, count: processedCount, permanentCount, operationId, taskNotificationOwned: true, affectedDirectories, undoUnavailable, warning };
         } catch (error) {
           await persistTrashUndo().catch(persistError => writeLog('error', 'Unable to persist partial trash undo record', persistError));
           if (processedCount > 0) {
@@ -1068,7 +1089,7 @@ const registerFileOperationsIpc = context => {
           publish({ phase: cancelled ? 'cancelled' : 'failed', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: '', processedCount, totalCount, error: error.message || String(error) });
           if (cancelled) task.cancelled();
           else task.fail(error);
-          if (cancelled) return { success: false, cancelled: true, operationId, count: processedCount, affectedDirectories, errorCode: CANCELLED_CODE };
+          if (cancelled) return { success: false, cancelled: true, operationId, taskNotificationOwned: true, count: processedCount, affectedDirectories, errorCode: CANCELLED_CODE };
           throw error;
         } finally {
           activeProjectFileOperations.delete(operationId);
@@ -1190,7 +1211,7 @@ const registerFileOperationsIpc = context => {
                 ? '操作中的文件或文件夹已在外部移动或删除，请刷新后重试'
                 : error.message || String(error);
       writeLog('error', 'Project file operation failed', { projectName, operation, targetRelativePath, count: relativePaths.length, errorCode: errorCode || undefined, transferStage: transferStage || undefined, sourcePath: error?.sourcePath, destinationPath: error?.destinationPath, nativeError: error?.message || String(error), error: errorMessage });
-      return { success: false, operationId: responseContext.operationId || undefined, affectedDirectories: responseContext.affectedDirectories, count: responseContext.count || undefined, cancelled: errorCode === CANCELLED_CODE || undefined, error: errorMessage, errorCode: errorCode || undefined, transferStage: transferStage || undefined };
+      return { success: false, operationId: responseContext.operationId || undefined, taskNotificationOwned: responseContext.taskNotificationOwned || undefined, affectedDirectories: responseContext.affectedDirectories, count: responseContext.count || undefined, cancelled: errorCode === CANCELLED_CODE || undefined, error: errorMessage, errorCode: errorCode || undefined, transferStage: transferStage || undefined };
     } finally {
       if (suppressedProjectRoot) releaseWorkspaceWatchPath?.(suppressedProjectRoot);
     }

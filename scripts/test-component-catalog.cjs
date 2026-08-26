@@ -87,7 +87,7 @@ try {
   fs.unlinkSync(incompatible);
 
   const hostIncompatible = path.join(componentRoot, 'host-incompatible.zip');
-  writeZip(hostIncompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), componentHost: { contractVersion: 2, compatibility: { minHostApiVersion: 5, maxHostApiVersion: 6 }, contributions: [{ type: 'workspace.toolbarAction' }, { type: 'component.fullPage' }] } }), 'tool.exe': 'binary' });
+  writeZip(hostIncompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), componentHost: { contractVersion: 2, compatibility: { minHostApiVersion: 6, maxHostApiVersion: 7 }, contributions: [{ type: 'workspace.toolbarAction' }, { type: 'component.fullPage' }] } }), 'tool.exe': 'binary' });
   assert.match(registry.list().find(item => item.id === 'third-party-tool').error, /不重叠/);
   fs.unlinkSync(hostIncompatible);
 
