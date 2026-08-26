@@ -83,7 +83,7 @@ def image_members(archive: zipfile.ZipFile, media_root: str) -> list[zipfile.Zip
     return members
 
 
-def extract_document(document_path: str) -> dict[str, object]:
+def extract_document(document_path: str, max_files: int = 2000, max_bytes: int = 2 * 1024 * 1024 * 1024) -> dict[str, object]:
     document = Path(document_path).resolve()
     result: dict[str, object] = {
         "document": str(document),
@@ -103,6 +103,8 @@ def extract_document(document_path: str) -> dict[str, object]:
 
         with zipfile.ZipFile(document, "r") as archive:
             members = image_members(archive, media_root)
+            if len(members) > max_files or sum(max(0, int(member.file_size)) for member in members) > max_bytes:
+                raise ValueError("文档内图片数量或总大小超过安全上限")
             if not members:
                 result.update(success=True, message="文档中没有图片")
                 return result
@@ -115,6 +117,8 @@ def extract_document(document_path: str) -> dict[str, object]:
                     shutil.copyfileobj(source, target, length=1024 * 1024)
                 extracted_files.append(str(output_path))
                 total_bytes += output_path.stat().st_size
+                if total_bytes > max_bytes:
+                    raise ValueError("文档内图片总大小超过安全上限")
 
         result.update(
             success=True,
@@ -136,9 +140,13 @@ def run(args_list: list[str]) -> None:
     subparsers = parser.add_subparsers(dest="command", required=True)
     extract_parser = subparsers.add_parser("extract")
     extract_parser.add_argument("--input", action="append", required=True, dest="inputs")
+    extract_parser.add_argument("--max-files", type=int, default=2000)
+    extract_parser.add_argument("--max-bytes", type=int, default=2 * 1024 * 1024 * 1024)
     args = parser.parse_args(args_list)
 
-    results = [extract_document(document) for document in args.inputs]
+    if args.max_files < 1 or args.max_files > 2000 or args.max_bytes < 1 or args.max_bytes > 2 * 1024 * 1024 * 1024:
+        raise ValueError("Office 图片提取安全上限无效")
+    results = [extract_document(document, args.max_files, args.max_bytes) for document in args.inputs]
     successful = [result for result in results if result.get("success")]
     failed = [result for result in results if not result.get("success")]
     payload = {

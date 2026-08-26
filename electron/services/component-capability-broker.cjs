@@ -1,7 +1,8 @@
 const { CAPABILITY_PERMISSIONS, HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 
 const MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
-const APPLICATION_SETTINGS_CAPABILITIES = new Set(['component.settings.v2', 'component.lifecycle.v2', 'dialogs.v2', 'notifications.v2']);
+const APPLICATION_SETTINGS_CAPABILITIES = new Set(['component.settings.v2', 'component.lifecycle.v2', 'dialogs.v2', 'notifications.v2', 'component.secrets.v1']);
+const APPLICATION_COMMAND_CAPABILITIES = new Set([...APPLICATION_SETTINGS_CAPABILITIES, 'network.fetch.v1']);
 
 const clonePayload = payload => {
   if (payload === undefined || payload === null) return {};
@@ -65,8 +66,9 @@ class ComponentCapabilityBroker {
     const normalized = String(method || '');
     const componentId = String(descriptor?.componentId || '');
     if (this.blockedComponents.has(componentId)) throw new Error(`Component capabilities are quiesced: ${componentId}`);
-    if (boundContext?.surface === 'application.settings' && !APPLICATION_SETTINGS_CAPABILITIES.has(normalized)) {
-      throw new Error(`Component capability is not available on the application settings surface: ${normalized}`);
+    const applicationAllowlist = boundContext?.surface === 'application.settings' ? APPLICATION_SETTINGS_CAPABILITIES : boundContext?.surface === 'application.command' ? APPLICATION_COMMAND_CAPABILITIES : null;
+    if (applicationAllowlist && !applicationAllowlist.has(normalized)) {
+      throw new Error(`Component capability is not available on the ${boundContext.surface} surface: ${normalized}`);
     }
     if (!descriptor?.service?.capabilities.includes(normalized)) { const error = new Error(`Component capability is not granted: ${normalized}`); error.code = 'COMPONENT_HOST_PERMISSION_DENIED'; throw error; }
     const permission = CAPABILITY_PERMISSIONS[normalized];
@@ -86,4 +88,4 @@ class ComponentCapabilityBroker {
   }
 }
 
-module.exports = { APPLICATION_SETTINGS_CAPABILITIES, ComponentCapabilityBroker, MAX_PAYLOAD_BYTES, clonePayload };
+module.exports = { APPLICATION_COMMAND_CAPABILITIES, APPLICATION_SETTINGS_CAPABILITIES, ComponentCapabilityBroker, MAX_PAYLOAD_BYTES, clonePayload };

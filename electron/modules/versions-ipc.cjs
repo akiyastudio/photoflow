@@ -2,7 +2,7 @@ const { registerVersionTrackingIpc } = require('./version-tracking-ipc.cjs');
 const { getProtectedProjectFolderRegistry } = require('../services/protected-project-folder.cjs');
 
 const registerVersionIpc = context => {
-  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
+  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
   const protectedProjectFolders = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const listRatedProjectMedia = (projectPath, workspaceRoot, projectName) => mediaRatingService.listProject(projectPath, { workspaceRoot, projectName });
   const validProgressFolderName = value => Boolean(value && path.basename(value) === value && !/[<>:"/\\|?*\x00-\x1f]/.test(value) && !/[. ]$/.test(value));
@@ -671,9 +671,52 @@ const registerVersionIpc = context => {
       const current = (listed.progressFolders || []).find(progress => progress.id === String(request.progressId || ''));
       if (!current || current.nodeRole !== 'progress') throw new Error('progress_folder_rename_role_invalid: 只能重命名已登记的 progress 目录');
       const expectedRelativePath = String(request.expectedRelativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
-      const currentRelativePath = path.relative(projectPath, path.resolve(current.folderPath)).replace(/\\/g, '/');
+      const externalRoute = String(current.externalLinkRelativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+      const currentRelativePath = externalRoute || path.relative(projectPath, path.resolve(current.folderPath)).replace(/\\/g, '/');
       if (!request.expectedFolderId || request.expectedFolderId !== current.folderId || expectedRelativePath !== currentRelativePath) {
         throw new Error('progress_folder_identity_mismatch: 当前目录已变化，请刷新后重试');
+      }
+      if (externalRoute) {
+        if (!externalRoute.toLocaleLowerCase().endsWith('.lnk')) throw new Error('external_progress_rename_unsupported: 只能重命名项目内的外链入口');
+        const resolution = projectVirtualPaths.resolve(projectPath, externalRoute, { externalRootMode: 'link' });
+        if (!resolution.isExternalLinkRoot || !resolution.shortcutPath) throw new Error('external_progress_rename_invalid: 外链入口当前不可用');
+        let fileName = String(request.newName || '').trim();
+        if (path.extname(fileName).toLocaleLowerCase() !== '.lnk') fileName += '.lnk';
+        if (!fileName || path.basename(fileName) !== fileName || /[<>:"/\\|?*\x00-\x1f]/.test(fileName) || /[. ]$/.test(fileName)) throw new Error('external_progress_name_invalid: 外链名称无效');
+        const oldRoute = externalRoute;
+        const parentRoute = path.posix.dirname(oldRoute);
+        const newRoute = [parentRoute === '.' ? '' : parentRoute, fileName].filter(Boolean).join('/');
+        oldPath = path.resolve(resolution.shortcutPath);
+        newPath = path.resolve(path.dirname(oldPath), fileName);
+        if (oldPath.toLocaleLowerCase() !== newPath.toLocaleLowerCase() && fs.existsSync(newPath)) throw new Error(`目标名称已被占用：${fileName}`);
+        suppressWorkspaceWatchPath(oldPath);
+        suppressWorkspaceWatchPath(newPath);
+        const mutation = await versionService.beginProgressTreeUpdate(workspaceRoot, { projectName });
+        mutationToken = mutation.mutationToken;
+        await versionService.renameExternalProgressLinkRoute(workspaceRoot, {
+          projectName, progressId: current.id, oldRelativePath: oldRoute, newRelativePath: newRoute,
+          mutationToken, preflight: true,
+        });
+        const temporaryPath = path.join(path.dirname(oldPath), `.photoflow-external-rename-${crypto.randomUUID()}.lnk`);
+        let published = false;
+        try {
+          await fs.promises.rename(oldPath, temporaryPath);
+          await fs.promises.rename(temporaryPath, newPath);
+          published = true;
+          const result = await versionService.renameExternalProgressLinkRoute(workspaceRoot, {
+            projectName, progressId: current.id, oldRelativePath: oldRoute, newRelativePath: newRoute, mutationToken,
+          });
+          mutationToken = '';
+          await refreshWorkspaceCatalog(workspaceRoot).catch(refreshError => writeLog('warn', 'Unable to refresh workspace catalog after external progress rename', { projectName, error: refreshError.message || String(refreshError) }));
+          await refreshManagedExternalWatchers?.(workspacePath, status, projectName).catch(watchError => writeLog('warn', 'Unable to refresh external watchers after external progress rename', { projectName, error: watchError.message || String(watchError) }));
+          return { ...result, folder: { name: fileName, path: newPath, relativePath: newRoute, updatedAt: Date.now() } };
+        } catch (error) {
+          if (published && fs.existsSync(newPath) && !fs.existsSync(oldPath)) await fs.promises.rename(newPath, oldPath).catch(() => undefined);
+          else if (!published && fs.existsSync(temporaryPath) && !fs.existsSync(oldPath)) await fs.promises.rename(temporaryPath, oldPath).catch(() => undefined);
+          throw error;
+        } finally {
+          await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
+        }
       }
       oldPath = path.resolve(current.folderPath);
       newPath = path.resolve(path.dirname(oldPath), String(request.newName || ''));

@@ -4,7 +4,7 @@
 
 ## 版本协商与弃用
 
-PhotoFlow 当前支持 Host API 2–5，并在组件声明的闭区间兼容范围中选择最高版本。`componentHost.contractVersion:2` 要求显式声明权限；`application.settingsPage` 从 Host API 3 开始可用，受控通知从 Host API 4 开始可用，项目只读扩展从 Host API 5 开始可用。
+PhotoFlow 当前支持 Host API 2–7，并在组件声明的闭区间兼容范围中选择最高版本。`componentHost.contractVersion:2` 要求显式声明权限；`application.settingsPage` 从 Host API 3 开始可用，受控通知从 Host API 4 开始可用，项目只读扩展从 Host API 5 开始可用，项目写入扩展从 Host API 6 开始可用，安全 secrets、受控网络和新 contribution 从 Host API 7 开始可用。
 
 RPC 方法、能力和事件都以 `.vN` 结尾。已发布语义不可修改；可以增加兼容字段，消费者必须忽略未知字段。破坏性变化使用新的方法/事件版本。弃用版本至少保留一个正常组件迁移窗口，并在移除前记录。`electron/compatibility/` 下的 V1 业务适配器已经弃用，不属于公开 API，也不再增加方法。
 
@@ -34,6 +34,15 @@ V2 必须声明合约版本、兼容范围、贡献项、服务协议/运行时/
 | `project.media.metadata.v1` | `project.media.read` | 白名单 EXIF、尺寸、色彩、相机/镜头与视频元数据 |
 | `project.versions.page.v1` / `project.version.graph.v1` | `project.versions.read` | 有界版本分页与只读版本/进度来源图 |
 | `project.media.ratings.v1` | `project.media.ratings.read` | 批量读取宿主实际支持的评分字段 |
+| `project.media.ratings.write.v1` | `project.media.ratings.write` | 批量评分 CAS 写入；逐项明确成功或失败 |
+| `project.version.update.v1` | `project.version.write` | 支持字段的原子版本 CAS 更新 |
+| `project.version.delete.v1` | `project.version.delete` | 独立高风险权限下的版本 CAS 删除 |
+| `project.progress.manage.v1` | `project.progress.manage` | 节点更新/取消登记与来源边变更 |
+| `project.import.v1` | `project.import` | 一次性输入令牌的多文件事务导入 |
+| `project.files.mutate.v1` | `project.files.write` | preflight/commit 的文件变更与收据 undo |
+| `project.media.process.v1` | `project.media.process` | 视频时间轴/裁剪与 Office 图片提取 |
+| `component.secrets.v1` | `component.secrets` | safeStorage 加密的组件隔离秘密引用 |
+| `network.fetch.v1` | `network.fetch` | origin allowlist、DNS pinning 与秘密绑定的 HTTPS 请求 |
 
 执行已声明的生命周期动作还需要 `component.lifecycle.manage`。代理对 `describe` 仍检查 `component.lifecycle.read`；生命周期服务在执行 `preflight`、`install`、`repair` 或 `uninstall` 前检查更强权限。
 
@@ -78,6 +87,24 @@ Host API 5 的项目只读扩展要求 `minHostApiVersion >= 5`。`project.files
 `component.settings.v2` 支持 `get`、`replace` 和浅层 `merge`。设置和检查点是最大 256 KiB 的 JSON 对象。更新原子执行并返回单调递增修订号。组件必须容忍保留的未知键，并自行迁移旧结构。
 
 ### 输出事务与版本
+
+### Host API 7：secrets、网络与宿主入口
+
+`component.secrets.v1` 在 project 与 application settings surface 可用。`put`、`list`、`delete` 都严格校验字段；list 永不返回秘密值。put 幂等收据独立于当前同名 record，旧 key 重放只返回原结果，不会回滚后续更新；用于比较原请求的收据内容同样由 `safeStorage` 加密，不持久化可离线枚举的秘密摘要，且密文计入总容量。读取时严格白名单验证 componentId、record/receipt/deletion 形状、公开结果字段、时间戳、metadata、base64 密文与 ref/name 唯一性；任一异常隔离整文件。普通 view 关闭不清除锁，显式清数据在同 component 锁队列后执行并阻止竞态写回。秘密仅以 Electron `safeStorage` 密文原子保存，加密不可用时 fail closed。
+
+`network.fetch.v1` 要求 canonical `origin` 与 URL origin 完全相同并属于 manifest `networkOrigins`。headers/secrets 必须为 plain object，mode、timeout、body 类型严格校验，GET/HEAD 禁止 body，base64 必须为 canonical 编码。单一总 deadline 与卸载 controller 从 secret 解析前开始，覆盖秘密锁/磁盘等待、DNS、连接、redirect 与响应；每跳过滤非 global 地址，并把验证地址直接交给 `agent:false` TLS transport lookup，原 hostname 用于 SNI、Host 和证书。跨 origin redirect 剥离 authorization/cookie/proxy header；301/302/303 转 GET 并清 body。secret 只能通过 `secretBindings` 注入固定 header。卸载经 capability barrier abort 活动请求，计数只在 finally 释放；普通 view 关闭不修改网络并发状态。
+
+Host API 7 contribution 为 `component.sidePanel`、`media.contextAction`、`project.contextAction`、`project.importProvider`、`project.exportProvider`、`application.command`。每项声明 `id`、`label`、`pageId` 和独立 `rpcMethods` allowlist；pageId 必须引用包内 fullPage，RPC 必须属于 service。项目入口绑定触发时的 scope 与 selection；跨目录媒体选择以共同祖先为 scope。application command 使用无项目 application context，且只有实际含命令的全局 Dock 注册 `Ctrl/Cmd+Shift+P`。宿主 UI 分别在项目工具栏/可调侧面板、媒体与项目右键菜单、导入/导出菜单及可搜索命令入口发现并打开这些 contribution。所有 surface 使用同一 sandbox preload，禁止导航、新窗口和 Node 集成；组件卸载、升级或项目关闭会关闭对应 view。
+
+Host API 6 的七项写能力必须设置 `minHostApiVersion >= 6`，且各自声明上表中的最小权限。评分批量限制为 1–100，采用逐项语义；只支持图片/RAW 的 `rating`，视频、标签和选择状态写入拒绝。checked CAS 与宿主旧评分 outbox 共用同一 per-file 队列；ExifTool 成功后的索引指纹刷新是非致命维护步骤，不会把已发生的评分副作用报告成失败。版本更新/删除、进度节点与边变更均使用 `expectedUpdatedAt` CAS；删除权限独立。progress 的项目/scope 路径会在数据库事务内再次以 Windows case-insensitive path-key 语义验证，所有图端点必须在当前物理 scope 内、不得是 external link，并继续复用数据库角色和循环约束。
+
+`project.import.v1` 先保留同 component/workspace/project/scope 的一次性 input token，再执行 stage→validate→commit；reservation 只暂停清理，不延长原 10 分钟授权，释放时恢复原到期并立即删除已过期 token。同幂等键并发调用共享一个 active owner，取消、冲突或失败会释放令牌并回滚已发布且摘要未变的文件。任何 import/file/process 恢复都重新执行 `lstat`、拒绝链接、验证 `realpath` 位于当前 canonical scope，并复核文件 SHA-256 或目录 identity/owner marker；目标被其他主体替换时既不认领成功，也不移动替换内容。
+
+`project.files.mutate.v1` 的短时 plan 绑定身份与摘要，commit 前再次复核；rename/move/mkdir/trash 默认拒绝覆盖、链接、Windows 保留名/尾点/尾空格、宿主保护根目录、进度目录和越界路径。每个 move 在副作用前写入 from/to intent 及文件 SHA-256 或目录 identity；插件目录 move 限制为同卷，从而可在 move 后、applied 前崩溃时验证并补记 applied。mkdir 使用 prepared/applied 日志。trash 使用 file-operations 域的原子替换命令收据：`executing` 状态若发现任一源已消失即为不可判定结果，返回人工恢复所需的 `outcomeUnknown`，永不重复 OS trash，也不伪装为 committed。preflight 的 `undoCapability` 对 trash 为 `requires-precise-recycle`；commit 只有在全部结果均为 `preciseRestore:true`、`permanent:false` 且有 PIDL 时才返回 `undoAvailable:true`。否则仍明确报告已提交，但 `undoAvailable:false`、`undo:[]`，后续 undo 请求拒绝。
+
+undo 本身同样使用逐项 intent/applied 日志。move undo 复核原 mutation 的摘要/目录 identity；mkdir undo 只移除仍属于原 mkdir 且为空的目录；recycle restore 在 originalPath 不存在时先 probe PIDL，probe 不确定或项目目标身份不匹配会返回人工恢复错误，绝不重复 restore。
+
+`project.media.process.v1` 当前完整处理动作是 `video.timelineFrames`、`video.trim` 和 `office.extractImages`；长处理还支持用相同幂等键及 `processAction` 调用 `status`/`cancel`。当前调用采用 await 语义：处理调用在宿主长请求租约内等待完成，同时后台任务提供进度、checkpoint 和协作式取消；发布前持久化确定性 target、owner 与摘要。Office 即使没有图片也先在组件私有 stage 创建空目录和 operation owner marker，再原子 move 到输出位置，消除 createDirectory 与 marker 之间的恢复空窗；同名目录被其他主体抢占时拒绝。receipt 恢复成功时会把对应后台 task 终态纠正为 `completed`，使 status 与收据一致。组件卸载会取消该组件仍活动的 import/process，in-flight 幂等锁会保留至实际 settle，阻止同 ID 重装后并发重放。renderer 没有这些 IPC 通道，只能由受监管服务调用领域能力。
 
 `project.output.v2` 动作：
 

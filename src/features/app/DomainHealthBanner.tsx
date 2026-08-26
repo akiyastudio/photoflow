@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import { AlertTriangle } from 'lucide-react';
 import type { ComponentStatus } from '../../types';
-import { useToast } from './useTopToastStack';
+import { useUserFacingToast } from './useUserFacingToast';
 
 type DomainHealthSnapshot = Awaited<ReturnType<Window['electronAPI']['getDomainHealth']>>;
 
@@ -12,7 +12,7 @@ const DOMAIN_LABELS: Record<string, string> = {
 };
 
 export const DomainHealthBanner = ({ components }: { components: ComponentStatus[] }) => {
-  const toast = useToast();
+  const toast = useUserFacingToast();
   const [snapshot, setSnapshot] = useState<DomainHealthSnapshot>({ success: true, domains: [], commands: [] });
   const refresh = useCallback(async () => {
     try {

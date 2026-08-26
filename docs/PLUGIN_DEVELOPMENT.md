@@ -5,7 +5,7 @@ PhotoFlow 把可选扩展包称为 **组件（Component）**。文件名保留�
 ## 快速开始
 
 1. 把 `examples/hello-component` 复制到以组件 ID 命名的目录。
-2. 普通 V2 组件可继续使用 Host API `2`；设置页需要 Host API `3`；声明顶部通知能力需要 Host API `4`；项目文件、元数据、版本图和评分只读扩展需要 Host API `5` 与 `minHostApiVersion:5`。
+2. 普通 V2 组件可继续使用 Host API `2`；设置页需要 API `3`，通知需要 API `4`，项目只读扩展需要 API `5`，项目写入扩展需要 API `6`；secrets、network 和新 contribution 需要 Host API `7` 与 `minHostApiVersion:7`。
 3. 添加一个 `workspace.toolbarAction`、一个与之相连的 `component.fullPage`、包内 UI 入口和服务入口。需要全局设置时，可额外贡献 `application.settingsPage`。
 4. 声明全部服务 RPC、Host 能力、权限和发出的事件。未声明的访问会默认拒绝。升级历史数据时，可声明 `component.storage.previous.v1` 和/或 `project.output.existing.v1` adoption grant；不要把组件业务表或路径字段加入宿主代码。
 5. 运行 `node scripts/mock-component-service.cjs path/to/service.cjs`，不启动 Electron 也能验证按行分隔的服务协议。
@@ -75,6 +75,8 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 
 Host API 5 服务可在清单显式声明后调用只读扩展，例如 `callHost(parentId, 'project.files.search.v1', { query:'xmp', pageSize:50 })`。同时声明 `project.files.read`；媒体元数据复用 `project.media.read`，版本与评分分别声明 `project.versions.read`、`project.media.ratings.read`。这些结果只含项目虚拟相对路径和稳定 ID，不要尝试从游标、媒体引用或图节点推导绝对路径。
 
+Host API 6 提供按能力拆分权限的项目写入扩展。参考 `examples/project-write-v6`：评分使用逐项语义，checked 与旧评分 outbox 共用 ExifTool per-file 队列；版本/进度使用数据库 CAS，并在 DB 内再次验证 scope；导入 reservation 不延长一次性 input token 的原始寿命；所有恢复重新验证物理 canonical scope、链接、摘要和 owner/identity。文件变更及 undo 都使用逐项 intent/applied 日志；目录 move 限同卷，trash/restore 的未知 OS 结果会安全停止并要求人工恢复。Office 空输出先在私有 stage 写 owner marker，再原子发布。媒体长调用当前会 await 完成，可用相同幂等键调用 `status`/`cancel`；receipt 恢复会同步 task 为 completed，卸载会取消活动 import/process。所有幂等键、plan、token 和收据都绑定 component/workspace/project/scope，设置页 surface 默认拒绝。
+
 ## 安全的“媒体 → 版本”流程
 
 1. 使用 `project.media.page.v2` 分页读取媒体。
@@ -97,7 +99,7 @@ stage 元数据与登记文件保留 24 小时，因此宿主重启后可以继�
 
 ## 测试与发布
 
-- `npm run test:component-host-v2` 先检查 SDK 类型，再检查协商、权限、外部/私有媒体、stage 过期与恢复、提交日志与受控替换、版本幂等、进度、任务、对话框、事件、真实媒体服务组合和服务模拟器。
+- `npm run test:component-host-v2` 先检查 SDK 类型，再检查 Host API 2–6 协商、权限、读写 scope、stage/导入恢复、CAS、幂等、文件 undo、进度、任务、媒体处理、对话框、事件和服务模拟器。
 - `npm run test:component-host`、`npm run test:component-service`、`npm run test:electron-security` 和 `npm run test:architecture` 覆盖隔离与兼容性。
 - 打包前用 `electron/contracts/schemas/component-manifest-v2.schema.json` 校验清单。
 - 安装包只包含构建后的 UI、服务和运行资源；为清单声明的生命周期动作计算哈希；在干净用户配置中安装，测试取消、重启，再用真实 V1 数据测试升级与降级。

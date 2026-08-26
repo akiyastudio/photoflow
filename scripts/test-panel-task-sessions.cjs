@@ -78,6 +78,9 @@ assert(!isActiveProjectFileTask(makeTask('done', 'move', 'completed', 1)), 'term
 assert.deepStrictEqual(selectProjectFileTaskToasts([trashTask, moveTask, pasteTask], new Set()).visible.map(task => task.id), ['paste', 'move', 'trash'], 'running tasks must precede queued tasks and use creation order within a state');
 assert.deepStrictEqual(selectProjectFileTaskToasts([{ ...trashTask, createdAt: 9_600 }], new Set(), 4, 10_000).visible, [], 'short queued waits must not flash a scheduler toast');
 assert.deepStrictEqual(selectProjectFileTaskToasts([{ ...trashTask, createdAt: 9_000 }], new Set(), 4, 10_000).visible.map(task => task.id), ['trash'], 'a real queued wait must become visible after the grace period');
+const overflowSelection = selectProjectFileTaskToasts(Array.from({ length: 7 }, (_, index) => makeTask(`overflow-${index}`, 'copy', 'running', index)), new Set(), 4, 10_000);
+assert.deepStrictEqual(overflowSelection.visible.map(task => task.id), ['overflow-0', 'overflow-1', 'overflow-2', 'overflow-3']);
+assert.equal(overflowSelection.overflowCount, 3, 'large task bursts retain four interactive cards and the existing overflow counter');
 const retainedRunningTask = { ...moveTask, id: 'long-running', createdAt: 1, updatedAt: 1 };
 const completedHistory = Array.from({ length: 205 }, (_, index) => ({ ...makeTask(`done-${index}`, 'copy', 'completed', 1000 - index), updatedAt: 1000 - index }));
 const mergedSnapshots = completedHistory.reduce((current, task) => mergeBackgroundTaskSnapshots(current, [task]), [retainedRunningTask]);

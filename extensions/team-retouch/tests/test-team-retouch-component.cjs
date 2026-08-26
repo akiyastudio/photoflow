@@ -16,6 +16,7 @@ assert.deepEqual([...allowed].sort(), [...manifest.componentHost.service.rpcMeth
 assert(!service.includes("'project.output.authorize.v1'") && !service.includes("'version.register.v1'"));
 for (const capability of ['project.media.page.v2','project.output.v2','version.create.v2','tasks.v2','component.storage.v2','component.settings.v2','component.lifecycle.v2']) assert(service.includes(`'${capability}'`));
 assert(packageScript.includes("path.join(root,'models'") && packageScript.includes('PyInstaller') && packageScript.includes('component.json'));
+assert(packageScript.includes("require.resolve('vite/package.json'") && packageScript.includes('packagedEntrypoint') && packageScript.includes('fs.renameSync(generatedExecutable, declaredExecutable)'), 'production packaging must resolve hoisted build tools and publish the manifest-declared executable');
 for (const action of Object.values(manifest.componentHost.service.lifecycleActions)) assert.equal(action.sha256, sha256(path.join(root, action.entry)));
 for (const entry of ['renderer/index.html','renderer/settings.html','renderer/team-retouch.svg','service.cjs','workflow-generation.cjs','workflow-artifact.cjs','workflow-manifest.cjs','package.json','package-lock.json']) assert(fs.existsSync(path.join(root, entry)), `missing plugin-owned file: ${entry}`);
 console.log('Team-retouch independent component boundary tests passed');

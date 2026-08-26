@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain: electronIpcMain, Menu, shell, dialog, protocol, nativeImage, clipboard, screen } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain: electronIpcMain, Menu, shell, dialog, protocol, nativeImage, clipboard, screen, safeStorage } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -121,6 +121,11 @@ const componentHostRegistry = createComponentHostRegistry({
 });
 configureProtectedProjectFolderRegistry({ descriptorProvider: componentHostRegistry.list });
 let componentViewManager; let componentServiceManager; let configMutationService; let toastOverlayManager;
+const destroyToastOverlayManager = () => {
+  const manager = toastOverlayManager;
+  toastOverlayManager = null;
+  manager?.destroy();
+};
 
 protocol.registerSchemesAsPrivileged([
   { scheme: 'photoflow-media', privileges: { standard: true, secure: true, supportFetchAPI: true, stream: true } },
@@ -545,6 +550,10 @@ console.error = (...values) => writeLog('error', values.map(formatLogValue).join
 
 
 function createWindow(loadRenderer = true) {
+  // On macOS all windows may close without quitting. Tear down IPC and event
+  // bindings while the manager still owns its original parent window, before
+  // replacing mainWindow during app activation.
+  destroyToastOverlayManager();
   // 2. 彻底移除顶部菜单栏 (File, Edit, View...)
   Menu.setApplicationMenu(null);
   mainWindow = new BrowserWindow({
@@ -613,6 +622,7 @@ function createWindow(loadRenderer = true) {
     preloadPath: path.join(__dirname, 'toast-overlay-preload.cjs'),
     rendererFile: toastOverlayRendererFile,
     developmentRendererUrl,
+    screen,
     writeLog,
   });
 
@@ -1856,7 +1866,7 @@ app.whenReady().then(async () => {
   // not load renderer code until every channel has been registered.
   createWindow(false);
 
-  const { componentCapabilityBroker, componentNotificationService } = createComponentHostCapabilityRuntime({
+  const { componentCapabilityBroker, componentNotificationService, clearComponentCapabilityState, clearComponentSecretData, abortComponentNetworkRequests } = createComponentHostCapabilityRuntime({
     ensureWorkspace,
     getWorkspaceDataRoot,
     resolveProjectEntry,
@@ -1864,7 +1874,7 @@ app.whenReady().then(async () => {
     IMAGE_EXTENSIONS,
     path, fs, crypto, getConfigPath, readSavedConfig, readConfig: configMutationService.read, mutateConfig: configMutationService.mutate,
     getProjectPath, dialog, mainWindow, mediaService, mediaRatingService, exiftool, shell, backgroundTasks,
-    uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths,
+    uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths, fileSystemService, runPythonJsonAction, safeStorage, secretsRoot: path.join(app.getPath('userData'), 'component-secrets'),
     getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
     RAW_EXTENSIONS, VIDEO_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS,
   });
@@ -1880,19 +1890,19 @@ app.whenReady().then(async () => {
     registry: componentHostRegistry,
     preloadPath: path.join(__dirname, 'component-preload.cjs'),
     ipcMain: electronIpcMain,
-    serviceManager: componentServiceManager, notificationService: componentNotificationService,
+    serviceManager: componentServiceManager, notificationService: componentNotificationService, clearComponentCapabilityState,
     writeLog,
   });
   registerComponentHostIpc({ ipcMain, manager: componentViewManager, mainWindow });
   const componentRpcIpcMain = createComponentRpcIpcProxy({ ipcMain, manager: componentViewManager });
 
-  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
+  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   for (const descriptor of componentHostRegistry.list()) componentCapabilityBroker.assertCapabilities(descriptor);
   const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
-  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
+  registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
   registerAdvancedVideoIpc({ BrowserWindow, app, crypto, dialog, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
@@ -1962,7 +1972,7 @@ app.whenReady().then(async () => {
 });
 
 registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutationService, writeLog, onQuit: () => {
-  toastOverlayManager?.destroy();
+  destroyToastOverlayManager();
   componentViewManager?.destroy();
   void componentServiceManager?.destroy();
   telemetryService?.stop();

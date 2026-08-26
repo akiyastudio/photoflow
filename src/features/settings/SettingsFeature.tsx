@@ -11,7 +11,7 @@ import { normalizeConfiguredSdDeviceRecords, removeConfiguredSdDevice, syncLegac
 import { MAX_SUBTITLE_FONT_SIZE, MIN_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../app/video-player-settings';
 import { componentSettingsSectionKey, type ComponentSettingsSection } from './component-settings-page-model';
 import { restoredWorkspaceConfig } from './restored-workspace-config';
-import { useToast } from '../app/useTopToastStack';
+import { useUserFacingToast } from '../app/useUserFacingToast';
 
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
@@ -478,7 +478,7 @@ const SettingsPanel = ({ title, onClose, children }: { title: string; onClose: (
 </div>;
 
 const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectFocus, config, components, componentInstallPath, componentsLoading, onRefreshComponents, onComponentsChanged, onSave, onConfigRestored, getDefaultSettings }: { activeSection: BuiltInSettingsSection; backupProjectFocus?: WorkspaceProject | null; onClearBackupProjectFocus?: () => void; config: AppConfig; components: ComponentStatus[]; componentInstallPath: string; componentsLoading: boolean; onRefreshComponents: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onSave: (config: AppConfig) => boolean | Promise<boolean>; onConfigRestored: (config: AppConfig) => void; getDefaultSettings: () => AppConfig | Promise<AppConfig> }) => {
-  const toast = useToast();
+  const toast = useUserFacingToast();
   const onNotice = useCallback((message: string, duration?: number) => { toast.show(message, duration); }, [toast]);
   const appDialog = useAppDialog();
   const [draft, setDraft] = useState(config);

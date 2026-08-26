@@ -1,9 +1,11 @@
 import './index.css';
+import { createToastOverlayLayoutReporter, type ToastOverlayLayout } from './features/app/toast-overlay-layout-reporter';
 
 declare global {
   interface Window {
     toastOverlay: {
-      onSnapshot: (callback: (value: { html: string; dark: boolean }) => void) => () => void;
+      onSnapshot: (callback: (value: { html: string; dark: boolean; revision: number }) => void) => () => void;
+      reportLayout: (layout: { visible: boolean; revision: number; x: number; y: number; width: number; height: number; viewportWidth: number; viewportHeight: number }) => Promise<{ success: boolean; stale?: boolean }>;
       setPointerInteractive: (interactive: boolean) => void;
       sendAction: (action: string, id: string) => void;
     };
@@ -34,6 +36,34 @@ const sanitizeHostMarkup = (html: string) => {
   return clean;
 };
 
+const TOAST_OVERLAY_GUTTER = 32;
+const measureLayout = (revision: number): ToastOverlayLayout => {
+  const viewportWidth = Math.max(0, Math.round(window.innerWidth));
+  const viewportHeight = Math.max(0, Math.round(window.innerHeight));
+  const stack = root.querySelector<HTMLElement>('.top-toast-stack--overlay');
+  const hasVisibleToast = Boolean(stack?.querySelector('[data-top-toast-id]'));
+  return !stack || !hasVisibleToast
+    ? { visible: false, revision, x: 0, y: 0, width: 0, height: 0, viewportWidth, viewportHeight }
+    : (() => {
+        const rect = stack.getBoundingClientRect();
+        const x = Math.max(0, Math.floor(rect.left - TOAST_OVERLAY_GUTTER));
+        const y = Math.max(0, Math.floor(rect.top - TOAST_OVERLAY_GUTTER));
+        const right = Math.min(viewportWidth, Math.ceil(rect.right + TOAST_OVERLAY_GUTTER));
+        const bottom = Math.min(viewportHeight, Math.ceil(rect.bottom + TOAST_OVERLAY_GUTTER));
+        return { visible: right > x && bottom > y, revision, x, y, width: Math.max(0, right - x), height: Math.max(0, bottom - y), viewportWidth, viewportHeight };
+      })();
+};
+const layoutReporter = createToastOverlayLayoutReporter({
+  measure: measureLayout,
+  send: layout => { void window.toastOverlay.reportLayout(layout).catch(() => undefined); },
+  setTimer: (callback, delay) => window.setTimeout(callback, delay),
+  clearTimer: timer => window.clearTimeout(timer),
+  requestFrame: callback => window.requestAnimationFrame(callback),
+  cancelFrame: frame => window.cancelAnimationFrame(frame),
+});
+const layoutObserver = new ResizeObserver(layoutReporter.schedule);
+layoutObserver.observe(root);
+
 window.toastOverlay.onSnapshot(snapshot => {
   const focused = document.activeElement instanceof HTMLElement ? { action: document.activeElement.dataset.toastOverlayAction, id: document.activeElement.dataset.toastOverlayId } : null;
   document.documentElement.classList.toggle('dark', snapshot.dark);
@@ -42,6 +72,10 @@ window.toastOverlay.onSnapshot(snapshot => {
   stack.setAttribute('aria-label', '通知');
   stack.appendChild(sanitizeHostMarkup(snapshot.html));
   root.replaceChildren(stack);
+  layoutObserver.disconnect();
+  layoutObserver.observe(root);
+  layoutObserver.observe(stack);
+  layoutReporter.acceptSnapshot(snapshot.revision);
   if (focused?.action && focused.id) stack.querySelector<HTMLElement>(`[data-toast-overlay-action="${CSS.escape(focused.action)}"][data-toast-overlay-id="${CSS.escape(focused.id)}"]`)?.focus();
 });
 
@@ -53,6 +87,7 @@ window.addEventListener('mousemove', event => {
   window.toastOverlay.setPointerInteractive(next);
 });
 window.addEventListener('mouseleave', () => { interactive = false; window.toastOverlay.setPointerInteractive(false); });
+window.addEventListener('resize', layoutReporter.schedule);
 window.addEventListener('click', event => {
   const button = event.target instanceof Element ? event.target.closest<HTMLElement>('[data-toast-overlay-action]') : null;
   const action = button?.dataset.toastOverlayAction;

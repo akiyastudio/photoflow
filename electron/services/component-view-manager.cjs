@@ -22,6 +22,7 @@ const normalizeOpenScope = request => {
 };
 const componentPageKey = ({ componentId, workspacePath, projectId }) => ['project', componentId, normalizeIdentity(workspacePath), String(projectId || '').trim()].join(PAGE_KEY_SEPARATOR);
 const componentSettingsPageKey = ({ componentId, pageId }) => ['application.settings', componentId, String(pageId || '').trim()].join(PAGE_KEY_SEPARATOR);
+const componentContributionKey = ({ componentId, contributionId, workspacePath, projectId }, surface) => [surface, componentId, contributionId, normalizeIdentity(workspacePath), String(projectId || '')].join(PAGE_KEY_SEPARATOR);
 const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
 const MIN_COMPONENT_SURFACE_HEIGHT = 120;
@@ -42,12 +43,13 @@ const diagnosticToken = value => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, notificationService = null, writeLog = () => undefined }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, notificationService = null, clearComponentCapabilityState = null, writeLog = () => undefined }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
     this.preloadPath = preloadPath;
     this.ipcMain = ipcMain;
+    this.clearComponentCapabilityState = clearComponentCapabilityState;
     this.writeLog = writeLog;
     this.serviceManager = serviceManager;
     this.notificationService = notificationService;
@@ -77,6 +79,7 @@ class ComponentViewManager {
         if (!this.serviceManager?.supports(instance.context.componentId, normalizedMethod)) throw new Error(`Unknown component service RPC method: ${normalizedMethod}`);
         return this.serviceManager.invoke(instance.context.componentId, normalizedMethod, payload, instance.context);
       }
+      if (instance.contribution) { if (!instance.contribution.rpcMethods.includes(normalizedMethod)) throw new Error(`Component RPC method is not allowed for contribution ${instance.contribution.id}: ${normalizedMethod}`); if (!this.serviceManager?.supports(instance.context.componentId, normalizedMethod)) throw new Error(`Unknown component service RPC method: ${normalizedMethod}`); return this.serviceManager.invoke(instance.context.componentId, normalizedMethod, payload, instance.context); }
       const registration = this.rpcMethods.get(normalizedMethod);
       if (registration?.componentId === instance.context.componentId) return registration.handler(event, payload, instance.context);
       if (this.serviceManager?.supports(instance.context.componentId, normalizedMethod)) {
@@ -105,9 +108,9 @@ class ComponentViewManager {
       contractVersion: item.contractVersion,
       hostApiVersion: item.hostApiVersion,
       actionId: item.toolbarAction.id,
-      label: item.development ? `${item.toolbarAction.label}（开发）` : item.toolbarAction.label,
+      label: item.toolbarAction.label,
       pageId: item.fullPage.id,
-      pageTitle: item.development ? `${item.fullPage.title}（开发组件）` : item.fullPage.title,
+      pageTitle: item.fullPage.title,
       development: item.development === true,
       ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
     }));
@@ -120,12 +123,13 @@ class ComponentViewManager {
       contractVersion: item.contractVersion,
       hostApiVersion: item.hostApiVersion,
       pageId: page.id,
-      label: item.development ? `${page.label}（开发）` : page.label,
-      pageTitle: item.development ? `${page.title}（开发组件）` : page.title,
+      label: page.label,
+      pageTitle: page.title,
       development: item.development === true,
       ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
     })));
   }
+  listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, hostApiVersion: item.hostApiVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
 
   async open(request) {
     return this.openSurface(request, 'project');
@@ -134,6 +138,7 @@ class ComponentViewManager {
   async openSettings(request) {
     return this.openSurface(request, 'application.settings');
   }
+  async openContribution(request) { const descriptor = this.registry.resolve(request.componentId); const contribution = descriptor?.contributions?.find(item => item.id === request.contributionId && item.type === request.type); if (!contribution) throw new Error('Unknown component contribution'); const surface = contribution.type === 'application.command' ? 'application.command' : contribution.type; return this.openSurface({ ...request, pageId: contribution.pageId, contribution }, surface); }
 
   releaseSettings(request) {
     const leaseId = String(request?.leaseId || '');
@@ -149,13 +154,13 @@ class ComponentViewManager {
 
   async openSurface(request, surface) {
     const descriptor = this.registry.resolve(request.componentId);
-    const settingsPage = surface === 'application.settings' ? descriptor?.settingsPages?.find(page => page.id === request.pageId) : null;
-    const page = surface === 'application.settings' ? settingsPage : descriptor?.fullPage;
+    const settingsPage = surface === 'application.settings' ? descriptor?.settingsPages?.find(page => page.id === request.pageId) : null; const contribution = request.contribution || null;
+    const page = surface === 'application.settings' ? settingsPage : contribution ? descriptor?.pages?.find(item => item.id === contribution.pageId) : descriptor?.fullPage;
     if (!descriptor || !page || page.id !== request.pageId) throw new Error('Unknown component page');
-    const key = surface === 'application.settings' ? componentSettingsPageKey(request) : componentPageKey(request);
+    const applicationLevel = surface === 'application.settings' || surface === 'application.command'; const key = surface === 'application.settings' ? componentSettingsPageKey(request) : contribution ? componentContributionKey(request, surface) : componentPageKey(request);
     const leaseId = surface === 'application.settings' ? String(request.leaseId || '') : '';
     if (surface === 'application.settings' && !/^[a-z0-9._:-]{8,160}$/i.test(leaseId)) throw new Error('Invalid component settings page lease');
-    this.writeLog('info', 'Component page context bound', { componentId: request.componentId, surface, projectId: surface === 'project' ? String(request.projectId || '') : '', projectName: surface === 'project' ? String(request.projectName || '') : '', projectStatus: surface === 'project' ? String(request.projectStatus || '') : '', sourcePageId: surface === 'project' ? String(request.sourcePageId || '') : '' });
+    this.writeLog('info', 'Component page context bound', { componentId: request.componentId, surface, contributionId: contribution?.id || '', projectId: applicationLevel ? '' : String(request.projectId || ''), projectName: applicationLevel ? '' : String(request.projectName || ''), projectStatus: applicationLevel ? '' : String(request.projectStatus || ''), sourcePageId: applicationLevel ? '' : String(request.sourcePageId || '') });
     let existing = this.instances.get(key);
     if (existing && (existing.descriptor.componentVersion !== descriptor.componentVersion || existing.page.entry !== page.entry)) {
       this.close(existing.instanceId);
@@ -169,9 +174,9 @@ class ComponentViewManager {
       existing.context = Object.freeze({
         ...existing.context,
         componentVersion: descriptor.componentVersion,
-        projectName: surface === 'project' ? String(request.projectName || '') : '',
-        projectStatus: surface === 'project' ? String(request.projectStatus || '') : '',
-        ...(surface === 'project' ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }),
+        projectName: !applicationLevel ? String(request.projectName || '') : '',
+        projectStatus: !applicationLevel ? String(request.projectStatus || '') : '',
+        ...(!applicationLevel ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }), contributionId: contribution?.id || '',
       });
       if (!existing.view.webContents.isDestroyed()) existing.view.webContents.send('component-sdk:context-changed', this.publicContext(existing));
       this.activate(existing.instanceId); return this.publicInstance(existing, leaseId);
@@ -186,7 +191,7 @@ class ComponentViewManager {
       webviewTag: false,
     } });
     const instance = {
-      key, instanceId, view, descriptor, page, settingsPage,
+      key, instanceId, view, descriptor, page, settingsPage, contribution,
       readyPromise: null,
       settingsLeases: new Set(surface === 'application.settings' ? [leaseId] : []),
       leaseGeneration: 1,
@@ -196,11 +201,11 @@ class ComponentViewManager {
         componentId: descriptor.componentId,
         componentVersion: descriptor.componentVersion,
         surface,
-        workspacePath: surface === 'project' ? String(request.workspacePath || '') : '',
-        projectId: surface === 'project' ? String(request.projectId || '') : '',
-        projectName: surface === 'project' ? String(request.projectName || '') : '',
-        projectStatus: surface === 'project' ? String(request.projectStatus || '') : '',
-        ...(surface === 'project' ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }),
+        workspacePath: !applicationLevel ? String(request.workspacePath || '') : '',
+        projectId: !applicationLevel ? String(request.projectId || '') : '',
+        projectName: !applicationLevel ? String(request.projectName || '') : '',
+        projectStatus: !applicationLevel ? String(request.projectStatus || '') : '',
+        ...(!applicationLevel ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }), contributionId: contribution?.id || '',
         eventSender: view.webContents,
         emitComponentEvent: (topic, payload) => {
           if (descriptor.service?.events?.includes(String(topic || '')) && !view.webContents.isDestroyed()) {
@@ -242,7 +247,7 @@ class ComponentViewManager {
       this.senderBindings.delete(senderId);
       if (this.instances.get(key) === instance) this.instances.delete(key);
       if (this.instancesById.get(instanceId) === instance) this.instancesById.delete(instanceId);
-      if (![...this.senderBindings.values()].some(bound => bound.context.componentId === descriptor.componentId)) this.notificationService?.clearComponent?.(descriptor.componentId);
+      if (![...this.senderBindings.values()].some(bound => bound.context.componentId === descriptor.componentId)) { this.notificationService?.clearComponent?.(descriptor.componentId); this.clearComponentCapabilityState?.(descriptor.componentId); }
     });
     this.mainWindow.contentView.addChildView(view);
     view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
@@ -263,15 +268,15 @@ class ComponentViewManager {
 
   publicContext(instance) {
     const { workspacePath: _privateWorkspacePath, eventSender: _privateEventSender, emitComponentEvent: _privateEmit, ...publicContext } = instance.context;
-    const applicationSettings = instance.context.surface === 'application.settings';
-    const permissions = applicationSettings
-      ? (instance.descriptor.service?.permissions || []).filter(permission => ['component.settings', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs', 'notifications'].includes(permission))
+    const applicationSettings = instance.context.surface === 'application.settings'; const applicationCommand = instance.context.surface === 'application.command'; const applicationSurface = applicationSettings || applicationCommand;
+    const permissions = applicationSurface
+      ? (instance.descriptor.service?.permissions || []).filter(permission => ['component.settings', 'component.secrets', 'network.fetch', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs', 'notifications'].includes(permission))
       : instance.descriptor.service?.permissions || [];
     return {
       ...publicContext,
       hostApiVersion: instance.descriptor.hostApiVersion,
       permissions,
-      events: applicationSettings ? [] : instance.descriptor.service?.events || [],
+      events: applicationSurface ? [] : instance.descriptor.service?.events || [],
       themeContractVersion: 1,
       resolvedTheme: this.resolvedTheme,
     };
@@ -382,6 +387,7 @@ class ComponentViewManager {
       .map(instance => instance.instanceId);
     ids.forEach(id => this.close(id));
     this.notificationService?.clearComponent?.(normalizedId);
+    this.clearComponentCapabilityState?.(normalizedId);
     return ids.length;
   }
 

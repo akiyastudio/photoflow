@@ -31,6 +31,10 @@ assert.equal(componentStatusFromAdvancedPreflight({ success: true, message: 'pre
 assert.equal(componentStatusFromAdvancedPreflight({ success: true, message: 'checking' }).advancedState, undefined, 'unknown/checking metadata must never be reported as not installed');
 assert.equal(componentStatusFromAdvancedPreflight({ success: true, installed: true }).advancedAvailable, true, 'the reviewed legacy installed field remains compatible');
 assert.equal(componentStatusFromAdvancedPreflight({ success: true, installed: true, advancedAvailable: false, state: 'repair-needed', advancedError: 'service failed' }).advancedAvailable, false, 'the explicit runtime result takes precedence over legacy installed metadata');
+assert.deepEqual(
+  componentStatusFromAdvancedPreflight({ success: true, advancedAvailable: false, state: 'unavailable', errorCategory: 'wsl-access-denied', runtimeSource: 'development' }),
+  { id: 'team-retouch', installed: true, runtimeAvailable: true, identityAvailable: true, advancedAvailable: false, advancedState: 'unavailable', advancedError: '', advancedErrorCategory: 'wsl-access-denied', advancedRuntimeSource: 'development', provider: '内置人物检测' },
+);
 
 const listed = await legacyApi.getComponents();
 assert.equal(listed.components[0].advancedAvailable, true);

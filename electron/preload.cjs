@@ -6,7 +6,7 @@ const COMPONENT_NOTIFICATION_DEDUPE_KEY = /^[a-z0-9][a-z0-9._:-]{0,79}$/i;
 const normalizeComponentNotificationRendererEvent = value => {
   if (!value || typeof value !== 'object' || value.apiVersion !== 2 || typeof value.componentId !== 'string' || !/^[a-z0-9][a-z0-9._-]{0,79}$/i.test(value.componentId)) return null;
   if (value.type === 'purge') return Object.freeze({ apiVersion: 2, type: 'purge', componentId: value.componentId });
-  if (value.type !== 'notification' || typeof value.id !== 'string' || !['project', 'application.settings'].includes(value.surface)) return null;
+  if (value.type !== 'notification' || typeof value.id !== 'string' || !['project', 'application.settings', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(value.surface)) return null;
   const notification = value.notification;
   if (!notification || Object.keys(notification).some(key => !['tone', 'message', 'dedupeKey'].includes(key)) || !COMPONENT_NOTIFICATION_TONES.has(notification.tone) || typeof notification.message !== 'string' || notification.message !== notification.message.trim() || notification.message.length < 1 || notification.message.length > 360 || (notification.dedupeKey !== undefined && (typeof notification.dedupeKey !== 'string' || !COMPONENT_NOTIFICATION_DEDUPE_KEY.test(notification.dedupeKey)))) return null;
   return Object.freeze({ apiVersion: 2, type: 'notification', id: value.id, componentId: value.componentId, surface: value.surface, notification: Object.freeze({ tone: notification.tone, message: notification.message, ...(notification.dedupeKey ? { dedupeKey: notification.dedupeKey } : {}) }) });
@@ -82,8 +82,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getComponents: (force = false) => ipcRenderer.invoke('components-list', force),
   getComponentHostActions: () => ipcRenderer.invoke('component-host-list'),
   getComponentSettingsPages: () => ipcRenderer.invoke('component-host-settings-list'),
+  getComponentContributions: () => ipcRenderer.invoke('component-host-contributions-list'),
   openComponentPage: request => ipcRenderer.invoke('component-host-open', request),
   openComponentSettingsPage: request => ipcRenderer.invoke('component-host-settings-open', request),
+  openComponentContribution: request => ipcRenderer.invoke('component-host-contribution-open', request),
   releaseComponentSettingsPage: request => ipcRenderer.invoke('component-host-settings-release', request),
   activateComponentPage: instanceId => ipcRenderer.invoke('component-host-activate', instanceId),
   setHostSurfaceSuspended: update => ipcRenderer.invoke('component-host-set-suspended', update),
@@ -306,7 +308,6 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getProjectFileClipboardStatus: () => ipcRenderer.invoke('workspace-file-clipboard-status'),
   cancelProjectFileCut: (workspacePath, status, projectName, paths) => ipcRenderer.invoke('workspace-cancel-file-cut', workspacePath, status, projectName, paths),
   getPathForFile: (file) => webUtils.getPathForFile(file),
-  prepareProjectFileDrag: (workspacePath, status, projectName, paths) => ipcRenderer.invoke('workspace-prepare-file-drag', workspacePath, status, projectName, paths),
   startProjectFileDrag: (workspacePath, status, projectName, paths) => ipcRenderer.send('workspace-start-file-drag', workspacePath, status, projectName, paths),
   onProjectFileDragEnd: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-file-drag-ended', subscription); return () => ipcRenderer.removeListener('workspace-file-drag-ended', subscription); },
   onProjectFileOperationProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-file-operation-progress', subscription); return () => ipcRenderer.removeListener('workspace-file-operation-progress', subscription); },

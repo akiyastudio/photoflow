@@ -5846,6 +5846,82 @@ def recover_progress_folder_relocations(root: str, db, fault_after=None):
     return {"success": True, "recovered": recovered, "pending": remaining}
 
 
+def progress_external_link_route_rename(root: str, db, payload: dict):
+    del root
+    project = project_row(db, payload["projectName"])
+    mutation_token = str(payload.get("mutationToken") or "")
+    lease = _progress_tree_mutation_lease(db, project["id"])
+    if not mutation_token or lease is None or lease.get("token") != mutation_token:
+        raise ValueError("progress_tree_mutation_expired: 版本树变更令牌已失效")
+    progress_id = str(payload.get("progressId") or "")
+    progress = db.execute(
+        "SELECT * FROM progress_folders WHERE id=? AND project_id=?", (progress_id, project["id"]),
+    ).fetchone()
+    if progress is None or progress["node_role"] != "progress" or not progress["external_link_relative_path"]:
+        raise ValueError("external_progress_rename_invalid: 只能重命名已登记的外链 progress 入口")
+    if progress["missing_since"] is not None or progress["tracking_state"] in PROGRESS_RELOCATION_ACTIVE_STATES:
+        raise ValueError("progress_folder_busy: 进度正在活动或待修复，不能重命名")
+    active = db.execute(
+        """SELECT 1 FROM tracking_sessions WHERE (progress_id=? OR parent_progress_id=?)
+           AND status IN ('comparing','pending_confirm','committing','failed') LIMIT 1""",
+        (progress_id, progress_id),
+    ).fetchone()
+    if active is not None:
+        raise ValueError("progress_folder_busy: 进度存在活动或待修复的跟踪会话")
+    old_route = normalize_external_link_relative_path(payload.get("oldRelativePath"))
+    new_route = normalize_external_link_relative_path(payload.get("newRelativePath"))
+    if not old_route or not new_route or progress["external_link_relative_path"].casefold() != old_route.casefold():
+        raise ValueError("external_progress_route_mismatch: 外链入口已变化，请刷新后重试")
+    if old_route.casefold() == new_route.casefold() and old_route == new_route:
+        db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(project["id"]),))
+        db.commit()
+        return {"success": True, "progressFolder": serialize_progress(_progress_row_by_id(db, progress_id))}
+    old_parent = old_route.rsplit("/", 1)[0] if "/" in old_route else ""
+    new_parent = new_route.rsplit("/", 1)[0] if "/" in new_route else ""
+    if old_parent.casefold() != new_parent.casefold() or not new_route.casefold().endswith(".lnk"):
+        raise ValueError("external_progress_route_invalid: 外链入口只能在原目录中改名")
+    affected = db.execute(
+        """SELECT id,external_link_relative_path FROM progress_folders
+           WHERE project_id=? AND external_link_relative_path IS NOT NULL""", (project["id"],),
+    ).fetchall()
+    affected = [row for row in affected if row["external_link_relative_path"].casefold() == old_route.casefold()
+                or row["external_link_relative_path"].casefold().startswith(old_route.casefold() + "/")]
+    if not affected:
+        raise ValueError("external_progress_route_mismatch: 没有找到外链版本路由")
+    if payload.get("preflight") is True:
+        return {"success": True, "affectedProgressIds": [row["id"] for row in affected]}
+    timestamp = int(time.time() * 1000)
+    try:
+        for row in affected:
+            route = _replace_relative_prefix(row["external_link_relative_path"], old_route, new_route)
+            db.execute(
+                """UPDATE progress_folders SET external_link_relative_path=?,
+                   display_name=CASE WHEN id=? THEN ? ELSE display_name END,updated_at=? WHERE id=?""",
+                (route, progress_id, new_route.rsplit("/", 1)[-1][:-4], timestamp, row["id"]),
+            )
+        for slot in db.execute(
+            "SELECT progress_id,relative_path_key FROM media_import_artifact_slots WHERE project_id=?", (project["id"],),
+        ).fetchall():
+            route = _replace_relative_prefix(slot["relative_path_key"], old_route, new_route).casefold()
+            if route != slot["relative_path_key"]:
+                db.execute(
+                    "UPDATE media_import_artifact_slots SET relative_path_key=?,updated_at=? WHERE project_id=? AND progress_id=?",
+                    (route, timestamp, project["id"], slot["progress_id"]),
+                )
+        db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(project["id"]),))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {
+        "success": True,
+        "progressFolder": serialize_progress(_progress_row_by_id(db, progress_id)),
+        "progressFolders": [serialize_progress(row) for row in progress_rows(db, project["id"])],
+        "oldRelativePath": old_route,
+        "newRelativePath": new_route,
+    }
+
+
 def progress_folder_rename(root: str, db, payload: dict, fault_after=None):
     recover_progress_folder_relocations(root, db)
     project = project_row(db, payload["projectName"])
@@ -6298,7 +6374,8 @@ def cleanup_progress_tombstones(root: str, db, cutoff: int | None = None):
 def progress_unregister(root: str, db, payload: dict):
     """Remove version semantics from an existing folder without touching its files."""
     project = project_row(db, payload["projectName"])
-    sync_progress_folder_locations(root, db, project)
+    if payload.get("skipLocationSync") is not True:
+        sync_progress_folder_locations(root, db, project)
     progress_id = str(payload.get("progressId") or "")
     progress = db.execute(
         "SELECT * FROM progress_folders WHERE id=? AND project_id=?",
@@ -6308,6 +6385,8 @@ def progress_unregister(root: str, db, payload: dict):
         if payload.get("allowMissing") is True:
             return {"success": True, "progressId": progress_id, "alreadyRemoved": True}
         raise ValueError("要取消登记的版本进度不存在")
+    if payload.get("expectedUpdatedAt") is not None and int(payload["expectedUpdatedAt"]) != int(progress["updated_at"]):
+        raise ValueError("progress_unregister_stale")
     if progress["node_role"] != "progress":
         raise ValueError("只有普通版本进度可以取消登记")
     if not os.path.isdir(progress["folder_path"]):
@@ -6332,6 +6411,16 @@ def progress_unregister(root: str, db, payload: dict):
     ordinary_layout_key = f"entry:{relative_path}"
     timestamp = int(time.time() * 1000)
     with db:
+        component_scope_key = payload.get("componentScopeKey")
+        if component_scope_key:
+            scope_prefix = str(component_scope_key) + os.sep.casefold() + "%"
+            scoped = db.execute(
+                """SELECT 1 FROM progress_folders WHERE id=? AND project_id=?
+                   AND external_link_relative_path IS NULL AND (folder_path_key=? OR folder_path_key LIKE ?)""",
+                (progress_id, project["id"], str(component_scope_key), scope_prefix),
+            ).fetchone()
+            if scoped is None:
+                raise ValueError("progress_component_scope_invalid")
         db.execute(
             "DELETE FROM tracking_sessions WHERE progress_id=? OR parent_progress_id=?",
             (progress_id, progress_id),
@@ -6374,6 +6463,98 @@ def progress_unregister(root: str, db, payload: dict):
         "relativePath": relative_path,
         "reparentedProgressCount": reparented_progress_count,
     }
+
+
+def _component_scope_paths(payload: dict):
+    project_path = canonical_path(str(payload.get("projectPath") or ""))
+    scope_path = canonical_path(str(payload.get("scopePath") or ""))
+    project_key = project_path.casefold()
+    scope_key = scope_path.casefold()
+    if not payload.get("projectPath") or not payload.get("scopePath") or not (scope_key == project_key or scope_key.startswith(project_key + os.sep.casefold())):
+        raise ValueError("component_scope_invalid")
+    return project_path, scope_path, scope_key
+
+
+def _component_progress_in_scope(row, scope_key: str) -> bool:
+    if row is None or row["external_link_relative_path"]:
+        return False
+    folder_key = canonical_path(str(row["folder_path"] or "")).casefold()
+    return folder_key == scope_key or folder_key.startswith(scope_key + os.sep.casefold())
+
+
+def progress_component_manage(root: str, db, payload: dict):
+    allowed = {"action", "projectName", "projectId", "projectPath", "scopePath", "progressId", "expectedUpdatedAt", "displayName", "trackingEnabled", "sourceProgressId", "targetProgressId", "newSourceProgressId", "edgeKind"}
+    if not isinstance(payload, dict) or set(payload) - allowed:
+        raise ValueError("progress_component_payload_invalid")
+    action = str(payload.get("action") or "")
+    project = project_row(db, str(payload.get("projectName") or ""))
+    if str(project["id"]) != str(payload.get("projectId") or ""):
+        raise ValueError("progress_component_project_invalid")
+    project_path, _scope_path, scope_key = _component_scope_paths(payload)
+    expected_project_path = canonical_path(os.path.join(canonical_path(root), project["relative_path"]))
+    if project_path.casefold() != expected_project_path.casefold():
+        raise ValueError("progress_component_project_scope_invalid")
+    def scoped_node(node_id: str):
+        row = db.execute("SELECT * FROM progress_folders WHERE id=? AND project_id=?", (str(node_id or ""), project["id"])).fetchone()
+        if not _component_progress_in_scope(row, scope_key):
+            raise ValueError("progress_component_scope_invalid")
+        return row
+    if action == "update":
+        row = scoped_node(payload.get("progressId"))
+        if int(row["updated_at"]) != int(payload.get("expectedUpdatedAt") or -1): raise ValueError("progress_component_stale")
+        changes = [field for field in ("displayName", "trackingEnabled") if field in payload]
+        if not changes or row["node_role"] not in ("progress", "selection", "workflow"): raise ValueError("progress_component_update_invalid")
+        fields, values = [], []
+        if "displayName" in payload:
+            display_name = str(payload["displayName"]).strip()
+            if not display_name or len(display_name) > 160: raise ValueError("progress_component_name_invalid")
+            fields.append("display_name=?"); values.append(display_name)
+        if "trackingEnabled" in payload:
+            if not isinstance(payload["trackingEnabled"], bool) or row["node_role"] != "progress": raise ValueError("progress_component_tracking_invalid")
+            fields.extend(("tracking_enabled=?", "tracking_state=?")); values.extend((int(payload["trackingEnabled"]), "stale" if payload["trackingEnabled"] else "disabled"))
+        timestamp = max(int(time.time() * 1000), int(row["updated_at"]) + 1); fields.append("updated_at=?"); values.append(timestamp); values.extend((row["id"], row["updated_at"], scope_key, scope_key + os.sep.casefold() + "%"))
+        with db:
+            if db.execute(f"""UPDATE progress_folders SET {', '.join(fields)} WHERE id=? AND updated_at=?
+                               AND external_link_relative_path IS NULL AND (folder_path_key=? OR folder_path_key LIKE ?)""", values).rowcount != 1:
+                current = scoped_node(row["id"])
+                if int(current["updated_at"]) != int(row["updated_at"]): raise ValueError("progress_component_stale")
+                raise ValueError("progress_component_scope_invalid")
+        result = next(item for item in progress_rows(db, project["id"], True) if item["id"] == row["id"])
+        return {"success": True, "progressFolder": serialize_progress(result)}
+    if action == "unregister":
+        scoped_node(payload.get("progressId"))
+        return progress_unregister(root, db, {"projectName": project["name"], "progressId": payload.get("progressId"), "expectedUpdatedAt": payload.get("expectedUpdatedAt"), "skipLocationSync": True, "componentScopeKey": scope_key})
+    source_id = str(payload.get("sourceProgressId") or ""); target_id = str(payload.get("targetProgressId") or ""); edge_kind = str(payload.get("edgeKind") or "")
+    scoped_node(source_id); scoped_node(target_id)
+    if action == "edgeCreate":
+        target = db.execute("SELECT updated_at FROM progress_folders WHERE id=? AND project_id=?", (target_id, project["id"])).fetchone()
+        if target is None or int(target["updated_at"]) != int(payload.get("expectedUpdatedAt") or -1): raise ValueError("progress_component_stale")
+        project_id, source_id, target_id, edge_kind = _validated_version_graph_edge(db, {"projectId": project["id"], "sourceProgressId": source_id, "targetProgressId": target_id, "edgeKind": edge_kind})
+        timestamp = int(time.time() * 1000); edge_id = str(uuid.uuid4())
+        with db:
+            scoped_node(source_id); scoped_node(target_id)
+            project_id, source_id, target_id, edge_kind = _validated_version_graph_edge(db, {"projectId": project["id"], "sourceProgressId": source_id, "targetProgressId": target_id, "edgeKind": edge_kind})
+            db.execute("INSERT INTO version_graph_edges(id,project_id,source_progress_id,target_progress_id,edge_kind,created_at,updated_at) VALUES(?,?,?,?,?,?,?)", (edge_id, project_id, source_id, target_id, edge_kind, timestamp, timestamp))
+        return {"success": True, "edge": serialize_version_graph_edge(db.execute("SELECT * FROM version_graph_edges WHERE id=?", (edge_id,)).fetchone())}
+    existing = db.execute("SELECT * FROM version_graph_edges WHERE project_id=? AND source_progress_id=? AND target_progress_id=? AND edge_kind=?", (project["id"], source_id, target_id, edge_kind)).fetchone()
+    if existing is None: raise ValueError("progress_component_edge_not_found")
+    if int(existing["updated_at"]) != int(payload.get("expectedUpdatedAt") or -1): raise ValueError("progress_component_stale")
+    if action == "edgeDelete":
+        with db:
+            scoped_node(source_id); scoped_node(target_id)
+            db.execute("DELETE FROM version_graph_edges WHERE id=? AND updated_at=?", (existing["id"], existing["updated_at"]))
+        return {"success": True, "edgeId": existing["id"]}
+    if action == "edgeReplaceSource":
+        new_source = str(payload.get("newSourceProgressId") or "")
+        scoped_node(new_source)
+        _validated_version_graph_edge(db, {"projectId": project["id"], "sourceProgressId": new_source, "targetProgressId": target_id, "edgeKind": edge_kind}, existing["id"])
+        timestamp = max(int(time.time() * 1000), int(existing["updated_at"]) + 1)
+        with db:
+            scoped_node(source_id); scoped_node(target_id); scoped_node(new_source)
+            _validated_version_graph_edge(db, {"projectId": project["id"], "sourceProgressId": new_source, "targetProgressId": target_id, "edgeKind": edge_kind}, existing["id"])
+            if db.execute("UPDATE version_graph_edges SET source_progress_id=?,updated_at=? WHERE id=? AND updated_at=?", (new_source, timestamp, existing["id"], existing["updated_at"])).rowcount != 1: raise ValueError("progress_component_stale")
+        return {"success": True, "edge": serialize_version_graph_edge(db.execute("SELECT * FROM version_graph_edges WHERE id=?", (existing["id"],)).fetchone())}
+    raise ValueError("progress_component_action_invalid")
 
 
 def progress_delete_missing(root: str, db, payload: dict):
@@ -8349,6 +8530,87 @@ def media_update_version(db, payload: dict):
     return {"success": True, **media_bundle(db, row["photo_id"])}
 
 
+def _component_version_row(db, payload: dict):
+    allowed = {"projectId", "projectPath", "scopePath", "versionId", "expectedUpdatedAt", "versionName", "note", "status", "isFinal", "makeCurrent"}
+    if not isinstance(payload, dict) or set(payload) - allowed:
+        raise ValueError("component_version_payload_invalid")
+    project_id = str(payload.get("projectId") or "").strip()
+    project_path = canonical_path(str(payload.get("projectPath") or ""))
+    scope_path = canonical_path(str(payload.get("scopePath") or ""))
+    project_key = project_path.casefold(); scope_key = scope_path.casefold()
+    if not project_id or not project_path or not scope_path or not (scope_key == project_key or scope_key.startswith(project_key + os.sep.casefold())):
+        raise ValueError("component_version_scope_invalid")
+    row = db.execute(
+        """SELECT version.*,photo.project_id FROM versions AS version
+             JOIN photos AS photo ON photo.id=version.photo_id
+            WHERE version.id=? AND version.is_deleted=0 AND photo.is_deleted=0 AND photo.project_id=?""",
+        (str(payload.get("versionId") or ""), project_id),
+    ).fetchone()
+    if row is None:
+        raise ValueError("component_version_not_found")
+    file_key = canonical_path(row["file_path"]).casefold()
+    if not (file_key == scope_key or file_key.startswith(scope_key + os.sep.casefold())):
+        raise ValueError("component_version_scope_invalid")
+    expected = payload.get("expectedUpdatedAt")
+    if not isinstance(expected, (int, float)) or isinstance(expected, bool) or not float(expected).is_integer() or int(expected) != int(row["updated_at"]):
+        raise ValueError("component_version_stale")
+    return row
+
+
+def media_component_update_version(db, payload: dict):
+    row = _component_version_row(db, payload)
+    changed = [field for field in ("versionName", "note", "status", "isFinal", "makeCurrent") if field in payload]
+    if not changed:
+        raise ValueError("component_version_update_empty")
+    fields, values = [], []
+    if "versionName" in payload:
+        name = str(payload["versionName"]).strip()
+        if not name or len(name) > 160:
+            raise ValueError("component_version_name_invalid")
+        fields.append("version_name=?"); values.append(name)
+    if "note" in payload:
+        note = str(payload["note"])
+        if len(note) > 2000:
+            raise ValueError("component_version_note_invalid")
+        fields.append("note=?"); values.append(note)
+    if "status" in payload:
+        status = str(payload["status"]).strip()
+        if not status or len(status) > 80 or any(ord(char) < 32 for char in status):
+            raise ValueError("component_version_status_invalid")
+        fields.append("status=?"); values.append(status)
+    timestamp = max(int(time.time() * 1000), int(row["updated_at"]) + 1)
+    with db:
+        current = db.execute("SELECT updated_at FROM versions WHERE id=? AND is_deleted=0", (row["id"],)).fetchone()
+        if current is None or int(current["updated_at"]) != int(row["updated_at"]):
+            raise ValueError("component_version_stale")
+        if "isFinal" in payload:
+            if not isinstance(payload["isFinal"], bool): raise ValueError("component_version_final_invalid")
+            if payload["isFinal"]: db.execute("UPDATE versions SET is_final=0,updated_at=? WHERE photo_id=? AND id!=?", (timestamp, row["photo_id"], row["id"]))
+            fields.append("is_final=?"); values.append(int(payload["isFinal"]))
+        if "makeCurrent" in payload:
+            if not isinstance(payload["makeCurrent"], bool) or not payload["makeCurrent"]: raise ValueError("component_version_current_invalid")
+            db.execute("UPDATE versions SET is_current=0,updated_at=? WHERE photo_id=? AND id!=?", (timestamp, row["photo_id"], row["id"]))
+            db.execute("UPDATE photos SET current_version_id=?,updated_at=? WHERE id=?", (row["id"], timestamp, row["photo_id"]))
+            fields.append("is_current=1")
+        fields.append("updated_at=?"); values.append(timestamp); values.extend((row["id"], row["updated_at"]))
+        updated = db.execute(f"UPDATE versions SET {', '.join(fields)} WHERE id=? AND updated_at=? AND is_deleted=0", values)
+        if updated.rowcount != 1: raise ValueError("component_version_stale")
+    result = db.execute("SELECT * FROM versions WHERE id=?", (row["id"],)).fetchone()
+    return {"success": True, "version": {key: value for key, value in serialize_version(result).items() if key not in ("filePath", "thumbnailPath")}}
+
+
+def media_component_delete_version(db, payload: dict):
+    if set(payload or {}) - {"projectId", "projectPath", "scopePath", "versionId", "expectedUpdatedAt"}:
+        raise ValueError("component_version_payload_invalid")
+    row = _component_version_row(db, payload)
+    if int(row["version_number"]) == 0: raise ValueError("component_version_original_protected")
+    with db:
+        current = db.execute("SELECT updated_at FROM versions WHERE id=? AND is_deleted=0", (row["id"],)).fetchone()
+        if current is None or int(current["updated_at"]) != int(row["updated_at"]): raise ValueError("component_version_stale")
+        cleanup = delete_version_rows(db, [row])
+    return {"success": True, "versionId": row["id"], "photoId": row["photo_id"], **cleanup}
+
+
 def media_refresh_metadata_fingerprint(db, payload: dict):
     """Accept an in-app metadata-only write without flagging a visual version change."""
     file_path = canonical_path(payload["filePath"])
@@ -9371,6 +9633,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         result = progress_folder_rename(root, db, payload)
         db.close()
         return result
+    elif action == "progress_external_link_route_rename":
+        result = progress_external_link_route_rename(root, db, payload)
+        db.close()
+        return result
     elif action == "progress_relation_update":
         result = progress_relation_update(db, payload)
         db.close()
@@ -9521,6 +9787,18 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "media_update_version":
         result = media_update_version(db, payload)
+        db.close()
+        return result
+    elif action == "progress_component_manage":
+        result = progress_component_manage(root, db, payload)
+        db.close()
+        return result
+    elif action == "media_component_update_version":
+        result = media_component_update_version(db, payload)
+        db.close()
+        return result
+    elif action == "media_component_delete_version":
+        result = media_component_delete_version(db, payload)
         db.close()
         return result
     elif action == "media_refresh_metadata_fingerprint":

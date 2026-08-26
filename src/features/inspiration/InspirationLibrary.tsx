@@ -8,7 +8,8 @@ import { renamedEntryDestinationPath } from '../workspace/file-entry-interaction
 import { pageOwnsFileOperationNotification } from '../workspace/file-operation-notification-model';
 import { INSPIRATION_FILE_BROWSER_CONTEXT } from '../file-browser/browser-context';
 import type { AppConfig, ComponentStatus, WorkspaceProject } from '../../types';
-import { useToast } from '../app/useTopToastStack';
+import { useUserFacingToast } from '../app/useUserFacingToast';
+import { mayCommitAsyncOperationResult } from '../file-operation-identity-model';
 
 export const INSPIRATION_PROJECT_NAME = '.__photoflow_inspiration__';
 const inspirationCollapsedPathsStorageKey = (rootPath: string) => {
@@ -67,7 +68,7 @@ export const InspirationLibraryNavigator = ({
   onOpenInNewTab: (relativePath: string) => void;
   onOpenSettings: () => void;
 }) => {
-  const toast = useToast();
+  const toast = useUserFacingToast();
   const onNotice = useCallback((message: string, duration?: number) => { toast.show(message, duration); }, [toast]);
   type InspirationFolder = { name: string; relativePath: string; parentRelativePath: string; depth: number };
   const appDialog = useAppDialog();
@@ -79,6 +80,9 @@ export const InspirationLibraryNavigator = ({
   const [renamingPath, setRenamingPath] = useState('');
   const [renameValue, setRenameValue] = useState('');
   const [busyPath, setBusyPath] = useState('');
+  const [pendingFolderMutation, setPendingFolderMutation] = useState<{
+    kind: 'rename' | 'create' | 'delete'; sourcePath?: string; target?: InspirationFolder;
+  } | null>(null);
   const [targetProjectsAvailable, setTargetProjectsAvailable] = useState(false);
   const [targetProject, setTargetProject] = useState<WorkspaceProject | null>(null);
   const folderLoadInFlightRef = useRef(false);
@@ -93,6 +97,14 @@ export const InspirationLibraryNavigator = ({
   const pendingTreeScrollTopRef = useRef<number | null>(null);
   const navigationContextRef = useRef({ rootPath, currentRelativePath });
   navigationContextRef.current = { rootPath, currentRelativePath };
+  const rootIdentityRef = useRef({ scopePath: rootPath, generation: 0 });
+  if (!mayCommitAsyncOperationResult(rootPath, rootIdentityRef.current.scopePath)) {
+    rootIdentityRef.current = { scopePath: rootPath, generation: rootIdentityRef.current.generation + 1 };
+  }
+  const rootGeneration = rootIdentityRef.current.generation;
+  const rootRequestIsCurrent = useCallback((requestedRootPath: string, requestedGeneration: number) => mayCommitAsyncOperationResult(
+    requestedRootPath, rootIdentityRef.current.scopePath, requestedGeneration, rootIdentityRef.current.generation,
+  ), []);
   useEscapeLayer(Boolean(folderMenu), () => setFolderMenu(null));
   useEscapeLayer(Boolean(renamingPath), () => { if (!renameSubmittingRef.current) setRenamingPath(''); });
   useEffect(() => {
@@ -127,6 +139,8 @@ export const InspirationLibraryNavigator = ({
     };
   }, [targetWorkspacePath]);
   const loadFolders = useCallback(async () => {
+    const requestedRootPath = rootPath;
+    const requestedGeneration = rootGeneration;
     if (!rootPath.trim()) {
       setFolders([]);
       setTreeError('');
@@ -138,6 +152,7 @@ export const InspirationLibraryNavigator = ({
     setLoading(true);
     try {
       const result = await window.electronAPI.listWorkspaceFolders(rootPath, '未分类', INSPIRATION_PROJECT_NAME);
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
       if (result.success) {
         setFolders(current => current.length === result.folders.length
           && current.every((folder, index) => folder.relativePath === result.folders[index]?.relativePath
@@ -154,20 +169,28 @@ export const InspirationLibraryNavigator = ({
       }
     } finally {
       folderLoadInFlightRef.current = false;
-      setLoading(false);
+      if (rootRequestIsCurrent(requestedRootPath, requestedGeneration)) setLoading(false);
       if (folderLoadQueuedRef.current) {
         folderLoadQueuedRef.current = false;
         setFolderLoadRevision(current => current + 1);
       }
     }
-  }, [rootPath]);
+  }, [rootGeneration, rootPath, rootRequestIsCurrent]);
   useEffect(() => { void loadFolders(); }, [folderLoadRevision, loadFolders]);
   useEffect(() => {
     if (active && !wasNavigatorActiveRef.current
       && (folderTreeDirtyRef.current || Date.now() - lastFolderLoadAtRef.current >= 30_000)) void loadFolders();
     wasNavigatorActiveRef.current = active;
   }, [active, loadFolders]);
-  useEffect(() => {
+  useLayoutEffect(() => {
+    renameSubmittingRef.current = false;
+    setBusyPath('');
+    setPendingFolderMutation(null);
+    setRenamingPath('');
+    setRenameValue('');
+    setFolderMenu(null);
+    setFolders([]);
+    pendingTreeScrollTopRef.current = null;
     setCollapsedPaths(readInspirationCollapsedPaths(rootPath));
   }, [rootPath]);
   useEffect(() => {
@@ -189,9 +212,26 @@ export const InspirationLibraryNavigator = ({
       window.removeEventListener('focus', refreshOnFocus);
     };
   }, [active, loadFolders, rootPath]);
-  const folderByPath = useMemo(() => new Map(folders.map(folder => [folder.relativePath, folder])), [folders]);
-  const parentPaths = useMemo(() => new Set(folders.map(folder => folder.parentRelativePath)), [folders]);
-  const visibleFolders = useMemo(() => folders.filter(folder => {
+  const presentedFolders = useMemo(() => {
+    if (!pendingFolderMutation) return folders;
+    if (pendingFolderMutation.kind === 'delete') return folders.filter(folder => folder.relativePath !== pendingFolderMutation.sourcePath && !folder.relativePath.startsWith(`${pendingFolderMutation.sourcePath}/`));
+    if (pendingFolderMutation.kind === 'create') return folders;
+    if (pendingFolderMutation.kind === 'rename' && pendingFolderMutation.target && pendingFolderMutation.sourcePath) {
+      const source = pendingFolderMutation.sourcePath;
+      const target = pendingFolderMutation.target;
+      return folders.map(folder => folder.relativePath === source || folder.relativePath.startsWith(`${source}/`) ? {
+        ...folder,
+        name: folder.relativePath === source ? target.name : folder.name,
+        relativePath: `${target.relativePath}${folder.relativePath.slice(source.length)}`,
+        parentRelativePath: folder.parentRelativePath === source || folder.parentRelativePath.startsWith(`${source}/`)
+          ? `${target.relativePath}${folder.parentRelativePath.slice(source.length)}` : folder.parentRelativePath,
+      } : folder);
+    }
+    return folders;
+  }, [folders, pendingFolderMutation]);
+  const folderByPath = useMemo(() => new Map(presentedFolders.map(folder => [folder.relativePath, folder])), [presentedFolders]);
+  const parentPaths = useMemo(() => new Set(presentedFolders.map(folder => folder.parentRelativePath)), [presentedFolders]);
+  const visibleFolders = useMemo(() => presentedFolders.filter(folder => {
     if (collapsedPaths.has('')) return false;
     let parentPath = folder.parentRelativePath;
     while (parentPath) {
@@ -199,7 +239,7 @@ export const InspirationLibraryNavigator = ({
       parentPath = folderByPath.get(parentPath)?.parentRelativePath || '';
     }
     return true;
-  }), [collapsedPaths, folderByPath, folders]);
+  }), [collapsedPaths, folderByPath, presentedFolders]);
   useLayoutEffect(() => {
     const container = treeScrollRef.current;
     if (!container) return;
@@ -243,21 +283,26 @@ export const InspirationLibraryNavigator = ({
     return next;
   });
   const startRename = (folder: InspirationFolder) => {
+    if (busyPath) { onNotice('另一个文件夹操作正在处理中'); return; }
     setFolderMenu(null);
     setRenamingPath(folder.relativePath);
     setRenameValue(folder.name);
   };
   const commitRename = async (folder: InspirationFolder) => {
+    const requestedRootPath = rootPath;
+    const requestedGeneration = rootGeneration;
     const nextName = renameValue.trim();
     if (renameSubmittingRef.current) return;
     if (!nextName || nextName === folder.name) { setRenamingPath(''); return; }
     renameSubmittingRef.current = true;
     setBusyPath(folder.relativePath);
-    const requestedRootPath = rootPath;
+    const targetRelativePath = [folder.parentRelativePath, nextName].filter(Boolean).join('/');
+    setPendingFolderMutation({ kind: 'rename', sourcePath: folder.relativePath, target: { ...folder, name: nextName, relativePath: targetRelativePath } });
+    setRenamingPath('');
     const requestedCurrentPath = currentRelativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
     try {
       const result = await window.electronAPI.projectFileOperation(rootPath, '未分类', INSPIRATION_PROJECT_NAME, 'rename', [folder.relativePath], '', nextName);
-      if (navigationContextRef.current.rootPath !== requestedRootPath) { setRenamingPath(''); return; }
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
       if (!result.success) { onNotice(`重命名文件夹失败：${result.error || '未知错误'}`, 6000); return; }
       const nextRelativePath = renamedEntryDestinationPath(folder.relativePath, nextName, result.movedItems);
       const navigationTarget = requestedCurrentPath === folder.relativePath || requestedCurrentPath.startsWith(`${folder.relativePath}/`)
@@ -275,26 +320,38 @@ export const InspirationLibraryNavigator = ({
       });
       setRenamingPath('');
       await loadFolders();
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
       const latestNavigation = navigationContextRef.current;
       if (latestNavigation.rootPath === requestedRootPath
         && latestNavigation.currentRelativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') === requestedCurrentPath) onNavigate(navigationTarget);
+    } catch (error) {
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
+      await loadFolders();
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
+      onNotice(`重命名文件夹失败：${error instanceof Error ? error.message : String(error || '未知错误')}`, 6000);
     } finally {
-      renameSubmittingRef.current = false;
-      setBusyPath('');
+      if (rootRequestIsCurrent(requestedRootPath, requestedGeneration)) {
+        renameSubmittingRef.current = false;
+        setBusyPath('');
+        setPendingFolderMutation(null);
+      }
     }
   };
   const createChildFolder = async (folder: InspirationFolder) => {
+    if (busyPath) { onNotice('另一个文件夹操作正在处理中'); return; }
     setFolderMenu(null);
     const requestedRootPath = rootPath;
+    const requestedGeneration = rootGeneration;
     const requestedCurrentPath = currentRelativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
     const answer = await appDialog.prompt({ title: '新建文件夹', message: `在“${folder.name}”中输入新文件夹名称。`, defaultValue: '新建文件夹', confirmLabel: '新建' });
     const folderName = answer?.trim();
     if (!folderName) return;
-    if (navigationContextRef.current.rootPath !== requestedRootPath) return;
+    if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
     setBusyPath(folder.relativePath);
+    setPendingFolderMutation({ kind: 'create' });
     try {
       const result = await window.electronAPI.createProjectFolder(rootPath, '未分类', INSPIRATION_PROJECT_NAME, folderName, folder.relativePath, true);
-      if (navigationContextRef.current.rootPath !== requestedRootPath) return;
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
       if (!result.success) { onNotice(`新建文件夹失败：${result.error || '未知错误'}`, 6000); return; }
       const createdRelativePath = (result.folder?.relativePath || `${folder.relativePath}/${result.folder?.name || folderName}`).replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
       setCollapsedPaths(current => {
@@ -305,35 +362,57 @@ export const InspirationLibraryNavigator = ({
         return next;
       });
       await loadFolders();
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
       const latestNavigation = navigationContextRef.current;
       if (latestNavigation.rootPath === requestedRootPath
         && latestNavigation.currentRelativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') === requestedCurrentPath) onNavigate(createdRelativePath);
       onNotice(`已在“${folder.name}”中新建文件夹“${result.folder?.name || folderName}”`);
+    } catch (error) {
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
+      await loadFolders();
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
+      onNotice(`新建文件夹失败：${error instanceof Error ? error.message : String(error || '未知错误')}`, 6000);
     } finally {
-      setBusyPath('');
+      if (rootRequestIsCurrent(requestedRootPath, requestedGeneration)) {
+        setBusyPath('');
+        setPendingFolderMutation(null);
+      }
     }
   };
   const deleteFolder = async (folder: InspirationFolder) => {
+    if (busyPath) { onNotice('另一个文件夹操作正在处理中'); return; }
+    const requestedRootPath = rootPath;
+    const requestedGeneration = rootGeneration;
+    const requestedCurrentPath = currentRelativePath.replace(/\\/g, '/');
     setFolderMenu(null);
-    if (!await appDialog.confirm({ title: `删除“${folder.name}”吗？`, message: '文件夹及其中内容将移入系统回收站。', confirmLabel: '删除文件夹', tone: 'danger' })) return;
+    const confirmed = await appDialog.confirm({ title: `删除“${folder.name}”吗？`, message: '文件夹及其中内容将移入系统回收站。', confirmLabel: '删除文件夹', tone: 'danger' });
+    if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration) || !confirmed) return;
     setBusyPath(folder.relativePath);
+    setPendingFolderMutation({ kind: 'delete', sourcePath: folder.relativePath });
     try {
       const result = await window.electronAPI.projectFileOperation(rootPath, '未分类', INSPIRATION_PROJECT_NAME, 'trash', [folder.relativePath]);
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
       const pageOwnsNotice = pageOwnsFileOperationNotification(result);
-      if (!result.success) { if (pageOwnsNotice) onNotice(`删除文件夹失败：${result.error || '未知错误'}`, 6000); return; }
-      const normalizedCurrent = currentRelativePath.replace(/\\/g, '/');
-      if (normalizedCurrent === folder.relativePath || normalizedCurrent.startsWith(`${folder.relativePath}/`)) onNavigate(folder.parentRelativePath);
+      if (!result.success) { if (result.count) { await loadFolders(); if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return; } if (pageOwnsNotice) onNotice(`删除文件夹失败：${result.error || '未知错误'}`, 6000); return; }
+      if (requestedCurrentPath === folder.relativePath || requestedCurrentPath.startsWith(`${folder.relativePath}/`)) onNavigate(folder.parentRelativePath);
       setCollapsedPaths(current => {
         const next = new Set([...current].filter(collapsedPath => collapsedPath !== folder.relativePath && !collapsedPath.startsWith(`${folder.relativePath}/`)));
         writeInspirationCollapsedPaths(rootPath, next);
         return next;
       });
       await loadFolders();
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
       if (pageOwnsNotice) onNotice(result.warning || `已将文件夹“${folder.name}”移入回收站`, result.warning ? 8000 : undefined);
     } catch (error) {
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
+      await loadFolders();
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
       onNotice(`删除文件夹失败：${error instanceof Error ? error.message : String(error || '未知错误')}`, 6000);
     } finally {
-      setBusyPath('');
+      if (rootRequestIsCurrent(requestedRootPath, requestedGeneration)) {
+        setBusyPath('');
+        setPendingFolderMutation(null);
+      }
     }
   };
   const addFolderToProject = (folder: InspirationFolder, chooseProject = false) => {
@@ -345,7 +424,7 @@ export const InspirationLibraryNavigator = ({
     const collapsed = collapsedPaths.has(relativePath);
     const folder = relativePath ? folderByPath.get(relativePath) : undefined;
     const renaming = renamingPath === relativePath;
-    return <div ref={selected ? selectedFolderRef : undefined} key={relativePath || '__root__'} onContextMenu={event => { if (!folder) return; event.preventDefault(); window.dispatchEvent(new Event('photoflow-menu-open')); setFolderMenu({ folder, x: event.clientX, y: event.clientY }); }} className={`group flex min-w-0 items-center rounded-lg ${selected ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'} ${busyPath === relativePath ? 'opacity-55' : ''}`} style={{ paddingLeft: 5 + depth * 14 }}>
+    return <div ref={selected ? selectedFolderRef : undefined} key={relativePath || '__root__'} onContextMenu={event => { if (!folder) return; event.preventDefault(); window.dispatchEvent(new Event('photoflow-menu-open')); setFolderMenu({ folder, x: event.clientX, y: event.clientY }); }} className={`group flex min-w-0 items-center rounded-lg ${selected ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50'}`} style={{ paddingLeft: 5 + depth * 14 }}>
       <button type="button" disabled={!hasChildren} onClick={() => toggleCollapsed(relativePath)} aria-label={`${collapsed ? '展开' : '收起'} ${label}`} className="flex h-8 w-6 shrink-0 items-center justify-center rounded text-slate-400 hover:bg-slate-200 disabled:invisible">{collapsed ? <ChevronRight size={14}/> : <ChevronDown size={14}/>}</button>
       {renaming && folder ? <form className="flex min-w-0 flex-1 items-center gap-2 py-1.5 pr-2" onSubmit={event => { event.preventDefault(); void commitRename(folder); }}><Folder size={16} className="shrink-0 text-blue-500"/><input autoFocus value={renameValue} onChange={event => setRenameValue(event.target.value)} onFocus={event => event.currentTarget.select()} onBlur={() => void commitRename(folder)} onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setRenamingPath(''); } }} disabled={busyPath === relativePath} aria-label={`重命名 ${label}`} className="min-w-0 flex-1 rounded border border-blue-400 bg-white px-1.5 py-0.5 text-sm text-slate-800 outline-none ring-2 ring-blue-100"/></form> : <button type="button" draggable={Boolean(relativePath)} onDragStart={event => { if (!relativePath) return; event.dataTransfer.effectAllowed = 'copy'; event.dataTransfer.setData('application/x-photoflow-folder-tab', JSON.stringify({ kind: 'inspiration', relativePath })); event.dataTransfer.setData('text/plain', label); window.dispatchEvent(new Event('photoflow:folder-tab-drag-start')); }} onDragEnd={() => window.dispatchEvent(new Event('photoflow:folder-tab-drag-end'))} onClick={() => onNavigate(relativePath)} title={relativePath ? `${label}（可拖到顶部标签栏）` : label} className={`flex min-w-0 flex-1 items-center gap-2 py-2 pr-2 text-left text-sm ${selected ? 'font-bold' : ''}`}><Folder size={16} className="shrink-0 text-blue-500"/><span className="truncate">{label}</span></button>}
     </div>;
@@ -381,7 +460,7 @@ export const InspirationLibraryPage = ({
   navigationRequest?: { path: string; id: number };
   onOpenDirectoryPage: (relativePath: string) => void;
 }) => {
-  const toast = useToast();
+  const toast = useUserFacingToast();
   const onNotice = useCallback((message: string, duration?: number) => { toast.show(message, duration); }, [toast]);
   const rootPath = config.inspirationLibrary.rootPath.trim();
   const [choosingRoot, setChoosingRoot] = useState(false);

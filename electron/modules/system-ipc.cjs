@@ -116,7 +116,7 @@ const normalizeProgressNamePresets = value => {
 };
 
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
   if (!configMutationService?.mutate) throw new Error('System IPC requires the shared config mutation service');
   const mutateConfig = configMutationService.mutate;
   ipcMain.handle('domain-health-status', () => ({
@@ -666,6 +666,7 @@ const registerSystemIpc = context => {
       try {
       componentViewManager?.closeComponent?.(componentId);
       await componentServiceManager?.stop?.(componentId, 'component-uninstall');
+      abortComponentNetworkRequests?.(componentId);
       await capabilityBarrier.drain({ timeoutMs: 7500 });
       const uninstallPath = clearUserData || componentPath === containerPath ? containerPath : componentPath;
       await shell.trashItem(uninstallPath);
@@ -698,6 +699,7 @@ const registerSystemIpc = context => {
         } catch (error) {
           cleanupWarnings.push(`组件设置：${error.message || String(error)}`);
         }
+        try { await clearComponentSecretData?.(componentId); } catch (error) { cleanupWarnings.push(`组件秘密：${error.message || String(error)}`); }
       }
       invalidateComponentStatus();
       writeLog('info', 'Component uninstalled', { componentId, componentPath: uninstallPath, clearUserData, cleanupWarnings });

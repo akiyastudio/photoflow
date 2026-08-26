@@ -5,6 +5,7 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
   const pendingRatings = new Map();
   const optimisticRatings = new Map();
   const activeWrites = new Set();
+  const fileWriteQueues = new Map();
   let writeSequence = 0;
   if (pendingFile) {
     try {
@@ -67,10 +68,16 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     for (const key of cache.keys()) if (key.startsWith(prefix)) cache.delete(key);
     onInvalidate(filePath);
   };
+  const enqueueFileWrite = (key, worker) => {
+    const previous = fileWriteQueues.get(key) || Promise.resolve();
+    const operation = previous.catch(() => undefined).then(worker);
+    fileWriteQueues.set(key, operation);
+    return operation.finally(() => { if (fileWriteQueues.get(key) === operation) fileWriteQueues.delete(key); });
+  };
   const drainRating = key => {
     if (activeWrites.has(key)) return;
     activeWrites.add(key);
-    void (async () => {
+    void enqueueFileWrite(key, async () => {
       let retry = false;
       try {
         while (pendingRatings.has(key)) {
@@ -108,7 +115,7 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
         }
         else if (pendingRatings.has(key)) drainRating(key);
       }
-    })();
+    });
   };
   const write = async (workspaceRoot, filePath, value) => {
     const rating = normalize(value);
@@ -128,6 +135,26 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     invalidate(filePath);
     drainRating(key);
     return rating;
+  };
+  const writeChecked = (workspaceRoot, filePath, value, expectedRevision) => {
+    const resolvedFilePath = path.resolve(filePath); const key = pathKey(resolvedFilePath); const rating = normalize(value);
+    return enqueueFileWrite(key, async () => {
+      const before = await fs.promises.lstat(resolvedFilePath);
+      if (!before.isFile() || before.isSymbolicLink() || !Number.isFinite(Number(expectedRevision)) || before.mtimeMs !== Number(expectedRevision)) {
+        const error = new Error('media_rating_revision_conflict'); error.code = 'MEDIA_RATING_REVISION_CONFLICT'; throw error;
+      }
+      const suppressedPaths = [resolvedFilePath, `${resolvedFilePath}_exiftool_tmp`, `${resolvedFilePath}_original`];
+      suppressedPaths.forEach(suppressWorkspaceWatchPath);
+      try { await exiftool.write(resolvedFilePath, { 'XMP:Rating': rating }, { writeArgs: ['-overwrite_original'] }); }
+      finally { suppressedPaths.forEach(releaseWorkspaceWatchPath); }
+      let after = await fs.promises.lstat(resolvedFilePath);
+      if (after.mtimeMs === before.mtimeMs) { const bumped = new Date(Math.max(Date.now(), before.mtimeMs + 2000)); await fs.promises.utimes(resolvedFilePath, after.atime, bumped); after = await fs.promises.lstat(resolvedFilePath); }
+      invalidate(resolvedFilePath);
+      await versionService.refreshMetadataFingerprint(path.resolve(workspaceRoot), { filePath: resolvedFilePath }).catch(error => {
+        writeLog('warn', 'Unable to refresh tracked fingerprint after checked metadata rating write', { filePath: resolvedFilePath, error: error.message || String(error) });
+      });
+      return { rating, previousRevision: before.mtimeMs, revision: after.mtimeMs };
+    });
   };
   const listProject = async (projectPath, options = {}) => {
     const candidates = [];
@@ -188,7 +215,7 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     const timer = setTimeout(() => drainRating(key), 0);
     timer.unref?.();
   }
-  return { invalidate, listProject, normalize, read, write };
+  return { invalidate, listProject, normalize, read, write, writeChecked };
 };
 
 module.exports = { createMediaRatingService };

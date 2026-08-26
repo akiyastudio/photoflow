@@ -1,8 +1,10 @@
 const registerComponentHostIpc = ({ ipcMain, manager, mainWindow }) => {
   ipcMain.handle('component-host-list', () => ({ success: true, actions: manager.listToolbarActions() }));
   ipcMain.handle('component-host-settings-list', () => ({ success: true, pages: manager.listSettingsPages() }));
+  ipcMain.handle('component-host-contributions-list', () => ({ success: true, contributions: manager.listContributions() }));
   ipcMain.handle('component-host-open', (_event, request) => manager.open(request).then(page => ({ success: true, page }), error => ({ success: false, error: error.message || String(error) })));
   ipcMain.handle('component-host-settings-open', (_event, request) => manager.openSettings(request).then(page => ({ success: true, page }), error => ({ success: false, error: error.message || String(error) })));
+  ipcMain.handle('component-host-contribution-open', (_event, request) => manager.openContribution(request).then(page => ({ success: true, page }), error => ({ success: false, error: error.message || String(error) })));
   ipcMain.handle('component-host-settings-release', (_event, request) => ({ success: manager.releaseSettings(request) }));
   ipcMain.handle('component-host-activate', (_event, instanceId) => ({ success: manager.activate(String(instanceId || '')) }));
   ipcMain.handle('component-host-set-suspended', (event, update) => {

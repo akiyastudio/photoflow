@@ -7,6 +7,7 @@ contextBridge.exposeInMainWorld('toastOverlay', Object.freeze({
     ipcRenderer.on('toast-overlay:snapshot', listener);
     return () => ipcRenderer.removeListener('toast-overlay:snapshot', listener);
   },
+  reportLayout: layout => ipcRenderer.invoke('toast-overlay:layout', layout),
   setPointerInteractive: interactive => ipcRenderer.send('toast-overlay:pointer-interactive', interactive === true),
   sendAction: (action, id) => ipcRenderer.send('toast-overlay:action', { action: String(action || ''), id: String(id || '') }),
 }));

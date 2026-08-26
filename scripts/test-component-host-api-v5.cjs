@@ -24,7 +24,7 @@ const manifest = { apiVersion: 1, id: 'host-v5-fixture', version: '1.0.0', compo
   ], service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1'], capabilities, permissions, events: [] } } };
 
 const descriptor = parseComponentHostManifest(manifest, componentRoot);
-assert.equal(COMPONENT_HOST_API_VERSION, 5); assert.equal(descriptor.hostApiVersion, 5);
+assert.equal(COMPONENT_HOST_API_VERSION, 7); assert.equal(descriptor.hostApiVersion, 5);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 5 } } }, componentRoot), /minHostApiVersion 5/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 4, maxHostApiVersion: 5 }, service: { ...manifest.componentHost.service, capabilities: [], permissions: ['project.files.read'] } } }, componentRoot), /minHostApiVersion 5/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: permissions.filter(item => item !== 'project.files.read') } } }, componentRoot), /requires permission project.files.read/);

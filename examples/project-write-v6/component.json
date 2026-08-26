@@ -1,0 +1,22 @@
+{
+  "apiVersion": 1,
+  "id": "project-write-v6",
+  "version": "0.1.0",
+  "componentHost": {
+    "contractVersion": 2,
+    "compatibility": { "minHostApiVersion": 6, "maxHostApiVersion": 6 },
+    "contributions": [
+      { "type": "workspace.toolbarAction", "id": "open", "label": "V6 写入示例", "pageId": "main" },
+      { "type": "component.fullPage", "id": "main", "title": "V6 写入示例", "entry": "ui/index.html" }
+    ],
+    "service": {
+      "protocolVersion": 1,
+      "runtime": "node",
+      "entrypoints": { "default": "service.cjs" },
+      "rpcMethods": ["project-write.rate.v1"],
+      "capabilities": ["project.media.ratings.write.v1"],
+      "permissions": ["project.media.ratings.write"],
+      "events": []
+    }
+  }
+}

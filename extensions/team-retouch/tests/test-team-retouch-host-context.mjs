@@ -96,6 +96,7 @@ assert.deepEqual(legacyAdvancedStatusPresentation(undefined, true), { state: 'ch
 assert.equal(legacyAdvancedStatusPresentation(undefined, false, '超时').state, 'error');
 assert.equal(legacyAdvancedStatusPresentation(undefined, false).state, 'unknown');
 assert.equal(legacyAdvancedStatusPresentation({ advancedState: 'not-installed' }, false).state, 'not-installed', 'only explicit not-installed metadata renders that state');
+assert.deepEqual(legacyAdvancedStatusPresentation({ advancedState: 'unavailable', advancedErrorCategory: 'wsl-access-denied', advancedRuntimeSource: 'development' }, false), { state: 'unavailable', text: '当前使用基础人物检测；开发运行进程无权访问 WSL。' });
 assert.match(readableComponentRpcError('team.project.get.v1', new Error('Error invoking remote method: Component service request timed out after 60000ms\n    at ipc (C:\\secret\\preload.js:1)')), /团片历史读取超时.*重试/);
 for (const unsafe of ['Component service request timed out', ' at ipc ', 'C:\\secret', 'localhost']) assert(!readableComponentRpcError('team.project.get.v1', new Error('Error invoking remote method: Component service request timed out after 60000ms\n    at ipc (C:\\secret\\preload.js:1)')).includes(unsafe), `renderer error leaked technical detail: ${unsafe}`);
 assert.match(readableComponentRpcError('team.project.migrate-step.v1', new Error('SQLITE_BUSY: database is locked')), /正在整理.*稍后重试/);

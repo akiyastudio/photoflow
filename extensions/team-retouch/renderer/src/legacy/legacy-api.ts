@@ -106,13 +106,16 @@ export const componentStatusFromAdvancedPreflight = (state: Json) => {
   const advancedAvailable = state.advancedAvailable !== undefined
     ? state.advancedAvailable === true
     : state.available !== undefined ? state.available === true : state.installed === true;
-  const advancedState = ['ready', 'not-installed', 'repair-needed'].includes(String(state.state || ''))
+  const advancedState = ['ready', 'not-installed', 'repair-needed', 'unavailable'].includes(String(state.state || ''))
     ? state.state
     : advancedAvailable ? 'ready' : state.installed === true ? 'repair-needed' : state.installed === false ? 'not-installed' : undefined;
   return {
     id: 'team-retouch', installed: true, runtimeAvailable: true, identityAvailable: true,
     advancedAvailable, advancedState,
-    advancedError: String(state.advancedError || state.error || ''), provider: '内置人物检测',
+    advancedError: String(state.advancedError || state.error || ''),
+    ...(state.errorCategory ? { advancedErrorCategory: String(state.errorCategory) } : {}),
+    ...(state.runtimeSource ? { advancedRuntimeSource: String(state.runtimeSource) } : {}),
+    provider: '内置人物检测',
   };
 };
 

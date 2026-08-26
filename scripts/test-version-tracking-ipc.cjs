@@ -139,6 +139,7 @@ registerVersionIpc({
   path,
   projectVirtualPaths,
   releaseWorkspaceWatchPath: value => (calls.releasedWatchPaths ||= []).push(value),
+  refreshManagedExternalWatchers: async () => { calls.externalWatcherRefreshes = (calls.externalWatcherRefreshes || 0) + 1; },
   refreshWorkspaceCatalog: async () => undefined,
   resolveProjectEntry: (_root, _status, _projectName, relativePath) => {
     const projectPath = path.join(workspaceRoot, 'Project');
@@ -169,6 +170,8 @@ async function main() {
   assert.deepStrictEqual(repositoryCall, [workspaceRoot, 'tracking_commit_complete', { sessionId: 'timeout-test' }, 30 * 60 * 1000], 'tracking finalization must use the long filesystem-snapshot timeout');
   await repository.renameProgressFolder(workspaceRoot, { progressId: 'rename-contract' });
   assert.deepStrictEqual(repositoryCall, [workspaceRoot, 'progress_folder_rename', { progressId: 'rename-contract' }], 'progress folder rename must use the dedicated backend action');
+  await repository.renameExternalProgressLinkRoute(workspaceRoot, { progressId: 'external-rename-contract' });
+  assert.deepStrictEqual(repositoryCall, [workspaceRoot, 'progress_external_link_route_rename', { progressId: 'external-rename-contract' }], 'external progress alias rename must use the dedicated route action');
 
   const start = handlers.get('workspace-progress-tracking-start');
   const commit = handlers.get('workspace-progress-tracking-commit');
@@ -452,6 +455,40 @@ async function main() {
   });
   assert.strictEqual(staleRename.success, false);
   assert.match(staleRename.error, /identity_mismatch/);
+
+  const externalFolderId = 'external-folder-id';
+  versionService.listProgress = async () => ({ success: true, progressFolders: [{
+    id: 'external-node', nodeRole: 'progress', mediaKind: 'image', displayName: 'external-progress',
+    folderPath: externalProgressPath, folderId: externalFolderId, externalLinkRelativePath: 'external-progress.lnk',
+    trackingState: 'ready',
+  }] });
+  const externalRouteRequests = [];
+  versionService.renameExternalProgressLinkRoute = async (_root, request) => {
+    externalRouteRequests.push(request);
+    if (request.preflight) return { success: true, affectedProgressIds: ['external-node'] };
+    return {
+      success: true, oldRelativePath: request.oldRelativePath, newRelativePath: request.newRelativePath,
+      progressFolder: {
+        id: 'external-node', nodeRole: 'progress', mediaKind: 'image', displayName: '客户终稿',
+        folderPath: externalProgressPath, folderId: externalFolderId, externalLinkRelativePath: request.newRelativePath,
+      },
+    };
+  };
+  const renamedExternal = await renameProgressFolder({}, workspaceRoot, 'active', 'Project', {
+    progressId: 'external-node', expectedFolderId: externalFolderId,
+    expectedRelativePath: 'external-progress.lnk', newName: '客户终稿',
+  });
+  assert.strictEqual(renamedExternal.success, true, renamedExternal.error);
+  assert.strictEqual(fs.existsSync(externalShortcutPath), false, 'the old project shortcut alias must be removed');
+  assert.strictEqual(fs.existsSync(path.join(workspaceRoot, 'Project', '客户终稿.lnk')), true, 'the renamed project shortcut alias must exist');
+  assert.strictEqual(fs.existsSync(externalProgressPath), true, 'renaming an external version alias must not rename its physical target');
+  assert.deepStrictEqual(externalRouteRequests.map(request => ({
+    oldRelativePath: request.oldRelativePath, newRelativePath: request.newRelativePath, preflight: request.preflight === true,
+  })), [
+    { oldRelativePath: 'external-progress.lnk', newRelativePath: '客户终稿.lnk', preflight: true },
+    { oldRelativePath: 'external-progress.lnk', newRelativePath: '客户终稿.lnk', preflight: false },
+  ]);
+  assert.strictEqual(calls.externalWatcherRefreshes, 1, 'renaming an external version alias must rebuild its watcher routes');
 
   console.log('version tracking V2 IPC tests passed');
 }

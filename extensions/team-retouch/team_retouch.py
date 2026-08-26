@@ -1712,9 +1712,21 @@ def probe_advanced_runtime():
         }
 
 
+def probe_advanced_installation():
+    from advanced_bridge import probe_advanced
+    available, error = probe_advanced()
+    return {
+        "success": True,
+        "advancedAvailable": available,
+        "pairDetrReady": available,
+        "sam2Ready": available,
+        "advancedError": error,
+    }
+
+
 def create_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("probe", "probe-advanced-runtime", "detect", "detect-batch", "identify", "match-batch", "restore", "rebuild", "merge"))
+    parser.add_argument("action", choices=("probe", "probe-advanced-installation", "probe-advanced-runtime", "detect", "detect-batch", "identify", "match-batch", "restore", "rebuild", "merge"))
     parser.add_argument("--input")
     parser.add_argument("--output-dir")
     parser.add_argument("--delivery-dir")
@@ -1736,6 +1748,9 @@ def run(args_list=None):
         return
     if args.action == "probe-advanced-runtime":
         emit(probe_advanced_runtime())
+        return
+    if args.action == "probe-advanced-installation":
+        emit(probe_advanced_installation())
         return
     if args.action == "merge":
         if not args.input or not args.manifest or not args.output:

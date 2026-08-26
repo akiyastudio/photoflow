@@ -14,7 +14,7 @@
 插件不能导入照片流 React 渲染层或 Electron 主进程代码，也不能取得任意 IPC、任意文件系统路径或宿主环境中的凭据。所有未在清单中声明的 RPC、能力、权限和事件都会默认拒绝。
 
 > [!IMPORTANT]
-> 所有组件必须使用 `componentHost.contractVersion: 2` 和 Host API 2 或更高版本；贡献设置页需要 Host API 3，受控顶部通知需要 Host API 4，项目只读扩展需要 Host API 5。旧数据只能通过版本化 adoption grant 迁入组件私有存储，不能请求旧宿主接口。
+> 所有组件必须使用 `componentHost.contractVersion: 2` 和 Host API 2 或更高版本；设置页需要 API 3，通知需要 API 4，项目只读扩展需要 API 5，项目写入扩展需要 API 6，secrets、受控网络和新 UI contribution 需要 API 7。旧数据只能通过版本化 adoption grant 迁入组件私有存储。
 
 ## 快速开始
 

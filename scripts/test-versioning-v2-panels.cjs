@@ -151,6 +151,18 @@ const versionTreeEntryRendererSource = projectWorkspaceSource.slice(
 );
 assert(versionTreeEntryRendererSource.includes('progressFolder && inlineRenamePath !== entry.relativePath')
   && versionTreeEntryRendererSource.includes('renderEntryName(entry, true)'), 'a registered progress node must render the shared inline rename input inside the version-tree canvas');
+const inlineRenameSource = projectWorkspaceSource.slice(
+  projectWorkspaceSource.indexOf('const beginInlineRename'),
+  projectWorkspaceSource.indexOf('const openFileMenuAt'),
+);
+assert(inlineRenameSource.includes('activeFileEntries.find') && inlineRenameSource.includes('if (finalViewOpen) {')
+  && inlineRenameSource.includes('await loadFinalViewEntries()'), 'favorite-view rename must resolve the real active entry and refresh the aggregate after committing');
+const beginRenameSource = projectWorkspaceSource.slice(
+  projectWorkspaceSource.indexOf('const beginRename'),
+  projectWorkspaceSource.indexOf('const batchRenameNames', projectWorkspaceSource.indexOf('const beginRename')),
+);
+assert(!beginRenameSource.includes("if (finalViewOpen)") && !beginRenameSource.includes('externalLinkRelativePath'));
+assert(beginRenameSource.includes('registeredProgressEntries.length && targetPaths.length > 1'), 'registered progress folders must allow one local or external alias rename while still rejecting batch rename');
 const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
 const versioningPublic = { ...model, ...layoutModel, ...canvasModel, ...edgeModel, ...canvasHook };
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {

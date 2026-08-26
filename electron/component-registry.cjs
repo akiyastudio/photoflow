@@ -132,7 +132,9 @@ const manifestCompatibilityError = (manifest, platform, arch) => {
     if (settingsPageCount && min < 3) return '设置页贡献需要 minHostApiVersion 3 或更高版本';
     const notificationDeclared = (host.service?.capabilities || []).map(String).includes('notifications.v2') || (host.service?.permissions || []).map(String).includes('notifications');
     if (notificationDeclared && min < 4) return '通知能力需要 minHostApiVersion 4 或更高版本';
-    if (toolbarCount !== 1 || pageCount !== 1 || settingsPageCount > 16 || contributions.length !== 2 + settingsPageCount) return '页面组件必须贡献一个 toolbarAction、一个 fullPage，并可选贡献设置页';
+    const api7Count = contributions.filter(item => ['component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(item?.type)).length;
+    if (api7Count && min < 7) return '新组件贡献需要 minHostApiVersion 7 或更高版本';
+    if (toolbarCount !== 1 || pageCount < 1 || pageCount > 16 || settingsPageCount > 16 || contributions.length !== toolbarCount + pageCount + settingsPageCount + api7Count) return '页面组件必须贡献一个 toolbarAction、1-16 个 fullPage，并可选贡献设置页或 Host API 7 入口';
   }
   const entrypoints = manifest.entrypoints || {};
   const relativeEntry = entrypoints[`${platform}-${arch}`] || entrypoints[platform] || entrypoints.default;

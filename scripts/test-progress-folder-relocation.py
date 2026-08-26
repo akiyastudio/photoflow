@@ -192,12 +192,48 @@ def test_validation_guards(temp: Path):
         db.close()
 
 
+def test_external_link_route_rename(temp: Path):
+    root = temp / "external-route-workspace"
+    db, progress = seed(root, temp / "external-route.sqlite3")
+    try:
+        db.execute(
+            "UPDATE progress_folders SET external_link_relative_path='客户精修.lnk' WHERE id='progress'"
+        )
+        db.execute(
+            "UPDATE media_import_artifact_slots SET relative_path_key='客户精修.lnk' WHERE progress_id='progress'"
+        )
+        db.commit()
+        token = workspace_db.progress_update_tree_begin(db, {"projectName": "Project"})["mutationToken"]
+        preflight = workspace_db.progress_external_link_route_rename(str(root), db, {
+            "projectName": "Project", "progressId": "progress", "oldRelativePath": "客户精修.lnk",
+            "newRelativePath": "客户终稿.lnk", "mutationToken": token, "preflight": True,
+        })
+        assert preflight["success"] and preflight["affectedProgressIds"] == ["progress"]
+        result = workspace_db.progress_external_link_route_rename(str(root), db, {
+            "projectName": "Project", "progressId": "progress", "oldRelativePath": "客户精修.lnk",
+            "newRelativePath": "客户终稿.lnk", "mutationToken": token,
+        })
+        assert result["success"] and result["oldRelativePath"] == "客户精修.lnk"
+        assert result["newRelativePath"] == "客户终稿.lnk"
+        row = db.execute(
+            "SELECT external_link_relative_path,display_name FROM progress_folders WHERE id='progress'"
+        ).fetchone()
+        assert tuple(row) == ("客户终稿.lnk", "客户终稿")
+        assert db.execute(
+            "SELECT relative_path_key FROM media_import_artifact_slots WHERE progress_id='progress'"
+        ).fetchone()[0] == "客户终稿.lnk".casefold()
+        assert progress.is_dir(), "renaming an external-link alias must not rename the physical target directory"
+    finally:
+        db.close()
+
+
 def main():
     with tempfile.TemporaryDirectory(prefix="photoflow-progress-relocation-") as temporary:
         temp = Path(temporary)
         test_relocation_and_needs_repair_retry(temp)
         test_fault_recovery(temp)
         test_validation_guards(temp)
+        test_external_link_route_rename(temp)
     print("progress folder relocation database tests passed")
 
 

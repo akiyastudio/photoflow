@@ -2,11 +2,11 @@ export type JsonPrimitive = string | number | boolean | null;
 export type JsonValue = JsonPrimitive | JsonObject | JsonValue[];
 export interface JsonObject { [key: string]: JsonValue }
 export type VersionedName = `${string}.v${number}`;
-export type HostApiVersion = 2 | 3 | 4 | 5;
-export type ComponentPermission = 'project.media.read' | 'project.input.read' | 'project.output.write' | 'project.version.create' | 'project.progress' | 'project.files.read' | 'project.versions.read' | 'project.media.ratings.read' | 'component.storage' | 'component.settings' | 'component.media' | 'tasks' | 'dialogs' | 'events' | 'component.lifecycle.read' | 'component.lifecycle.manage' | 'notifications';
+export type HostApiVersion = 2 | 3 | 4 | 5 | 6 | 7;
+export type ComponentPermission = 'project.media.read' | 'project.input.read' | 'project.output.write' | 'project.version.create' | 'project.progress' | 'project.files.read' | 'project.versions.read' | 'project.media.ratings.read' | 'project.media.ratings.write' | 'project.version.write' | 'project.version.delete' | 'project.progress.manage' | 'project.import' | 'project.files.write' | 'project.media.process' | 'component.secrets' | 'network.fetch' | 'component.storage' | 'component.settings' | 'component.media' | 'tasks' | 'dialogs' | 'events' | 'component.lifecycle.read' | 'component.lifecycle.manage' | 'notifications';
 export type ComponentHostErrorCode = 'COMPONENT_HOST_INVALID_REQUEST' | 'COMPONENT_HOST_PERMISSION_DENIED' | 'COMPONENT_HOST_NOT_FOUND' | 'COMPONENT_HOST_TOKEN_EXPIRED' | 'COMPONENT_HOST_TOKEN_SCOPE' | 'COMPONENT_HOST_LIMIT_EXCEEDED' | 'COMPONENT_HOST_VARIANT_UNAVAILABLE' | 'COMPONENT_HOST_CONFLICT' | 'COMPONENT_HOST_CANCELLED' | 'COMPONENT_HOST_TIMEOUT' | 'COMPONENT_HOST_SERVICE_EXITED' | 'COMPONENT_HOST_INTERNAL';
 export interface ComponentHostError extends Error { code: ComponentHostErrorCode | `COMPONENT_SERVICE_${string}`; retryable: boolean; details?: JsonValue }
-export interface ComponentContext { componentId: string; componentVersion: string; hostApiVersion: 1 | 2 | 3 | 4 | 5; surface: 'project' | 'application.settings'; projectId: string; projectName: string; projectStatus: string; scopeRelativePath: string; selectedRelativePaths: string[]; permissions: ComponentPermission[]; events: VersionedName[]; resolvedTheme: 'light' | 'dark' }
+export interface ComponentContext { componentId: string; componentVersion: string; hostApiVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7; surface: 'project' | 'application.settings' | 'component.sidePanel' | 'media.contextAction' | 'project.contextAction' | 'project.importProvider' | 'project.exportProvider' | 'application.command'; contributionId?: string; projectId: string; projectName: string; projectStatus: string; scopeRelativePath: string; selectedRelativePaths: string[]; permissions: ComponentPermission[]; events: VersionedName[]; resolvedTheme: 'light' | 'dark' }
 export type MediaKind = 'image' | 'raw' | 'video';
 export interface MediaPageRequest { pageSize?: number; cursor?: string | null; kinds?: MediaKind[] }
 export interface MediaPageItem { mediaRef: { relativePath: string }; relativePath: string; name: string; kind: MediaKind; extension: string; size: number; updatedAt: number; viaExternalLink?: true }
@@ -51,7 +51,7 @@ export type DialogsResponse = { apiVersion: 2; confirmed: boolean } | { apiVersi
 export interface ComponentEventRequest<T extends JsonObject = JsonObject> { topic: VersionedName; event: T }
 export interface ComponentEventResponse { apiVersion: 2; emitted: true }
 export type ComponentLifecycleRequest = { action: 'describe' } | { action: 'preflight' | 'install' | 'repair' | 'uninstall' };
-export type ComponentLifecycleResponse = { apiVersion: 2; componentId: string; componentVersion: string; negotiatedHostApiVersion: 2 | 3 | 4; permissions: ComponentPermission[]; events: VersionedName[]; lifecycleActions: string[]; state: 'active' } | { apiVersion: 2; success: true; action: 'preflight' | 'install' | 'repair' | 'uninstall'; taskId: string; message: string };
+export type ComponentLifecycleResponse = { apiVersion: 2; componentId: string; componentVersion: string; negotiatedHostApiVersion: HostApiVersion; permissions: ComponentPermission[]; events: VersionedName[]; lifecycleActions: string[]; state: 'active' } | { apiVersion: 2; success: true; action: 'preflight' | 'install' | 'repair' | 'uninstall'; taskId: string; message: string };
 export type NotificationTone = 'info' | 'success' | 'warning' | 'error';
 export interface NotificationRequest { tone: NotificationTone; message: string; dedupeKey?: string }
 export type NotificationResult = { apiVersion: 2; accepted: true; id: string } | { apiVersion: 2; accepted: false; deduplicated: true; code: 'NOTIFICATION_DEDUPLICATED' } | { apiVersion: 2; accepted: false; error: { code: string; message: string; retryable: boolean } };
@@ -73,6 +73,25 @@ export interface ProjectVersionGraphResponse { apiVersion: 1; progress: JsonObje
 export interface ProjectMediaRatingsRequest { mediaRefs: Array<{ relativePath: string }> }
 export interface ProjectMediaRating { mediaRef: { relativePath: string }; revision: number; rating: number | null; labels: null; selectionState: null }
 export interface ProjectMediaRatingsResponse { apiVersion: 1; supported: { rating: true; labels: false; selectionState: false }; items: ProjectMediaRating[] }
+export interface ProjectMediaRatingWriteItem { relativePath: string; rating: 0 | 1 | 2 | 3 | 4 | 5; expectedRevision: number }
+export interface ProjectMediaRatingsWriteRequest { items: ProjectMediaRatingWriteItem[]; idempotencyKey: string }
+export interface ProjectMediaRatingsWriteResponse { apiVersion: 1; semantics: 'per-item'; succeeded: number; failed: number; items: Array<{ mediaRef: { relativePath: string }; ok: boolean; rating?: number; previousRevision?: number; revision?: number; error?: { code: ComponentHostErrorCode; message: string } }> }
+export interface ProjectVersionUpdateRequest { versionId: string; expectedUpdatedAt: number; idempotencyKey: string; versionName?: string; note?: string; status?: string; isFinal?: boolean; makeCurrent?: true }
+export interface ProjectVersionDeleteRequest { versionId: string; expectedUpdatedAt: number; idempotencyKey: string }
+export type ProjectVersionMutationResponse = { apiVersion: 1; receiptId: string; version?: ProjectVersion; versionId?: string; deleted?: true };
+export type ProjectProgressManageRequest = { action: 'update' | 'unregister' | 'edgeCreate' | 'edgeDelete' | 'edgeReplaceSource'; idempotencyKey: string; expectedUpdatedAt: number; progressId?: string; displayName?: string; trackingEnabled?: boolean; sourceProgressId?: string; targetProgressId?: string; newSourceProgressId?: string; edgeKind?: string };
+export interface ProjectProgressManageResponse { apiVersion: 1; action: ProjectProgressManageRequest['action']; receiptId: string; progress?: JsonObject; edge?: JsonObject; progressId?: string }
+export type ProjectImportRequest = { action: 'commit'; idempotencyKey: string; items: Array<{ inputToken: string; targetRelativePath: string }> } | { action: 'cancel'; idempotencyKey: string };
+export interface ProjectImportResponse { apiVersion: 1; operationId: string; receiptId?: string; committed?: true; cancelled?: boolean; outputs?: Array<{ relativePath: string; size: number; sha256: string }> }
+export type ProjectFilesMutateRequest = { phase: 'preflight'; action: 'rename' | 'move' | 'mkdir' | 'trash'; relativePaths?: string[]; targetRelativePath?: string; newName?: string } | { phase: 'commit'; planToken: string; idempotencyKey: string } | { phase: 'undo'; receiptId: string; idempotencyKey: string };
+export type ProjectFilesMutateResponse = { apiVersion: 1; planToken: string; expiresAt: number; action: string; undoCapability: 'available' | 'requires-precise-recycle'; items: JsonObject[] } | { apiVersion: 1; receiptId: string; committed?: true; undone?: true; action?: string; undoAvailable?: boolean; undo?: JsonObject[] };
+export type ProjectMediaProcessRequest = { action: 'video.timelineFrames'; relativePath: string; times: number[] } | { action: 'video.trim'; idempotencyKey: string; relativePath: string; start: number; end: number; outputRelativePath: string; mode: 'fast' | 'exact' } | { action: 'office.extractImages'; idempotencyKey: string; relativePath: string; outputDirectory: string } | { action: 'status' | 'cancel'; idempotencyKey: string; processAction: 'video.trim' | 'office.extractImages' };
+export type ProjectMediaProcessResponse = { apiVersion: 1; action: ProjectMediaProcessRequest['action']; receiptId?: string; operationId?: string; frames?: string[]; output?: { relativePath: string; size: number; sha256: string }; outputs?: Array<{ relativePath: string; size: number; sha256: string }>; cancelled?: boolean; task?: { id: string; state: string; progress: number; message: string; checkpoint: JsonValue } | null };
+export type ComponentSecretsRequest = { action: 'put'; name: string; value: string; metadata?: JsonObject; idempotencyKey: string } | { action: 'list' } | { action: 'delete'; secretRef: string; idempotencyKey: string };
+export type ComponentSecretRecord = { secretRef: string; name: string; metadata: JsonObject; createdAt: number; updatedAt: number };
+export type ComponentSecretsResponse = ({ apiVersion: 1 } & ComponentSecretRecord) | { apiVersion: 1; items: ComponentSecretRecord[] } | { apiVersion: 1; secretRef: string; deleted: true };
+export type NetworkFetchRequest = { url: string; origin: `https://${string}`; method?: 'GET' | 'HEAD' | 'POST' | 'PUT' | 'PATCH' | 'DELETE'; headers?: Record<string, string>; body?: string | JsonValue; bodyMode?: 'text' | 'json' | 'base64'; responseMode?: 'text' | 'json' | 'base64'; timeoutMs?: number; secrets?: Record<string, string> };
+export type NetworkFetchResponse = { apiVersion: 1; status: number; headers: Record<string, string>; body: { text: string } | { json: JsonValue } | { base64: string }; truncated: false };
 export interface HostCapabilityMap {
   'project.media.page.v2': { request: MediaPageRequest; response: MediaPageResponse };
   'project.media.variants.v2': { request: MediaVariantsRequest; response: MediaVariantsResponse };
@@ -94,6 +113,15 @@ export interface HostCapabilityMap {
   'project.versions.page.v1': { request: ProjectFilesPageRequest; response: ProjectVersionsPageResponse };
   'project.version.graph.v1': { request: { includeMissing?: boolean }; response: ProjectVersionGraphResponse };
   'project.media.ratings.v1': { request: ProjectMediaRatingsRequest; response: ProjectMediaRatingsResponse };
+  'project.media.ratings.write.v1': { request: ProjectMediaRatingsWriteRequest; response: ProjectMediaRatingsWriteResponse };
+  'project.version.update.v1': { request: ProjectVersionUpdateRequest; response: ProjectVersionMutationResponse };
+  'project.version.delete.v1': { request: ProjectVersionDeleteRequest; response: ProjectVersionMutationResponse };
+  'project.progress.manage.v1': { request: ProjectProgressManageRequest; response: ProjectProgressManageResponse };
+  'project.import.v1': { request: ProjectImportRequest; response: ProjectImportResponse };
+  'project.files.mutate.v1': { request: ProjectFilesMutateRequest; response: ProjectFilesMutateResponse };
+  'project.media.process.v1': { request: ProjectMediaProcessRequest; response: ProjectMediaProcessResponse };
+  'component.secrets.v1': { request: ComponentSecretsRequest; response: ComponentSecretsResponse };
+  'network.fetch.v1': { request: NetworkFetchRequest; response: NetworkFetchResponse };
 }
 export type HostCapability = keyof HostCapabilityMap;
 export type HostCapabilityRequest<K extends HostCapability> = HostCapabilityMap[K]['request'];
@@ -110,6 +138,8 @@ export type ComponentServiceOutboundFrame = ReadyFrame | ServiceSuccessFrame | S
 export interface ComponentSdk { readonly contractVersion: 1; getContext(): Promise<ComponentContext>; readonly notify?: (payload: NotificationRequest) => Promise<NotificationResult>; rpc<T = unknown>(method: VersionedName, payload?: Record<string, unknown>): Promise<T>; onEvent<T = JsonObject>(topic: VersionedName, callback: (payload: T) => void): () => void; onActivate(callback: () => void): () => void; onDeactivate(callback: () => void): () => void; onThemeChange(callback: (value: { contractVersion: 1; resolvedTheme: 'light' | 'dark' }) => void): () => void; onContextChange(callback: (context: ComponentContext) => void): () => void }
 declare global { interface Window { photoFlowComponent: ComponentSdk } }
 export const host: ComponentSdk;
-export function assertHostApiV2(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 2 | 3 | 4 | 5 };
-export function assertHostApiV4(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 4 | 5 };
-export function assertHostApiV5(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 5 };
+export function assertHostApiV2(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 2 | 3 | 4 | 5 | 6 | 7 };
+export function assertHostApiV4(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 4 | 5 | 6 | 7 };
+export function assertHostApiV5(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 5 | 6 | 7 };
+export function assertHostApiV6(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 6 | 7 };
+export function assertHostApiV7(context: ComponentContext): asserts context is ComponentContext & { hostApiVersion: 7 };

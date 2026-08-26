@@ -8,7 +8,7 @@ import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../utils/recycleBinFailure';
 import { useTaskCenter } from '../features/background-tasks/TaskCenter';
 import { getWorkspaceCatalog, readWorkspaceCatalogSnapshot, workspaceCatalogEventMatches } from '../platform/workspace-catalog-client';
-import { useToast } from '../features/app/useTopToastStack';
+import { useUserFacingToast } from '../features/app/useUserFacingToast';
 
 type Action = 'import' | 'broll' | 'match';
 type ExistingProjectCandidate = {
@@ -148,6 +148,9 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const [error, setError] = useState('');
   const [menu, setMenu] = useState<{ project: WorkspaceProject; x: number; y: number } | null>(null);
   const [draggedProject, setDraggedProject] = useState<WorkspaceProject | null>(null);
+  const [pendingProjectAction, setPendingProjectAction] = useState<{ path: string; kind: 'move' | 'delete'; project: WorkspaceProject; targetStatus?: ProjectStatus } | null>(null);
+  const pendingProjectActionRef = useRef(pendingProjectAction);
+  pendingProjectActionRef.current = pendingProjectAction;
   const [dragTargetStatus, setDragTargetStatus] = useState<ProjectStatus | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [showCreateMenu, setShowCreateMenu] = useState(false);
@@ -177,7 +180,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const setName = (value: string) => setEditor(current => ({ ...current, name: value }));
   const [renameProject, setRenameProject] = useState<WorkspaceProject | null>(null);
   const [newProjectError, setNewProjectError] = useState('');
-  const toast = useToast();
+  const toast = useUserFacingToast();
   const [isCreating, setIsCreating] = useState(false);
   const resetProjectDate = () => {
     const value = initialProjectDate();
@@ -509,6 +512,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   };
   const move = async (project: WorkspaceProject, status: ProjectStatus) => {
     if (status === project.status) return;
+    if (pendingProjectActionRef.current) { setError('另一个项目操作正在处理中'); return; }
     const projectWorkspacePath = workspaceFor(project);
     if (project.archived && status !== '已归档') {
       await moveBack(project, status);
@@ -534,11 +538,24 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
         }
       }
     }
-    const result = await window.electronAPI.moveWorkspaceProject(projectWorkspacePath, project.status, project.name, status);
-    if (!result.success) setError(result.error || '更改状态失败');
-    else if (result.project) onSelectProject({ ...result.project, workspacePath: projectWorkspacePath }, project.path);
-    setExpanded(current => ({ ...current, [status]: true }));
-    refresh();
+    const pendingAction = { path: project.path, kind: 'move' as const, project, targetStatus: status };
+    pendingProjectActionRef.current = pendingAction;
+    setPendingProjectAction(pendingAction);
+    try {
+      const result = await window.electronAPI.moveWorkspaceProject(projectWorkspacePath, project.status, project.name, status);
+      if (!result.success) { pendingProjectActionRef.current = null; setPendingProjectAction(null); setError(result.error || '更改状态失败'); }
+      else if (result.project) onSelectProject({ ...result.project, workspacePath: projectWorkspacePath }, project.path);
+      setExpanded(current => ({ ...current, [status]: true }));
+      await refresh();
+    } catch (moveError) {
+      pendingProjectActionRef.current = null;
+      setPendingProjectAction(null);
+      setError(moveError instanceof Error ? moveError.message : '更改状态失败');
+      await refresh();
+    } finally {
+      pendingProjectActionRef.current = null;
+      setPendingProjectAction(null);
+    }
   };
   const dragProjectOverStatus = (event: React.DragEvent, status: ProjectStatus) => {
     if (!draggedProject || draggedProject.status === status) return;
@@ -566,21 +583,37 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     if (!result.success) toast.show(result.error || '无法移回项目', { tone: 'error', dedupeKey: `project-unarchive:${project.id}` });
   };
   const trash = async (project: WorkspaceProject) => {
+    if (pendingProjectActionRef.current) { setError('另一个项目操作正在处理中'); return; }
     if (!await appDialog.confirm({
       title: '确定要删除项目吗？',
       message: `删除项目会将项目文件夹“${project.name}”移入回收站。`,
       confirmLabel: '删除项目',
       tone: 'danger',
     })) return;
-    const result = await window.electronAPI.trashWorkspaceProject(workspaceFor(project), project.status, project.name);
-    if (!result.success) {
-      if (isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
-      else setError(result.error || '删除项目失败');
-    } else if (result.permanent) {
-      toast.show(`项目“${project.name}”已按 Windows 确认永久删除`, { tone: 'success', dedupeKey: `project-deleted:${project.id}` });
+    const pendingAction = { path: project.path, kind: 'delete' as const, project };
+    pendingProjectActionRef.current = pendingAction;
+    setPendingProjectAction(pendingAction);
+    try {
+      const result = await window.electronAPI.trashWorkspaceProject(workspaceFor(project), project.status, project.name);
+      if (!result.success) {
+        pendingProjectActionRef.current = null;
+        setPendingProjectAction(null);
+        if (isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+        else setError(result.error || '删除项目失败');
+      } else if (result.permanent) {
+        toast.show(`项目“${project.name}”已按 Windows 确认永久删除`, { tone: 'success', dedupeKey: `project-deleted:${project.id}` });
+      }
+      if (result.success) onProjectDeleted(project);
+      await refresh();
+    } catch (trashError) {
+      pendingProjectActionRef.current = null;
+      setPendingProjectAction(null);
+      setError(trashError instanceof Error ? trashError.message : '删除项目失败');
+      await refresh();
+    } finally {
+      pendingProjectActionRef.current = null;
+      setPendingProjectAction(null);
     }
-    if (result.success) onProjectDeleted(project);
-    refresh();
   };
   const openProject = async (project: WorkspaceProject) => {
     if (project.availability === 'missing') {
@@ -590,6 +623,14 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     const result = await window.electronAPI.openWorkspaceProject(workspaceFor(project), project.status, project.name);
     if (!result.success) setError(result.error || '无法打开文件夹');
   };
+  const presentedGroups = useMemo(() => {
+    if (!pendingProjectAction) return groups;
+    const withoutPendingProject = groups.map(group => ({ ...group, projects: group.projects.filter(project => project.path !== pendingProjectAction.path) }));
+    if (pendingProjectAction.kind === 'delete' || !pendingProjectAction.targetStatus) return withoutPendingProject;
+    return withoutPendingProject.map(group => group.status === pendingProjectAction.targetStatus
+      ? { ...group, projects: [...group.projects, { ...pendingProjectAction.project, status: pendingProjectAction.targetStatus! }] }
+      : group);
+  }, [groups, pendingProjectAction]);
   return <>
     <div className="relative px-4 pt-4" onClick={event => event.stopPropagation()}>
       <div className="flex w-full shadow-md shadow-blue-500/20">
@@ -599,8 +640,8 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       {showCreateMenu && <div role="menu" className="absolute left-4 right-4 top-full z-[250] mt-1 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button role="menuitem" type="button" onClick={openExistingProjectImport} className="project-menu-item"><FolderInput size={15}/>导入项目</button></div>}
     </div>
     <nav className="project-navigator-scroll flex-1 overflow-y-auto p-4 pt-2">
-      {statuses.filter(status => status !== '未分类' || (groups.find(group => group.status === status)?.projects.length || 0) > 0).map(status => {
-        const projects = (groups.find(group => group.status === status)?.projects || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+      {statuses.filter(status => status !== '未分类' || (presentedGroups.find(group => group.status === status)?.projects.length || 0) > 0).map(status => {
+        const projects = (presentedGroups.find(group => group.status === status)?.projects || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
         const isOpen = expanded[status];
         return <section key={status} onDragEnter={event => dragProjectOverStatus(event, status)} onDragOver={event => dragProjectOverStatus(event, status)} onDragLeave={event => leaveProjectStatus(event, status)} onDrop={event => dropProjectOnStatus(event, status)} className={`border-t py-2 first:border-t-0 transition ${dragTargetStatus === status ? 'rounded-lg border-blue-400 bg-blue-50 ring-2 ring-inset ring-blue-400' : 'border-slate-200'}`}>
           <button type="button" onClick={() => setExpanded(current => ({ ...current, [status]: !current[status] }))} className="flex w-full items-center gap-1.5 rounded-md px-2 py-2 text-left text-xs font-bold tracking-wide text-slate-500 hover:bg-slate-100 hover:text-slate-800">{isOpen ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{projectStatusLabel(status)}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{projects.length}</span></button>

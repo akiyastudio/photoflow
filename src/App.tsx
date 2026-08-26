@@ -11,10 +11,11 @@ import { useFolderTabNavigation } from './features/app/useFolderTabNavigation';
 import { browserPageActivation } from './features/app/workspace-tab-model';
 import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundTaskIndicator';
 import { useTaskCenter } from './features/background-tasks/TaskCenter';
-import { useToast } from './features/app/useTopToastStack';
+import { useUserFacingToast } from './features/app/useUserFacingToast';
 import { rendererErrorFingerprint, rendererErrorNoticeSummary, shouldReportRendererError, type RendererErrorOccurrence } from './features/app/renderer-error-notice-model';
 import { DomainHealthBanner } from './features/app/DomainHealthBanner';
 import { ComponentPageSurface } from './features/components/ComponentPageSurface'; import { ComponentSettingsPageSurface } from './features/components/ComponentSettingsPageSurface';
+import { ComponentContributionDock } from './features/components/ComponentContributionDock';
 import { useComponentPages } from './features/components/useComponentPages';
 import { ComponentIcon } from './components/ComponentIcon';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature'; import { componentSettingsSectionKey } from './features/settings/component-settings-page-model';
@@ -56,7 +57,7 @@ const App: React.FC = () => {
   const { dismissPanelTasksByOwnerPageId } = useTaskCenter(); const openPageIds = useMemo(() => new Set(projectPages.map(page => page.id)), [projectPages]);
   const [workspaceToolTabs, setWorkspaceToolTabs] = useState<WorkspaceToolTab[]>([]);
   const [, setProjectDestination] = useState<string | null>(null);
-  const toast = useToast();
+  const toast = useUserFacingToast();
   const showNotice = useCallback((message: string, durationOrTone?: number | 'info' | 'success' | 'warning' | 'error') => {
     toast.show(message, durationOrTone);
   }, [toast]);
@@ -105,7 +106,7 @@ const App: React.FC = () => {
   const reportComponentSettingsError = useCallback((message: string) => showNotice(`打开组件设置页失败：${message}`), [showNotice]);
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed).map(component => component.id)), [components]);
   const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); } });
-  const { actions: componentHostActions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
+  const { actions: componentHostActions, contributions: componentContributions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
 
   useEffect(() => {
     window.localStorage.setItem('photoflow:sidebar-width', String(Math.round(sidebarWidth)));
@@ -758,6 +759,7 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden bg-slate-50 text-slate-900 font-sans selection:bg-blue-500/30">
+      <div className="fixed right-3 top-2 z-[260]"><ComponentContributionDock contributions={componentContributions.filter(item => item.type === 'application.command')}/></div>
 
       {updateInfo && (
         <UpdateModal
@@ -888,7 +890,7 @@ const App: React.FC = () => {
             workspacePath={project.workspacePath || config.workspacePath}
             inspirationLibraryRootPath={config.inspirationLibrary.rootPath}
             installedComponentIds={installedComponentIds}
-            componentHostActions={componentHostActions} onOpenComponentPage={(action, scope) => void openComponentPage(action, project, project.workspacePath || config.workspacePath, scope)}
+            componentHostActions={componentHostActions} componentContributions={componentContributions} onOpenComponentPage={(action, scope) => void openComponentPage(action, project, project.workspacePath || config.workspacePath, scope)}
             videoPlaybackSettings={config.videoPlayback}
             projectToolbar={config.projectToolbar}
             customProjectCategories={config.customProjectCategories}

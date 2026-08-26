@@ -14,7 +14,7 @@ import { ConverterView, ImportCard, MatchView, ResearchView, ScreenshotMainImage
 import { PROJECT_FILE_BROWSER_CONTEXT } from '../file-browser/browser-context';
 import type { FileBrowserContext } from '../file-browser/browser-context';
 import { normalizeProjectCategoryOrder, PROJECT_TOOLBAR_ACTION_IDS, projectStatusLabel } from '../../types';
-import type { AppConfig, ComponentHostAction, ComponentPageOpenScope, MediaMetadataField, ProgressFolder, ProjectFileEntry, ProjectFileListFilter, ProjectFileOperationProgress, ProjectFileSortField, ProjectFilterScope, ProjectToolbarActionId, ShellNewFileType, VersionBatchFileOperation, VersionGraphEdge, WorkspaceProject } from '../../types';
+import type { AppConfig, ComponentContribution, ComponentHostAction, ComponentPageOpenScope, MediaMetadataField, ProgressFolder, ProjectFileEntry, ProjectFileListFilter, ProjectFileOperationProgress, ProjectFileSortField, ProjectFilterScope, ProjectToolbarActionId, ShellNewFileType, VersionBatchFileOperation, VersionGraphEdge, WorkspaceProject } from '../../types';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 import { useTaskCenter } from '../background-tasks/TaskCenter';
 import { isPanelTaskRestoreForPage, panelTaskSessionKey, type PanelTaskRestoreDetail } from '../background-tasks/panel-task-session-model';
@@ -34,13 +34,17 @@ import { projectWorkspaceClient } from '../../platform/project-workspace-client'
 import { useProjectFileSelection } from './useProjectFileSelection';
 import { defaultProjectFileSortDirection, isFolderLikeEntry, sortProjectFileEntries } from './file-entry-sort-model';
 import { pageOwnsFileOperationNotification } from './file-operation-notification-model';
+import { addPendingFileOperation, applyPendingFileOperations, operationRefreshDirectories, pendingOperationForEntry, pendingPathConflicts, predictUniqueDirectoryName, removePendingFileOperation, type PendingFileOperation } from './file-operation-state-model';
 import { ImportCompletionNotice, ToolModal } from './ProjectToolModal';
 import { ColumnResizeHandle, ComponentToolbarActions, FileListColumnResizeHandle, ViewportContextMenu } from './ProjectWorkspaceLayout';
 import { deleteMediaThumbnailPreview, findCachedMediaThumbnailPreview, forgetMediaThumbnailPreviews, getMediaThumbnailPreview, mediaThumbnailPreviewKey, rememberMediaThumbnailPreview, requestThumbnail, useThumbnailUpdates } from './useProjectThumbnail';
 import { formatShutterSpeed, isOfficeOpenXmlEntry, isPhotoshopOpenEntry, isScreenshotMainImageEntry, pickCaptureDate, pickMetadataValue, requestCaptureDateTime } from './project-workspace-media-metadata';
 import { DEFAULT_FILE_LIST_COLUMN_WIDTHS, FILE_LIST_COLUMN_KEYS, FILE_LIST_GRID_CHROME_WIDTH, clampNumber, fitFileListColumnWidths, fitProjectColumnWidths, readStoredBoolean, readStoredNumber, resizeFileListColumnBoundary, scheduleAfterProjectPaint, type FileListColumnBoundary, type FileListColumnWidths } from './project-workspace-layout-model';
 import { PhotoshopIcon } from './PhotoshopIcon';
-import { useToast, type ToastActivityHandle } from '../app/useTopToastStack';
+import { useUserFacingToast, type ToastActivityHandle } from '../app/useUserFacingToast';
+import { ComponentContributionDock } from '../components/ComponentContributionDock';
+import { mediaContributionScope, projectContributionScope } from '../components/component-contribution-scope-model';
+import { mayCommitAsyncOperationResult } from '../file-operation-identity-model';
 const FILE_VIRTUAL_OVERSCAN_ROWS = 10;
 const RECENT_FILES_PAGE_SIZE = 240;
 const RECENT_FILES_LOAD_AHEAD_PX = 900;
@@ -279,7 +283,7 @@ type FileBrowserWorkspaceProps = {
   inspirationTargetWorkspacePath?: string;
   inspirationLibraryRootPath?: string;
   installedComponentIds: ReadonlySet<string>;
-  componentHostActions?: ComponentHostAction[]; onOpenComponentPage?: (action: ComponentHostAction, scope: ComponentPageOpenScope) => void; videoPlaybackSettings: AppConfig['videoPlayback'];
+  componentHostActions?: ComponentHostAction[]; componentContributions?: ComponentContribution[]; onOpenComponentPage?: (action: ComponentHostAction, scope: ComponentPageOpenScope) => void; videoPlaybackSettings: AppConfig['videoPlayback'];
   projectToolbar?: AppConfig['projectToolbar'];
   customProjectCategories?: string[];
   projectCategoryOrder?: string[];
@@ -316,8 +320,8 @@ const isUnsupportedShortcutContent = (entry: ProjectFileEntry) => entry.viaShort
 const backgroundTaskPathKey = (value: unknown) => String(value || '').replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
 const handledVideoTrimTaskIds = new Set<string>();
 
-const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePath, inspirationTargetWorkspacePath, inspirationLibraryRootPath, installedComponentIds: _installedComponentIds, componentHostActions = [], onOpenComponentPage = () => undefined, videoPlaybackSettings, projectToolbar = { order: [...PROJECT_TOOLBAR_ACTION_IDS], hidden: [], onlyShowAvailable: false }, customProjectCategories = [], projectCategoryOrder = [], progressNamePresets = [], initialPanel, initialRelativePath = '', importConfig, importDefaults, brollConfig, videoTools, matchConfig, researchConfig, mediaCacheConfig, defaultFolderSort, itemOpenMode, folderAlphabetFilterEnabled = true, versionTreeEnabled = true, favoriteDisplayMode = 'binary', browserContext, navigationRequest, onDirectoryChange, onOpenInspirationPath, onOpenDirectoryPage, onOpenToolTab = () => undefined, onCloseToolTab = () => undefined, onImportConfigChange, onMatchConfigChange, onResearchConfigChange, onNotice, onProjectMoved = () => undefined, onDeleted = () => undefined }: FileBrowserWorkspaceProps) => {
-  const toast = useToast();
+const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePath, inspirationTargetWorkspacePath, inspirationLibraryRootPath, installedComponentIds: _installedComponentIds, componentHostActions = [], componentContributions = [], onOpenComponentPage = () => undefined, videoPlaybackSettings, projectToolbar = { order: [...PROJECT_TOOLBAR_ACTION_IDS], hidden: [], onlyShowAvailable: false }, customProjectCategories = [], projectCategoryOrder = [], progressNamePresets = [], initialPanel, initialRelativePath = '', importConfig, importDefaults, brollConfig, videoTools, matchConfig, researchConfig, mediaCacheConfig, defaultFolderSort, itemOpenMode, folderAlphabetFilterEnabled = true, versionTreeEnabled = true, favoriteDisplayMode = 'binary', browserContext, navigationRequest, onDirectoryChange, onOpenInspirationPath, onOpenDirectoryPage, onOpenToolTab = () => undefined, onCloseToolTab = () => undefined, onImportConfigChange, onMatchConfigChange, onResearchConfigChange, onNotice, onProjectMoved = () => undefined, onDeleted = () => undefined }: FileBrowserWorkspaceProps) => {
+  const toast = useUserFacingToast();
   const appDialog = useAppDialog();
   const projectStatuses = useMemo<Array<WorkspaceProject['status']>>(() => {
     const values = [...normalizeProjectCategoryOrder(projectCategoryOrder, customProjectCategories), project.status];
@@ -385,6 +389,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [fileEntries, setFileEntries] = useState<ProjectFileEntry[]>([]);
   const fileEntriesRef = useRef(fileEntries);
   fileEntriesRef.current = fileEntries;
+  const [pendingFileOperations, setPendingFileOperations] = useState<PendingFileOperation[]>([]);
+  const pendingFileOperationsRef = useRef(pendingFileOperations);
+  pendingFileOperationsRef.current = pendingFileOperations;
+  const pendingFileOperationSequenceRef = useRef(0);
   const renderedDirectoryRef = useRef({ path: normalizeProjectRelativePath(initialRelativePath), ready: false });
   const [directoryLoading, setDirectoryLoading] = useState(active);
   const [foregroundDirectoryReady, setForegroundDirectoryReady] = useState(false);
@@ -482,6 +490,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const onDirectoryChangeRef = useRef(onDirectoryChange);
   onDirectoryChangeRef.current = onDirectoryChange;
   const projectPathRef = useRef(project.path);
+  projectPathRef.current = project.path;
   const projectLifecycleRef = useRef<ProjectWorkspaceLifecycleIdentity>();
   const automaticProgressLoadKeyRef = useRef('');
   const progressFoldersRequestRef = useRef<Promise<ProgressFolder[]> | null>(null);
@@ -1614,6 +1623,16 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     directoryEntriesCacheRef.current.set(normalizedDirectory, nextEntries);
     if (normalizedDirectory === currentDirectory) setFileEntries(nextEntries);
   };
+  const removeOptimisticDirectoryEntry = (directoryPath: string, relativePath: string) => {
+    const normalizedDirectory = normalizeProjectRelativePath(directoryPath);
+    const currentDirectory = normalizeProjectRelativePath(currentRelativePathRef.current);
+    const cachedEntries = directoryEntriesCacheRef.current.get(normalizedDirectory);
+    const sourceEntries = cachedEntries ?? (normalizedDirectory === currentDirectory ? fileEntriesRef.current : null);
+    if (!sourceEntries) return;
+    const nextEntries = sourceEntries.filter(candidate => candidate.relativePath !== relativePath);
+    directoryEntriesCacheRef.current.set(normalizedDirectory, nextEntries);
+    if (normalizedDirectory === currentDirectory) setFileEntries(nextEntries);
+  };
   const scheduleDirectoryRefresh = (directoryPaths: string[] = [currentRelativePathRef.current]) => {
     for (const directoryPath of directoryPaths) {
       const normalized = normalizeProjectRelativePath(directoryPath);
@@ -1637,6 +1656,48 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       }
     }, 180);
   };
+  const startPendingFileOperation = (operation: Omit<PendingFileOperation, 'id'>) => {
+    if (pendingPathConflicts(pendingFileOperationsRef.current, operation.lockedPaths)) {
+      onNotice('所选文件或目标位置正在处理中，请等待当前操作完成');
+      return null;
+    }
+    const pending = { ...operation, projectPath: projectPathRef.current, id: `file-operation-${Date.now()}-${++pendingFileOperationSequenceRef.current}` };
+    const next = addPendingFileOperation(pendingFileOperationsRef.current, pending);
+    if (next === pendingFileOperationsRef.current) return null;
+    pendingFileOperationsRef.current = next;
+    setPendingFileOperations(next);
+    return pending;
+  };
+  const clearPendingFileOperation = (operationId: string) => {
+    const next = removePendingFileOperation(pendingFileOperationsRef.current, operationId);
+    pendingFileOperationsRef.current = next;
+    setPendingFileOperations(next);
+  };
+  const projectOperationIsCurrent = (requestedProjectPath: string) => mayCommitAsyncOperationResult(requestedProjectPath, projectPathRef.current);
+  const discardStaleProjectOperation = (requestedProjectPath: string, operation?: PendingFileOperation | null) => {
+    if (projectOperationIsCurrent(requestedProjectPath)) return false;
+    if (operation) clearPendingFileOperation(operation.id);
+    return true;
+  };
+  const reconcilePendingFileOperation = async (operation: PendingFileOperation, result?: { affectedDirectories?: string[] }, rollbackImmediately = false) => {
+    const requestedProjectPath = operation.projectPath || projectPathRef.current;
+    if (!projectOperationIsCurrent(requestedProjectPath)) { clearPendingFileOperation(operation.id); return; }
+    const directories = operationRefreshDirectories(operation, result);
+    if (rollbackImmediately) clearPendingFileOperation(operation.id);
+    for (const directory of directories) directoryEntriesCacheRef.current.delete(directory);
+    const currentPath = normalizeProjectRelativePath(currentRelativePathRef.current);
+    if (directories.includes(currentPath)) await refresh(currentPath, { includeProjectContents: !currentPath });
+    if (!projectOperationIsCurrent(requestedProjectPath)) { clearPendingFileOperation(operation.id); return; }
+    if (recursiveFlatOpen || currentFolderRecursiveSearchActive) {
+      await Promise.all(directories.map(directory => refreshRecursiveDirectory(directory)));
+      if (!projectOperationIsCurrent(requestedProjectPath)) { clearPendingFileOperation(operation.id); return; }
+    }
+    if (projectRootScopeSelected) setScopeRefreshToken(current => current + 1);
+    if (!rollbackImmediately) clearPendingFileOperation(operation.id);
+    // A later concurrent refresh may have invalidated the awaited request. The
+    // debounced pass is the final authority after the overlay has been removed.
+    scheduleDirectoryRefresh(directories);
+  };
 
   useEffect(() => {
     const nextIdentity = { pageId, projectId: project.id, projectPath: project.path, projectName: project.name, projectStatus: project.status };
@@ -1649,6 +1710,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (lifecycle.kind !== 'refresh') renderedDirectoryRef.current = { path: lifecycle.relativePath, ready: false };
     directoryEntriesCacheRef.current.clear();
     directoryPrefetchesRef.current.clear();
+    pendingFileOperationsRef.current = [];
+    setPendingFileOperations([]);
+    clipboardOperationSequenceRef.current += 1;
+    setCutPaths([]);
+    setClipboardPending(false);
+    setClipboardHasFiles(false);
     shortcutPreviewStatesRef.current.clear();
     progressFoldersRequestRef.current = null;
     if (lifecycle.kind !== 'refresh') setDirectoryLoading(active);
@@ -2139,7 +2206,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
 
   const recursiveSearchActive = (recursiveFlatOpen || currentFolderRecursiveSearchActive || projectRootFilterActive) && !finalViewOpen;
   const groupedResultsActive = (recursiveFlatOpen || currentFolderRecursiveSearchActive || projectRootFilterActive) && !finalViewOpen;
-  const activeFileEntries = projectRootFilterActive ? scopeEntries : recursiveFlatOpen || currentFolderRecursiveSearchActive ? searchEntries : finalViewOpen ? finalViewEntries : fileEntries;
+  const authoritativeActiveFileEntries = projectRootFilterActive ? scopeEntries : recursiveFlatOpen || currentFolderRecursiveSearchActive ? searchEntries : finalViewOpen ? finalViewEntries : fileEntries;
+  const activeFileEntries = useMemo(() => finalViewOpen
+    ? authoritativeActiveFileEntries
+    : applyPendingFileOperations(
+      authoritativeActiveFileEntries,
+      projectRootFilterActive || recursiveFlatOpen || currentFolderRecursiveSearchActive ? undefined : currentRelativePath,
+      pendingFileOperations,
+    ), [authoritativeActiveFileEntries, currentFolderRecursiveSearchActive, currentRelativePath, finalViewOpen, pendingFileOperations, projectRootFilterActive, recursiveFlatOpen]);
   const currentDirectoryFolders = useMemo(() => fileEntries.filter(isFolderLikeEntry), [fileEntries]);
   const folderAlphabetKeys = useMemo(() => availableFolderAlphabetKeys(currentDirectoryFolders.map(entry => entry.name)), [currentDirectoryFolders]);
   const folderAlphabetFilterVisible = folderAlphabetFilterEnabled && browseMode === 'grid' && !finalViewOpen && !recursiveSearchActive && !searchQuery.trim() && fileFilter === 'all' && ratingFilter === 'all' && currentDirectoryFolders.length > FOLDER_ALPHABET_FILTER_THRESHOLD;
@@ -2583,12 +2657,30 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       folderName = answer.trim();
     }
     if (projectPathRef.current !== requestedProjectPath) return;
-    const result = await projectWorkspaceClient.createProjectFolder(workspacePath, project.status, project.name, folderName, normalizedTarget, true);
-    if (projectPathRef.current !== requestedProjectPath) return;
-    if (!result.success) { onNotice(`新建文件夹失败：${result.error || '未知错误'}`); return; }
+    const targetEntries = directoryEntriesCacheRef.current.get(normalizedTarget)
+      || (normalizedTarget === normalizeProjectRelativePath(currentRelativePathRef.current) ? fileEntriesRef.current : []);
+    const predictedName = predictUniqueDirectoryName(folderName, targetEntries.map(entry => entry.name));
+    const requestedRelativePath = normalizeProjectRelativePath([normalizedTarget, predictedName].filter(Boolean).join('/'));
+    const optimisticEntry: ProjectFileEntry = {
+      name: predictedName, path: [project.path, requestedRelativePath].filter(Boolean).join('/'), relativePath: requestedRelativePath,
+      kind: 'folder', extension: '', size: 0, createdAt: Date.now(), updatedAt: Date.now(),
+    };
+    const pendingOperation = startPendingFileOperation({
+      kind: 'create',
+      label: '正在创建…',
+      lockedPaths: [`__directory__/${normalizedTarget || '__root__'}`, requestedRelativePath],
+      affectedDirectories: [normalizedTarget],
+    });
+    if (!pendingOperation) return;
+    upsertOptimisticDirectoryEntry(normalizedTarget, optimisticEntry);
+    let result: Awaited<ReturnType<typeof projectWorkspaceClient.createProjectFolder>>;
+    try { result = await projectWorkspaceClient.createProjectFolder(workspacePath, project.status, project.name, folderName, normalizedTarget, true); }
+    catch (error) { if (projectPathRef.current !== requestedProjectPath) { clearPendingFileOperation(pendingOperation.id); return; } removeOptimisticDirectoryEntry(normalizedTarget, requestedRelativePath); await reconcilePendingFileOperation(pendingOperation, undefined, true); onNotice(`新建文件夹失败：${error instanceof Error ? error.message : String(error)}`); return; }
+    if (projectPathRef.current !== requestedProjectPath) { clearPendingFileOperation(pendingOperation.id); return; }
+    if (!result.success) { removeOptimisticDirectoryEntry(normalizedTarget, requestedRelativePath); await reconcilePendingFileOperation(pendingOperation, undefined, true); onNotice(`新建文件夹失败：${result.error || '未知错误'}`); return; }
     const relativePath = normalizeProjectRelativePath(result.folder?.relativePath || [...[normalizedTarget, result.folder?.name || folderName].filter(Boolean)].join('/'));
     const updatedAt = result.folder?.updatedAt || Date.now();
-    upsertOptimisticDirectoryEntry(normalizedTarget, {
+    const createdEntry: ProjectFileEntry = {
       name: result.folder?.name || folderName,
       path: result.folder?.path || [project.path, relativePath].filter(Boolean).join('/'),
       relativePath,
@@ -2597,10 +2689,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       size: 0,
       createdAt: updatedAt,
       updatedAt,
-    });
+    };
+    upsertOptimisticDirectoryEntry(normalizedTarget, createdEntry, requestedRelativePath);
     refreshRecursiveResults(normalizedTarget);
-    const targetIsCurrent = normalizedTarget === normalizeProjectRelativePath(currentRelativePathRef.current);
-    if (targetIsCurrent) await refresh(normalizedTarget, { includeProjectContents: !normalizedTarget });
+    await reconcilePendingFileOperation(pendingOperation, { affectedDirectories: [normalizedTarget] });
     const canReveal = !createDirectly && mutatedEntryCanBeRevealed({
       requestedProjectPath,
       currentProjectPath: projectPathRef.current,
@@ -2638,9 +2730,19 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setShowCreateMenu(false);
     const requestedProjectPath = project.path;
     const normalizedTarget = normalizeProjectRelativePath(targetRelativePath);
-    const result = await projectWorkspaceClient.createProjectShellNewFile(workspacePath, project.status, project.name, normalizedTarget, type.id);
-    if (projectPathRef.current !== requestedProjectPath) return;
-    if (!result.success || !result.file) { onNotice(`新建${type.label}失败：${result.error || '未知错误'}`); return; }
+    const pendingOperation = startPendingFileOperation({
+      kind: 'create', label: `正在新建${type.label}…`,
+      lockedPaths: [`__directory__/${normalizedTarget || '__root__'}`],
+      affectedDirectories: [normalizedTarget],
+    });
+    if (!pendingOperation) return;
+    setWorkspaceActivityMessage(`正在新建${type.label}…`);
+    let result: Awaited<ReturnType<typeof projectWorkspaceClient.createProjectShellNewFile>>;
+    try { result = await projectWorkspaceClient.createProjectShellNewFile(workspacePath, project.status, project.name, normalizedTarget, type.id); }
+    catch (error) { if (projectPathRef.current !== requestedProjectPath) { clearPendingFileOperation(pendingOperation.id); return; } setWorkspaceActivityMessage(''); await reconcilePendingFileOperation(pendingOperation, undefined, true); onNotice(`新建${type.label}失败：${error instanceof Error ? error.message : String(error)}`); return; }
+    if (projectPathRef.current !== requestedProjectPath) { clearPendingFileOperation(pendingOperation.id); return; }
+    setWorkspaceActivityMessage('');
+    if (!result.success || !result.file) { await reconcilePendingFileOperation(pendingOperation, undefined, true); onNotice(`新建${type.label}失败：${result.error || '未知错误'}`); return; }
     const relativePath = normalizeProjectRelativePath(result.file.relativePath);
     upsertOptimisticDirectoryEntry(normalizedTarget, {
       ...result.file,
@@ -2651,8 +2753,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       createdAt: result.file.updatedAt,
     });
     refreshRecursiveResults(normalizedTarget);
-    const targetIsCurrent = normalizedTarget === normalizeProjectRelativePath(currentRelativePathRef.current);
-    if (targetIsCurrent) await refresh(normalizedTarget, { includeProjectContents: !normalizedTarget });
+    await reconcilePendingFileOperation(pendingOperation, { affectedDirectories: [normalizedTarget] });
     const canReveal = mutatedEntryCanBeRevealed({
       requestedProjectPath,
       currentProjectPath: projectPathRef.current,
@@ -3621,11 +3722,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     selectProjectFileRange(relativePath, additive, displayedFileEntries);
   };
   const beginInlineRename = (relativePath: string) => {
-    const entry = fileEntries.find(candidate => candidate.relativePath === relativePath);
+    const entry = activeFileEntries.find(candidate => candidate.relativePath === relativePath);
     if (!entry) return;
+    if (pendingPathConflicts(pendingFileOperationsRef.current, [relativePath])) { onNotice('该项目正在处理中，请稍后再试'); return; }
     if (isProtectedRenameEntry(entry)) { onNotice('该文件夹由工作流管理，请使用“修改进度”。'); return; }
-    const progressFolder = registeredProgressFolderForEntry(entry);
-    if (progressFolder?.nodeRole === 'progress' && (entry.externalLink || progressFolder.externalLinkRelativePath)) { onNotice('已登记的外链版本目录不能重命名；请先移动外链到项目内。'); return; }
     setSelectedPaths([relativePath]);
     setInlineRenamePath(relativePath);
     setInlineRenameValue(entry.name);
@@ -3641,31 +3741,52 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const commitInlineRename = async () => {
     if (!inlineRenamePath || renameCommitRef.current) return;
     const sourcePath = inlineRenamePath;
-    const sourceDirectoryPath = normalizeProjectRelativePath(currentRelativePathRef.current);
+    const sourceDirectoryPath = finalViewOpen ? projectRelativeParentPath(sourcePath) : normalizeProjectRelativePath(currentRelativePathRef.current);
     const requestedProjectPath = project.path;
-    const entry = fileEntries.find(candidate => candidate.relativePath === sourcePath);
+    const entry = activeFileEntries.find(candidate => candidate.relativePath === sourcePath);
     const nextName = inlineRenameValue.trim();
     if (!entry || !nextName || nextName === entry.name) { cancelInlineRename(); return; }
     if (isProtectedRenameEntry(entry)) { cancelInlineRename(); onNotice('该文件夹由项目工作流管理，不能普通重命名。'); return; }
     const progressFolder = registeredProgressFolderForEntry(entry);
-    if (progressFolder?.nodeRole === 'progress' && (entry.externalLink || progressFolder.externalLinkRelativePath)) { cancelInlineRename(); onNotice('已登记的外链版本目录不能重命名；请先移动外链到项目内。'); return; }
+    const optimisticRelativePath = normalizeProjectRelativePath(`${sourceDirectoryPath}/${nextName}`);
+    const pathSeparatorIndex = Math.max(entry.path.lastIndexOf('/'), entry.path.lastIndexOf('\\'));
+    const pendingOperation = startPendingFileOperation({
+      kind: 'rename', label: '正在重命名…', lockedPaths: [sourcePath, optimisticRelativePath], affectedDirectories: [sourceDirectoryPath],
+      tombstonePaths: [sourcePath],
+      optimisticEntries: [{ ...entry, name: nextName, relativePath: optimisticRelativePath }],
+    });
+    if (!pendingOperation) return;
+    cancelInlineRename();
     renameCommitRef.current = true;
-    const result = await (progressFolder?.nodeRole === 'progress'
-      ? projectWorkspaceClient.renameProgressFolder(workspacePath, project.status, project.name, {
-        progressId: progressFolder.id,
-        expectedFolderId: progressFolder.folderId,
-        expectedRelativePath: progressFolderRelativePath(progressFolder),
-        newName: nextName,
-      })
-      : projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'rename', [sourcePath], sourceDirectoryPath, nextName))
-      .finally(() => { renameCommitRef.current = false; });
-    if (projectPathRef.current !== requestedProjectPath) return;
-    if (!result.success) { onNotice(`重命名失败：${result.error || '未知错误'}`); return; }
+    let result: Awaited<ReturnType<typeof projectWorkspaceClient.projectFileOperation>> | Awaited<ReturnType<typeof projectWorkspaceClient.renameProgressFolder>>;
+    try {
+      result = await (progressFolder?.nodeRole === 'progress'
+        ? projectWorkspaceClient.renameProgressFolder(workspacePath, project.status, project.name, {
+          progressId: progressFolder.id,
+          expectedFolderId: progressFolder.folderId,
+          expectedRelativePath: progressFolderRelativePath(progressFolder),
+          newName: nextName,
+        })
+        : projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'rename', [sourcePath], sourceDirectoryPath, nextName));
+    } catch (error) {
+      await reconcilePendingFileOperation(pendingOperation, undefined, true);
+      onNotice(`重命名失败：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    } finally { renameCommitRef.current = false; }
+    if (projectPathRef.current !== requestedProjectPath) { clearPendingFileOperation(pendingOperation.id); return; }
+    if (!result.success) { await reconcilePendingFileOperation(pendingOperation, 'affectedDirectories' in result ? result : undefined, true); onNotice(`重命名失败：${result.error || '未知错误'}`); return; }
     const renamedPath = ('newRelativePath' in result ? result.newRelativePath : undefined)
       || ('movedItems' in result ? renamedEntryDestinationPath(sourcePath, nextName, result.movedItems) : normalizeProjectRelativePath(`${sourceDirectoryPath}/${nextName}`));
-    cancelInlineRename();
+    if (finalViewOpen) {
+      clearPendingFileOperation(pendingOperation.id);
+      setSelectedPaths([renamedPath]);
+      setPreviewPath(current => current === sourcePath ? renamedPath : current);
+      setPreviewMediaPath(current => current === sourcePath ? renamedPath : current);
+      await loadFinalViewEntries();
+      onNotice(`已重命名为“${nextName}”`);
+      return;
+    }
     const renamedName = renamedPath.split('/').pop() || nextName;
-    const pathSeparatorIndex = Math.max(entry.path.lastIndexOf('/'), entry.path.lastIndexOf('\\'));
     upsertOptimisticDirectoryEntry(sourceDirectoryPath, {
       ...entry,
       name: renamedName,
@@ -3687,7 +3808,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       }
       await loadProgressFolders();
     }
-    if (sourceDirectoryPath === normalizeProjectRelativePath(currentRelativePathRef.current)) await refresh(sourceDirectoryPath, { includeProjectContents: !sourceDirectoryPath });
+    await reconcilePendingFileOperation(pendingOperation, 'affectedDirectories' in result ? result : { affectedDirectories: [sourceDirectoryPath] });
     const canReveal = mutatedEntryCanBeRevealed({
       requestedProjectPath,
       currentProjectPath: projectPathRef.current,
@@ -3699,13 +3820,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     onNotice(`已重命名为“${nextName}”`);
   };
   const beginRename = (targetPaths = selectedPaths) => {
-    if (finalViewOpen) { onNotice('喜爱图片浏览是只读视图，请回到原文件夹重命名'); return; }
     if (!targetPaths.length) return;
     if (activeFileEntries.some(entry => targetPaths.includes(entry.relativePath) && isUnsupportedShortcutContent(entry))) { onNotice('普通快捷方式中的文件是只读浏览内容，不能在项目中重命名'); return; }
     if (activeFileEntries.some(entry => targetPaths.includes(entry.relativePath) && isProtectedRenameEntry(entry))) { onNotice('所选内容包含工作流文件夹，请使用“修改进度”。'); return; }
     const registeredProgressEntries = activeFileEntries.filter(entry => targetPaths.includes(entry.relativePath) && registeredProgressFolderForEntry(entry)?.nodeRole === 'progress');
     if (registeredProgressEntries.length && targetPaths.length > 1) { onNotice('已登记版本目录暂不支持批量或混合批量重命名，请单独重命名。'); return; }
-    if (registeredProgressEntries.some(entry => entry.externalLink || registeredProgressFolderForEntry(entry)?.externalLinkRelativePath)) { onNotice('已登记的外链版本目录不能重命名；请先移动外链到项目内。'); return; }
     if (targetPaths.length === 1) {
       beginInlineRename(targetPaths[0]);
       return;
@@ -3769,16 +3888,35 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const commitBatchRename = async () => {
     if (!batchRenameNames.length || batchRenameNames.some(name => !name) || selectedPaths.length < 2 || renameCommitRef.current) return;
     if (batchRenameEntries.some(entry => registeredProgressFolderForEntry(entry)?.nodeRole === 'progress')) { onNotice('已登记版本目录暂不支持批量或混合批量重命名，请单独重命名。'); return; }
-    renameCommitRef.current = true;
-    const result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'rename', selectedPaths, currentRelativePath, '批量重命名', { renameNames: batchRenameNames });
-    renameCommitRef.current = false;
-    if (!result.success) { onNotice(`批量重命名失败：${result.error || '未知错误'}`); return; }
-    const count = selectedPaths.length;
+    const sourcePaths = [...selectedPaths];
+    const requestedNames = [...batchRenameNames];
+    const optimisticEntries = batchRenameEntries.map((entry, index) => {
+      const name = requestedNames[index];
+      const relativePath = normalizeProjectRelativePath(`${currentRelativePath}/${name}`);
+      return { ...entry, name, relativePath };
+    });
+    const pendingOperation = startPendingFileOperation({
+      kind: 'rename', label: '正在批量重命名…', lockedPaths: [...sourcePaths, ...optimisticEntries.map(entry => entry.relativePath)],
+      affectedDirectories: [currentRelativePath], tombstonePaths: sourcePaths, optimisticEntries,
+    });
+    if (!pendingOperation) return;
     setBatchRenameOpen(false);
+    renameCommitRef.current = true;
+    let result: Awaited<ReturnType<typeof projectWorkspaceClient.projectFileOperation>>;
+    try {
+      result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'rename', sourcePaths, currentRelativePath, '批量重命名', { renameNames: requestedNames });
+    } catch (error) {
+      await reconcilePendingFileOperation(pendingOperation, undefined, true);
+      onNotice(`批量重命名失败：${error instanceof Error ? error.message : String(error)}`);
+      return;
+    } finally { renameCommitRef.current = false; }
+    if (!result.success) { await reconcilePendingFileOperation(pendingOperation, result, true); onNotice(`批量重命名失败：${result.error || '未知错误'}`); return; }
+    const count = sourcePaths.length;
     setBatchRenameParts([]);
     setSelectedPaths([]);
     onNotice(`已批量重命名 ${count} 个项目`);
-    refresh();
+    if (finalViewOpen) { clearPendingFileOperation(pendingOperation.id); await loadFinalViewEntries(); }
+    else await reconcilePendingFileOperation(pendingOperation, result);
   };
   const openFileMenuAt = (x: number, y: number, entry: ProjectFileEntry, selectEntry = true) => {
     filesSurfaceRef.current?.focus({ preventScroll: true });
@@ -4304,6 +4442,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setClipboardHasFiles(result.hasFiles);
   };
   const runFileOperation = async (operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename', nextName?: string, targetPaths = selectedPaths, destinationRelativePath = operationDirectoryPath) => {
+    const requestedProjectPath = projectPathRef.current;
     if (finalViewOpen && operation !== 'copy') { onNotice('当前为只读视图，请到原文件夹修改。'); return; }
     if (operation !== 'paste' && activeFileEntries.some(entry => targetPaths.includes(entry.relativePath) && isUnsupportedShortcutContent(entry))) { onNotice('普通快捷方式中的文件是只读浏览内容，不能执行此操作'); return; }
     const targetEntries = activeFileEntries.filter(entry => targetPaths.includes(entry.relativePath));
@@ -4319,12 +4458,15 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       const normalizedTargets = new Set(targetPaths.map(normalizeProjectRelativePath));
       const affectedProgressFolders = progressFolders.filter(folder => !folder.folderMissing
         && normalizedTargets.has(normalizeProjectRelativePath(folder.externalLinkRelativePath || projectRelativePath(folder.folderPath))));
-      if (affectedProgressFolders.length && !await appDialog.confirm({
-        title: affectedProgressFolders.length === 1 ? `删除版本 V${affectedProgressFolders[0].versionKey}？` : `删除 ${affectedProgressFolders.length} 个版本文件夹？`,
-        message: '文件夹会移入回收站；数据库中的版本节点、素材历史和后代关系不会删除，并会在版本树中显示为“失效”。从回收站恢复原文件夹，或创建同版本文件夹后可以重新连接。',
-        confirmLabel: '移入回收站',
-        tone: 'danger',
-      })) return;
+      if (affectedProgressFolders.length) {
+        const confirmed = await appDialog.confirm({
+          title: affectedProgressFolders.length === 1 ? `删除版本 V${affectedProgressFolders[0].versionKey}？` : `删除 ${affectedProgressFolders.length} 个版本文件夹？`,
+          message: '文件夹会移入回收站；数据库中的版本节点、素材历史和后代关系不会删除，并会在版本树中显示为“失效”。从回收站恢复原文件夹，或创建同版本文件夹后可以重新连接。',
+          confirmLabel: '移入回收站',
+          tone: 'danger',
+        });
+        if (!projectOperationIsCurrent(requestedProjectPath) || !confirmed) return;
+      }
     }
     const isClipboardSelection = operation === 'copy' || operation === 'cut';
     const clipboardOperationSequence = isClipboardSelection ? ++clipboardOperationSequenceRef.current : 0;
@@ -4332,13 +4474,31 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const previousClipboardHasFiles = clipboardHasFiles;
     const pasteClipboardGeneration = operation === 'paste' ? clipboardOperationSequenceRef.current : 0;
     const pasteCutPathsSnapshot = operation === 'paste' ? [...cutPaths] : [];
+    const normalizedDestination = normalizeProjectRelativePath(destinationRelativePath);
+    const pendingKind = operation === 'trash' ? 'delete' : operation;
+    const pendingOperation = operation === 'rename' ? null : startPendingFileOperation({
+      kind: pendingKind,
+      label: operation === 'trash' ? '正在移入回收站…'
+        : operation === 'paste' ? '正在准备粘贴…'
+          : operation === 'cut' ? '正在剪切…' : '正在复制…',
+      lockedPaths: operation === 'paste'
+        ? [`__directory__/${normalizedDestination || '__root__'}`, ...(normalizedDestination ? [normalizedDestination] : [])]
+        : targetPaths,
+      affectedDirectories: operation === 'paste'
+        ? [normalizedDestination]
+        : targetPaths.map(path => projectRelativeParentPath(normalizeProjectRelativePath(path))),
+      tombstonePaths: operation === 'trash' ? targetPaths : undefined,
+    });
+    if (operation !== 'rename' && !pendingOperation) return;
     if (isClipboardSelection) {
       setClipboardPending(true);
+      setCutPaths(operation === 'cut' ? [...targetPaths] : []);
+      setClipboardHasFiles(true);
     }
-    const normalizedDestination = normalizeProjectRelativePath(destinationRelativePath);
     let result: Awaited<ReturnType<typeof projectWorkspaceClient.projectFileOperation>>;
     try {
       result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, normalizedDestination, nextName);
+      if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
       if (result.requiresDecision?.kind === 'paste-conflict') {
         const policy = await appDialog.choice({
           title: '目标位置已有同名项目',
@@ -4350,10 +4510,19 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           ],
           defaultValue: 'keep-both',
         });
-        if (policy !== 'replace' && policy !== 'keep-both') { onNotice('粘贴已取消'); refresh(); return; }
+        if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
+        if (policy !== 'replace' && policy !== 'keep-both') {
+          if (pendingOperation) await reconcilePendingFileOperation(pendingOperation, result, true);
+          if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
+          onNotice('粘贴已取消'); refresh(); return;
+        }
         result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, operation, targetPaths, normalizedDestination, nextName, { pasteConflictPolicy: policy });
+        if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
       }
     } catch (error) {
+      if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
+      if (pendingOperation) await reconcilePendingFileOperation(pendingOperation, undefined, true);
+      if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
       if (isClipboardSelection && clipboardOperationSequenceRef.current === clipboardOperationSequence) {
         setCutPaths(previousCutPaths);
         setClipboardHasFiles(previousClipboardHasFiles);
@@ -4363,11 +4532,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       return;
     }
     if (result.cancelled) {
+      if (pendingOperation) await reconcilePendingFileOperation(pendingOperation, result);
+      if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
       if (isClipboardSelection && clipboardOperationSequenceRef.current === clipboardOperationSequence) {
         setCutPaths(previousCutPaths);
         setClipboardHasFiles(previousClipboardHasFiles);
         setClipboardPending(false);
       }
+      if (operation === 'trash' && result.count) setSelectedPaths([]);
       if (pageOwnsFileOperationNotification(result)) onNotice('粘贴已取消');
       refresh(); return;
     }
@@ -4377,17 +4549,25 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         setClipboardHasFiles(previousClipboardHasFiles);
         setClipboardPending(false);
       }
+      if (pendingOperation) await reconcilePendingFileOperation(pendingOperation, result, operation === 'copy' || operation === 'cut');
+      if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
       if (operation === 'trash' && result.count) {
         setSelectedPaths(current => current.filter(path => !targetPaths.includes(path)));
         scheduleDirectoryRefresh(result.affectedDirectories);
         refreshRecursiveResults(targetPaths.map(path => projectRelativeParentPath(normalizeProjectRelativePath(path))));
-        if (projectWorkflows) await loadProgressFolders();
+        if (projectWorkflows) {
+          await loadProgressFolders();
+          if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
+        }
       }
-      if (operation === 'trash' && isRecycleBinFailure(result.error, result.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
-      else if (pageOwnsFileOperationNotification(result)) onNotice(`操作失败：${result.error || '未知错误'}`);
+      if (operation === 'trash' && isRecycleBinFailure(result.error, result.errorCode)) {
+        await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+        if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
+      } else if (pageOwnsFileOperationNotification(result)) onNotice(`操作失败：${result.error || '未知错误'}`);
       return;
     }
     if (operation === 'copy' || operation === 'cut') {
+      if (pendingOperation) clearPendingFileOperation(pendingOperation.id);
       if (clipboardOperationSequenceRef.current !== clipboardOperationSequence) return;
       setCutPaths(operation === 'cut' ? [...targetPaths] : []);
       setClipboardHasFiles(true);
@@ -4415,8 +4595,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
             : '操作完成', result.warning ? 8000 : undefined);
       }
       setSelectedPaths([]);
-      if (projectWorkflows && (operation === 'trash' || operation === 'paste')) await loadProgressFolders();
-      scheduleDirectoryRefresh(result.affectedDirectories);
+      if (projectWorkflows && (operation === 'trash' || operation === 'paste')) {
+        await loadProgressFolders();
+        if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
+      }
+      if (pendingOperation) await reconcilePendingFileOperation(pendingOperation, result);
+      else scheduleDirectoryRefresh(result.affectedDirectories);
+      if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
       refreshRecursiveResults(operation === 'paste'
         ? normalizedDestination
         : targetPaths.map(path => projectRelativeParentPath(normalizeProjectRelativePath(path))));
@@ -4506,7 +4691,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const selectedContainsProtectedRenameEntry = selectedEntries.some(isProtectedRenameEntry);
   const selectedRegisteredProgressRenameEntries = selectedEntries.filter(entry => registeredProgressFolderForEntry(entry)?.nodeRole === 'progress');
   const selectedContainsBlockedProgressRenameEntry = selectedRegisteredProgressRenameEntries.length > 0
-    && (selectedEntries.length !== 1 || selectedRegisteredProgressRenameEntries.some(entry => entry.externalLink || registeredProgressFolderForEntry(entry)?.externalLinkRelativePath));
+    && selectedEntries.length !== 1;
   const selectedProgressFolder = selectedEntries.length === 1 && isFolderLikeEntry(selectedEntries[0]) ? selectedEntries[0] : undefined;
   const selectedRegisteredProgressFolder = registeredProgressFolderForEntry(selectedProgressFolder);
   const selectedEditableProgressFolder = selectedRegisteredProgressFolder?.nodeRole === 'progress' ? selectedRegisteredProgressFolder : undefined;
@@ -4940,7 +5125,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const fileMenuContainsProtectedRenameEntry = fileMenuEntries.some(isProtectedRenameEntry);
   const fileMenuRegisteredProgressRenameEntries = fileMenuEntries.filter(entry => registeredProgressFolderForEntry(entry)?.nodeRole === 'progress');
   const fileMenuContainsBlockedProgressRenameEntry = fileMenuRegisteredProgressRenameEntries.length > 0
-    && (fileMenuEntries.length !== 1 || fileMenuRegisteredProgressRenameEntries.some(entry => entry.externalLink || registeredProgressFolderForEntry(entry)?.externalLinkRelativePath));
+    && fileMenuEntries.length !== 1;
   const fileMenuVersionTreeFolder = registeredProgressFolderForEntry(fileMenu?.entry);
   const fileMenuRegisteredProgressFolder = fileMenuVersionTreeFolder?.nodeRole === 'progress' ? fileMenuVersionTreeFolder : undefined;
   const fileMenuScreenshotMainImageEntries = fileMenu
@@ -5173,6 +5358,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     void openProjectEntry(entry);
   };
   const handleEntryClick = (event: React.MouseEvent | React.KeyboardEvent, entry: ProjectFileEntry) => {
+    if (pendingOperationForEntry(entry).pendingOperationId) { event.preventDefault(); event.stopPropagation(); return; }
     if (inlineRenamePath === entry.relativePath) return;
     (event.currentTarget as HTMLElement).focus({ preventScroll: true });
     setOperationDirectoryPath(entry.viaShortcut ? currentRelativePath : projectRelativeParentPath(entry.relativePath));
@@ -5208,6 +5394,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     activateEntry(entry);
   };
   const handleEntryDoubleClick = (event: React.MouseEvent, entry: ProjectFileEntry) => {
+    if (pendingOperationForEntry(entry).pendingOperationId) { event.preventDefault(); event.stopPropagation(); return; }
     if (itemOpenMode !== 'double' || inlineRenamePath === entry.relativePath) return;
     event.preventDefault();
     event.stopPropagation();
@@ -5224,9 +5411,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (target?.dataset.entryPath) {
       const relativePath = target.dataset.entryPath;
       entryPointerModifiersRef.current = { path: relativePath, additive: event.ctrlKey || event.metaKey, range: event.shiftKey };
-      const requestedPaths = selectedPaths.includes(relativePath) ? selectedPaths : [relativePath];
-      const dragPaths = requestedPaths.filter(path => !activeFileEntries.some(candidate => candidate.relativePath === path && isUnsupportedShortcutContent(candidate)));
-      if (event.button === 0 && dragPaths.length) void projectWorkspaceClient.prepareProjectFileDrag(workspacePath, project.status, project.name, dragPaths).catch(() => undefined);
     }
   };
   const getEntryDisplayName = (entry: ProjectFileEntry) => (entry.kind === 'shortcut' || entry.externalLink) && entry.name.toLocaleLowerCase().endsWith('.lnk')
@@ -5256,22 +5440,25 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     className={`${grid ? 'mt-2 w-full text-xs' : 'min-w-0 flex-1 text-sm'} rounded border border-blue-500 bg-white px-1.5 py-0.5 text-slate-800 outline-none ring-2 ring-blue-200`}
   /> : grid ? <p className="mt-2 truncate text-xs font-medium text-slate-700">{getEntryDisplayName(entry)}</p> : <span className="truncate font-medium text-slate-700">{getEntryDisplayName(entry)}</span>;
   const renderEntryIcon = (entry: ProjectFileEntry, large = false, queueOrder = displayedFileEntries.findIndex(candidate => candidate.path === entry.path)) => {
-    if (isFolderLikeEntry(entry)) {
-      const cover = <FolderCover entry={entry} cacheConfig={mediaCacheConfig} requestedSize={large ? 320 : 160} queueOrder={queueOrder} large={large} loadEntries={loadDirectoryPreviewEntries}/>;
+    const visualEntry = entry;
+    if (isFolderLikeEntry(visualEntry)) {
+      const cover = <FolderCover entry={visualEntry} cacheConfig={mediaCacheConfig} requestedSize={large ? 320 : 160} queueOrder={queueOrder} large={large} loadEntries={loadDirectoryPreviewEntries}/>;
       return <>{cover}{entry.externalLink && <span aria-label="外链" className="shortcut-cover-badge"><ArrowUpRight size={large ? 16 : 10}/></span>}</>;
     }
-    if (entry.kind === 'shortcut') {
-      const shortcutIcon = <ShortcutEntryIcon entry={entry} cacheConfig={mediaCacheConfig} requestedSize={large ? 320 : 160} queueOrder={queueOrder} large={large} loadEntries={loadDirectoryPreviewEntries}/>;
+    if (visualEntry.kind === 'shortcut') {
+      const shortcutIcon = <ShortcutEntryIcon entry={visualEntry} cacheConfig={mediaCacheConfig} requestedSize={large ? 320 : 160} queueOrder={queueOrder} large={large} loadEntries={loadDirectoryPreviewEntries}/>;
       return large ? <span className="relative flex h-full w-full min-h-0 min-w-0 items-center justify-center">{shortcutIcon}</span> : shortcutIcon;
     }
-    if (entry.kind === 'image' || entry.kind === 'raw' || entry.kind === 'video') return <><MediaThumbnail entry={entry} cacheConfig={mediaCacheConfig} requestedSize={large ? gridThumbnailSize : 160} queueOrder={queueOrder} large={large}/>{entry.externalLink && <span aria-label="外链" className="shortcut-cover-badge"><ArrowUpRight size={large ? 16 : 10}/></span>}</>;
-    return <SystemFileIcon filePath={entry.path} size={large ? 48 : 28}/>;
+    if (visualEntry.kind === 'image' || visualEntry.kind === 'raw' || visualEntry.kind === 'video') return <><MediaThumbnail entry={visualEntry} cacheConfig={mediaCacheConfig} requestedSize={large ? gridThumbnailSize : 160} queueOrder={queueOrder} large={large}/>{entry.externalLink && <span aria-label="外链" className="shortcut-cover-badge"><ArrowUpRight size={large ? 16 : 10}/></span>}</>;
+    return <SystemFileIcon filePath={visualEntry.path} size={large ? 48 : 28}/>;
   };
   const entryHasPreviewState = (entry: ProjectFileEntry) => previewHighlightPath === entry.relativePath || directoryReturnHighlightPath === entry.relativePath;
   const renderEntrySelectionControl = (entry: ProjectFileEntry, list = false) => {
     const selected = selectedPaths.includes(entry.relativePath);
+    const pending = Boolean(pendingOperationForEntry(entry).pendingOperationId);
     return <button
       type="button"
+      disabled={pending}
       aria-pressed={selected}
       aria-label={`${selected ? '取消选择' : '选择'} ${getEntryDisplayName(entry)}`}
       onPointerDown={event => event.stopPropagation()}
@@ -5292,6 +5479,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     event.preventDefault();
     event.stopPropagation();
     const requestedPaths = selectedPaths.includes(entry.relativePath) ? selectedPaths : [entry.relativePath];
+    if (pendingPathConflicts(pendingFileOperationsRef.current, requestedPaths)) { onNotice('所选项目正在处理中，暂时不能拖动'); return; }
     const dragPaths = requestedPaths.filter(path => !activeFileEntries.some(candidate => candidate.relativePath === path && isUnsupportedShortcutContent(candidate)));
     if (!dragPaths.length) return;
     internalDragPathsRef.current = dragPaths;
@@ -5338,6 +5526,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     return folders.filter(folder => !(hasRawFolder && /^(jpg|jpeg|preview|previews|proxy|预览|代理)$/iu.test(folder.name)));
   };
   const performDirectoryDrop = async (internalPaths: string[], externalPaths: string[], targetRelativePath: string, targetName: string) => {
+    const requestedProjectPath = projectPathRef.current;
     const operation = internalPaths.length ? 'move' : 'import';
     const paths = internalPaths.length ? internalPaths : externalPaths;
     if (!paths.length) return;
@@ -5348,16 +5537,28 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       onNotice('已标记为版本节点的外链不能普通移动；请使用版本管理功能，或先移动外链到项目内');
       return;
     }
+    const normalizedTarget = normalizeProjectRelativePath(targetRelativePath);
+    const pendingOperation = startPendingFileOperation({
+      kind: operation, label: operation === 'move' ? '正在移动…' : '正在导入…',
+      lockedPaths: [...internalPaths, `__directory__/${normalizedTarget || '__root__'}`, ...(normalizedTarget ? [normalizedTarget] : [])],
+      affectedDirectories: [normalizedTarget, ...internalPaths.map(path => projectRelativeParentPath(normalizeProjectRelativePath(path)))],
+      tombstonePaths: operation === 'move' ? internalPaths : undefined,
+    });
+    if (!pendingOperation) return;
     let result: Awaited<ReturnType<typeof projectWorkspaceClient.projectFileOperation>>;
     try {
       result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, operation, paths, targetRelativePath);
+      if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
     } catch (error) {
+      if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
+      await reconcilePendingFileOperation(pendingOperation, undefined);
+      if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
       onNotice(`${operation === 'move' ? '移动' : '导入'}失败：${error instanceof Error ? error.message : String(error || '未知错误')}`);
       return;
     }
     const pageOwnsNotice = pageOwnsFileOperationNotification(result);
-    if (result.cancelled) { if (pageOwnsNotice) onNotice(operation === 'move' ? '移动已取消' : '导入已取消'); return; }
-    if (!result.success) { if (pageOwnsNotice) onNotice(`${operation === 'move' ? '移动' : '导入'}失败：${result.error || '未知错误'}`); return; }
+    if (result.cancelled) { await reconcilePendingFileOperation(pendingOperation, result); if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return; if (pageOwnsNotice) onNotice(operation === 'move' ? '移动已取消' : '导入已取消'); return; }
+    if (!result.success) { await reconcilePendingFileOperation(pendingOperation, result); if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return; if (pageOwnsNotice) onNotice(`${operation === 'move' ? '移动' : '导入'}失败：${result.error || '未知错误'}`); return; }
     if (operation === 'move') setCutPaths(current => current.filter(path => !paths.includes(path)));
     setSelectedPaths([]);
     if (pageOwnsNotice) onNotice(`已${operation === 'move' ? '移动' : '导入'} ${result.count} 个项目到 ${targetName}`);
@@ -5365,7 +5566,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       const folders = trackingSuggestionsForCreatedItems(result.createdItems || []);
       if (folders.length) setPendingProgressFolders(folders);
     }
-    refresh();
+    await reconcilePendingFileOperation(pendingOperation, result);
+    if (discardStaleProjectOperation(requestedProjectPath, pendingOperation)) return;
     refreshRecursiveResults([targetRelativePath, ...internalPaths.map(path => projectRelativeParentPath(normalizeProjectRelativePath(path)))]);
   };
   const handleEntryDragOver = (event: React.DragEvent<HTMLDivElement>, entry: ProjectFileEntry) => {
@@ -5467,7 +5669,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       internalDropHandledRef.current = false;
       return;
     }
-    if (result.nativeDrag?.status === 'failed' || result.nativeDrag?.status === 'failed-fast') return;
     if (!result.insideWindow || !dragPaths.length) return;
     const element = document.elementFromPoint(result.clientX, result.clientY);
     const titlebarDropZone = element?.closest<HTMLElement>('[data-folder-tab-drop-zone="true"]');
@@ -5503,22 +5704,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setSurfaceDropActive(false);
     if (!externalPaths.length) { onNotice('无法读取拖入文件的系统路径，请重新拖入'); return; }
     if (finalViewOpen) { onNotice('喜爱图片浏览是只读视图，不能导入文件'); return; }
-    let result: Awaited<ReturnType<typeof projectWorkspaceClient.projectFileOperation>>;
-    try {
-      result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'import', externalPaths, currentRelativePath);
-    } catch (error) {
-      onNotice(`导入失败：${error instanceof Error ? error.message : String(error || '未知错误')}`);
-      return;
-    }
-    const pageOwnsNotice = pageOwnsFileOperationNotification(result);
-    if (result.cancelled) { if (pageOwnsNotice) onNotice('导入已取消'); return; }
-    if (!result.success) { if (pageOwnsNotice) onNotice(`导入失败：${result.error || '未知错误'}`); return; }
-    if (pageOwnsNotice) onNotice(`已导入 ${result.count} 个项目`);
-    if (projectWorkflows) {
-      const folders = trackingSuggestionsForCreatedItems(result.createdItems || []);
-      if (folders.length) setPendingProgressFolders(folders);
-    }
-    refresh();
+    await performDirectoryDrop([], externalPaths, currentRelativePath, currentRelativePath.split('/').pop() || project.name);
   };
   useEffect(() => {
     const workspace = projectWorkspaceRef.current;
@@ -5741,6 +5927,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         {gatherToProject && <><button disabled={fileMenuContainsShortcutContent || gatheringInspiration || !inspirationProjects.length} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); startGatherInspiration(targets); }}><FolderInput size={14}/>添加到项目{inspirationTargetProject ? `“${inspirationTargetProject.name}”` : '…'}</button>{inspirationTargetProject && <button disabled={fileMenuContainsShortcutContent || gatheringInspiration} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); setGatherPickerPaths(targets); }}><ChevronDown size={14}/>选择其他项目…</button>}<div className="my-1 border-t border-slate-100"/></>}
         {projectWorkflows && canSelectFileMenuMedia && <><button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><div className="my-1 border-t border-slate-100"/></>}
         {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; const restoreSelection = fileMenuSelectionWasImplicitRef.current ? fileMenuSelectionSnapshotRef.current : null; setFileMenu(null); if (restoreSelection) { selectionAnchorPathRef.current = fileMenuSelectionAnchorSnapshotRef.current; setSelectedPaths(restoreSelection); } openPreviewFromMenu(entry); }}><PanelLeftOpen size={14}/>预览</button>}
+        {mediaContributionScope(fileMenuEntries, fileMenu.entry, pageId) && componentContributions.filter(item => item.type === 'media.contextAction').map(item => <button key={`${item.componentId}:${item.contributionId}`} className="project-menu-item" onClick={() => { const scope = mediaContributionScope(fileMenuEntries, fileMenu.entry, pageId)!; setFileMenu(null); window.dispatchEvent(new CustomEvent('photoflow:open-component-contribution', { detail: { contribution: item, scope } })); }}><Plus size={14}/>{item.label}</button>)}
         {!isFolderLikeEntry(fileMenu.entry) && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openProjectEntry(entry); }}><ExternalLink size={14}/>{fileMenu.entry.kind === 'shortcut' ? '打开快捷方式' : '用默认方式打开'}</button>}
         {fileMenu.entry.externalLink && <><button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; setFileMenu(null); void relinkExternalFolder(path); }}><RefreshCw size={14}/>重新定位外链</button><button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; setFileMenu(null); void materializeExternalLinks([path]); }}><FolderInput size={14}/>移动外链{fileMenu.entry.externalLinkTargetKind === 'file' ? '文件' : '文件夹'}到项目内</button></>}
         {fileMenu.entry.kind === 'shortcut' && !fileMenu.entry.externalLink && <button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; setFileMenu(null); void relinkExternalFolder(path); }}><RefreshCw size={14}/>重新接管旧版外链…</button>}
@@ -5749,7 +5936,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         {officeImageExtractorAvailable && fileMenuOfficeEntries.length > 0 && <button className="project-menu-item" onClick={() => { const entries = fileMenuOfficeEntries; setFileMenu(null); openOfficeImageExtractor(entries); }}><FileImage size={14}/>提取文档图片{fileMenuOfficeEntries.length > 1 ? `（${fileMenuOfficeEntries.length} 个文档）` : ''}</button>}
         {photoshopAvailable && isPhotoshopOpenEntry(fileMenu.entry) && <button disabled={fileMenuContainsUnsupportedShortcutContent} title={fileMenuContainsUnsupportedShortcutContent ? '普通快捷方式中的文件暂不支持直接发送到 Photoshop' : undefined} className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(isPhotoshopOpenEntry) : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><PhotoshopIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(isPhotoshopOpenEntry).length > 1 ? `（${selectedEntries.filter(isPhotoshopOpenEntry).length} 个）` : ''}</button>}
         {fileMenuHasToolActions && <div className="my-1 border-t border-slate-100"/>}
-        <button disabled={finalViewOpen || fileMenuContainsShortcutContent || fileMenuContainsProtectedRenameEntry || fileMenuContainsBlockedProgressRenameEntry} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : fileMenuContainsProtectedRenameEntry ? '该文件夹由项目工作流管理，不能普通重命名' : fileMenuContainsBlockedProgressRenameEntry ? fileMenuEntries.length > 1 ? '已登记版本目录暂不支持批量或混合批量重命名' : '已登记的外链版本目录不能重命名' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); beginRename(targets); }}><Edit size={14}/>{fileMenuTargetPaths.length > 1 ? '批量重命名' : '重命名'}</button>
+        <button disabled={fileMenuContainsShortcutContent || fileMenuContainsProtectedRenameEntry || fileMenuContainsBlockedProgressRenameEntry} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : fileMenuContainsProtectedRenameEntry ? '该文件夹由项目工作流管理，不能普通重命名' : fileMenuContainsBlockedProgressRenameEntry ? '已登记版本目录暂不支持批量或混合批量重命名' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); beginRename(targets); }}><Edit size={14}/>{fileMenuTargetPaths.length > 1 ? '批量重命名' : '重命名'}</button>
         <button disabled={finalViewOpen || fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('cut', undefined, targets); }}><Cut size={14}/>剪切</button>
         <button disabled={fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('copy', undefined, targets); }}><Copy size={14}/>复制</button>
         <button disabled={finalViewOpen || fileMenuContainsShortcutContent || !clipboardHasFiles} title={fileMenuContainsShortcutContent ? '快捷方式指向的外部文件夹是只读浏览区域' : finalViewOpen ? '喜爱图片浏览为只读视图' : clipboardHasFiles ? '粘贴到此文件所在文件夹' : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { setFileMenu(null); runFileOperation('paste'); }}><ClipboardPaste size={14}/>粘贴</button>
@@ -5763,8 +5950,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       {surfaceMenu && createPortal(<ViewportContextMenu x={surfaceMenu.x} y={surfaceMenu.y} widthClass="w-56" allowSubmenus>
         {surfaceMenu.kind === 'version-tree-layout' && <><button type="button" title="恢复版本树标准排版" className="project-menu-item" onClick={() => void restoreStandardVersionTreeLayout()}><RefreshCw size={14}/>刷新</button><div className="my-1 border-t border-slate-100"/></>}
         <p className="truncate px-2 py-1 text-[11px] font-bold text-slate-400" title={surfaceMenu.targetLabel}>在“{surfaceMenu.targetLabel}”中操作</p>
+        {componentContributions.filter(item => item.type === 'project.contextAction').map(item => <button key={`${item.componentId}:${item.contributionId}`} className="project-menu-item" onClick={() => { const scope = projectContributionScope(surfaceMenu.targetRelativePath, pageId); setSurfaceMenu(null); window.dispatchEvent(new CustomEvent('photoflow:open-component-contribution', { detail: { contribution: item, scope } })); }}><Plus size={14}/>{item.label}</button>)}
         <div className="group/submenu relative"><button className="project-menu-item w-full"><FolderPlus size={14}/>新建<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-72 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100">{projectWorkflows && !recursiveFlatOpen && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); void openProgressSetup('create'); }}><FolderPlus size={14}/>新建进度</button>}<button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void createFolder(target); }}><Folder size={14}/>新建文件夹</button><div className="my-1 border-t border-slate-100"/><div className="flex items-center justify-between px-2 pb-1 pt-1"><p className="text-[11px] font-bold text-slate-400">Windows 文件类型</p><button type="button" title="重新扫描 Windows 新建文件类型" disabled={shellNewTypesLoading} onClick={() => void loadShellNewTypes(true)} className="rounded p-1 text-slate-400 hover:bg-slate-100 hover:text-slate-700 disabled:opacity-50"><RefreshCw size={12} className={shellNewTypesLoading ? 'animate-spin' : ''}/></button></div><div className="max-h-72 overflow-y-auto">{shellNewTypesLoading && <p className="px-2 py-2 text-xs text-slate-400">正在读取系统新建菜单…</p>}{!shellNewTypesLoading && shellNewTypes.map(type => <button key={type.id} className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void createShellNewFile(type, target); }}>{type.iconDataUrl ? <img src={type.iconDataUrl} alt="" className="h-4 w-4 shrink-0 object-contain"/> : <File size={14} className="shrink-0"/>}<span className="min-w-0 flex-1 truncate">{type.label}</span><span className="ml-auto shrink-0 font-mono text-[10px] text-slate-400">{type.extension}</span></button>)}{!shellNewTypesLoading && shellNewTypesLoaded && !shellNewTypes.length && <p className="px-2 py-2 text-xs text-slate-400">系统没有可用的新建文件类型</p>}</div></div></div>
-        <div className="group/submenu relative"><button className="project-menu-item w-full"><FolderInput size={14}/>导入<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100">{projectWorkflows && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setPanel('import'); }}><MemoryStick size={14}/>从 SD 卡导入</button>}<button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); openManualImport(projectWorkflows ? 'original' : 'files', [], target); }}><FolderInput size={14}/>导入</button></div></div>
+        <div className="group/submenu relative"><button className="project-menu-item w-full"><FolderInput size={14}/>导入<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100">{projectWorkflows && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); setPanel('import'); }}><MemoryStick size={14}/>从 SD 卡导入</button>}<button className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); openManualImport(projectWorkflows ? 'original' : 'files', [], target); }}><FolderInput size={14}/>导入</button>{componentContributions.filter(item => item.type === 'project.importProvider').map(item => <button key={`${item.componentId}:${item.contributionId}`} className="project-menu-item" onClick={() => { const scopeRelativePath = surfaceMenu.targetRelativePath; setSurfaceMenu(null); window.dispatchEvent(new CustomEvent('photoflow:open-component-contribution', { detail: { contribution: item, scope: { scopeRelativePath, selectedRelativePaths: [], sourcePageId: pageId } } })); }}><FolderInput size={14}/>{item.label}</button>)}</div></div>
+        {componentContributions.filter(item => item.type === 'project.exportProvider').map(item => <button key={`${item.componentId}:${item.contributionId}`} className="project-menu-item" onClick={() => { const scopeRelativePath = surfaceMenu.targetRelativePath; setSurfaceMenu(null); window.dispatchEvent(new CustomEvent('photoflow:open-component-contribution', { detail: { contribution: item, scope: { scopeRelativePath, selectedRelativePaths: [], sourcePageId: pageId } } })); }}><ExternalLink size={14}/>{item.label}</button>)}
         {projectWorkflows && <button className="project-menu-item" onClick={() => { setSurfaceMenu(null); togglePanel('match'); }}><FileText size={14}/>从文件名选片</button>}
         <div className="my-1 border-t border-slate-100"/>
         <button disabled={!clipboardHasFiles} title={clipboardHasFiles ? `粘贴到“${surfaceMenu.targetLabel}”` : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { const target = surfaceMenu.targetRelativePath; setSurfaceMenu(null); void runFileOperation('paste', undefined, [], target); }}><ClipboardPaste size={14}/>粘贴</button>
@@ -5822,7 +6011,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         </div>
         <span aria-hidden className="project-toolbar-core-divider toolbar-divider"/>
         {selectedPaths.length > 0 && <span className="project-toolbar-selection mr-1 self-center text-xs text-slate-500">已选 {selectedPaths.length}</span>}
-        <button disabled={finalViewOpen || selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || selectedContainsBlockedProgressRenameEntry || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : selectedContainsProtectedRenameEntry ? '所选文件夹由项目工作流管理，不能普通重命名' : selectedContainsBlockedProgressRenameEntry ? selectedPaths.length > 1 ? '已登记版本目录暂不支持批量或混合批量重命名' : '已登记的外链版本目录不能重命名' : finalViewOpen ? '喜爱图片浏览为只读视图' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={() => beginRename()} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
+        <button disabled={selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || selectedContainsBlockedProgressRenameEntry || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : selectedContainsProtectedRenameEntry ? '所选文件夹由项目工作流管理，不能普通重命名' : selectedContainsBlockedProgressRenameEntry ? '已登记版本目录暂不支持批量或混合批量重命名' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={() => beginRename()} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
         <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '喜爱图片浏览为只读视图' : '剪切'} onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action"><Cut size={16}/>剪切</button>
         <button disabled={selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : '复制'} onClick={() => runFileOperation('copy')} className="project-action-button compact-hide-file-action"><Copy size={16}/>复制</button>
         {clipboardPending && <span role="status" aria-live="polite" className="text-xs text-slate-400">正在同步剪贴板…</span>}
@@ -5842,12 +6031,12 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         </div>
         {gatherToProject && !hiddenProjectToolbarActions.has('video-tools') && projectToolbarAvailability['video-tools'] && projectToolbarButtons['video-tools']}
         </div>
-        {projectWorkflows && <div className="project-toolbar-component-actions contents"><ComponentToolbarActions actions={componentHostActions} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: selectedEntries.filter(entry => entry.kind === 'image').map(entry => entry.relativePath), sourcePageId: pageId }} onOpen={onOpenComponentPage}/></div>}
+        <div className="project-toolbar-component-actions contents">{projectWorkflows && <ComponentToolbarActions actions={componentHostActions} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: selectedEntries.filter(entry => entry.kind === 'image').map(entry => entry.relativePath), sourcePageId: pageId }} onOpen={onOpenComponentPage}/>}<ComponentContributionDock contributions={componentContributions.filter(item => item.type !== 'application.command')} project={project} workspacePath={workspacePath} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: selectedEntries.map(entry => entry.relativePath), sourcePageId: pageId }} active={active}/></div>
         <div className="project-toolbar-overflow relative" onClick={event => event.stopPropagation()}>
           <button type="button" onClick={() => { const next = !showToolbarOverflowMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowToolbarOverflowMenu(next); }} aria-label="展开工具栏操作" aria-haspopup="menu" aria-expanded={showToolbarOverflowMenu} className={`project-action-button ${showToolbarOverflowMenu ? 'bg-blue-50 text-blue-600' : ''}`}><ChevronDown size={17} className={`transition-transform ${showToolbarOverflowMenu ? 'rotate-180' : ''}`}/></button>
           {showToolbarOverflowMenu && <div role="menu" aria-label="更多工具栏操作" className="project-toolbar-overflow-menu absolute left-0 top-full z-50 mt-1 w-56 overflow-visible rounded-lg border border-slate-200 bg-white p-1 shadow-xl" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setShowToolbarOverflowMenu(false); (event.currentTarget.previousElementSibling as HTMLButtonElement | null)?.focus(); } }} onClick={event => { const button = (event.target as HTMLElement).closest('button'); if (button && button.getAttribute('aria-haspopup') !== 'menu') setShowToolbarOverflowMenu(false); }}>
             <div className="project-toolbar-overflow-primary">
-              <button disabled={finalViewOpen || selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || selectedContainsBlockedProgressRenameEntry || !selectedPaths.length} onClick={() => beginRename()} className="project-menu-item"><Edit size={14}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
+              <button disabled={selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || selectedContainsBlockedProgressRenameEntry || !selectedPaths.length} onClick={() => beginRename()} className="project-menu-item"><Edit size={14}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
               <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('cut')} className="project-menu-item"><Cut size={14}/>剪切</button>
               <button disabled={selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('copy')} className="project-menu-item"><Copy size={14}/>复制</button>
               <button disabled={finalViewOpen || !clipboardHasFiles} onClick={() => runFileOperation('paste')} className="project-menu-item"><ClipboardPaste size={14}/>粘贴</button>
@@ -7388,7 +7577,7 @@ type ProjectWorkspaceProps = Omit<FileBrowserWorkspaceProps, 'browserContext' | 
   onCloseToolTab?: (pageId: string, kind: 'version') => void;
 };
 const ProjectWorkspace = ({ pageId, onDirectoryChange, onOpenToolTab, onCloseToolTab, ...props }: ProjectWorkspaceProps) => {
-  const toast = useToast();
+  const toast = useUserFacingToast();
   const onNotice = useCallback((message: string, duration?: number) => { toast.show(message, duration); }, [toast]);
   const bridgeRef = useRef({ onDirectoryChange, onOpenToolTab, onCloseToolTab });
   bridgeRef.current = { onDirectoryChange, onOpenToolTab, onCloseToolTab };

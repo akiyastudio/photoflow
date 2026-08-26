@@ -33,8 +33,8 @@ try {
   assert.equal(descriptor.settingsPages[0].entry, path.join(validRoot, 'dist', 'ui', 'settings.html')); assert.equal(descriptor.icon.entry, path.join(validRoot, 'src', 'icon.svg'));
   assert.equal(descriptor.service.entry, path.join(validRoot, 'src', 'service.cjs')); assert.equal(descriptor.developmentRuntime.command, path.join(validRoot, 'runtime.bin'));
   const action = ComponentViewManager.prototype.listToolbarActions.call({ registry: host })[0]; const settingsPage = ComponentViewManager.prototype.listSettingsPages.call({ registry: host })[0];
-  assert.equal(action.development, true); assert.match(action.label, /（开发）$/); assert.match(action.pageTitle, /（开发组件）$/);
-  assert.equal(settingsPage.development, true); assert.match(settingsPage.label, /（开发）$/);
+  assert.equal(action.development, true); assert.equal(action.label, 'Open'); assert.equal(action.pageTitle, 'Fixture');
+  assert.equal(settingsPage.development, true); assert.equal(settingsPage.label, 'Settings');
 
   const packaged = createComponentRegistry({ projectRoot, userComponentRoot: path.join(sandbox, 'production-components'), isPackaged: true, environment: env });
   assert.equal(packaged.list().length, 0, 'production must never discover source registrations'); assert.equal(packaged.hostCandidates().length, 0);

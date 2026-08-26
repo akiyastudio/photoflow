@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
-const { registerFileOperationsIpc } = require('../electron/modules/files-ipc.cjs');
+const { canUseSameVolumeCut, canUseSingleRenameMove, registerFileOperationsIpc, sameFilesystemDevice } = require('../electron/modules/files-ipc.cjs');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
 const { registerBrollImportIpc } = require('../electron/modules/broll-import.cjs');
 const { createProjectVirtualPathService } = require('../electron/services/project-virtual-path-service.cjs');
@@ -38,6 +38,29 @@ assert(mainSource.includes('createFileClipboardService') && !mainSource.includes
 assert(filesIpcSource.includes('const clearClipboardIfSnapshotCurrent') && filesIpcSource.includes('clearSystemFileClipboardIfCurrent(snapshot)'), 'cut clipboard clearing must delegate sequence and path validation to the native helper');
 assert.strictEqual((filesIpcSource.match(/await clearClipboardIfSnapshotCurrent\(clipboardSnapshot\)/g) || []).length, 2, 'both paste completion branches must verify clipboard ownership before clearing');
 assert(filesIpcSource.includes('missingCutSources') && filesIpcSource.includes('剪切源已被其他粘贴任务移动或删除'), 'a later paste sharing an already-consumed cut snapshot must return a clear source error');
+assert(filesIpcSource.includes('if (moves.length === 1 && sources.length === 1)') && filesIpcSource.includes('await fs.promises.rename(moves[0].source, moves[0].destination)'), 'single rename must have a one-call direct fast path');
+assert(filesIpcSource.includes('if (!sameVolumeCut) {') && filesIpcSource.indexOf('await collectCopyPlan(target.source') > filesIpcSource.indexOf('if (!sameVolumeCut) {'), 'same-volume cut-paste must bypass recursive copy planning');
+const singleMoveFastPathStart = filesIpcSource.indexOf('const singleSameVolumeMove');
+const singleMoveFastPathSource = filesIpcSource.slice(singleMoveFastPathStart, filesIpcSource.indexOf("if (operation === 'copy' || operation === 'cut')", singleMoveFastPathStart));
+assert(singleMoveFastPathSource.includes('canUseSingleRenameMove(process.platform, movePlan, destinationStat)') && singleMoveFastPathSource.includes('await fs.promises.rename(entry.source, entry.destination)'), 'single internal move fast path must require matching filesystem device identities');
+assert(singleMoveFastPathSource.includes('if (!singleSameVolumeMove) task.publish') && singleMoveFastPathSource.includes('await movePathAtomic(entry.source, entry.destination'), 'only the non-fast move path may scan or fall back to copy');
+const sameVolumeCutStart = filesIpcSource.indexOf('if (sameVolumeCut) {');
+const sameVolumeCutSource = filesIpcSource.slice(sameVolumeCutStart, filesIpcSource.indexOf('const totalBytes = plan.reduce', sameVolumeCutStart));
+assert(sameVolumeCutSource.includes('await fs.promises.rename(item.source, item.destination)') && !sameVolumeCutSource.includes('movePathAtomic('), 'same-volume cut-paste must use rename only, including rollback');
+assert(filesIpcSource.includes('topLevelTargets.map(item => sourceStatsByPath.get(pathKey(item.source)))'), 'cut-paste fast path must compare every cached source device with the real destination device');
+assert.strictEqual(sameFilesystemDevice({ dev: 401 }, { dev: 401 }), true, 'matching real device identities keep single move and cut-paste on the rename fast path');
+assert.strictEqual(sameFilesystemDevice({ dev: 401 }, { dev: 902 }), false, 'same-drive-letter paths on different mounted devices cannot enter either rename-only fast path');
+assert.strictEqual(sameFilesystemDevice({ dev: 0 }, { dev: 0 }), false, 'unavailable zero device identities conservatively disable fast paths');
+assert.strictEqual(sameFilesystemDevice({}, { dev: 401 }), false, 'missing source device identity conservatively disables fast paths');
+assert.strictEqual(sameFilesystemDevice({ dev: 401 }, {}), false, 'missing destination device identity conservatively disables fast paths');
+assert.strictEqual(sameFilesystemDevice({ dev: 401n }, { dev: 401n }), true, 'bigint device identities are compared without precision loss');
+assert.strictEqual(sameFilesystemDevice(Object.defineProperty({}, 'dev', { get: () => { throw new Error('stat dev unavailable'); } }), { dev: 401 }), false, 'device identity read failure conservatively disables fast paths');
+const sameDriveDifferentDeviceMove = [{ source: 'C:\\mount\\source.txt', destination: 'C:\\target\\source.txt', sourceStat: { dev: 401 } }];
+assert.strictEqual(canUseSingleRenameMove('win32', sameDriveDifferentDeviceMove, { dev: 902 }), false, 'single move on the same drive letter but a different mounted volume must use movePathAtomic fallback');
+assert.strictEqual(canUseSingleRenameMove('win32', sameDriveDifferentDeviceMove, { dev: 401 }), true, 'single move with matching real device identity keeps the direct rename path');
+assert.strictEqual(canUseSameVolumeCut('win32', 'cut', [{ dev: 401 }], { dev: 902 }), false, 'cut-paste on the same drive letter but a different mounted volume must use copy planning');
+assert.strictEqual(canUseSameVolumeCut('win32', 'cut', [{ dev: 401 }], { dev: 401 }), true, 'cut-paste with matching real device identity keeps the rename path');
+assert.strictEqual(canUseSameVolumeCut('win32', 'cut', [{ dev: 401 }, {}], { dev: 401 }), false, 'one unavailable source device disables the whole cut-paste rename fast path');
 
 const run = async () => {
   try {
@@ -88,7 +111,13 @@ const run = async () => {
     const moveSource = path.join(root, 'move-source.bin');
     const moveTarget = path.join(root, 'move-target.bin');
     fs.writeFileSync(moveSource, 'move');
-    await moveFileAtomic(moveSource, moveTarget);
+    let sameVolumeRenameCalls = 0;
+    const sameVolumeMove = await movePathAtomic(moveSource, moveTarget, { renameFile: async (source, destination) => {
+      sameVolumeRenameCalls += 1;
+      return fs.promises.rename(source, destination);
+    } });
+    assert.strictEqual(sameVolumeMove.copied, false);
+    assert.strictEqual(sameVolumeRenameCalls, 1, 'same-volume single move uses one rename without scanning or copying');
     assert.strictEqual(fs.existsSync(moveSource), false);
     assert.strictEqual(fs.readFileSync(moveTarget, 'utf8'), 'move');
 
@@ -172,6 +201,79 @@ const run = async () => {
     assert.strictEqual(fs.readFileSync(path.join(rollbackProject, 'second.txt'), 'utf8'), 'second');
     assert.strictEqual(fs.readdirSync(rollbackDestination).length, 0, 'rollback must leave no moved item in the destination');
     assert(rollbackResult.operationId && rollbackResult.affectedDirectories.includes('destination'));
+
+    const deviceMoveProject = path.join(root, 'device-aware-move-project');
+    const sameDeviceDestination = path.join(deviceMoveProject, 'same-device-target');
+    const differentDeviceDestination = path.join(deviceMoveProject, 'mounted-volume-target');
+    const sameDeviceSource = path.join(deviceMoveProject, 'same-device.txt');
+    const differentDeviceSource = path.join(deviceMoveProject, 'different-device.txt');
+    fs.mkdirSync(sameDeviceDestination, { recursive: true });
+    fs.mkdirSync(differentDeviceDestination, { recursive: true });
+    fs.writeFileSync(sameDeviceSource, 'same-device');
+    fs.writeFileSync(differentDeviceSource, 'different-device');
+    const mockedDeviceByPath = new Map([
+      [path.resolve(sameDeviceSource).toLowerCase(), 7101],
+      [path.resolve(sameDeviceDestination).toLowerCase(), 7101],
+      [path.resolve(differentDeviceSource).toLowerCase(), 7101],
+      [path.resolve(differentDeviceDestination).toLowerCase(), 9202],
+    ]);
+    let directDeviceRenameCalls = 0;
+    let fallbackDeviceMoveCalls = 0;
+    const deviceAwareFs = {
+      ...fs,
+      statSync: (targetPath, options) => {
+        const stat = fs.statSync(targetPath, options);
+        const mockedDevice = mockedDeviceByPath.get(path.resolve(targetPath).toLowerCase());
+        if (mockedDevice === undefined) return stat;
+        return new Proxy(stat, {
+          get: (target, property, receiver) => {
+            if (property === 'dev') return mockedDevice;
+            const value = Reflect.get(target, property, receiver);
+            return typeof value === 'function' ? value.bind(target) : value;
+          },
+        });
+      },
+      promises: {
+        ...fs.promises,
+        rename: async (sourcePath, destinationPath) => {
+          directDeviceRenameCalls += 1;
+          return fs.promises.rename(sourcePath, destinationPath);
+        },
+      },
+    };
+    const deviceMoveHandlers = new Map();
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => deviceMoveHandlers.set(name, handler), on: () => {} },
+      fs: deviceAwareFs, path, getProjectPath: () => deviceMoveProject, activeProjectFileOperations: new Map(),
+      assertInside,
+      movePathAtomic: async (sourcePath, destinationPath, options) => {
+        fallbackDeviceMoveCalls += 1;
+        return movePathAtomic(sourcePath, destinationPath, options);
+      },
+      pushUndoOperation: async () => undefined, throwIfCancelled, writeLog: () => undefined,
+    });
+    const deviceMoveHandler = deviceMoveHandlers.get('workspace-file-operation');
+    const sameDeviceMoveResult = await deviceMoveHandler(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'move', ['same-device.txt'], 'same-device-target',
+    );
+    assert.strictEqual(sameDeviceMoveResult.success, true, sameDeviceMoveResult.error);
+    assert.strictEqual(fs.existsSync(sameDeviceSource), false, 'same-device direct move removes the source');
+    assert.strictEqual(fs.readFileSync(path.join(sameDeviceDestination, 'same-device.txt'), 'utf8'), 'same-device', 'same-device direct move creates the destination');
+    assert.strictEqual(directDeviceRenameCalls, 1, 'same-device handler move uses the direct fs.rename path');
+    assert.strictEqual(fallbackDeviceMoveCalls, 0, 'same-device handler move does not invoke movePathAtomic');
+
+    directDeviceRenameCalls = 0;
+    const differentDeviceMoveResult = await deviceMoveHandler(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'move', ['different-device.txt'], 'mounted-volume-target',
+    );
+    assert.strictEqual(differentDeviceMoveResult.success, true, differentDeviceMoveResult.error);
+    assert.strictEqual(fs.existsSync(differentDeviceSource), false, 'different-device fallback move removes the source');
+    assert.strictEqual(fs.readFileSync(path.join(differentDeviceDestination, 'different-device.txt'), 'utf8'), 'different-device', 'different-device fallback move creates the destination');
+    assert.strictEqual(directDeviceRenameCalls, 0, 'different-device handler move never enters the direct fs.rename path');
+    assert.strictEqual(fallbackDeviceMoveCalls, 1, 'different-device handler move invokes movePathAtomic fallback');
 
     const cancelSource = path.join(root, 'cancel-source.bin');
     const cancelTarget = path.join(root, 'cancel-target.bin');
@@ -711,6 +813,101 @@ const run = async () => {
     assert.deepStrictEqual(partialTrashUndo.items.map(item => item.recyclePidl), ['pidl-partial'], 'successfully deleted paths must remain undoable when another batch item fails');
     assert.strictEqual(partialTrashWatcherRefreshes, 1, 'partial trash success must refresh managed external watchers before reporting the remaining failure');
 
+    const renameFastPathProject = path.join(root, 'rename-fast-path-project');
+    fs.mkdirSync(renameFastPathProject);
+    const renameFastPathHandlers = new Map();
+    const renameCalls = [];
+    let failRenameCall = 0;
+    let clipboardWriteCalls = 0;
+    let failClipboardWrite = false;
+    const countedRenameFs = {
+      ...fs,
+      promises: {
+        ...fs.promises,
+        rename: async (source, destination) => {
+          renameCalls.push({ source, destination });
+          if (failRenameCall && renameCalls.length === failRenameCall) throw Object.assign(new Error('injected rename failure'), { code: 'EIO' });
+          return fs.promises.rename(source, destination);
+        },
+      },
+    };
+    registerFileOperationsIpc({
+      Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => renameFastPathHandlers.set(name, handler), on: () => {} },
+      fs: countedRenameFs, path, getProjectPath: () => renameFastPathProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null }, ensureWorkspace: () => root,
+      writeSystemFileClipboard: async (sources, operation) => {
+        clipboardWriteCalls += 1;
+        if (failClipboardWrite) throw new Error('injected clipboard write failure');
+        return { sequence: clipboardWriteCalls, sources, operation };
+      },
+      pushUndoOperation: async () => undefined, writeLog: () => undefined,
+    });
+    fs.writeFileSync(path.join(renameFastPathProject, 'single.txt'), 'single');
+    let renameResult = await renameFastPathHandlers.get('workspace-file-operation')(
+      null, 'workspace', '策划中', 'project', 'rename', ['single.txt'], '', 'renamed.txt',
+    );
+    assert.strictEqual(renameResult.success, true, renameResult.error);
+    assert.strictEqual(renameCalls.length, 1, 'ordinary single rename must invoke the filesystem rename exactly once');
+    assert.strictEqual(fs.readFileSync(path.join(renameFastPathProject, 'renamed.txt'), 'utf8'), 'single');
+
+    renameCalls.length = 0;
+    failRenameCall = 1;
+    fs.writeFileSync(path.join(renameFastPathProject, 'direct-failure.txt'), 'retained');
+    renameResult = await renameFastPathHandlers.get('workspace-file-operation')(
+      null, 'workspace', '策划中', 'project', 'rename', ['direct-failure.txt'], '', 'never-created.txt',
+    );
+    failRenameCall = 0;
+    assert.strictEqual(renameResult.success, false);
+    assert.strictEqual(renameCalls.length, 1, 'failed direct rename is not retried through staging');
+    assert.strictEqual(fs.readFileSync(path.join(renameFastPathProject, 'direct-failure.txt'), 'utf8'), 'retained');
+    assert.strictEqual(fs.existsSync(path.join(renameFastPathProject, 'never-created.txt')), false);
+    let clipboardResult = await renameFastPathHandlers.get('workspace-file-operation')(
+      null, 'workspace', '策划中', 'project', 'copy', ['renamed.txt'], '', '',
+    );
+    assert.strictEqual(clipboardResult.success, true, clipboardResult.error);
+    assert.strictEqual(clipboardWriteCalls, 1, 'copy selection performs one system clipboard write and no file transfer');
+    failClipboardWrite = true;
+    clipboardResult = await renameFastPathHandlers.get('workspace-file-operation')(
+      null, 'workspace', '策划中', 'project', 'cut', ['renamed.txt'], '', '',
+    );
+    failClipboardWrite = false;
+    assert.strictEqual(clipboardResult.success, false);
+    assert.strictEqual(clipboardWriteCalls, 2, 'failed cut clipboard write is reported without a staging retry');
+
+    renameCalls.length = 0;
+    fs.writeFileSync(path.join(renameFastPathProject, 'CaseOnly.txt'), 'case-only');
+    renameResult = await renameFastPathHandlers.get('workspace-file-operation')(
+      null, 'workspace', '策划中', 'project', 'rename', ['CaseOnly.txt'], '', 'caseonly.txt',
+    );
+    assert.strictEqual(renameResult.success, true, renameResult.error);
+    assert.strictEqual(renameCalls.length, 1, 'case-only single rename must also use the direct path');
+    assert.strictEqual(fs.readFileSync(path.join(renameFastPathProject, 'caseonly.txt'), 'utf8'), 'case-only');
+
+    renameCalls.length = 0;
+    fs.writeFileSync(path.join(renameFastPathProject, 'one.txt'), 'one');
+    fs.writeFileSync(path.join(renameFastPathProject, 'two.txt'), 'two');
+    renameResult = await renameFastPathHandlers.get('workspace-file-operation')(
+      null, 'workspace', '策划中', 'project', 'rename', ['one.txt', 'two.txt'], '', 'batch', { renameNames: ['two.txt', 'one.txt'] },
+    );
+    assert.strictEqual(renameResult.success, true, renameResult.error);
+    assert.strictEqual(renameCalls.length, 4, 'a two-item swap must retain two-phase staging');
+    assert.strictEqual(fs.readFileSync(path.join(renameFastPathProject, 'one.txt'), 'utf8'), 'two');
+    assert.strictEqual(fs.readFileSync(path.join(renameFastPathProject, 'two.txt'), 'utf8'), 'one');
+
+    fs.renameSync(path.join(renameFastPathProject, 'one.txt'), path.join(renameFastPathProject, 'rollback-one.txt'));
+    fs.renameSync(path.join(renameFastPathProject, 'two.txt'), path.join(renameFastPathProject, 'rollback-two.txt'));
+    renameCalls.length = 0;
+    failRenameCall = 4;
+    renameResult = await renameFastPathHandlers.get('workspace-file-operation')(
+      null, 'workspace', '策划中', 'project', 'rename', ['rollback-one.txt', 'rollback-two.txt'], '', 'batch', { renameNames: ['rollback-two.txt', 'rollback-one.txt'] },
+    );
+    failRenameCall = 0;
+    assert.strictEqual(renameResult.success, false, 'an injected publish failure must be reported');
+    assert.strictEqual(fs.readFileSync(path.join(renameFastPathProject, 'rollback-one.txt'), 'utf8'), 'two', 'batch rollback restores the first source');
+    assert.strictEqual(fs.readFileSync(path.join(renameFastPathProject, 'rollback-two.txt'), 'utf8'), 'one', 'batch rollback restores the second source');
+    assert.strictEqual(fs.readdirSync(renameFastPathProject).some(name => name.startsWith('.photoflow-rename-')), false, 'batch rollback leaves no staging entries');
+
     const undoHandlers = new Map();
     const renameHistory = [replacementUndo];
     registerWorkspaceIpc({
@@ -759,8 +956,15 @@ const run = async () => {
     let projectRenameAttempts = 0;
     let suspendedRenameWatchers = 0;
     let resumedRenameWatchers = 0;
+    let projectFolderMkdirCalls = 0;
+    let failProjectFolderMkdir = false;
     const renameFs = {
       ...fs,
+      mkdirSync: (targetPath, options) => {
+        projectFolderMkdirCalls += 1;
+        if (failProjectFolderMkdir) throw Object.assign(new Error('injected mkdir failure'), { code: 'EIO' });
+        return fs.mkdirSync(targetPath, options);
+      },
       promises: {
         ...fs.promises,
         rename: async (sourcePath, destinationPath) => {
@@ -776,6 +980,18 @@ const run = async () => {
       ipcMain: { handle: (name, handler) => projectRenameHandlers.set(name, handler) }, fs: renameFs, path,
       WORKSPACE_STATUSES: ['策划中'], HIDDEN_SYSTEM_ENTRY_NAMES: new Set(), IMAGE_EXTENSIONS: new Set(), RAW_EXTENSIONS: new Set(), VIDEO_EXTENSIONS: new Set(),
       cleanProjectName: value => String(value).trim(), ensureWorkspace: () => renameWorkspaceRoot,
+      assertInside,
+      projectVirtualPaths: {
+        resolve: (projectRoot, relativePath) => ({
+          projectRoot,
+          virtualPath: String(relativePath || '').replace(/\\/g, '/'),
+          physicalPath: assertInside(projectRoot, path.resolve(projectRoot, relativePath || '.'), '项目路径', true),
+          mediaRoot: projectRoot,
+          viaExternalLink: false,
+          isExternalLinkRoot: false,
+        }),
+        listManagedExternalLinks: () => [],
+      },
       getProjectPath: (_workspacePath, _status, name) => path.join(renameWorkspaceRoot, name),
       getWorkspaceDataRoot: () => path.join(renameWorkspaceRoot, '.data'),
       workspaceCatalogs: new Map([[renameWorkspaceRoot, { byName: new Map([[renameSourceName.toLocaleLowerCase(), { name: renameSourceName, extra_json: '{}' }]]) }]]),
@@ -791,6 +1007,19 @@ const run = async () => {
     assert.strictEqual(suspendedRenameWatchers, 1, 'project rename should suspend its recursive watcher before renaming');
     assert.strictEqual(resumedRenameWatchers, 0, 'a successful rename should let the renderer attach a watcher to the new path');
     assert.strictEqual(fs.existsSync(renameTarget), true);
+    const createdFolder = await projectRenameHandlers.get('workspace-create-project-folder')(
+      null, renameWorkspaceRoot, '策划中', renameTargetName, '新建文件夹', '', true,
+    );
+    assert.strictEqual(createdFolder.success, true, createdFolder.error);
+    assert.strictEqual(projectFolderMkdirCalls, 1, 'ordinary folder creation uses one mkdir call');
+    failProjectFolderMkdir = true;
+    const failedFolder = await projectRenameHandlers.get('workspace-create-project-folder')(
+      null, renameWorkspaceRoot, '策划中', renameTargetName, '失败文件夹', '', true,
+    );
+    failProjectFolderMkdir = false;
+    assert.strictEqual(failedFolder.success, false);
+    assert.strictEqual(projectFolderMkdirCalls, 2, 'failed mkdir is not retried through staging');
+    assert.strictEqual(fs.existsSync(path.join(renameTarget, '失败文件夹')), false, 'failed mkdir leaves no optimistic backend artifact');
 
     const importProjectHandlers = new Map();
     const importWorkspaceRoot = path.join(root, 'import-existing-workspace');

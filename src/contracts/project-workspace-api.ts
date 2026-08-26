@@ -19,7 +19,7 @@ export type ProjectWorkspaceApiKey =
   | 'projectFileOperation' | 'registerProgressFolder' | 'registerProgressWithGraph' | 'relinkProjectExternalFolder' | 'renameProgressFolder'
   | 'registerVersionBaseline' | 'replaceVersionGraphEdgeSource' | 'resolveProjectShortcut'
   | 'retryVersionBatchOperations' | 'searchProjectFiles' | 'setMediaRating' | 'setWindowFullscreen'
-  | 'startProgressTracking' | 'prepareProjectFileDrag' | 'startProjectFileDrag' | 'trackTelemetry' | 'trashWorkspaceProject'
+  | 'startProgressTracking' | 'startProjectFileDrag' | 'trackTelemetry' | 'trashWorkspaceProject'
   | 'cancelProjectVideoTrim' | 'onProjectVideoTrimProgress' | 'trimProjectVideo' | 'unregisterProgressFolder' | 'unwatchFileRoot' | 'updateProgressFolder' | 'updateProgressRelation' | 'watchFileRoot';
 
 export type ProjectWorkspaceApi = Pick<IElectronAPI, ProjectWorkspaceApiKey>;

@@ -119,7 +119,7 @@ try {
   assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: manifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { ...item, entry: 'linked-settings/settings.html' } : item) } }, manifestRoot), /linked path/);
 } catch (error) { if (!['EPERM', 'EACCES'].includes(error?.code)) throw error; }
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: allPermissions.filter(value => value !== 'project.output.write') } } }, manifestRoot), /requires permission project\.output\.write/);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 6, maxHostApiVersion: 7 } } }, manifestRoot), /do not overlap/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 8, maxHostApiVersion: 9 } } }, manifestRoot), /do not overlap/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, unsafeExtension: true } }, manifestRoot), /Unknown component host field/);
 for (const schema of ['component-manifest-v2.schema.json', 'component-host-api-v2.schema.json', 'component-service-protocol-v1.schema.json']) JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', schema), 'utf8'));
 const capabilitySchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api-v2.schema.json'), 'utf8'));
@@ -202,7 +202,7 @@ const registrationOptions = overrides => ({
   projectVirtualPaths,
   ...overrides,
 });
-registerComponentProjectCapabilities(registrationOptions());
+const projectDomain = registerComponentProjectCapabilities(registrationOptions());
 broker.register('component.lifecycle.v2', (payload, _context, ownedDescriptor) => ({ apiVersion: 2, componentId: ownedDescriptor.componentId, componentVersion: ownedDescriptor.componentVersion, negotiatedHostApiVersion: ownedDescriptor.hostApiVersion, permissions: ownedDescriptor.service.permissions, events: ownedDescriptor.service.events, lifecycleActions: [], state: payload.action === 'describe' ? 'active' : 'active' }));
 assert(broker.assertCapabilities(descriptor));
 const context = { componentId: descriptor.componentId, componentVersion: descriptor.componentVersion, workspacePath: workspaceRoot, projectId: 'project-1', projectName: 'Project', projectStatus: 'active', emitComponentEvent: (topic, event) => { context.lastEvent = { topic, event }; } };
@@ -218,6 +218,18 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert.equal(mediaGrants.length, grantsBeforeMetadata, 'metadata-only media descriptions do not mint media URL grants');
   assert.equal(thumbnailRequests.length, thumbnailsBeforeMetadata, 'metadata-only media descriptions do not request thumbnails');
   const variants = await broker.invoke(descriptor, 'project.media.variants.v2', { photoId: 'photo-1', versionId: 'version-1', variants: ['thumbnail', 'preview', 'original'] }, context);
+  const reservationVariant = await broker.invoke(descriptor, 'project.media.variants.v2', { photoId: 'photo-1', versionId: 'version-1', variants: ['original'] }, context);
+  const realNow = Date.now; const issuedAt = realNow();
+  try {
+    Date.now = () => issuedAt + 9 * 60 * 1000;
+    const reserved = projectDomain.reserveInputs([reservationVariant.input.token], descriptor, context, 'reservation-expiry-test');
+    Date.now = () => issuedAt + 11 * 60 * 1000;
+    assert.equal(reserved[0].filePath, imagePath, 'active reservation retains the original input without extending its authorization');
+    assert.throws(() => projectDomain.peekInput(reservationVariant.input.token, descriptor, context), error => error.code === 'COMPONENT_HOST_CONFLICT', 'active reservation is not pruned after original expiry');
+    projectDomain.releaseReservation('reservation-expiry-test');
+    assert.throws(() => projectDomain.peekInput(reservationVariant.input.token, descriptor, context), error => error.code === 'COMPONENT_HOST_TOKEN_EXPIRED', 'release deletes a token whose original expiry passed while reserved');
+  } finally { Date.now = realNow; }
+  const freshInputVariant = await broker.invoke(descriptor, 'project.media.variants.v2', { photoId: 'photo-1', versionId: 'version-1', variants: ['original'] }, context);
   assert.notEqual(variants.variants.thumbnail.url, variants.variants.original.url, 'a JPEG thumbnail must be a generated derivative rather than its original URL');
   assert.deepEqual(thumbnailRequests.map(item => item.requestedSize), [320, 1600]);
   returnOriginalAsThumbnail = true;
@@ -226,9 +238,9 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   const externalVariants = await broker.invoke(descriptor, 'project.media.variants.v2', { photoId: 'photo-external', versionId: 'version-external', variants: ['original'] }, context);
   assert.equal(externalVariants.mediaRef.relativePath, 'External/outside.jpg', 'managed external photo versions retain their virtual project path');
 
-  const materialized = await broker.invoke(descriptor, 'project.input.tokens.v2', { action: 'materialize', token: variants.input.token }, context);
+  const materialized = await broker.invoke(descriptor, 'project.input.tokens.v2', { action: 'materialize', token: freshInputVariant.input.token }, context);
   assert(fs.existsSync(materialized.privatePath));
-  await assert.rejects(broker.invoke(descriptor, 'project.input.tokens.v2', { action: 'materialize', token: variants.input.token }, context), error => error.code === 'COMPONENT_HOST_TOKEN_EXPIRED', 'input grants are single-use');
+  await assert.rejects(broker.invoke(descriptor, 'project.input.tokens.v2', { action: 'materialize', token: freshInputVariant.input.token }, context), error => error.code === 'COMPONENT_HOST_TOKEN_EXPIRED', 'input grants are single-use');
 
   const legacyDataRoot = path.join(dataRoot, descriptor.componentId); const legacyDatabasePath = path.join(dataRoot, 'databases', `${descriptor.componentId}.sqlite3`);
   fs.mkdirSync(legacyDataRoot, { recursive: true }); fs.mkdirSync(path.dirname(legacyDatabasePath), { recursive: true }); fs.writeFileSync(path.join(legacyDataRoot, 'legacy-private.bin'), 'legacy-private'); fs.writeFileSync(legacyDatabasePath, 'legacy-database');
@@ -392,8 +404,8 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert.equal((await broker.invoke(descriptor, 'component.lifecycle.v2', { action: 'describe' }, applicationSettingsContext)).state, 'active', 'application settings surface may inspect declared lifecycle state');
   assert((await broker.invoke(descriptor, 'dialogs.v2', { kind: 'confirm', title: 'Confirm' }, applicationSettingsContext)).confirmed, 'application settings surface may use confirmation dialogs');
   await assert.rejects(broker.invoke(descriptor, 'dialogs.v2', { kind: 'openFiles' }, applicationSettingsContext), error => error.code === 'COMPONENT_HOST_PERMISSION_DENIED', 'application settings surface cannot mint project input tokens');
-  assert.throws(() => broker.invoke(descriptor, 'project.media.page.v2', { pageSize: 10 }, applicationSettingsContext), /not available on the application settings surface/, 'project capabilities fail closed on an application surface');
-  assert.throws(() => broker.invoke(descriptor, 'component.storage.v2', {}, applicationSettingsContext), /not available on the application settings surface/, 'project-scoped component storage fails closed on an application surface');
+  assert.throws(() => broker.invoke(descriptor, 'project.media.page.v2', { pageSize: 10 }, applicationSettingsContext), /not available on the application.settings surface/, 'project capabilities fail closed on an application surface');
+  assert.throws(() => broker.invoke(descriptor, 'component.storage.v2', {}, applicationSettingsContext), /not available on the application.settings surface/, 'project-scoped component storage fails closed on an application surface');
   const drainBroker = new ComponentCapabilityBroker(); let finishAcceptedCapability;
   drainBroker.register('component.settings.v2', () => new Promise(resolve => { finishAcceptedCapability = resolve; }));
   const drainDescriptor = { componentId: 'drain-fixture', service: { capabilities: ['component.settings.v2'], permissions: ['component.settings'] } };

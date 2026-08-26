@@ -8,6 +8,7 @@ const MAX_SETTINGS_BYTES = 256 * 1024;
 const MAX_INLINE_WRITE_BYTES = 8 * 1024 * 1024;
 const MAX_STAGE_BYTES = 2 * 1024 * 1024 * 1024;
 const INPUT_TOKEN_TTL_MS = 10 * 60 * 1000;
+const INPUT_RESERVATION_TTL_MS = 30 * 60 * 1000;
 const CURSOR_TTL_MS = 5 * 60 * 1000;
 const STAGE_TTL_MS = 24 * 60 * 60 * 1000;
 const STAGE_SCHEMA_VERSION = 1;
@@ -51,7 +52,11 @@ const boundedObject = (value, maxBytes, label) => {
   return JSON.parse(serialized);
 };
 const pruneExpiringMaps = now => {
-  for (const [key, value] of inputGrants) if (value.expiresAt <= now) inputGrants.delete(key);
+  for (const [key, value] of inputGrants) {
+    if (value.reservedBy && value.reservationExpiresAt > now) continue;
+    if (value.reservedBy) { delete value.reservedBy; delete value.reservationExpiresAt; value.expiresAt = value.originalExpiresAt ?? value.expiresAt; delete value.originalExpiresAt; }
+    if (value.expiresAt <= now) inputGrants.delete(key);
+  }
   for (const [key, value] of listSessions) if (value.expiresAt <= now) listSessions.delete(key);
 };
 const replaceJsonAtomic = async ({ fs, crypto, filePath, value }) => {
@@ -200,6 +205,7 @@ const registerComponentProjectCapabilities = ({
     const grant = inputGrants.get(String(token || ''));
     if (!grant) throw hostError(CODES.TOKEN_EXPIRED, 'Component input token is missing or expired');
     if (grant.scope !== scopeKey(descriptor, context)) throw hostError(CODES.TOKEN_SCOPE, 'Component input token belongs to another component or project');
+    if (grant.reservedBy) throw hostError(CODES.CONFLICT, 'Component input token is reserved by another operation');
     if (consume && --grant.usesRemaining <= 0) inputGrants.delete(String(token));
     return grant.filePath;
   };
@@ -878,7 +884,29 @@ const registerComponentProjectCapabilities = ({
     context.emitComponentEvent?.(topic, event);
     return { apiVersion: 2, emitted: true };
   });
-
+  return {
+    consumeInput: (token, descriptor, context) => consumeInput(token, descriptor, context, true),
+    peekInput: (token, descriptor, context) => consumeInput(token, descriptor, context, false),
+    reserveInputs: (tokens, descriptor, context, reservationId) => {
+      pruneExpiringMaps(Date.now()); const values = [...new Set(tokens.map(String))];
+      if (values.length !== tokens.length) throw hostError(CODES.INVALID_REQUEST, 'Input tokens must be unique');
+      const grants = values.map(token => {
+        const grant = inputGrants.get(token);
+        if (!grant) throw hostError(CODES.TOKEN_EXPIRED, 'Component input token is missing or expired');
+        if (grant.scope !== scopeKey(descriptor, context)) throw hostError(CODES.TOKEN_SCOPE, 'Component input token belongs to another component or project');
+        if (grant.reservedBy && grant.reservedBy !== reservationId) throw hostError(CODES.CONFLICT, 'Component input token is reserved by another operation');
+        return { token, grant };
+      });
+      grants.forEach(({ grant }) => { grant.originalExpiresAt ??= grant.expiresAt; grant.reservedBy = reservationId; grant.reservationExpiresAt = Date.now() + INPUT_RESERVATION_TTL_MS; });
+      return grants.map(({ token, grant }) => ({ token, filePath: grant.filePath }));
+    },
+    commitReservation: reservationId => { for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) inputGrants.delete(token); },
+    releaseReservation: reservationId => { const current = Date.now(); for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) { grant.expiresAt = grant.originalExpiresAt ?? grant.expiresAt; delete grant.originalExpiresAt; delete grant.reservedBy; delete grant.reservationExpiresAt; if (grant.expiresAt <= current) inputGrants.delete(token); } },
+    clearComponent: componentId => {
+      const prefix = `${String(componentId || '')}\0`;
+      for (const [token, grant] of inputGrants) if (String(grant.scope || '').startsWith(prefix)) inputGrants.delete(token);
+    },
+  };
 };
 
 module.exports = {

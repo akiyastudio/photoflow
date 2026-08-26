@@ -93,6 +93,7 @@ const activatedStatus = statusGuard.begin(); assert(statusGuard.isCurrent(activa
 for (const [value, loading, failed, expected] of [
   [undefined, true, false, 'loading'],
   [{ advancedAvailable: true, state: 'ready' }, false, false, 'ready'],
+  [{ state: 'unavailable', errorCategory: 'wsl-access-denied', runtimeSource: 'development' }, false, false, 'unavailable'],
   [{ state: 'not-installed', installed: false }, false, false, 'not-installed'],
   [{ state: 'repair-needed' }, false, false, 'repair-needed'],
   [{ success: false, message: 'raw backend detail' }, false, false, 'unavailable'],
@@ -102,6 +103,9 @@ for (const [value, loading, failed, expected] of [
   assert.equal(presentation.state, expected, `advanced environment state maps to ${expected}`);
   assert(!presentation.description.includes('raw backend detail'), 'advanced status never renders backend payload text');
 }
+const developmentAccessDenied = advancedEnvironmentPresentation({ state: 'unavailable', errorCategory: 'wsl-access-denied', runtimeSource: 'development' }, false, false);
+assert.equal(developmentAccessDenied.label, '权限受限');
+assert.match(developmentAccessDenied.description, /普通终端/);
 
 console.log('Team settings state-machine tests passed');
 

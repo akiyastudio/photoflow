@@ -9,17 +9,23 @@ const outputOption = process.argv.indexOf('--output-dir'); const archiveRoot = o
 const python = process.platform === 'win32' ? path.join(root, '.venv', 'Scripts', 'python.exe') : path.join(root, '.venv', 'bin', 'python');
 const models = [['rtmdet-ins_m_640x640.onnx',104857600],['face_detection_yunet_2023mar.onnx',204800],['adaface_ir18_webface4m.onnx',83886080],['osnet_x1_0_msmt17.onnx',7340032]];
 const run = (command,args) => { const result=spawnSync(command,args,{cwd:root,stdio:'inherit'}); if(result.error) throw result.error; if((result.status??1)!==0) throw new Error(`${command} failed with code ${result.status}`); };
+const viteBin = path.join(path.dirname(require.resolve('vite/package.json', { paths: [root] })), 'bin', 'vite.js');
 if (!fs.existsSync(python)) throw new Error('Plugin Python environment missing; run npm run setup:python');
 for (const [name,minimum] of models) { const file=path.join(root,'models',name); if(!fs.existsSync(file)||fs.statSync(file).size<minimum||fs.readFileSync(file).subarray(0,256).toString('utf8').startsWith('version https://git-lfs.github.com/spec/v1')) throw new Error(`Required model is missing or incomplete: models/${name}`); }
-run(process.execPath,[path.join(root,'node_modules','vite','bin','vite.js'),'build','--config',path.join(root,'renderer','vite.config.ts')]);
+run(process.execPath,[viteBin,'build','--config',path.join(root,'renderer','vite.config.ts')]);
 fs.rmSync(packageRoot,{recursive:true,force:true}); fs.mkdirSync(path.dirname(packageRoot),{recursive:true});
 const sep=process.platform==='win32'?';':':';
 run(python,['-m','PyInstaller','--onedir','--clean','--noconfirm','--workpath',path.join(dist,'pyinstaller-work'),'--specpath',path.join(dist,'spec'),'--distpath',dist,'--name','component','--collect-binaries','onnxruntime','--paths',root,'--hidden-import','patch_merge','--hidden-import','advanced_bridge','--hidden-import','identity_engine','--exclude-module','scipy','--exclude-module','matplotlib','--exclude-module','torch','--exclude-module','torchvision','--exclude-module','torchaudio',...models.flatMap(([name])=>['--add-data',`${path.join(root,'models',name)}${sep}models`]),...['pairdetr_service.py','sam2_service.py'].flatMap(name=>['--add-data',`${path.join(root,'advanced',name)}${sep}advanced`]),path.join(root,'team_retouch.py')]);
+const packagedEntrypoint = manifest.entrypoints[`${process.platform}-${process.arch}`] || manifest.entrypoints[process.platform] || manifest.entrypoints.default;
+const generatedExecutable = path.join(packageRoot, process.platform === 'win32' ? 'component.exe' : 'component');
+const declaredExecutable = path.join(packageRoot, packagedEntrypoint);
+if (!fs.existsSync(generatedExecutable)) throw new Error(`PyInstaller output is missing: ${generatedExecutable}`);
+if (path.resolve(generatedExecutable) !== path.resolve(declaredExecutable)) fs.renameSync(generatedExecutable, declaredExecutable);
 fs.cpSync(path.join(root,'dist','ui'),path.join(packageRoot,'ui'),{recursive:true}); fs.copyFileSync(path.join(root,'renderer','team-retouch.svg'),path.join(packageRoot,'ui','team-retouch.svg'));
 for(const name of ['service.cjs','workflow-generation.cjs','workflow-artifact.cjs','workflow-manifest.cjs']) fs.copyFileSync(path.join(root,name),path.join(packageRoot,name));
 fs.mkdirSync(path.join(packageRoot,'compatibility'),{recursive:true}); fs.copyFileSync(path.join(root,'compatibility','project-folder-policy.cjs'),path.join(packageRoot,'compatibility','project-folder-policy.cjs'));
 fs.cpSync(path.join(root,'advanced-installer'),path.join(packageRoot,'advanced-installer'),{recursive:true});
 const sha256=file=>crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex'); for(const action of Object.values(manifest.componentHost.service.lifecycleActions||{})) action.sha256=sha256(path.join(packageRoot,action.entry));
-fs.writeFileSync(path.join(packageRoot,'component.json'),`${JSON.stringify(manifest,null,2)}\n`); for(const file of manifest.requiredFiles||[]) if(!fs.existsSync(path.join(packageRoot,file))) throw new Error(`Packaged component is missing required file: ${file}`);
+fs.writeFileSync(path.join(packageRoot,'component.json'),`${JSON.stringify(manifest,null,2)}\n`); for(const file of [packagedEntrypoint,...(manifest.requiredFiles||[])]) if(!fs.existsSync(path.join(packageRoot,file))) throw new Error(`Packaged component is missing required file: ${file}`);
 fs.mkdirSync(archiveRoot,{recursive:true}); const archive=path.join(archiveRoot,`PhotoFlow-${manifest.id}-${manifest.version}-${process.platform}-${process.arch}.zip`);
 const script=['import pathlib,sys,zipfile','source,target=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2])','target.unlink(missing_ok=True)','with zipfile.ZipFile(target,"w",compression=zipfile.ZIP_DEFLATED,compresslevel=9) as z:','    for item in sorted(source.rglob("*")):','        if item.is_file(): z.write(item,pathlib.Path(source.name)/item.relative_to(source))'].join('\n'); run(python,['-c',script,packageRoot,archive]); console.log(`Installable component package: ${archive}`);

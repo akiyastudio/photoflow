@@ -1,11 +1,34 @@
 const { getProtectedProjectFolderRegistry } = require('../services/protected-project-folder.cjs');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
-const { createNativeFileDragService } = require('../services/native-file-drag-service.cjs');
+
+const filesystemDeviceIdentity = stat => {
+  try {
+    const device = stat?.dev;
+    if (typeof device === 'bigint') return device > 0n ? device.toString() : null;
+    return typeof device === 'number' && Number.isSafeInteger(device) && device > 0 ? String(device) : null;
+  } catch {
+    return null;
+  }
+};
+
+const sameFilesystemDevice = (sourceStat, destinationStat) => {
+  const sourceDevice = filesystemDeviceIdentity(sourceStat);
+  const destinationDevice = filesystemDeviceIdentity(destinationStat);
+  return sourceDevice !== null && destinationDevice !== null && sourceDevice === destinationDevice;
+};
+
+const canUseSingleRenameMove = (platform, movePlan, destinationStat) => movePlan.length === 1
+  && platform === 'win32'
+  && sameFilesystemDevice(movePlan[0].sourceStat, destinationStat);
+
+const canUseSameVolumeCut = (platform, clipboardOperation, sourceStats, destinationStat) => clipboardOperation === 'cut'
+  && platform === 'win32'
+  && sourceStats.length > 0
+  && sourceStats.every(sourceStat => sameFilesystemDevice(sourceStat, destinationStat));
 
 const registerFileOperationsIpc = context => {
   const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
-  const nativeFileDrag = createNativeFileDragService({ app, BrowserWindow, Date, nativeImage, process, writeLog });
   const resolveVirtual = (root, relativePath, options = {}) => projectVirtualPaths
     ? projectVirtualPaths.resolve(root, relativePath, options)
     : (() => {
@@ -218,39 +241,34 @@ const registerFileOperationsIpc = context => {
     return { success: true };
   });
   
-  const resolveFileDragSources = (workspacePath, status, projectName, relativePaths) => {
-    if (!Array.isArray(relativePaths) || !relativePaths.length) throw new Error('没有可拖动的文件');
-    const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-    const sources = Array.from(new Set(relativePaths.map(relativePath => {
-      if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的文件路径');
-      const source = resolveVirtual(root, relativePath, { externalRootMode: 'target' }).physicalPath;
-      if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
-      return source;
-    })));
-    return {
-      sources,
-      relativePaths: relativePaths.map(relativePath => String(relativePath).replace(/\\/g, '/')),
-    };
-  };
-
-  ipcMain.handle('workspace-prepare-file-drag', async (_event, workspacePath, status, projectName, relativePaths = []) => {
-    try {
-      const { sources } = resolveFileDragSources(workspacePath, status, projectName, relativePaths);
-      return await nativeFileDrag.prepare(sources[0]);
-    } catch (error) {
-      return { success: false, error: error.message || String(error) };
-    }
-  });
-
-  ipcMain.on('workspace-start-file-drag', (event, workspacePath, status, projectName, relativePaths = []) => {
+  ipcMain.on('workspace-start-file-drag', async (event, workspacePath, status, projectName, relativePaths = []) => {
     let validatedRelativePaths = [];
-    let nativeDrag = { attempted: false, durationMs: 0, status: 'failed' };
     try {
-      const resolved = resolveFileDragSources(workspacePath, status, projectName, relativePaths);
-      validatedRelativePaths = resolved.relativePaths;
-      nativeDrag = nativeFileDrag.start(event.sender, resolved.sources);
+      if (!Array.isArray(relativePaths) || !relativePaths.length) throw new Error('没有可拖动的文件');
+      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const sources = Array.from(new Set(relativePaths.map(relativePath => {
+        if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的文件路径');
+        const source = resolveVirtual(root, relativePath, { externalRootMode: 'target' }).physicalPath;
+        if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
+        return source;
+      })));
+      validatedRelativePaths = relativePaths.map(relativePath => String(relativePath).replace(/\\/g, '/'));
+
+      let icon = nativeImage.createEmpty();
+      try {
+        icon = await app.getFileIcon(sources[0], { size: 'normal' });
+      } catch (error) {
+        writeLog('warn', 'Unable to create native file drag icon', error);
+      }
+      if (event.sender.isDestroyed()) return;
+      const startedAt = Date.now();
+      writeLog('info', 'Starting native project file drag', { count: sources.length });
+      try {
+        event.sender.startDrag({ file: sources[0], files: sources, icon });
+      } finally {
+        writeLog('info', 'Native project file drag call ended', { count: sources.length, durationMs: Date.now() - startedAt });
+      }
     } catch (error) {
-      if (error?.nativeDrag) nativeDrag = error.nativeDrag;
       writeLog('error', 'Unable to start native project file drag', error);
       if (!event.sender.isDestroyed()) event.sender.send('app-error', error.message || String(error));
     } finally {
@@ -261,7 +279,7 @@ const registerFileOperationsIpc = context => {
         const clientX = contentBounds ? cursor.x - contentBounds.x : -1;
         const clientY = contentBounds ? cursor.y - contentBounds.y : -1;
         const insideWindow = Boolean(contentBounds && clientX >= 0 && clientY >= 0 && clientX < contentBounds.width && clientY < contentBounds.height);
-        event.sender.send('workspace-file-drag-ended', { paths: validatedRelativePaths, clientX, clientY, insideWindow, nativeDrag });
+        event.sender.send('workspace-file-drag-ended', { paths: validatedRelativePaths, clientX, clientY, insideWindow });
       }
     }
   });
@@ -337,7 +355,9 @@ const registerFileOperationsIpc = context => {
         if (!Array.isArray(relativePaths) || !relativePaths.length || relativePaths.length > 500) throw new Error('没有可导入的文件');
         const destinationResolution = resolveDestination(targetRelativePath);
         const destinationDir = destinationResolution.physicalPath;
-        if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
+        if (!fs.existsSync(destinationDir)) throw new Error('目标文件夹不存在');
+        const destinationStat = fs.statSync(destinationDir);
+        if (!destinationStat.isDirectory()) throw new Error('目标文件夹不存在');
         const sources = Array.from(new Set(relativePaths.map(source => {
           if (typeof source !== 'string' || !path.isAbsolute(source)) throw new Error('无效的外部文件路径');
           const resolvedSource = path.resolve(source);
@@ -446,7 +466,9 @@ const registerFileOperationsIpc = context => {
         await assertManagedExternalRootOperation(workspacePath, projectName, sourceResolutions, 'move');
         const destinationResolution = resolveDestination(targetRelativePath);
         const destinationDir = destinationResolution.physicalPath;
-        if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
+        if (!fs.existsSync(destinationDir)) throw new Error('目标文件夹不存在');
+        const destinationStat = fs.statSync(destinationDir);
+        if (!destinationStat.isDirectory()) throw new Error('目标文件夹不存在');
         if (destinationResolution.viaExternalLink && sourceResolutions.some(item => item.isExternalLinkRoot)) throw new Error('不能把项目外链根引用移动到另一个外链的内容中');
         const reservedDestinations = new Set();
         const movePlan = sources.map(source => {
@@ -462,13 +484,14 @@ const registerFileOperationsIpc = context => {
               : path.join(destinationDir, `${parsed.name} (${index++})${parsed.ext}`);
           }
           reservedDestinations.add(destination.toLowerCase());
-          return { source, destination };
+          return { source, destination, sourceStat: stat };
         });
         const affectedDirectories = Array.from(new Set([
           destinationResolution.virtualPath,
           ...sourceResolutions.map(item => path.posix.dirname(item.virtualPath) === '.' ? '' : path.posix.dirname(item.virtualPath)),
         ]));
         responseContext.affectedDirectories = affectedDirectories;
+        const singleSameVolumeMove = canUseSingleRenameMove(process.platform, movePlan, destinationStat);
         const task = createProjectFileTask({
           backgroundTasks, event, operationId, operation: 'move', title: `移动文件 · ${projectName}`,
           projectName, resources: [destinationDir, ...sources], cancelledCode: CANCELLED_CODE,
@@ -482,21 +505,27 @@ const registerFileOperationsIpc = context => {
           await task.start();
           let discoveredCount = 0;
           let lastScanPublishedAt = 0;
-          task.publish({ phase: 'scanning', progress: 0, currentName: '正在统计', processedCount: 0, totalCount: movePlan.length });
+          if (!singleSameVolumeMove) task.publish({ phase: 'scanning', progress: 0, currentName: '正在统计', processedCount: 0, totalCount: movePlan.length });
           for (const [index, entry] of movePlan.entries()) {
             throwIfCancelled(() => job.cancelled);
             task.publish({ phase: 'moving', progress: Math.round(index / Math.max(1, movePlan.length) * 100), currentName: path.basename(entry.source), processedCount: index, totalCount: movePlan.length });
-            const result = await movePathAtomic(entry.source, entry.destination, {
-              isCancelled: () => job.cancelled,
-              onDiscovered: () => {
-                discoveredCount += 1;
-                const now = Date.now();
-                if (now - lastScanPublishedAt < 120) return;
-                lastScanPublishedAt = now;
-                task.publish({ phase: 'scanning', progress: 0, currentName: `正在统计，已发现 ${discoveredCount} 个文件和文件夹`, processedCount: discoveredCount, totalCount: 0 });
-              },
-            });
-            moved.push({ ...entry, copied: Boolean(result?.copied) });
+            let result;
+            if (singleSameVolumeMove) {
+              await fs.promises.rename(entry.source, entry.destination);
+              result = { copied: false };
+            } else {
+              result = await movePathAtomic(entry.source, entry.destination, {
+                isCancelled: () => job.cancelled,
+                onDiscovered: () => {
+                  discoveredCount += 1;
+                  const now = Date.now();
+                  if (now - lastScanPublishedAt < 120) return;
+                  lastScanPublishedAt = now;
+                  task.publish({ phase: 'scanning', progress: 0, currentName: `正在统计，已发现 ${discoveredCount} 个文件和文件夹`, processedCount: discoveredCount, totalCount: 0 });
+                },
+              });
+            }
+            moved.push({ source: entry.source, destination: entry.destination, copied: Boolean(result?.copied) });
           }
           job.finishing = true;
           if (moved.length) await pushUndoOperation({ kind: 'move', moves: moved });
@@ -566,7 +595,9 @@ const registerFileOperationsIpc = context => {
         try {
           const destinationResolution = resolveDestination(targetRelativePath);
           const requestedDestination = destinationResolution.physicalPath;
-          if (!fs.existsSync(requestedDestination) || !fs.statSync(requestedDestination).isDirectory()) throw new Error('目标文件夹不存在');
+          if (!fs.existsSync(requestedDestination)) throw new Error('目标文件夹不存在');
+          const destinationStat = fs.statSync(requestedDestination);
+          if (!destinationStat.isDirectory()) throw new Error('目标文件夹不存在');
           const destinationDir = requestedDestination;
           affectedDirectories = [destinationResolution.virtualPath];
           responseContext.affectedDirectories = affectedDirectories;
@@ -686,6 +717,7 @@ const registerFileOperationsIpc = context => {
             const conflict = !sameSource && fs.existsSync(desiredDestination);
             requestedItems.push({ source, sourceStat, desiredDestination, sameSource, conflict, conflictIdentity: conflict ? await capturePathIdentity(desiredDestination) : null });
           }
+          const sourceStatsByPath = new Map(requestedItems.map(item => [pathKey(item.source), item.sourceStat]));
 
           const pasteConflicts = requestedItems.filter(item => item.conflict).map(item => ({ source: item.source, destination: item.desiredDestination, isDirectory: fs.statSync(item.desiredDestination).isDirectory() }));
           let replaceConflicts = false;
@@ -738,10 +770,12 @@ const registerFileOperationsIpc = context => {
             topLevelTargets.push({ source: item.source, destination, isDirectory: item.sourceStat.isDirectory() });
           }
 
-          const destinationVolume = path.parse(destinationDir).root.toLocaleLowerCase();
-          const sameVolumeCut = clipboardSnapshot.operation === 'cut'
-            && process.platform === 'win32'
-            && topLevelTargets.every(item => path.parse(item.source).root.toLocaleLowerCase() === destinationVolume);
+          const sameVolumeCut = canUseSameVolumeCut(
+            process.platform,
+            clipboardSnapshot.operation,
+            topLevelTargets.map(item => sourceStatsByPath.get(pathKey(item.source))),
+            destinationStat,
+          );
           const plan = [];
           if (!sameVolumeCut) {
             incomingRoot = path.join(destinationDir, `.photoflow-paste-${operationId}`);
@@ -819,12 +853,12 @@ const registerFileOperationsIpc = context => {
                 throwIfCancelled(() => job.cancelled);
                 await task.waitIfPaused();
                 publish({ phase: 'moving', progress: Math.round(index / Math.max(1, topLevelTargets.length) * 100), currentName: path.basename(item.source), bytesCopied: 0, totalBytes: 0, filesCopied: index, totalFiles: topLevelTargets.length });
-                await movePathAtomic(item.source, item.destination, { isCancelled: () => job.cancelled });
+                await fs.promises.rename(item.source, item.destination);
                 moved.push(item);
               }
             } catch (error) {
               for (const item of [...moved].reverse()) {
-                if (fs.existsSync(item.destination) && !fs.existsSync(item.source)) await movePathAtomic(item.destination, item.source).catch(() => undefined);
+                if (fs.existsSync(item.destination) && !fs.existsSync(item.source)) await fs.promises.rename(item.destination, item.source).catch(() => undefined);
               }
               await rollbackStagedReplacements();
               throw error;
@@ -1142,25 +1176,39 @@ const registerFileOperationsIpc = context => {
           if (fs.existsSync(destination) && !normalizedSources.has(path.resolve(destination).toLocaleLowerCase())) throw new Error(`目标名称已被占用：${path.basename(destination)}`);
         }
         const moves = sources.map((source, index) => ({ source, destination: destinations[index] })).filter(move => path.resolve(move.source) !== path.resolve(move.destination));
-        const staged = [];
-        try {
-          for (const move of moves) {
-            const temporary = path.join(path.dirname(move.source), `.photoflow-rename-${crypto.randomUUID()}${path.extname(move.source)}`);
-            await fs.promises.rename(move.source, temporary);
-            staged.push({ ...move, temporary, completed: false });
+        if (moves.length === 1 && sources.length === 1) {
+          // A single filesystem rename is already atomic on the source volume.
+          // Avoid the two-hop staging used to make multi-item swaps/cycles safe;
+          // it doubles watcher traffic and the latency visible after Enter.
+          await fs.promises.rename(moves[0].source, moves[0].destination);
+        } else {
+          const staged = [];
+          try {
+            for (const move of moves) {
+              const temporary = path.join(path.dirname(move.source), `.photoflow-rename-${crypto.randomUUID()}${path.extname(move.source)}`);
+              await fs.promises.rename(move.source, temporary);
+              staged.push({ ...move, temporary, completed: false });
+            }
+            for (const move of staged) {
+              await fs.promises.rename(move.temporary, move.destination);
+              move.completed = true;
+            }
+          } catch (error) {
+            // First move every published destination back into its private
+            // staging slot. This frees all original names before restoration,
+            // including swaps and longer rename cycles.
+            for (const move of [...staged].reverse()) {
+              try {
+                if (move.completed && fs.existsSync(move.destination) && !fs.existsSync(move.temporary)) await fs.promises.rename(move.destination, move.temporary);
+              } catch { /* best-effort rollback; original error is reported below */ }
+            }
+            for (const move of [...staged].reverse()) {
+              try {
+                if (fs.existsSync(move.temporary) && !fs.existsSync(move.source)) await fs.promises.rename(move.temporary, move.source);
+              } catch { /* best-effort rollback; original error is reported below */ }
+            }
+            throw error;
           }
-          for (const move of staged) {
-            await fs.promises.rename(move.temporary, move.destination);
-            move.completed = true;
-          }
-        } catch (error) {
-          for (const move of [...staged].reverse()) {
-            try {
-              if (move.completed && fs.existsSync(move.destination) && !fs.existsSync(move.source)) await fs.promises.rename(move.destination, move.source);
-              else if (!move.completed && fs.existsSync(move.temporary) && !fs.existsSync(move.source)) await fs.promises.rename(move.temporary, move.source);
-            } catch { /* best-effort rollback; original error is reported below */ }
-          }
-          throw error;
         }
         writeLog('info', 'Project files renamed', { projectName, count: sources.length });
         if (moves.length) await pushUndoOperation({ kind: 'files', moves });
@@ -1218,4 +1266,4 @@ const registerFileOperationsIpc = context => {
   });
 };
 
-module.exports = { registerFileOperationsIpc };
+module.exports = { canUseSameVolumeCut, canUseSingleRenameMove, registerFileOperationsIpc, sameFilesystemDevice };

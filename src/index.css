@@ -786,7 +786,17 @@ html.dark .usage-onboarding__panel { box-shadow:0 30px 90px rgba(0,0,0,.42),0 0 
 }
 .top-toast-stack[data-host-toast-model] { visibility:hidden; }
 .top-toast-stack--overlay { visibility:visible; }
-html:has(.top-toast-stack--overlay), html:has(.top-toast-stack--overlay) body { background:transparent!important; }
+html:has(.top-toast-stack--overlay), html:has(.top-toast-stack--overlay) body { margin:0; width:100%; height:100%; overflow:hidden; background:transparent!important; }
+#toast-overlay-root { width:100%; min-height:0; overflow:hidden; }
+.top-toast-stack--overlay {
+  position:relative;
+  left:auto;
+  top:auto;
+  width:calc(100% - 4rem);
+  max-height:calc(100vh - 4rem);
+  margin:2rem auto;
+  transform:none;
+}
 .app-notice-toast {
   display:flex;
   align-self:center;

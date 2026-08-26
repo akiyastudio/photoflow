@@ -84,8 +84,8 @@ class ComponentServiceManager {
     const message = { type: 'request', id, method, payload, context: {
       ...publicContext(boundContext),
       hostApiVersion: descriptor.hostApiVersion,
-      permissions: boundContext.surface === 'application.settings'
-        ? (descriptor.service.permissions || []).filter(permission => ['component.settings', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs', 'notifications'].includes(permission))
+      permissions: ['application.settings', 'application.command'].includes(boundContext.surface)
+        ? (descriptor.service.permissions || []).filter(permission => ['component.settings', 'component.secrets', 'network.fetch', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs', 'notifications'].includes(permission))
         : descriptor.service.permissions || [],
     } };
     return new Promise((resolve, reject) => {
@@ -216,7 +216,9 @@ class ComponentServiceManager {
       parent.capabilityStartedAt = capabilityStartedAt;
       try {
         const invocation = this.capabilityBroker.invoke(session.descriptor, frame.method, frame.payload, parent.context);
-        if (((frame.method === 'component.lifecycle.v2' && ['preflight', 'install', 'repair', 'uninstall'].includes(String(frame.payload?.action || ''))) || frame.method === 'tasks.v2') && !parent.longTimeoutArmed) {
+        if (((frame.method === 'component.lifecycle.v2' && ['preflight', 'install', 'repair', 'uninstall'].includes(String(frame.payload?.action || '')))
+          || frame.method === 'tasks.v2'
+          || frame.method === 'project.media.process.v1' && ['video.trim', 'office.extractImages'].includes(String(frame.payload?.action || ''))) && !parent.longTimeoutArmed) {
           clearTimeout(parent.timer);
           parent.longTimeoutArmed = true;
           parent.timer = setTimeout(parent.onTimeout, this.longRequestTimeoutMs);

@@ -722,7 +722,7 @@ export interface ComponentHostAction {
   componentId: string;
   componentVersion: string;
   contractVersion: 1 | 2;
-  hostApiVersion: 1 | 2 | 3 | 4;
+  hostApiVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   actionId: string;
   label: string;
   pageId: string;
@@ -736,7 +736,7 @@ export interface ComponentSettingsPageContribution {
   componentId: string;
   componentVersion: string;
   contractVersion: 2;
-  hostApiVersion: 3 | 4;
+  hostApiVersion: 3 | 4 | 5 | 6 | 7;
   pageId: string;
   label: string;
   pageTitle: string;
@@ -752,6 +752,8 @@ export interface ComponentPageOpenScope {
   /** Owning browser page used for auditable reopen context. */
   sourcePageId: string;
 }
+export type ComponentContributionType = 'component.sidePanel' | 'media.contextAction' | 'project.contextAction' | 'project.importProvider' | 'project.exportProvider' | 'application.command';
+export interface ComponentContribution { componentId: string; componentVersion: string; hostApiVersion: 7; contributionId: string; type: ComponentContributionType; label: string; title: string; pageId: string; rpcMethods: string[]; iconUrl?: string }
 
 export interface ComponentPageInstance {
   identity: string;
@@ -896,8 +898,10 @@ export interface IElectronAPI {
   getComponents: (force?: boolean) => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
   getComponentHostActions: () => Promise<{ success: boolean; actions: ComponentHostAction[]; error?: string }>;
   getComponentSettingsPages: () => Promise<{ success: boolean; pages: ComponentSettingsPageContribution[]; error?: string }>;
+  getComponentContributions: () => Promise<{ success: boolean; contributions: ComponentContribution[]; error?: string }>;
   openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus; scopeRelativePath?: string; selectedRelativePaths?: string[]; sourcePageId?: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
   openComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string; surface: 'application.settings'; leaseId: string }; error?: string }>;
+  openComponentContribution: (request: { componentId: string; contributionId: string; type: ComponentContributionType; workspacePath?: string; projectId?: string; projectName?: string; projectStatus?: ProjectStatus; scopeRelativePath?: string; selectedRelativePaths?: string[]; sourcePageId?: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string; surface: ComponentContributionType }; error?: string }>;
   releaseComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean }>;
   activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
   setHostSurfaceSuspended: (update: { rendererToken: string; revision: number; suspended: boolean }) => Promise<{ success: boolean }>;
@@ -1076,15 +1080,14 @@ export interface IElectronAPI {
   reportRendererError: (message: string, details?: string) => void;
   trackTelemetry: (eventName: string, properties?: Record<string, string | number | boolean>) => void;
   onAppError: (callback: (message: string) => void) => () => void;
-  onComponentNotification: (callback: (value: { apiVersion: 2; type: 'notification'; id: string; componentId: string; surface: 'project' | 'application.settings'; notification: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; dedupeKey?: string } } | { apiVersion: 2; type: 'purge'; componentId: string }) => void) => () => void;
+  onComponentNotification: (callback: (value: { apiVersion: 2; type: 'notification'; id: string; componentId: string; surface: 'project' | 'application.settings' | ComponentContributionType; notification: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; dedupeKey?: string } } | { apiVersion: 2; type: 'purge'; componentId: string }) => void) => () => void;
   getRawPreview: (filePath: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; previewUrl?: string; error?: string }>;
   projectFileOperation: (workspacePath: string, status: ProjectStatus, projectName: string, operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename' | 'select' | 'move' | 'import', paths: string[], targetRelativePath?: string, nextName?: string, options?: { sourceFolderRelativePath?: string; imageDestFolderName?: string; videoDestFolderName?: string; renameNames?: string[]; pasteConflictPolicy?: 'replace' | 'keep-both' }) => Promise<{ success: boolean; cancelled?: boolean; count?: number; permanentCount?: number; imageCount?: number; videoCount?: number; operationId?: string; taskNotificationOwned?: boolean; clipboardGeneration?: number; consumedCutClipboard?: boolean; affectedDirectories?: string[]; moves?: Array<{ sourceRelativePath: string; destinationRelativePath: string }>; movedItems?: Array<{ sourceRelativePath: string; destinationRelativePath: string; copied?: boolean }>; createdItems?: Array<{ name: string; relativePath: string; isDirectory: boolean }>; replacedCount?: number; replacedNames?: string[]; replacedPermanentCount?: number; replacedRetainedCount?: number; requiresDecision?: { kind: 'paste-conflict'; names: string[]; fileCount: number; folderCount: number; message: string; detail: string }; undoUnavailable?: boolean; warning?: string; error?: string; errorCode?: string }>;
   getProjectFileClipboardStatus: () => Promise<{ success: boolean; hasFiles: boolean; error?: string }>;
   cancelProjectFileCut: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[]) => Promise<{ success: boolean; cleared: boolean; hasFiles: boolean; error?: string }>;
   getPathForFile: (file: File) => string;
-  prepareProjectFileDrag: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[]) => Promise<{ success: boolean; error?: string }>;
   startProjectFileDrag: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[]) => void;
-  onProjectFileDragEnd: (callback: (result: { paths: string[]; clientX: number; clientY: number; insideWindow: boolean; nativeDrag?: { attempted: boolean; durationMs: number; status: 'completed' | 'failed-fast' | 'failed' } }) => void) => () => void;
+  onProjectFileDragEnd: (callback: (result: { paths: string[]; clientX: number; clientY: number; insideWindow: boolean }) => void) => () => void;
   onProjectFileOperationProgress: (callback: (progress: ProjectFileOperationProgress) => void) => () => void;
   cancelProjectFileOperation: (operationId: string) => Promise<{ success: boolean; error?: string }>;
   chooseCacheDirectory: () => Promise<{ cancelled?: boolean; path?: string }>;

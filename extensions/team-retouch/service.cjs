@@ -45,17 +45,21 @@ const hostAlgorithmRuntime = (() => {
   return command ? Object.freeze({ command, argsPrefix: Object.freeze(argsPrefix) }) : null;
 })();
 
-const resolveAlgorithmRuntime = () => {
-  const runtime = hostAlgorithmRuntime || { command: path.join(__dirname, process.platform === 'win32' ? 'team-retouch.exe' : 'team-retouch'), argsPrefix: [] };
+const validateAlgorithmRuntime = runtime => {
   const stat = fs.statSync(runtime.command, { throwIfNoEntry: false });
   if (!stat?.isFile()) throw new Error(`团片组件算法不可用：运行时不存在（${hostAlgorithmRuntime ? '开发 Python 环境' : '组件完整性运行时'}）`);
   for (const argument of runtime.argsPrefix) {
+    // Development argsPrefix contains interpreter switches followed by the
+    // validated component entry file. Switches such as Python's `-u` are not
+    // filesystem paths and must not be rejected as missing entries.
+    if (String(argument).startsWith('-')) continue;
     const candidate = path.resolve(argument);
     const argumentStat = fs.statSync(candidate, { throwIfNoEntry: false });
     if (!argumentStat?.isFile()) throw new Error('团片组件算法不可用：开发算法入口不存在');
   }
   return runtime;
 };
+const resolveAlgorithmRuntime = () => validateAlgorithmRuntime(hostAlgorithmRuntime || { command: path.join(__dirname, process.platform === 'win32' ? 'team-retouch.exe' : 'team-retouch'), argsPrefix: [] });
 
 const writeFrame = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const migrationMetric = (migration, phase, startedAt, values = {}) => {
@@ -625,17 +629,41 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
     else finish(resolve, result);
   });
 });
-const advancedRuntimeStatus = async (parentId, { refresh = false } = {}) => {
+const advancedRuntimeFailureStatus = (error, { development = Boolean(hostAlgorithmRuntime) } = {}) => {
+  const detail = String(error?.message || error || '');
+  const runtimeSource = development ? 'development' : 'packaged';
+  if (/E_ACCESSDENIED|拒绝访问|access (?:is )?denied|permission denied/i.test(detail)) return {
+    success: true, advancedAvailable: false, state: 'unavailable', errorCategory: 'wsl-access-denied', runtimeSource,
+    pairDetrReady: false, sam2Ready: false,
+    advancedError: development ? '开发运行进程无权访问 WSL' : '照片流当前无权访问 WSL',
+    message: development ? '请从具有 WSL 权限的普通终端启动开发应用；安装或修复模型不能解决此权限问题' : '请使用安装高级环境时的 Windows 用户运行照片流，并确认该用户可以启动 WSL',
+  };
+  const notInstalled = /运行时不存在|not found|ENOENT|WSL_E_DISTRO_NOT_FOUND|没有可用的团片协作 WSL 发行版/i.test(detail);
+  return {
+    success: true, advancedAvailable: false, state: notInstalled ? 'not-installed' : 'repair-needed', errorCategory: notInstalled ? 'not-installed' : 'runtime-incomplete', runtimeSource,
+    pairDetrReady: false, sam2Ready: false,
+    advancedError: notInstalled ? '增强人物检测尚未安装' : '增强人物检测运行时需要检查或修复',
+    message: notInstalled ? '当前使用基础人物检测；可在设置中安装增强版' : '当前使用基础人物检测；可在设置中检查或修复增强版',
+  };
+};
+const advancedRuntimeStatus = async (parentId, { refresh = false, full = false } = {}) => {
   const now = Date.now();
   if (!refresh && advancedRuntimeProbeCache?.expiresAt > now) return advancedRuntimeProbeCache.value;
   try {
-    const probe = await runAlgorithm(parentId, ['probe-advanced-runtime'], { timeoutMs: 30 * 1000 });
-    const advancedAvailable = probe?.pairDetrReady === true && probe?.sam2Ready === true;
-    const value = { success: true, advancedAvailable, state: advancedAvailable ? 'ready' : 'repair-needed', pairDetrReady: probe?.pairDetrReady === true, sam2Ready: probe?.sam2Ready === true, message: advancedAvailable ? '增强人物检测运行时已就绪' : '增强人物检测未完全就绪；基础人物检测仍可正常使用' };
-    advancedRuntimeProbeCache = { expiresAt: now + 30_000, value }; return value;
+    // Page-open status is intentionally a lightweight WSL/file probe. A full
+    // CUDA/model load belongs to install verification and real detection, not
+    // to rendering a settings page.
+    const action = full ? 'probe-advanced-runtime' : 'probe-advanced-installation';
+    const probe = await runAlgorithm(parentId, [action], { timeoutMs: full ? 2 * 60 * 1000 : 30 * 1000 });
+    const advancedAvailable = full ? probe?.pairDetrReady === true && probe?.sam2Ready === true : probe?.advancedAvailable === true;
+    if (!advancedAvailable && probe?.advancedError) {
+      const value = advancedRuntimeFailureStatus(probe.advancedError);
+      advancedRuntimeProbeCache = { expiresAt: now + 10_000, value }; return value;
+    }
+    const value = { success: true, advancedAvailable, installed: advancedAvailable, state: advancedAvailable ? 'ready' : 'repair-needed', errorCategory: advancedAvailable ? '' : 'runtime-incomplete', runtimeSource: hostAlgorithmRuntime ? 'development' : 'packaged', verification: full ? 'runtime' : 'installation', pairDetrReady: probe?.pairDetrReady === true, sam2Ready: probe?.sam2Ready === true, message: advancedAvailable ? '增强人物检测运行时已就绪' : '增强人物检测未完全就绪；基础人物检测仍可正常使用' };
+    advancedRuntimeProbeCache = { expiresAt: now + (advancedAvailable ? 5 * 60_000 : 10_000), value }; return value;
   } catch (error) {
-    const notInstalled = /运行时不存在|not found|ENOENT/i.test(String(error?.message || ''));
-    const value = { success: true, advancedAvailable: false, state: notInstalled ? 'not-installed' : 'repair-needed', pairDetrReady: false, sam2Ready: false, advancedError: notInstalled ? '增强人物检测尚未安装' : '增强人物检测运行时需要检查或修复', message: notInstalled ? '当前使用基础人物检测；可在设置中安装增强版' : '当前使用基础人物检测；可在设置中检查或修复增强版' };
+    const value = advancedRuntimeFailureStatus(error);
     advancedRuntimeProbeCache = { expiresAt: now + 10_000, value }; return value;
   }
 };
@@ -2543,7 +2571,7 @@ const runDurableOperationUnlocked = async (parentId, payload, context) => {
         result = await lifecycleAction(parentId, request.action);
         advancedRuntimeProbeCache = null;
         if (['install', 'repair'].includes(request.action)) {
-          const probe = await advancedRuntimeStatus(parentId, { refresh: true });
+          const probe = await advancedRuntimeStatus(parentId, { refresh: true, full: true });
           result = probe.advancedAvailable ? { ...result, advancedAvailable: true, state: 'ready' } : { ...result, success: false, state: probe.state, error: probe.advancedError || probe.message };
         }
       }
@@ -2707,7 +2735,7 @@ const handlers = {
     if (payload.acceptOnly) return acceptDurableOperation(parentId, payload, context, 'advanced-lifecycle', { action: payload.repair === true ? 'repair' : 'install' });
     const installed = await lifecycleAction(parentId, payload.repair === true ? 'repair' : 'install');
     advancedRuntimeProbeCache = null;
-    const probe = await advancedRuntimeStatus(parentId, { refresh: true });
+    const probe = await advancedRuntimeStatus(parentId, { refresh: true, full: true });
     if (!probe.advancedAvailable) return { ...installed, success: false, state: probe.state, error: probe.advancedError || probe.message };
     return { ...installed, advancedAvailable: true, state: 'ready' };
   },
@@ -2771,4 +2799,4 @@ process.once('exit', () => { for (const child of activeAlgorithms) child.kill();
 };
 
 if (require.main === module) startService();
-module.exports = { ensureSchema, startService, capabilityError, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, migrationErrorState, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState, resolveAlgorithmRuntime, resolveWorkflowTaskBinding, runMatcher, revisionRequestContext };
+module.exports = { ensureSchema, startService, capabilityError, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, migrationErrorState, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState, resolveAlgorithmRuntime, validateAlgorithmRuntime, resolveWorkflowTaskBinding, runMatcher, revisionRequestContext, advancedRuntimeFailureStatus };

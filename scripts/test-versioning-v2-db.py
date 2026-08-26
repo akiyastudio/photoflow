@@ -1688,6 +1688,50 @@ def test_detached_reconcile_repairs_legacy_dangling_projections(root: Path) -> N
         db.close()
 
 
+def test_component_host_v6_cas_mutations(root: Path) -> None:
+    workspace = root / "component-v6-workspace"
+    project = workspace / "Project"
+    raw = project / "RAW"
+    progress_path = project / "P1"
+    raw.mkdir(parents=True)
+    progress_path.mkdir()
+    original_file = raw / "photo.jpg"
+    edited_file = progress_path / "photo.jpg"
+    original_file.write_bytes(b"original")
+    edited_file.write_bytes(b"edited")
+    database = root / "component-v6.sqlite3"
+    db = workspace_db.connect(str(workspace), str(database))
+    now = int(time.time() * 1000)
+    db.execute("INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES('component-v6-project','Project','active','Project',?,?)", (now, now))
+    db.commit()
+    try:
+        workspace_db.media_sync_project(str(workspace), db, {"projectName": "Project", "externalRoots": []})
+        original = db.execute("SELECT * FROM versions WHERE file_path_key=?", (str(original_file.resolve()).casefold(),)).fetchone()
+        created = workspace_db.media_create_version(db, {"photoId": original["photo_id"], "parentVersionId": original["id"], "filePath": str(edited_file), "versionName": "Edit"})
+        version = next(item for item in created["versions"] if item["versionNumber"] == 1)
+        updated = workspace_db.media_component_update_version(db, {"projectId": "component-v6-project", "projectPath": str(project), "scopePath": str(project), "versionId": version["id"], "expectedUpdatedAt": version["updatedAt"], "versionName": "Updated"})
+        assert updated["version"]["versionName"] == "Updated"
+        try:
+            workspace_db.media_component_update_version(db, {"projectId": "component-v6-project", "projectPath": str(project), "scopePath": str(project), "versionId": version["id"], "expectedUpdatedAt": version["updatedAt"], "note": "stale"})
+            raise AssertionError("stale component version update was accepted")
+        except ValueError as error:
+            assert "component_version_stale" in str(error)
+        deleted = workspace_db.media_component_delete_version(db, {"projectId": "component-v6-project", "projectPath": str(project), "scopePath": str(project), "versionId": version["id"], "expectedUpdatedAt": updated["version"]["updatedAt"]})
+        assert deleted["versionId"] == version["id"]
+
+        original_progress = next(item for item in workspace_db.progress_list(str(workspace), db, {"projectName": "Project"})["progressFolders"] if item["displayName"] == "RAW")
+        progress = workspace_db.progress_register(str(workspace), db, {"projectName": "Project", "folderPath": str(progress_path), "mediaKind": "image", "versionKey": "1", "parentProgressId": original_progress["id"], "displayName": "P1", "trackingEnabled": False})["progressFolder"]
+        managed = workspace_db.progress_component_manage(str(workspace), db, {"action": "update", "projectName": "Project", "projectId": "component-v6-project", "projectPath": str(project), "scopePath": str(project), "progressId": progress["id"], "expectedUpdatedAt": progress["updatedAt"], "displayName": "P1 Updated"})
+        assert managed["progressFolder"]["displayName"] == "P1 Updated"
+        try:
+            workspace_db.progress_component_manage(str(workspace), db, {"action": "unregister", "projectName": "Project", "projectId": "component-v6-project", "projectPath": str(project), "scopePath": str(project), "progressId": progress["id"], "expectedUpdatedAt": progress["updatedAt"]})
+            raise AssertionError("stale component progress mutation was accepted")
+        except ValueError as error:
+            assert "progress_unregister_stale" in str(error)
+    finally:
+        db.close()
+
+
 def main() -> None:
     temp_root = Path(tempfile.mkdtemp(prefix="photoflow-versioning-v2-db-"))
     try:
@@ -1704,6 +1748,7 @@ def main() -> None:
         test_folder_purposes_and_legacy_orphan_survive_reload(temp_root)
         test_detached_missing_progress_cleanup_is_atomic(temp_root)
         test_detached_reconcile_repairs_legacy_dangling_projections(temp_root)
+        test_component_host_v6_cas_mutations(temp_root)
         print("versioning V2 database tests passed")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

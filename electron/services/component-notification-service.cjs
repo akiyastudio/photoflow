@@ -75,7 +75,7 @@ class ComponentNotificationService {
     if (!Number.isInteger(descriptor?.hostApiVersion) || descriptor.hostApiVersion < 4) return failure('NOTIFICATION_HOST_API_REQUIRED', 'Notifications require Host API 4');
     if (!descriptor?.service?.capabilities?.includes(NOTIFICATION_CAPABILITY)) return failure('NOTIFICATION_CAPABILITY_NOT_GRANTED', 'Notification capability is not granted');
     if (!descriptor?.service?.permissions?.includes(NOTIFICATION_PERMISSION)) return failure('NOTIFICATION_PERMISSION_DENIED', 'Notification permission is not granted');
-    if (!['project', 'application.settings'].includes(context.surface)) return failure('NOTIFICATION_CONTEXT_INVALID', 'Notification surface is not bound');
+    if (!['project', 'application.settings', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(context.surface)) return failure('NOTIFICATION_CONTEXT_INVALID', 'Notification surface is not bound');
     const normalized = normalizeNotificationPayload(payload);
     if (normalized.accepted === false) return normalized;
     const componentId = String(descriptor.componentId || '');

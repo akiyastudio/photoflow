@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useState } from 'react';
-import type { ComponentHostAction, ComponentPageInstance, ComponentPageOpenScope, ComponentStatus, WorkspaceProject } from '../../types';
+import type { ComponentContribution, ComponentHostAction, ComponentPageInstance, ComponentPageOpenScope, ComponentStatus, WorkspaceProject } from '../../types';
 import { bindComponentPageInstance, closeComponentPage, closeProjectComponentPages, componentPageActivationSucceeded, componentPageIsAvailable, ensureComponentPage } from './component-page-model';
-import { useToast } from '../app/useTopToastStack';
+import { useUserFacingToast } from '../app/useUserFacingToast';
 
 type ComponentHostBrowserPage = { id: string; projectId: string; project?: WorkspaceProject | null };
 
@@ -11,8 +11,9 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
   onProjectFallback: (page: ComponentHostBrowserPage) => void;
   onHomeFallback: () => void;
 }) => {
-  const toast = useToast();
+  const toast = useUserFacingToast();
   const [actions, setActions] = useState<ComponentHostAction[]>([]);
+  const [contributions, setContributions] = useState<ComponentContribution[]>([]);
   const [pages, setPages] = useState<ComponentPageInstance[]>([]);
   const [activeIdentity, setActiveIdentity] = useState('');
 
@@ -22,6 +23,7 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
       .catch(() => { if (active) setActions([]); });
     return () => { active = false; };
   }, [components]);
+  useEffect(() => { let active = true; void window.electronAPI.getComponentContributions().then(result => { if (active) setContributions(result.success ? result.contributions || [] : []); }).catch(() => { if (active) setContributions([]); }); return () => { active = false; }; }, [components]);
 
   useEffect(() => {
     const installedIds = new Set(components.filter(component => component.installed).map(component => component.id));
@@ -83,5 +85,5 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     const activePage = pages.find(candidate => candidate.identity === activeIdentity);
     if (activePage?.projectId === projectId && activePage.workspacePath.replace(/\\/g, '/').toLocaleLowerCase() === workspacePath.replace(/\\/g, '/').toLocaleLowerCase()) setActiveIdentity('');
   }, [activeIdentity, pages]);
-  return { actions, pages, activeIdentity, activate, deactivate, open, close, disposeProject };
+  return { actions, contributions, pages, activeIdentity, activate, deactivate, open, close, disposeProject };
 };
