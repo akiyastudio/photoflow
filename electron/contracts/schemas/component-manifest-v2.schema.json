@@ -48,7 +48,23 @@
             "permissions": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "enum": ["project.media.read", "project.input.read", "project.output.write", "project.version.create", "component.storage", "component.settings", "tasks", "dialogs", "events", "component.lifecycle.read", "component.lifecycle.manage", "component.media", "project.progress", "notifications"] } },
             "events": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/versioned" } },
             "runtimeActions": { "type": "array", "maxItems": 32, "uniqueItems": true, "items": { "$ref": "#/$defs/id" } },
-            "lifecycleActions": { "type": "object", "maxProperties": 16 }
+            "lifecycleActions": { "type": "object", "maxProperties": 16 },
+            "projectFolders": {
+              "type": "array", "maxItems": 32,
+              "items": {
+                "type": "object", "additionalProperties": false, "required": ["name"],
+                "properties": {
+                  "name": { "type": "string", "minLength": 1, "maxLength": 160, "pattern": "^\\S(?:[\\s\\S]*[^.\\s])?$" },
+                  "protectFromGenericRename": { "type": "boolean" },
+                  "reserveProgressRelocationName": { "type": "boolean" },
+                  "legacyAdoptionGrant": { "enum": ["component.storage.previous.v1", "project.output.existing.v1"] }
+                },
+                "anyOf": [
+                  { "required": ["protectFromGenericRename"], "properties": { "protectFromGenericRename": { "const": true } } },
+                  { "required": ["reserveProgressRelocationName"], "properties": { "reserveProgressRelocationName": { "const": true } } }
+                ]
+              }
+            }
           }
         }
       },

@@ -149,7 +149,6 @@ def test_validation_guards(temp: Path):
         for invalid_name, error_code in (
             ("CON", "progress_folder_name_invalid"), ("bad.", "progress_folder_name_invalid"),
             (".photoflow-private", "progress_folder_name_reserved"), ("RAW", "progress_folder_name_reserved"),
-            ("团片协作", "progress_folder_name_reserved"),
         ):
             token = workspace_db.progress_update_tree_begin(db, {"projectName": "Project"})["mutationToken"]
             try:

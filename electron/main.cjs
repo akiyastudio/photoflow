@@ -31,6 +31,7 @@ const { createFileClipboardService } = require('./services/file-clipboard-servic
 const { createShellNewService } = require('./services/shell-new-service.cjs');
 const { createMediaAccessService } = require('./services/media-access-service.cjs');
 const { createMediaFileResponse } = require('./services/media-response-service.cjs');
+const { configureProtectedProjectFolderRegistry } = require('./services/protected-project-folder.cjs');
 const { PythonDatabaseClient } = require('./repositories/database-client.cjs');
 const { WorkspaceSqliteCoordinator } = require('./services/workspace-sqlite-coordinator.cjs');
 const { createWorkspaceRepository } = require('./domains/workspace/public.cjs');
@@ -118,6 +119,7 @@ const componentHostRegistry = createComponentHostRegistry({
   candidateProvider: componentRegistry.hostCandidates,
   admitDescriptor: (descriptor, componentRoot) => { const component = componentRegistry.resolve(descriptor.componentId, { verifyIntegrity: true }); return Boolean(component && path.resolve(component.path) === path.resolve(componentRoot)); },
 });
+configureProtectedProjectFolderRegistry({ descriptorProvider: componentHostRegistry.list });
 let componentViewManager; let componentServiceManager; let configMutationService; let toastOverlayManager;
 
 protocol.registerSchemesAsPrivileged([

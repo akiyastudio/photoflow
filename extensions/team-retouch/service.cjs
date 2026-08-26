@@ -8,6 +8,7 @@ const { DatabaseSync } = require('node:sqlite');
 const { CANCELLED_CODE, buildWorkflowPlan, copyWorkflowPlan } = require('./workflow-generation.cjs');
 const { createTeamWorkflowArtifactService } = require('./workflow-artifact.cjs');
 const { createWorkflowManifestResolver } = require('./workflow-manifest.cjs');
+const PROJECT_FOLDER_COMPATIBILITY = require('./compatibility/project-folder-policy.cjs');
 
 const MAX_ITEMS = 2000;
 const DB_BUSY_TIMEOUT_MS = 750;
@@ -2418,7 +2419,7 @@ const migrateLegacyProjectArtifacts = async (parentId, context, control = {}) =>
           const prior = migrationStateFromDb(db, projectId); writeMigrationState(db, projectId, { ...prior, state: 'committed', phase: 'complete', pendingCount: 0, retryable: false });
           db.exec('COMMIT');
         } catch (error) { db.exec('ROLLBACK'); throw error; }
-        const state = migrationStateFromDb(db, projectId); migrationMetric('legacy-project-artifacts-v2', 'complete', startedAt, { itemCount: state.processedCount, state: state.state }); return state;
+        const state = migrationStateFromDb(db, projectId); migrationMetric(PROJECT_FOLDER_COMPATIBILITY.legacyMigration.id, 'complete', startedAt, { itemCount: state.processedCount, state: state.state }); return state;
       }
       const item = pending[0]; const { row, field, current } = item;
       try {
@@ -2437,10 +2438,10 @@ const migrateLegacyProjectArtifacts = async (parentId, context, control = {}) =>
           const prior = migrationStateFromDb(db, projectId); writeMigrationState(db, projectId, { state: 'pending', phase: 'outputs', processedCount: prior.processedCount + 1, pendingCount: Math.max(0, pending.length - 1), attemptCount: prior.attemptCount + 1, lastError: '', errorCategory: '', retryable: true });
           db.exec('COMMIT');
         } catch (error) { db.exec('ROLLBACK'); throw error; }
-        const state = migrationStateFromDb(db, projectId); migrationMetric('legacy-project-artifacts-v2', 'output-checkpoint', startedAt, { itemCount: 1, byteCount: targetStat.size, state: state.state }); return state;
+        const state = migrationStateFromDb(db, projectId); migrationMetric(PROJECT_FOLDER_COMPATIBILITY.legacyMigration.id, 'output-checkpoint', startedAt, { itemCount: 1, byteCount: targetStat.size, state: state.state }); return state;
       } catch (error) {
         const prior = migrationStateFromDb(db, projectId); const diagnostic = migrationErrorState(error); writeMigrationState(db, projectId, { ...prior, state: 'pending', phase: 'paused', pendingCount: pending.length, attemptCount: prior.attemptCount + 1, ...diagnostic, retryable: true });
-        migrationMetric('legacy-project-artifacts-v2', 'deferred', startedAt, { itemCount: 0, state: 'pending' });
+        migrationMetric(PROJECT_FOLDER_COMPATIBILITY.legacyMigration.id, 'deferred', startedAt, { itemCount: 0, state: 'pending' });
         return migrationStateFromDb(db, projectId);
       }
     } finally { db.close(); }

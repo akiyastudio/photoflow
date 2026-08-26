@@ -1,7 +1,9 @@
 const { registerVersionTrackingIpc } = require('./version-tracking-ipc.cjs');
+const { getProtectedProjectFolderRegistry } = require('../services/protected-project-folder.cjs');
 
 const registerVersionIpc = context => {
   const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
+  const protectedProjectFolders = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const listRatedProjectMedia = (projectPath, workspaceRoot, projectName) => mediaRatingService.listProject(projectPath, { workspaceRoot, projectName });
   const validProgressFolderName = value => Boolean(value && path.basename(value) === value && !/[<>:"/\\|?*\x00-\x1f]/.test(value) && !/[. ]$/.test(value));
   const isValidProgressParent = (folder, mediaKind) => Boolean(folder && !folder.folderMissing
@@ -675,6 +677,7 @@ const registerVersionIpc = context => {
       }
       oldPath = path.resolve(current.folderPath);
       newPath = path.resolve(path.dirname(oldPath), String(request.newName || ''));
+      if (protectedProjectFolders.isProtectedProjectFolderName(request.newName)) throw new Error('progress_folder_name_reserved: 该名称保留给固定工作流使用');
       suppressWorkspaceWatchPath(oldPath);
       suppressWorkspaceWatchPath(newPath);
       const mutation = await versionService.beginProgressTreeUpdate(workspaceRoot, { projectName });
@@ -685,6 +688,7 @@ const registerVersionIpc = context => {
         expectedFolderId: request.expectedFolderId,
         expectedRelativePath,
         newName: request.newName,
+        reservedProjectFolderNames: protectedProjectFolders.progressRelocationReservedNames(),
         mutationToken,
       });
       mutationToken = '';

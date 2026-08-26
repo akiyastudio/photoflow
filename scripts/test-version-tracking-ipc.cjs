@@ -439,7 +439,9 @@ async function main() {
     progressId: 'moved-node', expectedFolderId: localFolderId, expectedRelativePath: 'Move me', newName: '客户自由命名',
   });
   assert.strictEqual(renamedProgress.success, true, renamedProgress.error);
-  assert.deepStrictEqual(calls.renameProgressRequest, {
+  const { reservedProjectFolderNames, ...renameProgressRequest } = calls.renameProgressRequest;
+  assert(Array.isArray(reservedProjectFolderNames) && reservedProjectFolderNames.includes('raw'), 'Host must inject its current generic relocation policy');
+  assert.deepStrictEqual(renameProgressRequest, {
     projectName: 'Project', progressId: 'moved-node', expectedFolderId: localFolderId,
     expectedRelativePath: 'Move me', newName: '客户自由命名', mutationToken: 'tree-mutation-token',
   });

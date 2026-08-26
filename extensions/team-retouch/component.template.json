@@ -22,6 +22,7 @@
     "workflow-generation.cjs",
     "workflow-artifact.cjs",
     "workflow-manifest.cjs",
+    "compatibility/project-folder-policy.cjs",
     "_internal/models/rtmdet-ins_m_640x640.onnx",
     "_internal/models/face_detection_yunet_2023mar.onnx",
     "_internal/models/adaface_ir18_webface4m.onnx",
@@ -76,6 +77,14 @@
         "team.return.progress.v1", "team.workflow.progress.v1"
       ],
       "runtimeActions": [],
+      "projectFolders": [
+        {
+          "name": "团片协作",
+          "protectFromGenericRename": true,
+          "reserveProgressRelocationName": true,
+          "legacyAdoptionGrant": "project.output.existing.v1"
+        }
+      ],
       "lifecycleActions": {
         "preflight": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "de716fabc7677cd66d01251192e136b056ed9d36ecdd7ca2d9513a11309239ab" },
         "install": { "entry": "advanced-installer/setup-team-retouch-advanced.ps1", "sha256": "de716fabc7677cd66d01251192e136b056ed9d36ecdd7ca2d9513a11309239ab" },

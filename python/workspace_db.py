@@ -5509,14 +5509,29 @@ def _progress_tree_mutation_key(project_id: str) -> str:
     return f"progress_tree_mutation:{project_id}"
 
 
-PROGRESS_RELOCATION_RESERVED_NAMES = frozenset({
-    "raw", "jpg", "mov", "mov_转码", "图片选片", "视频选片", "策划", "团片协作",
+PROGRESS_RELOCATION_CORE_RESERVED_NAMES = frozenset({
+    "raw", "jpg", "mov", "mov_转码", "图片选片", "视频选片", "策划",
 })
 WINDOWS_DEVICE_NAME = re.compile(r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$", re.IGNORECASE)
 PROGRESS_RELOCATION_ACTIVE_STATES = ("pending_compare", "pending_confirm", "committing", "needs_repair")
 
 
-def _validate_progress_folder_name(value) -> str:
+def _progress_relocation_reserved_names(values) -> frozenset[str]:
+    if values is None:
+        values = []
+    if not isinstance(values, list) or len(values) > 32:
+        raise ValueError("progress_folder_policy_invalid: 保留目录策略无效")
+    names = set(PROGRESS_RELOCATION_CORE_RESERVED_NAMES)
+    for value in values:
+        if not isinstance(value, str) or value != value.strip() or not value or len(value) > 160:
+            raise ValueError("progress_folder_policy_invalid: 保留目录策略无效")
+        if value in (".", "..") or any(ord(character) < 32 for character in value) or any(character in '<>:"/\\|?*' for character in value):
+            raise ValueError("progress_folder_policy_invalid: 保留目录策略无效")
+        names.add(value.casefold())
+    return frozenset(names)
+
+
+def _validate_progress_folder_name(value, reserved_names=None) -> str:
     name = str(value or "")
     if name != name.strip() or not name or len(name) > 255 or name in (".", ".."):
         raise ValueError("progress_folder_name_invalid: 目录名称无效")
@@ -5525,7 +5540,7 @@ def _validate_progress_folder_name(value) -> str:
     if name.endswith((".", " ")) or WINDOWS_DEVICE_NAME.fullmatch(name):
         raise ValueError("progress_folder_name_invalid: 目录名称在 Windows 上不可用")
     folded = name.casefold()
-    if folded.startswith(".photoflow-") or folded in PROGRESS_RELOCATION_RESERVED_NAMES:
+    if folded.startswith(".photoflow-") or folded in _progress_relocation_reserved_names(reserved_names):
         raise ValueError("progress_folder_name_reserved: 该名称保留给固定工作流使用")
     return name
 
@@ -5837,7 +5852,7 @@ def progress_folder_rename(root: str, db, payload: dict, fault_after=None):
         raise ValueError("progress_folder_path_mismatch: 当前目录路径已变化，请刷新后重试")
     if not _progress_relocation_path_identity(old_path, expected_folder_id):
         raise ValueError("progress_folder_identity_mismatch: 当前目录 folderId 与数据库不一致")
-    new_name = _validate_progress_folder_name(payload.get("newName"))
+    new_name = _validate_progress_folder_name(payload.get("newName"), payload.get("reservedProjectFolderNames"))
     new_path = canonical_path(os.path.join(os.path.dirname(old_path), new_name))
     if os.path.dirname(new_path).casefold() != os.path.dirname(old_path).casefold() or not is_project_descendant(new_path, project_path):
         raise ValueError("progress_folder_name_invalid: 目标目录无效")

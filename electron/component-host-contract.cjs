@@ -205,7 +205,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   if (host.service !== undefined) {
     const raw = host.service;
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component service manifest');
-    rejectUnknownFields(raw, ['protocolVersion', 'runtime', 'entrypoints', 'rpcMethods', 'capabilities', 'permissions', 'events', 'runtimeActions', 'lifecycleActions'], 'component service');
+    rejectUnknownFields(raw, ['protocolVersion', 'runtime', 'entrypoints', 'rpcMethods', 'capabilities', 'permissions', 'events', 'runtimeActions', 'lifecycleActions', 'projectFolders'], 'component service');
     if (Number(raw.protocolVersion) !== COMPONENT_SERVICE_PROTOCOL_VERSION) throw new Error(`Unsupported component service protocolVersion: ${raw.protocolVersion}`);
     if (!['node', 'executable'].includes(raw.runtime)) throw new Error('Invalid component service runtime');
     const entries = raw.entrypoints;
@@ -233,6 +233,26 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     if (events.length > 32 || events.some(event => !VERSIONED_METHOD.test(event))) throw new Error('Component service events must be a bounded versioned allowlist');
     const runtimeActions = [...new Set((raw.runtimeActions || []).map(value => requiredId(value, 'runtime action')))];
     if (runtimeActions.length > 32) throw new Error('Component runtime actions must be a bounded allowlist');
+    if (raw.projectFolders !== undefined && !Array.isArray(raw.projectFolders)) throw new Error('Component project folders must be a bounded array');
+    if ((raw.projectFolders || []).length > 32) throw new Error('Component project folders must be a bounded array');
+    const projectFolderNames = new Set();
+    const projectFolders = (raw.projectFolders || []).map(declaration => {
+      if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) throw new Error('Invalid component project folder declaration');
+      rejectUnknownFields(declaration, ['name', 'protectFromGenericRename', 'reserveProgressRelocationName', 'legacyAdoptionGrant'], 'component project folder');
+      const name = requiredExactStringText(declaration.name, 'project folder name', 160);
+      if (name === '.' || name === '..' || /[<>:"/\\|?*\x00-\x1f]/.test(name) || /[. ]$/.test(name)) throw new Error('Invalid component project folder name');
+      const nameKey = name.toLocaleLowerCase('zh-CN');
+      if (projectFolderNames.has(nameKey)) throw new Error('Duplicate component project folder declaration');
+      projectFolderNames.add(nameKey);
+      if (declaration.protectFromGenericRename !== undefined && typeof declaration.protectFromGenericRename !== 'boolean') throw new Error('Invalid component project folder protection');
+      if (declaration.reserveProgressRelocationName !== undefined && typeof declaration.reserveProgressRelocationName !== 'boolean') throw new Error('Invalid component project folder protection');
+      const protectFromGenericRename = declaration.protectFromGenericRename === true;
+      const reserveProgressRelocationName = declaration.reserveProgressRelocationName === true;
+      if (!protectFromGenericRename && !reserveProgressRelocationName) throw new Error('Component project folder declaration must request a protection');
+      const legacyAdoptionGrant = declaration.legacyAdoptionGrant === undefined ? null : requiredExactStringText(declaration.legacyAdoptionGrant, 'project folder legacy adoption grant', 128);
+      if (legacyAdoptionGrant && !adoptionGrants.includes(legacyAdoptionGrant)) throw new Error('Component project folder legacy adoption grant is not granted');
+      return Object.freeze({ name, protectFromGenericRename, reserveProgressRelocationName, legacyAdoptionGrant });
+    });
     const lifecycleActions = {};
     for (const [action, declaration] of Object.entries(raw.lifecycleActions || {})) {
       const actionId = requiredId(action, 'lifecycle action');
@@ -255,6 +275,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       events: Object.freeze(events),
       runtimeActions: Object.freeze(runtimeActions),
       lifecycleActions: Object.freeze(lifecycleActions),
+      projectFolders: Object.freeze(projectFolders),
     });
     for (const settingsPage of settingsPages) {
       const unknownMethod = settingsPage.rpcMethods.find(method => !rpcMethods.includes(method));
