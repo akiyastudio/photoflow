@@ -22,6 +22,7 @@ const createVersionService = ({ repository }) => ({
   updateProgressTree: (root, payload) => repository.updateProgressTree(root, payload),
   beginProgressTreeUpdate: (root, payload) => repository.beginProgressTreeUpdate(root, payload),
   finishProgressTreeUpdate: (root, payload) => repository.finishProgressTreeUpdate(root, payload),
+  renameProgressFolder: (root, payload) => repository.renameProgressFolder(root, payload),
   updateProgressRelation: (root, payload) => repository.updateProgressRelation(root, payload),
   repairLegacySelectionRelation: (root, payload) => repository.repairLegacySelectionRelation(root, payload),
   commitImportGraph: (root, payload) => repository.commitImportGraph(root, payload),

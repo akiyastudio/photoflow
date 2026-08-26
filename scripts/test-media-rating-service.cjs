@@ -15,9 +15,15 @@ const run = async () => {
     const writeFinished = new Promise(resolve => { finishWrite = resolve; });
     let metadataWrites = 0;
     let fingerprintRefreshes = 0;
+    const favoriteExport = path.join(temporaryRoot, '任意自由名称');
+    const ordinaryProgress = path.join(temporaryRoot, '另一个目录');
+    fs.mkdirSync(favoriteExport);
+    fs.mkdirSync(ordinaryProgress);
+    fs.writeFileSync(path.join(favoriteExport, 'excluded.jpg'), 'excluded');
+    fs.writeFileSync(path.join(ordinaryProgress, 'included.jpg'), 'included');
     const service = createMediaRatingService({
       exiftool: {
-        readRaw: async () => ({ 'XMP:Rating': 0 }),
+        readRaw: async () => ({ 'XMP:Rating': 5 }),
         write: async () => { metadataWrites += 1; await writeFinished; },
       },
       fs,
@@ -26,7 +32,13 @@ const run = async () => {
       rawExtensions: new Set(),
       releaseWorkspaceWatchPath: () => undefined,
       suppressWorkspaceWatchPath: () => undefined,
-      versionService: { refreshMetadataFingerprint: async () => { fingerprintRefreshes += 1; } },
+      versionService: {
+        refreshMetadataFingerprint: async () => { fingerprintRefreshes += 1; },
+        listProgress: async () => ({ success: true, progressFolders: [
+          { folderPath: favoriteExport, sourceMetadata: { category: 'favorite-export' } },
+          { folderPath: ordinaryProgress, sourceMetadata: null },
+        ] }),
+      },
       projectVirtualPaths: { listManagedExternalLinks: () => [] },
       writeLog: () => undefined,
       pendingRatingsPath: outboxPath,
@@ -44,6 +56,9 @@ const run = async () => {
     }
     assert.strictEqual(JSON.parse(fs.readFileSync(outboxPath, 'utf8')).items.length, 0, 'a successful metadata write must clear the durable outbox');
     assert.strictEqual(fingerprintRefreshes, 1);
+    const rated = await service.listProject(temporaryRoot, { workspaceRoot: temporaryRoot, projectName: 'Project' });
+    assert(rated.some(entry => entry.name === 'included.jpg'));
+    assert(!rated.some(entry => entry.name === 'excluded.jpg'), 'favorite exports must be excluded by persisted node purpose, not a folder-name regex');
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }

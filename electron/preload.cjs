@@ -209,7 +209,22 @@ contextBridge.exposeInMainWorld('electronAPI', {
     sourceProgressId: request?.sourceProgressId,
   }),
   registerProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-register', workspacePath, status, projectName, request),
-  updateProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-update', workspacePath, status, projectName, request),
+  updateProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-update', workspacePath, status, projectName, {
+    progressId: request?.progressId,
+    mediaKind: request?.mediaKind,
+    versionKey: request?.versionKey,
+    parentProgressId: request?.parentProgressId,
+    trackingEnabled: request?.trackingEnabled,
+    trackingState: request?.trackingState,
+    renameFromParent: request?.renameFromParent,
+    copyMissingFromParent: request?.copyMissingFromParent,
+  }),
+  renameProgressFolder: (workspacePath, status, projectName, request) => ipcRenderer.invoke('workspace-progress-folder-rename', workspacePath, status, projectName, {
+    progressId: request?.progressId,
+    expectedFolderId: request?.expectedFolderId,
+    expectedRelativePath: request?.expectedRelativePath,
+    newName: request?.newName,
+  }),
   updateProgressRelation: (workspacePath, projectName, request) => ipcRenderer.invoke('workspace-progress-relation-update', workspacePath, projectName, {
     childProgressId: request?.childProgressId,
     parentProgressId: request?.parentProgressId ?? null,

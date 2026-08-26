@@ -50,7 +50,8 @@ const registerMediaRatingIpc = ({
   });
   ipcMain.handle('workspace-final-version-summary', async (_event, workspacePath, status, projectName) => {
     try {
-      const entries = await mediaRatingService.listProject(path.resolve(getProjectPath(workspacePath, status, projectName)));
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const entries = await mediaRatingService.listProject(path.resolve(getProjectPath(workspacePath, status, projectName)), { workspaceRoot, projectName });
       return { success: true, count: entries.length, availableCount: entries.length, missingCount: 0 };
     } catch (error) {
       return { success: false, count: 0, availableCount: 0, missingCount: 0, error: error.message || String(error) };
@@ -60,7 +61,7 @@ const registerMediaRatingIpc = ({
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
-      const entries = await mediaRatingService.listProject(path.resolve(getProjectPath(workspacePath, status, projectName)));
+      const entries = await mediaRatingService.listProject(path.resolve(getProjectPath(workspacePath, status, projectName)), { workspaceRoot, projectName });
       return { success: true, count: entries.length, availableCount: entries.length, missingCount: 0, entries };
     } catch (error) {
       return { success: false, count: 0, availableCount: 0, missingCount: 0, entries: [], error: error.message || String(error) };

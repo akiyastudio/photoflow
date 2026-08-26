@@ -978,12 +978,17 @@ const run = async () => {
     assert.deepStrictEqual(fs.readdirSync(fileLinkProjectPath).sort(), ['linked-file-source.jpg.lnk', 'linked-folder-source.lnk']);
 
     const managedRootGuardHandlers = new Map();
+    const registeredProgressFolder = path.join(fileLinkProjectPath, '客户自由目录');
+    fs.mkdirSync(registeredProgressFolder);
     registerFileOperationsIpc({
       Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
       ipcMain: { handle: (name, handler) => managedRootGuardHandlers.set(name, handler), on: () => {} },
       fs, path, getProjectPath: () => fileLinkProjectPath, ensureWorkspace: () => importWorkspaceRoot,
       projectVirtualPaths: importProjectVirtualPaths, activeProjectFileOperations: new Map(),
-      versionService: { listProgress: async () => ({ success: true, progressFolders: [{ externalLinkRelativePath: 'linked-folder-source.lnk' }] }) },
+      versionService: { listProgress: async () => ({ success: true, progressFolders: [
+        { externalLinkRelativePath: 'linked-folder-source.lnk' },
+        { id: 'registered-progress', nodeRole: 'progress', displayName: '客户自由目录', folderPath: registeredProgressFolder },
+      ] }) },
       pushUndoOperation: async () => undefined, writeLog: () => undefined,
     });
     const requestedMetadataPath = process.platform === 'win32'
@@ -997,6 +1002,13 @@ const run = async () => {
     assert.strictEqual(externalFileDetails.details[0].relativePath, requestedMetadataPath,
       'file-detail responses must preserve the requested path identity so Windows metadata hydration can match browse entries');
     assert.strictEqual(externalFileDetails.details[0].size, 6);
+    const blockedRegisteredRename = await managedRootGuardHandlers.get('workspace-file-operation')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, 'rename', ['客户自由目录'], '', '绕过改名',
+    );
+    assert.strictEqual(blockedRegisteredRename.success, false);
+    assert.match(blockedRegisteredRename.error, /已登记的版本进度/,
+      'ordinary files IPC must use the registered progress identity, independent of legacy folder-name patterns');
+    assert.strictEqual(fs.existsSync(registeredProgressFolder), true);
     const blockedTrackedMove = await managedRootGuardHandlers.get('workspace-file-operation')(
       null, importWorkspaceRoot, '策划中', fileLinkProjectName, 'move', ['linked-folder-source.lnk'], '',
     );

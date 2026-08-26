@@ -259,24 +259,19 @@ def test_v2_node_operations(root: Path) -> None:
         assert selection["parentProgressId"] == original["id"] and selection["relationKind"] == "auxiliary"
         assert not selection["trackingEnabled"] and not selection["renameFromParent"] and not selection["copyMissingFromParent"]
 
-        # Explicit IDs, not version-key prefixes, define the subtree. Renaming
-        # an arbitrary-key parent must still include its main child while the
-        # child's unrelated display key remains stable.
+        # Version metadata updates are node-local and never rename the selected
+        # directory or rewrite descendants as an implicit subtree operation.
         remapped = workspace_db.progress_update_tree(str(workspace), db, {
             "projectName": "Project", "primaryProgressId": parent["id"],
-            "updates": [
-                {"id": parent["id"], "mediaKind": "image", "versionKey": "renamed-main",
-                 "displayName": parent["displayName"], "folderPath": str(parent_folder),
-                 "parentProgressId": original["id"], "trackingEnabled": True, "trackingState": "ready"},
-                {"id": child["id"], "mediaKind": "image", "versionKey": "v2",
-                 "displayName": child["displayName"], "folderPath": str(child_folder),
-                 "parentProgressId": parent["id"], "trackingEnabled": True, "trackingState": "ready"},
-            ],
+            "updates": [{"id": parent["id"], "mediaKind": "image", "versionKey": "3",
+                         "displayName": "ignored", "folderPath": str(project / "ignored"),
+                         "parentProgressId": original["id"], "trackingEnabled": True, "trackingState": "ready"}],
         })
         remapped_by_id = {item["id"]: item for item in remapped["progressFolders"]}
-        assert remapped_by_id[parent["id"]]["versionKey"] == "renamed-main"
+        assert remapped_by_id[parent["id"]]["versionKey"] == "3"
         assert remapped_by_id[child["id"]]["versionKey"] == "v2"
         assert remapped_by_id[child["id"]]["parentProgressId"] == parent["id"]
+        assert remapped_by_id[parent["id"]]["folderPath"] == str(parent_folder)
 
         blocked_folder = project / "非法选片"
         blocked_folder.mkdir()
@@ -1088,19 +1083,17 @@ def test_external_link_progress_is_persisted_and_sync_safe(root: Path) -> None:
 
         moved_external = project / "Retouch"
         moved_external.mkdir()
-        try:
-            workspace_db.progress_update_tree(str(workspace), db, {
-                "projectName": "Project", "primaryProgressId": progress["id"],
-                "updates": [{
-                    "id": progress["id"], "mediaKind": "image", "versionKey": "1",
-                    "displayName": "Retouch", "folderPath": str(moved_external),
-                    "parentProgressId": original["id"], "trackingEnabled": True,
-                    "trackingState": "ready",
-                }],
-            })
-            assert False, "editing an external progress must never move it into the project"
-        except ValueError as error:
-            assert "external_progress_path_immutable" in str(error)
+        external_update = workspace_db.progress_update_tree(str(workspace), db, {
+            "projectName": "Project", "primaryProgressId": progress["id"],
+            "updates": [{
+                "id": progress["id"], "mediaKind": "image", "versionKey": "1",
+                "displayName": "Retouch", "folderPath": str(moved_external),
+                "parentProgressId": original["id"], "trackingEnabled": True,
+                "trackingState": "ready",
+            }],
+        })
+        assert external_update["progressFolder"]["folderPath"] == str(external_progress)
+        assert external_update["progressFolder"]["externalLinkRelativePath"] == "Retouch.lnk"
         moved_external.rmdir()
 
         snapshot = {"files": workspace_db.folder_media_snapshot(str(external_progress)), "parent": {}}

@@ -47,6 +47,20 @@ const registerFileOperationsIpc = context => {
       if (tracked.length) throw new Error('已纳入版本树的外链不能使用普通移动或重命名；请使用版本管理功能，或先“移动外链到项目内”');
     }
   };
+  const assertNoRegisteredProgressRootMutation = async (workspacePath, projectName, sources, operation) => {
+    if (!new Set(['move', 'rename', 'trash']).has(operation) || !versionService?.listProgress || !sources.length) return;
+    const listed = await versionService.listProgress(ensureWorkspace(workspacePath), projectName, true);
+    if (!listed?.success) throw new Error(listed?.error || '无法读取版本进度登记');
+    const registered = new Map((listed.progressFolders || [])
+      .filter(folder => folder.nodeRole === 'progress' && folder.folderPath)
+      .map(folder => [path.resolve(folder.folderPath).toLocaleLowerCase(), folder]));
+    for (const source of sources) {
+      let isDirectory = false;
+      try { isDirectory = fs.statSync(source).isDirectory(); } catch { /* normal missing-path validation follows */ }
+      const progress = isDirectory ? registered.get(path.resolve(source).toLocaleLowerCase()) : null;
+      if (progress) throw new Error(`已登记的版本进度“${progress.displayName || path.basename(source)}”不能使用普通文件操作修改；请使用版本进度目录重命名`);
+    }
+  };
   const refreshExternalWatchers = async (workspacePath, status, projectName, resolutions) => {
     if (!resolutions.some(resolution => resolution?.isExternalLinkRoot) || !refreshManagedExternalWatchers) return;
     await refreshManagedExternalWatchers(workspacePath, status, projectName);
@@ -408,6 +422,7 @@ const registerFileOperationsIpc = context => {
       }
       const sourceResolutions = relativePaths.map(resolveSource);
       const sources = sourceResolutions.map(item => item.physicalPath);
+      await assertNoRegisteredProgressRootMutation(workspacePath, projectName, sources, operation);
       if (operation === 'move') {
         const operationId = crypto.randomUUID();
         responseContext.operationId = operationId;

@@ -138,7 +138,7 @@ registerVersionIpc({
   mediaScanService,
   path,
   projectVirtualPaths,
-  releaseWorkspaceWatchPath: () => undefined,
+  releaseWorkspaceWatchPath: value => (calls.releasedWatchPaths ||= []).push(value),
   refreshWorkspaceCatalog: async () => undefined,
   resolveProjectEntry: (_root, _status, _projectName, relativePath) => {
     const projectPath = path.join(workspaceRoot, 'Project');
@@ -153,7 +153,7 @@ registerVersionIpc({
     return [progressEvent, { type: 'preview', data: { matches: [], suggestions: [], unmatched: ['new.jpg'] } }];
   },
   shell: testShell,
-  suppressWorkspaceWatchPath: () => undefined,
+  suppressWorkspaceWatchPath: value => (calls.suppressedWatchPaths ||= []).push(value),
   undefined,
   versionService,
   workspaceCatalogs: new Map([[workspaceRoot, {}]]),
@@ -167,6 +167,8 @@ async function main() {
   assert.deepStrictEqual(repositoryCall, [workspaceRoot, 'tracking_prepare', { progressId: 'timeout-test' }, 30 * 60 * 1000], 'tracking preparation must use the long folder-snapshot timeout');
   await repository.completeTrackingCommit(workspaceRoot, { sessionId: 'timeout-test' });
   assert.deepStrictEqual(repositoryCall, [workspaceRoot, 'tracking_commit_complete', { sessionId: 'timeout-test' }, 30 * 60 * 1000], 'tracking finalization must use the long filesystem-snapshot timeout');
+  await repository.renameProgressFolder(workspaceRoot, { progressId: 'rename-contract' });
+  assert.deepStrictEqual(repositoryCall, [workspaceRoot, 'progress_folder_rename', { progressId: 'rename-contract' }], 'progress folder rename must use the dedicated backend action');
 
   const start = handlers.get('workspace-progress-tracking-start');
   const commit = handlers.get('workspace-progress-tracking-commit');
@@ -386,7 +388,9 @@ async function main() {
   });
   assert.strictEqual(externalUpdate.success, true, externalUpdate.error);
   assert.strictEqual(treeUpdateRequest.mutationToken, 'tree-mutation-token');
-  assert.strictEqual(treeUpdateRequest.updates[0].folderPath, externalProgressPath, 'server policy must preserve an external progress physical path');
+  assert.strictEqual(treeUpdateRequest.updates.length, 1, 'semantic updates must mutate only the selected version node');
+  assert.strictEqual('folderPath' in treeUpdateRequest.updates[0], false, 'semantic updates must never submit a physical path');
+  assert.strictEqual('displayName' in treeUpdateRequest.updates[0], false, 'display names are directory caches and not version-tree addressing inputs');
   assert.strictEqual(fs.existsSync(externalProgressPath), true, 'editing external progress metadata must not move the external directory');
   const treeTask = calls.taskDefinitions.find(definition => definition.type === 'version-tree-update');
   assert(treeTask && treeTask.resourceAccess === 'write' && treeTask.resources[0] === path.join(workspaceRoot, 'Project'), 'whole-tree edits must reserve the project path for writes');
@@ -419,6 +423,33 @@ async function main() {
   assert.strictEqual(successfulRegistration.progressFolder.versionKey, 'not-derived-from-parent');
   assert.strictEqual(successfulRegistration.progressFolder.renameFromParent, true);
   assert.strictEqual(successfulRegistration.progressFolder.copyMissingFromParent, true);
+
+  const renameProgressFolder = handlers.get('workspace-progress-folder-rename');
+  const localFolder = path.join(workspaceRoot, 'Project', 'Move me');
+  const localFolderId = 'folder-id-move-me';
+  versionService.listProgress = async () => ({ success: true, progressFolders: [{
+    id: 'moved-node', nodeRole: 'progress', mediaKind: 'image', displayName: 'Move me',
+    folderPath: localFolder, folderId: localFolderId, trackingState: 'ready',
+  }] });
+  versionService.renameProgressFolder = async (_root, request) => {
+    calls.renameProgressRequest = request;
+    return { success: true, progressId: request.progressId, oldRelativePath: 'Move me', newRelativePath: request.newName };
+  };
+  const renamedProgress = await renameProgressFolder({}, workspaceRoot, 'active', 'Project', {
+    progressId: 'moved-node', expectedFolderId: localFolderId, expectedRelativePath: 'Move me', newName: '客户自由命名',
+  });
+  assert.strictEqual(renamedProgress.success, true, renamedProgress.error);
+  assert.deepStrictEqual(calls.renameProgressRequest, {
+    projectName: 'Project', progressId: 'moved-node', expectedFolderId: localFolderId,
+    expectedRelativePath: 'Move me', newName: '客户自由命名', mutationToken: 'tree-mutation-token',
+  });
+  assert(calls.suppressedWatchPaths.includes(localFolder), 'rename must suppress the old watcher path while committing');
+  assert(calls.releasedWatchPaths.includes(localFolder), 'rename must refresh/release watcher suppression after committing');
+  const staleRename = await renameProgressFolder({}, workspaceRoot, 'active', 'Project', {
+    progressId: 'moved-node', expectedFolderId: 'stale-folder-id', expectedRelativePath: 'Move me', newName: '不会提交',
+  });
+  assert.strictEqual(staleRename.success, false);
+  assert.match(staleRename.error, /identity_mismatch/);
 
   console.log('version tracking V2 IPC tests passed');
 }

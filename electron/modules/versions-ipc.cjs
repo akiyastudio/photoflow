@@ -2,7 +2,7 @@ const { registerVersionTrackingIpc } = require('./version-tracking-ipc.cjs');
 
 const registerVersionIpc = context => {
   const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
-  const listRatedProjectMedia = projectPath => mediaRatingService.listProject(projectPath);
+  const listRatedProjectMedia = (projectPath, workspaceRoot, projectName) => mediaRatingService.listProject(projectPath, { workspaceRoot, projectName });
   const validProgressFolderName = value => Boolean(value && path.basename(value) === value && !/[<>:"/\\|?*\x00-\x1f]/.test(value) && !/[. ]$/.test(value));
   const isValidProgressParent = (folder, mediaKind) => Boolean(folder && !folder.folderMissing
     && folder.mediaKind === mediaKind
@@ -125,7 +125,7 @@ const registerVersionIpc = context => {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const ratedEntries = await listRatedProjectMedia(projectPath);
+      const ratedEntries = await listRatedProjectMedia(projectPath, workspaceRoot, projectName);
       if (!ratedEntries.length) throw new Error('当前项目还没有标星的图片');
 
       const progressResult = await versionService.listProgress(workspaceRoot, projectName);
@@ -160,6 +160,7 @@ const registerVersionIpc = context => {
         displayName,
         folderPath,
         trackingEnabled: false,
+        sourceMetadata: { category: 'favorite-export', role: 'output', displayName },
       });
       writeLog('info', 'Final versions exported to progress folder', { projectName, displayName, count: copiedFiles.length });
       return {
@@ -585,8 +586,6 @@ const registerVersionIpc = context => {
   });
 
   ipcMain.handle('workspace-progress-update', async (_event, workspacePath, status, projectName, request = {}) => {
-    const completedMoves = [];
-    const stagedMoves = [];
     let mutationHandle = null;
     let mutationToken = '';
     let mutationWorkspaceRoot = '';
@@ -618,147 +617,35 @@ const registerVersionIpc = context => {
       if (request.mediaKind && request.mediaKind !== current.mediaKind) throw new Error('修改进度时不能改变图片或视频类型');
 
       const versionKey = String(request.versionKey || '').trim();
-      const displayName = String(request.displayName || '').trim();
       if (!/^\d+(?:_\d+)*$/.test(versionKey)) throw new Error('无效的版本编号');
-      if (!validProgressFolderName(displayName)) throw new Error('无效的进度名称');
-
-      const childrenByParent = new Map();
-      for (const progress of progressFolders) {
-        if (!progress.parentProgressId || progress.relationKind !== 'main' || progress.nodeRole !== 'progress') continue;
-        const children = childrenByParent.get(progress.parentProgressId) || [];
-        children.push(progress);
-        childrenByParent.set(progress.parentProgressId, children);
-      }
-      const subtree = [];
-      const visit = progress => {
-        subtree.push(progress);
-        for (const child of childrenByParent.get(progress.id) || []) visit(child);
-      };
-      visit(current);
-      const subtreeIds = new Set(subtree.map(progress => progress.id));
       const requestedParentId = String(request.parentProgressId || '').trim();
       if (!requestedParentId) throw new Error('progress_parent_required: 版本进度必须保留有效父节点');
-      if (requestedParentId && subtreeIds.has(requestedParentId)) throw new Error('进度不能移动到自己的后代版本下');
       const requestedParent = requestedParentId ? progressFolders.find(progress => progress.id === requestedParentId) : null;
       if (!isValidProgressParent(requestedParent, current.mediaKind)) throw new Error('父版本进度不存在');
-      const replacementTarget = progressFolders.find(progress => !subtreeIds.has(progress.id)
-        && progress.folderMissing
-        && progress.mediaKind === current.mediaKind
-        && progress.versionKey === versionKey);
-
-      const updates = subtree.map(progress => {
-        const nextVersionKey = progress.id === current.id ? versionKey : progress.versionKey;
-        const nextDisplayName = progress.id === current.id ? displayName : progress.displayName;
-        if (!validProgressFolderName(nextDisplayName)) throw new Error(`无效的进度名称：${nextDisplayName}`);
-        return {
-          id: progress.id,
-          mediaKind: progress.mediaKind,
-          versionKey: nextVersionKey,
-          parentProgressId: progress.id === current.id ? requestedParentId : progress.parentProgressId || null,
-          displayName: nextDisplayName,
-          previousFolderPath: path.resolve(progress.folderPath),
-          folderPath: request.preserveFolderPath || progress.externalLinkRelativePath
-            ? path.resolve(progress.folderPath)
-            : path.resolve(projectPath, nextDisplayName),
-          trackingEnabled: progress.id === current.id
-            ? request.trackingEnabled === undefined ? Boolean(current.trackingEnabled) : Boolean(request.trackingEnabled)
-            : Boolean(progress.trackingEnabled),
-          trackingState: progress.id === current.id
-            ? request.trackingState || current.trackingState
-            : progress.trackingState,
-        };
-      });
-
-      const versionKeys = new Set();
-      const displayNames = new Set();
-      const destinationPaths = new Set();
-      for (const update of updates) {
-        const versionIdentity = `${update.mediaKind}|${update.versionKey.toLocaleLowerCase()}`;
-        const nameIdentity = update.displayName.toLocaleLowerCase('zh-CN');
-        const pathIdentity = update.folderPath.toLocaleLowerCase();
-        if (versionKeys.has(versionIdentity)) throw new Error(`映射后版本 _${update.versionKey} 重复`);
-        if (displayNames.has(nameIdentity) || destinationPaths.has(pathIdentity)) throw new Error(`映射后进度名称重复：${update.displayName}`);
-        versionKeys.add(versionIdentity);
-        displayNames.add(nameIdentity);
-        destinationPaths.add(pathIdentity);
-      }
-      for (const progress of progressFolders) {
-        if (subtreeIds.has(progress.id) || progress.id === replacementTarget?.id) continue;
-        if (versionKeys.has(`${progress.mediaKind}|${progress.versionKey.toLocaleLowerCase()}`)) throw new Error(`版本 _${progress.versionKey} 已存在`);
-        if (displayNames.has(progress.displayName.toLocaleLowerCase('zh-CN'))) throw new Error(`进度名称已存在：${progress.displayName}`);
-      }
-
-      const sourcePaths = new Set(updates.map(update => update.previousFolderPath.toLocaleLowerCase()));
-      for (const update of updates) {
-        if (!fs.existsSync(update.previousFolderPath) || !fs.statSync(update.previousFolderPath).isDirectory()) {
-          throw new Error(`进度文件夹不存在：${path.basename(update.previousFolderPath)}`);
-        }
-        if (update.folderPath.toLocaleLowerCase() !== update.previousFolderPath.toLocaleLowerCase()
-          && fs.existsSync(update.folderPath) && !sourcePaths.has(update.folderPath.toLocaleLowerCase())) {
-          throw new Error(`文件夹“${update.displayName}”已经存在`);
-        }
-      }
-
-      const moves = updates.filter(update => update.folderPath !== update.previousFolderPath);
-      for (const move of moves) {
-        const temporaryPath = path.join(projectPath, `.photoflow-progress-${crypto.randomUUID()}`);
-        await fs.promises.rename(move.previousFolderPath, temporaryPath);
-        stagedMoves.push({ ...move, temporaryPath });
-      }
-      for (const move of stagedMoves) {
-        await fs.promises.rename(move.temporaryPath, move.folderPath);
-        completedMoves.push(move);
-      }
-
-      const databaseUpdates = updates.map(update => ({
-        id: replacementTarget && update.id === current.id ? replacementTarget.id : update.id,
-        mediaKind: update.mediaKind,
-        versionKey: update.versionKey,
-        parentProgressId: replacementTarget && update.parentProgressId === current.id ? replacementTarget.id : update.parentProgressId,
-        displayName: update.displayName,
-        folderPath: update.folderPath,
-        trackingEnabled: update.trackingEnabled,
-        trackingState: update.trackingState,
-      }));
       const updated = await versionService.updateProgressTree(workspaceRoot, {
         projectName,
         mutationToken,
-        primaryProgressId: replacementTarget?.id || current.id,
-        replacementProgressId: replacementTarget ? current.id : undefined,
-        updates: databaseUpdates,
+        primaryProgressId: current.id,
+        updates: [{
+          id: current.id,
+          mediaKind: current.mediaKind,
+          versionKey,
+          parentProgressId: requestedParentId,
+          trackingEnabled: request.trackingEnabled === undefined ? Boolean(current.trackingEnabled) : Boolean(request.trackingEnabled),
+          trackingState: request.trackingState || current.trackingState,
+          renameFromParent: request.renameFromParent === undefined ? Boolean(current.renameFromParent) : Boolean(request.renameFromParent),
+          copyMissingFromParent: request.copyMissingFromParent === undefined ? Boolean(current.copyMissingFromParent) : Boolean(request.copyMissingFromParent),
+        }],
       });
       // The write reservation above ends with the tree mutation. The deferred
       // project rescan is read-only, so its project-wide read reservation remains
       // compatible with focused version comparisons while still excluding later
       // filesystem writers.
       if (scheduleMediaTrackingScan) setTimeout(() => scheduleMediaTrackingScan(workspaceRoot, projectName, [], true), 250);
-      const updatedFolderPath = updates.find(update => update.id === current.id)?.folderPath || current.folderPath;
       mutationToken = '';
       mutationHandle?.complete?.('版本树已更新');
-      return {
-        ...updated,
-        folder: {
-          name: path.basename(updatedFolderPath),
-          path: updatedFolderPath,
-          relativePath: path.relative(projectPath, updatedFolderPath).replace(/\\/g, '/'),
-          updatedAt: Date.now(),
-        },
-      };
+      return updated;
     } catch (error) {
-      for (const move of [...completedMoves].reverse()) {
-        try {
-          if (fs.existsSync(move.folderPath) && !fs.existsSync(move.previousFolderPath)) await fs.promises.rename(move.folderPath, move.previousFolderPath);
-        } catch (rollbackError) {
-          writeLog('error', 'Unable to roll back progress folder rename', { path: move.folderPath, error: rollbackError.message || String(rollbackError) });
-        }
-      }
-      for (const move of [...stagedMoves].reverse()) {
-        try {
-          if (fs.existsSync(move.temporaryPath) && !fs.existsSync(move.previousFolderPath)) await fs.promises.rename(move.temporaryPath, move.previousFolderPath);
-        } catch (rollbackError) {
-          writeLog('error', 'Unable to restore staged progress folder', { path: move.temporaryPath, error: rollbackError.message || String(rollbackError) });
-        }
-      }
       if (mutationToken && mutationWorkspaceRoot) {
         await versionService.finishProgressTreeUpdate(mutationWorkspaceRoot, { projectName, mutationToken }).catch(finishError => {
           writeLog('error', 'Unable to release progress-tree mutation lease', { projectName, error: finishError.message || String(finishError) });
@@ -766,6 +653,50 @@ const registerVersionIpc = context => {
       }
       mutationHandle?.fail?.(error);
       return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('workspace-progress-folder-rename', async (_event, workspacePath, status, projectName, request = {}) => {
+    let mutationToken = '';
+    let workspaceRoot = '';
+    let oldPath = '';
+    let newPath = '';
+    try {
+      workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const listed = await versionService.listProgress(workspaceRoot, projectName, true);
+      const current = (listed.progressFolders || []).find(progress => progress.id === String(request.progressId || ''));
+      if (!current || current.nodeRole !== 'progress') throw new Error('progress_folder_rename_role_invalid: 只能重命名已登记的 progress 目录');
+      const expectedRelativePath = String(request.expectedRelativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+      const currentRelativePath = path.relative(projectPath, path.resolve(current.folderPath)).replace(/\\/g, '/');
+      if (!request.expectedFolderId || request.expectedFolderId !== current.folderId || expectedRelativePath !== currentRelativePath) {
+        throw new Error('progress_folder_identity_mismatch: 当前目录已变化，请刷新后重试');
+      }
+      oldPath = path.resolve(current.folderPath);
+      newPath = path.resolve(path.dirname(oldPath), String(request.newName || ''));
+      suppressWorkspaceWatchPath(oldPath);
+      suppressWorkspaceWatchPath(newPath);
+      const mutation = await versionService.beginProgressTreeUpdate(workspaceRoot, { projectName });
+      mutationToken = mutation.mutationToken;
+      const result = await versionService.renameProgressFolder(workspaceRoot, {
+        projectName,
+        progressId: current.id,
+        expectedFolderId: request.expectedFolderId,
+        expectedRelativePath,
+        newName: request.newName,
+        mutationToken,
+      });
+      mutationToken = '';
+      await refreshWorkspaceCatalog(workspaceRoot);
+      if (scheduleMediaTrackingScan) setTimeout(() => scheduleMediaTrackingScan(workspaceRoot, projectName, [], true), 250);
+      return result;
+    } catch (error) {
+      if (mutationToken && workspaceRoot) await versionService.finishProgressTreeUpdate(workspaceRoot, { projectName, mutationToken }).catch(() => undefined);
+      return { success: false, error: error.message || String(error) };
+    } finally {
+      if (oldPath) releaseWorkspaceWatchPath(oldPath);
+      if (newPath) releaseWorkspaceWatchPath(newPath);
     }
   });
   

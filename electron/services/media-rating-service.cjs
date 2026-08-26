@@ -129,8 +129,16 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     drainRating(key);
     return rating;
   };
-  const listProject = async projectPath => {
+  const listProject = async (projectPath, options = {}) => {
     const candidates = [];
+    const excludedDirectoryPaths = new Set();
+    if (options.workspaceRoot && options.projectName && versionService?.listProgress) {
+      const listed = await versionService.listProgress(options.workspaceRoot, options.projectName, true);
+      for (const progress of listed.progressFolders || []) {
+        if (progress.sourceMetadata?.category !== 'favorite-export' || !progress.folderPath) continue;
+        excludedDirectoryPaths.add(pathKey(progress.folderPath));
+      }
+    }
     const directories = [{ path: projectPath, virtualPath: '', viaExternalLink: false }];
     for (const link of projectVirtualPaths?.listManagedExternalLinks(projectPath) || []) {
       if (link.offline) continue;
@@ -150,7 +158,7 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
         const filePath = path.join(realDirectory, entry.name);
         const virtualPath = [directory.virtualPath, entry.name].filter(Boolean).join('/');
         if (entry.isDirectory()) {
-          if (!entry.name.startsWith('.photoflow-') && !/^图片后期_\d+(?:_\d+)*_喜爱$/u.test(entry.name)) directories.push({ path: filePath, virtualPath, viaExternalLink: directory.viaExternalLink });
+          if (!entry.name.startsWith('.photoflow-') && !excludedDirectoryPaths.has(pathKey(filePath))) directories.push({ path: filePath, virtualPath, viaExternalLink: directory.viaExternalLink });
           continue;
         }
         if (!entry.isFile()) continue;

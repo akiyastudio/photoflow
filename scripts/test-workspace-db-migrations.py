@@ -296,25 +296,23 @@ def test_progress_tree_version_remap(temp_root):
         "folderPath": child_old, "trackingEnabled": True,
     })["progressFolder"]
 
-    root_new = os.path.join(project_path, "图片后期_3")
-    child_new = os.path.join(project_path, "图片后期_3_1_精修")
-    os.rename(root_old, root_new)
-    os.rename(child_old, child_new)
     result = workspace_db.progress_update_tree(workspace_root, db, {
         "projectName": "进度重映射",
         "primaryProgressId": root_progress["id"],
-        "updates": [
-            {"id": root_progress["id"], "mediaKind": "image", "versionKey": "3", "parentProgressId": original["id"], "displayName": "图片后期_3", "folderPath": root_new, "trackingEnabled": False},
-            {"id": child_progress["id"], "mediaKind": "image", "versionKey": "3_1", "parentProgressId": root_progress["id"], "displayName": "图片后期_3_1_精修", "folderPath": child_new},
-        ],
+        "updates": [{"id": root_progress["id"], "mediaKind": "image", "versionKey": "3",
+                     "parentProgressId": original["id"], "displayName": "ignored",
+                     "folderPath": os.path.join(project_path, "ignored"), "trackingEnabled": False}],
     })
     assert result["progressFolder"]["versionKey"] == "3"
     assert result["progressFolder"]["trackingEnabled"] is False
     remapped = {folder["id"]: folder for folder in result["progressFolders"]}
-    assert remapped[child_progress["id"]]["versionKey"] == "3_1"
+    assert remapped[child_progress["id"]]["versionKey"] == "1_1"
     assert remapped[child_progress["id"]]["parentProgressId"] == root_progress["id"]
-    assert remapped[child_progress["id"]]["displayName"] == "图片后期_3_1_精修"
+    assert remapped[child_progress["id"]]["displayName"] == child_progress["displayName"]
     assert remapped[child_progress["id"]]["trackingEnabled"] is True
+    assert result["progressFolder"]["displayName"] == root_progress["displayName"]
+    assert result["progressFolder"]["folderPath"] == root_old
+    assert os.path.isdir(root_old) and os.path.isdir(child_old), "semantic updates must never rename physical directories"
     workspace_db._check_integrity(db, force=True)
     db.close()
 

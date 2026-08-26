@@ -51,7 +51,7 @@ VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
 PROGRESS_PURPOSE_CONSTRAINT_REVISION = "1"
 TRANSCODE_GRAPH_SCHEMA_REVISION = "1"
 LEGACY_PROGRESS_PARENT_REPAIR_REVISION = "1"
-TARGET_SCHEMA_VERSION = 32
+TARGET_SCHEMA_VERSION = 33
 MEDIA_INCREMENTAL_BATCH_SIZE = 64
 MEDIA_INCREMENTAL_COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 PROGRESS_NODE_ROLES = ("original", "progress", "selection", "artifact", "workflow", "broll")
@@ -1715,6 +1715,47 @@ def _migration_32(db):
     return False
 
 
+def _migration_33(db):
+    """Journal crash-recoverable local progress-folder relocations."""
+    migrated = False
+    for schema in (row[1] for row in db.execute("PRAGMA database_list").fetchall()):
+        tables = {row[0] for row in db.execute(f"SELECT name FROM {schema}.sqlite_master WHERE type='table'").fetchall()}
+        if "progress_folders" not in tables:
+            continue
+        indexes = {row[0] for row in db.execute(f"SELECT name FROM {schema}.sqlite_master WHERE type='index'").fetchall()}
+        migrated = migrated or "progress_folder_relocations" not in tables or not {
+            "progress_folder_relocations_pending", "progress_folder_relocations_progress_pending",
+        }.issubset(indexes)
+        db.executescript(
+            f"""
+            CREATE TABLE IF NOT EXISTS {schema}.progress_folder_relocations(
+              id TEXT PRIMARY KEY,
+              project_id TEXT NOT NULL,
+              progress_id TEXT NOT NULL,
+              folder_id TEXT NOT NULL,
+              old_path TEXT NOT NULL,
+              old_path_key TEXT NOT NULL,
+              new_path TEXT NOT NULL,
+              new_path_key TEXT NOT NULL,
+              temporary_path TEXT NOT NULL,
+              old_relative_path TEXT NOT NULL,
+              new_relative_path TEXT NOT NULL,
+              state TEXT NOT NULL CHECK(state IN ('prepared','filesystem_moved','database_relocated','completed')),
+              error TEXT NOT NULL DEFAULT '',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              completed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS {schema}.progress_folder_relocations_pending
+              ON progress_folder_relocations(state,updated_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS {schema}.progress_folder_relocations_progress_pending
+              ON progress_folder_relocations(progress_id)
+              WHERE state!='completed';
+            """
+        )
+    return migrated
+
+
 def _ensure_transcode_graph_schema(db):
     """Upgrade graph CHECK constraints without preserving retired video-preview slots."""
     changed = False
@@ -1838,6 +1879,7 @@ MIGRATIONS = {
     30: _migration_30,
     31: _migration_31,
     32: _migration_32,
+    33: _migration_33,
 }
 
 
@@ -1976,6 +2018,7 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
         purpose_constraints_migrated = False
         transcode_graph_migrated = False
         legacy_parent_revision_recorded = False
+        relocation_migrated = False
         try:
             run_compatibility_hooks("prepare_connection", db, database, False)
             if requested_domains:
@@ -1983,6 +2026,7 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
                 domain_migrated = _migration_28(db)
                 _migration_30(db)
                 _migration_32(db)
+                relocation_migrated = _migration_33(db)
             if include_compatibility:
                 run_compatibility_hooks("prepare_connection", db, database, True)
             # The catalog connection can record the global revision before the
@@ -2002,7 +2046,7 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
         except Exception:
             db.close()
             raise
-        if domain_migrated or purpose_constraints_migrated or transcode_graph_migrated or legacy_parent_revision_recorded:
+        if domain_migrated or purpose_constraints_migrated or transcode_graph_migrated or legacy_parent_revision_recorded or relocation_migrated:
             db.commit()
             if _can_run_full_integrity_check(db):
                 _check_integrity(db, force=True)
@@ -2237,6 +2281,7 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
             _migration_29(db)
             _migration_30(db)
             _migration_32(db)
+            _migration_33(db)
             _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
     else:
         for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
@@ -2279,6 +2324,7 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
             _migration_28(db)
             _migration_30(db)
             _migration_32(db)
+            _migration_33(db)
         if include_compatibility:
             run_compatibility_hooks("prepare_connection", db, database, True)
     except Exception:
@@ -3570,7 +3616,7 @@ def serialize_progress(row):
         "id": row["id"], "projectId": row["project_id"], "mediaKind": row["media_kind"],
         "versionKey": row["version_key"], "parentProgressId": row["parent_progress_id"],
         "parentVersionKey": row["parent_version_key"], "displayName": row["display_name"],
-        "folderPath": row["folder_path"], "folderMissing": folder_missing,
+        "folderPath": row["folder_path"], "folderId": row["folder_id"] if "folder_id" in row.keys() else None, "folderMissing": folder_missing,
         "externalLinkRelativePath": row["external_link_relative_path"] if "external_link_relative_path" in row.keys() else None,
         "missingSince": missing_since if folder_missing else None,
         "nodeRole": row["node_role"] if "node_role" in row.keys() else "progress",
@@ -5463,6 +5509,375 @@ def _progress_tree_mutation_key(project_id: str) -> str:
     return f"progress_tree_mutation:{project_id}"
 
 
+PROGRESS_RELOCATION_RESERVED_NAMES = frozenset({
+    "raw", "jpg", "mov", "mov_转码", "图片选片", "视频选片", "策划", "团片协作",
+})
+WINDOWS_DEVICE_NAME = re.compile(r"^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$", re.IGNORECASE)
+PROGRESS_RELOCATION_ACTIVE_STATES = ("pending_compare", "pending_confirm", "committing", "needs_repair")
+
+
+def _validate_progress_folder_name(value) -> str:
+    name = str(value or "")
+    if name != name.strip() or not name or len(name) > 255 or name in (".", ".."):
+        raise ValueError("progress_folder_name_invalid: 目录名称无效")
+    if any(ord(character) < 32 for character in name) or any(character in '<>:"/\\|?*' for character in name):
+        raise ValueError("progress_folder_name_invalid: 目录名称包含 Windows 非法字符")
+    if name.endswith((".", " ")) or WINDOWS_DEVICE_NAME.fullmatch(name):
+        raise ValueError("progress_folder_name_invalid: 目录名称在 Windows 上不可用")
+    folded = name.casefold()
+    if folded.startswith(".photoflow-") or folded in PROGRESS_RELOCATION_RESERVED_NAMES:
+        raise ValueError("progress_folder_name_reserved: 该名称保留给固定工作流使用")
+    return name
+
+
+def _replace_path_prefix(value, old_path: str, new_path: str):
+    if value is None:
+        return None
+    text = str(value)
+    old = canonical_path(old_path)
+    new = canonical_path(new_path)
+    text_key = canonical_path(text).casefold()
+    old_key = old.casefold()
+    if text_key == old_key:
+        return new
+    for separator in (os.sep, "/", "\\"):
+        prefix = old_key.rstrip("/\\") + separator
+        normalized_text = text.replace("/", os.sep).replace("\\", os.sep)
+        normalized_prefix = old.rstrip("/\\") + os.sep
+        if normalized_text.casefold().startswith(normalized_prefix.casefold()):
+            suffix = normalized_text[len(normalized_prefix):]
+            return os.path.join(new, suffix)
+        if text.casefold().startswith(prefix):
+            return new.rstrip("/\\") + text[len(old):]
+    return text
+
+
+def _replace_relative_prefix(value, old_relative: str, new_relative: str):
+    text = str(value or "").replace("\\", "/")
+    old = old_relative.replace("\\", "/").strip("/")
+    new = new_relative.replace("\\", "/").strip("/")
+    if text.casefold() == old.casefold():
+        return new
+    prefix = old.rstrip("/") + "/"
+    if text.casefold().startswith(prefix.casefold()):
+        return new.rstrip("/") + "/" + text[len(prefix):]
+    return text
+
+
+def _path_is_at_or_below(value, root_path: str) -> bool:
+    candidate = canonical_path(value)
+    root = canonical_path(root_path)
+    return candidate.casefold() == root.casefold() or candidate.casefold().startswith(root.rstrip("/\\").casefold() + os.sep.casefold())
+
+
+def _relocate_progress_database_paths(db, operation):
+    old_path = operation["old_path"]
+    new_path = operation["new_path"]
+    old_relative = operation["old_relative_path"]
+    new_relative = operation["new_relative_path"]
+    project_id = operation["project_id"]
+    progress_id = operation["progress_id"]
+    timestamp = int(time.time() * 1000)
+
+    progress_rows_to_update = db.execute(
+        "SELECT id,folder_path FROM progress_folders WHERE project_id=?", (project_id,),
+    ).fetchall()
+    for row in progress_rows_to_update:
+        relocated = _replace_path_prefix(row["folder_path"], old_path, new_path)
+        if relocated == row["folder_path"] and not _path_is_at_or_below(row["folder_path"], new_path):
+            continue
+        db.execute(
+            """UPDATE progress_folders SET folder_path=?,folder_path_key=?,folder_id=?,
+               display_name=CASE WHEN id=? THEN ? ELSE display_name END,updated_at=? WHERE id=?""",
+            (relocated, relocated.casefold(), directory_identity(relocated), progress_id,
+             os.path.basename(new_path), timestamp, row["id"]),
+        )
+
+    for slot in db.execute(
+        "SELECT progress_id,relative_path_key FROM media_import_artifact_slots WHERE project_id=?", (project_id,),
+    ).fetchall():
+        relocated = _replace_relative_prefix(slot["relative_path_key"], old_relative, new_relative).casefold()
+        if relocated != slot["relative_path_key"]:
+            db.execute(
+                "UPDATE media_import_artifact_slots SET relative_path_key=?,updated_at=? WHERE project_id=? AND progress_id=?",
+                (relocated, timestamp, project_id, slot["progress_id"]),
+            )
+
+    batches = db.execute(
+        "SELECT id,source_folder_path,display_name FROM version_batches WHERE project_id=?", (project_id,),
+    ).fetchall()
+    affected_batch_ids = []
+    for batch in batches:
+        relocated = _replace_path_prefix(batch["source_folder_path"], old_path, new_path)
+        if relocated != batch["source_folder_path"] or _path_is_at_or_below(batch["source_folder_path"], new_path):
+            affected_batch_ids.append(batch["id"])
+        else:
+            continue
+        db.execute(
+            """UPDATE version_batches SET source_folder_path=?,source_folder_path_key=?,source_folder_id=?,
+               display_name=CASE WHEN ? THEN ? ELSE display_name END,updated_at=? WHERE id=?""",
+            (relocated, relocated.casefold(), directory_identity(relocated), int(relocated.casefold() == new_path.casefold()),
+             os.path.basename(new_path), timestamp, batch["id"]),
+        )
+
+    if affected_batch_ids:
+        placeholders = ",".join("?" for _ in affected_batch_ids)
+        for item in db.execute(
+            f"SELECT id,source_path FROM batch_items WHERE batch_id IN ({placeholders})", tuple(affected_batch_ids),
+        ).fetchall():
+            relocated = _replace_path_prefix(item["source_path"], old_path, new_path)
+            if relocated != item["source_path"]:
+                db.execute(
+                    "UPDATE batch_items SET source_path=?,source_path_key=?,updated_at=? WHERE id=?",
+                    (relocated, relocated.casefold(), timestamp, item["id"]),
+                )
+        for operation_row in db.execute(
+            f"SELECT id,source_path,target_path FROM batch_file_operations WHERE batch_id IN ({placeholders})",
+            tuple(affected_batch_ids),
+        ).fetchall():
+            source = _replace_path_prefix(operation_row["source_path"], old_path, new_path)
+            target = _replace_path_prefix(operation_row["target_path"], old_path, new_path)
+            if source != operation_row["source_path"] or target != operation_row["target_path"]:
+                db.execute(
+                    "UPDATE batch_file_operations SET source_path=?,target_path=?,updated_at=? WHERE id=?",
+                    (source, target, timestamp, operation_row["id"]),
+                )
+
+    photos = db.execute("SELECT id,original_file_path FROM photos WHERE project_id=?", (project_id,)).fetchall()
+    photo_ids = [row["id"] for row in photos]
+    for photo in photos:
+        relocated = _replace_path_prefix(photo["original_file_path"], old_path, new_path)
+        if relocated != photo["original_file_path"]:
+            db.execute("UPDATE photos SET original_file_path=?,updated_at=? WHERE id=?", (relocated, timestamp, photo["id"]))
+    if photo_ids:
+        placeholders = ",".join("?" for _ in photo_ids)
+        versions = db.execute(
+            f"SELECT id,file_path FROM versions WHERE photo_id IN ({placeholders})", tuple(photo_ids),
+        ).fetchall()
+        version_ids = [version["id"] for version in versions]
+        for version in versions:
+            relocated = _replace_path_prefix(version["file_path"], old_path, new_path)
+            if relocated == version["file_path"]:
+                continue
+            db.execute(
+                "UPDATE versions SET file_path=?,file_path_key=?,updated_at=? WHERE id=?",
+                (relocated, relocated.casefold(), timestamp, version["id"]),
+            )
+        if version_ids:
+            placeholders = ",".join("?" for _ in version_ids)
+            for record in db.execute(
+                f"SELECT id,current_path FROM file_records WHERE owner_id IN ({placeholders})", tuple(version_ids),
+            ).fetchall():
+                relocated = _replace_path_prefix(record["current_path"], old_path, new_path)
+                if relocated != record["current_path"]:
+                    db.execute(
+                        "UPDATE file_records SET current_path=?,file_name=?,updated_at=? WHERE id=?",
+                        (relocated, os.path.basename(relocated), timestamp, record["id"]),
+                    )
+
+    # Incremental manifests are immutable and may embed paths in result JSON.
+    # Invalidate the project's snapshots atomically instead of partially rewriting them.
+    snapshot_ids = [row[0] for row in db.execute(
+        "SELECT snapshot_id FROM media_incremental_snapshots WHERE project_id=?", (project_id,),
+    ).fetchall()]
+    if snapshot_ids:
+        placeholders = ",".join("?" for _ in snapshot_ids)
+        parameters = tuple(snapshot_ids)
+        for table in (
+            "media_incremental_snapshot_files", "media_incremental_snapshot_scopes",
+            "media_incremental_snapshot_baseline", "media_incremental_snapshot_batches",
+        ):
+            db.execute(f"DELETE FROM {table} WHERE snapshot_id IN ({placeholders})", parameters)
+        db.execute(f"DELETE FROM media_incremental_snapshots WHERE snapshot_id IN ({placeholders})", parameters)
+
+
+def _progress_relocation_path_identity(path_value: str, expected_folder_id: str) -> bool:
+    return os.path.isdir(path_value) and directory_identity(path_value) == expected_folder_id
+
+
+def _advance_progress_folder_relocation(db, operation, fault_after=None):
+    relocation_id = operation["id"]
+    expected_id = operation["folder_id"]
+    old_path = operation["old_path"]
+    new_path = operation["new_path"]
+    temporary_path = operation["temporary_path"]
+    state = operation["state"]
+
+    def inject(stage):
+        if fault_after == stage:
+            raise RuntimeError(f"test_fault_after_{stage}")
+
+    if state == "prepared":
+        old_matches = _progress_relocation_path_identity(old_path, expected_id)
+        temporary_matches = _progress_relocation_path_identity(temporary_path, expected_id)
+        new_matches = _progress_relocation_path_identity(new_path, expected_id)
+        if new_matches and not old_matches and not temporary_matches:
+            pass
+        elif temporary_matches and not old_matches and not os.path.exists(new_path):
+            os.rename(temporary_path, new_path)
+        elif old_matches and not temporary_matches:
+            if os.path.exists(new_path) and canonical_path(new_path).casefold() != canonical_path(old_path).casefold():
+                raise ValueError("progress_folder_target_conflict: 目标目录已存在，恢复不会覆盖")
+            os.rename(old_path, temporary_path)
+            inject("temporary_moved")
+            if os.path.exists(new_path):
+                raise ValueError("progress_folder_target_conflict: 目标目录已存在，恢复不会覆盖")
+            os.rename(temporary_path, new_path)
+        else:
+            raise ValueError("progress_folder_identity_mismatch: 无法验证待恢复目录的 folderId")
+        if not _progress_relocation_path_identity(new_path, expected_id):
+            raise ValueError("progress_folder_identity_mismatch: 文件系统移动后 folderId 不匹配")
+        db.execute(
+            "UPDATE progress_folder_relocations SET state='filesystem_moved',error='',updated_at=? WHERE id=?",
+            (int(time.time() * 1000), relocation_id),
+        )
+        db.commit()
+        state = "filesystem_moved"
+        inject("filesystem_moved")
+
+    if state == "filesystem_moved":
+        if not _progress_relocation_path_identity(new_path, expected_id):
+            raise ValueError("progress_folder_identity_mismatch: 数据库重定位前 folderId 不匹配")
+        try:
+            _relocate_progress_database_paths(db, operation)
+            db.execute(
+                "UPDATE progress_folder_relocations SET state='database_relocated',error='',updated_at=? WHERE id=?",
+                (int(time.time() * 1000), relocation_id),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        state = "database_relocated"
+        inject("database_relocated")
+
+    if state == "database_relocated":
+        # Attached media/versioning stores can be in WAL mode, where a process
+        # crash may expose a partially published cross-database commit. Reapply
+        # the prefix rewrite idempotently before declaring the journal complete.
+        try:
+            _relocate_progress_database_paths(db, operation)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        row = db.execute("SELECT folder_path,folder_id FROM progress_folders WHERE id=?", (operation["progress_id"],)).fetchone()
+        if row is None or row["folder_path"].casefold() != new_path.casefold() or row["folder_id"] != expected_id:
+            raise ValueError("progress_folder_database_relocation_invalid: 数据库路径尚未正确重定位")
+        timestamp = int(time.time() * 1000)
+        db.execute(
+            """UPDATE progress_folder_relocations SET state='completed',error='',updated_at=?,completed_at=?
+               WHERE id=?""",
+            (timestamp, timestamp, relocation_id),
+        )
+        lease = _progress_tree_mutation_lease(db, operation["project_id"])
+        if lease is not None and int(lease.get("createdAt") or 0) <= int(operation["created_at"]):
+            db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(operation["project_id"]),))
+        db.commit()
+        inject("completed")
+    return db.execute("SELECT * FROM progress_folder_relocations WHERE id=?", (relocation_id,)).fetchone()
+
+
+def recover_progress_folder_relocations(root: str, db, fault_after=None):
+    del root
+    try:
+        pending = db.execute(
+            "SELECT * FROM progress_folder_relocations WHERE state!='completed' ORDER BY created_at,id"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {"success": True, "recovered": 0, "pending": 0}
+    recovered = 0
+    for operation in pending:
+        try:
+            completed = _advance_progress_folder_relocation(db, operation, fault_after=fault_after)
+            recovered += int(completed["state"] == "completed")
+        except Exception as error:
+            db.execute(
+                "UPDATE progress_folder_relocations SET error=?,updated_at=? WHERE id=?",
+                (str(error)[:2000], int(time.time() * 1000), operation["id"]),
+            )
+            db.commit()
+            raise
+    remaining = db.execute("SELECT COUNT(*) FROM progress_folder_relocations WHERE state!='completed'").fetchone()[0]
+    return {"success": True, "recovered": recovered, "pending": remaining}
+
+
+def progress_folder_rename(root: str, db, payload: dict, fault_after=None):
+    recover_progress_folder_relocations(root, db)
+    project = project_row(db, payload["projectName"])
+    mutation_token = str(payload.get("mutationToken") or "")
+    lease = _progress_tree_mutation_lease(db, project["id"])
+    if not mutation_token or lease is None or lease.get("token") != mutation_token:
+        raise ValueError("progress_tree_mutation_expired: 版本树变更令牌已失效")
+    progress_id = str(payload.get("progressId") or "")
+    progress = db.execute(
+        "SELECT * FROM progress_folders WHERE id=? AND project_id=?", (progress_id, project["id"]),
+    ).fetchone()
+    if progress is None or progress["node_role"] != "progress":
+        raise ValueError("progress_folder_rename_role_invalid: 只能重命名已登记的 progress 目录")
+    if progress["external_link_relative_path"]:
+        raise ValueError("external_progress_rename_unsupported: 第一版不支持重命名外链版本")
+    if progress["missing_since"] is not None or progress["tracking_state"] in PROGRESS_RELOCATION_ACTIVE_STATES:
+        raise ValueError("progress_folder_busy: 进度正在活动或待修复，不能重命名")
+    active = db.execute(
+        """SELECT 1 FROM tracking_sessions WHERE (progress_id=? OR parent_progress_id=?)
+           AND status IN ('comparing','pending_confirm','committing','failed') LIMIT 1""",
+        (progress_id, progress_id),
+    ).fetchone()
+    if active is not None:
+        raise ValueError("progress_folder_busy: 进度存在活动或待修复的跟踪会话")
+    expected_folder_id = str(payload.get("expectedFolderId") or "")
+    expected_relative = str(payload.get("expectedRelativePath") or "").replace("\\", "/").strip("/")
+    if not expected_folder_id or progress["folder_id"] != expected_folder_id:
+        raise ValueError("progress_folder_identity_mismatch: folderId 已变化，请刷新后重试")
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    old_path = canonical_path(progress["folder_path"])
+    old_relative = os.path.relpath(old_path, project_path).replace("\\", "/")
+    if expected_relative != old_relative or not is_project_descendant(old_path, project_path):
+        raise ValueError("progress_folder_path_mismatch: 当前目录路径已变化，请刷新后重试")
+    if not _progress_relocation_path_identity(old_path, expected_folder_id):
+        raise ValueError("progress_folder_identity_mismatch: 当前目录 folderId 与数据库不一致")
+    new_name = _validate_progress_folder_name(payload.get("newName"))
+    new_path = canonical_path(os.path.join(os.path.dirname(old_path), new_name))
+    if os.path.dirname(new_path).casefold() != os.path.dirname(old_path).casefold() or not is_project_descendant(new_path, project_path):
+        raise ValueError("progress_folder_name_invalid: 目标目录无效")
+    new_relative = os.path.relpath(new_path, project_path).replace("\\", "/")
+    if new_path == old_path:
+        db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(project["id"]),))
+        db.commit()
+        return {"success": True, "progressId": progress_id, "oldRelativePath": old_relative,
+                "newRelativePath": new_relative, "unchanged": True}
+    if new_path.casefold() != old_path.casefold() and os.path.exists(new_path):
+        raise ValueError("progress_folder_target_conflict: 目标目录已存在")
+    registered = db.execute(
+        "SELECT id FROM progress_folders WHERE project_id=? AND folder_path_key=? AND id<>?",
+        (project["id"], new_path.casefold(), progress_id),
+    ).fetchone()
+    if registered is not None:
+        raise ValueError("progress_folder_target_conflict: 目标路径已被其他版本节点登记")
+    operation_id = str(uuid.uuid4())
+    temporary_path = os.path.join(os.path.dirname(old_path), f".photoflow-progress-relocate-{operation_id}")
+    timestamp = int(time.time() * 1000)
+    db.execute(
+        """INSERT INTO progress_folder_relocations(
+             id,project_id,progress_id,folder_id,old_path,old_path_key,new_path,new_path_key,
+             temporary_path,old_relative_path,new_relative_path,state,error,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (operation_id, project["id"], progress_id, expected_folder_id, old_path, old_path.casefold(),
+         new_path, new_path.casefold(), temporary_path, old_relative, new_relative, "prepared", "", timestamp, timestamp),
+    )
+    db.commit()
+    operation = db.execute("SELECT * FROM progress_folder_relocations WHERE id=?", (operation_id,)).fetchone()
+    completed = _advance_progress_folder_relocation(db, operation, fault_after=fault_after)
+    db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(project["id"]),))
+    db.commit()
+    return {
+        "success": True, "operationId": operation_id, "state": completed["state"],
+        "progressId": progress_id, "oldRelativePath": old_relative, "newRelativePath": new_relative,
+        "progressFolder": serialize_progress(_progress_row_by_id(db, progress_id)),
+    }
+
+
 def _progress_tree_mutation_lease(db, project_id: str):
     raw = _meta_value(db, _progress_tree_mutation_key(project_id))
     if not raw:
@@ -5516,12 +5931,12 @@ def progress_update_tree_finish(db, payload: dict):
 
 
 def progress_update_tree(root: str, db, payload: dict):
+    del root
     project = project_row(db, payload["projectName"])
     updates = payload.get("updates")
     primary_id = str(payload.get("primaryProgressId") or "")
-    replacement_id = str(payload.get("replacementProgressId") or "")
     mutation_token = str(payload.get("mutationToken") or "")
-    if not primary_id or not isinstance(updates, list) or not updates:
+    if not primary_id or not isinstance(updates, list) or len(updates) != 1:
         raise ValueError("没有可更新的进度关系")
 
     lease = _progress_tree_mutation_lease(db, project["id"])
@@ -5538,132 +5953,60 @@ def progress_update_tree(root: str, db, payload: dict):
         raise ValueError("node_busy: 项目中存在正在比较、确认或提交的版本，暂时不能修改版本树")
 
     rows = {row["id"]: row for row in progress_rows(db, project["id"])}
-    update_ids = {str(update.get("id") or "") for update in updates}
-    if "" in update_ids or len(update_ids) != len(updates) or primary_id not in update_ids:
+    update = updates[0]
+    progress_id = str(update.get("id") or "")
+    if not progress_id or progress_id != primary_id:
         raise ValueError("进度更新列表无效")
-    if any(progress_id not in rows for progress_id in update_ids):
+    row = rows.get(progress_id)
+    if row is None or row["node_role"] != "progress":
         raise ValueError("要修改的进度不存在")
-    children_by_parent = {}
-    for row in rows.values():
-        parent_id = row["parent_progress_id"]
-        if parent_id and row["relation_kind"] == "main" and row["node_role"] == "progress":
-            children_by_parent.setdefault(parent_id, []).append(row["id"])
-    expected_ids = set()
-
-    def collect_subtree(progress_id):
-        expected_ids.add(progress_id)
-        for child_id in children_by_parent.get(progress_id, []):
-            collect_subtree(child_id)
-
-    collect_subtree(replacement_id or primary_id)
-    if replacement_id:
-        replacement = rows.get(replacement_id)
-        replacement_target = rows.get(primary_id)
-        if replacement is None or replacement_target is None or replacement_id == primary_id:
-            raise ValueError("失效进度替换目标无效")
-        if replacement["media_kind"] != replacement_target["media_kind"]:
-            raise ValueError("失效进度替换时不能改变图片或视频类型")
-        if os.path.isdir(replacement["folder_path"]):
-            raise ValueError("被替换进度的原文件夹仍然存在")
-        expected_ids.discard(replacement_id)
-        expected_ids.add(primary_id)
-    if update_ids != expected_ids:
-        raise ValueError("必须一次性更新当前进度及其全部后代")
-
-    normalized = []
-    target_versions = set()
-    target_names = set()
-    target_paths = set()
-    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
-    for update in updates:
-        progress_id = str(update["id"])
-        row = rows[progress_id]
-        if row["node_role"] != "progress":
-            raise ValueError("修改版本树只接受 progress 节点")
-        media_kind = str(update.get("mediaKind") or row["media_kind"])
-        if media_kind != row["media_kind"]:
-            raise ValueError("修改进度时不能改变图片或视频类型")
-        version_key = str(update.get("versionKey") or "")
-        if not version_key or len(version_key) > 128 or any(ord(character) < 32 for character in version_key):
-            raise ValueError("无效的版本编号")
-        display_name = str(update.get("displayName") or "").strip()
-        if not display_name:
-            raise ValueError("进度名称不能为空")
-        folder_path = canonical_path(update.get("folderPath") or "")
-        external_link_relative_path = row["external_link_relative_path"]
-        if external_link_relative_path and folder_path.casefold() != row["folder_path_key"]:
-            raise ValueError("external_progress_path_immutable: 外链版本只能通过“移动外链到项目内”改变物理位置")
-        is_unchanged_external = bool(external_link_relative_path) and folder_path.casefold() == row["folder_path_key"]
-        if (not is_unchanged_external and not is_project_descendant(folder_path, project_path)) or not os.path.isdir(folder_path):
-            raise ValueError("版本进度必须是项目内的文件夹")
-        parent_id = update.get("parentProgressId") or None
-        if not parent_id:
-            raise ValueError("progress_parent_required: 版本进度必须保留有效父节点")
-        parent = rows.get(parent_id)
-        if parent is None or parent["missing_since"] is not None or parent["media_kind"] != media_kind or not _is_valid_structural_parent(parent):
-            raise ValueError("父版本进度不存在")
-
-        version_identity = (media_kind, version_key.casefold())
-        name_identity = display_name.casefold()
-        path_identity = folder_path.casefold()
-        if version_identity in target_versions:
-            raise ValueError(f"版本 _{version_key} 重复")
-        if name_identity in target_names:
-            raise ValueError(f"进度名称重复：{display_name}")
-        if path_identity in target_paths:
-            raise ValueError(f"进度文件夹重复：{display_name}")
-        target_versions.add(version_identity)
-        target_names.add(name_identity)
-        target_paths.add(path_identity)
-        if update.get("trackingState"):
-            tracking_state = str(update["trackingState"])
-        elif "trackingEnabled" in update:
-            tracking_state = "ready" if bool(update["trackingEnabled"]) else "disabled"
-        else:
-            tracking_state = str(row["tracking_state"] or ("ready" if row["tracking_enabled"] else "disabled"))
-        if tracking_state not in PROGRESS_TRACKING_STATES:
-            raise ValueError("无效的版本跟踪状态")
-        tracking_enabled = int(update.get("trackingEnabled", row["tracking_enabled"]))
-        if tracking_state == "disabled":
-            tracking_enabled = 0
-        normalized.append((progress_id, media_kind, version_key, parent_id, display_name, folder_path, external_link_relative_path, tracking_enabled, tracking_state))
-
-    for row in rows.values():
-        if row["id"] in update_ids:
-            continue
-        if (row["media_kind"], row["version_key"].casefold()) in target_versions:
-            raise ValueError(f"版本 _{row['version_key']} 已存在")
-        if row["display_name"].casefold() in target_names:
-            raise ValueError(f"进度名称已存在：{row['display_name']}")
-        if row["folder_path_key"] in target_paths:
-            raise ValueError(f"进度文件夹已登记：{row['display_name']}")
+    media_kind = str(update.get("mediaKind") or row["media_kind"])
+    if media_kind != row["media_kind"]:
+        raise ValueError("修改进度时不能改变图片或视频类型")
+    version_key = str(update.get("versionKey") or "").strip()
+    if not re.fullmatch(r"\d+(?:_\d+)*", version_key) or len(version_key) > 128:
+        raise ValueError("无效的版本编号")
+    duplicate = db.execute(
+        "SELECT 1 FROM progress_folders WHERE project_id=? AND media_kind=? AND version_key=? COLLATE NOCASE AND id<>?",
+        (project["id"], media_kind, version_key, progress_id),
+    ).fetchone()
+    if duplicate is not None:
+        raise ValueError(f"版本 _{version_key} 已存在")
+    parent_id = str(update.get("parentProgressId") or "")
+    parent = rows.get(parent_id)
+    if not parent_id:
+        raise ValueError("progress_parent_required: 版本进度必须保留有效父节点")
+    if parent is None or parent["missing_since"] is not None or parent["media_kind"] != media_kind or not _is_valid_structural_parent(parent):
+        raise ValueError("父版本进度不存在")
+    cursor = parent
+    visited = set()
+    while cursor is not None:
+        if cursor["id"] == progress_id:
+            raise ValueError("progress_cycle: 进度不能移动到自己的后代版本下")
+        if cursor["id"] in visited:
+            raise ValueError("progress_cycle: 版本树存在循环")
+        visited.add(cursor["id"])
+        cursor = rows.get(cursor["parent_progress_id"]) if cursor["parent_progress_id"] else None
+    tracking_enabled = int(bool(update.get("trackingEnabled", row["tracking_enabled"])))
+    rename_from_parent = int(bool(update.get("renameFromParent", row["rename_from_parent"])))
+    copy_missing_from_parent = int(bool(update.get("copyMissingFromParent", row["copy_missing_from_parent"])))
+    tracking_state = str(update.get("trackingState") or row["tracking_state"] or ("ready" if tracking_enabled else "disabled"))
+    if tracking_state not in PROGRESS_TRACKING_STATES:
+        raise ValueError("无效的版本跟踪状态")
+    if not tracking_enabled:
+        tracking_state = "disabled"
+        if rename_from_parent or copy_missing_from_parent:
+            raise ValueError("未开启跟踪时不能保存沿用文件名或补齐策略")
 
     timestamp = int(time.time() * 1000)
     try:
-        # Unique(project, kind, version) requires temporary values so swaps and
-        # prefix remaps can be committed as one transaction.
-        for index, (progress_id, _media_kind, _version_key, _parent_id, _display_name, _folder_path, _external_link_relative_path, _tracking_enabled, _tracking_state) in enumerate(normalized):
-            db.execute(
-                "UPDATE progress_folders SET version_key=?,updated_at=? WHERE id=?",
-                (f"__progress_update_{index}_{uuid.uuid4().hex}", timestamp, progress_id),
-            )
-        for progress_id, media_kind, version_key, parent_id, display_name, folder_path, external_link_relative_path, tracking_enabled, tracking_state in normalized:
-            db.execute(
-                """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,
-                   relation_kind=CASE WHEN ? IS NULL THEN NULL ELSE 'main' END,display_name=?,
-                   folder_path=?,folder_path_key=?,folder_id=?,external_link_relative_path=?,tracking_enabled=?,tracking_state=?,missing_since=NULL,updated_at=? WHERE id=?""",
-                (media_kind, version_key, parent_id, parent_id, display_name, folder_path, folder_path.casefold(),
-                 directory_identity(folder_path), external_link_relative_path, tracking_enabled, tracking_state, timestamp, progress_id),
-            )
-        if replacement_id:
-            # The physical directory identity moved to the recovered progress.
-            # Clear it from the now-missing former progress so a later location
-            # sync cannot bind both database rows to the same folder.
-            db.execute(
-                """UPDATE progress_folders SET folder_id=NULL,missing_since=COALESCE(missing_since,?),updated_at=?
-                   WHERE id=?""",
-                (timestamp, timestamp, replacement_id),
-            )
+        db.execute(
+            """UPDATE progress_folders SET version_key=?,parent_progress_id=?,relation_kind='main',
+               tracking_enabled=?,tracking_state=?,rename_from_parent=?,copy_missing_from_parent=?,updated_at=?
+               WHERE id=?""",
+            (version_key, parent_id, tracking_enabled, tracking_state, rename_from_parent,
+             copy_missing_from_parent, timestamp, progress_id),
+        )
         if mutation_token:
             db.execute(
                 "DELETE FROM meta WHERE key=?",
@@ -8948,6 +9291,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
         db.close()
         return result
     elif action == "progress_list":
+        recover_progress_folder_relocations(root, db)
         result = progress_list(root, db, payload)
         db.close()
         return result
@@ -8973,6 +9317,10 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "progress_update_tree_finish":
         result = progress_update_tree_finish(db, payload)
+        db.close()
+        return result
+    elif action == "progress_folder_rename":
+        result = progress_folder_rename(root, db, payload)
         db.close()
         return result
     elif action == "progress_relation_update":

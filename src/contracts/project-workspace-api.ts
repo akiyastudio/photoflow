@@ -16,7 +16,7 @@ export type ProjectWorkspaceApiKey =
   | 'listRecentProjectFiles' | 'moveWorkspaceProject' | 'onBackgroundTaskChanged' | 'onProjectFileDragEnd'
   | 'onProjectFileOperationProgress' | 'onThumbnailStateChanged' | 'onWorkspaceFilesChanged' | 'openMediaVersion'
   | 'openProjectEntriesInPhotoshop' | 'openProjectEntry' | 'openWorkspaceProject' | 'preflightManualSelection' | 'materializeProjectExternalLinks'
-  | 'projectFileOperation' | 'registerProgressFolder' | 'registerProgressWithGraph' | 'relinkProjectExternalFolder'
+  | 'projectFileOperation' | 'registerProgressFolder' | 'registerProgressWithGraph' | 'relinkProjectExternalFolder' | 'renameProgressFolder'
   | 'registerVersionBaseline' | 'replaceVersionGraphEdgeSource' | 'resolveProjectShortcut'
   | 'retryVersionBatchOperations' | 'searchProjectFiles' | 'setMediaRating' | 'setWindowFullscreen'
   | 'startProgressTracking' | 'startProjectFileDrag' | 'trackTelemetry' | 'trashWorkspaceProject'

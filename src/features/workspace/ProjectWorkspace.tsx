@@ -111,7 +111,6 @@ const normalizeProjectRelativePath = (value: string) => value.replace(/\\/g, '/'
 const projectRelativeParentPath = (value: string) => normalizeProjectRelativePath(value).split('/').slice(0, -1).join('/');
 const INSPIRATION_DISABLED_IMPORT_KINDS: readonly ImportMaterialKind[] = ['original', 'progress', 'broll'];
 const PROTECTED_PROJECT_FOLDER_NAMES = new Set(['raw', 'jpg', 'mov', 'mov_转码', '策划']);
-const PROGRESS_FOLDER_NAME_PATTERN = /^(?:图片后期|视频后期)_\d+(?:_\d+)*(?:_.+)?$/u;
 const progressNodeMediaKind = (folder: Pick<ProgressFolder, 'mediaKind'>): 'image' | 'video' | null => folder.mediaKind === 'image' || folder.mediaKind === 'video' ? folder.mediaKind : null;
 type ProgressSetupDraft = {
   mode: 'create' | 'import' | 'mark';
@@ -3004,13 +3003,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!draft || progressSubmittingRef.current) return;
     if (!progressVersionIsValid(draft)) { onNotice('版本号格式或分支层级无效，请检查后重试。'); return; }
     if (progressVersionHasConflict(draft)) { onNotice(`版本 V${draft.versionKey} 已存在，请使用其他版本号。`); return; }
-    if (progressNameHasConflict(draft)) { onNotice('生成的版本文件夹名称已存在，请修改版本号或名称。'); return; }
     const appendTarget = progressAppendTarget(draft);
     if (appendTarget?.trackingState === 'needs_repair' || appendTarget?.trackingState === 'committing') {
       onNotice(appendTarget.trackingState === 'needs_repair' ? '请先修复当前版本批次，再追加文件。' : '当前版本批次仍在提交，请稍后再追加。');
       return;
     }
-    const generatedName = resolvedProgressFolderName(draft);
     const trackingEnabled = appendTarget ? appendTarget.trackingState !== 'disabled' : normalizeProgressSetupTrackingPolicy(draft.relationKind, draft).trackingEnabled;
     const parentFolder = appendTarget
       ? progressFolders.find(folder => folder.id === appendTarget.parentProgressId && !folder.folderMissing)
@@ -3019,6 +3016,58 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     progressSubmittingRef.current = true;
     setProgressSubmitting(true);
     try {
+      if (draft.mode === 'mark' && draft.existingProgressId) {
+        const existingProgress = progressFolders.find(folder => folder.id === draft.existingProgressId);
+        if (!existingProgress) throw new Error('没有找到要修改的版本节点');
+        const relativePath = progressFolderRelativePath(existingProgress);
+        const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
+        const policyChanged = existingProgress.trackingEnabled !== policy.trackingEnabled
+          || existingProgress.renameFromParent !== policy.renameFromParent
+          || existingProgress.copyMissingFromParent !== policy.copyMissingFromParent
+          || existingProgress.parentProgressId !== (draft.parentProgressId || undefined)
+          || (existingProgress.relationKind || 'main') !== draft.relationKind;
+        const updated = await projectWorkspaceClient.updateProgressFolder(workspacePath, project.status, project.name, {
+          progressId: existingProgress.id,
+          versionKey: draft.versionKey,
+          parentProgressId: draft.parentProgressId || undefined,
+          trackingEnabled: policy.trackingEnabled,
+          trackingState: policy.trackingEnabled && policyChanged ? 'pending_compare' : policy.trackingEnabled ? existingProgress.trackingState : 'disabled',
+          renameFromParent: policy.renameFromParent,
+          copyMissingFromParent: policy.copyMissingFromParent,
+        });
+        if (!updated.success || !updated.progressFolder) throw new Error(updated.error || '无法更新版本信息或跟踪策略');
+        setProgressSetup(null);
+        if (versionProgressId === existingProgress.id) {
+          versionProgressLocationRef.current = {
+            progressId: updated.progressFolder.id,
+            folderPath: updated.progressFolder.folderPath,
+            relativePath: progressFolderRelativePath(updated.progressFolder),
+          };
+          setVersionProgressId(updated.progressFolder.id);
+        }
+        progressFoldersRef.current = progressFoldersRef.current.map(folder => folder.id === updated.progressFolder!.id ? updated.progressFolder! : folder);
+        setProgressFolders(current => current.map(folder => folder.id === updated.progressFolder!.id ? updated.progressFolder! : folder));
+        setSelectedPaths([relativePath]);
+        if (policy.trackingEnabled && draft.relationKind === 'main' && draft.parentProgressId && policyChanged) {
+          const started = await projectWorkspaceClient.startProgressTracking(workspacePath, project.name, { progressId: updated.progressFolder.id, mode: existingProgress.trackingEnabled ? 'refresh' : 'compare' });
+          if (!started.success || !started.sessionId) {
+            await loadProgressFolders();
+            onNotice(`进度修改已保存，但跟踪启动失败：${started.error || '可从“继续版本跟踪”重试'}`, 8000);
+            return;
+          }
+          window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${updated.progressFolder.id}`, started.sessionId);
+          setTrackingConfirmationProgressId(updated.progressFolder.id);
+          if (started.sessionStatus === 'pending_confirm' || started.sessionStatus === 'committing' || started.sessionStatus === 'failed') setTrackingConfirmationSessionId(started.sessionId);
+          onNotice('修改已保存，正在后台比较版本。');
+        } else {
+          onNotice(`已修改进度“${updated.progressFolder.displayName}”。`);
+        }
+        void loadProgressFolders();
+        return;
+      }
+
+      if (progressNameHasConflict(draft)) { onNotice('生成的版本文件夹名称已存在，请修改版本号或名称。'); return; }
+      const generatedName = resolvedProgressFolderName(draft);
       if (draft.mode === 'create') {
         const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
         const registered = await registerProgressWithWorkflow({
@@ -3040,77 +3089,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         onNotice(`已创建${draft.mediaKind === 'image' ? '图片' : '视频'}进度“${generatedName}”（版本 V${draft.versionKey}）`);
         void loadProgressFolders();
         void refresh('');
-        return;
-      }
-
-      if (draft.mode === 'mark' && draft.existingProgressId) {
-        const existingProgress = progressFolders.find(folder => folder.id === draft.existingProgressId);
-        if (!existingProgress) throw new Error('没有找到要修改的版本节点');
-        let relativePath = progressFolderRelativePath(existingProgress);
-        if (draft.relationKind === 'main' && relativePath.includes('/')) setProgressTask('正在安全移动文件夹到项目根目录…');
-        const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
-        const policyChanged = existingProgress.trackingEnabled !== policy.trackingEnabled
-          || existingProgress.renameFromParent !== policy.renameFromParent
-          || existingProgress.copyMissingFromParent !== policy.copyMissingFromParent
-          || existingProgress.parentProgressId !== (draft.parentProgressId || undefined)
-          || (existingProgress.relationKind || 'main') !== draft.relationKind;
-        const renamed = await projectWorkspaceClient.updateProgressFolder(workspacePath, project.status, project.name, {
-          progressId: existingProgress.id,
-          mediaKind: draft.mediaKind,
-          versionKey: draft.versionKey,
-          parentProgressId: draft.parentProgressId || undefined,
-          displayName: generatedName,
-          trackingEnabled: policy.trackingEnabled,
-          trackingState: policy.trackingEnabled && policyChanged ? 'pending_compare' : policy.trackingEnabled ? existingProgress.trackingState : 'disabled',
-          preserveFolderPath: Boolean(existingProgress.externalLinkRelativePath),
-        });
-        if (!renamed.success || !renamed.progressFolder) throw new Error(renamed.error || '无法修改版本文件夹名称或分支');
-        relativePath = renamed.folder?.relativePath || progressFolderRelativePath(renamed.progressFolder) || relativePath;
-        const registered = await registerProgressWithWorkflow({
-          progressId: renamed.progressFolder.id,
-          relativePath,
-          mediaKind: draft.mediaKind,
-          versionKey: draft.versionKey,
-          parentProgressId: draft.parentProgressId || undefined,
-          displayName: generatedName,
-          ...policy,
-          trackingState: policy.trackingEnabled && policyChanged ? 'pending_compare' : policy.trackingEnabled ? renamed.progressFolder.trackingState : 'disabled',
-        }, draft.workflowInputProgressIds);
-        if (!registered.success || !registered.progressFolder) throw new Error(registered.error || '版本文件夹已修改，但无法保存版本跟踪策略');
-        setProgressSetup(null);
-        directoryEntriesCacheRef.current.clear();
-        if (versionProgressId === existingProgress.id) {
-          const previousLocation = versionProgressLocationRef.current;
-          const nextLocation = {
-            progressId: registered.progressFolder.id,
-            folderPath: registered.progressFolder.folderPath,
-            relativePath: progressFolderRelativePath(registered.progressFolder),
-          };
-          if (previousLocation) {
-            setVersionEntry(current => current ? remapEntryAfterProgressFolderMove(current, previousLocation, nextLocation) : current);
-          }
-          versionProgressLocationRef.current = nextLocation;
-          setVersionProgressId(registered.progressFolder.id);
-        }
-        progressFoldersRef.current = progressFoldersRef.current.map(folder => folder.id === registered.progressFolder!.id ? registered.progressFolder! : folder);
-        setProgressFolders(current => current.map(folder => folder.id === registered.progressFolder!.id ? registered.progressFolder! : folder));
-        setSelectedPaths([relativePath]);
-        if (policy.trackingEnabled && draft.relationKind === 'main' && draft.parentProgressId && policyChanged) {
-          const started = await projectWorkspaceClient.startProgressTracking(workspacePath, project.name, { progressId: registered.progressFolder.id, mode: existingProgress.trackingEnabled ? 'refresh' : 'compare' });
-          if (!started.success || !started.sessionId) {
-            await loadProgressFolders();
-            await refresh('');
-            onNotice(`进度修改已保存，但跟踪启动失败：${started.error || '可从“继续版本跟踪”重试'}`, 8000);
-            return;
-          }
-          window.localStorage.setItem(`photoflow:tracking-session:${workspacePath}:${project.name}:${registered.progressFolder.id}`, started.sessionId);
-          setTrackingConfirmationProgressId(registered.progressFolder.id);
-          if (started.sessionStatus === 'pending_confirm' || started.sessionStatus === 'committing' || started.sessionStatus === 'failed') setTrackingConfirmationSessionId(started.sessionId);
-          onNotice('修改已保存，正在后台比较版本。');
-        } else {
-          onNotice(`已修改进度“${registered.progressFolder.displayName}”。`);
-        }
-        void Promise.all([loadProgressFolders(), refresh('')]);
         return;
       }
 
@@ -3625,6 +3603,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const entry = fileEntries.find(candidate => candidate.relativePath === relativePath);
     if (!entry) return;
     if (isProtectedRenameEntry(entry)) { onNotice('该文件夹由工作流管理，请使用“修改进度”。'); return; }
+    const progressFolder = registeredProgressFolderForEntry(entry);
+    if (progressFolder?.nodeRole === 'progress' && (entry.externalLink || progressFolder.externalLinkRelativePath)) { onNotice('已登记的外链版本目录不能重命名；请先移动外链到项目内。'); return; }
     setSelectedPaths([relativePath]);
     setInlineRenamePath(relativePath);
     setInlineRenameValue(entry.name);
@@ -3646,12 +3626,22 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const nextName = inlineRenameValue.trim();
     if (!entry || !nextName || nextName === entry.name) { cancelInlineRename(); return; }
     if (isProtectedRenameEntry(entry)) { cancelInlineRename(); onNotice('该文件夹由项目工作流管理，不能普通重命名。'); return; }
+    const progressFolder = registeredProgressFolderForEntry(entry);
+    if (progressFolder?.nodeRole === 'progress' && (entry.externalLink || progressFolder.externalLinkRelativePath)) { cancelInlineRename(); onNotice('已登记的外链版本目录不能重命名；请先移动外链到项目内。'); return; }
     renameCommitRef.current = true;
-    const result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'rename', [sourcePath], sourceDirectoryPath, nextName)
+    const result = await (progressFolder?.nodeRole === 'progress'
+      ? projectWorkspaceClient.renameProgressFolder(workspacePath, project.status, project.name, {
+        progressId: progressFolder.id,
+        expectedFolderId: progressFolder.folderId,
+        expectedRelativePath: progressFolderRelativePath(progressFolder),
+        newName: nextName,
+      })
+      : projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'rename', [sourcePath], sourceDirectoryPath, nextName))
       .finally(() => { renameCommitRef.current = false; });
     if (projectPathRef.current !== requestedProjectPath) return;
     if (!result.success) { onNotice(`重命名失败：${result.error || '未知错误'}`); return; }
-    const renamedPath = renamedEntryDestinationPath(sourcePath, nextName, result.movedItems);
+    const renamedPath = ('newRelativePath' in result ? result.newRelativePath : undefined)
+      || ('movedItems' in result ? renamedEntryDestinationPath(sourcePath, nextName, result.movedItems) : normalizeProjectRelativePath(`${sourceDirectoryPath}/${nextName}`));
     cancelInlineRename();
     const renamedName = renamedPath.split('/').pop() || nextName;
     const pathSeparatorIndex = Math.max(entry.path.lastIndexOf('/'), entry.path.lastIndexOf('\\'));
@@ -3662,6 +3652,20 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       relativePath: renamedPath,
     }, sourcePath);
     refreshRecursiveResults(sourceDirectoryPath);
+    if (progressFolder?.nodeRole === 'progress') {
+      const renamedProgress = 'progressFolder' in result ? result.progressFolder : undefined;
+      if (renamedProgress) {
+        progressFoldersRef.current = progressFoldersRef.current.map(folder => folder.id === renamedProgress.id ? renamedProgress : folder);
+        setProgressFolders(current => current.map(folder => folder.id === renamedProgress.id ? renamedProgress : folder));
+        if (versionProgressId === renamedProgress.id) {
+          const previousLocation = versionProgressLocationRef.current;
+          const nextLocation = { progressId: renamedProgress.id, folderPath: renamedProgress.folderPath, relativePath: renamedPath };
+          if (previousLocation) setVersionEntry(current => current ? remapEntryAfterProgressFolderMove(current, previousLocation, nextLocation) : current);
+          versionProgressLocationRef.current = nextLocation;
+        }
+      }
+      await loadProgressFolders();
+    }
     if (sourceDirectoryPath === normalizeProjectRelativePath(currentRelativePathRef.current)) await refresh(sourceDirectoryPath, { includeProjectContents: !sourceDirectoryPath });
     const canReveal = mutatedEntryCanBeRevealed({
       requestedProjectPath,
@@ -3678,6 +3682,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     if (!targetPaths.length) return;
     if (activeFileEntries.some(entry => targetPaths.includes(entry.relativePath) && isUnsupportedShortcutContent(entry))) { onNotice('普通快捷方式中的文件是只读浏览内容，不能在项目中重命名'); return; }
     if (activeFileEntries.some(entry => targetPaths.includes(entry.relativePath) && isProtectedRenameEntry(entry))) { onNotice('所选内容包含工作流文件夹，请使用“修改进度”。'); return; }
+    const registeredProgressEntries = activeFileEntries.filter(entry => targetPaths.includes(entry.relativePath) && registeredProgressFolderForEntry(entry)?.nodeRole === 'progress');
+    if (registeredProgressEntries.length && targetPaths.length > 1) { onNotice('已登记版本目录暂不支持批量或混合批量重命名，请单独重命名。'); return; }
+    if (registeredProgressEntries.some(entry => entry.externalLink || registeredProgressFolderForEntry(entry)?.externalLinkRelativePath)) { onNotice('已登记的外链版本目录不能重命名；请先移动外链到项目内。'); return; }
     if (targetPaths.length === 1) {
       beginInlineRename(targetPaths[0]);
       return;
@@ -3740,6 +3747,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const batchRenameNames = buildBatchRenameNames();
   const commitBatchRename = async () => {
     if (!batchRenameNames.length || batchRenameNames.some(name => !name) || selectedPaths.length < 2 || renameCommitRef.current) return;
+    if (batchRenameEntries.some(entry => registeredProgressFolderForEntry(entry)?.nodeRole === 'progress')) { onNotice('已登记版本目录暂不支持批量或混合批量重命名，请单独重命名。'); return; }
     renameCommitRef.current = true;
     const result = await projectWorkspaceClient.projectFileOperation(workspacePath, project.status, project.name, 'rename', selectedPaths, currentRelativePath, '批量重命名', { renameNames: batchRenameNames });
     renameCommitRef.current = false;
@@ -4458,8 +4466,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     return progressFolders.find(folder => folder.folderPath.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase() === entryPath);
   };
   const entryIsInsideProgressFolder = (entry: ProjectFileEntry) => {
-    const topLevelName = normalizeProjectRelativePath(entry.relativePath).split('/')[0] || '';
-    if (PROGRESS_FOLDER_NAME_PATTERN.test(topLevelName)) return true;
     const entryPath = entry.path.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase();
     return progressFolders.some(folder => {
       const folderPath = folder.folderPath.replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase();
@@ -4471,11 +4477,14 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const normalizedPath = normalizeProjectRelativePath(entry.relativePath);
     if (!normalizedPath || normalizedPath.includes('/')) return false;
     const normalizedName = entry.name.toLocaleLowerCase('zh-CN');
+    const registeredFolder = registeredProgressFolderForEntry(entry);
     return PROTECTED_PROJECT_FOLDER_NAMES.has(normalizedName)
-      || PROGRESS_FOLDER_NAME_PATTERN.test(entry.name)
-      || Boolean(registeredProgressFolderForEntry(entry));
+      || Boolean(registeredFolder && registeredFolder.nodeRole !== 'progress');
   };
   const selectedContainsProtectedRenameEntry = selectedEntries.some(isProtectedRenameEntry);
+  const selectedRegisteredProgressRenameEntries = selectedEntries.filter(entry => registeredProgressFolderForEntry(entry)?.nodeRole === 'progress');
+  const selectedContainsBlockedProgressRenameEntry = selectedRegisteredProgressRenameEntries.length > 0
+    && (selectedEntries.length !== 1 || selectedRegisteredProgressRenameEntries.some(entry => entry.externalLink || registeredProgressFolderForEntry(entry)?.externalLinkRelativePath));
   const selectedProgressFolder = selectedEntries.length === 1 && isFolderLikeEntry(selectedEntries[0]) ? selectedEntries[0] : undefined;
   const selectedRegisteredProgressFolder = registeredProgressFolderForEntry(selectedProgressFolder);
   const selectedEditableProgressFolder = selectedRegisteredProgressFolder?.nodeRole === 'progress' ? selectedRegisteredProgressFolder : undefined;
@@ -4914,6 +4923,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const fileMenuContainsUnsupportedShortcutContent = fileMenuTargetPaths.some(path => activeFileEntries.some(entry => entry.relativePath === path && entry.viaShortcut && !entry.viaExternalLink));
   const fileMenuEntries = fileMenuTargetPaths.map(relativePath => activeFileEntries.find(entry => entry.relativePath === relativePath)).filter((entry): entry is ProjectFileEntry => Boolean(entry));
   const fileMenuContainsProtectedRenameEntry = fileMenuEntries.some(isProtectedRenameEntry);
+  const fileMenuRegisteredProgressRenameEntries = fileMenuEntries.filter(entry => registeredProgressFolderForEntry(entry)?.nodeRole === 'progress');
+  const fileMenuContainsBlockedProgressRenameEntry = fileMenuRegisteredProgressRenameEntries.length > 0
+    && (fileMenuEntries.length !== 1 || fileMenuRegisteredProgressRenameEntries.some(entry => entry.externalLink || registeredProgressFolderForEntry(entry)?.externalLinkRelativePath));
   const fileMenuVersionTreeFolder = registeredProgressFolderForEntry(fileMenu?.entry);
   const fileMenuRegisteredProgressFolder = fileMenuVersionTreeFolder?.nodeRole === 'progress' ? fileMenuVersionTreeFolder : undefined;
   const fileMenuScreenshotMainImageEntries = fileMenu
@@ -5692,7 +5704,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         {officeImageExtractorAvailable && fileMenuOfficeEntries.length > 0 && <button className="project-menu-item" onClick={() => { const entries = fileMenuOfficeEntries; setFileMenu(null); openOfficeImageExtractor(entries); }}><FileImage size={14}/>提取文档图片{fileMenuOfficeEntries.length > 1 ? `（${fileMenuOfficeEntries.length} 个文档）` : ''}</button>}
         {photoshopAvailable && isPhotoshopOpenEntry(fileMenu.entry) && <button disabled={fileMenuContainsUnsupportedShortcutContent} title={fileMenuContainsUnsupportedShortcutContent ? '普通快捷方式中的文件暂不支持直接发送到 Photoshop' : undefined} className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(isPhotoshopOpenEntry) : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><PhotoshopIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(isPhotoshopOpenEntry).length > 1 ? `（${selectedEntries.filter(isPhotoshopOpenEntry).length} 个）` : ''}</button>}
         {fileMenuHasToolActions && <div className="my-1 border-t border-slate-100"/>}
-        <button disabled={finalViewOpen || fileMenuContainsShortcutContent || fileMenuContainsProtectedRenameEntry} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : fileMenuContainsProtectedRenameEntry ? '该文件夹由项目工作流管理，不能普通重命名' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); beginRename(targets); }}><Edit size={14}/>{fileMenuTargetPaths.length > 1 ? '批量重命名' : '重命名'}</button>
+        <button disabled={finalViewOpen || fileMenuContainsShortcutContent || fileMenuContainsProtectedRenameEntry || fileMenuContainsBlockedProgressRenameEntry} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : fileMenuContainsProtectedRenameEntry ? '该文件夹由项目工作流管理，不能普通重命名' : fileMenuContainsBlockedProgressRenameEntry ? fileMenuEntries.length > 1 ? '已登记版本目录暂不支持批量或混合批量重命名' : '已登记的外链版本目录不能重命名' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); beginRename(targets); }}><Edit size={14}/>{fileMenuTargetPaths.length > 1 ? '批量重命名' : '重命名'}</button>
         <button disabled={finalViewOpen || fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('cut', undefined, targets); }}><Cut size={14}/>剪切</button>
         <button disabled={fileMenuContainsShortcutContent} title={fileMenuContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : undefined} className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); runFileOperation('copy', undefined, targets); }}><Copy size={14}/>复制</button>
         <button disabled={finalViewOpen || fileMenuContainsShortcutContent || !clipboardHasFiles} title={fileMenuContainsShortcutContent ? '快捷方式指向的外部文件夹是只读浏览区域' : finalViewOpen ? '喜爱图片浏览为只读视图' : clipboardHasFiles ? '粘贴到此文件所在文件夹' : '剪贴板中没有文件'} className="project-menu-item" onClick={() => { setFileMenu(null); runFileOperation('paste'); }}><ClipboardPaste size={14}/>粘贴</button>
@@ -5765,7 +5777,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         </div>
         <span aria-hidden className="project-toolbar-core-divider toolbar-divider"/>
         {selectedPaths.length > 0 && <span className="project-toolbar-selection mr-1 self-center text-xs text-slate-500">已选 {selectedPaths.length}</span>}
-        <button disabled={finalViewOpen || selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : selectedContainsProtectedRenameEntry ? '所选文件夹由项目工作流管理，不能普通重命名' : finalViewOpen ? '喜爱图片浏览为只读视图' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={() => beginRename()} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
+        <button disabled={finalViewOpen || selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || selectedContainsBlockedProgressRenameEntry || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : selectedContainsProtectedRenameEntry ? '所选文件夹由项目工作流管理，不能普通重命名' : selectedContainsBlockedProgressRenameEntry ? selectedPaths.length > 1 ? '已登记版本目录暂不支持批量或混合批量重命名' : '已登记的外链版本目录不能重命名' : finalViewOpen ? '喜爱图片浏览为只读视图' : selectedPaths.length > 1 ? '批量重命名' : '重命名'} onClick={() => beginRename()} className="project-action-button compact-hide-file-action"><Edit size={16}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
         <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : finalViewOpen ? '喜爱图片浏览为只读视图' : '剪切'} onClick={() => runFileOperation('cut')} className="project-action-button compact-hide-file-action"><Cut size={16}/>剪切</button>
         <button disabled={selectedContainsShortcutContent || !selectedPaths.length} title={selectedContainsShortcutContent ? '快捷方式中的文件是只读浏览内容' : '复制'} onClick={() => runFileOperation('copy')} className="project-action-button compact-hide-file-action"><Copy size={16}/>复制</button>
         {clipboardPending && <span role="status" aria-live="polite" className="text-xs text-slate-400">正在同步剪贴板…</span>}
@@ -5790,7 +5802,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           <button type="button" onClick={() => { const next = !showToolbarOverflowMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowToolbarOverflowMenu(next); }} aria-label="展开工具栏操作" aria-haspopup="menu" aria-expanded={showToolbarOverflowMenu} className={`project-action-button ${showToolbarOverflowMenu ? 'bg-blue-50 text-blue-600' : ''}`}><ChevronDown size={17} className={`transition-transform ${showToolbarOverflowMenu ? 'rotate-180' : ''}`}/></button>
           {showToolbarOverflowMenu && <div role="menu" aria-label="更多工具栏操作" className="project-toolbar-overflow-menu absolute left-0 top-full z-50 mt-1 w-56 overflow-visible rounded-lg border border-slate-200 bg-white p-1 shadow-xl" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setShowToolbarOverflowMenu(false); (event.currentTarget.previousElementSibling as HTMLButtonElement | null)?.focus(); } }} onClick={event => { const button = (event.target as HTMLElement).closest('button'); if (button && button.getAttribute('aria-haspopup') !== 'menu') setShowToolbarOverflowMenu(false); }}>
             <div className="project-toolbar-overflow-primary">
-              <button disabled={finalViewOpen || selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || !selectedPaths.length} onClick={() => beginRename()} className="project-menu-item"><Edit size={14}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
+              <button disabled={finalViewOpen || selectedContainsShortcutContent || selectedContainsProtectedRenameEntry || selectedContainsBlockedProgressRenameEntry || !selectedPaths.length} onClick={() => beginRename()} className="project-menu-item"><Edit size={14}/>{selectedPaths.length > 1 ? '批量重命名' : '重命名'}</button>
               <button disabled={finalViewOpen || selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('cut')} className="project-menu-item"><Cut size={14}/>剪切</button>
               <button disabled={selectedContainsShortcutContent || !selectedPaths.length} onClick={() => runFileOperation('copy')} className="project-menu-item"><Copy size={14}/>复制</button>
               <button disabled={finalViewOpen || !clipboardHasFiles} onClick={() => runFileOperation('paste')} className="project-menu-item"><ClipboardPaste size={14}/>粘贴</button>

@@ -111,6 +111,7 @@ const createMediaRepository = client => {
   updateProgressTree: (root, payload) => client.call(root, 'progress_update_tree', payload),
   beginProgressTreeUpdate: (root, payload) => client.call(root, 'progress_update_tree_begin', payload),
   finishProgressTreeUpdate: (root, payload) => client.call(root, 'progress_update_tree_finish', payload),
+  renameProgressFolder: (root, payload) => client.call(root, 'progress_folder_rename', payload),
   updateProgressRelation: (root, payload) => client.call(root, 'progress_relation_update', payload),
   repairLegacySelectionRelation: (root, payload) => client.call(root, 'progress_legacy_selection_repair', payload),
   commitImportGraph: (root, payload) => client.call(root, 'media_workflow_import_commit', payload),
