@@ -19,11 +19,13 @@ const reviewDirectory = path.join(dataRoot, 'workflow-return-reviews', projectSt
 const deliveryDirectory = path.join(dataRoot, 'legacy-work');
 const taskOnePatch = path.join(deliveryDirectory, 'task-one.png');
 const taskTwoPatch = path.join(deliveryDirectory, 'task-two.png');
+const taskThreePatch = path.join(deliveryDirectory, 'task-three.png');
 const returnedSource = path.join(sandbox, 'returned-a.png');
 fs.mkdirSync(deliveryDirectory, { recursive: true });
 fs.mkdirSync(projectRoot, { recursive: true });
 fs.writeFileSync(taskOnePatch, 'ORIGINAL-TASK-ONE');
 fs.writeFileSync(taskTwoPatch, 'ORIGINAL-TASK-TWO');
+fs.writeFileSync(taskThreePatch, 'ORIGINAL-TASK-THREE');
 fs.writeFileSync(returnedSource, 'RETURNED-BY-A');
 
 const bundle = {
@@ -34,7 +36,7 @@ const bundle = {
 fs.writeFileSync(bundle.versions[0].filePath, 'BASE');
 
 const child = spawn(process.execPath, [path.join(__dirname, '..', 'service.cjs')], {
-  env: { SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1' }, stdio: ['pipe', 'pipe', 'pipe'],
+  env: { SystemRoot: process.env.SystemRoot, ELECTRON_RUN_AS_NODE: '1', PHOTOFLOW_TEST_FAULT_REVIEW_SESSION_AFTER_COMMIT: 'session-write-failure', PHOTOFLOW_TEST_FAULT_REVIEW_RETIRE: 'retire-failure' }, stdio: ['pipe', 'pipe', 'pipe'],
 });
 const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
 const pending = new Map();
@@ -141,6 +143,16 @@ const seedReview = (id, content) => {
     version: 2, id, status: 'active', result: { matches: [{ returnId: id, path: reviewPath, accepted: false }] },
   }));
 };
+const seedReviewMatches = (id, matches) => {
+  fs.rmSync(reviewDirectory, { recursive: true, force: true });
+  fs.mkdirSync(reviewDirectory, { recursive: true });
+  const stored = matches.map((match, index) => {
+    const reviewPath = path.join(reviewDirectory, `${id}-${index + 1}.png`);
+    fs.writeFileSync(reviewPath, match.content);
+    return { returnId: match.returnId, path: reviewPath, sourceName: `${match.returnId}.png`, accepted: false };
+  });
+  fs.writeFileSync(path.join(reviewDirectory, 'session.json'), JSON.stringify({ version: 2, id, projectId: 'project', status: 'active', result: { acceptedCount: 0, reviewCount: stored.length, matches: stored } }));
+};
 const restoreManifestDirectory = () => {
   if (!manifestDirectoryBackup) return;
   fs.rmSync(path.dirname(manifestPath), { force: true });
@@ -155,19 +167,21 @@ const restoreManifestDirectory = () => {
     const db = new DatabaseSync(databasePath);
     db.exec('BEGIN IMMEDIATE');
     db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('photo', 'project', 'base', 1, 1);
+    db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('photo-b', 'project', 'base-b', 1, 1);
     db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('foreign-photo', 'other-project', 'foreign-base', 1, 1);
     const insertTask = db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
     insertTask.run('task-1', 'photo', 'base', 1, '任务一', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 1 }, { personIndex: 2 }]), 1, 1);
     insertTask.run('task-2', 'photo', 'base', 3, '任务二', '{}', '{}', taskTwoPatch, JSON.stringify([{ personIndex: 3 }, { personIndex: 4 }]), 1, 1);
+    insertTask.run('task-3', 'photo-b', 'base-b', 5, '任务三', '{}', '{}', taskThreePatch, JSON.stringify([{ personIndex: 5 }, { personIndex: 6 }]), 1, 1);
     insertTask.run('foreign-task', 'foreign-photo', 'foreign-base', 5, '外部项目任务', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 5 }]), 1, 1);
     const insertStage = db.prepare(`INSERT INTO team_task_stages(id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`);
-    for (const [taskId, people] of [['task-1', [1, 2]], ['task-2', [3, 4]]]) for (const [index, personIndex] of people.entries()) insertStage.run(`${taskId}-stage-${personIndex}`, taskId, personIndex, index + 1, 'pending', 1, 1);
+    for (const [taskId, people] of [['task-1', [1, 2]], ['task-2', [3, 4]], ['task-3', [5, 6]]]) for (const [index, personIndex] of people.entries()) insertStage.run(`${taskId}-stage-${personIndex}`, taskId, personIndex, index + 1, 'pending', 1, 1);
     const insertIdentity = db.prepare(`INSERT INTO team_person_identities(id,project_id,name,created_at,updated_at) VALUES(?,?,?,?,?)`);
     const insertAssignment = db.prepare(`INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,updated_at,task_id,stage_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
-    for (const personIndex of [1, 2, 3, 4]) {
+    for (const personIndex of [1, 2, 3, 4, 5, 6]) {
       insertIdentity.run(`identity-${personIndex}`, 'project', `人物 ${personIndex}`, 1, 1);
-      const taskId = personIndex <= 2 ? 'task-1' : 'task-2';
-      insertAssignment.run('project', 'photo', 'base', personIndex, `identity-${personIndex}`, 1, 'manual', 0, 1, taskId, `${taskId}-stage-${personIndex}`);
+      const taskId = personIndex <= 2 ? 'task-1' : personIndex <= 4 ? 'task-2' : 'task-3';
+      insertAssignment.run('project', personIndex <= 4 ? 'photo' : 'photo-b', personIndex <= 4 ? 'base' : 'base-b', personIndex, `identity-${personIndex}`, 1, 'manual', 0, 1, taskId, `${taskId}-stage-${personIndex}`);
     }
     db.exec('COMMIT');
     assert.throws(() => resolveWorkflowTaskBinding(db, 'project', 'foreign-task', [{ item: { photoId: 'legacy-photo', baseVersionId: 'foreign-base' } }]), /不属于当前项目/, 'a stable task id cannot rebind a workflow chain across projects');
@@ -191,6 +205,34 @@ const restoreManifestDirectory = () => {
     const taskTwoActive = assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
     assertInactive('task-1', 2);
     assertInactive('task-2', 4);
+
+    const expandedManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const taskThreeWeekOne = '第1周/E/任务三_人物5.png';
+    const taskThreeWeekTwo = '第2周/F/任务三_人物6.png';
+    expandedManifest.groups.push(
+      { week: 1, identityId: 'identity-5', identityName: 'E', relativePath: '第1周/E', items: [{ photoId: 'photo-b', baseVersionId: 'base-b', taskId: 'task-3', personIndex: 5, photoName: '任务三', available: true, relativePath: taskThreeWeekOne }] },
+      { week: 2, identityId: 'identity-6', identityName: 'F', relativePath: '第2周/F', items: [{ photoId: 'photo-b', baseVersionId: 'base-b', taskId: 'task-3', personIndex: 6, photoName: '任务三', available: false, relativePath: taskThreeWeekTwo }] },
+    );
+    fs.mkdirSync(path.dirname(path.join(outputDirectory, taskThreeWeekOne)), { recursive: true });
+    fs.mkdirSync(path.dirname(path.join(outputDirectory, taskThreeWeekTwo)), { recursive: true });
+    fs.copyFileSync(taskThreePatch, path.join(outputDirectory, taskThreeWeekOne));
+    fs.writeFileSync(manifestPath, JSON.stringify(expandedManifest, null, 2));
+    assertActive('task-3', 5, 'ORIGINAL-TASK-THREE');
+    assertInactive('task-3', 6);
+
+    const missingManifestBackup = `${manifestPath}.missing-fixture`;
+    fs.renameSync(manifestPath, missingManifestBackup);
+    const missingManifestDb = new DatabaseSync(databasePath);
+    missingManifestDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-1', 'photo', 'missing manifest fixture', 0);
+    missingManifestDb.close();
+    const missingDrain = await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
+    assert.equal(missingDrain.state, 'failed');
+    const missingAfterDb = new DatabaseSync(databasePath);
+    assert.equal(missingAfterDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-1').count, 1, 'a missing workflow manifest must never drop its durable pending reconcile');
+    assert.match(missingAfterDb.prepare('SELECT error FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-1').error, /workflow-missing/, 'the retained pending row records a diagnostic reason');
+    missingAfterDb.close();
+    fs.renameSync(missingManifestBackup, manifestPath);
+    assert.equal((await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 })).state, 'ready');
 
     const legacyManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     for (const item of legacyManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1')) item.photoId = 'legacy-photo-id';
@@ -281,6 +323,87 @@ const restoreManifestDirectory = () => {
     assertInactive('task-1', 2);
     assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
     assertInactive('task-2', 4);
+
+    await Promise.all([
+      invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' }),
+      invoke('team.identity.complete.v1', { photoId: 'photo-b', baseVersionId: 'base-b', taskId: 'task-3', personIndex: 5, completed: true, completionKind: 'no-retouch' }),
+    ]);
+    assertActive('task-1', 2, 'ORIGINAL-TASK-ONE');
+    assertActive('task-3', 6, 'ORIGINAL-TASK-THREE');
+    await Promise.all([
+      invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false }),
+      invoke('team.identity.complete.v1', { photoId: 'photo-b', baseVersionId: 'base-b', taskId: 'task-3', personIndex: 5, completed: false }),
+    ]);
+    assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
+    assertActive('task-3', 5, 'ORIGINAL-TASK-THREE');
+
+    seedReviewMatches('confirm-ignore-lock', [
+      { returnId: 'confirm-me', content: 'CONFIRM-ME' },
+      { returnId: 'ignore-me', content: 'IGNORE-ME' },
+    ]);
+    const [lockedConfirm, lockedIgnore] = await Promise.all([
+      invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'confirm-ignore-lock', returnId: 'confirm-me', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 }),
+      invoke('team.workflow.return-review.ignore.v1', { reviewSessionId: 'confirm-ignore-lock', returnId: 'ignore-me' }),
+    ]);
+    assert.equal(lockedConfirm.success, true); assert.equal(lockedIgnore.success, true);
+    assert.equal(fs.existsSync(reviewDirectory), false, 'confirm and ignore serialize their session updates and retire the completed batch once');
+    await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false });
+
+    seedReviewMatches('confirm-discard-lock', [
+      { returnId: 'confirm-before-discard', content: 'CONFIRM-BEFORE-DISCARD' },
+      { returnId: 'discard-me', content: 'DISCARD-ME' },
+    ]);
+    const [confirmedBeforeDiscard, discardedAfterConfirm] = await Promise.all([
+      invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'confirm-discard-lock', returnId: 'confirm-before-discard', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 }),
+      invoke('team.workflow.return-review.discard.v1', { reviewSessionId: 'confirm-discard-lock' }),
+    ]);
+    assert.equal(confirmedBeforeDiscard.success, true); assert.equal(discardedAfterConfirm.success, true);
+    assert.equal(fs.existsSync(reviewDirectory), false, 'confirm and discard serialize without resurrecting a stale session');
+    await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false });
+
+    seedReviewMatches('double-confirm-lock', [
+      { returnId: 'double-a', content: 'DOUBLE-A' },
+      { returnId: 'double-b', content: 'DOUBLE-B' },
+    ]);
+    const artifactCountBeforeDouble = (() => { const value = new DatabaseSync(databasePath); try { return value.prepare('SELECT COUNT(*) count FROM team_task_artifacts').get().count; } finally { value.close(); } })();
+    const doubleResults = await Promise.all([
+      invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'double-confirm-lock', returnId: 'double-a', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 }),
+      invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'double-confirm-lock', returnId: 'double-b', photoId: 'photo-b', baseVersionId: 'base-b', taskId: 'task-3', personIndex: 5 }),
+    ]);
+    assert(doubleResults.every(result => result.success), 'different-photo confirms in one review batch both commit');
+    assert.equal(fs.existsSync(reviewDirectory), false, 'the final concurrent confirmation retires exactly one completed review batch');
+    const repeatedDouble = await Promise.all([
+      invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'double-confirm-lock', returnId: 'double-a', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 }),
+      invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'double-confirm-lock', returnId: 'double-b', photoId: 'photo-b', baseVersionId: 'base-b', taskId: 'task-3', personIndex: 5 }),
+    ]);
+    assert(repeatedDouble.every(result => result.success && result.idempotent), 'lost RPC responses can retry both confirmations without requiring the retired session');
+    const artifactCountAfterDouble = (() => { const value = new DatabaseSync(databasePath); try { return value.prepare('SELECT COUNT(*) count FROM team_task_artifacts').get().count; } finally { value.close(); } })();
+    assert.equal(artifactCountAfterDouble, artifactCountBeforeDouble + 2, 'idempotent retries never archive duplicate returned artifacts');
+    await Promise.all([
+      invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false }),
+      invoke('team.identity.complete.v1', { photoId: 'photo-b', baseVersionId: 'base-b', taskId: 'task-3', personIndex: 5, completed: false }),
+    ]);
+
+    seedReview('session-write-failure', 'SESSION-WRITE-FAILURE');
+    const sessionFailureResult = await invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'session-write-failure', returnId: 'session-write-failure', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
+    assert.equal(sessionFailureResult.success, true, 'a post-COMMIT review-session failure must still report the durable confirmation');
+    assert.equal(sessionFailureResult.cleanupPending, true, 'the injected session failure is surfaced as recoverable cleanup work');
+    const recoveredConfirmation = await invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'session-write-failure', returnId: 'session-write-failure', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
+    assert.equal(recoveredConfirmation.success, true); assert.equal(recoveredConfirmation.idempotent, true);
+    assert.equal(fs.existsSync(reviewDirectory), false, 'the durable confirmation journal repairs and retires a stale pending review on retry');
+    await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false });
+
+    seedReview('retire-failure', 'RETIRE-FAILURE');
+    const retireFailure = await invoke('team.workflow.return-confirm.v1', { reviewSessionId: 'retire-failure', returnId: 'retire-failure', photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
+    assert.equal(retireFailure.success, true); assert.equal(retireFailure.cleanupPending, true);
+    assert.equal(fs.existsSync(reviewDirectory), true, 'a failed background retirement leaves the completed marker available for startup recovery');
+    const orphanRetiredDirectory = `${reviewDirectory}.completed-orphan-fixture`;
+    fs.mkdirSync(orphanRetiredDirectory, { recursive: true }); fs.writeFileSync(path.join(orphanRetiredDirectory, 'stale'), 'stale');
+    const afterCleanupRecovery = await invoke('team.workflow.return-review.get.v1');
+    assert.equal(afterCleanupRecovery.review, null);
+    assert.equal(fs.existsSync(reviewDirectory), false, 'the next review startup retires a previously completed live directory');
+    assert.equal(fs.existsSync(orphanRetiredDirectory), false, 'startup recovery sweeps abandoned .completed-* directories');
+    await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false });
 
     seedReview('concurrent-return', 'CONCURRENT-RETURN');
     workflowScopeCount = 0;

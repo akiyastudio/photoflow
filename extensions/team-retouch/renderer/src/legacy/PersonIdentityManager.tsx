@@ -290,7 +290,7 @@ const WorkflowReturnReviewDialog = ({ result, cacheConfig, componentActive, busy
     <div className="flex max-h-[94vh] w-full max-w-[1500px] flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl">
       <header className="flex shrink-0 items-start gap-4 border-b border-slate-200 px-5 py-4"><div className="min-w-0 flex-1"><h3 className="font-bold text-slate-900">批量返图 · 看图确认</h3>{result.success ? <div className="mt-2 flex flex-wrap items-center gap-2 text-xs"><span className="rounded-full bg-emerald-50 px-2.5 py-1 font-bold text-emerald-700">已确认 {result.acceptedCount || 0}</span><span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">待确认 {result.reviewCount || 0}</span>{Boolean(result.missingTaskCount) && <span className="text-slate-500">另有 {result.missingTaskCount} 个任务未收到可靠返图</span>}<span className="text-slate-400">左侧选返图，右侧直接核对照片内容</span></div> : <p className="mt-1 text-sm text-red-600">{result.error || '批量返图失败'}</p>}</div><button type="button" onClick={onClose} disabled={workflowBusy} className="rounded-md p-2 text-slate-500 hover:bg-slate-100 disabled:opacity-40"><X size={19}/></button></header>
       {result.success && result.matches.length > 0 ? <div className="grid min-h-0 flex-1 grid-cols-[330px_minmax(0,1fr)]">
-        <aside className="min-h-0 overflow-y-auto border-r border-slate-200 bg-slate-50 p-3"><div className="space-y-2">{result.matches.map((match, index) => <button type="button" key={match.returnId} onClick={() => setActiveReturnId(match.returnId)} className={`w-full overflow-hidden rounded-xl border text-left transition ${activeMatch?.returnId === match.returnId ? 'border-blue-500 bg-white shadow-sm ring-2 ring-blue-100' : 'border-slate-200 bg-white hover:border-blue-300'}`}><div className="grid h-24 grid-cols-2 gap-px bg-slate-200"><ReturnImage active={componentActive} filePath={match.mediaPath || match.path} cacheConfig={cacheConfig}/><ReturnImage active={componentActive} filePath={match.patchPath} cacheConfig={cacheConfig}/></div><div className="p-2.5"><div className="flex items-center gap-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[10px] font-bold text-slate-500">{index + 1}</span><span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-700">{match.sourceName}</span><span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${match.accepted ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{match.accepted ? '已确认' : '待确认'}</span></div><p className="mt-1 truncate pl-7 text-[11px] text-slate-500">{match.matched ? `${match.photoName} · ${match.personName} · ${Math.round(match.score * 100)}%` : '未找到可靠候选任务'}</p></div></button>)}</div></aside>
+        <aside className="min-h-0 overflow-y-auto border-r border-slate-200 bg-slate-50 p-3"><div className="space-y-2">{result.matches.map((match, index) => <button type="button" key={match.returnId} onClick={() => setActiveReturnId(match.returnId)} className={`w-full overflow-hidden rounded-xl border text-left transition ${activeMatch?.returnId === match.returnId ? 'border-blue-500 bg-white shadow-sm ring-2 ring-blue-100' : 'border-slate-200 bg-white hover:border-blue-300'}`}><div className="grid h-24 grid-cols-2 gap-px bg-slate-200"><ReturnImage active={componentActive} filePath={match.mediaPath || match.path} cacheConfig={cacheConfig}/><ReturnImage active={componentActive} filePath={match.patchPath} cacheConfig={cacheConfig}/></div><div className="p-2.5"><div className="flex items-center gap-2"><span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-slate-100 text-[10px] font-bold text-slate-500">{index + 1}</span><span className="min-w-0 flex-1 truncate text-xs font-bold text-slate-700">{match.sourceName}</span><span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${match.relayState === 'failed' ? 'bg-red-50 text-red-700' : match.accepted ? 'bg-emerald-50 text-emerald-700' : 'bg-amber-50 text-amber-700'}`}>{!match.accepted ? '待确认' : match.relayState === 'ready' ? '接力已就绪' : match.relayState === 'failed' ? '更新失败' : '返图已确认'}</span></div><p className="mt-1 truncate pl-7 text-[11px] text-slate-500">{match.matched ? `${match.photoName} · ${match.personName} · ${Math.round(match.score * 100)}%` : '未找到可靠候选任务'}</p></div></button>)}</div></aside>
         <section className="flex min-h-0 min-w-0 flex-col bg-slate-950 text-white">{activeMatch ? <><div className="flex flex-wrap items-center gap-2 border-b border-white/10 bg-slate-900 px-4 py-2 text-[11px]" data-return-evidence><span className={`rounded-full px-2.5 py-1 font-bold ${matchAssessment.needsManualMatch ? 'bg-amber-500/20 text-amber-300' : 'bg-blue-500/20 text-blue-200'}`}>{matchAssessment.label}{matchAssessment.score !== undefined ? ` · ${Math.round(matchAssessment.score * 100)}%` : ''}</span><span className={`rounded-full px-2.5 py-1 font-bold ${modificationAssessment.suspicious || !modificationAssessment.known ? 'bg-amber-500/20 text-amber-300' : 'bg-emerald-500/20 text-emerald-300'}`}>{modificationAssessment.label}</span>{!modificationAssessment.known && <span className="text-slate-400">旧数据无 editEvidence，必须看图核对</span>}{modificationAssessment.warnings.length > 0 && <span className="font-bold text-amber-300">返图警告：{modificationAssessment.warnings.map(warning => warning?.message || warning?.code || String(warning)).join('；')}</span>}</div><ImageComparisonView active={componentActive}
           left={{ label: `任务图 · ${activeCandidate?.photoName || '暂无候选'}`, content: activeCandidate?.patchPath ? <ReturnImage active={componentActive} filePath={activeCandidate.patchPath} cacheConfig={cacheConfig} eager className="absolute inset-0 h-full w-full"/> : <div className="absolute inset-0 flex items-center justify-center text-xs text-amber-300">没有可对比的候选任务</div> }}
           right={{ label: `返图 · ${activeMatch.sourceName}`, content: <ReturnImage active={componentActive} filePath={activeMatch.mediaPath || activeMatch.path} cacheConfig={cacheConfig} eager className="absolute inset-0 h-full w-full"/> }}
@@ -301,7 +301,7 @@ const WorkflowReturnReviewDialog = ({ result, cacheConfig, componentActive, busy
           className="min-h-[360px]"
           leading={<><p className="truncate text-sm font-bold">{activeMatch.sourceName}</p><p className="mt-0.5 truncate text-[11px] text-slate-400">返图 ↔ {activeCandidate ? `${activeCandidate.photoName} · ${activeCandidate.personName}` : '暂无候选任务'}</p></>}
         />
-          <footer className="shrink-0 border-t border-white/10 bg-slate-900 px-4 py-3"><div className="flex items-end gap-3"><div className="min-w-0 flex-1"><p className="mb-2 text-xs font-bold text-slate-300">候选任务（点击缩略图可人工改匹配）</p><div className="flex gap-2 overflow-x-auto">{candidates.length ? candidates.map(candidate => { const used = Boolean(candidate.taskId && usedTaskIds.has(candidate.taskId) && !(activeMatch.accepted && candidate.taskId === activeMatch.taskId)); return <button type="button" key={candidate.taskId} disabled={used} onClick={() => setCandidateByReturn(current => ({ ...current, [activeMatch.returnId]: candidate.taskId || '' }))} className={`flex w-44 shrink-0 items-center gap-2 rounded-lg border p-1.5 text-left disabled:opacity-35 ${activeCandidate?.taskId === candidate.taskId ? 'border-blue-400 bg-blue-500/15' : 'border-white/10 bg-white/5 hover:border-white/25'}`}><ReturnImage active={componentActive} filePath={candidate.patchPath} cacheConfig={cacheConfig} className="h-12 w-16 shrink-0 rounded"/><span className="min-w-0"><span className="block truncate text-[11px] font-bold text-slate-200">{candidate.photoName || '未知照片'}</span><span className="mt-1 block truncate text-[10px] text-slate-400">{candidate.personName || '未知人物'} · {Math.round((candidate.score || 0) * 100)}%</span></span></button>; }) : <p className="py-3 text-xs text-slate-500">没有可用候选</p>}</div></div><div className="shrink-0 text-right">{activeMatch.accepted ? <div><span className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500/15 px-3 py-2 text-xs font-bold text-emerald-300"><CheckCircle2 size={14}/>返图任务已完成</span><p className="mt-1 text-[10px] text-slate-500">匹配度 {Math.round((activeMatch.score || 0) * 100)}%</p></div> : <div className="flex items-center gap-2"><button type="button" disabled={workflowBusy} onClick={() => onIgnore(activeMatch)} title="从本批审核中移除，不会完成任何任务，也不会删除原始文件" className="inline-flex items-center gap-2 rounded-lg border border-slate-600 px-3 py-2.5 text-xs font-bold text-slate-200 hover:border-amber-400 hover:text-amber-300 disabled:opacity-40">{busy === `workflow-ignore:${activeMatch.returnId}` ? <Loader2 size={14} className="animate-spin"/> : <X size={14}/>}忽略 · 不是任务返图</button><button type="button" disabled={!activeCandidate?.taskId || !activeCandidate.photoId || !activeCandidate.baseVersionId || activeCandidate.personIndex === undefined || candidateAlreadyUsed || workflowBusy} onClick={() => activeCandidate && onConfirm(activeMatch, activeCandidate)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40">{busy === `workflow-confirm:${activeMatch.returnId}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}确认返图并完成任务</button></div>}{modificationAssessment.suspicious && <p className="mt-1 text-[10px] font-bold text-amber-300">返图疑似未修改，请先用对比模式核对</p>}{candidateAlreadyUsed && <p className="mt-1 text-[10px] text-amber-300">这个任务已被另一张返图占用</p>}</div></div></footer></> : null}</section>
+          <footer className="shrink-0 border-t border-white/10 bg-slate-900 px-4 py-3"><div className="flex items-end gap-3"><div className="min-w-0 flex-1"><p className="mb-2 text-xs font-bold text-slate-300">候选任务（点击缩略图可人工改匹配）</p><div className="flex gap-2 overflow-x-auto">{candidates.length ? candidates.map(candidate => { const used = Boolean(candidate.taskId && usedTaskIds.has(candidate.taskId) && !(activeMatch.accepted && candidate.taskId === activeMatch.taskId)); return <button type="button" key={candidate.taskId} disabled={used} onClick={() => setCandidateByReturn(current => ({ ...current, [activeMatch.returnId]: candidate.taskId || '' }))} className={`flex w-44 shrink-0 items-center gap-2 rounded-lg border p-1.5 text-left disabled:opacity-35 ${activeCandidate?.taskId === candidate.taskId ? 'border-blue-400 bg-blue-500/15' : 'border-white/10 bg-white/5 hover:border-white/25'}`}><ReturnImage active={componentActive} filePath={candidate.patchPath} cacheConfig={cacheConfig} className="h-12 w-16 shrink-0 rounded"/><span className="min-w-0"><span className="block truncate text-[11px] font-bold text-slate-200">{candidate.photoName || '未知照片'}</span><span className="mt-1 block truncate text-[10px] text-slate-400">{candidate.personName || '未知人物'} · {Math.round((candidate.score || 0) * 100)}%</span></span></button>; }) : <p className="py-3 text-xs text-slate-500">没有可用候选</p>}</div></div><div className="shrink-0 text-right">{activeMatch.accepted ? <div><span className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold ${activeMatch.relayState === 'failed' ? 'bg-red-500/15 text-red-300' : 'bg-emerald-500/15 text-emerald-300'}`}><CheckCircle2 size={14}/>{activeMatch.relayState === 'ready' ? '接力已就绪' : activeMatch.relayState === 'failed' ? '接力更新失败' : '返图已确认 · 接力准备中'}</span><p className="mt-1 text-[10px] text-slate-500">确认只归档返图；接力发布完成后才会显示就绪</p></div> : <div className="flex items-center gap-2"><button type="button" disabled={workflowBusy} onClick={() => onIgnore(activeMatch)} title="从本批审核中移除，不会完成任何任务，也不会删除原始文件" className="inline-flex items-center gap-2 rounded-lg border border-slate-600 px-3 py-2.5 text-xs font-bold text-slate-200 hover:border-amber-400 hover:text-amber-300 disabled:opacity-40">{busy === `workflow-ignore:${activeMatch.returnId}` ? <Loader2 size={14} className="animate-spin"/> : <X size={14}/>}忽略 · 不是任务返图</button><button type="button" disabled={!activeCandidate?.taskId || !activeCandidate.photoId || !activeCandidate.baseVersionId || activeCandidate.personIndex === undefined || candidateAlreadyUsed || workflowBusy} onClick={() => activeCandidate && onConfirm(activeMatch, activeCandidate)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40">{busy === `workflow-confirm:${activeMatch.returnId}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}确认返图</button></div>}{modificationAssessment.suspicious && <p className="mt-1 text-[10px] font-bold text-amber-300">返图疑似未修改，请先用对比模式核对</p>}{candidateAlreadyUsed && <p className="mt-1 text-[10px] text-amber-300">这个任务已被另一张返图占用</p>}</div></div></footer></> : null}</section>
       </div> : result.success ? <div className="flex min-h-64 items-center justify-center text-sm text-slate-500">没有可确认的返图</div> : null}
       <div className="flex shrink-0 items-center justify-between gap-4 border-t border-slate-200 bg-slate-50 px-5 py-3"><span className="text-xs text-slate-500">点击四周不会关闭；退出时会保留或明确放弃未确认返图。</span><button type="button" onClick={onClose} disabled={workflowBusy} className="dialog-primary">{pendingReviewCount ? '退出审核…' : '完成并关闭'}</button></div>
     </div>
@@ -450,6 +450,10 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     let active = true;
     setWorkflowReturnResult(null);
     setWorkflowReturnReviewOpen(false);
+    void legacyApi.drainTeamWorkflowReconciles(20).then(result => {
+      if (!active) return;
+      if (result.state === 'failed') onNotice(`返图已确认，但接力更新失败：${result.error || '请稍后重试'}`, 'error');
+    }).catch(error => { if (active) onNotice(`返图接力恢复失败：${error instanceof Error ? error.message : String(error)}`, 'error'); });
     void legacyApi.getTeamWorkflowReturnReview(workspacePath, project.name, project.status).then(result => {
       if (!active) return;
       if (!result.success) {
@@ -921,38 +925,43 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       .sort((left, right) => left.week - right.week || left.personIndex - right.personIndex)
       .map(item => item.personIndex);
     setBusy(`workflow-confirm:${match.returnId}`);
-    const result = await legacyApi.confirmTeamWorkflowReturn(workspacePath, project.name, {
-      status: project.status,
-      reviewSessionId: workflowReturnResult?.reviewSessionId,
-      returnId: match.returnId,
-      photoId: candidate.photoId,
-      baseVersionId: candidate.baseVersionId,
-      personIndex: candidate.personIndex,
-      taskId: candidate.taskId,
-      taskOrder,
-    });
-    setBusy('');
-    if (!result.success) { onNotice(`确认返图失败：${result.error || '未知错误'}`, 'error'); return; }
-    setWorkflowReturnResult(current => current ? {
-      ...current,
-      reviewSessionId: result.reviewSessionCompleted ? undefined : current.reviewSessionId,
-      acceptedCount: (current.acceptedCount || 0) + 1,
-      reviewCount: Math.max(0, (current.reviewCount || 0) - 1),
-      missingTaskCount: Math.max(0, (current.missingTaskCount || 0) - 1),
-      matches: current.matches.map(item => item.returnId === match.returnId ? {
-        ...item,
-        ...candidate,
-        returnId: item.returnId,
-        sourceName: item.sourceName,
-        path: item.path,
-        matched: true,
-        accepted: true,
-        confidence: 'manual',
-      } : item),
-    } : current);
-    await load(false);
-    onProjectChanged();
-    onNotice(result.warning || `已确认返图匹配：${candidate.photoName || '任务图'} · ${candidate.personName || '人物'}`, result.warning ? 'warning' : 'success');
+    try {
+      const result = await legacyApi.confirmTeamWorkflowReturn(workspacePath, project.name, {
+        status: project.status,
+        reviewSessionId: workflowReturnResult?.reviewSessionId,
+        returnId: match.returnId,
+        photoId: candidate.photoId,
+        baseVersionId: candidate.baseVersionId,
+        personIndex: candidate.personIndex,
+        taskId: candidate.taskId,
+        taskOrder,
+      });
+      if (!result.success) { onNotice(`确认返图失败：${result.error || '未知错误'}`, 'error'); return; }
+      setWorkflowReturnResult(current => current ? {
+        ...current,
+        reviewSessionId: result.reviewSessionCompleted ? undefined : current.reviewSessionId,
+        acceptedCount: (current.acceptedCount || 0) + (result.idempotent ? 0 : 1),
+        reviewCount: Math.max(0, (current.reviewCount || 0) - (result.idempotent ? 0 : 1)),
+        missingTaskCount: Math.max(0, (current.missingTaskCount || 0) - (result.idempotent ? 0 : 1)),
+        matches: current.matches.map(item => item.returnId === match.returnId ? {
+          ...item, ...candidate, returnId: item.returnId, sourceName: item.sourceName, path: item.path,
+          matched: true, accepted: true, confidence: 'manual', relayState: 'preparing',
+        } : item),
+      } : current);
+      onProjectChanged();
+      onNotice(`返图已确认：${candidate.photoName || '任务图'} · ${candidate.personName || '人物'}；接力准备中`, 'success');
+      void legacyApi.drainTeamWorkflowReconciles(20).then(drain => {
+        const relayState = drain.state === 'ready' ? 'ready' : drain.state === 'failed' ? 'failed' : 'preparing';
+        setWorkflowReturnResult(current => current ? { ...current, matches: current.matches.map(item => item.returnId === match.returnId ? { ...item, relayState, relayError: drain.error || '' } : item) } : current);
+        if (relayState === 'ready') { onNotice('返图接力已就绪', 'success'); void load(false); }
+        else if (relayState === 'failed') onNotice(`返图已确认，但接力更新失败：${drain.error || '下次启动将继续恢复'}`, 'error');
+      }).catch(error => {
+        setWorkflowReturnResult(current => current ? { ...current, matches: current.matches.map(item => item.returnId === match.returnId ? { ...item, relayState: 'failed', relayError: error instanceof Error ? error.message : String(error) } : item) } : current);
+        onNotice(`返图已确认，但接力更新失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+      });
+    } catch (error) {
+      onNotice(`确认返图失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally { setBusy(''); }
   };
   const ignoreWorkflowReturn = async (match: TeamPatchReturnMatch) => {
     const reviewSessionId = workflowReturnResult?.reviewSessionId;
@@ -970,8 +979,10 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     });
     if (!confirmed) return;
     setBusy(`workflow-ignore:${match.returnId}`);
-    const result = await legacyApi.ignoreTeamWorkflowReturnReview(workspacePath, project.name, reviewSessionId, match.returnId);
-    setBusy('');
+    let result;
+    try { result = await legacyApi.ignoreTeamWorkflowReturnReview(workspacePath, project.name, reviewSessionId, match.returnId); }
+    catch (error) { onNotice(`移除非任务返图失败：${error instanceof Error ? error.message : String(error)}`, 'error'); return; }
+    finally { setBusy(''); }
     if (!result.success) {
       onNotice(`移除非任务返图失败：${result.error || '未知错误'}`, 'error');
       return;

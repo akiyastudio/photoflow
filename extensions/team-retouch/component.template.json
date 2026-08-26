@@ -53,7 +53,7 @@
         "team.workflow.status.v1", "team.workflow.cancel.v1", "team.workflow.generate.v1",
         "team.workflow.export.v1", "team.workflow.open-export.v1",
         "team.workflow.return-review.get.v1", "team.workflow.return-review.discard.v1", "team.workflow.return-review.ignore.v1",
-        "team.workflow.return-batch.v1", "team.workflow.return-confirm.v1",
+        "team.workflow.return-batch.v1", "team.workflow.return-confirm.v1", "team.workflow.reconcile-drain.v1",
         "team.patch.select-returns.v1", "team.patch.return-batch.v1",
         "team.workflow.artifact.migrate.v1",
         "team.progress.list.v1", "team.progress.create.v1",

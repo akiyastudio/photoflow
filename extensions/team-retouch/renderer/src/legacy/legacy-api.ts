@@ -112,6 +112,7 @@ export const legacyApi = {
   discardTeamWorkflowReturnReview: (...args: any[]) => ok('team.workflow.return-review.discard.v1', { reviewSessionId: String(args[2] || '') }),
   ignoreTeamWorkflowReturnReview: (...args: any[]) => ok('team.workflow.return-review.ignore.v1', { reviewSessionId: String(args[2] || ''), returnId: String(args[3] || '') }),
   confirmTeamWorkflowReturn: (...args: any[]) => ok('team.workflow.return-confirm.v1', payload(args)),
+  drainTeamWorkflowReconciles: (maxItems = 20) => ok('team.workflow.reconcile-drain.v1', { maxItems }),
   getProgressFolders: () => ok('team.progress.list.v1'),
   registerProgressWithGraph: (...args: any[]) => ok('team.progress.create.v1', payload(args)),
   openTeamPatch: async (reference: string) => { const ref = parseLegacyMediaRef(reference); return ref?.kind === 'working' ? ok('team.patch.open.v1', ref) : { success: false, error: '工作图引用已失效' }; },

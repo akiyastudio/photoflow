@@ -56,6 +56,7 @@ const allowedMethods = new Set([
   'team.workflow.cancel.v1', 'team.workflow.export.v1', 'team.workflow.open-export.v1', 'team.workflow.return-batch.v1',
   'team.workflow.return-review.get.v1', 'team.workflow.return-review.discard.v1',
   'team.workflow.return-review.ignore.v1', 'team.workflow.return-confirm.v1',
+  'team.workflow.reconcile-drain.v1',
   'team.workflow.artifact.migrate.v1',
   'team.settings.get.v1', 'team.settings.update.v1', 'team.advanced.status.v1', 'team.advanced.preflight.v1',
   'team.advanced.install.v1', 'team.advanced.uninstall.v1',
