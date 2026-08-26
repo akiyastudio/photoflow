@@ -49,7 +49,7 @@ try {
   legacy.close();
 
   let migrated = ensureSchema(databasePath);
-  assert.equal(migrated.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, '5');
+  assert.equal(migrated.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, '6');
   const assignments = migrated.prepare('SELECT person_index,task_id,stage_id,artifact_id FROM team_person_assignments ORDER BY person_index').all();
   assert.equal(assignments[0].task_id, 'task-a');
   assert.equal(assignments[1].task_id, 'task-b');
@@ -61,7 +61,7 @@ try {
   assert.equal(migrated.prepare('SELECT COUNT(*) count FROM team_task_artifacts').get().count, 2, 'migration is idempotent');
   assert.equal(migrated.prepare('SELECT COUNT(*) count FROM team_task_stages').get().count, 2, 'stage migration is idempotent');
   migrated.close();
-  console.log('Team-retouch schema v5 migration tests passed');
+  console.log('Team-retouch schema v6 migration tests passed');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
 }

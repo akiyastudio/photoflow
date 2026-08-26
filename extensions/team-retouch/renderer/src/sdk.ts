@@ -44,7 +44,7 @@ export const notify = (message: string, tone: NoticeTone) => {
 const allowedMethods = new Set([
   'team.media.page.v1', 'team.progress.list.v1', 'team.progress.create.v1',
   'team.project.get.v1', 'team.project.register.v1', 'team.project.remove-photo.v1',
-  'team.project.migrate-step.v1',
+  'team.project.migrate-step.v1', 'team.project.calibrate-step.v1',
   'team.media.authorize.v1', 'team.patch.open.v1',
   'team.identity.similarities.v1', 'team.identity.suggest.v1', 'team.identity.save.v1',
   'team.identity.assign.v1', 'team.identity.confirm-group.v1', 'team.identity.complete.v1', 'team.identity.delete.v1',
@@ -58,6 +58,7 @@ const allowedMethods = new Set([
   'team.workflow.return-review.ignore.v1', 'team.workflow.return-confirm.v1',
   'team.workflow.reconcile-drain.v1',
   'team.workflow.artifact.migrate.v1',
+  'team.operation.run.v1', 'team.operation.get.v1', 'team.operation.cancel.v1',
   'team.settings.get.v1', 'team.settings.update.v1', 'team.advanced.status.v1', 'team.advanced.preflight.v1',
   'team.advanced.install.v1', 'team.advanced.uninstall.v1',
 ]);

@@ -296,21 +296,25 @@ const restoreManifestDirectory = () => {
     await invoke('team.project.migrate-step.v1');
 
     await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' });
+    await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     const taskOneB = assertActive('task-1', 2, 'ORIGINAL-TASK-ONE');
     assertInactive('task-1', 1);
     assert.equal(fs.readFileSync(taskTwoActive, 'utf8'), 'ORIGINAL-TASK-TWO', 'reconciling task one must not alter task two');
     const beforeRepeat = fs.statSync(taskOneB).mtimeMs;
     const beforeNames = fs.readdirSync(path.dirname(taskOneB)).sort();
     await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' });
+    await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     assert.equal(fs.statSync(taskOneB).mtimeMs, beforeRepeat, 'repeated reconciliation reuses the correct published input');
     assert.deepEqual(fs.readdirSync(path.dirname(taskOneB)).sort(), beforeNames, 'repeated reconciliation creates no duplicate files');
 
     await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false });
+    await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
     assertInactive('task-1', 2);
     assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
 
     await invoke('team.patch.upload.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
+    await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     assertActive('task-1', 2, 'RETURNED-BY-A');
     assertInactive('task-1', 1);
     assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
@@ -319,6 +323,7 @@ const restoreManifestDirectory = () => {
     identityDb.close();
 
     await invoke('team.patch.remove-upload.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1 });
+    await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
     assertInactive('task-1', 2);
     assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
@@ -328,12 +333,14 @@ const restoreManifestDirectory = () => {
       invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' }),
       invoke('team.identity.complete.v1', { photoId: 'photo-b', baseVersionId: 'base-b', taskId: 'task-3', personIndex: 5, completed: true, completionKind: 'no-retouch' }),
     ]);
+    await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     assertActive('task-1', 2, 'ORIGINAL-TASK-ONE');
     assertActive('task-3', 6, 'ORIGINAL-TASK-THREE');
     await Promise.all([
       invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false }),
       invoke('team.identity.complete.v1', { photoId: 'photo-b', baseVersionId: 'base-b', taskId: 'task-3', personIndex: 5, completed: false }),
     ]);
+    await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
     assertActive('task-3', 5, 'ORIGINAL-TASK-THREE');
 
@@ -405,6 +412,7 @@ const restoreManifestDirectory = () => {
     assert.equal(fs.existsSync(orphanRetiredDirectory), false, 'startup recovery sweeps abandoned .completed-* directories');
     await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false });
 
+    await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     seedReview('concurrent-return', 'CONCURRENT-RETURN');
     workflowScopeCount = 0;
     const mediaReadsBeforeConfirm = capabilityCounts.get('project.media.variants.v2') || 0;
@@ -418,7 +426,7 @@ const restoreManifestDirectory = () => {
     assert.equal(capabilityCounts.get('project.output.v2') || 0, outputCallsBeforeConfirm, 'manual confirmation never waits for project-output publication');
     const queuedDb = new DatabaseSync(databasePath);
     assert.equal(queuedDb.prepare(`SELECT completed FROM team_person_assignments WHERE photo_id='photo' AND base_version_id='base' AND person_index=1`).get().completed, 1);
-    assert.equal(queuedDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 1);
+    assert.equal(queuedDb.prepare("SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id='task-1'").get().count, 1);
     queuedDb.close();
     holdSecondWorkflowScope = true;
     workflowScopeCount = 0;
@@ -432,6 +440,7 @@ const restoreManifestDirectory = () => {
     releaseHeldWorkflow();
     await backgroundReconcile;
     await concurrentUndo;
+    await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     holdSecondWorkflowScope = false;
     assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
     assertInactive('task-1', 2);
@@ -446,7 +455,7 @@ const restoreManifestDirectory = () => {
     const archived = pendingDb.prepare(`SELECT a.completed,a.artifact_id,r.artifact_path FROM team_person_assignments a JOIN team_task_artifacts r ON r.id=a.artifact_id WHERE a.photo_id='photo' AND a.base_version_id='base' AND a.person_index=1`).get();
     assert.equal(archived.completed, 1);
     assert.equal(fs.readFileSync(archived.artifact_path, 'utf8'), 'RECOVERABLE-RETURN');
-    assert.equal(pendingDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 1);
+    assert.equal(pendingDb.prepare("SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id='task-1'").get().count, 1);
     pendingDb.close();
     const reload = await invoke('team.project.get.v1'); assert.equal(reload.migration.state, 'pending'); await invoke('team.project.migrate-step.v1');
     const recoveredDb = new DatabaseSync(databasePath);
@@ -455,16 +464,17 @@ const restoreManifestDirectory = () => {
     assertActive('task-1', 2, 'RECOVERABLE-RETURN');
     assertInactive('task-1', 1);
     await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false });
+    await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
     artifactScopeCount = 0;
     breakManifestOnArtifactCall = 1;
     const savedNoRetouch = await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' });
     assert.equal(savedNoRetouch.success, true, 'committed no-retouch state must not be reported as a failed operation');
     assert.equal(savedNoRetouch.reconcilePending, true);
-    assert.match(savedNoRetouch.warning, /无需重复操作/);
+    assert.match(savedNoRetouch.warning, /后台更新/);
     const noRetouchPendingDb = new DatabaseSync(databasePath);
     assert.equal(noRetouchPendingDb.prepare(`SELECT completed,completion_kind FROM team_person_assignments WHERE photo_id='photo' AND base_version_id='base' AND person_index=1`).get().completion_kind, 'no-retouch');
-    assert.equal(noRetouchPendingDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count, 1);
+    assert.equal(noRetouchPendingDb.prepare("SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id='task-1'").get().count, 1);
     noRetouchPendingDb.close();
     restoreManifestDirectory();
     breakManifestOnArtifactCall = 0;

@@ -23,6 +23,18 @@ import './legacy-style.css';
 
 type Json = Record<string, any>;
 const assertSuccess = (value: Json, fallback: string) => { if (value?.success === false) throw new Error(value.error || fallback); return value; };
+const TRUSTED_SNAPSHOT_VERSION = 1;
+const trustedSnapshotKey = (projectId: string) => `photoflow:team-retouch:trusted-workspace:v${TRUSTED_SNAPSHOT_VERSION}:${projectId}`;
+const readTrustedSnapshot = (projectId: string): Json | undefined => {
+  try {
+    const value = JSON.parse(window.localStorage.getItem(trustedSnapshotKey(projectId)) || 'null');
+    return value?.version === TRUSTED_SNAPSHOT_VERSION && value?.projectId === projectId && value?.workspace?.success !== false ? value.workspace : undefined;
+  } catch { return undefined; }
+};
+const writeTrustedSnapshot = (projectId: string, workspace: Json) => {
+  if (workspace?.snapshotVersion !== TRUSTED_SNAPSHOT_VERSION) return;
+  try { window.localStorage.setItem(trustedSnapshotKey(projectId), JSON.stringify({ version: TRUSTED_SNAPSHOT_VERSION, projectId, storedAt: Date.now(), workspace })); } catch { /* Display cache is optional. */ }
+};
 const applyResolvedTheme = (resolvedTheme: 'light' | 'dark') => {
   // This renderer owns its isolated document. Scoping the body keeps every
   // createPortal surface on the same contract without leaking into Host DOM.
@@ -65,6 +77,8 @@ const App = () => {
   const loadGuardRef = useRef(createLatestHistoryLoadGuard());
   const loadCoordinatorRef = useRef<ReturnType<typeof createHistoryContextLoadCoordinator<ComponentContext>> | null>(null);
   const activationRefreshGateRef = useRef(createActivationRefreshGate());
+  const calibrationBusyRef = useRef(false);
+  const reconcileStartedRef = useRef('');
   useEffect(() => { entriesRef.current = entries; }, [entries]);
   const performLoadEntries = useCallback(async (hostContext: ComponentContext, manualMigrationRetry = false) => {
     const managerScopeKey = workspaceSeedScopeKey(hostContext.projectId, { id: hostContext.projectId, name: hostContext.projectName, status: hostContext.projectStatus });
@@ -76,6 +90,7 @@ const App = () => {
     try {
       let workspace = assertSuccess(await rpc<Json>('team.project.get.v1'), '无法读取团片协作历史');
       if (!loadGuardRef.current.isCurrent(requestId)) return;
+      writeTrustedSnapshot(hostContext.projectId, workspace);
       setWorkspaceSnapshot(normalizeWorkspace(workspace));
       const waitingForHostStorage = workspace.migration?.phase === 'host-storage-adoption';
       if (workspace.migration?.state !== 'committed') {
@@ -105,6 +120,7 @@ const App = () => {
           if (loadGuardRef.current.isCurrent(requestId) && migration?.state === 'committed') {
             let refreshed = assertSuccess(await rpc<Json>('team.project.get.v1'), '无法刷新团片协作历史');
             if (!loadGuardRef.current.isCurrent(requestId)) return;
+            writeTrustedSnapshot(hostContext.projectId, refreshed);
             if (waitingForHostStorage && selectedRelativePaths.length) refreshed = assertSuccess(await rpc<Json>('team.project.register.v1', { relativePaths: selectedRelativePaths }), '无法登记所选团片图片');
             if (!loadGuardRef.current.isCurrent(requestId)) return;
             setWorkspaceSnapshot(normalizeWorkspace(refreshed));
@@ -143,6 +159,7 @@ const App = () => {
           const registered = assertSuccess(await rpc<Json>('team.project.register.v1', { relativePaths: selectedRelativePaths }), '无法登记所选团片图片');
           if (!loadGuardRef.current.isCurrent(requestId)) return;
           if (registered.photos) workspace = registered;
+          writeTrustedSnapshot(hostContext.projectId, workspace);
           setWorkspaceSnapshot(normalizeWorkspace(workspace));
           const nextResolution = resolveTeamRetouchEntriesForOpen(workspace, [...currentRelativePaths, ...selectedRelativePaths]);
           setHistoryRecordCount(nextResolution.historyPhotoCount); setHistoryOwnershipPendingCount(nextResolution.ownershipPendingCount);
@@ -167,9 +184,45 @@ const App = () => {
   if (!loadCoordinatorRef.current) loadCoordinatorRef.current = createHistoryContextLoadCoordinator(performLoadEntries);
   const loadEntries = useCallback((hostContext: ComponentContext, options: { force?: boolean; manualMigrationRetry?: boolean } = {}) => loadCoordinatorRef.current!.request(hostContext, options), []);
   useEffect(() => {
+    if (!entriesLoaded || !context || calibrationBusyRef.current || !workspaceSnapshot?.calibration?.pendingCount) return;
+    calibrationBusyRef.current = true;
+    let active = true;
+    void legacyApi.calibrateTeamProjectWorkspace(24).then((result: Json) => {
+      if (active && result.calibratedCount && contextRef.current) void loadEntries(contextRef.current, { force: true });
+    }).catch(() => undefined).finally(() => { calibrationBusyRef.current = false; });
+    return () => { active = false; };
+  }, [entriesLoaded, context?.projectId, workspaceSnapshot?.revision, workspaceSnapshot?.calibration?.pendingCount, loadEntries]);
+  useEffect(() => {
+    if (!entriesLoaded || !context?.projectId || reconcileStartedRef.current === context.projectId) return;
+    reconcileStartedRef.current = context.projectId;
+    void legacyApi.drainTeamWorkflowReconciles(4).then((result: Json) => {
+      if (result.recoveredCount && contextRef.current) void loadEntries(contextRef.current, { force: true });
+    }).catch(() => undefined);
+  }, [entriesLoaded, context?.projectId, loadEntries]);
+  useEffect(() => {
     let mounted = true;
     const stopSettings = settingsController.subscribe(value => { if (mounted) setSettingsState(value); });
-    const acceptContext = (nextContext: ComponentContext) => { if (!mounted) return; contextRef.current = nextContext; setContext(nextContext); applyResolvedTheme(nextContext.resolvedTheme); void loadEntries(nextContext); };
+    const acceptContext = (nextContext: ComponentContext) => {
+      if (!mounted) return;
+      const projectChanged = Boolean(contextRef.current?.projectId && contextRef.current.projectId !== nextContext.projectId);
+      if (projectChanged) {
+        entriesRef.current = []; setEntries([]); entriesLoadedRef.current = false; setEntriesLoaded(false);
+        setWorkspaceSnapshot(normalizeWorkspace(undefined)); setManagerWorkspaceSeed(undefined);
+        reconcileStartedRef.current = '';
+      }
+      legacyApi.setMediaAuthorizationScope(nextContext.projectId);
+      contextRef.current = nextContext; setContext(nextContext); applyResolvedTheme(nextContext.resolvedTheme);
+      const trusted = readTrustedSnapshot(nextContext.projectId);
+      if (trusted) {
+        const resolution = resolveTeamRetouchEntriesForOpen(trusted, []);
+        legacyApi.setProjectEntries(resolution.entries); entriesRef.current = resolution.entries; setEntries(resolution.entries);
+        setWorkspaceSnapshot(normalizeWorkspace(trusted));
+        setManagerWorkspaceSeed({ scopeKey: workspaceSeedScopeKey(nextContext.projectId, { id: nextContext.projectId, name: nextContext.projectName, status: nextContext.projectStatus }), workspace: hydrateLegacyWorkspace(trusted) });
+        setHistoryRecordCount(resolution.historyPhotoCount); setHistoryOwnershipPendingCount(resolution.ownershipPendingCount);
+        entriesLoadedRef.current = true; setEntriesLoaded(true); setInitialLoading(false);
+      }
+      void loadEntries(nextContext);
+    };
     void window.photoFlowComponent.getContext().then(acceptContext).catch(error => { if (mounted) { setInitialLoading(false); setLoadError(error instanceof Error ? error.message : String(error)); } });
     void settingsController.refresh();
     const stopTheme = window.photoFlowComponent.onThemeChange(value => { if (mounted && value.contractVersion === 1) applyResolvedTheme(value.resolvedTheme); });

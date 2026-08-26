@@ -1097,17 +1097,21 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     try {
       const target = await outputProgress.ensureTargetProgress(workspace.workflowNode?.id);
       let merged = 0;
-      for (const photo of mergeablePhotos) {
-        const result = await legacyApi.mergeTeamPatches(workspacePath, project.status, project.name, {
-          photoId: photo.photoId,
-          baseVersionId: photo.baseVersionId,
-          outputProgressId: target.id,
-          versionName: '团片协作合成',
-        });
-        if (result.success) merged += 1;
-      }
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < mergeablePhotos.length) {
+          const photo = mergeablePhotos[cursor++];
+          const result = await legacyApi.mergeTeamPatches(workspacePath, project.status, project.name, {
+            photoId: photo.photoId,
+            baseVersionId: photo.baseVersionId,
+            outputProgressId: target.id,
+            versionName: '团片协作合成',
+          });
+          if (result.success) merged += 1;
+        }
+      };
+      await Promise.all(Array.from({ length: Math.min(3, mergeablePhotos.length) }, worker));
       await load(false);
-      onProjectChanged();
       onNotice(`已将 ${merged}/${mergeablePhotos.length} 张全部完成的图片合成到目标进度`, 'success');
     } catch (error) {
       onNotice(`合成照片失败：${error instanceof Error ? error.message : String(error)}`, 'error');

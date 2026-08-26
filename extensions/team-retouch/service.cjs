@@ -17,8 +17,10 @@ const workflowJobs = new Map();
 const photoOperations = new Map();
 const reviewSessionOperations = new Map();
 const projectWorkflowOperations = new Map();
+const durableOperationRuns = new Map();
 const activeRequestControls = new Map();
 const injectedTestFaults = new Set();
+const schemaReadyPaths = new Set();
 let advancedRuntimeProbeCache = null;
 let nextCapabilityId = 1;
 
@@ -50,7 +52,9 @@ const writeFrame = value => process.stdout.write(`${JSON.stringify(value)}\n`);
 const migrationMetric = (migration, phase, startedAt, values = {}) => writeFrame({
   type: 'metric', migration, phase, elapsedMs: Date.now() - startedAt,
   itemCount: Math.max(0, Number(values.itemCount) || 0), byteCount: Math.max(0, Number(values.byteCount) || 0),
-  state: String(values.state || ''),
+  queueMs: Math.max(0, Number(values.queueMs) || 0), ackMs: Math.max(0, Number(values.ackMs) || 0),
+  cacheHit: values.cacheHit === true, fallback: values.fallback === true,
+  outcome: String(values.outcome || values.state || ''), state: String(values.state || ''),
 });
 const parseJson = (value, fallback) => {
   try { return JSON.parse(value || ''); } catch { return fallback; }
@@ -248,8 +252,10 @@ const publishWorkingImageV2 = async (parentId, storage, sourcePath, baseRelative
 
 const ensureSchema = databasePath => {
   fs.mkdirSync(path.dirname(databasePath), { recursive: true });
+  const schemaAlreadyReady = schemaReadyPaths.has(databasePath) && fs.existsSync(databasePath);
   const db = new DatabaseSync(databasePath);
   db.exec(`PRAGMA busy_timeout=${DB_BUSY_TIMEOUT_MS}; PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON;`);
+  if (schemaAlreadyReady) return db;
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS team_patch_tasks (
@@ -265,6 +271,9 @@ const ensureSchema = databasePath => {
     CREATE INDEX IF NOT EXISTS team_patch_photo ON team_patch_tasks(photo_id, base_version_id, is_deleted);
     CREATE TABLE IF NOT EXISTS team_retouch_photos (
       photo_id TEXT PRIMARY KEY, project_id TEXT NOT NULL, base_version_id TEXT NOT NULL,
+      display_name TEXT NOT NULL DEFAULT '', relative_path TEXT NOT NULL DEFAULT '',
+      relative_path_state TEXT NOT NULL DEFAULT 'unresolvable', file_missing INTEGER NOT NULL DEFAULT 0,
+      calibrated_at INTEGER NOT NULL DEFAULT 0,
       created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
     );
     CREATE INDEX IF NOT EXISTS team_retouch_photo_project ON team_retouch_photos(project_id, updated_at);
@@ -292,6 +301,11 @@ const ensureSchema = databasePath => {
   addColumn('team_person_assignments', 'task_id', 'TEXT');
   addColumn('team_person_assignments', 'stage_id', 'TEXT');
   addColumn('team_person_assignments', 'artifact_id', 'TEXT');
+  addColumn('team_retouch_photos', 'display_name', "TEXT NOT NULL DEFAULT ''");
+  addColumn('team_retouch_photos', 'relative_path', "TEXT NOT NULL DEFAULT ''");
+  addColumn('team_retouch_photos', 'relative_path_state', "TEXT NOT NULL DEFAULT 'unresolvable'");
+  addColumn('team_retouch_photos', 'file_missing', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('team_retouch_photos', 'calibrated_at', 'INTEGER NOT NULL DEFAULT 0');
   db.exec(`
     CREATE TABLE IF NOT EXISTS team_task_stages (
       id TEXT PRIMARY KEY, task_id TEXT NOT NULL, person_index INTEGER NOT NULL,
@@ -319,6 +333,15 @@ const ensureSchema = databasePath => {
       PRIMARY KEY(review_session_id, return_id),
       FOREIGN KEY(task_id) REFERENCES team_patch_tasks(id)
     );
+    CREATE TABLE IF NOT EXISTS team_durable_operations (
+      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, kind TEXT NOT NULL,
+      state TEXT NOT NULL, phase TEXT NOT NULL DEFAULT 'accepted', progress REAL NOT NULL DEFAULT 0,
+      request_json TEXT NOT NULL DEFAULT '{}', checkpoint_json TEXT NOT NULL DEFAULT '{}',
+      result_json TEXT NOT NULL DEFAULT '{}', error TEXT NOT NULL DEFAULT '',
+      cancel_requested INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL, updated_at INTEGER NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS team_operation_project_state ON team_durable_operations(project_id,state,updated_at);
   `);
   const storedSchemaVersion = Number(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value || 0);
   if (storedSchemaVersion < 4) {
@@ -346,7 +369,8 @@ const ensureSchema = databasePath => {
       }
     }
   }
-  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','5') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
+  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','6') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
+  schemaReadyPaths.add(databasePath);
   return db;
 };
 const fileSha256 = filePath => new Promise((resolve, reject) => {
@@ -483,7 +507,15 @@ const advancedRuntimeStatus = async (parentId, { refresh = false } = {}) => {
 
 const taskRows = (db, photoId, baseVersionId) => db.prepare(`SELECT * FROM team_patch_tasks WHERE photo_id=? AND (?='' OR base_version_id=?) AND is_deleted=0 ORDER BY created_at,person_index`).all(String(photoId), String(baseVersionId || ''), String(baseVersionId || ''));
 const listTasks = (db, photoId, baseVersionId = '') => taskRows(db, photoId, baseVersionId).map(serializeTask);
-const registerPhoto = (db, context, photoId, baseVersionId) => db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(photo_id) DO UPDATE SET project_id=excluded.project_id,base_version_id=excluded.base_version_id,updated_at=excluded.updated_at`).run(String(photoId), String(context.projectId), String(baseVersionId), Date.now(), Date.now());
+const registerPhoto = (db, context, photoId, baseVersionId, metadata = {}) => db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,display_name,relative_path,relative_path_state,file_missing,calibrated_at,created_at,updated_at)
+  VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(photo_id) DO UPDATE SET
+  project_id=excluded.project_id,base_version_id=excluded.base_version_id,
+  display_name=CASE WHEN excluded.display_name<>'' THEN excluded.display_name ELSE team_retouch_photos.display_name END,
+  relative_path=CASE WHEN excluded.relative_path<>'' THEN excluded.relative_path ELSE team_retouch_photos.relative_path END,
+  relative_path_state=CASE WHEN excluded.relative_path<>'' THEN excluded.relative_path_state ELSE team_retouch_photos.relative_path_state END,
+  file_missing=CASE WHEN excluded.relative_path<>'' THEN excluded.file_missing ELSE team_retouch_photos.file_missing END,
+  calibrated_at=MAX(team_retouch_photos.calibrated_at,excluded.calibrated_at),updated_at=excluded.updated_at`)
+  .run(String(photoId), String(context.projectId), String(baseVersionId), String(metadata.displayName || ''), String(metadata.relativePath || ''), String(metadata.relativePathState || (metadata.relativePath ? 'ready' : 'unresolvable')), metadata.fileMissing ? 1 : 0, Number(metadata.calibratedAt) || 0, Date.now(), Date.now());
 
 const replacePatches = (db, context, photoId, baseVersionId, tasks) => {
   const old = listTasks(db, photoId, baseVersionId);
@@ -584,6 +616,7 @@ const detectPhoto = async (parentId, payload, context) => {
     let replaced;
     try {
       replaced = replacePatches(db, context, payload.photoId, payload.baseVersionId, publishedTasks);
+      registerPhoto(db, context, payload.photoId, payload.baseVersionId, { displayName: bundle.photo?.displayName || bundle.photo?.originalName, relativePath: metadataBase.relativePath, relativePathState: metadataBase.relativePathState, fileMissing: metadataBase.fileMissing, calibratedAt: Date.now() });
       if (payload.restoreExcluded) db.prepare('DELETE FROM team_person_exclusions WHERE project_id=? AND photo_id=? AND base_version_id=?').run(String(context.projectId), String(payload.photoId), String(payload.baseVersionId));
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -734,11 +767,13 @@ const uploadPatch = (parentId, payload, context) => withDomain(parentId, async (
       db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status='uploaded',updated_at=? WHERE id=?`).run(outputPath, Date.now(), row.id);
       db.prepare(`${upsertAssignmentSql}`).run(String(context.projectId), row.photo_id, row.base_version_id, personIndex, existingAssignment?.identity_id || null, 1, 'manual', 1, Date.now());
       db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,artifact_id=?,edited_patch_path=?,completed=1,completion_kind='retouched',return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, artifact.stageId, artifact.id, outputPath, Date.now(), Date.now(), row.photo_id, row.base_version_id, personIndex);
+      markWorkflowReconcilePending(db, { taskId: row.id, photoId: row.photo_id }, new Error('返图已上传，等待后台更新接力任务'));
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     await appendCommand(storage, { operationId, type: 'patch-upload', state: 'committed' });
+    await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: row.id, photoId: row.photo_id, error: '返图已上传，等待后台更新接力任务' }).catch(() => undefined);
     committed = true;
-    return finalizeReconcile(parentId, context, { taskId: row.id, photoId: row.photo_id }, { success: true, tasks: listTasks(db, row.photo_id).map(publicTask) }, db);
+    return { success: true, tasks: listTasks(db, row.photo_id).map(publicTask), reconcilePending: true, relayState: 'preparing', warning: '返图已安全上传；下一位接力任务正在后台准备' };
   } catch (error) {
     if (!committed) {
       await removeArtifacts([stagedPath, outputPath]);
@@ -767,11 +802,13 @@ const removeUpload = (parentId, payload, context) => withDomain(parentId, async 
     db.prepare(`UPDATE team_person_assignments SET completed=0,completion_kind='',artifact_id=NULL,edited_patch_path=NULL,completed_at=NULL,updated_at=? WHERE photo_id=? AND base_version_id=? AND person_index=?`).run(Date.now(), row.photo_id, row.base_version_id, personIndex);
     const predecessor = currentTaskArtifact(db, row.id)?.artifact_path || null;
     db.prepare(`UPDATE team_patch_tasks SET edited_patch_path=?,status=?,merged_version_id=NULL,merge_metrics_json='{}',updated_at=? WHERE id=?`).run(predecessor, predecessor ? 'uploaded' : 'exported', Date.now(), row.id);
+    markWorkflowReconcilePending(db, { taskId: row.id, photoId: row.photo_id }, new Error('返图已撤销，等待后台更新接力任务'));
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); await appendCommand(storage, { operationId, type: 'patch-remove-upload', state: 'rolled-back', error: error.message || String(error) }); throw error; }
   await appendCommand(storage, { operationId, type: 'patch-remove-upload', state: 'committed' });
+  await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: row.id, photoId: row.photo_id, error: '返图已撤销，等待后台更新接力任务' }).catch(() => undefined);
   if (removedPath) await removeArtifacts([removedPath]);
-  return finalizeReconcile(parentId, context, { taskId: row.id, photoId: row.photo_id }, { success: true, tasks: listTasks(db, row.photo_id).map(publicTask), cleanupQueued: Boolean(removedPath) }, db);
+  return { success: true, tasks: listTasks(db, row.photo_id).map(publicTask), cleanupQueued: Boolean(removedPath), reconcilePending: true, relayState: 'preparing', warning: '返图撤销已保存；接力任务正在后台更新' };
 });
 
 const bboxIou = (left, right) => {
@@ -950,7 +987,11 @@ const detectBatch = async (parentId, payload, context) => {
           }
           db.exec('BEGIN IMMEDIATE');
           let replaced;
-          try { replaced = replacePatches(db, context, item.bundle.photo.id, item.base.id, publishedTasks); db.exec('COMMIT'); }
+          try {
+            replaced = replacePatches(db, context, item.bundle.photo.id, item.base.id, publishedTasks);
+            registerPhoto(db, context, item.bundle.photo.id, item.base.id, { displayName: item.bundle.photo?.displayName || item.bundle.photo?.originalName, relativePath: item.base.relativePath, relativePathState: item.base.relativePathState, fileMissing: item.base.fileMissing, calibratedAt: Date.now() });
+            db.exec('COMMIT');
+          }
           catch (error) { db.exec('ROLLBACK'); throw error; }
           await commitPublished(published);
           await removeArtifacts(replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
@@ -1303,7 +1344,7 @@ const storeReturnedPatchInDomain = async (db, storage, sourcePath, payload, cont
       if (payload.deferReconcile) markWorkflowReconcilePending(db, { taskId: row.id, photoId: row.photo_id }, new Error('返图已确认，等待后台更新接力任务'));
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
-    if (payload.deferReconcile) void appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: row.id, photoId: row.photo_id, error: '返图已确认，等待后台更新接力任务' }).catch(() => undefined);
+    if (payload.deferReconcile) await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: row.id, photoId: row.photo_id, error: '返图已确认，等待后台更新接力任务' }).catch(() => undefined);
     return {
       success: true,
       artifactPath: destination,
@@ -1367,7 +1408,7 @@ const componentMediaV2 = async (parentId, payload, action = 'variants') => {
   if (!url) return unavailableMedia(variant, 'variant-unavailable');
   return { success: true, variant, url, ...(variant === 'preview' ? { previewUrl: url } : { originalUrl: url }), opaqueRef: media.opaqueRef };
 };
-const completeIdentity = (parentId, payload, context) => withDomain(parentId, async db => {
+const completeIdentity = (parentId, payload, context) => withDomain(parentId, async (db, storage) => {
   const photoId = String(payload.photoId || '');
   const baseVersionId = String(payload.baseVersionId || '');
   const personIndex = Number(payload.personIndex);
@@ -1395,10 +1436,12 @@ const completeIdentity = (parentId, payload, context) => withDomain(parentId, as
     } else {
       db.prepare(`UPDATE team_person_assignments SET task_id=?,stage_id=?,completed=1,completion_kind=?,return_missing=0,return_missing_since=NULL,completed_at=?,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?`).run(row.id, stage?.id || null, String(payload.completionKind || 'no-retouch'), Date.now(), Date.now(), String(context.projectId), photoId, baseVersionId, personIndex);
     }
+    markWorkflowReconcilePending(db, { taskId: row.id, photoId: row.photo_id }, new Error(payload.completed === false ? '完成状态已撤销，等待后台更新接力任务' : '完成状态已保存，等待后台更新接力任务'));
     db.exec('COMMIT');
   } catch (error) { db.exec('ROLLBACK'); throw error; }
   if (removedPath) await fs.promises.rm(removedPath, { force: true }).catch(() => undefined);
-  return finalizeReconcile(parentId, context, { taskId: row.id, photoId: row.photo_id }, { success: true, completed: payload.completed !== false, taskId: row.id, personIndex }, db);
+  await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: row.id, photoId: row.photo_id, error: payload.completed === false ? '完成状态已撤销，等待后台更新接力任务' : '完成状态已保存，等待后台更新接力任务' }).catch(() => undefined);
+  return { success: true, completed: payload.completed !== false, taskId: row.id, personIndex, reconcilePending: true, relayState: 'preparing', warning: '状态已安全保存；接力任务正在后台更新' };
 });
 const publicWorkspace = value => ({
   ...value,
@@ -1426,13 +1469,10 @@ const workspaceSnapshot = async (parentId, context) => {
       ...registered.map(row => row.photo_id),
       ...assignments.map(row => row.photo_id),
     ]).slice(0, MAX_ITEMS);
-    const versionByPhoto = new Map([...registered.map(row => [String(row.photo_id), String(row.base_version_id)]), ...assignments.map(row => [String(row.photo_id), String(row.base_version_id)])]);
-    const media = candidatePhotoIds.length
-      ? await readMedia(parentId, { mediaRefs: candidatePhotoIds.map(photoId => ({ photoId, ...(versionByPhoto.get(String(photoId)) ? { versionId: versionByPhoto.get(String(photoId)) } : {}) })) })
-      : { items: [] };
-    const bundles = new Map((media.items || []).map(item => [String(item.photo?.id || ''), item]));
     const registrations = new Map(registered.map(row => [String(row.photo_id), row]));
+    const versionByPhoto = new Map([...registered.map(row => [String(row.photo_id), String(row.base_version_id)]), ...assignments.map(row => [String(row.photo_id), String(row.base_version_id)])]);
     const tasksByPhoto = new Map();
+    const excludedByVersion = new Map();
     if (candidatePhotoIds.length) {
       const placeholders = candidatePhotoIds.map(() => '?').join(',');
       for (const row of db.prepare(`SELECT * FROM team_patch_tasks WHERE is_deleted=0 AND photo_id IN (${placeholders}) ORDER BY created_at,person_index`).all(...candidatePhotoIds)) {
@@ -1440,9 +1480,12 @@ const workspaceSnapshot = async (parentId, context) => {
         values.push(row);
         tasksByPhoto.set(String(row.photo_id), values);
       }
+      for (const row of db.prepare(`SELECT photo_id,base_version_id,COUNT(*) count FROM team_person_exclusions WHERE project_id=? AND photo_id IN (${placeholders}) GROUP BY photo_id,base_version_id`).all(projectId, ...candidatePhotoIds)) {
+        excludedByVersion.set(`${row.photo_id}\0${row.base_version_id}`, Number(row.count) || 0);
+      }
     }
     const photos = [];
-    for (const [photoId, bundle] of bundles) {
+    for (const photoId of candidatePhotoIds) {
       const rows = tasksByPhoto.get(photoId) || [];
       const registration = registrations.get(photoId);
       if (!rows.length && !registration) continue;
@@ -1452,16 +1495,15 @@ const workspaceSnapshot = async (parentId, context) => {
         values.push(row);
         grouped.set(String(row.base_version_id), values);
       }
-      const currentVersionId = String(bundle.photo?.currentVersionId || '');
       let baseVersionId = String(registration?.base_version_id || '');
-      if (!baseVersionId) baseVersionId = grouped.has(currentVersionId) ? currentVersionId : [...grouped.keys()].at(-1) || '';
-      const base = (bundle.versions || []).find(version => String(version.id) === baseVersionId);
-      if (!base) continue;
+      if (!baseVersionId) baseVersionId = String(versionByPhoto.get(photoId) || [...grouped.keys()].at(-1) || '');
+      if (!baseVersionId) continue;
+      const relativePath = String(registration?.relative_path || '');
       photos.push({
-        photoId, baseVersionId, name: bundle.photo?.displayName || path.parse(bundle.photo?.originalName || base.relativePath || '').name,
-        relativePath: base.relativePath || '', relativePathState: base.relativePathState || 'unresolvable', fileMissing: Boolean(base.fileMissing), mediaRef: { photoId, versionId: baseVersionId, relativePath: base.relativePath || '' },
+        photoId, baseVersionId, name: String(registration?.display_name || path.parse(relativePath).name || photoId),
+        relativePath, relativePathState: String(registration?.relative_path_state || 'unresolvable'), fileMissing: Boolean(registration?.file_missing), mediaRef: { photoId, versionId: baseVersionId, relativePath },
         tasks: (grouped.get(baseVersionId) || []).map(serializeTask),
-        excludedPersonCount: Number(db.prepare('SELECT COUNT(*) AS count FROM team_person_exclusions WHERE project_id=? AND photo_id=? AND base_version_id=?').get(projectId, photoId, baseVersionId)?.count || 0),
+        excludedPersonCount: excludedByVersion.get(`${photoId}\0${baseVersionId}`) || 0,
       });
     }
     const identities = db.prepare('SELECT id,name,color,created_at AS createdAt,updated_at AS updatedAt FROM team_person_identities WHERE project_id=? ORDER BY created_at').all(projectId);
@@ -1483,8 +1525,17 @@ const workspaceSnapshot = async (parentId, context) => {
     const generatedSameWeek = new Set(uniqueText(generatedSettings?.sameWeekIdentityIds));
     const workflowItems = (manifest?.groups || []).flatMap(group => group.items || []);
     const workflowAvailableItems = workflowItems.filter(item => item.available && item.relativePath);
+    const maxima = db.prepare(`SELECT
+      (SELECT COALESCE(MAX(updated_at),0) FROM team_retouch_photos WHERE project_id=?) photos_at,
+      (SELECT COALESCE(MAX(updated_at),0) FROM team_person_assignments WHERE project_id=?) assignments_at,
+      (SELECT COALESCE(MAX(updated_at),0) FROM team_person_identities WHERE project_id=?) identities_at`).get(projectId, projectId, projectId);
+    const calibratedCount = registered.filter(row => Number(row.calibrated_at) > 0).length;
     return {
       success: true, photos, identities, assignments: normalizedAssignments,
+      snapshotVersion: 1,
+      revision: `${Number(maxima.photos_at) || 0}:${Number(maxima.assignments_at) || 0}:${Number(maxima.identities_at) || 0}`,
+      stale: calibratedCount < registered.length,
+      calibration: { calibratedCount, pendingCount: Math.max(0, registered.length - calibratedCount) },
       workflowGenerated: Boolean(manifest && Number(manifest.version) >= 2),
       workflowNeedsRegeneration: Boolean(manifest && generatedSettings && (JSON.stringify(generatedOrder) !== JSON.stringify(preferredIdentityOrder)
         || JSON.stringify(generatedOrder.slice(1).filter(id => generatedSameWeek.has(id))) !== JSON.stringify(sameWeekIdentityIds))),
@@ -1495,6 +1546,33 @@ const workspaceSnapshot = async (parentId, context) => {
       workflowSettings: { preferredIdentityOrder, preferredIdentityId: preferredIdentityOrder[0] || undefined, sameWeekIdentityIds },
     };
   } finally { db.close(); }
+};
+
+const calibrateWorkspaceStep = async (parentId, payload, context) => {
+  const storage = await hostStorage(parentId);
+  const limit = Math.min(48, Math.max(1, Number(payload.maxItems) || 24));
+  const db = ensureSchema(storage.databasePath);
+  let pending;
+  try { pending = db.prepare(`SELECT photo_id,base_version_id FROM team_retouch_photos WHERE project_id=? AND (calibrated_at=0 OR calibrated_at<?) ORDER BY calibrated_at,created_at LIMIT ?`).all(String(context.projectId), Date.now() - 5 * 60_000, limit); }
+  finally { db.close(); }
+  if (!pending.length) return { success: true, state: 'ready', calibratedCount: 0, pendingCount: 0 };
+  const media = await readMedia(parentId, { mediaRefs: pending.map(row => ({ photoId: row.photo_id, versionId: row.base_version_id })) });
+  const calibrated = new Map((media.items || []).map(bundle => [String(bundle.photo?.id || ''), bundle]));
+  const updateDb = ensureSchema(storage.databasePath);
+  try {
+    updateDb.exec('BEGIN IMMEDIATE');
+    try {
+      for (const row of pending) {
+        const bundle = calibrated.get(String(row.photo_id));
+        const base = (bundle?.versions || []).find(version => String(version.id) === String(row.base_version_id));
+        if (!bundle || !base) continue;
+        registerPhoto(updateDb, context, row.photo_id, row.base_version_id, { displayName: bundle.photo?.displayName || bundle.photo?.originalName, relativePath: base.relativePath, relativePathState: base.relativePathState, fileMissing: base.fileMissing, calibratedAt: Date.now() });
+      }
+      updateDb.exec('COMMIT');
+    } catch (error) { updateDb.exec('ROLLBACK'); throw error; }
+    const pendingCount = Number(updateDb.prepare('SELECT COUNT(*) count FROM team_retouch_photos WHERE project_id=? AND calibrated_at=0').get(String(context.projectId))?.count) || 0;
+    return { success: true, state: pendingCount ? 'preparing' : 'ready', calibratedCount: calibrated.size, pendingCount };
+  } finally { updateDb.close(); }
 };
 
 const writeJsonAtomic = async (target, value) => {
@@ -1564,11 +1642,15 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
     await writeJsonAtomic(checkpointPath, { version: 1, fingerprint, projectName: context.projectName, status: context.projectStatus, updatedAt: Date.now() });
     checkpointReady = true;
     await publish({ phase: 'copying', totalFiles: plan.files.length, totalBytes: plan.totalBytes, message: checkpoint?.fingerprint === fingerprint ? '正在续传工作图…' : '正在复制工作图…' });
+    let progressReports = Promise.resolve();
     await copyWorkflowPlan({
       files: plan.files, totalBytes: plan.totalBytes, copyFileAtomic, concurrency: 3,
       isCancelled: () => job.cancelled,
-      onProgress: update => { void publish({ ...update, message: update.phase === 'resuming' ? '正在复用已完成的工作图…' : update.phase === 'finalizing' ? '正在提交工作流程…' : '正在复制工作图…' }); },
+      onProgress: update => {
+        progressReports = progressReports.catch(() => undefined).then(() => publish({ ...update, message: update.phase === 'resuming' ? '正在复用已完成的工作图…' : update.phase === 'finalizing' ? '正在提交工作流程…' : '正在复制工作图…' }));
+      },
     });
+    await progressReports;
     if (job.cancelled) throw Object.assign(new Error('工作流程生成已取消'), { code: CANCELLED_CODE });
     const manifest = { version: 2, projectId: String(context.projectId), projectName: context.projectName, status: context.projectStatus, generatedAt: Date.now(), workflowSettings, groups: plan.manifestGroups };
     if (fs.existsSync(scope.outputDirectory)) {
@@ -1620,9 +1702,15 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
 const generateWorkflow = (parentId, payload, context) => withProjectWorkflowOperation(context.projectId, () => generateWorkflowUnlocked(parentId, payload, context));
 
 const workflowStatus = async (parentId, _payload, context) => {
-  const reconciliation = await retryPendingWorkflowReconciles(parentId, context).catch(() => ({ pendingCount: 0, recoveredCount: 0 }));
   const key = `${context.projectId}:${context.projectStatus}:${context.projectName}`;
   const job = workflowJobs.get(key) || null;
+  const reconciliation = await withDomain(parentId, db => {
+    const row = db.prepare(`SELECT COUNT(*) pendingCount,MIN(updated_at) oldestAt FROM team_workflow_reconcile_pending pending
+      JOIN team_patch_tasks task ON task.id=pending.task_id
+      JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+      WHERE registered.project_id=?`).get(String(context.projectId));
+    return { state: Number(row?.pendingCount) ? 'preparing' : 'ready', pendingCount: Number(row?.pendingCount) || 0, oldestAt: Number(row?.oldestAt) || 0 };
+  });
   if (!job) {
     const storage = await hostStorage(parentId); const recovered = await readJson(path.join(storage.dataPath, 'workflow-jobs', `${sha256(key)}.json`), null);
     return { success: true, job: recovered, reconciliation };
@@ -1647,10 +1735,17 @@ const exportWorkflow = async (parentId, payload, context, open = false) => {
   let directory = path.resolve(outputDirectory, String(group?.relativePath || ''));
   const expectedAvailable = (group?.items || []).some(item => item.available);
   if (group?.relativePath && isInside(outputDirectory, directory) && (expectedAvailable && (!fs.existsSync(directory) || !availableCount()))) {
-    for (const taskId of uniqueText((group.items || []).map(item => item.taskId))) await reconcileWorkflowTaskChain(parentId, context, taskId);
-    ({ outputDirectory, manifest } = await readWorkflowManifest(parentId, context));
-    group = (manifest?.groups || []).find(item => Number(item.week) === Number(payload.week) && String(item.identityId || '') === String(payload.identityId || ''));
-    directory = path.resolve(outputDirectory, String(group?.relativePath || ''));
+    if (open) {
+      const taskIds = uniqueText((group.items || []).map(item => item.taskId));
+      await withDomain(parentId, db => {
+        const insert = db.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?) ON CONFLICT(task_id) DO UPDATE SET error=excluded.error,updated_at=excluded.updated_at`);
+        for (const taskId of taskIds) {
+          const task = db.prepare('SELECT photo_id FROM team_patch_tasks WHERE id=? AND is_deleted=0').get(taskId);
+          if (task) insert.run(taskId, task.photo_id, '用户打开任务文件夹，等待后台准备', Date.now());
+        }
+      });
+      return { success: true, state: 'preparing', count: 0, pendingCount: taskIds.length, message: '任务文件夹正在准备，可继续其他操作' };
+    }
   }
   if (!group?.relativePath || !isInside(outputDirectory, directory) || !fs.existsSync(directory)) throw new Error('任务文件夹不存在，且无法从当前工作图与返图记录安全重建');
   const count = availableCount();
@@ -2144,7 +2239,10 @@ const legacyProjectMigrationStatus = async parentId => {
   if (storage.adoption?.state === 'pending') return { state: 'pending', phase: 'host-storage-adoption', processedCount: 0, pendingCount: 1, attemptCount: 0, lastError: '', retryable: true, updatedAt: Number(storage.adoption.startedAt) || 0 };
   const db = ensureSchema(storage.databasePath);
   try {
-    const projectId = String(storage.projectId); const pendingCount = pendingLegacyArtifactItems(db, storage.dataPath, projectId).length;
+    const projectId = String(storage.projectId);
+    const storedState = migrationStateFromDb(db, projectId);
+    const hasStoredState = Boolean(storedState.updatedAt) || storedState.state === 'committed';
+    const pendingCount = hasStoredState ? storedState.pendingCount : pendingLegacyArtifactItems(db, storage.dataPath, projectId).length;
     const maintenancePendingCount = Number(db.prepare(`SELECT COUNT(*) count FROM team_workflow_reconcile_pending pending
       JOIN team_patch_tasks task ON task.id=pending.task_id
       JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
@@ -2243,16 +2341,81 @@ const returnConfirm = (parentId, payload, context) => withReviewSessionOperation
   return { success: true, confirmationState: 'confirmed', relayState: 'preparing', warning: registered.warning, reconcilePending: true, reviewSessionCompleted: !recovered.session, cleanupPending: recovered.cleanupPending };
 });
 
+const acceptDurableOperation = async (parentId, payload, context, kind, extra = {}) => {
+  const startedAt = Date.now();
+  const operationId = String(payload.operationId || crypto.randomUUID());
+  const accepted = await withDomain(parentId, db => {
+    const existing = db.prepare('SELECT * FROM team_durable_operations WHERE id=? AND project_id=?').get(operationId, String(context.projectId));
+    if (existing) return { success: true, accepted: true, operationId, state: existing.state, phase: existing.phase, cacheHit: true };
+    const now = Date.now();
+    db.prepare(`INSERT INTO team_durable_operations(id,project_id,kind,state,phase,request_json,created_at,updated_at) VALUES(?,?,?,'accepted','accepted',?,?,?)`)
+      .run(operationId, String(context.projectId), kind, JSON.stringify({ ...payload, operationId, ...extra }), now, now);
+    return { success: true, accepted: true, operationId, state: 'accepted', phase: 'accepted' };
+  });
+  migrationMetric(`team-operation-${kind}`, 'ack', startedAt, { ackMs: Date.now() - startedAt, itemCount: Array.isArray(payload.groups) ? payload.groups.reduce((count, group) => count + (group.items?.length || 0), 0) : Array.isArray(payload.items) ? payload.items.length : payload.photoId ? 1 : 0, cacheHit: accepted.cacheHit === true, outcome: accepted.state });
+  return accepted;
+};
+
+const durableOperationSnapshot = row => row ? ({
+  operationId: row.id, kind: row.kind, state: row.state, phase: row.phase, progress: Number(row.progress) || 0,
+  checkpoint: parseJson(row.checkpoint_json, {}), result: parseJson(row.result_json, {}), error: row.error || '',
+  cancelRequested: Boolean(row.cancel_requested), createdAt: row.created_at, updatedAt: row.updated_at,
+}) : null;
+
+const runDurableOperationUnlocked = async (parentId, payload, context) => {
+  const operationId = String(payload.operationId || '');
+  const storage = await hostStorage(parentId); const db = ensureSchema(storage.databasePath);
+  let row;
+  try {
+    row = db.prepare('SELECT * FROM team_durable_operations WHERE id=? AND project_id=?').get(operationId, String(context.projectId));
+    if (!row) throw new Error('持久化操作不存在或不属于当前项目');
+    if (row.state === 'completed') return { ...parseJson(row.result_json, {}), operationId, operation: durableOperationSnapshot(row) };
+    if (row.cancel_requested) return { success: false, cancelled: true, operationId };
+    db.prepare("UPDATE team_durable_operations SET state='running',phase='running',updated_at=? WHERE id=?").run(Date.now(), operationId);
+  } finally { db.close(); }
+  const request = parseJson(row.request_json, {});
+  try {
+    let result;
+    if (row.kind === 'workflow-generate') result = await generateWorkflow(parentId, request, context);
+    else if (row.kind === 'return-batch') result = await returnBatch(parentId, request, context, request.workflowMode === true);
+    else if (row.kind === 'merge') result = await withPhotoOperation(request.photoId, () => mergePatches(parentId, request, context));
+    else throw new Error(`未知持久化操作类型：${row.kind}`);
+    const finalState = result?.cancelled ? 'failed' : result?.requiresConfirmation ? 'accepted' : result?.success === false ? 'failed' : 'completed';
+    const finalDb = ensureSchema(storage.databasePath);
+    try { finalDb.prepare('UPDATE team_durable_operations SET state=?,phase=?,progress=?,result_json=?,error=?,updated_at=? WHERE id=?').run(finalState, result?.requiresConfirmation ? 'confirmation' : finalState, finalState === 'completed' ? 100 : 0, JSON.stringify(result || {}), String(result?.error || ''), Date.now(), operationId); }
+    finally { finalDb.close(); }
+    return { ...result, operationId };
+  } catch (error) {
+    const failedDb = ensureSchema(storage.databasePath);
+    try { failedDb.prepare("UPDATE team_durable_operations SET state='failed',phase='failed',error=?,updated_at=? WHERE id=?").run(error.message || String(error), Date.now(), operationId); }
+    finally { failedDb.close(); }
+    throw error;
+  }
+};
+const runDurableOperation = (parentId, payload, context) => withKeyedOperation(durableOperationRuns, payload.operationId, () => runDurableOperationUnlocked(parentId, payload, context));
+
+const getDurableOperation = (parentId, payload, context) => withDomain(parentId, db => {
+  const row = db.prepare('SELECT * FROM team_durable_operations WHERE id=? AND project_id=?').get(String(payload.operationId || ''), String(context.projectId));
+  return { success: true, operation: durableOperationSnapshot(row) };
+});
+
+const cancelDurableOperation = async (parentId, payload, context) => {
+  const operationId = String(payload.operationId || '');
+  await withDomain(parentId, db => db.prepare('UPDATE team_durable_operations SET cancel_requested=1,phase=?,updated_at=? WHERE id=? AND project_id=?').run('cancelling', Date.now(), operationId, String(context.projectId)));
+  await cancelWorkflow(parentId, { operationId }).catch(() => undefined);
+  return { success: true, operationId, cancelRequested: true };
+};
+
 const handlers = {
   'team.project.get.v1': async (parentId, _payload, context) => {
     const startedAt = Date.now();
     const migration = await legacyProjectMigrationStatus(parentId);
     if (migration.phase === 'host-storage-adoption') {
-      migrationMetric('team-project-get-v1', 'storage-adoption-pending', startedAt, { itemCount: 0, state: migration.state });
+      migrationMetric('team-project-get-v1', 'storage-adoption-pending', startedAt, { itemCount: 0, state: migration.state, outcome: 'accepted', fallback: true });
       return { success: true, photos: [], identities: [], assignments: [], workflowGenerated: false, workflowNeedsRegeneration: false, workflowAvailableKeys: [], workflowAvailableSubjectKeys: [], workflowSettings: { preferredIdentityOrder: [], sameWeekIdentityIds: [] }, migration };
     }
     const snapshot = publicWorkspace(await workspaceSnapshot(parentId, context));
-    migrationMetric('team-project-get-v1', 'snapshot', startedAt, { itemCount: snapshot.photos?.length || 0, state: migration.state });
+    migrationMetric('team-project-get-v1', 'snapshot', startedAt, { itemCount: snapshot.photos?.length || 0, state: migration.state, outcome: 'completed', cacheHit: snapshot.stale !== true });
     return { ...snapshot, migration };
   },
   'team.project.migrate-step.v1': async (parentId, _payload, context) => {
@@ -2260,6 +2423,7 @@ const handlers = {
     if (migration.state === 'committed' && !context.signal?.aborted) await retryPendingWorkflowReconciles(parentId, context, 1);
     return legacyProjectMigrationStatus(parentId);
   },
+  'team.project.calibrate-step.v1': calibrateWorkspaceStep,
   'team.workflow.reconcile-drain.v1': (parentId, payload, context) => retryPendingWorkflowReconciles(parentId, context, Math.min(50, Math.max(1, Number(payload.maxItems) || 20))),
   'team.project.register.v1': async (parentId, payload, context) => {
     const relativePaths = uniqueText(payload.relativePaths);
@@ -2273,7 +2437,7 @@ const handlers = {
           const base = (bundle.versions || []).find(version => String(version.id) === String(bundle.photo?.currentVersionId))
             || (bundle.versions || []).find(version => version.isCurrent) || (bundle.versions || []).at(-1);
           if (!photoId || !base?.id) throw new Error('无法登记缺少照片或当前版本的团片图片');
-          registerPhoto(db, context, photoId, String(base.id));
+          registerPhoto(db, context, photoId, String(base.id), { displayName: bundle.photo?.displayName || bundle.photo?.originalName, relativePath: base.relativePath, relativePathState: base.relativePathState, fileMissing: base.fileMissing, calibratedAt: Date.now() });
         }
         db.exec('COMMIT');
       } catch (error) { db.exec('ROLLBACK'); throw error; }
@@ -2294,7 +2458,7 @@ const handlers = {
   'team.patch.cleanup.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => cleanupPatches(parentId, payload, context)),
   'team.patch.upload.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => uploadPatch(parentId, payload, context)),
   'team.patch.remove-upload.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => removeUpload(parentId, payload, context)),
-  'team.patch.merge.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => mergePatches(parentId, payload, context)),
+  'team.patch.merge.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'merge') : withPhotoOperation(payload.photoId, () => mergePatches(parentId, payload, context)),
   'team.identity.similarities.v1': readIdentitySimilarities,
   'team.identity.suggest.v1': suggestIdentities,
   'team.identity.complete.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => completeIdentity(parentId, payload, context)),
@@ -2304,16 +2468,19 @@ const handlers = {
   'team.workflow.settings.save.v1': saveWorkflowSettings,
   'team.workflow.status.v1': workflowStatus,
   'team.workflow.cancel.v1': cancelWorkflow,
-  'team.workflow.generate.v1': generateWorkflow,
+  'team.workflow.generate.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'workflow-generate') : generateWorkflow(parentId, payload, context),
   'team.workflow.export.v1': (parentId, payload, context) => exportWorkflow(parentId, payload, context, false),
   'team.workflow.open-export.v1': (parentId, payload, context) => exportWorkflow(parentId, payload, context, true),
   'team.workflow.return-review.get.v1': reviewGet,
   'team.workflow.return-review.discard.v1': reviewDiscard,
   'team.workflow.return-review.ignore.v1': reviewIgnore,
-  'team.workflow.return-batch.v1': (parentId, payload, context) => returnBatch(parentId, payload, context, true),
+  'team.workflow.return-batch.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'return-batch', { workflowMode: true }) : returnBatch(parentId, payload, context, true),
   'team.workflow.return-confirm.v1': returnConfirm,
   'team.patch.select-returns.v1': selectReturns,
-  'team.patch.return-batch.v1': (parentId, payload, context) => returnBatch(parentId, payload, context, false),
+  'team.patch.return-batch.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'return-batch', { workflowMode: false }) : returnBatch(parentId, payload, context, false),
+  'team.operation.run.v1': runDurableOperation,
+  'team.operation.get.v1': getDurableOperation,
+  'team.operation.cancel.v1': cancelDurableOperation,
   'team.workflow.artifact.migrate.v1': migrateWorkflowArtifacts,
   'team.progress.list.v1': parentId => listProjectProgress(parentId),
   'team.progress.create.v1': (parentId, payload) => createProjectProgress(parentId, payload),

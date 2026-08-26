@@ -187,23 +187,6 @@ const originalPreviewKind = (filePath: string): 'image' | 'raw' => {
   return ['cr2', 'cr3', 'nef', 'arw', 'raf', 'orf', 'rw2', 'dng', 'rwl', '3fr', 'fff', 'iiq', 'pef', 'srw'].includes(extension) ? 'raw' : 'image';
 };
 
-const useOriginalPreview = (filePath: string | undefined, cacheConfig: AppConfig['mediaCache'], enabled = true) => {
-  const [url, setUrl] = useState('');
-  useEffect(() => {
-    let active = true;
-    setUrl('');
-    if (!filePath || !enabled) return () => { active = false; };
-    void legacyApi.getMediaOriginal(filePath, originalPreviewKind(filePath), cacheConfig).then(result => {
-      const matrix = result.orientation?.matrix;
-      const orientationMatches = !matrix
-        || matrix.length === 4 && matrix.every((value, index) => value === [1, 0, 0, 1][index]);
-      if (active && result.success && result.mediaUrl && orientationMatches) setUrl(result.mediaUrl);
-    }).catch(() => undefined);
-    return () => { active = false; };
-  }, [filePath, enabled, cacheConfig.directory, cacheConfig.maxSizeGB]);
-  return url;
-};
-
 const LazyPreviewPlaceholder = ({ failed, error, onRetry }: { failed: boolean; error: string; onRetry: () => void }) => failed
   ? <div className="flex max-w-lg flex-col items-center justify-center gap-2 px-4 text-center text-xs text-amber-300"><AlertTriangle size={22}/><strong>预览加载失败</strong><span className="break-words leading-5 text-amber-200" title={error}>{error || '未知媒体读取错误'}</span><button type="button" onClick={onRetry} className="rounded-md border border-amber-400/40 px-2.5 py-1 font-bold text-amber-300 hover:bg-amber-400/10">重试预览</button></div>
   : <Loader2 className="animate-spin text-slate-500"/>;
@@ -448,7 +431,7 @@ type PhotoCardProps = Omit<Props, 'entries' | 'activeStep' | 'onStepChange'> & {
   initialPhoto?: TeamProjectPhoto;
 };
 
-const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, componentActive = true, identityState, refreshToken, onIdentityChanged, onDetectionComplete, onPickIdentity, processingMessage, initialPhoto, onNotice, onEntriesChange, onProjectChanged }: PhotoCardProps) => {
+const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, componentActive = true, identityState, refreshToken, onIdentityChanged, onDetectionComplete, onPickIdentity, processingMessage, initialPhoto, onNotice, onEntriesChange }: PhotoCardProps) => {
   const appDialog = useAppDialog();
   const [bundle, setBundle] = useState<TeamPatchBundle>(() => initialPhoto ? bundleFromWorkspacePhoto(initialPhoto) : { success: true, versions: [], tasks: [] });
   const [loading, setLoading] = useState(!initialPhoto);
@@ -483,14 +466,14 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, comp
   };
   useEffect(() => {
     if (initialWorkspaceBundleRef.current) { initialWorkspaceBundleRef.current = false; return; }
+    if (!previewEnabled) return;
     void load();
-  }, [entry.path, entry.updatedAt, refreshToken]);
+  }, [entry.path, entry.updatedAt, refreshToken, previewEnabled]);
 
   const baseVersion = useMemo<MediaVersion | undefined>(() => bundle.versions.find(version => version.id === bundle.photo?.currentVersionId) || bundle.versions.find(version => version.isCurrent) || bundle.versions.at(-1), [bundle.versions, bundle.photo?.currentVersionId]);
   const tasks = useMemo(() => bundle.tasks.filter(task => task.baseVersionId === baseVersion?.id), [bundle.tasks, baseVersion?.id]);
   const sourceThumbnail = useLazyPreview(baseVersion?.filePath, cacheConfig, 1280, '', previewEnabled);
-  const sourceOriginalUrl = useOriginalPreview(baseVersion?.filePath, cacheConfig, previewEnabled);
-  const sourcePreview = { ...sourceThumbnail, url: sourceOriginalUrl || sourceThumbnail.url };
+  const sourcePreview = sourceThumbnail;
   const [imageSize, setImageSize] = useState({ width: 1, height: 1 });
   const assignments = useMemo(() => new Map(identityState.assignments.map(item => [assignmentKey(item.photoId, item.baseVersionId, item.personIndex), item])), [identityState.assignments]);
   const identities = useMemo(() => new Map(identityState.identities.map(item => [item.id, item])), [identityState.identities]);
@@ -515,13 +498,15 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, comp
     })) return;
     setBusy('detect');
     setDetectionProgress({ progress: 1, message: '正在启动 AI 识别进程…' });
-    const result = await legacyApi.detectTeamPatchPeople(workspacePath, project.status, project.name, { photoId: bundle.photo.id, baseVersionId: baseVersion.id, restoreExcluded });
-    setBusy('');
-    if (!result.success) { onNotice(`AI 识别失败：${result.error || '未知错误'}`, 'error'); return; }
-    setBundle(normalizeBundle(result));
-    await onDetectionComplete();
-    const personCount = result.detection?.personCount || result.tasks.reduce((total, task) => total + membersOf(task).length, 0);
-    onNotice(restoreExcluded ? `已恢复人工排除记录并重新识别 ${personCount} 个人物` : `已识别 ${personCount} 个人物，并自动尝试匹配项目中的人物身份`, 'success');
+    try {
+      const result = await legacyApi.detectTeamPatchPeople(workspacePath, project.status, project.name, { photoId: bundle.photo.id, baseVersionId: baseVersion.id, restoreExcluded });
+      if (!result.success) { onNotice(`AI 识别失败：${result.error || '未知错误'}`, 'error'); return; }
+      setBundle(normalizeBundle(result));
+      await onDetectionComplete();
+      const personCount = result.detection?.personCount || result.tasks.reduce((total, task) => total + membersOf(task).length, 0);
+      onNotice(restoreExcluded ? `已恢复人工排除记录并重新识别 ${personCount} 个人物` : `已识别 ${personCount} 个人物，并自动尝试匹配项目中的人物身份`, 'success');
+    } catch (error) { onNotice(`AI 识别失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { setBusy(''); }
   };
 
   const updateTask = async (task: TeamPatchTask, changes: { personName?: string; assignee?: string; crop?: Crop; needsReview?: boolean; reviewReason?: string }) => {
@@ -535,29 +520,34 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, comp
   const saveCrop = async () => {
     if (!cropEditor) return;
     setBusy(`crop:${cropEditor.task.id}`);
-    const result = await updateTask(cropEditor.task, { crop: cropEditor.crop, needsReview: false, reviewReason: '' });
-    setBusy('');
-    if (result) { setCropEditor(null); onNotice(result.warning || `已按新范围重新生成工作图${result.workflowRefreshCount ? `，并同步更新 ${result.workflowRefreshCount} 个工作区文件` : ''}`, result.warning ? 'warning' : 'success'); }
+    try {
+      const result = await updateTask(cropEditor.task, { crop: cropEditor.crop, needsReview: false, reviewReason: '' });
+      if (result) { setCropEditor(null); onNotice(result.warning || `已按新范围重新生成工作图${result.workflowRefreshCount ? `，并同步更新 ${result.workflowRefreshCount} 个工作区文件` : ''}`, result.warning ? 'warning' : 'success'); }
+    } catch (error) { onNotice(`更新工作图失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { setBusy(''); }
   };
 
   const deleteTask = async (task: TeamPatchTask) => {
     if (!bundle.photo || !await appDialog.confirm({ title: '删除这张错误工作图？', message: '会删除该工作图及其中人物的标记；原照片不会删除。如只是范围不完整，请选择“调整范围”。', confirmLabel: '删除错误工作图', tone: 'danger' })) return;
     setBusy(`delete:${task.id}`);
-    const result = await legacyApi.deleteTeamPatch(workspacePath, { photoId: bundle.photo.id, taskId: task.id });
-    setBusy('');
-    if (!result.success) { onNotice(`删除工作图失败：${result.error || '未知错误'}`, 'error'); return; }
-    setBundle(current => ({ ...current, tasks: result.tasks }));
-    await onIdentityChanged();
+    try {
+      const result = await legacyApi.deleteTeamPatch(workspacePath, { photoId: bundle.photo.id, taskId: task.id });
+      if (!result.success) { onNotice(`删除工作图失败：${result.error || '未知错误'}`, 'error'); return; }
+      setBundle(current => ({ ...current, tasks: result.tasks }));
+      await onIdentityChanged();
+    } catch (error) { onNotice(`删除工作图失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { setBusy(''); }
   };
 
   const removeFromProject = async () => {
     if (!bundle.photo || !baseVersion || !await appDialog.confirm({ title: `从团片协作中删除“${bundle.photo.displayName || entry.name}”？`, message: '会删除这张图片的裁图、人物标注和流程状态，原照片不会删除。', confirmLabel: '删除团片协作数据', tone: 'danger' })) return;
     setBusy('remove-photo');
-    const result = await legacyApi.removeProjectTeamPhoto(workspacePath, { photoId: bundle.photo.id, baseVersionId: baseVersion.id });
-    setBusy('');
-    if (!result.success) { onNotice(`删除失败：${result.error || '未知错误'}`, 'error'); return; }
-    onProjectChanged?.();
-    onEntriesChange?.([]);
+    try {
+      const result = await legacyApi.removeProjectTeamPhoto(workspacePath, { photoId: bundle.photo.id, baseVersionId: baseVersion.id });
+      if (!result.success) { onNotice(`删除失败：${result.error || '未知错误'}`, 'error'); return; }
+      onEntriesChange?.([]);
+    } catch (error) { onNotice(`删除失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { setBusy(''); }
   };
 
   const identifiedCount = tasks.reduce((total, task) => total + membersOf(task).filter(member => {
@@ -843,12 +833,13 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     if (!await ensureFaceRecognitionConsent(appDialog)) return;
     identifyingRef.current = true;
     setIdentityState(current => ({ ...current, identifying: true }));
-    const result = await legacyApi.suggestTeamIdentities(workspacePath, project.name);
-    identifyingRef.current = false;
-    if (!result.success) { setIdentityState(current => ({ ...current, identifying: false })); onNotice(`人物自动标记失败：${result.error || '未知错误'}`, 'error'); return; }
-    await syncTaskLabels(workspacePath, result);
-    setIdentityState({ ...result, identifying: false });
-    onProjectChanged?.();
+    try {
+      const result = await legacyApi.suggestTeamIdentities(workspacePath, project.name);
+      if (!result.success) { onNotice(`人物自动标记失败：${result.error || '未知错误'}`, 'error'); return; }
+      await syncTaskLabels(workspacePath, result);
+      setIdentityState({ ...result, identifying: false });
+    } catch (error) { onNotice(`人物自动标记失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { identifyingRef.current = false; setIdentityState(current => ({ ...current, identifying: false })); }
   };
 
   const runBatch = async () => {
@@ -856,13 +847,15 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     const targetEntries = unrecognizedPaths.length ? entries.filter(entry => unrecognizedPaths.includes(entry.relativePath)) : entries;
     setRunning(true);
     setResults([]);
-    const result = await legacyApi.detectTeamPatchBatch(workspacePath, project.status, project.name, { relativePaths: targetEntries.map(entry => entry.relativePath) });
-    setRunning(false);
-    setResults(result.results || []);
-    setRefreshToken(current => current + 1);
-    if (!result.success) { onNotice(`识别图片失败：${result.error || '未知错误'}`, 'error'); return; }
-    await identifyAndSync();
-    onNotice(`识别完成：${result.results.filter(item => item.success).length}/${targetEntries.length} 张成功，并已自动尝试标记人物`, 'success');
+    try {
+      const result = await legacyApi.detectTeamPatchBatch(workspacePath, project.status, project.name, { relativePaths: targetEntries.map(entry => entry.relativePath) });
+      setResults(result.results || []);
+      setRefreshToken(current => current + 1);
+      if (!result.success) { onNotice(`识别图片失败：${result.error || '未知错误'}`, 'error'); return; }
+      await identifyAndSync();
+      onNotice(`识别完成：${result.results.filter(item => item.success).length}/${targetEntries.length} 张成功，并已自动尝试标记人物`, 'success');
+    } catch (error) { onNotice(`识别图片失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { setRunning(false); }
   };
 
   const overallProgress = progress.itemCount ? Math.max(0, Math.min(100, ((Math.max(1, progress.itemIndex) - 1) + progress.progress / 100) / progress.itemCount * 100)) : 0;
