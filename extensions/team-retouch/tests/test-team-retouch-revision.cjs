@@ -10,7 +10,9 @@ const dataPath = path.join(sandbox, 'storage'); const databasePath = path.join(d
 let db = ensureSchema(databasePath);
 const workingPath = path.join(dataPath, 'media', 'photo-a', 'version-a', 'working-a.png'); fs.mkdirSync(path.dirname(workingPath), { recursive: true }); fs.writeFileSync(workingPath, 'working');
 db.prepare('INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)').run('photo-a', 'project-a', 'version-a', 1, 1);
-db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,'{}','{}',?,'[]',1,1)`).run('task-a', 'photo-a', 'version-a', 1, '人物 1', workingPath);
+db.prepare('INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)').run('photo-a', 'project-b', 'version-a', 1, 1);
+db.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,?,'{}','{}',?,'[]',1,1)`).run('project-a', 'task-a', 'photo-a', 'version-a', 1, '项目 A 人物', workingPath);
+db.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,?,'{}','{}',?,'[]',1,1)`).run('project-b', 'task-a', 'photo-a', 'version-a', 1, '项目 B 人物', workingPath);
 db.close();
 
 const simulator = projectId => createHostSimulator({
@@ -37,6 +39,10 @@ const simulator = projectId => createHostSimulator({
 
     const projectBMutation = await projectB.request('team.identity.save.v1', { name: 'Project B', assignments: [], expectedRevision: '0' });
     assert.equal(projectBMutation.revision, '1', 'project B accepts its own revision 0 after project A advanced independently');
+    db = ensureSchema(databasePath);
+    assert.equal(db.prepare('SELECT person_name FROM team_patch_tasks WHERE project_id=? AND id=?').get('project-a', 'task-a').person_name, '更新人物');
+    assert.equal(db.prepare('SELECT person_name FROM team_patch_tasks WHERE project_id=? AND id=?').get('project-b', 'task-a').person_name, '项目 B 人物', 'same task/photo/person IDs in project B are never updated by project A');
+    db.close();
 
     db = ensureSchema(databasePath);
     db.prepare('INSERT INTO team_revision_guards(request_id,project_id,expected_revision,bumped,created_at) VALUES(?,?,?,?,?)').run('exclude-request', 'project-a', 2, 0, Date.now());

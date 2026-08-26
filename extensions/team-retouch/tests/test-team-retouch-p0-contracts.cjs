@@ -25,12 +25,13 @@ const { createHostSimulator } = require('./host-simulator.cjs');
 
   const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'team-retouch-durable-contract-'));
   const dataPath = path.join(sandbox, 'storage'); fs.mkdirSync(dataPath, { recursive: true });
+  const databasePath = path.join(dataPath, 'storage.sqlite3');
   let taskCapabilityCalls = 0;
   const simulator = createHostSimulator({
     service: path.join(__dirname, '..', 'service.cjs'),
     context: { componentId: 'team-retouch', componentVersion: 'test', surface: 'project', projectId: 'durable-project', projectName: 'Durable', projectStatus: 'active' },
     capabilities: {
-      'component.storage.v2': () => ({ apiVersion: 2, dataPath, databasePath: path.join(dataPath, 'storage.sqlite3'), projectId: 'durable-project', ownership: 'component-private' }),
+      'component.storage.v2': () => ({ apiVersion: 2, dataPath, databasePath, projectId: 'durable-project', ownership: 'component-private' }),
       'tasks.v2': () => { taskCapabilityCalls += 1; return { apiVersion: 2, task: null, cancelled: false }; },
     },
   });
@@ -73,6 +74,11 @@ const { createHostSimulator } = require('./host-simulator.cjs');
     await simulator.request('team.operation.cancel.v1', { operationId: 'durable-1' });
     const cancelled = await simulator.request('team.operation.get.v1', { operationId: 'durable-1' });
     assert.equal(cancelled.operation.cancelRequested, true);
+    assert.equal(cancelled.operation.state, 'cancelled', 'accepted-but-not-run operation reaches cancelled terminal state immediately');
+    const secretToken = 'SECRET_RETURN_TOKEN_MUST_NOT_PERSIST';
+    await simulator.request('team.workflow.return-batch.v1', { acceptOnly: true, operationId: 'secret-return', returnedFiles: [secretToken], items: [] });
+    assert(!fs.readFileSync(databasePath).includes(Buffer.from(secretToken)), 'durable SQLite payload never contains one-time return tokens');
+    await simulator.request('team.operation.cancel.v1', { operationId: 'secret-return' });
     console.log(`Team-retouch P0 contracts passed: maximum durable ack ${maximumDurableAckMs.toFixed(1)}ms, lightweight mutation ${identityMutationMs.toFixed(1)}ms, media concurrency ${maximum}`);
   } finally { simulator.close(); fs.rmSync(sandbox, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

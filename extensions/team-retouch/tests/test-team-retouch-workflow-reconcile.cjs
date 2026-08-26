@@ -170,13 +170,13 @@ const restoreManifestDirectory = () => {
     db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('photo', 'project', 'base', 1, 1);
     db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('photo-b', 'project', 'base-b', 1, 1);
     db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,created_at,updated_at) VALUES(?,?,?,?,?)`).run('foreign-photo', 'other-project', 'foreign-base', 1, 1);
-    const insertTask = db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
-    insertTask.run('task-1', 'photo', 'base', 1, '任务一', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 1 }, { personIndex: 2 }]), 1, 1);
-    insertTask.run('task-2', 'photo', 'base', 3, '任务二', '{}', '{}', taskTwoPatch, JSON.stringify([{ personIndex: 3 }, { personIndex: 4 }]), 1, 1);
-    insertTask.run('task-3', 'photo-b', 'base-b', 5, '任务三', '{}', '{}', taskThreePatch, JSON.stringify([{ personIndex: 5 }, { personIndex: 6 }]), 1, 1);
-    insertTask.run('foreign-task', 'foreign-photo', 'foreign-base', 5, '外部项目任务', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 5 }]), 1, 1);
-    const insertStage = db.prepare(`INSERT INTO team_task_stages(id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?)`);
-    for (const [taskId, people] of [['task-1', [1, 2]], ['task-2', [3, 4]], ['task-3', [5, 6]]]) for (const [index, personIndex] of people.entries()) insertStage.run(`${taskId}-stage-${personIndex}`, taskId, personIndex, index + 1, 'pending', 1, 1);
+    const insertTask = db.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)`);
+    insertTask.run('project', 'task-1', 'photo', 'base', 1, '任务一', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 1 }, { personIndex: 2 }]), 1, 1);
+    insertTask.run('project', 'task-2', 'photo', 'base', 3, '任务二', '{}', '{}', taskTwoPatch, JSON.stringify([{ personIndex: 3 }, { personIndex: 4 }]), 1, 1);
+    insertTask.run('project', 'task-3', 'photo-b', 'base-b', 5, '任务三', '{}', '{}', taskThreePatch, JSON.stringify([{ personIndex: 5 }, { personIndex: 6 }]), 1, 1);
+    insertTask.run('other-project', 'foreign-task', 'foreign-photo', 'foreign-base', 5, '外部项目任务', '{}', '{}', taskOnePatch, JSON.stringify([{ personIndex: 5 }]), 1, 1);
+    const insertStage = db.prepare(`INSERT INTO team_task_stages(project_id,id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`);
+    for (const [taskId, people] of [['task-1', [1, 2]], ['task-2', [3, 4]], ['task-3', [5, 6]]]) for (const [index, personIndex] of people.entries()) insertStage.run('project', `${taskId}-stage-${personIndex}`, taskId, personIndex, index + 1, 'pending', 1, 1);
     const insertIdentity = db.prepare(`INSERT INTO team_person_identities(id,project_id,name,created_at,updated_at) VALUES(?,?,?,?,?)`);
     const insertAssignment = db.prepare(`INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,updated_at,task_id,stage_id) VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
     for (const personIndex of [1, 2, 3, 4, 5, 6]) {
@@ -224,7 +224,7 @@ const restoreManifestDirectory = () => {
     const missingManifestBackup = `${manifestPath}.missing-fixture`;
     fs.renameSync(manifestPath, missingManifestBackup);
     const missingManifestDb = new DatabaseSync(databasePath);
-    missingManifestDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-1', 'photo', 'missing manifest fixture', 0);
+    missingManifestDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('project', 'task-1', 'photo', 'missing manifest fixture', 0);
     missingManifestDb.close();
     const missingDrain = await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
     assert.equal(missingDrain.state, 'preparing');
@@ -242,7 +242,7 @@ const restoreManifestDirectory = () => {
     for (const item of legacyManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1')) item.photoId = 'legacy-photo-id';
     fs.writeFileSync(manifestPath, JSON.stringify(legacyManifest, null, 2));
     const legacyPendingDb = new DatabaseSync(databasePath);
-    legacyPendingDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-1', 'legacy-photo-id', '工作流程 task 链跨越了错误的照片版本', 1);
+    legacyPendingDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('project', 'task-1', 'legacy-photo-id', '工作流程 task 链跨越了错误的照片版本', 1);
     legacyPendingDb.close();
     const legacyStatus = await invoke('team.project.get.v1');
     assert.deepEqual({ state: legacyStatus.migration.state, phase: legacyStatus.migration.phase, pending: legacyStatus.migration.maintenancePendingCount }, { state: 'pending', phase: 'workflow-reconcile', pending: 1 });
@@ -250,7 +250,7 @@ const restoreManifestDirectory = () => {
     assert(JSON.parse(fs.readFileSync(manifestPath, 'utf8')).groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1').every(item => item.photoId === 'photo'), 'all items in the stable task/base chain are atomically rewritten to the current project photo id');
     const healedDb = new DatabaseSync(databasePath);
     assert.equal(healedDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-1').count, 0, 'a healed legacy photo id clears its reconcile retry');
-    healedDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-1', 'photo', 'idempotency check', 2);
+    healedDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('project', 'task-1', 'photo', 'idempotency check', 2);
     healedDb.close();
     const auditPath = path.join(dataRoot, 'command-log', 'operations.ndjson');
     const repairAuditCount = () => fs.readFileSync(auditPath, 'utf8').split(/\r?\n/).filter(Boolean).map(line => JSON.parse(line)).filter(item => item.state === 'legacy-photo-id-repaired' && item.taskId === 'task-1').length;
@@ -262,7 +262,7 @@ const restoreManifestDirectory = () => {
     for (const item of conflictManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-2')) { item.photoId = 'legacy-conflict-photo'; item.baseVersionId = 'wrong-base'; }
     fs.writeFileSync(manifestPath, JSON.stringify(conflictManifest, null, 2));
     const rejectedDb = new DatabaseSync(databasePath);
-    rejectedDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-2', 'legacy-conflict-photo', 'version conflict fixture', 3);
+    rejectedDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('project', 'task-2', 'legacy-conflict-photo', 'version conflict fixture', 3);
     rejectedDb.close();
     await invoke('team.project.migrate-step.v1');
     const rejectedItems = JSON.parse(fs.readFileSync(manifestPath, 'utf8')).groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-2');
@@ -270,7 +270,7 @@ const restoreManifestDirectory = () => {
     const rejectedStateDb = new DatabaseSync(databasePath);
     assert.match(rejectedStateDb.prepare('SELECT error FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-2').error, /错误的照片版本/);
     rejectedStateDb.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run('task-2');
-    rejectedStateDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('foreign-task', 'foreign-photo', 'cross-project fixture', 4);
+    rejectedStateDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('other-project', 'foreign-task', 'foreign-photo', 'cross-project fixture', 4);
     rejectedStateDb.close();
     await invoke('team.project.migrate-step.v1');
     const crossProjectDb = new DatabaseSync(databasePath);
@@ -285,7 +285,7 @@ const restoreManifestDirectory = () => {
     for (const item of laterFailureManifest.groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1')) item.photoId = 'legacy-photo-before-later-failure';
     fs.writeFileSync(manifestPath, JSON.stringify(laterFailureManifest, null, 2));
     const laterFailureDb = new DatabaseSync(databasePath);
-    laterFailureDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-1', 'legacy-photo-before-later-failure', 'retry after legacy id', 3);
+    laterFailureDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('project', 'task-1', 'legacy-photo-before-later-failure', 'retry after legacy id', 3);
     laterFailureDb.close();
     artifactScopeCount = 0;
     breakManifestOnArtifactCall = 2;

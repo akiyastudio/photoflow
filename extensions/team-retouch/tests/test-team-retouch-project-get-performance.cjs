@@ -12,12 +12,12 @@ fs.mkdirSync(dataPath, { recursive: true });
 const db = ensureSchema(databasePath);
 db.exec('BEGIN');
 const photo = db.prepare(`INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,display_name,relative_path,relative_path_state,file_missing,calibrated_at,created_at,updated_at) VALUES(?,?,?,?,?,'ready',0,?,?,?)`);
-const task = db.prepare(`INSERT INTO team_patch_tasks(id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,'{}','{}',?,'[]',?,?)`);
+const task = db.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,created_at,updated_at) VALUES(?,?,?,?,?,?,'{}','{}',?,'[]',?,?)`);
 const exclusion = db.prepare(`INSERT INTO team_person_exclusions(id,project_id,photo_id,base_version_id,bbox_json,created_at) VALUES(?,?,?,?, '{}',?)`);
 for (let index = 0; index < 2000; index += 1) {
   const photoId = `photo-${index}`; const versionId = `version-${index}`;
   photo.run(photoId, 'project-performance', versionId, `Photo ${index}`, `images/${index}.jpg`, 1, index + 1, index + 1);
-  task.run(`task-${index}`, photoId, versionId, 1, '人物 1', `working/${index}.png`, index + 1, index + 1);
+  task.run('project-performance', `task-${index}`, photoId, versionId, 1, '人物 1', `working/${index}.png`, index + 1, index + 1);
   if (index % 3 === 0) exclusion.run(`excluded-${index}`, 'project-performance', photoId, versionId, index + 1);
 }
 db.prepare('INSERT INTO meta(key,value) VALUES(?,?)').run(projectMigrationCommittedKey('project-performance'), 'committed');

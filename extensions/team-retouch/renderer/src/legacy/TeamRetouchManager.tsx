@@ -485,7 +485,7 @@ const TeamRetouchPhotoCard = ({ entry, workspacePath, project, cacheConfig, comp
   }, [tasks]);
 
   useEffect(() => legacyApi.onTeamPatchDetectionProgress(value => {
-    if (value.photoId === bundle.photo?.id && value.baseVersionId === baseVersion?.id) setDetectionProgress({ progress: value.progress, message: value.message });
+    if ((!value.projectId || value.projectId === project.id) && value.photoId === bundle.photo?.id && value.baseVersionId === baseVersion?.id) setDetectionProgress({ progress: value.progress, message: value.message });
   }), [bundle.photo?.id, baseVersion?.id]);
 
   const detect = async (restoreExcluded = false) => {
@@ -674,7 +674,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
     void loadIdentities();
     return () => { identityLoadSequenceRef.current += 1; };
   }, [workspacePath, project.id, project.name, project.status, initialWorkspace, initialWorkspacePending]);
-  useEffect(() => legacyApi.onTeamPatchBatchProgress(value => setProgress({ itemIndex: value.itemIndex, itemCount: value.itemCount, progress: value.progress, itemName: value.itemName, message: value.message })), []);
+  useEffect(() => legacyApi.onTeamPatchBatchProgress(value => { if (!value.projectId || value.projectId === project.id) setProgress({ itemIndex: value.itemIndex, itemCount: value.itemCount, progress: value.progress, itemName: value.itemName, message: value.message }); }), [project.id]);
   useEffect(() => {
     if (!identityState.workflowNode?.id) return;
     void teamGraph.ensureWorkflowInputs(identityState.workflowNode.id).then(() => onProjectChanged?.()).catch(error => {

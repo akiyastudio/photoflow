@@ -431,12 +431,12 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     return () => { active = false; };
   }, [workspacePath, project.name, project.status]);
   useEffect(() => legacyApi.onTeamPatchReturnBatchProgress(value => {
-    setWorkflowReturnProgress(current => current ? updateWorkflowReturnProgress(current, value) : current);
-  }), []);
+    if (!value.projectId || value.projectId === project.id) setWorkflowReturnProgress(current => current ? updateWorkflowReturnProgress(current, value) : current);
+  }), [project.id]);
   useEffect(() => {
     let active = true;
     const unsubscribe = legacyApi.onTeamWorkflowGenerationProgress(value => {
-      if (value.projectName === project.name) setWorkflowGeneration(value);
+      if ((!value.projectId || value.projectId === project.id) && value.projectName === project.name) setWorkflowGeneration(value);
     });
     void legacyApi.getTeamWorkflowGenerationStatus(workspacePath, project.status, project.name).then(result => {
       if (active && result.success && result.job) setWorkflowGeneration(result.job);

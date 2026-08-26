@@ -206,6 +206,7 @@ const App = () => {
       if (!mounted) return;
       const projectChanged = Boolean(contextRef.current?.projectId && contextRef.current.projectId !== nextContext.projectId);
       if (projectChanged) {
+        loadGuardRef.current.invalidate();
         entriesRef.current = []; setEntries([]); entriesLoadedRef.current = false; setEntriesLoaded(false);
         setWorkspaceSnapshot(normalizeWorkspace(undefined)); setManagerWorkspaceSeed(undefined);
         reconcileStartedRef.current = '';
