@@ -277,6 +277,7 @@ const ensureSchema = databasePath => {
   if (schemaAlreadyReady) return db;
   db.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   const existingSchemaVersion = Number(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value || 0);
+  const hadLegacyDomainTables = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='team_patch_tasks'").get());
   if (existingSchemaVersion > 9) { db.close(); throw new Error(`团片数据库版本 ${existingSchemaVersion} 高于当前支持的 9；已拒绝降级打开`); }
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -403,8 +404,8 @@ const ensureSchema = databasePath => {
   addColumn('team_workflow_review_confirmations', 'project_id', "TEXT NOT NULL DEFAULT ''");
   addColumn('team_durable_operations', 'base_revision', 'INTEGER NOT NULL DEFAULT 0');
   const storedSchemaVersion = existingSchemaVersion;
-  if (storedSchemaVersion < 9) {
-    db.exec('BEGIN IMMEDIATE');
+  if (storedSchemaVersion < 9 && hadLegacyDomainTables) {
+    db.exec('PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE');
     try {
       db.prepare(`UPDATE team_patch_tasks SET project_id=(SELECT registered.project_id FROM team_retouch_photos registered WHERE registered.photo_id=team_patch_tasks.photo_id AND registered.base_version_id=team_patch_tasks.base_version_id) WHERE project_id=''`).run();
       if (db.prepare("SELECT 1 FROM team_patch_tasks WHERE project_id='' LIMIT 1").get()) throw new Error('历史 task 无法唯一绑定项目；已拒绝 schema v9 迁移');
@@ -413,16 +414,63 @@ const ensureSchema = databasePath => {
       db.prepare(`UPDATE team_workflow_reconcile_pending SET project_id=(SELECT task.project_id FROM team_patch_tasks task WHERE task.id=team_workflow_reconcile_pending.task_id) WHERE project_id=''`).run();
       db.prepare(`UPDATE team_workflow_review_confirmations SET project_id=(SELECT task.project_id FROM team_patch_tasks task WHERE task.id=team_workflow_review_confirmations.task_id) WHERE project_id=''`).run();
       for (const table of ['team_task_stages','team_task_artifacts','team_workflow_reconcile_pending','team_workflow_review_confirmations']) if (db.prepare(`SELECT 1 FROM ${table} WHERE project_id='' LIMIT 1`).get()) throw new Error(`历史 ${table} 无法唯一绑定项目；已拒绝 schema v9 迁移`);
-      db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS team_photo_project_id ON team_retouch_photos(project_id,photo_id);
-        CREATE UNIQUE INDEX IF NOT EXISTS team_task_project_id ON team_patch_tasks(project_id,id);
-        CREATE UNIQUE INDEX IF NOT EXISTS team_stage_project_id ON team_task_stages(project_id,id);
-        CREATE UNIQUE INDEX IF NOT EXISTS team_artifact_project_id ON team_task_artifacts(project_id,id);
-        CREATE UNIQUE INDEX IF NOT EXISTS team_assignment_project_subject ON team_person_assignments(project_id,photo_id,base_version_id,person_index);
-        CREATE UNIQUE INDEX IF NOT EXISTS team_pending_project_task ON team_workflow_reconcile_pending(project_id,task_id);
-        CREATE UNIQUE INDEX IF NOT EXISTS team_confirmation_project_return ON team_workflow_review_confirmations(project_id,review_session_id,return_id);`);
+      const rebuildTables = ['team_retouch_photos','team_person_identities','team_patch_tasks','team_person_assignments','team_person_exclusions','team_task_stages','team_task_artifacts','team_workflow_reconcile_pending','team_workflow_review_confirmations','team_durable_operations'];
+      const counts = Object.fromEntries(rebuildTables.map(table => [table, Number(db.prepare(`SELECT COUNT(*) count FROM ${table}`).get().count)]));
+      db.exec(`
+        CREATE TABLE v9_photos AS SELECT * FROM team_retouch_photos WHERE 0;
+        CREATE TABLE v9_identities AS SELECT * FROM team_person_identities WHERE 0;
+        CREATE TABLE v9_tasks AS SELECT * FROM team_patch_tasks WHERE 0;
+        CREATE TABLE v9_assignments AS SELECT * FROM team_person_assignments WHERE 0;
+        CREATE TABLE v9_exclusions AS SELECT * FROM team_person_exclusions WHERE 0;
+        CREATE TABLE v9_stages AS SELECT * FROM team_task_stages WHERE 0;
+        CREATE TABLE v9_artifacts AS SELECT * FROM team_task_artifacts WHERE 0;
+        CREATE TABLE v9_pending AS SELECT * FROM team_workflow_reconcile_pending WHERE 0;
+        CREATE TABLE v9_confirmations AS SELECT * FROM team_workflow_review_confirmations WHERE 0;
+        CREATE TABLE v9_operations AS SELECT * FROM team_durable_operations WHERE 0;
+        INSERT INTO v9_photos SELECT * FROM team_retouch_photos;
+        INSERT INTO v9_identities SELECT * FROM team_person_identities;
+        INSERT INTO v9_tasks SELECT * FROM team_patch_tasks;
+        INSERT INTO v9_assignments SELECT * FROM team_person_assignments;
+        INSERT INTO v9_exclusions SELECT * FROM team_person_exclusions;
+        INSERT INTO v9_stages SELECT * FROM team_task_stages;
+        INSERT INTO v9_artifacts SELECT * FROM team_task_artifacts;
+        INSERT INTO v9_pending SELECT * FROM team_workflow_reconcile_pending;
+        INSERT INTO v9_confirmations SELECT * FROM team_workflow_review_confirmations;
+        INSERT INTO v9_operations SELECT * FROM team_durable_operations;
+      `);
+      for (const [table, expected] of Object.entries(counts)) {
+        const replacement = ({ team_retouch_photos: 'v9_photos', team_person_identities: 'v9_identities', team_patch_tasks: 'v9_tasks', team_person_assignments: 'v9_assignments', team_person_exclusions: 'v9_exclusions', team_task_stages: 'v9_stages', team_task_artifacts: 'v9_artifacts', team_workflow_reconcile_pending: 'v9_pending', team_workflow_review_confirmations: 'v9_confirmations', team_durable_operations: 'v9_operations' })[table];
+        if (Number(db.prepare(`SELECT COUNT(*) count FROM ${replacement}`).get().count) !== expected) throw new Error(`schema v9 copy count mismatch: ${table}`);
+      }
+      if (process.env.PHOTOFLOW_TEST_FAULT_SCHEMA_V9 === 'after-copy') throw new Error('injected schema v9 rebuild failure');
+      db.exec(`
+        DROP TABLE team_workflow_review_confirmations; DROP TABLE team_workflow_reconcile_pending; DROP TABLE team_task_artifacts; DROP TABLE team_task_stages; DROP TABLE team_person_assignments; DROP TABLE team_person_exclusions; DROP TABLE team_patch_tasks; DROP TABLE team_person_identities; DROP TABLE team_retouch_photos; DROP TABLE team_durable_operations;
+        ALTER TABLE v9_photos RENAME TO team_retouch_photos; ALTER TABLE v9_identities RENAME TO team_person_identities; ALTER TABLE v9_tasks RENAME TO team_patch_tasks; ALTER TABLE v9_assignments RENAME TO team_person_assignments; ALTER TABLE v9_exclusions RENAME TO team_person_exclusions; ALTER TABLE v9_stages RENAME TO team_task_stages; ALTER TABLE v9_artifacts RENAME TO team_task_artifacts; ALTER TABLE v9_pending RENAME TO team_workflow_reconcile_pending; ALTER TABLE v9_confirmations RENAME TO team_workflow_review_confirmations; ALTER TABLE v9_operations RENAME TO team_durable_operations;
+        CREATE UNIQUE INDEX team_photo_project_id ON team_retouch_photos(project_id,photo_id);
+        CREATE UNIQUE INDEX team_identity_project_id ON team_person_identities(project_id,id);
+        CREATE UNIQUE INDEX team_task_project_id ON team_patch_tasks(project_id,id);
+        CREATE UNIQUE INDEX team_assignment_project_subject ON team_person_assignments(project_id,photo_id,base_version_id,person_index);
+        CREATE UNIQUE INDEX team_exclusion_project_id ON team_person_exclusions(project_id,id);
+        CREATE UNIQUE INDEX team_stage_project_id ON team_task_stages(project_id,id);
+        CREATE UNIQUE INDEX team_stage_project_task_person ON team_task_stages(project_id,task_id,person_index);
+        CREATE UNIQUE INDEX team_artifact_project_id ON team_task_artifacts(project_id,id);
+        CREATE UNIQUE INDEX team_pending_project_task ON team_workflow_reconcile_pending(project_id,task_id);
+        CREATE UNIQUE INDEX team_confirmation_project_return ON team_workflow_review_confirmations(project_id,review_session_id,return_id);
+        CREATE UNIQUE INDEX team_operation_project_id ON team_durable_operations(project_id,id);
+      `);
       db.exec('COMMIT');
-    } catch (error) { db.exec('ROLLBACK'); db.close(); throw error; }
+      db.exec('PRAGMA foreign_keys=ON');
+    } catch (error) { db.exec('ROLLBACK'); db.exec('PRAGMA foreign_keys=ON'); db.close(); throw error; }
   }
+  if (storedSchemaVersion < 9 && hadLegacyDomainTables) for (const table of ['team_retouch_photos','team_person_identities','team_person_assignments','team_person_exclusions','team_patch_tasks','team_task_stages','team_task_artifacts','team_workflow_reconcile_pending','team_workflow_review_confirmations']) for (const action of ['INSERT','UPDATE','DELETE']) db.exec(`
+    CREATE TRIGGER IF NOT EXISTS ${table}_revision_guard_${action.toLowerCase()} BEFORE ${action} ON ${table} BEGIN
+      SELECT CASE WHEN EXISTS(SELECT 1 FROM team_revision_guards WHERE request_id=team_request_id() AND bumped=0) AND (SELECT expected_revision FROM team_revision_guards WHERE request_id=team_request_id())>=0 AND (SELECT expected_revision FROM team_revision_guards WHERE request_id=team_request_id())<>COALESCE((SELECT revision FROM team_project_revisions WHERE project_id=(SELECT project_id FROM team_revision_guards WHERE request_id=team_request_id())),0) THEN RAISE(ABORT,'TEAM_REVISION_CONFLICT') END;
+    END;
+    CREATE TRIGGER IF NOT EXISTS ${table}_revision_${action.toLowerCase()} AFTER ${action} ON ${table} BEGIN
+      INSERT INTO team_project_revisions(project_id,revision) SELECT project_id,0 FROM team_revision_guards WHERE request_id=team_request_id() ON CONFLICT(project_id) DO NOTHING;
+      UPDATE team_project_revisions SET revision=revision+1 WHERE project_id=(SELECT project_id FROM team_revision_guards WHERE request_id=team_request_id()) AND EXISTS(SELECT 1 FROM team_revision_guards WHERE request_id=team_request_id() AND bumped=0);
+      UPDATE team_revision_guards SET bumped=1 WHERE request_id=team_request_id();
+    END;`);
   if (storedSchemaVersion < 4) {
     const now = Date.now();
     const tasks = db.prepare('SELECT * FROM team_patch_tasks').all();
@@ -2317,8 +2365,8 @@ const pendingLegacyArtifactItems = (db, dataPath, projectId) => {
   const items = [];
   for (const row of db.prepare(`SELECT task.id,task.photo_id,task.base_version_id,task.patch_path,task.mask_path,task.edited_patch_path
     FROM team_patch_tasks task JOIN team_retouch_photos registered
-      ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
-    WHERE task.is_deleted=0 AND registered.project_id=? ORDER BY task.id`).all(String(projectId))) {
+      ON registered.project_id=task.project_id AND registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+    WHERE task.is_deleted=0 AND task.project_id=? ORDER BY task.id`).all(String(projectId))) {
     for (const field of ['patch_path', 'mask_path', 'edited_patch_path']) {
       const current = String(row[field] || '');
       if (current && path.isAbsolute(current) && !isInside(dataPath, current)) items.push({ row, field, current });

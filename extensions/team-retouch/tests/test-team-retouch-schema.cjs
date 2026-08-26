@@ -60,6 +60,9 @@ try {
   assert.equal(assignments[1].task_id, 'task-b');
   assert(assignments.every(item => item.stage_id && item.artifact_id));
   assert.equal(migrated.prepare('SELECT COUNT(*) count FROM team_task_artifacts').get().count, 2);
+  migrated.prepare('INSERT INTO team_retouch_photos(photo_id,project_id,base_version_id,display_name,relative_path,relative_path_state,file_missing,calibrated_at,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?)').run('photo', 'project-b', 'base', 'B', 'b.jpg', 'ready', 0, 1, 1, 1);
+  migrated.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,assignee,detector,bbox_json,crop_json,patch_path,mask_json,members_json,needs_review,review_reason,status,merge_metrics_json,generation_json,created_at,updated_at,is_deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('project-b', 'task-a', 'photo', 'base', 1, 'B', '', '', '{}', '{}', 'b.png', '{}', '[]', 0, '', 'exported', '{}', '{}', 1, 1, 0);
+  assert.equal(migrated.prepare("SELECT COUNT(*) count FROM team_patch_tasks WHERE id='task-a'").get().count, 2, 'migrated v8 database accepts the same task id in two projects');
   migrated.close();
 
   migrated = ensureSchema(databasePath);
