@@ -403,12 +403,16 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (action !== 'discard') return;
     if (workflowReturnResult.reviewSessionId) {
       setBusy('workflow-review-discard');
-      const result = await legacyApi.discardTeamWorkflowReturnReview(workspacePath, project.name, workflowReturnResult.reviewSessionId);
-      setBusy('');
-      if (!result.success) {
-        onNotice(`放弃返图审核批次失败：${result.error || '未知错误'}`, 'error');
+      try {
+        const result = await legacyApi.discardTeamWorkflowReturnReview(workspacePath, project.name, workflowReturnResult.reviewSessionId);
+        if (!result.success) {
+          onNotice(`放弃返图审核批次失败：${result.error || '未知错误'}`, 'error');
+          return;
+        }
+      } catch (error) {
+        onNotice(`放弃返图审核批次失败：${error instanceof Error ? error.message : String(error)}`, 'error');
         return;
-      }
+      } finally { setBusy(''); }
     }
     setWorkflowReturnReviewOpen(false);
     setWorkflowReturnResult(null);
@@ -937,17 +941,22 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         taskOrder,
       });
       if (!result.success) { onNotice(`确认返图失败：${result.error || '未知错误'}`, 'error'); return; }
-      setWorkflowReturnResult(current => current ? {
-        ...current,
-        reviewSessionId: result.reviewSessionCompleted ? undefined : current.reviewSessionId,
-        acceptedCount: (current.acceptedCount || 0) + (result.idempotent ? 0 : 1),
-        reviewCount: Math.max(0, (current.reviewCount || 0) - (result.idempotent ? 0 : 1)),
-        missingTaskCount: Math.max(0, (current.missingTaskCount || 0) - (result.idempotent ? 0 : 1)),
-        matches: current.matches.map(item => item.returnId === match.returnId ? {
-          ...item, ...candidate, returnId: item.returnId, sourceName: item.sourceName, path: item.path,
-          matched: true, accepted: true, confidence: 'manual', relayState: 'preparing',
-        } : item),
-      } : current);
+      setWorkflowReturnResult(current => {
+        if (!current) return current;
+        const wasAccepted = Boolean(current.matches.find(item => item.returnId === match.returnId)?.accepted);
+        const acceptedDelta = wasAccepted ? 0 : 1;
+        return {
+          ...current,
+          reviewSessionId: result.reviewSessionCompleted ? undefined : current.reviewSessionId,
+          acceptedCount: (current.acceptedCount || 0) + acceptedDelta,
+          reviewCount: Math.max(0, (current.reviewCount || 0) - acceptedDelta),
+          missingTaskCount: Math.max(0, (current.missingTaskCount || 0) - acceptedDelta),
+          matches: current.matches.map(item => item.returnId === match.returnId ? {
+            ...item, ...candidate, returnId: item.returnId, sourceName: item.sourceName, path: item.path,
+            matched: true, accepted: true, confidence: 'manual', relayState: 'preparing',
+          } : item),
+        };
+      });
       onProjectChanged();
       onNotice(`返图已确认：${candidate.photoName || '任务图'} · ${candidate.personName || '人物'}；接力准备中`, 'success');
       void legacyApi.drainTeamWorkflowReconciles(20).then(drain => {
