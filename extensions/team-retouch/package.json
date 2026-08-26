@@ -3,7 +3,27 @@
   "version": "26.8.25.3",
   "private": true,
   "type": "module",
-  "photoflowComponent": { "manifest": "component.template.json" },
+  "photoflowComponent": {
+    "manifest": "component.template.json",
+    "development": {
+      "prepare": "build",
+      "runtime": {
+        "command": { "win32": ".venv/Scripts/python.exe", "default": ".venv/bin/python" },
+        "entry": "team_retouch.py",
+        "argsPrefix": ["-u"]
+      },
+      "files": {
+        "team-retouch.exe": "team_retouch.py",
+        "ui/index.html": "dist/ui/index.html",
+        "ui/settings.html": "dist/ui/settings.html",
+        "ui/team-retouch.svg": "renderer/team-retouch.svg",
+        "_internal/models/rtmdet-ins_m_640x640.onnx": "models/rtmdet-ins_m_640x640.onnx",
+        "_internal/models/face_detection_yunet_2023mar.onnx": "models/face_detection_yunet_2023mar.onnx",
+        "_internal/models/adaface_ir18_webface4m.onnx": "models/adaface_ir18_webface4m.onnx",
+        "_internal/models/osnet_x1_0_msmt17.onnx": "models/osnet_x1_0_msmt17.onnx"
+      }
+    }
+  },
   "scripts": {
     "build": "vite build --config renderer/vite.config.ts",
     "typecheck": "tsc -p renderer/tsconfig.json --pretty false",

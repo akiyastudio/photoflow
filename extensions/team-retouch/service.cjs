@@ -21,12 +21,12 @@ let nextCapabilityId = 1;
 
 const hostAlgorithmRuntime = (() => {
   const values = process.argv.slice(2);
-  const commandIndex = values.indexOf('--photoflow-algorithm-command');
+  const commandIndex = Math.max(values.indexOf('--photoflow-development-command'), values.indexOf('--photoflow-algorithm-command'));
   if (commandIndex < 0) return null;
   const command = String(values[commandIndex + 1] || '').trim();
   const argsPrefix = [];
   for (let index = 0; index < values.length; index += 1) {
-    if (values[index] === '--photoflow-algorithm-arg-prefix') argsPrefix.push(String(values[index + 1] || ''));
+    if (values[index] === '--photoflow-development-arg' || values[index] === '--photoflow-algorithm-arg-prefix') argsPrefix.push(String(values[index + 1] || ''));
   }
   return command ? Object.freeze({ command, argsPrefix: Object.freeze(argsPrefix) }) : null;
 })();

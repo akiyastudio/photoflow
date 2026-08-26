@@ -132,7 +132,10 @@ class ComponentServiceManager {
       const service = descriptor.service;
       const nodeRuntime = service.runtime === 'node';
       const command = nodeRuntime ? this.executablePath : service.entry;
-      const args = nodeRuntime ? [service.entry] : [];
+      const developmentRuntimeArgs = descriptor.developmentRuntime
+        ? ['--photoflow-development-command', descriptor.developmentRuntime.command, ...descriptor.developmentRuntime.argsPrefix.flatMap(value => ['--photoflow-development-arg', value])]
+        : [];
+      const args = nodeRuntime ? [service.entry, ...developmentRuntimeArgs] : developmentRuntimeArgs;
       const options = {
         cwd: path.dirname(service.entry),
         env: { ...serviceEnvironment(), ...(nodeRuntime ? { ELECTRON_RUN_AS_NODE: '1' } : {}) },

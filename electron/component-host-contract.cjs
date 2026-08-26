@@ -101,6 +101,11 @@ const resolvePackageFile = ({ relativeEntry, componentRoot, developmentOverride 
   return realEntry;
 };
 
+const developmentOverrideFor = (developmentFiles, relativeEntry) => {
+  const overrideEntry = developmentFiles?.files?.[String(relativeEntry || '').replace(/\\/g, '/')];
+  return overrideEntry ? { overrideRoot: developmentFiles.componentRoot, overrideEntry } : null;
+};
+
 const parseComponentIcon = (value, componentRoot, developmentOverride = null) => {
   if (value === undefined || value === null || value === '') return null;
   if (typeof value !== 'string') throw new Error('Invalid component icon declaration');
@@ -157,7 +162,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   const allowedAdoptionGrants = new Set(['component.storage.previous.v1', 'project.output.existing.v1']);
   const adoptionGrants = host.adoptionGrants === undefined ? [] : host.adoptionGrants;
   if (!Array.isArray(adoptionGrants) || adoptionGrants.length > allowedAdoptionGrants.size || new Set(adoptionGrants).size !== adoptionGrants.length || adoptionGrants.some(grant => !allowedAdoptionGrants.has(grant))) throw new Error('Invalid component host adoption grants');
-  const icon = parseComponentIcon(manifest.icon, componentRoot, developmentFiles?.icon || null);
+  const icon = parseComponentIcon(manifest.icon, componentRoot, developmentOverrideFor(developmentFiles, manifest.icon) || developmentFiles?.icon || null);
   const seen = new Set();
   const pages = new Map();
   const actions = [];
@@ -172,7 +177,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     if (raw.type === 'component.fullPage') {
       rejectUnknownFields(raw, ['type', 'id', 'title', 'entry'], 'component fullPage contribution');
       const relativeEntry = requiredText(raw.entry, 'page entry', 512).replace(/\\/g, '/');
-      const entry = resolvePackageFile({ relativeEntry, componentRoot, developmentOverride: developmentFiles?.page, label: 'Component page entry' });
+      const entry = resolvePackageFile({ relativeEntry, componentRoot, developmentOverride: developmentOverrideFor(developmentFiles, relativeEntry) || developmentFiles?.page, label: 'Component page entry' });
       pages.set(id, { type: raw.type, id, title: requiredText(raw.title, 'page title'), entry, relativeEntry });
     } else if (raw.type === 'workspace.toolbarAction') {
       rejectUnknownFields(raw, ['type', 'id', 'label', 'pageId'], 'component toolbarAction contribution');
@@ -182,7 +187,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       if (min < 3) throw new Error('Application settings pages require minHostApiVersion 3 or newer');
       rejectUnknownFields(raw, ['type', 'id', 'label', 'title', 'entry', 'rpcMethods'], 'application settingsPage contribution');
       const relativeEntry = requiredExactStringText(raw.entry, 'settings page entry', 512).replace(/\\/g, '/');
-      const entry = resolvePackageFile({ relativeEntry, componentRoot, developmentOverride: developmentFiles?.settingsPages?.[id], label: 'Component settings page entry' });
+      const entry = resolvePackageFile({ relativeEntry, componentRoot, developmentOverride: developmentOverrideFor(developmentFiles, relativeEntry) || developmentFiles?.settingsPages?.[id], label: 'Component settings page entry' });
       if (!Array.isArray(raw.rpcMethods) || raw.rpcMethods.length < 1 || raw.rpcMethods.length > 32 || raw.rpcMethods.some(method => typeof method !== 'string')) throw new Error('Component settings page RPC methods must be a bounded versioned allowlist');
       const rpcMethods = raw.rpcMethods.map(value => requiredExactStringText(value, 'settings page RPC method', 128));
       if (new Set(rpcMethods).size !== rpcMethods.length) throw new Error('Component settings page RPC methods must not contain duplicates');
@@ -207,10 +212,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     if (!entries || typeof entries !== 'object' || Array.isArray(entries)) throw new Error('Missing component service entrypoints');
     const platformKey = `${process.platform}-${process.arch}`;
     const relativeEntry = requiredText(entries[platformKey] || entries[process.platform] || entries.default, 'service entry', 512).replace(/\\/g, '/');
-    const entry = path.resolve(componentRoot, relativeEntry);
-    if (!isInside(componentRoot, entry)) throw new Error('Component service entry escapes component root');
-    const stat = fs.statSync(entry, { throwIfNoEntry: false });
-    if (!stat?.isFile() || stat.isSymbolicLink()) throw new Error(`Component service entry is missing or unsafe: ${relativeEntry}`);
+    const entry = resolvePackageFile({ relativeEntry, componentRoot, developmentOverride: developmentOverrideFor(developmentFiles, relativeEntry), label: 'Component service entry' });
     const rpcMethods = [...new Set((raw.rpcMethods || []).map(value => requiredText(value, 'service RPC method', 128)))];
     if (!rpcMethods.length || rpcMethods.length > 128 || rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error('Component service RPC methods must be a bounded versioned allowlist');
     const capabilities = [...new Set((raw.capabilities || []).map(value => requiredText(value, 'service capability', 128)))];
@@ -236,8 +238,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       const actionId = requiredId(action, 'lifecycle action');
       if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) throw new Error(`Invalid component lifecycle action: ${actionId}`);
       const relativeActionEntry = requiredText(declaration.entry, 'lifecycle action entry', 512).replace(/\\/g, '/');
-      const actionEntry = path.resolve(componentRoot, relativeActionEntry);
-      if (!isInside(componentRoot, actionEntry)) throw new Error('Component lifecycle action escapes component root');
+      const actionEntry = resolvePackageFile({ relativeEntry: relativeActionEntry, componentRoot, developmentOverride: developmentOverrideFor(developmentFiles, relativeActionEntry), label: 'Component lifecycle action entry' });
       const sha256 = requiredText(declaration.sha256, 'lifecycle action SHA-256', 64).toLowerCase();
       if (!/^[a-f0-9]{64}$/.test(sha256)) throw new Error(`Invalid component lifecycle action SHA-256: ${actionId}`);
       lifecycleActions[actionId] = Object.freeze({ entry: actionEntry, relativeEntry: relativeActionEntry, sha256 });
@@ -288,7 +289,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   });
 };
 
-const createComponentHostRegistry = ({ roots, admitDescriptor = null }) => {
+const createComponentHostRegistry = ({ roots = [], candidateProvider = null, admitDescriptor = null }) => {
   const candidates = () => {
     const values = [];
     for (const root of roots) {
@@ -305,16 +306,16 @@ const createComponentHostRegistry = ({ roots, admitDescriptor = null }) => {
     }
     return values;
   };
-  const inspectRoot = ({ componentRoot, manifestPath = path.join(componentRoot, 'component.json'), expectedId = '', source }) => {
-    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+  const inspectRoot = ({ componentRoot, manifestPath = path.join(componentRoot, 'component.json'), manifest: providedManifest = null, developmentFiles = null, developmentRuntime = null, expectedId = '', source }) => {
+    const manifest = providedManifest || JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     if (expectedId && manifest.id !== expectedId) throw new Error(`Component id does not match its directory: ${manifest.id || 'missing'}`);
-    const descriptor = parseComponentHostManifest(manifest, componentRoot);
+    const descriptor = parseComponentHostManifest(manifest, componentRoot, developmentFiles);
     if (descriptor && admitDescriptor && admitDescriptor(descriptor, componentRoot, source) !== true) throw new Error(`Component host admission rejected: ${descriptor.componentId}`);
-    return descriptor ? { ...descriptor, componentRoot, source } : null;
+    return descriptor ? { ...descriptor, componentRoot, source, ...(developmentFiles ? { development: true } : {}), ...(developmentRuntime ? { developmentRuntime } : {}) } : null;
   };
   const list = () => {
     const byId = new Map();
-    for (const candidate of candidates()) {
+    for (const candidate of candidateProvider ? candidateProvider() : candidates()) {
       try {
         const descriptor = inspectRoot(candidate);
         if (descriptor && !byId.has(descriptor.componentId)) byId.set(descriptor.componentId, descriptor);

@@ -1,24 +1,7 @@
-const fs = require('fs');
-const path = require('path');
 const { PLUGIN_DEFINITIONS, findPluginByCapability } = require('../plugins/plugin-catalog.cjs');
 
-const createPluginService = ({ app, projectRoot, registry, getDevelopmentPython, runJsonCommand }) => {
-  const developmentRunConfig = (pluginId, args = []) => {
-    const definition = PLUGIN_DEFINITIONS[pluginId];
-    if (!definition?.developmentEntry) return null;
-    const scriptPath = path.join(projectRoot, ...definition.developmentEntry);
-    if (!fs.existsSync(scriptPath)) return null;
-    for (const asset of definition.requiredAssets || []) {
-      if (!fs.existsSync(path.join(path.dirname(scriptPath), ...asset))) return null;
-    }
-    return { command: getDevelopmentPython(), args: ['-u', scriptPath, ...args] };
-  };
-
+const createPluginService = ({ app, registry, runJsonCommand }) => {
   const resolveRunConfig = (pluginId, args = []) => {
-    if (!app.isPackaged) {
-      const development = developmentRunConfig(pluginId, args);
-      if (development) return development;
-    }
     const plugin = registry.resolve(pluginId, { verifyIntegrity: app.isPackaged });
     if (!plugin) {
       const error = new Error(`未安装插件：${PLUGIN_DEFINITIONS[pluginId]?.name || pluginId}`);
@@ -28,10 +11,6 @@ const createPluginService = ({ app, projectRoot, registry, getDevelopmentPython,
     return { command: plugin.command, args: [...plugin.argsPrefix, ...args] };
   };
   const resolveRunConfigAsync = async (pluginId, args = []) => {
-    if (!app.isPackaged) {
-      const development = developmentRunConfig(pluginId, args);
-      if (development) return development;
-    }
     const plugin = await registry.resolveAsync(pluginId, { verifyIntegrity: app.isPackaged });
     if (!plugin) {
       const error = new Error(`未安装插件：${PLUGIN_DEFINITIONS[pluginId]?.name || pluginId}`);
@@ -42,19 +21,6 @@ const createPluginService = ({ app, projectRoot, registry, getDevelopmentPython,
   };
 
   const inspect = pluginId => {
-    if (!app.isPackaged) {
-      const development = developmentRunConfig(pluginId, []);
-      if (development) return {
-        ...PLUGIN_DEFINITIONS[pluginId],
-        capability: PLUGIN_DEFINITIONS[pluginId].capabilities[0],
-        installed: true,
-        compatible: true,
-        version: PLUGIN_DEFINITIONS[pluginId].version || 'development',
-        path: path.dirname(development.args[1]),
-        source: 'development',
-        sizeBytes: 0,
-      };
-    }
     return registry.inspect(pluginId, { verifyIntegrity: false });
   };
 

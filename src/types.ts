@@ -725,6 +725,7 @@ export interface ComponentHostAction {
   label: string;
   pageId: string;
   pageTitle: string;
+  development?: boolean;
   /** Host-issued URL for a validated package-local icon. */
   iconUrl?: string;
 }
@@ -737,6 +738,7 @@ export interface ComponentSettingsPageContribution {
   pageId: string;
   label: string;
   pageTitle: string;
+  development?: boolean;
   iconUrl?: string;
 }
 

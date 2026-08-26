@@ -105,9 +105,10 @@ class ComponentViewManager {
       contractVersion: item.contractVersion,
       hostApiVersion: item.hostApiVersion,
       actionId: item.toolbarAction.id,
-      label: item.toolbarAction.label,
+      label: item.development ? `${item.toolbarAction.label}（开发）` : item.toolbarAction.label,
       pageId: item.fullPage.id,
-      pageTitle: item.fullPage.title,
+      pageTitle: item.development ? `${item.fullPage.title}（开发组件）` : item.fullPage.title,
+      development: item.development === true,
       ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
     }));
   }
@@ -119,8 +120,9 @@ class ComponentViewManager {
       contractVersion: item.contractVersion,
       hostApiVersion: item.hostApiVersion,
       pageId: page.id,
-      label: page.label,
-      pageTitle: page.title,
+      label: item.development ? `${page.label}（开发）` : page.label,
+      pageTitle: item.development ? `${page.title}（开发组件）` : page.title,
+      development: item.development === true,
       ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
     })));
   }

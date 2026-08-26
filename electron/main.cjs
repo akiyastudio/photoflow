@@ -115,6 +115,7 @@ const componentRegistry = createComponentRegistry({
 });
 const componentHostRegistry = createComponentHostRegistry({
   roots: componentRegistry.roots,
+  candidateProvider: componentRegistry.hostCandidates,
   admitDescriptor: (descriptor, componentRoot) => { const component = componentRegistry.resolve(descriptor.componentId, { verifyIntegrity: true }); return Boolean(component && path.resolve(component.path) === path.resolve(componentRoot)); },
 });
 let componentViewManager; let componentServiceManager; let configMutationService; let toastOverlayManager;
@@ -689,7 +690,7 @@ const runJsonCommand = createJsonCommandRunner({
   spawnJob: run => spawnSupervisedJob({ prefix: 'python:json-job', kind: 'python-job', command: run.command, args: run.args, options: { stdio: ['ignore', 'pipe', 'pipe'] } }),
 });
 
-pluginService = createPluginService({ app, projectRoot, registry: componentRegistry, getDevelopmentPython, runJsonCommand });
+pluginService = createPluginService({ app, registry: componentRegistry, runJsonCommand });
 
 const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage, signal, deadlineAt) =>
   runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs, onMessage, signal, deadlineAt);
