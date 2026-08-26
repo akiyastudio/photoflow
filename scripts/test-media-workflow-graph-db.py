@@ -400,9 +400,9 @@ def test_selection_mainline_repair(root: Path, db):
     workspace_db._check_integrity(db, force=True)
 
 
-def test_role_conversion_rejects_structural_children(root: Path, db):
+def test_import_role_conversion_rejects_structural_children(root: Path, db):
     project, _project_id = make_project(root, db, "role-conversion-children")
-    for name in ("camera", "camera-v1", "组件工作区", "team-v1"):
+    for name in ("camera", "camera-v1"):
         (project / name).mkdir()
     camera = workspace_db.progress_register(str(root), db, {
         "projectName": "role-conversion-children", "mediaKind": "image", "versionKey": "camera-source",
@@ -423,23 +423,6 @@ def test_role_conversion_rejects_structural_children(root: Path, db):
         assert "import_graph_role_conflict" in str(error) and "结构子节点" in str(error)
     assert db.execute("SELECT node_role,artifact_kind FROM progress_folders WHERE id=?", (camera["id"],)).fetchone()[:] == ("original", None)
 
-    component_source = workspace_db.progress_register(str(root), db, {
-        "projectName": "role-conversion-children", "mediaKind": "image", "versionKey": "team-source",
-        "displayName": "组件工作区", "folderPath": str(project / "组件工作区"), "nodeRole": "original", "trackingEnabled": False,
-    })["progressFolder"]
-    workspace_db.progress_register(str(root), db, {
-        "projectName": "role-conversion-children", "mediaKind": "image", "versionKey": "team-1",
-        "displayName": "team-v1", "folderPath": str(project / "team-v1"), "nodeRole": "progress",
-        "parentProgressId": component_source["id"], "relationKind": "main", "trackingEnabled": False,
-    })
-    try:
-        workspace_db.ensure_component_workflow_node(str(root), db, workspace_db.project_row(db, "role-conversion-children"))
-        raise AssertionError("original with structural children was converted to workflow")
-    except ValueError as error:
-        assert "role_conversion_children_forbidden" in str(error)
-    assert db.execute("SELECT node_role,artifact_kind FROM progress_folders WHERE id=?", (component_source["id"],)).fetchone()[:] == ("original", None)
-
-
 def main():
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "workspace"
@@ -457,7 +440,7 @@ def main():
             test_import_mapping_follows_external_rename(root, db)
             test_manual_media_adoption(root, db)
             test_selection_mainline_repair(root, db)
-            test_role_conversion_rejects_structural_children(root, db)
+            test_import_role_conversion_rejects_structural_children(root, db)
         finally:
             db.close()
     print("media workflow graph database tests passed")

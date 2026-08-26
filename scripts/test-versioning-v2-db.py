@@ -826,7 +826,7 @@ def test_legacy_selection_relation_repair(root: Path) -> None:
 def test_version_tree_layout_persistence(root: Path) -> None:
     workspace = root / "layout-workspace"
     project = workspace / "Project"
-    for name in ("RAW", "P1", "组件工作区", "Other"):
+    for name in ("RAW", "P1", "P2", "Other"):
         (project / name).mkdir(parents=True, exist_ok=True)
     database = root / "layout.sqlite3"
     db = workspace_db.connect(str(workspace), str(database))
@@ -842,13 +842,16 @@ def test_version_tree_layout_persistence(root: Path) -> None:
             db, workspace, mediaKind="image", versionKey="p1", displayName="P1", folderPath=str(project / "P1"),
             nodeRole="progress", relationKind="main", parentProgressId=raw["id"], trackingEnabled=False, trackingState="disabled",
         )
-        workflow = workspace_db.component_project_workspace(str(workspace), db, {"projectName": "Project"})["workflowNode"]
+        p2 = register(
+            db, workspace, mediaKind="image", versionKey="1_1", displayName="P2", folderPath=str(project / "P2"),
+            nodeRole="progress", relationKind="main", parentProgressId=p1["id"], trackingEnabled=False, trackingState="disabled",
+        )
         saved = workspace_db.version_tree_layout_save(db, {
             "projectName": "Project", "scopeKey": "", "expectedRevision": 0, "mode": "patch",
             "positions": [
                 {"nodeKey": f"progress:{raw['id']}", "x": 10.5, "y": 20.25},
                 {"nodeKey": f"progress:{p1['id']}", "x": 250, "y": 30},
-                {"nodeKey": f"progress:{workflow['id']}", "x": 500, "y": 100},
+                {"nodeKey": f"progress:{p2['id']}", "x": 500, "y": 100},
                 {"nodeKey": "entry:other", "x": 20, "y": 400},
             ],
         })
@@ -857,7 +860,7 @@ def test_version_tree_layout_persistence(root: Path) -> None:
         assert loaded["revision"] == 1
         assert {(item["nodeKey"], item["x"], item["y"]) for item in loaded["positions"]} == {
             (f"progress:{raw['id']}", 10.5, 20.25), (f"progress:{p1['id']}", 250.0, 30.0),
-            (f"progress:{workflow['id']}", 500.0, 100.0),
+            (f"progress:{p2['id']}", 500.0, 100.0),
             ("entry:other", 20.0, 400.0),
         }
         patched = workspace_db.version_tree_layout_save(db, {
@@ -1368,7 +1371,7 @@ def test_detached_missing_progress_cleanup_is_atomic(root: Path) -> None:
     (original_folder / "base.jpg").write_bytes(b"base")
     (progress_folder / "edit.jpg").write_bytes(b"edit")
     database = root / "detached-cleanup.sqlite3"
-    db = workspace_db.connect(str(workspace), str(database), include_domains=True, include_team=True)
+    db = workspace_db.connect(str(workspace), str(database), include_domains=True)
     now = int(time.time() * 1000)
     db.execute(
         "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES('detached-project','Project','后期中','Project',?,?)",
@@ -1507,7 +1510,7 @@ def test_detached_reconcile_repairs_legacy_dangling_projections(root: Path) -> N
     (folders["Progress"] / "edit.jpg").write_bytes(b"edit")
     (folders["DisposableProgress"] / "discard.jpg").write_bytes(b"discard")
     database = root / "detached-reconcile.sqlite3"
-    db = workspace_db.connect(str(workspace), str(database), include_domains=True, include_team=True)
+    db = workspace_db.connect(str(workspace), str(database), include_domains=True)
     now = int(time.time() * 1000)
     db.execute(
         "INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES('reconcile-project','Project','后期中','Project',?,?)",

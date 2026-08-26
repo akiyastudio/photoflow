@@ -1,6 +1,6 @@
 const assert = require('assert/strict');
 const { WorkspaceSqliteCoordinator, normalizeDatabasePath } = require('../electron/services/workspace-sqlite-coordinator.cjs');
-const { WorkspaceDatabaseOperationPolicy } = require('../electron/repositories/workspace-database-operation-policy.cjs');
+const { WorkspaceDatabaseOperationPolicy, domainDatabasePath } = require('../electron/repositories/workspace-database-operation-policy.cjs');
 const { CoordinatedDatabaseClient } = require('../electron/repositories/coordinated-database-client.cjs');
 
 const deferred = () => {
@@ -49,7 +49,34 @@ const run = async () => {
   const multi = policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'media_sync_apply_batch' });
   assert.equal(new Set(multi.databases.map(item => normalizeDatabasePath(item.path))).size, 3, 'media operations acquire catalog, media, and versioning databases together');
   const recreateProject = policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'add' });
-  assert.equal(new Set(recreateProject.databases.map(item => normalizeDatabasePath(item.path))).size, 4, 'project creation reserves catalog, media, versioning, and team stores for retired-name cleanup');
+  assert.deepEqual(new Set(recreateProject.databases.map(item => normalizeDatabasePath(item.path))), new Set([
+    'C:/Data/workspace.sqlite3',
+    domainDatabasePath('C:/Data/workspace.sqlite3', 'media'),
+    domainDatabasePath('C:/Data/workspace.sqlite3', 'versioning'),
+  ].map(normalizeDatabasePath)), 'project creation coordinates only the core catalog, media, and versioning stores');
+
+  const componentStorageCoordinator = new WorkspaceSqliteCoordinator();
+  const coreStarted = deferred(); const releaseCore = deferred();
+  const coreWrite = componentStorageCoordinator.run({ databases: recreateProject.databases }, async () => {
+    coreStarted.resolve(); await releaseCore.promise;
+  });
+  await coreStarted.promise;
+  const componentStoragePath = 'C:/Data/components/fixture-component/projects/project-1/storage.sqlite3';
+  let isolatedComponentEntered = false;
+  await componentStorageCoordinator.run({ databases: [{ path: componentStoragePath, mode: 'write' }] }, () => { isolatedComponentEntered = true; });
+  assert.equal(isolatedComponentEntered, true, 'component.storage.v2 remains independent from core workspace database leases');
+  releaseCore.resolve(); await coreWrite;
+
+  const componentStarted = deferred(); const releaseComponent = deferred(); const componentOrder = [];
+  const firstComponentWrite = componentStorageCoordinator.run({ databases: [{ path: componentStoragePath, mode: 'write' }] }, async () => {
+    componentOrder.push('first'); componentStarted.resolve(); await releaseComponent.promise;
+  });
+  await componentStarted.promise;
+  const secondComponentWrite = componentStorageCoordinator.run({ databases: [{ path: 'C:/Data/components/fixture-component/projects/../projects/project-1/storage.sqlite3', mode: 'write' }] }, () => componentOrder.push('second'));
+  await new Promise(resolve => setTimeout(resolve, 10));
+  assert.deepEqual(componentOrder, ['first'], 'component-private storage serializes writers by canonical database path');
+  releaseComponent.resolve(); await Promise.all([firstComponentWrite, secondComponentWrite]);
+  assert.deepEqual(componentOrder, ['first', 'second']);
 
   const retryCoordinator = new WorkspaceSqliteCoordinator();
   const attemptEvents = [];
