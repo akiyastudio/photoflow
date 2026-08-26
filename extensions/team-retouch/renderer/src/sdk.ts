@@ -83,3 +83,10 @@ export const rpc = async <T = unknown>(method: string, payload?: unknown) => {
   try { return await window.photoFlowComponent.rpc<T>(method, payload); }
   catch (error) { throw new Error(readableComponentRpcError(method, error)); }
 };
+
+export const durableRpc = async <T = unknown>(method: string, payload: Record<string, unknown> = {}) => {
+  const operationId = String(payload.operationId || crypto.randomUUID());
+  const accepted = await rpc<Record<string, unknown>>(method, { ...payload, operationId, acceptOnly: true });
+  if (accepted.success === false || accepted.accepted !== true) return accepted as T;
+  return rpc<T>('team.operation.run.v1', { operationId });
+};

@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useRef, useState, type ReactNode } from 'react';
 import { AlertCircle, Loader2, RotateCcw, Wrench } from 'lucide-react';
 import { useAppDialog } from './legacy/legacy-dialog-context';
-import { rpc } from './sdk';
+import { durableRpc, rpc } from './sdk';
 import { advancedEnvironmentPresentation, createLatestRequestGuard, runNotifiedAction, type TeamSettings, type TeamSettingsPatch } from './team-settings-model';
 
 type Json = Record<string, unknown>;
@@ -78,9 +78,9 @@ export const TeamSettingsContent = ({ value, patch, notice }: { value: TeamSetti
           <div className="team-settings-banner pf-banner" data-tone={advanced.tone === 'danger' ? 'danger' : advanced.tone === 'warning' ? 'warning' : undefined}>{(advanced.state === 'error' || advanced.state === 'repair-needed' || advanced.state === 'unavailable') && <AlertCircle size={15}/>}<span>{advanced.description}</span></div>
           <div className="team-settings-actions">
             {(advanced.state === 'error' || advanced.state === 'unavailable') && <button type="button" className="team-settings-button team-settings-button-secondary" onClick={() => void refreshEnvironment()} disabled={Boolean(busy)}><RotateCcw size={14}/>重新检查</button>}
-            <button type="button" className="team-settings-button team-settings-button-secondary" onClick={() => void run('检查安装条件', async () => { applyLifecycleResult(assertSuccess(await rpc<Json>('team.advanced.preflight.v1'), '安装条件检查失败')); })} disabled={Boolean(busy)}><RotateCcw size={14}/>检查条件</button>
-            <button type="button" className="team-settings-button team-settings-button-primary" onClick={() => void run('安装或修复增强版', async () => { applyLifecycleResult(assertSuccess(await rpc<Json>('team.advanced.install.v1', { repair: true }), '安装失败')); })} disabled={Boolean(busy)}><Wrench size={14}/>{busy === '安装或修复增强版' ? '正在处理…' : '安装 / 修复'}</button>
-            <button type="button" className="team-settings-button team-settings-button-danger" onClick={() => void run('卸载增强版', async () => { if (!await appDialog.confirm({ title: '卸载人物检测增强版吗？', message: '将删除 PairDETR、SAM 2.1 和独立运行环境；基础检测和身份识别不受影响。', confirmLabel: '卸载增强版', tone: 'danger' })) return false; assertSuccess(await rpc<Json>('team.advanced.uninstall.v1'), '卸载失败'); applyLifecycleResult({ success: true, state: 'not-installed', installed: false }); return true; })} disabled={Boolean(busy)}>卸载</button>
+            <button type="button" className="team-settings-button team-settings-button-secondary" onClick={() => void run('检查安装条件', async () => { applyLifecycleResult(assertSuccess(await durableRpc<Json>('team.advanced.preflight.v1'), '安装条件检查失败')); })} disabled={Boolean(busy)}><RotateCcw size={14}/>检查条件</button>
+            <button type="button" className="team-settings-button team-settings-button-primary" onClick={() => void run('安装或修复增强版', async () => { applyLifecycleResult(assertSuccess(await durableRpc<Json>('team.advanced.install.v1', { repair: true }), '安装失败')); })} disabled={Boolean(busy)}><Wrench size={14}/>{busy === '安装或修复增强版' ? '正在处理…' : '安装 / 修复'}</button>
+            <button type="button" className="team-settings-button team-settings-button-danger" onClick={() => void run('卸载增强版', async () => { if (!await appDialog.confirm({ title: '卸载人物检测增强版吗？', message: '将删除 PairDETR、SAM 2.1 和独立运行环境；基础检测和身份识别不受影响。', confirmLabel: '卸载增强版', tone: 'danger' })) return false; assertSuccess(await durableRpc<Json>('team.advanced.uninstall.v1'), '卸载失败'); applyLifecycleResult({ success: true, state: 'not-installed', installed: false }); return true; })} disabled={Boolean(busy)}>卸载</button>
           </div>
         </div>
       </SettingsRow>

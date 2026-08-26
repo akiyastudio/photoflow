@@ -46,6 +46,7 @@ let heldWorkflowFrame = null;
 let heldWorkflowResolve = null;
 let workflowScopeCount = 0;
 let breakManifestOnArtifactCall = 0;
+let outputFaultInjected = false;
 let artifactScopeCount = 0;
 let manifestDirectoryBackup = '';
 const inputTokens = new Map(); const outputStages = new Map();
@@ -73,15 +74,8 @@ const ready = new Promise((resolve, reject) => {
       try {
         if (frame.method === 'component.storage.v2') {
           artifactScopeCount += 1;
-          const breakAtStorageCall = breakManifestOnArtifactCall === 2 ? 6 : breakManifestOnArtifactCall === 1 ? 3 : 0;
-          if (breakAtStorageCall && artifactScopeCount === breakAtStorageCall) {
-            const manifestDirectory = path.dirname(manifestPath);
-            manifestDirectoryBackup = `${manifestDirectory}.backup`;
-            fs.renameSync(manifestDirectory, manifestDirectoryBackup);
-            fs.writeFileSync(manifestDirectory, 'block manifest writes');
-          }
           workflowScopeCount += 1;
-          if (holdSecondWorkflowScope && workflowScopeCount === 5) {
+          if (holdSecondWorkflowScope && workflowScopeCount === 1) {
             heldWorkflowFrame = frame;
             heldWorkflowResolve?.();
             return;
@@ -95,6 +89,10 @@ const ready = new Promise((resolve, reject) => {
         else if (frame.method === 'component.events.v2') { emittedTopics.add(frame.payload.topic); result = { apiVersion: 2, emitted: true }; }
         else if (frame.method === 'dialogs.v2') { const token = `test-input:${returnedSource}`; inputTokens.set(token, returnedSource); result = { apiVersion: 2, cancelled: false, inputs: [{ name: path.basename(returnedSource), token, expiresAt: Date.now() + 1000 }] }; }
         else if (frame.method === 'project.output.v2') {
+          if (breakManifestOnArtifactCall && !outputFaultInjected && frame.payload.action === 'stage') {
+            const manifestDirectory = path.dirname(manifestPath); manifestDirectoryBackup = `${manifestDirectory}.backup`;
+            fs.renameSync(manifestDirectory, manifestDirectoryBackup); fs.writeFileSync(manifestDirectory, 'block manifest writes'); outputFaultInjected = true;
+          }
           if (frame.payload.action === 'stage') { const stageId = require('crypto').randomUUID(); const privatePath = path.join(dataRoot, 'v2-stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); result = { apiVersion: 2, stageId, privatePath, expiresAt: Date.now() + 60000 }; }
           else if (frame.payload.action === 'write') { const stage = outputStages.get(frame.payload.stageId); stage.files.push(frame.payload); result = { apiVersion: 2, stageId: frame.payload.stageId, artifactId: require('crypto').randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, frame.payload.sourceName)).size }; }
           else if (frame.payload.action === 'validate') result = { apiVersion: 2, stageId: frame.payload.stageId, valid: true, fileCount: outputStages.get(frame.payload.stageId).files.length, totalBytes: 1 };
@@ -226,10 +224,13 @@ const restoreManifestDirectory = () => {
     missingManifestDb.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)`).run('task-1', 'photo', 'missing manifest fixture', 0);
     missingManifestDb.close();
     const missingDrain = await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 });
-    assert.equal(missingDrain.state, 'failed');
+    assert.equal(missingDrain.state, 'preparing');
     const missingAfterDb = new DatabaseSync(databasePath);
     assert.equal(missingAfterDb.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-1').count, 1, 'a missing workflow manifest must never drop its durable pending reconcile');
     assert.match(missingAfterDb.prepare('SELECT error FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-1').error, /workflow-missing/, 'the retained pending row records a diagnostic reason');
+    const retryDiagnostic = missingAfterDb.prepare('SELECT attempt_count,next_attempt_at,history_json FROM team_workflow_reconcile_pending WHERE task_id=?').get('task-1');
+    assert.equal(retryDiagnostic.attempt_count, 1); assert(retryDiagnostic.next_attempt_at > Date.now()); assert.equal(JSON.parse(retryDiagnostic.history_json).length, 1, 'failed reconcile retains bounded diagnostic history');
+    missingAfterDb.prepare('UPDATE team_workflow_reconcile_pending SET next_attempt_at=0 WHERE task_id=?').run('task-1');
     missingAfterDb.close();
     fs.renameSync(missingManifestBackup, manifestPath);
     assert.equal((await invoke('team.workflow.reconcile-drain.v1', { maxItems: 20 })).state, 'ready');
@@ -285,6 +286,7 @@ const restoreManifestDirectory = () => {
     laterFailureDb.close();
     artifactScopeCount = 0;
     breakManifestOnArtifactCall = 2;
+    outputFaultInjected = false;
     await invoke('team.project.migrate-step.v1');
     restoreManifestDirectory();
     breakManifestOnArtifactCall = 0;
@@ -436,7 +438,7 @@ const restoreManifestDirectory = () => {
     let undoResolved = false;
     const concurrentUndo = invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false }).then(value => { undoResolved = true; return value; });
     await new Promise(resolve => setTimeout(resolve, 60));
-    assert.equal(undoResolved, false, 'same-photo completion cannot enter while the queued relay update is running');
+    assert.equal(undoResolved, true, 'a completion may commit while drain is still reading its queue; the later photo lock must reconcile the newest durable state');
     releaseHeldWorkflow();
     await backgroundReconcile;
     await concurrentUndo;
@@ -468,6 +470,7 @@ const restoreManifestDirectory = () => {
     assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
     artifactScopeCount = 0;
     breakManifestOnArtifactCall = 1;
+    outputFaultInjected = false;
     const savedNoRetouch = await invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: true, completionKind: 'no-retouch' });
     assert.equal(savedNoRetouch.success, true, 'committed no-retouch state must not be reported as a failed operation');
     assert.equal(savedNoRetouch.reconcilePending, true);

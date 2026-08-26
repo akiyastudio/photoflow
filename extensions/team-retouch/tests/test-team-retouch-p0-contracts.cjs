@@ -6,6 +6,8 @@ const { pathToFileURL } = require('node:url');
 const { createHostSimulator } = require('./host-simulator.cjs');
 
 (async () => {
+  const serviceSource = fs.readFileSync(path.join(__dirname, '..', 'service.cjs'), 'utf8');
+  assert(serviceSource.includes('p50Ms: percentile(.5)') && serviceSource.includes('p95Ms: percentile(.95)') && serviceSource.includes("migrationMetric('team-rpc'"), 'all RPC metrics expose bounded aggregate p50/p95 fields');
   const schedulerPath = pathToFileURL(path.join(__dirname, '..', 'renderer', 'src', 'legacy', 'legacy-media-scheduler.ts')).href;
   const { scheduleLegacyMedia, expireLegacyMedia } = await import(schedulerPath);
   let active = 0; let maximum = 0; let executions = 0;
@@ -41,9 +43,36 @@ const { createHostSimulator } = require('./host-simulator.cjs');
     assert.equal(taskCapabilityCalls, 0, 'no Host capability remains running after the acceptance response');
     const status = await simulator.request('team.operation.get.v1', { operationId: 'durable-1' });
     assert.equal(status.operation.state, 'accepted');
+    const identityMutationStartedAt = performance.now();
+    const identityMutation = await simulator.request('team.identity.save.v1', { name: 'Revision Contract', assignments: [] });
+    const identityMutationMs = performance.now() - identityMutationStartedAt;
+    assert(identityMutationMs < 1000, `lightweight revision-checked mutation exceeded 1s: ${identityMutationMs.toFixed(1)}ms`);
+    assert.match(identityMutation.revision, /^\d+:\d+:\d+$/, 'mutations return the authoritative workspace revision');
+    await assert.rejects(simulator.request('team.identity.save.v1', { name: 'Stale Mutation', assignments: [], expectedRevision: '0:0:0' }), /已被其他操作更新/, 'stale mutations fail before changing domain state');
+    const durableKinds = [
+      ['team.patch.detect.v1', 'detect', { photoId: 'photo', baseVersionId: 'version' }],
+      ['team.patch.detect-batch.v1', 'detect-batch', { relativePaths: ['images/one.jpg'] }],
+      ['team.identity.suggest.v1', 'identity-suggest', {}],
+      ['team.patch.update.v1', 'patch-update', { photoId: 'photo', taskId: 'task' }],
+      ['team.person.exclude.v1', 'person-exclude', { photoId: 'photo', baseVersionId: 'version', personIndex: 1 }],
+      ['team.advanced.preflight.v1', 'advanced-lifecycle', {}],
+      ['team.advanced.install.v1', 'advanced-lifecycle', { repair: true }],
+      ['team.advanced.uninstall.v1', 'advanced-lifecycle', {}],
+    ];
+    let maximumDurableAckMs = ackMs;
+    for (const [method, kind, request] of durableKinds) {
+      const operationId = `durable-${method}`;
+      const operationStartedAt = performance.now();
+      const next = await simulator.request(method, { ...request, operationId, acceptOnly: true });
+      const operationAckMs = performance.now() - operationStartedAt; maximumDurableAckMs = Math.max(maximumDurableAckMs, operationAckMs);
+      assert(operationAckMs < 1000, `${method} durable acceptance exceeded 1s: ${operationAckMs.toFixed(1)}ms`);
+      assert.equal(next.state, 'accepted');
+      const nextStatus = await simulator.request('team.operation.get.v1', { operationId });
+      assert.equal(nextStatus.operation.kind, kind);
+    }
     await simulator.request('team.operation.cancel.v1', { operationId: 'durable-1' });
     const cancelled = await simulator.request('team.operation.get.v1', { operationId: 'durable-1' });
     assert.equal(cancelled.operation.cancelRequested, true);
-    console.log(`Team-retouch P0 contracts passed: durable ack ${ackMs.toFixed(1)}ms, media concurrency ${maximum}`);
+    console.log(`Team-retouch P0 contracts passed: maximum durable ack ${maximumDurableAckMs.toFixed(1)}ms, lightweight mutation ${identityMutationMs.toFixed(1)}ms, media concurrency ${maximum}`);
   } finally { simulator.close(); fs.rmSync(sandbox, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

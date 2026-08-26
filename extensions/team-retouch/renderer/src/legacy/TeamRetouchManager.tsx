@@ -608,6 +608,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
   const [results, setResults] = useState<BatchResult[]>([]);
   const [progress, setProgress] = useState({ itemIndex: 0, itemCount: entries.length, progress: 0, itemName: '', message: '准备批量识别' });
   const [refreshToken, setRefreshToken] = useState(0);
+  const [visiblePhotoCount, setVisiblePhotoCount] = useState(24);
   const initialSeed = isUsableWorkspaceSeed(initialWorkspace) ? initialWorkspace : undefined;
   const seedScopeKey = workspaceSeedScopeKey(workspacePath, project);
   const workspaceSeedGateRef = useRef(createWorkspaceSeedGate(seedScopeKey, Boolean(initialSeed)));
@@ -634,6 +635,7 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
   const unrecognizedPaths = useMemo(() => entries
     .filter(entry => !entry.teamHistoryMissing && !(workspacePhotoForEntry(identityState.photos, entry)?.tasks.length))
     .map(entry => entry.relativePath), [entries, identityState.photos]);
+  const visibleEntries = useMemo(() => entries.slice(0, visiblePhotoCount), [entries, visiblePhotoCount]);
   const selectedIdentitySubject = identitySubjects.find(subject => subject.key === identityPickerKey);
   const selectedCandidateSubjects = useMemo(() => {
     if (!selectedIdentitySubject) return [];
@@ -874,13 +876,13 @@ const TeamRetouchWorkspace = ({ entries, historyRecordCount = entries.length, hi
       ? <div className="flex min-h-52 items-center justify-center rounded-xl border border-slate-200 bg-white text-sm font-bold text-slate-600"><Loader2 size={18} className="mr-2 animate-spin text-blue-600"/>正在读取团片历史中的人物与工作图…</div>
       : identityLoadError
         ? <div className="flex min-h-52 flex-col items-center justify-center gap-3 rounded-xl border border-red-200 bg-white px-6 text-center text-sm text-red-700"><p className="font-bold">团片协作数据读取失败</p><p className="max-w-2xl text-xs text-slate-500">{identityLoadError}</p><button type="button" className="dialog-primary" onClick={() => { setIdentityLoading(true); void loadIdentities(); }}>重新读取</button></div>
-        : entries.map(entry => {
+        : visibleEntries.map(entry => {
         const result = resultByPath.get(entry.relativePath);
         const initialPhoto = workspacePhotoForEntry(identityState.photos, entry);
         const photoId = initialPhoto?.photoId || '';
         if (entry.teamHistoryMissing) return <section key={entry.relativePath} className="team-card pf-card p-5"><div className="flex items-start gap-3"><AlertTriangle size={22} className="mt-0.5 shrink-0 text-amber-500"/><div className="min-w-0 flex-1"><h3 className="font-bold text-slate-800">{entry.name || '团片历史图片'} · 缺失 / 需重新关联</h3><p className="mt-1 text-xs leading-5 text-slate-500">{entry.teamHistoryMissingReason || '历史记录暂时无法恢复项目内路径。'} 已保留该记录，不会删除人物、任务或版本数据。</p><div className="mt-3 flex flex-wrap gap-2 text-[11px] text-slate-500"><span className="rounded-full bg-slate-100 px-2.5 py-1">Photo ID：{entry.teamHistoryPhotoId || '未知'}</span><span className="rounded-full bg-slate-100 px-2.5 py-1">版本：{entry.teamHistoryBaseVersionId || '未知'}</span><span className="rounded-full bg-amber-50 px-2.5 py-1 font-bold text-amber-700">关联任务 {entry.teamHistoryTaskCount || 0}</span></div><button type="button" className="dialog-secondary mt-4" onClick={() => onProjectChanged?.()}>重新读取并关联</button></div></div></section>;
         return <section key={entry.relativePath} className="space-y-2">{result && !result.success && <div className="rounded-lg bg-red-50 px-3 py-2 text-xs font-bold text-red-600">{result.error || `${entry.name} 识别失败`}</div>}<TeamRetouchPhotoCard entry={entry} workspacePath={workspacePath} project={project} cacheConfig={cacheConfig} componentStatus={componentStatus} onClose={onClose} onNotice={onNotice} onProjectChanged={onProjectChanged} onEntriesChange={() => { const next = entries.filter(candidate => candidate.relativePath !== entry.relativePath); onEntriesChange?.(next); }} identityState={identityState} initialPhoto={initialPhoto} refreshToken={refreshToken + (photoRefreshTokens[photoId] || 0)} processingMessage={photoProcessingMessages[photoId]} onIdentityChanged={() => loadIdentities(true)} onDetectionComplete={identifyAndSync} onPickIdentity={openIdentityPicker}/></section>;
-        })}</div></main>
+        })}{!identityLoading && !identityLoadError && visiblePhotoCount < entries.length && <button type="button" className="dialog-secondary mx-auto block" aria-label="加载更多团片照片" onClick={() => setVisiblePhotoCount(current => current + 24)}>再加载 24 张（剩余 {entries.length - visiblePhotoCount}）</button>}</div></main>
     {selectedIdentitySubject && <IdentityPicker
       subject={selectedIdentitySubject}
       candidates={selectedCandidateSubjects}

@@ -3,7 +3,7 @@ import { StrictMode, useCallback, useEffect, useMemo, useRef, useState, type Poi
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import './style.css';
-import { notify, rpc, type ComponentContext } from './sdk';
+import { durableRpc, notify, rpc, type ComponentContext } from './sdk';
 import { clampCrop, clampZoom, expandCrop, fitCropToMembers, normalizeRotation, progressCandidates, rankIdentityCandidates, resizeCrop, returnCandidates, returnReviewItems, shouldBlink, subjectsFromWorkspace, taskMembers, workflowGroups, type CompareMode, type Crop, type CropHandle, type Json, type Tab } from './interaction-model';
 
 type Settings = { useGpu: boolean; oversizeCropMode: 'face-centered' | 'expand' };
@@ -95,9 +95,9 @@ function DetectionPanel({ files, workspace, active, busy, run, refresh }: PanelP
     assertSuccess(await rpc<Json>('team.project.register.v1', { relativePaths: paths }), '登记团片失败');
     if (paths.length === 1) {
       const photo = photos.find((item: Json) => item.relativePath === paths[0]);
-      if (photo) assertSuccess(await rpc<Json>('team.patch.detect.v1', { photoId: photo.photoId, baseVersionId: photo.baseVersionId, restoreExcluded }), '检测失败');
-      else assertSuccess(await rpc<Json>('team.patch.detect-batch.v1', { relativePaths: paths }), '检测失败');
-    } else assertSuccess(await rpc<Json>('team.patch.detect-batch.v1', { relativePaths: paths }), '批量检测失败');
+      if (photo) assertSuccess(await durableRpc<Json>('team.patch.detect.v1', { photoId: photo.photoId, baseVersionId: photo.baseVersionId, restoreExcluded }), '检测失败');
+      else assertSuccess(await durableRpc<Json>('team.patch.detect-batch.v1', { relativePaths: paths }), '检测失败');
+    } else assertSuccess(await durableRpc<Json>('team.patch.detect-batch.v1', { relativePaths: paths }), '批量检测失败');
     await refresh();
   });
   const open = async (photo: Json) => {
@@ -136,7 +136,7 @@ function PeoplePanel({ workspace, active, busy, run }: PanelProps) {
   useEffect(() => { let mounted = true; void rpc<Json>('team.identity.similarities.v1').then(result => { if (mounted && result.success !== false) setSimilarities(result.similarities || []); }); return () => { mounted = false; }; }, [workspace.assignments]);
   const suggest = () => {
     if (localStorage.getItem('photoflow:team-retouch:face-consent') !== 'granted') { setConsentOpen(true); return; }
-    void run('正在分析人物候选', async () => { const result = assertSuccess(await rpc<Json>('team.identity.suggest.v1'), '自动人物标记失败'); setSimilarities(result.similarities || []); });
+    void run('正在分析人物候选', async () => { const result = assertSuccess(await durableRpc<Json>('team.identity.suggest.v1'), '自动人物标记失败'); setSimilarities(result.similarities || []); });
   };
   const assign = () => void run('确认人物身份', async () => {
     if (!subject || !candidate) throw new Error('请选择人物与身份候选');
@@ -189,7 +189,7 @@ function WorkflowPanel({ workspace, active: _active, busy, run }: PanelProps) {
   const generate = () => run('正在生成工作流', async () => {
     if (!groups.length) throw new Error('没有已确认且可编排的人物任务');
     assertSuccess(await rpc<Json>('team.workflow.settings.save.v1', { preferredIdentityOrder: order, preferredIdentityId: order[0], sameWeekIdentityIds: sameWeek }), '保存排期失败');
-    const result = assertSuccess(await rpc<Json>('team.workflow.generate.v1', { operationId: crypto.randomUUID(), replace, preferredIdentityOrder: order, preferredIdentityId: order[0], sameWeekIdentityIds: sameWeek, groups }), '生成失败');
+    const result = assertSuccess(await durableRpc<Json>('team.workflow.generate.v1', { operationId: crypto.randomUUID(), replace, preferredIdentityOrder: order, preferredIdentityId: order[0], sameWeekIdentityIds: sameWeek, groups }), '生成失败');
     if (result.requiresConfirmation) { setReplace(true); throw new Error('目标目录已存在。已开启替换选项，请确认后再次生成。'); }
     setStatus(result.job || result);
   });
@@ -229,7 +229,7 @@ function ReturnsPanel({ workspace, active, busy, run }: PanelProps) {
     const selected = assertSuccess(await rpc<Json>('team.patch.select-returns.v1'), '选择返图失败');
     if (selected.cancelled) return;
     const returnedFiles = selected.files || selected.returnedFiles || [];
-    const result = assertSuccess(await rpc<Json>('team.workflow.return-batch.v1', { returnedFiles, items: subjectsFromWorkspace(workspace).map((subject: Json) => ({ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, taskId: subject.task.id, taskOrder: subject.task.taskOrder })) }), '返图匹配失败');
+    const result = assertSuccess(await durableRpc<Json>('team.workflow.return-batch.v1', { returnedFiles, items: subjectsFromWorkspace(workspace).map((subject: Json) => ({ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, taskId: subject.task.id, taskOrder: subject.task.taskOrder })) }), '返图匹配失败');
     const next = result.review || result; setReview(next); setSelectedCandidates(Object.fromEntries(returnReviewItems(next).map((item: Json) => [String(item.returnId || item.id), returnCandidates(item)[0] || item])));
   });
   const sessionId = review?.reviewSessionId || review?.id;
@@ -249,14 +249,14 @@ function MergePanel({ workspace, active: _active, busy, run }: PanelProps) {
     if (!id) throw new Error('宿主未返回输出进度');
     setTarget(id); localStorage.setItem('photoflow:team-retouch-output', id); return id;
   };
-  const merge = (photo: Json) => run('正在合并照片', async () => { const outputProgressId = await ensureTarget(); assertSuccess(await rpc<Json>('team.patch.merge.v1', { photoId: photo.photoId, baseVersionId: photo.baseVersionId, outputProgressId, versionName: '团片协作合并' }), '合并失败'); });
+  const merge = (photo: Json) => run('正在合并照片', async () => { const outputProgressId = await ensureTarget(); assertSuccess(await durableRpc<Json>('team.patch.merge.v1', { photoId: photo.photoId, baseVersionId: photo.baseVersionId, outputProgressId, versionName: '团片协作合并' }), '合并失败'); });
   return <div className="grid"><section className="card"><h2>选择合并目标进度</h2><div className="row"><select value={target} onChange={event => { setTarget(event.target.value); if (event.target.value === '__new__') localStorage.removeItem('photoflow:team-retouch-output'); else localStorage.setItem('photoflow:team-retouch-output', event.target.value); }}><option value="__new__">新建图片进度</option>{progress.map(item => <option value={item.id} key={item.id}>{item.displayName || item.versionKey}</option>)}</select>{target === '__new__' && <input value={name} onChange={event => setName(event.target.value)} aria-label="新进度名称"/>}</div><p className="hint">来源进度不可作为目标；选择会按项目记忆。</p></section><section className="card"><h2>逐张合并</h2><div className="list">{(workspace.photos || []).map((photo: Json) => <div className="item" key={`${photo.photoId}:${photo.baseVersionId}`}><div><strong>{photo.name || photo.displayName || photo.photoId}</strong><small>{photo.tasks?.filter((task: Json) => ['uploaded', 'merged'].includes(String(task.status))).length || 0} / {photo.tasks?.length || 0} 个返图就绪</small></div><span className="spacer"/><button className="btn primary" disabled={busy || !photo.tasks?.length} onClick={() => void merge(photo)}>合并到目标进度</button></div>)}</div></section></div>;
 }
 
 function SettingsPanel({ settings, setSettings, busy, run }: PanelProps & { settings: Settings; setSettings: (settings: Settings) => void }) {
   const [environment, setEnvironment] = useState<Json>();
   return <div className="grid"><section className="card half"><h2>组件设置</h2><label className="check-row"><input type="checkbox" checked={settings.useGpu} onChange={event => setSettings({ ...settings, useGpu: event.target.checked })}/><span>优先使用 GPU</span></label><label className="field"><span>超大人物裁剪</span><select value={settings.oversizeCropMode} onChange={event => setSettings({ ...settings, oversizeCropMode: event.target.value as Settings['oversizeCropMode'] })}><option value="face-centered">保持 4000 像素并以面部居中</option><option value="expand">扩大范围保留完整人物</option></select></label><button className="btn primary" disabled={busy} onClick={() => void run('保存组件设置', async () => { assertSuccess(await rpc<Json>('team.settings.update.v1', settings), '保存失败'); })}>保存设置</button></section>
-    <section className="card half"><h2>高级环境</h2><p className="hint">环境操作只管理组件自带算法和模型，不修改视频播放器边界。</p><div className="row"><button className="btn" disabled={busy} onClick={() => void run('检查高级环境', async () => { setEnvironment(await rpc<Json>('team.advanced.preflight.v1')); })}>检查</button><button className="btn primary" disabled={busy} onClick={() => void run('安装/修复高级环境', async () => { assertSuccess(await rpc<Json>('team.advanced.install.v1', { repair: true }), '安装失败'); })}>安装 / 修复</button><button className="btn danger" disabled={busy} onClick={() => void run('卸载高级环境', async () => { assertSuccess(await rpc<Json>('team.advanced.uninstall.v1'), '卸载失败'); })}>卸载</button></div>{environment && <pre className={environment.success === false ? 'error-text' : ''}>{environment.message || environment.error || JSON.stringify(environment, null, 2)}</pre>}</section></div>;
+    <section className="card half"><h2>高级环境</h2><p className="hint">环境操作只管理组件自带算法和模型，不修改视频播放器边界。</p><div className="row"><button className="btn" disabled={busy} onClick={() => void run('检查高级环境', async () => { setEnvironment(await durableRpc<Json>('team.advanced.preflight.v1')); })}>检查</button><button className="btn primary" disabled={busy} onClick={() => void run('安装/修复高级环境', async () => { assertSuccess(await durableRpc<Json>('team.advanced.install.v1', { repair: true }), '安装失败'); })}>安装 / 修复</button><button className="btn danger" disabled={busy} onClick={() => void run('卸载高级环境', async () => { assertSuccess(await durableRpc<Json>('team.advanced.uninstall.v1'), '卸载失败'); })}>卸载</button></div>{environment && <pre className={environment.success === false ? 'error-text' : ''}>{environment.message || environment.error || JSON.stringify(environment, null, 2)}</pre>}</section></div>;
 }
 
 function App() {

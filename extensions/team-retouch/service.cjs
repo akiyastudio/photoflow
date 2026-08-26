@@ -18,11 +18,15 @@ const photoOperations = new Map();
 const reviewSessionOperations = new Map();
 const projectWorkflowOperations = new Map();
 const durableOperationRuns = new Map();
+const durableOperationParentIds = new Map();
+const algorithmControlsByParent = new Map();
+const requestStoragePromises = new Map();
 const activeRequestControls = new Map();
 const injectedTestFaults = new Set();
 const schemaReadyPaths = new Set();
 let advancedRuntimeProbeCache = null;
 let nextCapabilityId = 1;
+const metricSamples = new Map();
 
 const hostAlgorithmRuntime = (() => {
   const values = process.argv.slice(2);
@@ -49,13 +53,18 @@ const resolveAlgorithmRuntime = () => {
 };
 
 const writeFrame = value => process.stdout.write(`${JSON.stringify(value)}\n`);
-const migrationMetric = (migration, phase, startedAt, values = {}) => writeFrame({
-  type: 'metric', migration, phase, elapsedMs: Date.now() - startedAt,
-  itemCount: Math.max(0, Number(values.itemCount) || 0), byteCount: Math.max(0, Number(values.byteCount) || 0),
-  queueMs: Math.max(0, Number(values.queueMs) || 0), ackMs: Math.max(0, Number(values.ackMs) || 0),
-  cacheHit: values.cacheHit === true, fallback: values.fallback === true,
-  outcome: String(values.outcome || values.state || ''), state: String(values.state || ''),
-});
+const migrationMetric = (migration, phase, startedAt, values = {}) => {
+  const elapsedMs = Date.now() - startedAt;
+  const key = `${migration}:${phase}`; const samples = [...(metricSamples.get(key) || []), elapsedMs].slice(-128).sort((a, b) => a - b); metricSamples.set(key, samples);
+  const percentile = value => samples[Math.min(samples.length - 1, Math.max(0, Math.ceil(samples.length * value) - 1))] || 0;
+  writeFrame({
+    type: 'metric', migration, phase, elapsedMs, sampleCount: samples.length, p50Ms: percentile(.5), p95Ms: percentile(.95),
+    itemCount: Math.max(0, Number(values.itemCount) || 0), byteCount: Math.max(0, Number(values.byteCount) || 0),
+    queueMs: Math.max(0, Number(values.queueMs) || 0), ackMs: Math.max(0, Number(values.ackMs) || 0),
+    cacheHit: values.cacheHit === true, fallback: values.fallback === true,
+    outcome: String(values.outcome || values.state || ''), state: String(values.state || ''),
+  });
+};
 const parseJson = (value, fallback) => {
   try { return JSON.parse(value || ''); } catch { return fallback; }
 };
@@ -163,7 +172,7 @@ const artifactGrantForStorage = (storage, payload) => {
 const artifactGrantV2 = async (parentId, payload) => artifactGrantForStorage(await hostStorage(parentId), payload);
 const inputStages = new Map();
 const storageMigrationOperations = new Map();
-const rawHostStorage = async parentId => {
+const loadRawHostStorage = async parentId => {
   const value = await callHostV2(parentId, 'component.storage.v2', {}); const storage = { ...value, ...(value.dataPath ? { dataRoot: value.dataPath } : {}) };
   if (value.adoption?.legacyDataRoot) {
     let operation = storageMigrationOperations.get(value.databasePath);
@@ -171,6 +180,11 @@ const rawHostStorage = async parentId => {
     await operation;
   }
   return storage;
+};
+const rawHostStorage = parentId => {
+  const key = String(parentId); let promise = requestStoragePromises.get(key);
+  if (!promise) { promise = loadRawHostStorage(parentId); requestStoragePromises.set(key, promise); }
+  return promise;
 };
 const hostStorage = async parentId => {
   const storage = await rawHostStorage(parentId);
@@ -323,7 +337,9 @@ const ensureSchema = databasePath => {
     );
     CREATE INDEX IF NOT EXISTS team_artifact_chain ON team_task_artifacts(task_id, created_at, is_deleted);
     CREATE TABLE IF NOT EXISTS team_workflow_reconcile_pending (
-      task_id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, error TEXT NOT NULL DEFAULT '', updated_at INTEGER NOT NULL,
+      task_id TEXT PRIMARY KEY, photo_id TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
+      attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT NOT NULL DEFAULT '', history_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL,
       FOREIGN KEY(task_id) REFERENCES team_patch_tasks(id)
     );
     CREATE TABLE IF NOT EXISTS team_workflow_review_confirmations (
@@ -343,6 +359,10 @@ const ensureSchema = databasePath => {
     );
     CREATE INDEX IF NOT EXISTS team_operation_project_state ON team_durable_operations(project_id,state,updated_at);
   `);
+  addColumn('team_workflow_reconcile_pending', 'attempt_count', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('team_workflow_reconcile_pending', 'next_attempt_at', 'INTEGER NOT NULL DEFAULT 0');
+  addColumn('team_workflow_reconcile_pending', 'last_error', "TEXT NOT NULL DEFAULT ''");
+  addColumn('team_workflow_reconcile_pending', 'history_json', "TEXT NOT NULL DEFAULT '[]'");
   const storedSchemaVersion = Number(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value || 0);
   if (storedSchemaVersion < 4) {
     const now = Date.now();
@@ -369,7 +389,7 @@ const ensureSchema = databasePath => {
       }
     }
   }
-  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','6') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
+  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','7') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
   schemaReadyPaths.add(databasePath);
   return db;
 };
@@ -469,6 +489,9 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
   let settled = false;
   const finish = (callback, value) => { if (settled) return; settled = true; clearTimeout(timer); callback(value); };
   activeAlgorithms.add(child);
+  const controls = algorithmControlsByParent.get(String(parentId)) || new Set();
+  const control = { cancel: () => { cancelled = true; child.kill(); } };
+  controls.add(control); algorithmControlsByParent.set(String(parentId), controls);
   const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
   const timer = setTimeout(() => { child.kill(); finish(reject, new Error('团片组件算法运行超时')); }, timeoutMs);
   timer.unref?.();
@@ -483,6 +506,7 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
   child.once('error', error => { finish(reject, error); });
   child.once('exit', code => {
     activeAlgorithms.delete(child);
+    controls.delete(control); if (!controls.size) algorithmControlsByParent.delete(String(parentId));
     lines.close();
     if (cancelled) finish(reject, Object.assign(new Error('团片组件算法已取消'), { code: CANCELLED_CODE }));
     else if (code !== 0) finish(reject, new Error(stderr.trim() || `团片组件算法退出（${code}）`));
@@ -1310,9 +1334,12 @@ const archiveReturnedFile = async (source, destination, storageRoot) => {
   return 'copied';
 };
 
-const markWorkflowReconcilePending = (db, payload, error) => db.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,updated_at) VALUES(?,?,?,?)
-  ON CONFLICT(task_id) DO UPDATE SET photo_id=excluded.photo_id,error=excluded.error,updated_at=excluded.updated_at`)
-  .run(String(payload.taskId), String(payload.photoId), error?.message || String(error || '等待后台更新接力任务'), Date.now());
+const markWorkflowReconcilePending = (db, payload, error) => {
+  const message = String(error?.message || error || '等待后台更新接力任务').slice(0, 500);
+  return db.prepare(`INSERT INTO team_workflow_reconcile_pending(task_id,photo_id,error,attempt_count,next_attempt_at,last_error,history_json,updated_at) VALUES(?,?,?,0,0,?,'[]',?)
+    ON CONFLICT(task_id) DO UPDATE SET photo_id=excluded.photo_id,error=excluded.error,attempt_count=0,next_attempt_at=0,last_error=excluded.last_error,updated_at=excluded.updated_at`)
+    .run(String(payload.taskId), String(payload.photoId), message, message, Date.now());
+};
 
 const storeReturnedPatchInDomain = async (db, storage, sourcePath, payload, context) => {
   const source = path.resolve(sourcePath);
@@ -1451,6 +1478,13 @@ const publicWorkspace = value => ({
   })),
   assignments: (value?.assignments || []).map(assignment => Object.fromEntries(Object.entries(assignment).filter(([field]) => !['editedPatchPath', 'returnedPath'].includes(field)))),
 });
+const domainRevision = (db, projectId) => {
+  const maxima = db.prepare(`SELECT
+    (SELECT COALESCE(MAX(updated_at),0) FROM team_retouch_photos WHERE project_id=?) photos_at,
+    (SELECT COALESCE(MAX(updated_at),0) FROM team_person_assignments WHERE project_id=?) assignments_at,
+    (SELECT COALESCE(MAX(updated_at),0) FROM team_person_identities WHERE project_id=?) identities_at`).get(projectId, projectId, projectId);
+  return `${Number(maxima.photos_at) || 0}:${Number(maxima.assignments_at) || 0}:${Number(maxima.identities_at) || 0}`;
+};
 
 const migrateWorkflowArtifacts = async (parentId, payload) => {
   const storage = await hostStorage(parentId);
@@ -1525,15 +1559,11 @@ const workspaceSnapshot = async (parentId, context) => {
     const generatedSameWeek = new Set(uniqueText(generatedSettings?.sameWeekIdentityIds));
     const workflowItems = (manifest?.groups || []).flatMap(group => group.items || []);
     const workflowAvailableItems = workflowItems.filter(item => item.available && item.relativePath);
-    const maxima = db.prepare(`SELECT
-      (SELECT COALESCE(MAX(updated_at),0) FROM team_retouch_photos WHERE project_id=?) photos_at,
-      (SELECT COALESCE(MAX(updated_at),0) FROM team_person_assignments WHERE project_id=?) assignments_at,
-      (SELECT COALESCE(MAX(updated_at),0) FROM team_person_identities WHERE project_id=?) identities_at`).get(projectId, projectId, projectId);
     const calibratedCount = registered.filter(row => Number(row.calibrated_at) > 0).length;
     return {
       success: true, photos, identities, assignments: normalizedAssignments,
       snapshotVersion: 1,
-      revision: `${Number(maxima.photos_at) || 0}:${Number(maxima.assignments_at) || 0}:${Number(maxima.identities_at) || 0}`,
+      revision: domainRevision(db, projectId),
       stale: calibratedCount < registered.length,
       calibration: { calibratedCount, pendingCount: Math.max(0, registered.length - calibratedCount) },
       workflowGenerated: Boolean(manifest && Number(manifest.version) >= 2),
@@ -1705,11 +1735,14 @@ const workflowStatus = async (parentId, _payload, context) => {
   const key = `${context.projectId}:${context.projectStatus}:${context.projectName}`;
   const job = workflowJobs.get(key) || null;
   const reconciliation = await withDomain(parentId, db => {
-    const row = db.prepare(`SELECT COUNT(*) pendingCount,MIN(updated_at) oldestAt FROM team_workflow_reconcile_pending pending
+    const row = db.prepare(`SELECT COUNT(*) pendingCount,MIN(updated_at) oldestAt,MIN(CASE WHEN next_attempt_at>0 THEN next_attempt_at END) nextAttemptAt,MAX(attempt_count) maxAttemptCount FROM team_workflow_reconcile_pending pending
       JOIN team_patch_tasks task ON task.id=pending.task_id
       JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
       WHERE registered.project_id=?`).get(String(context.projectId));
-    return { state: Number(row?.pendingCount) ? 'preparing' : 'ready', pendingCount: Number(row?.pendingCount) || 0, oldestAt: Number(row?.oldestAt) || 0 };
+    const latest = db.prepare(`SELECT pending.last_error FROM team_workflow_reconcile_pending pending
+      JOIN team_patch_tasks task ON task.id=pending.task_id JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+      WHERE registered.project_id=? ORDER BY pending.updated_at DESC LIMIT 1`).get(String(context.projectId));
+    return { state: Number(row?.pendingCount) ? 'preparing' : 'ready', pendingCount: Number(row?.pendingCount) || 0, oldestAt: Number(row?.oldestAt) || 0, nextAttemptAt: Number(row?.nextAttemptAt) || 0, maxAttemptCount: Number(row?.maxAttemptCount) || 0, lastError: String(latest?.last_error || '') };
   });
   if (!job) {
     const storage = await hostStorage(parentId); const recovered = await readJson(path.join(storage.dataPath, 'workflow-jobs', `${sha256(key)}.json`), null);
@@ -1996,38 +2029,13 @@ const reconcileWorkflowTaskChainUnlocked = async (parentId, context, taskId, exi
 };
 const reconcileWorkflowTaskChain = (parentId, context, taskId, existingDb = null) => withProjectWorkflowOperation(context.projectId, () => reconcileWorkflowTaskChainUnlocked(parentId, context, taskId, existingDb));
 
-const queueWorkflowReconcile = async (parentId, payload, error) => {
-  const storage = await hostStorage(parentId);
-  const db = ensureSchema(storage.databasePath);
-  try { markWorkflowReconcilePending(db, payload, error); }
-  finally { db.close(); }
-  await appendCommand(storage, { operationId: crypto.randomUUID(), type: 'workflow-reconcile', state: 'pending-retry', taskId: payload.taskId, photoId: payload.photoId, error: error.message || String(error) }).catch(() => undefined);
-};
-
-const finalizeReconcile = async (parentId, context, payload, result = { success: true }, existingDb = null) => {
-  try {
-    const reconciliation = await reconcileWorkflowTaskChain(parentId, context, payload.taskId, existingDb);
-    if (!reconciliation.reconciled) throw new Error(`接力更新未完成：${reconciliation.reason || 'unknown'}`);
-    if (existingDb) existingDb.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run(String(payload.taskId));
-    else await withDomain(parentId, db => db.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run(String(payload.taskId)));
-    return result;
-  } catch (error) {
-    await queueWorkflowReconcile(parentId, payload, error);
-    return { ...result, success: true, reconcilePending: true, warning: '操作已安全保存，但工作流程目录暂未更新；组件将在下次加载时自动重试，无需重复操作' };
-  }
-};
-
-const storeReturnedAndReconcile = (parentId, sourcePath, payload, context) => withPhotoOperation(payload.photoId, async () => {
-  const registered = await storeReturnedPatch(parentId, sourcePath, payload, context);
-  return finalizeReconcile(parentId, context, payload, registered);
-});
 const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomain(parentId, (db, storage) => storeReturnedPatchInDomain(db, storage, sourcePath, payload, context));
 
 const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1) => {
-  const pending = await withDomain(parentId, db => db.prepare(`SELECT pending.task_id,pending.photo_id FROM team_workflow_reconcile_pending pending
+  const pending = await withDomain(parentId, db => db.prepare(`SELECT pending.* FROM team_workflow_reconcile_pending pending
     JOIN team_patch_tasks task ON task.id=pending.task_id
     JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
-    WHERE registered.project_id=? ORDER BY pending.updated_at LIMIT ?`).all(String(context.projectId), Math.max(1, Number(maxItems) || 1)));
+    WHERE registered.project_id=? AND pending.next_attempt_at<=? ORDER BY pending.next_attempt_at,pending.updated_at LIMIT ?`).all(String(context.projectId), Date.now(), Math.max(1, Number(maxItems) || 1)));
   let recovered = 0;
   for (const item of pending) await withPhotoOperation(item.photo_id, async () => {
     try {
@@ -2036,10 +2044,14 @@ const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1) =
       await withDomain(parentId, db => db.prepare('DELETE FROM team_workflow_reconcile_pending WHERE task_id=?').run(item.task_id));
       recovered += 1;
     } catch (error) {
-      await withDomain(parentId, db => db.prepare('UPDATE team_workflow_reconcile_pending SET error=?,updated_at=? WHERE task_id=?').run(error.message || String(error), Date.now(), item.task_id)).catch(() => undefined);
+      const message = String(error.message || error).slice(0, 500);
+      const attemptCount = Math.max(1, Number(item.attempt_count) + 1);
+      const nextAttemptAt = Date.now() + Math.min(5 * 60_000, 1000 * (2 ** Math.min(8, attemptCount - 1)));
+      const history = [...parseJson(item.history_json, []), { at: Date.now(), attemptCount, error: message }].slice(-8);
+      await withDomain(parentId, db => db.prepare('UPDATE team_workflow_reconcile_pending SET error=?,last_error=?,attempt_count=?,next_attempt_at=?,history_json=?,updated_at=? WHERE task_id=?').run(message, message, attemptCount, nextAttemptAt, JSON.stringify(history), Date.now(), item.task_id)).catch(() => undefined);
     }
   });
-  const remaining = await withDomain(parentId, db => db.prepare(`SELECT pending.error,pending.updated_at FROM team_workflow_reconcile_pending pending
+  const remaining = await withDomain(parentId, db => db.prepare(`SELECT pending.error,pending.last_error,pending.attempt_count,pending.next_attempt_at,pending.updated_at FROM team_workflow_reconcile_pending pending
     JOIN team_patch_tasks task ON task.id=pending.task_id
     JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
     WHERE registered.project_id=? ORDER BY pending.updated_at LIMIT 1`).get(String(context.projectId)));
@@ -2047,7 +2059,7 @@ const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1) =
     JOIN team_patch_tasks task ON task.id=pending.task_id
     JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
     WHERE registered.project_id=?`).get(String(context.projectId))?.count) || 0);
-  return { success: true, state: pendingCount ? (recovered ? 'preparing' : 'failed') : 'ready', pendingCount, recoveredCount: recovered, error: remaining?.error || '' };
+  return { success: true, state: pendingCount ? 'preparing' : 'ready', pendingCount, recoveredCount: recovered, attemptedCount: pending.length, deferredCount: Math.max(0, pendingCount - pending.length), attemptCount: Number(remaining?.attempt_count) || 0, nextAttemptAt: Number(remaining?.next_attempt_at) || 0, error: remaining?.last_error || remaining?.error || '' };
 };
 
 const returnBatch = async (parentId, payload, context, workflowMode) => {
@@ -2098,7 +2110,7 @@ const returnBatch = async (parentId, payload, context, workflowMode) => {
     for (const [index, match] of high.entries()) {
       throwIfCancelled();
       if (!stagedSources.has(path.resolve(match.path))) throw new Error('Matched return escaped its component staging grant');
-      const registered = await storeReturnedAndReconcile(parentId, match.path, { photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode, matchConfidence: match.matchConfidence, editEvidence: match.editEvidence, returnWarnings: match.returnWarnings }, context);
+      const registered = await withPhotoOperation(match.photoId, () => storeReturnedPatch(parentId, match.path, { photoId: match.photoId, baseVersionId: match.baseVersionId, taskId: match.taskId, personIndex: match.personIndex, complete: workflowMode, deferReconcile: true, matchConfidence: match.matchConfidence, editEvidence: match.editEvidence, returnWarnings: match.returnWarnings }, context));
       accepted.push({ ...match, path: undefined, patchPath: undefined, accepted: true, reconcilePending: Boolean(registered.reconcilePending), warning: registered.warning });
       await report('report', progressUpdate('importing', 82 + 12 * (index + 1) / Math.max(1, high.length), `正在归档返图 ${index + 1}/${high.length}`));
     }
@@ -2346,11 +2358,11 @@ const acceptDurableOperation = async (parentId, payload, context, kind, extra = 
   const operationId = String(payload.operationId || crypto.randomUUID());
   const accepted = await withDomain(parentId, db => {
     const existing = db.prepare('SELECT * FROM team_durable_operations WHERE id=? AND project_id=?').get(operationId, String(context.projectId));
-    if (existing) return { success: true, accepted: true, operationId, state: existing.state, phase: existing.phase, cacheHit: true };
+    if (existing) return { success: true, accepted: true, operationId, state: existing.state, phase: existing.phase, cacheHit: true, resumable: kind !== 'return-batch', ...(kind === 'return-batch' ? { restartPolicy: 'requires-reselection', limitation: '返图选择凭据不会跨进程保存；重启后必须重新选择返图' } : {}) };
     const now = Date.now();
     db.prepare(`INSERT INTO team_durable_operations(id,project_id,kind,state,phase,request_json,created_at,updated_at) VALUES(?,?,?,'accepted','accepted',?,?,?)`)
       .run(operationId, String(context.projectId), kind, JSON.stringify({ ...payload, operationId, ...extra }), now, now);
-    return { success: true, accepted: true, operationId, state: 'accepted', phase: 'accepted' };
+    return { success: true, accepted: true, operationId, state: 'accepted', phase: 'accepted', resumable: kind !== 'return-batch', ...(kind === 'return-batch' ? { restartPolicy: 'requires-reselection', limitation: '返图选择凭据不会跨进程保存；重启后必须重新选择返图' } : {}) };
   });
   migrationMetric(`team-operation-${kind}`, 'ack', startedAt, { ackMs: Date.now() - startedAt, itemCount: Array.isArray(payload.groups) ? payload.groups.reduce((count, group) => count + (group.items?.length || 0), 0) : Array.isArray(payload.items) ? payload.items.length : payload.photoId ? 1 : 0, cacheHit: accepted.cacheHit === true, outcome: accepted.state });
   return accepted;
@@ -2359,7 +2371,7 @@ const acceptDurableOperation = async (parentId, payload, context, kind, extra = 
 const durableOperationSnapshot = row => row ? ({
   operationId: row.id, kind: row.kind, state: row.state, phase: row.phase, progress: Number(row.progress) || 0,
   checkpoint: parseJson(row.checkpoint_json, {}), result: parseJson(row.result_json, {}), error: row.error || '',
-  cancelRequested: Boolean(row.cancel_requested), createdAt: row.created_at, updatedAt: row.updated_at,
+  cancelRequested: Boolean(row.cancel_requested), resumable: row.kind !== 'return-batch', ...(row.kind === 'return-batch' ? { restartPolicy: 'requires-reselection', limitation: '返图选择凭据不会跨进程保存；重启后必须重新选择返图' } : {}), createdAt: row.created_at, updatedAt: row.updated_at,
 }) : null;
 
 const runDurableOperationUnlocked = async (parentId, payload, context) => {
@@ -2374,11 +2386,30 @@ const runDurableOperationUnlocked = async (parentId, payload, context) => {
     db.prepare("UPDATE team_durable_operations SET state='running',phase='running',updated_at=? WHERE id=?").run(Date.now(), operationId);
   } finally { db.close(); }
   const request = parseJson(row.request_json, {});
+  durableOperationParentIds.set(operationId, String(parentId));
   try {
+    await assertExpectedRevision(parentId, request, context);
+    if (row.kind === 'return-batch' && Date.now() - Number(row.created_at) > 30_000) throw Object.assign(new Error('返图选择授权已过期；为避免缓存越权输入，请重新选择返图后重试'), { code: 'COMPONENT_INPUT_RESELECTION_REQUIRED', retryable: true });
     let result;
     if (row.kind === 'workflow-generate') result = await generateWorkflow(parentId, request, context);
     else if (row.kind === 'return-batch') result = await returnBatch(parentId, request, context, request.workflowMode === true);
     else if (row.kind === 'merge') result = await withPhotoOperation(request.photoId, () => mergePatches(parentId, request, context));
+    else if (row.kind === 'detect') result = await withPhotoOperation(request.photoId, () => detectPhoto(parentId, request, context));
+    else if (row.kind === 'detect-batch') result = await detectBatch(parentId, request, context);
+    else if (row.kind === 'identity-suggest') result = await suggestIdentities(parentId, request, context);
+    else if (row.kind === 'patch-update') result = await withPhotoOperation(request.photoId, () => updatePatch(parentId, request, context));
+    else if (row.kind === 'person-exclude') result = await withPhotoOperation(request.photoId, () => excludePerson(parentId, request, context));
+    else if (row.kind === 'advanced-lifecycle') {
+      if (request.action === 'preflight') result = await lifecycleAction(parentId, 'preflight');
+      else {
+        result = await lifecycleAction(parentId, request.action);
+        advancedRuntimeProbeCache = null;
+        if (['install', 'repair'].includes(request.action)) {
+          const probe = await advancedRuntimeStatus(parentId, { refresh: true });
+          result = probe.advancedAvailable ? { ...result, advancedAvailable: true, state: 'ready' } : { ...result, success: false, state: probe.state, error: probe.advancedError || probe.message };
+        }
+      }
+    }
     else throw new Error(`未知持久化操作类型：${row.kind}`);
     const finalState = result?.cancelled ? 'failed' : result?.requiresConfirmation ? 'accepted' : result?.success === false ? 'failed' : 'completed';
     const finalDb = ensureSchema(storage.databasePath);
@@ -2390,7 +2421,7 @@ const runDurableOperationUnlocked = async (parentId, payload, context) => {
     try { failedDb.prepare("UPDATE team_durable_operations SET state='failed',phase='failed',error=?,updated_at=? WHERE id=?").run(error.message || String(error), Date.now(), operationId); }
     finally { failedDb.close(); }
     throw error;
-  }
+  } finally { durableOperationParentIds.delete(operationId); }
 };
 const runDurableOperation = (parentId, payload, context) => withKeyedOperation(durableOperationRuns, payload.operationId, () => runDurableOperationUnlocked(parentId, payload, context));
 
@@ -2402,8 +2433,22 @@ const getDurableOperation = (parentId, payload, context) => withDomain(parentId,
 const cancelDurableOperation = async (parentId, payload, context) => {
   const operationId = String(payload.operationId || '');
   await withDomain(parentId, db => db.prepare('UPDATE team_durable_operations SET cancel_requested=1,phase=?,updated_at=? WHERE id=? AND project_id=?').run('cancelling', Date.now(), operationId, String(context.projectId)));
+  const runningParentId = durableOperationParentIds.get(operationId);
+  if (runningParentId) for (const control of algorithmControlsByParent.get(runningParentId) || []) control.cancel();
   await cancelWorkflow(parentId, { operationId }).catch(() => undefined);
   return { success: true, operationId, cancelRequested: true };
+};
+
+const MUTATING_METHODS = new Set([
+  'team.project.register.v1','team.project.remove-photo.v1','team.identity.save.v1','team.identity.assign.v1','team.identity.confirm-group.v1','team.identity.delete.v1','team.identity.suggest.v1',
+  'team.person.exclude.v1','team.patch.detect.v1','team.patch.detect-batch.v1','team.patch.update.v1','team.patch.delete.v1','team.patch.cleanup.v1','team.patch.upload.v1','team.patch.remove-upload.v1','team.patch.merge.v1',
+  'team.identity.complete.v1','team.workflow.settings.save.v1','team.workflow.generate.v1','team.workflow.return-batch.v1','team.workflow.return-confirm.v1','team.patch.return-batch.v1','team.operation.run.v1',
+]);
+const readDomainRevision = (parentId, context) => withDomain(parentId, db => domainRevision(db, String(context.projectId)));
+const assertExpectedRevision = async (parentId, payload, context) => {
+  if (!payload.expectedRevision) return;
+  const actual = await readDomainRevision(parentId, context);
+  if (String(payload.expectedRevision) !== actual) throw Object.assign(new Error('团片数据已被其他操作更新，请刷新后重试'), { code: 'COMPONENT_HOST_CONFLICT', retryable: true });
 };
 
 const handlers = {
@@ -2449,18 +2494,18 @@ const handlers = {
   'team.identity.assign.v1': assignIdentity,
   'team.identity.confirm-group.v1': async (parentId, payload, context) => publicWorkspace(await confirmIdentityGroup(parentId, payload, context)),
   'team.identity.delete.v1': deleteIdentity,
-  'team.person.exclude.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => excludePerson(parentId, payload, context)),
+  'team.person.exclude.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'person-exclude') : withPhotoOperation(payload.photoId, () => excludePerson(parentId, payload, context)),
   'team.patch.get.v1': getPatchBundle,
-  'team.patch.detect.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => detectPhoto(parentId, payload, context)),
-  'team.patch.detect-batch.v1': detectBatch,
-  'team.patch.update.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => updatePatch(parentId, payload, context)),
+  'team.patch.detect.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'detect') : withPhotoOperation(payload.photoId, () => detectPhoto(parentId, payload, context)),
+  'team.patch.detect-batch.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'detect-batch') : detectBatch(parentId, payload, context),
+  'team.patch.update.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'patch-update') : withPhotoOperation(payload.photoId, () => updatePatch(parentId, payload, context)),
   'team.patch.delete.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => deletePatch(parentId, payload, context)),
   'team.patch.cleanup.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => cleanupPatches(parentId, payload, context)),
   'team.patch.upload.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => uploadPatch(parentId, payload, context)),
   'team.patch.remove-upload.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => removeUpload(parentId, payload, context)),
   'team.patch.merge.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'merge') : withPhotoOperation(payload.photoId, () => mergePatches(parentId, payload, context)),
   'team.identity.similarities.v1': readIdentitySimilarities,
-  'team.identity.suggest.v1': suggestIdentities,
+  'team.identity.suggest.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'identity-suggest') : suggestIdentities(parentId, payload, context),
   'team.identity.complete.v1': (parentId, payload, context) => withPhotoOperation(payload.photoId, () => completeIdentity(parentId, payload, context)),
   'team.media.page.v1': (parentId, payload) => listProjectMediaPage(parentId, payload),
   'team.media.authorize.v1': (parentId, payload) => componentMediaV2(parentId, mediaRequest(payload)),
@@ -2487,18 +2532,23 @@ const handlers = {
   'team.settings.get.v1': parentId => componentSettings(parentId, { action: 'get' }),
   'team.settings.update.v1': (parentId, payload) => componentSettings(parentId, { action: 'update', settings: payload }),
   'team.advanced.status.v1': parentId => advancedRuntimeStatus(parentId),
-  'team.advanced.preflight.v1': async parentId => {
+  'team.advanced.preflight.v1': async (parentId, payload, context) => {
+    if (payload.acceptOnly) return acceptDurableOperation(parentId, payload, context, 'advanced-lifecycle', { action: 'preflight' });
     try { return await lifecycleAction(parentId, 'preflight'); }
     catch (error) { return { success: false, state: 'repair-needed', errorCategory: 'installation-prerequisite', message: String(error?.message || '增强人物检测安装条件未满足') }; }
   },
-  'team.advanced.install.v1': async (parentId, payload) => {
+  'team.advanced.install.v1': async (parentId, payload, context) => {
+    if (payload.acceptOnly) return acceptDurableOperation(parentId, payload, context, 'advanced-lifecycle', { action: payload.repair === true ? 'repair' : 'install' });
     const installed = await lifecycleAction(parentId, payload.repair === true ? 'repair' : 'install');
     advancedRuntimeProbeCache = null;
     const probe = await advancedRuntimeStatus(parentId, { refresh: true });
     if (!probe.advancedAvailable) return { ...installed, success: false, state: probe.state, error: probe.advancedError || probe.message };
     return { ...installed, advancedAvailable: true, state: 'ready' };
   },
-  'team.advanced.uninstall.v1': async parentId => { const result = await lifecycleAction(parentId, 'uninstall'); advancedRuntimeProbeCache = null; return result; },
+  'team.advanced.uninstall.v1': async (parentId, payload, context) => {
+    if (payload.acceptOnly) return acceptDurableOperation(parentId, payload, context, 'advanced-lifecycle', { action: 'uninstall' });
+    const result = await lifecycleAction(parentId, 'uninstall'); advancedRuntimeProbeCache = null; return result;
+  },
 };
 
 const startService = () => {
@@ -2516,6 +2566,7 @@ input.on('line', line => {
   }
   if (frame?.type === 'cancel') {
     const requestId = String(frame.id || ''); activeRequestControls.get(requestId)?.abort();
+    for (const control of algorithmControlsByParent.get(requestId) || []) control.cancel();
     for (const [capabilityId, pending] of pendingCapabilities) if (pending.parentId === requestId) {
       pendingCapabilities.delete(capabilityId);
       pending.reject(Object.assign(new Error('团片请求已超时取消，可从上次安全进度重试'), { code: 'COMPONENT_REQUEST_CANCELLED' }));
@@ -2525,11 +2576,19 @@ input.on('line', line => {
   if (frame?.type !== 'request') return;
   const id = String(frame.id || '');
   const handler = handlers[String(frame.method || '')];
+  const rpcStartedAt = Date.now();
   const control = new AbortController(); activeRequestControls.set(id, control);
-  Promise.resolve(handler ? handler(id, frame.payload || {}, { ...(frame.context || {}), signal: control.signal }) : Promise.reject(new Error('Unknown team-retouch service method')))
-    .then(result => writeFrame({ type: 'response', id, ok: true, result }))
-    .catch(error => writeFrame({ type: 'response', id, ok: false, error: error.message || String(error) }))
-    .finally(() => activeRequestControls.delete(id));
+  const requestContext = { ...(frame.context || {}), signal: control.signal };
+  const method = String(frame.method || '');
+  Promise.resolve(handler ? assertExpectedRevision(id, frame.payload || {}, requestContext).then(() => handler(id, frame.payload || {}, requestContext)) : Promise.reject(new Error('Unknown team-retouch service method')))
+    .then(async result => {
+      if (MUTATING_METHODS.has(method) && result && typeof result === 'object') result = { ...result, revision: await readDomainRevision(id, requestContext) };
+      const itemCount = Array.isArray(result?.photos) ? result.photos.length : Array.isArray(result?.results) ? result.results.length : Array.isArray(result?.matches) ? result.matches.length : Number(result?.count) || 0;
+      migrationMetric('team-rpc', String(frame.method || 'unknown'), rpcStartedAt, { ackMs: Date.now() - rpcStartedAt, itemCount, cacheHit: result?.cacheHit === true, fallback: result?.fallback === true, outcome: result?.state || 'completed' });
+      writeFrame({ type: 'response', id, ok: true, result });
+    })
+    .catch(error => { migrationMetric('team-rpc', String(frame.method || 'unknown'), rpcStartedAt, { ackMs: Date.now() - rpcStartedAt, outcome: error?.code === CANCELLED_CODE ? 'cancelled' : 'failed' }); writeFrame({ type: 'response', id, ok: false, error: error.message || String(error) }); })
+    .finally(() => { activeRequestControls.delete(id); requestStoragePromises.delete(id); });
 });
 
 writeFrame({ type: 'ready', protocolVersion: 1 });

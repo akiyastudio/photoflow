@@ -63,7 +63,14 @@ const hydrateReviewResult = (result: Json) => {
   return { ...result, matches };
 };
 const payload = (args: any[]) => { for (let index = args.length - 1; index >= 0; index -= 1) { const value = args[index]; if (value && typeof value === 'object' && !Array.isArray(value)) return value; } return {}; };
-const ok = async (method: string, value?: Json) => rpc<Json>(method, value);
+let workspaceRevision = '';
+const revisionMutations = new Set(['team.project.register.v1','team.project.remove-photo.v1','team.identity.save.v1','team.identity.assign.v1','team.identity.confirm-group.v1','team.identity.delete.v1','team.identity.suggest.v1','team.person.exclude.v1','team.patch.detect.v1','team.patch.detect-batch.v1','team.patch.update.v1','team.patch.delete.v1','team.patch.cleanup.v1','team.patch.upload.v1','team.patch.remove-upload.v1','team.patch.merge.v1','team.identity.complete.v1','team.workflow.settings.save.v1','team.workflow.generate.v1','team.workflow.return-batch.v1','team.workflow.return-confirm.v1','team.patch.return-batch.v1']);
+const ok = async (method: string, value?: Json) => {
+  const request = revisionMutations.has(method) && workspaceRevision ? { ...(value || {}), expectedRevision: value?.expectedRevision || workspaceRevision } : value;
+  const result = await rpc<Json>(method, request);
+  if (result?.revision) workspaceRevision = String(result.revision);
+  return result;
+};
 const durable = async (method: string, value: Json) => {
   const operationId = String(value.operationId || crypto.randomUUID());
   const accepted = await ok(method, { ...value, operationId, acceptOnly: true });
@@ -105,17 +112,17 @@ export const legacyApi = {
   getTeamPatches: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.get.v1', { relativePath: String(args[3] || '') }), String(args[4] || '')),
   getTeamProjectWorkspace: async () => hydrateLegacyWorkspace(await ok('team.project.get.v1')),
   calibrateTeamProjectWorkspace: (maxItems = 24) => ok('team.project.calibrate-step.v1', { maxItems }),
-  detectTeamPatchPeople: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.detect.v1', payload(args))),
-  detectTeamPatchBatch: (...args: any[]) => ok('team.patch.detect-batch.v1', payload(args)),
-  updateTeamPatch: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.update.v1', payload(args))),
+  detectTeamPatchPeople: async (...args: any[]) => hydrateLegacyBundle(await durable('team.patch.detect.v1', payload(args))),
+  detectTeamPatchBatch: (...args: any[]) => durable('team.patch.detect-batch.v1', payload(args)),
+  updateTeamPatch: async (...args: any[]) => hydrateLegacyBundle(await durable('team.patch.update.v1', payload(args))),
   deleteTeamPatch: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.delete.v1', payload(args))),
   removeProjectTeamPhoto: (...args: any[]) => ok('team.project.remove-photo.v1', payload(args)),
-  excludeTeamPerson: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.person.exclude.v1', payload(args))),
+  excludeTeamPerson: async (...args: any[]) => hydrateLegacyWorkspace(await durable('team.person.exclude.v1', payload(args))),
   saveTeamIdentity: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.save.v1', payload(args))),
   assignTeamIdentity: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.assign.v1', payload(args))),
   confirmTeamIdentityGroup: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.confirm-group.v1', payload(args))),
   deleteTeamIdentity: async (...args: any[]) => hydrateLegacyWorkspace(await ok('team.identity.delete.v1', payload(args))),
-  suggestTeamIdentities: async () => hydrateLegacyWorkspace(await ok('team.identity.suggest.v1')),
+  suggestTeamIdentities: async () => hydrateLegacyWorkspace(await durable('team.identity.suggest.v1', {})),
   getTeamIdentitySimilarities: () => ok('team.identity.similarities.v1'),
   completeTeamIdentity: (...args: any[]) => ok('team.identity.complete.v1', payload(args)),
   uploadTeamPatch: (...args: any[]) => ok('team.patch.upload.v1', payload(args)),
