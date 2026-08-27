@@ -19,14 +19,16 @@ const createVideoPlaybackBroker = ({ pluginService, path }) => {
       displayName: 'Chromium', priority: 100, probe: { support: chromiumSupport, basis: 'html-media-can-play-type' },
     }];
     for (const item of contributions()) {
-      const support = item.contribution.probe.extensions.includes(extension) ? 'probably' : 'maybe';
+      // A declared extension proves only that the backend accepts the
+      // container family; it says nothing about the file's actual codec.
+      const support = item.contribution.probe.extensions.includes(extension) ? 'maybe' : 'unknown';
       descriptors.push({
         backendId: item.backendId,
         protocolVersion: item.contribution.protocolVersion,
         transport: item.contribution.transport,
         displayName: item.component.name || item.contribution.backendId,
         priority: item.contribution.priority,
-        probe: { support, basis: 'manifest-container-probe' },
+        probe: { support, basis: 'manifest-extension-hint' },
       });
     }
     return descriptors.filter(item => item.probe.support !== 'unsupported')

@@ -430,6 +430,10 @@ export const startPlaybackSession = async ({ backends, context }: {
   };
 
   current = await startNext();
+  // Native stdout may deliver file-loaded and subtitle-tracks before start()
+  // resolves. Apply only the application-owned subtitle policy here; full
+  // state restoration is reserved for an actual backend switch.
+  if (currentTracks.length) applySubtitleSnapshot(current, currentTracks);
   return {
     get id() { return current?.id || context.requestId; },
     get backendId() { return current?.backendId || backends[0]?.descriptor.backendId || 'unavailable'; },

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { ChromiumPlaybackBackend, chromiumContainerProbe } from '../src/platform/video-playback/playback-session.ts';
+import { ChromiumPlaybackBackend, chromiumContainerProbe, startPlaybackSession } from '../src/platform/video-playback/playback-session.ts';
 
 globalThis.HTMLMediaElement = { HAVE_FUTURE_DATA: 3 };
 
@@ -86,6 +86,22 @@ const context = (video, states, failures, published) => ({
   await assert.rejects(new ChromiumPlaybackBackend(descriptor).start(context(video, [], [], [])), /decode failed/);
   assert.equal(video.src, '');
   assert.equal(video.listenerBalance, 0, 'startup failure must clean listeners and the media source');
+}
+
+{
+  const video = new FakeVideo({ failLoad: true });
+  let componentStarts = 0;
+  const component = {
+    descriptor: { ...descriptor, backendId: 'fixture.component', transport: 'native-process-v1', priority: 80 },
+    async start() {
+      componentStarts += 1;
+      return { id: 'component-session', backendId: 'fixture.component', control() {}, setBounds() {}, async capture() { return { success: true }; }, async chooseSubtitle() { return { success: true }; }, async close() {} };
+    },
+  };
+  const session = await startPlaybackSession({ backends: [new ChromiumPlaybackBackend(descriptor), component], context: context(video, [], [], []) });
+  assert.equal(session.backendId, 'fixture.component');
+  assert.equal(componentStarts, 1, 'a real Chromium metadata/decode failure must switch to the contributed backend exactly once');
+  await session.close();
 }
 
 console.log('Chromium playback backend event, control, failure, and cleanup tests passed.');

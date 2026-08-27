@@ -90,7 +90,7 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   `videoPlayback` preference all ship in the main renderer. `PlaybackSession`
   and `VideoPlaybackBackend` are application-owned contracts. The Electron
   playback broker discovers versioned, UI-less `media.playbackBackend@v1`
-  manifest contributions and combines their container probes with Chromium's
+  manifest contributions and combines their container-extension hints with Chromium's
   `HTMLMediaElement.canPlayType` probe. Extensions are hints rather than codec
   conclusions; actual backend startup remains the final capability check. The
   optional advanced component contributes only a supervised decoder/rendering

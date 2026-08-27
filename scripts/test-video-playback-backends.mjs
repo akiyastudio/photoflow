@@ -41,17 +41,20 @@ const contextFor = (states = []) => ({
 }
 
 {
-  const backend = makeBackend('subtitle-policy');
-  const session = await startPlaybackSession({ backends: [backend], context: contextFor() });
-  backend.calls.onState({ type: 'subtitle-tracks', subtitleTracks: [
+  const startupTracks = [
     { id: 'en-1', stableId: 'embedded:en:title:srt:0', source: 'embedded', language: 'en', selected: false },
     { id: 'zh-7', stableId: 'embedded:zh:title:srt:0', source: 'embedded', language: 'zh-CN', selected: false },
-  ], subtitleTrackId: null, subtitleVisible: false, subtitleDelay: 0 });
+  ];
+  const backend = makeBackend('subtitle-policy', { startStates: [
+    { type: 'file-loaded', buffering: false },
+    { type: 'subtitle-tracks', subtitleTracks: startupTracks, subtitleTrackId: null, subtitleVisible: false, subtitleDelay: 0 },
+  ] });
+  const session = await startPlaybackSession({ backends: [backend], context: contextFor() });
   assert.deepEqual(backend.calls.controls.slice(-3), [
     { action: 'subtitle-delay', value: 0 },
     { action: 'subtitle-select', value: 'zh-7' },
     { action: 'subtitle-visible', value: true },
-  ], 'application subtitle policy must select the first preferred-language match');
+  ], 'tracks emitted before backend start resolves must still receive application subtitle policy');
   await session.close();
 }
 

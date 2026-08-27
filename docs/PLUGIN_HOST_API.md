@@ -98,7 +98,7 @@ Host API 7 contribution 为 `component.sidePanel`、`media.contextAction`、`pro
 
 无 UI 的运行时组件可在顶层 `runtimeContributions` 声明
 `media.playbackBackend`，当前协议版本为 1。声明包含组件内唯一的
-`backendId`、`native-process-v1` transport、优先级和受限扩展名 probe。
+`backendId`、`native-process-v1` transport、优先级和受限容器扩展名提示。
 Electron 播放 broker 校验声明、结合 Chromium `canPlayType` probe 生成不含
 组件实现细节的 descriptor；扩展名只用于排序提示，不能替代实际启动探测。
 这类贡献不创建页面、设置入口或 renderer surface。
