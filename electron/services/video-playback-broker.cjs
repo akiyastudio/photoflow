@@ -31,8 +31,16 @@ const createVideoPlaybackBroker = ({ pluginService, path }) => {
         probe: { support, basis: 'manifest-extension-hint' },
       });
     }
+    const chromiumHasCapabilitySignal = chromiumSupport === 'probably' || chromiumSupport === 'maybe';
     return descriptors.filter(item => item.probe.support !== 'unsupported')
-      .sort((left, right) => supportRank[right.probe.support] - supportRank[left.probe.support] || right.priority - left.priority || left.backendId.localeCompare(right.backendId));
+      .sort((left, right) => {
+        // Manifest priority compares contributed backends only. A container
+        // extension hint may never outrank a positive Chromium capability signal.
+        if (chromiumHasCapabilitySignal && left.transport !== right.transport) return left.transport === 'chromium' ? -1 : 1;
+        return supportRank[right.probe.support] - supportRank[left.probe.support]
+          || right.priority - left.priority
+          || left.backendId.localeCompare(right.backendId);
+      });
   };
 
   const resolveRunConfigAsync = async (backendId, args) => {

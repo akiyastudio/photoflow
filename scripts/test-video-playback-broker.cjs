@@ -21,7 +21,7 @@ const run = async () => {
       pluginService: {
         list: () => [{
           id: 'fixture-player', name: 'Fixture Player', installed: true, compatible: true,
-          manifest: { runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 1, backendId: 'decoder', transport: 'native-process-v1', priority: 80, probe: { extensions: ['.mp4', '.mov'] } }] },
+          manifest: { runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 1, backendId: 'decoder', transport: 'native-process-v1', priority: 1000, probe: { extensions: ['.mp4', '.mov'] } }] },
         }, { id: 'undeclared-runtime', name: 'Old Runtime', installed: true, compatible: true, manifest: {} }],
         resolveRunConfigAsync: async () => ({ command: 'fixture.exe', args: [] }),
       },
@@ -32,7 +32,7 @@ const run = async () => {
     assert.deepEqual(source, { success: true, mediaUrl: 'photoflow-media://file/clip.mp4' });
     const discovered = await handlers.get('video-playback-backends')({}, sourcePath, 'maybe');
     assert.equal(discovered.success, true);
-    assert.deepEqual(discovered.backends.map(item => item.backendId), ['core.chromium', 'fixture-player:decoder'], 'ordinary MP4 must prefer core Chromium when both probes are maybe');
+    assert.deepEqual(discovered.backends.map(item => item.backendId), ['core.chromium', 'fixture-player:decoder'], 'ordinary MP4 must prefer core Chromium even when a component declares maximum priority');
     assert.equal(discovered.backends.some(item => item.backendId.includes('undeclared-runtime')), false, 'an undeclared historical runtime must not be promoted into the v1 protocol');
     assert.equal(discovered.backends[1].probe.basis, 'manifest-extension-hint');
     const unknownChromium = await handlers.get('video-playback-backends')({}, sourcePath, 'unknown');

@@ -318,7 +318,9 @@ export const startPlaybackSession = async ({ backends, context }: {
     if (Number.isFinite(state.volume)) snapshot.volume = Math.max(0, Math.min(100, Number(state.volume)));
     if (typeof state.muted === 'boolean') snapshot.muted = state.muted;
     if (Number.isFinite(state.speed)) snapshot.speed = Math.max(0.25, Math.min(4, Number(state.speed)));
-    const stableId = selectedStableId(state);
+    // Before the initial backend is bound, a selected flag is only a decoder
+    // fact. It must not replace the application's default subtitle policy.
+    const stableId = current ? selectedStableId(state) : undefined;
     if (Number.isFinite(state.subtitleDelay)) snapshot.subtitle.delay = Math.max(-30, Math.min(30, Number(state.subtitleDelay)));
     if (typeof state.subtitleVisible === 'boolean' && (snapshot.subtitle.mode !== 'default' || stableId)) snapshot.subtitle.visible = state.subtitleVisible;
     if (stableId) snapshot.subtitle = { ...snapshot.subtitle, mode: 'track', stableId };

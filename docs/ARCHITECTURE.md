@@ -92,7 +92,9 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   playback broker discovers versioned, UI-less `media.playbackBackend@v1`
   manifest contributions and combines their container-extension hints with Chromium's
   `HTMLMediaElement.canPlayType` probe. Extensions are hints rather than codec
-  conclusions; actual backend startup remains the final capability check. The
+  conclusions, and manifest priority orders contributed backends only—it cannot
+  outrank a positive Chromium capability signal. Actual backend startup remains
+  the final capability check. The
   optional advanced component contributes only a supervised decoder/rendering
   backend. A media
   generation records attempted backends and never automatically attempts the

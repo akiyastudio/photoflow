@@ -101,6 +101,7 @@ Host API 7 contribution 为 `component.sidePanel`、`media.contextAction`、`pro
 `backendId`、`native-process-v1` transport、优先级和受限容器扩展名提示。
 Electron 播放 broker 校验声明、结合 Chromium `canPlayType` probe 生成不含
 组件实现细节的 descriptor；扩展名只用于排序提示，不能替代实际启动探测。
+清单 priority 只比较多个组件后端，不能压过 Chromium 的 probably/maybe 信号。
 这类贡献不创建页面、设置入口或 renderer surface。
 
 Host API 7 的七项写能力必须设置 `minHostApiVersion = 7`，且各自声明上表中的最小权限。评分批量限制为 1–100，采用逐项语义；只支持图片/RAW 的 `rating`，视频、标签和选择状态写入拒绝。checked CAS 与宿主旧评分 outbox 共用同一 per-file 队列；ExifTool 成功后的索引指纹刷新是非致命维护步骤，不会把已发生的评分副作用报告成失败。版本更新/删除、进度节点与边变更均使用 `expectedUpdatedAt` CAS；删除权限独立。progress 的项目/scope 路径会在数据库事务内再次以 Windows case-insensitive path-key 语义验证，所有图端点必须在当前物理 scope 内、不得是 external link，并继续复用数据库角色和循环约束。

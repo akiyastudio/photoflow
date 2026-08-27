@@ -42,19 +42,20 @@ const contextFor = (states = []) => ({
 
 {
   const startupTracks = [
-    { id: 'en-1', stableId: 'embedded:en:title:srt:0', source: 'embedded', language: 'en', selected: false },
+    { id: 'en-1', stableId: 'embedded:en:title:srt:0', source: 'embedded', language: 'en', selected: true },
     { id: 'zh-7', stableId: 'embedded:zh:title:srt:0', source: 'embedded', language: 'zh-CN', selected: false },
   ];
   const backend = makeBackend('subtitle-policy', { startStates: [
     { type: 'file-loaded', buffering: false },
-    { type: 'subtitle-tracks', subtitleTracks: startupTracks, subtitleTrackId: null, subtitleVisible: false, subtitleDelay: 0 },
+    { type: 'subtitle-tracks', subtitleTracks: startupTracks, subtitleTrackId: 'en-1', subtitleVisible: true, subtitleDelay: 0 },
   ] });
   const session = await startPlaybackSession({ backends: [backend], context: contextFor() });
   assert.deepEqual(backend.calls.controls.slice(-3), [
     { action: 'subtitle-delay', value: 0 },
     { action: 'subtitle-select', value: 'zh-7' },
     { action: 'subtitle-visible', value: true },
-  ], 'tracks emitted before backend start resolves must still receive application subtitle policy');
+  ], 'backend-selected startup tracks must not override the application preferred-language policy');
+  assert.equal(backend.calls.controls.some(request => request.action === 'subtitle-select' && request.value === 'en-1'), false);
   await session.close();
 }
 
