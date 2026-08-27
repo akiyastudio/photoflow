@@ -86,12 +86,24 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   repositories and version IPC implementations remain a compatibility backend
   during the next extraction stage; they are not exposed to the main renderer.
 - Advanced video UI is built into the application: `AdvancedVideoPlayer`,
-  Chromium fallback playback, trimming, screenshots, keyboard controls and the
-  `videoPlayback` preference all ship in the main renderer. The optional
-  `video-playback-mpv` component contributes only the supervised native decoder
-  process and libmpv runtime capability; installing it never installs a renderer
-  bundle. Configurations saved under the former component-settings key are
-  migrated into `videoPlayback` on load.
+  Chromium playback, trimming, screenshots, keyboard controls and the
+  `videoPlayback` preference all ship in the main renderer. `PlaybackSession`
+  and `VideoPlaybackBackend` are application-owned contracts: common web video
+  containers use `ChromiumPlaybackBackend`, while the optional advanced
+  component contributes only a supervised decoder/rendering backend. A media
+  generation records attempted backends and never automatically attempts the
+  same backend twice. Startup failure or runtime loss may select the other
+  untried backend; only exhaustion of both backends produces the install/repair
+  or system-player guidance. Installing the component never installs product UI.
+  Configurations saved under the former component-settings key are migrated into
+  `videoPlayback` on load.
+
+  The current Electron `video-player-*` IPC names and native input events are a
+  compatibility adapter for the optional backend. Removal plan: move native raw
+  input translation and screenshot publication into the generic playback broker,
+  then retire the legacy advanced-video aliases after all supported installed
+  renderers have crossed the compatibility window. New renderer/domain code must
+  depend only on the generic backend/session contracts.
 
 ## Stable contracts
 

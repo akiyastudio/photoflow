@@ -6,6 +6,8 @@ import type { VideoPlayerState, VideoPlaybackSettings, VideoSubtitleTrack } from
 import { useHostSurfaceState } from './LayerProvider';
 import { readSubtitleMemory, resolveRememberedSubtitle, writeSubtitleMemory } from './video-subtitle-memory';
 import { DEFAULT_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../features/app/video-player-settings';
+import { ChromiumPlaybackBackend, ComponentPlaybackBackend, startPlaybackSession } from '../platform/video-playback/playback-session';
+import type { PlaybackSession } from '../platform/video-playback/playback-session';
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -76,9 +78,10 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const showNavigation = Boolean(onNavigate);
   const playerRootRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const videoRef = useRef<HTMLVideoElement>(null);
   const controlPanelRef = useRef<HTMLDivElement>(null);
   const controlsOverlayRef = useRef<HTMLDivElement>(null);
-  const sessionRef = useRef('');
+  const sessionRef = useRef<PlaybackSession | null>(null);
   const playerIdRef = useRef(createPlaybackToken());
   const requestIdRef = useRef('');
   const errorReportedRef = useRef(false);
@@ -115,7 +118,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     let active = true;
     const requestId = createPlaybackToken();
     requestIdRef.current = requestId;
-    sessionRef.current = '';
+    sessionRef.current = null;
     nativeContextMenuOpenRef.current = false;
     errorReportedRef.current = false;
     metadataKeyRef.current = '';
@@ -127,9 +130,8 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     subtitleMemoryRestoredRef.current = false;
     rememberAddedSubtitleRef.current = false;
     setState(initialState());
-    const unsubscribe = window.electronAPI.onVideoPlayerState(update => {
+    const handleState = (update: VideoPlayerState) => {
       if (update.playerId !== playerIdRef.current || update.requestId !== requestIdRef.current) return;
-      if (sessionRef.current && update.sessionId !== sessionRef.current) return;
       if (update.type === 'navigate') {
         onNavigateRef.current(update.direction === -1 ? -1 : 1);
         return;
@@ -139,7 +141,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         const rect = surfaceRef.current?.getBoundingClientRect();
         if (rect) {
           nativeContextMenuOpenRef.current = true;
-          if (sessionRef.current) window.electronAPI.setVideoPlayerBounds(sessionRef.current, { x: 0, y: 0, width: 0, height: 0, visible: false });
+          sessionRef.current?.setBounds({ x: 0, y: 0, width: 0, height: 0, visible: false });
           onContextMenuAtRef.current(rect.left + Number(update.x || 0), rect.top + Number(update.y || 0));
         }
         return;
@@ -155,7 +157,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       if (update.type === 'fatal' || update.type === 'error' || update.type === 'stopped') {
         if (!errorReportedRef.current) {
           errorReportedRef.current = true;
-          onErrorRef.current(update.error || (update.type === 'stopped' ? '视频播放器会话已停止' : '视频播放器失败，请修复或重新安装视频播放器运行时'));
+          onErrorRef.current(update.error || 'Chromium 与高级视频解码组件均无法播放此视频；请安装或修复高级解码组件，或使用系统播放器');
         }
         return;
       }
@@ -170,32 +172,39 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         if (update.type === 'state' && update.buffering === false) setStarting(false);
         setState(current => ({ ...current, ...update }));
       }
-    });
-    void window.electronAPI.startVideoPlayer(filePath, keyboardSettings, playerIdRef.current, requestId).then(result => {
-      if (!result.success || !result.sessionId) {
-        if (active && !errorReportedRef.current) {
-          errorReportedRef.current = true;
-          onErrorRef.current(result.error || '视频播放器无法启动，请在组件管理中修复或重新安装视频播放器运行时');
-        }
-        return;
-      }
+    };
+    const video = videoRef.current;
+    if (!video) return undefined;
+    void startPlaybackSession({
+      backends: [new ChromiumPlaybackBackend(), new ComponentPlaybackBackend()],
+      context: {
+        filePath,
+        settings: keyboardSettings,
+        playerId: playerIdRef.current,
+        requestId,
+        video,
+        electronApi: window.electronAPI,
+        onState: handleState,
+      },
+    }).then(session => {
       if (!active || requestIdRef.current !== requestId) {
-        void window.electronAPI.stopVideoPlayer(result.sessionId);
+        void session.close();
         return;
       }
-      sessionRef.current = result.sessionId;
-      setSessionId(result.sessionId);
+      sessionRef.current = session;
+      setSessionId(requestId);
+    }).catch(error => {
+      if (active && !errorReportedRef.current) {
+        errorReportedRef.current = true;
+        onErrorRef.current(`视频无法播放：${error instanceof Error ? error.message : String(error)}。请安装或修复高级解码组件，或使用系统播放器。`);
+      }
     });
     return () => {
       active = false;
       if (requestIdRef.current === requestId) requestIdRef.current = '';
-      unsubscribe();
       const currentSession = sessionRef.current;
-      sessionRef.current = '';
-      if (currentSession) {
-        window.electronAPI.setVideoPlayerBounds(currentSession, { x: 0, y: 0, width: 0, height: 0, visible: false });
-        void window.electronAPI.stopVideoPlayer(currentSession);
-      }
+      sessionRef.current = null;
+      void currentSession?.close();
     };
   }, [filePath, keyboardSettings.arrowKeyAction, keyboardSettings.subtitlesEnabled, keyboardSettings.subtitlePreferredLanguages.join(','), keyboardSettings.subtitleSize, keyboardSettings.subtitleStyle]);
 
@@ -207,13 +216,13 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     const resolution = resolveRememberedSubtitle(memory, state.subtitleTracks);
     if (resolution.mode === 'default' || resolution.mode === 'missing') return;
     if (resolution.mode === 'off') {
-      window.electronAPI.controlVideoPlayer(sessionId, { action: 'subtitle-select', value: '' });
-      window.electronAPI.controlVideoPlayer(sessionId, { action: 'subtitle-delay', value: resolution.delay });
+      sessionRef.current?.control({ action: 'subtitle-select', value: '' });
+      sessionRef.current?.control({ action: 'subtitle-delay', value: resolution.delay });
       return;
     }
-    window.electronAPI.controlVideoPlayer(sessionId, { action: 'subtitle-select', value: resolution.track.id });
-    window.electronAPI.controlVideoPlayer(sessionId, { action: 'subtitle-delay', value: resolution.delay });
-    window.electronAPI.controlVideoPlayer(sessionId, { action: 'subtitle-visible', value: resolution.visible });
+    sessionRef.current?.control({ action: 'subtitle-select', value: resolution.track.id });
+    sessionRef.current?.control({ action: 'subtitle-delay', value: resolution.delay });
+    sessionRef.current?.control({ action: 'subtitle-visible', value: resolution.visible });
   }, [filePath, sessionId, state.subtitleTracks]);
 
   useEffect(() => {
@@ -271,7 +280,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     } : undefined;
     const visible = !hostSurfaceSuspended && !nativeContextMenuOpenRef.current && document.visibilityState === 'visible' && rect.width > 1 && rect.height > 1
       && rect.right > 0 && rect.bottom > 0 && rect.left < window.innerWidth && rect.top < window.innerHeight;
-    window.electronAPI.setVideoPlayerBounds(sessionRef.current, {
+    sessionRef.current.setBounds({
       x: Math.round(rect.left * scale),
       y: Math.round(rect.top * scale),
       width: Math.round(rect.width * scale),
@@ -324,7 +333,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
 
   const control = (action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay', value?: number | boolean | string) => {
     if (!sessionRef.current) return;
-    window.electronAPI.controlVideoPlayer(sessionRef.current, { action, value });
+    sessionRef.current.control({ action, value });
   };
   const paused = state.paused !== false;
   const duration = Math.max(0, Number(state.duration) || 0);
@@ -356,7 +365,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const seekRelative = useCallback((seconds: number) => {
     if (!sessionRef.current) return;
     const current = playbackPositionRef.current;
-    window.electronAPI.controlVideoPlayer(sessionRef.current, {
+    sessionRef.current.control({
       action: 'seek',
       value: Math.max(0, Math.min(current.duration || Number.MAX_SAFE_INTEGER, current.time + seconds)),
     });
@@ -409,7 +418,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     setCapturing(true);
     setCaptureNotice(null);
     try {
-      const result = await window.electronAPI.captureVideoPlayerFrame(currentSession);
+      const result = await currentSession.capture();
       setCaptureNotice(result.success
         ? { text: '当前帧已保存' }
         : { text: result.error || '截图失败', error: true });
@@ -443,13 +452,13 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const changeSubtitleFontSize = (fontSize: number) => {
     const normalized = normalizeSubtitleFontSize(fontSize);
     setSubtitleFontSize(normalized);
-    if (sessionRef.current) window.electronAPI.controlVideoPlayer(sessionRef.current, { action: 'subtitle-style', fontSize: normalized, style: keyboardSettings.subtitleStyle });
+    sessionRef.current?.control({ action: 'subtitle-style', fontSize: normalized, style: keyboardSettings.subtitleStyle });
   };
   const addSubtitle = async () => {
     if (!sessionRef.current) return;
     // Choosing a new subtitle is an explicit override of a remembered "off" state.
     subtitleMemoryRestoredRef.current = true;
-    const chosen = await window.electronAPI.chooseVideoSubtitle(sessionRef.current);
+    const chosen = await sessionRef.current.chooseSubtitle();
     if (!chosen.success) setCaptureNotice({ text: chosen.error || '字幕加载失败', error: true });
     else if (!chosen.cancelled) rememberAddedSubtitleRef.current = true;
   };
@@ -516,7 +525,14 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       tabIndex={0}
       aria-label={paused ? '播放视频' : '暂停视频'}
       onClick={togglePlayback}
+      onContextMenu={event => {
+        if (!onContextMenuAtRef.current) return;
+        event.preventDefault();
+        onContextMenuAtRef.current(event.clientX, event.clientY);
+      }}
+      onPointerMove={() => onPointerActivityRef.current?.()}
       onKeyDown={event => {
+        if (event.key === 'Escape') onEscapeRef.current?.();
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           togglePlayback();
@@ -524,7 +540,9 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       }}
       className="relative min-h-0 flex-1 cursor-pointer bg-black bg-contain bg-center bg-no-repeat outline-none"
       style={poster ? { backgroundImage: `url(${JSON.stringify(poster).slice(1, -1)})` } : undefined}
-    />
+    >
+      <video ref={videoRef} className="pointer-events-none absolute inset-0 h-full w-full object-contain" aria-hidden="true"/>
+    </div>
     {controlsVisible && (controlsOverlay ? <div ref={controlsOverlayRef} className="absolute inset-x-0 bottom-0 z-20">{playbackControls}</div> : playbackControls)}
   </div>;
 };

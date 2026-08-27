@@ -81,6 +81,7 @@ const createMediaFileResponse = async (filePath, request) => {
   const range = parseByteRange(rangeHeader, stat.size);
   const commonHeaders = {
     'Accept-Ranges': 'bytes',
+    'Access-Control-Allow-Origin': '*',
     'Cache-Control': 'private, max-age=3600',
     'Content-Type': CONTENT_TYPES.get(path.extname(filePath).toLowerCase()) || 'application/octet-stream',
   };

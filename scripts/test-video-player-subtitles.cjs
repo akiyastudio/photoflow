@@ -80,7 +80,7 @@ assert(hoverThumbnail.includes('<video ref={videoRef}')
   && hoverThumbnail.includes('onEnded={restartPlayback}')
   && workspace.includes('HOVER_VIDEO_PLAY_DELAY_MS = 300'),
 'thumbnail hover previews must use one delayed, muted, seekable, looping Chromium playback surface');
-assert(!workspace.includes('<video') && !versions.includes('<video'), 'formal playback paths must remain on the native video player');
+assert(player.includes('<video ref={videoRef}') && player.includes('startPlaybackSession'), 'formal playback must retain an application-owned Chromium surface behind the shared player UI');
 assert(decoder.includes('GetProperty("track-list/count")') && decoder.includes('"track-list/" + index') && !decoder.includes('GetProperty("track-list")'), 'libmpv node arrays must be read through indexed scalar properties');
 assert(decoder.indexOf('player.LoadPendingSidecars()') > decoder.indexOf('type == "file-loaded"') && decoder.indexOf('Run("loadfile"') < decoder.indexOf('player.LoadPendingSidecars()'), 'sidecars must be attached only after the active file-loaded event');
 assert(decoder.includes('Path.GetFileName(path)') && !decoder.includes('Path.GetFullPath(path)).ToLowerInvariant()'), 'external stable ids must not embed an absolute machine path');

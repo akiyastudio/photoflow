@@ -1,7 +1,42 @@
 const { createAdvancedVideoService } = require('../services/advanced-video-service.cjs');
 
-const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog }) => {
+const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog }) => {
   const service = createAdvancedVideoService({ BrowserWindow, crypto, mediaService, path, pluginService, processSupervisor, spawn, writeLog });
+  const screenshotTarget = sourcePath => {
+    const now = new Date();
+    const pad = (value, length = 2) => String(value).padStart(length, '0');
+    const stamp = `${now.getFullYear()}${pad(now.getMonth() + 1)}${pad(now.getDate())}-${pad(now.getHours())}${pad(now.getMinutes())}${pad(now.getSeconds())}-${pad(now.getMilliseconds(), 3)}`;
+    const parsed = path.parse(sourcePath);
+    const id = crypto.randomUUID();
+    return {
+      finalPath: path.join(parsed.dir, `${parsed.name}_截图_${stamp}_${id.slice(0, 8)}.png`),
+      temporaryPath: path.join(parsed.dir, `.${parsed.name}.${id}.photoflow-chromium-screenshot.png`),
+    };
+  };
+  ipcMain.handle('video-playback-source', async (_event, filePath) => {
+    try {
+      const sourcePath = await mediaService.authorizeInput(filePath);
+      return { success: true, mediaUrl: mediaService.toUrl(sourcePath, true) };
+    } catch (error) { return { success: false, error: error.message || String(error) }; }
+  });
+  ipcMain.handle('video-player-publish-frame', async (_event, filePath, bytes) => {
+    let temporaryPath = '';
+    try {
+      const sourcePath = await mediaService.authorizeInput(filePath);
+      const buffer = Buffer.from(bytes || []);
+      const hasPngTrailer = buffer.length >= 20 && buffer.readUInt32BE(buffer.length - 12) === 0 && buffer.subarray(buffer.length - 8, buffer.length - 4).toString('ascii') === 'IEND';
+      if (!hasPngTrailer || buffer.length > 100 * 1024 * 1024 || buffer.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') throw new Error('视频截图数据无效');
+      const target = screenshotTarget(sourcePath);
+      temporaryPath = target.temporaryPath;
+      await fs.promises.writeFile(temporaryPath, buffer, { flag: 'wx' });
+      await fs.promises.rename(temporaryPath, target.finalPath);
+      temporaryPath = '';
+      return { success: true, path: target.finalPath };
+    } catch (error) {
+      if (temporaryPath) await fs.promises.unlink(temporaryPath).catch(() => undefined);
+      return { success: false, error: error.message || String(error) };
+    }
+  });
   // Legacy IPC aliases remain for renderer compatibility; current UI uses video-player-* only.
   ipcMain.handle('advanced-video-start', async (event, filePath, arrowKeyAction, playerId, requestId) => {
     try { return { success: true, ...(await service.start(event, filePath, arrowKeyAction, playerId, requestId)) }; }
