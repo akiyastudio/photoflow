@@ -324,16 +324,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
             return result;
         }
 
-        internal void TogglePause()
-        {
-            if (IsAtEnd())
-            {
-                Play();
-                return;
-            }
-            SetProperty("pause", IsYesValue(GetProperty("pause")) ? "no" : "yes");
-        }
-
         internal void Play()
         {
             if (IsAtEnd()) Check(Run("seek", "0", "absolute+exact"), "重新播放视频");
@@ -349,18 +339,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
         {
             if (IsAtEnd()) SetProperty("pause", "yes");
             Check(Run("seek", Math.Max(0, seconds).ToString(CultureInfo.InvariantCulture), "absolute+exact"), "跳转视频");
-        }
-
-        internal void SeekRelative(double seconds)
-        {
-            if (IsAtEnd())
-            {
-                double duration;
-                if (!double.TryParse(GetProperty("duration"), NumberStyles.Float, CultureInfo.InvariantCulture, out duration)) duration = 0;
-                SeekAbsolute(duration + seconds);
-                return;
-            }
-            Check(Run("seek", seconds.ToString(CultureInfo.InvariantCulture), "relative+exact"), "跳转视频");
         }
 
         internal bool IsAtEnd()
@@ -443,10 +421,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private Thread pollThread;
         private string lastState = string.Empty;
         private bool loading;
-        private bool arrowKeysNavigate;
-        private bool subtitleDefaultEnabled;
-        private string[] subtitlePreferredLanguages = new string[0];
-        private bool subtitleDefaultsPending;
         private string lastSubtitleState = string.Empty;
         private int lastPointerActivityTick;
         private Point lastPointerLocation;
@@ -556,26 +530,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 BeginInvoke(new Action(Close));
                 return;
             }
-            if (name == "set-keyboard-mode")
-            {
-                arrowKeysNavigate = ReadString(value, "value") == "navigate";
-                return;
-            }
-            if (name == "set-subtitle-defaults")
-            {
-                subtitleDefaultEnabled = ReadBool(value, "enabled");
-                object languages;
-                var list = new List<string>();
-                if (value.TryGetValue("preferredLanguages", out languages) && languages is object[])
-                    foreach (object language in (object[])languages) if (language != null) list.Add(language.ToString().Trim().ToLowerInvariant());
-                subtitlePreferredLanguages = list.ToArray();
-                subtitleDefaultsPending = true;
-                lock (playerLock)
-                {
-                    if (player != null) ApplySubtitleStyle(player, ReadSubtitleFontSize(value), ReadString(value, "style"));
-                }
-                return;
-            }
             lock (playerLock)
             {
                 if (player == null) return;
@@ -584,7 +538,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     string path = ReadString(value, "path");
                     if (string.IsNullOrWhiteSpace(path)) throw new InvalidOperationException("视频路径为空");
                     loading = true;
-                    subtitleDefaultsPending = true;
                     player.Open(path);
                 }
                 else if (name == "play") player.Play();
@@ -645,16 +598,14 @@ namespace PhotoFlow.AdvancedVideoDecoder
         {
             base.OnMouseClick(eventArgs);
             if (shuttingDown) return;
-            if (eventArgs.Button == MouseButtons.Left)
-            {
-                lock (playerLock)
-                {
-                    if (player != null) player.TogglePause();
-                }
-            }
-            else if (eventArgs.Button == MouseButtons.Right)
+            if (eventArgs.Button == MouseButtons.Left || eventArgs.Button == MouseButtons.Right)
                 Emit(new Dictionary<string, object> {
-                    { "type", "context-menu" }, { "x", eventArgs.X }, { "y", eventArgs.Y }
+                    { "type", "input" },
+                    { "input", new Dictionary<string, object> {
+                        { "kind", "pointer-button" },
+                        { "button", eventArgs.Button == MouseButtons.Left ? "left" : "right" },
+                        { "x", eventArgs.X }, { "y", eventArgs.Y }
+                    } }
                 });
         }
 
@@ -672,15 +623,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
             player.SetProperty("sub-scale", (normalized / 55.0).ToString("0.###", CultureInfo.InvariantCulture));
             player.SetProperty("sub-border-size", style == "high-contrast" ? "4" : "2.5");
             player.SetProperty("sub-shadow-offset", style == "high-contrast" ? "2" : "1");
-        }
-
-        private static bool SubtitleLanguageMatches(string trackLanguage, string preferredLanguage)
-        {
-            string track = (trackLanguage ?? string.Empty).Trim().Replace('_', '-');
-            string preferred = (preferredLanguage ?? string.Empty).Trim().Replace('_', '-');
-            return string.Equals(track, preferred, StringComparison.OrdinalIgnoreCase)
-                || track.StartsWith(preferred + "-", StringComparison.OrdinalIgnoreCase)
-                || preferred.StartsWith(track + "-", StringComparison.OrdinalIgnoreCase);
         }
 
         private static void ExcludeOverlayHole(System.Drawing.Region region, int width, int height, int holeX, int holeY, int holeWidth, int holeHeight, bool ellipse)
@@ -735,36 +677,25 @@ namespace PhotoFlow.AdvancedVideoDecoder
             int now = Environment.TickCount;
             if (unchecked(now - lastPointerActivityTick) < 200) return;
             lastPointerActivityTick = now;
-            Emit(new Dictionary<string, object> { { "type", "pointer-activity" } });
+            Emit(new Dictionary<string, object> {
+                { "type", "input" },
+                { "input", new Dictionary<string, object> { { "kind", "pointer-move" }, { "x", eventArgs.X }, { "y", eventArgs.Y } } }
+            });
         }
 
         protected override bool ProcessCmdKey(ref Message message, Keys keyData)
         {
             Keys key = keyData & Keys.KeyCode;
-            if (key == Keys.Escape)
+            if (key == Keys.Escape || key == Keys.Left || key == Keys.Right)
             {
-                Emit(new Dictionary<string, object> { { "type", "escape" } });
-                return base.ProcessCmdKey(ref message, keyData);
-            }
-            if (key == Keys.Left || key == Keys.Right)
-            {
-                HandleArrowKeyInput(key == Keys.Right ? 1 : -1);
+                string rawKey = key == Keys.Escape ? "Escape" : key == Keys.Left ? "ArrowLeft" : "ArrowRight";
+                Emit(new Dictionary<string, object> {
+                    { "type", "input" },
+                    { "input", new Dictionary<string, object> { { "kind", "key" }, { "key", rawKey } } }
+                });
                 return true;
             }
             return base.ProcessCmdKey(ref message, keyData);
-        }
-
-        private void HandleArrowKeyInput(int direction)
-        {
-            if (arrowKeysNavigate)
-            {
-                Emit(new Dictionary<string, object> { { "type", "navigate" }, { "direction", direction } });
-                return;
-            }
-            lock (playerLock)
-            {
-                if (player != null) player.SeekRelative(direction * 5);
-            }
         }
 
         private static bool WaitForCompletePng(string filePath, int timeoutMs)
@@ -820,32 +751,10 @@ namespace PhotoFlow.AdvancedVideoDecoder
                                     // Ignore a stale event from a superseded loadfile command.
                                     if (!player.LoadPendingSidecars()) continue;
                                     loading = false;
-                                    subtitleDefaultsPending = true;
                                 }
                                 Emit(eventValue);
                             }
                             IList<Dictionary<string, object>> subtitleTracks = player.SubtitleTracks();
-                            if (subtitleDefaultsPending && !loading)
-                            {
-                                subtitleDefaultsPending = false;
-                                string selectedId = null;
-                                if (subtitleDefaultEnabled)
-                                {
-                                    foreach (string language in subtitlePreferredLanguages)
-                                    {
-                                        foreach (Dictionary<string, object> track in subtitleTracks)
-                                        {
-                                            if (!SubtitleLanguageMatches(Convert.ToString(track["language"]), language)) continue;
-                                            selectedId = Convert.ToString(track["id"]);
-                                            break;
-                                        }
-                                        if (selectedId != null) break;
-                                    }
-                                    if (selectedId == null && subtitleTracks.Count > 0) selectedId = Convert.ToString(subtitleTracks[0]["id"]);
-                                }
-                                player.SetProperty("sid", selectedId ?? "no");
-                                player.SetProperty("sub-visibility", selectedId == null ? "no" : "yes");
-                            }
                             var subtitleState = new Dictionary<string, object> {
                                 { "type", "subtitle-tracks" }, { "subtitleTracks", subtitleTracks },
                                 { "subtitleTrackId", player.GetProperty("sid") },

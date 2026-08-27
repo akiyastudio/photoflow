@@ -6,7 +6,7 @@ import type { VideoPlayerState, VideoPlaybackSettings, VideoSubtitleTrack } from
 import { useHostSurfaceState } from './LayerProvider';
 import { readSubtitleMemory, resolveRememberedSubtitle, writeSubtitleMemory } from './video-subtitle-memory';
 import { DEFAULT_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../features/app/video-player-settings';
-import { ChromiumPlaybackBackend, ComponentPlaybackBackend, startPlaybackSession } from '../platform/video-playback/playback-session';
+import { discoverPlaybackBackends, startPlaybackSession } from '../platform/video-playback/playback-session';
 import type { PlaybackSession } from '../platform/video-playback/playback-session';
 
 const formatTime = (seconds: number) => {
@@ -93,7 +93,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const onPointerActivityRef = useRef(onPointerActivity);
   const onEscapeRef = useRef(onEscape);
   const onPlaybackStateRef = useRef(onPlaybackState);
-  const playbackPositionRef = useRef({ time: 0, duration: 0 });
+  const playbackPositionRef = useRef({ time: 0, duration: 0, paused: true });
   const nativeContextMenuOpenRef = useRef(false);
   onErrorRef.current = onError;
   onMetadataRef.current = onMetadata;
@@ -132,6 +132,35 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     setState(initialState());
     const handleState = (update: VideoPlayerState) => {
       if (update.playerId !== playerIdRef.current || update.requestId !== requestIdRef.current) return;
+      if (update.type === 'input' && update.input) {
+        const input = update.input;
+        if (input.kind === 'pointer-move') onPointerActivityRef.current?.();
+        else if (input.kind === 'pointer-button' && input.button === 'left') {
+          const position = playbackPositionRef.current;
+          const action = position.paused ? 'play' : 'pause';
+          position.paused = action !== 'play';
+          sessionRef.current?.control({ action });
+        } else if (input.kind === 'pointer-button' && input.button === 'right') {
+          if (!onContextMenuAtRef.current) return;
+          const rect = surfaceRef.current?.getBoundingClientRect();
+          if (rect) {
+            nativeContextMenuOpenRef.current = true;
+            sessionRef.current?.setBounds({ x: 0, y: 0, width: 0, height: 0, visible: false });
+            onContextMenuAtRef.current(rect.left + Number(input.x || 0), rect.top + Number(input.y || 0));
+          }
+        } else if (input.kind === 'key' && input.key === 'Escape') onEscapeRef.current?.();
+        else if (input.kind === 'key' && (input.key === 'ArrowLeft' || input.key === 'ArrowRight')) {
+          const direction = input.key === 'ArrowLeft' ? -1 : 1;
+          if (videoDirectionalAction(keyboardSettings.arrowKeyAction, 'arrows') === 'navigate') onNavigateRef.current(direction);
+          else {
+            const position = playbackPositionRef.current;
+            const nextTime = Math.max(0, Math.min(position.duration || Number.MAX_SAFE_INTEGER, position.time + direction * SKIP_SECONDS));
+            position.time = nextTime;
+            sessionRef.current?.control({ action: 'seek', value: nextTime });
+          }
+        }
+        return;
+      }
       if (update.type === 'navigate') {
         onNavigateRef.current(update.direction === -1 ? -1 : 1);
         return;
@@ -175,8 +204,8 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     };
     const video = videoRef.current;
     if (!video) return undefined;
-    void startPlaybackSession({
-      backends: [new ChromiumPlaybackBackend(), new ComponentPlaybackBackend()],
+    void discoverPlaybackBackends({ filePath, video, electronApi: window.electronAPI }).then(backends => startPlaybackSession({
+      backends,
       context: {
         filePath,
         settings: keyboardSettings,
@@ -186,7 +215,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         electronApi: window.electronAPI,
         onState: handleState,
       },
-    }).then(session => {
+    })).then(session => {
       if (!active || requestIdRef.current !== requestId) {
         void session.close();
         return;
@@ -338,11 +367,15 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const paused = state.paused !== false;
   const duration = Math.max(0, Number(state.duration) || 0);
   const time = Math.max(0, Math.min(duration || Number.MAX_SAFE_INTEGER, Number(state.time) || 0));
-  playbackPositionRef.current = { time, duration };
+  playbackPositionRef.current = { time, duration, paused };
   const speed = Math.max(0.25, Math.min(4, Number(state.speed) || 1));
   const muted = Boolean(state.muted);
   const volume = Math.max(0, Math.min(100, Number(state.volume) || 0));
-  const togglePlayback = () => control(paused ? 'play' : 'pause');
+  const togglePlayback = () => {
+    const action = playbackPositionRef.current.paused ? 'play' : 'pause';
+    playbackPositionRef.current.paused = action !== 'play';
+    control(action);
+  };
   const cyclePlaybackSpeed = () => {
     const currentIndex = PLAYBACK_SPEEDS.findIndex(value => Math.abs(value - speed) < 0.001);
     const nextIndex = currentIndex >= 0 ? (currentIndex + 1) % PLAYBACK_SPEEDS.length : 0;
@@ -365,10 +398,9 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const seekRelative = useCallback((seconds: number) => {
     if (!sessionRef.current) return;
     const current = playbackPositionRef.current;
-    sessionRef.current.control({
-      action: 'seek',
-      value: Math.max(0, Math.min(current.duration || Number.MAX_SAFE_INTEGER, current.time + seconds)),
-    });
+    const nextTime = Math.max(0, Math.min(current.duration || Number.MAX_SAFE_INTEGER, current.time + seconds));
+    current.time = nextTime;
+    sessionRef.current.control({ action: 'seek', value: nextTime });
   }, []);
 
   useEffect(() => {

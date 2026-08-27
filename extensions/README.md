@@ -63,8 +63,9 @@ The current component IDs are:
   whole sample-component workflow is unavailable.
 - `video-playback-mpv`: “视频播放器”. The legacy installation ID is retained
   for package compatibility. It runs libmpv in an isolated process and embeds
-  the native video surface in PhotoFlow; startup or decoding failures are
-  reported explicitly and never fall back to Chromium playback. It is a runtime-only backend
+  the native video surface in PhotoFlow. It declares the UI-less,
+  versioned `media.playbackBackend` capability; startup or decoding failures may
+  fall back to another untried backend under the application session. It is a runtime-only backend
   capability: the player, controls, trimming, screenshots and settings remain
   in the main application, and the component package must not contain renderer
   JavaScript, HTML or CSS.

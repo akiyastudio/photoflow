@@ -12,6 +12,7 @@ const workspace = read('src/features/workspace/ProjectWorkspace.tsx');
 const hoverThumbnail = read('src/components/VideoHoverThumbnail.tsx');
 const versions = read('src/components/VersionManager.tsx');
 const config = read('src/features/app/app-config.ts');
+const playbackSession = read('src/platform/video-playback/playback-session.ts');
 const ts = require('typescript');
 
 const sizeJavaScript = ts.transpileModule(read('src/features/app/video-player-settings.ts'), {
@@ -84,6 +85,7 @@ assert(player.includes('<video ref={videoRef}') && player.includes('startPlaybac
 assert(decoder.includes('GetProperty("track-list/count")') && decoder.includes('"track-list/" + index') && !decoder.includes('GetProperty("track-list")'), 'libmpv node arrays must be read through indexed scalar properties');
 assert(decoder.indexOf('player.LoadPendingSidecars()') > decoder.indexOf('type == "file-loaded"') && decoder.indexOf('Run("loadfile"') < decoder.indexOf('player.LoadPendingSidecars()'), 'sidecars must be attached only after the active file-loaded event');
 assert(decoder.includes('Path.GetFileName(path)') && !decoder.includes('Path.GetFullPath(path)).ToLowerInvariant()'), 'external stable ids must not embed an absolute machine path');
-assert(decoder.includes('if (selectedId != null) break;') && decoder.includes('SubtitleLanguageMatches'), 'preferred-language selection must stop at the first matching preference and accept language subtags');
+assert(playbackSession.includes('languageMatches') && playbackSession.includes('context.settings.subtitlePreferredLanguages') && playbackSession.includes('if (track) break;'), 'preferred-language selection must be owned by the application session and accept language subtags');
+assert(!decoder.includes('SubtitleLanguageMatches') && !decoder.includes('subtitlePreferredLanguages') && !decoder.includes('set-subtitle-defaults'), 'the native backend must report tracks without owning subtitle default policy');
 
 console.log('Video player subtitle contracts passed.');

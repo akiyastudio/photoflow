@@ -36,7 +36,7 @@ const run = async () => {
       crypto: { randomUUID: () => `capture-${++sequence}` },
       mediaService: { authorizeInput: async value => path.resolve(value) },
       path,
-      pluginService: { resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
+      playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
       spawn: () => {
         const child = makeChild();
         children.push(child);
@@ -125,7 +125,7 @@ const run = async () => {
       crypto: { randomUUID: () => `race-${++raceSequence}` },
       mediaService: { authorizeInput: async value => path.resolve(value) },
       path,
-      pluginService: { resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
+      playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
       spawn: () => {
         const raceChild = makeChild();
         raceChildren.push(raceChild);

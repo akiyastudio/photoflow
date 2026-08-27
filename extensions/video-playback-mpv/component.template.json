@@ -12,5 +12,17 @@
   "integrity": "component-integrity.json",
   "requiredFiles": [
     "libmpv-2.dll"
+  ],
+  "runtimeContributions": [
+    {
+      "type": "media.playbackBackend",
+      "protocolVersion": 1,
+      "backendId": "advanced-video",
+      "transport": "native-process-v1",
+      "priority": 80,
+      "probe": {
+        "extensions": [".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".m2ts", ".webm"]
+      }
+    }
   ]
 }

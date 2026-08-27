@@ -75,7 +75,7 @@ const run = async () => {
     crypto: { randomUUID: () => `session-${++uuidIndex}` },
     mediaService: { authorizeInput: async value => path.resolve(value) },
     path,
-    pluginService: {
+    playbackBroker: { defaultBackendId: () => 'fixture-backend',
       resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }),
     },
     spawn: (command, args, options) => {
@@ -94,10 +94,9 @@ const run = async () => {
   assert.strictEqual(result.sessionId, 'session-1');
   assert.strictEqual(spawned[0].options.windowsHide, true);
   assert.deepStrictEqual(spawned[0].args, ['--parent-hwnd', '123456']);
-  assert.deepStrictEqual(stdinLines[0], { command: 'set-keyboard-mode', value: 'navigate' });
-  assert.deepStrictEqual(stdinLines[1], { command: 'set-subtitle-defaults', enabled: false, preferredLanguages: [], fontSize: 55, style: 'standard' });
-  assert.deepStrictEqual(stdinLines[2], { command: 'open', path: path.resolve(sourceVideo) });
-  assert.deepStrictEqual(stdinLines[3], { command: 'play' });
+  assert.deepStrictEqual(stdinLines[0], { command: 'open', path: path.resolve(sourceVideo) });
+  assert.deepStrictEqual(stdinLines[1], { command: 'subtitle-style', fontSize: 55, style: 'standard' });
+  assert.deepStrictEqual(stdinLines[2], { command: 'play' });
 
   service.setBounds({ sender }, result.sessionId, {
     x: 10.4, y: 20.6, width: 300.2, height: 200.8, visible: true,
@@ -112,20 +111,20 @@ const run = async () => {
   service.control({ sender }, result.sessionId, { action: 'subtitle-style', fontSize: 73, style: 'high-contrast' });
   service.control({ sender }, result.sessionId, { action: 'arbitrary-command' });
   service.control({ sender: { id: 99 } }, result.sessionId, { action: 'pause' });
-  assert.deepStrictEqual(stdinLines[4], {
+  assert.deepStrictEqual(stdinLines[3], {
     command: 'set-bounds', x: 10, y: 21, width: 300, height: 201, visible: true,
     holeX: 210, holeY: 80, holeWidth: 90, holeHeight: 121,
     controlsHoleX: 0, controlsHoleY: 150, controlsHoleWidth: 300, controlsHoleHeight: 51,
     cornerHoleX: 240, cornerHoleY: 0, cornerHoleWidth: 60, cornerHoleHeight: 72,
   });
-  assert.deepStrictEqual(stdinLines[5], { command: 'play' });
-  assert.deepStrictEqual(stdinLines.slice(6), [
+  assert.deepStrictEqual(stdinLines[4], { command: 'play' });
+  assert.deepStrictEqual(stdinLines.slice(5), [
     { command: 'subtitle-select', value: '3' },
     { command: 'subtitle-visible', value: false },
     { command: 'subtitle-delay', value: 1.5 },
     { command: 'subtitle-style', fontSize: 73, style: 'high-contrast' },
   ]);
-  assert.strictEqual(stdinLines.length, 10, 'only allowlisted commands from the owning renderer may reach the native session');
+  assert.strictEqual(stdinLines.length, 9, 'only allowlisted commands from the owning renderer may reach the native session');
 
   assert(sender.sent.some(item => item.channel === 'advanced-video-state'
     && item.value.sessionId === 'session-1'
@@ -160,7 +159,7 @@ const run = async () => {
     crypto: { randomUUID: () => `cleanup-${++cleanupUuid}` },
     mediaService: { authorizeInput: async value => path.resolve(value) },
     path,
-    pluginService: { resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
+    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
     spawn: () => {
       const cleanupChild = makeChild();
       cleanupChildren.push(cleanupChild);
@@ -224,12 +223,12 @@ const run = async () => {
   assert(decoderSource.includes('SetOptionalOption("osc", "no")')
     && decoderSource.includes('result != MpvErrorOptionNotFound'),
   'advanced video playback must tolerate LGPL builds without the optional OSC script option');
-  assert(playerSource.includes('onClick={togglePlayback}') && decoderSource.includes('OnMouseClick'), 'clicking the video surface must toggle playback in both renderer and native surfaces');
+  assert(playerSource.includes('onClick={togglePlayback}') && decoderSource.includes('OnMouseClick') && decoderSource.includes('{ "kind", "pointer-button" }') && !decoderSource.includes('TogglePause'), 'native clicks must be forwarded as raw input and interpreted only by the application player');
   assert(!playerSource.includes("key === 'BrowserBack'") && !playerSource.includes("key === 'MediaTrackPrevious'") && !decoderSource.includes('key == Keys.BrowserBack') && !decoderSource.includes('Keys.MediaPreviousTrack'), 'browser and media navigation keys must not be repurposed as player controls');
-  assert(playerSource.includes("group === 'arrows'") && playerSource.includes("return arrowKeyAction === 'navigate' ? 'seek' : 'navigate'") && playerSource.includes("videoDirectionalAction(keyboardSettings.arrowKeyAction, 'forward-back')") && decoderSource.includes('if (arrowKeysNavigate)'), 'arrow keys and the controls beside play/pause must always resolve to complementary actions');
+  assert(playerSource.includes("group === 'arrows'") && playerSource.includes("return arrowKeyAction === 'navigate' ? 'seek' : 'navigate'") && playerSource.includes("videoDirectionalAction(keyboardSettings.arrowKeyAction, 'forward-back')") && decoderSource.includes('"ArrowLeft"') && !decoderSource.includes('arrowKeysNavigate') && !decoderSource.includes('HandleArrowKeyInput'), 'native arrow keys must remain raw while the application resolves seek versus navigation');
   assert(!playerSource.includes('event.button !== 3 && event.button !== 4') && !decoderSource.includes('MouseButtons.XButton1'), 'mouse back and forward buttons must retain their normal application behavior');
   assert(decoderSource.includes('if (IsAtEnd()) Check(Run("seek", "0", "absolute+exact")') && decoderSource.includes('{ "paused", player.IsAtEnd() || IsYes(player.GetProperty("pause")) }'), 'playback controls must recover from EOF and report the ended state as paused');
-  assert(decoderSource.includes('if (IsAtEnd())') && decoderSource.includes('SeekAbsolute(duration + seconds)'), 'relative seeking must remain available after playback reaches EOF');
+  assert(decoderSource.includes('internal void SeekAbsolute') && !decoderSource.includes('internal void SeekRelative'), 'the native backend must expose absolute seeking without owning relative-seek product semantics');
   assert(playerSource.includes('backwardControlLabel') && playerSource.includes('forwardControlLabel') && playerSource.includes('runForwardBackControl(-1)') && playerSource.includes('runForwardBackControl(1)'), 'the controls beside play/pause must expose their active seek or navigation behavior');
   assert(playerSource.includes('cyclePlaybackSpeed') && playerSource.includes("controlPanel === 'speed'") && playerSource.includes('absolute bottom-full') && playerSource.includes('PLAYBACK_SPEEDS.map') && playerSource.includes('currentSession.capture()'), 'video controls must expose a compact floating playback-speed panel, click-to-cycle speed, and backend-neutral current-frame capture');
   assert(playerSource.includes("controlPanel === 'volume'") && playerSource.includes('aria-label="调整音量"') && playerSource.includes("control('mute', !muted)"), 'volume must use a floating panel above its icon while icon clicks toggle mute');
@@ -271,7 +270,7 @@ const run = async () => {
     crypto: { randomUUID: () => 'session-race' },
     mediaService: { authorizeInput: value => new Promise(resolve => pendingAuthorization.set(value, resolve)) },
     path,
-    pluginService: { resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
+    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
     spawn: () => {
       const raceChild = makeChild();
       raceChildren.push(raceChild);
@@ -302,7 +301,7 @@ const run = async () => {
     crypto: { randomUUID: () => 'session-integrity-race' },
     mediaService: { authorizeInput: async value => path.resolve(value) },
     path,
-    pluginService: { resolveRunConfigAsync: () => new Promise(resolve => pendingRunConfigs.push(resolve)) },
+    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: () => new Promise(resolve => pendingRunConfigs.push(resolve)) },
     spawn: () => {
       const child = makeChild();
       integrityRaceChildren.push(child);

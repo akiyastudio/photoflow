@@ -1,7 +1,9 @@
 const { createAdvancedVideoService } = require('../services/advanced-video-service.cjs');
+const { createVideoPlaybackBroker } = require('../services/video-playback-broker.cjs');
 
 const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog }) => {
-  const service = createAdvancedVideoService({ BrowserWindow, crypto, mediaService, path, pluginService, processSupervisor, spawn, writeLog });
+  const playbackBroker = createVideoPlaybackBroker({ pluginService, path });
+  const service = createAdvancedVideoService({ BrowserWindow, crypto, mediaService, path, playbackBroker, processSupervisor, spawn, writeLog });
   const screenshotTarget = sourcePath => {
     const now = new Date();
     const pad = (value, length = 2) => String(value).padStart(length, '0');
@@ -18,6 +20,12 @@ const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcM
       const sourcePath = await mediaService.authorizeInput(filePath);
       return { success: true, mediaUrl: mediaService.toUrl(sourcePath, true) };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
+  });
+  ipcMain.handle('video-playback-backends', async (_event, filePath, browserProbe) => {
+    try {
+      const sourcePath = await mediaService.authorizeInput(filePath);
+      return { success: true, backends: await playbackBroker.listDescriptors(sourcePath, browserProbe) };
+    } catch (error) { return { success: false, backends: [], error: error.message || String(error) }; }
   });
   ipcMain.handle('video-player-publish-frame', async (_event, filePath, bytes) => {
     let temporaryPath = '';
@@ -45,8 +53,8 @@ const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcM
       return { success: false, error: error.message || String(error) };
     }
   });
-  ipcMain.handle('video-player-start', async (event, filePath, settings, playerId, requestId) => {
-    try { return { success: true, ...(await service.start(event, filePath, settings, playerId, requestId)) }; }
+  ipcMain.handle('video-player-start', async (event, filePath, settings, playerId, requestId, backendId) => {
+    try { return { success: true, ...(await service.start(event, filePath, settings, playerId, requestId, backendId)) }; }
     catch (error) {
       writeLog('warn', 'Video player start failed', { error: error.message || String(error) });
       return { success: false, error: error.message || String(error) };

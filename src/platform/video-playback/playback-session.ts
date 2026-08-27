@@ -1,6 +1,6 @@
-import type { VideoPlaybackSettings, VideoPlayerState } from '../../types';
+import type { VideoPlaybackBackendDescriptor, VideoPlaybackSettings, VideoPlayerState, VideoSubtitleTrack } from '../../types';
 
-export type PlaybackBackendKind = 'chromium' | 'component';
+export type PlaybackBackendId = string;
 export type PlaybackControl = {
   action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay' | 'subtitle-style';
   value?: number | boolean | string;
@@ -21,7 +21,7 @@ export type PlaybackBounds = {
 
 export interface PlaybackSession {
   readonly id: string;
-  readonly backend: PlaybackBackendKind;
+  readonly backendId: PlaybackBackendId;
   control(request: PlaybackControl): void;
   setBounds(bounds: PlaybackBounds): void;
   capture(): Promise<{ success: boolean; path?: string; error?: string }>;
@@ -30,9 +30,19 @@ export interface PlaybackSession {
 }
 
 export interface VideoPlaybackBackend {
-  readonly kind: PlaybackBackendKind;
+  readonly descriptor: VideoPlaybackBackendDescriptor;
   start(context: PlaybackBackendContext): Promise<PlaybackSession>;
 }
+
+export type PlaybackSessionSnapshot = {
+  time: number;
+  paused: boolean;
+  volume: number;
+  muted: boolean;
+  speed: number;
+  subtitle: { mode: 'default' | 'off' | 'track'; stableId?: string; visible: boolean; delay: number };
+  subtitleStyle: { fontSize: VideoPlaybackSettings['subtitleSize']; style: VideoPlaybackSettings['subtitleStyle'] };
+};
 
 type ElectronApi = Window['electronAPI'];
 
@@ -68,7 +78,8 @@ const waitForChromiumReady = (video: HTMLVideoElement) => new Promise<void>((res
 });
 
 export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
-  readonly kind = 'chromium' as const;
+  readonly descriptor: VideoPlaybackBackendDescriptor;
+  constructor(descriptor: VideoPlaybackBackendDescriptor) { this.descriptor = descriptor; }
 
   async start(context: PlaybackBackendContext): Promise<PlaybackSession> {
     const source = await context.electronApi.getVideoPlaybackSource(context.filePath);
@@ -139,7 +150,7 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
 
     return {
       id: context.requestId,
-      backend: this.kind,
+      backendId: this.descriptor.backendId,
       control: request => {
         if (closed) return;
         if (request.action === 'play') void video.play().catch(error => {
@@ -177,25 +188,32 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
   }
 }
 
-export class ComponentPlaybackBackend implements VideoPlaybackBackend {
-  readonly kind = 'component' as const;
+export class BrokeredPlaybackBackend implements VideoPlaybackBackend {
+  readonly descriptor: VideoPlaybackBackendDescriptor;
+  constructor(descriptor: VideoPlaybackBackendDescriptor) { this.descriptor = descriptor; }
 
   async start(context: PlaybackBackendContext): Promise<PlaybackSession> {
     let sessionId = '';
     let closed = false;
     let ready = false;
+    let loadError: Error | null = null;
+    let resolveLoaded!: () => void;
+    const loaded = new Promise<void>(resolve => { resolveLoaded = resolve; });
     const unsubscribe = context.electronApi.onVideoPlayerState(update => {
       if (update.playerId !== context.playerId || update.requestId !== context.requestId) return;
       if (sessionId && update.sessionId !== sessionId) return;
       if (update.type === 'fatal' || update.type === 'error' || update.type === 'stopped') {
-        if (ready && !closed) context.onRuntimeFailure(update.error || '高级视频解码组件意外退出');
+        const error = update.error || '高级视频解码组件意外退出';
+        if (ready && !closed) context.onRuntimeFailure(error);
+        else { loadError = new Error(error); resolveLoaded(); }
         return;
       }
+      if (update.type === 'file-loaded') resolveLoaded();
       context.onState(update);
     });
     let result;
     try {
-      result = await context.electronApi.startVideoPlayer(context.filePath, context.settings, context.playerId, context.requestId);
+      result = await context.electronApi.startVideoPlayer(context.filePath, context.settings, context.playerId, context.requestId, this.descriptor.backendId);
     } catch (error) {
       unsubscribe();
       throw error;
@@ -205,10 +223,24 @@ export class ComponentPlaybackBackend implements VideoPlaybackBackend {
       throw new Error(result.error || '高级视频解码组件无法启动');
     }
     sessionId = result.sessionId;
+    let timer = 0;
+    try {
+      await Promise.race([
+        loaded,
+        new Promise<never>((_resolve, reject) => { timer = window.setTimeout(() => reject(new Error('高级视频播放后端打开媒体超时')), 8000); }),
+      ]);
+      if (loadError) throw loadError;
+    } catch (error) {
+      unsubscribe();
+      await context.electronApi.stopVideoPlayer(sessionId);
+      throw error;
+    } finally {
+      window.clearTimeout(timer);
+    }
     ready = true;
     return {
       id: sessionId,
-      backend: this.kind,
+      backendId: this.descriptor.backendId,
       control: request => context.electronApi.controlVideoPlayer(sessionId, request),
       setBounds: bounds => context.electronApi.setVideoPlayerBounds(sessionId, bounds),
       capture: () => context.electronApi.captureVideoPlayerFrame(sessionId),
@@ -224,66 +256,198 @@ export class ComponentPlaybackBackend implements VideoPlaybackBackend {
   }
 }
 
-const chromiumFirstExtensions = new Set(['.mp4', '.m4v', '.webm', '.ogv', '.ogg']);
+const MIME_HINTS: Record<string, string> = {
+  '.avi': 'video/x-msvideo', '.m4v': 'video/mp4', '.mkv': 'video/x-matroska',
+  '.mov': 'video/quicktime', '.mp4': 'video/mp4', '.ogv': 'video/ogg',
+  '.ogg': 'video/ogg', '.webm': 'video/webm',
+};
 
-export const preferredPlaybackBackends = (filePath: string): PlaybackBackendKind[] => {
+export const chromiumContainerProbe = (video: HTMLVideoElement, filePath: string): 'probably' | 'maybe' | 'unknown' => {
   const cleanPath = filePath.split(/[?#]/, 1)[0];
   const dot = cleanPath.lastIndexOf('.');
-  const extension = dot >= 0 ? cleanPath.slice(dot).toLowerCase() : '';
-  return chromiumFirstExtensions.has(extension) ? ['chromium', 'component'] : ['component', 'chromium'];
+  const mime = MIME_HINTS[dot >= 0 ? cleanPath.slice(dot).toLowerCase() : ''];
+  if (!mime) return 'unknown';
+  const result = video.canPlayType(mime);
+  return result === 'probably' || result === 'maybe' ? result : 'unknown';
 };
+
+export const discoverPlaybackBackends = async (context: Pick<PlaybackBackendContext, 'filePath' | 'video' | 'electronApi'>): Promise<VideoPlaybackBackend[]> => {
+  const result = await context.electronApi.getVideoPlaybackBackends(context.filePath, chromiumContainerProbe(context.video, context.filePath));
+  if (!result.success) throw new Error(result.error || '无法发现视频播放后端');
+  return result.backends.map(descriptor => descriptor.transport === 'chromium'
+    ? new ChromiumPlaybackBackend(descriptor)
+    : new BrokeredPlaybackBackend(descriptor));
+};
+
+const languageMatches = (trackLanguage: string | undefined, preferredLanguage: string) => {
+  const track = String(trackLanguage || '').trim().replaceAll('_', '-').toLowerCase();
+  const preferred = String(preferredLanguage || '').trim().replaceAll('_', '-').toLowerCase();
+  return Boolean(track && preferred && (track === preferred || track.startsWith(`${preferred}-`) || preferred.startsWith(`${track}-`)));
+};
+
+const initialSnapshot = (settings: VideoPlaybackSettings): PlaybackSessionSnapshot => ({
+  time: 0, paused: false, volume: 100, muted: false, speed: 1,
+  subtitle: { mode: 'default', visible: settings.subtitlesEnabled === true, delay: 0 },
+  subtitleStyle: { fontSize: settings.subtitleSize, style: settings.subtitleStyle },
+});
+const cloneSnapshot = (value: PlaybackSessionSnapshot): PlaybackSessionSnapshot => ({
+  ...value, subtitle: { ...value.subtitle }, subtitleStyle: { ...value.subtitleStyle },
+});
+
+const selectedStableId = (state: VideoPlayerState) => state.subtitleTracks?.find(track => track.id === String(state.subtitleTrackId ?? '') || track.selected)?.stableId;
 
 export const startPlaybackSession = async ({ backends, context }: {
   backends: VideoPlaybackBackend[];
   context: Omit<PlaybackBackendContext, 'onRuntimeFailure'>;
 }): Promise<PlaybackSession> => {
-  const attempted = new Set<PlaybackBackendKind>();
+  const attempted = new Set<PlaybackBackendId>();
   let current: PlaybackSession | null = null;
+  let currentTracks: VideoSubtitleTrack[] = [];
+  let currentSubtitleState: VideoPlayerState | null = null;
   let closed = false;
   let switching = false;
+  let fallbackPromise: Promise<void> | null = null;
+  let suppressBackendState = false;
   let lastError = '';
   let lastBounds: PlaybackBounds | null = null;
-  const ordered = preferredPlaybackBackends(context.filePath)
-    .map(kind => backends.find(backend => backend.kind === kind))
-    .filter((backend): backend is VideoPlaybackBackend => Boolean(backend));
+  let snapshot = initialSnapshot(context.settings);
+
+  const updateSnapshotFromState = (state: VideoPlayerState) => {
+    if (Number.isFinite(state.time)) snapshot.time = Math.max(0, Number(state.time));
+    if (typeof state.paused === 'boolean') snapshot.paused = state.paused;
+    if (Number.isFinite(state.volume)) snapshot.volume = Math.max(0, Math.min(100, Number(state.volume)));
+    if (typeof state.muted === 'boolean') snapshot.muted = state.muted;
+    if (Number.isFinite(state.speed)) snapshot.speed = Math.max(0.25, Math.min(4, Number(state.speed)));
+    const stableId = selectedStableId(state);
+    if (Number.isFinite(state.subtitleDelay)) snapshot.subtitle.delay = Math.max(-30, Math.min(30, Number(state.subtitleDelay)));
+    if (typeof state.subtitleVisible === 'boolean' && (snapshot.subtitle.mode !== 'default' || stableId)) snapshot.subtitle.visible = state.subtitleVisible;
+    if (stableId) snapshot.subtitle = { ...snapshot.subtitle, mode: 'track', stableId };
+  };
+
+  const applySubtitleSnapshot = (session: PlaybackSession, tracks: VideoSubtitleTrack[], value = snapshot) => {
+    session.control({ action: 'subtitle-delay', value: value.subtitle.delay });
+    let track: VideoSubtitleTrack | undefined;
+    if (value.subtitle.mode === 'track') track = tracks.find(item => item.stableId === value.subtitle.stableId);
+    else if (value.subtitle.mode === 'default' && context.settings.subtitlesEnabled) {
+      for (const language of context.settings.subtitlePreferredLanguages || []) {
+        track = tracks.find(item => languageMatches(item.language, language));
+        if (track) break;
+      }
+      track ||= tracks[0];
+    }
+    if (!track || value.subtitle.mode === 'off') {
+      session.control({ action: 'subtitle-select', value: '' });
+      return;
+    }
+    value.subtitle = { ...value.subtitle, mode: 'track', stableId: track.stableId };
+    session.control({ action: 'subtitle-select', value: track.id });
+    session.control({ action: 'subtitle-visible', value: value.subtitle.visible });
+  };
+
+  const handleBackendState = (state: VideoPlayerState) => {
+    if (!suppressBackendState) updateSnapshotFromState(state);
+    if (state.type === 'subtitle-tracks') {
+      currentTracks = state.subtitleTracks || [];
+      currentSubtitleState = state;
+      if (current) applySubtitleSnapshot(current, currentTracks);
+    }
+    if (!suppressBackendState) context.onState(state);
+  };
+
+  const restoreSnapshot = (session: PlaybackSession, value: PlaybackSessionSnapshot) => {
+    session.control({ action: 'pause' });
+    session.control({ action: 'volume', value: value.volume });
+    session.control({ action: 'mute', value: value.muted });
+    session.control({ action: 'speed', value: value.speed });
+    session.control({ action: 'seek', value: value.time });
+    session.control({ action: 'subtitle-style', fontSize: value.subtitleStyle.fontSize, style: value.subtitleStyle.style });
+    applySubtitleSnapshot(session, currentTracks, value);
+    if (!value.paused) session.control({ action: 'play' });
+  };
 
   const startNext = async (): Promise<PlaybackSession> => {
-    const backend = ordered.find(candidate => !attempted.has(candidate.kind));
+    if (closed) throw new Error('视频播放会话已经关闭');
+    const backend = backends.find(candidate => !attempted.has(candidate.descriptor.backendId));
     if (!backend) throw new Error(lastError || 'Chromium 与高级视频解码组件均无法播放此视频');
-    attempted.add(backend.kind);
+    attempted.add(backend.descriptor.backendId);
+    currentTracks = [];
+    currentSubtitleState = null;
     try {
-      return await backend.start({
+      const started = await backend.start({
         ...context,
-        onRuntimeFailure: error => { void switchAfterFailure(error); },
+        onState: handleBackendState,
+        onRuntimeFailure: error => { void beginSwitch(error); },
       });
+      if (closed) {
+        await started.close();
+        throw new Error('视频播放会话已经关闭');
+      }
+      return started;
     } catch (error) {
       lastError = error instanceof Error ? error.message : String(error);
+      if (closed) throw error;
       return startNext();
     }
   };
   const switchAfterFailure = async (error: string) => {
     if (closed || switching) return;
     switching = true;
+    suppressBackendState = true;
+    const preserved = cloneSnapshot(snapshot);
     lastError = error;
     const failed = current;
     current = null;
     await failed?.close().catch(() => undefined);
-    context.onState(stateEnvelope(context, 'loading', { buffering: true, subtitleTracks: [], subtitleTrackId: null, subtitleVisible: false }));
+    if (!closed) context.onState(stateEnvelope(context, 'loading', { buffering: true, subtitleTracks: [], subtitleTrackId: null, subtitleVisible: false }));
     try {
-      current = await startNext();
+      const next = await startNext();
+      if (closed) {
+        await next.close();
+        return;
+      }
+      current = next;
+      snapshot = preserved;
       if (lastBounds) current.setBounds(lastBounds);
+      restoreSnapshot(current, snapshot);
+      if (currentSubtitleState) {
+        const restoredTrack = currentTracks.find(item => item.stableId === snapshot.subtitle.stableId);
+        context.onState({ ...currentSubtitleState, subtitleTrackId: restoredTrack?.id ?? null, subtitleVisible: snapshot.subtitle.visible, subtitleDelay: snapshot.subtitle.delay });
+      }
+      context.onState(stateEnvelope(context, 'state', {
+        time: snapshot.time, paused: snapshot.paused, volume: snapshot.volume, muted: snapshot.muted, speed: snapshot.speed,
+        subtitleDelay: snapshot.subtitle.delay, subtitleVisible: snapshot.subtitle.visible, buffering: false,
+      }));
     } catch (terminalError) {
-      context.onState(stateEnvelope(context, 'fatal', { error: `视频无法播放：${terminalError instanceof Error ? terminalError.message : String(terminalError)}。请安装或修复高级解码组件，或使用系统播放器。` }));
+      if (!closed) context.onState(stateEnvelope(context, 'fatal', { error: `视频无法播放：${terminalError instanceof Error ? terminalError.message : String(terminalError)}。请安装或修复高级解码组件，或使用系统播放器。` }));
     } finally {
+      suppressBackendState = false;
       switching = false;
     }
+  };
+  const beginSwitch = (error: string) => {
+    if (!fallbackPromise) fallbackPromise = switchAfterFailure(error).finally(() => { fallbackPromise = null; });
+    return fallbackPromise;
   };
 
   current = await startNext();
   return {
     get id() { return current?.id || context.requestId; },
-    get backend() { return current?.backend || ordered[0]?.kind || 'chromium'; },
-    control: request => current?.control(request),
+    get backendId() { return current?.backendId || backends[0]?.descriptor.backendId || 'unavailable'; },
+    control: request => {
+      if (request.action === 'play') snapshot.paused = false;
+      else if (request.action === 'pause' || request.action === 'stop') snapshot.paused = true;
+      else if (request.action === 'seek') snapshot.time = Math.max(0, Number(request.value) || 0);
+      else if (request.action === 'volume') snapshot.volume = Math.max(0, Math.min(100, Number(request.value) || 0));
+      else if (request.action === 'mute') snapshot.muted = Boolean(request.value);
+      else if (request.action === 'speed') snapshot.speed = Math.max(0.25, Math.min(4, Number(request.value) || 1));
+      else if (request.action === 'subtitle-delay') snapshot.subtitle.delay = Math.max(-30, Math.min(30, Number(request.value) || 0));
+      else if (request.action === 'subtitle-visible') snapshot.subtitle.visible = Boolean(request.value);
+      else if (request.action === 'subtitle-select') {
+        const track = currentTracks.find(item => item.id === String(request.value || ''));
+        snapshot.subtitle = track ? { ...snapshot.subtitle, mode: 'track', stableId: track.stableId } : { ...snapshot.subtitle, mode: 'off', stableId: undefined, visible: false };
+      } else if (request.action === 'subtitle-style') snapshot.subtitleStyle = { fontSize: request.fontSize ?? snapshot.subtitleStyle.fontSize, style: request.style ?? snapshot.subtitleStyle.style };
+      current?.control(request);
+    },
     setBounds: bounds => {
       lastBounds = bounds;
       current?.setBounds(bounds);
@@ -295,6 +459,7 @@ export const startPlaybackSession = async ({ backends, context }: {
       const active = current;
       current = null;
       await active?.close();
+      await fallbackPromise;
     },
   };
 };

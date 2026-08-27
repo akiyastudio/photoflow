@@ -774,7 +774,7 @@ export interface VideoPlayerState {
   sessionId: string;
   playerId: string;
   requestId: string;
-  type: 'ready' | 'loading' | 'file-loaded' | 'state' | 'subtitle-tracks' | 'ended' | 'navigate' | 'context-menu' | 'pointer-activity' | 'escape' | 'stopped' | 'error' | 'fatal';
+  type: 'ready' | 'loading' | 'file-loaded' | 'state' | 'subtitle-tracks' | 'ended' | 'input' | 'navigate' | 'context-menu' | 'pointer-activity' | 'escape' | 'stopped' | 'error' | 'fatal';
   time?: number;
   duration?: number;
   paused?: boolean;
@@ -792,6 +792,22 @@ export interface VideoPlayerState {
   subtitleTrackId?: string | null;
   subtitleVisible?: boolean;
   subtitleDelay?: number;
+  input?: {
+    kind: 'pointer-button' | 'key' | 'pointer-move';
+    button?: 'left' | 'right';
+    key?: 'ArrowLeft' | 'ArrowRight' | 'Escape';
+    x?: number;
+    y?: number;
+  };
+}
+
+export interface VideoPlaybackBackendDescriptor {
+  backendId: string;
+  protocolVersion: 1;
+  transport: 'chromium' | 'native-process-v1';
+  displayName: string;
+  priority: number;
+  probe: { support: 'probably' | 'maybe' | 'unknown'; basis: string };
 }
 
 /** Legacy type alias for the compatibility IPC surface. */
@@ -1082,7 +1098,8 @@ export interface IElectronAPI {
   getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, priority?: 0 | 1 | 2 | 3, queueOrder?: number) => Promise<{ success: boolean; taskId?: string; state?: ThumbnailState; previewUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; cacheLayer?: 'memory' | 'disk' | 'source'; error?: string }>;
   cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; sourceMtimeMs?: number; sourceSize?: number; error?: string }) => void) => () => void;
-  startVideoPlayer: (filePath: string, settings: VideoPlaybackSettings, playerId: string, requestId: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string }>;
+  startVideoPlayer: (filePath: string, settings: VideoPlaybackSettings, playerId: string, requestId: string, backendId?: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string }>;
+  getVideoPlaybackBackends: (filePath: string, browserProbe: 'probably' | 'maybe' | 'unsupported' | 'unknown') => Promise<{ success: boolean; backends: VideoPlaybackBackendDescriptor[]; error?: string }>;
   getVideoPlaybackSource: (filePath: string) => Promise<{ success: boolean; mediaUrl?: string; error?: string }>;
   setVideoPlayerBounds: (sessionId: string, bounds: { x: number; y: number; width: number; height: number; visible: boolean; overlayHole?: { x: number; y: number; width: number; height: number }; controlsOverlayHole?: { x: number; y: number; width: number; height: number }; cornerOverlayHole?: { x: number; y: number; width: number; height: number } }) => void;
   setAdvancedVideoBounds: (sessionId: string, bounds: {

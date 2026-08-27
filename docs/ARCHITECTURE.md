@@ -88,9 +88,13 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
 - Advanced video UI is built into the application: `AdvancedVideoPlayer`,
   Chromium playback, trimming, screenshots, keyboard controls and the
   `videoPlayback` preference all ship in the main renderer. `PlaybackSession`
-  and `VideoPlaybackBackend` are application-owned contracts: common web video
-  containers use `ChromiumPlaybackBackend`, while the optional advanced
-  component contributes only a supervised decoder/rendering backend. A media
+  and `VideoPlaybackBackend` are application-owned contracts. The Electron
+  playback broker discovers versioned, UI-less `media.playbackBackend@v1`
+  manifest contributions and combines their container probes with Chromium's
+  `HTMLMediaElement.canPlayType` probe. Extensions are hints rather than codec
+  conclusions; actual backend startup remains the final capability check. The
+  optional advanced component contributes only a supervised decoder/rendering
+  backend. A media
   generation records attempted backends and never automatically attempts the
   same backend twice. Startup failure or runtime loss may select the other
   untried backend; only exhaustion of both backends produces the install/repair
@@ -98,12 +102,15 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   Configurations saved under the former component-settings key are migrated into
   `videoPlayback` on load.
 
-  The current Electron `video-player-*` IPC names and native input events are a
-  compatibility adapter for the optional backend. Removal plan: move native raw
-  input translation and screenshot publication into the generic playback broker,
-  then retire the legacy advanced-video aliases after all supported installed
-  renderers have crossed the compatibility window. New renderer/domain code must
-  depend only on the generic backend/session contracts.
+  Playback state is normalized and owned by `PlaybackSession`; fallback restores
+  position, pause, audio, rate and stable subtitle selection before resuming.
+  Native surfaces report raw pointer/key activity and track facts; product input
+  and subtitle-default policy are interpreted by the application. The current
+  Electron `video-player-*` IPC names, `advanced-video-*` aliases, and the broker's
+  mapping for packages published before `media.playbackBackend@v1` are compatibility
+  adapters. Removal plan: retire those aliases and the legacy manifest mapping
+  after all supported installed renderers/packages cross the compatibility window.
+  New renderer/domain code must depend only on generic descriptors and sessions.
 
 ## Stable contracts
 

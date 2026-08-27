@@ -4,6 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { registerAdvancedVideoIpc } = require('../electron/modules/advanced-video-ipc.cjs');
 const { createMediaFileResponse } = require('../electron/services/media-response-service.cjs');
+const { parseMediaPlaybackBackendContributions } = require('../electron/contracts/media-playback-backend-contract.cjs');
 
 const run = async () => {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-playback-broker-'));
@@ -16,11 +17,24 @@ const run = async () => {
       BrowserWindow: {}, app: { once() {} }, crypto: { randomUUID: () => `broker-${++sequence}` }, dialog: {}, fs,
       ipcMain: { handle: (name, handler) => handlers.set(name, handler), on() {} },
       mediaService: { authorizeInput: async value => path.resolve(value), toUrl: value => `photoflow-media://file/${path.basename(value)}` },
-      path, pluginService: {}, spawn() {}, writeLog() {},
+      path,
+      pluginService: {
+        list: () => [{
+          id: 'fixture-player', name: 'Fixture Player', installed: true, compatible: true,
+          manifest: { runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 1, backendId: 'decoder', transport: 'native-process-v1', priority: 80, probe: { extensions: ['.mp4', '.mov'] } }] },
+        }],
+        resolveRunConfigAsync: async () => ({ command: 'fixture.exe', args: [] }),
+      },
+      spawn() {}, writeLog() {},
     });
 
     const source = await handlers.get('video-playback-source')({}, sourcePath);
     assert.deepEqual(source, { success: true, mediaUrl: 'photoflow-media://file/clip.mp4' });
+    const discovered = await handlers.get('video-playback-backends')({}, sourcePath, 'maybe');
+    assert.equal(discovered.success, true);
+    assert.deepEqual(discovered.backends.map(item => item.backendId), ['fixture-player:decoder', 'core.chromium'], 'manifest probe must participate in backend ordering');
+    assert.equal(discovered.backends[0].probe.basis, 'manifest-container-probe');
+    assert.throws(() => parseMediaPlaybackBackendContributions({ runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 99, backendId: 'bad', transport: 'native-process-v1', priority: 0, probe: { extensions: ['.mp4'] } }] }), /Unsupported/);
 
     const png = Buffer.concat([
       Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),

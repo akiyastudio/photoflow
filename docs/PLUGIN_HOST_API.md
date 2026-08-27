@@ -96,6 +96,13 @@ Host API 7 的项目只读扩展要求 `minHostApiVersion = 7`。`project.files.
 
 Host API 7 contribution 为 `component.sidePanel`、`media.contextAction`、`project.contextAction`、`project.importProvider`、`project.exportProvider`、`application.command`。每项声明 `id`、`label`、`pageId` 和独立 `rpcMethods` allowlist；pageId 必须引用包内 fullPage，RPC 必须属于 service。项目入口绑定触发时的 scope 与 selection；跨目录媒体选择以共同祖先为 scope。application command 使用无项目 application context，且只有实际含命令的全局 Dock 注册 `Ctrl/Cmd+Shift+P`。宿主 UI 分别在项目工具栏/可调侧面板、媒体与项目右键菜单、导入/导出菜单及可搜索命令入口发现并打开这些 contribution。所有 surface 使用同一 sandbox preload，禁止导航、新窗口和 Node 集成；组件卸载、升级或项目关闭会关闭对应 view。
 
+无 UI 的运行时组件可在顶层 `runtimeContributions` 声明
+`media.playbackBackend`，当前协议版本为 1。声明包含组件内唯一的
+`backendId`、`native-process-v1` transport、优先级和受限扩展名 probe。
+Electron 播放 broker 校验声明、结合 Chromium `canPlayType` probe 生成不含
+组件实现细节的 descriptor；扩展名只用于排序提示，不能替代实际启动探测。
+这类贡献不创建页面、设置入口或 renderer surface。
+
 Host API 7 的七项写能力必须设置 `minHostApiVersion = 7`，且各自声明上表中的最小权限。评分批量限制为 1–100，采用逐项语义；只支持图片/RAW 的 `rating`，视频、标签和选择状态写入拒绝。checked CAS 与宿主旧评分 outbox 共用同一 per-file 队列；ExifTool 成功后的索引指纹刷新是非致命维护步骤，不会把已发生的评分副作用报告成失败。版本更新/删除、进度节点与边变更均使用 `expectedUpdatedAt` CAS；删除权限独立。progress 的项目/scope 路径会在数据库事务内再次以 Windows case-insensitive path-key 语义验证，所有图端点必须在当前物理 scope 内、不得是 external link，并继续复用数据库角色和循环约束。
 
 `project.import.v7` 先保留同 component/workspace/project/scope 的一次性 input token，再执行 stage→validate→commit；reservation 只暂停清理，不延长原 10 分钟授权，释放时恢复原到期并立即删除已过期 token。同幂等键并发调用共享一个 active owner，取消、冲突或失败会释放令牌并回滚已发布且摘要未变的文件。任何 import/file/process 恢复都重新执行 `lstat`、拒绝链接、验证 `realpath` 位于当前 canonical scope，并复核文件 SHA-256 或目录 identity/owner marker；目标被其他主体替换时既不认领成功，也不移动替换内容。

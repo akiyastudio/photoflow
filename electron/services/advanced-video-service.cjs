@@ -1,8 +1,6 @@
 const { StringDecoder } = require('string_decoder');
 const fs = require('fs');
 
-// Legacy installation boundary: published runtimes are already installed under this immutable id.
-const COMPONENT_ID = 'video-playback-mpv';
 const START_TIMEOUT_MS = 8000;
 const SCREENSHOT_TIMEOUT_MS = 8000;
 const SCREENSHOT_PROBE_MS = 40;
@@ -20,7 +18,7 @@ const nativeWindowHandleValue = window => {
 };
 
 const createAdvancedVideoService = ({
-  BrowserWindow, crypto, mediaService, path, pluginService, processSupervisor = null, spawn, writeLog,
+  BrowserWindow, crypto, mediaService, path, playbackBroker, processSupervisor = null, spawn, writeLog,
   fileSystem = fs, screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS,
 }) => {
   const sessions = new Map();
@@ -131,7 +129,7 @@ const createAdvancedVideoService = ({
     if (id) stop(id, senderId);
   };
 
-  const start = async (event, filePath, requestedSettings = {}, playerId, requestId) => {
+  const start = async (event, filePath, requestedSettings = {}, playerId, requestId, requestedBackendId = '') => {
     const settings = typeof requestedSettings === 'string'
       ? { arrowKeyAction: requestedSettings }
       : requestedSettings && typeof requestedSettings === 'object' ? requestedSettings : {};
@@ -152,7 +150,9 @@ const createAdvancedVideoService = ({
       assertCurrentLaunch();
       const ownerWindow = BrowserWindow.fromWebContents(sender);
       if (!ownerWindow || ownerWindow.isDestroyed()) throw new Error('照片流窗口已经关闭');
-      const runConfig = await pluginService.resolveRunConfigAsync(COMPONENT_ID, ['--parent-hwnd', nativeWindowHandleValue(ownerWindow)]);
+      const backendId = String(requestedBackendId || playbackBroker.defaultBackendId());
+      if (!backendId) throw new Error('没有可用的高级视频播放后端');
+      const runConfig = await playbackBroker.resolveRunConfigAsync(backendId, ['--parent-hwnd', nativeWindowHandleValue(ownerWindow)]);
       assertCurrentLaunch();
       const id = crypto.randomUUID();
       const managedProcess = processSupervisor?.launch({
@@ -269,15 +269,8 @@ const createAdvancedVideoService = ({
 
       await readyPromise;
       assertCurrentLaunch();
-      sendCommand(session, { command: 'set-keyboard-mode', value: settings.arrowKeyAction === 'navigate' ? 'navigate' : 'seek' });
-      sendCommand(session, {
-        command: 'set-subtitle-defaults',
-        enabled: settings.subtitlesEnabled === true,
-        preferredLanguages: Array.isArray(settings.subtitlePreferredLanguages) ? settings.subtitlePreferredLanguages.slice(0, 8) : [],
-        fontSize: normalizeSubtitleFontSize(settings.subtitleSize),
-        style: settings.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard',
-      });
       if (!sendCommand(session, { command: 'open', path: authorizedPath })) throw new Error('无法向视频播放器发送文件');
+      sendCommand(session, { command: 'subtitle-style', fontSize: normalizeSubtitleFontSize(settings.subtitleSize), style: settings.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard' });
       if (!sendCommand(session, { command: 'play' })) throw new Error('无法启动视频播放器');
       writeLog('info', 'Advanced video decoder started', { sessionId: id, filePath: authorizedPath });
       return { sessionId: id, playerId: normalizedPlayerId, requestId: normalizedRequestId };
@@ -393,4 +386,4 @@ const createAdvancedVideoService = ({
   return { start, setBounds, control, addSubtitle, ownsSession, screenshot, stop, dispose, sessions, sessionsByPlayer, launches };
 };
 
-module.exports = { COMPONENT_ID, createAdvancedVideoService, nativeWindowHandleValue };
+module.exports = { createAdvancedVideoService, nativeWindowHandleValue };
