@@ -13,6 +13,29 @@ const registerHostCapabilities = (componentCapabilityBroker, registrations) => {
   }
 };
 
+const finalizeComponentRuntimeInstall = async ({ componentId, destination, backupPath = '', fs, configMutationService, componentViewManager, componentServiceManager, invalidateComponentStatus = () => undefined }) => {
+  const stopInstalledRuntime = async reason => {
+    try { componentViewManager?.closeComponent?.(componentId); } catch { /* rollback must continue */ }
+    await Promise.resolve(componentServiceManager?.stop?.(componentId, reason)).catch(() => undefined);
+  };
+  try {
+    await stopInstalledRuntime('component-upgrade');
+    await configMutationService.adoptLegacySettings();
+    return { backupPath };
+  } catch (error) {
+    await stopInstalledRuntime('component-install-rollback');
+    try {
+      await fs.promises.rm(destination, { recursive: true, force: true });
+      if (backupPath && fs.existsSync(backupPath)) await fs.promises.rename(backupPath, destination);
+      invalidateComponentStatus();
+    } catch (rollbackError) {
+      error.preserveComponentBackupPath = backupPath || '';
+      error.message = `${error.message || String(error)}；组件运行时回滚失败：${rollbackError.message || String(rollbackError)}`;
+    }
+    throw error;
+  }
+};
+
 const PYTHON_BACKGROUND_TASK_PROFILES = Object.freeze({
   'png_to_jpg.py': Object.freeze({ title: 'PNG 转 JPG', type: 'python-tool', concurrencyGroup: 'disk-io', concurrencyLimit: 3, concurrencyWriteLimit: 2 }),
   'research.py': Object.freeze({ title: '截取分镜帧', type: 'python-tool', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1 }),
@@ -569,6 +592,7 @@ const registerSystemIpc = context => {
     let stagingPath = '';
     let backupPath = '';
     let packageStagePath = '';
+    let preserveBackupPath = false;
     try {
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
       const discoveredPackage = pluginService.resolvePackage(componentId);
@@ -619,11 +643,15 @@ const registerSystemIpc = context => {
         backupPath = '';
         throw error;
       }
+      try {
+        await finalizeComponentRuntimeInstall({ componentId, destination, backupPath, fs, configMutationService, componentViewManager, componentServiceManager, invalidateComponentStatus });
+      } catch (error) {
+        preserveBackupPath = Boolean(error.preserveComponentBackupPath);
+        throw error;
+      }
       const cleanupPaths = [backupPath, packageStagePath].filter(Boolean);
       backupPath = '';
       packageStagePath = '';
-      componentViewManager?.closeComponent?.(componentId);
-      await componentServiceManager?.stop?.(componentId, 'component-upgrade');
       queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
       invalidateComponentStatus();
       writeLog('info', 'Component installed', { componentId, destination });
@@ -632,7 +660,7 @@ const registerSystemIpc = context => {
       return { success: false, error: error.message || String(error) };
     } finally {
       if (stagingPath) await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
-      if (backupPath) await fs.promises.rm(backupPath, { recursive: true, force: true }).catch(() => undefined);
+      if (backupPath && !preserveBackupPath) await fs.promises.rm(backupPath, { recursive: true, force: true }).catch(() => undefined);
       if (packageStagePath) await fs.promises.rm(packageStagePath, { recursive: true, force: true }).catch(() => undefined);
     }
   });
@@ -1296,4 +1324,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc };
+module.exports = { finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc };

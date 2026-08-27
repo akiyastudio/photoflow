@@ -308,7 +308,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getProjectFileClipboardStatus: () => ipcRenderer.invoke('workspace-file-clipboard-status'),
   cancelProjectFileCut: (workspacePath, status, projectName, paths) => ipcRenderer.invoke('workspace-cancel-file-cut', workspacePath, status, projectName, paths),
   getPathForFile: (file) => webUtils.getPathForFile(file),
-  startProjectFileDrag: (workspacePath, status, projectName, paths) => ipcRenderer.send('workspace-start-file-drag', workspacePath, status, projectName, paths),
+  startProjectFileDrag: (workspacePath, status, projectName, paths, context) => ipcRenderer.send('workspace-start-file-drag', workspacePath, status, projectName, paths, context),
   onProjectFileDragEnd: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-file-drag-ended', subscription); return () => ipcRenderer.removeListener('workspace-file-drag-ended', subscription); },
   onProjectFileOperationProgress: (callback) => { const subscription = (_event, value) => callback(value); ipcRenderer.on('workspace-file-operation-progress', subscription); return () => ipcRenderer.removeListener('workspace-file-operation-progress', subscription); },
   cancelProjectFileOperation: (operationId) => ipcRenderer.invoke('workspace-cancel-file-operation', operationId),

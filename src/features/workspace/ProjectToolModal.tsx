@@ -22,7 +22,7 @@ import {
 } from 'lucide-react';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { PanelTaskScope, useTaskCenter } from '../background-tasks/TaskCenter';
-import { panelTaskSessionKey } from '../background-tasks/panel-task-session-model';
+import { isActivePresentedBackgroundTaskForPanel, panelTaskSessionKey } from '../background-tasks/panel-task-session-model';
 
 const TOOL_MODAL_DETAILS: Record<string, { description: string; icon: React.ReactNode }> = {
   import: { description: '分析 SD 卡素材并导入当前项目。', icon: <MemoryStick size={18}/> },
@@ -45,11 +45,12 @@ const TOOL_MODAL_DETAILS: Record<string, { description: string; icon: React.Reac
 };
 
 export const ToolModal = ({ title, ownerPageId, panelKind, open, busy = false, onClose, children }: { title: string; ownerPageId: string; panelKind: string; open: boolean; busy?: boolean; onClose: () => void; children: React.ReactNode }) => {
-  const { panelTasks, reportPanelTask, dismissPanelTask } = useTaskCenter();
+  const { backgroundTasks, panelTasks, reportPanelTask, dismissPanelTask } = useTaskCenter();
   const taskKey = panelTaskSessionKey(ownerPageId, panelKind);
   const task = panelTasks[taskKey];
   const manualBusyRef = useRef(false);
-  const effectiveBusy = busy || task?.state === 'running';
+  const backgroundTaskActive = backgroundTasks.some(candidate => isActivePresentedBackgroundTaskForPanel(candidate, ownerPageId, panelKind));
+  const effectiveBusy = busy || task?.state === 'running' || backgroundTaskActive;
   useEscapeLayer(open, onClose, true, true);
 
   const reportBusyAsPanelTask = !panelKind.startsWith('version-');

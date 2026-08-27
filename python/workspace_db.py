@@ -1716,16 +1716,19 @@ def _migration_32(db):
 
 
 def _migration_33(db):
-    """Journal crash-recoverable local progress-folder relocations."""
+    """Journal crash-recoverable local and external progress relocations."""
     migrated = False
     for schema in (row[1] for row in db.execute("PRAGMA database_list").fetchall()):
         tables = {row[0] for row in db.execute(f"SELECT name FROM {schema}.sqlite_master WHERE type='table'").fetchall()}
         if "progress_folders" not in tables:
             continue
         indexes = {row[0] for row in db.execute(f"SELECT name FROM {schema}.sqlite_master WHERE type='index'").fetchall()}
-        migrated = migrated or "progress_folder_relocations" not in tables or not {
+        external_columns_before = ({row[1] for row in db.execute(f"PRAGMA {schema}.table_info(progress_external_link_renames)").fetchall()}
+                                   if "progress_external_link_renames" in tables else set())
+        migrated = migrated or "progress_folder_relocations" not in tables or "progress_external_link_renames" not in tables or not {
             "progress_folder_relocations_pending", "progress_folder_relocations_progress_pending",
-        }.issubset(indexes)
+            "progress_external_link_renames_pending", "progress_external_link_renames_progress_pending",
+        }.issubset(indexes) or not {"mutation_token", "lease_created_at"}.issubset(external_columns_before)
         db.executescript(
             f"""
             CREATE TABLE IF NOT EXISTS {schema}.progress_folder_relocations(
@@ -1751,8 +1754,37 @@ def _migration_33(db):
             CREATE UNIQUE INDEX IF NOT EXISTS {schema}.progress_folder_relocations_progress_pending
               ON progress_folder_relocations(progress_id)
               WHERE state!='completed';
+            CREATE TABLE IF NOT EXISTS {schema}.progress_external_link_renames(
+              id TEXT PRIMARY KEY,
+              operation_key TEXT NOT NULL UNIQUE,
+              project_id TEXT NOT NULL,
+              progress_id TEXT NOT NULL,
+              old_relative_path TEXT NOT NULL,
+              new_relative_path TEXT NOT NULL,
+              old_path TEXT NOT NULL,
+              new_path TEXT NOT NULL,
+              temporary_path TEXT NOT NULL,
+              link_sha256 TEXT NOT NULL,
+              mutation_token TEXT NOT NULL DEFAULT '',
+              lease_created_at INTEGER NOT NULL DEFAULT 0,
+              state TEXT NOT NULL CHECK(state IN ('prepared','filesystem_moved','database_relocated','completed')),
+              error TEXT NOT NULL DEFAULT '',
+              created_at INTEGER NOT NULL,
+              updated_at INTEGER NOT NULL,
+              completed_at INTEGER
+            );
+            CREATE INDEX IF NOT EXISTS {schema}.progress_external_link_renames_pending
+              ON progress_external_link_renames(state,updated_at);
+            CREATE UNIQUE INDEX IF NOT EXISTS {schema}.progress_external_link_renames_progress_pending
+              ON progress_external_link_renames(progress_id)
+              WHERE state!='completed';
             """
         )
+        external_columns = {row[1] for row in db.execute(f"PRAGMA {schema}.table_info(progress_external_link_renames)").fetchall()}
+        if "mutation_token" not in external_columns:
+            db.execute(f"ALTER TABLE {schema}.progress_external_link_renames ADD COLUMN mutation_token TEXT NOT NULL DEFAULT ''")
+        if "lease_created_at" not in external_columns:
+            db.execute(f"ALTER TABLE {schema}.progress_external_link_renames ADD COLUMN lease_created_at INTEGER NOT NULL DEFAULT 0")
     return migrated
 
 
@@ -5846,14 +5878,205 @@ def recover_progress_folder_relocations(root: str, db, fault_after=None):
     return {"success": True, "recovered": recovered, "pending": remaining}
 
 
-def progress_external_link_route_rename(root: str, db, payload: dict):
+def _apply_external_progress_route_database(db, operation):
+    project_id = operation["project_id"]
+    progress_id = operation["progress_id"]
+    old_route = operation["old_relative_path"]
+    new_route = operation["new_relative_path"]
+    timestamp = int(time.time() * 1000)
+    affected = db.execute(
+        """SELECT id,external_link_relative_path FROM progress_folders
+           WHERE project_id=? AND external_link_relative_path IS NOT NULL""", (project_id,),
+    ).fetchall()
+    for row in affected:
+        current_route = row["external_link_relative_path"]
+        if (current_route.casefold() == old_route.casefold()
+                or current_route.casefold().startswith(old_route.casefold() + "/")):
+            route = _replace_relative_prefix(current_route, old_route, new_route)
+            db.execute(
+                """UPDATE progress_folders SET external_link_relative_path=?,
+                   display_name=CASE WHEN id=? THEN ? ELSE display_name END,updated_at=? WHERE id=?""",
+                (route, progress_id, new_route.rsplit("/", 1)[-1][:-4], timestamp, row["id"]),
+            )
+    for slot in db.execute(
+        "SELECT progress_id,relative_path_key FROM media_import_artifact_slots WHERE project_id=?", (project_id,),
+    ).fetchall():
+        route = _replace_relative_prefix(slot["relative_path_key"], old_route, new_route).casefold()
+        if route != slot["relative_path_key"]:
+            db.execute(
+                "UPDATE media_import_artifact_slots SET relative_path_key=?,updated_at=? WHERE project_id=? AND progress_id=?",
+                (route, timestamp, project_id, slot["progress_id"]),
+            )
+
+
+def _external_link_matches(file_path: str, expected_sha256: str) -> bool:
+    return os.path.isfile(file_path) and full_fingerprint(file_path) == expected_sha256
+
+
+def _windows_paths_alias_same_entry(old_path: str, new_path: str) -> bool:
+    """Return true only for differently-cased names of one Windows directory entry."""
+    if os.name != "nt" or old_path == new_path or old_path.casefold() != new_path.casefold():
+        return False
+    try:
+        return os.path.samefile(old_path, new_path)
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def _advance_external_progress_link_rename(db, operation, fault_after=None):
+    operation_id = operation["id"]
+    old_path = operation["old_path"]
+    new_path = operation["new_path"]
+    temporary_path = operation["temporary_path"]
+    expected_sha256 = operation["link_sha256"]
+    state = operation["state"]
+
+    def inject(stage):
+        if fault_after == stage:
+            raise RuntimeError(f"test_fault_after_{stage}")
+
+    if state == "prepared":
+        old_matches = _external_link_matches(old_path, expected_sha256)
+        temporary_matches = _external_link_matches(temporary_path, expected_sha256)
+        new_matches = _external_link_matches(new_path, expected_sha256)
+        case_only_same_entry = (old_matches and new_matches
+                                and _windows_paths_alias_same_entry(old_path, new_path))
+        if new_matches and not old_matches and not temporary_matches:
+            pass
+        elif temporary_matches and not old_matches and not os.path.exists(new_path):
+            os.rename(temporary_path, new_path)
+        elif old_matches and not temporary_matches:
+            if os.path.exists(new_path) and not case_only_same_entry:
+                raise ValueError("external_progress_target_conflict: 目标入口已存在，恢复不会覆盖")
+            os.rename(old_path, temporary_path)
+            inject("temporary_moved")
+            if os.path.exists(new_path):
+                raise ValueError("external_progress_target_conflict: 目标入口已存在，恢复不会覆盖")
+            os.rename(temporary_path, new_path)
+        else:
+            raise ValueError("external_progress_link_identity_mismatch: 外链入口身份已变化")
+        if not _external_link_matches(new_path, expected_sha256):
+            raise ValueError("external_progress_link_identity_mismatch: 发布后的外链入口身份不匹配")
+        db.execute(
+            "UPDATE progress_external_link_renames SET state='filesystem_moved',error='',updated_at=? WHERE id=?",
+            (int(time.time() * 1000), operation_id),
+        )
+        db.commit()
+        state = "filesystem_moved"
+        inject("filesystem_moved")
+
+    if state == "filesystem_moved":
+        if not _external_link_matches(new_path, expected_sha256):
+            raise ValueError("external_progress_link_identity_mismatch: 数据库提交前外链入口身份已变化")
+        try:
+            _apply_external_progress_route_database(db, operation)
+            db.execute(
+                "UPDATE progress_external_link_renames SET state='database_relocated',error='',updated_at=? WHERE id=?",
+                (int(time.time() * 1000), operation_id),
+            )
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        state = "database_relocated"
+        inject("database_relocated")
+
+    if state == "database_relocated":
+        if not _external_link_matches(new_path, expected_sha256):
+            raise ValueError("external_progress_link_identity_mismatch: 已提交外链入口身份已变化")
+        try:
+            _apply_external_progress_route_database(db, operation)
+            row = db.execute("SELECT external_link_relative_path FROM progress_folders WHERE id=?", (operation["progress_id"],)).fetchone()
+            if row is None or row["external_link_relative_path"].casefold() != operation["new_relative_path"].casefold():
+                raise ValueError("external_progress_database_relocation_invalid: 数据库路由尚未正确更新")
+            timestamp = int(time.time() * 1000)
+            db.execute(
+                """UPDATE progress_external_link_renames SET state='completed',error='',updated_at=?,completed_at=?
+                   WHERE id=?""", (timestamp, timestamp, operation_id),
+            )
+            lease = _progress_tree_mutation_lease(db, operation["project_id"])
+            owns_current_lease = (lease is not None and operation["mutation_token"]
+                                  and lease.get("token") == operation["mutation_token"]
+                                  and int(lease.get("createdAt") or 0) == int(operation["lease_created_at"] or 0))
+            owns_legacy_lease = (lease is not None and not operation["mutation_token"]
+                                 and int(operation["lease_created_at"] or 0) == 0
+                                 and 0 < int(lease.get("createdAt") or 0) <= int(operation["created_at"] or 0))
+            if owns_current_lease or owns_legacy_lease:
+                db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(operation["project_id"]),))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        inject("completed")
+    return db.execute("SELECT * FROM progress_external_link_renames WHERE id=?", (operation_id,)).fetchone()
+
+
+def recover_progress_external_link_renames(root: str, db, fault_after=None):
     del root
+    try:
+        pending = db.execute(
+            "SELECT * FROM progress_external_link_renames WHERE state!='completed' ORDER BY created_at,id"
+        ).fetchall()
+    except sqlite3.OperationalError:
+        return {"success": True, "recovered": 0, "pending": 0}
+    recovered = 0
+    for operation in pending:
+        try:
+            completed = _advance_external_progress_link_rename(db, operation, fault_after=fault_after)
+            recovered += int(completed["state"] == "completed")
+        except Exception as error:
+            current = db.execute(
+                "SELECT state FROM progress_external_link_renames WHERE id=?", (operation["id"],),
+            ).fetchone()
+            db.execute(
+                "UPDATE progress_external_link_renames SET error=?,updated_at=? WHERE id=?",
+                (("" if current is not None and current["state"] == "completed" else str(error)[:2000]),
+                 int(time.time() * 1000), operation["id"]),
+            )
+            db.commit()
+            raise
+    remaining = db.execute("SELECT COUNT(*) FROM progress_external_link_renames WHERE state!='completed'").fetchone()[0]
+    return {"success": True, "recovered": recovered, "pending": remaining}
+
+
+def progress_external_link_route_rename(root: str, db, payload: dict, fault_after=None):
+    recover_progress_external_link_renames(root, db, fault_after=fault_after)
     project = project_row(db, payload["projectName"])
+    progress_id = str(payload.get("progressId") or "")
+    old_route = normalize_external_link_relative_path(payload.get("oldRelativePath"))
+    new_route = normalize_external_link_relative_path(payload.get("newRelativePath"))
     mutation_token = str(payload.get("mutationToken") or "")
+    requested_operation_id = str(payload.get("operationId") or "")
+    if requested_operation_id:
+        existing = db.execute(
+            "SELECT * FROM progress_external_link_renames WHERE id=?", (requested_operation_id,),
+        ).fetchone()
+        if (existing is None or existing["project_id"] != project["id"] or existing["progress_id"] != progress_id
+                or existing["old_relative_path"].casefold() != old_route.casefold()
+                or existing["new_relative_path"].casefold() != new_route.casefold()):
+            raise ValueError("external_progress_rename_operation_mismatch: 外链重命名事务不匹配")
+        completed = _advance_external_progress_link_rename(db, existing, fault_after=fault_after)
+        return {
+            "success": True, "operationId": completed["id"], "state": completed["state"],
+            "oldRelativePath": completed["old_relative_path"], "newRelativePath": completed["new_relative_path"],
+            "progressFolder": serialize_progress(_progress_row_by_id(db, completed["progress_id"])),
+        }
+    operation_key = hashlib.sha256(
+        f"{project['id']}\0{progress_id}\0{old_route.casefold()}\0{new_route.casefold()}\0{mutation_token}".encode("utf-8")
+    ).hexdigest()
+    existing = db.execute(
+        "SELECT * FROM progress_external_link_renames WHERE operation_key=?", (operation_key,),
+    ).fetchone()
+    if existing is not None:
+        completed = _advance_external_progress_link_rename(db, existing, fault_after=fault_after)
+        return {
+            "success": True, "operationId": completed["id"], "state": completed["state"],
+            "oldRelativePath": completed["old_relative_path"], "newRelativePath": completed["new_relative_path"],
+            "progressFolder": serialize_progress(_progress_row_by_id(db, completed["progress_id"])),
+        }
     lease = _progress_tree_mutation_lease(db, project["id"])
     if not mutation_token or lease is None or lease.get("token") != mutation_token:
         raise ValueError("progress_tree_mutation_expired: 版本树变更令牌已失效")
-    progress_id = str(payload.get("progressId") or "")
     progress = db.execute(
         "SELECT * FROM progress_folders WHERE id=? AND project_id=?", (progress_id, project["id"]),
     ).fetchone()
@@ -5868,8 +6091,6 @@ def progress_external_link_route_rename(root: str, db, payload: dict):
     ).fetchone()
     if active is not None:
         raise ValueError("progress_folder_busy: 进度存在活动或待修复的跟踪会话")
-    old_route = normalize_external_link_relative_path(payload.get("oldRelativePath"))
-    new_route = normalize_external_link_relative_path(payload.get("newRelativePath"))
     if not old_route or not new_route or progress["external_link_relative_path"].casefold() != old_route.casefold():
         raise ValueError("external_progress_route_mismatch: 外链入口已变化，请刷新后重试")
     if old_route.casefold() == new_route.casefold() and old_route == new_route:
@@ -5888,38 +6109,75 @@ def progress_external_link_route_rename(root: str, db, payload: dict):
                 or row["external_link_relative_path"].casefold().startswith(old_route.casefold() + "/")]
     if not affected:
         raise ValueError("external_progress_route_mismatch: 没有找到外链版本路由")
-    if payload.get("preflight") is True:
-        return {"success": True, "affectedProgressIds": [row["id"] for row in affected]}
+    old_path_value = str(payload.get("oldPath") or "")
+    new_path_value = str(payload.get("newPath") or "")
+    if not old_path_value and not new_path_value:
+        if payload.get("preflight") is True:
+            return {"success": True, "affectedProgressIds": [row["id"] for row in affected]}
+        # Compatibility for trusted in-process callers that already performed
+        # the physical shortcut rename. Electron passes both paths and always
+        # uses the crash-recoverable journal above.
+        try:
+            _apply_external_progress_route_database(db, {
+                "project_id": project["id"], "progress_id": progress_id,
+                "old_relative_path": old_route, "new_relative_path": new_route,
+            })
+            db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(project["id"]),))
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        return {
+            "success": True, "progressFolder": serialize_progress(_progress_row_by_id(db, progress_id)),
+            "progressFolders": [serialize_progress(row) for row in progress_rows(db, project["id"])],
+            "oldRelativePath": old_route, "newRelativePath": new_route,
+        }
+    if not old_path_value or not new_path_value:
+        raise ValueError("external_progress_route_path_mismatch: 外链入口物理路径不完整")
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    old_path = canonical_path(old_path_value)
+    new_path = canonical_path(new_path_value)
+    expected_old_path = canonical_path(os.path.join(project_path, old_route.replace("/", os.sep)))
+    expected_new_path = canonical_path(os.path.join(project_path, new_route.replace("/", os.sep)))
+    if old_path.casefold() != expected_old_path.casefold() or new_path.casefold() != expected_new_path.casefold():
+        raise ValueError("external_progress_route_path_mismatch: 外链入口物理路径与项目路由不一致")
+    if not os.path.isfile(old_path):
+        raise ValueError("external_progress_rename_invalid: 外链入口当前不可用")
+    if old_path.casefold() != new_path.casefold() and os.path.exists(new_path):
+        raise ValueError("external_progress_target_conflict: 目标入口已存在")
+    operation_id = str(uuid.uuid4())
+    temporary_path = os.path.join(os.path.dirname(old_path), f".photoflow-external-rename-{operation_id}.lnk")
     timestamp = int(time.time() * 1000)
-    try:
-        for row in affected:
-            route = _replace_relative_prefix(row["external_link_relative_path"], old_route, new_route)
-            db.execute(
-                """UPDATE progress_folders SET external_link_relative_path=?,
-                   display_name=CASE WHEN id=? THEN ? ELSE display_name END,updated_at=? WHERE id=?""",
-                (route, progress_id, new_route.rsplit("/", 1)[-1][:-4], timestamp, row["id"]),
-            )
-        for slot in db.execute(
-            "SELECT progress_id,relative_path_key FROM media_import_artifact_slots WHERE project_id=?", (project["id"],),
-        ).fetchall():
-            route = _replace_relative_prefix(slot["relative_path_key"], old_route, new_route).casefold()
-            if route != slot["relative_path_key"]:
-                db.execute(
-                    "UPDATE media_import_artifact_slots SET relative_path_key=?,updated_at=? WHERE project_id=? AND progress_id=?",
-                    (route, timestamp, project["id"], slot["progress_id"]),
-                )
-        db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(project["id"]),))
-        db.commit()
-    except Exception:
-        db.rollback()
-        raise
+    db.execute(
+        """INSERT INTO progress_external_link_renames(
+             id,operation_key,project_id,progress_id,old_relative_path,new_relative_path,
+             old_path,new_path,temporary_path,link_sha256,mutation_token,lease_created_at,state,error,created_at,updated_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        (operation_id, operation_key, project["id"], progress_id, old_route, new_route,
+         old_path, new_path, temporary_path, full_fingerprint(old_path), mutation_token,
+         int(lease.get("createdAt") or 0), "prepared", "", timestamp, timestamp),
+    )
+    db.commit()
+    if payload.get("preflight") is True:
+        return {"success": True, "operationId": operation_id, "state": "prepared",
+                "affectedProgressIds": [row["id"] for row in affected]}
+    completed = _advance_external_progress_link_rename(
+        db, db.execute("SELECT * FROM progress_external_link_renames WHERE id=?", (operation_id,)).fetchone(),
+        fault_after=fault_after,
+    )
     return {
-        "success": True,
+        "success": True, "operationId": completed["id"], "state": completed["state"],
         "progressFolder": serialize_progress(_progress_row_by_id(db, progress_id)),
         "progressFolders": [serialize_progress(row) for row in progress_rows(db, project["id"])],
-        "oldRelativePath": old_route,
-        "newRelativePath": new_route,
+        "oldRelativePath": old_route, "newRelativePath": new_route,
     }
+
+
+def progress_locations_snapshot(root: str, db, payload: dict):
+    """Refresh registered locations without running discovery or migrations."""
+    project = project_row(db, payload["projectName"])
+    sync_progress_folder_locations(root, db, project)
+    return progress_snapshot(db, payload, project)
 
 
 def progress_folder_rename(root: str, db, payload: dict, fault_after=None):
@@ -6050,7 +6308,141 @@ def progress_update_tree_finish(db, payload: dict):
     return {"success": True}
 
 
-def progress_update_tree(root: str, db, payload: dict):
+def _progress_update_tree_legacy(root: str, db, payload: dict):
+    project = project_row(db, payload["projectName"])
+    updates = payload.get("updates")
+    primary_id = str(payload.get("primaryProgressId") or "")
+    replacement_id = str(payload.get("replacementProgressId") or "")
+    mutation_token = str(payload.get("mutationToken") or "")
+    if not primary_id or not isinstance(updates, list) or not updates:
+        raise ValueError("没有可更新的进度关系")
+    lease = _progress_tree_mutation_lease(db, project["id"])
+    if lease is not None and lease.get("token") != mutation_token:
+        raise ValueError("node_busy: 版本树正在由另一个操作修改")
+    if mutation_token and (lease is None or lease.get("token") != mutation_token):
+        raise ValueError("progress_tree_mutation_expired: 版本树变更令牌已失效")
+    active_session = db.execute(
+        """SELECT 1 FROM tracking_sessions WHERE project_id=?
+           AND status IN ('comparing','pending_confirm','committing','failed') LIMIT 1""",
+        (project["id"],),
+    ).fetchone()
+    if active_session is not None:
+        raise ValueError("node_busy: 项目中存在正在比较、确认或提交的版本，暂时不能修改版本树")
+    rows = {row["id"]: row for row in progress_rows(db, project["id"])}
+    update_ids = {str(update.get("id") or "") for update in updates}
+    if "" in update_ids or len(update_ids) != len(updates) or primary_id not in update_ids:
+        raise ValueError("进度更新列表无效")
+    if any(progress_id not in rows for progress_id in update_ids):
+        raise ValueError("要修改的进度不存在")
+    children_by_parent = {}
+    for row in rows.values():
+        if row["parent_progress_id"] and row["relation_kind"] == "main" and row["node_role"] == "progress":
+            children_by_parent.setdefault(row["parent_progress_id"], []).append(row["id"])
+    expected_ids = set()
+
+    def collect_subtree(progress_id):
+        if progress_id in expected_ids:
+            raise ValueError("progress_cycle: 版本树存在循环")
+        expected_ids.add(progress_id)
+        for child_id in children_by_parent.get(progress_id, []):
+            collect_subtree(child_id)
+
+    collect_subtree(replacement_id or primary_id)
+    if replacement_id:
+        replacement = rows.get(replacement_id)
+        target = rows.get(primary_id)
+        if replacement is None or target is None or replacement_id == primary_id:
+            raise ValueError("失效进度替换目标无效")
+        if replacement["media_kind"] != target["media_kind"]:
+            raise ValueError("失效进度替换时不能改变图片或视频类型")
+        if os.path.isdir(replacement["folder_path"]):
+            raise ValueError("被替换进度的原文件夹仍然存在")
+        expected_ids.discard(replacement_id)
+        expected_ids.add(primary_id)
+    if update_ids != expected_ids:
+        raise ValueError("必须一次性更新当前进度及其全部后代")
+    normalized = []
+    target_versions = set()
+    target_names = set()
+    target_paths = set()
+    project_path = canonical_path(os.path.join(os.path.abspath(root), project["relative_path"]))
+    for update in updates:
+        progress_id = str(update["id"])
+        row = rows[progress_id]
+        if row["node_role"] != "progress":
+            raise ValueError("修改版本树只接受 progress 节点")
+        media_kind = str(update.get("mediaKind") or row["media_kind"])
+        if media_kind != row["media_kind"]:
+            raise ValueError("修改进度时不能改变图片或视频类型")
+        version_key = str(update.get("versionKey") or "")
+        if not version_key or len(version_key) > 128 or any(ord(character) < 32 for character in version_key):
+            raise ValueError("无效的版本编号")
+        display_name = str(update.get("displayName") or "").strip()
+        if not display_name:
+            raise ValueError("进度名称不能为空")
+        folder_path = canonical_path(update.get("folderPath") or "")
+        external_route = row["external_link_relative_path"]
+        unchanged_external = bool(external_route) and folder_path.casefold() == row["folder_path_key"]
+        if external_route and not unchanged_external:
+            raise ValueError("external_progress_path_immutable: 外链版本只能通过“移动外链到项目内”改变物理位置")
+        if (not unchanged_external and not is_project_descendant(folder_path, project_path)) or not os.path.isdir(folder_path):
+            raise ValueError("版本进度必须是项目内的文件夹")
+        parent_id = update.get("parentProgressId") or None
+        parent = rows.get(parent_id)
+        if not parent_id:
+            raise ValueError("progress_parent_required: 版本进度必须保留有效父节点")
+        if parent is None or parent["missing_since"] is not None or parent["media_kind"] != media_kind or not _is_valid_structural_parent(parent):
+            raise ValueError("父版本进度不存在")
+        version_identity = (media_kind, version_key.casefold())
+        name_identity = display_name.casefold()
+        path_identity = folder_path.casefold()
+        if version_identity in target_versions or name_identity in target_names or path_identity in target_paths:
+            raise ValueError("进度树更新包含重复版本、名称或文件夹")
+        target_versions.add(version_identity); target_names.add(name_identity); target_paths.add(path_identity)
+        tracking_enabled = int(bool(update.get("trackingEnabled", row["tracking_enabled"])))
+        tracking_state = str(update.get("trackingState") or ("ready" if tracking_enabled else "disabled"))
+        if tracking_state not in PROGRESS_TRACKING_STATES:
+            raise ValueError("无效的版本跟踪状态")
+        if not tracking_enabled:
+            tracking_state = "disabled"
+        normalized.append((progress_id, media_kind, version_key, parent_id, display_name, folder_path,
+                           external_route, tracking_enabled, tracking_state))
+    for row in rows.values():
+        if row["id"] in update_ids or replacement_id and row["id"] == replacement_id:
+            continue
+        if ((row["media_kind"], row["version_key"].casefold()) in target_versions
+                or row["display_name"].casefold() in target_names or row["folder_path_key"] in target_paths):
+            raise ValueError("目标版本、名称或文件夹已被其他进度占用")
+    timestamp = int(time.time() * 1000)
+    try:
+        for index, item in enumerate(normalized):
+            db.execute("UPDATE progress_folders SET version_key=?,updated_at=? WHERE id=?",
+                       (f"__progress_update_{index}_{uuid.uuid4().hex}", timestamp, item[0]))
+        for progress_id, media_kind, version_key, parent_id, display_name, folder_path, external_route, tracking_enabled, tracking_state in normalized:
+            db.execute(
+                """UPDATE progress_folders SET media_kind=?,version_key=?,parent_progress_id=?,relation_kind='main',
+                   display_name=?,folder_path=?,folder_path_key=?,folder_id=?,external_link_relative_path=?,
+                   tracking_enabled=?,tracking_state=?,missing_since=NULL,updated_at=? WHERE id=?""",
+                (media_kind, version_key, parent_id, display_name, folder_path, folder_path.casefold(),
+                 directory_identity(folder_path), external_route, tracking_enabled, tracking_state, timestamp, progress_id),
+            )
+        if replacement_id:
+            db.execute(
+                """UPDATE progress_folders SET folder_id=NULL,missing_since=COALESCE(missing_since,?),updated_at=?
+                   WHERE id=?""", (timestamp, timestamp, replacement_id),
+            )
+        if mutation_token:
+            db.execute("DELETE FROM meta WHERE key=?", (_progress_tree_mutation_key(project["id"]),))
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    refreshed = progress_rows(db, project["id"])
+    return {"success": True, "progressFolder": serialize_progress(next(row for row in refreshed if row["id"] == primary_id)),
+            "progressFolders": [serialize_progress(row) for row in refreshed]}
+
+
+def _progress_update_tree_single(root: str, db, payload: dict):
     del root
     project = project_row(db, payload["projectName"])
     updates = payload.get("updates")
@@ -6144,6 +6536,13 @@ def progress_update_tree(root: str, db, payload: dict):
         "progressFolder": serialize_progress(primary),
         "progressFolders": [serialize_progress(row) for row in refreshed],
     }
+
+
+def progress_update_tree(root: str, db, payload: dict):
+    updates = payload.get("updates")
+    if payload.get("replacementProgressId") or isinstance(updates, list) and len(updates) != 1:
+        return _progress_update_tree_legacy(root, db, payload)
+    return _progress_update_tree_single(root, db, payload)
 
 
 def _progress_row_by_id(db, progress_id: str):
@@ -9602,11 +10001,16 @@ def mutate(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "progress_list":
         recover_progress_folder_relocations(root, db)
+        recover_progress_external_link_renames(root, db)
         result = progress_list(root, db, payload)
         db.close()
         return result
     elif action == "progress_snapshot":
         result = progress_snapshot(db, payload)
+        db.close()
+        return result
+    elif action == "progress_locations_snapshot":
+        result = progress_locations_snapshot(root, db, payload)
         db.close()
         return result
     elif action == "progress_register":

@@ -9,6 +9,7 @@ const { CANCELLED_CODE, buildWorkflowPlan, copyWorkflowPlan } = require('./workf
 const { createTeamWorkflowArtifactService } = require('./workflow-artifact.cjs');
 const { createWorkflowManifestResolver } = require('./workflow-manifest.cjs');
 const PROJECT_FOLDER_COMPATIBILITY = require('./compatibility/project-folder-policy.cjs');
+const { restoreProjectBundle, restoreWorkspaceBundle, selectRestoreSource, loadRestoreSources, writeRestoreReceipt } = require('./compatibility/storage-restore.cjs');
 
 const MAX_ITEMS = 2000;
 const DB_BUSY_TIMEOUT_MS = 750;
@@ -29,6 +30,9 @@ const injectedTestFaults = new Set();
 const schemaReadyPaths = new Set();
 let advancedRuntimeProbeCache = null;
 let nextCapabilityId = 1;
+let restoreLeaseHeld = false;
+let restoreHold = null;
+const completedRestoreHolds = new Map();
 const metricSamples = new Map();
 const revisionRequestContext = new AsyncLocalStorage();
 const activeProjectId = () => String(revisionRequestContext.getStore()?.projectId || '');
@@ -261,7 +265,7 @@ const publishProjectFiles = async (parentId, files, idempotencyKey, replacements
 const publishWorkingImage = async (parentId, storage, sourcePath, baseRelativePath, operationKey) => {
   const normalizedBase = String(baseRelativePath || '').replace(/\\/g, '/'); const parsed = path.posix.parse(normalizedBase);
   const outputRelativePath = [parsed.dir, `${parsed.name}_裁切`, path.basename(sourcePath)].filter(Boolean).join('/');
-  const ledgerPath = path.join(storage.dataPath, 'output-ownership', 'working-images.json'); const ledger = await readJson(ledgerPath, {});
+  const ledgerPath = path.join(storage.dataPath, 'output-ownership', sha256(String(storage.projectId)), 'working-images.json'); const ledger = await readJson(ledgerPath, {});
   let previous = ledger[outputRelativePath] || null;
   if (!previous) {
     try { const adopted = await callHostV7(parentId, 'project.output.v7', { action: 'adopt', migrationId: `working-${sha256(outputRelativePath).slice(0, 24)}`, outputs: [{ relativePath: outputRelativePath }] }); const output = adopted.outputs?.[0]; if (output) previous = { commitId: adopted.commitId, artifactId: output.artifactId, sha256: output.sha256 }; } catch { /* A new working image has no legacy target to adopt. */ }
@@ -481,7 +485,10 @@ const ensureSchema = databasePath => {
     const tasks = db.prepare('SELECT * FROM team_patch_tasks').all();
     const insertStage = db.prepare(`INSERT OR IGNORE INTO team_task_stages(project_id,id,task_id,person_index,stage_order,state,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?)`);
     const updateAssignmentLink = db.prepare(`UPDATE team_person_assignments SET task_id=COALESCE(task_id,?),stage_id=COALESCE(stage_id,?) WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?`);
-    const insertArtifact = db.prepare(`INSERT OR IGNORE INTO team_task_artifacts(project_id,id,task_id,stage_id,person_index,kind,artifact_path,created_at) VALUES(?,?,?,?,?,?,?,?)`);
+    // schema-v9's guarded rebuild uses CREATE TABLE AS and therefore cannot
+    // retain column defaults. Supply the non-null values explicitly while
+    // upgrading historical component databases.
+    const insertArtifact = db.prepare(`INSERT OR IGNORE INTO team_task_artifacts(project_id,id,task_id,stage_id,person_index,kind,artifact_path,digest,metadata_json,created_at,is_deleted) VALUES(?,?,?,?,?,?,?,?,?,?,?)`);
     for (const task of tasks) {
       const members = parseJson(task.members_json, []).length ? parseJson(task.members_json, []) : [{ personIndex: task.person_index }];
       for (const [order, member] of members.entries()) {
@@ -492,14 +499,35 @@ const ensureSchema = databasePath => {
         const assignment = db.prepare('SELECT edited_patch_path,artifact_id,completed_at FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=?').get(task.project_id, task.photo_id, task.base_version_id, personIndex);
         if (assignment?.edited_patch_path) {
           const artifactId = assignment.artifact_id || `legacy-artifact:${task.id}:${personIndex}`;
-          insertArtifact.run(task.project_id, artifactId, task.id, stageId, personIndex, 'returned', assignment.edited_patch_path, Number(assignment.completed_at || task.updated_at || now));
+          insertArtifact.run(task.project_id, artifactId, task.id, stageId, personIndex, 'returned', assignment.edited_patch_path, '', '{}', Number(assignment.completed_at || task.updated_at || now), 0);
           db.prepare('UPDATE team_person_assignments SET artifact_id=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND person_index=? AND artifact_id IS NULL').run(artifactId, task.project_id, task.photo_id, task.base_version_id, personIndex);
         }
       }
       if (task.edited_patch_path && !db.prepare('SELECT 1 FROM team_task_artifacts WHERE project_id=? AND task_id=? AND artifact_path=?').get(task.project_id, task.id, task.edited_patch_path)) {
-        insertArtifact.run(task.project_id, `legacy-task-artifact:${task.id}`, task.id, null, null, 'returned', task.edited_patch_path, Number(task.updated_at || now));
+        insertArtifact.run(task.project_id, `legacy-task-artifact:${task.id}`, task.id, null, null, 'returned', task.edited_patch_path, '', '{}', Number(task.updated_at || now), 0);
       }
     }
+  }
+  // Historical builds stored one workspace-wide completion bit. Expand it
+  // once into project-owned markers before deleting it so a later project
+  // restore can invalidate only its own legacy-artifact adoption state.
+  if (db.prepare("SELECT value FROM meta WHERE key='legacy_project_artifacts_v2'").get()?.value === 'committed') {
+    const projectIds = new Set();
+    for (const table of ['team_project_revisions','team_retouch_photos','team_person_identities','team_person_assignments','team_person_exclusions','team_patch_tasks','team_task_stages','team_task_artifacts','team_workflow_reconcile_pending','team_workflow_review_confirmations','team_durable_operations','team_workflow_settings','team_workflow_state','team_review_state']) {
+      if (!db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?").get(table)) continue;
+      const hasProjectId = db.prepare(`PRAGMA table_info(${table})`).all().some(column => column.name === 'project_id');
+      if (hasProjectId) for (const row of db.prepare(`SELECT DISTINCT project_id FROM ${table} WHERE project_id IS NOT NULL AND project_id<>''`).all()) projectIds.add(String(row.project_id));
+    }
+    db.exec('BEGIN IMMEDIATE');
+    try {
+      for (const projectId of projectIds) {
+        const suffix = sha256(projectId).slice(0, 24);
+        db.prepare('INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)').run(`legacy_project_artifacts_v2:${suffix}`, 'committed');
+        db.prepare('INSERT OR IGNORE INTO meta(key,value) VALUES(?,?)').run(`legacy_project_artifacts_v2_state:${suffix}`, JSON.stringify({ state: 'committed', phase: 'complete', pendingCount: 0, retryable: false, migratedFromGlobal: true, updatedAt: Date.now() }));
+      }
+      db.prepare("DELETE FROM meta WHERE key='legacy_project_artifacts_v2'").run();
+      db.exec('COMMIT');
+    } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
   db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','9') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
   schemaReadyPaths.add(databasePath);
@@ -1797,7 +1825,10 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
     await reportTask(parentId, operationId, 'start', { message: job.message, checkpoint: { projectId: context.projectId, operationId } }, 'workflow.progress');
     const scope = await workflowScope(parentId, context);
     const previousManifest = scope.manifest;
-    if ((fs.existsSync(scope.outputDirectory) || previousManifest) && !payload.replace) return { success: true, requiresConfirmation: true, operationId };
+    if ((fs.existsSync(scope.outputDirectory) || previousManifest) && !payload.replace) {
+      await publish({ state: 'awaiting-confirmation', phase: 'awaiting-confirmation', message: '已有团片工作流，等待确认替换' });
+      return { success: true, requiresConfirmation: true, operationId, state: job.state };
+    }
     const snapshot = await workspaceSnapshot(parentId, context);
     const projectDirectory = path.dirname(scope.outputDirectory);
     stagingDirectory = path.join(projectDirectory, '.photoflow-team-workflow-staging');
@@ -2645,7 +2676,93 @@ const normalizeRevisionError = error => {
   if (/TEAM_REVISION_CONFLICT/.test(String(error?.message || ''))) return Object.assign(new Error('团片数据已被其他操作更新，请刷新后重试'), { code: 'COMPONENT_HOST_CONFLICT', retryable: true });
   return error;
 };
+const restoreBusyReasons = () => {
+  const reasons = [];
+  if ([...workflowJobs.values()].some(job => job?.state === 'running')) reasons.push('workflow-job');
+  if (photoOperations.size) reasons.push('photo-operation');
+  if (reviewSessionOperations.size) reasons.push('review-operation');
+  if (projectWorkflowOperations.size) reasons.push('workflow-operation');
+  if (durableOperationRuns.size || durableOperationParentIds.size) reasons.push('durable-operation');
+  if (activeAlgorithms.size) reasons.push('algorithm-process');
+  // The restore request itself is present in this map. Any additional request
+  // means the Host barrier was violated or a detached request is still live.
+  if (activeRequestControls.size > 1) reasons.push('rpc-request');
+  return reasons;
+};
+const withRestoreLease = async (context, worker, busyReasons = restoreBusyReasons()) => {
+  if (context?.componentBackupRestore !== true || context?.surface !== 'backup.restore') throw Object.assign(new Error('团片恢复方法仅允许 Host 备份恢复调度器调用'), { code: 'COMPONENT_RESTORE_FORBIDDEN' });
+  if (restoreLeaseHeld || busyReasons.length) throw Object.assign(new Error(`团片组件仍有后台写入，暂不能恢复${busyReasons.length ? `（${busyReasons.join(', ')}）` : ''}`), { code: 'COMPONENT_BUSY', retryable: true });
+  restoreLeaseHeld = true;
+  try { return await worker(); }
+  finally { restoreLeaseHeld = false; }
+};
+const restoreTokenFrom = payload => String(payload?.quiesceToken || payload?.holdToken || payload?.token || '');
+const restoreBinding = (payload, mode) => `${mode}\0${String(payload?.operationId || '')}\0${String(payload?.targetWorkspace?.root || payload?.targetWorkspace?.dataRoot || '')}`;
+const restoreStorageBinding = payload => {
+  const storage = payload?.targetStorage || {}; const normalize = value => value ? path.resolve(String(value)) : '';
+  return { databasePath: normalize(storage.databasePath), dataPath: normalize(storage.dataPath), controlPath: normalize(storage.controlPath) };
+};
+const bindRestoreStorage = (hold, incoming) => {
+  for (const key of ['databasePath', 'dataPath', 'controlPath']) {
+    const current = String(hold?.[key] || ''); const next = String(incoming?.[key] || '');
+    if (current && next && current.toLowerCase() !== next.toLowerCase()) return false;
+    if (!current && next) hold[key] = next;
+  }
+  hold.storageBound = Boolean(hold.databasePath || hold.dataPath || hold.controlPath);
+  return true;
+};
+const withRestorePhase = async (context, payload, mode, worker) => {
+  const phase = String(payload?.phase || 'standalone');
+  if (phase === 'standalone') return withRestoreLease(context, worker);
+  if (context?.componentBackupRestore !== true || context?.surface !== 'backup.restore') throw Object.assign(new Error('团片恢复方法仅允许 Host 备份恢复调度器调用'), { code: 'COMPONENT_RESTORE_FORBIDDEN' });
+  if (phase === 'prepare') {
+    const busy = restoreBusyReasons();
+    if (restoreLeaseHeld || busy.length) throw Object.assign(new Error(`团片组件仍有后台写入，暂不能恢复${busy.length ? `（${busy.join(', ')}）` : ''}`), { code: 'COMPONENT_BUSY', retryable: true });
+    const quiesceToken = crypto.randomUUID(); restoreLeaseHeld = true;
+    const storage = restoreStorageBinding(payload);
+    restoreHold = { quiesceToken, mode, binding: restoreBinding(payload, mode), operationId: String(payload.operationId || ''), ...storage, storageBound: Boolean(storage.databasePath || storage.dataPath || storage.controlPath) };
+    if (restoreHold.databasePath) schemaReadyPaths.delete(restoreHold.databasePath);
+    return { schemaVersion: 1, operationId: restoreHold.operationId, status: 'prepared', quiesceToken };
+  }
+  const token = restoreTokenFrom(payload);
+  const completed = completedRestoreHolds.get(token);
+  if (!restoreHold && completed && completed.binding === restoreBinding(payload, mode) && (phase === 'finalize' || phase === 'rollback')) return { schemaVersion: 1, operationId: String(payload.operationId || ''), status: completed.status, idempotent: true };
+  if (!restoreHold || restoreHold.quiesceToken !== token || restoreHold.mode !== mode || restoreHold.binding !== restoreBinding(payload, mode)) throw Object.assign(new Error('团片恢复 quiesce token 无效、跨操作或已释放'), { code: 'COMPONENT_RESTORE_HOLD_INVALID' });
+  const incomingStorage = restoreStorageBinding(payload);
+  const hasIncomingStorage = Boolean(incomingStorage.databasePath || incomingStorage.dataPath || incomingStorage.controlPath);
+  if (hasIncomingStorage && !bindRestoreStorage(restoreHold, incomingStorage)) throw Object.assign(new Error('团片恢复目标存储在 quiesce 期间发生变化'), { code: 'COMPONENT_RESTORE_HOLD_INVALID' });
+  if (phase === 'apply') {
+    if (!restoreHold.databasePath || !restoreHold.dataPath || !restoreHold.controlPath) throw Object.assign(new Error('团片恢复 apply 缺少冻结的 Host 存储边界'), { code: 'COMPONENT_RESTORE_HOLD_INVALID' });
+    schemaReadyPaths.delete(restoreHold.databasePath);
+    return worker();
+  }
+  if (phase === 'finalize' || phase === 'rollback') {
+    if (restoreHold.databasePath) schemaReadyPaths.delete(restoreHold.databasePath);
+    const status = phase === 'rollback' ? 'rolled-back' : 'finalized';
+    completedRestoreHolds.set(token, { binding: restoreHold.binding, status });
+    while (completedRestoreHolds.size > 128) completedRestoreHolds.delete(completedRestoreHolds.keys().next().value);
+    restoreHold = null; restoreLeaseHeld = false;
+    return { schemaVersion: 1, operationId: String(payload.operationId || ''), status };
+  }
+  throw Object.assign(new Error(`团片恢复阶段不受支持：${phase}`), { code: 'COMPONENT_RESTORE_PHASE_UNSUPPORTED' });
+};
 const handlers = {
+  'team.backup-restore.workspace.v1': async (parentId, payload, context) => withRestorePhase(context, payload, 'workspace', async () => {
+    const loaded = loadRestoreSources(payload); const source = selectRestoreSource(loaded.sources);
+    if (!source?.path) throw Object.assign(new Error('团片工作区恢复格式不受支持'), { code: 'COMPONENT_RESTORE_FORMAT_UNSUPPORTED' });
+    const databasePath = String(payload.targetStorage?.databasePath || '');
+    if (!databasePath) throw new Error('团片工作区恢复缺少 Host 授权的目标组件存储');
+    const result = restoreWorkspaceBundle({ source, sources: loaded.sources, destinationPath: databasePath, destinationDataPath: payload.targetStorage?.dataPath, payload, ensureSchema });
+    return writeRestoreReceipt(payload, loaded.manifest, loaded.sources, result);
+  }),
+  'team.backup-restore.project.v1': async (parentId, payload, context) => withRestorePhase(context, payload, 'project', async () => {
+    const loaded = loadRestoreSources(payload); const source = selectRestoreSource(loaded.sources);
+    if (!source?.path) throw Object.assign(new Error('团片项目恢复格式不受支持'), { code: 'COMPONENT_RESTORE_FORMAT_UNSUPPORTED' });
+    const databasePath = String(payload.targetStorage?.databasePath || '');
+    if (!databasePath) throw new Error('团片项目恢复缺少 Host 授权的目标组件存储');
+    const result = restoreProjectBundle({ source, sources: loaded.sources, destinationPath: databasePath, destinationDataPath: payload.targetStorage?.dataPath, payload, ensureSchema });
+    return writeRestoreReceipt(payload, loaded.manifest, loaded.sources, result);
+  }),
   'team.project.get.v1': async (parentId, _payload, context) => {
     const startedAt = Date.now();
     const migration = await legacyProjectMigrationStatus(parentId);
@@ -2799,4 +2916,4 @@ process.once('exit', () => { for (const child of activeAlgorithms) child.kill();
 };
 
 if (require.main === module) startService();
-module.exports = { ensureSchema, startService, capabilityError, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, migrationErrorState, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState, resolveAlgorithmRuntime, validateAlgorithmRuntime, resolveWorkflowTaskBinding, runMatcher, revisionRequestContext, advancedRuntimeFailureStatus };
+module.exports = { ensureSchema, startService, capabilityError, migrateAdoptedPrivatePaths, migrateLegacyProjectArtifacts, migrationStateFromDb, migrationErrorState, pendingLegacyArtifactItems, projectMigrationCommittedKey, projectMigrationMetaKey, writeMigrationState, resolveAlgorithmRuntime, validateAlgorithmRuntime, resolveWorkflowTaskBinding, runMatcher, revisionRequestContext, advancedRuntimeFailureStatus, restoreBusyReasons, withRestoreLease, withRestorePhase };

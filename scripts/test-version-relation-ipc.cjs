@@ -15,6 +15,7 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   let layoutSaveAttempts = 0;
   let layoutLockFailures = 0;
   let snapshotProgressCalls = 0;
+  let locationSnapshotCalls = 0;
   let edgeReplacePayload;
   let unregisterPayload;
   let filesystemCalls = 0;
@@ -42,6 +43,12 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
         assert.strictEqual(projectName, 'Trusted Project');
         assert.strictEqual(includeMissing, undefined);
         snapshotProgressCalls += 1;
+        return { success: true, progressFolders: [child, parent], graphEdges: [] };
+      },
+      snapshotProgressLocations: async (_root, projectName, includeMissing) => {
+        assert.strictEqual(projectName, 'Trusted Project');
+        assert.strictEqual(includeMissing, true, 'the public tree must retain freshly detected missing nodes');
+        locationSnapshotCalls += 1;
         return { success: true, progressFolders: [child, parent], graphEdges: [] };
       },
       listProgress: async (_root, projectName, includeMissing) => {
@@ -93,7 +100,8 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
   assert(progressFoldersHandler, 'interactive progress reads must be registered');
   const progressFoldersResult = await progressFoldersHandler(null, workspaceRoot, 'Trusted Project');
   assert.strictEqual(progressFoldersResult.success, true);
-  assert.strictEqual(snapshotProgressCalls, 1, 'opening the version tree must use the read-only progress snapshot');
+  assert.strictEqual(locationSnapshotCalls, 1, 'opening the version tree must use the locked location-refresh snapshot');
+  assert.strictEqual(snapshotProgressCalls, 0, 'the public tree must not use a stale query-only snapshot');
 
   const unregisterHandler = handlers.get('workspace-progress-unregister');
   assert(unregisterHandler, 'progress unregister IPC must be registered');

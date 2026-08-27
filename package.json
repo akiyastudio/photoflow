@@ -15,6 +15,7 @@
     "build:shell-thumbnail": "node scripts/build-shell-thumbnail.cjs",
     "build:recycle-bin-service": "node scripts/build-recycle-bin-service.cjs",
     "build:file-clipboard-service": "node scripts/build-file-clipboard-service.cjs",
+    "build:file-publication-service": "node scripts/build-file-publication-service.cjs",
     "dev": "vite",
     "build": "tsc -b && vite build",
     "build:python": "node scripts/prepare-ffmpeg.cjs && node scripts/build-python.cjs",
@@ -35,7 +36,10 @@
     "test": "node scripts/check-project.cjs --tests-only",
     "test:full": "node scripts/run-full-test-suite.cjs",
     "test:thumbnail-pipeline": "node scripts/test-thumbnail-coordinator.cjs && node scripts/test-thumbnail-pipeline.cjs && node scripts/test-image-thumbnail-runtime.cjs && node scripts/test-thumbnail-startup-recovery.cjs && node scripts/test-thumbnail-maintenance-integration.cjs && node scripts/test-thumbnail-ambiguous-publish.cjs && node scripts/test-thumbnail-second-launch-recovery.cjs",
-    "test:file-transfer": "node scripts/test-file-transfer.cjs",
+    "test:file-transfer": "npm run build:file-publication-service && node scripts/test-file-transfer.cjs && node scripts/test-file-publication-batch-orchestration.cjs",
+    "test:file-publication-service": "npm run build:file-publication-service && node scripts/test-file-publication-service.cjs",
+    "test:file-publication-platform": "node scripts/test-file-publication-platform.cjs",
+    "test:native-file-drag": "node scripts/test-native-file-drag.cjs",
     "test:project-virtual-path": "node scripts/test-project-virtual-path-service.cjs",
     "test:file-clipboard-service": "node scripts/test-file-clipboard-service.cjs",
     "test:filesystem-safety": "node scripts/test-filesystem-safety.cjs && node scripts/test-recycle-bin-service.cjs",
@@ -91,10 +95,11 @@
     "test:version-manager-scope": "node scripts/test-metadata-labels.cjs && node scripts/test-version-manager-scope.cjs",
     "test:classify-import": ".venv\\Scripts\\python.exe scripts\\test-classify-import.py",
     "test:backup": ".venv\\Scripts\\python.exe scripts\\test-backup.py",
-    "test:backup-service": "node scripts/test-backup-service.cjs",
+    "test:backup-service": "node scripts/test-backup-service.cjs && node scripts/test-workspace-storage-key-service.cjs && node scripts/run-component-declared-tests.cjs backup-restore",
+    "test:component-package-layout": "node scripts/test-component-declared-tests.cjs && node scripts/run-component-declared-tests.cjs package-layout",
     "test:storage-usage": "node scripts/test-storage-usage-service.cjs && node scripts/test-media-cache-multi-process.cjs",
     "test:archive-service": "node scripts/test-archive-service.cjs",
-    "test:components": "npm run test:component-visual-contract && node scripts/test-component-catalog.cjs && node scripts/test-components.cjs && node scripts/test-component-development.cjs && node scripts/test-component-status-refresh-policy.cjs && node scripts/test-component-host.cjs && node scripts/test-component-service.cjs",
+    "test:components": "npm run test:component-visual-contract && node scripts/test-component-catalog.cjs && node scripts/test-components.cjs && node scripts/test-component-development.cjs && node scripts/test-component-status-refresh-policy.cjs && node scripts/test-component-install-adoption.cjs && node scripts/test-component-host.cjs && node scripts/test-component-service.cjs && npm run test:component-package-layout",
     "test:component-development": "node scripts/test-component-development.cjs",
     "test:component-catalog": "node scripts/test-component-catalog.cjs",
     "test:component-host": "node scripts/test-component-host.cjs",
@@ -103,7 +108,7 @@
     "test:component-service": "node scripts/test-component-service.cjs && node scripts/test-component-lifecycle.cjs",
     "test:advanced-video": "node scripts/test-video-player-subtitles.cjs && node scripts/test-advanced-video-screenshot-publication.cjs && node scripts/test-advanced-video-service.cjs",
     "test:raw-decoder": ".venv\\Scripts\\python.exe scripts\\test-raw-decoder.py",
-    "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py",
+    "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py && node scripts/test-office-image-extraction-ipc.cjs",
     "test:research": ".venv\\Scripts\\python.exe scripts\\test-research.py",
     "test:video-split": ".venv\\Scripts\\python.exe scripts\\test-cut-video.py",
     "test:video-trim": "node scripts/test-video-trim-commit.cjs",
@@ -111,10 +116,10 @@
     "test:screenshot-main-image": ".venv\\Scripts\\python.exe scripts\\test-screenshot-main-image.py",
     "test:inspiration-gather": "node scripts/test-inspiration-gather.cjs",
     "preview": "vite preview",
-    "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && npm run build:file-clipboard-service && node scripts/launch-electron-dev.cjs",
+    "electron": "npm run build:shell-thumbnail && npm run build:recycle-bin-service && npm run build:file-clipboard-service && npm run build:file-publication-service && node scripts/launch-electron-dev.cjs",
     "electron:dev": "cross-env PHOTOFLOW_DEV_SERVER_URL=http://localhost:5173 concurrently -k \"cross-env BROWSER=none npm run dev\" \"npm run electron\"",
     "cleanup:electron-artifacts": "node scripts/cleanup-electron-artifacts.cjs",
-    "electron:build": "npm run generate:icon && npm run generate:installer-terms && npm run build && npm run build:python && npm run build:shell-thumbnail && npm run build:recycle-bin-service && npm run build:file-clipboard-service && electron-builder && npm run cleanup:electron-artifacts"
+    "electron:build": "npm run generate:icon && npm run generate:installer-terms && npm run build && npm run build:python && npm run build:shell-thumbnail && npm run build:recycle-bin-service && npm run build:file-clipboard-service && npm run build:file-publication-service && electron-builder && npm run cleanup:electron-artifacts"
   },
   "build": {
     "appId": "com.photoflow.toolkit",
@@ -168,6 +173,10 @@
         {
           "from": "electron/bin/file-clipboard-service.exe",
           "to": "file-clipboard-service.exe"
+        },
+        {
+          "from": "electron/bin/file-publication-service.exe",
+          "to": "file-publication-service.exe"
         }
       ]
     },
@@ -200,6 +209,10 @@
         {
           "from": "artifacts/python/ffmpeg.zip",
           "to": "python/ffmpeg.zip"
+        },
+        {
+          "from": "electron/bin/file-publication-service",
+          "to": "file-publication-service"
         }
       ]
     },

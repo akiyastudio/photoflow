@@ -1,8 +1,7 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { ProgressFolder, ProjectFileEntry, VersionGraphEdge } from '../types';
-import { layoutVersionTree, DEFAULT_VERSION_TREE_SPACING, versionTreeAreaSize, versionTreeCanvasBounds, allowedVersionTreeRelationKinds, versionTreeEdgeGeometry, versionTreeEdgePath, versionTreeEdgePresentation, versionTreeRelationLabel, type VersionTreeEdgeKind, type VersionTreeSupplementalEdgeKind, useVersionTreeCanvas, type VersionTreeDragState, progressRelationChangeError, projectVisibleVersionGraph, trackingStateLabel } from '../features/versioning/public';
-import { resolveVersionTreeEntryMapping } from '../features/versioning/project-version-tree-entry-model';
+import { layoutVersionTree, DEFAULT_VERSION_TREE_SPACING, versionTreeAreaSize, versionTreeCanvasBounds, allowedVersionTreeRelationKinds, versionTreeEdgeGeometry, versionTreeEdgePath, versionTreeEdgePresentation, versionTreeRelationLabel, type VersionTreeEdgeKind, type VersionTreeSupplementalEdgeKind, useVersionTreeCanvas, type VersionTreeDragState, progressRelationChangeError, projectVisibleVersionGraph, resolveVersionTreeEntryMapping, trackingStateLabel, versionTreeReactKey } from '../features/versioning/public';
 import { FILE_GRID_GAP } from '../features/workspace/marquee-selection-model';
 import { useHostSurfaceSuspension } from './LayerProvider';
 
@@ -58,6 +57,7 @@ type PositionedItem = { key: string; nodeKey: string; areaKind: VersionTreeAreaK
 type LayoutRelation = { id: string; kind: VersionTreeEdgeKind; parentId: string; childId: string; selectable: boolean };
 type DrawnEdge = { id: string; kind: VersionTreeEdgeKind; path: string; parentId?: string; childId?: string; startX: number; startY: number; endX: number; endY: number; menuX: number; menuY: number };
 const normalizePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLocaleLowerCase('zh-CN');
+const versionTreeCanvasItemId = (item: Pick<PositionedItem, 'key' | 'nodeKey' | 'folder'>) => item.folder ? item.nodeKey : item.key;
 const inferredExternalOriginalKind = (entry: ProjectFileEntry): 'image' | 'video' | undefined => {
   if (!entry.externalLink || entry.externalLinkTargetKind === 'file') return undefined;
   const name = entry.name.replace(/\.lnk$/i, '').trim().toLocaleLowerCase('zh-CN');
@@ -131,7 +131,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   // outputs, while ordinary files remain passive nodes in the Other area.
   const ordinaryEntries = resolvedEntryMapping.ordinaryEntries;
   const selectedNodeIds = useMemo(() => new Set([
-    ...versionItems.filter(item => selectedPathSet.has(normalizePath(item.entry.relativePath))).map(item => `entry:${normalizePath(item.entry.relativePath)}`),
+    ...versionItems.filter(item => selectedPathSet.has(normalizePath(item.entry.relativePath))).map(item => `progress:${item.folder.id}`),
     ...ordinaryEntries.filter(entry => selectedPathSet.has(normalizePath(entry.relativePath))).map(entry => `entry:${normalizePath(entry.relativePath)}`),
   ]), [ordinaryEntries, selectedPathSet, versionItems]);
 
@@ -200,7 +200,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
     })));
     return { positioned, relations };
   }, [auxiliaryGap, columnGap, nodeHeight, nodeWidth, ordinaryEntries, otherColumnGap, rootGap, rowGap, versionItems, visibleEdges]);
-  const canvasNodes = useMemo(() => defaultLayout.positioned.map(item => ({ id: item.key, nodeKey: item.nodeKey, fallbackNodeKeys: item.folder ? [item.key] : undefined, x: item.x, y: item.y })), [defaultLayout]);
+  const canvasNodes = useMemo(() => defaultLayout.positioned.map(item => ({ id: versionTreeCanvasItemId(item), nodeKey: item.nodeKey, fallbackNodeKeys: item.folder ? [item.key] : undefined, x: item.x, y: item.y })), [defaultLayout]);
   const canvas = useVersionTreeCanvas({
     active, nodes: canvasNodes,
     workspacePath, projectName, scopeKey: activeRelativePath, nodeWidth, nodeHeight, collisionHorizontalGap: otherColumnGap, coordinateScale: zoom, onNotice,
@@ -208,7 +208,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   });
   const layout = useMemo(() => {
     const positioned = defaultLayout.positioned.flatMap(item => {
-      const position = canvas.positions.get(item.key);
+      const position = canvas.positions.get(versionTreeCanvasItemId(item));
       return position ? [{ ...item, x: canvasPadding + position.x, y: canvasPadding + position.y }] : [];
     });
     const byId = new Map<string, PositionedItem>();
@@ -636,7 +636,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
         {selectedChild.nodeRole === 'selection' && <span className="text-violet-600">选片关系只能更换来源</span>}
       </div>}
       {renderedItems.map(item => {
-        const nodeHandlers = canvas.nodePointerHandlers(item.key);
+        const nodeHandlers = canvas.nodePointerHandlers(versionTreeCanvasItemId(item));
         const canBeParent = Boolean(item.folder && !item.folder.folderMissing
           && (item.folder.nodeRole === 'original' && !item.folder.artifactKind
             || ['selection', 'workflow'].includes(item.folder.nodeRole)
@@ -656,7 +656,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
               : candidateHovered
                 ? 'bg-emerald-500'
                 : 'bg-blue-600';
-        return <div key={item.key} {...nodeHandlers} draggable={false} data-version-tree-node="true" data-version-progress-id={item.folder?.id} data-version-output-target-key={createVersionTarget || item.folder && item.folder.nodeRole !== 'broll' ? item.key : undefined} onPointerDownCapture={event => {
+        return <div key={versionTreeReactKey(item)} {...nodeHandlers} draggable={false} data-version-tree-node="true" data-version-progress-id={item.folder?.id} data-version-output-target-key={createVersionTarget || item.folder && item.folder.nodeRole !== 'broll' ? item.key : undefined} onPointerDownCapture={event => {
           setSelectedNodeKey(item.key);
           if (event.button !== 0 || !(event.ctrlKey || event.metaKey) || !onStartFileDrag || (event.target as Element).closest('button,input,select,textarea,[data-version-tree-port]')) return;
           nativeFileDragRef.current = { nodeKey: item.key, pointerId: event.pointerId };

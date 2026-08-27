@@ -26,6 +26,7 @@ DOMAIN_TABLES = {
         "tracking_session_items", "legacy_selection_relation_repairs",
         "version_tree_layouts", "version_tree_node_positions", "version_graph_edges",
         "media_import_graph_sessions", "media_import_artifact_slots", "progress_folder_relocations",
+        "progress_external_link_renames",
     ),
 }
 

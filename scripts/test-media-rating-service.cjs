@@ -16,10 +16,16 @@ const run = async () => {
     let metadataWrites = 0;
     let fingerprintRefreshes = 0;
     const favoriteExport = path.join(temporaryRoot, '任意自由名称');
+    const legacyFavoriteExport = path.join(temporaryRoot, '图片后期_N_喜爱');
+    const metadataNamedLikeLegacy = path.join(temporaryRoot, '图片后期_自定义_喜爱');
     const ordinaryProgress = path.join(temporaryRoot, '另一个目录');
     fs.mkdirSync(favoriteExport);
+    fs.mkdirSync(legacyFavoriteExport);
+    fs.mkdirSync(metadataNamedLikeLegacy);
     fs.mkdirSync(ordinaryProgress);
     fs.writeFileSync(path.join(favoriteExport, 'excluded.jpg'), 'excluded');
+    fs.writeFileSync(path.join(legacyFavoriteExport, 'legacy-excluded.jpg'), 'legacy-excluded');
+    fs.writeFileSync(path.join(metadataNamedLikeLegacy, 'metadata-included.jpg'), 'metadata-included');
     fs.writeFileSync(path.join(ordinaryProgress, 'included.jpg'), 'included');
     const service = createMediaRatingService({
       exiftool: {
@@ -36,6 +42,8 @@ const run = async () => {
         refreshMetadataFingerprint: async () => { fingerprintRefreshes += 1; },
         listProgress: async () => ({ success: true, progressFolders: [
           { folderPath: favoriteExport, sourceMetadata: { category: 'favorite-export' } },
+          { folderPath: legacyFavoriteExport, sourceMetadata: null },
+          { folderPath: metadataNamedLikeLegacy, sourceMetadata: { category: 'progress' } },
           { folderPath: ordinaryProgress, sourceMetadata: null },
         ] }),
       },
@@ -59,6 +67,8 @@ const run = async () => {
     const rated = await service.listProject(temporaryRoot, { workspaceRoot: temporaryRoot, projectName: 'Project' });
     assert(rated.some(entry => entry.name === 'included.jpg'));
     assert(!rated.some(entry => entry.name === 'excluded.jpg'), 'favorite exports must be excluded by persisted node purpose, not a folder-name regex');
+    assert(!rated.some(entry => entry.name === 'legacy-excluded.jpg'), 'legacy databases without source metadata must retain favorite-export compatibility');
+    assert(rated.some(entry => entry.name === 'metadata-included.jpg'), 'explicit modern metadata must override the legacy folder-name fallback');
   } finally {
     fs.rmSync(temporaryRoot, { recursive: true, force: true });
   }

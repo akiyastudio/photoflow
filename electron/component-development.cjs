@@ -5,6 +5,7 @@ const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const MAX_METADATA_BYTES = 1024 * 1024;
 const ALLOWED_DEVELOPMENT_FIELDS = new Set(['prepare', 'runtime', 'files']);
 const ALLOWED_RUNTIME_FIELDS = new Set(['command', 'entry', 'argsPrefix']);
+const TEST_SUITE = /^[a-z][a-z0-9-]*$/;
 
 const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -76,8 +77,15 @@ const inspectDevelopmentComponent = (componentRoot, { platform = process.platfor
   const packageManifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
   const component = packageManifest.photoflowComponent;
   if (!component || typeof component !== 'object' || Array.isArray(component)) return null;
-  const unknownComponent = Object.keys(component).filter(field => !['manifest', 'development'].includes(field));
+  const unknownComponent = Object.keys(component).filter(field => !['manifest', 'development', 'tests'].includes(field));
   if (unknownComponent.length) throw new Error(`Unknown photoflowComponent field: ${unknownComponent[0]}`);
+  if (component.tests !== undefined) {
+    if (!component.tests || typeof component.tests !== 'object' || Array.isArray(component.tests)) throw new Error('Component tests must be a suite mapping');
+    for (const [suite, files] of Object.entries(component.tests)) {
+      if (!TEST_SUITE.test(suite) || !Array.isArray(files) || files.length > 16 || new Set(files).size !== files.length || files.some(file => typeof file !== 'string' || file.length > 256 || !/\.(?:cjs|mjs)$/.test(file))) throw new Error(`Invalid declared component test suite: ${suite}`);
+      for (const file of files) relativeFile(file, `component test ${suite}`);
+    }
+  }
   const development = component.development;
   if (!development || typeof development !== 'object' || Array.isArray(development)) return null;
   const unknownDevelopment = Object.keys(development).filter(field => !ALLOWED_DEVELOPMENT_FIELDS.has(field));

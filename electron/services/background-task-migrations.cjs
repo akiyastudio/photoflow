@@ -5,7 +5,7 @@ const ACTIVE_STATES = new Set(['queued', 'running', 'pausing', 'paused', 'resumi
 const STATES = new Set([...ACTIVE_STATES, 'completed', 'failed', 'cancelled']);
 const TASK_CENTER_POLICIES = new Set(['always', 'attention-only', 'hidden']);
 const RESUME_POLICIES = new Set(['atomic', 'checkpoint', 'safe-restart']);
-const NOTIFICATION_POLICIES = new Set(['silent', 'error-only', 'result-only', 'progress-toast']);
+const NOTIFICATION_POLICIES = new Set(['silent', 'error-only', 'result-only', 'progress-toast', 'progress-and-result']);
 const HISTORY_POLICIES = new Set(['persistent', 'ephemeral']);
 
 const isRecord = value => value && typeof value === 'object' && !Array.isArray(value);

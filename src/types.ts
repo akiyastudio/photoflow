@@ -844,7 +844,7 @@ export interface BackgroundTask {
     retryable: boolean;
   };
   resumePolicy: 'checkpoint' | 'safe-restart' | 'atomic';
-  notificationPolicy: 'progress-toast' | 'result-only' | 'error-only' | 'silent';
+  notificationPolicy: 'progress-toast' | 'progress-and-result' | 'result-only' | 'error-only' | 'silent';
   taskCenterPolicy: 'always' | 'attention-only' | 'hidden';
   historyPolicy: 'persistent' | 'ephemeral';
   retryOfTaskId?: string | null;
@@ -874,6 +874,34 @@ export interface AppUpdateInfo {
   url: string;
   notes: string;
   mandatory: boolean;
+}
+
+export interface OfficeImageExtractionItem {
+  document: string;
+  documentName: string;
+  success: boolean;
+  count: number;
+  totalBytes?: number;
+  outputFolder?: string;
+  files?: string[];
+  message?: string;
+  error?: string;
+  publishSuccess?: boolean;
+  publishError?: string;
+}
+
+export interface OfficeImageExtractionResult {
+  success: boolean;
+  documentCount?: number;
+  successfulCount?: number;
+  failedCount?: number;
+  imageCount?: number;
+  requestedCount?: number;
+  acceptedCount?: number;
+  skippedCount?: number;
+  results: OfficeImageExtractionItem[];
+  error?: string;
+  warning?: string;
 }
 
 export interface IElectronAPI {
@@ -965,7 +993,7 @@ export interface IElectronAPI {
   cancelRecentProjectFiles: (cursor: string) => Promise<{ success: boolean; errorCode?: 'RECENT_FILES_SESSION_EXPIRED'; error?: string }>;
   listWorkspaceFolders: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; folders: Array<{ name: string; relativePath: string; parentRelativePath: string; depth: number; externalLink?: boolean; externalLinkOffline?: boolean; viaExternalLink?: boolean }>; truncated?: boolean; error?: string }>;
   addInspirationToProject: (inspirationRoot: string, targetWorkspacePath: string, targetStatus: ProjectStatus, targetProjectName: string, relativePaths: string[]) => Promise<{ success: boolean; count?: number; fileCount?: number; shortcutCount?: number; planningFolder?: string; error?: string }>;
-  extractOfficeImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<{ success: boolean; documentCount?: number; successfulCount?: number; failedCount?: number; imageCount?: number; results: Array<{ document: string; documentName: string; success: boolean; count: number; totalBytes?: number; outputFolder?: string; files?: string[]; message?: string; error?: string }>; error?: string }>;
+  extractOfficeImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[]) => Promise<OfficeImageExtractionResult>;
   extractScreenshotMainImages: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], options?: { requestId?: string; analyzeOnly?: boolean; crops?: Array<{ x: number; y: number; width: number; height: number }>; outputSuffix?: '主图' | '裁剪' }) => Promise<{
     success: boolean;
     inputCount?: number;
@@ -1086,8 +1114,8 @@ export interface IElectronAPI {
   getProjectFileClipboardStatus: () => Promise<{ success: boolean; hasFiles: boolean; error?: string }>;
   cancelProjectFileCut: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[]) => Promise<{ success: boolean; cleared: boolean; hasFiles: boolean; error?: string }>;
   getPathForFile: (file: File) => string;
-  startProjectFileDrag: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[]) => void;
-  onProjectFileDragEnd: (callback: (result: { paths: string[]; clientX: number; clientY: number; insideWindow: boolean }) => void) => () => void;
+  startProjectFileDrag: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[], context: { sessionId: string; sourcePageId: string; origin: 'file-browser' | 'version-tree'; pointerType: 'mouse' | 'pen' | 'touch' | 'unknown' }) => void;
+  onProjectFileDragEnd: (callback: (result: { sessionId: string; sourcePageId: string; origin: 'file-browser' | 'version-tree'; paths: string[]; clientX: number; clientY: number; insideWindow: boolean; started: boolean; releaseConfirmed: boolean }) => void) => () => void;
   onProjectFileOperationProgress: (callback: (progress: ProjectFileOperationProgress) => void) => () => void;
   cancelProjectFileOperation: (operationId: string) => Promise<{ success: boolean; error?: string }>;
   chooseCacheDirectory: () => Promise<{ cancelled?: boolean; path?: string }>;

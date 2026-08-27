@@ -23,6 +23,7 @@
     "workflow-artifact.cjs",
     "workflow-manifest.cjs",
     "compatibility/project-folder-policy.cjs",
+    "compatibility/storage-restore.cjs",
     "_internal/models/rtmdet-ins_m_640x640.onnx",
     "_internal/models/face_detection_yunet_2023mar.onnx",
     "_internal/models/adaface_ir18_webface4m.onnx",
@@ -31,6 +32,7 @@
   "componentHost": {
     "contractVersion": 2,
     "compatibility": { "minHostApiVersion": 7, "maxHostApiVersion": 7 },
+    "legacySettingsAdoptions": [{ "topLevelKey": "personDetection" }],
     "adoptionGrants": ["component.storage.previous.v1", "project.output.existing.v1"],
     "contributions": [
       { "type": "workspace.toolbarAction", "id": "open", "label": "团片协作", "pageId": "main" },
@@ -41,7 +43,19 @@
       "protocolVersion": 1,
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
+      "backupRestore": {
+        "transactionProtocolVersion": 1,
+        "sourceManifestProtocolVersion": 1,
+        "receiptProtocolVersion": 1,
+        "workspace": { "method": "team.backup-restore.workspace.v1" },
+        "project": { "method": "team.backup-restore.project.v1" },
+        "sources": [
+          { "scope": "component-storage", "path": "team-retouch/storage.sqlite3", "format": "component-storage-v1" },
+          { "scope": "domain-database", "path": "team-retouch.sqlite3", "format": "legacy-domain-v1" }
+        ]
+      },
       "rpcMethods": [
+        "team.backup-restore.workspace.v1", "team.backup-restore.project.v1",
         "team.project.get.v1", "team.project.migrate-step.v1", "team.project.calibrate-step.v1", "team.project.register.v1", "team.project.remove-photo.v1",
         "team.identity.save.v1", "team.identity.assign.v1",
         "team.identity.confirm-group.v1", "team.identity.delete.v1",

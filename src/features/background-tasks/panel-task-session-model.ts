@@ -12,6 +12,16 @@ export const panelTaskRestoreDetail = (ownerPageId: string, panelKind: string): 
 
 export const isPanelTaskRestoreForPage = (ownerPageId: string, detail?: PanelTaskRestoreDetail) => detail?.ownerPageId === ownerPageId;
 
+const ACTIVE_PRESENTED_BACKGROUND_TASK_STATES = new Set(['queued', 'running', 'pausing', 'paused', 'resuming']);
+
+export const isActivePresentedBackgroundTaskForPanel = (
+  task: { state?: string; metadata?: Record<string, unknown> },
+  ownerPageId: string,
+  panelKind: string,
+) => ACTIVE_PRESENTED_BACKGROUND_TASK_STATES.has(task.state || '')
+  && String(task.metadata?.presentationOwnerPageId || '') === ownerPageId
+  && String(task.metadata?.presentationPanelKind || '') === panelKind;
+
 export const nextPanelTaskStartedAt = (
   previous: { state?: string; startedAt?: number } | undefined,
   nextState: string,

@@ -190,17 +190,24 @@ const restoreManifestDirectory = () => {
     assert.deepEqual(resolveWorkflowTaskBinding(db, 'project', 'task-1', [{ item: { photoId: 'legacy-photo', baseVersionId: 'base' } }]).legacyPhotoIds, ['legacy-photo']);
     db.close();
 
+    const workflowGroups = [
+      { week: 1, identityId: 'identity-1', identityName: 'A', items: [{ photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, photoName: '任务一' }] },
+      { week: 1, identityId: 'identity-3', identityName: 'C', items: [{ photoId: 'photo', baseVersionId: 'base', taskId: 'task-2', personIndex: 3, photoName: '任务二' }] },
+      { week: 2, identityId: 'identity-2', identityName: 'B', items: [{ photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 2, photoName: '任务一' }] },
+      { week: 2, identityId: 'identity-4', identityName: 'D', items: [{ photoId: 'photo', baseVersionId: 'base', taskId: 'task-2', personIndex: 4, photoName: '任务二' }] },
+    ];
     const generated = await invoke('team.workflow.generate.v1', {
       operationId: 'reconcile-fixture', replace: true,
       preferredIdentityOrder: ['identity-1', 'identity-2', 'identity-3', 'identity-4'],
-      groups: [
-        { week: 1, identityId: 'identity-1', identityName: 'A', items: [{ photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, photoName: '任务一' }] },
-        { week: 1, identityId: 'identity-3', identityName: 'C', items: [{ photoId: 'photo', baseVersionId: 'base', taskId: 'task-2', personIndex: 3, photoName: '任务二' }] },
-        { week: 2, identityId: 'identity-2', identityName: 'B', items: [{ photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 2, photoName: '任务一' }] },
-        { week: 2, identityId: 'identity-4', identityName: 'D', items: [{ photoId: 'photo', baseVersionId: 'base', taskId: 'task-2', personIndex: 4, photoName: '任务二' }] },
-      ],
+      groups: workflowGroups,
     });
     assert.equal(generated.success, true, generated.error);
+    const confirmationRequired = await invoke('team.workflow.generate.v1', { operationId: 'confirm-existing-fixture', groups: [] });
+    assert.equal(confirmationRequired.requiresConfirmation, true);
+    assert.equal(confirmationRequired.state, 'awaiting-confirmation', 'confirmation exits the running state so restore/retry is not permanently busy');
+    const replacementRetry = await invoke('team.workflow.generate.v1', { operationId: 'replace-existing-fixture', replace: true, groups: workflowGroups });
+    assert.equal(replacementRetry.success, true, replacementRetry.error);
+    assert.equal(replacementRetry.alreadyRunning, undefined, 'replace retry is not blocked by the prior confirmation job');
     assert(emittedTopics.has('team.workflow.progress.v1'), 'workflow progress reaches the host on its declared plugin event topic');
     assertActive('task-1', 1, 'ORIGINAL-TASK-ONE');
     const taskTwoActive = assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
@@ -440,8 +447,11 @@ const restoreManifestDirectory = () => {
     await held;
     let undoResolved = false;
     const concurrentUndo = invoke('team.identity.complete.v1', { photoId: 'photo', baseVersionId: 'base', taskId: 'task-1', personIndex: 1, completed: false }).then(value => { undoResolved = true; return value; });
-    await new Promise(resolve => setTimeout(resolve, 60));
-    assert.equal(undoResolved, true, 'a completion may commit while drain is still reading its queue; the later photo lock must reconcile the newest durable state');
+    const undoCommittedBeforeRelease = await Promise.race([
+      concurrentUndo.then(() => true),
+      new Promise(resolve => setTimeout(() => resolve(false), 2000)),
+    ]);
+    assert.equal(undoResolved && undoCommittedBeforeRelease, true, 'a completion may commit while drain is still reading its queue; the later photo lock must reconcile the newest durable state');
     releaseHeldWorkflow();
     await backgroundReconcile;
     await concurrentUndo;

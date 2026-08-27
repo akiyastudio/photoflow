@@ -12,12 +12,23 @@ using System.Windows.Forms;
 
 internal static class FileClipboardService
 {
+    [StructLayout(LayoutKind.Sequential)]
+    private struct Point { public int X; public int Y; }
+
     private const string DropEffectFormat = "Preferred DropEffect";
     private const int RetryCount = 8;
+    private const int VirtualKeyLeftButton = 0x01;
+    private const int MouseReleaseTimeoutMs = 30000;
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
 
     [DllImport("user32.dll")]
     private static extern uint GetClipboardSequenceNumber();
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int virtualKey);
+
+    [DllImport("user32.dll")]
+    private static extern bool GetCursorPos(out Point point);
 
     [STAThread]
     private static int Main(string[] args)
@@ -26,13 +37,14 @@ internal static class FileClipboardService
         Console.OutputEncoding = new UTF8Encoding(false);
         try
         {
-            if (args.Length != 1) throw new ArgumentException("需要 write、read 或 clear-if-current 命令");
+            if (args.Length != 1) throw new ArgumentException("需要 write、read、clear-if-current 或 wait-left-release 命令");
             object result;
             switch (args[0])
             {
                 case "write": result = Write(ReadRequest()); break;
                 case "read": result = Read(); break;
                 case "clear-if-current": result = ClearIfCurrent(ReadRequest()); break;
+                case "wait-left-release": result = WaitForLeftMouseRelease(); break;
                 default: throw new ArgumentException("未知命令：" + args[0]);
             }
             Console.WriteLine(Json.Serialize(result));
@@ -155,5 +167,33 @@ internal static class FileClipboardService
         var first = left.Select(Path.GetFullPath).OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray();
         var second = right.Select(Path.GetFullPath).OrderBy(value => value, StringComparer.OrdinalIgnoreCase).ToArray();
         return first.Length == second.Length && first.SequenceEqual(second, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static bool LeftMouseButtonDown()
+    {
+        return (GetAsyncKeyState(VirtualKeyLeftButton) & 0x8000) != 0;
+    }
+
+    private static object WaitForLeftMouseRelease()
+    {
+        var startedAt = Environment.TickCount;
+        var leftButtonWasDown = LeftMouseButtonDown();
+        while (LeftMouseButtonDown())
+        {
+            if (unchecked(Environment.TickCount - startedAt) >= MouseReleaseTimeoutMs)
+                throw new TimeoutException("等待鼠标左键释放超时");
+            Thread.Sleep(8);
+        }
+        Point cursor;
+        var cursorCaptured = GetCursorPos(out cursor);
+        return new {
+            success = true,
+            leftButtonWasDown,
+            releaseConfirmed = true,
+            waitedMs = Math.Max(0, unchecked(Environment.TickCount - startedAt)),
+            cursorCaptured,
+            screenX = cursorCaptured ? (int?)cursor.X : null,
+            screenY = cursorCaptured ? (int?)cursor.Y : null
+        };
     }
 }

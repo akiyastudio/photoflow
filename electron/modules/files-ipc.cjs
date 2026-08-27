@@ -1,5 +1,10 @@
 const { getProtectedProjectFolderRegistry } = require('../services/protected-project-folder.cjs');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
+const { createNativeFileDragService } = require('../services/native-file-drag-service.cjs');
+const { PUBLISH_PARTIAL_CODE, publishPathNoClobber: defaultPublishPathNoClobber } = require('../services/file-transfer-service.cjs');
+
+const INSPIRATION_VIRTUAL_PROJECT_NAME = '.__photoflow_inspiration__';
+const isInspirationVirtualProject = projectName => projectName === INSPIRATION_VIRTUAL_PROJECT_NAME;
 
 const filesystemDeviceIdentity = stat => {
   try {
@@ -27,8 +32,9 @@ const canUseSameVolumeCut = (platform, clipboardOperation, sourceStats, destinat
   && sourceStats.every(sourceStat => sameFilesystemDevice(sourceStat, destinationStat));
 
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, waitForLeftMouseRelease, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
+  const nativeFileDrag = createNativeFileDragService({ nativeImage, writeLog });
   const resolveVirtual = (root, relativePath, options = {}) => projectVirtualPaths
     ? projectVirtualPaths.resolve(root, relativePath, options)
     : (() => {
@@ -51,9 +57,13 @@ const registerFileOperationsIpc = context => {
   };
   const clipboardPathKey = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
   const normalizedVirtualPath = value => String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLocaleLowerCase('zh-CN');
+  const physicalPathContains = (parent, candidate) => {
+    const relative = path.relative(path.resolve(parent), path.resolve(candidate));
+    return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
+  };
   const trackedExternalRoots = async (workspacePath, projectName, resolutions) => {
     const roots = resolutions.filter(resolution => resolution?.isExternalLinkRoot);
-    if (!roots.length || !versionService?.listProgress) return [];
+    if (!roots.length || isInspirationVirtualProject(projectName) || !versionService?.listProgress) return [];
     const listed = await versionService.listProgress(ensureWorkspace(workspacePath), projectName, true);
     if (!listed?.success) throw new Error(listed?.error || '无法读取外链版本登记');
     const routes = (listed.progressFolders || []).map(folder => normalizedVirtualPath(folder.externalLinkRelativePath)).filter(Boolean);
@@ -73,23 +83,68 @@ const registerFileOperationsIpc = context => {
       if (tracked.length) throw new Error('已纳入版本树的外链不能使用普通移动或重命名；请使用版本管理功能，或先“移动外链到项目内”');
     }
   };
-  const assertNoRegisteredProgressRootMutation = async (workspacePath, projectName, sources, operation) => {
-    if (!new Set(['move', 'rename', 'trash']).has(operation) || !versionService?.listProgress || !sources.length) return;
+  const assertNoRegisteredProgressRootMutation = async (workspacePath, projectName, resolutions, operation) => {
+    if (isInspirationVirtualProject(projectName) || !new Set(['move', 'rename', 'trash', 'cut', 'cut-paste']).has(operation) || !versionService?.listProgress || !resolutions.length) return;
     const listed = await versionService.listProgress(ensureWorkspace(workspacePath), projectName, true);
     if (!listed?.success) throw new Error(listed?.error || '无法读取版本进度登记');
-    const registered = new Map((listed.progressFolders || [])
-      .filter(folder => folder.nodeRole === 'progress' && folder.folderPath)
-      .map(folder => [path.resolve(folder.folderPath).toLocaleLowerCase(), folder]));
-    for (const source of sources) {
+    const registered = (listed.progressFolders || []).filter(folder => folder.nodeRole === 'progress' && folder.folderPath);
+    for (const resolution of resolutions) {
+      const source = resolution?.physicalPath || resolution;
       let isDirectory = false;
       try { isDirectory = fs.statSync(source).isDirectory(); } catch { /* normal missing-path validation follows */ }
-      const progress = isDirectory ? registered.get(path.resolve(source).toLocaleLowerCase()) : null;
-      if (progress) throw new Error(`已登记的版本进度“${progress.displayName || path.basename(source)}”不能使用普通文件操作修改；请使用版本进度目录重命名`);
+      if (!isDirectory && !resolution?.isExternalLinkRoot) continue;
+      const sourceVirtual = normalizedVirtualPath(resolution?.shortcutVirtualPath || resolution?.virtualPath);
+      const progress = registered.find(folder => {
+        const exactPhysical = clipboardPathKey(folder.folderPath) === clipboardPathKey(source);
+        const containsPhysical = physicalPathContains(source, folder.folderPath);
+        const progressVirtual = normalizedVirtualPath(folder.externalLinkRelativePath);
+        const exactVirtual = Boolean(sourceVirtual && progressVirtual && sourceVirtual === progressVirtual);
+        const containsVirtual = Boolean(sourceVirtual && progressVirtual && progressVirtual.startsWith(`${sourceVirtual}/`));
+        if (operation === 'trash') return containsPhysical && !exactPhysical || containsVirtual && !exactVirtual;
+        return containsPhysical || containsVirtual;
+      });
+      if (progress) throw new Error(`已登记的版本进度“${progress.displayName || path.basename(progress.folderPath)}”不能通过普通文件操作或其祖先目录迁移；请使用版本进度专用功能`);
     }
   };
-  const refreshExternalWatchers = async (workspacePath, status, projectName, resolutions) => {
-    if (!resolutions.some(resolution => resolution?.isExternalLinkRoot) || !refreshManagedExternalWatchers) return;
+  const resolutionContainsManagedLink = (resolution, managedLinks) => {
+    const route = normalizedVirtualPath(resolution?.shortcutVirtualPath || resolution?.virtualPath);
+    if (!route) return false;
+    return managedLinks.some(link => {
+      const managedRoute = normalizedVirtualPath(link.shortcutVirtualPath);
+      return managedRoute === route || managedRoute.startsWith(`${route}/`);
+    });
+  };
+  const refreshExternalWatchers = async (workspacePath, status, projectName, resolutions, managedLinks = []) => {
+    if (!refreshManagedExternalWatchers || !resolutions.some(resolution => resolution?.isExternalLinkRoot || resolutionContainsManagedLink(resolution, managedLinks))) return;
     await refreshManagedExternalWatchers(workspacePath, status, projectName);
+  };
+  const assertNoProtectedPasteReplacement = async (workspacePath, projectName, projectRoot, destinations, managedLinks = []) => {
+    if (!destinations.length) return;
+    const progressFolders = [];
+    if (!isInspirationVirtualProject(projectName) && versionService?.listProgress) {
+      const listed = await versionService.listProgress(ensureWorkspace(workspacePath), projectName, true);
+      if (!listed?.success) throw new Error(listed?.error || '无法读取版本进度登记');
+      progressFolders.push(...(listed.progressFolders || []).filter(folder => folder.nodeRole === 'progress'));
+    }
+    for (const destination of destinations) {
+      const destinationVirtual = normalizedVirtualPath(virtualPathFor(projectRoot, destination, managedLinks));
+      const protectedCoreFolder = isProtectedProjectFolderPath({ fs, path, projectRoot, candidate: destination });
+      const managedLink = Boolean(projectVirtualPaths?.readManagedExternalLink?.(destination)) || managedLinks.find(link => {
+        if (link.shortcutPath && physicalPathContains(destination, link.shortcutPath)) return true;
+        const route = normalizedVirtualPath(link.shortcutVirtualPath);
+        return Boolean(route && (route === destinationVirtual || route.startsWith(`${destinationVirtual}/`)));
+      });
+      const registeredProgress = progressFolders.find(folder => {
+        const protectsPhysicalPath = folder.folderPath && physicalPathContains(destination, folder.folderPath);
+        const route = normalizedVirtualPath(folder.externalLinkRelativePath);
+        const protectsVirtualPath = route && (route === destinationVirtual || route.startsWith(`${destinationVirtual}/`));
+        return protectsPhysicalPath || protectsVirtualPath;
+      });
+      if (protectedCoreFolder || managedLink || registeredProgress) {
+        const label = registeredProgress?.displayName || path.basename(destination);
+        throw new Error(`受保护的项目目标“${label}”不能通过普通粘贴替换；请使用对应的项目或版本管理功能`);
+      }
+    }
   };
   const clearClipboardIfSnapshotCurrent = async snapshot => {
     if (snapshot?.operation !== 'cut' || !snapshot.sources?.length) return false;
@@ -201,7 +256,7 @@ const registerFileOperationsIpc = context => {
       });
       task.setPausable(false);
       task.saveCheckpoint({ ...checkpoint, phase: 'finalizing' }, 99, '正在完成粘贴');
-      for (const item of targets) await fs.promises.rename(item.stagedDestination, item.destination);
+      for (const item of targets) await publishPathNoClobber(item.stagedDestination, item.destination);
       await fs.promises.rm(incomingRoot, { recursive: true, force: true });
       await pushUndoOperation({ kind: 'remove-created', paths: targets.map(item => item.destination), label: '粘贴' }).catch(error => writeLog('warn', 'Unable to record resumed paste undo history', error));
       task.report(100, '文件粘贴完成', { bytesCopied: totalBytes, totalBytes, filesCopied: targets.length, totalFiles: targets.length });
@@ -241,46 +296,82 @@ const registerFileOperationsIpc = context => {
     return { success: true };
   });
   
-  ipcMain.on('workspace-start-file-drag', async (event, workspacePath, status, projectName, relativePaths = []) => {
-    let validatedRelativePaths = [];
-    try {
-      if (!Array.isArray(relativePaths) || !relativePaths.length) throw new Error('没有可拖动的文件');
-      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const sources = Array.from(new Set(relativePaths.map(relativePath => {
-        if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的文件路径');
-        const source = resolveVirtual(root, relativePath, { externalRootMode: 'target' }).physicalPath;
-        if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
-        return source;
-      })));
-      validatedRelativePaths = relativePaths.map(relativePath => String(relativePath).replace(/\\/g, '/'));
+  const resolveFileDragSources = (workspacePath, status, projectName, relativePaths) => {
+    if (!Array.isArray(relativePaths) || !relativePaths.length) throw new Error('没有可拖动的文件');
+    const root = path.resolve(getProjectPath(workspacePath, status, projectName));
+    const sources = Array.from(new Set(relativePaths.map(relativePath => {
+      if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的文件路径');
+      const source = resolveVirtual(root, relativePath, { externalRootMode: 'target' }).physicalPath;
+      if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
+      return source;
+    })));
+    const sourceSummary = sources.reduce((summary, source) => {
+      const stat = fs.statSync(source);
+      if (stat.isDirectory()) summary.directoryCount += 1;
+      else if (stat.isFile()) summary.fileCount += 1;
+      else summary.otherCount += 1;
+      return summary;
+    }, { directoryCount: 0, fileCount: 0, otherCount: 0 });
+    return {
+      sources,
+      sourceSummary,
+      relativePaths: relativePaths.map(relativePath => String(relativePath).replace(/\\/g, '/')),
+    };
+  };
 
-      let icon = nativeImage.createEmpty();
-      try {
-        icon = await app.getFileIcon(sources[0], { size: 'normal' });
-      } catch (error) {
-        writeLog('warn', 'Unable to create native file drag icon', error);
-      }
+  ipcMain.on('workspace-start-file-drag', (event, workspacePath, status, projectName, relativePaths = [], dragContext = {}) => {
+    let validatedRelativePaths = [];
+    let nativeDragStarted = false;
+    let mouseReleasePromise = null;
+    const sessionId = typeof dragContext?.sessionId === 'string' ? dragContext.sessionId.slice(0, 120) : '';
+    const sourcePageId = typeof dragContext?.sourcePageId === 'string' ? dragContext.sourcePageId.slice(0, 200) : '';
+    const origin = dragContext?.origin === 'version-tree' ? 'version-tree' : 'file-browser';
+    const pointerType = ['mouse', 'pen', 'touch'].includes(dragContext?.pointerType) ? dragContext.pointerType : 'unknown';
+    const sendDragEnded = release => {
       if (event.sender.isDestroyed()) return;
-      const startedAt = Date.now();
-      writeLog('info', 'Starting native project file drag', { count: sources.length });
-      try {
-        event.sender.startDrag({ file: sources[0], files: sources, icon });
-      } finally {
-        writeLog('info', 'Native project file drag call ended', { count: sources.length, durationMs: Date.now() - startedAt });
-      }
+      const ownerWindow = BrowserWindow.fromWebContents(event.sender);
+      const contentBounds = ownerWindow?.getContentBounds();
+      const releasePoint = release?.cursorCaptured === true && Number.isFinite(release?.screenX) && Number.isFinite(release?.screenY)
+        ? { x: Number(release.screenX), y: Number(release.screenY) }
+        : null;
+      const cursor = releasePoint && screen.screenToDipPoint ? screen.screenToDipPoint(releasePoint) : releasePoint || screen.getCursorScreenPoint();
+      const clientX = contentBounds ? cursor.x - contentBounds.x : -1;
+      const clientY = contentBounds ? cursor.y - contentBounds.y : -1;
+      const insideWindow = Boolean(contentBounds && clientX >= 0 && clientY >= 0 && clientX < contentBounds.width && clientY < contentBounds.height);
+      event.sender.send('workspace-file-drag-ended', {
+        sessionId, sourcePageId, origin, paths: validatedRelativePaths, clientX, clientY, insideWindow,
+        started: nativeDragStarted,
+        releaseConfirmed: release?.releaseConfirmed === true && (process.platform !== 'win32'
+          || release?.leftButtonWasDown === true && (pointerType === 'mouse' || pointerType === 'unknown')),
+      });
+    };
+    try {
+      const resolved = resolveFileDragSources(workspacePath, status, projectName, relativePaths);
+      validatedRelativePaths = resolved.relativePaths;
+      if (process.platform === 'win32' && waitForLeftMouseRelease) mouseReleasePromise = Promise.resolve(waitForLeftMouseRelease()).catch(error => {
+        writeLog('warn', 'Unable to observe native file drag mouse release', { sessionId, error: error?.message || String(error) });
+        return { releaseConfirmed: false, leftButtonWasDown: false, waitedMs: 0 };
+      });
+      nativeFileDrag.start(event.sender, resolved.sources, resolved.sourceSummary);
+      nativeDragStarted = true;
     } catch (error) {
       writeLog('error', 'Unable to start native project file drag', error);
       if (!event.sender.isDestroyed()) event.sender.send('app-error', error.message || String(error));
     } finally {
-      if (!event.sender.isDestroyed()) {
-        const ownerWindow = BrowserWindow.fromWebContents(event.sender);
-        const contentBounds = ownerWindow?.getContentBounds();
-        const cursor = screen.getCursorScreenPoint();
-        const clientX = contentBounds ? cursor.x - contentBounds.x : -1;
-        const clientY = contentBounds ? cursor.y - contentBounds.y : -1;
-        const insideWindow = Boolean(contentBounds && clientX >= 0 && clientY >= 0 && clientX < contentBounds.width && clientY < contentBounds.height);
-        event.sender.send('workspace-file-drag-ended', { paths: validatedRelativePaths, clientX, clientY, insideWindow });
-      }
+      if (!nativeDragStarted) sendDragEnded({ releaseConfirmed: false });
+      else if (mouseReleasePromise) {
+        mouseReleasePromise.then(release => {
+          writeLog('info', 'Native project file drag release observed', {
+            sessionId, origin, pointerType, waitedMs: Number(release?.waitedMs) || 0,
+            leftButtonWasDown: release?.leftButtonWasDown === true,
+            internalDropAuthorized: release?.releaseConfirmed === true && release?.leftButtonWasDown === true && (pointerType === 'mouse' || pointerType === 'unknown'),
+          });
+          sendDragEnded(release);
+        }).catch(error => {
+          writeLog('warn', 'Unable to confirm native file drag mouse release', { sessionId, error: error?.message || String(error) });
+          sendDragEnded({ releaseConfirmed: false });
+        });
+      } else sendDragEnded({ releaseConfirmed: true });
     }
   });
   
@@ -445,6 +536,20 @@ const registerFileOperationsIpc = context => {
             })),
           };
         } catch (error) {
+          if (error?.code === PUBLISH_PARTIAL_CODE) {
+            await removeCreatedPasteTargets(createdTargets);
+            let recoveryUndo = null;
+            try {
+              recoveryUndo = await pushUndoOperation({
+                kind: 'remove-created', paths: [error.destinationPath], retainedSourcePaths: [error.sourcePath],
+                identities: { [path.resolve(error.destinationPath)]: error.publishedIdentity }, label: '恢复未完成导入',
+              });
+            } catch (undoError) { writeLog('error', 'Unable to record partial import recovery', { operationId, error: undoError.message || String(undoError) }); }
+            error.message = `${error.message || String(error)}；导入处于部分完成状态，${recoveryUndo ? '已创建可用撤销记录' : '请保留恢复副本'}：${error.sourcePath}`;
+            publish({ phase: 'failed', progress: 99, currentName: '', error: error.message });
+            task.fail(error);
+            return { success: false, count: 0, operationId, taskNotificationOwned: true, error: error.message, errorCode: PUBLISH_PARTIAL_CODE, recoveryRequired: true, recovery: { undoToken: recoveryUndo?.undoToken || '', publishedPaths: [error.destinationPath], retainedSourcePaths: [error.sourcePath] } };
+          }
           await removeCreatedPasteTargets(createdTargets);
           const cancelled = error?.code === CANCELLED_CODE;
           publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, currentName: '', error: error.message || String(error) });
@@ -458,7 +563,7 @@ const registerFileOperationsIpc = context => {
       }
       const sourceResolutions = relativePaths.map(resolveSource);
       const sources = sourceResolutions.map(item => item.physicalPath);
-      await assertNoRegisteredProgressRootMutation(workspacePath, projectName, sources, operation);
+      await assertNoRegisteredProgressRootMutation(workspacePath, projectName, sourceResolutions, operation);
       if (operation === 'move') {
         const operationId = crypto.randomUUID();
         responseContext.operationId = operationId;
@@ -511,7 +616,7 @@ const registerFileOperationsIpc = context => {
             task.publish({ phase: 'moving', progress: Math.round(index / Math.max(1, movePlan.length) * 100), currentName: path.basename(entry.source), processedCount: index, totalCount: movePlan.length });
             let result;
             if (singleSameVolumeMove) {
-              await fs.promises.rename(entry.source, entry.destination);
+              await publishPathNoClobber(entry.source, entry.destination);
               result = { copied: false };
             } else {
               result = await movePathAtomic(entry.source, entry.destination, {
@@ -529,7 +634,7 @@ const registerFileOperationsIpc = context => {
           }
           job.finishing = true;
           if (moved.length) await pushUndoOperation({ kind: 'move', moves: moved });
-          await refreshExternalWatchers(workspacePath, status, projectName, sourceResolutions);
+          await refreshExternalWatchers(workspacePath, status, projectName, sourceResolutions, projectLinkHints);
           task.publish({ phase: 'complete', progress: 100, currentName: '', processedCount: moved.length, totalCount: movePlan.length });
           task.complete('文件移动完成');
           writeLog('info', 'Project files moved by internal drag', { projectName, targetRelativePath, count: moved.length, operationId });
@@ -580,8 +685,13 @@ const registerFileOperationsIpc = context => {
       if (operation === 'paste') {
         const operationId = crypto.randomUUID();
         responseContext.operationId = operationId;
+        const pasteProjectKey = clipboardPathKey(root);
+        if ([...activeProjectFileOperations.values()].some(active => active?.operation === 'paste' && active?.projectKey === pasteProjectKey)) {
+          throw new Error('当前项目已有文件粘贴任务，请等待完成后再试');
+        }
         let affectedDirectories = [];
-        let job = { cancelled: false, finishing: false };
+        let job = { cancelled: false, finishing: false, operation: 'paste', projectKey: pasteProjectKey };
+        activeProjectFileOperations.set(operationId, job);
         let task = null;
         const createdTargets = [];
         const stagedReplacements = [];
@@ -589,6 +699,7 @@ const registerFileOperationsIpc = context => {
         let topLevelTargets = [];
         let incomingRoot = '';
         let replacementRoot = '';
+        let pasteClipboardOperation = 'copy';
         let pasteResumeCheckpoint = null;
         const publish = payload => task?.publish(payload);
         publish({ phase: 'scanning', progress: 0, currentName: '', bytesCopied: 0, totalBytes: 0 });
@@ -632,6 +743,7 @@ const registerFileOperationsIpc = context => {
                 projectName, resources: [destinationDir], cancelledCode: CANCELLED_CODE,
               });
               job = task.job;
+              Object.assign(job, { operation: 'paste', projectKey: pasteProjectKey });
               job.cancel = task.cancel;
               activeProjectFileOperations.set(operationId, job);
               responseContext.taskNotificationOwned = true;
@@ -641,7 +753,7 @@ const registerFileOperationsIpc = context => {
               try {
                 await fs.promises.writeFile(temporary, png, { flag: 'wx' });
                 throwIfCancelled(() => job.cancelled);
-                await fs.promises.rename(temporary, destination);
+                await publishPathNoClobber(temporary, destination);
               } catch (error) {
                 await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
                 throw error;
@@ -668,6 +780,7 @@ const registerFileOperationsIpc = context => {
             }
           }
           if (!clipboardSnapshot?.sources?.length) throw new Error('剪贴板中没有文件或文件夹');
+          pasteClipboardOperation = clipboardSnapshot.operation;
 
           const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
           const uniqueSources = [];
@@ -697,6 +810,7 @@ const registerFileOperationsIpc = context => {
             cancelledCode: CANCELLED_CODE,
           });
           job = task.job;
+          Object.assign(job, { operation: 'paste', projectKey: pasteProjectKey });
           job.cancel = task.cancel;
           activeProjectFileOperations.set(operationId, job);
           responseContext.taskNotificationOwned = true;
@@ -716,6 +830,14 @@ const registerFileOperationsIpc = context => {
             const sameSource = pathKey(desiredDestination) === pathKey(source);
             const conflict = !sameSource && fs.existsSync(desiredDestination);
             requestedItems.push({ source, sourceStat, desiredDestination, sameSource, conflict, conflictIdentity: conflict ? await capturePathIdentity(desiredDestination) : null });
+          }
+          if (clipboardSnapshot.operation === 'cut') {
+            await assertNoRegisteredProgressRootMutation(
+              workspacePath,
+              projectName,
+              uniqueSources.map(source => ({ physicalPath: source, virtualPath: virtualPathFor(root, source, projectLinkHints) })),
+              'cut-paste',
+            );
           }
           const sourceStatsByPath = new Map(requestedItems.map(item => [pathKey(item.source), item.sourceStat]));
 
@@ -749,6 +871,15 @@ const registerFileOperationsIpc = context => {
               };
             }
             replaceConflicts = conflictPolicy === 'replace';
+          }
+          if (replaceConflicts) {
+            await assertNoProtectedPasteReplacement(
+              workspacePath,
+              projectName,
+              root,
+              pasteConflicts.map(item => item.destination),
+              projectLinkHints,
+            );
           }
 
           topLevelTargets = [];
@@ -811,18 +942,20 @@ const registerFileOperationsIpc = context => {
               if (!await samePathIdentity(destination, replacementIdentities.get(pathKey(destination)))) throw new Error(`同名项目“${path.basename(destination)}”在确认后发生变化，请重新粘贴`);
               const backup = path.join(replacementRoot, `${index}-${path.basename(destination)}`);
               const originalIdentity = await capturePathIdentity(destination);
-              await fs.promises.rename(destination, backup);
+              await publishPathNoClobber(destination, backup);
               stagedReplacements.push({ original: destination, backup, originalIdentity });
             }
           };
 
           const rollbackStagedReplacements = async () => {
+            let retained = 0;
             for (const item of [...stagedReplacements].reverse()) {
               if (!fs.existsSync(item.backup)) continue;
-              if (fs.existsSync(item.original)) await fs.promises.rm(item.original, { recursive: true, force: true });
-              await fs.promises.rename(item.backup, item.original);
+              if (fs.existsSync(item.original)) { retained += 1; continue; }
+              await publishPathNoClobber(item.backup, item.original);
             }
             if (replacementRoot && !stagedReplacements.some(item => fs.existsSync(item.backup))) await fs.promises.rm(replacementRoot, { recursive: true, force: true }).catch(() => undefined);
+            return retained;
           };
 
           const finalizeReplacements = async () => {
@@ -843,6 +976,19 @@ const registerFileOperationsIpc = context => {
             if (replacementRoot && !items.some(item => item.backup)) await fs.promises.rm(replacementRoot, { recursive: true, force: true }).catch(() => undefined);
             return { items, permanentCount, retainedCount };
           };
+          const cutSourceResolutions = clipboardSnapshot.operation === 'cut'
+            ? uniqueSources.map(source => ({ physicalPath: source, virtualPath: virtualPathFor(root, source, projectLinkHints) }))
+            : [];
+          const refreshCutPasteWatchersAfterCommit = async () => {
+            if (clipboardSnapshot.operation !== 'cut' || activeProjectFileOperations.get(operationId) !== job) return undefined;
+            try {
+              await refreshExternalWatchers(workspacePath, status, projectName, cutSourceResolutions, projectLinkHints);
+              return undefined;
+            } catch (error) {
+              writeLog('warn', 'Cut-paste committed but external watchers could not be refreshed', { workspacePath, status, projectName, error: error.message || String(error) });
+              return '文件已移动，但外链目录监听刷新失败；页面会在后续核对时更新。';
+            }
+          };
 
           if (sameVolumeCut) {
             await stageReplacements();
@@ -853,12 +999,12 @@ const registerFileOperationsIpc = context => {
                 throwIfCancelled(() => job.cancelled);
                 await task.waitIfPaused();
                 publish({ phase: 'moving', progress: Math.round(index / Math.max(1, topLevelTargets.length) * 100), currentName: path.basename(item.source), bytesCopied: 0, totalBytes: 0, filesCopied: index, totalFiles: topLevelTargets.length });
-                await fs.promises.rename(item.source, item.destination);
-                moved.push(item);
+                await publishPathNoClobber(item.source, item.destination);
+                moved.push({ ...item, publishedIdentity: await capturePathIdentity(item.destination) });
               }
             } catch (error) {
               for (const item of [...moved].reverse()) {
-                if (fs.existsSync(item.destination) && !fs.existsSync(item.source)) await fs.promises.rename(item.destination, item.source).catch(() => undefined);
+                if (fs.existsSync(item.destination) && !fs.existsSync(item.source) && await samePathIdentity(item.destination, item.publishedIdentity)) await publishPathNoClobber(item.destination, item.source).catch(() => undefined);
               }
               await rollbackStagedReplacements();
               throw error;
@@ -872,10 +1018,11 @@ const registerFileOperationsIpc = context => {
             if (count) await pushUndoOperation(replacements.items.length ? { kind: 'paste-replace', mode: 'cut', moves: topLevelTargets, items: replacements.items, backupRoot: replacementRoot } : { kind: 'move', moves: topLevelTargets }).catch(error => {
               writeLog('warn', 'Unable to record paste undo history', error);
             });
+            const warning = await refreshCutPasteWatchersAfterCommit();
             publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: count, totalFiles: count, count });
             task.complete('文件移动完成');
             writeLog('info', 'Project files moved by same-volume rename', { projectName, targetRelativePath, count, operationId });
-            return { success: true, cancelled: false, errorCode: undefined, count, operationId, taskNotificationOwned: true, affectedDirectories, consumedCutClipboard: true, movedItems: topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })), replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
+            return { success: true, cancelled: false, errorCode: undefined, count, operationId, taskNotificationOwned: true, affectedDirectories, consumedCutClipboard: true, movedItems: topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })), replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount, warning };
           }
 
           const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
@@ -920,14 +1067,14 @@ const registerFileOperationsIpc = context => {
           try {
             for (const item of topLevelTargets) {
               throwIfCancelled(() => job.cancelled);
-              await fs.promises.rename(item.stagedDestination, item.destination);
-              committedTargets.push(item);
+              await publishPathNoClobber(item.stagedDestination, item.destination);
+              committedTargets.push({ ...item, publishedIdentity: await capturePathIdentity(item.destination) });
             }
             await fs.promises.rm(incomingRoot, { recursive: true, force: true });
             createdTargets.length = 0;
           } catch (error) {
             for (const item of [...committedTargets].reverse()) {
-              if (fs.existsSync(item.destination) && !fs.existsSync(item.stagedDestination)) await fs.promises.rename(item.destination, item.stagedDestination).catch(() => undefined);
+              if (fs.existsSync(item.destination) && !fs.existsSync(item.stagedDestination) && await samePathIdentity(item.destination, item.publishedIdentity)) await publishPathNoClobber(item.destination, item.stagedDestination).catch(() => undefined);
             }
             await rollbackStagedReplacements().catch(() => undefined);
             throw error;
@@ -948,21 +1095,41 @@ const registerFileOperationsIpc = context => {
               : { kind: 'remove-created', paths: topLevelTargets.map(item => item.destination), label: '粘贴' }).catch(error => {
                 writeLog('warn', 'Unable to record paste undo history', error);
               });
+          const warning = await refreshCutPasteWatchersAfterCommit();
           publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
           task.complete('文件粘贴完成');
           writeLog('info', 'Project files pasted', { projectName, targetRelativePath, count, operationId, ...transferStats });
-          return { success: true, cancelled: false, errorCode: undefined, count, operationId, taskNotificationOwned: true, affectedDirectories, consumedCutClipboard: clipboardSnapshot.operation === 'cut', createdItems: clipboardSnapshot.operation === 'copy' ? topLevelTargets.map(item => ({ name: path.basename(item.destination), relativePath: virtualPathFor(root, item.destination, [destinationResolution]), isDirectory: item.isDirectory })) : undefined, movedItems: clipboardSnapshot.operation === 'cut' ? topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })) : undefined, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount };
+          return { success: true, cancelled: false, errorCode: undefined, count, operationId, taskNotificationOwned: true, affectedDirectories, consumedCutClipboard: clipboardSnapshot.operation === 'cut', createdItems: clipboardSnapshot.operation === 'copy' ? topLevelTargets.map(item => ({ name: path.basename(item.destination), relativePath: virtualPathFor(root, item.destination, [destinationResolution]), isDirectory: item.isDirectory })) : undefined, movedItems: clipboardSnapshot.operation === 'cut' ? topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })) : undefined, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount, warning };
         } catch (error) {
+          if (error?.code === PUBLISH_PARTIAL_CODE) {
+            const publishedPaths = topLevelTargets.map(item => item.destination).filter(candidate => fs.existsSync(candidate));
+            const retainedSourceRoots = incomingRoot && physicalPathContains(incomingRoot, error.sourcePath || '') ? [incomingRoot] : [];
+            const identities = error.destinationPath && error.publishedIdentity ? { [path.resolve(error.destinationPath)]: error.publishedIdentity } : {};
+            let recoveryUndo = null;
+            try {
+              recoveryUndo = await pushUndoOperation(stagedReplacements.length
+                ? { kind: 'paste-replace', mode: 'copy', moves: topLevelTargets.filter(item => publishedPaths.includes(item.destination)), items: stagedReplacements, backupRoot: replacementRoot, retainedSourceRoots, identities }
+                : { kind: 'remove-created', paths: publishedPaths, retainedSourceRoots, identities, label: '恢复未完成发布' });
+            } catch (undoError) {
+              writeLog('error', 'Unable to record partial paste recovery', { operationId, error: undoError.message || String(undoError) });
+            }
+            error.message = `${error.message || String(error)}；本次粘贴处于部分完成状态，${recoveryUndo ? '已创建可重试的撤销/恢复记录' : '撤销记录创建失败，请保留恢复路径'}：${error.sourcePath || incomingRoot}`;
+            publish({ phase: 'failed', progress: 99, currentName: '', error: error.message });
+            task?.fail(error);
+            return { success: false, operationId, taskNotificationOwned: true, affectedDirectories, error: error.message, errorCode: PUBLISH_PARTIAL_CODE, recoveryRequired: true, recovery: { undoToken: recoveryUndo?.undoToken || '', publishedPaths, retainedSourcePaths: [error.sourcePath].filter(Boolean), retainedReplacementPaths: stagedReplacements.map(item => item.backup).filter(candidate => fs.existsSync(candidate)), clipboardOperation: pasteClipboardOperation } };
+          }
           // Once cut finalization starts, keeping the completed copies is the only
           // data-safe fallback if removing a source fails partway through.
           if (!job.finishing) {
             await removeCreatedPasteTargets(createdTargets);
+            let retainedReplacementBackups = 0;
             for (const item of [...stagedReplacements].reverse()) {
               if (!fs.existsSync(item.backup)) continue;
-              if (fs.existsSync(item.original)) await fs.promises.rm(item.original, { recursive: true, force: true }).catch(() => undefined);
-              await fs.promises.rename(item.backup, item.original).catch(() => undefined);
+              if (fs.existsSync(item.original)) { retainedReplacementBackups += 1; continue; }
+              await publishPathNoClobber(item.backup, item.original).catch(() => undefined);
             }
             if (replacementRoot && !stagedReplacements.some(item => fs.existsSync(item.backup))) await fs.promises.rm(replacementRoot, { recursive: true, force: true }).catch(() => undefined);
+            if (retainedReplacementBackups) error.message = `${error.message || String(error)}；${retainedReplacementBackups} 个旧同名项目的恢复副本已安全保留，未覆盖后来出现的内容`;
           } else {
             const recoveryNames = [];
             const reservedRecovery = new Set(topLevelTargets.map(item => process.platform === 'win32' ? path.resolve(item.destination).toLowerCase() : path.resolve(item.destination)));
@@ -971,10 +1138,10 @@ const registerFileOperationsIpc = context => {
               if (fs.existsSync(item.original)) {
                 const stat = await fs.promises.lstat(item.original).catch(() => null);
                 const recovery = uniqueDestination(path.dirname(item.original), path.basename(item.original), reservedRecovery, Boolean(stat?.isDirectory()));
-                await fs.promises.rename(item.original, recovery).catch(() => undefined);
+                await publishPathNoClobber(item.original, recovery).catch(() => undefined);
                 if (fs.existsSync(recovery)) recoveryNames.push(path.basename(recovery));
               }
-              if (!fs.existsSync(item.original)) await fs.promises.rename(item.backup, item.original).catch(() => undefined);
+              if (!fs.existsSync(item.original)) await publishPathNoClobber(item.backup, item.original).catch(() => undefined);
             }
             const retainedReplacementBackup = stagedReplacements.some(item => fs.existsSync(item.backup));
             if (replacementRoot && !retainedReplacementBackup) await fs.promises.rm(replacementRoot, { recursive: true, force: true }).catch(() => undefined);
@@ -1097,7 +1264,7 @@ const registerFileOperationsIpc = context => {
             });
           }
           try {
-            await refreshExternalWatchers(workspacePath, status, projectName, existingSourceResolutions);
+            await refreshExternalWatchers(workspacePath, status, projectName, existingSourceResolutions, projectLinkHints);
           } catch (watchError) {
             watchRefreshDegraded = true;
             writeLog('warn', 'Trash completed but external watchers could not be refreshed', {
@@ -1114,7 +1281,7 @@ const registerFileOperationsIpc = context => {
         } catch (error) {
           await persistTrashUndo().catch(persistError => writeLog('error', 'Unable to persist partial trash undo record', persistError));
           if (processedCount > 0) {
-            await refreshExternalWatchers(workspacePath, status, projectName, existingSourceResolutions)
+            await refreshExternalWatchers(workspacePath, status, projectName, existingSourceResolutions, projectLinkHints)
               .catch(watchError => writeLog('warn', 'Unable to refresh external watchers after partial trash operation', {
                 workspacePath, status, projectName, error: watchError.message || String(watchError),
               }));
@@ -1180,17 +1347,19 @@ const registerFileOperationsIpc = context => {
           // A single filesystem rename is already atomic on the source volume.
           // Avoid the two-hop staging used to make multi-item swaps/cycles safe;
           // it doubles watcher traffic and the latency visible after Enter.
-          await fs.promises.rename(moves[0].source, moves[0].destination);
+          const caseOnlyRename = clipboardPathKey(moves[0].source) === clipboardPathKey(moves[0].destination);
+          if (caseOnlyRename) await fs.promises.rename(moves[0].source, moves[0].destination);
+          else await publishPathNoClobber(moves[0].source, moves[0].destination);
         } else {
           const staged = [];
           try {
             for (const move of moves) {
               const temporary = path.join(path.dirname(move.source), `.photoflow-rename-${crypto.randomUUID()}${path.extname(move.source)}`);
-              await fs.promises.rename(move.source, temporary);
+              await publishPathNoClobber(move.source, temporary);
               staged.push({ ...move, temporary, completed: false });
             }
             for (const move of staged) {
-              await fs.promises.rename(move.temporary, move.destination);
+              await publishPathNoClobber(move.temporary, move.destination);
               move.completed = true;
             }
           } catch (error) {
@@ -1199,12 +1368,12 @@ const registerFileOperationsIpc = context => {
             // including swaps and longer rename cycles.
             for (const move of [...staged].reverse()) {
               try {
-                if (move.completed && fs.existsSync(move.destination) && !fs.existsSync(move.temporary)) await fs.promises.rename(move.destination, move.temporary);
+                if (move.completed && fs.existsSync(move.destination) && !fs.existsSync(move.temporary)) await publishPathNoClobber(move.destination, move.temporary);
               } catch { /* best-effort rollback; original error is reported below */ }
             }
             for (const move of [...staged].reverse()) {
               try {
-                if (fs.existsSync(move.temporary) && !fs.existsSync(move.source)) await fs.promises.rename(move.temporary, move.source);
+                if (fs.existsSync(move.temporary) && !fs.existsSync(move.source)) await publishPathNoClobber(move.temporary, move.source);
               } catch { /* best-effort rollback; original error is reported below */ }
             }
             throw error;
@@ -1212,7 +1381,7 @@ const registerFileOperationsIpc = context => {
         }
         writeLog('info', 'Project files renamed', { projectName, count: sources.length });
         if (moves.length) await pushUndoOperation({ kind: 'files', moves });
-        await refreshExternalWatchers(workspacePath, status, projectName, sourceResolutions);
+        await refreshExternalWatchers(workspacePath, status, projectName, sourceResolutions, projectLinkHints);
         return {
           success: true,
           cancelled: false,

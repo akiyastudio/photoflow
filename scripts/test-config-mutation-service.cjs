@@ -4,7 +4,11 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
-const { createConfigMutationService, nextComponentRevision, normalizeComponentRevision, readConfigFileWithRecovery, configSnapshotExists, registerConfigDrainBeforeQuit } = require('../electron/services/config-mutation-service.cjs');
+const { createConfigMutationService, adoptLegacyComponentSettings: adoptLegacyComponentSettingsWithPolicy, nextComponentRevision, normalizeComponentRevision, readConfigFileWithRecovery, configSnapshotExists, registerConfigDrainBeforeQuit } = require('../electron/services/config-mutation-service.cjs');
+const { createComponentDataAdoptionPolicy } = require('../electron/compatibility/component-data-adoption-policy.cjs');
+
+const adoptionPolicy = createComponentDataAdoptionPolicy({ version: 1, legacyDomainDatabaseOwners: [], legacySettingsAdoptions: [{ componentId: 'fixture-adopter', topLevelKey: 'legacyFixture' }] });
+const adoptLegacyComponentSettings = (config, descriptors) => adoptLegacyComponentSettingsWithPolicy(config, descriptors, adoptionPolicy);
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-config-mutation-'));
 const configPath = path.join(root, 'config.json');
@@ -30,11 +34,57 @@ const service = createConfigMutationService({ fs, crypto, getConfigPath: () => c
   assert.deepEqual(revisions, [3, 4, 5], 'serialized config mutations observe monotonic component revisions');
   for (const invalid of [-1, 1.5, Number.MAX_SAFE_INTEGER + 1, Infinity, '4', null]) assert.equal(normalizeComponentRevision(invalid), 0, 'invalid component revisions normalize to zero');
   assert.equal(nextComponentRevision(5), 6); assert.throws(() => nextComponentRevision(Number.MAX_SAFE_INTEGER), /exhausted/);
+  const adoption = [{ componentId: 'fixture-adopter', legacySettingsAdoptions: [{ topLevelKey: 'legacyFixture' }] }];
+  for (const topLevelKey of ['componentSettings', 'componentSettingsRevisions', 'workspacePath', 'backup', 'unrelatedGlobal']) {
+    assert.throws(() => adoptLegacyComponentSettings({ [topLevelKey]: { secret: true } }, [{ componentId: 'malicious-component', legacySettingsAdoptions: [{ topLevelKey }] }]), /Unauthorized legacy settings adoption/, `a component cannot adopt ${topLevelKey}`);
+  }
+  assert.throws(() => adoptLegacyComponentSettings({}, [adoption[0], structuredClone(adoption[0])]), /more than one|claimed more than once/, 'a legacy key has exactly one global claimant');
+  assert.throws(() => adoptLegacyComponentSettings({}, [adoption[0], { componentId: 'malicious-component', legacySettingsAdoptions: [{ topLevelKey: 'legacyFixture' }] }]), /claimed more than once|Unauthorized/, 'another component cannot claim an authorized component legacy key');
+  const legacyOnly = { legacyFixture: { useGpu: false, oversizeCropMode: 'expand' }, componentSettings: {}, componentSettingsRevisions: {} };
+  const adopted = adoptLegacyComponentSettings(legacyOnly, adoption);
+  assert.deepEqual(adopted.componentSettings['fixture-adopter'], legacyOnly.legacyFixture, 'a declared legacy top-level value is adopted into the component namespace');
+  assert.equal(adopted.componentSettingsRevisions['fixture-adopter'], 1); assert.deepEqual(adopted.legacyFixture, legacyOnly.legacyFixture, 'adoption preserves the legacy source');
+  assert.notStrictEqual(adopted.componentSettings['fixture-adopter'], legacyOnly.legacyFixture, 'adoption clones legacy settings instead of sharing mutable references');
+  legacyOnly.legacyFixture.useGpu = true; assert.equal(adopted.componentSettings['fixture-adopter'].useGpu, false, 'later legacy source mutation cannot alter the adopted namespace'); legacyOnly.legacyFixture.useGpu = false;
+  for (const invalidLegacyValue of [null, [], 'settings', 7, false]) {
+    const invalidLegacy = { legacyFixture: invalidLegacyValue, componentSettings: {}, componentSettingsRevisions: {} };
+    const skipped = adoptLegacyComponentSettings(invalidLegacy, adoption);
+    assert.strictEqual(skipped, invalidLegacy); assert.deepEqual(skipped.componentSettingsRevisions, {}, 'invalid legacy values remain retryable and do not create a tombstone/revision');
+  }
+  assert.strictEqual(adoptLegacyComponentSettings(adopted, adoption), adopted, 'repeated adoption is idempotent');
+  const newWins = adoptLegacyComponentSettings({ ...legacyOnly, componentSettings: { 'fixture-adopter': { useGpu: true } }, componentSettingsRevisions: { 'fixture-adopter': 7 } }, adoption);
+  assert.deepEqual(newWins.componentSettings['fixture-adopter'], { useGpu: true }); assert.equal(newWins.componentSettingsRevisions['fixture-adopter'], 7, 'an existing namespace and revision win over legacy settings');
+  const tombstoneWins = adoptLegacyComponentSettings({ ...legacyOnly, componentSettingsRevisions: { 'fixture-adopter': 9 } }, adoption);
+  assert.equal(Object.hasOwn(tombstoneWins.componentSettings, 'fixture-adopter'), false); assert.equal(tombstoneWins.componentSettingsRevisions['fixture-adopter'], 9, 'a newer namespace tombstone prevents resurrection');
   const restoredRevision = service.mergeRestoredConfig({ componentSettings: { fixture: { old: true } }, componentSettingsRevisions: { fixture: 3 } }, { componentSettings: { fixture: { restored: true } }, componentSettingsRevisions: { fixture: -9 } }, 'D:/restored');
   assert.deepEqual(restoredRevision.componentSettings.fixture, { restored: true }); assert.equal(restoredRevision.componentSettingsRevisions.fixture, 4, 'backup restore normalizes invalid revisions before issuing a newer revision');
   const restoredTombstone = service.mergeRestoredConfig({ componentSettings: { fixture: { stale: true } }, componentSettingsRevisions: { fixture: 2 } }, { componentSettings: {}, componentSettingsRevisions: { fixture: 7 } }, 'D:/restored');
   assert.equal(Object.hasOwn(restoredTombstone.componentSettings, 'fixture'), false, 'a restored no-value revision is an explicit tombstone that removes the current namespace');
   assert.equal(restoredTombstone.componentSettingsRevisions.fixture, 8, 'restored tombstones receive a new monotonic revision');
+  const restoredLegacy = service.mergeRestoredConfig({ componentSettings: {}, componentSettingsRevisions: {} }, legacyOnly, 'D:/restored');
+  assert.equal(Object.hasOwn(restoredLegacy.componentSettings, 'fixture-adopter'), false, 'undeclared services do not interpret component-specific legacy settings');
+  const declaredPath = path.join(root, 'declared-config.json'); fs.writeFileSync(declaredPath, JSON.stringify(legacyOnly));
+  const declaredService = createConfigMutationService({ fs, crypto, getConfigPath: () => declaredPath, readSavedConfig: () => JSON.parse(fs.readFileSync(declaredPath, 'utf8')), legacySettingsAdoptions: adoption, adoptionPolicy });
+  await declaredService.adoptLegacySettings(); const declaredSaved = JSON.parse(fs.readFileSync(declaredPath, 'utf8'));
+  assert.deepEqual(declaredSaved.componentSettings['fixture-adopter'], legacyOnly.legacyFixture); assert.equal(declaredSaved.componentSettingsRevisions['fixture-adopter'], 1);
+  await declaredService.mutate(current => declaredService.mergeRendererConfig(legacyOnly, current));
+  assert.deepEqual(JSON.parse(fs.readFileSync(declaredPath, 'utf8')).componentSettings['fixture-adopter'], legacyOnly.legacyFixture, 'a pre-adoption renderer snapshot cannot erase the adopted namespace through CAS');
+  await declaredService.adoptLegacySettings(); assert.deepEqual(JSON.parse(fs.readFileSync(declaredPath, 'utf8')), declaredSaved, 'startup adoption remains byte/semantic idempotent');
+  const restoreAdopted = declaredService.mergeRestoredConfig({ componentSettings: {}, componentSettingsRevisions: {} }, legacyOnly, 'D:/restored');
+  assert.deepEqual(restoreAdopted.componentSettings['fixture-adopter'], legacyOnly.legacyFixture); assert.equal(restoreAdopted.componentSettingsRevisions['fixture-adopter'], 1, 'backup restore applies declared legacy adoption atomically');
+  const restoreNewWins = declaredService.mergeRestoredConfig({ componentSettings: { 'fixture-adopter': { useGpu: true } }, componentSettingsRevisions: { 'fixture-adopter': 12 } }, legacyOnly, 'D:/restored');
+  assert.deepEqual(restoreNewWins.componentSettings['fixture-adopter'], { useGpu: true }); assert.equal(restoreNewWins.componentSettingsRevisions['fixture-adopter'], 12, 'current namespaced settings outrank a legacy-only backup');
+  const restoredNamespaceWins = declaredService.mergeRestoredConfig({ componentSettings: {}, componentSettingsRevisions: {} }, { ...legacyOnly, componentSettings: { 'fixture-adopter': { useGpu: true } }, componentSettingsRevisions: { 'fixture-adopter': 4 } }, 'D:/restored');
+  assert.deepEqual(restoredNamespaceWins.componentSettings['fixture-adopter'], { useGpu: true }); assert.equal(restoredNamespaceWins.componentSettingsRevisions['fixture-adopter'], 5, 'a restored namespace outranks its legacy source');
+  const restoredNamespaceTombstone = declaredService.mergeRestoredConfig({ componentSettings: {}, componentSettingsRevisions: {} }, { ...legacyOnly, componentSettingsRevisions: { 'fixture-adopter': 4 } }, 'D:/restored');
+  assert.equal(Object.hasOwn(restoredNamespaceTombstone.componentSettings, 'fixture-adopter'), false); assert.equal(restoredNamespaceTombstone.componentSettingsRevisions['fixture-adopter'], 5, 'a restored namespace tombstone cannot be resurrected by its legacy source');
+
+  const dynamicPath = path.join(root, 'dynamic-config.json'); fs.writeFileSync(dynamicPath, JSON.stringify(legacyOnly));
+  let installedDescriptors = [];
+  const dynamicService = createConfigMutationService({ fs, crypto, getConfigPath: () => dynamicPath, readSavedConfig: () => JSON.parse(fs.readFileSync(dynamicPath, 'utf8')), legacySettingsAdoptionsProvider: () => installedDescriptors, adoptionPolicy });
+  await dynamicService.adoptLegacySettings(); assert.equal(Object.hasOwn(JSON.parse(fs.readFileSync(dynamicPath, 'utf8')).componentSettings, 'fixture-adopter'), false, 'an uninstalled component cannot claim legacy settings');
+  installedDescriptors = adoption; await dynamicService.adoptLegacySettings();
+  assert.deepEqual(JSON.parse(fs.readFileSync(dynamicPath, 'utf8')).componentSettings['fixture-adopter'], legacyOnly.legacyFixture, 'runtime installation uses the current descriptor set and adopts settings on the serialized mutation tail');
 
   const beforeClear = readSavedConfig();
   const staleBeforeClear = JSON.parse(JSON.stringify(beforeClear));
@@ -111,4 +161,3 @@ const service = createConfigMutationService({ fs, crypto, getConfigPath: () => c
   assert.equal(quitCalls, 1); assert.equal(cleanupCalls, 1); assert.equal(quitState(), 'ready');
   console.log('Config mutation concurrency tests passed');
 })().finally(() => fs.rmSync(root, { recursive: true, force: true })).catch(error => { console.error(error); process.exitCode = 1; });
-

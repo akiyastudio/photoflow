@@ -673,7 +673,7 @@ const App: React.FC = () => {
     setProjectDestination(null);
     setActiveTab('inspiration');
   };
-  const { navigationRequests: browserNavigationRequests, openInNewTab: openInspirationDirectoryPage, navigateCurrent: navigateInspiration, dropActive: folderTabDropActive, sourceDragActive: folderTabSourceDragActive, dropProps: folderTabDropProps } = useFolderTabNavigation({ rootPath: config?.inspirationLibrary.rootPath.trim() || '', pages: projectPages, activePageId, createPage, requestInspirationPath, activateInspiration, openProjectInNewTab: project => openProjectDirectoryPage(project, '') });
+  const { navigationRequests: browserNavigationRequests, openInNewTab: openInspirationDirectoryPage, navigateCurrent: navigateInspiration } = useFolderTabNavigation({ rootPath: config?.inspirationLibrary.rootPath.trim() || '', pages: projectPages, activePageId, createPage, requestInspirationPath, activateInspiration });
   const openSettingsTab = async () => {
     if (activeTab === 'component') await componentHost.deactivate(); setSettingsTabOpen(true);
     setActiveTab('settings');
@@ -759,8 +759,6 @@ const App: React.FC = () => {
 
   return (
     <div className="flex h-screen w-full flex-col overflow-hidden bg-slate-50 text-slate-900 font-sans selection:bg-blue-500/30">
-      <div className="fixed right-3 top-2 z-[260]"><ComponentContributionDock contributions={componentContributions.filter(item => item.type === 'application.command')}/></div>
-
       {updateInfo && (
         <UpdateModal
           version={updateInfo.version}
@@ -781,7 +779,7 @@ const App: React.FC = () => {
             <span className="truncate text-sm font-bold text-slate-800">照片流</span>
           </div>
         </div>
-        <div {...folderTabDropProps} data-folder-tab-drop-zone="true" aria-label="标签栏" className={`relative flex min-w-0 flex-1 transition-colors ${folderTabDropActive ? 'bg-blue-50 ring-1 ring-inset ring-blue-400' : ''}`}>
+        <div aria-label="标签栏" className="relative flex min-w-0 flex-1">
           {titlebarTabScroll.overflow && <button type="button" aria-label="向左滚动标签" title="向左滚动标签" disabled={!titlebarTabScroll.canScrollLeft} onClick={() => scrollTitlebarTabs(-1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronLeft size={15}/></button>}
           <div ref={titlebarTabsRef} onWheel={handleTitlebarTabWheel} aria-label="已打开的窗口" className="titlebar-tabs-scroll scrollbar-hide flex min-w-0 shrink items-end gap-0 overflow-x-auto px-2 pt-1.5">
             <button type="button" {...titlebarTabDragProps('home')} data-active-tab={activeTab === 'home'} onClick={showHomeTab} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[92px] max-w-[180px] items-center gap-2 rounded-t-lg border px-3 text-xs font-medium transition ${activeTab === 'home' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
@@ -810,10 +808,11 @@ const App: React.FC = () => {
             {settingsTabOpen && <div {...titlebarTabDragProps('settings')} data-active-tab={activeTab === 'settings'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[108px] max-w-[180px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'settings' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openSettingsTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Settings size={14} className="shrink-0"/><span className="truncate">设置</span></button><button type="button" data-tab-drag-ignore="true" aria-label="关闭设置" title="关闭设置" onClick={closeSettingsTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
           </div>
           {titlebarTabScroll.overflow && <button type="button" aria-label="向右滚动标签" title="向右滚动标签" disabled={!titlebarTabScroll.canScrollRight} onClick={() => scrollTitlebarTabs(1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronRight size={15}/></button>}
-          <div aria-label={folderTabSourceDragActive ? '标签栏空白区域' : '拖动窗口'} className={`${folderTabSourceDragActive ? 'app-titlebar-control' : 'app-window-drag-region'} min-w-8 flex-1`}/>
+          <div aria-label="拖动窗口" className="app-window-drag-region min-w-8 flex-1"/>
         </div>
         <DomainHealthBanner components={components}/>
         <BackgroundTaskIndicator ownerPageIds={openPageIds} open={backgroundTaskDrawerOpen} onOpenChange={setBackgroundTaskDrawerOpen} drawerHostRef={backgroundTaskDrawerHostRef}/>
+        {componentContributions.some(item => item.type === 'application.command') && <div className="app-titlebar-control flex shrink-0 items-center px-2"><ComponentContributionDock contributions={componentContributions.filter(item => item.type === 'application.command')}/></div>}
         <WindowControls/>
       </header>
 

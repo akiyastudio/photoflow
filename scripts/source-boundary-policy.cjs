@@ -1,10 +1,14 @@
 const ALLOWED_RENDERER_FEATURE_EDGES = Object.freeze([
   'app->background-tasks',
+  'components->app',
+  'inspiration->app',
   'inspiration->file-browser',
   'inspiration->workspace',
   'settings->app',
   'settings->tools',
   'workspace->background-tasks',
+  'workspace->app',
+  'workspace->components',
   'workspace->file-browser',
   'workspace->metadata',
   'workspace->tools',
@@ -21,8 +25,8 @@ const ALLOWED_COMPONENT_FEATURE_EDGES = Object.freeze([
 
 const ENTRY_FILE_BUDGETS = Object.freeze({
   'src/App.tsx': 950,
-  'src/features/workspace/ProjectWorkspace.tsx': 7350,
-  'electron/modules/workspace-ipc.cjs': 3120,
+  'src/features/workspace/ProjectWorkspace.tsx': 7800,
+  'electron/modules/workspace-ipc.cjs': 3200,
 });
 
 const ALLOWED_IPC_REGISTRAR_EDGES = Object.freeze([

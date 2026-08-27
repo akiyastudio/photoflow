@@ -22,6 +22,10 @@
         "_internal/models/adaface_ir18_webface4m.onnx": "models/adaface_ir18_webface4m.onnx",
         "_internal/models/osnet_x1_0_msmt17.onnx": "models/osnet_x1_0_msmt17.onnx"
       }
+    },
+    "tests": {
+      "backup-restore": ["tests/test-team-retouch-host-backup-restore-e2e.cjs"],
+      "package-layout": ["tests/test-team-retouch-package-layout.cjs"]
     }
   },
   "scripts": {

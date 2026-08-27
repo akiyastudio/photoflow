@@ -7,7 +7,7 @@ const DEFAULT_BACKGROUND_TASK_POLICY = Object.freeze({
 });
 
 const BACKGROUND_TASK_POLICIES = Object.freeze({
-  'project-file-operation': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', pausable: true, resumable: true },
+  'project-file-operation': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-and-result', pausable: true, resumable: true },
   'project-archive': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', resumable: true },
   'project-unarchive': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', resumable: true },
   'workspace-backup': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', resumable: true },

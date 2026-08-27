@@ -2,12 +2,27 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
+const { createFilePublicationService } = require('./file-publication-service.cjs');
 
 const CANCELLED_CODE = 'EOPCANCELLED';
 const SOURCE_CLEANUP_INCOMPLETE_CODE = 'ESOURCECLEANUP';
+const PUBLISH_PARTIAL_CODE = 'EPUBLISHPARTIAL';
 const DEFAULT_SMALL_FILE_THRESHOLD = 2 * 1024 * 1024;
 const DEFAULT_SMALL_FILE_CONCURRENCY = 8;
-const WINDOWS_TRANSIENT_FILE_ERRORS = new Set(['EACCES', 'EBUSY', 'EPERM']);
+const LINK_COPY_FALLBACK_ERRORS = new Set(['EXDEV']);
+const MAX_BATCH_MANIFEST_BYTES = 480 * 1024;
+let configuredNativePublicationService = null;
+const configureNativePublicationService = service => { configuredNativePublicationService = service || null; };
+const bundledNativePublicationService = createFilePublicationService({ app: { isPackaged: false }, projectRoot: path.resolve(__dirname, '..', '..') });
+const takeBoundedBatch = (items, start, maxItems, measure) => {
+  const batch = []; let bytes = 0;
+  while (start + batch.length < items.length && batch.length < maxItems) {
+    const item = items[start + batch.length]; const next = measure(item) + 32;
+    if (batch.length && bytes + next > MAX_BATCH_MANIFEST_BYTES) break;
+    batch.push(item); bytes += next;
+  }
+  return batch;
+};
 
 const attachTransferContext = (error, stage, source, destination) => {
   if (!error || typeof error !== 'object') return error;
@@ -92,48 +107,77 @@ const assertDiskSpace = async (directory, requiredBytes) => {
   }
 };
 
-const commitTemporaryFile = async (temporary, target, options = {}) => {
-  const allowCopyFallback = options.allowCopyFallback ?? process.platform === 'win32';
-  const renameFile = options.renameFile || fs.promises.rename.bind(fs.promises);
-  const copyFile = options.copyFile || fs.promises.copyFile.bind(fs.promises);
-  const maxAttempts = options.maxAttempts ?? (allowCopyFallback ? 6 : 1);
-  let renameError = null;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    try {
-      await renameFile(temporary, target);
-      return { strategy: 'rename' };
-    } catch (error) {
-      renameError = error;
-      if (!WINDOWS_TRANSIENT_FILE_ERRORS.has(error?.code) || fs.existsSync(target)) throw error;
-      if (attempt === maxAttempts) break;
-      await new Promise(resolve => setTimeout(resolve, attempt * 75));
-    }
-  }
-  if (!allowCopyFallback || !renameError) throw renameError;
+const publishedIdentityFromStat = (filePath, stat) => ({
+  path: path.resolve(filePath),
+  device: stat.dev.toString(),
+  inode: stat.ino.toString(),
+  size: stat.size.toString(),
+  modifiedNs: typeof stat.mtimeNs === 'bigint' ? stat.mtimeNs.toString() : String(Math.trunc(stat.mtimeMs * 1e6)),
+  directory: stat.isDirectory(),
+});
 
-  // Windows thumbnail providers and antivirus software may briefly open the
-  // completed temporary file and block rename with EPERM. An exclusive copy
-  // still preserves no-overwrite semantics and is safe because the temporary
-  // file has already passed the size validation above.
-  let copiedTarget = false;
-  try {
-    await copyFile(temporary, target, fs.constants.COPYFILE_EXCL);
-    copiedTarget = true;
-    const [temporaryStat, targetStat] = await Promise.all([fs.promises.stat(temporary), fs.promises.stat(target)]);
-    if (temporaryStat.size !== targetStat.size) {
-      await fs.promises.rm(target, { force: true }).catch(() => undefined);
-      throw new Error(`最终文件校验失败：${path.basename(target)}`);
-    }
-    for (let attempt = 1; attempt <= 6 && fs.existsSync(temporary); attempt += 1) {
-      await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
-      if (fs.existsSync(temporary)) await new Promise(resolve => setTimeout(resolve, attempt * 75));
-    }
-    return { strategy: 'copy-fallback' };
-  } catch (fallbackError) {
-    if (copiedTarget && fs.existsSync(target)) await fs.promises.rm(target, { force: true }).catch(() => undefined);
-    fallbackError.renameErrorCode = renameError.code;
-    throw fallbackError;
+const capturePublishedIdentity = async filePath => publishedIdentityFromStat(filePath, await fs.promises.stat(filePath, { bigint: true }));
+const fileDigest = async filePath => {
+  const hash = crypto.createHash('sha256');
+  const reader = fs.createReadStream(filePath);
+  for await (const chunk of reader) hash.update(chunk);
+  return hash.digest('hex');
+};
+
+const partialPublishError = ({ source, target, identity, cleanupError, rollbackError, strategy }) => {
+  const error = new Error(`内容已发布到“${path.basename(target)}”，但源文件清理失败且无法安全回滚；已保留可恢复副本`);
+  error.code = PUBLISH_PARTIAL_CODE;
+  error.transferStage = 'cleanup-published-source';
+  error.sourcePath = source;
+  error.destinationPath = target;
+  error.publishedIdentity = identity;
+  error.publishStrategy = strategy;
+  error.published = true;
+  error.recoveryRequired = true;
+  error.recoveryPath = cleanupError?.recoveryPath || target;
+  error.sourceRetained = true;
+  error.cleanupError = cleanupError?.message || String(cleanupError);
+  error.cleanupCode = cleanupError?.code;
+  error.cause = cleanupError;
+  error.rollbackError = rollbackError?.message || String(rollbackError || '');
+  return error;
+};
+const stagingRecoveryError = ({ source, destination, staging, cause, strategy }) => {
+  const error = new Error(`目标“${path.basename(destination)}”尚未发布；跨卷暂存副本已保留，可安全恢复或重试`);
+  error.code = PUBLISH_PARTIAL_CODE;
+  error.transferStage = 'recovery-staging';
+  error.sourcePath = source;
+  error.destinationPath = destination;
+  error.published = false;
+  error.publishStrategy = strategy;
+  error.recoveryRequired = true;
+  error.recoveryPath = cause?.recoveryPath || staging;
+  error.sourceRetained = fs.existsSync(source);
+  error.cleanupError = cause?.message || String(cause);
+  error.cleanupCode = cause?.code;
+  error.cause = cause;
+  return error;
+};
+const publicationServiceMissingError = source => Object.assign(new Error('平台原子文件发布服务不可用，未发布任何目标，源内容已保留'), { code: 'FILE_PUBLICATION_SERVICE_MISSING', sourcePath: source, sourceRetained: true, published: false, recoveryRequired: false });
+
+const publishPathNoClobber = async (source, destination, options = {}) => {
+  const resolvedSource = path.resolve(source);
+  const target = path.resolve(destination);
+  const sourceStat = await fs.promises.lstat(resolvedSource);
+  const existing = await fs.promises.lstat(target).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+  if (existing) throw Object.assign(new Error(`目标已存在：${path.basename(target)}`), { code: 'EEXIST' });
+  await fs.promises.mkdir(path.dirname(target), { recursive: true });
+  if (!sourceStat.isFile() && !sourceStat.isDirectory()) throw new Error(`不支持发布此文件类型：${path.basename(resolvedSource)}`);
+  const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+  if (!nativeService?.nativeAvailable?.()) {
+    throw publicationServiceMissingError(resolvedSource);
   }
+  const result = await nativeService.moveNoReplace(resolvedSource, target);
+  return { strategy: result.strategy || 'win32-move-no-replace', identity: await capturePublishedIdentity(target), nativeIdentity: result.identity, sourceRemoved: true, recoveryRequired: false };
+};
+
+const commitTemporaryFile = async (temporary, target, options = {}) => {
+  return publishPathNoClobber(temporary, target, options);
 };
 
 const copyFileAtomic = async (source, destination, options = {}) => {
@@ -183,14 +227,14 @@ const copyFileAtomic = async (source, destination, options = {}) => {
     await fs.promises.utimes(temporary, sourceInfo.stat.atime, sourceInfo.stat.mtime).catch(() => undefined);
     if (durable) await syncTemporaryFile(temporary, sourceInfo.path, target);
     checkCancelled();
-    const commit = await commitTemporaryFile(temporary, target).catch(error => { throw attachTransferContext(error, 'commit-target', sourceInfo.path, target); });
+    const commit = await commitTemporaryFile(temporary, target, options).catch(error => { throw attachTransferContext(error, 'commit-target', sourceInfo.path, target); });
     await fs.promises.chmod(target, sourceInfo.stat.mode).catch(() => undefined);
     onProgress({ bytesCopied: sourceInfo.stat.size, totalBytes: sourceInfo.stat.size });
-    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: true, commitStrategy: commit.strategy };
+    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: true, commitStrategy: commit.strategy, publishedIdentity: commit.identity, nativePublishedIdentity: commit.nativeIdentity };
   } catch (error) {
     reader.destroy();
     writer.destroy();
-    await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
+    if (error?.code !== PUBLISH_PARTIAL_CODE) await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
     throw error;
   }
 };
@@ -277,7 +321,7 @@ const removeCopiedSources = async (plan, options = {}) => {
   }
 };
 
-const copySmallFileAtomic = async (entry, options = {}) => {
+const stageSmallFileAtomic = async (entry, options = {}) => {
   const { isCancelled = () => false, durable = false } = options;
   const target = path.resolve(entry.destination);
   const targetDirectory = path.dirname(target);
@@ -301,11 +345,21 @@ const copySmallFileAtomic = async (entry, options = {}) => {
     await fs.promises.utimes(temporary, entry.atime, entry.mtime).catch(() => undefined);
     if (durable) await syncTemporaryFile(temporary, entry.source, target);
     throwIfCancelled(isCancelled);
-    const commit = await commitTemporaryFile(temporary, target).catch(error => { throw attachTransferContext(error, 'commit-target', entry.source, target); });
-    await fs.promises.chmod(target, originalMode).catch(() => undefined);
-    return { source: entry.source, destination: target, bytes: entry.size, copied: true, commitStrategy: commit.strategy };
+    return { entry, temporary, target, originalMode };
   } catch (error) {
-    await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
+    if (error?.code !== PUBLISH_PARTIAL_CODE) await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
+    throw error;
+  }
+};
+
+const copySmallFileAtomic = async (entry, options = {}) => {
+  const staged = await stageSmallFileAtomic(entry, options);
+  try {
+    const commit = await commitTemporaryFile(staged.temporary, staged.target, options).catch(error => { throw attachTransferContext(error, 'commit-target', entry.source, staged.target); });
+    await fs.promises.chmod(staged.target, staged.originalMode).catch(() => undefined);
+    return { source: entry.source, destination: staged.target, bytes: entry.size, copied: true, commitStrategy: commit.strategy, publishedIdentity: commit.identity };
+  } catch (error) {
+    if (error?.code !== PUBLISH_PARTIAL_CODE) await fs.promises.rm(staged.temporary, { force: true }).catch(() => undefined);
     throw error;
   }
 };
@@ -324,6 +378,7 @@ const copyPlannedFiles = async (plan, options = {}) => {
     waitIfPaused = async () => undefined,
     isEntryComplete = async () => false,
     onEntryComplete = async () => undefined,
+    copyLargeFileAtomic = copyFileAtomic,
   } = options;
   const directories = plan.filter(entry => entry.kind === 'directory');
   const files = plan.filter(entry => entry.kind === 'file');
@@ -350,7 +405,10 @@ const copyPlannedFiles = async (plan, options = {}) => {
   let resumedFiles = 0;
   const shouldCancel = () => Boolean(control.error) || isCancelled();
   const rememberError = error => {
-    if (!control.error) control.error = error;
+    if (!control.error) { control.error = error; return; }
+    if (error?.recoveryRequired) control.error.recoveryRequired = true;
+    if (Array.isArray(error?.recoveryPaths)) control.error.recoveryPaths = [...new Set([...(control.error.recoveryPaths || []), ...error.recoveryPaths])];
+    if (Array.isArray(error?.unknownIndexes)) control.error.unknownIndexes = [...new Set([...(control.error.unknownIndexes || []), ...error.unknownIndexes])];
   };
   const runPool = async (entries, concurrency, copyEntry) => {
     let nextIndex = 0;
@@ -384,19 +442,150 @@ const copyPlannedFiles = async (plan, options = {}) => {
     await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), entries.length) }, worker));
   };
 
-  const smallPool = runPool(smallFiles, smallFileConcurrency, async entry => {
-    activeSmallCopies += 1;
-    peakSmallConcurrency = Math.max(peakSmallConcurrency, activeSmallCopies);
-    try {
-      await waitIfPaused();
-      return await copySmallFileAtomic(entry, { durable, isCancelled: shouldCancel });
-    } finally {
-      activeSmallCopies -= 1;
+  const smallPool = (async () => {
+    const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+    if (typeof nativeService?.moveNoReplaceBatch !== 'function') {
+      await runPool(smallFiles, smallFileConcurrency, async entry => {
+        activeSmallCopies += 1;
+        peakSmallConcurrency = Math.max(peakSmallConcurrency, activeSmallCopies);
+        try {
+          await waitIfPaused();
+          return await copySmallFileAtomic(entry, { durable, isCancelled: shouldCancel, nativePublicationService: nativeService });
+        } finally {
+          activeSmallCopies -= 1;
+        }
+      });
+      return;
     }
-  });
+
+    const prepared = [];
+    let nextIndex = 0;
+    const prepareWorker = async () => {
+      while (!control.error) {
+        try { throwIfCancelled(isCancelled); await waitIfPaused(); } catch (error) { rememberError(error); return; }
+        const index = nextIndex++;
+        if (index >= smallFiles.length) return;
+        const entry = smallFiles[index];
+        try {
+          if (await isEntryComplete(entry)) {
+            resumedFiles += 1;
+            onProgress({ entry, bytesDelta: entry.size, fileCompleted: true, resumed: true });
+            continue;
+          }
+          onFileStart(entry);
+          activeSmallCopies += 1;
+          peakSmallConcurrency = Math.max(peakSmallConcurrency, activeSmallCopies);
+          try {
+            const staged = await stageSmallFileAtomic(entry, { durable, isCancelled: shouldCancel });
+            prepared.push({ ...staged, planIndex: index });
+          } finally {
+            activeSmallCopies -= 1;
+          }
+        } catch (error) {
+          rememberError(error);
+          return;
+        }
+      }
+    };
+    await Promise.all(Array.from({ length: Math.min(Math.max(1, smallFileConcurrency), smallFiles.length) }, prepareWorker));
+    prepared.sort((left, right) => left.planIndex - right.planIndex);
+    if (control.error || isCancelled()) {
+      if (!control.error) rememberError(cancelledError());
+    }
+    if (!prepared.length) return;
+
+    const batchSize = 2048;
+    const preservedUnknown = new Set();
+    try {
+      for (let offset = 0; offset < prepared.length;) {
+        const inspectionChunk = takeBoundedBatch(prepared, offset, batchSize, item => Math.ceil(Buffer.byteLength(item.temporary) / 3) * 4);
+        const inspections = await nativeService.inspectPathsBatch(inspectionChunk.map(item => item.temporary));
+        for (let index = 0; index < inspectionChunk.length; index += 1) {
+          if (!inspections[index]?.success || typeof inspections[index].identity !== 'string') throw Object.assign(new Error('无法预捕获批量发布源身份'), { code: 'PUBLISH_OWNERSHIP_CONFLICT', recoveryPaths: inspectionChunk.map(item => item.temporary), recoveryRequired: true });
+          inspectionChunk[index].nativeIdentity = inspections[index].identity;
+        }
+        offset += inspectionChunk.length;
+      }
+    } catch (error) {
+      error.recoveryRequired = true;
+      error.recoveryPaths = prepared.filter(item => !item.nativeIdentity).map(item => item.temporary);
+      rememberError(error);
+    }
+    for (let offset = 0; offset < prepared.length && !control.error;) {
+      try { throwIfCancelled(isCancelled); await waitIfPaused(); } catch (error) { rememberError(error); break; }
+      const chunk = takeBoundedBatch(prepared, offset, batchSize, item => Math.ceil(Buffer.byteLength(item.temporary) / 3) * 4 + Math.ceil(Buffer.byteLength(item.target) / 3) * 4 + Math.ceil(Buffer.byteLength(item.nativeIdentity) / 3) * 4);
+      let completed = [];
+      let publicationError = null;
+      try {
+        completed = await nativeService.moveNoReplaceBatch(chunk.map(item => ({ source: item.temporary, target: item.target, identity: item.nativeIdentity })));
+      } catch (error) {
+        completed = Array.isArray(error.completed) ? error.completed : [];
+        publicationError = error;
+        try {
+          const observed = await nativeService.inspectPathsBatch([...chunk.map(item => item.temporary), ...chunk.map(item => item.target)]);
+          const reconciled = [];
+          const unknown = [];
+          for (let index = 0; index < chunk.length; index += 1) {
+            const sourceState = observed[index]; const targetState = observed[chunk.length + index]; const identity = chunk[index].nativeIdentity;
+            if (!sourceState.success && targetState.success && targetState.identity === identity) reconciled.push({ index, identity, strategy: 'native-batch-reconciled' });
+            else if (!(sourceState.success && sourceState.identity === identity && !targetState.success)) unknown.push(index);
+          }
+          completed = reconciled;
+          if (unknown.length) {
+            publicationError.unknownIndexes = unknown.map(index => offset + index);
+            for (const index of unknown) preservedUnknown.add(chunk[index].temporary);
+            publicationError.recoveryRequired = true;
+            publicationError.recoveryPaths = unknown.map(index => chunk[index].temporary).filter(candidate => fs.existsSync(candidate));
+          }
+        } catch (reconcileError) {
+          publicationError.reconciliationError = reconcileError;
+        }
+      }
+      const completedIndexes = new Set(completed.map(item => item.index));
+      const published = chunk.filter((_, index) => completedIndexes.has(index));
+
+      // Establish ownership of every target in this chunk before a callback
+      // can cancel or fail, so callers can roll back the exact committed set.
+      const owned = [];
+      for (const item of published) {
+        await fs.promises.chmod(item.target, item.originalMode).catch(() => undefined);
+        const localIndex = chunk.indexOf(item); const nativeResult = completed.find(result => result.index === localIndex);
+        const targetStat = await fs.promises.stat(item.target, { bigint: true });
+        const publishedIdentity = { ...publishedIdentityFromStat(item.target, targetStat), nativeIdentity: nativeResult.identity };
+        owned.push({ item, publishedIdentity, strategy: nativeResult.strategy || 'native-batch-move-no-replace' });
+        onCreated(item.target);
+      }
+      for (const { item, publishedIdentity, strategy } of owned) {
+        smallFilesCopied += 1;
+        onProgress({ entry: item.entry, bytesDelta: item.entry.size, fileCompleted: true });
+        try { await onEntryComplete(item.entry, { source: item.entry.source, destination: item.target, bytes: item.entry.size, copied: true, commitStrategy: strategy, publishedIdentity }); }
+        catch (error) { rememberError(error); break; }
+      }
+      if (publicationError && !control.error) {
+        const failed = chunk[publicationError.failedIndex];
+        rememberError(attachTransferContext(publicationError, 'commit-target', failed?.entry.source, failed?.target));
+      }
+      offset += chunk.length;
+    }
+    if (isCancelled() && !control.error) rememberError(cancelledError());
+    const unprocessed = prepared.filter(item => !preservedUnknown.has(item.temporary) && item.nativeIdentity && fs.existsSync(item.temporary));
+    if (control.error || isCancelled()) {
+      for (let offset = 0; offset < unprocessed.length;) {
+        const cleanupChunk = takeBoundedBatch(unprocessed, offset, batchSize, item => Math.ceil(Buffer.byteLength(item.temporary) / 3) * 4 + Math.ceil(Buffer.byteLength(item.nativeIdentity) / 3) * 4);
+        try {
+          const results = await nativeService.deletePathsBatch(cleanupChunk.map(item => ({ path: item.temporary, identity: item.nativeIdentity })));
+          const retained = results.map((result, index) => result.success ? null : (result.recoveryPath || cleanupChunk[index].temporary)).filter(Boolean);
+          if (retained.length && control.error) { control.error.recoveryRequired = true; control.error.recoveryPaths = [...new Set([...(control.error.recoveryPaths || []), ...retained])]; }
+        } catch (cleanupError) {
+          if (control.error) { control.error.recoveryRequired = true; control.error.recoveryPaths = [...new Set([...(control.error.recoveryPaths || []), ...cleanupChunk.map(item => item.temporary)])]; control.error.cleanupError = cleanupError; }
+        }
+        offset += cleanupChunk.length;
+      }
+    }
+  })();
   const largePool = runPool(largeFiles, 1, async entry => {
     let reportedBytes = 0;
-    const result = await copyFileAtomic(entry.source, entry.destination, {
+    const result = await copyLargeFileAtomic(entry.source, entry.destination, {
       durable,
       isCancelled: shouldCancel,
       waitIfPaused,
@@ -428,25 +617,42 @@ const removeCreatedPasteTargets = async targets => {
 const moveFileAtomic = async (source, destination, options = {}) => {
   const sourceInfo = await assertRegularFile(source);
   const target = path.resolve(destination);
-  const renameFile = options.renameFile || fs.promises.rename.bind(fs.promises);
   if (options.isCancelled?.()) throw cancelledError();
   if (fs.existsSync(target)) throw Object.assign(new Error(`目标文件已存在：${path.basename(target)}`), { code: 'EEXIST' });
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
   try {
-    await renameFile(sourceInfo.path, target);
+    const publish = await publishPathNoClobber(sourceInfo.path, target, options);
     options.onProgress?.({ bytesCopied: sourceInfo.stat.size, totalBytes: sourceInfo.stat.size });
-    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: false };
+    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: false, commitStrategy: publish.strategy };
   } catch (error) {
-    if (error?.code !== 'EXDEV') throw error;
+    if (!LINK_COPY_FALLBACK_ERRORS.has(error?.code)) throw error;
   }
 
-  const result = await copyFileAtomic(sourceInfo.path, target, options);
-  if (options.isCancelled?.()) {
-    await fs.promises.rm(target, { force: true }).catch(() => undefined);
-    throw cancelledError();
+  const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+  if (!nativeService?.nativeAvailable?.()) {
+    throw publicationServiceMissingError(sourceInfo.path);
   }
-  await fs.promises.rm(sourceInfo.path, { force: true });
-  return { ...result, copied: true };
+  const sourceIdentity = (await nativeService.inspectPath(sourceInfo.path)).identity;
+  const staged = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.photoflow-cross-volume`);
+  try {
+    const stagedCopy = await copyFileAtomic(sourceInfo.path, staged, { ...options, isCancelled: options.isCancelled });
+    const [stagedStat, sha256] = await Promise.all([fs.promises.stat(staged), fileDigest(staged)]);
+    if (options.isCancelled?.()) {
+      await nativeService.compareDeleteFile({ target: staged, sha256, size: stagedStat.size, identity: stagedCopy.nativePublishedIdentity });
+      throw cancelledError();
+    }
+    const committed = await nativeService.commitCrossVolumeFile({ source: sourceInfo.path, staged, target, sha256, size: stagedStat.size, sourceIdentity });
+    options.onProgress?.({ bytesCopied: sourceInfo.stat.size, totalBytes: sourceInfo.stat.size });
+    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: true, commitStrategy: committed.strategy };
+  } catch (error) {
+    if (error?.code === CANCELLED_CODE || error?.code === 'EEXIST') throw error;
+    const targetExists = fs.existsSync(target);
+    const stagedExists = fs.existsSync(staged);
+    if (stagedExists) error.recoveryPath = staged;
+    if (targetExists) throw partialPublishError({ source: sourceInfo.path, target, cleanupError: error, strategy: 'win32-cross-volume-locked-commit' });
+    if (stagedExists) throw stagingRecoveryError({ source: sourceInfo.path, destination: target, staging: staged, cause: error, strategy: 'cross-volume-staging-recovery' });
+    throw error;
+  }
 };
 
 const movePathAtomic = async (source, destination, options = {}) => {
@@ -458,9 +664,8 @@ const movePathAtomic = async (source, destination, options = {}) => {
   if (fs.existsSync(target)) throw Object.assign(new Error(`目标已存在：${path.basename(target)}`), { code: 'EEXIST' });
 
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
-  const renameFile = options.renameFile || fs.promises.rename.bind(fs.promises);
   try {
-    await renameFile(resolvedSource, target);
+    await publishPathNoClobber(resolvedSource, target, options);
     return { source: resolvedSource, destination: target, copied: false };
   } catch (error) {
     if (error?.code !== 'EXDEV') throw error;
@@ -475,6 +680,10 @@ const movePathAtomic = async (source, destination, options = {}) => {
       isCancelled: options.isCancelled,
       onDiscovered: options.onDiscovered,
     });
+    const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+    if (nativeService?.nativeAvailable?.()) {
+      for (const entry of plan) entry.nativeSourceIdentity = (await nativeService.inspectPath(entry.source)).identity;
+    }
     const totalBytes = plan.reduce((sum, entry) => sum + entry.size, 0);
     await assertDiskSpace(path.dirname(target), totalBytes);
     await copyPlannedFiles(plan, {
@@ -487,12 +696,35 @@ const movePathAtomic = async (source, destination, options = {}) => {
     });
     throwIfCancelled(options.isCancelled || (() => false));
     await assertCopyPlanSourcesUnchanged(plan);
-    await fs.promises.rename(temporary, target);
+    await publishPathNoClobber(temporary, target, options.publishTemporaryOptions || {});
     targetCommitted = true;
     throwIfCancelled(options.isCancelled || (() => false));
-    await removeCopiedSources(plan, { removeFile: options.removeFile });
+    if (nativeService?.nativeAvailable?.()) {
+      const completedSources = [];
+      try {
+        for (const entry of plan.filter(item => item.kind === 'file')) {
+          throwIfCancelled(options.isCancelled || (() => false));
+          const relative = path.relative(temporary, entry.destination);
+          const targetFile = path.join(target, relative);
+          const sha256 = await fileDigest(targetFile);
+          await nativeService.commitTreeFile({ source: entry.source, target: targetFile, sha256, size: entry.size, identity: entry.nativeSourceIdentity });
+          completedSources.push(entry.source);
+        }
+        for (const entry of plan.filter(item => item.kind === 'directory').sort((left, right) => right.source.length - left.source.length)) {
+          throwIfCancelled(options.isCancelled || (() => false));
+          await nativeService.deleteEmptyDirectory({ source: entry.source, identity: entry.nativeSourceIdentity });
+          completedSources.push(entry.source);
+        }
+      } catch (cleanupError) {
+        const partial = partialPublishError({ source: resolvedSource, target, identity: await capturePublishedIdentity(target), cleanupError, strategy: 'win32-cross-volume-directory-locked-commit' });
+        partial.completedSourcePaths = completedSources;
+        partial.remainingSourcePaths = plan.map(entry => entry.source).filter(candidate => fs.existsSync(candidate));
+        throw partial;
+      }
+    } else throw publicationServiceMissingError(resolvedSource);
   } catch (error) {
     await fs.promises.rm(temporary, { recursive: true, force: true }).catch(() => undefined);
+    if (error?.code === PUBLISH_PARTIAL_CODE) throw error;
     if (targetCommitted) {
       const cleanupError = new Error(`目标目录已完整保存，但源清理未完成，可能存在重复内容：${error?.message || '未知错误'}`);
       cleanupError.code = SOURCE_CLEANUP_INCOMPLETE_CODE;
@@ -509,6 +741,7 @@ const movePathAtomic = async (source, destination, options = {}) => {
 
 module.exports = {
   CANCELLED_CODE,
+  PUBLISH_PARTIAL_CODE,
   SOURCE_CLEANUP_INCOMPLETE_CODE,
   DEFAULT_SMALL_FILE_CONCURRENCY,
   DEFAULT_SMALL_FILE_THRESHOLD,
@@ -519,12 +752,14 @@ module.exports = {
   assertRegularFile,
   collectCopyPlan,
   commitTemporaryFile,
+  configureNativePublicationService,
   copyFileAtomic,
   copyPlannedFiles,
   copySmallFileAtomic,
   isInside,
   moveFileAtomic,
   movePathAtomic,
+  publishPathNoClobber,
   removeCopiedSources,
   removeCreatedPasteTargets,
   throwIfCancelled,

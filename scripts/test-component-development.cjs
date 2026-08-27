@@ -16,7 +16,8 @@ const writeFixture = (id, mutate = () => undefined) => {
   }
   const method = `${id}.settings.v1`;
   const manifest = { apiVersion: 1, id, version: '1.0.0', displayName: `Fixture ${id}`, description: 'Generic development fixture', icon: 'ui/icon.svg', entrypoints: { default: 'algorithm.bin' }, requiredFiles: ['ui/index.html', 'ui/settings.html', 'ui/icon.svg', 'service.cjs'], componentHost: { contractVersion: 2, compatibility: { minHostApiVersion: 7, maxHostApiVersion: 7 }, contributions: [{ type: 'workspace.toolbarAction', id: 'open', label: 'Open', pageId: 'main' }, { type: 'component.fullPage', id: 'main', title: 'Fixture', entry: 'ui/index.html' }, { type: 'application.settingsPage', id: 'settings', label: 'Settings', entry: 'ui/settings.html', rpcMethods: [method] }], service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: [method], capabilities: ['component.settings.v7'], permissions: ['component.settings'], events: [], runtimeActions: [] } } };
-  const packageManifest = { name: `fixture-${id}`, private: true, scripts: { build: 'fixture-build' }, photoflowComponent: { manifest: 'component.template.json', development: { prepare: 'build', runtime: { command: 'runtime.bin', entry: 'algorithm.js', argsPrefix: ['--fixture'] }, files: { 'algorithm.bin': 'algorithm.js', 'ui/index.html': 'dist/ui/index.html', 'ui/settings.html': 'dist/ui/settings.html', 'ui/icon.svg': 'src/icon.svg', 'service.cjs': 'src/service.cjs' } } } };
+  const packageManifest = { name: `fixture-${id}`, private: true, scripts: { build: 'fixture-build' }, photoflowComponent: { manifest: 'component.template.json', tests: { 'package-layout': ['tests/layout.cjs'] }, development: { prepare: 'build', runtime: { command: 'runtime.bin', entry: 'algorithm.js', argsPrefix: ['--fixture'] }, files: { 'algorithm.bin': 'algorithm.js', 'ui/index.html': 'dist/ui/index.html', 'ui/settings.html': 'dist/ui/settings.html', 'ui/icon.svg': 'src/icon.svg', 'service.cjs': 'src/service.cjs' } } } };
+  fs.mkdirSync(path.join(root, 'tests'), { recursive: true }); fs.writeFileSync(path.join(root, 'tests', 'layout.cjs'), '');
   mutate({ root, manifest, packageManifest });
   fs.writeFileSync(path.join(root, 'component.template.json'), JSON.stringify(manifest)); fs.writeFileSync(path.join(root, 'package.json'), JSON.stringify(packageManifest));
   return root;
@@ -42,9 +43,10 @@ try {
   writeFixture('missing-build', ({ root }) => fs.rmSync(path.join(root, 'dist', 'ui', 'index.html')));
   writeFixture('path-escape', ({ packageManifest }) => { packageManifest.photoflowComponent.development.files['ui/index.html'] = '../outside.html'; });
   writeFixture('unknown-field', ({ packageManifest }) => { packageManifest.photoflowComponent.development.catalogMagic = true; });
+  writeFixture('unsafe-test', ({ packageManifest }) => { packageManifest.photoflowComponent.tests['package-layout'] = ['../outside.cjs']; });
   writeFixture('undeclared-map', ({ packageManifest }) => { packageManifest.photoflowComponent.development.files['private/secret.js'] = 'algorithm.js'; });
   writeFixture('permission-default-deny', ({ manifest }) => { delete manifest.componentHost.service.permissions; });
-  for (const [id, pattern] of [['missing-build', /missing or unsafe/], ['path-escape', /component-local relative file/], ['unknown-field', /Unknown component development field/], ['undeclared-map', /undeclared component file/], ['permission-default-deny', /Host API 7 permissions must be exact and unique/]]) {
+  for (const [id, pattern] of [['missing-build', /missing or unsafe/], ['path-escape', /component-local relative file/], ['unknown-field', /Unknown component development field/], ['unsafe-test', /component-local relative file/], ['undeclared-map', /undeclared component file/], ['permission-default-deny', /Host API 7 permissions must be exact and unique/]]) {
     const invalid = registry.inspect(id); assert.equal(invalid.source, 'development'); assert.equal(invalid.compatible, false); assert.match(invalid.error, pattern);
   }
 

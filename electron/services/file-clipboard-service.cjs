@@ -74,7 +74,11 @@ const createFileClipboardService = ({ app, projectRoot, processSupervisor = null
     if (!ensureAvailable()) return { success: true, cleared: false, sources: [], operation: 'copy', sequence: 0 };
     return queueMutation(() => runJson(executable(), ['clear-if-current'], JSON.stringify({ sequence: snapshot.sequence, sources: snapshot.sources }), 12000, processSupervisor));
   };
-  return { write, read, clearIfCurrent, executable, nativeAvailable: () => process.platform === 'win32' && fs.existsSync(executable()) };
+  const waitForLeftMouseRelease = async () => {
+    if (!ensureAvailable()) return { success: true, leftButtonWasDown: false, releaseConfirmed: true, waitedMs: 0 };
+    return runJson(executable(), ['wait-left-release'], '', 35000, processSupervisor);
+  };
+  return { write, read, clearIfCurrent, waitForLeftMouseRelease, executable, nativeAvailable: () => process.platform === 'win32' && fs.existsSync(executable()) };
 };
 
 module.exports = { createFileClipboardService };

@@ -4,6 +4,7 @@ const path = require('path');
 const { Transform } = require('stream');
 const { pipeline } = require('stream/promises');
 const { AsyncLocalStorage } = require('async_hooks');
+const { defaultComponentDataAdoptionPolicy, ownsLegacyComponentDomainDatabase, isOwnedLegacyComponentDomainDatabase, legacyComponentOwnerForDomainDatabase } = require('../compatibility/component-data-adoption-policy.cjs');
 const {
   MANAGED_EXTERNAL_FOLDER_PREFIX,
   MANAGED_EXTERNAL_FILE_PREFIX,
@@ -43,6 +44,53 @@ const sha256File = async filePath => {
   for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
   return hash.digest('hex');
 };
+const assertNoReparseAncestorsBeforeCreate = async candidate => {
+  let cursor = path.resolve(candidate);
+  while (true) {
+    const stat = await fs.promises.lstat(cursor).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+    if (stat) {
+      if (stat.isSymbolicLink()) { const error = new Error(`恢复目标祖先包含链接或重解析点：${cursor}`); error.code = 'COMPONENT_RESTORE_TARGET_UNSAFE'; throw error; }
+      const real = await fs.promises.realpath(cursor).catch(error => ['EPERM', 'EACCES'].includes(error?.code) ? null : Promise.reject(error));
+      if (!real) { const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent; continue; }
+      const normalize = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
+      if (normalize(real) !== normalize(cursor)) { const error = new Error(`恢复目标祖先解析到其他位置：${cursor}`); error.code = 'COMPONENT_RESTORE_TARGET_UNSAFE'; throw error; }
+    }
+    const parent = path.dirname(cursor); if (parent === cursor) break; cursor = parent;
+  }
+};
+const COMPONENT_SOURCE_MANIFEST_SCHEMA = 'component-backup-restore-sources-v1';
+const COMPONENT_RECEIPT_SCHEMA = 'component-backup-restore-receipt-v1';
+const componentSourceKey = (scope, relativePath) => `${scope}\0${normalizeKey(relativePath)}`;
+const isComponentHostControlStoragePath = value => {
+  const segments = normalizeKey(value).split('/');
+  const first = segments[1] || '';
+  return ['inputs', 'staging', '.component-restore-transactions'].includes(first)
+    || first.startsWith('.photoflow-restore-') || first.startsWith('.component-restore-') || first.startsWith('.restore-staging-');
+};
+const writeHashedJson = async (filePath, value) => {
+  const body = `${JSON.stringify(value)}\n`;
+  await fs.promises.writeFile(filePath, body, { encoding: 'utf8', flag: 'wx' });
+  return { path: filePath, sha256: crypto.createHash('sha256').update(body).digest('hex'), size: Buffer.byteLength(body) };
+};
+const readHashedJson = async (root, filePath, expectedHash, label) => {
+  const resolved = path.resolve(String(filePath || ''));
+  if (!inside(root, resolved) || resolved === path.resolve(root)) throw new Error(`${label} 路径越界`);
+  const rootStat = await fs.promises.lstat(root);
+  if (rootStat.isSymbolicLink()) throw new Error(`${label} 根目录不允许链接路径`);
+  const rootReal = await fs.promises.realpath(root);
+  let cursor = resolved;
+  while (inside(root, cursor) && cursor !== path.resolve(root)) {
+    const linkStat = await fs.promises.lstat(cursor);
+    if (linkStat.isSymbolicLink()) throw new Error(`${label} 不允许链接路径`);
+    cursor = path.dirname(cursor);
+  }
+  const resolvedReal = await fs.promises.realpath(resolved);
+  if (!inside(rootReal, resolvedReal)) throw new Error(`${label} 真实路径越界`);
+  const stat = await fs.promises.lstat(resolved);
+  if (!stat.isFile() || stat.size > 128 * 1024 * 1024) throw new Error(`${label} 大小无效`);
+  if (await sha256File(resolved) !== expectedHash) throw new Error(`${label} 哈希校验失败`);
+  return JSON.parse(await fs.promises.readFile(resolved, 'utf8'));
+};
 
 const createBackupService = context => {
   const {
@@ -57,12 +105,15 @@ const createBackupService = context => {
     getWorkspaceMediaDatabasePath,
     getWorkspaceVersioningDatabasePath,
     getWorkspaceDataRoot,
+    getWorkspaceDataRootForKey,
+    bindWorkspaceStorageKeyForRestore,
     workspaceSqliteCoordinator,
     credentialService,
     prepareDomainRecovery,
     readSavedConfig,
     configMutationService,
     runPythonJsonAction,
+    componentDataAdoptionPolicy = defaultComponentDataAdoptionPolicy,
     shell,
     writeLog,
     componentServiceManager,
@@ -228,14 +279,21 @@ const createBackupService = context => {
 
   const snapshotComponentStorage = async (workspaceDataRoot, stage) => {
     const sourceRoot = path.join(workspaceDataRoot, 'components');
-    if (!await exists(sourceRoot)) return [];
+    if (!await exists(sourceRoot)) return { files: [], componentBackups: [] };
     if (!componentServiceManager?.quiesceForStorageSnapshot) throw new Error('组件数据包快照缺少通用 service quiesce 边界');
     const resume = await componentServiceManager.quiesceForStorageSnapshot();
     const snapshotRoot = path.join(stage, 'component-storage');
     try {
-      const liveFiles = await collectFiles(sourceRoot, 'component-storage', (_relative, item) => {
+      const snapshotDescriptors = componentServiceManager.backupSnapshotDescriptors?.() || componentRestoreDescriptors();
+      const frozenDescriptors = snapshotDescriptors.map(descriptor => ({ descriptor, token: componentRestoreDescriptorToken(descriptor) }));
+      const liveFiles = await collectFiles(sourceRoot, 'component-storage', (relative, item) => {
         if (item.isSymbolicLink()) throw new Error('组件数据包包含不允许的符号链接');
-        return false;
+        const segments = normalizeKey(relative).split('/');
+        const privateRelative = segments.slice(1).join('/');
+        // These paths are Host/service transport state, never component-owned
+        // durable data. Including them can recursively back up restore inputs,
+        // journals, or an interrupted transaction.
+        return Boolean(privateRelative) && isComponentHostControlStoragePath(relative);
       });
       for (const file of liveFiles) {
         const destination = safeDestination(snapshotRoot, file.relative);
@@ -246,10 +304,677 @@ const createBackupService = context => {
         if (before.size !== after.size || before.mtimeMs !== after.mtimeMs
           || await sha256File(file.absolute) !== await sha256File(destination)) throw new Error('组件数据包在 quiesce 快照期间发生变化');
       }
-      return collectFiles(snapshotRoot, 'component-storage');
+      const files = await collectFiles(snapshotRoot, 'component-storage');
+      const currentDescriptors = componentServiceManager.backupSnapshotDescriptors?.() || componentRestoreDescriptors();
+      if (currentDescriptors.length !== frozenDescriptors.length) throw new Error('组件清单在数据包快照期间发生变化');
+      for (const frozen of frozenDescriptors) {
+        const current = currentDescriptors.find(item => item.componentId === frozen.descriptor.componentId);
+        if (!current || componentRestoreDescriptorToken(current) !== frozen.token) throw new Error(`组件 ${frozen.descriptor.componentId} 在数据包快照期间发生升级`);
+      }
+      const frozenById = new Map(frozenDescriptors.map(item => [item.descriptor.componentId, item.descriptor]));
+      const storageComponentIds = [...new Set(files.map(file => componentIdFromStoragePath(file.relative)).filter(Boolean))].sort();
+      const componentBackups = storageComponentIds.map(componentId => {
+        const descriptor = frozenById.get(componentId);
+        return {
+        componentId,
+        componentVersion: String(descriptor?.componentVersion || 'unversioned'),
+        sources: (descriptor?.service?.backupRestore?.sources || []).filter(source => files.some(entry => entry.scope === source.scope && entry.relative === source.path))
+          .map(source => ({ scope: source.scope, path: normalizeKey(source.path), format: source.format })),
+      };
+      });
+      return { files, componentBackups };
     } finally {
       await resume();
     }
+  };
+
+  const componentRestoreDescriptors = () => componentServiceManager?.backupRestoreDescriptors?.() || [];
+  const componentIdFromStoragePath = value => normalizeKey(value).split('/')[0] || '';
+  const snapshotComponentRecord = (manifest, componentId) => Array.isArray(manifest.componentBackups)
+    ? manifest.componentBackups.find(item => item?.componentId === componentId)
+    : null;
+  const matchingComponentSources = (manifest, descriptor) => {
+    const snapshotRecord = snapshotComponentRecord(manifest, descriptor.componentId);
+    const inferredOpaqueSources = snapshotRecord?.sources?.length === 0
+      ? (descriptor.service.backupRestore.sources || []).filter(source => source.scope === 'component-storage'
+        && componentIdFromStoragePath(source.path) === descriptor.componentId
+        && manifest.files.some(item => item.scope === source.scope && item.path === source.path))
+        .map(source => ({ ...source, format: 'unversioned', metadataOrigin: 'inferred' }))
+      : [];
+    const declarations = snapshotRecord
+      ? (snapshotRecord.sources.length ? snapshotRecord.sources.map(source => ({ ...source, metadataOrigin: 'snapshot' })) : inferredOpaqueSources)
+      : (descriptor.service.backupRestore.sources || []).map(source => ({ ...source, format: 'unversioned', metadataOrigin: 'legacy-manifest' }));
+    return (declarations || []).flatMap(source => {
+      const entry = manifest.files.find(item => item.scope === source.scope && item.path === source.path);
+      return entry ? [{ declaration: source, entry, sourceVersion: snapshotRecord?.componentVersion || 'unversioned', metadataOrigin: source.metadataOrigin }] : [];
+    });
+  };
+  const validateComponentBackupMetadata = (manifest, descriptors = [], { restoreCompatibility = false } = {}) => {
+    const metadataInvalid = message => { const error = new Error(message); error.code = 'COMPONENT_BACKUP_METADATA_INVALID'; return error; };
+    const reservedDomainDatabases = new Set(['core.sqlite3', 'operations.sqlite3', 'media.sqlite3', 'versioning.sqlite3']);
+    const invalidLegacyDomain = manifest.files.find(item => item.scope === 'domain-database'
+      && !reservedDomainDatabases.has(item.path) && !isOwnedLegacyComponentDomainDatabase(item.path, componentDataAdoptionPolicy));
+    if (invalidLegacyDomain) {
+      const error = new Error(`备份包含未授权的历史域数据库：${invalidLegacyDomain.path}`);
+      error.code = 'COMPONENT_LEGACY_RESTORE_OWNER_MISSING'; error.sourcePath = invalidLegacyDomain.path; throw error;
+    }
+    if (manifest.componentBackups == null) return;
+    if (!Array.isArray(manifest.componentBackups)) throw metadataInvalid('备份组件元数据无效');
+    const owners = new Map();
+    const componentRecords = new Set();
+    for (const record of manifest.componentBackups) {
+      if (!record || typeof record.componentId !== 'string' || !record.componentId || typeof record.componentVersion !== 'string'
+        || !Array.isArray(record.sources)) throw metadataInvalid('备份组件元数据无效');
+      if (componentRecords.has(record.componentId)) throw metadataInvalid(`备份组件元数据重复：${record.componentId}`);
+      componentRecords.add(record.componentId);
+      for (const source of record.sources) {
+        if (!source || !['component-storage', 'domain-database'].includes(source.scope)
+          || typeof source.path !== 'string' || !source.path || typeof source.format !== 'string' || !source.format) throw metadataInvalid('备份组件源元数据无效');
+        if (source.scope === 'domain-database' && (reservedDomainDatabases.has(source.path)
+          || !ownsLegacyComponentDomainDatabase(record.componentId, source.path, componentDataAdoptionPolicy))) {
+          const error = new Error(`备份组件不得认领宿主数据库：${source.path}`);
+          error.code = 'COMPONENT_RESTORE_SOURCE_UNAUTHORIZED'; error.componentId = record.componentId; error.sourcePath = source.path; throw error;
+        }
+        if (source.scope === 'component-storage' && componentIdFromStoragePath(source.path) !== record.componentId) {
+          const error = new Error(`备份组件元数据归属无效：${source.path}`);
+          error.code = 'COMPONENT_RESTORE_SOURCE_UNAUTHORIZED'; error.componentId = record.componentId; error.sourcePath = source.path; throw error;
+        }
+        const installed = descriptors.find(item => item.componentId === record.componentId);
+        if (restoreCompatibility && installed) {
+          const authorized = installed.service?.backupRestore?.sources?.some(item => item.scope === source.scope && item.path === source.path);
+          if (!authorized) { const error = new Error(`备份组件源不在当前组件授权清单：${source.path}`); error.code = 'COMPONENT_RESTORE_SOURCE_MISSING'; error.componentId = record.componentId; error.sourcePath = source.path; throw error; }
+        }
+        const key = componentSourceKey(source.scope, source.path);
+        if (owners.has(key)) throw metadataInvalid(`备份组件源被重复认领：${source.path}`);
+        owners.set(key, record.componentId);
+        const entry = manifest.files.find(item => item.scope === source.scope && item.path === source.path);
+        if (!entry) { const error = new Error(`备份组件元数据对应对象缺失：${source.path}`); error.code = 'COMPONENT_RESTORE_SOURCE_MISSING'; throw error; }
+      }
+    }
+    const storedComponentIds = new Set(manifest.files.filter(item => item.scope === 'component-storage' && !isComponentHostControlStoragePath(item.path))
+      .map(item => componentIdFromStoragePath(item.path)).filter(Boolean));
+    if (storedComponentIds.size !== componentRecords.size || [...storedComponentIds].some(componentId => !componentRecords.has(componentId))) throw metadataInvalid('备份组件元数据未完整覆盖组件存储');
+  };
+  const componentRestoreOperationId = (...parts) => crypto.createHash('sha256').update(parts.map(String).join('\0')).digest('hex');
+  const componentRestoreDescriptorToken = descriptor => crypto.createHash('sha256').update(JSON.stringify({
+    componentId: descriptor.componentId, componentVersion: descriptor.componentVersion,
+    backupRestore: descriptor.service?.backupRestore || null, rpcMethods: descriptor.service?.rpcMethods || [],
+  })).digest('hex');
+  const preflightComponentRestore = (manifest, mode) => {
+    if (!componentServiceManager?.invokeBackupRestore) throw new Error('组件数据恢复缺少通用 component-owned restore hook');
+    const descriptors = componentRestoreDescriptors();
+    validateComponentBackupMetadata(manifest, descriptors, { restoreCompatibility: true });
+    const reservedDomainDatabases = new Set(['core.sqlite3', 'operations.sqlite3', 'media.sqlite3', 'versioning.sqlite3']);
+    const declaredLegacySources = new Set(descriptors.flatMap(descriptor => descriptor.service.backupRestore.sources || [])
+      .filter(source => source.scope === 'domain-database').map(source => source.path));
+    const redundantLegacySources = new Map();
+    const hasCompleteCurrentSnapshot = componentId => {
+      const record = snapshotComponentRecord(manifest, componentId);
+      const currentFiles = manifest.files.filter(item => item.scope === 'component-storage' && !isComponentHostControlStoragePath(item.path)
+        && componentIdFromStoragePath(item.path) === componentId);
+      if (!currentFiles.length) return false;
+      if (!record) return manifest.componentBackups == null && currentFiles.some(item => item.path === `${componentId}/storage.sqlite3`);
+      const declaredCurrent = (record.sources || []).filter(source => source.scope === 'component-storage');
+      return declaredCurrent.length
+        ? declaredCurrent.some(source => currentFiles.some(item => item.path === source.path))
+        : currentFiles.some(item => item.path === `${componentId}/storage.sqlite3`);
+    };
+    const orphanedLegacyEntry = manifest.files.find(item => item.scope === 'domain-database'
+      && !reservedDomainDatabases.has(item.path) && !declaredLegacySources.has(item.path)
+      && (() => {
+        const owner = legacyComponentOwnerForDomainDatabase(item.path, componentDataAdoptionPolicy);
+        if (owner && hasCompleteCurrentSnapshot(owner)) {
+          if (mode === 'workspace') { const paths = redundantLegacySources.get(owner) || []; paths.push(item.path); redundantLegacySources.set(owner, paths); }
+          return false;
+        }
+        return true;
+      })());
+    if (orphanedLegacyEntry) {
+      const error = new Error(`备份包含未安装或未注册组件的历史数据源：${orphanedLegacyEntry.path}`);
+      error.code = 'COMPONENT_LEGACY_RESTORE_OWNER_MISSING'; error.sourcePath = orphanedLegacyEntry.path; throw error;
+    }
+    const componentIds = new Set(manifest.files.filter(item => item.scope === 'component-storage' && !isComponentHostControlStoragePath(item.path)).map(item => componentIdFromStoragePath(item.path)).filter(Boolean));
+    if (mode === 'project') {
+      for (const componentId of componentIds) {
+        const descriptor = descriptors.find(item => item.componentId === componentId);
+        if (!descriptor?.service?.backupRestore?.project) {
+          const error = new Error(`组件 ${componentId} 的备份包含私有数据，但该组件未声明项目级恢复支持`);
+          error.code = 'COMPONENT_PROJECT_RESTORE_UNSUPPORTED'; error.componentId = componentId; throw error;
+        }
+        const ownsDeclaredSource = matchingComponentSources(manifest, descriptor).some(source => source.entry.scope === 'component-storage'
+          && componentIdFromStoragePath(source.entry.path) === componentId);
+        if (!ownsDeclaredSource) {
+          const error = new Error(`组件 ${componentId} 的备份包含私有数据，但缺少该组件声明的主恢复源`);
+          error.code = 'COMPONENT_RESTORE_SOURCE_MISSING'; error.componentId = componentId; throw error;
+        }
+      }
+    } else {
+      for (const componentId of componentIds) {
+        const descriptor = descriptors.find(item => item.componentId === componentId);
+        if (!descriptor?.service?.backupRestore?.workspace) continue;
+        const ownsDeclaredSource = matchingComponentSources(manifest, descriptor).some(source => source.entry.scope === 'component-storage'
+          && componentIdFromStoragePath(source.entry.path) === componentId);
+        if (!ownsDeclaredSource) {
+          const error = new Error(`组件 ${componentId} 的备份包含私有数据，但缺少该组件声明的主恢复源`);
+          error.code = 'COMPONENT_RESTORE_SOURCE_MISSING'; error.componentId = componentId; throw error;
+        }
+      }
+    }
+    for (const descriptor of descriptors) {
+      if (descriptor.service.backupRestore.transactionProtocolVersion !== 1
+        || descriptor.service.backupRestore.sourceManifestProtocolVersion !== 1
+        || descriptor.service.backupRestore.receiptProtocolVersion !== 1) {
+        const error = new Error(`组件 ${descriptor.componentId} 的备份恢复协议版本不受支持`);
+        error.code = 'COMPONENT_RESTORE_PROTOCOL_UNSUPPORTED'; throw error;
+      }
+      const matched = matchingComponentSources(manifest, descriptor);
+      const hasCurrentMatched = matched.some(source => source.entry.scope === 'component-storage');
+      const hasSelectedLegacy = !hasCurrentMatched && matched.some(source => source.entry.scope === 'domain-database');
+      const mayOpaquePreserveWorkspace = mode === 'workspace' && hasCurrentMatched && !hasSelectedLegacy;
+      if (matched.length && !descriptor.service.backupRestore[mode] && !mayOpaquePreserveWorkspace) {
+        const error = new Error(`组件 ${descriptor.componentId} 的备份包含私有数据，但未声明${mode === 'project' ? '项目级' : '工作区级'}恢复支持`);
+        error.code = mode === 'project' ? 'COMPONENT_PROJECT_RESTORE_UNSUPPORTED' : 'COMPONENT_WORKSPACE_RESTORE_UNSUPPORTED';
+        error.componentId = descriptor.componentId; throw error;
+      }
+      for (const hook of [descriptor.service.backupRestore.workspace, descriptor.service.backupRestore.project].filter(Boolean)) {
+        if (componentServiceManager.supports?.(descriptor.componentId, hook.method)) {
+          const error = new Error(`组件 ${descriptor.componentId} 的恢复 hook 被错误暴露为普通 RPC`);
+          error.code = 'COMPONENT_RESTORE_HOOK_PUBLIC'; error.componentId = descriptor.componentId; throw error;
+        }
+      }
+    }
+    const actionable = descriptors.filter(descriptor => matchingComponentSources(manifest, descriptor).length && descriptor.service.backupRestore[mode]);
+    const opaquePreserved = mode === 'workspace' ? [...new Set([...componentIds]
+      .filter(componentId => !descriptors.some(descriptor => descriptor.componentId === componentId))
+      .concat(descriptors.filter(descriptor => {
+      const matched = matchingComponentSources(manifest, descriptor); return matched.some(source => source.entry.scope === 'component-storage')
+        && !descriptor.service.backupRestore.workspace;
+      }).map(descriptor => descriptor.componentId)))] : [];
+    return Object.freeze({ mode, opaquePreserved: Object.freeze(opaquePreserved), redundantLegacySources: Object.freeze([...redundantLegacySources].map(([componentId, paths]) => Object.freeze({ componentId, paths: Object.freeze(paths.sort()) }))), descriptors: Object.freeze(actionable.map(descriptor => Object.freeze({ descriptor, token: componentRestoreDescriptorToken(descriptor) }))) });
+  };
+  const verifyComponentRestoreSources = async (target, manifest, plan, task) => {
+    const required = [manifest.database, ...manifest.files].sort((left, right) => `${left.scope || ''}\0${left.path || ''}`.localeCompare(`${right.scope || ''}\0${right.path || ''}`));
+    const checkpoint = task?.getCheckpoint?.() || {};
+    const savedVerification = checkpoint.verification || {};
+    const savedIndex = Math.max(0, Math.min(required.length, Number(savedVerification.verifiedIndex) || 0));
+    const nextDigest = (previous, entry, stat) => crypto.createHash('sha256').update([previous, entry.hash, stat.size, stat.mtimeMs, stat.ctimeMs, stat.ino || 0].join('\0')).digest('hex');
+    let identityDigest = '0'.repeat(64);
+    let verifiedIndex = savedIndex;
+    for (let index = 0; index < savedIndex; index += 1) {
+      const entry = required[index]; const stat = await fs.promises.lstat(objectPath(target, entry.hash)).catch(() => null);
+      if (!stat?.isFile() || stat.size !== Number(entry.size)) { verifiedIndex = 0; identityDigest = '0'.repeat(64); break; }
+      identityDigest = nextDigest(identityDigest, entry, stat);
+    }
+    if (verifiedIndex && identityDigest !== savedVerification.identityDigest) { verifiedIndex = 0; identityDigest = '0'.repeat(64); }
+    for (const [index, entry] of required.entries()) {
+      task?.throwIfCancelled?.();
+      const source = objectPath(target, entry.hash);
+      const stat = await fs.promises.lstat(source).catch(() => null);
+      if (!stat?.isFile() || stat.size !== Number(entry.size)) {
+        const error = new Error(`备份对象缺失或大小不符：${entry.path || 'workspace.sqlite3'}`);
+        error.code = 'BACKUP_OBJECT_PREFLIGHT_FAILED'; error.sourcePath = entry.path || 'workspace.sqlite3'; error.componentId = entry.scope === 'component-storage' ? componentIdFromStoragePath(entry.path) : undefined; throw error;
+      }
+      if (index >= verifiedIndex && await sha256File(source) !== entry.hash) {
+        const error = new Error(`备份对象预检哈希失败：${entry.path || 'workspace.sqlite3'}`);
+        error.code = 'BACKUP_OBJECT_PREFLIGHT_FAILED'; error.sourcePath = entry.path || 'workspace.sqlite3'; error.componentId = entry.scope === 'component-storage' ? componentIdFromStoragePath(entry.path) : undefined; throw error;
+      }
+      if (index >= verifiedIndex) identityDigest = nextDigest(identityDigest, entry, stat);
+      task?.report?.((index + 1) / Math.max(1, required.length) * 2, `正在预检恢复对象 ${index + 1}/${required.length}`);
+      if (index + 1 >= verifiedIndex && ((index + 1) % 64 === 0 || index + 1 === required.length)) task?.saveCheckpoint?.({ ...task.getCheckpoint(), phase: 'verifying', verification: { verifiedIndex: index + 1, identityDigest } }, (index + 1) / Math.max(1, required.length) * 2, `已验证恢复对象 ${index + 1}/${required.length}`);
+    }
+    if (componentServiceManager?.prepareBackupRestore) {
+      await componentServiceManager.prepareBackupRestore(plan.descriptors.map(item => item.descriptor.componentId));
+    }
+    return true;
+  };
+  const restoreOwnedComponentDataUnderLease = async ({ target, manifest, mode, task, sourceWorkspace, targetWorkspace, project, plan, invokeBackupRestore, beforeTargetWrite, continuation }) => {
+    if (!plan || plan.mode !== mode) throw new Error('组件恢复缺少已验证的 preflight plan');
+    const currentDescriptors = componentRestoreDescriptors();
+    for (const item of plan.descriptors) {
+      const current = currentDescriptors.find(descriptor => descriptor.componentId === item.descriptor.componentId);
+      if (!current || componentRestoreDescriptorToken(current) !== item.token) {
+        const error = new Error(`组件 ${item.descriptor.componentId} 在恢复 preflight 后发生变化`);
+        error.code = 'COMPONENT_RESTORE_PLAN_CHANGED'; throw error;
+      }
+    }
+    const descriptors = plan.descriptors.map(item => item.descriptor);
+    const authorizedDataRoot = path.resolve(targetWorkspace.dataRoot);
+    await assertNoReparseAncestorsBeforeCreate(targetWorkspace.root);
+    await assertNoReparseAncestorsBeforeCreate(authorizedDataRoot);
+    const existingDataRootReal = await fs.promises.realpath(authorizedDataRoot).catch(() => null);
+    const targetComponentIds = [...new Set([...descriptors.map(descriptor => descriptor.componentId), ...(plan.opaquePreserved || [])])];
+    for (const candidate of [authorizedDataRoot, path.join(authorizedDataRoot, 'components'), ...targetComponentIds.map(componentId => path.join(authorizedDataRoot, 'components', componentId))]) {
+      const stat = await fs.promises.lstat(candidate).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+      if (stat?.isSymbolicLink()) { const error = new Error('组件恢复目标包含符号链接或重解析边界'); error.code = 'COMPONENT_RESTORE_TARGET_UNSAFE'; throw error; }
+      if (stat && existingDataRootReal && !inside(existingDataRootReal, await fs.promises.realpath(candidate))) { const error = new Error('组件恢复目标越过授权数据根目录'); error.code = 'COMPONENT_RESTORE_TARGET_UNSAFE'; throw error; }
+    }
+    const operationIds = new Map(descriptors.map(descriptor => [descriptor.componentId,
+      componentRestoreOperationId(task.id, manifest.id || manifest.createdAt, mode, descriptor.componentId, project?.id || targetWorkspace.root)]));
+    const prepared = [];
+    const phaseContext = { projectId: project?.id, projectName: project?.targetName, projectStatus: project?.targetStatus, workspacePath: targetWorkspace.root };
+    const releasePrepared = async phase => {
+      const failures = [];
+      const released = new Set();
+      for (const item of [...prepared].reverse()) {
+        try {
+          const result = await invokeBackupRestore(item.descriptor.componentId, mode, {
+            schemaVersion: 1, phase, operationId: item.operationId, mode, quiesceToken: item.quiesceToken,
+            sourceWorkspace, targetWorkspace, ...(project ? { project } : {}),
+          }, phaseContext);
+          if (!result || result.operationId !== item.operationId) throw new Error(`组件 ${item.descriptor.componentId} 返回了无效的 ${phase} 回执`);
+          released.add(item);
+        } catch (error) { failures.push(error); }
+      }
+      for (let index = prepared.length - 1; index >= 0; index -= 1) if (released.has(prepared[index])) prepared.splice(index, 1);
+      if (failures.length) throw new AggregateError(failures, `组件恢复 ${phase} 阶段失败`);
+    };
+    const settlePrepared = async phase => {
+      let lastError = null;
+      for (let attempt = 0; attempt < 2 && prepared.length; attempt += 1) try { await releasePrepared(phase); } catch (error) { lastError = error; }
+      if (!prepared.length) return { pending: false, error: lastError };
+      const stopFailures = [];
+      for (const item of [...prepared]) {
+        try { await componentServiceManager.stop(item.descriptor.componentId, `component-restore-${phase}-failed`); prepared.splice(prepared.indexOf(item), 1); }
+        catch (error) { componentServiceManager.quarantine?.(item.descriptor.componentId, `component-restore-${phase}-pending`); stopFailures.push(error); }
+      }
+      return { pending: prepared.length > 0, error: stopFailures.length ? new AggregateError(stopFailures, `组件恢复 ${phase} token 无法释放`) : lastError };
+    };
+    try {
+      for (const descriptor of descriptors) {
+        const operationId = operationIds.get(descriptor.componentId);
+        const result = await invokeBackupRestore(descriptor.componentId, mode, {
+          schemaVersion: 1, phase: 'prepare', operationId, mode, sourceWorkspace, targetWorkspace,
+          sourceVersion: snapshotComponentRecord(manifest, descriptor.componentId)?.componentVersion || 'unversioned',
+          targetVersion: String(descriptor.componentVersion || 'unversioned'), ...(project ? { project } : {}),
+        }, phaseContext);
+        if (!result || result.operationId !== operationId || result.status !== 'prepared' || typeof result.quiesceToken !== 'string' || !result.quiesceToken) throw new Error(`组件 ${descriptor.componentId} 返回了无效的 prepare 回执`);
+        prepared.push({ descriptor, operationId, quiesceToken: result.quiesceToken });
+      }
+    } catch (error) {
+      const release = await settlePrepared('finalize');
+      if (release.pending) throw new AggregateError([error, release.error], '组件恢复 prepare 失败且已准备组件已隔离');
+      throw error;
+    }
+    let transactionCommitted = false;
+    let activeTransactionRoot = null;
+    try {
+    await beforeTargetWrite?.();
+    const transactionsRoot = path.join(targetWorkspace.dataRoot, '.component-restore-transactions');
+    for (const candidate of [targetWorkspace.dataRoot, path.join(targetWorkspace.dataRoot, 'components'), transactionsRoot]) {
+      const stat = await fs.promises.lstat(candidate).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+      if (stat?.isSymbolicLink()) { const error = new Error('组件恢复目标包含符号链接或重解析边界'); error.code = 'COMPONENT_RESTORE_TARGET_UNSAFE'; throw error; }
+    }
+    const rejectSymlinks = async root => {
+      if (!await exists(root)) return;
+      const pending = [root];
+      while (pending.length) {
+        const currentDirectory = pending.pop();
+        for (const entry of await fs.promises.readdir(currentDirectory, { withFileTypes: true })) {
+        if (entry.isSymbolicLink()) { const error = new Error('组件恢复事务不允许符号链接'); error.code = 'COMPONENT_RESTORE_SYMLINK_UNSAFE'; throw error; }
+          if (entry.isDirectory()) pending.push(path.join(currentDirectory, entry.name));
+        }
+      }
+    };
+    const writeDurableJson = async (filePath, value) => {
+      await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+      const next = `${filePath}.${crypto.randomUUID()}.next`;
+      await fs.promises.writeFile(next, JSON.stringify(value), { encoding: 'utf8', flag: 'wx' });
+      const handle = await fs.promises.open(next, 'r+');
+      try { await handle.sync().catch(error => { if (!['EPERM', 'EINVAL', 'ENOTSUP'].includes(error?.code)) throw error; }); }
+      finally { await handle.close(); }
+      await fs.promises.rename(next, filePath);
+      const directory = await fs.promises.open(path.dirname(filePath), 'r').catch(() => null);
+      try { await directory?.sync().catch(error => { if (!['EPERM', 'EINVAL', 'ENOTSUP'].includes(error?.code)) throw error; }); }
+      finally { await directory?.close(); }
+    };
+    const writeTransactionJournal = (transactionRoot, value) => writeDurableJson(path.join(transactionRoot, `journal.${value.state}.json`), value);
+    const rollbackTransaction = async (transactionRoot, { preserve = false } = {}) => {
+      let journal = null;
+      for (const state of ['committed', 'applying', 'planned']) {
+        journal = await fs.promises.readFile(path.join(transactionRoot, `journal.${state}.json`), 'utf8').then(JSON.parse, () => null);
+        if (journal) break;
+      }
+      if (!journal?.components || journal.state === 'planned' || journal.state === 'committed') { await fs.promises.rm(transactionRoot, { recursive: true, force: true }); return; }
+      for (const item of journal.components) {
+        const backupRoot = safeDestination(path.join(transactionRoot, 'backups'), item.componentId);
+        const liveRoot = safeDestination(path.join(targetWorkspace.dataRoot, 'components'), item.componentId);
+        const liveStat = await fs.promises.lstat(liveRoot).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+        if (liveStat?.isSymbolicLink()) { const error = new Error(`组件 ${item.componentId} 的恢复目标变成了链接`); error.code = 'COMPONENT_RESTORE_TARGET_UNSAFE'; throw error; }
+        if (item.existed && !await exists(backupRoot)) {
+          const error = new Error(`组件 ${item.componentId} 的恢复事务备份缺失，拒绝删除当前数据`);
+          error.code = 'COMPONENT_RESTORE_ROLLBACK_BACKUP_MISSING'; throw error;
+        }
+        if (item.existed) {
+          await rejectSymlinks(backupRoot);
+          const files = await collectFiles(backupRoot, 'rollback');
+          const byRelative = new Map(files.map(file => [file.relative, file.absolute]));
+          if (!Array.isArray(item.backupFiles) || byRelative.size !== item.backupFiles.length) { const error = new Error(`组件 ${item.componentId} 的恢复事务备份清单不完整`); error.code = 'COMPONENT_RESTORE_ROLLBACK_BACKUP_INVALID'; throw error; }
+          for (const expected of item.backupFiles) if (!byRelative.has(expected.relative) || (await fs.promises.stat(byRelative.get(expected.relative))).size !== expected.size
+            || await sha256File(byRelative.get(expected.relative)) !== expected.sha256) { const error = new Error(`组件 ${item.componentId} 的恢复事务备份已损坏`); error.code = 'COMPONENT_RESTORE_ROLLBACK_BACKUP_INVALID'; throw error; }
+        }
+      }
+      for (const item of [...journal.components].reverse()) {
+        const targetRoot = safeDestination(path.join(targetWorkspace.dataRoot, 'components'), item.componentId);
+        const backupRoot = safeDestination(path.join(transactionRoot, 'backups'), item.componentId);
+        const donePath = safeDestination(path.join(transactionRoot, 'rollback-progress'), `${item.componentId}.done.json`);
+        const targetMatchesBackup = async () => {
+          const files = await collectFiles(targetRoot, 'rollback'); const byRelative = new Map(files.map(file => [file.relative, file.absolute]));
+          if (byRelative.size !== item.backupFiles.length) return false;
+          for (const expected of item.backupFiles) if (!byRelative.has(expected.relative) || (await fs.promises.stat(byRelative.get(expected.relative))).size !== expected.size
+            || await sha256File(byRelative.get(expected.relative)) !== expected.sha256) return false;
+          return true;
+        };
+        if (await exists(donePath)) {
+          const progress = await fs.promises.readFile(donePath, 'utf8').then(JSON.parse, () => null);
+          if (!progress || progress.componentId !== item.componentId || !['absent', 'backup'].includes(progress.restored)) { const error = new Error(`组件 ${item.componentId} 的恢复事务进度文件无效`); error.code = 'COMPONENT_RESTORE_ROLLBACK_PROGRESS_INVALID'; throw error; }
+          const replayValid = item.existed ? await exists(targetRoot) && await targetMatchesBackup() : !await exists(targetRoot);
+          if (replayValid) continue;
+          await fs.promises.rm(donePath, { force: true });
+        }
+        if (!item.existed) {
+          if (await exists(targetRoot)) await fs.promises.rm(targetRoot, { recursive: true, force: true });
+          await writeDurableJson(donePath, { componentId: item.componentId, restored: 'absent' });
+          continue;
+        }
+        const replacement = safeDestination(path.join(transactionRoot, 'rollback-replacements'), item.componentId);
+        const displaced = safeDestination(path.join(transactionRoot, 'rollback-displaced'), item.componentId);
+        if (await exists(displaced) && await exists(targetRoot) && !await exists(replacement) && await targetMatchesBackup()) {
+          await writeDurableJson(donePath, { componentId: item.componentId, restored: 'backup' }); await fs.promises.rm(displaced, { recursive: true, force: true }); continue;
+        }
+        await fs.promises.rm(replacement, { recursive: true, force: true }); await fs.promises.mkdir(path.dirname(replacement), { recursive: true });
+        await fs.promises.cp(backupRoot, replacement, { recursive: true, errorOnExist: true, force: false });
+        const replacementFiles = await collectFiles(replacement, 'rollback');
+        const replacementByRelative = new Map(replacementFiles.map(file => [file.relative, file.absolute]));
+        if (replacementByRelative.size !== item.backupFiles.length) throw Object.assign(new Error(`组件 ${item.componentId} 的回滚替换副本不完整`), { code: 'COMPONENT_RESTORE_ROLLBACK_REPLACE_INVALID' });
+        for (const expected of item.backupFiles) {
+          const filePath = replacementByRelative.get(expected.relative);
+          if (!filePath || (await fs.promises.stat(filePath)).size !== expected.size || await sha256File(filePath) !== expected.sha256) throw Object.assign(new Error(`组件 ${item.componentId} 的回滚替换副本校验失败`), { code: 'COMPONENT_RESTORE_ROLLBACK_REPLACE_INVALID' });
+          const fileHandle = await fs.promises.open(filePath, 'r+'); try { await fileHandle.sync().catch(error => { if (!['EPERM', 'EINVAL', 'ENOTSUP'].includes(error?.code)) throw error; }); } finally { await fileHandle.close(); }
+        }
+        if (await exists(displaced) && await exists(targetRoot) && !await targetMatchesBackup()) await fs.promises.rm(targetRoot, { recursive: true, force: true });
+        if (await exists(targetRoot) && !await exists(displaced)) { await fs.promises.mkdir(path.dirname(displaced), { recursive: true }); await fs.promises.rename(targetRoot, displaced); }
+        if (!await exists(targetRoot)) await fs.promises.rename(replacement, targetRoot);
+        if (!await targetMatchesBackup()) { const error = new Error(`组件 ${item.componentId} 的恢复事务替换校验失败`); error.code = 'COMPONENT_RESTORE_ROLLBACK_REPLACE_INVALID'; throw error; }
+        const targetParentHandle = await fs.promises.open(path.dirname(targetRoot), 'r').catch(() => null);
+        try { await targetParentHandle?.sync().catch(error => { if (!['EPERM', 'EINVAL', 'ENOTSUP'].includes(error?.code)) throw error; }); } finally { await targetParentHandle?.close(); }
+        await writeDurableJson(donePath, { componentId: item.componentId, restored: 'backup' });
+        await fs.promises.rm(displaced, { recursive: true, force: true });
+      }
+      if (!preserve) await fs.promises.rm(transactionRoot, { recursive: true, force: true });
+    };
+    for (const entry of await fs.promises.readdir(transactionsRoot, { withFileTypes: true }).catch(() => [])) {
+      if (entry.isDirectory()) await rollbackTransaction(path.join(transactionsRoot, entry.name));
+    }
+    const transactionId = componentRestoreOperationId(task.id, manifest.id || manifest.createdAt, mode, project?.id || targetWorkspace.root);
+    const transactionRoot = safeDestination(transactionsRoot, transactionId);
+    activeTransactionRoot = transactionRoot;
+    const transactionComponents = [];
+    for (const descriptor of descriptors) {
+      const targetRoot = safeDestination(path.join(targetWorkspace.dataRoot, 'components'), descriptor.componentId);
+      const existed = await exists(targetRoot);
+      transactionComponents.push({ componentId: descriptor.componentId, existed });
+    }
+    await fs.promises.mkdir(transactionRoot, { recursive: true });
+    await writeTransactionJournal(transactionRoot, { schemaVersion: 1, state: 'planned', components: transactionComponents });
+    await fs.promises.mkdir(path.join(transactionRoot, 'backups'), { recursive: true });
+    for (const descriptor of descriptors) {
+      const targetRoot = safeDestination(path.join(targetWorkspace.dataRoot, 'components'), descriptor.componentId);
+      const backupRoot = safeDestination(path.join(transactionRoot, 'backups'), descriptor.componentId);
+      const existed = transactionComponents.find(item => item.componentId === descriptor.componentId).existed;
+      if (existed) {
+        await rejectSymlinks(targetRoot);
+        await fs.promises.cp(targetRoot, backupRoot, { recursive: true, errorOnExist: true, force: false });
+        const [before, after] = await Promise.all([collectFiles(targetRoot, 'transaction'), collectFiles(backupRoot, 'transaction')]);
+        if (before.length !== after.length) throw new Error(`组件 ${descriptor.componentId} 恢复事务快照不完整`);
+        const afterByRelative = new Map(after.map(file => [file.relative, file.absolute]));
+        for (const file of before) if (!afterByRelative.has(file.relative) || await sha256File(file.absolute) !== await sha256File(afterByRelative.get(file.relative))) throw new Error(`组件 ${descriptor.componentId} 恢复事务快照校验失败`);
+        const transactionItem = transactionComponents.find(item => item.componentId === descriptor.componentId);
+        transactionItem.backupFiles = [];
+        for (const file of after) {
+          const stat = await fs.promises.stat(file.absolute); transactionItem.backupFiles.push({ relative: file.relative, size: stat.size, sha256: await sha256File(file.absolute) });
+          const handle = await fs.promises.open(file.absolute, 'r+'); try { await handle.sync().catch(error => { if (!['EPERM', 'EINVAL', 'ENOTSUP'].includes(error?.code)) throw error; }); } finally { await handle.close(); }
+        }
+        const backupDirectories = [...new Set([backupRoot, path.dirname(backupRoot), path.join(transactionRoot, 'backups'), transactionRoot,
+          ...after.map(file => path.dirname(file.absolute))])].sort((left, right) => right.length - left.length);
+        for (const directoryPath of backupDirectories) {
+          const handle = await fs.promises.open(directoryPath, 'r').catch(() => null);
+          try { await handle?.sync().catch(error => { if (!['EPERM', 'EINVAL', 'ENOTSUP'].includes(error?.code)) throw error; }); } finally { await handle?.close(); }
+        }
+      }
+    }
+    await writeTransactionJournal(transactionRoot, { schemaVersion: 1, state: 'applying', components: transactionComponents });
+    const results = (plan.opaquePreserved || []).map(componentId => {
+      const paths = manifest.files.filter(item => item.scope === 'component-storage' && !isComponentHostControlStoragePath(item.path) && componentIdFromStoragePath(item.path) === componentId).map(item => item.path).sort();
+      const redundantLegacy = plan.redundantLegacySources?.find(item => item.componentId === componentId)?.paths || [];
+      return { componentId, schemaVersion: 1, status: 'opaque-preserved', pathCount: paths.length, pathsDigest: crypto.createHash('sha256').update(paths.join('\0')).digest('hex'),
+        redundantLegacySourceCount: redundantLegacy.length, redundantLegacySourcesDigest: crypto.createHash('sha256').update(redundantLegacy.join('\0')).digest('hex') };
+    });
+    const handled = new Set();
+    const stageRoot = path.join(temporaryRoot(target), `component-restore-${crypto.randomUUID()}`);
+    try {
+      for (const descriptor of descriptors) {
+        const hasCurrentOpaqueStorage = manifest.files.some(item => item.scope === 'component-storage' && !isComponentHostControlStoragePath(item.path)
+          && componentIdFromStoragePath(item.path) === descriptor.componentId);
+        const matchedSources = matchingComponentSources(manifest, descriptor);
+        const currentDeclaredSources = matchedSources.filter(source => source.entry.scope === 'component-storage');
+        const declaredSources = currentDeclaredSources.length ? currentDeclaredSources : matchedSources.filter(source => source.entry.scope === 'domain-database').slice(0, 1);
+        const hasLegacySource = declaredSources.some(source => source.entry.scope === 'domain-database');
+        if (mode === 'workspace' && hasCurrentOpaqueStorage && !hasLegacySource && !descriptor.service.backupRestore.workspace) {
+          const paths = manifest.files.filter(item => item.scope === 'component-storage' && !isComponentHostControlStoragePath(item.path) && componentIdFromStoragePath(item.path) === descriptor.componentId).map(item => item.path).sort();
+          results.push({ componentId: descriptor.componentId, schemaVersion: 1, status: 'opaque-preserved', pathCount: paths.length, pathsDigest: crypto.createHash('sha256').update(paths.join('\0')).digest('hex') });
+          continue;
+        }
+        const declaredKeys = new Set(declaredSources.map(source => `${source.entry.scope}\0${source.entry.path}`));
+        const opaqueSources = hasCurrentOpaqueStorage
+          ? manifest.files.filter(item => item.scope === 'component-storage' && !isComponentHostControlStoragePath(item.path) && componentIdFromStoragePath(item.path) === descriptor.componentId && !declaredKeys.has(`${item.scope}\0${item.path}`))
+            .map(entry => ({ declaration: { format: 'component-storage-opaque-v1' }, entry }))
+          : [];
+        const sources = [...declaredSources, ...opaqueSources];
+        if (!sources.length) continue;
+        const hook = descriptor.service.backupRestore[mode];
+        if (!hook) {
+          const error = new Error(`组件 ${descriptor.componentId} 的备份包含私有数据，但未声明${mode === 'project' ? '项目级' : '工作区级'}恢复支持`);
+          error.code = mode === 'project' ? 'COMPONENT_PROJECT_RESTORE_UNSUPPORTED' : 'COMPONENT_WORKSPACE_RESTORE_UNSUPPORTED';
+          error.componentId = descriptor.componentId;
+          throw error;
+        }
+        const componentStage = safeDestination(stageRoot, descriptor.componentId);
+        const staged = [];
+        for (const source of sources) {
+          const destination = safeDestination(componentStage, `${source.entry.scope}/${source.entry.path}`);
+          await materialize(target, source.entry, destination, task);
+          if (await sha256File(destination) !== source.entry.hash) throw new Error(`组件 ${descriptor.componentId} 恢复源哈希校验失败`);
+          staged.push({
+            sourceKey: componentSourceKey(source.entry.scope, source.entry.path),
+            scope: source.entry.scope,
+            format: source.declaration.format,
+            sourceVersion: source.sourceVersion || snapshotComponentRecord(manifest, descriptor.componentId)?.componentVersion || 'unversioned',
+            metadataOrigin: source.metadataOrigin || source.declaration.metadataOrigin || 'snapshot',
+            relativePath: source.entry.path,
+            path: destination,
+            sha256: source.entry.hash,
+            size: source.entry.size,
+            required: declaredSources.includes(source),
+          });
+        }
+        const operationId = operationIds.get(descriptor.componentId);
+        const preparedComponent = prepared.find(item => item.descriptor.componentId === descriptor.componentId);
+        const targetComponentRoot = safeDestination(path.join(targetWorkspace.dataRoot, 'components'), descriptor.componentId);
+        const componentControlPath = safeDestination(path.join(transactionRoot, 'component-work'), descriptor.componentId);
+        await fs.promises.mkdir(componentControlPath, { recursive: true });
+        const currentStorage = descriptor.service.backupRestore.sources.find(source => source.scope === 'component-storage' && componentIdFromStoragePath(source.path) === descriptor.componentId);
+        const currentRelativePath = currentStorage ? normalizeKey(currentStorage.path).split('/').slice(1).join('/') : 'storage.sqlite3';
+        const targetDatabasePath = safeDestination(targetComponentRoot, currentRelativePath);
+        const sourceManifestValue = {
+          schema: COMPONENT_SOURCE_MANIFEST_SCHEMA,
+          schemaVersion: 1,
+          operationId,
+          componentId: descriptor.componentId,
+          sourceVersion: snapshotComponentRecord(manifest, descriptor.componentId)?.componentVersion || 'unversioned',
+          targetVersion: String(descriptor.componentVersion || 'unversioned'),
+          mode,
+          receiptContract: {
+            schema: COMPONENT_RECEIPT_SCHEMA,
+            version: 1,
+            keyField: 'sourceKey',
+            dispositionField: 'disposition',
+            destinationField: 'destinationRelativePath',
+            reasonField: 'reason',
+            messageField: 'message',
+            actions: { applied: 'applied', skipped: 'intentionally-skipped', hostPreserved: 'host-preserved' },
+            skipReasons: ['other-project', 'rebuildable-cache', 'non-authoritative-audit', 'host-control', 'redundant-transition-source'],
+            allowHostPreserved: mode === 'workspace',
+          },
+          entries: staged.map(source => ({ ...source, absolutePath: source.path, path: undefined })),
+        };
+        const sourceManifest = await writeHashedJson(path.join(componentStage, 'source-manifest.json'), sourceManifestValue);
+        const hookPayload = {
+          schemaVersion: 1, phase: 'apply', operationId, mode, quiesceToken: preparedComponent.quiesceToken,
+          sourceManifestPath: sourceManifest.path,
+          sourceManifestSha256: sourceManifest.sha256,
+          sourceCount: staged.length,
+          sourceVersion: sourceManifestValue.sourceVersion,
+          targetVersion: sourceManifestValue.targetVersion,
+          sourceWorkspace, targetWorkspace,
+          targetStorage: { dataPath: targetComponentRoot, databasePath: targetDatabasePath, controlPath: componentControlPath },
+          ...(project ? { project } : {}),
+        };
+        // Kept non-enumerable for in-process compatibility tests only. It can
+        // never cross the JSON-line service boundary, so RPC size is bounded.
+        Object.defineProperty(hookPayload, 'sources', { value: staged, enumerable: false });
+        const rawResult = await invokeBackupRestore(descriptor.componentId, mode, hookPayload,
+          { projectId: project?.id, projectName: project?.targetName, projectStatus: project?.targetStatus, workspacePath: targetWorkspace.root });
+        let result = rawResult;
+        let receiptDispositionStatuses = null;
+        if (rawResult?.receiptPath) {
+          result = await readHashedJson(componentStage, rawResult.receiptPath, rawResult.receiptSha256, `组件 ${descriptor.componentId} 恢复回执`);
+          if (result.schema !== COMPONENT_RECEIPT_SCHEMA || result.sourceManifestSha256 !== sourceManifest.sha256
+            || Number(rawResult.dispositionCount) !== result.dispositions?.length) throw new Error(`组件 ${descriptor.componentId} 返回了无效的文件恢复回执`);
+          const receiptKeys = new Set();
+          const receiptContract = sourceManifestValue.receiptContract;
+          const allowedSkipReasons = new Set(receiptContract.skipReasons);
+          const allowedActions = new Set(Object.values(receiptContract.actions));
+          for (const item of result.dispositions) {
+            const sourceKey = item?.[receiptContract.keyField]; const disposition = item?.[receiptContract.dispositionField];
+            if (!item || typeof sourceKey !== 'string' || receiptKeys.has(sourceKey)
+              || !allowedActions.has(disposition)
+              || disposition === receiptContract.actions.hostPreserved && !receiptContract.allowHostPreserved
+              || disposition === receiptContract.actions.skipped && !allowedSkipReasons.has(item[receiptContract.reasonField])) {
+              throw new Error(`组件 ${descriptor.componentId} 的文件恢复回执处置无效`);
+            }
+            receiptKeys.add(sourceKey);
+          }
+          if (receiptKeys.size !== staged.length || staged.some(item => !receiptKeys.has(item.sourceKey))) throw new Error(`组件 ${descriptor.componentId} 的文件恢复回执未逐项处置全部来源`);
+          receiptDispositionStatuses = new Map(result.dispositions.map(item => [item[receiptContract.keyField], item[receiptContract.dispositionField]]));
+          result = {
+            ...result,
+            consumedPaths: result.dispositions.filter(item => item[receiptContract.dispositionField] === receiptContract.actions.applied).map(item => item[receiptContract.keyField]),
+            pathDispositions: result.dispositions.filter(item => item[receiptContract.dispositionField] !== receiptContract.actions.applied).map(item => ({
+              relativePath: item[receiptContract.keyField],
+              disposition: item[receiptContract.dispositionField] === receiptContract.actions.hostPreserved ? 'preserved' : 'rebuildable',
+              warning: item[receiptContract.reasonField] || '',
+            })),
+          };
+        }
+        if (!result || result.schemaVersion !== 1 || result.operationId !== operationId || !['committed', 'already-committed'].includes(result.status)) throw new Error(`组件 ${descriptor.componentId} 返回了无效的恢复回执`);
+        if (!Array.isArray(result.consumedPaths) || result.consumedPaths.some(value => typeof value !== 'string')) throw new Error(`组件 ${descriptor.componentId} 的恢复回执缺少 consumedPaths`);
+        const usesSourceKeys = rawResult?.receiptPath;
+        const stagedByPath = new Map(staged.map((source, index) => [usesSourceKeys ? source.sourceKey : source.relativePath, { source, original: sources[index] }]));
+        const consumedPaths = new Set(result.consumedPaths);
+        if (consumedPaths.size !== result.consumedPaths.length || [...consumedPaths].some(relativePath => !stagedByPath.has(relativePath))) throw new Error(`组件 ${descriptor.componentId} 的恢复回执包含无效 consumedPaths`);
+        const dispositions = Array.isArray(result.pathDispositions) ? result.pathDispositions : [];
+        const dispositionByPath = new Map();
+        for (const disposition of dispositions) {
+          const relativePath = String(disposition?.relativePath || ''); const kind = String(disposition?.disposition || '');
+          if (!stagedByPath.has(relativePath) || consumedPaths.has(relativePath) || dispositionByPath.has(relativePath)
+            || !['preserved', 'rebuildable'].includes(kind) || kind === 'rebuildable' && !String(disposition.warning || '').trim()) throw new Error(`组件 ${descriptor.componentId} 的恢复回执包含无效 pathDispositions`);
+          dispositionByPath.set(relativePath, { disposition: kind, warning: String(disposition.warning || '') });
+        }
+        const requiredDeclaredPaths = declaredSources.map(source => usesSourceKeys ? componentSourceKey(source.entry.scope, source.entry.path) : source.entry.path);
+        if (requiredDeclaredPaths.some(relativePath => !consumedPaths.has(relativePath))) throw new Error(`组件 ${descriptor.componentId} 未消费声明的主恢复源`);
+        if ((mode === 'project' || usesSourceKeys) && staged.some(source => {
+          const key = usesSourceKeys ? source.sourceKey : source.relativePath;
+          return !consumedPaths.has(key) && !dispositionByPath.has(key);
+        })) throw new Error(`组件 ${descriptor.componentId} 未说明全部恢复源的处理结果`);
+        for (const relativePath of [...consumedPaths, ...dispositionByPath.keys()]) {
+          if (receiptDispositionStatuses?.get(relativePath) === sourceManifestValue.receiptContract.actions.hostPreserved) continue;
+          const original = stagedByPath.get(relativePath).original.entry;
+          handled.add(`${original.scope}\0${original.path}`);
+        }
+        const hostPreservedPaths = mode === 'workspace' ? [...new Set(staged.filter(source => {
+          const key = usesSourceKeys ? source.sourceKey : source.relativePath;
+          return usesSourceKeys
+            ? receiptDispositionStatuses?.get(key) === sourceManifestValue.receiptContract.actions.hostPreserved
+            : !consumedPaths.has(key) && !dispositionByPath.has(key);
+        }).map(source => usesSourceKeys ? source.sourceKey : source.relativePath))].sort() : [];
+        const hostPreservedDigest = crypto.createHash('sha256').update(hostPreservedPaths.join('\0')).digest('hex');
+        results.push(usesSourceKeys ? {
+          componentId: descriptor.componentId,
+          schemaVersion: 1,
+          operationId,
+          status: result.status,
+          appliedCount: consumedPaths.size,
+          dispositionCount: staged.length,
+          receiptSha256: rawResult.receiptSha256,
+          warnings: (Array.isArray(result.warnings) ? result.warnings : []).slice(0, 32).map(value => String(value).slice(0, 512)),
+          hostPreservedCount: hostPreservedPaths.length,
+          hostPreservedDigest,
+        } : { componentId: descriptor.componentId, ...result, hostPreservedPaths });
+      }
+      const componentRestore = { results, handled };
+      const continuationResult = continuation ? await continuation(componentRestore) : componentRestore;
+      await writeTransactionJournal(transactionRoot, { schemaVersion: 1, state: 'committed', components: transactionComponents,
+        finalizePending: prepared.map(item => ({ componentId: item.descriptor.componentId, operationId: item.operationId, quiesceToken: item.quiesceToken })) });
+      transactionCommitted = true;
+      let finalizeWarning = null;
+      let cleanupPending = false;
+      for (let attempt = 0; attempt < 2 && prepared.length; attempt += 1) {
+        try { await releasePrepared('finalize'); }
+        catch (error) { finalizeWarning = error; }
+      }
+      if (prepared.length) {
+        const stopFailures = [];
+        for (const item of [...prepared]) {
+          try { await componentServiceManager.stop(item.descriptor.componentId, 'component-restore-finalize-failed'); prepared.splice(prepared.indexOf(item), 1); }
+          catch (error) { stopFailures.push(error); }
+        }
+        if (stopFailures.length) {
+          cleanupPending = true;
+          for (const item of prepared) componentServiceManager.quarantine?.(item.descriptor.componentId, 'component-restore-finalize-pending');
+          finalizeWarning = new AggregateError(stopFailures, '组件恢复已提交；未释放的组件服务已隔离并等待清理');
+        }
+      }
+      if (!cleanupPending) {
+        try { await fs.promises.rm(transactionRoot, { recursive: true, force: true }); }
+        catch (error) { cleanupPending = true; finalizeWarning = error; writeLog('warn', '组件恢复事务已提交但清理延后', { transactionRoot, error: error.message || String(error) }); }
+      }
+      return finalizeWarning && continuationResult && typeof continuationResult === 'object'
+        ? { ...continuationResult, componentRestoreWarnings: [cleanupPending ? '组件恢复已提交；组件服务已隔离并等待 finalize 清理' : '组件恢复已提交；finalize 失败后已隔离组件服务'], cleanupPending } : continuationResult;
+    } catch (error) {
+      if (transactionCommitted) throw error;
+      try {
+        await rollbackTransaction(transactionRoot, { preserve: true });
+        await writeTransactionJournal(transactionRoot, { schemaVersion: 1, state: 'rolled-back', components: transactionComponents,
+          releasePending: prepared.map(item => ({ componentId: item.descriptor.componentId, operationId: item.operationId, quiesceToken: item.quiesceToken })) });
+      }
+      catch (rollbackError) { throw new AggregateError([error, rollbackError], '组件恢复失败且事务回滚未完成'); }
+      throw error;
+    } finally { await fs.promises.rm(stageRoot, { recursive: true, force: true }).catch(() => undefined); }
+    } catch (error) {
+      if (!transactionCommitted && prepared.length) {
+        const release = await settlePrepared('rollback');
+        if (!release.pending && activeTransactionRoot) await fs.promises.rm(activeTransactionRoot, { recursive: true, force: true }).catch(() => undefined);
+        if (release.pending) throw new AggregateError([error, release.error], '组件恢复失败且 quiesce token 已隔离等待释放');
+      }
+      throw error;
+    }
+  };
+  const restoreOwnedComponentData = async options => {
+    const componentIds = options.plan.descriptors.map(item => item.descriptor.componentId);
+    if (componentServiceManager.withBackupRestoreLease) {
+      return componentServiceManager.withBackupRestoreLease(componentIds, invokeBackupRestore => restoreOwnedComponentDataUnderLease({ ...options, invokeBackupRestore }));
+    }
+    return restoreOwnedComponentDataUnderLease({ ...options, invokeBackupRestore: componentServiceManager.invokeBackupRestore.bind(componentServiceManager) });
   };
 
   const storeFile = async (target, sourcePath, task, progress, backupConfig = {}) => {
@@ -601,7 +1326,7 @@ const createBackupService = context => {
       const workspaceDataFiles = await collectFiles(workspaceDataRoot, 'workspace-data', (relative, item) => {
         const normalized = normalizeKey(relative);
         const first = normalized.split('/')[0];
-        return (item.isDirectory() && ['thumbnails', 'backups', 'components'].includes(first))
+        return (item.isDirectory() && ['thumbnails', 'backups', 'components', '.component-restore-transactions'].includes(first))
           || normalized === databaseRelative
           || normalized === `${databaseRelative}-wal`
           || normalized === `${databaseRelative}-shm`
@@ -618,7 +1343,8 @@ const createBackupService = context => {
       // Component Host V2 owns this complete tree. The host treats it as an
       // opaque, hash-addressed data package and never opens a component file
       // or assumes a database/schema layout.
-      const componentStorageFiles = await snapshotComponentStorage(workspaceDataRoot, stage);
+      const componentStorageSnapshot = await snapshotComponentStorage(workspaceDataRoot, stage);
+      const componentStorageFiles = componentStorageSnapshot.files;
       const appFiles = [];
       const linearizedConfigPath = path.join(stage, 'photoflow-config-snapshot.json');
       await fs.promises.writeFile(linearizedConfigPath, JSON.stringify(config, null, 2), 'utf8');
@@ -747,6 +1473,7 @@ const createBackupService = context => {
         });
       }
       if (!databaseStored) throw new Error('未能保存数据库快照');
+      const componentBackups = componentStorageSnapshot.componentBackups;
       const manifest = {
         formatVersion: SNAPSHOT_FORMAT_VERSION,
         id,
@@ -759,6 +1486,7 @@ const createBackupService = context => {
         database: { ...databaseStored, schemaVersion: databaseInfo.schemaVersion },
         projects: databaseInfo.projects || [],
         materializedArchiveProjectIds,
+        componentBackups,
         files: stored,
         totals: { files: stored.length + 1, bytes: databaseStored.size + stored.reduce((sum, item) => sum + item.size, 0) },
         incremental: { reusedFiles, reusedBytes, transferredBytes: Math.max(0, transferredBytes) },
@@ -825,6 +1553,19 @@ const createBackupService = context => {
       throw new Error(`备份对象校验失败：${entry.path}`);
     }
     await fs.promises.rename(temporary, destination);
+  };
+  const materializeRestoreEntry = async (target, entry, destination, task) => {
+    await assertNoReparseAncestorsBeforeCreate(path.dirname(destination));
+    const current = await fs.promises.lstat(destination).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+    if (current) {
+      if (!current.isFile() || current.isSymbolicLink() || current.size !== Number(entry.size) || await sha256File(destination) !== entry.hash) {
+        const error = new Error(`恢复目标与备份对象冲突：${entry.path}`); error.code = 'RESTORE_TARGET_CONFLICT'; throw error;
+      }
+      return { adopted: true };
+    }
+    await materialize(target, entry, destination, task);
+    if (await sha256File(destination) !== entry.hash) throw new Error(`恢复对象发布后哈希校验失败：${entry.path}`);
+    return { adopted: false };
   };
 
   const externalTargetKey = value => {
@@ -901,8 +1642,12 @@ const createBackupService = context => {
     if (workspaceRoot && inside(path.resolve(workspaceRoot), destination)) throw new Error('恢复位置不能位于当前工作区内部');
     const existing = await fs.promises.readdir(destination).catch(() => []);
     const incompleteMarker = path.join(destination, '.photoflow-restore-incomplete');
-    if (existing.length && !(resumeTask?.id && await exists(incompleteMarker))) throw new Error('请选择一个空文件夹作为恢复位置');
+    const onlyUnboundIdentityMarker = existing.length > 0 && existing.every(name => name === '.photoflow-workspace-id');
+    if (existing.length && !onlyUnboundIdentityMarker && !(resumeTask?.id && await exists(incompleteMarker))) throw new Error('请选择一个空文件夹作为恢复位置');
     const manifest = await manifestFor(target, snapshot);
+    const componentRestorePlan = preflightComponentRestore(manifest, 'workspace');
+    const restoreSessionId = String(resumeTask?.metadata?.restoreSessionId || resumeTask?.checkpoint?.restoreSessionId || crypto.randomUUID());
+    const retryRestore = previous => restoreWorkspace(workspaceRoot, snapshot, destination, { id: previous?.id, metadata: previous?.metadata || {}, checkpoint: { ...(previous?.checkpoint || {}), restoreSessionId }, progress: 0 });
     const run = () => backgroundTasks.run({
       ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'workspace-restore',
@@ -913,28 +1658,76 @@ const createBackupService = context => {
       resumable: true,
       checkpoint: resumeTask?.checkpoint,
       progress: resumeTask?.progress,
-      metadata: { workspacePath: workspaceRoot ? path.resolve(workspaceRoot) : '', snapshotId: snapshot, targetPath: destination },
+      metadata: { workspacePath: workspaceRoot ? path.resolve(workspaceRoot) : '', snapshotId: snapshot, targetPath: destination, restoreSessionId },
       resumeFactory: taskSnapshot => restoreWorkspace(workspaceRoot, snapshot, destination, taskSnapshot),
     }, async task => {
-      await fs.promises.mkdir(destination, { recursive: true });
-      await fs.promises.writeFile(path.join(destination, '.photoflow-restore-incomplete'), String(Date.now()), 'utf8');
-      const workspaceEntries = manifest.files.filter(item => item.scope === 'workspace' && item.path !== '.photoflow-workspace-id');
+      await verifyComponentRestoreSources(target, manifest, componentRestorePlan, task);
       const savedCheckpoint = task.getCheckpoint() || {};
-      const newId = String(savedCheckpoint.newWorkspaceId || crypto.randomUUID().replaceAll('-', ''));
+      const formalPlanExists = Boolean(await fs.promises.lstat(incompleteMarker).catch(() => null));
+      let plannedRestore = await fs.promises.readFile(incompleteMarker, 'utf8').then(value => { try { return JSON.parse(value); } catch { return {}; } }, () => ({}));
+      if (formalPlanExists && (plannedRestore.schemaVersion !== 1 || plannedRestore.state !== 'planned' || !/^[a-f0-9]{24,64}$/.test(String(plannedRestore.workspaceId || ''))
+        || plannedRestore.snapshotId !== snapshot || plannedRestore.restoreSessionId !== restoreSessionId || path.resolve(String(plannedRestore.destinationRoot || '')) !== destination)) { const error = new Error('正式恢复计划标记无效或冲突'); error.code = 'WORKSPACE_STORAGE_KEY_CONFLICT'; throw error; }
+      let claimedPlanPath = '';
+      if (!plannedRestore.workspaceId) {
+        const candidates = [];
+        for (const name of (await fs.promises.readdir(path.dirname(destination)).catch(() => [])).filter(name => /^\.pfr-[a-f0-9-]+\.next$/i.test(name))) {
+          const candidatePath = path.join(path.dirname(destination), name);
+          const value = await fs.promises.readFile(candidatePath, 'utf8').then(text => { try { return JSON.parse(text); } catch { return null; } }, () => null);
+          if (value?.destinationRoot && path.resolve(value.destinationRoot) === destination) {
+            if (value.schemaVersion !== 1 || value.state !== 'planned' || value.snapshotId !== snapshot || value.restoreSessionId !== restoreSessionId || !/^[a-f0-9]{24,64}$/.test(String(value.workspaceId || ''))) { const error = new Error('恢复计划临时文件无效或冲突'); error.code = 'WORKSPACE_STORAGE_KEY_CONFLICT'; throw error; }
+            candidates.push({ path: candidatePath, value });
+          }
+        }
+        if (candidates.length > 1) { const error = new Error('存在多个匹配的恢复计划临时文件'); error.code = 'WORKSPACE_STORAGE_KEY_CONFLICT'; throw error; }
+        if (candidates.length === 1) { plannedRestore = candidates[0].value; claimedPlanPath = candidates[0].path; }
+      }
+      const newId = String(savedCheckpoint.newWorkspaceId || plannedRestore.workspaceId || crypto.randomUUID().replaceAll('-', ''));
+      await assertNoReparseAncestorsBeforeCreate(destination);
+      await fs.promises.mkdir(destination, { recursive: true });
+      if (plannedRestore.workspaceId && (plannedRestore.workspaceId !== newId || plannedRestore.snapshotId !== snapshot || plannedRestore.restoreSessionId !== restoreSessionId
+        || path.resolve(String(plannedRestore.destinationRoot || '')) !== destination)) { const error = new Error('恢复断点 identity 与当前任务冲突'); error.code = 'WORKSPACE_STORAGE_KEY_CONFLICT'; throw error; }
+      if (claimedPlanPath) await fs.promises.rename(claimedPlanPath, incompleteMarker);
+      else if (!plannedRestore.workspaceId) {
+        const plannedPath = path.join(path.dirname(destination), `.pfr-${crypto.randomUUID()}.next`);
+        await fs.promises.writeFile(plannedPath, JSON.stringify({ schemaVersion: 1, state: 'planned', destinationRoot: destination, workspaceId: newId, snapshotId: snapshot, restoreSessionId, taskId: task.id }), { encoding: 'utf8', flag: 'wx' });
+        await fs.promises.rename(plannedPath, incompleteMarker);
+      }
+      if (bindWorkspaceStorageKeyForRestore) await bindWorkspaceStorageKeyForRestore(destination, newId);
+      else {
+        const marker = markerPath(destination); const current = await fs.promises.readFile(marker, 'utf8').catch(() => '');
+        if (current.trim() && current.trim() !== newId) { const error = new Error('恢复目标 workspace identity 冲突'); error.code = 'WORKSPACE_STORAGE_KEY_CONFLICT'; throw error; }
+        if (!current.trim()) await fs.promises.writeFile(marker, `${newId}\n`, { encoding: 'utf8', flag: 'wx' });
+      }
+      task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'identity-bound', newWorkspaceId: newId, restoreSessionId }, 2, '已绑定恢复工作区 identity');
+      const newDataRoot = getWorkspaceDataRootForKey ? getWorkspaceDataRootForKey(newId) : getWorkspaceDataRoot(destination);
+      const componentEntries = manifest.files.filter(item => item.scope === 'component-storage' && !isComponentHostControlStoragePath(item.path));
+      const componentStorageRoot = path.join(newDataRoot, 'components');
       const completedWorkspace = new Set(Array.isArray(savedCheckpoint.completedWorkspace) ? savedCheckpoint.completedWorkspace : []);
       const completedData = new Set(Array.isArray(savedCheckpoint.completedData) ? savedCheckpoint.completedData : []);
-      task.saveCheckpoint({ version: 1, phase: 'preparing', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData] }, Math.max(1, Number(resumeTask?.progress) || 1), '正在准备恢复工作区');
+      const completedComponents = new Set(Array.isArray(savedCheckpoint.completedComponents) ? savedCheckpoint.completedComponents : []);
+      return restoreOwnedComponentData({
+        target, manifest, mode: 'workspace', task, plan: componentRestorePlan,
+        sourceWorkspace: { root: manifest.workspace.root, dataRoot: manifest.workspace.dataRoot || '' },
+        targetWorkspace: { root: destination, dataRoot: newDataRoot },
+        beforeTargetWrite: async () => undefined,
+        continuation: async componentRestore => {
+      for (const entry of componentEntries) {
+        if (componentRestore.handled.has(`${entry.scope}\0${entry.path}`)) continue;
+        const entryDestination = safeDestination(componentStorageRoot, entry.path);
+        await materializeRestoreEntry(target, entry, entryDestination, task);
+        completedComponents.add(entry.path);
+        task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'component-data', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData], completedComponents: [...completedComponents] }, 3, `正在恢复组件数据 ${completedComponents.size}/${componentEntries.length}`);
+      }
+      const workspaceEntries = manifest.files.filter(item => item.scope === 'workspace' && item.path !== '.photoflow-workspace-id');
+      task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'preparing', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData], completedComponents: [...completedComponents] }, Math.max(3, Number(resumeTask?.progress) || 1), '正在准备恢复工作区');
       let completed = 0;
       for (const entry of workspaceEntries) {
         const entryDestination = safeDestination(destination, entry.path);
-        const existingStat = completedWorkspace.has(entry.path) ? await fs.promises.stat(entryDestination).catch(() => null) : null;
-        const checkpointValid = existingStat?.isFile() && existingStat.size === Number(entry.size)
-          && await sha256File(entryDestination).then(hash => hash === entry.hash, () => false);
-        if (!checkpointValid) await materialize(target, entry, entryDestination, task);
+        await materializeRestoreEntry(target, entry, entryDestination, task);
         completedWorkspace.add(entry.path);
         completed += 1;
         const progress = 5 + completed / Math.max(1, workspaceEntries.length) * 70;
-        task.saveCheckpoint({ version: 1, phase: 'workspace-files', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData] }, progress, `正在恢复项目文件 ${completed}/${workspaceEntries.length}`, { completedFiles: completed, totalFiles: workspaceEntries.length });
+        task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'workspace-files', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData], completedComponents: [...completedComponents] }, progress, `正在恢复项目文件 ${completed}/${workspaceEntries.length}`, { completedFiles: completed, totalFiles: workspaceEntries.length });
       }
       const materializedArchiveIds = new Set(manifest.materializedArchiveProjectIds || []);
       for (const project of manifest.projects || []) {
@@ -945,25 +1738,13 @@ const createBackupService = context => {
         await fs.promises.mkdir(path.dirname(linkPath), { recursive: true });
         await fs.promises.symlink(archivePath, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
       }
-      await fs.promises.writeFile(markerPath(destination), `${newId}\n`, 'utf8');
-      const newDataRoot = getWorkspaceDataRoot(destination);
       const dataEntries = manifest.files.filter(item => item.scope === 'workspace-data');
       for (const [index, entry] of dataEntries.entries()) {
         const entryDestination = safeDestination(newDataRoot, entry.path);
-        const existingStat = completedData.has(entry.path) ? await fs.promises.stat(entryDestination).catch(() => null) : null;
-        const checkpointValid = existingStat?.isFile() && existingStat.size === Number(entry.size)
-          && await sha256File(entryDestination).then(hash => hash === entry.hash, () => false);
-        if (!checkpointValid) await materialize(target, entry, entryDestination, task);
+        await materializeRestoreEntry(target, entry, entryDestination, task);
         completedData.add(entry.path);
         const progress = 75 + (index + 1) / Math.max(1, dataEntries.length) * 10;
-        task.saveCheckpoint({ version: 1, phase: 'workspace-data', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData] }, progress, `正在恢复内部数据 ${index + 1}/${dataEntries.length}`);
-      }
-      const componentEntries = manifest.files.filter(item => item.scope === 'component-storage');
-      const componentStorageRoot = path.join(newDataRoot, 'components');
-      for (const entry of componentEntries) {
-        const entryDestination = safeDestination(componentStorageRoot, entry.path);
-        await materialize(target, entry, entryDestination, task);
-        if (await sha256File(entryDestination) !== entry.hash) throw new Error('组件数据包恢复后哈希校验失败');
+        task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'workspace-data', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData], completedComponents: [...completedComponents] }, progress, `正在恢复内部数据 ${index + 1}/${dataEntries.length}`);
       }
       await withWorkspaceRecoveryLease({
         workspaceRoot: destination,
@@ -990,13 +1771,16 @@ const createBackupService = context => {
             await fs.promises.rm(portable, { force: true });
           }
         }
-        const databaseSource = objectPath(target, manifest.database.hash);
-        await runRecoveryPythonAction('backup_db.py', [
-          'restore-workspace', '--source', databaseSource, '--destination', getWorkspaceDatabasePath(destination),
-          '--old-root', manifest.workspace.root, '--new-root', destination,
-          '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
-          '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
-        ], 30 * 60 * 1000);
+        const portableCore = path.join(destination, `.photoflow-core-restore-${crypto.randomUUID()}.sqlite3`);
+        try {
+          await materialize(target, { ...manifest.database, path: 'workspace.sqlite3' }, portableCore, task);
+          await runRecoveryPythonAction('backup_db.py', [
+            'restore-workspace', '--source', portableCore, '--destination', getWorkspaceDatabasePath(destination),
+            '--old-root', manifest.workspace.root, '--new-root', destination,
+            '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
+            '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
+          ], 30 * 60 * 1000);
+        } finally { await fs.promises.rm(portableCore, { force: true }); }
       });
       const restoredConfigEntry = manifest.files.find(entry => entry.scope === 'app-config' && entry.path === 'photoflow_config.json');
       let restoredConfig = {};
@@ -1020,8 +1804,10 @@ const createBackupService = context => {
       );
       const savedConfig = await configMutationService.mutate(currentConfig => configMutationService.mergeRestoredConfig(currentConfig, restoredConfig, destination));
       task.report(100, '工作区恢复完成');
-      return { workspacePath: destination, savedConfig };
-    }, run);
+      return { workspacePath: destination, savedConfig, componentRestore: componentRestore.results };
+        },
+      });
+    }, retryRestore);
     const execution = await run();
     if (execution.task?.state === 'completed' && backgroundTasks.flush?.() !== false) await fs.promises.rm(incompleteMarker, { force: true });
     return execution;
@@ -1033,6 +1819,7 @@ const createBackupService = context => {
     if (!isApprovedTarget(target)) throw new Error('备份位置未经授权');
     const root = path.resolve(workspaceRoot);
     const manifest = await manifestFor(target, snapshot);
+    const componentRestorePlan = preflightComponentRestore(manifest, 'project');
     const project = (manifest.projects || []).find(item => item.id === projectId);
     if (!project) throw new Error('备份快照中找不到该项目');
     const projectRoot = path.resolve(root, project.relativePath);
@@ -1052,22 +1839,33 @@ const createBackupService = context => {
       metadata: { workspacePath: root, snapshotId: snapshot, projectId: project.id, projectName: project.name },
       resumeFactory: taskSnapshot => restoreProject(root, snapshot, project.id, taskSnapshot),
     }, async task => {
-      await fs.promises.writeFile(incompleteMarker, String(Date.now()), 'utf8');
+      await verifyComponentRestoreSources(target, manifest, componentRestorePlan, task);
       const savedCheckpoint = task.getCheckpoint() || {};
       const completedProject = new Set(Array.isArray(savedCheckpoint.completedProject) ? savedCheckpoint.completedProject : []);
       const completedData = new Set(Array.isArray(savedCheckpoint.completedData) ? savedCheckpoint.completedData : []);
+      const newDataRoot = getWorkspaceDataRoot(root);
+      return restoreOwnedComponentData({
+        target, manifest, mode: 'project', task, plan: componentRestorePlan,
+        sourceWorkspace: { root: manifest.workspace.root, dataRoot: manifest.workspace.dataRoot || '' },
+        targetWorkspace: { root, dataRoot: newDataRoot },
+        project: { id: project.id, name: project.name, sourceName: project.name, targetName: project.name, sourceStatus: project.status, targetStatus: project.status, sourceRelativePath: project.relativePath, targetRelativePath: project.relativePath },
+        beforeTargetWrite: async () => {
+          await assertNoReparseAncestorsBeforeCreate(projectRoot);
+          const projectStat = await fs.promises.lstat(projectRoot).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+          if (projectStat && (!projectStat.isDirectory() || projectStat.isSymbolicLink()
+            || !inside(await fs.promises.realpath(root), await fs.promises.realpath(projectRoot)))) { const error = new Error('项目恢复目标包含链接或越过工作区'); error.code = 'COMPONENT_RESTORE_TARGET_UNSAFE'; throw error; }
+          await fs.promises.writeFile(incompleteMarker, String(Date.now()), 'utf8');
+        },
+        continuation: async componentRestore => {
       const prefix = normalizeKey(project.relativePath).replace(/\/$/, '') + '/';
       const projectEntries = manifest.files.filter(item => item.scope === 'workspace' && item.projectIds?.includes(project.id) && (item.path === prefix.slice(0, -1) || item.path.startsWith(prefix)));
       for (const [index, entry] of projectEntries.entries()) {
         const relative = entry.path.slice(prefix.length);
         const entryDestination = safeDestination(projectRoot, relative);
-        const existingStat = completedProject.has(entry.path) ? await fs.promises.stat(entryDestination).catch(() => null) : null;
-        const checkpointValid = existingStat?.isFile() && existingStat.size === Number(entry.size)
-          && await sha256File(entryDestination).then(hash => hash === entry.hash, () => false);
-        if (!checkpointValid) await materialize(target, entry, entryDestination, task);
+        await materializeRestoreEntry(target, entry, entryDestination, task);
         completedProject.add(entry.path);
         const progress = 5 + (index + 1) / Math.max(1, projectEntries.length) * 70;
-        task.saveCheckpoint({ version: 1, phase: 'project-files', completedProject: [...completedProject], completedData: [...completedData] }, progress, `正在恢复项目文件 ${index + 1}/${projectEntries.length}`);
+        task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'project-files', completedProject: [...completedProject], completedData: [...completedData] }, progress, `正在恢复项目文件 ${index + 1}/${projectEntries.length}`);
       }
       const archivePath = String(project.extra?.archive?.path || '');
       if (archivePath && !(manifest.materializedArchiveProjectIds || []).includes(project.id) && path.isAbsolute(archivePath)
@@ -1075,18 +1873,25 @@ const createBackupService = context => {
         await fs.promises.mkdir(path.dirname(projectRoot), { recursive: true });
         await fs.promises.symlink(archivePath, projectRoot, process.platform === 'win32' ? 'junction' : 'dir');
       }
-      const newDataRoot = getWorkspaceDataRoot(root);
       const dataEntries = manifest.files.filter(item => item.scope === 'workspace-data' && item.projectIds?.includes(project.id));
       for (const [index, entry] of dataEntries.entries()) {
         const entryDestination = safeDestination(newDataRoot, entry.path);
-        const existingStat = completedData.has(entry.path) ? await fs.promises.stat(entryDestination).catch(() => null) : null;
-        const checkpointValid = existingStat?.isFile() && existingStat.size === Number(entry.size)
-          && await sha256File(entryDestination).then(hash => hash === entry.hash, () => false);
-        if (!checkpointValid) await materialize(target, entry, entryDestination, task);
+        await materializeRestoreEntry(target, entry, entryDestination, task);
         completedData.add(entry.path);
         const progress = 76 + (index + 1) / Math.max(1, dataEntries.length) * 9;
-        task.saveCheckpoint({ version: 1, phase: 'project-data', completedProject: [...completedProject], completedData: [...completedData] }, progress, `正在恢复项目内部数据 ${index + 1}/${dataEntries.length}`);
+        task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'project-data', completedProject: [...completedProject], completedData: [...completedData] }, progress, `正在恢复项目内部数据 ${index + 1}/${dataEntries.length}`);
       }
+      const portableDomainRoot = path.join(root, `.photoflow-project-domain-restore-${crypto.randomUUID()}`);
+      const mediaEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'media.sqlite3');
+      const versioningEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'versioning.sqlite3');
+      const portableCore = path.join(portableDomainRoot, 'core.sqlite3');
+      const portableMedia = mediaEntry ? path.join(portableDomainRoot, 'media.sqlite3') : '';
+      const portableVersioning = versioningEntry ? path.join(portableDomainRoot, 'versioning.sqlite3') : '';
+      await fs.promises.mkdir(portableDomainRoot, { recursive: true });
+      try {
+      await materialize(target, { ...manifest.database, path: 'workspace.sqlite3' }, portableCore, task);
+      if (mediaEntry) await materialize(target, mediaEntry, portableMedia, task);
+      if (versioningEntry) await materialize(target, versioningEntry, portableVersioning, task);
       await withWorkspaceRecoveryLease({
         workspaceRoot: root,
         domains: ['core', 'media', 'versioning'],
@@ -1094,32 +1899,31 @@ const createBackupService = context => {
         deadlineAt: Date.now() + 30 * 60 * 1000,
       }, async () => {
         await runRecoveryPythonAction('backup_db.py', [
-          'restore-project', '--source', objectPath(target, manifest.database.hash), '--destination', getWorkspaceDatabasePath(root),
+          'restore-project', '--source', portableCore, '--destination', getWorkspaceDatabasePath(root),
           '--project-id', project.id, '--old-root', manifest.workspace.root, '--new-root', root,
           '--target-relative-path', project.relativePath, '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
           '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
         ], 30 * 60 * 1000);
-        const mediaEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'media.sqlite3');
-        const versioningEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'versioning.sqlite3');
         if (mediaEntry && getWorkspaceMediaDatabasePath) {
           await runRecoveryPythonAction('domain_recovery.py', [
-            'restore-project', '--domain', 'media', '--source', objectPath(target, mediaEntry.hash),
+            'restore-project', '--domain', 'media', '--source', portableMedia,
             '--destination', getWorkspaceMediaDatabasePath(root), '--project-id', project.id,
-            ...(versioningEntry ? ['--peer-source', objectPath(target, versioningEntry.hash)] : []),
+            ...(versioningEntry ? ['--peer-source', portableVersioning] : []),
             '--old-root', manifest.workspace.root, '--new-root', root,
             '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
           ], 30 * 60 * 1000);
         }
         if (versioningEntry && mediaEntry && getWorkspaceVersioningDatabasePath) {
           await runRecoveryPythonAction('domain_recovery.py', [
-            'restore-project', '--domain', 'versioning', '--source', objectPath(target, versioningEntry.hash),
+            'restore-project', '--domain', 'versioning', '--source', portableVersioning,
             '--destination', getWorkspaceVersioningDatabasePath(root), '--project-id', project.id,
-            '--peer-source', objectPath(target, mediaEntry.hash),
+            '--peer-source', portableMedia,
             '--old-root', manifest.workspace.root, '--new-root', root,
             '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
           ], 30 * 60 * 1000);
         }
       });
+      } finally { await fs.promises.rm(portableDomainRoot, { recursive: true, force: true }); }
       await mergeExternalLinkRegistry(
         target,
         manifest,
@@ -1128,7 +1932,9 @@ const createBackupService = context => {
         task,
       );
       task.report(100, '项目恢复完成');
-      return { project };
+      return { project, componentRestore: componentRestore.results };
+        },
+      });
     }, run);
     const execution = await run();
     if (execution.task?.state === 'completed' && backgroundTasks.flush?.() !== false) await fs.promises.rm(incompleteMarker, { force: true });
@@ -1140,6 +1946,7 @@ const createBackupService = context => {
     const target = String(config?.backup?.targetPath || '').trim();
     if (!isApprovedTarget(target)) throw new Error('备份位置未经授权');
     const manifest = await manifestFor(target, snapshot);
+    validateComponentBackupMetadata(manifest);
     const run = () => backgroundTasks.run({
       ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'backup-verify',

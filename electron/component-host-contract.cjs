@@ -1,5 +1,11 @@
 const fs = require('fs');
 const path = require('path');
+const {
+  defaultComponentDataAdoptionPolicy,
+  ownsLegacyComponentDomainDatabase,
+  isOwnedLegacyComponentDomainDatabase,
+  authorizesLegacySettingsAdoption,
+} = require('./compatibility/component-data-adoption-policy.cjs');
 
 const COMPONENT_HOST_CONTRACT_VERSION = 2;
 const COMPONENT_HOST_MIN_API_VERSION = 7;
@@ -65,7 +71,6 @@ const CAPABILITY_PERMISSIONS = Object.freeze({
 });
 const COMPONENT_ICON_MIME_TYPES = new Map([['.png', 'image/png'], ['.svg', 'image/svg+xml']]);
 const MAX_COMPONENT_ICON_BYTES = 512 * 1024;
-
 const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
@@ -99,6 +104,7 @@ const rejectUnknownFields = (value, allowed, label) => {
   const unknown = Object.keys(value || {}).filter(field => !allowed.includes(field));
   if (unknown.length) throw new Error(`Unknown ${label} field: ${unknown[0]}`);
 };
+const normalizeBackupSourcePath = value => String(value || '').replace(/\\/g, '/').replace(/^\/+/, '').split('/').filter(Boolean).join('/');
 
 const resolveDevelopmentFile = ({ declaredEntry, componentRoot, overrideRoot, overrideEntry, label }) => {
   const declared = path.resolve(componentRoot, declaredEntry);
@@ -164,14 +170,14 @@ const parseComponentIcon = (value, componentRoot, developmentOverride = null) =>
   return Object.freeze({ entry: realEntry, relativeEntry, mimeType });
 };
 
-const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = null) => {
+const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = null, adoptionPolicy = defaultComponentDataAdoptionPolicy) => {
   const host = manifest?.componentHost;
   if (host === undefined) return null;
   if (Number(manifest.apiVersion) !== 1) throw new Error(`Unsupported component apiVersion: ${manifest.apiVersion}`);
   if (!host || typeof host !== 'object' || Array.isArray(host)) throw new Error('Invalid componentHost manifest');
   const contractVersion = Number(host.contractVersion);
   if (contractVersion !== COMPONENT_HOST_CONTRACT_VERSION) throw new Error(`Unsupported component host contractVersion: ${host.contractVersion}`);
-  rejectUnknownFields(host, ['contractVersion', 'compatibility', 'contributions', 'service', 'adoptionGrants'], 'component host');
+  rejectUnknownFields(host, ['contractVersion', 'compatibility', 'contributions', 'service', 'adoptionGrants', 'legacySettingsAdoptions'], 'component host');
   const compatibility = host.compatibility;
   if (!compatibility || typeof compatibility !== 'object') throw new Error('Missing component host compatibility range');
   rejectUnknownFields(compatibility, ['minHostApiVersion', 'maxHostApiVersion'], 'component compatibility');
@@ -182,6 +188,16 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   if (!Array.isArray(host.contributions) || host.contributions.length < 2 || host.contributions.length > 32) throw new Error('Component host contributions must be a bounded array');
 
   const componentId = requiredId(manifest.id, 'component id');
+  if (!Array.isArray(host.legacySettingsAdoptions) && host.legacySettingsAdoptions !== undefined) throw new Error('Legacy settings adoptions must be a bounded unique array');
+  const legacySettingsAdoptions = (host.legacySettingsAdoptions || []).map(declaration => {
+    if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) throw new Error('Invalid legacy settings adoption declaration');
+    rejectUnknownFields(declaration, ['topLevelKey'], 'legacy settings adoption');
+    const topLevelKey = requiredExactStringText(declaration.topLevelKey, 'legacy settings top-level key', 128);
+    if (!/^[A-Za-z][A-Za-z0-9]*$/.test(topLevelKey)) throw new Error('Invalid legacy settings top-level key');
+    if (!authorizesLegacySettingsAdoption(componentId, topLevelKey, adoptionPolicy)) throw new Error('Legacy settings adoption is not authorized by the host');
+    return Object.freeze({ topLevelKey });
+  });
+  if (legacySettingsAdoptions.length > 8 || new Set(legacySettingsAdoptions.map(item => item.topLevelKey)).size !== legacySettingsAdoptions.length) throw new Error('Legacy settings adoptions must be a bounded unique array');
   const allowedAdoptionGrants = new Set(['component.storage.previous.v1', 'project.output.existing.v1']);
   const adoptionGrants = host.adoptionGrants === undefined ? [] : host.adoptionGrants;
   if (!Array.isArray(adoptionGrants) || adoptionGrants.length > allowedAdoptionGrants.size || new Set(adoptionGrants).size !== adoptionGrants.length || adoptionGrants.some(grant => !allowedAdoptionGrants.has(grant))) throw new Error('Invalid component host adoption grants');
@@ -235,7 +251,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   if (host.service !== undefined) {
     const raw = host.service;
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component service manifest');
-    rejectUnknownFields(raw, ['protocolVersion', 'runtime', 'entrypoints', 'rpcMethods', 'capabilities', 'permissions', 'events', 'runtimeActions', 'lifecycleActions', 'projectFolders', 'networkOrigins', 'secretBindings'], 'component service');
+    rejectUnknownFields(raw, ['protocolVersion', 'runtime', 'entrypoints', 'rpcMethods', 'capabilities', 'permissions', 'events', 'runtimeActions', 'lifecycleActions', 'projectFolders', 'networkOrigins', 'secretBindings', 'backupRestore'], 'component service');
     if (Number(raw.protocolVersion) !== COMPONENT_SERVICE_PROTOCOL_VERSION) throw new Error(`Unsupported component service protocolVersion: ${raw.protocolVersion}`);
     if (!['node', 'executable'].includes(raw.runtime)) throw new Error('Invalid component service runtime');
     const entries = raw.entrypoints;
@@ -300,12 +316,53 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       lifecycleActions[actionId] = Object.freeze({ entry: actionEntry, relativeEntry: relativeActionEntry, sha256 });
     }
     if (Object.keys(lifecycleActions).length > 16) throw new Error('Component lifecycle actions must be bounded');
+    let backupRestore = null;
+    if (raw.backupRestore !== undefined) {
+      const declaration = raw.backupRestore;
+      if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) throw new Error('Invalid component backup restore declaration');
+      rejectUnknownFields(declaration, ['transactionProtocolVersion', 'sourceManifestProtocolVersion', 'receiptProtocolVersion', 'workspace', 'project', 'sources'], 'component backup restore');
+      for (const field of ['transactionProtocolVersion', 'sourceManifestProtocolVersion', 'receiptProtocolVersion']) {
+        if (declaration[field] !== 1) throw new Error(`Unsupported component backup restore ${field}`);
+      }
+      const parseHook = (value, mode) => {
+        if (value === undefined) return null;
+        if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid component ${mode} backup restore hook`);
+        rejectUnknownFields(value, ['method'], `component ${mode} backup restore hook`);
+        const method = requiredExactStringText(value.method, `${mode} backup restore method`, 128);
+        if (!VERSIONED_METHOD.test(method) || !rpcMethods.includes(method)) throw new Error(`Component ${mode} backup restore method must be declared by the service`);
+        return Object.freeze({ method });
+      };
+      if (!Array.isArray(declaration.sources) || declaration.sources.length < 1 || declaration.sources.length > 16) throw new Error('Component backup restore sources must be a bounded array');
+      const sourceKeys = new Set();
+      const sources = declaration.sources.map(source => {
+        if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error('Invalid component backup restore source');
+        rejectUnknownFields(source, ['scope', 'path', 'format'], 'component backup restore source');
+        const scope = requiredExactStringText(source.scope, 'backup restore source scope', 40);
+        const sourcePath = requiredExactStringText(source.path, 'backup restore source path', 512);
+        const format = requiredExactStringText(source.format, 'backup restore source format', 80);
+        if (!['component-storage', 'domain-database'].includes(scope) || normalizeBackupSourcePath(sourcePath) !== sourcePath || sourcePath.split('/').some(segment => segment === '.' || segment === '..')) throw new Error('Invalid component backup restore source');
+        if (scope === 'component-storage' && sourcePath.split('/')[0] !== componentId) throw new Error('Component backup restore storage source must be owned by the declaring component');
+        if (scope === 'domain-database' && !ownsLegacyComponentDomainDatabase(componentId, sourcePath, adoptionPolicy)) throw new Error('Component backup restore domain database source is not owned by the declaring component');
+        const key = `${scope}\0${sourcePath}`; if (sourceKeys.has(key)) throw new Error('Duplicate component backup restore source'); sourceKeys.add(key);
+        return Object.freeze({ scope, path: sourcePath, format });
+      });
+      const workspace = parseHook(declaration.workspace, 'workspace'); const project = parseHook(declaration.project, 'project');
+      if (!workspace && !project) throw new Error('Component backup restore must declare at least one hook');
+      const hookMethods = [workspace?.method, project?.method].filter(Boolean);
+      if (new Set(hookMethods).size !== hookMethods.length) throw new Error('Component backup restore hook methods must be unique');
+      backupRestore = Object.freeze({
+        transactionProtocolVersion: 1, sourceManifestProtocolVersion: 1, receiptProtocolVersion: 1,
+        workspace, project, sources: Object.freeze(sources),
+      });
+    }
+    const hostOnlyRpcMethods = Object.freeze([backupRestore?.workspace?.method, backupRestore?.project?.method].filter(Boolean));
     service = Object.freeze({
       protocolVersion: COMPONENT_SERVICE_PROTOCOL_VERSION,
       runtime: raw.runtime,
       entry,
       relativeEntry,
       rpcMethods: Object.freeze(rpcMethods),
+      hostOnlyRpcMethods,
       capabilities: Object.freeze(capabilities),
       permissions: Object.freeze(permissions),
       events: Object.freeze(events),
@@ -314,12 +371,14 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       projectFolders: Object.freeze(projectFolders),
       networkOrigins: Object.freeze(networkOrigins),
       secretBindings: Object.freeze(secretBindings),
+      backupRestore,
     });
     for (const settingsPage of settingsPages) {
       const unknownMethod = settingsPage.rpcMethods.find(method => !rpcMethods.includes(method));
       if (unknownMethod) throw new Error(`Component settings page RPC method is not declared by the service: ${unknownMethod}`);
+      if (settingsPage.rpcMethods.some(method => hostOnlyRpcMethods.includes(method))) throw new Error('Component settings page cannot expose a host-only RPC method');
     }
-    for (const contribution of api7Contributions) { const unknownMethod = contribution.rpcMethods.find(method => !rpcMethods.includes(method)); if (unknownMethod) throw new Error(`${contribution.type} RPC method is not declared by the service: ${unknownMethod}`); }
+    for (const contribution of api7Contributions) { const unknownMethod = contribution.rpcMethods.find(method => !rpcMethods.includes(method)); if (unknownMethod) throw new Error(`${contribution.type} RPC method is not declared by the service: ${unknownMethod}`); if (contribution.rpcMethods.some(method => hostOnlyRpcMethods.includes(method))) throw new Error(`${contribution.type} cannot expose a host-only RPC method`); }
   }
   let advancedRuntime = null;
   if (manifest.advancedRuntime !== undefined) {
@@ -340,6 +399,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     hostApiVersion: negotiatedHostApiVersion,
     compatibility: { minHostApiVersion: min, maxHostApiVersion: max },
     adoptionGrants: Object.freeze([...adoptionGrants]),
+    legacySettingsAdoptions: Object.freeze(legacySettingsAdoptions),
     toolbarAction: Object.freeze({ ...actions[0], pageTitle: page.title }),
     fullPage: Object.freeze(page),
     pages: Object.freeze([...pages.values()].map(value => Object.freeze(value))),
@@ -351,7 +411,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   });
 };
 
-const createComponentHostRegistry = ({ roots = [], candidateProvider = null, admitDescriptor = null }) => {
+const createComponentHostRegistry = ({ roots = [], candidateProvider = null, admitDescriptor = null, adoptionPolicy = defaultComponentDataAdoptionPolicy }) => {
   const candidates = () => {
     const values = [];
     for (const root of roots) {
@@ -371,7 +431,7 @@ const createComponentHostRegistry = ({ roots = [], candidateProvider = null, adm
   const inspectRoot = ({ componentRoot, manifestPath = path.join(componentRoot, 'component.json'), manifest: providedManifest = null, developmentFiles = null, developmentRuntime = null, expectedId = '', source }) => {
     const manifest = providedManifest || JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     if (expectedId && manifest.id !== expectedId) throw new Error(`Component id does not match its directory: ${manifest.id || 'missing'}`);
-    const descriptor = parseComponentHostManifest(manifest, componentRoot, developmentFiles);
+    const descriptor = parseComponentHostManifest(manifest, componentRoot, developmentFiles, adoptionPolicy);
     if (descriptor && admitDescriptor && admitDescriptor(descriptor, componentRoot, source) !== true) throw new Error(`Component host admission rejected: ${descriptor.componentId}`);
     return descriptor ? { ...descriptor, componentRoot, source, ...(developmentFiles ? { development: true } : {}), ...(developmentRuntime ? { developmentRuntime } : {}) } : null;
   };
@@ -405,4 +465,6 @@ module.exports = {
   parseComponentIcon,
   resolvePackageFile,
   parseComponentHostManifest,
+  ownsLegacyComponentDomainDatabase,
+  isOwnedLegacyComponentDomainDatabase,
 };

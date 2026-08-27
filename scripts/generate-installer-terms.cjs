@@ -6,7 +6,7 @@ const legalRoot = path.join(repositoryRoot, 'docs', 'legal');
 const htmlOutputPath = path.join(legalRoot, 'INSTALLER_TERMS.html');
 const textOutputPath = path.join(legalRoot, 'INSTALLER_TERMS.txt');
 
-const readHtml = name => fs.readFileSync(path.join(legalRoot, name), 'utf8');
+const readHtml = name => fs.readFileSync(path.join(legalRoot, name), 'utf8').replace(/\r\n?/g, '\n');
 const extract = (html, pattern, label) => {
   const match = html.match(pattern);
   if (!match) throw new Error(`无法从法律文件中提取${label}`);

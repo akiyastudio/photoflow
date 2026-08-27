@@ -12,11 +12,12 @@ const { scheduleSdImportedMedia } = require('./workspace/sd-import-media-scan.cj
 const { createDeletedProjectCleanup } = require('./workspace/deleted-project-cleanup.cjs');
 const { formatProjectDate, normalizeProjectDate, readProjectDate } = require('./workspace/project-date.cjs');
 const { runWorkspaceMaintenanceWithRetry, workspaceDatabaseTaskResource } = require('./workspace/workspace-maintenance.cjs');
+const { publishPathNoClobber: defaultPublishPathNoClobber } = require('../services/file-transfer-service.cjs');
 
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
 const registerWorkspaceIpc = context => {
-  const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation = () => false, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
+  const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation = () => false, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const logSlowWorkspaceInteraction = (operation, startedAt, details = {}) => {
     const elapsedMs = Date.now() - startedAt;
@@ -636,6 +637,8 @@ const registerWorkspaceIpc = context => {
         }
         if (!phase.pathsRemoved) {
           for (const item of operation.paths) await fs.promises.rm(item, { recursive: true, force: true });
+          for (const retainedRoot of operation.retainedSourceRoots || []) await fs.promises.rm(retainedRoot, { recursive: true, force: true });
+          for (const retainedPath of operation.retainedSourcePaths || []) await fs.promises.rm(retainedPath, { recursive: true, force: true });
           phase.pathsRemoved = true;
         }
         if (!phase.managedExternalLinksRevoked && operation.managedExternalLinkIds?.length) {
@@ -764,6 +767,24 @@ const registerWorkspaceIpc = context => {
         if (replacementItems.some(item => item.permanent || (!item.backup && !item.recyclePidl))) {
           throw new Error('部分被替换的原项目已由 Windows 永久删除，无法完整撤销此次粘贴');
         }
+        if (operation.partialUndoState) {
+          const partial = operation.partialUndoState;
+          const occupied = replacementItems.find(item => fs.existsSync(item.original));
+          if (occupied) throw Object.assign(new Error(`无法继续撤销：“${path.basename(occupied.original)}”被后来出现的未知项目占用；新粘贴内容和旧备份均已保留在 ${partial.undoRoot}`), { code: 'UNDO_PUBLISH_CONFLICT', recoveryRequired: true });
+          for (const item of replacementItems) {
+            if (item.backup) await publishPathNoClobber(item.backup, item.original);
+            else await recycleBinService.restore({ recyclePidl: item.recyclePidl, originalPath: item.original });
+          }
+          if (operation.mode === 'cut') {
+            for (const item of partial.stagedNewItems || []) if (fs.existsSync(item.temporary)) await movePathAtomic(item.temporary, item.source);
+          } else {
+            for (const item of partial.stagedNewItems || []) if (fs.existsSync(item.temporary)) await fs.promises.rm(item.temporary, { recursive: true, force: true });
+          }
+          await fs.promises.rm(partial.undoRoot, { recursive: true, force: true }).catch(() => undefined);
+          for (const retainedRoot of operation.retainedSourceRoots || []) await fs.promises.rm(retainedRoot, { recursive: true, force: true }).catch(() => undefined);
+          operation.partialUndoState = null;
+          return { success: true, message: `已继续撤销粘贴并恢复 ${replacementItems.length} 个被替换项目` };
+        }
         for (const move of moves) await assertUndoIdentity(operation, move.destination);
         const destinationKeys = new Set(moves.map(move => path.resolve(move.destination).toLocaleLowerCase()));
         if (operation.mode === 'cut' && moves.some(move => fs.existsSync(move.source) && !destinationKeys.has(path.resolve(move.source).toLocaleLowerCase()))) {
@@ -786,11 +807,11 @@ const registerWorkspaceIpc = context => {
         try {
           for (const [index, move] of moves.entries()) {
             const temporary = path.join(undoRoot, `new-${index}-${path.basename(move.destination)}`);
-            await fs.promises.rename(move.destination, temporary);
+            await publishPathNoClobber(move.destination, temporary);
             stagedNewItems.push({ ...move, temporary, movedToSource: false });
           }
           for (const item of replacementItems) {
-            if (item.backup) await fs.promises.rename(item.backup, item.original);
+            if (item.backup) await publishPathNoClobber(item.backup, item.original);
             else await recycleBinService.restore({ recyclePidl: item.recyclePidl, originalPath: item.original });
             restoredOldItems.push(item);
           }
@@ -807,7 +828,7 @@ const registerWorkspaceIpc = context => {
             if (!fs.existsSync(item.original)) continue;
             const rollbackBackup = path.join(undoRoot, `old-${index}-${path.basename(item.original)}`);
             try {
-              await fs.promises.rename(item.original, rollbackBackup);
+              await publishPathNoClobber(item.original, rollbackBackup);
               item.backup = rollbackBackup;
               item.backupRoot = undoRoot;
               item.recyclePidl = '';
@@ -818,13 +839,20 @@ const registerWorkspaceIpc = context => {
           for (const item of [...stagedNewItems].reverse()) {
             try {
               if (item.movedToSource && fs.existsSync(item.source) && !fs.existsSync(item.temporary)) await movePathAtomic(item.source, item.temporary);
-              if (fs.existsSync(item.temporary) && !fs.existsSync(item.destination)) await fs.promises.rename(item.temporary, item.destination);
+              if (fs.existsSync(item.temporary) && !fs.existsSync(item.destination)) await publishPathNoClobber(item.temporary, item.destination);
             } catch { /* best-effort rollback; preserve every reachable copy */ }
+          }
+          if (stagedNewItems.some(item => fs.existsSync(item.temporary)) || replacementItems.some(item => item.backup && fs.existsSync(item.backup))) {
+            preserveUndoRoot = true;
+            operation.partialUndoState = { undoRoot, stagedNewItems: stagedNewItems.map(item => ({ ...item })) };
+            error.message = `${error.message || String(error)}；检测到晚到同名占用，未覆盖未知内容；新粘贴内容与旧备份已保留在 ${undoRoot}，清理占用后可再次撤销`;
+            error.code = 'UNDO_PUBLISH_CONFLICT';
           }
           if (!preserveUndoRoot) await fs.promises.rm(undoRoot, { recursive: true, force: true }).catch(() => undefined);
           throw error;
         }
         await fs.promises.rm(undoRoot, { recursive: true, force: true }).catch(() => undefined);
+        for (const retainedRoot of operation.retainedSourceRoots || []) await fs.promises.rm(retainedRoot, { recursive: true, force: true }).catch(() => undefined);
         const backupRoots = new Set(replacementItems.map(item => item.backupRoot).filter(Boolean));
         for (const backupRoot of backupRoots) await fs.promises.rm(backupRoot, { recursive: true, force: true }).catch(() => undefined);
         return { success: true, message: `已撤销粘贴并恢复 ${replacementItems.length} 个被替换项目` };
@@ -2120,8 +2148,18 @@ const registerWorkspaceIpc = context => {
 
   ipcMain.handle('workspace-extract-office-images', async (_event, workspacePath, status, projectName, relativePaths = []) => {
     try {
-      const requestedPaths = Array.isArray(relativePaths) ? relativePaths.slice(0, 50) : [];
+      const requestedPaths = Array.isArray(relativePaths) ? relativePaths : [];
       if (!requestedPaths.length) throw new Error('没有选择 Office 文档');
+      if (requestedPaths.length > 50) {
+        return {
+          success: false,
+          error: `一次最多处理 50 个 Office 文档；已选择 ${requestedPaths.length} 个，本次未处理任何文档`,
+          requestedCount: requestedPaths.length,
+          acceptedCount: 0,
+          skippedCount: requestedPaths.length,
+          results: [],
+        };
+      }
       const projectRoot = path.resolve(getProjectPath(workspacePath, status, projectName));
       const resolutions = requestedPaths.map(relativePath => virtualPaths.resolve(projectRoot, relativePath, { externalRootMode: 'target' }));
       const targets = resolutions.map(resolution => resolution.physicalPath);
@@ -2132,23 +2170,58 @@ const registerWorkspaceIpc = context => {
       }
       const args = ['extract', ...targets.flatMap(target => ['--input', target])];
       const result = await runPythonJsonAction('office_media_extract.py', args, 20 * 60 * 1000);
-      if (!result?.success) throw new Error(result?.error || '提取图片失败');
+      const extractionResults = Array.isArray(result?.results) ? result.results : [];
+      const successfulResults = extractionResults.filter(item => item?.success);
+      // A batch is reported as unsuccessful when any document fails. Preserve the
+      // successful items so the renderer can show an accurate partial-completion
+      // state instead of making an already-published extraction look unfinished.
+      if (!result || (!result.success && !successfulResults.length)) throw new Error(result?.error || '提取图片失败');
+      const publishedResults = extractionResults.map(item => ({ ...item }));
       const linkRequests = [];
-      for (let index = 0; index < (result.results || []).length; index += 1) {
-        const item = result.results[index];
+      for (let index = 0; index < extractionResults.length; index += 1) {
+        const item = extractionResults[index];
         if (!item?.success || !item.outputFolder) continue;
-        const resolution = resolutions[index];
-        const outputRoot = resolution.viaExternalLink ? resolution.mediaRoot : projectRoot;
-        const outputFolder = assertExistingInside(outputRoot, path.resolve(item.outputFolder), 'Office 图片输出路径');
-        if (!fs.statSync(outputFolder).isDirectory()) throw new Error('Office 图片输出不是文件夹');
-        if (resolution.viaExternalLink && resolution.externalTargetKind === 'file') {
-          const shortcutPath = uniqueDestination(path.dirname(resolution.shortcutPath), `${path.basename(outputFolder)}.lnk`);
-          linkRequests.push({ shortcutPath, target: outputFolder, kind: 'folder', displayName: path.basename(outputFolder) });
+        try {
+          const resolution = resolutions[index];
+          const outputRoot = resolution.viaExternalLink ? resolution.mediaRoot : projectRoot;
+          const outputFolder = assertExistingInside(outputRoot, path.resolve(item.outputFolder), 'Office 图片输出路径');
+          if (!fs.statSync(outputFolder).isDirectory()) throw new Error('Office 图片输出不是文件夹');
+          publishedResults[index].publishSuccess = true;
+          if (resolution.viaExternalLink && resolution.externalTargetKind === 'file') {
+            const shortcutPath = uniqueDestination(path.dirname(resolution.shortcutPath), `${path.basename(outputFolder)}.lnk`);
+            linkRequests.push({ index, shortcutPath, target: outputFolder, kind: 'folder', displayName: path.basename(outputFolder) });
+          }
+        } catch (error) {
+          publishedResults[index].publishSuccess = false;
+          publishedResults[index].publishError = error.message || String(error);
         }
       }
-      if (linkRequests.length) virtualPaths.createManagedExternalLinksBatch(linkRequests);
+      if (linkRequests.length) {
+        try {
+          virtualPaths.createManagedExternalLinksBatch(linkRequests.map(request => ({
+            shortcutPath: request.shortcutPath,
+            target: request.target,
+            kind: request.kind,
+            displayName: request.displayName,
+          })));
+        } catch (error) {
+          for (const request of linkRequests) {
+            publishedResults[request.index].publishSuccess = false;
+            publishedResults[request.index].publishError = error.message || String(error);
+          }
+        }
+      }
       mainWindow?.webContents.send('workspace-files-changed', { root: projectRoot, fileName: '' });
-      return { ...result, results: Array.isArray(result.results) ? result.results : [] };
+      const publicationFailures = publishedResults.filter(item => item?.success && item.publishSuccess === false);
+      return {
+        ...result,
+        success: Boolean(result.success) && publicationFailures.length === 0,
+        requestedCount: requestedPaths.length,
+        acceptedCount: requestedPaths.length,
+        skippedCount: 0,
+        ...(publicationFailures.length ? { error: `已提取图片，但 ${publicationFailures.length} 个结果发布失败；可从输出目录恢复` } : {}),
+        results: publishedResults,
+      };
     } catch (error) {
       writeLog('warn', 'Office image extraction failed', { projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error), results: [] };

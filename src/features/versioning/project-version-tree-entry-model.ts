@@ -1,7 +1,18 @@
 import type { ProgressFolder, ProjectFileEntry } from '../../types';
-import type { PendingProjectFileEntry } from '../workspace/file-operation-state-model';
 
 export type ResolvedVersionTreeEntryItem = { folder: ProgressFolder; entry: ProjectFileEntry };
+type RenameAwareProjectFileEntry = ProjectFileEntry & { pendingSourceRelativePath?: string };
+
+export const versionTreeReactKey = (item: {
+  key: string;
+  nodeKey: string;
+  folder?: Pick<ProgressFolder, 'folderId'>;
+}) => item.folder
+  // A rename keeps both the graph node and physical folder identity stable,
+  // so its mounted cover can survive the path transition. A real relink keeps
+  // the graph node but changes folderId and must discard the previous cover.
+  ? `${item.nodeKey}:folder:${item.folder.folderId || 'unknown'}`
+  : item.key;
 
 const normalizePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '').toLocaleLowerCase('zh-CN');
 const parentPath = (value: string) => normalizePath(value).split('/').slice(0, -1).join('/');
@@ -20,7 +31,7 @@ export const resolveVersionTreeEntryMapping = ({
   projectRelativePath: (absolutePath: string) => string;
 }) => {
   const normalizedScopePath = normalizePath(scopePath);
-  const liveEntries = entries as PendingProjectFileEntry[];
+  const liveEntries = entries as RenameAwareProjectFileEntry[];
   const liveEntryByPath = new Map(liveEntries.map(entry => [normalizePath(entry.relativePath), entry]));
   const liveEntryBySourceAlias = new Map(liveEntries
     .filter(entry => Boolean(entry.pendingSourceRelativePath))

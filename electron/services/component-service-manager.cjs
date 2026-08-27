@@ -4,6 +4,7 @@ const path = require('path');
 const MAX_LINE_BYTES = 2 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 60 * 1000;
 const LONG_REQUEST_TIMEOUT_MS = 4 * 60 * 60 * 1000;
+const BACKUP_RESTORE_INVOCATION = Symbol('component-backup-restore-invocation');
 
 const cloneRequestPayload = payload => {
   if (payload === undefined || payload === null) return {};
@@ -17,10 +18,11 @@ const serviceEnvironment = (source = process.env) => Object.fromEntries([
   'SystemRoot', 'WINDIR', 'TEMP', 'TMP', 'TMPDIR', 'LANG', 'LC_ALL',
 ].filter(key => typeof source[key] === 'string' && source[key]).map(key => [key, source[key]]));
 
-const publicContext = context => Object.freeze({
+const publicContext = (context, componentBackupRestore = false) => Object.freeze({
   componentId: context.componentId,
   componentVersion: context.componentVersion,
   surface: context.surface || 'project',
+  componentBackupRestore: componentBackupRestore === true,
   projectId: context.projectId,
   projectName: context.projectName,
   projectStatus: context.projectStatus,
@@ -49,13 +51,126 @@ class ComponentServiceManager {
     this.storageSnapshotBarrier = null;
     this.activeInvocations = 0;
     this.activityWaiters = new Set();
+    this.backupRestoreLeaseTail = Promise.resolve();
+    this.backupRestoreLeaseCount = 0;
+    this.backupRestoreIdle = Promise.resolve();
+    this.releaseBackupRestoreIdle = null;
+    this.quarantinedComponents = new Map();
   }
 
   supports(componentId, method) {
-    return Boolean(this.registry.resolve(componentId)?.service?.rpcMethods.includes(String(method || '')));
+    if (this.quarantinedComponents.has(String(componentId || ''))) return false;
+    const descriptor = this.registry.resolve(componentId);
+    const normalizedMethod = String(method || '');
+    return Boolean(descriptor?.service?.rpcMethods.includes(normalizedMethod) && !this.isBackupRestoreMethod(descriptor, normalizedMethod));
+  }
+
+  isBackupRestoreMethod(descriptor, method) {
+    const declaration = descriptor?.service?.backupRestore;
+    return Boolean(declaration && [declaration.workspace?.method, declaration.project?.method].filter(Boolean).includes(String(method || '')));
+  }
+
+  backupRestoreDescriptors() {
+    return this.registry.list().filter(descriptor => descriptor?.service?.backupRestore);
+  }
+
+  backupSnapshotDescriptors() {
+    return this.registry.list().map(descriptor => ({
+      componentId: descriptor.componentId,
+      componentVersion: descriptor.componentVersion,
+      service: descriptor.service ? { backupRestore: descriptor.service.backupRestore || null, rpcMethods: descriptor.service.rpcMethods || [] } : null,
+    }));
+  }
+
+  quarantine(componentId, reason = 'component-quarantined') { this.quarantinedComponents.set(String(componentId || ''), String(reason)); }
+  assertNotQuarantined(componentId) { if (this.quarantinedComponents.has(String(componentId || ''))) { const error = new Error(`Component ${componentId} is quarantined`); error.code = 'COMPONENT_QUARANTINED'; throw error; } }
+  async clearQuarantineAfterRepair(componentId) {
+    const id = String(componentId || ''); const reason = this.quarantinedComponents.get(id); if (!reason) return false;
+    await this.stop(id, 'component-quarantine-repair'); this.quarantinedComponents.delete(id);
+    try { const descriptor = this.registry.resolve(id); if (!descriptor) throw new Error(`Unknown component: ${id}`); const session = await this.ensureSession(descriptor); await session.ready; return true; }
+    catch (error) { this.quarantinedComponents.set(id, reason); throw error; }
+  }
+
+  async prepareBackupRestore(componentIds) {
+    for (const componentId of [...new Set((componentIds || []).map(String))]) {
+      this.assertNotQuarantined(componentId);
+      const descriptor = this.registry.resolve(componentId);
+      if (!descriptor?.service?.backupRestore) throw new Error(`Unknown component backup restore owner: ${componentId}`);
+      this.capabilityBroker.assertCapabilities(descriptor);
+      const session = await this.ensureSession(descriptor); await session.ready;
+    }
+    return true;
+  }
+
+  async invokeBackupRestore(componentId, mode, payload, boundContext = {}) {
+    this.assertNotQuarantined(componentId);
+    if (!['workspace', 'project'].includes(mode)) throw new TypeError('Invalid component backup restore mode');
+    const descriptor = this.registry.resolve(componentId);
+    const hook = descriptor?.service?.backupRestore?.[mode];
+    if (!hook) { const error = new Error(`Component ${componentId} does not support ${mode} backup restore`); error.code = mode === 'project' ? 'COMPONENT_PROJECT_RESTORE_UNSUPPORTED' : 'COMPONENT_WORKSPACE_RESTORE_UNSUPPORTED'; throw error; }
+    return this.withBackupRestoreLease([componentId], invoke => invoke(componentId, mode, payload, boundContext));
+  }
+
+  async withBackupRestoreLease(componentIds, worker) {
+    if (this.backupRestoreLeaseCount++ === 0) this.backupRestoreIdle = new Promise(resolve => { this.releaseBackupRestoreIdle = resolve; });
+    let releaseTurn;
+    const previousTurn = this.backupRestoreLeaseTail;
+    this.backupRestoreLeaseTail = new Promise(resolve => { releaseTurn = resolve; });
+    await previousTurn;
+    try { return await this.withBackupRestoreLeaseExclusive(componentIds, worker); }
+    finally {
+      releaseTurn();
+      this.backupRestoreLeaseCount -= 1;
+      if (this.backupRestoreLeaseCount === 0) { this.releaseBackupRestoreIdle?.(); this.releaseBackupRestoreIdle = null; }
+    }
+  }
+
+  async withBackupRestoreLeaseExclusive(componentIds, worker) {
+    if (!Array.isArray(componentIds) || typeof worker !== 'function') throw new TypeError('Invalid component backup restore lease');
+    let preparedSessions;
+    while (true) {
+      if (this.storageSnapshotBarrier) await this.storageSnapshotBarrier.released;
+      preparedSessions = new Map();
+      for (const componentId of [...new Set(componentIds.map(String))]) {
+        this.assertNotQuarantined(componentId);
+        const descriptor = this.registry.resolve(componentId);
+        if (!descriptor) throw new Error(`Unknown component: ${componentId}`);
+        this.capabilityBroker.assertCapabilities(descriptor);
+        const session = await this.ensureSession(descriptor); await session.ready; preparedSessions.set(componentId, session);
+      }
+      if (!this.storageSnapshotBarrier) break;
+    }
+    let releaseBarrier;
+    const barrier = { released: new Promise(resolve => { releaseBarrier = resolve; }), release: () => releaseBarrier() };
+    this.storageSnapshotBarrier = barrier;
+    try {
+      if (this.activeInvocations > 0) {
+        let timer; let notify;
+        try {
+          await Promise.race([
+            new Promise(resolve => { notify = resolve; this.activityWaiters.add(resolve); }),
+            new Promise((_, reject) => { timer = setTimeout(() => { const error = new Error('Component service is busy; backup restore was deferred'); error.code = 'COMPONENT_BUSY'; reject(error); }, this.requestTimeoutMs); timer.unref?.(); }),
+          ]);
+        } finally { clearTimeout(timer); if (notify) this.activityWaiters.delete(notify); }
+      }
+      const invoke = async (componentId, mode, payload, boundContext = {}) => {
+        if (!['workspace', 'project'].includes(mode)) throw new TypeError('Invalid component backup restore mode');
+        const descriptor = this.registry.resolve(componentId); const hook = descriptor?.service?.backupRestore?.[mode];
+        if (!hook || !preparedSessions.has(componentId)) throw new Error(`Component ${componentId} is outside the backup restore lease`);
+        return this.invokeOnce(descriptor, hook.method, cloneRequestPayload(payload), {
+          ...boundContext, componentId: descriptor.componentId, componentVersion: descriptor.componentVersion, surface: 'backup.restore',
+        }, preparedSessions.get(componentId), true, BACKUP_RESTORE_INVOCATION);
+      };
+      return await worker(invoke);
+    } finally {
+      if (this.storageSnapshotBarrier === barrier) this.storageSnapshotBarrier = null;
+      releaseBarrier();
+    }
   }
 
   async invoke(componentId, method, payload, boundContext) {
+    if (this.quarantinedComponents.has(String(componentId || ''))) { const error = new Error(`Component ${componentId} is quarantined`); error.code = 'COMPONENT_QUARANTINED'; throw error; }
+    if (this.backupRestoreLeaseCount > 0) { await this.backupRestoreIdle; return this.invoke(componentId, method, payload, boundContext); }
     if (this.storageSnapshotBarrier) {
       await this.storageSnapshotBarrier.released;
       return this.invoke(componentId, method, payload, boundContext);
@@ -66,6 +181,11 @@ class ComponentServiceManager {
     if (!descriptor?.service?.rpcMethods.includes(String(method || ''))) throw new Error(`Unknown component service RPC method: ${method}`);
     this.capabilityBroker.assertCapabilities(descriptor);
     const normalizedMethod = String(method || '');
+    if (this.isBackupRestoreMethod(descriptor, normalizedMethod)) {
+      const error = new Error(`Component backup restore method is host-only: ${normalizedMethod}`);
+      error.code = 'COMPONENT_HOST_ONLY_METHOD';
+      throw error;
+    }
     const normalizedPayload = cloneRequestPayload(payload);
     return await this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext);
     } finally {
@@ -77,12 +197,17 @@ class ComponentServiceManager {
     }
   }
 
-  async invokeOnce(descriptor, method, payload, boundContext) {
-    const session = await this.ensureSession(descriptor);
+  async invokeOnce(descriptor, method, payload, boundContext, preparedSession = null, forceLongTimeout = false, invocationIdentity = null) {
+    if (this.isBackupRestoreMethod(descriptor, method) && invocationIdentity !== BACKUP_RESTORE_INVOCATION) {
+      const error = new Error(`Component backup restore method is host-only: ${method}`);
+      error.code = 'COMPONENT_HOST_ONLY_METHOD';
+      throw error;
+    }
+    const session = preparedSession || await this.ensureSession(descriptor);
     await session.ready;
     const id = String(this.nextRequestId++);
     const message = { type: 'request', id, method, payload, context: {
-      ...publicContext(boundContext),
+      ...publicContext(boundContext, invocationIdentity === BACKUP_RESTORE_INVOCATION),
       hostApiVersion: descriptor.hostApiVersion,
       permissions: ['application.settings', 'application.command'].includes(boundContext.surface)
         ? (descriptor.service.permissions || []).filter(permission => ['component.settings', 'component.secrets', 'network.fetch', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs', 'notifications'].includes(permission))
@@ -90,7 +215,7 @@ class ComponentServiceManager {
     } };
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
-      const pending = { resolve, reject, timer: null, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0, longTimeoutArmed: false, onTimeout: null };
+      const pending = { resolve, reject, timer: null, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0, longTimeoutArmed: forceLongTimeout, onTimeout: null };
       pending.onTimeout = () => {
         if (session.pending.get(id) !== pending) return;
         session.pending.delete(id);
@@ -116,6 +241,7 @@ class ComponentServiceManager {
   }
 
   async ensureSession(descriptor) {
+    this.assertNotQuarantined(descriptor?.componentId);
     if (this.storageSnapshotBarrier) {
       await this.storageSnapshotBarrier.released;
       return this.ensureSession(descriptor);
@@ -265,6 +391,7 @@ class ComponentServiceManager {
   }
 
   async quiesceForStorageSnapshot({ timeoutMs = 5000 } = {}) {
+    if (this.backupRestoreLeaseCount > 0) { await this.backupRestoreIdle; return this.quiesceForStorageSnapshot({ timeoutMs }); }
     if (this.storageSnapshotBarrier) {
       await this.storageSnapshotBarrier.released;
       return this.quiesceForStorageSnapshot();

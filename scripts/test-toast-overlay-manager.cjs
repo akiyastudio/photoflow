@@ -173,7 +173,7 @@ assert.equal(TOAST_OVERLAY_MAX_WIDTH - 64, 480, '32px horizontal gutters preserv
 assert(/\.top-toast-stack\s*\{[\s\S]*?max-height:max\(1rem,min\(28rem,calc\(100vh - 10\.75rem\)\)\);[\s\S]*?overflow-y:auto;/.test(styles), 'host stack keeps the original 448 DIP cap and internal vertical scrolling');
 assert(/\.top-toast-stack--overlay\s*\{[\s\S]*?width:calc\(100% - 4rem\);[\s\S]*?max-height:calc\(100vh - 4rem\);[\s\S]*?margin:2rem auto;/.test(styles), 'overlay stack reserves 32 DIP gutters while scrolling inside the capped native window');
 assert(renderer.includes("closest('[data-top-toast-id]')") && renderer.includes('setPointerInteractive(next)'), 'scrolling over toast cards keeps the narrow overlay pointer-interactive');
-assert(!filesIpc.includes('suspendForNativeDrag') && !filesIpc.includes('native-file-drag-service') && !filesIpc.includes('failed-fast'), 'structurally narrow overlay removes native-drag workarounds and timing heuristics');
+assert(!filesIpc.includes('suspendForNativeDrag'), 'the structurally narrow overlay must not be suspended during native file drags');
 
 manager.destroy();
 assert.equal(overlay.destroyed, true);

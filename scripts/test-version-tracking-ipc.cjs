@@ -140,7 +140,7 @@ registerVersionIpc({
   projectVirtualPaths,
   releaseWorkspaceWatchPath: value => (calls.releasedWatchPaths ||= []).push(value),
   refreshManagedExternalWatchers: async () => { calls.externalWatcherRefreshes = (calls.externalWatcherRefreshes || 0) + 1; },
-  refreshWorkspaceCatalog: async () => undefined,
+  refreshWorkspaceCatalog: async () => { if (calls.failCatalogRefresh) throw new Error('injected catalog refresh failure'); },
   resolveProjectEntry: (_root, _status, _projectName, relativePath) => {
     const projectPath = path.join(workspaceRoot, 'Project');
     const resolved = path.resolve(projectPath, String(relativePath || ''));
@@ -438,10 +438,11 @@ async function main() {
     calls.renameProgressRequest = request;
     return { success: true, progressId: request.progressId, oldRelativePath: 'Move me', newRelativePath: request.newName };
   };
-  const renamedProgress = await renameProgressFolder({}, workspaceRoot, 'active', 'Project', {
+  calls.failCatalogRefresh = true; const renamedProgress = await renameProgressFolder({}, workspaceRoot, 'active', 'Project', {
     progressId: 'moved-node', expectedFolderId: localFolderId, expectedRelativePath: 'Move me', newName: '客户自由命名',
-  });
+  }); calls.failCatalogRefresh = false;
   assert.strictEqual(renamedProgress.success, true, renamedProgress.error);
+  assert.strictEqual(renamedProgress.warnings[0].code, 'WORKSPACE_CATALOG_REFRESH_FAILED', 'a post-commit catalog refresh failure is a degraded warning, not a false transaction failure');
   const { reservedProjectFolderNames, ...renameProgressRequest } = calls.renameProgressRequest;
   assert(Array.isArray(reservedProjectFolderNames) && reservedProjectFolderNames.includes('raw'), 'Host must inject its current generic relocation policy');
   assert.deepStrictEqual(renameProgressRequest, {
@@ -457,15 +458,18 @@ async function main() {
   assert.match(staleRename.error, /identity_mismatch/);
 
   const externalFolderId = 'external-folder-id';
+  let externalListedRoute = 'external-progress.lnk';
   versionService.listProgress = async () => ({ success: true, progressFolders: [{
     id: 'external-node', nodeRole: 'progress', mediaKind: 'image', displayName: 'external-progress',
-    folderPath: externalProgressPath, folderId: externalFolderId, externalLinkRelativePath: 'external-progress.lnk',
+    folderPath: externalProgressPath, folderId: externalFolderId, externalLinkRelativePath: externalListedRoute,
     trackingState: 'ready',
   }] });
   const externalRouteRequests = [];
   versionService.renameExternalProgressLinkRoute = async (_root, request) => {
     externalRouteRequests.push(request);
-    if (request.preflight) return { success: true, affectedProgressIds: ['external-node'] };
+    if (request.preflight) return { success: true, operationId: 'external-operation', affectedProgressIds: ['external-node'] };
+    fs.renameSync(request.oldPath, request.newPath);
+    externalListedRoute = request.newRelativePath;
     return {
       success: true, oldRelativePath: request.oldRelativePath, newRelativePath: request.newRelativePath,
       progressFolder: {
@@ -488,7 +492,12 @@ async function main() {
     { oldRelativePath: 'external-progress.lnk', newRelativePath: '客户终稿.lnk', preflight: true },
     { oldRelativePath: 'external-progress.lnk', newRelativePath: '客户终稿.lnk', preflight: false },
   ]);
-  assert.strictEqual(calls.externalWatcherRefreshes, 1, 'renaming an external version alias must rebuild its watcher routes');
+  const repeatedExternal = await renameProgressFolder({}, workspaceRoot, 'active', 'Project', {
+    progressId: 'external-node', expectedFolderId: externalFolderId,
+    expectedRelativePath: 'external-progress.lnk', newName: '客户终稿',
+  });
+  assert.strictEqual(repeatedExternal.success, true); assert.strictEqual(repeatedExternal.idempotent, true, 'a retry after startup recovery recognizes the already committed route and does not rename again');
+  assert.strictEqual(calls.externalWatcherRefreshes, 2, 'normal commit and recovered retry both rebuild watcher routes');
 
   console.log('version tracking V2 IPC tests passed');
 }

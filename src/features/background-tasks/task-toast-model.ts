@@ -56,9 +56,16 @@ export const isBackgroundTaskCenterVisible = (task: BackgroundTask) => {
     || (task.type === 'version-tracking' && (task.state === 'completed' || task.state === 'cancelled'));
 };
 
+const showsProgressToast = (task: BackgroundTask) => task.notificationPolicy === 'progress-toast'
+  || task.notificationPolicy === 'progress-and-result'
+  || (!task.notificationPolicy && (task.type === 'project-file-operation' || task.type === 'version-tracking'));
+
+const showsSuccessToast = (task: BackgroundTask) => task.notificationPolicy === 'result-only'
+  || task.notificationPolicy === 'progress-and-result';
+
 export const taskToastExpiresAt = (task: BackgroundTask) => task.state === 'failed'
   ? task.updatedAt + FAILURE_TOAST_MS
-  : task.state === 'completed' && task.notificationPolicy === 'result-only'
+  : task.state === 'completed' && showsSuccessToast(task)
     ? task.updatedAt + RESULT_TOAST_MS
     : 0;
 
@@ -66,11 +73,9 @@ export const taskToastLiveRole = (state: BackgroundTask['state']): 'alert' | 'st
 
 export const isActiveProjectFileTask = (task: BackgroundTask, now = Date.now()) => {
   const active = task.state === 'queued' || task.state === 'running' || task.state === 'pausing' || task.state === 'paused' || task.state === 'resuming';
-  const progressPolicy = task.notificationPolicy === 'progress-toast'
-    || (!task.notificationPolicy && (task.type === 'project-file-operation' || task.type === 'version-tracking'));
-  if (active) return progressPolicy;
+  if (active) return showsProgressToast(task);
   if (task.state === 'failed') return task.notificationPolicy !== 'silent' && now < taskToastExpiresAt(task);
-  return task.state === 'completed' && task.notificationPolicy === 'result-only' && now < taskToastExpiresAt(task);
+  return task.state === 'completed' && showsSuccessToast(task) && now < taskToastExpiresAt(task);
 };
 
 export const compareProjectFileTasks = (left: BackgroundTask, right: BackgroundTask) => {

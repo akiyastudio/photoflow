@@ -42,7 +42,7 @@ const { converterTriggerAction } = projectPanelLifecycleModule.exports;
 const compiledPanelTaskSessionModel = ts.transpileModule(panelTaskSessionModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const panelTaskSessionModelModule = { exports: {} };
 new Function('module', 'exports', compiledPanelTaskSessionModel)(panelTaskSessionModelModule, panelTaskSessionModelModule.exports);
-const { isPanelTaskRestoreForPage, nextPanelTaskStartedAt, panelTaskRestoreDetail, panelTaskSessionKey, removePanelTasksByOwnerPageId } = panelTaskSessionModelModule.exports;
+const { isActivePresentedBackgroundTaskForPanel, isPanelTaskRestoreForPage, nextPanelTaskStartedAt, panelTaskRestoreDetail, panelTaskSessionKey, removePanelTasksByOwnerPageId } = panelTaskSessionModelModule.exports;
 const compiledTopToastNoticeModel = ts.transpileModule(topToastNoticeModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const topToastNoticeModelModule = { exports: {} };
 new Function('module', 'exports', compiledTopToastNoticeModel)(topToastNoticeModelModule, topToastNoticeModelModule.exports);
@@ -68,6 +68,19 @@ assert.equal(nextPanelTaskStartedAt(undefined, 'running', 100), 100, 'the first 
 assert.equal(nextPanelTaskStartedAt({ state: 'running', startedAt: 100 }, 'running', 200), 100, 'progress reports must preserve the first start time');
 assert.equal(nextPanelTaskStartedAt({ state: 'running', startedAt: 100 }, 'completed', 200), 100, 'completion must retain the original start time');
 assert.equal(nextPanelTaskStartedAt({ state: 'completed', startedAt: 100 }, 'running', 300), 300, 'a new run using the same panel must receive a new start time');
+
+const presentedPythonTask = (state, ownerPageId = 'page-a', panelKind = 'research') => ({
+  state,
+  metadata: { presentationOwnerPageId: ownerPageId, presentationPanelKind: panelKind },
+});
+for (const state of ['queued', 'running', 'pausing', 'paused', 'resuming']) {
+  assert(isActivePresentedBackgroundTaskForPanel(presentedPythonTask(state), 'page-a', 'research'), `${state} presented Python tasks must keep their owning panel in background-minimize mode`);
+}
+for (const state of ['completed', 'failed', 'cancelled', 'interrupted']) {
+  assert(!isActivePresentedBackgroundTaskForPanel(presentedPythonTask(state), 'page-a', 'research'), `${state} presented Python tasks must restore the ordinary close control`);
+}
+assert(!isActivePresentedBackgroundTaskForPanel(presentedPythonTask('running', 'page-b'), 'page-a', 'research'), 'a task from another page must not affect the current panel');
+assert(!isActivePresentedBackgroundTaskForPanel(presentedPythonTask('running', 'page-a', 'video-split'), 'page-a', 'research'), 'a task from another panel kind must not affect the current panel');
 
 const makeTask = (id, operation, state, createdAt) => ({ id, type: 'project-file-operation', title: id, state, progress: 0, message: '', cancellable: true, retryable: false, resumable: false, resumeAvailable: false, restartAvailable: false, capabilities: { cancellable: true, pausable: false, resumable: false, retryable: false }, resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', metadata: { operation }, createdAt, updatedAt: createdAt, startedAt: 0, finishedAt: 0 });
 const moveTask = makeTask('move', 'move', 'running', 20);
@@ -182,7 +195,7 @@ assert(taskCenter.includes('onBackgroundTaskChanged') && taskCenter.includes('re
 assert(taskStatus.includes('usePanelTaskReporter') && taskStatus.includes("const state: TaskCenterProgressReport['state'] = isRunning ? 'running'"), 'the shared progress component must report panel task state without per-panel adapters');
 assert(indicator.includes('useTaskCenter()') && !indicator.includes('onBackgroundTaskChanged('), 'the background indicator must consume the shared provider instead of creating a duplicate subscription');
 assert(workspace.includes('mountedPanels.has') && workspace.includes("open={panel === 'research'}") && workspace.includes("open={panel === 'converter'}"), 'component panels must stay mounted while their modal is minimized');
-assert(projectToolModal.includes("aria-label={effectiveBusy ? '收起到后台' : '关闭'}") && projectToolModal.includes('if (event.target === event.currentTarget && !effectiveBusy)'), 'running panels must minimize explicitly and ignore accidental backdrop clicks');
+assert(projectToolModal.includes('isActivePresentedBackgroundTaskForPanel(candidate, ownerPageId, panelKind)') && projectToolModal.includes("aria-label={effectiveBusy ? '收起到后台' : '关闭'}") && projectToolModal.includes('if (event.target === event.currentTarget && !effectiveBusy)'), 'renderer and main-process running tasks must minimize explicitly and ignore accidental backdrop clicks');
 for (const inlineLayerState of ['progressCompare', 'progressRepair', 'pendingProgressFolders.length', 'draggingChildId || pendingRelationChange', 'batchRenameOpen', 'confirmDelete']) {
   assert(workspace.includes(`useEscapeLayer(active && Boolean(${inlineLayerState})`) || workspace.includes(`useEscapeLayer(active && ${inlineLayerState}`), `inline ${inlineLayerState} host suspension must release when its project page becomes inactive`);
 }

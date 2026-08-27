@@ -1,4 +1,5 @@
 const assert = require('assert');
+const crypto = require('crypto');
 const { EventEmitter } = require('events');
 const fs = require('fs');
 const os = require('os');
@@ -12,8 +13,10 @@ const { createMediaRepository } = require('../electron/repositories/media-reposi
 const { createOperationsRepository } = require('../electron/repositories/operations-repository.cjs');
 const { createBackupService, safeDestination, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
 const { createConfigMutationService } = require('../electron/services/config-mutation-service.cjs');
+const { defaultComponentDataAdoptionPolicy } = require('../electron/compatibility/component-data-adoption-policy.cjs');
 const VENV_PYTHON = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
 const TEST_PYTHON = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : process.env.PYTHON || 'python';
+const sha256FileForTest = filePath => crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 
 const waitForCoordinatorQueue = async (coordinator, minimum, timeoutMs = 5000) => {
   const deadline = Date.now() + timeoutMs;
@@ -76,11 +79,16 @@ const prepareWorkspace = async (temporaryRoot, name, id) => {
   await fs.promises.mkdir(path.dirname(mediaDatabase), { recursive: true });
   await fs.promises.mkdir(path.join(dataRoot, 'sample-component'), { recursive: true });
   await fs.promises.mkdir(path.join(dataRoot, 'components', 'sample-component', 'private'), { recursive: true });
+  await fs.promises.mkdir(path.join(dataRoot, 'components', 'second-component'), { recursive: true });
+  await fs.promises.mkdir(path.join(dataRoot, 'components', 'sample-component', '.restore-staging-crashed'), { recursive: true });
   await fs.promises.writeFile(path.join(root, '.photoflow-workspace-id'), `${id}\n`, 'utf8');
   await fs.promises.writeFile(path.join(project, '原片.jpg'), `photo-${id}`, 'utf8');
   await fs.promises.writeFile(path.join(dataRoot, 'sample-component', 'shared.json'), `internal-${id}`, 'utf8');
   await fs.promises.writeFile(path.join(dataRoot, 'components', 'sample-component', 'storage.sqlite3'), `opaque-database-${id}`, 'utf8');
+  await fs.promises.writeFile(path.join(dataRoot, 'components', 'sample-component', 'storage.sqlite3-wal'), `opaque-wal-${id}`, 'utf8');
   await fs.promises.writeFile(path.join(dataRoot, 'components', 'sample-component', 'private', 'state.json'), JSON.stringify({ id }), 'utf8');
+  await fs.promises.writeFile(path.join(dataRoot, 'components', 'sample-component', '.restore-staging-crashed', 'control.json'), 'must-not-back-up', 'utf8');
+  await fs.promises.writeFile(path.join(dataRoot, 'components', 'second-component', 'storage.sqlite3'), `second-opaque-${id}`, 'utf8');
   await runPython('workspace_db.py', ['catalog_sync', '--root', root, '--database', database, '--payload', '{}']);
   await runPython('workspace_db.py', ['init', '--root', root, '--database', database]);
   await runPython('-c', [
@@ -131,11 +139,22 @@ const main = async () => {
     const recoveryLeases = [];
     const recoveryEvents = [];
     const recoveryActionOptions = [];
+    const recoveryPythonSources = [];
     const databaseLogs = [];
     let rejectRecoveryPause = false;
     let componentServicesActive = true;
     let componentQuiesceCount = 0;
     let componentResumeCount = 0;
+    const componentRestoreCalls = [];
+    const componentRestorePhaseCalls = [];
+    let componentRestoreFailure = null;
+    let componentRollbackTamper = false;
+    let componentContinuationFailure = false;
+    const componentPhaseFailures = new Map();
+    let secondProjectRestoreSupported = true;
+    let secondCurrentSourceMatches = true;
+    let lateComponentInstalled = false;
+    let fileReceiptWorkspaceComponent = '';
     let nextRecoveryBarrier = null;
     const armRecoveryBarrier = () => {
       let admit;
@@ -182,10 +201,88 @@ const main = async () => {
       readSavedConfig,
       runPythonJsonAction: (...args) => {
         if (args.length >= 6) recoveryActionOptions.push({ timeoutMs: args[2], signal: args[4], deadlineAt: args[5] });
+        if (Array.isArray(args[1])) for (let index = 0; index < args[1].length - 1; index += 1) if (['--source', '--peer-source'].includes(args[1][index])) recoveryPythonSources.push(args[1][index + 1]);
+        if (componentContinuationFailure && args[0] === 'backup_db.py' && args[1]?.includes('restore-project')) throw new Error('simulated core continuation failure');
         return runPython(...args);
       },
       shell: { readShortcutLink: shortcutPath => JSON.parse(fs.readFileSync(shortcutPath, 'utf8')) },
       componentServiceManager: {
+        backupRestoreDescriptors: () => [...[{ componentId: 'sample-component', componentVersion: '1.2.3', service: { backupRestore: {
+          transactionProtocolVersion: 1, sourceManifestProtocolVersion: 1, receiptProtocolVersion: 1,
+          workspace: { method: 'sample.backup.workspace.v1' }, project: { method: 'sample.backup.project.v1' },
+          sources: [{ scope: 'component-storage', path: 'sample-component/storage.sqlite3', format: 'component-storage-v1' }],
+        } } }, { componentId: 'second-component', componentVersion: '4.5.6', service: { backupRestore: {
+          transactionProtocolVersion: 1, sourceManifestProtocolVersion: 1, receiptProtocolVersion: 1,
+          workspace: { method: 'second.backup.workspace.v1' }, project: secondProjectRestoreSupported ? { method: 'second.backup.project.v1' } : null,
+          sources: [{ scope: 'component-storage', path: secondCurrentSourceMatches ? 'second-component/storage.sqlite3' : 'second-component/missing.sqlite3', format: 'component-storage-v1' }],
+        } } }], ...(lateComponentInstalled ? [{ componentId: 'late-component', componentVersion: '2.0.0', service: { backupRestore: {
+          transactionProtocolVersion: 1, sourceManifestProtocolVersion: 1, receiptProtocolVersion: 1,
+          workspace: { method: 'late.backup.workspace.v1' }, project: { method: 'late.backup.project.v1' },
+          sources: [{ scope: 'component-storage', path: 'late-component/storage.sqlite3', format: 'late-storage-v2' }],
+        } } }] : [])],
+        invokeBackupRestore: async (componentId, mode, payload) => {
+          componentRestorePhaseCalls.push({ componentId, mode, payload });
+          if (payload.phase === 'prepare') return { schemaVersion: 1, operationId: payload.operationId, status: 'prepared', quiesceToken: `token:${componentId}:${payload.operationId}` };
+          if (payload.phase === 'finalize' || payload.phase === 'rollback') {
+            const failureKey = `${componentId}:${payload.phase}`; const remaining = componentPhaseFailures.get(failureKey) || 0;
+            if (remaining > 0) { componentPhaseFailures.set(failureKey, remaining - 1); throw new Error(`simulated ${payload.phase} release failure`); }
+            return { schemaVersion: 1, operationId: payload.operationId, status: payload.phase === 'finalize' ? 'finalized' : 'rolled-back' };
+          }
+          componentRestoreCalls.push({ componentId, mode, payload });
+          if (mode === 'project') { await fs.promises.mkdir(payload.targetStorage.dataPath, { recursive: true }); await fs.promises.writeFile(path.join(payload.targetStorage.dataPath, 'restore-hook-marker.txt'), componentId, 'utf8'); }
+          if (componentRestoreFailure === `${componentId}:${mode}`) {
+            if (componentRollbackTamper) {
+              const transactionRoot = path.resolve(payload.targetStorage.controlPath, '..', '..');
+              await fs.promises.rm(path.join(transactionRoot, 'backups', 'sample-component', 'storage.sqlite3'), { force: true });
+            }
+            throw new Error('simulated component restore failure');
+          }
+          if (mode === 'workspace' && fileReceiptWorkspaceComponent === componentId) {
+            const sourceManifest = JSON.parse(await fs.promises.readFile(payload.sourceManifestPath, 'utf8'));
+            const dispositions = [];
+            for (const source of payload.sources) {
+              const hostPreserved = source.relativePath.endsWith('/private/state.json');
+              if (!hostPreserved && source.relativePath.startsWith(`${componentId}/`)) {
+                const destination = path.join(payload.targetStorage.dataPath, source.relativePath.slice(componentId.length + 1));
+                await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+                await fs.promises.copyFile(source.path, destination);
+              }
+              dispositions.push({
+                sourceKey: source.sourceKey,
+                disposition: hostPreserved ? 'host-preserved' : 'applied',
+                destinationRelativePath: hostPreserved ? '' : source.relativePath,
+                reason: hostPreserved ? 'host-control' : '',
+                message: hostPreserved ? 'Host performs the opaque workspace copy' : '',
+              });
+            }
+            const receipt = {
+              schema: sourceManifest.receiptContract.schema,
+              schemaVersion: 1,
+              operationId: payload.operationId,
+              status: 'committed',
+              sourceManifestSha256: payload.sourceManifestSha256,
+              dispositions,
+              warnings: [],
+            };
+            const receiptBody = `${JSON.stringify(receipt)}\n`;
+            const receiptPath = path.join(path.dirname(payload.sourceManifestPath), 'restore-receipt.json');
+            await fs.promises.writeFile(receiptPath, receiptBody, 'utf8');
+            return {
+              schemaVersion: 1,
+              operationId: payload.operationId,
+              status: 'committed',
+              receiptPath,
+              receiptSha256: crypto.createHash('sha256').update(receiptBody).digest('hex'),
+              dispositionCount: dispositions.length,
+            };
+          }
+          const consumedPaths = payload.sources.filter(source => mode === 'project' || !source.relativePath.endsWith('/private/state.json')).map(source => source.relativePath);
+          if (mode === 'workspace') for (const source of payload.sources.filter(item => consumedPaths.includes(item.relativePath) && item.relativePath.startsWith(`${componentId}/`))) {
+            const destination = path.join(payload.targetStorage.dataPath, source.relativePath.slice(componentId.length + 1));
+            await fs.promises.mkdir(path.dirname(destination), { recursive: true }); await fs.promises.copyFile(source.path, destination);
+          }
+          return { schemaVersion: 1, operationId: payload.operationId, status: 'committed', consumedPaths, imported: {} };
+        },
         quiesceForStorageSnapshot: async () => {
           assert.equal(componentServicesActive, true);
           componentServicesActive = false;
@@ -226,7 +323,12 @@ const main = async () => {
     assert.strictEqual(firstRun.task.state, 'completed');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'operations.sqlite3'), 'operations database must use a consistent online snapshot');
     const componentEntries = firstRun.result.files.filter(entry => entry.scope === 'component-storage');
-    assert.deepStrictEqual(componentEntries.map(entry => entry.path).sort(), ['sample-component/private/state.json', 'sample-component/storage.sqlite3']);
+    assert.deepStrictEqual(componentEntries.map(entry => entry.path).sort(), ['sample-component/private/state.json', 'sample-component/storage.sqlite3', 'sample-component/storage.sqlite3-wal', 'second-component/storage.sqlite3']);
+    assert.deepEqual(firstRun.result.componentBackups, [
+      { componentId: 'sample-component', componentVersion: '1.2.3', sources: [{ scope: 'component-storage', path: 'sample-component/storage.sqlite3', format: 'component-storage-v1' }] },
+      { componentId: 'second-component', componentVersion: '4.5.6', sources: [{ scope: 'component-storage', path: 'second-component/storage.sqlite3', format: 'component-storage-v1' }] },
+    ], 'component source format and installed version are frozen into the same quiesced snapshot as its files');
+    assert.equal(componentEntries.some(entry => entry.path.includes('.restore-staging-')), false, 'Host/component restore control residue is never snapshotted');
     assert(componentEntries.every(entry => /^[a-f0-9]{64}$/.test(entry.hash)), 'component package entries must be content-addressed');
     assert.equal(componentServicesActive, true, 'component services must resume after the immutable package is staged');
     assert.ok(firstRun.result.files.some(entry => entry.scope === 'domain-database' && entry.path === 'media.sqlite3'), 'media database must use a consistent online snapshot');
@@ -257,6 +359,37 @@ const main = async () => {
     const backedProjectRoot = path.resolve(first.root, backedProject.relativePath);
     await fs.promises.rm(backedProjectRoot, { recursive: true, force: true });
     assert.strictEqual(fs.existsSync(backedProjectRoot), false);
+    const replacementManifestPath = path.join(target, STORE_DIRECTORY, 'snapshots', replacementRun.result.id, 'manifest.json');
+    const replacementManifest = JSON.parse(await fs.promises.readFile(replacementManifestPath, 'utf8'));
+    const orphanFixture = { ...replacementManifest.files.find(entry => entry.scope === 'domain-database'), path: 'uninstalled-private.sqlite3' };
+    replacementManifest.files.push(orphanFixture); await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    const rejectedWorkspaceRoot = path.join(temporaryRoot, 'rejected-uninstalled-workspace');
+    await assert.rejects(service.restoreWorkspace(first.root, replacementRun.result.id, rejectedWorkspaceRoot), error => error?.code === 'COMPONENT_LEGACY_RESTORE_OWNER_MISSING');
+    assert.equal(fs.existsSync(rejectedWorkspaceRoot), false, 'component ownership preflight must run before creating the workspace target');
+    await assert.rejects(service.restoreProject(first.root, replacementRun.result.id, backedProject.id), error => error?.code === 'COMPONENT_LEGACY_RESTORE_OWNER_MISSING');
+    assert.equal(fs.existsSync(path.join(first.root, `.photoflow-project-restore-${backedProject.id}.incomplete`)), false, 'component ownership preflight must run before creating a project marker');
+    replacementManifest.files.pop(); await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    replacementManifest.componentBackups.push({ componentId: 'evil-component', componentVersion: '1', sources: [{ scope: 'domain-database', path: 'media.sqlite3', format: 'stolen-media-v1' }] });
+    const rejectedMetadataRoot = path.join(temporaryRoot, 'rejected-malicious-component-metadata');
+    await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    await assert.rejects(service.restoreWorkspace(first.root, replacementRun.result.id, rejectedMetadataRoot), error => error?.code === 'COMPONENT_RESTORE_SOURCE_UNAUTHORIZED');
+    await assert.rejects(service.verify(first.root, replacementRun.result.id), error => error?.code === 'COMPONENT_RESTORE_SOURCE_UNAUTHORIZED', 'backup verify rejects forged component ownership metadata too');
+    assert.equal(fs.existsSync(rejectedMetadataRoot), false, 'malicious component metadata is rejected before any restore target write');
+    replacementManifest.componentBackups.pop(); await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    replacementManifest.componentBackups.push(structuredClone(replacementManifest.componentBackups[0])); await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    await assert.rejects(service.verify(first.root, replacementRun.result.id), error => error?.code === 'COMPONENT_BACKUP_METADATA_INVALID');
+    replacementManifest.componentBackups.pop();
+    const removedMetadataEntry = replacementManifest.files.splice(replacementManifest.files.findIndex(entry => entry.scope === 'component-storage' && entry.path === replacementManifest.componentBackups[0].sources[0].path), 1)[0];
+    await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    await assert.rejects(service.verify(first.root, replacementRun.result.id), error => error?.code === 'COMPONENT_RESTORE_SOURCE_MISSING');
+    replacementManifest.files.push(removedMetadataEntry); await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    const savedComponentMetadata = replacementManifest.componentBackups; delete replacementManifest.componentBackups;
+    const legacyDomainFixture = { ...replacementManifest.files.find(entry => entry.scope === 'domain-database'), path: 'evil-unowned.sqlite3' };
+    replacementManifest.files.push(legacyDomainFixture); await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    await assert.rejects(service.verify(first.root, replacementRun.result.id), /未授权的历史域数据库/, 'old manifests cannot smuggle an unowned domain database through snapshot-only verification');
+    legacyDomainFixture.path = defaultComponentDataAdoptionPolicy.legacyDomainDatabaseOwners[0].paths[0]; await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    assert.equal((await service.verify(first.root, replacementRun.result.id)).task.state, 'completed', 'old manifests retain statically Host-owned legacy database verification');
+    replacementManifest.files.pop(); replacementManifest.componentBackups = savedComponentMetadata; await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
     const projectBarrier = armRecoveryBarrier();
     const restoredProjectPromise = service.restoreProject(first.root, replacementRun.result.id, backedProject.id);
     await projectBarrier.admitted;
@@ -269,7 +402,79 @@ const main = async () => {
     projectBarrier.release();
     const [restoredProject] = await Promise.all([restoredProjectPromise, queuedMaintenance, queuedWriter]);
     assert.strictEqual(restoredProject.task.state, 'completed');
+    assert.equal(componentRestoreCalls.length, 2, 'project restore must invoke every component-owned import hook');
+    const sampleRestore = componentRestoreCalls.find(call => call.componentId === 'sample-component');
+    assert.equal(sampleRestore.mode, 'project');
+    assert.deepEqual(sampleRestore.payload.sources.map(source => source.relativePath).sort(), ['sample-component/private/state.json', 'sample-component/storage.sqlite3', 'sample-component/storage.sqlite3-wal']);
+    const stagedMain = sampleRestore.payload.sources.find(source => source.relativePath.endsWith('/storage.sqlite3'));
+    const stagedWal = sampleRestore.payload.sources.find(source => source.relativePath.endsWith('/storage.sqlite3-wal'));
+    assert.equal(path.dirname(stagedMain.path), path.dirname(stagedWal.path), 'SQLite main database and sidecars must remain adjacent in staging');
+    assert(componentRestoreCalls.every(call => call.payload.sources.every(source => !fs.existsSync(source.path))), 'component restore staging must be removed after hooks settle');
+    const opaqueFixture = { ...replacementManifest.files.find(entry => entry.scope === 'component-storage' && entry.path === 'sample-component/storage.sqlite3'), path: 'late-component/storage.sqlite3' };
+    replacementManifest.files.push(opaqueFixture);
+    replacementManifest.componentBackups.push({ componentId: 'late-component', componentVersion: 'unversioned', sources: [] });
+    await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    lateComponentInstalled = true;
+    const lateRestoreStart = componentRestoreCalls.length;
+    await fs.promises.rm(backedProjectRoot, { recursive: true, force: true });
+    const lateRestoreResult = await service.restoreProject(first.root, replacementRun.result.id, backedProject.id);
+    assert.equal(lateRestoreResult.task.state, 'completed', 'opaque storage backed up while uninstalled becomes project-restorable after an owner is installed');
+    const lateRestore = componentRestoreCalls.slice(lateRestoreStart).find(call => call.componentId === 'late-component');
+    assert.equal(lateRestore.payload.sources[0].format, 'unversioned');
+    assert.equal(lateRestore.payload.sources[0].sourceVersion, 'unversioned');
+    assert.equal(lateRestore.payload.sources[0].metadataOrigin, 'inferred');
+    lateComponentInstalled = false;
+    replacementManifest.files.pop(); replacementManifest.componentBackups.pop();
+    await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    await fs.promises.rm(backedProjectRoot, { recursive: true, force: true });
+    secondProjectRestoreSupported = false;
+    const callsBeforeUnsupported = componentRestoreCalls.length;
+    await assert.rejects(service.restoreProject(first.root, replacementRun.result.id, backedProject.id), error => error?.code === 'COMPONENT_PROJECT_RESTORE_UNSUPPORTED');
+    assert.equal(componentRestoreCalls.length, callsBeforeUnsupported, 'unsupported components must be detected before any supported hook commits');
+    secondProjectRestoreSupported = true;
+    secondCurrentSourceMatches = false;
+    await assert.rejects(service.restoreProject(first.root, replacementRun.result.id, backedProject.id), error => error?.code === 'COMPONENT_RESTORE_SOURCE_MISSING');
+    assert.equal(componentRestoreCalls.length, callsBeforeUnsupported, 'missing declared component sources must fail before any hook commits');
+    assert.equal((await service.verify(first.root, replacementRun.result.id)).task.state, 'completed', 'snapshot verification is independent of the currently installed component source format/path');
+    secondCurrentSourceMatches = true;
+    const sampleComponentRoot = path.join(first.dataRoot, 'components', 'sample-component');
+    const secondComponentRoot = path.join(first.dataRoot, 'components', 'second-component');
+    await Promise.all([sampleComponentRoot, secondComponentRoot].map(root => fs.promises.rm(path.join(root, 'restore-hook-marker.txt'), { force: true })));
+    const beforeComponentRollback = await Promise.all([sampleComponentRoot, secondComponentRoot].map(root => fs.promises.readFile(path.join(root, 'storage.sqlite3'))));
+    componentRestoreFailure = 'second-component:project'; componentRollbackTamper = true;
+    await assert.rejects(service.restoreProject(first.root, replacementRun.result.id, backedProject.id), error => error instanceof AggregateError);
+    componentRestoreFailure = null; componentRollbackTamper = false;
+    assert.equal(fs.existsSync(path.join(sampleComponentRoot, 'restore-hook-marker.txt')), true, 'corrupt rollback backup is detected before any live component root is touched');
+    await fs.promises.rm(path.join(first.dataRoot, '.component-restore-transactions'), { recursive: true, force: true });
+    await Promise.all([sampleComponentRoot, secondComponentRoot].map(root => fs.promises.rm(path.join(root, 'restore-hook-marker.txt'), { force: true })));
+    await fs.promises.rm(path.join(first.root, `.photoflow-project-restore-${backedProject.id}.incomplete`), { force: true });
+    componentRestoreFailure = 'second-component:project';
+    await assert.rejects(service.restoreProject(first.root, replacementRun.result.id, backedProject.id), /simulated component restore failure/);
+    componentRestoreFailure = null;
+    assert.deepEqual(await Promise.all([sampleComponentRoot, secondComponentRoot].map(root => fs.promises.readFile(path.join(root, 'storage.sqlite3')))), beforeComponentRollback, 'a later component failure must restore every component root byte-for-byte');
+    assert.equal(fs.existsSync(path.join(sampleComponentRoot, 'restore-hook-marker.txt')), false, 'rollback removes writes committed by an earlier component hook');
+    assert.equal(fs.existsSync(path.join(first.dataRoot, '.component-restore-transactions')), true, 'transaction parent remains available for future same-volume journals');
+    assert.deepEqual(await fs.promises.readdir(path.join(first.dataRoot, '.component-restore-transactions')), [], 'successful rollback removes its journal and snapshots');
+    await fs.promises.rm(path.join(first.root, `.photoflow-project-restore-${backedProject.id}.incomplete`), { force: true });
+    const firstOperationId = sampleRestore.payload.operationId;
+    componentPhaseFailures.set('sample-component:finalize', 1);
+    const freshRestore = await service.restoreProject(first.root, replacementRun.result.id, backedProject.id);
+    assert.equal(freshRestore.task.state, 'completed');
+    assert(componentRestorePhaseCalls.filter(call => call.componentId === 'sample-component' && call.payload.phase === 'finalize').length >= 2, 'finalize token release retries without losing the pending token');
+    const freshSampleRestore = componentRestoreCalls.filter(call => call.componentId === 'sample-component').at(-1);
+    assert.notEqual(freshSampleRestore.payload.operationId, firstOperationId, 'a fresh user restore must receive a new component operation id');
+    await fs.promises.rm(backedProjectRoot, { recursive: true, force: true });
+    await Promise.all([sampleComponentRoot, secondComponentRoot].map(root => fs.promises.rm(path.join(root, 'restore-hook-marker.txt'), { force: true })));
+    const beforeContinuationRollback = await Promise.all([sampleComponentRoot, secondComponentRoot].map(root => fs.promises.readFile(path.join(root, 'storage.sqlite3'))));
+    componentContinuationFailure = true;
+    await assert.rejects(service.restoreProject(first.root, replacementRun.result.id, backedProject.id), /simulated core continuation failure/);
+    componentContinuationFailure = false;
+    assert.deepEqual(await Promise.all([sampleComponentRoot, secondComponentRoot].map(root => fs.promises.readFile(path.join(root, 'storage.sqlite3')))), beforeContinuationRollback, 'core continuation failure rolls back all component roots while the outer lease is held');
+    assert.equal(fs.existsSync(path.join(sampleComponentRoot, 'restore-hook-marker.txt')), false);
+    await fs.promises.rm(path.join(first.root, `.photoflow-project-restore-${backedProject.id}.incomplete`), { force: true });
     assert.equal(recoveryLeases.at(-1).databases.length, 3, 'project restore must lock core, media and versioning databases');
+    const backupObjectsRoot = `${path.resolve(target, STORE_DIRECTORY, 'objects')}${path.sep}`.toLocaleLowerCase();
+    assert(recoveryPythonSources.every(source => !`${path.resolve(source)}${path.sep}`.toLocaleLowerCase().startsWith(backupObjectsRoot)), 'Python recovery only receives verified portable copies, never object-store paths');
     assert(recoveryLeases.at(-1).databases.every(database => database.mode === 'exclusive'));
     assert(recoveryActionOptions.some(options => options.signal && Number.isFinite(options.deadlineAt) && options.timeoutMs <= options.deadlineAt - Date.now() + 1000), 'recovery tools must receive the active AbortSignal and remaining deadline');
     const mediaBarrier = armRecoveryBarrier();
@@ -355,10 +560,19 @@ const main = async () => {
     const originalDataRoot = currentWorkspace.dataRoot;
     const originalDatabase = currentWorkspace.database;
     currentWorkspace = { ...first, dataRoot: restoredDataRoot, database: restoredDatabase, operationsDatabase: restoredOperationsDatabase };
+    fileReceiptWorkspaceComponent = 'sample-component';
     await fs.promises.writeFile(externalLinksPath, JSON.stringify({ version: 1, links: { 'current-link': { target: 'E:/current-media', kind: 'folder', createdAt: 2 } } }), 'utf8');
     await configMutationService.mutate(current => ({ ...current, theme: 'dark', defaultFolderSort: 'size', componentSettings: { ...(current.componentSettings || {}), 'concurrent-fixture': { enabled: true } }, componentSettingsRevisions: { ...(current.componentSettingsRevisions || {}), 'concurrent-fixture': 10 } }));
     const restored = await service.restoreWorkspace(first.root, replacementRun.result.id, restoreRoot);
     assert.strictEqual(restored.task.state, 'completed');
+    const sampleWorkspaceRestore = componentRestoreCalls.filter(call => call.componentId === 'sample-component' && call.mode === 'workspace').at(-1);
+    assert.deepEqual(sampleWorkspaceRestore.payload.sources.map(source => source.relativePath).sort(), ['sample-component/private/state.json', 'sample-component/storage.sqlite3', 'sample-component/storage.sqlite3-wal'], 'workspace hooks receive the complete current component tree, including SQLite sidecars and opaque files');
+    assert(sampleWorkspaceRestore.payload.sources.every(source => !fs.existsSync(source.path)), 'workspace hook staging is removed after the hook settles');
+    const sampleWorkspaceResult = restored.result.componentRestore.find(item => item.componentId === 'sample-component');
+    const hostPreservedKey = `component-storage\0sample-component/private/state.json`;
+    assert.equal(sampleWorkspaceResult.hostPreservedCount, 1, 'validated host-preserved dispositions are counted once');
+    assert.equal(sampleWorkspaceResult.hostPreservedDigest, crypto.createHash('sha256').update(hostPreservedKey).digest('hex'), 'host-preserved result exposes only a stable bounded digest');
+    assert.equal(Object.prototype.hasOwnProperty.call(sampleWorkspaceResult, 'hostPreservedPaths'), false, 'file receipt results do not persist the full host-preserved path list');
     assert.equal(restored.result.savedConfig.theme, 'light'); assert.equal(restored.result.savedConfig.defaultFolderSort, 'name', 'workspace restore returns the canonical ordinary settings from the snapshot');
     assert.equal(restored.result.savedConfig.workspacePath, path.resolve(restoreRoot));
     assert.deepEqual(readSavedConfig().theme, 'light'); assert.equal(readSavedConfig().defaultFolderSort, 'name', 'restored ordinary settings remain on disk instead of being overwritten by the pre-restore draft');
@@ -372,6 +586,9 @@ const main = async () => {
     assert.strictEqual(restoredUndo.record.id, 'workspace-one-id-undo', 'workspace restore must restore the operations journal');
     assert.equal(await fs.promises.readFile(path.join(restoredDataRoot, 'components', 'sample-component', 'storage.sqlite3'), 'utf8'), 'opaque-database-workspace-one-id');
     assert.equal(JSON.parse(await fs.promises.readFile(path.join(restoredDataRoot, 'components', 'sample-component', 'private', 'state.json'), 'utf8')).id, 'workspace-one-id');
+    assert.equal(await sha256FileForTest(path.join(restoredDataRoot, 'components', 'sample-component', 'private', 'state.json')),
+      await sha256FileForTest(path.join(first.dataRoot, 'components', 'sample-component', 'private', 'state.json')),
+      'the Host raw copy publishes the exact host-preserved source bytes');
     const workspaceRestoredExternalLinks = JSON.parse(await fs.promises.readFile(externalLinksPath, 'utf8'));
     assert.ok(workspaceRestoredExternalLinks.links['backed-link'], 'workspace restore must restore identities referenced by restored shortcuts');
     assert.ok(workspaceRestoredExternalLinks.links['current-link'], 'workspace restore must preserve current identities');

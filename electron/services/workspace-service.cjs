@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const createWorkspaceService = ({ repository, reconcileRepository = repository, catalogs, assertInside, assertExistingInside }) => {
+const createWorkspaceService = ({ repository, reconcileRepository = repository, catalogs, assertInside, assertExistingInside, getConfiguredInspirationRoot = () => '' }) => {
   const resolveRoot = workspacePath => {
     if (typeof workspacePath !== 'string' || !workspacePath.trim()) throw new Error('尚未选择工作目录');
     const requestedPath = path.resolve(workspacePath.trim());
@@ -43,8 +43,14 @@ const createWorkspaceService = ({ repository, reconcileRepository = repository, 
     if (!validStatus) throw new Error('无效的项目状态');
     if (projectName === '.__photoflow_inspiration__') {
       const inspirationRoot = path.resolve(String(workspacePath || '').trim());
+      const configuredValue = String(getConfiguredInspirationRoot() || '').trim();
+      if (!configuredValue) throw new Error('尚未配置灵感库文件夹');
+      const configuredRoot = path.resolve(configuredValue);
+      const comparable = value => process.platform === 'win32' ? value.toLocaleLowerCase() : value;
+      if (comparable(inspirationRoot) !== comparable(configuredRoot)) throw new Error('灵感库路径未获用户配置授权');
       if (!fs.existsSync(inspirationRoot)) throw new Error('灵感库文件夹不存在');
       assertExistingInside(path.dirname(inspirationRoot), inspirationRoot, '灵感库路径', true);
+      if (comparable(fs.realpathSync(inspirationRoot)) !== comparable(fs.realpathSync(configuredRoot))) throw new Error('灵感库路径未获用户配置授权');
       return inspirationRoot;
     }
     const root = ensureRoot(workspacePath);

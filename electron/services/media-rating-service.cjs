@@ -134,6 +134,10 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     }
     invalidate(filePath);
     drainRating(key);
+    // Let the queued worker enter exiftool.write before acknowledging the
+    // interactive request. Persistence remains background work; the durable
+    // outbox and optimistic read are already established above.
+    await Promise.resolve();
     return rating;
   };
   const writeChecked = (workspaceRoot, filePath, value, expectedRevision) => {
@@ -162,7 +166,10 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     if (options.workspaceRoot && options.projectName && versionService?.listProgress) {
       const listed = await versionService.listProgress(options.workspaceRoot, options.projectName, true);
       for (const progress of listed.progressFolders || []) {
-        if (progress.sourceMetadata?.category !== 'favorite-export' || !progress.folderPath) continue;
+        if (!progress.folderPath) continue;
+        const category = progress.sourceMetadata?.category;
+        const legacyFavoriteExport = progress.sourceMetadata == null && /^图片后期_.+_喜爱$/u.test(path.basename(progress.folderPath));
+        if (category !== 'favorite-export' && !legacyFavoriteExport) continue;
         excludedDirectoryPaths.add(pathKey(progress.folderPath));
       }
     }

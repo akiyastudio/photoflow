@@ -15,6 +15,7 @@ assert(packageJson.scripts['electron:build'].includes('npm run generate:installe
 const text = fs.readFileSync(path.join(repositoryRoot, packageJson.build.nsis.license));
 assert.deepStrictEqual([...text.subarray(0, 3)], [0xef, 0xbb, 0xbf]);
 const decoded = text.toString('utf8');
+assert.strictEqual(decoded.includes('\r\r\n'), false, 'installer terms must use canonical CRLF line endings');
 for (const required of [
   '照片流安装条款与隐私说明',
   '照片流用户协议及内测条款',

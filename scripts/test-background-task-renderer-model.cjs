@@ -84,4 +84,23 @@ assert.equal(toastModel.isBackgroundTaskCenterVisible(task('automatic-interrupte
 assert.equal(toastModel.isBackgroundTaskCenterVisible(task('hidden-failed', 'failed', 5, { taskCenterPolicy: 'hidden' })), false, 'hidden tasks must never enter the task center');
 assert.equal(toastModel.isBackgroundTaskCenterVisible(task('manual-running', 'running', 6, { type: 'cache-cleanup', notificationPolicy: 'result-only' })), true, 'manual maintenance must continue to expose progress');
 
+const moveRunning = task('move-toast', 'running', 100, { type: 'project-file-operation', notificationPolicy: 'progress-and-result' });
+const moveCompleted = task('move-toast', 'completed', 110, { type: 'project-file-operation', notificationPolicy: 'progress-and-result', message: '文件移动完成' });
+assert.equal(toastModel.isActiveProjectFileTask(moveRunning, 100), true, 'combined project-file notification must show progress while running');
+assert.equal(toastModel.taskToastExpiresAt(moveCompleted), 6110, 'combined project-file completion must remain visible for the result interval');
+assert.equal(toastModel.isActiveProjectFileTask(moveCompleted, 6109), true, 'combined project-file completion remains visible before expiry');
+assert.equal(toastModel.isActiveProjectFileTask(moveCompleted, 6110), false, 'combined project-file completion expires at the result deadline');
+assert.equal(toastModel.isActiveProjectFileTask(task('progress-complete', 'completed', 110, { notificationPolicy: 'progress-toast' }), 111), false, 'progress-only tasks must not gain a terminal result toast');
+assert.equal(toastModel.isActiveProjectFileTask(task('result-running', 'running', 110, { notificationPolicy: 'result-only' }), 111), false, 'result-only tasks stay hidden while running');
+assert.equal(toastModel.isActiveProjectFileTask(task('result-complete', 'completed', 110, { notificationPolicy: 'result-only' }), 111), true, 'result-only tasks retain their completion toast');
+
+let transition = streamModel.receiveBackgroundTaskSnapshot(streamModel.initialBackgroundTaskStreamState(), { revision: 20, tasks: [moveRunning] });
+transition = streamModel.receiveBackgroundTaskDelta(transition, delta(21, [moveCompleted]));
+assert.equal(transition.tasks.length, 1, 'running-to-completed task updates replace the same task identity');
+assert.deepEqual(toastModel.selectProjectFileTaskToasts(transition.tasks, new Set(), 4, 111).visible.map(item => item.id), ['move-toast'], 'the progress card must become exactly one completion card');
+
+let fastCompletion = streamModel.receiveBackgroundTaskSnapshot(streamModel.initialBackgroundTaskStreamState(), { revision: 30, tasks: [] });
+fastCompletion = streamModel.receiveBackgroundTaskDelta(fastCompletion, delta(31, [task('fast-move', 'completed', 120, { type: 'project-file-operation', notificationPolicy: 'progress-and-result', message: '文件移动完成' })]));
+assert.deepEqual(toastModel.selectProjectFileTaskToasts(fastCompletion.tasks, new Set(), 4, 121).visible.map(item => item.id), ['fast-move'], 'a move completing before any progress paint must still show one result toast');
+
 console.log('background task renderer model tests passed');

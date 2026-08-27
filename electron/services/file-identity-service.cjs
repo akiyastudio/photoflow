@@ -34,9 +34,11 @@ const addUndoIdentities = async operation => {
         : operation.kind === 'broll-import'
           ? [...(operation.createdPaths || []), ...(operation.moves || []).map(move => move.destination)]
           : [];
-  const identities = {};
+  const identities = { ...(operation.identities || {}) };
   for (const candidate of candidates) {
-    try { identities[path.resolve(candidate)] = await capturePathIdentity(candidate); }
+    const resolved = path.resolve(candidate);
+    if (identities[resolved]) continue;
+    try { identities[resolved] = await capturePathIdentity(candidate); }
     catch { /* the undo handler will reject missing targets */ }
   }
   return { ...operation, identities };

@@ -10,6 +10,7 @@ const { createComponentRegistry } = require('./component-registry.cjs'); const {
 const { ComponentViewManager } = require('./services/component-view-manager.cjs'); const { createComponentHostCapabilityRuntime } = require('./services/component-host-capability-runtime.cjs');
 const { ToastOverlayManager } = require('./services/toast-overlay-manager.cjs');
 const { ComponentServiceManager } = require('./services/component-service-manager.cjs'); const { createConfigMutationService, readConfigFileWithRecovery, registerConfigDrainBeforeQuit } = require('./services/config-mutation-service.cjs');
+const { createWorkspaceStorageKeyService } = require('./services/workspace-storage-key-service.cjs');
 const { createComponentRpcIpcProxy } = require('./component-rpc-contract.cjs');
 const { registerComponentHostIpc } = require('./modules/component-host-ipc.cjs');
 const { registerComponentIconProtocol } = require('./modules/component-icon-protocol.cjs');
@@ -28,6 +29,7 @@ const { registerArchiveIpc } = require('./modules/archive-ipc.cjs');
 const { registerStorageUsageIpc } = require('./modules/storage-usage-ipc.cjs');
 const { createRecycleBinService } = require('./services/recycle-bin-service.cjs');
 const { createFileClipboardService } = require('./services/file-clipboard-service.cjs');
+const { createFilePublicationService } = require('./services/file-publication-service.cjs');
 const { createShellNewService } = require('./services/shell-new-service.cjs');
 const { createMediaAccessService } = require('./services/media-access-service.cjs');
 const { createMediaFileResponse } = require('./services/media-response-service.cjs');
@@ -291,6 +293,7 @@ const workspaceSqliteCoordinator = new WorkspaceSqliteCoordinator();
 
 const recycleBinService = createRecycleBinService({ app, shell, projectRoot, processSupervisor });
 const fileClipboardService = createFileClipboardService({ app, projectRoot, processSupervisor });
+const filePublicationService = createFilePublicationService({ app, projectRoot, processSupervisor });
 const shellNewService = createShellNewService({ app });
 const fileSystemService = createFileSystemService({ recycleBinService });
 const {
@@ -304,6 +307,8 @@ const {
   copyPlannedFiles,
   moveFileAtomic,
   movePathAtomic,
+  publishPathNoClobber,
+  configureNativePublicationService,
   removeCopiedSources,
   removeCreatedPasteTargets,
   throwIfCancelled,
@@ -313,6 +318,7 @@ const {
   assertUndoIdentity,
   samePathIdentity,
 } = fileSystemService;
+configureNativePublicationService(filePublicationService);
 const eventBus = createEventBus();
 mediaAccessService = createMediaAccessService({
   getWorkspaceRoots: () => [...workspaceCatalogs.keys()],
@@ -883,45 +889,10 @@ const getResourceBirthdaysPath = () => {
 
 const WORKSPACE_STATUSES = ['未分类', '策划中', '待拍摄', '后期中', '已归档'];
 
-const legacyWorkspaceStorageKey = root => {
-  const identity = process.platform === 'win32' ? root.toLocaleLowerCase() : root;
-  return crypto.createHash('sha256').update(identity).digest('hex').slice(0, 24);
-};
-
-const workspaceStorageKeys = new Map();
-const getWorkspaceStorageKey = root => {
-  const resolvedRoot = path.resolve(root);
-  const cached = workspaceStorageKeys.get(resolvedRoot);
-  if (cached) return cached;
-  const markerPath = path.join(resolvedRoot, '.photoflow-workspace-id');
-  const readMarker = () => {
-    try {
-      const value = fs.readFileSync(markerPath, 'utf8').trim().toLowerCase();
-      return /^[a-f0-9]{24,64}$/.test(value) ? value : '';
-    } catch {
-      return '';
-    }
-  };
-  let key = readMarker();
-  if (!key) {
-    const legacyKey = legacyWorkspaceStorageKey(resolvedRoot);
-    const databaseDir = path.join(app.getPath('userData'), 'workspace-data');
-    const hasLegacyData = fs.existsSync(path.join(databaseDir, `${legacyKey}.sqlite3`)) || fs.existsSync(path.join(databaseDir, legacyKey));
-    key = hasLegacyData ? legacyKey : crypto.randomUUID().replaceAll('-', '');
-    try {
-      fs.writeFileSync(markerPath, `${key}\n`, { encoding: 'utf8', flag: 'wx' });
-    } catch (error) {
-      const concurrentlyCreated = readMarker();
-      if (concurrentlyCreated) key = concurrentlyCreated;
-      else {
-        key = legacyKey;
-        writeLog('warn', 'Unable to persist stable workspace identity; using path identity for this session', { root: resolvedRoot, error: error.message || String(error) });
-      }
-    }
-  }
-  workspaceStorageKeys.set(resolvedRoot, key);
-  return key;
-};
+const workspaceStorageKeyService = createWorkspaceStorageKeyService({
+  fs, path, crypto, databaseDir: path.join(app.getPath('userData'), 'workspace-data'), writeLog,
+});
+const getWorkspaceStorageKey = root => workspaceStorageKeyService.get(root);
 
 const getWorkspaceDatabasePath = root => {
   const databaseDir = path.join(app.getPath('userData'), 'workspace-data');
@@ -930,11 +901,7 @@ const getWorkspaceDatabasePath = root => {
   return path.join(databaseDir, fileName);
 };
 
-const getWorkspaceDataRoot = root => path.join(
-  app.getPath('userData'),
-  'workspace-data',
-  getWorkspaceStorageKey(root),
-);
+const getWorkspaceDataRoot = root => workspaceStorageKeyService.getDataRootForKey(getWorkspaceStorageKey(root));
 
 const getWorkspaceOperationsDatabasePath = root => path.join(
   getWorkspaceDataRoot(root),
@@ -1056,6 +1023,7 @@ const mediaRepository = {
   recordCompare: mediaInteractionRepository.recordCompare,
   listProgress: mediaInteractionRepository.listProgress,
   snapshotProgress: mediaInteractionRepository.snapshotProgress,
+  snapshotProgressLocations: mediaInteractionRepository.snapshotProgressLocations,
   registerProgress: mediaInteractionRepository.registerProgress,
   registerProgressWithGraph: mediaInteractionRepository.registerProgressWithGraph,
   adoptMediaFolder: mediaInteractionRepository.adoptMediaFolder,
@@ -1119,6 +1087,7 @@ const workspaceService = createWorkspaceService({
   statuses: WORKSPACE_STATUSES,
   assertInside,
   assertExistingInside,
+  getConfiguredInspirationRoot: () => readSavedConfig()?.inspirationLibrary?.rootPath || '',
 });
 const resolveWorkspaceRoot = workspaceService.resolveRoot;
 const ensureWorkspace = workspaceService.ensureRoot;
@@ -1718,6 +1687,7 @@ const flattenMetadataValue = (group, name, value, depth = 0) => {
 const writeSystemFileClipboard = (sources, operation) => fileClipboardService.write(sources, operation);
 const readSystemFileClipboard = () => fileClipboardService.read();
 const clearSystemFileClipboardIfCurrent = snapshot => fileClipboardService.clearIfCurrent(snapshot);
+const waitForLeftMouseRelease = () => fileClipboardService.waitForLeftMouseRelease();
 const cancelSystemFileCut = async expectedSources => {
   if (process.platform !== 'win32') return { cleared: false, hasFiles: false };
   const current = await readSystemFileClipboard();
@@ -1825,7 +1795,7 @@ registerBrollImportIpc({
 });
 registerBackgroundTasksIpc({ ipcMain, eventBus, backgroundTasks, getMainWindow: () => mainWindow });
 app.whenReady().then(async () => {
-  configMutationService = createConfigMutationService({ fs, crypto, getConfigPath, readSavedConfig }); await configMutationService.ready;
+  configMutationService = createConfigMutationService({ fs, crypto, getConfigPath, readSavedConfig, legacySettingsAdoptionsProvider: componentHostRegistry.list }); await configMutationService.ready; await configMutationService.adoptLegacySettings();
   registerComponentIconProtocol({ protocol, registry: componentHostRegistry, fs, writeLog });
   protocol.handle('photoflow-media', async request => {
     try {
@@ -1898,8 +1868,8 @@ app.whenReady().then(async () => {
 
   registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   for (const descriptor of componentHostRegistry.list()) componentCapabilityBroker.assertCapabilities(descriptor);
-  const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
-  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
+  const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
+  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, publishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, waitForLeftMouseRelease, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
   registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
@@ -1943,7 +1913,7 @@ app.whenReady().then(async () => {
       if (failures.length) throw new AggregateError(failures, '数据库恢复完成，但部分 client 未能恢复');
     });
   });
-  const backupService = createBackupService({ app, backgroundTasks, credentialService, configMutationService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, workspaceSqliteCoordinator, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog, componentServiceManager });
+  const backupService = createBackupService({ app, backgroundTasks, credentialService, configMutationService, getConfigPath, getUserBirthdaysPath, getManagedExternalLinkRegistryPath: () => managedExternalLinkRegistryPath, getManagedExternalLinks: projectRoot => projectVirtualPaths.listManagedExternalLinks(projectRoot), getWorkspaceDatabasePath, getWorkspaceOperationsDatabasePath, getWorkspaceMediaDatabasePath, getWorkspaceVersioningDatabasePath, getWorkspaceDataRoot, getWorkspaceDataRootForKey: workspaceStorageKeyService.getDataRootForKey, bindWorkspaceStorageKeyForRestore: workspaceStorageKeyService.bindForRestore, workspaceSqliteCoordinator, prepareDomainRecovery, readSavedConfig, runPythonJsonAction, shell, writeLog, componentServiceManager });
   registerBackupIpc({ backupService, credentialService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
   const archiveService = createArchiveService({ backgroundTasks, movePathAtomic, readSavedConfig, workspaceRepository, writeLog });
   registerArchiveIpc({ archiveService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });

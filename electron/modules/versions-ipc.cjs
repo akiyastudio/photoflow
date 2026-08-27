@@ -89,7 +89,7 @@ const registerVersionIpc = context => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
-      return await versionService.snapshotProgress(workspaceRoot, projectName);
+      return await versionService.snapshotProgressLocations(workspaceRoot, projectName, true);
     } catch (error) {
       return { success: false, error: error.message || String(error), progressFolders: [], legacySelectionRelationRepairs: [] };
     }
@@ -673,9 +673,23 @@ const registerVersionIpc = context => {
       const expectedRelativePath = String(request.expectedRelativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
       const externalRoute = String(current.externalLinkRelativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
       const currentRelativePath = externalRoute || path.relative(projectPath, path.resolve(current.folderPath)).replace(/\\/g, '/');
-      if (!request.expectedFolderId || request.expectedFolderId !== current.folderId || expectedRelativePath !== currentRelativePath) {
+      if (!request.expectedFolderId || request.expectedFolderId !== current.folderId) {
         throw new Error('progress_folder_identity_mismatch: 当前目录已变化，请刷新后重试');
       }
+      if (expectedRelativePath !== currentRelativePath && externalRoute) {
+        let repeatedFileName = String(request.newName || '').trim();
+        if (path.extname(repeatedFileName).toLocaleLowerCase() !== '.lnk') repeatedFileName += '.lnk';
+        const expectedParent = path.posix.dirname(expectedRelativePath);
+        const repeatedRoute = [expectedParent === '.' ? '' : expectedParent, repeatedFileName].filter(Boolean).join('/');
+        if (externalRoute.toLocaleLowerCase() === repeatedRoute.toLocaleLowerCase()) {
+          const warnings = [];
+          await refreshWorkspaceCatalog(workspaceRoot).catch(refreshError => { warnings.push({ code: 'WORKSPACE_CATALOG_REFRESH_FAILED', message: refreshError.message || String(refreshError) }); writeLog('warn', 'Unable to refresh workspace catalog after recovered external progress rename', { projectName, error: refreshError.message || String(refreshError) }); });
+          await refreshManagedExternalWatchers?.(workspacePath, status, projectName).catch(watchError => { warnings.push({ code: 'EXTERNAL_WATCHER_REFRESH_FAILED', message: watchError.message || String(watchError) }); writeLog('warn', 'Unable to refresh external watchers after recovered external progress rename', { projectName, error: watchError.message || String(watchError) }); });
+          return { success: true, idempotent: true, ...(warnings.length ? { warnings } : {}), progressFolder: current, folder: { name: repeatedFileName, path: path.resolve(projectPath, repeatedRoute), relativePath: repeatedRoute, updatedAt: Date.now() } };
+        }
+        throw new Error('progress_folder_identity_mismatch: 当前目录已变化，请刷新后重试');
+      }
+      if (expectedRelativePath !== currentRelativePath) throw new Error('progress_folder_identity_mismatch: 当前目录已变化，请刷新后重试');
       if (externalRoute) {
         if (!externalRoute.toLocaleLowerCase().endsWith('.lnk')) throw new Error('external_progress_rename_unsupported: 只能重命名项目内的外链入口');
         const resolution = projectVirtualPaths.resolve(projectPath, externalRoute, { externalRootMode: 'link' });
@@ -693,30 +707,19 @@ const registerVersionIpc = context => {
         suppressWorkspaceWatchPath(newPath);
         const mutation = await versionService.beginProgressTreeUpdate(workspaceRoot, { projectName });
         mutationToken = mutation.mutationToken;
-        await versionService.renameExternalProgressLinkRoute(workspaceRoot, {
+        const prepared = await versionService.renameExternalProgressLinkRoute(workspaceRoot, {
           projectName, progressId: current.id, oldRelativePath: oldRoute, newRelativePath: newRoute,
-          mutationToken, preflight: true,
+          oldPath, newPath, mutationToken, preflight: true,
         });
-        const temporaryPath = path.join(path.dirname(oldPath), `.photoflow-external-rename-${crypto.randomUUID()}.lnk`);
-        let published = false;
-        try {
-          await fs.promises.rename(oldPath, temporaryPath);
-          await fs.promises.rename(temporaryPath, newPath);
-          published = true;
-          const result = await versionService.renameExternalProgressLinkRoute(workspaceRoot, {
-            projectName, progressId: current.id, oldRelativePath: oldRoute, newRelativePath: newRoute, mutationToken,
-          });
-          mutationToken = '';
-          await refreshWorkspaceCatalog(workspaceRoot).catch(refreshError => writeLog('warn', 'Unable to refresh workspace catalog after external progress rename', { projectName, error: refreshError.message || String(refreshError) }));
-          await refreshManagedExternalWatchers?.(workspacePath, status, projectName).catch(watchError => writeLog('warn', 'Unable to refresh external watchers after external progress rename', { projectName, error: watchError.message || String(watchError) }));
-          return { ...result, folder: { name: fileName, path: newPath, relativePath: newRoute, updatedAt: Date.now() } };
-        } catch (error) {
-          if (published && fs.existsSync(newPath) && !fs.existsSync(oldPath)) await fs.promises.rename(newPath, oldPath).catch(() => undefined);
-          else if (!published && fs.existsSync(temporaryPath) && !fs.existsSync(oldPath)) await fs.promises.rename(temporaryPath, oldPath).catch(() => undefined);
-          throw error;
-        } finally {
-          await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
-        }
+        const result = await versionService.renameExternalProgressLinkRoute(workspaceRoot, {
+          projectName, progressId: current.id, oldRelativePath: oldRoute, newRelativePath: newRoute,
+          oldPath, newPath, operationId: prepared.operationId, mutationToken,
+        });
+        mutationToken = '';
+        const warnings = [];
+        await refreshWorkspaceCatalog(workspaceRoot).catch(refreshError => { warnings.push({ code: 'WORKSPACE_CATALOG_REFRESH_FAILED', message: refreshError.message || String(refreshError) }); writeLog('warn', 'Unable to refresh workspace catalog after external progress rename', { projectName, error: refreshError.message || String(refreshError) }); });
+        await refreshManagedExternalWatchers?.(workspacePath, status, projectName).catch(watchError => { warnings.push({ code: 'EXTERNAL_WATCHER_REFRESH_FAILED', message: watchError.message || String(watchError) }); writeLog('warn', 'Unable to refresh external watchers after external progress rename', { projectName, error: watchError.message || String(watchError) }); });
+        return { ...result, ...(warnings.length ? { warnings } : {}), folder: { name: fileName, path: newPath, relativePath: newRoute, updatedAt: Date.now() } };
       }
       oldPath = path.resolve(current.folderPath);
       newPath = path.resolve(path.dirname(oldPath), String(request.newName || ''));
@@ -735,9 +738,10 @@ const registerVersionIpc = context => {
         mutationToken,
       });
       mutationToken = '';
-      await refreshWorkspaceCatalog(workspaceRoot);
+      const warnings = [];
+      await refreshWorkspaceCatalog(workspaceRoot).catch(refreshError => { warnings.push({ code: 'WORKSPACE_CATALOG_REFRESH_FAILED', message: refreshError.message || String(refreshError) }); writeLog('warn', 'Unable to refresh workspace catalog after committed progress rename', { projectName, error: refreshError.message || String(refreshError) }); });
       if (scheduleMediaTrackingScan) setTimeout(() => scheduleMediaTrackingScan(workspaceRoot, projectName, [], true), 250);
-      return result;
+      return { ...result, ...(warnings.length ? { warnings } : {}) };
     } catch (error) {
       if (mutationToken && workspaceRoot) await versionService.finishProgressTreeUpdate(workspaceRoot, { projectName, mutationToken }).catch(() => undefined);
       return { success: false, error: error.message || String(error) };

@@ -14,10 +14,14 @@ assert(nativeSource.includes('[STAThread]'), 'native clipboard commands must run
 assert(nativeSource.includes('data.SetFileDropList(files)') && nativeSource.includes('Preferred DropEffect'), 'native writes must publish CF_HDROP and Preferred DropEffect');
 assert(nativeSource.includes('operation == "cut" ? 2 : 1'), 'copy and cut drop effects must be DWORD values 1 and 2');
 assert(nativeSource.includes('GetClipboardSequenceNumber') && nativeSource.includes('case "clear-if-current"'), 'native reads and conditional clearing must use Windows clipboard sequence numbers');
+assert(nativeSource.includes('case "wait-left-release"') && nativeSource.includes('GetAsyncKeyState') && nativeSource.includes('VirtualKeyLeftButton'), 'native drag release confirmation must observe the physical Windows left-button state');
+assert(nativeSource.includes('GetCursorPos') && nativeSource.includes('cursorCaptured'), 'native release confirmation must capture the release position at the same observation point');
+assert(nativeSource.includes('MouseReleaseTimeoutMs = 30000') && nativeSource.includes('Thread.Sleep(8)'), 'native release waiting must poll briefly with a bounded timeout');
 assert(nativeSource.includes('Write(ReadRequest())') && nativeSource.includes('写入后回读验证失败'), 'native writes must immediately verify the persisted clipboard payload');
 assert(nativeSource.includes('RetryCount') && nativeSource.includes('Thread.Sleep'), 'clipboard busy handling must use bounded short retries');
 assert(serviceSource.includes("path.join(process.resourcesPath, 'file-clipboard-service.exe')") && serviceSource.includes("path.join(projectRoot, 'electron', 'bin', 'file-clipboard-service.exe')"), 'the wrapper must resolve packaged and development executables separately');
 assert(serviceSource.includes('FILE_CLIPBOARD_SERVICE_MISSING') && !serviceSource.includes('powershell.exe'), 'missing native service errors must be explicit and must not fall back to PowerShell');
+assert(serviceSource.includes("runJson(executable(), ['wait-left-release']") && serviceSource.includes('waitForLeftMouseRelease'), 'the Electron wrapper must expose native left-button release waiting');
 assert(buildSource.includes('System.Windows.Forms.dll') && buildSource.includes('FileClipboardService.cs'), 'the build must compile the Windows Forms clipboard helper');
 
 const run = async () => {

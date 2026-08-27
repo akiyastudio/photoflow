@@ -107,6 +107,7 @@ const createMediaRepository = client => {
   recordCompare: (root, payload) => client.call(root, 'media_record_compare', payload),
   listProgress: (root, projectName, includeMissing = false) => client.call(root, 'progress_list', { projectName, includeMissing }),
   snapshotProgress: (root, projectName, includeMissing = false) => client.call(root, 'progress_snapshot', { projectName, includeMissing }),
+  snapshotProgressLocations: (root, projectName, includeMissing = false) => client.call(root, 'progress_locations_snapshot', { projectName, includeMissing }),
   registerProgress: (root, payload) => client.call(root, 'progress_register', payload),
   registerProgressWithGraph: (root, payload) => client.call(root, 'progress_register_with_graph', payload),
   adoptMediaFolder: (root, payload) => client.call(root, 'progress_adopt_media', payload),

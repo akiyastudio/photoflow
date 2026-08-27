@@ -6,6 +6,7 @@ import argparse
 import json
 import re
 import shutil
+import sys
 import zipfile
 from pathlib import Path, PurePosixPath
 
@@ -159,9 +160,12 @@ def run(args_list: list[str]) -> None:
     }
     if failed and not successful:
         payload["error"] = str(failed[0].get("error") or "提取图片失败")
-    print(json.dumps(payload, ensure_ascii=False))
+    # The Electron protocol is UTF-8 in development and packaged builds. Writing
+    # bytes avoids the Windows redirected-stdout code page, while compact Unicode
+    # JSON keeps a 2000-image result substantially smaller than ASCII escaping.
+    encoded = json.dumps(payload, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    sys.stdout.buffer.write(encoded + b"\n")
 
 
 if __name__ == "__main__":
-    import sys
     run(sys.argv[1:])

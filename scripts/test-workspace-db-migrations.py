@@ -14,6 +14,36 @@ workspace_db = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(workspace_db)
 
 
+def test_schema_33_backfills_legacy_external_rename_columns(temp_root):
+    workspace_root = os.path.join(temp_root, "schema-33-external-rename-workspace")
+    os.makedirs(workspace_root)
+    database = os.path.join(temp_root, "schema-33-external-rename.sqlite3")
+    db = workspace_db.connect(workspace_root, database, include_domains=True)
+    db.execute(
+        """INSERT INTO progress_external_link_renames(
+             id,operation_key,project_id,progress_id,old_relative_path,new_relative_path,
+             old_path,new_path,temporary_path,link_sha256,mutation_token,lease_created_at,
+             state,error,created_at,updated_at,completed_at)
+           VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+        ("legacy-operation", "legacy-operation-key", "legacy-project", "legacy-progress",
+         "old.lnk", "new.lnk", "old.lnk", "new.lnk", "temporary.lnk", "digest",
+         "legacy-token", 123, "completed", "", 100, 101, 101),
+    )
+    db.commit()
+    db.execute("ALTER TABLE progress_external_link_renames DROP COLUMN mutation_token")
+    db.execute("ALTER TABLE progress_external_link_renames DROP COLUMN lease_created_at")
+    db.commit()
+    db.close()
+    upgraded = workspace_db.connect(workspace_root, database, include_domains=True)
+    columns = {row[1] for row in upgraded.execute("PRAGMA versioning.table_info(progress_external_link_renames)").fetchall()}
+    assert {"mutation_token", "lease_created_at"} <= columns
+    migrated = upgraded.execute(
+        "SELECT mutation_token,lease_created_at FROM progress_external_link_renames WHERE id='legacy-operation'"
+    ).fetchone()
+    assert tuple(migrated) == ("", 0), "schema-33 migration must preserve old rows with explicit legacy ownership defaults"
+    upgraded.close()
+
+
 def test_schema_28_migrates_detached_versioning_store(temp_root):
     workspace_root = os.path.join(temp_root, "schema-28-detached-workspace")
     os.makedirs(workspace_root)
@@ -1211,6 +1241,7 @@ def main():
         test_schema_23_upgrades_to_graph_schema_24(temp_root)
         test_schema_24_upgrades_to_import_slots_schema_25(temp_root)
         test_schema_28_migrates_detached_versioning_store(temp_root)
+        test_schema_33_backfills_legacy_external_rename_columns(temp_root)
         print("workspace database migration tests passed")
     finally:
         shutil.rmtree(temp_root, ignore_errors=True)

@@ -10,6 +10,40 @@ export interface FileEntryClickIntentInput {
   clickCount?: number;
 }
 
+export interface FileEntryPointerModifiers {
+  path: string;
+  additive: boolean;
+  range: boolean;
+  pointerType: 'mouse' | 'pen' | 'touch';
+}
+
+/** Pointer capture records click/drag context only; selection belongs to click or dragstart. */
+export const fileEntryPointerModifiers = ({
+  path,
+  ctrlKey = false,
+  metaKey = false,
+  shiftKey = false,
+  pointerType,
+}: {
+  path: string;
+  ctrlKey?: boolean;
+  metaKey?: boolean;
+  shiftKey?: boolean;
+  pointerType: FileEntryPointerModifiers['pointerType'];
+}): FileEntryPointerModifiers => ({
+  path,
+  additive: ctrlKey || metaKey,
+  range: shiftKey,
+  pointerType,
+});
+
+/** A successful dragstart selects only an unselected entry; selected drags retain their group. */
+export const fileEntrySelectionAfterDragStart = (
+  selectedPaths: readonly string[],
+  entryPath: string,
+  dragPaths: readonly string[],
+) => dragPaths.length > 0 && !selectedPaths.includes(entryPath) ? [entryPath] : [...selectedPaths];
+
 export const fileEntryClickIntent = ({
   openMode,
   selectionCount,

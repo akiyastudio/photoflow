@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const Ajv = require('ajv');
 const { parseComponentHostManifest, HOST_CAPABILITIES, CAPABILITY_PERMISSIONS, COMPONENT_HOST_MIN_API_VERSION, COMPONENT_HOST_MAX_API_VERSION } = require('../electron/component-host-contract.cjs');
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
 const { registerComponentProjectCapabilities, resetComponentHostCapabilityStateForTest, stableUuid, STAGE_TTL_MS } = require('../electron/services/component-project-capabilities.cjs');
@@ -92,6 +93,24 @@ const manifest = {
 };
 const descriptor = parseComponentHostManifest(manifest, manifestRoot);
 assert.equal(descriptor.hostApiVersion, 7);
+const restoreManifest = structuredClone(manifest);
+restoreManifest.componentHost.service.rpcMethods.push('fixture.restore.workspace.v1');
+restoreManifest.componentHost.service.backupRestore = { transactionProtocolVersion: 1, sourceManifestProtocolVersion: 1, receiptProtocolVersion: 1, workspace: { method: 'fixture.restore.workspace.v1' }, sources: [{ scope: 'component-storage', path: 'fixture-component/storage.sqlite3', format: 'fixture-v1' }] };
+const restoreDescriptor = parseComponentHostManifest(restoreManifest, manifestRoot);
+assert.equal(restoreDescriptor.service.backupRestore.sources[0].path, 'fixture-component/storage.sqlite3');
+assert.deepEqual(restoreDescriptor.service.hostOnlyRpcMethods, ['fixture.restore.workspace.v1'], 'restore hooks are explicitly host-only service methods');
+const duplicateRestoreHook = structuredClone(restoreManifest); duplicateRestoreHook.componentHost.service.backupRestore.project = { method: 'fixture.restore.workspace.v1' };
+assert.throws(() => parseComponentHostManifest(duplicateRestoreHook, manifestRoot), /hook methods must be unique/);
+const settingsExposeRestore = structuredClone(restoreManifest); settingsExposeRestore.componentHost.contributions.find(item => item.type === 'application.settingsPage').rpcMethods.push('fixture.restore.workspace.v1');
+assert.throws(() => parseComponentHostManifest(settingsExposeRestore, manifestRoot), /host-only RPC method/);
+const contributionExposeRestore = structuredClone(restoreManifest); contributionExposeRestore.componentHost.contributions.push({ type: 'application.command', id: 'restore', label: 'Restore', pageId: 'main', rpcMethods: ['fixture.restore.workspace.v1'] });
+assert.throws(() => parseComponentHostManifest(contributionExposeRestore, manifestRoot), /host-only RPC method/);
+for (const forbiddenDatabase of ['operations.sqlite3', 'media.sqlite3', 'versioning.sqlite3', 'other-component.sqlite3']) {
+  const maliciousRestore = structuredClone(restoreManifest); maliciousRestore.componentHost.service.backupRestore.sources = [{ scope: 'domain-database', path: forbiddenDatabase, format: 'stolen-v1' }];
+  assert.throws(() => parseComponentHostManifest(maliciousRestore, manifestRoot), /domain database source is not owned/, `a component cannot claim ${forbiddenDatabase}`);
+}
+const backslashRestoreManifest = structuredClone(restoreManifest); backslashRestoreManifest.componentHost.service.backupRestore.sources[0].path = 'fixture-component\\storage.sqlite3';
+assert.throws(() => parseComponentHostManifest(backslashRestoreManifest, manifestRoot), /Invalid component backup restore source/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, capabilities: [...coreCapabilities, ' notifications.v7'] } } }, manifestRoot), /exact and unique/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: [...allPermissions, allPermissions[0]] } } }, manifestRoot), /exact and unique/);
 for (let legacyVersion = 2; legacyVersion <= 6; legacyVersion += 1) {
@@ -120,6 +139,28 @@ assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { .
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 8, maxHostApiVersion: 9 } } }, manifestRoot), /only Host API 7/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, unsafeExtension: true } }, manifestRoot), /Unknown component host field/);
 for (const schema of ['component-manifest-v2.schema.json', 'component-host-api-v7.schema.json', 'component-service-protocol-v1.schema.json']) JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', schema), 'utf8'));
+const componentManifestSchema2020 = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-manifest-v2.schema.json'), 'utf8'));
+// The repository's installed Ajv 6 validates draft-07. Adapt only the test copy;
+// the published contract remains draft 2020-12 with $defs.
+const componentManifestSchema = JSON.parse(JSON.stringify(componentManifestSchema2020).replaceAll('#/$defs/', '#/definitions/'));
+componentManifestSchema.definitions = componentManifestSchema.$defs; delete componentManifestSchema.$defs; delete componentManifestSchema.$schema; delete componentManifestSchema.$id;
+const validateComponentManifest = new Ajv({ allErrors: true }).compile(componentManifestSchema);
+const schemaFixture = structuredClone(restoreManifest);
+schemaFixture.componentHost.legacySettingsAdoptions = [{ topLevelKey: 'legacyFixtureSettings' }];
+assert.equal(validateComponentManifest(schemaFixture), true, JSON.stringify(validateComponentManifest.errors));
+const invalidManifest = mutate => { const value = structuredClone(schemaFixture); mutate(value); assert.equal(validateComponentManifest(value), false, 'strict component manifest schema must reject an invalid adoption/restore declaration'); };
+invalidManifest(value => { value.componentHost.legacySettingsAdoptions[0].unknown = true; });
+invalidManifest(value => { value.componentHost.legacySettingsAdoptions.push(structuredClone(value.componentHost.legacySettingsAdoptions[0])); });
+invalidManifest(value => { value.componentHost.legacySettingsAdoptions = Array.from({ length: 9 }, (_unused, index) => ({ topLevelKey: `legacy${index}` })); });
+invalidManifest(value => { value.componentHost.legacySettingsAdoptions[0].topLevelKey = 'legacy-setting' });
+invalidManifest(value => { value.componentHost.service.backupRestore.unknown = true; });
+invalidManifest(value => { delete value.componentHost.service.backupRestore.workspace; });
+invalidManifest(value => { value.componentHost.service.backupRestore.workspace.method = 'fixture.restore'; });
+invalidManifest(value => { value.componentHost.service.backupRestore.sources = []; });
+invalidManifest(value => { value.componentHost.service.backupRestore.sources[0].path = '../fixture.sqlite3'; });
+invalidManifest(value => { value.componentHost.service.backupRestore.sources[0].path = 'fixture-component\\storage.sqlite3'; });
+invalidManifest(value => { value.componentHost.service.backupRestore.sources[0].path = ' fixture-component/storage.sqlite3'; });
+invalidManifest(value => { value.componentHost.service.backupRestore.sources[0].extra = true; });
 const capabilitySchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api-v7.schema.json'), 'utf8'));
 const schemaMethods = Object.values(capabilitySchema.$defs).map(value => value?.properties?.method?.const).filter(Boolean).sort();
 assert.deepEqual(schemaMethods, [...HOST_CAPABILITIES].sort(), 'machine-readable schema must discriminate every supported capability method');

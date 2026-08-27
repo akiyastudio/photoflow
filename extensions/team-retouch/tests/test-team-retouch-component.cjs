@@ -12,11 +12,14 @@ assert.deepEqual(manifest.componentHost.adoptionGrants, ['component.storage.prev
 assert(manifest.componentHost.service.capabilities.every(capability => /\.v[2-9]$/.test(capability)));
 assert(manifest.componentHost.service.rpcMethods.every(method => method.startsWith('team.') && /\.v\d+$/.test(method)));
 const allowed = [...(sdk.match(/const allowedMethods = new Set\(\[([\s\S]*?)\]\);/)?.[1] || '').matchAll(/'(team\.[^']+\.v\d+)'/g)].map(match => match[1]);
-assert.deepEqual([...allowed].sort(), [...manifest.componentHost.service.rpcMethods].sort());
+const hostOnlyRestoreMethods = new Set(Object.values(manifest.componentHost.service.backupRestore || {}).filter(value => value?.method).map(value => value.method));
+assert.deepEqual(Object.fromEntries(['transactionProtocolVersion','sourceManifestProtocolVersion','receiptProtocolVersion'].map(key => [key, manifest.componentHost.service.backupRestore[key]])), { transactionProtocolVersion: 1, sourceManifestProtocolVersion: 1, receiptProtocolVersion: 1 });
+assert.deepEqual([...allowed].sort(), manifest.componentHost.service.rpcMethods.filter(method => !hostOnlyRestoreMethods.has(method)).sort());
 assert(!service.includes("'project.output.authorize.v1'") && !service.includes("'version.register.v1'"));
 for (const capability of ['project.media.page.v7','project.output.v7','version.create.v7','tasks.v7','component.storage.v7','component.settings.v7','component.lifecycle.v7']) assert(service.includes(`'${capability}'`));
 assert(packageScript.includes("path.join(root,'models'") && packageScript.includes('PyInstaller') && packageScript.includes('component.json'));
 assert(packageScript.includes("require.resolve('vite/package.json'") && packageScript.includes('packagedEntrypoint') && packageScript.includes('fs.renameSync(generatedExecutable, declaredExecutable)'), 'production packaging must resolve hoisted build tools and publish the manifest-declared executable');
+assert(packageScript.includes("require('./package-layout.cjs')") && packageScript.includes('copyServiceRuntime(root,packageRoot)'), 'production packaging must stage the complete isolated service runtime');
 for (const action of Object.values(manifest.componentHost.service.lifecycleActions)) assert.equal(action.sha256, sha256(path.join(root, action.entry)));
 for (const entry of ['renderer/index.html','renderer/settings.html','renderer/team-retouch.svg','service.cjs','workflow-generation.cjs','workflow-artifact.cjs','workflow-manifest.cjs','package.json','package-lock.json']) assert(fs.existsSync(path.join(root, entry)), `missing plugin-owned file: ${entry}`);
 console.log('Team-retouch independent component boundary tests passed');

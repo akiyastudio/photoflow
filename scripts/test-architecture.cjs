@@ -4,11 +4,12 @@ const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const isolatedId = ['team', 'retouch'].join('-');
 const pluginRoot = path.join(root, 'extensions', isolatedId);
+const adoptionPolicyPath = path.join(root, 'electron', 'compatibility', 'component-data-adoption-policy.json');
 const ignored = new Set(['.git','node_modules','artifacts','.cache','.venv','dist']);
 const walk = directory => fs.readdirSync(directory,{withFileTypes:true}).flatMap(entry=>{
   if(ignored.has(entry.name)) return [];
   const absolute=path.join(directory,entry.name);
-  if(path.resolve(absolute)===path.resolve(pluginRoot)) return [];
+  if(path.resolve(absolute)===path.resolve(pluginRoot)||path.resolve(absolute)===path.resolve(adoptionPolicyPath)) return [];
   return entry.isDirectory()?walk(absolute):[absolute];
 });
 const forbidden = new RegExp([
@@ -34,6 +35,17 @@ for(const file of walk(root)){
   const source=fs.readFileSync(file,'utf8'); if(forbidden.test(source)||forbidden.test(path.relative(root,file))) leaks.push(path.relative(root,file));
 }
 assert.deepEqual(leaks,[],`component-specific semantics escaped the plugin boundary:\n${leaks.join('\n')}`);
+const policy=JSON.parse(fs.readFileSync(adoptionPolicyPath,'utf8'));
+assert.deepEqual(Object.keys(policy).sort(),['legacyDomainDatabaseOwners','legacySettingsAdoptions','version']);
+assert.equal(policy.version,1);
+assert.deepEqual(policy.legacyDomainDatabaseOwners,[{componentId:isolatedId,paths:[`${isolatedId}.sqlite3`]}]);
+assert.deepEqual(policy.legacySettingsAdoptions,[{componentId:isolatedId,topLevelKey:['person','Detection'].join('')}]);
+const policyApi=require('../electron/compatibility/component-data-adoption-policy.cjs');
+assert(Object.isFrozen(policyApi.defaultComponentDataAdoptionPolicy));
+assert(Object.isFrozen(policyApi.defaultComponentDataAdoptionPolicy.legacyDomainDatabaseOwners));
+assert(Object.isFrozen(policyApi.defaultComponentDataAdoptionPolicy.legacySettingsAdoptions));
+assert.throws(()=>policyApi.createComponentDataAdoptionPolicy({...policy,legacySettingsAdoptions:[...policy.legacySettingsAdoptions,{componentId:'fixture',topLevelKey:policy.legacySettingsAdoptions[0].topLevelKey}]}),/Duplicate/);
+assert.throws(()=>policyApi.authorizesLegacySettingsAdoption('fixture','legacyFixture',{legacySettingsAdoptions:[{componentId:'fixture',topLevelKey:'legacyFixture'}]}),/Unvalidated/);
 const main=fs.readFileSync(path.join(root,'electron','main.cjs'),'utf8');
 const builder=fs.readFileSync(path.join(root,'scripts','build-components.cjs'),'utf8');
 const catalog=fs.readFileSync(path.join(root,'electron','plugins','plugin-catalog.cjs'),'utf8');

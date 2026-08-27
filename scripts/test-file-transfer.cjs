@@ -9,9 +9,11 @@ const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs'
 const { registerBrollImportIpc } = require('../electron/modules/broll-import.cjs');
 const { createProjectVirtualPathService } = require('../electron/services/project-virtual-path-service.cjs');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
+const { createWorkspaceService } = require('../electron/services/workspace-service.cjs');
 const { addUndoIdentities, assertUndoIdentity, capturePathIdentity, samePathIdentity } = require('../electron/services/file-identity-service.cjs');
 const {
   CANCELLED_CODE,
+  PUBLISH_PARTIAL_CODE,
   SOURCE_CLEANUP_INCOMPLETE_CODE,
   DEFAULT_SMALL_FILE_CONCURRENCY,
   assertCopyPlanSourcesUnchanged,
@@ -20,15 +22,18 @@ const {
   assertInside,
   collectCopyPlan,
   commitTemporaryFile,
+  configureNativePublicationService,
   copyFileAtomic,
   copyPlannedFiles,
   moveFileAtomic,
   movePathAtomic,
+  publishPathNoClobber,
   removeCopiedSources,
   removeCreatedPasteTargets,
   throwIfCancelled,
   uniqueDestination,
 } = require('../electron/services/file-transfer-service.cjs');
+const { createFilePublicationService } = require('../electron/services/file-publication-service.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-transfer-test-'));
 const filesIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'files-ipc.cjs'), 'utf8');
@@ -42,11 +47,11 @@ assert(filesIpcSource.includes('if (moves.length === 1 && sources.length === 1)'
 assert(filesIpcSource.includes('if (!sameVolumeCut) {') && filesIpcSource.indexOf('await collectCopyPlan(target.source') > filesIpcSource.indexOf('if (!sameVolumeCut) {'), 'same-volume cut-paste must bypass recursive copy planning');
 const singleMoveFastPathStart = filesIpcSource.indexOf('const singleSameVolumeMove');
 const singleMoveFastPathSource = filesIpcSource.slice(singleMoveFastPathStart, filesIpcSource.indexOf("if (operation === 'copy' || operation === 'cut')", singleMoveFastPathStart));
-assert(singleMoveFastPathSource.includes('canUseSingleRenameMove(process.platform, movePlan, destinationStat)') && singleMoveFastPathSource.includes('await fs.promises.rename(entry.source, entry.destination)'), 'single internal move fast path must require matching filesystem device identities');
+assert(singleMoveFastPathSource.includes('canUseSingleRenameMove(process.platform, movePlan, destinationStat)') && singleMoveFastPathSource.includes('await publishPathNoClobber(entry.source, entry.destination)'), 'single internal move fast path must require matching filesystem device identities and use no-clobber publication');
 assert(singleMoveFastPathSource.includes('if (!singleSameVolumeMove) task.publish') && singleMoveFastPathSource.includes('await movePathAtomic(entry.source, entry.destination'), 'only the non-fast move path may scan or fall back to copy');
 const sameVolumeCutStart = filesIpcSource.indexOf('if (sameVolumeCut) {');
 const sameVolumeCutSource = filesIpcSource.slice(sameVolumeCutStart, filesIpcSource.indexOf('const totalBytes = plan.reduce', sameVolumeCutStart));
-assert(sameVolumeCutSource.includes('await fs.promises.rename(item.source, item.destination)') && !sameVolumeCutSource.includes('movePathAtomic('), 'same-volume cut-paste must use rename only, including rollback');
+assert(sameVolumeCutSource.includes('await publishPathNoClobber(item.source, item.destination)') && !sameVolumeCutSource.includes('movePathAtomic('), 'same-volume cut-paste must use the atomic no-clobber publisher, including rollback');
 assert(filesIpcSource.includes('topLevelTargets.map(item => sourceStatsByPath.get(pathKey(item.source)))'), 'cut-paste fast path must compare every cached source device with the real destination device');
 assert.strictEqual(sameFilesystemDevice({ dev: 401 }, { dev: 401 }), true, 'matching real device identities keep single move and cut-paste on the rename fast path');
 assert.strictEqual(sameFilesystemDevice({ dev: 401 }, { dev: 902 }), false, 'same-drive-letter paths on different mounted devices cannot enter either rename-only fast path');
@@ -64,6 +69,27 @@ assert.strictEqual(canUseSameVolumeCut('win32', 'cut', [{ dev: 401 }, {}], { dev
 
 const run = async () => {
   try {
+    const nativePublication = createFilePublicationService({ app: { isPackaged: false }, projectRoot: path.resolve(__dirname, '..') });
+    configureNativePublicationService(nativePublication);
+    const configuredInspirationRoot = path.join(root, 'configured-inspiration');
+    const unconfiguredInspirationRoot = path.join(root, 'renderer-selected-root');
+    fs.mkdirSync(configuredInspirationRoot);
+    fs.mkdirSync(unconfiguredInspirationRoot);
+    const inspirationWorkspaceService = createWorkspaceService({
+      repository: {}, catalogs: new Map(), assertInside, assertExistingInside,
+      getConfiguredInspirationRoot: () => configuredInspirationRoot,
+    });
+    assert.strictEqual(
+      inspirationWorkspaceService.getProjectPath(configuredInspirationRoot, '未分类', '.__photoflow_inspiration__'),
+      path.resolve(configuredInspirationRoot),
+      'the saved inspiration root remains browseable and writable',
+    );
+    assert.throws(
+      () => inspirationWorkspaceService.getProjectPath(unconfiguredInspirationRoot, '未分类', '.__photoflow_inspiration__'),
+      /未获用户配置授权/,
+      'the renderer cannot promote an arbitrary existing directory to an inspiration write root',
+    );
+
     const source = path.join(root, 'source.bin');
     const copy = path.join(root, 'copy.bin');
     fs.writeFileSync(source, Buffer.alloc(8 * 1024 * 1024, 0x5a));
@@ -78,11 +104,29 @@ const run = async () => {
     const fallbackResult = await commitTemporaryFile(fallbackTemporary, fallbackTarget, {
       allowCopyFallback: true,
       maxAttempts: 1,
-      renameFile: async () => { throw Object.assign(new Error('simulated Windows scanner lock'), { code: 'EPERM' }); },
+      linkFile: async () => { throw Object.assign(new Error('simulated Windows scanner lock'), { code: 'EPERM' }); },
     });
-    assert.strictEqual(fallbackResult.strategy, 'copy-fallback');
+    assert.strictEqual(fallbackResult.strategy, 'win32-move-no-replace');
     assert.strictEqual(fs.readFileSync(fallbackTarget, 'utf8'), 'rename fallback');
     assert.strictEqual(fs.existsSync(fallbackTemporary), false);
+
+    for (const directoryCase of [false, true]) {
+      const lateSource = path.join(root, `native-late-${directoryCase ? 'directory' : 'file'}-source`);
+      const lateTarget = path.join(root, `native-late-${directoryCase ? 'directory' : 'file'}-target`);
+      if (directoryCase) { fs.mkdirSync(lateSource); fs.writeFileSync(path.join(lateSource, 'source.txt'), 'source survives'); }
+      else fs.writeFileSync(lateSource, 'source survives');
+      const racingNative = {
+        nativeAvailable: () => true,
+        moveNoReplace: async (sourcePath, targetPath) => {
+          if (directoryCase) { fs.mkdirSync(targetPath); fs.writeFileSync(path.join(targetPath, 'late.txt'), 'late unknown'); }
+          else fs.writeFileSync(targetPath, 'late unknown');
+          return nativePublication.moveNoReplace(sourcePath, targetPath);
+        },
+      };
+      await assert.rejects(publishPathNoClobber(lateSource, lateTarget, { nativePublicationService: racingNative }), error => error.code === 'EEXIST');
+      assert.strictEqual(directoryCase ? fs.readFileSync(path.join(lateTarget, 'late.txt'), 'utf8') : fs.readFileSync(lateTarget, 'utf8'), 'late unknown');
+      assert.strictEqual(fs.existsSync(lateSource), true, 'native no-replace keeps the source when a late target wins');
+    }
 
     const durableSource = path.join(root, 'durable-source.bin');
     const durableTarget = path.join(root, 'durable-target.bin');
@@ -111,34 +155,101 @@ const run = async () => {
     const moveSource = path.join(root, 'move-source.bin');
     const moveTarget = path.join(root, 'move-target.bin');
     fs.writeFileSync(moveSource, 'move');
-    let sameVolumeRenameCalls = 0;
-    const sameVolumeMove = await movePathAtomic(moveSource, moveTarget, { renameFile: async (source, destination) => {
-      sameVolumeRenameCalls += 1;
-      return fs.promises.rename(source, destination);
-    } });
+    let sameVolumePublishCalls = 0;
+    const sameVolumeMove = await movePathAtomic(moveSource, moveTarget, { nativePublicationService: { nativeAvailable: () => true, moveNoReplace: async (source, destination) => { sameVolumePublishCalls += 1; return nativePublication.moveNoReplace(source, destination); } } });
     assert.strictEqual(sameVolumeMove.copied, false);
-    assert.strictEqual(sameVolumeRenameCalls, 1, 'same-volume single move uses one rename without scanning or copying');
+    assert.strictEqual(sameVolumePublishCalls, 1, 'same-volume single move uses one atomic no-clobber publication without scanning or copying');
     assert.strictEqual(fs.existsSync(moveSource), false);
     assert.strictEqual(fs.readFileSync(moveTarget, 'utf8'), 'move');
 
     const crossVolumeSource = path.join(root, 'cross-volume-source.bin');
     const crossVolumeTarget = path.join(root, 'cross-volume-target.bin');
     fs.writeFileSync(crossVolumeSource, 'cross-volume move');
+    const simulatedCrossNative = {
+      nativeAvailable: () => true,
+      moveNoReplace: async (source, destination) => path.resolve(source) === path.resolve(crossVolumeSource)
+        ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' }))
+        : nativePublication.moveNoReplace(source, destination),
+      inspectPath: value => nativePublication.inspectPath(value),
+      commitCrossVolumeFile: async ({ source, staged, target }) => { await nativePublication.moveNoReplace(staged, target); fs.unlinkSync(source); return { strategy: 'simulated-cross-volume-locked-commit' }; },
+      compareDeleteFile: request => nativePublication.compareDeleteFile(request),
+    };
     const crossVolumeResult = await movePathAtomic(crossVolumeSource, crossVolumeTarget, {
-      renameFile: async () => { throw Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' }); },
+      nativePublicationService: simulatedCrossNative,
     });
     assert.strictEqual(crossVolumeResult.copied, true);
     assert.strictEqual(fs.existsSync(crossVolumeSource), false);
     assert.strictEqual(fs.readFileSync(crossVolumeTarget, 'utf8'), 'cross-volume move');
+
+    const stagedRaceSource = path.join(root, 'cross-volume-staging-race-source.bin');
+    const stagedRaceTarget = path.join(root, 'cross-volume-staging-race-target.bin');
+    fs.writeFileSync(stagedRaceSource, 'same bytes replacement');
+    let stagedRaceCancelled = false; let stagedRaceReplacement; let stagedRaceOriginal;
+    const stagedRaceNative = {
+      ...nativePublication,
+      nativeAvailable: () => true,
+      moveNoReplace: async (source, destination) => path.resolve(source) === path.resolve(stagedRaceSource)
+        ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' }))
+        : nativePublication.moveNoReplace(source, destination),
+    };
+    await assert.rejects(moveFileAtomic(stagedRaceSource, stagedRaceTarget, {
+      nativePublicationService: stagedRaceNative,
+      isCancelled: () => stagedRaceCancelled,
+      onProgress: () => {
+        if (stagedRaceCancelled) return;
+        const stagedName = fs.readdirSync(root).find(name => name.includes('.cross-volume-staging-race-target.bin.') && name.endsWith('.photoflow-cross-volume'));
+        if (!stagedName) return;
+        stagedRaceReplacement = path.join(root, stagedName); stagedRaceOriginal = `${stagedRaceReplacement}.original`;
+        fs.renameSync(stagedRaceReplacement, stagedRaceOriginal);
+        fs.writeFileSync(stagedRaceReplacement, 'same bytes replacement');
+        stagedRaceCancelled = true;
+      },
+    }), error => error.code === PUBLISH_PARTIAL_CODE && error.cleanupCode === 'PUBLISH_OWNERSHIP_CONFLICT');
+    assert.strictEqual(fs.readFileSync(stagedRaceSource, 'utf8'), 'same bytes replacement', 'cancel retains the move source');
+    assert.strictEqual(fs.readFileSync(stagedRaceReplacement, 'utf8'), 'same bytes replacement', 'compare-delete must retain a same-byte staging replacement');
+    assert(fs.existsSync(stagedRaceOriginal), 'the originally published staging object remains explicit in the injected race');
+    assert(!fs.existsSync(stagedRaceTarget));
+
+    const readOnlyCancelSource = path.join(root, 'cross-volume-readonly-cancel-source.bin'); const readOnlyCancelTarget = path.join(root, 'cross-volume-readonly-cancel-target.bin');
+    fs.writeFileSync(readOnlyCancelSource, 'readonly cancellation'); fs.chmodSync(readOnlyCancelSource, 0o444); let readOnlyCancelled = false;
+    const readOnlyCancelNative = { ...nativePublication, nativeAvailable: () => true, moveNoReplace: async (source, destination) => path.resolve(source) === path.resolve(readOnlyCancelSource) ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' })) : nativePublication.moveNoReplace(source, destination) };
+    await assert.rejects(moveFileAtomic(readOnlyCancelSource, readOnlyCancelTarget, { nativePublicationService: readOnlyCancelNative, isCancelled: () => readOnlyCancelled, onProgress: () => { if (fs.readdirSync(root).some(name => name.includes('.cross-volume-readonly-cancel-target.bin.') && name.endsWith('.photoflow-cross-volume'))) readOnlyCancelled = true; } }), error => error.code === CANCELLED_CODE);
+    assert(fs.existsSync(readOnlyCancelSource)); assert(!fs.existsSync(readOnlyCancelTarget)); assert(!fs.readdirSync(root).some(name => name.includes('.cross-volume-readonly-cancel-target.bin.') && name.endsWith('.photoflow-cross-volume')), 'owned read-only staging is removed on cancellation');
+
+    const sourceRaceSource = path.join(root, 'cross-volume-source-race-source.bin');
+    const sourceRaceTarget = path.join(root, 'cross-volume-source-race-target.bin');
+    const sourceRaceOriginal = `${sourceRaceSource}.original`;
+    fs.writeFileSync(sourceRaceSource, 'same bytes source replacement');
+    let sourceRaceInjected = false;
+    const sourceRaceNative = {
+      ...nativePublication,
+      nativeAvailable: () => true,
+      moveNoReplace: async (source, destination) => path.resolve(source) === path.resolve(sourceRaceSource)
+        ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' }))
+        : nativePublication.moveNoReplace(source, destination),
+    };
+    let sourceRaceError;
+    await assert.rejects(moveFileAtomic(sourceRaceSource, sourceRaceTarget, {
+      nativePublicationService: sourceRaceNative,
+      onProgress: () => {
+        if (sourceRaceInjected || !fs.readdirSync(root).some(name => name.includes('.cross-volume-source-race-target.bin.') && name.endsWith('.photoflow-cross-volume'))) return;
+        fs.renameSync(sourceRaceSource, sourceRaceOriginal);
+        fs.writeFileSync(sourceRaceSource, 'same bytes source replacement');
+        sourceRaceInjected = true;
+      },
+    }), error => { sourceRaceError = error; return error.code === PUBLISH_PARTIAL_CODE && error.cleanupCode === 'PUBLISH_OWNERSHIP_CONFLICT' && error.published === false && error.transferStage === 'recovery-staging'; });
+    assert(sourceRaceInjected, 'source replacement must be injected only after the staging copy was published');
+    assert.strictEqual(fs.readFileSync(sourceRaceSource, 'utf8'), 'same bytes source replacement', 'pre-copy source identity rejects deletion of a same-byte replacement');
+    assert(fs.existsSync(sourceRaceOriginal)); assert(!fs.existsSync(sourceRaceTarget)); assert(fs.existsSync(sourceRaceError.recoveryPath), 'owned staging remains recoverable after pre-publish identity rejection'); assert(!sourceRaceError.message.includes('内容已发布'), 'staging-only recovery must not claim the destination was published'); assert.strictEqual(sourceRaceError.destinationPath, sourceRaceTarget);
 
     const crossVolumeDirectorySource = path.join(root, 'cross-volume-directory-source');
     const crossVolumeDirectoryTarget = path.join(root, 'cross-volume-directory-target');
     fs.mkdirSync(path.join(crossVolumeDirectorySource, 'nested'), { recursive: true });
     fs.writeFileSync(path.join(crossVolumeDirectorySource, 'nested', 'photo.jpg'), 'directory move');
     await movePathAtomic(crossVolumeDirectorySource, crossVolumeDirectoryTarget, {
-      renameFile: async () => { throw Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' }); },
+      nativePublicationService: { ...nativePublication, nativeAvailable: () => true, moveNoReplace: async (source, target) => path.resolve(source) === path.resolve(crossVolumeDirectorySource) ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' })) : nativePublication.moveNoReplace(source, target) },
     });
-    assert.strictEqual(fs.existsSync(crossVolumeDirectorySource), false);
+    assert.strictEqual(fs.existsSync(crossVolumeDirectorySource), false, 'normal cross-volume directory move deletes the verified source tree');
     assert.strictEqual(fs.readFileSync(path.join(crossVolumeDirectoryTarget, 'nested', 'photo.jpg'), 'utf8'), 'directory move');
     assert.strictEqual(fs.readdirSync(root).some(name => name.endsWith('.photoflow-part')), false);
 
@@ -153,19 +264,17 @@ const run = async () => {
     let sourceDeleteAttempt = 0;
     await assert.rejects(
       movePathAtomic(cleanupFailureSource, cleanupFailureTarget, {
-        renameFile: async () => { throw Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' }); },
+        nativePublicationService: { ...nativePublication, nativeAvailable: () => true, moveNoReplace: async (source, target) => path.resolve(source) === path.resolve(cleanupFailureSource) ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' })) : nativePublication.moveNoReplace(source, target), commitTreeFile: async request => { sourceDeleteAttempt += 1; if (sourceDeleteAttempt === 2) throw Object.assign(new Error('simulated source cleanup failure'), { code: 'EACCES' }); return nativePublication.commitTreeFile(request); } },
         removeFile: async (sourcePath, removeOptions) => {
           sourceDeleteAttempt += 1;
           if (sourceDeleteAttempt === 2) throw Object.assign(new Error('simulated source cleanup failure'), { code: 'EACCES' });
           await fs.promises.rm(sourcePath, removeOptions);
         },
       }),
-      error => error.code === SOURCE_CLEANUP_INCOMPLETE_CODE
-        && error.transferStage === 'cleanup-source'
-        && /源清理未完成，可能存在重复内容/.test(error.message),
+      error => error.code === PUBLISH_PARTIAL_CODE && error.recoveryRequired,
     );
-    assert.strictEqual(sourceDeleteAttempt, 2, 'the injected failure must occur while deleting the second source file');
-    assert.strictEqual(fs.existsSync(path.join(cleanupFailureSource, cleanupFailureFiles[0])), false, 'the first source file must already be deleted before the injected failure');
+    assert.strictEqual(sourceDeleteAttempt, 2, 'the injected failure occurs at the second locked per-file commit');
+    assert.strictEqual(fs.existsSync(path.join(cleanupFailureSource, cleanupFailureFiles[0])), false, 'the first source was deleted only after its target was locked and verified');
     assert.strictEqual(fs.existsSync(path.join(cleanupFailureSource, cleanupFailureFiles[1])), true, 'the failed source deletion must leave that source file in place');
     assert.strictEqual(fs.existsSync(cleanupFailureTarget), true, 'a committed target directory must survive source cleanup failure');
     for (const [index, relativePath] of cleanupFailureFiles.entries()) {
@@ -217,7 +326,7 @@ const run = async () => {
       [path.resolve(differentDeviceSource).toLowerCase(), 7101],
       [path.resolve(differentDeviceDestination).toLowerCase(), 9202],
     ]);
-    let directDeviceRenameCalls = 0;
+    let directDevicePublishCalls = 0;
     let fallbackDeviceMoveCalls = 0;
     const deviceAwareFs = {
       ...fs,
@@ -235,10 +344,7 @@ const run = async () => {
       },
       promises: {
         ...fs.promises,
-        rename: async (sourcePath, destinationPath) => {
-          directDeviceRenameCalls += 1;
-          return fs.promises.rename(sourcePath, destinationPath);
-        },
+        rename: fs.promises.rename.bind(fs.promises),
       },
     };
     const deviceMoveHandlers = new Map();
@@ -247,6 +353,7 @@ const run = async () => {
       ipcMain: { handle: (name, handler) => deviceMoveHandlers.set(name, handler), on: () => {} },
       fs: deviceAwareFs, path, getProjectPath: () => deviceMoveProject, activeProjectFileOperations: new Map(),
       assertInside,
+      publishPathNoClobber: (sourcePath, destinationPath) => { directDevicePublishCalls += 1; return publishPathNoClobber(sourcePath, destinationPath); },
       movePathAtomic: async (sourcePath, destinationPath, options) => {
         fallbackDeviceMoveCalls += 1;
         return movePathAtomic(sourcePath, destinationPath, options);
@@ -261,10 +368,10 @@ const run = async () => {
     assert.strictEqual(sameDeviceMoveResult.success, true, sameDeviceMoveResult.error);
     assert.strictEqual(fs.existsSync(sameDeviceSource), false, 'same-device direct move removes the source');
     assert.strictEqual(fs.readFileSync(path.join(sameDeviceDestination, 'same-device.txt'), 'utf8'), 'same-device', 'same-device direct move creates the destination');
-    assert.strictEqual(directDeviceRenameCalls, 1, 'same-device handler move uses the direct fs.rename path');
+    assert.strictEqual(directDevicePublishCalls, 1, 'same-device handler move uses the direct atomic no-clobber path');
     assert.strictEqual(fallbackDeviceMoveCalls, 0, 'same-device handler move does not invoke movePathAtomic');
 
-    directDeviceRenameCalls = 0;
+    directDevicePublishCalls = 0;
     const differentDeviceMoveResult = await deviceMoveHandler(
       { sender: { isDestroyed: () => false, send: () => {} } },
       'workspace', '策划中', 'project', 'move', ['different-device.txt'], 'mounted-volume-target',
@@ -272,7 +379,7 @@ const run = async () => {
     assert.strictEqual(differentDeviceMoveResult.success, true, differentDeviceMoveResult.error);
     assert.strictEqual(fs.existsSync(differentDeviceSource), false, 'different-device fallback move removes the source');
     assert.strictEqual(fs.readFileSync(path.join(differentDeviceDestination, 'different-device.txt'), 'utf8'), 'different-device', 'different-device fallback move creates the destination');
-    assert.strictEqual(directDeviceRenameCalls, 0, 'different-device handler move never enters the direct fs.rename path');
+    assert.strictEqual(directDevicePublishCalls, 0, 'different-device handler move never enters the same-device direct publish path');
     assert.strictEqual(fallbackDeviceMoveCalls, 1, 'different-device handler move invokes movePathAtomic fallback');
 
     const cancelSource = path.join(root, 'cancel-source.bin');
@@ -570,6 +677,218 @@ const run = async () => {
     assert(conflictResult.requiresDecision.message.includes('same.jpg'), 'the current Windows clipboard item must drive conflict detection');
     assert.strictEqual(fs.readFileSync(path.join(conflictProject, 'same.jpg'), 'utf8'), 'existing destination', 'decision preflight must not modify the destination');
 
+    const protectedReplaceProject = path.join(root, 'protected-replace-project');
+    const protectedReplaceSources = path.join(root, 'protected-replace-sources');
+    fs.mkdirSync(protectedReplaceProject);
+    fs.mkdirSync(protectedReplaceSources);
+    const protectedRaw = path.join(protectedReplaceProject, 'RAW');
+    const protectedVersions = path.join(protectedReplaceProject, 'versions');
+    const protectedProgress = path.join(protectedVersions, 'v1');
+    const protectedExternalLink = path.join(protectedReplaceProject, 'external-progress.lnk');
+    const protectedManagedLink = path.join(protectedReplaceProject, 'ordinary-link.lnk');
+    fs.mkdirSync(protectedRaw);
+    fs.writeFileSync(path.join(protectedRaw, 'identity.txt'), 'raw identity');
+    fs.mkdirSync(protectedProgress, { recursive: true });
+    fs.writeFileSync(path.join(protectedProgress, 'identity.txt'), 'progress identity');
+    fs.writeFileSync(protectedExternalLink, 'external progress identity');
+    fs.writeFileSync(protectedManagedLink, 'ordinary managed identity');
+    const replacementSources = {
+      RAW: path.join(protectedReplaceSources, 'RAW'),
+      versions: path.join(protectedReplaceSources, 'versions'),
+      progress: path.join(protectedReplaceSources, 'progress-source', 'v1'),
+      externalProgress: path.join(protectedReplaceSources, 'external-progress.lnk'),
+      ordinaryLink: path.join(protectedReplaceSources, 'ordinary-link.lnk'),
+    };
+    fs.mkdirSync(replacementSources.RAW);
+    fs.writeFileSync(path.join(replacementSources.RAW, 'incoming.txt'), 'incoming raw');
+    fs.mkdirSync(replacementSources.versions);
+    fs.writeFileSync(path.join(replacementSources.versions, 'incoming.txt'), 'incoming versions');
+    fs.mkdirSync(replacementSources.progress, { recursive: true });
+    fs.writeFileSync(path.join(replacementSources.progress, 'incoming.txt'), 'incoming progress');
+    fs.writeFileSync(replacementSources.externalProgress, 'incoming external progress link');
+    fs.writeFileSync(replacementSources.ordinaryLink, 'incoming ordinary link');
+    let protectedReplaceClipboard = { operation: 'copy', sources: [replacementSources.RAW] };
+    let protectedReplaceUndoCalls = 0;
+    const protectedReplaceHandlers = new Map();
+    const managedLinkPaths = new Set([path.resolve(protectedExternalLink), path.resolve(protectedManagedLink)]);
+    const protectedReplaceVirtualPaths = {
+      listManagedExternalLinks: () => [
+        { shortcutPath: protectedExternalLink, shortcutVirtualPath: 'external-progress.lnk' },
+        { shortcutPath: protectedManagedLink, shortcutVirtualPath: 'ordinary-link.lnk' },
+      ],
+      readManagedExternalLink: candidate => managedLinkPaths.has(path.resolve(candidate)) ? { linkId: 'managed' } : null,
+      resolve: (projectRoot, relativePath) => ({
+        projectRoot,
+        physicalPath: path.resolve(projectRoot, relativePath || '.'),
+        virtualPath: String(relativePath || '').replace(/\\/g, '/'),
+        viaExternalLink: false,
+        isExternalLinkRoot: false,
+      }),
+      toVirtualPath: (projectRoot, physicalPath) => path.relative(projectRoot, physicalPath).replace(/\\/g, '/'),
+    };
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => protectedReplaceHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => protectedReplaceProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null }, ensureWorkspace: () => root,
+      projectVirtualPaths: protectedReplaceVirtualPaths,
+      versionService: { listProgress: async () => ({ success: true, progressFolders: [
+        { id: 'local-progress', nodeRole: 'progress', displayName: 'V1', folderPath: protectedProgress },
+        { id: 'external-progress', nodeRole: 'progress', displayName: 'External', folderPath: path.join(root, 'external-target'), externalLinkRelativePath: 'external-progress.lnk' },
+      ] }) },
+      readSystemFileClipboard: async () => protectedReplaceClipboard,
+      writeLog: () => {}, assertInside, assertExistingInside, assertDiskSpace, capturePathIdentity, samePathIdentity,
+      collectCopyPlan, copyPlannedFiles, removeCreatedPasteTargets, removeCopiedSources, throwIfCancelled, uniqueDestination,
+      pushUndoOperation: async () => { protectedReplaceUndoCalls += 1; },
+      recycleBinService: { trash: async () => { throw new Error('protected targets must never reach replacement recycling'); } },
+      clearSystemFileClipboardIfCurrent: async () => ({ cleared: true }),
+    });
+    const protectedPaste = protectedReplaceHandlers.get('workspace-file-operation');
+    for (const testCase of [
+      { label: 'core directory', source: replacementSources.RAW, target: protectedRaw },
+      { label: 'registered progress ancestor', source: replacementSources.versions, target: protectedVersions },
+      { label: 'registered progress root', source: replacementSources.progress, target: protectedProgress, targetRelativePath: 'versions' },
+      { label: 'external progress link', source: replacementSources.externalProgress, target: protectedExternalLink },
+      { label: 'ordinary managed link', source: replacementSources.ordinaryLink, target: protectedManagedLink },
+    ]) {
+      protectedReplaceClipboard = { operation: 'copy', sources: [testCase.source] };
+      const before = fs.statSync(testCase.target).isDirectory()
+        ? fs.readdirSync(testCase.target, { recursive: true }).map(String).sort()
+        : fs.readFileSync(testCase.target, 'utf8');
+      const result = await protectedPaste(
+        { sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'paste', [], testCase.targetRelativePath || '', '', { pasteConflictPolicy: 'replace' },
+      );
+      assert.strictEqual(result.success, false, `${testCase.label} replacement must be rejected`);
+      assert.match(result.error, /受保护的项目目标/);
+      const after = fs.statSync(testCase.target).isDirectory()
+        ? fs.readdirSync(testCase.target, { recursive: true }).map(String).sort()
+        : fs.readFileSync(testCase.target, 'utf8');
+      assert.deepStrictEqual(after, before, `${testCase.label} keeps its content and identity-bearing entry intact`);
+      assert.strictEqual(fs.readdirSync(protectedReplaceProject).some(name => name.startsWith('.photoflow-')), false, 'protected replacement rejection is atomic and creates no staging root');
+    }
+    protectedReplaceClipboard = { operation: 'cut', sources: [replacementSources.ordinaryLink] };
+    const blockedCutReplace = await protectedPaste(
+      { sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'paste', [], '', '', { pasteConflictPolicy: 'replace' },
+    );
+    assert.strictEqual(blockedCutReplace.success, false, 'cut-paste cannot bypass managed-link destination protection');
+    assert.strictEqual(fs.readFileSync(replacementSources.ordinaryLink, 'utf8'), 'incoming ordinary link', 'rejected cut keeps its source in place');
+    assert.strictEqual(fs.readFileSync(protectedManagedLink, 'utf8'), 'ordinary managed identity', 'rejected cut keeps destination identity intact');
+    assert.strictEqual(protectedReplaceUndoCalls, 0, 'atomic destination rejection creates no misleading rollback or undo record');
+    protectedReplaceClipboard = { operation: 'copy', sources: [replacementSources.RAW] };
+    const keptBoth = await protectedPaste(
+      { sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'paste', [], '', '', { pasteConflictPolicy: 'keep-both' },
+    );
+    assert.strictEqual(keptBoth.success, true, keptBoth.error);
+    assert.strictEqual(fs.readFileSync(path.join(protectedRaw, 'identity.txt'), 'utf8'), 'raw identity', 'keep-both does not touch the protected conflict target');
+    assert(keptBoth.createdItems[0].name !== 'RAW' && fs.existsSync(path.join(protectedReplaceProject, keptBoth.createdItems[0].name, 'incoming.txt')), 'keep-both publishes only to its newly generated unprotected path');
+    assert.strictEqual(protectedReplaceUndoCalls, 1, 'successful keep-both retains normal undo behavior');
+
+    const watcherPasteProject = path.join(root, 'watcher-cut-paste-project');
+    const watcherPasteTarget = path.join(watcherPasteProject, 'moved');
+    const watcherPasteSource = path.join(watcherPasteProject, 'linked-ancestor');
+    const watcherPasteSibling = path.join(watcherPasteProject, 'sibling.txt');
+    fs.mkdirSync(watcherPasteSource, { recursive: true });
+    fs.mkdirSync(watcherPasteTarget);
+    fs.writeFileSync(path.join(watcherPasteSource, 'tracked.lnk'), 'managed watcher entry');
+    fs.writeFileSync(watcherPasteSibling, 'sibling');
+    const watcherPasteHandlers = new Map();
+    const watcherPasteOperations = new Map();
+    let watcherPasteRefreshes = 0;
+    let watcherPastePublishFailure = true;
+    let watcherPrefixAtRefresh = '';
+    const listWatcherLinks = () => {
+      const oldShortcut = path.join(watcherPasteProject, 'linked-ancestor', 'tracked.lnk');
+      const newShortcut = path.join(watcherPasteTarget, 'linked-ancestor', 'tracked.lnk');
+      const shortcutPath = fs.existsSync(newShortcut) ? newShortcut : oldShortcut;
+      return fs.existsSync(shortcutPath) ? [{
+        shortcutPath,
+        shortcutVirtualPath: path.relative(watcherPasteProject, shortcutPath).replace(/\\/g, '/'),
+      }] : [];
+    };
+    const watcherPasteVirtualPaths = {
+      listManagedExternalLinks: listWatcherLinks,
+      readManagedExternalLink: () => null,
+      resolve: (projectRoot, relativePath) => ({
+        projectRoot,
+        physicalPath: path.resolve(projectRoot, relativePath || '.'),
+        virtualPath: String(relativePath || '').replace(/\\/g, '/'),
+        viaExternalLink: false,
+        isExternalLinkRoot: false,
+      }),
+      toVirtualPath: (projectRoot, physicalPath) => path.relative(projectRoot, physicalPath).replace(/\\/g, '/'),
+    };
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process: { platform: 'win32' }, undefined, crypto,
+      ipcMain: { handle: (name, handler) => watcherPasteHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => watcherPasteProject, activeProjectFileOperations: watcherPasteOperations,
+      fileOperationState: { projectFileClipboard: null }, ensureWorkspace: () => root,
+      projectVirtualPaths: watcherPasteVirtualPaths,
+      versionService: { listProgress: async () => ({ success: true, progressFolders: [] }) },
+      readSystemFileClipboard: async () => ({ operation: 'cut', sources: [watcherPasteSource, watcherPasteSibling] }),
+      writeLog: () => {}, assertInside, assertExistingInside, assertDiskSpace, capturePathIdentity, samePathIdentity,
+      collectCopyPlan, copyPlannedFiles, removeCreatedPasteTargets, removeCopiedSources, throwIfCancelled, uniqueDestination,
+      clearSystemFileClipboardIfCurrent: async () => ({ cleared: true }),
+      pushUndoOperation: async () => undefined,
+      refreshManagedExternalWatchers: async () => {
+        watcherPasteRefreshes += 1;
+        watcherPrefixAtRefresh = listWatcherLinks()[0]?.shortcutVirtualPath || '';
+      },
+      publishPathNoClobber: async (source, destination) => {
+        if (watcherPastePublishFailure && path.resolve(source) === path.resolve(watcherPasteSibling)) {
+          watcherPastePublishFailure = false;
+          throw Object.assign(new Error('simulated cancelled second cut publication'), { code: CANCELLED_CODE });
+        }
+        return publishPathNoClobber(source, destination);
+      },
+    });
+    const watcherPaste = watcherPasteHandlers.get('workspace-file-operation');
+    const rolledBackWatcherPaste = await watcherPaste(
+      { sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'paste', [], 'moved', '', {},
+    );
+    assert.strictEqual(rolledBackWatcherPaste.success, false);
+    assert.strictEqual(rolledBackWatcherPaste.cancelled, true, 'a cancelled cut-paste reports cancellation after rolling back prior moves');
+    assert.strictEqual(watcherPasteRefreshes, 0, 'failed/cancelled cut-paste keeps the old watcher and never refreshes early');
+    assert.strictEqual(fs.existsSync(path.join(watcherPasteSource, 'tracked.lnk')), true, 'rollback restores the managed-link ancestor at its old route');
+    assert.strictEqual(fs.existsSync(path.join(watcherPasteTarget, 'linked-ancestor')), false);
+    const committedWatcherPaste = await watcherPaste(
+      { sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'paste', [], 'moved', '', {},
+    );
+    assert.strictEqual(committedWatcherPaste.success, true, committedWatcherPaste.error);
+    assert.strictEqual(watcherPasteRefreshes, 1, 'a committed cut-paste refreshes managed external watchers exactly once');
+    assert.strictEqual(watcherPrefixAtRefresh, 'moved/linked-ancestor/tracked.lnk', 'the rebuilt watcher observes the managed link under its new virtual prefix');
+    assert.strictEqual(fs.existsSync(path.join(watcherPasteTarget, 'linked-ancestor', 'tracked.lnk')), true);
+
+    const concurrentPublishProject = path.join(root, 'concurrent-publish-project');
+    const concurrentPublishSourceRoot = path.join(root, 'concurrent-publish-source');
+    fs.mkdirSync(concurrentPublishProject);
+    fs.mkdirSync(concurrentPublishSourceRoot);
+    const concurrentPublishSource = path.join(concurrentPublishSourceRoot, 'arriving.txt');
+    const concurrentPublishTarget = path.join(concurrentPublishProject, 'arriving.txt');
+    fs.writeFileSync(concurrentPublishSource, 'clipboard content');
+    const concurrentPublishHandlers = new Map();
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => concurrentPublishHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => concurrentPublishProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null },
+      readSystemFileClipboard: async () => ({ operation: 'copy', sources: [concurrentPublishSource] }),
+      mainWindow: null, writeLog: () => {}, assertInside, assertExistingInside, assertDiskSpace,
+      collectCopyPlan, copyPlannedFiles: async (plan, options) => {
+        const result = await copyPlannedFiles(plan, options);
+        fs.writeFileSync(concurrentPublishTarget, 'concurrent rename winner');
+        return result;
+      },
+      removeCreatedPasteTargets, throwIfCancelled, uniqueDestination,
+    });
+    const concurrentPublishResult = await concurrentPublishHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'paste', [], '',
+    );
+    assert.strictEqual(concurrentPublishResult.success, false, 'a target created after scan must abort publication');
+    assert.match(concurrentPublishResult.error, /目标已存在|同名项目/);
+    assert.strictEqual(fs.readFileSync(concurrentPublishTarget, 'utf8'), 'concurrent rename winner', 'late concurrent content must never be overwritten');
+    assert.strictEqual(fs.readdirSync(concurrentPublishProject).some(name => name.startsWith('.photoflow-paste-')), false, 'failed no-clobber publication must roll back its staging root');
+
     const screenshotProject = path.join(root, 'screenshot-paste-project');
     fs.mkdirSync(screenshotProject);
     const screenshotHandlers = new Map();
@@ -624,6 +943,104 @@ const run = async () => {
     assert.strictEqual(failureResult.success, false);
     assert.strictEqual(fs.readFileSync(failureTarget, 'utf8'), 'original content', 'a failed replacement must not touch the old target');
     assert.strictEqual(fs.readdirSync(failureProject).some(name => name.startsWith('.photoflow-')), false);
+
+    const replacementRaceProject = path.join(root, 'replacement-race-project');
+    const replacementRaceExternal = path.join(root, 'replacement-race-external');
+    fs.mkdirSync(replacementRaceProject);
+    fs.mkdirSync(replacementRaceExternal);
+    const replacementRaceSource = path.join(replacementRaceExternal, 'same.txt');
+    const replacementRaceTarget = path.join(replacementRaceProject, 'same.txt');
+    fs.writeFileSync(replacementRaceSource, 'new replacement');
+    fs.writeFileSync(replacementRaceTarget, 'old replacement');
+    const replacementRaceHandlers = new Map();
+    const replacementRaceFs = {
+      ...fs,
+      promises: {
+        ...fs.promises,
+        rename: async (source, destination) => {
+          await fs.promises.rename(source, destination);
+          if (path.resolve(source) === path.resolve(replacementRaceTarget) && String(destination).includes('.photoflow-replace-')) {
+            fs.writeFileSync(replacementRaceTarget, 'concurrent replacement');
+          }
+        },
+      },
+    };
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => replacementRaceHandlers.set(name, handler), on: () => {} },
+      fs: replacementRaceFs, path, getProjectPath: () => replacementRaceProject, activeProjectFileOperations: new Map(),
+      publishPathNoClobber: async (publishSource, publishDestination, options) => {
+        const result = await publishPathNoClobber(publishSource, publishDestination, options);
+        if (path.resolve(publishSource) === path.resolve(replacementRaceTarget) && String(publishDestination).includes('.photoflow-replace-')) {
+          fs.writeFileSync(replacementRaceTarget, 'concurrent replacement');
+        }
+        return result;
+      },
+      fileOperationState: { projectFileClipboard: null },
+      readSystemFileClipboard: async () => ({ operation: 'copy', sources: [replacementRaceSource] }),
+      mainWindow: null, writeLog: () => {}, assertInside, assertExistingInside, assertDiskSpace, capturePathIdentity, samePathIdentity,
+      collectCopyPlan, copyPlannedFiles, removeCreatedPasteTargets, throwIfCancelled, uniqueDestination,
+    });
+    const replacementRaceResult = await replacementRaceHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'paste', [], '', '', { pasteConflictPolicy: 'replace' },
+    );
+    assert.strictEqual(replacementRaceResult.success, false, 'a replacement target recreated after staging must abort publication');
+    assert.strictEqual(fs.readFileSync(replacementRaceTarget, 'utf8'), 'concurrent replacement', 'rollback must never delete a later replacement occupant');
+    const retainedReplacementRoot = fs.readdirSync(replacementRaceProject).find(name => name.startsWith('.photoflow-replace-'));
+    assert(retainedReplacementRoot, 'the displaced original must remain recoverable when its name is concurrently reused');
+    const retainedReplacementPath = path.join(replacementRaceProject, retainedReplacementRoot, fs.readdirSync(path.join(replacementRaceProject, retainedReplacementRoot))[0]);
+    assert.strictEqual(fs.readFileSync(retainedReplacementPath, 'utf8'), 'old replacement');
+    assert.strictEqual(fs.readFileSync(replacementRaceSource, 'utf8'), 'new replacement', 'failed copy replacement preserves its source');
+
+    const partialReplaceProject = path.join(root, 'partial-replace-project');
+    const partialReplaceExternal = path.join(root, 'partial-replace-external');
+    fs.mkdirSync(partialReplaceProject);
+    fs.mkdirSync(partialReplaceExternal);
+    const partialReplaceSource = path.join(partialReplaceExternal, 'same.txt');
+    const partialReplaceTarget = path.join(partialReplaceProject, 'same.txt');
+    fs.writeFileSync(partialReplaceSource, 'partial new');
+    fs.writeFileSync(partialReplaceTarget, 'partial old');
+    const partialReplaceHandlers = new Map();
+    const partialReplaceUndoHistory = [];
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => partialReplaceHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => partialReplaceProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null },
+      readSystemFileClipboard: async () => ({ operation: 'copy', sources: [partialReplaceSource] }),
+      mainWindow: null, writeLog: () => {}, assertInside, assertExistingInside, assertDiskSpace, capturePathIdentity, samePathIdentity,
+      collectCopyPlan, copyPlannedFiles, removeCreatedPasteTargets, throwIfCancelled, uniqueDestination,
+      publishPathNoClobber: (publishSource, publishDestination) => publishPathNoClobber(publishSource, publishDestination,
+        path.resolve(publishDestination) === path.resolve(partialReplaceTarget) && String(publishSource).includes('.photoflow-paste-')
+          ? {
+              removeSource: async () => { throw Object.assign(new Error('simulated staging ACL'), { code: 'EACCES' }); },
+              removePublished: async () => { throw Object.assign(new Error('simulated published lock'), { code: 'EBUSY' }); },
+            }
+          : {}),
+      pushUndoOperation: async operation => {
+        const stored = { ...await addUndoIdentities(operation), undoToken: crypto.randomUUID() };
+        partialReplaceUndoHistory.push(stored);
+        return stored;
+      },
+    });
+    const partialReplaceResult = await partialReplaceHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } },
+      'workspace', '策划中', 'project', 'paste', [], '', '', { pasteConflictPolicy: 'replace' },
+    );
+    assert.strictEqual(partialReplaceResult.success, true, partialReplaceResult.error);
+    assert.strictEqual(partialReplaceUndoHistory.length, 1, 'native atomic replace creates its normal usable undo record');
+    assert.strictEqual(fs.readFileSync(partialReplaceTarget, 'utf8'), 'partial new');
+    const partialReplaceUndoHandlers = new Map();
+    registerWorkspaceIpc({
+      Array, Boolean, Date, Error, Math, Object, Promise, Set, String, undefined, crypto,
+      ipcMain: { handle: (name, handler) => partialReplaceUndoHandlers.set(name, handler) }, fs, path, renameHistory: partialReplaceUndoHistory,
+      assertUndoIdentity, movePathAtomic, pathExists: async value => fs.existsSync(value), samePathIdentity,
+      recycleBinService: { probe: async () => ({ exists: false }) },
+    });
+    const recoveredPartialReplace = await partialReplaceUndoHandlers.get('workspace-undo-rename')(null, '');
+    assert.strictEqual(recoveredPartialReplace.success, true, recoveredPartialReplace.error);
+    assert.strictEqual(fs.readFileSync(partialReplaceTarget, 'utf8'), 'partial old', 'partial replace undo restores the hidden old content');
 
     const successProject = path.join(root, 'replacement-success-project');
     const successExternal = path.join(root, 'replacement-success-external');
@@ -712,6 +1129,51 @@ const run = async () => {
     assert.strictEqual(trashBatchCalls, 1, 'a duplicate-only selection must collapse to the single-item recycle path');
     assert.strictEqual(fs.existsSync(duplicateTrashFolder), false);
     assert.deepStrictEqual(trashUndo.items.map(item => item.recyclePidl), ['pidl-single']);
+
+    const protectedProgressProject = path.join(root, 'protected-progress-project');
+    const protectedProgressParent = path.join(protectedProgressProject, 'versions');
+    const protectedProgressFolder = path.join(protectedProgressParent, 'v1');
+    const protectedProgressPasteTarget = path.join(protectedProgressProject, 'target');
+    fs.mkdirSync(protectedProgressFolder, { recursive: true });
+    fs.mkdirSync(protectedProgressPasteTarget);
+    fs.writeFileSync(path.join(protectedProgressFolder, 'photo.jpg'), 'tracked');
+    const progressHandlers = new Map();
+    let progressClipboardWrites = 0;
+    const progressRows = [{ id: 'progress-v1', nodeRole: 'progress', displayName: 'V1', folderPath: protectedProgressFolder }];
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => progressHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: () => protectedProgressProject, activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null }, ensureWorkspace: () => root,
+      versionService: { listProgress: async () => ({ success: true, progressFolders: progressRows }) },
+      readSystemFileClipboard: async () => ({ operation: 'cut', sources: [protectedProgressParent] }),
+      writeSystemFileClipboard: async () => { progressClipboardWrites += 1; return { sequence: 1 }; },
+      capturePathIdentity, removeCreatedPasteTargets, writeLog: () => {},
+      recycleBinService: { trash: async source => { fs.rmSync(source, { recursive: true }); return { success: true, originalPath: source, recyclePidl: 'progress-trash', preciseRestore: true, permanent: false }; } },
+      workspaceRepository: { addUndoRecord: async () => ({ id: 'progress-trash-undo' }) },
+      pushUndoOperation: async () => undefined,
+    });
+    const ancestorMove = await progressHandlers.get('workspace-file-operation')(null, 'workspace', '策划中', 'project', 'move', ['versions'], '', '');
+    assert.strictEqual(ancestorMove.success, false, 'moving a local progress ancestor must be blocked');
+    assert.match(ancestorMove.error, /祖先目录迁移/);
+    const ancestorCut = await progressHandlers.get('workspace-file-operation')(null, 'workspace', '策划中', 'project', 'cut', ['versions'], '', '');
+    assert.strictEqual(ancestorCut.success, false, 'cutting a progress ancestor must be blocked before clipboard publication');
+    assert.strictEqual(progressClipboardWrites, 0);
+    const ancestorTrash = await progressHandlers.get('workspace-file-operation')(null, 'workspace', '策划中', 'project', 'trash', ['versions'], '', '');
+    assert.strictEqual(ancestorTrash.success, false, 'trashing a progress ancestor must not split registered paths');
+    assert.strictEqual(fs.existsSync(protectedProgressFolder), true);
+    const pastedAncestor = await progressHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'paste', [], 'target', '',
+    );
+    assert.strictEqual(pastedAncestor.success, false, 'a system clipboard cut cannot bypass progress ancestor protection');
+    assert.match(pastedAncestor.error, /祖先目录迁移/);
+    assert.strictEqual(fs.existsSync(protectedProgressFolder), true, 'rejected cut-paste leaves the registered tree in place');
+    const directProgressTrash = await progressHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'trash', ['versions/v1'], '', '',
+    );
+    assert.strictEqual(directProgressTrash.success, true, directProgressTrash.error);
+    assert.strictEqual(fs.existsSync(protectedProgressFolder), false, 'direct trash keeps the DB row but makes its folder missing');
+    assert.strictEqual(progressRows[0].id, 'progress-v1', 'direct trash never unregisters the progress node');
 
     const undoFailureTrashFolder = path.join(trashProject, 'undo-failure-folder');
     fs.mkdirSync(undoFailureTrashFolder);
@@ -835,6 +1297,11 @@ const run = async () => {
       Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
       ipcMain: { handle: (name, handler) => renameFastPathHandlers.set(name, handler), on: () => {} },
       fs: countedRenameFs, path, getProjectPath: () => renameFastPathProject, activeProjectFileOperations: new Map(),
+      publishPathNoClobber: async (publishSource, publishDestination) => {
+        renameCalls.push({ source: publishSource, destination: publishDestination });
+        if (failRenameCall && renameCalls.length === failRenameCall) throw Object.assign(new Error('injected rename failure'), { code: 'EIO' });
+        return publishPathNoClobber(publishSource, publishDestination);
+      },
       fileOperationState: { projectFileClipboard: null }, ensureWorkspace: () => root,
       writeSystemFileClipboard: async (sources, operation) => {
         clipboardWriteCalls += 1;
@@ -848,7 +1315,7 @@ const run = async () => {
       null, 'workspace', '策划中', 'project', 'rename', ['single.txt'], '', 'renamed.txt',
     );
     assert.strictEqual(renameResult.success, true, renameResult.error);
-    assert.strictEqual(renameCalls.length, 1, 'ordinary single rename must invoke the filesystem rename exactly once');
+    assert.strictEqual(renameCalls.length, 1, 'ordinary single rename must invoke the no-clobber publisher exactly once');
     assert.strictEqual(fs.readFileSync(path.join(renameFastPathProject, 'renamed.txt'), 'utf8'), 'single');
 
     renameCalls.length = 0;
@@ -920,6 +1387,60 @@ const run = async () => {
     assert.strictEqual(undoReplacementResult.success, true);
     assert.strictEqual(fs.readFileSync(successTarget, 'utf8'), 'restorable original');
     assert.strictEqual(fs.readdirSync(successProject).some(name => name.startsWith('.photoflow-')), false);
+
+    for (const directoryCase of [false, true]) {
+      const label = directoryCase ? 'directory' : 'file';
+      const undoRaceRoot = path.join(root, `undo-replace-race-${label}`);
+      const undoRaceDestination = path.join(undoRaceRoot, `same-${label}`);
+      const undoRaceBackupRoot = path.join(undoRaceRoot, '.old-backup');
+      const undoRaceBackup = path.join(undoRaceBackupRoot, `same-${label}`);
+      fs.mkdirSync(undoRaceBackupRoot, { recursive: true });
+      if (directoryCase) {
+        fs.mkdirSync(undoRaceDestination, { recursive: true });
+        fs.writeFileSync(path.join(undoRaceDestination, 'new.txt'), 'new directory');
+        fs.mkdirSync(undoRaceBackup, { recursive: true });
+        fs.writeFileSync(path.join(undoRaceBackup, 'old.txt'), 'old directory');
+      } else {
+        fs.writeFileSync(undoRaceDestination, 'new file');
+        fs.writeFileSync(undoRaceBackup, 'old file');
+      }
+      const undoRaceOperation = await addUndoIdentities({
+        kind: 'paste-replace', mode: 'copy',
+        moves: [{ source: path.join(root, `source-${label}`), destination: undoRaceDestination }],
+        items: [{ original: undoRaceDestination, backup: undoRaceBackup, backupRoot: undoRaceBackupRoot, permanent: false }],
+      });
+      const undoRaceHistory = [undoRaceOperation];
+      const undoRaceHandlers = new Map();
+      let lateOccupantCreated = false;
+      registerWorkspaceIpc({
+        Array, Boolean, Date, Error, Math, Object, Promise, Set, String, undefined, crypto,
+        ipcMain: { handle: (name, handler) => undoRaceHandlers.set(name, handler) }, fs, path, renameHistory: undoRaceHistory,
+        assertUndoIdentity, movePathAtomic, pathExists: async value => fs.existsSync(value), samePathIdentity,
+        publishPathNoClobber: async (publishSource, publishDestination) => {
+          const result = await publishPathNoClobber(publishSource, publishDestination);
+          if (!lateOccupantCreated && path.resolve(publishSource) === path.resolve(undoRaceDestination) && String(publishDestination).includes('.photoflow-undo-paste-')) {
+            lateOccupantCreated = true;
+            if (directoryCase) { fs.mkdirSync(undoRaceDestination); fs.writeFileSync(path.join(undoRaceDestination, 'late.txt'), 'late directory'); }
+            else fs.writeFileSync(undoRaceDestination, 'late file');
+          }
+          return result;
+        },
+        recycleBinService: { probe: async () => ({ exists: false }) },
+      });
+      const conflictedUndo = await undoRaceHandlers.get('workspace-undo-rename')(null, '');
+      assert.strictEqual(conflictedUndo.success, false, `${label} replace undo must report a late conflict`);
+      assert.match(conflictedUndo.error, /晚到同名占用|目标已存在/);
+      assert.strictEqual(directoryCase ? fs.readFileSync(path.join(undoRaceDestination, 'late.txt'), 'utf8') : fs.readFileSync(undoRaceDestination, 'utf8'), directoryCase ? 'late directory' : 'late file', 'late unknown content is preserved');
+      assert.strictEqual(fs.existsSync(undoRaceBackup), true, 'old replacement backup remains recoverable');
+      assert.strictEqual(undoRaceHistory.length, 1, 'conflicted replacement undo remains retryable');
+      const partialUndoRoot = undoRaceHistory[0].partialUndoState?.undoRoot;
+      assert(partialUndoRoot && fs.existsSync(partialUndoRoot), 'new pasted content remains in the undo recovery root');
+      fs.rmSync(undoRaceDestination, { recursive: true, force: true });
+      const recoveredUndo = await undoRaceHandlers.get('workspace-undo-rename')(null, '');
+      assert.strictEqual(recoveredUndo.success, true, recoveredUndo.error);
+      assert.strictEqual(directoryCase ? fs.readFileSync(path.join(undoRaceDestination, 'old.txt'), 'utf8') : fs.readFileSync(undoRaceDestination, 'utf8'), directoryCase ? 'old directory' : 'old file');
+      assert.strictEqual(fs.existsSync(partialUndoRoot), false, 'successful retry clears the undo recovery root');
+    }
 
     const occupiedRestorePath = path.join(root, 'occupied-restore.txt');
     fs.writeFileSync(occupiedRestorePath, 'new occupant');
@@ -1206,18 +1727,159 @@ const run = async () => {
     assert(browsedManagedExternalFolder.entries.some(entry => entry.name === 'inside.jpg' && entry.viaExternalLink), 'managed external folders must browse through the normal in-app folder route');
     assert.deepStrictEqual(fs.readdirSync(fileLinkProjectPath).sort(), ['linked-file-source.jpg.lnk', 'linked-folder-source.lnk']);
 
+    const inspirationProjectName = '.__photoflow_inspiration__';
+    const inspirationProjectRoot = path.join(root, 'inspiration-virtual-project');
+    const inspirationMoveTarget = path.join(inspirationProjectRoot, 'moved');
+    fs.mkdirSync(inspirationMoveTarget, { recursive: true });
+    fs.writeFileSync(path.join(inspirationProjectRoot, 'rename-me.txt'), 'rename');
+    fs.writeFileSync(path.join(inspirationProjectRoot, 'move-me.txt'), 'move');
+    fs.writeFileSync(path.join(inspirationProjectRoot, 'trash-me.txt'), 'trash');
+    fs.writeFileSync(path.join(inspirationProjectRoot, 'conflict-source.txt'), 'source');
+    fs.writeFileSync(path.join(inspirationProjectRoot, 'conflict-target.txt'), 'target');
+    fs.writeFileSync(path.join(inspirationProjectRoot, 'watch-link.lnk'), 'managed external link');
+    fs.writeFileSync(path.join(inspirationProjectRoot, 'watch-move.lnk'), 'managed external link move');
+    fs.writeFileSync(path.join(inspirationProjectRoot, 'watch-trash.lnk'), 'managed external link trash');
+    for (const ancestorName of ['watch-ancestor-rename', 'watch-ancestor-move', 'watch-ancestor-trash']) {
+      fs.mkdirSync(path.join(inspirationProjectRoot, ancestorName));
+      fs.writeFileSync(path.join(inspirationProjectRoot, ancestorName, 'tracked.lnk'), 'managed nested external link');
+    }
+    const escapedInspirationPath = path.join(root, 'outside-inspiration.txt');
+    fs.writeFileSync(escapedInspirationPath, 'outside');
+    const inspirationHandlers = new Map();
+    let inspirationListProgressCalls = 0;
+    let inspirationWatcherRefreshes = 0;
+    const inspirationVirtualPaths = {
+      listManagedExternalLinks: () => ['watch-ancestor-rename/tracked.lnk', 'watch-ancestor-move/tracked.lnk', 'watch-ancestor-trash/tracked.lnk'].map(shortcutVirtualPath => ({ shortcutVirtualPath })),
+      resolve: (projectRoot, relativePath) => {
+        const physicalPath = path.resolve(projectRoot, relativePath || '.');
+        const relative = path.relative(projectRoot, physicalPath);
+        if (relative && (relative.startsWith('..') || path.isAbsolute(relative))) throw new Error('项目路径无效');
+        const virtualPath = String(relativePath || '').replace(/\\/g, '/');
+        const isExternalLinkRoot = virtualPath.endsWith('.lnk');
+        return {
+          projectRoot,
+          virtualPath,
+          physicalPath,
+          mediaRoot: projectRoot,
+          viaExternalLink: isExternalLinkRoot,
+          isExternalLinkRoot,
+          shortcutPath: isExternalLinkRoot ? physicalPath : undefined,
+          shortcutVirtualPath: isExternalLinkRoot ? virtualPath : undefined,
+        };
+      },
+      toVirtualPath: (projectRoot, physicalPath) => path.relative(projectRoot, physicalPath).replace(/\\/g, '/'),
+    };
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
+      ipcMain: { handle: (name, handler) => inspirationHandlers.set(name, handler), on: () => {} },
+      fs, path, getProjectPath: (_workspacePath, _status, projectName) => {
+        assert.strictEqual(projectName, inspirationProjectName);
+        return inspirationProjectRoot;
+      },
+      ensureWorkspace: () => inspirationProjectRoot,
+      projectVirtualPaths: inspirationVirtualPaths,
+      activeProjectFileOperations: new Map(), fileOperationState: { projectFileClipboard: null },
+      versionService: { listProgress: async () => {
+        inspirationListProgressCalls += 1;
+        throw Object.assign(new Error('项目未登记，请先刷新项目列表'), { code: 'INVALID_DATABASE_OPERATION' });
+      } },
+      refreshManagedExternalWatchers: async () => { inspirationWatcherRefreshes += 1; },
+      movePathAtomic, capturePathIdentity, throwIfCancelled,
+      recycleBinService: { trash: async source => {
+        fs.rmSync(source, { recursive: true });
+        return { success: true, originalPath: source, recyclePidl: 'inspiration-trash', preciseRestore: true, permanent: false };
+      } },
+      workspaceRepository: { addUndoRecord: async () => ({ id: 'inspiration-trash-undo' }) },
+      pushUndoOperation: async () => undefined, writeLog: () => undefined,
+    });
+    const inspirationOperation = inspirationHandlers.get('workspace-file-operation');
+    let inspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'rename', ['rename-me.txt'], '', 'renamed.txt',
+    );
+    assert.strictEqual(inspirationResult.success, true, inspirationResult.error);
+    assert.strictEqual(fs.readFileSync(path.join(inspirationProjectRoot, 'renamed.txt'), 'utf8'), 'rename');
+    inspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'move', ['move-me.txt'], 'moved', '',
+    );
+    assert.strictEqual(inspirationResult.success, true, inspirationResult.error);
+    assert.strictEqual(fs.readFileSync(path.join(inspirationMoveTarget, 'move-me.txt'), 'utf8'), 'move');
+    inspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'trash', ['trash-me.txt'], '', '',
+    );
+    assert.strictEqual(inspirationResult.success, true, inspirationResult.error);
+    assert.strictEqual(fs.existsSync(path.join(inspirationProjectRoot, 'trash-me.txt')), false);
+    inspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'rename', ['watch-link.lnk'], '', 'watch-renamed',
+    );
+    assert.strictEqual(inspirationResult.success, true, inspirationResult.error);
+    assert.strictEqual(fs.existsSync(path.join(inspirationProjectRoot, 'watch-renamed.lnk')), true);
+    inspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'move', ['watch-move.lnk'], 'moved', '',
+    );
+    assert.strictEqual(inspirationResult.success, true, inspirationResult.error);
+    assert.strictEqual(fs.existsSync(path.join(inspirationMoveTarget, 'watch-move.lnk')), true);
+    inspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'trash', ['watch-trash.lnk'], '', '',
+    );
+    assert.strictEqual(inspirationResult.success, true, inspirationResult.error);
+    assert.strictEqual(fs.existsSync(path.join(inspirationProjectRoot, 'watch-trash.lnk')), false);
+    inspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'rename', ['watch-ancestor-rename'], '', 'watch-ancestor-renamed',
+    );
+    assert.strictEqual(inspirationResult.success, true, inspirationResult.error);
+    inspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'move', ['watch-ancestor-move'], 'moved', '',
+    );
+    assert.strictEqual(inspirationResult.success, true, inspirationResult.error);
+    inspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'trash', ['watch-ancestor-trash'], '', '',
+    );
+    assert.strictEqual(inspirationResult.success, true, inspirationResult.error);
+    assert.strictEqual(inspirationListProgressCalls, 0, 'inspiration file operations must never query registered project progress');
+    assert.strictEqual(inspirationWatcherRefreshes, 6, 'renaming, moving, and trashing external roots or ordinary ancestors must rebuild managed watchers with current virtual paths');
+    const escapedInspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'rename', ['../outside-inspiration.txt'], '', 'escaped.txt',
+    );
+    assert.strictEqual(escapedInspirationResult.success, false, 'inspiration paths must remain confined to the inspiration root');
+    assert.match(escapedInspirationResult.error, /项目路径无效/);
+    assert.strictEqual(fs.readFileSync(escapedInspirationPath, 'utf8'), 'outside');
+    const conflictedInspirationResult = await inspirationOperation(
+      null, inspirationProjectRoot, '未分类', inspirationProjectName, 'rename', ['conflict-source.txt'], '', 'conflict-target.txt',
+    );
+    assert.strictEqual(conflictedInspirationResult.success, false, 'inspiration rename must preserve target conflict checks');
+    assert.match(conflictedInspirationResult.error, /目标名称已被占用/);
+    assert.strictEqual(fs.readFileSync(path.join(inspirationProjectRoot, 'conflict-source.txt'), 'utf8'), 'source');
+    assert.strictEqual(fs.readFileSync(path.join(inspirationProjectRoot, 'conflict-target.txt'), 'utf8'), 'target');
+    assert.strictEqual(inspirationListProgressCalls, 0, 'failed inspiration safety checks must not fall through to version registration');
+
     const managedRootGuardHandlers = new Map();
     const registeredProgressFolder = path.join(fileLinkProjectPath, '客户自由目录');
+    const externalProgressTarget = path.join(root, 'external-progress-target');
+    const externalProgressAncestor = path.join(fileLinkProjectPath, 'external-ancestor');
+    const externalProgressShortcut = path.join(externalProgressAncestor, 'tracked.lnk');
     fs.mkdirSync(registeredProgressFolder);
+    fs.mkdirSync(externalProgressTarget);
+    fs.mkdirSync(externalProgressAncestor);
+    importProjectVirtualPaths.createManagedExternalLink(externalProgressShortcut, { target: externalProgressTarget, kind: 'folder', displayName: 'tracked' });
+    let externalProgressTrashedPath = '';
+    let externalProgressExistsAfterRecycle = true;
+    let managedRootListProgressCalls = 0;
     registerFileOperationsIpc({
       Array, Boolean, Date, Error, Math, Promise, Set, String, process, undefined, crypto,
       ipcMain: { handle: (name, handler) => managedRootGuardHandlers.set(name, handler), on: () => {} },
       fs, path, getProjectPath: () => fileLinkProjectPath, ensureWorkspace: () => importWorkspaceRoot,
       projectVirtualPaths: importProjectVirtualPaths, activeProjectFileOperations: new Map(),
-      versionService: { listProgress: async () => ({ success: true, progressFolders: [
-        { externalLinkRelativePath: 'linked-folder-source.lnk' },
-        { id: 'registered-progress', nodeRole: 'progress', displayName: '客户自由目录', folderPath: registeredProgressFolder },
-      ] }) },
+      versionService: { listProgress: async () => {
+        managedRootListProgressCalls += 1;
+        return { success: true, progressFolders: [
+          { externalLinkRelativePath: 'linked-folder-source.lnk' },
+          { id: 'registered-progress', nodeRole: 'progress', displayName: '客户自由目录', folderPath: registeredProgressFolder },
+          { id: 'external-progress', nodeRole: 'progress', displayName: '外链进度', folderPath: externalProgressTarget, externalLinkRelativePath: 'external-ancestor/tracked.lnk' },
+        ] };
+      } },
+      capturePathIdentity,
+      recycleBinService: { trash: async source => { externalProgressTrashedPath = source; fs.unlinkSync(source); externalProgressExistsAfterRecycle = fs.existsSync(source); return { success: true, originalPath: source, recyclePidl: 'external-progress-trash', preciseRestore: true, permanent: false }; } },
+      workspaceRepository: { addUndoRecord: async () => ({ id: 'external-progress-trash-undo' }) },
       pushUndoOperation: async () => undefined, writeLog: () => undefined,
     });
     const requestedMetadataPath = process.platform === 'win32'
@@ -1237,7 +1899,22 @@ const run = async () => {
     assert.strictEqual(blockedRegisteredRename.success, false);
     assert.match(blockedRegisteredRename.error, /已登记的版本进度/,
       'ordinary files IPC must use the registered progress identity, independent of legacy folder-name patterns');
+    assert.strictEqual(managedRootListProgressCalls, 1, 'ordinary project rename must still query registered progress roots');
     assert.strictEqual(fs.existsSync(registeredProgressFolder), true);
+    const blockedExternalAncestorRename = await managedRootGuardHandlers.get('workspace-file-operation')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, 'rename', ['external-ancestor'], '', 'external-renamed',
+    );
+    assert.strictEqual(blockedExternalAncestorRename.success, false, 'an external progress virtual ancestor must be protected');
+    assert.match(blockedExternalAncestorRename.error, /祖先目录迁移/);
+    const directExternalProgressTrash = await managedRootGuardHandlers.get('workspace-file-operation')(
+      { sender: { isDestroyed: () => false, send: () => {} } }, importWorkspaceRoot, '策划中', fileLinkProjectName, 'trash', ['external-ancestor/tracked.lnk'], '', '',
+    );
+    assert.strictEqual(directExternalProgressTrash.success, true, directExternalProgressTrash.error);
+    assert.strictEqual(directExternalProgressTrash.count, 1, `external progress trash must process its shortcut (${externalProgressTrashedPath})`);
+    assert.strictEqual(path.resolve(externalProgressTrashedPath), path.resolve(externalProgressShortcut), 'external progress trash must target the managed shortcut rather than its external folder');
+    assert.strictEqual(externalProgressExistsAfterRecycle, false, 'the recycle helper removes the external progress shortcut');
+    assert.strictEqual(fs.existsSync(externalProgressShortcut), false, 'direct external progress trash removes only the managed shortcut and leaves its DB identity missing');
+    assert.strictEqual(fs.existsSync(externalProgressTarget), true, 'trashing an external progress link never deletes the external target content');
     const blockedTrackedMove = await managedRootGuardHandlers.get('workspace-file-operation')(
       null, importWorkspaceRoot, '策划中', fileLinkProjectName, 'move', ['linked-folder-source.lnk'], '',
     );
@@ -1561,7 +2238,12 @@ const run = async () => {
   }
 };
 
-run().catch(error => {
+const testTimeout = setTimeout(() => {
+  console.error('file transfer service tests timed out before completing');
+  process.exit(1);
+}, 30000);
+run().then(() => clearTimeout(testTimeout)).catch(error => {
+  clearTimeout(testTimeout);
   console.error(error);
   process.exit(1);
 });

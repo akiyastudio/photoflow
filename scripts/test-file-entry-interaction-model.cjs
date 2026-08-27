@@ -4,7 +4,11 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 
 (async () => {
-  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
+  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, fileEntryPointerModifiers, fileEntrySelectionAfterDragStart, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
+  const { mergeMarqueeSelection } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'marquee-selection-model.ts')).href);
+  const { directoryPreviewCacheKey, directoryPreviewCacheKeyWithin, folderCoverEntryAfterLoad, pendingDirectoryPreviewSourceCacheKey, remapDirectoryPreviewCacheKey, remapPendingDirectoryPreviewEntries, settlePendingDirectoryPreviewRenameCaches, shouldCacheDirectoryPreviewResult } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'directory-preview-cache-model.ts')).href);
+  const { FOLDER_COVER_MAX_CONSECUTIVE_LOAD_FAILURES, createFolderCoverMediaState, folderCoverRequestKey, reduceFolderCoverMediaState } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'folder-cover-media-model.ts')).href);
+  const { presentOfficeExtractionResult } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'office-extraction-result-model.ts')).href);
   const { availableFolderAlphabetKeys, folderAlphabetKey } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'folder-alphabet-filter-model.ts')).href);
   const intent = overrides => fileEntryClickIntent({
     openMode: 'single',
@@ -22,12 +26,60 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(intent({ range: true, selectionCount: 2 }), 'range-select', 'Shift click retains range selection precedence');
   assert.strictEqual(intent({ selectionCount: 2, clickCount: 2 }), 'ignore-repeat', 'the second click in a double click must not undo the first selection change');
 
+  const runPointerClickSequence = ({ surface, openMode, initialSelection = [], detail = 1 }) => {
+    let selection = [...initialSelection];
+    const pointer = fileEntryPointerModifiers({ path: '素材/照片.jpg', pointerType: 'mouse' });
+    assert.deepStrictEqual(selection, initialSelection, `${surface} pointerdown must survive a React flush without mutating selection`);
+    const clickIntent = fileEntryClickIntent({
+      openMode,
+      selectionCount: selection.length,
+      range: pointer.range,
+      additive: pointer.additive,
+      clickCount: detail,
+    });
+    if (clickIntent === 'select') selection = [pointer.path];
+    return { clickIntent, selection, activated: clickIntent === 'open' };
+  };
+  for (const surface of ['grid', 'list', 'version-tree']) {
+    assert.deepStrictEqual(runPointerClickSequence({ surface, openMode: 'single' }), {
+      clickIntent: 'open', selection: [], activated: true,
+    }, `${surface} pointerdown -> React flush -> click must activate instead of add-and-preview`);
+  }
+  const doubleFirst = runPointerClickSequence({ surface: 'grid', openMode: 'double' });
+  assert.deepStrictEqual(doubleFirst, { clickIntent: 'select', selection: ['素材/照片.jpg'], activated: false }, 'double mode first click selects without activating');
+  assert.strictEqual(fileEntryClickIntent({ openMode: 'double', selectionCount: doubleFirst.selection.length, range: false, additive: false, clickCount: 2 }), 'ignore-repeat', 'double mode second click leaves activation to the double-click handler');
+
+  assert.deepStrictEqual(mergeMarqueeSelection([], ['a.jpg'], false), ['a.jpg'], 'a marquee from no selection selects its hits');
+  assert.deepStrictEqual(mergeMarqueeSelection(['a.jpg'], [], false), [], 'a non-additive marquee can clear an existing selection');
+  assert.deepStrictEqual(mergeMarqueeSelection(['a.jpg', 'b.jpg'], ['c.jpg'], true), ['a.jpg', 'b.jpg', 'c.jpg'], 'an additive marquee preserves a multi-selection and adds hits');
+  assert.deepStrictEqual(fileEntrySelectionAfterDragStart([], 'a.jpg', []), [], 'pointerdown or a rejected dragstart cannot select an entry');
+  assert.deepStrictEqual(fileEntrySelectionAfterDragStart([], 'a.jpg', ['a.jpg']), ['a.jpg'], 'a successful dragstart selects an unselected target');
+  assert.deepStrictEqual(fileEntrySelectionAfterDragStart(['a.jpg'], 'a.jpg', ['a.jpg']), ['a.jpg'], 'dragging a selected target preserves that selection');
+  assert.deepStrictEqual(fileEntrySelectionAfterDragStart(['a.jpg', 'b.jpg'], 'a.jpg', ['a.jpg', 'b.jpg']), ['a.jpg', 'b.jpg'], 'dragging one selected item preserves the selected group');
+
   assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼/精修', '客户/婚礼'), '客户/婚礼/精修', 'returning one level reveals the folder that was just left');
   assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼/精修', '客户'), '客户/婚礼', 'returning through a breadcrumb reveals the direct child leading to the previous directory');
   assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼', ''), '客户', 'returning to the root reveals the top-level folder that was just left');
   assert.strictEqual(directoryEntryToRevealOnReturn('客户', '客户/婚礼'), '', 'entering a child directory does not request a return reveal');
   assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼', '归档'), '', 'navigating to an unrelated directory does not request a return reveal');
   const workspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
+  const normalOfficeResult = presentOfficeExtractionResult({ success: true, documentCount: 1, successfulCount: 1, imageCount: 2, results: [{ document: 'C:/项目/方案.docx', documentName: '方案.docx', success: true, count: 2, outputFolder: 'C:/项目/方案_media', publishSuccess: true }] }, 1);
+  assert.strictEqual(normalOfficeResult.state, 'success');
+  const partialOfficeResult = presentOfficeExtractionResult({ success: true, documentCount: 2, successfulCount: 1, failedCount: 1, imageCount: 2, results: [{ document: 'ok.docx', documentName: 'ok.docx', success: true, count: 2, outputFolder: 'ok_media' }, { document: 'bad.docx', documentName: 'bad.docx', success: false, count: 0, error: '文档损坏' }] }, 2);
+  assert.strictEqual(partialOfficeResult.state, 'partial');
+  assert.deepStrictEqual(partialOfficeResult.extractionFailures, [{ documentName: 'bad.docx', error: '文档损坏' }]);
+  const publicationFailure = presentOfficeExtractionResult({ success: false, error: '已提取但链接发布失败', results: [{ document: '方案.docx', documentName: '方案.docx', success: true, count: 2, outputFolder: 'C:/项目/方案_media', publishSuccess: false, publishError: '快捷方式写入失败' }] }, 1);
+  assert.strictEqual(publicationFailure.state, 'publication-failed');
+  assert.strictEqual(publicationFailure.publicationFailures[0].outputFolder, 'C:/项目/方案_media');
+  assert.strictEqual(presentOfficeExtractionResult({ success: false, error: '提取失败', results: [] }, 1), null, 'an authoritative extraction failure must remain a retryable failure state');
+  const authoritativeEmpty = presentOfficeExtractionResult({ success: true, documentCount: 1, successfulCount: 1, imageCount: 0, results: [{ document: '空.xlsx', documentName: '空.xlsx', success: true, count: 0, message: '文档中没有图片' }] }, 1);
+  assert.strictEqual(authoritativeEmpty.state, 'success');
+  assert.strictEqual(authoritativeEmpty.images, 0);
+  assert(workspaceSource.includes('图片已提取，但发布失败') && workspaceSource.includes('恢复目录：') && workspaceSource.includes('请勿盲目重试提取'), 'the mounted Office result panel must visibly distinguish recoverable publication failure from extraction failure');
+  assert(workspaceSource.includes('directoryPreviewRequestTokensRef.current.get(cacheKey) !== requestToken'), 'late directory preview requests must be rejected after rename cache settlement invalidates their token');
+  assert(workspaceSource.includes('settleDirectoryPreviewRenames([optimisticRenameEntry], true)') && workspaceSource.includes('settleDirectoryPreviewRenames([optimisticRenameEntry], false)'), 'single-folder rename must explicitly promote or roll back its directory preview cache');
+  assert(workspaceSource.includes('pendingRename || !result.authoritative') && workspaceSource.includes('return { entries: [], authoritative: false }'), 'a transient directory read failure must retain the mounted cover instead of masquerading as an authoritative empty folder');
+  assert(workspaceSource.includes('optimisticDirectoryEntriesCacheRef.current.set(cacheKey, remapped)') && workspaceSource.includes('if (pendingRename) return Promise.resolve({ entries: [], authoritative: false })'), 'optimistic rename previews must stay isolated from authoritative source caches and never browse a swap target before commit');
   assert(workspaceSource.includes('setDirectoryReturnHighlightPath(returnedFolder.relativePath)'), 'returning must mark the folder with a dedicated location highlight');
   assert(!workspaceSource.includes('setSelectedPaths([returnedFolder.relativePath])'), 'returning must not add the folder to the file-operation selection');
   assert(workspaceSource.includes('requestFileReveal(returnedFolder.relativePath)'), 'returning must scroll the folder back into view');
@@ -37,6 +89,15 @@ const { pathToFileURL } = require('url');
   assert(entryClickSource.includes("if ('key' in event)") && entryClickSource.includes('activateEntry(entry)') && entryClickSource.includes("intent === 'add-and-preview'") && entryClickSource.includes('addSelectionAndSyncOpenPanes(entry)') && entryClickSource.includes("intent === 'select'") && entryClickSource.includes('setSelectedPaths([entry.relativePath])'), 'Enter must open in both modes, a selected-session body click must add and preview, and the first plain double-mode click must select exactly one entry');
   const entryDoubleClickSource = workspaceSource.slice(workspaceSource.indexOf('const handleEntryDoubleClick'), workspaceSource.indexOf('const handleFileSurfacePointerDownCapture'));
   assert(entryDoubleClickSource.includes('event.ctrlKey || event.metaKey || event.shiftKey') && entryDoubleClickSource.indexOf('return;') < entryDoubleClickSource.indexOf('activateEntry(entry)'), 'modified double-click gestures must remain selection-only instead of opening the entry');
+  const pointerCaptureSource = workspaceSource.slice(workspaceSource.indexOf('const handleFileSurfacePointerDownCapture'), workspaceSource.indexOf('const getEntryDisplayName'));
+  assert(pointerCaptureSource.includes('fileEntryPointerModifiers({') && pointerCaptureSource.includes('target?.focus({ preventScroll: true })') && !pointerCaptureSource.includes('setSelectedPaths'), 'pointerdown capture may focus and record modifiers/pointer type, but must never mutate selection');
+  const dragStartSource = workspaceSource.slice(workspaceSource.indexOf('const startEntryDrag'), workspaceSource.indexOf('const finishEntryDrag'));
+  assert(dragStartSource.indexOf('if (!dragPaths.length) return;') < dragStartSource.indexOf('fileEntrySelectionAfterDragStart('), 'selection may change only after drag paths are non-empty and dragstart is accepted');
+  assert(dragStartSource.includes('fileEntrySelectionAfterDragStart(selectedPaths, entry.relativePath, dragPaths)'), 'successful dragstart must select an unselected target without clearing a selected group');
+  const versionEntryStart = workspaceSource.indexOf('const renderVersionTreeEntry');
+  const versionEntrySource = workspaceSource.slice(versionEntryStart, workspaceSource.indexOf('const progressCompareCandidates', versionEntryStart));
+  for (const handler of ['onClick={event => handleEntryClick(event, entry)}', 'onDoubleClick={event => handleEntryDoubleClick(event, entry)}']) assert(versionEntrySource.includes(handler), `version-tree entries must wire ${handler}`);
+  for (const layoutMarker of ['searchResultGroups.map', "viewMode === 'list'", 'renderedFileEntries.map']) assert(workspaceSource.includes(layoutMarker), `${layoutMarker} file surface must remain mounted`);
   const inlineRenameSource = workspaceSource.slice(workspaceSource.indexOf('const renderEntryName'), workspaceSource.indexOf('const renderEntryIcon'));
   assert(inlineRenameSource.includes('onBlur={() => { void commitInlineRename(); }}'), 'clicking outside an inline rename input must commit the new name');
   assert(inlineRenameSource.includes("if (event.key === 'Escape') { event.preventDefault(); cancelInlineRename(); }"), 'Escape must continue to cancel an inline rename');
@@ -71,6 +132,120 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(remapEntryAfterProgressFolderMove(openVersionEntry,
     { folderPath: 'D:\\照片流\\项目\\其他', relativePath: '其他' },
     { folderPath: 'D:\\照片流\\项目\\新名称', relativePath: '新名称' }), openVersionEntry, 'unrelated open entries must not be remapped');
+
+  const cachedCoverEntry = {
+    name: '封面.jpg', kind: 'image', extension: '.jpg', size: 42, createdAt: 10, updatedAt: 20,
+    relativePath: '客户/旧版本/子目录/封面.jpg', parentRelativePath: '客户/旧版本/子目录',
+    path: 'D:\\项目\\客户\\旧版本\\子目录\\封面.jpg', previewUrl: 'photoflow-media://file/stable-thumbnail-grant', rating: 5,
+  };
+  const pendingFolderRename = {
+    name: '新版本', kind: 'folder', extension: '', size: 0, createdAt: 1, updatedAt: 2,
+    relativePath: '客户/新版本', path: 'D:\\项目\\客户\\新版本', pendingSourceRelativePath: '客户\\旧版本',
+  };
+  const [remappedCoverEntry] = remapPendingDirectoryPreviewEntries(pendingFolderRename, [cachedCoverEntry]);
+  assert.deepStrictEqual({ relativePath: remappedCoverEntry.relativePath, parentRelativePath: remappedCoverEntry.parentRelativePath, path: remappedCoverEntry.path }, {
+    relativePath: '客户/新版本/子目录/封面.jpg', parentRelativePath: '客户/新版本/子目录', path: 'D:/项目/客户/新版本/子目录/封面.jpg',
+  }, 'pending rename preview cache remaps nested relative and physical paths across slash styles and casing');
+  assert.strictEqual(remappedCoverEntry.previewUrl, cachedCoverEntry.previewUrl, 'pending rename preview cache preserves the existing thumbnail grant');
+  assert.strictEqual(remappedCoverEntry.rating, 5, 'pending rename preview cache preserves media metadata');
+  const similarPrefixEntry = { ...cachedCoverEntry, relativePath: '客户/旧版本备份/封面.jpg', path: 'D:/项目/客户/旧版本备份/封面.jpg' };
+  assert.strictEqual(remapPendingDirectoryPreviewEntries(pendingFolderRename, [similarPrefixEntry])[0], similarPrefixEntry, 'similar directory prefixes are not rewritten as children');
+  const unrelatedPhysicalEntry = { ...cachedCoverEntry, path: 'D:/项目/客户/别处/封面.jpg' };
+  assert.strictEqual(remapPendingDirectoryPreviewEntries(pendingFolderRename, [unrelatedPhysicalEntry])[0], unrelatedPhysicalEntry, 'a matching virtual route cannot rewrite an unrelated physical path');
+  const externalRename = {
+    ...pendingFolderRename, kind: 'shortcut', externalLink: true, externalLinkTarget: 'E:\\外链素材\\RAW', externalLinkTargetKind: 'folder',
+    relativePath: '外链新名.lnk', pendingSourceRelativePath: '外链旧名.lnk', path: 'D:/项目/外链新名.lnk',
+  };
+  const externalChild = { ...cachedCoverEntry, relativePath: '外链旧名.lnk/封面.jpg', parentRelativePath: '外链旧名.lnk', path: 'e:/外链素材/raw/封面.jpg' };
+  const [remappedExternalChild] = remapPendingDirectoryPreviewEntries(externalRename, [externalChild]);
+  assert.strictEqual(remappedExternalChild.relativePath, '外链新名.lnk/封面.jpg', 'external-link cache remaps its virtual route');
+  assert.strictEqual(remappedExternalChild.parentRelativePath, '外链新名.lnk', 'external-link cache remaps an immediate child parent route');
+  assert.strictEqual(remappedExternalChild.path, 'E:/外链素材/RAW/封面.jpg', 'external-link cache keeps the authoritative physical target route');
+  assert.strictEqual(remappedExternalChild.previewUrl, externalChild.previewUrl, 'external-link cache keeps its preview URL');
+  assert.strictEqual(directoryPreviewCacheKey(externalRename), '外链新名.lnk');
+  assert.strictEqual(pendingDirectoryPreviewSourceCacheKey(externalRename), '外链旧名.lnk');
+  assert.strictEqual(shouldCacheDirectoryPreviewResult(true, { success: false, entries: [] }), false, 'a first pending-path browse failure cannot poison the cache');
+  assert.strictEqual(shouldCacheDirectoryPreviewResult(true, { success: true, entries: [] }), false, 'a transient pending-path empty result cannot poison the cache');
+  assert.strictEqual(shouldCacheDirectoryPreviewResult(true, { success: true, entries: [remappedCoverEntry] }), true, 'a successful pending-path browse can replace the remapped cache');
+  assert.strictEqual(shouldCacheDirectoryPreviewResult(false, { success: false, entries: [] }), false, 'an ordinary transient browse failure cannot poison a reusable directory cache key');
+  assert.strictEqual(shouldCacheDirectoryPreviewResult(false, { success: true, entries: [] }), true, 'an authoritative ordinary empty folder remains cacheable');
+  assert.strictEqual(folderCoverEntryAfterLoad(cachedCoverEntry, [], true), cachedCoverEntry, 'pending rename empty results retain the mounted folder cover');
+  assert.strictEqual(folderCoverEntryAfterLoad(cachedCoverEntry, [], false), undefined, 'an authoritative ordinary empty result clears the cover');
+  let coverMedia = createFolderCoverMediaState('old-source|42|20|320', 'photoflow-media://old-cover');
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'CANDIDATE_LOADED', url: 'photoflow-media://old-cover' });
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'SOURCE_UPDATED', sourceKey: 'renamed-source|42|20|320', preserveDisplayed: true });
+  assert.strictEqual(coverMedia.displayedUrl, 'photoflow-media://old-cover', 'a renamed media path with no authoritative preview yet keeps its loaded cover');
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'THUMBNAIL_UPDATED', state: 'STALE' });
+  assert.strictEqual(coverMedia.displayedUrl, 'photoflow-media://old-cover', 'a pending rename STALE update does not blank the loaded cover');
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'THUMBNAIL_UPDATED', state: 'READY', previewUrl: 'photoflow-media://new-cover' });
+  assert.strictEqual(coverMedia.displayedUrl, 'photoflow-media://old-cover', 'a READY replacement remains hidden until the browser loads it successfully');
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'CANDIDATE_LOADED', url: 'photoflow-media://new-cover' });
+  assert.strictEqual(coverMedia.displayedUrl, 'photoflow-media://new-cover', 'a successfully loaded READY replacement swaps in seamlessly');
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'THUMBNAIL_UPDATED', state: 'READY', previewUrl: 'photoflow-media://bad-cover?token=1' });
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'CANDIDATE_FAILED', url: 'photoflow-media://bad-cover?token=1' });
+  assert.strictEqual(coverMedia.displayedUrl, 'photoflow-media://new-cover', 'a bad never-loaded replacement cannot poison the displayed cover');
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'THUMBNAIL_UPDATED', state: 'READY', previewUrl: 'photoflow-media://bad-cover?token=2' });
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'CANDIDATE_FAILED', url: 'photoflow-media://bad-cover?token=2' });
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'THUMBNAIL_UPDATED', state: 'READY', previewUrl: 'photoflow-media://bad-cover?token=3' });
+  assert.strictEqual(coverMedia.candidateUrl, undefined, 'fresh authorization tokens cannot bypass the per-source load failure budget');
+  assert.strictEqual(coverMedia.consecutiveLoadFailures, FOLDER_COVER_MAX_CONSECUTIVE_LOAD_FAILURES, 'the bounded failure state has constant memory instead of retaining every expired token');
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'THUMBNAIL_UPDATED', state: 'STALE' });
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'THUMBNAIL_UPDATED', state: 'READY', previewUrl: 'photoflow-media://recovered-cover' });
+  coverMedia = reduceFolderCoverMediaState(coverMedia, { type: 'CANDIDATE_LOADED', url: 'photoflow-media://recovered-cover' });
+  assert.strictEqual(coverMedia.displayedUrl, 'photoflow-media://recovered-cover', 'a new thumbnail generation receives a fresh bounded budget and can recover');
+  assert.notStrictEqual(folderCoverRequestKey('renamed-source|42|20|320', true, 0), folderCoverRequestKey('renamed-source|42|20|320', false, 0), 'pending-to-committed transition must trigger an authoritative thumbnail request even when the target path is unchanged');
+  const committedRenameCaches = new Map([[pendingDirectoryPreviewSourceCacheKey(pendingFolderRename), [cachedCoverEntry]]]);
+  const committedOptimisticCaches = new Map();
+  const committedSettlement = settlePendingDirectoryPreviewRenameCaches(committedRenameCaches, committedOptimisticCaches, [pendingFolderRename], true);
+  assert.strictEqual(committedRenameCaches.get('客户/新版本')[0].relativePath, '客户/新版本/子目录/封面.jpg', 'successful rename promotes a remapped target cache');
+  assert.strictEqual(committedRenameCaches.has('客户/旧版本'), false, 'successful rename retires the stale source route');
+  assert.deepStrictEqual(committedSettlement.invalidatedRequestRoots, ['客户/旧版本', '客户/新版本'], 'commit invalidates both stale source reads and target reads started before the filesystem rename');
+  const rolledBackRenameCaches = new Map([[pendingDirectoryPreviewSourceCacheKey(pendingFolderRename), [cachedCoverEntry]]]);
+  const rolledBackOptimisticCaches = new Map([[directoryPreviewCacheKey(pendingFolderRename), [remappedCoverEntry]]]);
+  const rolledBackSettlement = settlePendingDirectoryPreviewRenameCaches(rolledBackRenameCaches, rolledBackOptimisticCaches, [pendingFolderRename], false);
+  assert.strictEqual(rolledBackRenameCaches.get('客户/旧版本')[0], cachedCoverEntry, 'rollback retains the authoritative source cache and cover');
+  assert.strictEqual(rolledBackRenameCaches.has('客户/新版本'), false, 'rollback removes the optimistic target so later name reuse cannot show the wrong cover');
+  assert.strictEqual(rolledBackOptimisticCaches.has('客户/新版本'), false, 'rollback discards the isolated optimistic overlay');
+  assert.deepStrictEqual(rolledBackSettlement.invalidatedRequestRoots, ['客户/新版本'], 'rollback invalidates every late target request');
+
+  const cacheCover = (folder, token) => ({
+    ...cachedCoverEntry,
+    name: `${token}.jpg`, relativePath: `${folder}/${token}.jpg`, parentRelativePath: folder,
+    path: `D:/项目/${folder}/${token}.jpg`, previewUrl: `photoflow-media://${token}`,
+  });
+  const pendingRootRename = (source, target) => ({
+    ...pendingFolderRename,
+    name: target, relativePath: target, path: `D:/项目/${target}`, pendingSourceRelativePath: source,
+  });
+  const swapCaches = new Map([['A', [cacheCover('A', 'cover-a')]], ['B', [cacheCover('B', 'cover-b')]]]);
+  settlePendingDirectoryPreviewRenameCaches(swapCaches, new Map(), [pendingRootRename('A', 'B'), pendingRootRename('B', 'A')], true);
+  assert.strictEqual(swapCaches.get('A')[0].previewUrl, 'photoflow-media://cover-b', 'A/B swap atomically moves B cover to A');
+  assert.strictEqual(swapCaches.get('B')[0].previewUrl, 'photoflow-media://cover-a', 'A/B swap atomically moves A cover to B');
+  const overlaySwapCaches = new Map([['A', [cacheCover('A', 'cover-a')]], ['B', [cacheCover('B', 'cover-b')]]]);
+  const overlaySwapEntries = [pendingRootRename('A', 'B'), pendingRootRename('B', 'A')];
+  const overlaySwap = new Map([
+    ['B', remapPendingDirectoryPreviewEntries(overlaySwapEntries[0], overlaySwapCaches.get('A'))],
+    ['A', remapPendingDirectoryPreviewEntries(overlaySwapEntries[1], overlaySwapCaches.get('B'))],
+  ]);
+  settlePendingDirectoryPreviewRenameCaches(overlaySwapCaches, overlaySwap, overlaySwapEntries, true);
+  assert.deepStrictEqual([overlaySwapCaches.get('A')[0].previewUrl, overlaySwapCaches.get('B')[0].previewUrl], [
+    'photoflow-media://cover-b', 'photoflow-media://cover-a',
+  ], 'non-empty optimistic overlays preserve swap direction when atomically promoted');
+  const cycleCaches = new Map([
+    ['A', [cacheCover('A', 'cover-a')]], ['B', [cacheCover('B', 'cover-b')]], ['C', [cacheCover('C', 'cover-c')]],
+    ['A/subdir', [cacheCover('A/subdir', 'nested-a')]],
+    ['shortcut:A/tool.lnk:20', [cacheCover('A/tool.lnk', 'shortcut-a')]],
+  ]);
+  settlePendingDirectoryPreviewRenameCaches(cycleCaches, new Map(), [pendingRootRename('A', 'B'), pendingRootRename('B', 'C'), pendingRootRename('C', 'A')], true);
+  assert.deepStrictEqual([cycleCaches.get('A')[0].previewUrl, cycleCaches.get('B')[0].previewUrl, cycleCaches.get('C')[0].previewUrl], [
+    'photoflow-media://cover-c', 'photoflow-media://cover-a', 'photoflow-media://cover-b',
+  ], 'three-directory rename cycles read every source from one immutable snapshot');
+  assert.strictEqual(cycleCaches.get('B/subdir')[0].previewUrl, 'photoflow-media://nested-a', 'rename settlement migrates loaded child-directory caches by path segment prefix');
+  assert.strictEqual(cycleCaches.get('shortcut:B/tool.lnk:20')[0].previewUrl, 'photoflow-media://shortcut-a', 'rename settlement migrates shortcut preview caches nested under the renamed directory');
+  assert.strictEqual(cycleCaches.has('A/subdir'), false, 'successful settlement retires old child-directory cache prefixes');
+  assert.strictEqual(directoryPreviewCacheKeyWithin('A-backup', 'A'), false, 'prefix invalidation never mistakes a similar sibling name for a child path');
+  assert.strictEqual(directoryPreviewCacheKeyWithin('shortcut:A/subdir/tool.lnk:20', 'A'), true, 'shortcut preview keys inside a renamed subtree participate in prefix invalidation');
+  assert.strictEqual(remapDirectoryPreviewCacheKey('shortcut:A/subdir/tool.lnk:20', 'A', 'B'), 'shortcut:B/subdir/tool.lnk:20', 'nested shortcut preview keys preserve their timestamp identity while the virtual path moves');
 
   const mutationContext = {
     requestedProjectPath: 'D:/照片流/项目',

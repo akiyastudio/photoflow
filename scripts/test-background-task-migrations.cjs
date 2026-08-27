@@ -30,6 +30,7 @@ assert.equal(migrated.tasks.find(task => task.id === 'retry').retryOfTaskId, 're
 assert.deepEqual(migrateBackgroundTaskPayload(migrated), migrated, 'migration must be idempotent');
 assert.deepEqual(migrateBackgroundTaskPayload({ version: 2, tasks: ['bad', 1, null] }), { version: BACKGROUND_TASK_PERSISTENCE_VERSION, tasks: [] }, 'invalid task data must be ignored safely');
 assert.equal(resolveBackgroundTaskPolicy({ type: 'thumbnail-generate' }).taskCenterPolicy, 'attention-only');
+assert.equal(resolveBackgroundTaskPolicy({ type: 'project-file-operation' }).notificationPolicy, 'progress-and-result', 'project file operations must keep one toast from progress through the terminal result');
 assert.equal(resolveBackgroundTaskPolicy({ type: 'thumbnail-generate', taskCenterPolicy: 'always', resumePolicy: 'atomic', notificationPolicy: 'progress-toast' }).taskCenterPolicy, 'attention-only', 'registered central policy must override persisted presentation fields');
 assert.equal(resolveBackgroundTaskPolicy({ type: 'thumbnail-generate', resumePolicy: 'atomic' }).resumePolicy, 'safe-restart');
 assert.equal(resolveBackgroundTaskPolicy({ type: 'cache-cleanup', metadata: { origin: 'daily-auto' } }).taskCenterPolicy, 'attention-only');
@@ -45,6 +46,10 @@ const normalizedExternal = migrateBackgroundTaskPayload({ tasks: [record('extern
   taskCenterPolicy: 'hidden', resumePolicy: 'checkpoint', notificationPolicy: 'result-only',
 })] }).tasks[0];
 assert.equal(normalizedExternal.taskCenterPolicy, 'hidden', 'unregistered external task types may retain explicit policy');
+const normalizedProgressAndResult = migrateBackgroundTaskPayload({ tasks: [record('external-progress-result', 'plugin-external-task', 'completed', {}, {
+  notificationPolicy: 'progress-and-result',
+})] }).tasks[0];
+assert.equal(normalizedProgressAndResult.notificationPolicy, 'progress-and-result', 'the combined progress/result policy must survive persistence migration');
 const invalidExternalPolicy = migrateBackgroundTaskPayload({ tasks: [record('external-normalized', 'plugin-external-task', 'completed', [], {
   taskCenterPolicy: 'invalid', resumePolicy: 'invalid', notificationPolicy: 'invalid',
 })] }).tasks[0];

@@ -102,6 +102,66 @@ const main = async () => {
   jsonChild.emit('exit', 0, null);
   await timedJsonRejection;
 
+  const largeJsonChild = new EventEmitter();
+  largeJsonChild.stdout = new PassThrough();
+  largeJsonChild.stderr = new PassThrough();
+  largeJsonChild.kill = () => true;
+  const largeRunner = createJsonCommandRunner({ spawnJob: () => largeJsonChild });
+  const unicodePaths = Array.from({ length: 2000 }, (_, index) => `C:/项目/${'很长的中文目录/'.repeat(80)}图片-${index}.jpg`);
+  const largeResultPromise = largeRunner({ command: 'python', args: [] }, 'large-json');
+  const encodedLargeResult = JSON.stringify({ success: true, files: unicodePaths });
+  assert.ok(Buffer.byteLength(encodedLargeResult, 'utf8') > 2 * 1024 * 1024, 'fixture must cover the former 2 MiB tail window');
+  for (let offset = 0; offset < encodedLargeResult.length; offset += 8191) largeJsonChild.stdout.write(encodedLargeResult.slice(offset, offset + 8191));
+  largeJsonChild.stdout.write('\n');
+  largeJsonChild.emit('close', 0, null);
+  const largeResult = await largeResultPromise;
+  assert.equal(largeResult.files.length, 2000);
+  assert.equal(largeResult.files[1999], unicodePaths[1999], 'large Unicode JSON messages must remain complete');
+
+  const rejectingJsonChild = () => {
+    const child = new EventEmitter();
+    child.stdout = new PassThrough();
+    child.stderr = new PassThrough();
+    child.exitCode = null;
+    child.signalCode = null;
+    child.killed = false;
+    child.kill = () => {
+      child.killed = true;
+      queueMicrotask(() => { child.signalCode = 'SIGTERM'; child.emit('exit', null, 'SIGTERM'); });
+      return true;
+    };
+    return child;
+  };
+  const assertOversizedProtocolRejected = async (writePayload, label) => {
+    const child = rejectingJsonChild();
+    const runner = createJsonCommandRunner({ spawnJob: () => child, terminationTimeoutMs: 200 });
+    const pending = runner({ command: 'python', args: [] }, label);
+    writePayload(child.stdout);
+    await assert.rejects(pending, error => error.code === 'PROCESS_PROTOCOL_MESSAGE_TOO_LARGE');
+    assert.equal(child.killed, true, `${label} must terminate the oversized producer`);
+  };
+  await assertOversizedProtocolRejected(stdout => stdout.write(`${'x'.repeat(34_603_034)}\n`), 'oversized-complete-line');
+  await assertOversizedProtocolRejected(stdout => {
+    stdout.write('x'.repeat(20 * 1024 * 1024));
+    stdout.write('x'.repeat(13 * 1024 * 1024));
+    stdout.write('x');
+  }, 'oversized-cross-chunk-without-newline');
+
+  const historyChild = new EventEmitter();
+  historyChild.stdout = new PassThrough();
+  historyChild.stderr = new PassThrough();
+  historyChild.kill = () => true;
+  let historyMessageCount = 0;
+  const historyRunner = createJsonCommandRunner({ spawnJob: () => historyChild });
+  const historyPromise = historyRunner({ command: 'python', args: [] }, 'bounded-history', 1000, () => { historyMessageCount += 1; });
+  historyChild.stdout.write(`${JSON.stringify({ type: 'error', message: 'evicted-old-error' })}\n`);
+  for (let index = 0; index < 256; index += 1) historyChild.stdout.write(`${JSON.stringify({ type: 'progress', index })}\n`);
+  historyChild.stdout.write(`${JSON.stringify({ success: true, marker: 'latest-result' })}\n`);
+  historyChild.emit('close', 0, null);
+  const historyResult = await historyPromise;
+  assert.equal(historyMessageCount, 258, 'all parsed messages must still reach the progress callback');
+  assert.equal(historyResult.marker, 'latest-result', 'only bounded history should influence final protocol resolution');
+
   let expiredSpawned = false;
   const expiredRunner = createJsonCommandRunner({ spawnJob: () => { expiredSpawned = true; return jsonChild; } });
   await assert.rejects(expiredRunner({ command: 'python', args: [] }, 'expired-json', 1000, undefined, undefined, Date.now() - 1), error => error.code === 'PROCESS_TIMEOUT');
@@ -116,6 +176,7 @@ const main = async () => {
   for (const relative of [
     'electron/services/recycle-bin-service.cjs',
     'electron/services/file-clipboard-service.cjs',
+    'electron/services/file-publication-service.cjs',
     'electron/services/advanced-video-service.cjs',
     'electron/services/image-thumbnail-runtime.cjs',
     'electron/modules/broll-import.cjs',

@@ -6,7 +6,7 @@ const { spawnSync } = require('child_process');
 const { capturePathIdentity, samePathIdentity } = require('../electron/services/file-identity-service.cjs');
 const { createMediaAccessService } = require('../electron/services/media-access-service.cjs');
 const fileTransferSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'file-transfer-service.cjs'), 'utf8');
-assert(fileTransferSource.includes('await collectCopyPlan(resolvedSource, temporary, plan') && fileTransferSource.includes('await assertCopyPlanSourcesUnchanged(plan)') && fileTransferSource.includes('await removeCopiedSources(plan,'), 'cross-volume directory moves must retain source identity validation and safe cleanup');
+assert(fileTransferSource.includes('await collectCopyPlan(resolvedSource, temporary, plan') && fileTransferSource.includes('nativeService.inspectPath(entry.source)') && fileTransferSource.includes('nativeService.commitTreeFile') && fileTransferSource.includes('nativeService.deleteEmptyDirectory'), 'cross-volume directory moves must use planned identities and locked native per-entry cleanup');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-safety-test-'));
 const workspace = path.join(root, 'workspace');

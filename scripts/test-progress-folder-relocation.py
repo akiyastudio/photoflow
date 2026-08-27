@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 import tempfile
 import time
@@ -91,8 +92,13 @@ def rename(db, root: Path, progress: Path, new_name: str, fault_after=None):
 
 def assert_relocated(db, target: Path):
     target_key = str(target).casefold()
-    progress = db.execute("SELECT folder_path_key,display_name FROM progress_folders WHERE id='progress'").fetchone()
+    progress = db.execute("SELECT folder_path_key,display_name,folder_id FROM progress_folders WHERE id='progress'").fetchone()
     assert progress["folder_path_key"] == target_key and progress["display_name"] == target.name
+    relocation_folder_id = db.execute(
+        "SELECT folder_id FROM progress_folder_relocations WHERE progress_id='progress' ORDER BY created_at DESC LIMIT 1"
+    ).fetchone()[0]
+    assert progress["folder_id"] == relocation_folder_id == workspace_db.directory_identity(str(target)), \
+        "a path-only rename must preserve the physical folder identity used by mounted version-tree covers"
     assert db.execute("SELECT relative_path_key FROM media_import_artifact_slots WHERE progress_id='progress'").fetchone()[0] == target.name.casefold()
     batch = db.execute("SELECT source_folder_path_key,source_folder_id,status FROM version_batches WHERE id='batch'").fetchone()
     assert batch[0] == target_key and batch[1] == workspace_db.directory_identity(str(target)) and batch[2] == "needs_repair"
@@ -225,6 +231,239 @@ def test_external_link_route_rename(temp: Path):
         assert progress.is_dir(), "renaming an external-link alias must not rename the physical target directory"
     finally:
         db.close()
+    identity_root = temp / "external-identity" / "workspace"
+    db, _progress = seed(identity_root, temp / "external-identity" / "workspace.sqlite3")
+    try:
+        payload, old_link, new_link = _prepare_external_rename(db, identity_root, "原入口.lnk", "新入口.lnk")
+        old_link.write_bytes(b"replacement-link")
+        try:
+            workspace_db.progress_external_link_route_rename(str(identity_root), db, payload)
+            raise AssertionError("changed link identity was accepted")
+        except ValueError as error:
+            assert "external_progress_link_identity_mismatch" in str(error)
+        assert old_link.read_bytes() == b"replacement-link" and not new_link.exists()
+    finally:
+        db.close()
+
+
+def test_location_snapshot_retains_deleted_and_restored_nodes(temp: Path):
+    root = temp / "missing-snapshot" / "workspace"
+    db, progress = seed(root, temp / "missing-snapshot" / "workspace.sqlite3")
+    external_link = root / "Project" / "外链版本.lnk"
+    external_link.write_bytes(b"managed-link")
+    db.execute(
+        "UPDATE progress_folders SET external_link_relative_path=? WHERE id='progress'",
+        (external_link.name,),
+    )
+    db.commit()
+    try:
+        external_link.unlink()
+        stale = workspace_db.progress_snapshot(db, {"projectName": "Project", "includeMissing": True})
+        assert next(node for node in stale["progressFolders"] if node["id"] == "progress")["folderMissing"] is False, \
+            "query-only snapshots must not inspect or mutate the filesystem"
+
+        missing = workspace_db.progress_locations_snapshot(
+            str(root), db, {"projectName": "Project", "includeMissing": True},
+        )
+        missing_node = next(node for node in missing["progressFolders"] if node["id"] == "progress")
+        assert missing_node["folderMissing"] is True and missing_node["externalLinkRelativePath"] == external_link.name
+        assert missing_node["parentProgressId"] == "original", "missing nodes retain graph identity"
+        active_only = workspace_db.progress_locations_snapshot(
+            str(root), db, {"projectName": "Project", "includeMissing": False},
+        )
+        assert all(node["id"] != "progress" for node in active_only["progressFolders"]), \
+            "includeMissing=false must continue to filter inactive nodes"
+
+        external_link.write_bytes(b"managed-link")
+        restored = workspace_db.progress_locations_snapshot(
+            str(root), db, {"projectName": "Project", "includeMissing": True},
+        )
+        restored_node = next(node for node in restored["progressFolders"] if node["id"] == "progress")
+        assert restored_node["id"] == missing_node["id"] and restored_node["folderMissing"] is False
+
+        db.execute("UPDATE progress_folders SET external_link_relative_path=NULL WHERE id='progress'")
+        db.commit()
+        trashed = root.parent / "trashed-progress"
+        progress.rename(trashed)
+        local_missing = workspace_db.progress_locations_snapshot(
+            str(root), db, {"projectName": "Project", "includeMissing": True},
+        )
+        assert next(node for node in local_missing["progressFolders"] if node["id"] == "progress")["folderMissing"] is True
+        trashed.rename(progress)
+        local_restored = workspace_db.progress_locations_snapshot(
+            str(root), db, {"projectName": "Project", "includeMissing": True},
+        )
+        assert next(node for node in local_restored["progressFolders"] if node["id"] == "progress")["folderMissing"] is False
+    finally:
+        db.close()
+
+
+def _prepare_external_rename(db, root: Path, old_name: str, new_name: str):
+    project = root / "Project"
+    old_link = project / old_name
+    new_link = project / new_name
+    old_link.write_bytes(b"managed-shortcut-identity")
+    db.execute(
+        "UPDATE progress_folders SET external_link_relative_path=?,display_name=? WHERE id='progress'",
+        (old_name, old_link.stem),
+    )
+    db.commit()
+    token = workspace_db.progress_update_tree_begin(db, {"projectName": "Project"})["mutationToken"]
+    payload = {
+        "projectName": "Project", "progressId": "progress", "oldRelativePath": old_name,
+        "newRelativePath": new_name, "oldPath": str(old_link), "newPath": str(new_link),
+        "mutationToken": token,
+    }
+    prepared = workspace_db.progress_external_link_route_rename(
+        str(root), db, {**payload, "preflight": True},
+    )
+    assert prepared["state"] == "prepared"
+    return payload, old_link, new_link
+
+
+def test_external_link_journal_fault_recovery(temp: Path):
+    for stage in ("temporary_moved", "filesystem_moved", "database_relocated", "completed"):
+        case = temp / f"external-{stage}"
+        root = case / "workspace"
+        db, _progress = seed(root, case / "workspace.sqlite3")
+        try:
+            payload, old_link, new_link = _prepare_external_rename(db, root, "旧入口.lnk", f"恢复-{stage}.lnk")
+            try:
+                workspace_db.progress_external_link_route_rename(str(root), db, payload, fault_after=stage)
+                raise AssertionError(f"external fault {stage} did not fire")
+            except RuntimeError as error:
+                assert f"test_fault_after_{stage}" in str(error)
+            recovered = workspace_db.recover_progress_external_link_renames(str(root), db)
+            assert recovered["pending"] == 0
+            assert new_link.read_bytes() == b"managed-shortcut-identity" and not old_link.exists()
+            row = db.execute("SELECT external_link_relative_path FROM progress_folders WHERE id='progress'").fetchone()
+            assert row[0] == new_link.name
+            repeated = workspace_db.progress_external_link_route_rename(str(root), db, payload)
+            assert repeated["state"] == "completed" and repeated["operationId"]
+        finally:
+            db.close()
+
+
+def test_external_link_case_only_journal_fault_recovery(temp: Path):
+    if os.name != "nt":
+        return
+    for stage in ("temporary_moved", "filesystem_moved", "database_relocated", "completed"):
+        case = temp / f"external-case-only-{stage}"
+        root = case / "workspace"
+        db, _progress = seed(root, case / "workspace.sqlite3")
+        try:
+            payload, old_link, new_link = _prepare_external_rename(
+                db, root, "CaseLink.lnk", "caselink.lnk",
+            )
+            assert os.path.samefile(old_link, new_link), "Windows case aliases must resolve to one entry"
+            original_stat = old_link.stat()
+            original_identity = (original_stat.st_dev, original_stat.st_ino)
+            try:
+                workspace_db.progress_external_link_route_rename(str(root), db, payload, fault_after=stage)
+                raise AssertionError(f"case-only external fault {stage} did not fire")
+            except RuntimeError as error:
+                assert f"test_fault_after_{stage}" in str(error)
+
+            recovered = workspace_db.recover_progress_external_link_renames(str(root), db)
+            assert recovered["pending"] == 0
+            assert new_link.read_bytes() == b"managed-shortcut-identity"
+            renamed_stat = new_link.stat()
+            assert (renamed_stat.st_dev, renamed_stat.st_ino) == original_identity
+            actual_names = {entry.name for entry in (root / "Project").iterdir()}
+            assert "caselink.lnk" in actual_names and "CaseLink.lnk" not in actual_names
+            row = db.execute(
+                "SELECT external_link_relative_path,display_name FROM progress_folders WHERE id='progress'"
+            ).fetchone()
+            assert tuple(row) == ("caselink.lnk", "caselink")
+            journal = db.execute(
+                "SELECT state,error FROM progress_external_link_renames ORDER BY created_at DESC LIMIT 1"
+            ).fetchone()
+            assert tuple(journal) == ("completed", "")
+            listed = workspace_db.progress_snapshot(db, {"projectName": "Project", "includeMissing": True})
+            assert next(node for node in listed["progressFolders"] if node["id"] == "progress")[
+                "externalLinkRelativePath"
+            ] == "caselink.lnk"
+
+            repeated = workspace_db.progress_external_link_route_rename(str(root), db, payload)
+            assert repeated["state"] == "completed" and repeated["operationId"]
+            assert new_link.read_bytes() == b"managed-shortcut-identity"
+            assert db.execute(
+                "SELECT COUNT(*) FROM progress_external_link_renames"
+            ).fetchone()[0] == 1
+        finally:
+            db.close()
+
+
+def test_external_link_journal_conflict_and_identity_guards(temp: Path):
+    conflict_root = temp / "external-conflict" / "workspace"
+    db, _progress = seed(conflict_root, temp / "external-conflict" / "workspace.sqlite3")
+    try:
+        payload, old_link, new_link = _prepare_external_rename(db, conflict_root, "旧入口.lnk", "占用入口.lnk")
+        new_link.write_bytes(b"managed-shortcut-identity")
+        try:
+            workspace_db.progress_external_link_route_rename(str(conflict_root), db, payload)
+            raise AssertionError("external rename overwrote a conflicting target")
+        except ValueError as error:
+            assert "external_progress_target_conflict" in str(error)
+        assert old_link.read_bytes() == b"managed-shortcut-identity"
+        assert new_link.read_bytes() == b"managed-shortcut-identity", \
+            "a distinct target remains a conflict even when its content hash matches"
+    finally:
+        db.close()
+
+
+def test_external_link_recovery_preserves_newer_lease(temp: Path):
+    root = temp / "external-newer-lease" / "workspace"
+    db, _progress = seed(root, temp / "external-newer-lease" / "workspace.sqlite3")
+    try:
+        payload, _old_link, _new_link = _prepare_external_rename(db, root, "旧事务.lnk", "已提交.lnk")
+        try:
+            workspace_db.progress_external_link_route_rename(str(root), db, payload, fault_after="database_relocated")
+            raise AssertionError("database_relocated fault did not fire")
+        except RuntimeError:
+            pass
+        workspace_db.progress_update_tree_finish(db, {"projectName": "Project", "mutationToken": payload["mutationToken"]})
+        newer = workspace_db.progress_update_tree_begin(db, {"projectName": "Project"})["mutationToken"]
+        workspace_db.recover_progress_external_link_renames(str(root), db)
+        lease = workspace_db._progress_tree_mutation_lease(db, "project")
+        assert lease is not None and lease["token"] == newer, "an old completed recovery must not delete a newer mutation lease"
+        workspace_db.progress_update_tree_finish(db, {"projectName": "Project", "mutationToken": newer})
+    finally:
+        db.close()
+
+
+def test_migrated_external_link_rows_adopt_only_old_leases(temp: Path):
+    release_root = temp / "external-legacy-lease-release" / "workspace"
+    db, _progress = seed(release_root, temp / "external-legacy-lease-release" / "workspace.sqlite3")
+    try:
+        payload, _old_link, _new_link = _prepare_external_rename(db, release_root, "旧迁移.lnk", "已恢复.lnk")
+        operation = db.execute("SELECT * FROM progress_external_link_renames").fetchone()
+        db.execute("UPDATE progress_external_link_renames SET mutation_token='',lease_created_at=0 WHERE id=?", (operation["id"],))
+        db.commit()
+        workspace_db.progress_external_link_route_rename(str(release_root), db, {**payload, "operationId": operation["id"]})
+        assert workspace_db._progress_tree_mutation_lease(db, "project") is None, "a migrated row releases the provably older legacy lease"
+    finally:
+        db.close()
+    preserve_root = temp / "external-legacy-lease-preserve" / "workspace"
+    db, _progress = seed(preserve_root, temp / "external-legacy-lease-preserve" / "workspace.sqlite3")
+    try:
+        payload, _old_link, _new_link = _prepare_external_rename(db, preserve_root, "旧迁移.lnk", "已恢复.lnk")
+        operation = db.execute("SELECT * FROM progress_external_link_renames").fetchone()
+        db.execute("UPDATE progress_external_link_renames SET mutation_token='',lease_created_at=0 WHERE id=?", (operation["id"],))
+        db.commit()
+        try:
+            workspace_db.progress_external_link_route_rename(str(preserve_root), db, {**payload, "operationId": operation["id"]}, fault_after="database_relocated")
+            raise AssertionError("database_relocated fault did not fire")
+        except RuntimeError:
+            pass
+        newer_created_at = int(operation["created_at"]) + 1000
+        workspace_db._set_meta(db, workspace_db._progress_tree_mutation_key("project"), json.dumps({"token": "newer-migrated-lease", "createdAt": newer_created_at}, separators=(",", ":")))
+        db.commit()
+        workspace_db.recover_progress_external_link_renames(str(preserve_root), db)
+        lease = workspace_db._progress_tree_mutation_lease(db, "project")
+        assert lease is not None and lease["token"] == "newer-migrated-lease", "a genuinely newer lease survives migrated-row recovery"
+    finally:
+        db.close()
 
 
 def main():
@@ -234,6 +473,12 @@ def main():
         test_fault_recovery(temp)
         test_validation_guards(temp)
         test_external_link_route_rename(temp)
+        test_location_snapshot_retains_deleted_and_restored_nodes(temp)
+        test_external_link_journal_fault_recovery(temp)
+        test_external_link_case_only_journal_fault_recovery(temp)
+        test_external_link_journal_conflict_and_identity_guards(temp)
+        test_external_link_recovery_preserves_newer_lease(temp)
+        test_migrated_external_link_rows_adopt_only_old_leases(temp)
     print("progress folder relocation database tests passed")
 
 

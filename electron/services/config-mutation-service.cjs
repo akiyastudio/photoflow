@@ -1,4 +1,5 @@
 const path = require('path');
+const { defaultComponentDataAdoptionPolicy, authorizesLegacySettingsAdoption } = require('../compatibility/component-data-adoption-policy.cjs');
 
 const normalizeComponentRevision = value => Number.isSafeInteger(value) && value >= 0 ? value : 0;
 const nextComponentRevision = value => {
@@ -8,6 +9,43 @@ const nextComponentRevision = value => {
 };
 
 const objectValue = value => value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+const normalizeLegacySettingsAdoptions = (descriptors, adoptionPolicy = defaultComponentDataAdoptionPolicy) => {
+  const declarations = (Array.isArray(descriptors) ? descriptors : []).flatMap(descriptor =>
+  (Array.isArray(descriptor?.legacySettingsAdoptions) ? descriptor.legacySettingsAdoptions : []).map(declaration => ({
+    componentId: String(descriptor.componentId || ''),
+    topLevelKey: String(declaration?.topLevelKey || ''),
+  }))
+  ).filter(declaration => declaration.componentId && declaration.topLevelKey);
+  const claimedKeys = new Set();
+  const claimingComponents = new Set();
+  for (const declaration of declarations) {
+    if (!authorizesLegacySettingsAdoption(declaration.componentId, declaration.topLevelKey, adoptionPolicy)) throw new Error(`Unauthorized legacy settings adoption: ${declaration.topLevelKey}`);
+    if (claimingComponents.has(declaration.componentId)) throw new Error(`Component declares more than one legacy settings adoption: ${declaration.componentId}`);
+    if (claimedKeys.has(declaration.topLevelKey)) throw new Error(`Legacy settings key is claimed more than once: ${declaration.topLevelKey}`);
+    claimingComponents.add(declaration.componentId);
+    claimedKeys.add(declaration.topLevelKey);
+  }
+  return declarations;
+};
+const adoptLegacyComponentSettings = (config, descriptors, adoptionPolicy = defaultComponentDataAdoptionPolicy) => {
+  const source = objectValue(config);
+  const settings = objectValue(source.componentSettings);
+  const revisions = objectValue(source.componentSettingsRevisions);
+  let componentSettings = settings;
+  let componentSettingsRevisions = revisions;
+  let changed = false;
+  for (const declaration of normalizeLegacySettingsAdoptions(descriptors, adoptionPolicy)) {
+    if (!Object.prototype.hasOwnProperty.call(source, declaration.topLevelKey)) continue;
+    const legacyValue = source[declaration.topLevelKey];
+    if (!legacyValue || typeof legacyValue !== 'object' || Array.isArray(legacyValue) || ![Object.prototype, null].includes(Object.getPrototypeOf(legacyValue))) continue;
+    // A namespace always wins. A revision without a namespace is an explicit tombstone.
+    if (Object.prototype.hasOwnProperty.call(settings, declaration.componentId) || normalizeComponentRevision(revisions[declaration.componentId]) > 0) continue;
+    if (!changed) { componentSettings = { ...settings }; componentSettingsRevisions = { ...revisions }; changed = true; }
+    componentSettings[declaration.componentId] = structuredClone(legacyValue);
+    componentSettingsRevisions[declaration.componentId] = nextComponentRevision(revisions[declaration.componentId]);
+  }
+  return changed ? { ...source, componentSettings, componentSettingsRevisions } : source;
+};
 const readConfigFileWithRecovery = (fs, filePath) => {
   const primary = String(filePath);
   const recovery = `${primary}.recovery`;
@@ -38,7 +76,7 @@ const mergeRendererConfigWithOpaqueSettings = (normalizedConfig, current) => {
   return { ...normalizedConfig, componentSettings, componentSettingsRevisions };
 };
 
-const mergeRestoredConfig = (current, restored, destination) => {
+const mergeRestoredConfig = (current, restored, destination, legacySettingsAdoptions = [], adoptionPolicy = defaultComponentDataAdoptionPolicy) => {
   const currentSettings = objectValue(current.componentSettings);
   const restoredSettings = objectValue(restored.componentSettings);
   const currentRevisions = objectValue(current.componentSettingsRevisions);
@@ -56,10 +94,11 @@ const mergeRestoredConfig = (current, restored, destination) => {
     const revision = restoredOwnsValue || restoredHasTombstone ? nextComponentRevision(Math.max(currentRevision, restoredRevision)) : Math.max(currentRevision, restoredRevision);
     if (revision > 0) componentSettingsRevisions[id] = revision;
   }
-  return { ...current, ...restored, workspacePath: destination, backup: current?.backup || restored.backup, componentSettings, componentSettingsRevisions };
+  return adoptLegacyComponentSettings({ ...current, ...restored, workspacePath: destination, backup: current?.backup || restored.backup, componentSettings, componentSettingsRevisions }, legacySettingsAdoptions, adoptionPolicy);
 };
 
-const createConfigMutationService = ({ fs, crypto, getConfigPath, readSavedConfig, faultInjector = () => undefined }) => {
+const createConfigMutationService = ({ fs, crypto, getConfigPath, readSavedConfig, legacySettingsAdoptions = [], legacySettingsAdoptionsProvider = null, adoptionPolicy = defaultComponentDataAdoptionPolicy, faultInjector = () => undefined }) => {
+  const currentLegacySettingsAdoptions = () => typeof legacySettingsAdoptionsProvider === 'function' ? legacySettingsAdoptionsProvider() : legacySettingsAdoptions;
   const recoveryPath = () => `${getConfigPath()}.recovery`;
   const recover = async () => {
     const filePath = getConfigPath();
@@ -102,6 +141,7 @@ const createConfigMutationService = ({ fs, crypto, getConfigPath, readSavedConfi
       const current = readSavedConfig() || {};
       const next = await mutator(current);
       if (!next || typeof next !== 'object' || Array.isArray(next)) throw new TypeError('Config mutation must return an object');
+      if (next === current) return current;
       await writeAtomic(next);
       return next;
     });
@@ -116,7 +156,8 @@ const createConfigMutationService = ({ fs, crypto, getConfigPath, readSavedConfi
       pending.then(() => { clearTimeout(timer); resolve(); });
     });
   };
-  return { ready: tail, recover, mutate, read, drain, hasSnapshot: () => configSnapshotExists(fs, getConfigPath()), mergeRendererConfig: mergeRendererConfigWithOpaqueSettings, mergeRestoredConfig, nextRevision: nextComponentRevision, normalizeRevision: normalizeComponentRevision };
+  const adoptLegacySettings = () => mutate(current => adoptLegacyComponentSettings(current, currentLegacySettingsAdoptions(), adoptionPolicy));
+  return { ready: tail, recover, mutate, read, drain, adoptLegacySettings, hasSnapshot: () => configSnapshotExists(fs, getConfigPath()), mergeRendererConfig: mergeRendererConfigWithOpaqueSettings, mergeRestoredConfig: (current, restored, destination) => mergeRestoredConfig(current, restored, destination, currentLegacySettingsAdoptions(), adoptionPolicy), nextRevision: nextComponentRevision, normalizeRevision: normalizeComponentRevision };
 };
 
 const registerConfigDrainBeforeQuit = ({ app, getConfigMutationService, writeLog = () => undefined, onQuit, timeoutMs = 5000 }) => {
@@ -132,5 +173,4 @@ const registerConfigDrainBeforeQuit = ({ app, getConfigMutationService, writeLog
   return () => state;
 };
 
-module.exports = { createConfigMutationService, mergeRendererConfigWithOpaqueSettings, mergeRestoredConfig, nextComponentRevision, normalizeComponentRevision, readConfigFileWithRecovery, configSnapshotExists, registerConfigDrainBeforeQuit };
-
+module.exports = { createConfigMutationService, mergeRendererConfigWithOpaqueSettings, mergeRestoredConfig, adoptLegacyComponentSettings, nextComponentRevision, normalizeComponentRevision, readConfigFileWithRecovery, configSnapshotExists, registerConfigDrainBeforeQuit };

@@ -6,6 +6,8 @@ const { pathToFileURL } = require('url');
 (async () => {
   const modelPath = path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-operation-notification-model.ts');
   const { pageOwnsFileOperationNotification } = await import(pathToFileURL(modelPath).href);
+  const toastModelPath = path.resolve(__dirname, '..', 'src', 'features', 'background-tasks', 'task-toast-model.ts');
+  const { selectProjectFileTaskToasts } = await import(pathToFileURL(toastModelPath).href);
 
   assert.strictEqual(pageOwnsFileOperationNotification({ taskNotificationOwned: true }), false,
     'a visible progress/result task owns its terminal notification');
@@ -23,6 +25,19 @@ const { pathToFileURL } = require('url');
     'a file import failure before an operation id exists must retain page feedback');
   assert.strictEqual(pageOwnsFileOperationNotification(undefined), true,
     'a rejected IPC call has no task result and remains owned by the page');
+
+  const completedMoveTask = {
+    id: 'move-result', type: 'project-file-operation', title: '移动文件', state: 'completed', progress: 100, message: '文件移动完成',
+    notificationPolicy: 'progress-and-result', metadata: { operation: 'move', processedCount: 1, totalCount: 1 }, createdAt: 100, updatedAt: 110,
+  };
+  const ownedMoveResult = { success: true, operationId: completedMoveTask.id, taskNotificationOwned: true };
+  const centralMoveToasts = selectProjectFileTaskToasts([completedMoveTask], new Set(), 4, 111).visible;
+  assert.strictEqual(pageOwnsFileOperationNotification(ownedMoveResult), false);
+  assert.deepStrictEqual(centralMoveToasts.map(task => task.id), ['move-result'], 'a task-owned move success must have exactly one central completion toast');
+  assert.strictEqual(Number(pageOwnsFileOperationNotification(ownedMoveResult)) + centralMoveToasts.length, 1,
+    'task-owned move completion must select exactly one notification surface');
+  assert.strictEqual(Number(pageOwnsFileOperationNotification({ success: true, taskNotificationOwned: false })), 1,
+    'a move without a central task owner must retain exactly one page fallback toast');
 
   const workspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
   const runFileOperation = workspaceSource.slice(workspaceSource.indexOf('const runFileOperation'), workspaceSource.indexOf('const handleFileShortcut'));

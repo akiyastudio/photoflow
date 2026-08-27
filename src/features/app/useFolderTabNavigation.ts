@@ -1,6 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
-import type React from 'react';
-import type { WorkspaceProject } from '../../types';
+import { useRef, useState } from 'react';
 import type { BrowserPageInstance } from './workspace-tab-model';
 
 type InspirationPageDraft = Omit<BrowserPageInstance, 'id'>;
@@ -12,7 +10,6 @@ export const useFolderTabNavigation = ({
   createPage,
   requestInspirationPath,
   activateInspiration,
-  openProjectInNewTab,
 }: {
   rootPath: string;
   pages: BrowserPageInstance[];
@@ -20,22 +17,9 @@ export const useFolderTabNavigation = ({
   createPage: (page: InspirationPageDraft) => string;
   requestInspirationPath: (rootPath: string, relativePath: string) => void;
   activateInspiration: () => void;
-  openProjectInNewTab: (project: WorkspaceProject) => void;
 }) => {
   const [navigationRequests, setNavigationRequests] = useState<Record<string, { path: string; id: number }>>({});
   const navigationRequestIdRef = useRef(0);
-  const [dropActive, setDropActive] = useState(false);
-  const [sourceDragActive, setSourceDragActive] = useState(false);
-  useEffect(() => {
-    const start = () => setSourceDragActive(true);
-    const end = () => { setSourceDragActive(false); setDropActive(false); };
-    window.addEventListener('photoflow:folder-tab-drag-start', start);
-    window.addEventListener('photoflow:folder-tab-drag-end', end);
-    return () => {
-      window.removeEventListener('photoflow:folder-tab-drag-start', start);
-      window.removeEventListener('photoflow:folder-tab-drag-end', end);
-    };
-  }, []);
 
   const openInNewTab = (relativePath: string) => {
     createPage({ kind: 'inspiration', projectId: `inspiration:${rootPath}`, project: null, inspirationRootPath: rootPath, currentRelativePath: relativePath, initialRelativePath: relativePath, operation: null });
@@ -49,32 +33,5 @@ export const useFolderTabNavigation = ({
     } else requestInspirationPath(rootPath, relativePath);
     activateInspiration();
   };
-  const dropProps = {
-    'data-folder-tab-drop-zone': 'true',
-    onDragOver: (event: React.DragEvent<HTMLDivElement>) => {
-      if (!Array.from(event.dataTransfer.types).includes('application/x-photoflow-folder-tab')) return;
-      event.preventDefault();
-      event.stopPropagation();
-      event.dataTransfer.dropEffect = 'copy';
-      setDropActive(true);
-    },
-    onDragLeave: (event: React.DragEvent<HTMLDivElement>) => {
-      if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDropActive(false);
-    },
-    onDrop: (event: React.DragEvent<HTMLDivElement>) => {
-      const serialized = event.dataTransfer.getData('application/x-photoflow-folder-tab');
-      setDropActive(false);
-      setSourceDragActive(false);
-      if (!serialized) return;
-      event.preventDefault();
-      event.stopPropagation();
-      try {
-        const payload = JSON.parse(serialized) as { kind?: string; relativePath?: string; project?: WorkspaceProject };
-        if (payload.kind === 'inspiration' && payload.relativePath) openInNewTab(payload.relativePath);
-        else if (payload.kind === 'project' && payload.project) openProjectInNewTab(payload.project);
-      } catch { /* ignore unrelated drag payloads */ }
-    },
-  };
-
-  return { navigationRequests, openInNewTab, navigateCurrent, dropActive, sourceDragActive, dropProps };
+  return { navigationRequests, openInNewTab, navigateCurrent };
 };

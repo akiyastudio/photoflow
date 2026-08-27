@@ -164,8 +164,12 @@ const beginRenameSource = projectWorkspaceSource.slice(
 assert(!beginRenameSource.includes("if (finalViewOpen)") && !beginRenameSource.includes('externalLinkRelativePath'));
 assert(beginRenameSource.includes('registeredProgressEntries.length && targetPaths.length > 1'), 'registered progress folders must allow one local or external alias rename while still rejecting batch rename');
 const workspaceGridModel = loadCommonJs(compile('src/features/workspace/marquee-selection-model.ts'));
-const versioningPublic = { ...model, ...layoutModel, ...canvasModel, ...edgeModel, ...canvasHook };
 const versionTreeEntryModel = loadCommonJs(compile('src/features/versioning/project-version-tree-entry-model.ts'));
+const versioningPublic = { ...model, ...layoutModel, ...canvasModel, ...edgeModel, ...canvasHook, ...versionTreeEntryModel };
+assert.strictEqual(versionTreeEntryModel.versionTreeReactKey({ key: 'entry:old-name', nodeKey: 'progress:stable-progress', folder: { folderId: 'physical-folder-a' } }), 'progress:stable-progress:folder:physical-folder-a', 'registered version nodes combine graph and physical-folder identity');
+assert.strictEqual(versionTreeEntryModel.versionTreeReactKey({ key: 'entry:new-name', nodeKey: 'progress:stable-progress', folder: { folderId: 'physical-folder-a' } }), 'progress:stable-progress:folder:physical-folder-a', 'registered version node React identity survives a path-only rename');
+assert.notStrictEqual(versionTreeEntryModel.versionTreeReactKey({ key: 'entry:new-name', nodeKey: 'progress:stable-progress', folder: { folderId: 'physical-folder-b' } }), 'progress:stable-progress:folder:physical-folder-a', 'relinking the same graph node to another physical folder must remount its cover');
+assert.strictEqual(versionTreeEntryModel.versionTreeReactKey({ key: 'entry:ordinary', nodeKey: 'entry:ordinary' }), 'entry:ordinary', 'ordinary entries keep their path-based React key');
 const tree = loadCommonJs(compile('src/components/ProjectVersionTree.tsx'), request => {
   if (request === '../features/versioning/public') return versioningPublic;
   if (request === '../features/versioning/versioning-v2-model') return model;
@@ -525,6 +529,66 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     onCanvasControllerChange(controller) { canvasController = controller; },
     onViewportScrollChange(scrolled) { viewportScrollStates.push(scrolled); },
   };
+  let renameProbeMounts = 0;
+  let renameProbeUnmounts = 0;
+  const RenameMountProbe = ({ relativePath }) => {
+    React.useEffect(() => {
+      renameProbeMounts += 1;
+      return () => { renameProbeUnmounts += 1; };
+    }, []);
+    return React.createElement('div', { 'data-rename-mount-probe': relativePath }, relativePath);
+  };
+  const stableRawFolder = { ...folders[0], folderId: 'physical-raw-folder' };
+  const renameFolder = {
+    ...tracked,
+    id: 'rename-probe',
+    folderId: 'physical-progress-folder',
+    folderPath: 'C:/p/Old progress',
+    displayName: 'Old progress',
+    parentProgressId: 'raw',
+    versionKey: 'rename-probe',
+  };
+  const rawRenameEntry = { ...entries[0] };
+  const oldRenameEntry = mappingEntry('Old progress');
+  const renameTreeProps = {
+    ...treeProps,
+    projectName: 'Rename mount identity',
+    progressFolders: [stableRawFolder, renameFolder],
+    graphEdges: [],
+    entries: [rawRenameEntry, oldRenameEntry],
+    structureEntries: [rawRenameEntry, oldRenameEntry],
+    pendingChildId: undefined,
+    renderEntry: (entry, folder) => folder?.id === renameFolder.id
+      ? React.createElement(RenameMountProbe, { relativePath: entry.relativePath })
+      : React.createElement('div', null, entry.name),
+  };
+  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, renameTreeProps)));
+  assert.strictEqual(renameProbeMounts, 1, 'the stateful registered-folder cover mounts once at its original path');
+  const pendingRenameEntry = mappingEntry('New progress', { pendingSourceRelativePath: 'Old progress' });
+  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, {
+    ...renameTreeProps,
+    entries: [rawRenameEntry, pendingRenameEntry],
+  })));
+  assert.strictEqual(renameProbeMounts, 1, 'optimistic path rename must preserve the mounted registered-folder cover');
+  assert.strictEqual(renameProbeUnmounts, 0, 'optimistic path rename must not tear down the cover subtree');
+  const committedRenameFolder = { ...renameFolder, folderPath: 'C:/p/New progress', displayName: 'New progress' };
+  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, {
+    ...renameTreeProps,
+    progressFolders: [stableRawFolder, committedRenameFolder],
+    entries: [rawRenameEntry, mappingEntry('New progress')],
+    structureEntries: [rawRenameEntry, mappingEntry('New progress')],
+  })));
+  assert.strictEqual(renameProbeMounts, 1, 'committing a rename with the same folderId must retain the cover instance');
+  assert.strictEqual(renameProbeUnmounts, 0, 'committed path metadata must not blank a mounted cover');
+  const relinkedRenameFolder = { ...committedRenameFolder, folderId: 'replacement-physical-folder', folderPath: 'C:/p/Replacement progress', displayName: 'Replacement progress' };
+  await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, {
+    ...renameTreeProps,
+    progressFolders: [stableRawFolder, relinkedRenameFolder],
+    entries: [rawRenameEntry, mappingEntry('Replacement progress')],
+    structureEntries: [rawRenameEntry, mappingEntry('Replacement progress')],
+  })));
+  assert.strictEqual(renameProbeMounts, 2, 'relinking the graph node to a new folderId must mount a fresh cover');
+  assert.strictEqual(renameProbeUnmounts, 1, 'relinking must discard the previous physical folder cover');
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, treeProps)));
   const brollCanvasNodes = allNodes(container).filter(node => node.attributes.get('data-version-progress-id') === 'broll');
   assert.strictEqual(brollCanvasNodes.length, 1, 'a persisted mixed broll folder must render exactly once in the Other shelf');
