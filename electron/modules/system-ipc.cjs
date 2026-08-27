@@ -436,6 +436,12 @@ const registerSystemIpc = context => {
     telemetryService?.reportCrash('renderer_error', error);
   });
 
+  ipcMain.on('renderer-info-log', (_event, message, details) => {
+    const text = String(message || 'Renderer info').slice(0, 500);
+    const detailText = String(details || '').slice(0, 4000);
+    writeLog('info', `Renderer: ${text}`, detailText);
+  });
+
   ipcMain.on('telemetry-track', (_event, eventName, properties) => {
     telemetryService?.track(eventName, properties);
   });

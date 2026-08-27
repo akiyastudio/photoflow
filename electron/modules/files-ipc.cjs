@@ -1,6 +1,6 @@
 const { getProtectedProjectFolderRegistry } = require('../services/protected-project-folder.cjs');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
-const { createNativeFileDragService } = require('../services/native-file-drag-service.cjs');
+const { createFallbackDragIcon, usableDragIcon } = require('../services/native-file-drag-service.cjs');
 const { PUBLISH_PARTIAL_CODE, publishPathNoClobber: defaultPublishPathNoClobber } = require('../services/file-transfer-service.cjs');
 
 const INSPIRATION_VIRTUAL_PROJECT_NAME = '.__photoflow_inspiration__';
@@ -32,9 +32,9 @@ const canUseSameVolumeCut = (platform, clipboardOperation, sourceStats, destinat
   && sourceStats.every(sourceStat => sameFilesystemDevice(sourceStat, destinationStat));
 
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, samePathIdentity, screen, selectionService, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, waitForLeftMouseRelease, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resumeToastOverlayAfterNativeDrag, samePathIdentity, screen, selectionService, suspendToastOverlayForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
-  const nativeFileDrag = createNativeFileDragService({ nativeImage, writeLog });
+  const nativeFileDragFallbackIcon = createFallbackDragIcon(nativeImage);
   const resolveVirtual = (root, relativePath, options = {}) => projectVirtualPaths
     ? projectVirtualPaths.resolve(root, relativePath, options)
     : (() => {
@@ -319,59 +319,62 @@ const registerFileOperationsIpc = context => {
     };
   };
 
-  ipcMain.on('workspace-start-file-drag', (event, workspacePath, status, projectName, relativePaths = [], dragContext = {}) => {
+  ipcMain.on('workspace-start-file-drag', async (event, workspacePath, status, projectName, relativePaths = [], dragContext = {}) => {
     let validatedRelativePaths = [];
     let nativeDragStarted = false;
-    let mouseReleasePromise = null;
+    let overlaySuspended = false;
     const sessionId = typeof dragContext?.sessionId === 'string' ? dragContext.sessionId.slice(0, 120) : '';
     const sourcePageId = typeof dragContext?.sourcePageId === 'string' ? dragContext.sourcePageId.slice(0, 200) : '';
     const origin = dragContext?.origin === 'version-tree' ? 'version-tree' : 'file-browser';
-    const pointerType = ['mouse', 'pen', 'touch'].includes(dragContext?.pointerType) ? dragContext.pointerType : 'unknown';
-    const sendDragEnded = release => {
+    const sendDragEnded = () => {
       if (event.sender.isDestroyed()) return;
       const ownerWindow = BrowserWindow.fromWebContents(event.sender);
       const contentBounds = ownerWindow?.getContentBounds();
-      const releasePoint = release?.cursorCaptured === true && Number.isFinite(release?.screenX) && Number.isFinite(release?.screenY)
-        ? { x: Number(release.screenX), y: Number(release.screenY) }
-        : null;
-      const cursor = releasePoint && screen.screenToDipPoint ? screen.screenToDipPoint(releasePoint) : releasePoint || screen.getCursorScreenPoint();
+      const cursor = screen.getCursorScreenPoint();
       const clientX = contentBounds ? cursor.x - contentBounds.x : -1;
       const clientY = contentBounds ? cursor.y - contentBounds.y : -1;
       const insideWindow = Boolean(contentBounds && clientX >= 0 && clientY >= 0 && clientX < contentBounds.width && clientY < contentBounds.height);
+      writeLog('info', 'Native project file drag completion', { sessionId, origin, clientX, clientY, insideWindow, started: nativeDragStarted });
       event.sender.send('workspace-file-drag-ended', {
         sessionId, sourcePageId, origin, paths: validatedRelativePaths, clientX, clientY, insideWindow,
         started: nativeDragStarted,
-        releaseConfirmed: release?.releaseConfirmed === true && (process.platform !== 'win32'
-          || release?.leftButtonWasDown === true && (pointerType === 'mouse' || pointerType === 'unknown')),
       });
     };
     try {
       const resolved = resolveFileDragSources(workspacePath, status, projectName, relativePaths);
       validatedRelativePaths = resolved.relativePaths;
-      if (process.platform === 'win32' && waitForLeftMouseRelease) mouseReleasePromise = Promise.resolve(waitForLeftMouseRelease()).catch(error => {
-        writeLog('warn', 'Unable to observe native file drag mouse release', { sessionId, error: error?.message || String(error) });
-        return { releaseConfirmed: false, leftButtonWasDown: false, waitedMs: 0 };
-      });
-      nativeFileDrag.start(event.sender, resolved.sources, resolved.sourceSummary);
+      try {
+        suspendToastOverlayForNativeDrag?.();
+        overlaySuspended = true;
+      } catch (error) {
+        writeLog('warn', 'Unable to suspend toast overlay for native file drag', { error: error?.message || String(error) });
+      }
+      let icon = nativeFileDragFallbackIcon;
+      try {
+        const shellIcon = await app.getFileIcon(resolved.sources[0], { size: 'normal' });
+        if (usableDragIcon(shellIcon)) icon = shellIcon;
+        else writeLog('warn', 'Shell returned an empty native project file drag icon', { projectName });
+      } catch (error) {
+        writeLog('warn', 'Unable to create native project file drag icon', { projectName, error: error?.message || String(error) });
+      }
+      if (event.sender.isDestroyed()) return;
+      const startedAt = Date.now();
+      const details = { count: resolved.sources.length, mode: resolved.sources.length === 1 ? 'file' : 'files', icon: icon === nativeFileDragFallbackIcon ? 'visible-fallback' : 'fresh-shell', ...resolved.sourceSummary };
+      writeLog('info', 'Starting native project file drag', details);
+      event.sender.startDrag(resolved.sources.length === 1
+        ? { file: resolved.sources[0], icon }
+        : { file: resolved.sources[0], files: resolved.sources, icon });
+      writeLog('info', 'Native project file drag ended', { ...details, durationMs: Math.max(0, Date.now() - startedAt) });
       nativeDragStarted = true;
     } catch (error) {
       writeLog('error', 'Unable to start native project file drag', error);
       if (!event.sender.isDestroyed()) event.sender.send('app-error', error.message || String(error));
     } finally {
-      if (!nativeDragStarted) sendDragEnded({ releaseConfirmed: false });
-      else if (mouseReleasePromise) {
-        mouseReleasePromise.then(release => {
-          writeLog('info', 'Native project file drag release observed', {
-            sessionId, origin, pointerType, waitedMs: Number(release?.waitedMs) || 0,
-            leftButtonWasDown: release?.leftButtonWasDown === true,
-            internalDropAuthorized: release?.releaseConfirmed === true && release?.leftButtonWasDown === true && (pointerType === 'mouse' || pointerType === 'unknown'),
-          });
-          sendDragEnded(release);
-        }).catch(error => {
-          writeLog('warn', 'Unable to confirm native file drag mouse release', { sessionId, error: error?.message || String(error) });
-          sendDragEnded({ releaseConfirmed: false });
-        });
-      } else sendDragEnded({ releaseConfirmed: true });
+      sendDragEnded();
+      if (overlaySuspended) {
+        try { resumeToastOverlayAfterNativeDrag?.(); }
+        catch (error) { writeLog('warn', 'Unable to resume toast overlay after native file drag', { error: error?.message || String(error) }); }
+      }
     }
   });
   

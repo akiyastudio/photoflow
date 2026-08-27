@@ -11,7 +11,7 @@ const IDEMPOTENT_ACTIONS = new Set([
   'maintenance_run', 'media_sync_apply_batch', 'media_sync_finalize',
   'media_sync_paths_apply_batch', 'media_sync_paths_finalize', 'progress_stale_apply',
 ]);
-const VERSIONING_ONLY_ACTIONS = new Set(['batch_list', 'progress_snapshot', 'version_graph_edge_list', 'version_tree_layout_get', 'version_tree_layout_save']);
+const VERSIONING_ONLY_ACTIONS = new Set(['batch_list', 'progress_snapshot', 'progress_locations_snapshot', 'version_graph_edge_list', 'version_tree_layout_get', 'version_tree_layout_save']);
 
 const domainDatabasePath = (database, domain) => {
   const absolute = path.resolve(database);

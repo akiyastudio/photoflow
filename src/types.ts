@@ -1106,6 +1106,7 @@ export interface IElectronAPI {
   getMediaOriginal: (filePath: string, kind: 'image' | 'raw', cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; mediaUrl?: string; original?: boolean; orientation?: { matrix: number[]; swapsAxes: boolean; rawOrientation: number; embeddedOrientation: number }; error?: string }>;
   getMediaMetadata: (filePath: string) => Promise<{ success: boolean; fields: MediaMetadataField[]; error?: string }>;
   reportRendererError: (message: string, details?: string) => void;
+  reportRendererInfo: (message: string, details?: string) => void;
   trackTelemetry: (eventName: string, properties?: Record<string, string | number | boolean>) => void;
   onAppError: (callback: (message: string) => void) => () => void;
   onComponentNotification: (callback: (value: { apiVersion: 2; type: 'notification'; id: string; componentId: string; surface: 'project' | 'application.settings' | ComponentContributionType; notification: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; dedupeKey?: string } } | { apiVersion: 2; type: 'purge'; componentId: string }) => void) => () => void;
@@ -1114,8 +1115,8 @@ export interface IElectronAPI {
   getProjectFileClipboardStatus: () => Promise<{ success: boolean; hasFiles: boolean; error?: string }>;
   cancelProjectFileCut: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[]) => Promise<{ success: boolean; cleared: boolean; hasFiles: boolean; error?: string }>;
   getPathForFile: (file: File) => string;
-  startProjectFileDrag: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[], context: { sessionId: string; sourcePageId: string; origin: 'file-browser' | 'version-tree'; pointerType: 'mouse' | 'pen' | 'touch' | 'unknown' }) => void;
-  onProjectFileDragEnd: (callback: (result: { sessionId: string; sourcePageId: string; origin: 'file-browser' | 'version-tree'; paths: string[]; clientX: number; clientY: number; insideWindow: boolean; started: boolean; releaseConfirmed: boolean }) => void) => () => void;
+  startProjectFileDrag: (workspacePath: string, status: ProjectStatus, projectName: string, paths: string[], context: { sessionId: string; sourcePageId: string; origin: 'file-browser' | 'version-tree' }) => void;
+  onProjectFileDragEnd: (callback: (result: { sessionId: string; sourcePageId: string; origin: 'file-browser' | 'version-tree'; paths: string[]; clientX: number; clientY: number; insideWindow: boolean; started: boolean }) => void) => () => void;
   onProjectFileOperationProgress: (callback: (progress: ProjectFileOperationProgress) => void) => () => void;
   cancelProjectFileOperation: (operationId: string) => Promise<{ success: boolean; error?: string }>;
   chooseCacheDirectory: () => Promise<{ cancelled?: boolean; path?: string }>;

@@ -4,7 +4,7 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 
 (async () => {
-  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, fileEntryPointerModifiers, fileEntrySelectionAfterDragStart, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
+  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, fileEntryDragPaths, fileEntryPointerModifiers, fileEntrySelectionAfterDragStart, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
   const { mergeMarqueeSelection } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'marquee-selection-model.ts')).href);
   const { directoryPreviewCacheKey, directoryPreviewCacheKeyWithin, folderCoverEntryAfterLoad, pendingDirectoryPreviewSourceCacheKey, remapDirectoryPreviewCacheKey, remapPendingDirectoryPreviewEntries, settlePendingDirectoryPreviewRenameCaches, shouldCacheDirectoryPreviewResult } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'directory-preview-cache-model.ts')).href);
   const { FOLDER_COVER_MAX_CONSECUTIVE_LOAD_FAILURES, createFolderCoverMediaState, folderCoverRequestKey, reduceFolderCoverMediaState } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'folder-cover-media-model.ts')).href);
@@ -44,6 +44,10 @@ const { pathToFileURL } = require('url');
     assert.deepStrictEqual(runPointerClickSequence({ surface, openMode: 'single' }), {
       clickIntent: 'open', selection: [], activated: true,
     }, `${surface} pointerdown -> React flush -> click must activate instead of add-and-preview`);
+    const selectionAfterCancelledDrag = fileEntrySelectionAfterDragStart([], '素材/照片.jpg', ['素材/照片.jpg']);
+    assert.deepStrictEqual(runPointerClickSequence({ surface, openMode: 'single', initialSelection: selectionAfterCancelledDrag }), {
+      clickIntent: 'open', selection: [], activated: true,
+    }, `${surface} empty selection -> unselected dragstart -> cancel -> click must still activate`);
   }
   const doubleFirst = runPointerClickSequence({ surface: 'grid', openMode: 'double' });
   assert.deepStrictEqual(doubleFirst, { clickIntent: 'select', selection: ['素材/照片.jpg'], activated: false }, 'double mode first click selects without activating');
@@ -53,9 +57,17 @@ const { pathToFileURL } = require('url');
   assert.deepStrictEqual(mergeMarqueeSelection(['a.jpg'], [], false), [], 'a non-additive marquee can clear an existing selection');
   assert.deepStrictEqual(mergeMarqueeSelection(['a.jpg', 'b.jpg'], ['c.jpg'], true), ['a.jpg', 'b.jpg', 'c.jpg'], 'an additive marquee preserves a multi-selection and adds hits');
   assert.deepStrictEqual(fileEntrySelectionAfterDragStart([], 'a.jpg', []), [], 'pointerdown or a rejected dragstart cannot select an entry');
-  assert.deepStrictEqual(fileEntrySelectionAfterDragStart([], 'a.jpg', ['a.jpg']), ['a.jpg'], 'a successful dragstart selects an unselected target');
+  assert.deepStrictEqual(fileEntrySelectionAfterDragStart([], 'a.jpg', ['a.jpg']), [], 'a successful native dragstart keeps an unselected target out of persistent selection');
   assert.deepStrictEqual(fileEntrySelectionAfterDragStart(['a.jpg'], 'a.jpg', ['a.jpg']), ['a.jpg'], 'dragging a selected target preserves that selection');
   assert.deepStrictEqual(fileEntrySelectionAfterDragStart(['a.jpg', 'b.jpg'], 'a.jpg', ['a.jpg', 'b.jpg']), ['a.jpg', 'b.jpg'], 'dragging one selected item preserves the selected group');
+  assert.deepStrictEqual(fileEntryDragPaths('unsupported.lnk/item.jpg', ['unsupported.lnk/item.jpg', 'actual-first.jpg', 'actual-second.jpg'], path => path.startsWith('unsupported.lnk/')), {
+    requestedPaths: ['unsupported.lnk/item.jpg', 'actual-first.jpg', 'actual-second.jpg'],
+    dragPaths: ['actual-first.jpg', 'actual-second.jpg'],
+  }, 'an unsupported first selected entry is removed while the actual draggable order is preserved for prewarm and start');
+  assert.deepStrictEqual(fileEntryDragPaths('unsupported.lnk/item.jpg', [], path => path.startsWith('unsupported.lnk/')).dragPaths, [], 'an unselected unsupported entry has no prewarm or drag source');
+  assert.deepStrictEqual(fileEntryDragPaths('outside-selection.jpg', ['selected.jpg'], () => false), {
+    requestedPaths: ['outside-selection.jpg'], dragPaths: ['outside-selection.jpg'],
+  }, 'dragging an unselected entry does not inherit the unrelated selection');
 
   assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼/精修', '客户/婚礼'), '客户/婚礼/精修', 'returning one level reveals the folder that was just left');
   assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼/精修', '客户'), '客户/婚礼', 'returning through a breadcrumb reveals the direct child leading to the previous directory');
@@ -92,8 +104,8 @@ const { pathToFileURL } = require('url');
   const pointerCaptureSource = workspaceSource.slice(workspaceSource.indexOf('const handleFileSurfacePointerDownCapture'), workspaceSource.indexOf('const getEntryDisplayName'));
   assert(pointerCaptureSource.includes('fileEntryPointerModifiers({') && pointerCaptureSource.includes('target?.focus({ preventScroll: true })') && !pointerCaptureSource.includes('setSelectedPaths'), 'pointerdown capture may focus and record modifiers/pointer type, but must never mutate selection');
   const dragStartSource = workspaceSource.slice(workspaceSource.indexOf('const startEntryDrag'), workspaceSource.indexOf('const finishEntryDrag'));
-  assert(dragStartSource.indexOf('if (!dragPaths.length) return;') < dragStartSource.indexOf('fileEntrySelectionAfterDragStart('), 'selection may change only after drag paths are non-empty and dragstart is accepted');
-  assert(dragStartSource.includes('fileEntrySelectionAfterDragStart(selectedPaths, entry.relativePath, dragPaths)'), 'successful dragstart must select an unselected target without clearing a selected group');
+  assert(!dragStartSource.includes('setSelectedPaths') && !dragStartSource.includes('fileEntrySelectionAfterDragStart'), 'native dragstart must not commit a transient drag target into persistent selection');
+  assert(!dragStartSource.includes('setNativeDraggingRelativePath') && !dragStartSource.includes('data-native-file-dragging'), 'native dragstart must not trigger a React visual update before the OS handoff');
   const versionEntryStart = workspaceSource.indexOf('const renderVersionTreeEntry');
   const versionEntrySource = workspaceSource.slice(versionEntryStart, workspaceSource.indexOf('const progressCompareCandidates', versionEntryStart));
   for (const handler of ['onClick={event => handleEntryClick(event, entry)}', 'onDoubleClick={event => handleEntryDoubleClick(event, entry)}']) assert(versionEntrySource.includes(handler), `version-tree entries must wire ${handler}`);

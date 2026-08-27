@@ -48,6 +48,24 @@ const run = async () => {
   assert.equal(policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'maintenance_run' }).mode, 'exclusive');
   const multi = policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'media_sync_apply_batch' });
   assert.equal(new Set(multi.databases.map(item => normalizeDatabasePath(item.path))).size, 3, 'media operations acquire catalog, media, and versioning databases together');
+  const progressLocations = policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'progress_locations_snapshot' });
+  assert.equal(progressLocations.idempotent, true, 'location synchronization retains its existing retry-safe semantics');
+  assert.equal(progressLocations.mode, 'write', 'location synchronization must not enter the JS confirmed-read allowlist');
+  assert(progressLocations.databases.every(database => database.mode === 'write'), 'catalog and versioning must both retain writer leases because domain attachment and location identity mutate state');
+  assert.deepEqual(new Set(progressLocations.databases.map(item => normalizeDatabasePath(item.path))), new Set([
+    'C:/Data/workspace.sqlite3', domainDatabasePath('C:/Data/workspace.sqlite3', 'versioning'),
+  ].map(normalizeDatabasePath)), 'location synchronization locks catalog and versioning only');
+  const mediaPath = domainDatabasePath('C:/Data/workspace.sqlite3', 'media');
+  const mediaIsolationCoordinator = new WorkspaceSqliteCoordinator();
+  const mediaWriterStarted = deferred(); const releaseMediaWriter = deferred();
+  const mediaWriter = mediaIsolationCoordinator.run({ databases: [{ path: mediaPath, mode: 'write' }] }, async () => { mediaWriterStarted.resolve(); await releaseMediaWriter.promise; });
+  await mediaWriterStarted.promise;
+  let locationEntered = false;
+  await mediaIsolationCoordinator.run({ databases: progressLocations.databases }, () => { locationEntered = true; });
+  assert.equal(locationEntered, true, 'an active media writer must not block the versioning-only location snapshot');
+  releaseMediaWriter.resolve(); await mediaWriter;
+  mediaIsolationCoordinator.quarantine([{ path: mediaPath, mode: 'write' }], new Error('media unavailable'));
+  assert.equal(await mediaIsolationCoordinator.run({ databases: progressLocations.databases }, () => 'location-ok'), 'location-ok', 'media quarantine must not reject the versioning-only location snapshot');
   const recreateProject = policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'add' });
   assert.deepEqual(new Set(recreateProject.databases.map(item => normalizeDatabasePath(item.path))), new Set([
     'C:/Data/workspace.sqlite3',

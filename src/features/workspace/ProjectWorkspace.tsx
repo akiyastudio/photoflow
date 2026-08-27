@@ -23,7 +23,8 @@ import { advanceMarqueeAutoScroll, marqueeAutoScrollDelta } from './marquee-auto
 import { converterTriggerAction } from './project-panel-lifecycle';
 import { PROJECT_BACKGROUND_LOAD_DELAYS_MS, PROJECT_WATCH_FALLBACK_REFRESH_MS, isForegroundDirectoryRefresh, resolveProjectWorkspaceLifecycle, shouldReconcileProjectWatch, type ProjectWorkspaceLifecycleIdentity } from './project-workspace-lifecycle';
 import { applyShortcutPreviewState } from './shortcut-preview-state-model';
-import { directoryEntryToRevealOnReturn, fileEntryClickIntent, fileEntryPointerModifiers, fileEntrySelectionAfterDragStart, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath, type ProgressFolderEntryLocation } from './file-entry-interaction-model';
+import { directoryEntryToRevealOnReturn, fileEntryClickIntent, fileEntryDragPaths, fileEntryPointerModifiers, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath, type ProgressFolderEntryLocation } from './file-entry-interaction-model';
+import { nativeFileDragDecisionDetails, nativeFileDragOwnerIdentity, nativeFileDragSessionMustReset, nativeFileDragTargetFromElement, tryStartNativeFileDrag } from './native-file-drag-session-model';
 import { FOLDER_ALPHABET_FILTER_THRESHOLD, FOLDER_ALPHABET_KEYS, availableFolderAlphabetKeys, folderAlphabetKey } from './folder-alphabet-filter-model';
 import { useRecentFilesAutoLoad } from './useRecentFilesAutoLoad';
 import { collectProgressSubtree, inspectProgressRelations } from './progress-tree-model';
@@ -527,6 +528,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const internalDragPathsRef = useRef<string[]>([]);
   const internalDropHandledRef = useRef(false);
   const nativeFileDragSessionRef = useRef<{ id: string; origin: 'file-browser' | 'version-tree'; paths: string[] } | null>(null);
+  const nativeFileDragOwnerIdentityRef = useRef(nativeFileDragOwnerIdentity(pageId, project.path));
   const suppressDraggedEntryClickRef = useRef<{ path: string; sessionId: string } | null>(null);
   const renameCommitRef = useRef(false);
   const selectionResetKey = `${active}|${fileFilter}|${ratingFilter}|${filterScope}|${searchQuery}`;
@@ -5614,35 +5616,45 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       className={`${list ? 'file-select-box' : 'file-grid-select'} ${selected ? 'is-selected border-blue-600 bg-blue-600 text-white' : `border-slate-300 ${list ? 'bg-white' : 'bg-white/90'} text-transparent`} ${list ? 'flex h-4 w-4 shrink-0' : 'absolute left-3 top-3 z-10 flex h-4 w-4'} items-center justify-center rounded border`}
     ><CheckSquare size={12}/></button>;
   };
+  const entryDragPaths = (entry: ProjectFileEntry) => {
+    return fileEntryDragPaths(entry.relativePath, selectedPaths, path => activeFileEntries.some(candidate => candidate.relativePath === path && isUnsupportedShortcutContent(candidate)));
+  };
+  const resetNativeDragSession = (expectedSessionId: string) => {
+    const session = nativeFileDragSessionRef.current;
+    if (!session || session.id !== expectedSessionId) return false;
+    nativeFileDragSessionRef.current = null;
+    internalDragPathsRef.current = [];
+    internalDropHandledRef.current = false;
+    if (suppressDraggedEntryClickRef.current?.sessionId === expectedSessionId) suppressDraggedEntryClickRef.current = null;
+    setDragTargetPath(''); setRecursiveDropTargetPath(null); setSurfaceDropActive(false);
+    return true;
+  };
   const startEntryDrag = (event: React.DragEvent<HTMLDivElement>, entry: ProjectFileEntry, origin: 'file-browser' | 'version-tree' = 'file-browser') => {
     event.preventDefault();
     event.stopPropagation();
-    const requestedPaths = selectedPaths.includes(entry.relativePath) ? selectedPaths : [entry.relativePath];
+    const { requestedPaths, dragPaths } = entryDragPaths(entry);
     if (pendingPathConflicts(pendingFileOperationsRef.current, requestedPaths)) { onNotice('所选项目正在处理中，暂时不能拖动'); return; }
-    const dragPaths = requestedPaths.filter(path => !activeFileEntries.some(candidate => candidate.relativePath === path && isUnsupportedShortcutContent(candidate)));
     if (!dragPaths.length) return;
-    if (!selectedPaths.includes(entry.relativePath)) {
-      setSelectedPaths(fileEntrySelectionAfterDragStart(selectedPaths, entry.relativePath, dragPaths));
-    }
     const sessionId = crypto.randomUUID();
-    const pointer = entryPointerModifiersRef.current?.path === entry.relativePath ? entryPointerModifiersRef.current : null;
     internalDragPathsRef.current = origin === 'file-browser' ? dragPaths : [];
     internalDropHandledRef.current = false;
     nativeFileDragSessionRef.current = { id: sessionId, origin, paths: dragPaths };
     suppressDraggedEntryClickRef.current = { path: entry.relativePath, sessionId };
-    projectWorkspaceClient.startProjectFileDrag(workspacePath, project.status, project.name, dragPaths, {
-      sessionId,
-      sourcePageId: pageId,
-      origin,
-      pointerType: origin === 'file-browser' ? pointer?.pointerType || 'mouse' : 'mouse',
-    });
+    tryStartNativeFileDrag(() => projectWorkspaceClient.startProjectFileDrag(workspacePath, project.status, project.name, dragPaths, {
+      sessionId, sourcePageId: pageId, origin,
+    }), () => { if (resetNativeDragSession(sessionId)) onNotice('无法开始文件拖动，请重试'); });
   };
   const finishEntryDrag = () => {
     internalDragPathsRef.current = [];
-    setDragTargetPath('');
-    setRecursiveDropTargetPath(null);
-    setSurfaceDropActive(false);
+    setDragTargetPath(''); setRecursiveDropTargetPath(null); setSurfaceDropActive(false);
   };
+  useEffect(() => {
+    const nextIdentity = nativeFileDragOwnerIdentity(pageId, project.path); const reset = nativeFileDragSessionMustReset(nativeFileDragOwnerIdentityRef.current, nextIdentity, active); nativeFileDragOwnerIdentityRef.current = nextIdentity;
+    if (!reset) return;
+    nativeFileDragSessionRef.current = null;
+    internalDragPathsRef.current = []; internalDropHandledRef.current = false; suppressDraggedEntryClickRef.current = null;
+    setDragTargetPath(''); setRecursiveDropTargetPath(null); setSurfaceDropActive(false);
+  }, [active, pageId, project.path]);
   const hasExternalFiles = (event: React.DragEvent<HTMLElement>) => !nativeFileDragSessionRef.current && internalDragPathsRef.current.length === 0 && Array.from(event.dataTransfer.types).includes('Files');
   const getExternalFilePaths = (event: React.DragEvent<HTMLElement>) => Array.from(event.dataTransfer.files)
     .map(file => {
@@ -5657,14 +5669,8 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     return normalizedSources.filter(({ normalized }) => projectRelativeParentPath(normalized) !== normalizedTarget).map(({ source }) => source);
   };
   const canDropInternalIntoFolder = (entry: ProjectFileEntry) => internalMovePathsForTarget(internalDragPathsRef.current, entry.relativePath).length > 0;
-  const recursiveDropTargetFromElement = (element: Element | null) => {
-    const target = element?.closest<HTMLElement>('[data-recursive-folder-path]');
-    if (!target || target.dataset.recursiveFolderReadonly === 'true') return null;
-    return {
-      relativePath: normalizeProjectRelativePath(target.dataset.recursiveFolderPath || ''),
-      label: target.dataset.recursiveFolderLabel || target.dataset.recursiveFolderPath || '项目根目录',
-    };
-  };
+  const resolveNativeDragTarget = (element: Element | null) => nativeFileDragTargetFromElement({ element, surface: filesSurfaceRef.current, currentRelativePath: currentRelativePathRef.current, rootLabel: project.name, normalize: normalizeProjectRelativePath });
+  const reportNativeDragDecision = (reason: string, result: { clientX: number; clientY: number; insideWindow: boolean; started: boolean }, targetSource = 'none') => window.electronAPI?.reportRendererInfo?.('Native project file drag decision', nativeFileDragDecisionDetails(reason, result, targetSource));
   const trackingSuggestionsForCreatedItems = (items: Array<{ name: string; relativePath: string; isDirectory: boolean }>) => {
     const folders = items.filter(item => item.isDirectory).map(item => ({
       relativePath: normalizeProjectRelativePath(item.relativePath),
@@ -5788,20 +5794,21 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   };
   useEffect(() => {
     const acceptInternalFolderDrag = (event: DragEvent) => {
-      if (!internalDragPathsRef.current.length) return;
-      const element = event.target as HTMLElement | null;
-      const folderTarget = element?.closest<HTMLElement>('[data-entry-kind="folder"][data-entry-path]');
-      const recursiveTarget = folderTarget ? null : recursiveDropTargetFromElement(element);
-      const targetRelativePath = folderTarget?.dataset.entryPath ?? recursiveTarget?.relativePath;
-      if (targetRelativePath === undefined || !internalMovePathsForTarget(internalDragPathsRef.current, targetRelativePath).length) return;
+      const session = nativeFileDragSessionRef.current;
+      if (!activeRef.current || !session || session.origin !== 'file-browser' || !internalDragPathsRef.current.length) return;
+      const target = resolveNativeDragTarget(event.target as HTMLElement | null);
+      if (!target || !internalMovePathsForTarget(internalDragPathsRef.current, target.relativePath).length) {
+        setDragTargetPath(''); setRecursiveDropTargetPath(null);
+        return;
+      }
       event.preventDefault();
       if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
-      if (folderTarget) {
-        setRecursiveDropTargetPath(null);
-        setDragTargetPath(targetRelativePath);
+      if (target.element.dataset.entryKind === 'folder') {
+        setRecursiveDropTargetPath(null); setDragTargetPath(target.relativePath);
+      } else if (target.element.dataset.recursiveFolderPath !== undefined) {
+        setDragTargetPath(''); setRecursiveDropTargetPath(target.relativePath);
       } else {
-        setDragTargetPath('');
-        setRecursiveDropTargetPath(normalizeProjectRelativePath(targetRelativePath));
+        setDragTargetPath(''); setRecursiveDropTargetPath(null);
       }
     };
     window.addEventListener('dragover', acceptInternalFolderDrag, true);
@@ -5814,29 +5821,25 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     const clickSuppression = suppressDraggedEntryClickRef.current;
     window.setTimeout(() => { if (suppressDraggedEntryClickRef.current === clickSuppression) suppressDraggedEntryClickRef.current = null; }, 250);
     const dragPaths = result.paths?.length ? result.paths : session.paths;
-    internalDragPathsRef.current = [];
-    setDragTargetPath('');
-    setRecursiveDropTargetPath(null);
-    setSurfaceDropActive(false);
+    finishEntryDrag();
     if (internalDropHandledRef.current) {
-      internalDropHandledRef.current = false;
-      return;
+      internalDropHandledRef.current = false; reportNativeDragDecision('html-drop-already-handled', result, 'html-drop'); return;
     }
-    if (!result.started || !result.releaseConfirmed || !result.insideWindow) return;
-    const element = document.elementFromPoint(result.clientX, result.clientY);
-    const folderTarget = element?.closest<HTMLElement>('[data-entry-kind="folder"][data-entry-path]');
-    const recursiveTarget = folderTarget ? null : recursiveDropTargetFromElement(element);
+    if (!result.started) { reportNativeDragDecision('native-drag-not-started', result); return; }
+    if (!result.insideWindow) { reportNativeDragDecision('released-outside-window', result); return; }
+    const target = resolveNativeDragTarget(document.elementFromPoint(result.clientX, result.clientY));
     if (session.origin === 'version-tree') {
-      if (folderTarget || recursiveTarget) onNotice('版本树中按住 Ctrl 拖动只用于拖到资源管理器，不能移动到应用内文件夹');
+      if (target) onNotice('版本树中按住 Ctrl 拖动只用于拖到资源管理器，不能移动到应用内文件夹');
+      reportNativeDragDecision(target ? 'version-tree-internal-target-rejected' : 'version-tree-external-drag-ended', result, target ? 'release-hit-test' : 'none');
       return;
     }
-    if (!dragPaths.length) return;
-    const targetRelativePath = folderTarget?.dataset.entryPath ?? recursiveTarget?.relativePath;
-    if (targetRelativePath === undefined) return;
+    if (!dragPaths.length) { reportNativeDragDecision('empty-source-set', result); return; }
+    if (!target) { reportNativeDragDecision('no-internal-target', result); return; }
+    const targetRelativePath = target.relativePath;
     const movablePaths = internalMovePathsForTarget(dragPaths, targetRelativePath);
-    if (!movablePaths.length) return;
-    const targetName = folderTarget?.title || recursiveTarget?.label || targetRelativePath.split(/[\\/]/).pop() || '项目根目录';
-    void performDirectoryDrop(movablePaths, [], targetRelativePath, targetName);
+    if (!movablePaths.length) { reportNativeDragDecision('target-is-source-or-current-parent', result, 'release-hit-test'); return; }
+    reportNativeDragDecision('internal-move-accepted', result, 'release-hit-test');
+    void performDirectoryDrop(movablePaths, [], targetRelativePath, target.label);
   }), [activeFileEntries, onNotice, pageId, workspacePath, project.status, project.name, recursiveFlatOpen]);
   const handleSurfaceDragOver = (event: React.DragEvent<HTMLDivElement>) => {
     if (!hasExternalFiles(event)) return;

@@ -16,7 +16,7 @@ MEDIA_ACTIONS = (
     "media_workflow_import_commit",
 )
 PROGRESS_ACTIONS = (
-    "batch_list", "progress_list", "progress_snapshot", "progress_register", "progress_register_with_graph", "progress_component_manage",
+    "batch_list", "progress_list", "progress_snapshot", "progress_locations_snapshot", "progress_register", "progress_register_with_graph", "progress_component_manage",
     "progress_adopt_media", "progress_revert_external_adoptions", "progress_update_tree_begin", "progress_update_tree", "progress_update_tree_finish", "progress_folder_rename", "progress_external_link_route_rename", "progress_relation_update", "progress_legacy_selection_repair",
     "version_graph_edge_create", "version_graph_edge_list", "version_graph_edge_delete", "version_graph_edge_replace_source",
     "version_tree_layout_get", "version_tree_layout_save", "progress_policy_save", "progress_mark_stale",
@@ -34,7 +34,7 @@ TRACKING_ACTIONS = (
 # been reviewed for media-table access. This lets version layouts and progress
 # snapshots remain usable while the rebuildable media index is unavailable.
 VERSIONING_ONLY_ACTIONS = frozenset((
-    "batch_list", "progress_snapshot", "version_graph_edge_list",
+    "batch_list", "progress_snapshot", "progress_locations_snapshot", "version_graph_edge_list",
     "version_tree_layout_get", "version_tree_layout_save",
 ))
 UNDO_ACTIONS = ("undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable")

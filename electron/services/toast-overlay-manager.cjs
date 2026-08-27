@@ -39,6 +39,8 @@ class ToastOverlayManager {
     this.snapshotRevision = 0;
     this.snapshot = { html: '', dark: false, revision: this.snapshotRevision };
     this.layout = null;
+    this.nativeDragSuspendCount = 0;
+    this.parentListenersRegistered = false;
     this.onParentBoundsChanged = () => this.syncBounds();
     this.onMainRendererReload = () => { this.snapshot = { html: '', dark: false, revision: ++this.snapshotRevision }; this.layout = null; this.syncBounds(); this.sendSnapshot(); };
     this.onDisplayMetricsChanged = () => this.syncBounds();
@@ -89,7 +91,22 @@ class ToastOverlayManager {
     }
   }
 
+  suspendForNativeDrag() {
+    this.nativeDragSuspendCount += 1;
+    if (this.nativeDragSuspendCount !== 1) return;
+    const overlay = this.overlayWindow;
+    if (overlay && !overlay.isDestroyed()) overlay.destroy();
+  }
+
+  resumeAfterNativeDrag() {
+    this.nativeDragSuspendCount = Math.max(0, this.nativeDragSuspendCount - 1);
+    if (this.nativeDragSuspendCount !== 0) return;
+    if (!this.overlayWindow && this.mainWindow && !this.mainWindow.isDestroyed()) this.create();
+    else this.syncBounds();
+  }
+
   create() {
+    if (this.nativeDragSuspendCount > 0 || this.overlayWindow || !this.mainWindow || this.mainWindow.isDestroyed()) return;
     const overlay = new this.BrowserWindow({
       parent: this.mainWindow,
       frame: false,
@@ -116,12 +133,15 @@ class ToastOverlayManager {
     overlay.webContents.on('did-finish-load', () => { this.ready = true; this.layout = null; this.syncBounds(); this.sendSnapshot(); });
     overlay.webContents.on('render-process-gone', (_event, details) => { this.ready = false; this.layout = null; overlay.hide(); this.writeLog('error', 'Toast overlay renderer exited', { reason: details?.reason, exitCode: details?.exitCode }); if (!overlay.isDestroyed() && typeof overlay.reload === 'function') void overlay.reload(); });
     overlay.once('closed', () => { this.ready = false; this.layout = null; this.overlayWindow = null; });
-    for (const event of ['move', 'resize', 'maximize', 'unmaximize', 'minimize', 'restore', 'enter-full-screen', 'leave-full-screen']) this.mainWindow.on(event, this.onParentBoundsChanged);
-    this.mainWindow.on('show', this.onParentBoundsChanged);
-    this.mainWindow.on('hide', this.onParentBoundsChanged);
-    this.mainWindow.webContents.on('did-start-loading', this.onMainRendererReload);
-    this.mainWindow.webContents.on('render-process-gone', this.onMainRendererReload);
-    this.screen?.on?.('display-metrics-changed', this.onDisplayMetricsChanged);
+    if (!this.parentListenersRegistered) {
+      for (const event of ['move', 'resize', 'maximize', 'unmaximize', 'minimize', 'restore', 'enter-full-screen', 'leave-full-screen']) this.mainWindow.on(event, this.onParentBoundsChanged);
+      this.mainWindow.on('show', this.onParentBoundsChanged);
+      this.mainWindow.on('hide', this.onParentBoundsChanged);
+      this.mainWindow.webContents.on('did-start-loading', this.onMainRendererReload);
+      this.mainWindow.webContents.on('render-process-gone', this.onMainRendererReload);
+      this.screen?.on?.('display-metrics-changed', this.onDisplayMetricsChanged);
+      this.parentListenersRegistered = true;
+    }
     this.syncBounds();
     if (this.developmentRendererUrl) void overlay.loadURL(`${this.developmentRendererUrl.replace(/\/$/, '')}/toast-overlay.html`);
     else void overlay.loadFile(this.rendererFile);
@@ -140,7 +160,7 @@ class ToastOverlayManager {
       height: maxHeight,
     };
     const layout = this.layout;
-    if (!layout || !this.ready || !this.snapshot.html.trim() || !this.mainWindow.isVisible() || this.mainWindow.isMinimized()) {
+    if (this.nativeDragSuspendCount > 0 || !layout || !this.ready || !this.snapshot.html.trim() || !this.mainWindow.isVisible() || this.mainWindow.isMinimized()) {
       overlay.setBounds(measurementBounds, false);
       overlay.hide();
       return;
@@ -168,10 +188,13 @@ class ToastOverlayManager {
   }
 
   destroy() {
-    for (const event of ['move', 'resize', 'maximize', 'unmaximize', 'minimize', 'restore', 'enter-full-screen', 'leave-full-screen', 'show', 'hide']) this.mainWindow?.removeListener?.(event, this.onParentBoundsChanged);
-    this.mainWindow?.webContents?.removeListener?.('did-start-loading', this.onMainRendererReload);
-    this.mainWindow?.webContents?.removeListener?.('render-process-gone', this.onMainRendererReload);
-    this.screen?.removeListener?.('display-metrics-changed', this.onDisplayMetricsChanged);
+    if (this.parentListenersRegistered) {
+      for (const event of ['move', 'resize', 'maximize', 'unmaximize', 'minimize', 'restore', 'enter-full-screen', 'leave-full-screen', 'show', 'hide']) this.mainWindow?.removeListener?.(event, this.onParentBoundsChanged);
+      this.mainWindow?.webContents?.removeListener?.('did-start-loading', this.onMainRendererReload);
+      this.mainWindow?.webContents?.removeListener?.('render-process-gone', this.onMainRendererReload);
+      this.screen?.removeListener?.('display-metrics-changed', this.onDisplayMetricsChanged);
+      this.parentListenersRegistered = false;
+    }
     this.ipcMain.removeHandler('toast-overlay:update');
     this.ipcMain.removeHandler('toast-overlay:layout');
     this.ipcMain.removeAllListeners('toast-overlay:pointer-interactive');

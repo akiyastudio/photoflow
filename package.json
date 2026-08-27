@@ -49,7 +49,7 @@
     "test:media-rating": "node scripts/test-media-rating-service.cjs",
     "test:deleted-project-cleanup": "node scripts/test-deleted-project-cleanup.cjs",
     "test:data-maintenance": ".venv\\Scripts\\python.exe scripts\\test-data-maintenance.py",
-    "test:database-migrations": ".venv\\Scripts\\python.exe scripts\\test-workspace-db-migrations.py && .venv\\Scripts\\python.exe scripts\\test-thumbnail-legacy-migration-scale.py",
+    "test:database-migrations": ".venv\\Scripts\\python.exe scripts\\test-workspace-db-migrations.py && .venv\\Scripts\\python.exe scripts\\test-progress-locations-domain-routing.py && .venv\\Scripts\\python.exe scripts\\test-thumbnail-legacy-migration-scale.py",
     "test:database-locking": ".venv\\Scripts\\python.exe scripts\\test-database-locking.py && node scripts/test-workspace-sqlite-coordinator.cjs && node scripts/test-database-client-lock-retry.cjs && node scripts/test-database-client-timeout-lease.cjs && node scripts/test-workspace-maintenance-retry.cjs && node scripts/test-media-sync-batching.cjs",
     "test:architecture": "node scripts/test-architecture.cjs && node scripts/test-toast-architecture.cjs && node scripts/test-user-facing-notice-model.cjs",
     "test:domain-contracts": "node scripts/test-domain-contracts.cjs",

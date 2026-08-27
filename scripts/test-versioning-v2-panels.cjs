@@ -24,6 +24,15 @@ class TestNode extends TestEventTarget {
   setPointerCapture(pointerId) { this.capturedPointers.add(pointerId); }
   hasPointerCapture(pointerId) { return this.capturedPointers.has(pointerId); }
   releasePointerCapture(pointerId) { this.capturedPointers.delete(pointerId); }
+  querySelectorAll(selector) {
+    const matches = [];
+    const visit = node => {
+      if (selector === '[data-version-tree-node="true"]' && node.attributes?.get('data-version-tree-node') === 'true') matches.push(node);
+      node.childNodes?.forEach(visit);
+    };
+    this.childNodes.forEach(visit);
+    return matches;
+  }
   closest(selector) {
     let cursor = this;
     while (cursor) {
@@ -746,15 +755,19 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(entryOpenClicks, 1, 'movement below the threshold must preserve the entry click');
   const savesBeforeNativeFileDrag = layoutRequests.saves.length;
   await React.act(async () => {
+    dispatch(testWindow, 'keydown', { key: 'Control', ctrlKey: true, target: testDocument.body });
+  });
+  assert.strictEqual(rawCanvasNode.attributes.get('draggable'), 'true', 'holding Ctrl must arm native draggable before pointerdown so the browser can create a real drag gesture');
+  await React.act(async () => {
     dispatch(rawCanvasNode, 'pointerdown', { pointerId: 91, button: 0, ctrlKey: true, clientX: 100, clientY: 100 });
     dispatch(rawCanvasNode, 'pointermove', { pointerId: 91, button: 0, ctrlKey: true, clientX: 700, clientY: 600 });
     dispatch(rawCanvasNode, 'dragstart', { ctrlKey: true });
-    assert.strictEqual(rawCanvasNode.draggable, false, 'a cancelled HTML drag must immediately return the node to canvas-drag mode');
     dispatch(rawCanvasNode, 'dragend', { ctrlKey: true });
+    dispatch(testWindow, 'keyup', { key: 'Control', ctrlKey: false, target: testDocument.body });
   });
   assert.deepStrictEqual(nativeFileDragRequests, ['RAW'], 'Ctrl-dragging a version-tree folder must start the native file drag');
   assert.strictEqual(layoutRequests.saves.length, savesBeforeNativeFileDrag, 'Ctrl-dragging a folder must not move or save its version-tree position');
-  assert.strictEqual(rawCanvasNode.draggable, false, 'the node must return to canvas-drag mode after the native file drag ends');
+  assert.strictEqual(rawCanvasNode.attributes.get('draggable'), 'false', 'releasing Ctrl must return the node to canvas-layout mode after native drag');
   await React.act(async () => {
     dispatch(rawCanvasNode, 'pointerdown', { pointerId: 42, button: 0, clientX: 100, clientY: 100 });
     dispatch(rawCanvasNode, 'pointermove', { pointerId: 42, button: 0, clientX: 700, clientY: 600 });

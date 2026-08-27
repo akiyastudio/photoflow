@@ -81,6 +81,10 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   const [zoom, setZoom] = useState(1);
   const [selectedNodeKey, setSelectedNodeKey] = useState('');
   const [blankOutputSourceId, setBlankOutputSourceId] = useState('');
+  const [nativeDragArmed, setNativeDragArmed] = useState(false);
+  const nativeDragScopeRef = useRef<HTMLDivElement>(null);
+  const onStartFileDragRef = useRef(onStartFileDrag);
+  onStartFileDragRef.current = onStartFileDrag;
   useHostSurfaceSuspension(active && Boolean(relationChoice || blankOutputSourceId));
   const [viewportBounds, setViewportBounds] = useState({ left: 0, top: 0, width: 1600, height: 1000 });
   const [areaBandSizes, setAreaBandSizes] = useState<Partial<Record<VersionTreeAreaKind, VersionTreeAreaSize>>>({});
@@ -95,6 +99,32 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   const activePortRef = useRef<{ element: Element; pointerId: number; childId: string } | null>(null);
   const createVersionPortRef = useRef<{ element: Element; pointerId: number; sourceId: string } | null>(null);
   const reconnectEdgeRef = useRef<Pick<VersionGraphEdge, 'id' | 'sourceProgressId' | 'targetProgressId' | 'edgeKind'> | null>(null);
+  useEffect(() => {
+    const setNativeDragArm = (armed: boolean) => {
+      // Update the DOM in the keyboard event itself. Waiting for React to
+      // commit can let Chromium classify the following pointer gesture while
+      // draggable is still false.
+      nativeDragScopeRef.current?.querySelectorAll<HTMLElement>('[data-version-tree-node="true"]').forEach(node => {
+        node.draggable = armed && Boolean(onStartFileDragRef.current);
+        if (armed) node.dataset.nativeDragArmed = 'true';
+        else delete node.dataset.nativeDragArmed;
+      });
+      setNativeDragArmed(armed);
+    };
+    const updateNativeDragArm = (event: KeyboardEvent) => {
+      if (event.key !== 'Control' && event.key !== 'Meta') return;
+      setNativeDragArm(event.type === 'keydown');
+    };
+    const disarmNativeDrag = () => setNativeDragArm(false);
+    window.addEventListener('keydown', updateNativeDragArm, true);
+    window.addEventListener('keyup', updateNativeDragArm, true);
+    window.addEventListener('blur', disarmNativeDrag);
+    return () => {
+      window.removeEventListener('keydown', updateNativeDragArm, true);
+      window.removeEventListener('keyup', updateNativeDragArm, true);
+      window.removeEventListener('blur', disarmNativeDrag);
+    };
+  }, []);
   useEffect(() => {
     if (pendingChildId || !activePortRef.current) return;
     const activePort = activePortRef.current;
@@ -618,7 +648,7 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   };
   const hasGraphItems = layout.positioned.length > 0;
   const renderedItems = layout.positioned.filter(item => item.folder || item.x + nodeWidth >= viewportBounds.left - 500 && item.x <= viewportBounds.left + viewportBounds.width + 500 && item.y + nodeHeight >= viewportBounds.top - 500 && item.y <= viewportBounds.top + viewportBounds.height + 500);
-  return <div className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col">
+  return <div ref={nativeDragScopeRef} className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col">
     {graph.cycleNodeIds.length > 0 && <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">版本关系需要修复：{graph.cycleNodeIds.join('、')}</div>}
     {relationChoice && <div role="dialog" aria-modal="true" aria-label="选择关系类型" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><section className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">选择关系类型</h3><p className="mt-1 text-xs text-slate-500">两端节点支持多种合法关系，请明确选择本次连线语义。</p><div className="mt-4 grid gap-2">{relationChoice.kinds.map(kind => <button key={kind} type="button" onClick={() => submitNewRelation(relationChoice.sourceId, relationChoice.targetId, kind)} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm hover:border-blue-400 hover:bg-blue-50">{versionTreeRelationLabel(kind)}</button>)}</div><button type="button" onClick={() => { setRelationChoice(null); onCancelRelationEdit?.(); }} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
     {blankOutputSourceId && <div role="dialog" aria-modal="true" aria-label="从输出端创建节点" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/40 p-4"><section className="w-full max-w-xs rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">从 V{visibleFolderById.get(blankOutputSourceId)?.versionKey} 创建</h3><p className="mt-1 text-xs text-slate-500">输出线放到空白处时，可直接新建兼容节点。</p><div className="mt-4 grid gap-2"><button type="button" onClick={() => { const source = visibleFolderById.get(blankOutputSourceId); setBlankOutputSourceId(''); if (source) onRequestCreateEmptyVersion?.(source, false); }} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-left text-sm font-semibold text-blue-700">新建下一版本</button><button type="button" onClick={() => { const source = visibleFolderById.get(blankOutputSourceId); setBlankOutputSourceId(''); if (source) onRequestCreateEmptyVersion?.(source, true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm text-slate-700">新建可跟踪版本分支</button></div><button type="button" onClick={() => setBlankOutputSourceId('')} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
@@ -656,11 +686,10 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
               : candidateHovered
                 ? 'bg-emerald-500'
                 : 'bg-blue-600';
-        return <div key={versionTreeReactKey(item)} {...nodeHandlers} draggable={false} data-version-tree-node="true" data-version-progress-id={item.folder?.id} data-version-output-target-key={createVersionTarget || item.folder && item.folder.nodeRole !== 'broll' ? item.key : undefined} onPointerDownCapture={event => {
+        return <div key={versionTreeReactKey(item)} {...nodeHandlers} draggable={nativeDragArmed && Boolean(onStartFileDrag)} data-version-tree-node="true" data-native-drag-armed={nativeDragArmed ? 'true' : undefined} data-version-progress-id={item.folder?.id} data-version-output-target-key={createVersionTarget || item.folder && item.folder.nodeRole !== 'broll' ? item.key : undefined} onPointerDownCapture={event => {
           setSelectedNodeKey(item.key);
           if (event.button !== 0 || !(event.ctrlKey || event.metaKey) || !onStartFileDrag || (event.target as Element).closest('button,input,select,textarea,[data-version-tree-port]')) return;
           nativeFileDragRef.current = { nodeKey: item.key, pointerId: event.pointerId };
-          event.currentTarget.draggable = true;
           // Ctrl-drag belongs to the OS file-drag path. Do not let the canvas
           // node handler claim this pointer and persist a new layout position.
           event.stopPropagation();
@@ -668,12 +697,10 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
           const nativeDrag = nativeFileDragRef.current;
           if (!nativeDrag || nativeDrag.nodeKey !== item.key || nativeDrag.pointerId !== event.pointerId) return;
           nativeFileDragRef.current = null;
-          event.currentTarget.draggable = false;
         }} onPointerCancelCapture={event => {
           const nativeDrag = nativeFileDragRef.current;
           if (!nativeDrag || nativeDrag.nodeKey !== item.key || nativeDrag.pointerId !== event.pointerId) return;
           nativeFileDragRef.current = null;
-          event.currentTarget.draggable = false;
         }} onDragStart={event => {
           const nativeDrag = nativeFileDragRef.current;
           if (!nativeDrag || nativeDrag.nodeKey !== item.key || !onStartFileDrag) { event.preventDefault(); return; }
@@ -683,11 +710,9 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
             // Electron owns the drag after startProjectFileDrag is sent and a
             // cancelled HTML drag is not guaranteed to emit dragend.
             nativeFileDragRef.current = null;
-            event.currentTarget.draggable = false;
           }
-        }} onDragEnd={event => {
+        }} onDragEnd={() => {
           nativeFileDragRef.current = null;
-          event.currentTarget.draggable = false;
         }} onFocusCapture={() => setSelectedNodeKey(item.key)} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} className={`group/version-node absolute z-20 cursor-grab rounded-xl active:cursor-grabbing ${createVersionTargetKey === item.key ? 'ring-2 ring-emerald-400 ring-offset-2' : ''}`} data-node-role={item.folder?.nodeRole} data-tracking-label={item.folder ? trackingStateLabel(item.folder) : undefined} style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight, touchAction: 'none' }}>
         {renderEntry(item.entry, item.folder, item.sourceKind)}
         {item.folder && <>

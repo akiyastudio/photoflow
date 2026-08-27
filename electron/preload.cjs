@@ -298,6 +298,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   getMediaOriginal: (filePath, kind, cacheConfig) => ipcRenderer.invoke('media-original', filePath, kind, cacheConfig),
   getMediaMetadata: (filePath) => ipcRenderer.invoke('media-metadata', filePath),
   reportRendererError: (message, details) => ipcRenderer.send('renderer-error-log', message, details),
+  reportRendererInfo: (message, details) => ipcRenderer.send('renderer-info-log', message, details),
   trackTelemetry: (eventName, properties) => ipcRenderer.send('telemetry-track', eventName, properties),
   onAppError: (callback) => { const subscription = (_event, message) => callback(message); ipcRenderer.on('app-error', subscription); return () => ipcRenderer.removeListener('app-error', subscription); },
   onComponentNotification: (callback) => {

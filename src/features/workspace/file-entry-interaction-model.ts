@@ -37,12 +37,25 @@ export const fileEntryPointerModifiers = ({
   pointerType,
 });
 
-/** A successful dragstart selects only an unselected entry; selected drags retain their group. */
+/** Native dragging never creates a persistent selection; selected drags retain their group. */
 export const fileEntrySelectionAfterDragStart = (
   selectedPaths: readonly string[],
+  _entryPath: string,
+  _dragPaths: readonly string[],
+) => [...selectedPaths];
+
+/** Selected native drags retain order while excluding entries that cannot be exported. */
+export const fileEntryDragPaths = (
   entryPath: string,
-  dragPaths: readonly string[],
-) => dragPaths.length > 0 && !selectedPaths.includes(entryPath) ? [entryPath] : [...selectedPaths];
+  selectedPaths: readonly string[],
+  isUnsupportedPath: (path: string) => boolean,
+) => {
+  const requestedPaths = selectedPaths.includes(entryPath) ? [...selectedPaths] : [entryPath];
+  return {
+    requestedPaths,
+    dragPaths: requestedPaths.filter(path => !isUnsupportedPath(path)),
+  };
+};
 
 export const fileEntryClickIntent = ({
   openMode,

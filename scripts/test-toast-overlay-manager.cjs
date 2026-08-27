@@ -173,10 +173,26 @@ assert.equal(TOAST_OVERLAY_MAX_WIDTH - 64, 480, '32px horizontal gutters preserv
 assert(/\.top-toast-stack\s*\{[\s\S]*?max-height:max\(1rem,min\(28rem,calc\(100vh - 10\.75rem\)\)\);[\s\S]*?overflow-y:auto;/.test(styles), 'host stack keeps the original 448 DIP cap and internal vertical scrolling');
 assert(/\.top-toast-stack--overlay\s*\{[\s\S]*?width:calc\(100% - 4rem\);[\s\S]*?max-height:calc\(100vh - 4rem\);[\s\S]*?margin:2rem auto;/.test(styles), 'overlay stack reserves 32 DIP gutters while scrolling inside the capped native window');
 assert(renderer.includes("closest('[data-top-toast-id]')") && renderer.includes('setPointerInteractive(next)'), 'scrolling over toast cards keeps the narrow overlay pointer-interactive');
-assert(!filesIpc.includes('suspendForNativeDrag'), 'the structurally narrow overlay must not be suspended during native file drags');
+assert(filesIpc.includes('suspendToastOverlayForNativeDrag?.()') && filesIpc.includes('resumeToastOverlayAfterNativeDrag?.()'), 'native file dragging hides the separate overlay HWND only around the blocking OLE call');
+
+update({ sender: mainContents }, { html: '<div data-top-toast-id="notice:resume">resume</div>', dark: false });
+manager.suspendForNativeDrag(); manager.suspendForNativeDrag();
+assert.equal(overlay.destroyed, true, 'native drag suspension destroys the separate overlay HWND instead of merely hiding it');
+assert.equal(manager.overlayWindow, null);
+manager.resumeAfterNativeDrag();
+assert.equal(manager.overlayWindow, null, 'nested native drag suspension does not rebuild before the final resume');
+manager.resumeAfterNativeDrag();
+const rebuiltOverlay = FakeWindow.last;
+assert.notStrictEqual(rebuiltOverlay, overlay, 'the final resume creates a fresh HWND after the native drag completes');
+assert.equal(parent.listenerCount('move'), 1, 'rebuilding the HWND does not duplicate parent lifecycle listeners');
+rebuiltOverlay.webContents.emit('did-finish-load');
+assert.equal(rebuiltOverlay.webContents.sent.at(-1)[1].html.includes('notice:resume'), true, 'the rebuilt overlay receives the current notification snapshot');
+reportLayout({ sender: rebuiltOverlay.webContents }, { visible: true, revision: manager.snapshot.revision, x: 0, y: 0, width: 320, height: 80, viewportWidth: 400, viewportHeight: 192 });
+assert.equal(rebuiltOverlay.visible, true, 'the rebuilt overlay becomes visible after reporting its restored layout');
 
 manager.destroy();
 assert.equal(overlay.destroyed, true);
+assert.equal(rebuiltOverlay.destroyed, true);
 assert.equal(handlers.size, 0);
 assert.equal(listeners.size, 0);
 assert.equal(screen.listenerCount('display-metrics-changed'), 0, 'destroy removes display listeners idempotently');
