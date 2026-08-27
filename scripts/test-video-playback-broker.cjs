@@ -22,7 +22,7 @@ const run = async () => {
         list: () => [{
           id: 'fixture-player', name: 'Fixture Player', installed: true, compatible: true,
           manifest: { runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 1, backendId: 'decoder', transport: 'native-process-v1', priority: 80, probe: { extensions: ['.mp4', '.mov'] } }] },
-        }],
+        }, { id: 'undeclared-runtime', name: 'Old Runtime', installed: true, compatible: true, manifest: {} }],
         resolveRunConfigAsync: async () => ({ command: 'fixture.exe', args: [] }),
       },
       spawn() {}, writeLog() {},
@@ -33,6 +33,7 @@ const run = async () => {
     const discovered = await handlers.get('video-playback-backends')({}, sourcePath, 'maybe');
     assert.equal(discovered.success, true);
     assert.deepEqual(discovered.backends.map(item => item.backendId), ['fixture-player:decoder', 'core.chromium'], 'manifest probe must participate in backend ordering');
+    assert.equal(discovered.backends.some(item => item.backendId.includes('undeclared-runtime')), false, 'an undeclared historical runtime must not be promoted into the v1 protocol');
     assert.equal(discovered.backends[0].probe.basis, 'manifest-container-probe');
     assert.throws(() => parseMediaPlaybackBackendContributions({ runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 99, backendId: 'bad', transport: 'native-process-v1', priority: 0, probe: { extensions: ['.mp4'] } }] }), /Unsupported/);
 

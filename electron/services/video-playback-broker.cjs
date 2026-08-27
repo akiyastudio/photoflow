@@ -1,14 +1,5 @@
 const { parseMediaPlaybackBackendContributions } = require('../contracts/media-playback-backend-contract.cjs');
 
-// Compatibility is deliberately contained here. Published runtime-only
-// packages before media.playbackBackend@v1 did not carry runtimeContributions.
-const LEGACY_BACKEND_COMPONENT_ID = 'video-playback-mpv';
-const LEGACY_BACKEND = Object.freeze({
-  type: 'media.playbackBackend', protocolVersion: 1, backendId: 'advanced-video',
-  transport: 'native-process-v1', priority: 80,
-  probe: Object.freeze({ extensions: Object.freeze(['.avi', '.m4v', '.mkv', '.mov', '.mp4', '.mpeg', '.mpg', '.mts', '.m2ts', '.webm']) }),
-});
-
 const supportRank = Object.freeze({ probably: 3, maybe: 2, unknown: 1, unsupported: 0 });
 const normalizeBrowserProbe = value => ['probably', 'maybe', 'unsupported'].includes(value) ? value : 'unknown';
 
@@ -17,7 +8,6 @@ const createVideoPlaybackBroker = ({ pluginService, path }) => {
     if (!component?.installed || !component.compatible) return [];
     let declared = [];
     try { declared = parseMediaPlaybackBackendContributions(component.manifest); } catch { return []; }
-    if (!declared.length && component.id === LEGACY_BACKEND_COMPONENT_ID) declared = [LEGACY_BACKEND];
     return declared.map(contribution => ({ component, contribution, backendId: `${component.id}:${contribution.backendId}` }));
   });
 

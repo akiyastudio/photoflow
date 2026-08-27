@@ -106,10 +106,12 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   position, pause, audio, rate and stable subtitle selection before resuming.
   Native surfaces report raw pointer/key activity and track facts; product input
   and subtitle-default policy are interpreted by the application. The current
-  Electron `video-player-*` IPC names, `advanced-video-*` aliases, and the broker's
-  mapping for packages published before `media.playbackBackend@v1` are compatibility
-  adapters. Removal plan: retire those aliases and the legacy manifest mapping
-  after all supported installed renderers/packages cross the compatibility window.
+  Electron `video-player-*` IPC names and `advanced-video-*` aliases are compatibility
+  adapters around the generic broker. Packages without an explicit
+  `media.playbackBackend@v1` declaration are not treated as playback backends,
+  because their input/default-policy behavior cannot satisfy the v1 ownership
+  contract. Removal plan: retire the IPC aliases after all supported installed
+  renderers cross the compatibility window.
   New renderer/domain code must depend only on generic descriptors and sessions.
 
 ## Stable contracts

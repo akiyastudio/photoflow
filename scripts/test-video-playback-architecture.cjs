@@ -18,7 +18,7 @@ for (const source of [rendererSession, player, nativeService]) {
 assert(rendererSession.includes('VideoPlaybackBackendDescriptor') && rendererSession.includes('backendId: PlaybackBackendId') && rendererSession.includes('discoverPlaybackBackends'), 'renderer sessions must consume generic discovered descriptors');
 assert(!rendererSession.includes("'chromium' | 'component'") && !player.includes('new ComponentPlaybackBackend'), 'renderer backend types must not be a fixed legacy pair');
 assert(nativeService.includes('playbackBroker.resolveRunConfigAsync') && !nativeService.includes('COMPONENT_ID'), 'native session service must resolve opaque backend ids through the broker');
-assert(broker.includes('LEGACY_BACKEND_COMPONENT_ID'), 'legacy package identity may exist only inside the Electron compatibility broker');
+assert(!broker.includes('video-playback-mpv') && broker.includes('parseMediaPlaybackBackendContributions'), 'the broker must require a declared contribution instead of manufacturing a fixed legacy backend');
 assert(manifest.runtimeContributions.some(item => item.type === 'media.playbackBackend' && item.protocolVersion === 1 && item.transport === 'native-process-v1'), 'runtime-only video component must declare media.playbackBackend@v1');
 assert(!decoder.includes('TogglePause') && !decoder.includes('HandleArrowKeyInput') && !decoder.includes('arrowKeysNavigate') && !decoder.includes('set-keyboard-mode'), 'native surfaces must not interpret click or arrow-key product semantics');
 assert(decoder.includes('{ "type", "input" }') && decoder.includes('"pointer-button"') && decoder.includes('"ArrowLeft"') && decoder.includes('"Escape"'), 'native surfaces must forward generic raw input');
