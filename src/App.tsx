@@ -27,6 +27,7 @@ import { normalizeSavedSdDeviceRecords } from './features/tools/sd-startup-impor
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
 import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
 import type { AppConfig, AppUpdateInfo, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentSettingsPageContribution, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
+import { normalizeVideoShortcutBindings } from './contracts/video-shortcuts';
 import { ColumnResizeHandle } from './features/app/AppShellLayout';
 import { clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
 import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, IMAGE_SELECTION_FOLDER_NAME, VIDEO_SELECTION_FOLDER_NAME, isMac, localDateKey, normalizeHomeOrder, normalizeMediaCacheSize, normalizeProjectCategories, normalizeProjectToolbar, normalizeVideoPreviewQuality } from './features/app/app-config';
@@ -338,6 +339,7 @@ const App: React.FC = () => {
               subtitleSize: normalizeSubtitleFontSize(fileConfig.videoPlayback?.subtitleSize),
               subtitleStyle: fileConfig.videoPlayback?.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard',
               hdrMode: ['sdr', 'hdr-passthrough', 'tone-map'].includes(String(fileConfig.videoPlayback?.hdrMode)) ? fileConfig.videoPlayback!.hdrMode : 'auto',
+              shortcuts: normalizeVideoShortcutBindings(fileConfig.videoPlayback?.shortcuts),
             };
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;

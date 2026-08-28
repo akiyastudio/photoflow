@@ -570,7 +570,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     { "input", new Dictionary<string, object> {
                         { "kind", "pointer-button" },
                         { "button", eventArgs.Button == MouseButtons.Left ? "left" : "right" },
-                        { "x", eventArgs.X }, { "y", eventArgs.Y }
+                        { "x", eventArgs.X }, { "y", eventArgs.Y }, { "clickCount", eventArgs.Clicks },
+                        { "ctrl", (Control.ModifierKeys & Keys.Control) != 0 }, { "alt", (Control.ModifierKeys & Keys.Alt) != 0 }, { "shift", (Control.ModifierKeys & Keys.Shift) != 0 }, { "meta", false }
                     } }
                 });
         }
@@ -609,16 +610,29 @@ namespace PhotoFlow.AdvancedVideoDecoder
         protected override bool ProcessCmdKey(ref Message message, Keys keyData)
         {
             Keys key = keyData & Keys.KeyCode;
-            if (key == Keys.Escape || key == Keys.Left || key == Keys.Right)
-            {
-                string rawKey = key == Keys.Escape ? "Escape" : key == Keys.Left ? "ArrowLeft" : "ArrowRight";
+            if ((key == Keys.F4 && (keyData & Keys.Alt) != 0) || key == Keys.LWin || key == Keys.RWin) return base.ProcessCmdKey(ref message, keyData);
+            string code = DomCode(key);
+            if (!string.IsNullOrEmpty(code)) {
+                string rawKey = key == Keys.Space ? " " : key == Keys.Escape ? "Escape" : key.ToString();
                 Emit(new Dictionary<string, object> {
                     { "type", "input" },
-                    { "input", new Dictionary<string, object> { { "kind", "key" }, { "key", rawKey } } }
+                    { "input", new Dictionary<string, object> { { "kind", "key" }, { "key", rawKey }, { "code", code },
+                        { "ctrl", (keyData & Keys.Control) != 0 }, { "alt", (keyData & Keys.Alt) != 0 }, { "shift", (keyData & Keys.Shift) != 0 }, { "meta", false },
+                        { "repeat", (message.LParam.ToInt64() & (1L << 30)) != 0 } } }
                 });
                 return true;
             }
             return base.ProcessCmdKey(ref message, keyData);
+        }
+
+        private static string DomCode(Keys key)
+        {
+            if (key >= Keys.A && key <= Keys.Z) return "Key" + key.ToString();
+            if (key >= Keys.D0 && key <= Keys.D9) return "Digit" + ((int)key - (int)Keys.D0).ToString(CultureInfo.InvariantCulture);
+            if (key == Keys.Left) return "ArrowLeft"; if (key == Keys.Right) return "ArrowRight"; if (key == Keys.Up) return "ArrowUp"; if (key == Keys.Down) return "ArrowDown";
+            if (key == Keys.Space) return "Space"; if (key == Keys.Escape) return "Escape"; if (key == Keys.PageUp) return "PageUp"; if (key == Keys.PageDown) return "PageDown";
+            if (key == Keys.Oemcomma) return "Comma"; if (key == Keys.OemPeriod) return "Period"; if (key == Keys.OemOpenBrackets) return "BracketLeft"; if (key == Keys.OemCloseBrackets) return "BracketRight"; if (key == Keys.OemPipe) return "Backslash";
+            return string.Empty;
         }
 
         private void ApplyHdrMode(LibMpv target)

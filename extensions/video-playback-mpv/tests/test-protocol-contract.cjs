@@ -3,6 +3,8 @@ const source = fs.readFileSync(path.join(__dirname, '..', 'AdvancedVideoDecoder.
 assert(source.includes('media-playback-backend-v1') && source.includes('protocolVersion') && source.includes('commandSequence') && source.includes('eventSequence'));
 assert(source.includes('"media.open"') && source.includes('"playback.seek"') && source.includes('"capture.stage"'));
 assert(source.includes('OnMouseClick') && source.includes('"pointer-button"') && !source.includes('TogglePause'));
+for(const field of ['"code"','"key"','"ctrl"','"alt"','"shift"','"meta"','"repeat"','"clickCount"'])assert(source.includes(field),`raw input must include ${field}`);
+assert(source.includes('key == Keys.F4')&&source.includes('return base.ProcessCmdKey'), 'system-reserved keys must stay with Windows');
 assert(source.includes('SetOption("sub-auto", "no")') && source.includes('SubtitleTracks'));
 for(const extension of ['.srt','.ass','.ssa','.vtt'])assert(source.includes(`extension == "${extension}"`));
 for(const command of ['subtitle-select','subtitle-visible','subtitle-delay','subtitle-style','subtitle-add'])assert(source.includes(`name == "${command}"`));

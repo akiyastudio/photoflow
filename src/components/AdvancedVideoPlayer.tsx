@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- directional input helpers are intentionally colocated with the player contract */
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import { Camera, Captions, Gauge, Info, Loader2, Pause, Play, Plus, Settings2, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
 import type { VideoPlaybackBackendDescriptor, VideoPlayerState, VideoPlaybackSettings, VideoSubtitleTrack } from '../types';
@@ -10,6 +10,8 @@ import { discoverPlaybackBackends, startPlaybackSession } from '../platform/vide
 import type { PlaybackSession } from '../platform/video-playback/playback-session';
 import { DEFAULT_VIDEO_TRANSFORM, hdrModeAvailability, playbackCapabilityPresentation } from '../contracts/video-playback';
 import type { VideoTransform } from '../contracts/video-playback';
+import { bindingsForArrowMode, normalizeVideoShortcutBindings, resolveVideoShortcut, shortcutInputFromKeyboardEvent } from '../contracts/video-shortcuts';
+import type { VideoActionId } from '../contracts/video-shortcuts';
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -25,7 +27,7 @@ const formatTime = (seconds: number) => {
 const PLAYBACK_SPEEDS = [0.5, 1, 1.25, 1.5, 2, 3, 4];
 const SKIP_SECONDS = 5;
 const SUBTITLE_FONT_SIZE_PRESETS = [{ label: '小', value: 20 }, { label: '中', value: 30 }, { label: '大', value: 40 }] as const;
-const DEFAULT_VIDEO_SETTINGS: VideoPlaybackSettings = { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: ['zh', 'chi', 'zho'], subtitleSize: DEFAULT_SUBTITLE_FONT_SIZE, subtitleStyle: 'standard', hdrMode: 'auto' };
+const DEFAULT_VIDEO_SETTINGS: VideoPlaybackSettings = { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: ['zh', 'chi', 'zho'], subtitleSize: DEFAULT_SUBTITLE_FONT_SIZE, subtitleStyle: 'standard', hdrMode: 'auto', shortcuts: {} };
 const createPlaybackToken = () => globalThis.crypto?.randomUUID?.() || `video_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 
 type VideoDirectionalInputGroup = 'arrows' | 'forward-back';
@@ -54,6 +56,7 @@ type VideoPlayerProps = {
   controlsVisible?: boolean;
   controlsOverlay?: boolean;
   onEscape?: () => void;
+  onToggleFullscreen?: () => void;
   bottomControls?: ReactNode;
   editorSeekRequest?: { id: number; time: number; pause?: boolean };
   onPlaybackState?: (state: { time: number; duration: number; paused: boolean }) => void;
@@ -74,7 +77,7 @@ const initialState = (): VideoPlayerState => ({
   duration: 0,
 });
 
-const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onContextMenuAt, onPointerActivity, topRightOverlayHole = 0, controlsVisible = true, controlsOverlay = false, onEscape, bottomControls, editorSeekRequest, onPlaybackState, keyboardSettings = DEFAULT_VIDEO_SETTINGS }: VideoPlayerProps) => {
+const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onContextMenuAt, onPointerActivity, topRightOverlayHole = 0, controlsVisible = true, controlsOverlay = false, onEscape, onToggleFullscreen, bottomControls, editorSeekRequest, onPlaybackState, keyboardSettings = DEFAULT_VIDEO_SETTINGS }: VideoPlayerProps) => {
   const { suspended: hostSurfaceSuspended } = useHostSurfaceState();
   const navigate = onNavigate || (() => undefined);
   const showNavigation = Boolean(onNavigate);
@@ -94,6 +97,8 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const onContextMenuAtRef = useRef(onContextMenuAt);
   const onPointerActivityRef = useRef(onPointerActivity);
   const onEscapeRef = useRef(onEscape);
+  const onToggleFullscreenRef = useRef(onToggleFullscreen);
+  const shortcutActionRef = useRef<(action: VideoActionId) => void>(() => undefined);
   const onPlaybackStateRef = useRef(onPlaybackState);
   const playbackPositionRef = useRef({ time: 0, duration: 0, paused: true });
   const nativeContextMenuOpenRef = useRef(false);
@@ -103,6 +108,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   onContextMenuAtRef.current = onContextMenuAt;
   onPointerActivityRef.current = onPointerActivity;
   onEscapeRef.current = onEscape;
+  onToggleFullscreenRef.current = onToggleFullscreen;
   onPlaybackStateRef.current = onPlaybackState;
   const [sessionId, setSessionId] = useState('');
   const [starting, setStarting] = useState(true);
@@ -117,6 +123,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const subtitleMemoryRestoredRef = useRef(false);
   const rememberAddedSubtitleRef = useRef(false);
   const [state, setState] = useState<VideoPlayerState>(initialState);
+  const shortcutBindings = useMemo(() => bindingsForArrowMode(normalizeVideoShortcutBindings(keyboardSettings.shortcuts), keyboardSettings.arrowKeyAction), [keyboardSettings.arrowKeyAction, keyboardSettings.shortcuts]);
 
   useEffect(() => setSubtitleFontSize(normalizeSubtitleFontSize(keyboardSettings.subtitleSize)), [keyboardSettings.subtitleSize]);
 
@@ -146,10 +153,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         const input = update.input;
         if (input.kind === 'pointer-move') onPointerActivityRef.current?.();
         else if (input.kind === 'pointer-button' && input.button === 'left') {
-          const position = playbackPositionRef.current;
-          const action = position.paused ? 'play' : 'pause';
-          position.paused = action !== 'play';
-          sessionRef.current?.control({ action });
+          shortcutActionRef.current('video.playPause');
         } else if (input.kind === 'pointer-button' && input.button === 'right') {
           if (!onContextMenuAtRef.current) return;
           const rect = surfaceRef.current?.getBoundingClientRect();
@@ -158,16 +162,9 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
             sessionRef.current?.setBounds({ x: 0, y: 0, width: 0, height: 0, visible: false });
             onContextMenuAtRef.current(rect.left + Number(input.x || 0), rect.top + Number(input.y || 0));
           }
-        } else if (input.kind === 'key' && input.key === 'Escape') onEscapeRef.current?.();
-        else if (input.kind === 'key' && (input.key === 'ArrowLeft' || input.key === 'ArrowRight')) {
-          const direction = input.key === 'ArrowLeft' ? -1 : 1;
-          if (videoDirectionalAction(keyboardSettings.arrowKeyAction, 'arrows') === 'navigate') onNavigateRef.current(direction);
-          else {
-            const position = playbackPositionRef.current;
-            const nextTime = Math.max(0, Math.min(position.duration || Number.MAX_SAFE_INTEGER, position.time + direction * SKIP_SECONDS));
-            position.time = nextTime;
-            sessionRef.current?.control({ action: 'seek', value: nextTime });
-          }
+        } else if (input.kind === 'key') {
+          const action = resolveVideoShortcut({ key: input.key || '', code: input.code || input.key || '', ctrl: input.ctrl === true, alt: input.alt === true, shift: input.shift === true, meta: input.meta === true, repeat: input.repeat === true }, shortcutBindings, { scope: showNavigation ? 'media' : 'video' });
+          if (action) shortcutActionRef.current(action);
         }
         return;
       }
@@ -247,7 +244,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       sessionRef.current = null;
       void currentSession?.close();
     };
-  }, [filePath, keyboardSettings.arrowKeyAction, keyboardSettings.subtitlesEnabled, keyboardSettings.subtitlePreferredLanguages.join(','), keyboardSettings.subtitleSize, keyboardSettings.subtitleStyle]);
+  }, [filePath, keyboardSettings.arrowKeyAction, keyboardSettings.subtitlesEnabled, keyboardSettings.subtitlePreferredLanguages.join(','), keyboardSettings.subtitleSize, keyboardSettings.subtitleStyle, JSON.stringify(keyboardSettings.shortcuts)]);
 
   useEffect(() => {
     if (!sessionId || subtitleMemoryRestoredRef.current || !state.subtitleTracks?.length) return;
@@ -448,28 +445,23 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     };
   }, [syncBounds]);
   useEffect(() => {
-    const runDirectionalAction = (direction: -1 | 1, group: VideoDirectionalInputGroup) => {
-      if (videoDirectionalAction(keyboardSettings.arrowKeyAction, group) === 'navigate') onNavigateRef.current(direction);
-      else seekRelative(direction * SKIP_SECONDS);
-    };
-    const handleDirectionalKey = (event: KeyboardEvent) => {
-      const input = videoDirectionalKeyboardInput(event.key);
-      if (!input) return;
-      if (event.ctrlKey || event.metaKey || event.altKey) return;
+    const handleShortcut = (event: KeyboardEvent) => {
       const visiblePlayers = [...document.querySelectorAll<HTMLElement>('[data-video-player="true"]')]
         .filter(player => player.getClientRects().length > 0);
       if (visiblePlayers.length > 1 && !playerRootRef.current?.contains(document.activeElement)) return;
       const target = event.target as HTMLElement | null;
-      if (target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]')) return;
+      const editable = Boolean(target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]'));
+      const action = resolveVideoShortcut(shortcutInputFromKeyboardEvent(event), shortcutBindings, { editable, scope: showNavigation ? 'media' : 'video' });
+      if (!action || event.repeat && ['video.capture','video.fullscreen','video.subtitles','video.info'].includes(action)) return;
       event.preventDefault();
       event.stopPropagation();
-      runDirectionalAction(input.direction, input.group);
+      shortcutActionRef.current(action);
     };
-    window.addEventListener('keydown', handleDirectionalKey);
+    window.addEventListener('keydown', handleShortcut);
     return () => {
-      window.removeEventListener('keydown', handleDirectionalKey);
+      window.removeEventListener('keydown', handleShortcut);
     };
-  }, [keyboardSettings.arrowKeyAction, seekRelative]);
+  }, [shortcutBindings, showNavigation]);
   const captureFrame = async () => {
     const currentSession = sessionRef.current;
     if (!currentSession || capturing) return;
@@ -533,6 +525,25 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const activeBackend = availableBackends.find(item => item.backendId === activeBackendId);
   const capabilityPresentation = playbackCapabilityPresentation(activeBackend?.features, displayCapability.hdrAvailable);
   const hdrAvailability = hdrModeAvailability({ requested: keyboardSettings.hdrMode, backendModes: activeBackend?.features.hdr.modes || ['sdr'], hdrDisplayAvailable: displayCapability.hdrAvailable });
+  shortcutActionRef.current = action => {
+    if (action === 'video.playPause') togglePlayback();
+    else if (action === 'video.seekBackward') seekRelative(-SKIP_SECONDS);
+    else if (action === 'video.seekForward') seekRelative(SKIP_SECONDS);
+    else if (action === 'video.frameBackward') seekRelative(-1 / 30);
+    else if (action === 'video.frameForward') seekRelative(1 / 30);
+    else if (action === 'video.volumeUp') changeVolume(Math.min(100, volume + 5));
+    else if (action === 'video.volumeDown') changeVolume(Math.max(0, volume - 5));
+    else if (action === 'video.mute') control('mute', !muted);
+    else if (action === 'video.speedUp' || action === 'video.speedDown') { const index = PLAYBACK_SPEEDS.findIndex(value => value >= speed); const next = action === 'video.speedUp' ? PLAYBACK_SPEEDS[Math.min(PLAYBACK_SPEEDS.length - 1, Math.max(0, index + 1))] : PLAYBACK_SPEEDS[Math.max(0, (index < 0 ? PLAYBACK_SPEEDS.length : index) - 1)]; control('speed', next); }
+    else if (action === 'video.resetSpeed') control('speed', 1);
+    else if (action === 'video.fullscreen') onToggleFullscreenRef.current?.();
+    else if (action === 'video.exitFullscreen') onEscapeRef.current?.();
+    else if (action === 'video.capture') void captureFrame();
+    else if (action === 'video.subtitles') setControlPanel(current => current === 'subtitles' ? null : 'subtitles');
+    else if (action === 'video.info') setControlPanel(current => current === 'info' ? null : 'info');
+    else if (action === 'media.previous') onNavigateRef.current(-1);
+    else if (action === 'media.next') onNavigateRef.current(1);
+  };
 
   const forwardBackAction = videoDirectionalAction(keyboardSettings.arrowKeyAction, 'forward-back');
   const runForwardBackControl = (direction: -1 | 1) => {
@@ -617,8 +628,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       }}
       onPointerMove={() => onPointerActivityRef.current?.()}
       onKeyDown={event => {
-        if (event.key === 'Escape') onEscapeRef.current?.();
-        if (event.key === 'Enter' || event.key === ' ') {
+        if (event.key === 'Enter') {
           event.preventDefault();
           togglePlayback();
         }

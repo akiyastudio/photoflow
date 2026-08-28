@@ -38,6 +38,7 @@ export interface VideoPlaybackSettings {
   subtitleSize: number;
   subtitleStyle: 'standard' | 'high-contrast';
   hdrMode: 'auto' | 'sdr' | 'hdr-passthrough' | 'tone-map';
+  shortcuts: Record<string, string[]>;
 }
 export interface ResearchSettings {
   sensitivity: 'low' | 'standard' | 'high';
@@ -796,7 +797,14 @@ export interface VideoPlayerState {
   input?: {
     kind: 'pointer-button' | 'key' | 'pointer-move';
     button?: 'left' | 'right';
-    key?: 'ArrowLeft' | 'ArrowRight' | 'Escape';
+    key?: string;
+    code?: string;
+    ctrl?: boolean;
+    alt?: boolean;
+    shift?: boolean;
+    meta?: boolean;
+    repeat?: boolean;
+    clickCount?: number;
     x?: number;
     y?: number;
   };
