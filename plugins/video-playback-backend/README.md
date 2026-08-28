@@ -6,12 +6,12 @@
 
 组件默认使用稳定的 `gpu` 视频输出、D3D11、`hwdec=auto-safe` 和预读缓存。硬件不支持相机的 H.265 10-bit 4:2:2 时，libmpv 自身会回退到 CPU 解码。这里不启用 `gpu-next`，因为它在嵌入 Electron 子窗口时可能触发原生 D3D11 访问冲突。
 
-## 一键构建发布包
+## 从源码一键构建发布包
 
-准备经过策略验证的 LGPL libmpv 运行目录后，在本工程目录运行：
+在 MSYS2 UCRT64 环境中，在本工程目录运行：
 
 ```bash
-npm run build -- --mpv-root C:\path\to\libmpv-runtime
+npm run build:release
 ```
 
 该命令会完成以下工作：
@@ -19,17 +19,17 @@ npm run build -- --mpv-root C:\path\to\libmpv-runtime
 1. 按 `media-runtime.lock.json` 的完整提交哈希构建 zlib、FreeType、FriBidi、HarfBuzz、libass、SPIRV-Cross、libplacebo 和 LGPL FFmpeg。
 2. 构建固定版本的 mpv 0.41.0，并强制使用 `-Dgpl=false`、WASAPI、D3D11 和硬件解码。
 3. 生成并校验 `runtime-manifest.json`、全部 DLL 的 SHA-256、对应源码包和许可证包。
-4. 编译 `advanced-video-decoder.exe` 并生成可安装组件 ZIP。
+4. 编译 `advanced-video-decoder.exe` 并生成可安装组件 ZIP。整个流程只读取本工程内的 lock、策略、源码和脚本。
 
 输出文件：
 
 ```text
-dist/PhotoFlow-video-playback-mpv-26.8.28.2-win32-x64.zip
+dist/PhotoFlow-video-playback-mpv-26.8.28.3-win32-x64.zip
 ```
 
 ## 仅使用已有运行时打包
 
-若已经拥有由上述流程生成的运行时，可以跳过依赖编译：
+若已经拥有由上述流程生成的运行时，可以跳过依赖编译；`npm run build` 只验证并打包已有运行时，不会声称重新构建 libmpv：
 
 ```powershell
 npm run build -- --mpv-root C:\path\to\libmpv-runtime

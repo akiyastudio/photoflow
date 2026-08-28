@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "ffmpeg": {
+    "version": "7.1.1",
+    "repository": "https://git.ffmpeg.org/ffmpeg.git",
+    "commit": "68af2cc3feb8c78aec2722c728fd87f03515fa7c",
+    "license": "GPL-2.0-or-later"
+  },
+  "x264": {
+    "repository": "https://code.videolan.org/videolan/x264.git",
+    "mirrorRepository": "https://github.com/mirror/x264.git",
+    "commit": "3a21e97bf23676a0bf4616df8bc2207c9fd7b1d3",
+    "license": "GPL-2.0-or-later"
+  },
+  "x265": {
+    "version": "4.2",
+    "repository": "https://github.com/Multicorewareinc/x265.git",
+    "commit": "e444744c03978c1fb4e037168967020cf2648427",
+    "license": "GPL-2.0-or-later"
+  },
+  "zlib": {
+    "version": "1.3.1",
+    "repository": "https://github.com/madler/zlib.git",
+    "commit": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
+    "license": "Zlib"
+  },
+  "nvCodecHeaders": {
+    "version": "12.1.14.0",
+    "repository": "https://github.com/FFmpeg/nv-codec-headers.git",
+    "commit": "1889e62e2d35ff7aa9baca2bceb14f053785e6f1",
+    "license": "MIT"
+  },
+  "mpv": {
+    "version": "0.41.0",
+    "repository": "https://github.com/mpv-player/mpv.git",
+    "ref": "v0.41.0",
+    "commit": "41f6a645068483470267271e1d09966ca3b9f413",
+    "license": "LGPL-2.1-or-later",
+    "requiredMesonOptions": ["-Dgpl=false", "-Dlibmpv=true"]
+  },
+  "mpvDependencies": {
+    "freetype": {
+      "version": "2.13.3",
+      "repository": "https://gitlab.freedesktop.org/freetype/freetype.git",
+      "ref": "VER-2-13-3",
+      "commit": "42608f77f20749dd6ddc9e0536788eaad70ea4b5",
+      "license": "FTL-or-GPL-2.0-or-later"
+    },
+    "fribidi": {
+      "version": "1.0.16",
+      "repository": "https://github.com/fribidi/fribidi.git",
+      "ref": "v1.0.16",
+      "commit": "68162babff4f39c4e2dc164a5e825af93bda9983",
+      "license": "LGPL-2.1-or-later"
+    },
+    "harfbuzz": {
+      "version": "10.2.0",
+      "repository": "https://github.com/harfbuzz/harfbuzz.git",
+      "ref": "10.2.0",
+      "commit": "7b27c8edd46c674e01dd226fa9e1aa7549f5c436",
+      "license": "MIT"
+    },
+    "libass": {
+      "version": "0.17.4",
+      "repository": "https://github.com/libass/libass.git",
+      "ref": "0.17.4",
+      "commit": "bbb3c7f1570a4a021e52683f3fbdf74fe492ae84",
+      "license": "ISC"
+    },
+    "spirvCross": {
+      "version": "vulkan-sdk-1.4.304.1",
+      "repository": "https://github.com/KhronosGroup/SPIRV-Cross.git",
+      "ref": "vulkan-sdk-1.4.304.1",
+      "commit": "ebe2aa0cd80f5eb5cd8a605da604cacf72205f3b",
+      "license": "Apache-2.0-or-MIT"
+    },
+    "libplacebo": {
+      "version": "7.351.0",
+      "repository": "https://github.com/haasn/libplacebo.git",
+      "ref": "v7.351.0",
+      "commit": "3188549fba13bbdf3a5a98de2a38c2e71f04e21e",
+      "license": "LGPL-2.1-or-later"
+    }
+  }
+}
+

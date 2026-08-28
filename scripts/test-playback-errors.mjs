@@ -1,1 +1,27 @@
-import assert from'node:assert/strict';import{classifyPlaybackError,PlaybackFailure,PLAYBACK_ERROR_CODES}from'../src/contracts/playback-errors.ts';assert.equal(PLAYBACK_ERROR_CODES.length,14);assert.equal(classifyPlaybackError(new Error('GPU device lost')).code,'GPU_DEVICE_LOST');assert.equal(classifyPlaybackError(new Error('hardware decode failed')).code,'HARDWARE_DECODING_FAILED');assert.equal(classifyPlaybackError(new Error('render initialization failed')).code,'RENDER_INITIALIZATION_FAILED');assert.equal(classifyPlaybackError(new Error('surface HWND invalid')).code,'SURFACE_LOST');assert.equal(classifyPlaybackError(new Error('startup timeout')).code,'STARTUP_TIMEOUT');const permission=classifyPlaybackError(new Error('permission denied'));assert.equal(permission.code,'PERMISSION_DENIED');assert.equal(permission.suggestedFallback,'system-player');const corrupt=classifyPlaybackError(new Error('corrupt media'));assert.equal(corrupt.code,'CORRUPT_MEDIA');assert.equal(corrupt.recoverable,false);assert.equal(classifyPlaybackError(new Error('用户取消')).code,'CANCELLED');const failure=new PlaybackFailure('MEDIA_UNSUPPORTED','codec',true,[{backendId:'a',phase:'start',startedAt:1,endedAt:2,errorCode:'UNSUPPORTED_CODEC',automatic:true}]);assert.equal(failure.code,'UNSUPPORTED_CODEC');assert.equal(classifyPlaybackError(failure),failure);assert.equal(failure.suggestedFallback,'component');console.log('Playback stable error code, compatibility mapping, fallback suggestion and attempt tests passed.');
+import assert from 'node:assert/strict';
+import { classifyPlaybackError, PlaybackFailure, PLAYBACK_ERROR_CODES } from '../src/contracts/playback-errors.ts';
+
+assert.equal(PLAYBACK_ERROR_CODES.length, 14);
+assert.equal(classifyPlaybackError(new Error('GPU device lost')).code, 'GPU_DEVICE_LOST');
+assert.equal(classifyPlaybackError(new Error('hardware decode failed')).code, 'HARDWARE_DECODING_FAILED');
+assert.equal(classifyPlaybackError(new Error('render initialization failed')).code, 'RENDER_INITIALIZATION_FAILED');
+assert.equal(classifyPlaybackError(new Error('surface HWND invalid')).code, 'SURFACE_LOST');
+assert.equal(classifyPlaybackError(new Error('startup timeout')).code, 'STARTUP_TIMEOUT');
+const permission = classifyPlaybackError(new Error('permission denied'));
+assert.equal(permission.code, 'PERMISSION_DENIED');
+assert.equal(permission.suggestedFallback, 'system-player');
+const corrupt = classifyPlaybackError(new Error('corrupt media'));
+assert.equal(corrupt.code, 'CORRUPT_MEDIA');
+assert.equal(corrupt.recoverable, false);
+assert.equal(classifyPlaybackError(new Error('用户取消')).code, 'CANCELLED');
+const failure = new PlaybackFailure('MEDIA_UNSUPPORTED', 'codec', true, [{ backendId: 'a', phase: 'start', startedAt: 1, endedAt: 2, errorCode: 'UNSUPPORTED_CODEC', automatic: true }]);
+assert.equal(failure.code, 'UNSUPPORTED_CODEC');
+assert.equal(classifyPlaybackError(failure), failure);
+assert.equal(failure.suggestedFallback, 'component');
+const unknown = classifyPlaybackError({ code: 'PLUGIN_PRIVATE_FAILURE', message: 'GPU device lost' });
+assert.equal(unknown.code, 'GPU_DEVICE_LOST');
+assert(PLAYBACK_ERROR_CODES.includes(unknown.code));
+const constructed = new PlaybackFailure('ARBITRARY_PLUGIN_CODE', 'unsupported codec');
+assert.equal(constructed.code, 'UNSUPPORTED_CODEC');
+assert(PLAYBACK_ERROR_CODES.includes(constructed.code));
+console.log('Playback stable error code, compatibility mapping, fallback suggestion and attempt tests passed.');

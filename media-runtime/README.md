@@ -20,20 +20,4 @@
 
 `prepare-ffmpeg.cjs` 会验证许可证、必需/禁止构建参数及三个归档的 SHA-256，任何一项不合格都会中止安装包构建。
 
-## libmpv
-
-`scripts/media-runtime/build-libmpv-lgpl-windows.sh` 只构建 `-Dgpl=false -Dlibmpv=true` 的 libmpv，并在开始前拒绝链接启用了 GPL/nonfree/x264/x265 等选项的 FFmpeg。libass、libplacebo、FFmpeg 以及所有传递依赖也必须来自 LGPL 兼容前缀。运行前需要设置：
-
-```bash
-export LGPL_PREFIX=/path/to/lgpl-prefix
-export LGPL_FFMPEG_COMMIT=完整的40位FFmpeg提交哈希
-export LGPL_DEPENDENCY_SOURCE_ARCHIVE=/path/to/exact-dependency-sources.zip
-export LGPL_DEPENDENCY_LICENSE_ARCHIVE=/path/to/dependency-licenses.zip
-bash scripts/media-runtime/build-libmpv-lgpl-windows.sh
-```
-
-脚本会从实际 `ffmpeg.exe -buildconf` 读取配置，并把 FFmpeg 版本、完整提交哈希、依赖对应源码包和许可证包一起固化到 libmpv 清单中。
-
-把最终 DLL、许可证、精确对应源码包和 `runtime-manifest.json` 放入 `plugins/video-playback-backend/vendor/`。独立后端工程会再次验证 LGPL 声明、构建参数和每个文件哈希。
-
-`vendor/` 是本地或 CI 产物，不提交 Git；固定版本和构建脚本提交 Git。
+libmpv 的固定版本、源码构建、许可证材料与发布说明由独立工程 `plugins/video-playback-backend/` 完整拥有；主程序媒体运行时目录只负责核心 FFmpeg 工具链。

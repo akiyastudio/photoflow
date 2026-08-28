@@ -34,7 +34,7 @@ export const playbackCapabilityPresentation = (features: { transforms: {aspectMo
   hdrPassthroughAvailable:features?.hdr.passthrough===true&&hdrDisplayAvailable,toneMappingAvailable:features?.hdr.toneMapping===true,toneMappingAlgorithms:features?.hdr.algorithms||[],targetPeakControl:features?.hdr.targetPeakControl===true,
   statisticsGroups:features?.statistics||{basic:false,decode:false,hdr:false,timing:false,cache:false,gpu:false},
   subtitleFormats:[...(features?.subtitles.external?['vtt','srt']:[]),...(features?.subtitles.ass?['ass','ssa']:[])],
-  captureAvailable: features?.capture.sourceFrame === true,displayedCaptureAvailable:features?.capture.displayedFrame===true,
+  captureAvailable: features?.capture.displayedFrame === true,displayedCaptureAvailable:features?.capture.displayedFrame===true,
 });
 
 export const transformedFrameSize = (width: number, height: number, value: VideoTransform) => {

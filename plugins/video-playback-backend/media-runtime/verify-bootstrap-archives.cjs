@@ -21,3 +21,4 @@ const verify = (label, filePath, expected) => {
 
 verify('source archive', sourceArg, manifest.complianceArtifacts?.sourceArchive);
 verify('license archive', licenseArg, manifest.complianceArtifacts?.licenseArchive);
+

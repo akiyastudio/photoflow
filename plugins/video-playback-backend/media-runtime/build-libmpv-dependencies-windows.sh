@@ -3,7 +3,8 @@ set -euo pipefail
 
 # Builds the complete, pinned LGPL-compatible dependency prefix used by
 # build-libmpv-lgpl-windows.sh. Run from an MSYS2 UCRT64 shell.
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
 work_root="${PHOTOFLOW_MPV_DEPENDENCY_ROOT:-$repo_root/.cache/media-runtime-build/mpv-dependencies}"
 jobs="${NUMBER_OF_PROCESSORS:-4}"
 
@@ -57,7 +58,7 @@ if [[ -n "$bootstrap_source_archive" ]]; then
   test -f "$bootstrap_source_archive" || { echo "Missing bootstrap source archive: $bootstrap_source_archive" >&2; exit 1; }
   test -f "$bootstrap_license_archive" || { echo "Missing bootstrap license archive: $bootstrap_license_archive" >&2; exit 1; }
   test -f "$bootstrap_manifest" || { echo "Missing bootstrap manifest: $bootstrap_manifest" >&2; exit 1; }
-  node "$repo_root/scripts/media-runtime/verify-bootstrap-archives.cjs" \
+  node "$repo_root/media-runtime/verify-bootstrap-archives.cjs" \
     "$bootstrap_manifest" "$bootstrap_source_archive" "$bootstrap_license_archive"
   bootstrap_root="$work_root/bootstrap"
   mkdir -p "$bootstrap_root/source" "$bootstrap_root/licenses" "$bootstrap_root/dependencies"
@@ -140,9 +141,9 @@ apply_locked_patch() {
     exit 1
   fi
 }
-apply_locked_patch "$source_root/libass" "$repo_root/scripts/media-runtime/patches/libass-disable-iconv.patch"
-apply_locked_patch "$source_root/freetype" "$repo_root/scripts/media-runtime/patches/freetype-disable-bzip2.patch"
-apply_locked_patch "$source_root/libplacebo" "$repo_root/scripts/media-runtime/patches/libplacebo-static-winpthread.patch"
+apply_locked_patch "$source_root/libass" "$repo_root/media-runtime/patches/libass-disable-iconv.patch"
+apply_locked_patch "$source_root/freetype" "$repo_root/media-runtime/patches/freetype-disable-bzip2.patch"
+apply_locked_patch "$source_root/libplacebo" "$repo_root/media-runtime/patches/libplacebo-static-winpthread.patch"
 
 export PKG_CONFIG_PATH="$prefix/lib/pkgconfig:$prefix/share/pkgconfig"
 export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
@@ -292,10 +293,10 @@ else
 fi
 
 cp "$repo_root/media-runtime.lock.json" "$package_root/source/build-materials/media-runtime.lock.json"
-cp "$repo_root/scripts/media-runtime/build-libmpv-dependencies-windows.sh" "$package_root/source/build-materials/"
-cp "$repo_root/scripts/media-runtime/patches/libass-disable-iconv.patch" "$package_root/source/build-materials/"
-cp "$repo_root/scripts/media-runtime/patches/freetype-disable-bzip2.patch" "$package_root/source/build-materials/"
-cp "$repo_root/scripts/media-runtime/patches/libplacebo-static-winpthread.patch" "$package_root/source/build-materials/"
+cp "$repo_root/media-runtime/build-libmpv-dependencies-windows.sh" "$package_root/source/build-materials/"
+cp "$repo_root/media-runtime/patches/libass-disable-iconv.patch" "$package_root/source/build-materials/"
+cp "$repo_root/media-runtime/patches/freetype-disable-bzip2.patch" "$package_root/source/build-materials/"
+cp "$repo_root/media-runtime/patches/libplacebo-static-winpthread.patch" "$package_root/source/build-materials/"
 cp "$work_root/ffmpeg-configure-flags.txt" "$work_root/ffmpeg-config.mak" "$package_root/source/build-materials/"
 if command -v pacman >/dev/null 2>&1; then
   pacman -Q > "$package_root/source/build-materials/msys2-packages.txt"
