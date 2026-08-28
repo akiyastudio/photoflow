@@ -116,10 +116,13 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 SetOption("gpu-api", "d3d11");
                 SetOption("hwdec", "auto-safe");
                 SetOption("hwdec-codecs", "all");
+                SetOptionalOption("vd-lavc-software-fallback", "3");
+                SetOptionalOption("audio-fallback-to-null", "yes");
             }
             SetOption("cache", "yes");
             SetOption("demuxer-readahead-secs", "5");
             SetOption("demuxer-max-bytes", "256MiB");
+            SetOptionalOption("demuxer-lavf-o", "fflags=+genpts+igndts");
             SetOption("keep-open", "yes");
             SetOption("idle", "yes");
             // Discovery is explicit so camera telemetry and sidecars never become visible automatically.
@@ -240,7 +243,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
             foreach (string sidecar in sidecars)
             {
                 if (!File.Exists(sidecar)) continue;
-                Check(Run("sub-add", sidecar, "auto"), "发现外挂字幕");
+                if (Run("sub-add", sidecar, "auto") < 0) continue;
             }
             return true;
         }
@@ -398,6 +401,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private DateTime lastStatisticsAt = DateTime.MinValue;
         private string requestedHdrMode = "auto";
         private bool hdrDisplayAvailable;
+        private int recoveryStage;
 
         internal DecoderHost(string sessionId)
         {
@@ -483,6 +487,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 {
                     string path = ReadString(value, "path");
                     if (string.IsNullOrWhiteSpace(path)) throw new InvalidOperationException("视频路径为空");
+                    recoveryStage = 0;
                     loading = true;
                     player.Open(path);
                 }
@@ -642,6 +647,22 @@ namespace PhotoFlow.AdvancedVideoDecoder
             target.SetProperty("tone-mapping", requestedHdrMode == "sdr" ? "clip" : "auto");
         }
 
+        private bool TryRecoverPlayback(string error)
+        {
+            lock (playerLock)
+            {
+                if (player == null || recoveryStage >= 4) return false;
+                recoveryStage++;
+                string code;
+                if (recoveryStage == 1) { player.SetProperty("hwdec", "no"); code = "HARDWARE_DECODE_FALLBACK"; }
+                else if (recoveryStage == 2) { player.SetProperty("gpu-dumb-mode", "yes"); player.SetProperty("scale", "bilinear"); code = "GPU_SAFE_MODE"; }
+                else if (recoveryStage == 3) { player.SetProperty("demuxer-lavf-o", "fflags=+genpts+igndts"); player.SetProperty("cache", "yes"); code = "TIMESTAMP_CACHE_RECOVERY"; }
+                else { player.SetProperty("audio", "no"); code = "AUDIO_DISABLED_RECOVERY"; }
+                Emit(new Dictionary<string, object> { { "type", "diagnostic" }, { "diagnostic", new Dictionary<string, object> { { "code", code }, { "severity", "warning" }, { "phase", "runtime-recovery" }, { "protocolVersion", 1 }, { "message", error ?? string.Empty }, { "recoverable", true } } } });
+                return true;
+            }
+        }
+
         private static bool WaitForCompletePng(string filePath, int timeoutMs)
         {
             DateTime deadline = DateTime.UtcNow.AddMilliseconds(timeoutMs);
@@ -690,6 +711,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                             foreach (Dictionary<string, object> eventValue in player.DrainEvents())
                             {
                                 string type = ReadString(eventValue, "type");
+                                if (type == "error" && TryRecoverPlayback(ReadString(eventValue, "error"))) continue;
                                 if (type == "file-loaded")
                                 {
                                     // Ignore a stale event from a superseded loadfile command.
@@ -749,7 +771,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 }
                 catch (Exception error)
                 {
-                    if (!shuttingDown) Emit(new Dictionary<string, object> { { "type", "error" }, { "error", error.Message } });
+                    if (!shuttingDown && !TryRecoverPlayback(error.Message)) Emit(new Dictionary<string, object> { { "type", "error" }, { "error", error.Message }, { "errorCode", "DECODE_FAILED" } });
                 }
                 Thread.Sleep(150);
             }

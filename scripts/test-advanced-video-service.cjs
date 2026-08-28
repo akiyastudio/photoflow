@@ -176,6 +176,12 @@ const run = async () => {
   cleanupService.stop(cleanupSession.sessionId, sender.id);
   fs.rmSync(screenshotRoot, { recursive: true, force: true });
 
+  const timeoutChild = makeChild();
+  const timeoutService = createAdvancedVideoService({ BrowserWindow: { fromWebContents: () => ({ isDestroyed: () => false }) }, captureService: makeCaptures(), crypto: { randomUUID: () => 'session-timeout' }, mediaInputSessionService: makeMediaInputs(), nativeSurfaceService: { attach: async () => ({ setBounds() {}, close() {} }) }, path, playbackBroker: { defaultBackendId: () => 'fixture-backend', ownerForBackend: () => ({ componentId: 'fixture-component' }), resolveRunConfigAsync: async (_id, args) => ({ command: 'fixture.exe', args }) }, spawn: () => timeoutChild, startupTimeoutMs: 20, writeLog() {} });
+  const startupTimeoutKeepAlive = setTimeout(() => undefined, 100);
+  await assert.rejects(timeoutService.start({ sender }, 'C:\\workspace\\timeout.mov', {}, 'player-timeout', 'request-timeout'), /超时/);
+  clearTimeout(startupTimeoutKeepAlive);
+
   const playerSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'components', 'AdvancedVideoPlayer.tsx'), 'utf8');
   const workspaceSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
   const systemIpcSource = require('fs').readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');

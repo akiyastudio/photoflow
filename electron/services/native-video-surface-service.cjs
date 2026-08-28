@@ -10,7 +10,7 @@ const createNativeVideoSurfaceService = ({ app, path, processSupervisor = null, 
   const command = app.isPackaged
     ? path.join(process.resourcesPath, 'video-surface-host.exe')
     : path.join(__dirname, '..', 'bin', 'video-surface-host.exe');
-  const attach = async ({ ownerWindow, componentProcess, surfaceHandle, sessionId }) => {
+  const attach = async ({ ownerWindow, componentProcess, surfaceHandle, sessionId, onLost = () => undefined }) => {
     const childHandle = String(surfaceHandle || ''); const expectedPid = Number(componentProcess?.pid);
     if (!HANDLE.test(childHandle) || !Number.isSafeInteger(expectedPid) || expectedPid <= 0 || !ownerWindow || ownerWindow.isDestroyed()) throw new Error('原生视频表面声明无效');
     const args = ['--parent-hwnd', nativeHandleValue(ownerWindow), '--child-hwnd', childHandle, '--expected-pid', String(expectedPid), '--session-id', sessionId];
@@ -35,6 +35,7 @@ const createNativeVideoSurfaceService = ({ app, path, processSupervisor = null, 
         } catch (error) { fail(error); }
       });
     }).catch(error => { try { child.kill(); } catch { /* already exited */ } throw error; });
+    child.once('exit', code => { if (!closed) onLost(new Error(`原生视频表面丢失（${code ?? '未知'}）`)); });
     const setBounds = bounds => {
       if (closed || !child.stdin.writable) return false;
       try { child.stdin.write(`${JSON.stringify({ command: 'bounds', ...bounds })}\n`); return true; }

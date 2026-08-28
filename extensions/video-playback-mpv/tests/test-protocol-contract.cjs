@@ -15,4 +15,6 @@ assert(source.includes('MaxFrameBytes = 256 * 1024') && source.includes('Encodin
 assert(source.includes('"video.transform"')&&source.includes('video-aspect-override')&&source.includes('video-rotate')&&source.includes('flipHorizontal'));
 assert(source.includes('"video.hdr-mode"')&&source.includes('target-colorspace-hint')&&source.includes('hdrDisplayAvailable'));
 assert(source.includes('"statistics.level"')&&source.includes('statisticsInterval')&&source.includes('decoder-frame-drop-count'));
+for(const marker of ['vd-lavc-software-fallback','audio-fallback-to-null','fflags=+genpts+igndts','HARDWARE_DECODE_FALLBACK','GPU_SAFE_MODE','TIMESTAMP_CACHE_RECOVERY','AUDIO_DISABLED_RECOVERY'])assert(source.includes(marker),`missing bounded recovery stage ${marker}`);
+assert(source.includes('if (Run("sub-add", sidecar, "auto") < 0) continue;'),'bad sidecar subtitles must be skipped');
 console.log('libmpv backend v1 protocol contract tests passed.');

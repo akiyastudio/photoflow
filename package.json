@@ -110,6 +110,7 @@
     "test:advanced-video": "node scripts/test-media-playback-backend-v1.cjs && node scripts/test-video-playback-host-security.cjs && node scripts/test-video-playback-service-integration.cjs && node --experimental-strip-types scripts/test-video-display-model.mjs && node --experimental-strip-types scripts/test-video-playback-backends.mjs && node --experimental-strip-types scripts/test-chromium-playback-backend.mjs && node scripts/test-video-playback-broker.cjs && node scripts/test-video-playback-architecture.cjs && node scripts/test-video-player-subtitles.cjs && node scripts/test-advanced-video-screenshot-publication.cjs && node scripts/test-advanced-video-service.cjs && node extensions/video-playback-mpv/tests/test-protocol-contract.cjs",
     "test:video-core-independence": "node scripts/test-video-core-plugin-independence.cjs",
     "test:video-shortcuts": "node --experimental-strip-types scripts/test-video-shortcuts.mjs",
+    "test:video-errors": "node --experimental-strip-types scripts/test-playback-errors.mjs",
     "test:raw-decoder": ".venv\\Scripts\\python.exe scripts\\test-raw-decoder.py",
     "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py && node scripts/test-office-image-extraction-ipc.cjs",
     "test:research": ".venv\\Scripts\\python.exe scripts\\test-research.py",

@@ -149,6 +149,7 @@ const contextFor = (states = []) => ({
   await nextTurn();
   assert.deepEqual([first.calls.starts, second.calls.starts], [1, 1], 'each descriptor may be attempted only once per generation');
   assert.equal(states.at(-1)?.type, 'fatal');
+  assert.equal(states.at(-1)?.errorCode, 'ALL_BACKENDS_FAILED'); assert.deepEqual(states.at(-1)?.attempts.map(item => item.backendId), ['loop.a','loop.a','loop.b','loop.b']);
   await session.close();
 }
 

@@ -1,6 +1,8 @@
 import type { VideoPlaybackBackendDescriptor, VideoPlaybackSettings, VideoPlayerState, VideoSubtitleTrack } from '../../types';
 import { chromiumVideoStyle, DEFAULT_VIDEO_TRANSFORM, drawTransformedVideoFrame, normalizeVideoTransform, transformedFrameSize } from '../../contracts/video-playback.ts';
 import type { VideoHdrMode, VideoStatisticsLevel, VideoTransform } from '../../contracts/video-playback.ts';
+import { classifyPlaybackError, PlaybackFailure } from '../../contracts/playback-errors.ts';
+import type { PlaybackAttempt, PlaybackErrorCode } from '../../contracts/playback-errors.ts';
 
 export type PlaybackBackendId = string;
 export type PlaybackControl = {
@@ -28,6 +30,7 @@ export interface PlaybackSession {
   readonly id: string;
   readonly backendId: PlaybackBackendId;
   readonly availableBackends?: VideoPlaybackBackendDescriptor[];
+  readonly attempts?: PlaybackAttempt[];
   control(request: PlaybackControl): void;
   setBounds(bounds: PlaybackBounds): void;
   capture(): Promise<{ success: boolean; path?: string; error?: string }>;
@@ -64,7 +67,7 @@ export type PlaybackBackendContext = {
   video: HTMLVideoElement;
   electronApi: ElectronApi;
   onState: (state: VideoPlayerState) => void;
-  onRuntimeFailure: (error: string) => void;
+  onRuntimeFailure: (error: string, code?: PlaybackErrorCode) => void;
 };
 
 const stateEnvelope = (context: Omit<PlaybackBackendContext, 'onRuntimeFailure'>, type: VideoPlayerState['type'], state: Partial<VideoPlayerState> = {}): VideoPlayerState => ({
@@ -140,7 +143,7 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
     const onError = () => {
       if (closed || !loaded || runtimeFailureReported) return;
       runtimeFailureReported = true;
-      context.onRuntimeFailure(video.error?.message || 'Chromium 视频解码失败');
+      context.onRuntimeFailure(video.error?.message || 'Chromium 视频解码失败', 'DECODE_FAILED');
     };
     const emitStatistics = () => {
       if (statisticsLevel === 'off' || closed) return;
@@ -264,7 +267,7 @@ export class BrokeredPlaybackBackend implements VideoPlaybackBackend {
       if (sessionId && update.sessionId !== sessionId) return;
       if (update.type === 'fatal' || update.type === 'error' || update.type === 'stopped') {
         const error = update.error || '高级视频解码组件意外退出';
-        if (ready && !closed) context.onRuntimeFailure(error);
+        if (ready && !closed) context.onRuntimeFailure(error, update.errorCode || 'BACKEND_CRASHED');
         else { loadError = new Error(error); resolveLoaded(); }
         return;
       }
@@ -280,7 +283,7 @@ export class BrokeredPlaybackBackend implements VideoPlaybackBackend {
     }
     if (!result.success || !result.sessionId) {
       unsubscribe();
-      throw new Error(result.error || '高级视频解码组件无法启动');
+      throw new PlaybackFailure(result.errorCode || 'BACKEND_UNAVAILABLE', result.error || '高级视频解码组件无法启动');
     }
     sessionId = result.sessionId;
     let timer = 0;
@@ -362,6 +365,7 @@ export const startPlaybackSession = async ({ backends, context }: {
   context: Omit<PlaybackBackendContext, 'onRuntimeFailure'>;
 }): Promise<PlaybackSession> => {
   const attempted = new Set<PlaybackBackendId>();
+  const attempts: PlaybackAttempt[] = [];
   let current: PlaybackSession | null = null;
   let currentTracks: VideoSubtitleTrack[] = [];
   let currentSubtitleState: VideoPlayerState | null = null;
@@ -435,32 +439,37 @@ export const startPlaybackSession = async ({ backends, context }: {
     if (closed) throw new Error('视频播放会话已经关闭');
     const backend = (preferredBackendId ? backends.find(candidate => candidate.descriptor.backendId === preferredBackendId && !attempted.has(candidate.descriptor.backendId)) : null)
       || backends.find(candidate => !attempted.has(candidate.descriptor.backendId));
-    if (!backend) throw new Error(lastError || 'Chromium 与高级视频解码组件均无法播放此视频');
+    if (!backend) throw new PlaybackFailure('ALL_BACKENDS_FAILED', lastError || 'Chromium 与高级视频解码组件均无法播放此视频', false, attempts.map(item => ({ ...item })));
     attempted.add(backend.descriptor.backendId);
+    const attempt: PlaybackAttempt = { backendId: backend.descriptor.backendId, phase: 'start', startedAt: Date.now(), endedAt: 0, automatic: !preferredBackendId };
+    attempts.push(attempt);
     currentTracks = [];
     currentSubtitleState = null;
     try {
       const started = await backend.start({
         ...context,
         onState: handleBackendState,
-        onRuntimeFailure: error => { void beginSwitch(error); },
+        onRuntimeFailure: (error, code) => { void beginSwitch(error, '', code); },
       });
+      attempt.endedAt = Date.now();
       if (closed) {
         await started.close();
         throw new Error('视频播放会话已经关闭');
       }
       return started;
     } catch (error) {
-      lastError = error instanceof Error ? error.message : String(error);
+      const failure = classifyPlaybackError(error, 'BACKEND_UNAVAILABLE'); attempt.endedAt = Date.now(); attempt.errorCode = failure.code; attempt.message = failure.message;
+      lastError = failure.message;
       if (closed) throw error;
       return startNext();
     }
   };
-  const switchAfterFailure = async (error: string, preferredBackendId = '') => {
+  const switchAfterFailure = async (error: string, preferredBackendId = '', errorCode: PlaybackErrorCode = 'BACKEND_CRASHED') => {
     if (closed || switching) return;
     switching = true;
     suppressBackendState = true;
     const preserved = cloneSnapshot(snapshot);
+    if (current) attempts.push({ backendId: current.backendId, phase: 'runtime', startedAt: Date.now(), endedAt: Date.now(), errorCode, message: error, automatic: !preferredBackendId });
     lastError = error;
     const failed = current;
     current = null;
@@ -485,14 +494,14 @@ export const startPlaybackSession = async ({ backends, context }: {
         subtitleDelay: snapshot.subtitle.delay, subtitleVisible: snapshot.subtitle.visible, buffering: false,
       }));
     } catch (terminalError) {
-      if (!closed) context.onState(stateEnvelope(context, 'fatal', { error: `视频无法播放：${terminalError instanceof Error ? terminalError.message : String(terminalError)}。请安装或修复高级解码组件，或使用系统播放器。` }));
+      if (!closed) context.onState(stateEnvelope(context, 'fatal', { errorCode: 'ALL_BACKENDS_FAILED', attempts: attempts.map(item => ({ ...item })), error: `视频无法播放：${terminalError instanceof Error ? terminalError.message : String(terminalError)}。请安装或修复高级解码组件，或使用系统播放器。` }));
     } finally {
       suppressBackendState = false;
       switching = false;
     }
   };
-  const beginSwitch = (error: string, preferredBackendId = '') => {
-    if (!fallbackPromise) fallbackPromise = switchAfterFailure(error, preferredBackendId).finally(() => { fallbackPromise = null; });
+  const beginSwitch = (error: string, preferredBackendId = '', errorCode: PlaybackErrorCode = 'BACKEND_CRASHED') => {
+    if (!fallbackPromise) fallbackPromise = switchAfterFailure(error, preferredBackendId, errorCode).finally(() => { fallbackPromise = null; });
     return fallbackPromise;
   };
 
@@ -506,6 +515,7 @@ export const startPlaybackSession = async ({ backends, context }: {
   return {
     get id() { return current?.id || context.requestId; },
     get backendId() { return current?.backendId || backends[0]?.descriptor.backendId || 'unavailable'; },
+    get attempts() { return attempts.map(item => ({ ...item })); },
     control: request => {
       if (request.action === 'play') snapshot.paused = false;
       else if (request.action === 'pause' || request.action === 'stop') snapshot.paused = true;

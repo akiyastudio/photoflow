@@ -790,6 +790,8 @@ export interface VideoPlayerState {
   x?: number;
   y?: number;
   error?: string;
+  errorCode?: PlaybackErrorCode;
+  attempts?: PlaybackAttempt[];
   subtitleTracks?: VideoSubtitleTrack[];
   subtitleTrackId?: string | null;
   subtitleVisible?: boolean;
@@ -1127,7 +1129,7 @@ export interface IElectronAPI {
   getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, priority?: 0 | 1 | 2 | 3, queueOrder?: number) => Promise<{ success: boolean; taskId?: string; state?: ThumbnailState; previewUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; cacheLayer?: 'memory' | 'disk' | 'source'; error?: string }>;
   cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; sourceMtimeMs?: number; sourceSize?: number; error?: string }) => void) => () => void;
-  startVideoPlayer: (filePath: string, settings: VideoPlaybackSettings, playerId: string, requestId: string, backendId?: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string }>;
+  startVideoPlayer: (filePath: string, settings: VideoPlaybackSettings, playerId: string, requestId: string, backendId?: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string; errorCode?: PlaybackErrorCode }>;
   getVideoPlaybackBackends: (filePath: string, browserProbe: 'probably' | 'maybe' | 'unsupported' | 'unknown') => Promise<{ success: boolean; backends: VideoPlaybackBackendDescriptor[]; error?: string }>;
   getVideoDisplayCapabilities: () => Promise<{ success: boolean; display: { displayId: string; scaleFactor: number; colorSpace: string; hdrAvailable: boolean; reason: string; bounds: { x: number; y: number; width: number; height: number } | null }; error?: string }>;
   getVideoPlaybackSource: (filePath: string) => Promise<{ success: boolean; mediaUrl?: string; error?: string }>;
@@ -1237,3 +1239,4 @@ declare global {
     electronAPI: IElectronAPI;
   }
 }
+import type { PlaybackAttempt, PlaybackErrorCode } from './contracts/playback-errors';

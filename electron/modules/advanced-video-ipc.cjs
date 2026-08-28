@@ -4,6 +4,7 @@ const { createNativeVideoSurfaceService } = require('../services/native-video-su
 const { createMediaInputSessionService } = require('../services/media-input-session-service.cjs');
 const { createVideoDisplayOutputService } = require('../services/video-display-output-service.cjs');
 const { createPlaybackCaptureService } = require('../services/playback-capture-service.cjs');
+const { playbackError } = require('../contracts/playback-errors.cjs');
 
 const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog }) => {
   const playbackBroker = createVideoPlaybackBroker({ pluginService, path });
@@ -69,7 +70,7 @@ const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcM
     try { return { success: true, ...(await service.start(event, filePath, settings, playerId, requestId, backendId)) }; }
     catch (error) {
       writeLog('warn', 'Video player start failed', { error: error.message || String(error) });
-      return { success: false, error: error.message || String(error) };
+      const normalized = playbackError(error, 'BACKEND_UNAVAILABLE'); return { success: false, error: normalized.message, errorCode: normalized.code };
     }
   });
   ipcMain.on('advanced-video-bounds', (event, sessionId, bounds) => service.setBounds(event, sessionId, bounds));

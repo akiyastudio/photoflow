@@ -43,10 +43,11 @@ const run = async () => {
   };
   const surfaceHost = createNativeVideoSurfaceService({ app: { isPackaged: false }, path, spawn, writeLog() {}, startupTimeoutMs: 100 });
   const handle = Buffer.alloc(8); handle.writeBigUInt64LE(12345n);
-  const controller = await surfaceHost.attach({ ownerWindow: { isDestroyed: () => false, getNativeWindowHandle: () => handle }, componentProcess: { pid: 777 }, surfaceHandle: '45678', sessionId: 'surface-session' });
+  let surfaceLoss = ''; const controller = await surfaceHost.attach({ ownerWindow: { isDestroyed: () => false, getNativeWindowHandle: () => handle }, componentProcess: { pid: 777 }, surfaceHandle: '45678', sessionId: 'surface-session', onLost: error => { surfaceLoss = error.message; } });
   assert.deepEqual(launches[0].args, ['--parent-hwnd', '12345', '--child-hwnd', '45678', '--expected-pid', '777', '--session-id', 'surface-session']);
   controller.setBounds({ x: 1, y: 2, width: 300, height: 200, visible: true });
   assert.equal(launches[0].child.commands[0].command, 'bounds');
+  launches[0].child.emit('exit', 9); assert.match(surfaceLoss, /表面丢失/);
   controller.close();
   assert.equal(launches[0].child.commands.at(-1).command, 'close');
   await assert.rejects(surfaceHost.attach({ ownerWindow: { isDestroyed: () => false, getNativeWindowHandle: () => handle }, componentProcess: { pid: 777 }, surfaceHandle: 'not-a-handle', sessionId: 'surface-session' }), /声明无效/);

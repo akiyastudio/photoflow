@@ -10,4 +10,6 @@ The component registers only its own native HWND. PhotoFlow verifies process own
 
 Capture uses a host-created stage with owner checks, expiry, complete-image validation and atomic same-directory commit. The backend receives only the stage identity/path and never selects the public filename. Structured diagnostics use a strict field allowlist and cannot access host logs, environment variables, secrets or other components.
 
+Application failures use stable `PlaybackErrorCode` values and preserve an ordered attempt ledger. Automatic fallback remains finite: each descriptor is attempted at most once per media generation. The native backend has its own bounded recovery ladder—hardware to software decode, GPU safe mode, timestamp/cache repair, then silent-audio continuation—and skips individual corrupt sidecar subtitles. Exhausting that ladder emits a normalized error; no arbitrary decoder option crosses the host protocol.
+
 This protocol applies only to project media inside PhotoFlow. It defines no file association, registry, default-app, shell-open, external double-click or single-instance routing behavior.

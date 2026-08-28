@@ -14,7 +14,7 @@ const normalizeSubtitleFontSize = value => {
 
 const createAdvancedVideoService = ({
   BrowserWindow, captureService, crypto, displayOutputService = null, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor = null, spawn, writeLog,
-  screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS,
+  startupTimeoutMs = START_TIMEOUT_MS, screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS,
 }) => {
   const sessions = new Map();
   const sessionsByPlayer = new Map();
@@ -137,7 +137,7 @@ const createAdvancedVideoService = ({
         command: runConfig.command,
         args: runConfig.args,
         options: { cwd: path.dirname(runConfig.command), stdio: ['pipe', 'pipe', 'pipe'] },
-        health: { startupTimeoutMs: START_TIMEOUT_MS },
+        health: { startupTimeoutMs },
         onExitCleanup: ({ child: exitedChild }) => {
           mediaInputSessionService.revokePlaybackSession?.(id);
           captureService.abortSession?.(id);
@@ -193,7 +193,7 @@ const createAdvancedVideoService = ({
         rejectReady = reject;
         session.rejectReady = reject;
       });
-      const startupTimer = setTimeout(() => rejectReady(new Error('视频播放器启动超时，请在组件管理中修复或重新安装视频播放器运行时')), START_TIMEOUT_MS);
+      const startupTimer = setTimeout(() => { const error = new Error('视频播放器启动超时，请在组件管理中修复或重新安装视频播放器运行时'); error.code = 'START_TIMEOUT'; rejectReady(error); }, startupTimeoutMs);
       startupTimer.unref?.();
 
       const consumeLine = line => {
@@ -212,7 +212,7 @@ const createAdvancedVideoService = ({
         }
         if (value.type === 'surface-created') {
           if (session.surfaceAttachPromise) return;
-          session.surfaceAttachPromise = nativeSurfaceService.attach({ ownerWindow: session.ownerWindow, componentProcess: session.child, surfaceHandle: value.surfaceHandle, sessionId: session.id })
+          session.surfaceAttachPromise = nativeSurfaceService.attach({ ownerWindow: session.ownerWindow, componentProcess: session.child, surfaceHandle: value.surfaceHandle, sessionId: session.id, onLost: error => { if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'SURFACE_LOST', error: error.message }); } })
             .then(controller => { session.surfaceController = controller; return controller; });
           return;
         }
@@ -267,7 +267,7 @@ const createAdvancedVideoService = ({
         session.lastError = error.message || String(error);
         clearTimeout(startupTimer);
         rejectReady(error);
-        if (!session.stopped) emit(session, { type: 'fatal', error: session.lastError });
+        if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'BACKEND_CRASHED', error: session.lastError });
       });
       child.once('exit', code => {
         clearTimeout(startupTimer);
@@ -279,7 +279,7 @@ const createAdvancedVideoService = ({
         }
         removeSession(session);
         if (!session.ready) rejectReady(new Error(session.lastError || stderr.trim() || `视频播放器退出（${code ?? '未知'}），请修复或重新安装视频播放器运行时`));
-        else if (!session.stopped) emit(session, { type: 'fatal', error: session.lastError || stderr.trim() || '视频播放器意外退出，请重新打开视频；若持续失败请修复视频播放器运行时' });
+        else if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'BACKEND_CRASHED', error: session.lastError || stderr.trim() || '视频播放器意外退出，请重新打开视频；若持续失败请修复视频播放器运行时' });
         writeLog(code === 0 || session.stopped ? 'info' : 'warn', 'Advanced video decoder exited', { sessionId: id, code, error: stderr.trim() });
       });
 
