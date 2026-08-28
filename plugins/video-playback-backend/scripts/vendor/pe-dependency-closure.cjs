@@ -105,4 +105,3 @@ function verifyPeDependencyClosure(root, entryNames) {
 }
 
 module.exports = { readPeDependencies, verifyPeDependencyClosure };
-

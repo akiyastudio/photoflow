@@ -10,7 +10,6 @@ const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
 };
-
 const normalizeRelativeFile = value => String(value || '').replace(/\\/g, '/');
 
 const sha256File = filePath => crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
@@ -148,4 +147,3 @@ module.exports = {
   validateComponentIntegrity,
   validateComponentIntegrityAsync,
 };
-

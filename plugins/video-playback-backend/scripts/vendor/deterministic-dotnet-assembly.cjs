@@ -81,4 +81,3 @@ const normalizeDotnetAssembly = filePath => {
 };
 
 module.exports = { locateMvid, normalizeDotnetAssembly };
-

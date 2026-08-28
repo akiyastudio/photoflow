@@ -15,4 +15,3 @@ index 53ba3d3..be24a31 100644
  else
      pthreads = dependency('threads')
      has_setclock = cc.has_header_symbol(
-

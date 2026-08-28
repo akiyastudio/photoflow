@@ -16,4 +16,3 @@ index 6fd12dc..dad3844 100644
  
  if bzip2_dep.found()
    ftoption_command += ['--enable=FT_CONFIG_OPTION_USE_BZIP2']
-
