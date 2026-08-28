@@ -43,6 +43,32 @@ const PYTHON_BACKGROUND_TASK_PROFILES = Object.freeze({
   'cut_video.py': Object.freeze({ title: '视频切割', type: 'python-tool', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1 }),
 });
 
+const PYTHON_WORKER_RESOURCE_PROFILES = Object.freeze({
+  'classify.py': Object.freeze({
+    'video-split': Object.freeze({ capacities: [Object.freeze({ key: 'heavy-media', access: 'write', limit: 1, writeLimit: 1 })] }),
+    'video-transcode': Object.freeze({ capacities: [Object.freeze({ key: 'heavy-media', access: 'write', limit: 1, writeLimit: 1 })] }),
+    'video-preview': Object.freeze({ capacities: [Object.freeze({ key: 'heavy-media', access: 'write', limit: 1, writeLimit: 1 })] }),
+    'raw-jpg': Object.freeze({ capacities: [Object.freeze({ key: 'cpu-heavy', access: 'write', limit: 1, writeLimit: 1 })] }),
+  }),
+});
+
+const resolvePythonWorkerResourceLease = (scriptName, payload) => {
+  const leaseId = String(payload?.leaseId || '');
+  const profile = String(payload?.profile || '');
+  const phase = String(payload?.phase || '').replace(/[\u0000-\u001f\u007f]/g, ' ').trim().slice(0, 120);
+  if (!/^[a-z0-9-]{8,100}$/i.test(leaseId)) throw new Error('Invalid worker resource lease identifier');
+  const definition = PYTHON_WORKER_RESOURCE_PROFILES[scriptName]?.[profile];
+  if (!definition) throw new Error('Worker requested an unsupported resource profile');
+  return {
+    leaseId,
+    profile,
+    definition: {
+      capacities: definition.capacities.map(capacity => ({ ...capacity })),
+      runningMessage: phase || '正在执行资源密集阶段',
+    },
+  };
+};
+
 const normalizePythonTaskPresentation = value => {
   if (!value || typeof value !== 'object') return null;
   const ownerPageId = String(value.ownerPageId || '').trim().slice(0, 160);
@@ -65,6 +91,12 @@ const pythonToolResourcePaths = (scriptName, args, pathApi) => {
     const resolved = pathApi.resolve(normalized);
     if (resolved) paths.push(resolved);
   };
+  const addTranscodeDestinationFamily = value => {
+    const normalized = String(value || '').trim();
+    if (!normalized) return;
+    const resolved = pathApi.resolve(normalized).replace(/[\\/]+/g, '/').toLocaleLowerCase();
+    if (resolved) paths.push(`photoflow-transcode-destination/${resolved}`);
+  };
   if (scriptName === 'research.py') {
     for (let index = 0; index < args.length; index += 1) {
       if (args[index] === '--path' && args[index + 1]) addDirectoryFor(args[++index]);
@@ -79,7 +111,10 @@ const pythonToolResourcePaths = (scriptName, args, pathApi) => {
       const value = args[index];
       if (valueOptions.has(value)) {
         const optionValue = args[++index];
-        if (value === '--source-folder') addDirectoryFor(optionValue);
+        if (value === '--source-folder') {
+          addDirectory(optionValue);
+          addTranscodeDestinationFamily(optionValue);
+        }
         else if (value === '--output-dir') addDirectory(optionValue);
         else if (value === '--output-path') addDirectoryFor(optionValue);
         continue;
@@ -785,6 +820,7 @@ const registerSystemIpc = context => {
     const cancelFile = cancellable ? path.join(app.getPath('temp'), `photoflow-cancel-${normalizedRequestId}.flag`) : '';
     let runtimeArgs = cancellable ? [...args, '--cancel_file', cancelFile] : [...args];
     if (scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage)) {
+      if (['import', 'broll'].includes(classifyStage)) runtimeArgs.push('--resource_protocol');
       try {
         const bundledExifTool = await exiftoolPath();
         if (bundledExifTool) runtimeArgs.push('--exiftool_path', String(bundledExifTool));
@@ -797,6 +833,8 @@ const registerSystemIpc = context => {
     let backgroundTaskId = tracksImportTask ? `${normalizedRequestId}:${classifyStage}:${invocationId}` : '';
     let importTask = null;
     let toolTask = null;
+    let importOperationLease = null;
+    let toolOperationLease = null;
     let importTargets = importDestination ? [importDestination] : [];
     if (tracksImportTask && normalizedRequestId) {
       const sdPathIndex = args.indexOf('--sd_path');
@@ -821,11 +859,6 @@ const registerSystemIpc = context => {
         title: destinationName ? `${importTitle} · ${destinationName}` : importTitle,
         message: classifyStage === 'plan' ? '等待扫描素材' : '等待其他文件操作完成',
         runningMessage: classifyStage === 'plan' ? '正在读取拍摄日期并匹配项目' : '正在准备导入',
-        concurrencyGroup: writesImportFiles ? (args.includes('--split_large_files') ? 'heavy-media' : 'disk-io') : '',
-        concurrencyLimit: args.includes('--split_large_files') ? 1 : 3,
-        concurrencyWriteLimit: args.includes('--split_large_files') ? 1 : 2,
-        resourceAccess: writesImportFiles ? 'write' : 'read',
-        resources: [...(writesImportFiles ? importTargets : []), ...sourcePaths].filter(Boolean),
         metadata: { operation: directSource ? 'import-negative' : 'import-sd', importStage: classifyStage, projectName: destinationName, phase: classifyStage === 'plan' ? 'scanning' : 'queued', destinationPath: importDestination, requestId: normalizedRequestId },
       }) || null;
       if (importTask && !importTask.deduplicated) {
@@ -835,6 +868,12 @@ const registerSystemIpc = context => {
         }, { once: true });
         try {
           await importTask.waitForStart();
+          importOperationLease = await importTask.context.acquireResourceLease({
+            capacities: writesImportFiles ? [{ key: 'disk-io', access: 'write', limit: 3, writeLimit: 2 }] : [],
+            resourceAccess: writesImportFiles ? 'write' : 'read',
+            resources: [...(writesImportFiles ? importTargets : []), ...sourcePaths].filter(Boolean),
+            runningMessage: classifyStage === 'plan' ? '正在读取拍摄日期并匹配项目' : '正在准备导入',
+          });
         } catch (error) {
           importTask.cancelled();
           forgetPythonTask(normalizedRequestId, invocationId);
@@ -862,11 +901,6 @@ const registerSystemIpc = context => {
         cancellable,
         notificationPolicy: 'progress-toast',
         resumePolicy: 'atomic',
-        concurrencyGroup: toolProfile.concurrencyGroup,
-        concurrencyLimit: toolProfile.concurrencyLimit,
-        concurrencyWriteLimit: toolProfile.concurrencyWriteLimit,
-        resourceAccess: 'write',
-        resources: taskResources,
         metadata: { scriptName, requestId: normalizedRequestId, phase: 'queued', ...presentationMetadata },
       }) || null;
       if (toolTask && !toolTask.deduplicated) {
@@ -876,6 +910,17 @@ const registerSystemIpc = context => {
         }, { once: true });
         try {
           await toolTask.waitForStart();
+          toolOperationLease = await toolTask.context.acquireResourceLease({
+            capacities: [{
+              key: toolProfile.concurrencyGroup,
+              access: 'write',
+              limit: toolProfile.concurrencyLimit,
+              writeLimit: toolProfile.concurrencyWriteLimit,
+            }],
+            resourceAccess: 'write',
+            resources: taskResources,
+            runningMessage: '正在启动任务',
+          });
         } catch (error) {
           toolTask.cancelled();
           forgetPythonTask(normalizedRequestId, invocationId);
@@ -912,6 +957,12 @@ const registerSystemIpc = context => {
           });
         }
       }, 600);
+    };
+    const releaseOperationLeases = () => {
+      importOperationLease?.release();
+      toolOperationLease?.release();
+      importOperationLease = null;
+      toolOperationLease = null;
     };
     try {
       if (cancelFile) fs.rmSync(cancelFile, { force: true });
@@ -968,12 +1019,74 @@ const registerSystemIpc = context => {
       let toolFailed = false;
       let toolCancelled = false;
       let toolProgress = 0;
+      let workerClosed = false;
+      const pendingWorkerResourceLeases = new Set();
+      const activeWorkerResourceLeases = new Map();
+      const sendWorkerControl = payload => {
+        if (workerClosed || !pyProcess.stdin?.writable) return false;
+        pyProcess.stdin.write(`${JSON.stringify(payload)}\n`, error => {
+          if (error && !workerClosed) writeLog('warn', 'Unable to send Python worker resource control', { error: error.message || String(error) });
+        });
+        return true;
+      };
+      const releaseWorkerResourceLease = leaseId => {
+        const lease = activeWorkerResourceLeases.get(leaseId);
+        if (!lease) return false;
+        activeWorkerResourceLeases.delete(leaseId);
+        lease.release();
+        return true;
+      };
+      const releaseAllWorkerResourceLeases = () => {
+        for (const leaseId of [...activeWorkerResourceLeases.keys()]) releaseWorkerResourceLease(leaseId);
+      };
+      const requestWorkerResourceLease = payload => {
+        let request;
+        try { request = resolvePythonWorkerResourceLease(scriptName, payload); }
+        catch (error) {
+          sendWorkerControl({ type: 'resource_denied', leaseId: String(payload?.leaseId || ''), error: error.message || String(error) });
+          return;
+        }
+        if (pendingWorkerResourceLeases.has(request.leaseId) || activeWorkerResourceLeases.has(request.leaseId)) {
+          sendWorkerControl({ type: 'resource_denied', leaseId: request.leaseId, error: 'Duplicate worker resource lease identifier' });
+          return;
+        }
+        if (pendingWorkerResourceLeases.size + activeWorkerResourceLeases.size >= 4) {
+          sendWorkerControl({ type: 'resource_denied', leaseId: request.leaseId, error: 'Too many worker resource leases' });
+          return;
+        }
+        pendingWorkerResourceLeases.add(request.leaseId);
+        const acquire = importTask?.context?.acquireResourceLease
+          ? importTask.context.acquireResourceLease(request.definition)
+          : Promise.resolve({ id: '', release: () => false });
+        void acquire.then(lease => {
+          pendingWorkerResourceLeases.delete(request.leaseId);
+          if (workerClosed) {
+            lease.release();
+            return;
+          }
+          activeWorkerResourceLeases.set(request.leaseId, lease);
+          if (!sendWorkerControl({ type: 'resource_granted', leaseId: request.leaseId, profile: request.profile })) {
+            releaseWorkerResourceLease(request.leaseId);
+          }
+        }).catch(error => {
+          pendingWorkerResourceLeases.delete(request.leaseId);
+          sendWorkerControl({ type: 'resource_denied', leaseId: request.leaseId, error: error.message || String(error) });
+        });
+      };
       const handlePythonOutputLine = line => {
         const trimmed = line.trim();
         if (!trimmed) return;
         try {
           const jsonMsg = JSON.parse(trimmed);
           managedProcess?.markHealthy({ protocol: 'renderer-python-events' });
+          if (jsonMsg.type === 'resource_request') {
+            requestWorkerResourceLease(jsonMsg.data);
+            return;
+          }
+          if (jsonMsg.type === 'resource_release') {
+            releaseWorkerResourceLease(String(jsonMsg.data?.leaseId || ''));
+            return;
+          }
           mainWindow.webContents.send('python-event', { ...jsonMsg, scriptName, requestId });
           if (jsonMsg.type === 'success' && Array.isArray(jsonMsg.data?.importedPaths)) {
             for (const importedPath of jsonMsg.data.importedPaths) {
@@ -1049,6 +1162,9 @@ const registerSystemIpc = context => {
       });
   
       pyProcess.on('close', (code) => {
+        workerClosed = true;
+        releaseAllWorkerResourceLeases();
+        releaseOperationLeases();
         if (stdoutBuffer.trim()) handlePythonOutputLine(stdoutBuffer);
         stdoutBuffer = '';
         const cancelledByCoordinator = Boolean(importTask?.context?.signal.aborted);
@@ -1099,6 +1215,9 @@ const registerSystemIpc = context => {
       
       // 监听启动错误（比如 exe 不存在）
       pyProcess.on('error', (err) => {
+         workerClosed = true;
+         releaseAllWorkerResourceLeases();
+         releaseOperationLeases();
          importTask?.fail(err);
          toolTask?.fail(err);
          finalizeImportWatch(false);
@@ -1116,6 +1235,7 @@ const registerSystemIpc = context => {
       });
   
     } catch (e) {
+      releaseOperationLeases();
       importTask?.fail(e);
       toolTask?.fail(e);
       forgetPythonTask(normalizedRequestId, invocationId);
@@ -1323,6 +1443,36 @@ const registerSystemIpc = context => {
     });
     return choice.canceled ? { cancelled: true } : { path: choice.filePaths[0] };
   });
+
+  ipcMain.handle('inspect-source-paths', async (_event, requestedPaths = []) => {
+    try {
+      const sourceRequests = (Array.isArray(requestedPaths) ? requestedPaths : [])
+        .filter(value => typeof value === 'string' && value.trim() && value.length <= 32768)
+        .map(value => value.trim().replace(/^["']+|["']+$/g, ''))
+        .filter((value, index, values) => values.findIndex(candidate => {
+          const candidatePath = path.resolve(candidate);
+          const currentPath = path.resolve(value);
+          return process.platform === 'win32'
+            ? candidatePath.toLocaleLowerCase() === currentPath.toLocaleLowerCase()
+            : candidatePath === currentPath;
+        }) === index)
+        .map(value => ({ path: value, resolvedPath: path.resolve(value) }))
+        .slice(0, 4096);
+      const sources = [];
+      const missingPaths = [];
+      for (const source of sourceRequests) {
+        try {
+          const stat = await fs.promises.stat(source.resolvedPath);
+          if (stat.isDirectory()) sources.push({ path: source.path, kind: 'folder' });
+          else if (stat.isFile()) sources.push({ path: source.path, kind: 'file' });
+          else missingPaths.push(source.path);
+        } catch { missingPaths.push(source.path); }
+      }
+      return { success: true, sources, missingPaths };
+    } catch (error) {
+      return { success: false, sources: [], missingPaths: [], error: error.message || String(error) };
+    }
+  });
   
   ipcMain.handle('photoshop-status', async () => {
     const executable = await findLatestPhotoshop();
@@ -1330,4 +1480,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc };
+module.exports = { finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease };

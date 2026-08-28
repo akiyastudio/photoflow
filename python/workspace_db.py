@@ -6177,6 +6177,8 @@ def progress_locations_snapshot(root: str, db, payload: dict):
     """Refresh registered locations without running discovery or migrations."""
     project = project_row(db, payload["projectName"])
     sync_progress_folder_locations(root, db, project)
+    with db:
+        ensure_selection_workflow_inputs(db, project["id"])
     return progress_snapshot(db, payload, project)
 
 

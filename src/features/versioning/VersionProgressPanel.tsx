@@ -162,10 +162,10 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
       <ImportSourceControls
         selectionTitle="选择或拖入进度文件/文件夹"
         selectionDescription="可直接拖入多个文件或文件夹"
-        selectedCount={draft.sourcePaths?.length || 0}
+        selectedPaths={draft.sourcePaths || []}
+        onSelectedPathsChange={paths => update({ sourcePaths: paths })}
         onChooseFiles={onChooseFiles || onSubmit}
         onChooseFolder={onChooseFolder}
-        onDropPaths={paths => update({ sourcePaths: paths })}
         importKind="progress"
         onImportKindChange={kind => onImportKindChange?.(kind, draft.sourcePaths || [])}
         deleteSourceAfterImport={draft.deleteSourceAfterImport === true}

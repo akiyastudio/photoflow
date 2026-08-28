@@ -65,8 +65,8 @@ const run = async () => {
       screen: { getCursorScreenPoint: () => ({ x: 110, y: 220 }) },
       activeProjectFileOperations: new Map(),
       fileOperationState: { projectFileClipboard: null },
-      suspendToastOverlayForNativeDrag: () => overlayLifecycle.push('suspend'),
-      resumeToastOverlayAfterNativeDrag: () => overlayLifecycle.push('resume'),
+      suspendToastViewForNativeDrag: () => overlayLifecycle.push('suspendToastView'),
+      resumeToastViewAfterNativeDrag: () => overlayLifecycle.push('resumeToastView'),
       writeLog: () => undefined,
     });
 
@@ -76,7 +76,7 @@ const run = async () => {
       sessionId: 'session-a', sourcePageId: 'page-a', origin: 'file-browser',
     });
     assert.strictEqual(dragItems.length, 1);
-    assert.deepStrictEqual(overlayLifecycle.slice(0, 3), ['suspend', 'startDrag', 'resume'], 'the overlay HWND stays hidden for exactly the blocking native drag interval');
+    assert.deepStrictEqual(overlayLifecycle, ['suspendToastView', 'startDrag', 'resumeToastView'], 'the persistent Toast child view leaves hit testing only for the blocking native drag');
     assert.strictEqual(dragItems[0].icon, shellIcon, 'each drag passes the freshly returned Shell icon directly to startDrag');
     assert.deepStrictEqual(shellCalls[0], [path.join(temporaryRoot, 'folder'), { size: 'normal' }]);
     assert.deepStrictEqual(sent.filter(([channel]) => channel === 'workspace-file-drag-ended').at(-1)[1], {
@@ -88,6 +88,7 @@ const run = async () => {
       sessionId: 'session-multi', sourcePageId: 'page-a', origin: 'file-browser',
     });
     assert.deepStrictEqual(dragItems.at(-1).files, [path.join(temporaryRoot, 'folder'), path.join(temporaryRoot, 'folder-2')]);
+    assert.deepStrictEqual(overlayLifecycle.slice(-3), ['suspendToastView', 'startDrag', 'resumeToastView']);
     assert.strictEqual(shellCalls.length, 2, 'every gesture performs a fresh Shell icon lookup instead of reusing a cached NativeImage');
 
     const endedBeforeInvalid = sent.filter(([channel]) => channel === 'workspace-file-drag-ended').length;
@@ -103,21 +104,33 @@ const run = async () => {
   }
 
   const filesIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'files-ipc.cjs'), 'utf8');
+  const resolveSource = filesIpcSource.slice(filesIpcSource.indexOf('const resolveFileDragSources'), filesIpcSource.indexOf("ipcMain.on('workspace-start-file-drag'"));
   const dragHandler = filesIpcSource.slice(filesIpcSource.indexOf("ipcMain.on('workspace-start-file-drag'"), filesIpcSource.indexOf("ipcMain.handle('workspace-file-clipboard-status'"));
+  assert(resolveSource.includes('fs.statSync(source)') && !resolveSource.includes('fs.existsSync(source)'), 'source validation and type classification share one synchronous filesystem lookup');
+  assert(resolveSource.includes('seenSources') && resolveSource.includes('validatedPaths'), 'physical sources and returned relative paths are deduplicated together');
   assert(dragHandler.startsWith("ipcMain.on('workspace-start-file-drag', async"), 'main drag flow is restored to the old async Shell-icon path');
   assert(dragHandler.indexOf("await app.getFileIcon(resolved.sources[0], { size: 'normal' })") < dragHandler.indexOf('event.sender.startDrag('));
   assert(!filesIpcSource.includes('workspace-prepare-file-drag') && !dragHandler.includes('nativeFileDrag.prepare') && !dragHandler.includes('nativeFileDrag.start'));
   assert(!filesIpcSource.includes('workspace-file-drag-renderer-release') && !filesIpcSource.includes('workspace-file-drag-renderer-cancel'));
   assert(!dragHandler.includes('waitForLeftMouseRelease') && !dragHandler.includes('rendererEvidence') && !dragHandler.includes('releaseConfirmed'));
+  assert(dragHandler.includes('suspendToastViewForNativeDrag?.()') && dragHandler.includes('resumeToastViewAfterNativeDrag?.()'), 'native drag temporarily removes the persistent Toast child view from hit testing');
+  assert(dragHandler.includes('gestureDurationMs:') && !dragHandler.includes('durationMs:'), 'drag timing is logged as gesture duration and never classified as a success signal');
 
   const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
-  const dragEndSource = workspaceSource.slice(workspaceSource.indexOf('onProjectFileDragEnd(result =>'), workspaceSource.indexOf('const handleSurfaceDragOver'));
+  const dragEndSource = workspaceSource.slice(workspaceSource.indexOf('projectFileDragEndHandlerRef.current = result =>'), workspaceSource.indexOf("useEffect(() => projectWorkspaceClient.onProjectFileDragEnd"));
   assert(dragEndSource.includes('result.sessionId !== session.id') && dragEndSource.includes('result.sourcePageId !== pageId'), 'renderer keeps session and page identity checks');
   assert(dragEndSource.indexOf('nativeFileDragSessionRef.current = null') < dragEndSource.indexOf('document.elementFromPoint'), 'a session is consumed before processing its final target');
   assert(dragEndSource.includes('if (internalDropHandledRef.current)') && dragEndSource.includes('if (!result.started)') && dragEndSource.includes('if (!result.insideWindow)'), 'renderer keeps only cheap duplicate, start, and window guards');
   assert(!workspaceSource.includes('confirmProjectFileDragRelease') && !workspaceSource.includes('cancelProjectFileDrag'));
   assert(!workspaceSource.includes('prepareProjectFileDrag') && !workspaceSource.includes('nativeDraggingRelativePath') && !workspaceSource.includes('data-native-file-dragging'));
   assert(!dragEndSource.includes('releaseConfirmed') && !dragEndSource.includes('trustedNativeFileDragTarget') && !dragEndSource.includes('stale-target-rejected'));
+  assert((workspaceSource.match(/onProjectFileDragEnd\(/g) || []).length === 1 && workspaceSource.includes('projectFileDragEndHandlerRef.current(result)), []'), 'drag completion subscribes once and dispatches through a latest-handler ref');
+  assert(workspaceSource.includes("new Event('photoflow:folder-tab-drag-start')") && workspaceSource.includes("new Event('photoflow:folder-tab-drag-end')") && dragEndSource.includes('[data-folder-tab-drop-zone="true"]') && dragEndSource.includes("reportNativeDragDecision('folder-tab-opened'"), 'single ordinary folders can open from a final titlebar hit without a parallel HTML payload');
+
+  const appSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
+  const folderTabNavigationSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'app', 'useFolderTabNavigation.ts'), 'utf8');
+  assert(appSource.includes("data-folder-tab-drop-zone={folderTabSourceDragActive ? 'true' : undefined}") && appSource.includes("folderTabSourceDragActive ? 'app-titlebar-control' : 'app-window-drag-region'"), 'the titlebar becomes a no-drag hit target only during an eligible folder gesture');
+  assert(folderTabNavigationSource.includes("addEventListener('photoflow:folder-tab-drag-start'") && folderTabNavigationSource.includes("addEventListener('photoflow:folder-tab-drag-end'"), 'folder-tab affordance follows the native session lifecycle');
 
   const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'preload.cjs'), 'utf8');
   assert(!preloadSource.includes('workspace-prepare-file-drag') && !preloadSource.includes('workspace-file-drag-renderer-release') && !preloadSource.includes('workspace-file-drag-renderer-cancel'));

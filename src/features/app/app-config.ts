@@ -112,6 +112,7 @@ export const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
     sdPath: '',
     sdPaths: [],
     sdDriveTypes: {},
+    sdDriveVideoActions: {},
     sdDeviceIds: {},
     sdDevices: [],
     destPath: `${userPath}/Desktop`,

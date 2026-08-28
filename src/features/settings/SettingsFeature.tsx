@@ -391,7 +391,7 @@ const ProjectToolbarSettingsEditor = ({ value, onChange }: { value: AppConfig['p
   </div>;
 };
 
-const SdDriveHistorySettings = ({ value, onChange }: { value: AppConfig['smartImport']; onChange: (value: AppConfig['smartImport']) => void }) => {
+const SdDriveHistorySettings = ({ value, onChange, onOpenVideoPanel }: { value: AppConfig['smartImport']; onChange: (value: AppConfig['smartImport']) => void; onOpenVideoPanel: (panel: 'split' | 'transcode') => void }) => {
   const appDialog = useAppDialog();
   const records = normalizeConfiguredSdDeviceRecords(value.sdDevices);
   const selectedPaths = [...new Set(value.sdPaths?.length ? value.sdPaths : value.sdPath ? [value.sdPath] : [])];
@@ -400,6 +400,7 @@ const SdDriveHistorySettings = ({ value, onChange }: { value: AppConfig['smartIm
   const entryCount = records.length + legacyPaths.length;
   const setRecordEnabled = (deviceId: string, enabled: boolean) => onChange(syncLegacySdMirrors(value, records.map(record => record.deviceId === deviceId ? { ...record, enabled } : record)));
   const setRecordType = (deviceId: string, type: 'work' | 'broll') => onChange(syncLegacySdMirrors(value, records.map(record => record.deviceId === deviceId ? { ...record, type } : record)));
+  const setRecordVideoAction = (deviceId: string, key: 'splitVideosOnImport' | 'transcodeVideosOnImport', enabled: boolean) => onChange(syncLegacySdMirrors(value, records.map(record => record.deviceId === deviceId ? { ...record, [key]: enabled } : record)));
   const removeRecord = (deviceId: string) => onChange(removeConfiguredSdDevice(value, deviceId));
   const setLegacyEnabled = (path: string, enabled: boolean) => {
     const sdPaths = enabled
@@ -410,19 +411,29 @@ const SdDriveHistorySettings = ({ value, onChange }: { value: AppConfig['smartIm
       sdPath: sdPaths[0] || '',
       sdPaths,
       sdDriveTypes: { ...value.sdDriveTypes, [path]: value.sdDriveTypes[path] || 'work' },
+      sdDriveVideoActions: { ...value.sdDriveVideoActions, [path]: value.sdDriveVideoActions?.[path] || { splitVideosOnImport: false, transcodeVideosOnImport: false } },
     });
   };
   const setLegacyType = (path: string, type: 'work' | 'broll') => onChange({
     ...value,
     sdDriveTypes: { ...value.sdDriveTypes, [path]: type },
   });
+  const setLegacyVideoAction = (path: string, key: 'splitVideosOnImport' | 'transcodeVideosOnImport', enabled: boolean) => {
+    const current = value.sdDriveVideoActions?.[path] || { splitVideosOnImport: false, transcodeVideosOnImport: false };
+    onChange({
+      ...value,
+      sdDriveVideoActions: { ...value.sdDriveVideoActions, [path]: { ...current, [key]: enabled } },
+    });
+  };
   const removeLegacy = (path: string) => {
     const sdPaths = selectedPaths.filter(item => item !== path);
     const sdDriveTypes = { ...value.sdDriveTypes };
+    const sdDriveVideoActions = { ...value.sdDriveVideoActions };
     const sdDeviceIds = { ...(value.sdDeviceIds || {}) };
     delete sdDriveTypes[path];
+    delete sdDriveVideoActions[path];
     delete sdDeviceIds[path];
-    onChange({ ...value, sdPath: sdPaths[0] || '', sdPaths, sdDriveTypes, sdDeviceIds });
+    onChange({ ...value, sdPath: sdPaths[0] || '', sdPaths, sdDriveTypes, sdDriveVideoActions, sdDeviceIds });
   };
   const clear = async () => {
     if (!entryCount || !await appDialog.confirm({
@@ -432,24 +443,37 @@ const SdDriveHistorySettings = ({ value, onChange }: { value: AppConfig['smartIm
       cancelLabel: '取消',
       tone: 'danger',
     })) return;
-    onChange({ ...value, sdPath: '', sdPaths: [], sdDriveTypes: {}, sdDeviceIds: {}, sdDevices: [] });
+    onChange({ ...value, sdPath: '', sdPaths: [], sdDriveTypes: {}, sdDriveVideoActions: {}, sdDeviceIds: {}, sdDevices: [] });
   };
   return <div className="settings-group-card overflow-hidden rounded-xl border border-slate-200 bg-white">
     {entryCount ? <div className="divide-y divide-slate-200">
-      {records.map(record => <div key={record.deviceId} className="grid gap-3 px-4 py-3.5 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center">
-        <div className="min-w-0"><p title={record.lastMountPath} className="truncate font-mono text-sm font-bold text-slate-700">{record.lastMountPath}</p><p className={`mt-1 text-xs ${record.enabled && record.confirmedAt > 0 ? 'text-emerald-600' : 'text-amber-600'}`}>{record.confirmedAt <= 0 ? '需要在导入面板重新确认设备身份' : record.enabled ? '已启用，按设备身份自动匹配' : '仅保留历史，不会自动读取'}</p></div>
-        <div className="flex flex-wrap items-center gap-3"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={record.enabled} onChange={event => setRecordEnabled(record.deviceId, event.target.checked)}/>启用</label><select aria-label={`${record.lastMountPath} 默认导入类型`} value={record.type} onChange={event => setRecordType(record.deviceId, event.target.value as 'work' | 'broll')} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-600"><option value="work">工作文件</option><option value="broll">花絮</option></select></div>
-        <button type="button" onClick={() => removeRecord(record.deviceId)} aria-label={`删除 ${record.lastMountPath} 的历史记录`} title="删除历史记录" className="inline-flex w-fit items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>删除</button>
+      {records.map(record => <div key={record.deviceId} className="px-4 py-3.5">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center">
+          <div className="min-w-0"><p title={record.lastMountPath} className="truncate font-mono text-sm font-bold text-slate-700">{record.lastMountPath}</p><p className={`mt-1 text-xs ${record.enabled && record.confirmedAt > 0 ? 'text-emerald-600' : 'text-amber-600'}`}>{record.confirmedAt <= 0 ? '需要在导入面板重新确认设备身份' : record.enabled ? '已启用，按设备身份自动匹配' : '仅保留历史，不会自动读取'}</p></div>
+          <div className="flex flex-wrap items-center gap-3"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={record.enabled} onChange={event => setRecordEnabled(record.deviceId, event.target.checked)}/>启用</label><select aria-label={`${record.lastMountPath} 默认导入类型`} value={record.type} onChange={event => setRecordType(record.deviceId, event.target.value as 'work' | 'broll')} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-600"><option value="work">原始素材</option><option value="broll">花絮</option></select></div>
+          <button type="button" onClick={() => removeRecord(record.deviceId)} aria-label={`删除 ${record.lastMountPath} 的历史记录`} title="删除历史记录" className="inline-flex w-fit items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>删除</button>
+        </div>
+        <div className="mt-3 grid gap-2 border-t border-slate-100 pt-3 sm:grid-cols-2">
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700"><input type="checkbox" checked={record.splitVideosOnImport} onChange={event => setRecordVideoAction(record.deviceId, 'splitVideosOnImport', event.target.checked)}/>导入时切割视频</label><button type="button" className="text-xs font-bold text-blue-600 hover:text-blue-700" onClick={() => onOpenVideoPanel('split')}>切割规则</button></div>
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700"><input type="checkbox" checked={record.transcodeVideosOnImport} onChange={event => setRecordVideoAction(record.deviceId, 'transcodeVideosOnImport', event.target.checked)}/>导入时转码视频</label><button type="button" className="text-xs font-bold text-blue-600 hover:text-blue-700" onClick={() => onOpenVideoPanel('transcode')}>转码参数</button></div>
+        </div>
       </div>)}
       {legacyPaths.map(path => {
       const enabled = selectedPaths.includes(path);
-      return <div key={path} className="grid gap-3 px-4 py-3.5 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center">
-        <div className="min-w-0"><p title={path} className="truncate font-mono text-sm font-bold text-slate-700">{path}</p><p className="mt-1 text-xs text-amber-600">旧盘符记录，需要连接设备后重新确认</p></div>
-        <div className="flex flex-wrap items-center gap-3">
-          <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={enabled} onChange={event => setLegacyEnabled(path, event.target.checked)}/>启用</label>
-          <select aria-label={`${path} 默认导入类型`} value={value.sdDriveTypes[path] || 'work'} onChange={event => setLegacyType(path, event.target.value as 'work' | 'broll')} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-600"><option value="work">工作文件</option><option value="broll">花絮</option></select>
+      const videoActions = value.sdDriveVideoActions?.[path] || { splitVideosOnImport: false, transcodeVideosOnImport: false };
+      return <div key={path} className="px-4 py-3.5">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center">
+          <div className="min-w-0"><p title={path} className="truncate font-mono text-sm font-bold text-slate-700">{path}</p><p className="mt-1 text-xs text-amber-600">旧盘符记录；重新接入并确认身份后会保留下方行为</p></div>
+          <div className="flex flex-wrap items-center gap-3">
+            <label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-600"><input type="checkbox" checked={enabled} onChange={event => setLegacyEnabled(path, event.target.checked)}/>启用</label>
+            <select aria-label={`${path} 默认导入类型`} value={value.sdDriveTypes[path] || 'work'} onChange={event => setLegacyType(path, event.target.value as 'work' | 'broll')} className="rounded-md border border-slate-200 bg-white px-2.5 py-2 text-xs font-medium text-slate-600"><option value="work">原始素材</option><option value="broll">花絮</option></select>
+          </div>
+          <button type="button" onClick={() => removeLegacy(path)} aria-label={`删除 ${path} 的历史记录`} title="删除历史记录" className="inline-flex w-fit items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>删除</button>
         </div>
-        <button type="button" onClick={() => removeLegacy(path)} aria-label={`删除 ${path} 的历史记录`} title="删除历史记录" className="inline-flex w-fit items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>删除</button>
+        <div className="mt-3 grid gap-2 border-t border-slate-100 pt-3 sm:grid-cols-2">
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700"><input type="checkbox" checked={videoActions.splitVideosOnImport} onChange={event => setLegacyVideoAction(path, 'splitVideosOnImport', event.target.checked)}/>导入时切割视频</label><button type="button" className="text-xs font-bold text-blue-600 hover:text-blue-700" onClick={() => onOpenVideoPanel('split')}>切割规则</button></div>
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700"><input type="checkbox" checked={videoActions.transcodeVideosOnImport} onChange={event => setLegacyVideoAction(path, 'transcodeVideosOnImport', event.target.checked)}/>导入时转码视频</label><button type="button" className="text-xs font-bold text-blue-600 hover:text-blue-700" onClick={() => onOpenVideoPanel('transcode')}>转码参数</button></div>
+        </div>
       </div>;
     })}</div> : <div className="px-4 py-8 text-center"><HardDrive size={26} className="mx-auto text-slate-300"/><p className="mt-3 text-sm font-medium text-slate-500">还没有记录过 SD 卡设备</p><p className="mt-1 text-xs text-slate-400">在导入模块中选择设备后会自动出现在这里。</p></div>}
     {entryCount > 0 && <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 px-4 py-3"><span className="text-xs text-slate-400">共记录 {entryCount} 个设备，更改会立即保存。</span><button type="button" onClick={() => void clear()} className="text-xs font-bold text-red-600 hover:text-red-700">清空全部历史</button></div>}
@@ -897,18 +921,10 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="RAW 缺 JPG 时自动创建" description="RAW 缺少同名 JPG 时自动生成。"><SettingsToggle label="RAW 缺 JPG 时自动创建" checked={draft.importDefaults.generateJpgFromRaw} onChange={checked => update('importDefaults', { ...draft.importDefaults, generateJpgFromRaw: checked })}/></SettingsRow>
       <SettingsRow title="导入后默认删除源文件" description="关闭时保留源文件，每个导入面板仍可单独决定本次行为。"><SettingsToggle label="导入后默认删除源文件" checked={draft.importDefaults.deleteSourceAfterImport} onChange={checked => update('importDefaults', { ...draft.importDefaults, deleteSourceAfterImport: checked })}/></SettingsRow>
     </SettingsPageGroup>
-    <SettingsPageGroup title="导入工作文件">
-      <SettingsRow title="导入工作文件时执行视频切割" description="仅处理导入的工作视频；开启时使用视频切割面板的规则。"><div className="flex items-center justify-end gap-3"><button type="button" className="dialog-secondary px-3 py-1.5 text-xs" onClick={() => setImportVideoPanel('split')}>打开视频切割面板</button><SettingsToggle label="导入工作文件时执行视频切割" checked={draft.importDefaults.splitVideosOnImport} onChange={checked => { update('importDefaults', { ...draft.importDefaults, splitVideosOnImport: checked }); if (checked) setImportVideoPanel('split'); }}/></div></SettingsRow>
-      <SettingsRow title="导入工作文件时执行视频转码" description="仅处理导入的工作视频；开启时使用视频转码面板保存的参数。"><div className="flex items-center justify-end gap-3"><button type="button" className="dialog-secondary px-3 py-1.5 text-xs" onClick={() => setImportVideoPanel('transcode')}>打开视频转码面板</button><SettingsToggle label="导入工作文件时执行视频转码" checked={draft.importDefaults.transcodeVideosOnImport} onChange={checked => { update('importDefaults', { ...draft.importDefaults, transcodeVideosOnImport: checked }); if (checked) setImportVideoPanel('transcode'); }}/></div></SettingsRow>
-    </SettingsPageGroup>
-    <SettingsPageGroup title="导入花絮">
-      <SettingsRow title="导入花絮时执行视频切割" description="仅处理导入的花絮视频；使用同一个视频切割面板规则。"><div className="flex items-center justify-end gap-3"><button type="button" className="dialog-secondary px-3 py-1.5 text-xs" onClick={() => setImportVideoPanel('split')}>打开视频切割面板</button><SettingsToggle label="导入花絮时执行视频切割" checked={draft.brollImport.splitVideosOnImport} onChange={checked => { update('brollImport', { ...draft.brollImport, splitVideosOnImport: checked }); if (checked) setImportVideoPanel('split'); }}/></div></SettingsRow>
-      <SettingsRow title="导入花絮时执行视频转码" description="仅处理导入的花絮视频；使用同一个视频转码面板参数。"><div className="flex items-center justify-end gap-3"><button type="button" className="dialog-secondary px-3 py-1.5 text-xs" onClick={() => setImportVideoPanel('transcode')}>打开视频转码面板</button><SettingsToggle label="导入花絮时执行视频转码" checked={draft.brollImport.transcodeVideosOnImport} onChange={checked => { update('brollImport', { ...draft.brollImport, transcodeVideosOnImport: checked }); if (checked) setImportVideoPanel('transcode'); }}/></div></SettingsRow>
-    </SettingsPageGroup>
     <SettingsPageGroup title="从 SD 卡导入">
       <SettingsRow title="启动时自动从 SD 卡导入" description="应用完成启动后，检查已确认身份且包含相机媒体目录的可移动 SD 卡；无人值守导入始终保留卡内源文件。"><SettingsToggle label="启动时自动从 SD 卡导入" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
       <SettingsRow title="导入日期范围" description="限制从真实 SD 卡读取的素材拍摄日期。"><select value={draft.smartImport.dateFilter} onChange={event => update('smartImport', { ...draft.smartImport, dateFilter: event.target.value as AppConfig['smartImport']['dateFilter'] })} className="form-input ml-auto max-w-sm"><option value="all">全部素材</option><option value="today">仅今天拍摄的素材</option><option value="today_yesterday">今天和昨天拍摄的素材</option></select></SettingsRow>
-      <SettingsRow title="已记录的 SD 卡设备" description="管理设备是否用于导入，以及默认作为工作文件还是花絮。" align="start"><SdDriveHistorySettings value={draft.smartImport} onChange={smartImport => update('smartImport', smartImport)}/></SettingsRow>
+      <SettingsRow title="已记录的 SD 卡设备" description="为每张卡分别设置导入类型和视频处理行为；例如 G 盘可以转码，其他卡可以不处理。" align="start"><SdDriveHistorySettings value={draft.smartImport} onChange={smartImport => update('smartImport', smartImport)} onOpenVideoPanel={setImportVideoPanel}/></SettingsRow>
     </SettingsPageGroup>
     {importVideoPanel === 'split' && <SettingsPanel title="视频切割设置" onClose={() => setImportVideoPanel(null)}><VideoSplitView embedded settingsOnly/></SettingsPanel>}
     {importVideoPanel === 'transcode' && <SettingsPanel title="视频转码设置" onClose={() => setImportVideoPanel(null)}><VideoTranscodeView embedded settingsOnly initialSettings={draft.videoTools.transcode} onSettingsChange={transcode => update('videoTools', { ...draft.videoTools, transcode })}/></SettingsPanel>}

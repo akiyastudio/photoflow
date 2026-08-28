@@ -4,6 +4,7 @@ const { pathToFileURL } = require('url');
 
 (async () => {
   const model = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'metadata', 'metadata-pane-model.ts')).href);
+  const selectionModel = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'multi-selection-metadata-model.ts')).href);
   const fields = [
     { group: 'EXIF', name: 'Rating', value: '1' },
     { group: '文件:基础', name: 'Name', value: 'a.jpg' },
@@ -40,6 +41,32 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(empty.size, 0, 'no selected file must have no expanded groups');
   const fileWithoutMetadata = model.reconcileExpandedMetadataGroups(empty, 'C:/empty.jpg', model.metadataGroupDependencyKey([]));
   assert.deepStrictEqual([...fileWithoutMetadata], ['Application']);
+
+  const entries = [
+    { name: 'one.mp4', path: 'C:/project/mov/one.mp4', relativePath: 'mov/one.mp4', kind: 'video', extension: '.mp4', size: 1024, createdAt: 1000, updatedAt: 3000 },
+    { name: 'two.mp4', path: 'C:/project/mov/two.mp4', relativePath: 'mov/two.mp4', kind: 'video', extension: '.mp4', size: 2048, createdAt: 2000, updatedAt: 4000 },
+  ];
+  const mediaSummary = selectionModel.summarizeMultiSelection(entries);
+  assert.strictEqual(mediaSummary.selectedCount, 2);
+  assert.strictEqual(mediaSummary.selectedFileCount, 2);
+  assert.strictEqual(mediaSummary.totalSize, 3072, 'known file sizes must be added together');
+  assert.strictEqual(mediaSummary.sizeComplete, true);
+  assert.strictEqual(mediaSummary.typeSummary, '2 个视频');
+  assert.strictEqual(mediaSummary.formatSummary, 'MP4');
+  assert.strictEqual(mediaSummary.commonParentPath, 'mov');
+  assert.deepStrictEqual([mediaSummary.earliestCreatedAt, mediaSummary.latestCreatedAt], [1000, 2000]);
+
+  const folder = { name: 'stills', path: 'C:/project/stills', relativePath: 'stills', kind: 'folder', extension: '', size: 0, createdAt: 500, updatedAt: 5000 };
+  const pendingFolderSummary = selectionModel.summarizeMultiSelection([...entries, folder]);
+  assert.strictEqual(pendingFolderSummary.sizeComplete, false, 'folder totals must remain pending until recursive details arrive');
+  const completeFolderSummary = selectionModel.summarizeMultiSelection([...entries, folder], {
+    [folder.path]: { size: 4096, createdAt: 500, updatedAt: 5000, fileCount: 3, folderCount: 1 },
+  });
+  assert.strictEqual(completeFolderSummary.totalSize, 7168);
+  assert.strictEqual(completeFolderSummary.containedFileCount, 5);
+  assert.strictEqual(completeFolderSummary.containedFolderCount, 1);
+  assert.strictEqual(completeFolderSummary.typeSummary, '1 个文件夹，2 个视频');
+  assert.strictEqual(completeFolderSummary.commonParentPath, '');
 
   console.log('metadata pane model tests passed');
 })().catch(error => {

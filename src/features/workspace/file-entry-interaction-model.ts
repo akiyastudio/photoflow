@@ -5,6 +5,7 @@ export type FileEntryClickIntent = 'ignore-repeat' | 'range-select' | 'toggle-se
 export interface FileEntryClickIntentInput {
   openMode: FileEntryOpenMode;
   selectionCount: number;
+  entrySelected: boolean;
   range: boolean;
   additive: boolean;
   clickCount?: number;
@@ -60,6 +61,7 @@ export const fileEntryDragPaths = (
 export const fileEntryClickIntent = ({
   openMode,
   selectionCount,
+  entrySelected,
   range,
   additive,
   clickCount = 1,
@@ -67,7 +69,7 @@ export const fileEntryClickIntent = ({
   if (clickCount > 1) return 'ignore-repeat';
   if (range) return 'range-select';
   if (additive) return 'toggle-select';
-  if (selectionCount > 0) return 'add-and-preview';
+  if (selectionCount > 0) return entrySelected ? 'toggle-select' : 'add-and-preview';
   return openMode === 'single' ? 'open' : 'select';
 };
 

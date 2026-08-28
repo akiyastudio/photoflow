@@ -17,6 +17,7 @@ import uuid
 from collections.abc import Callable, Iterable
 
 from ffmpeg_utils import get_ffmpeg_exe
+from send2trash import send2trash
 
 
 VIDEO_PREVIEW_QUALITY_PROFILES = {
@@ -49,6 +50,10 @@ GENERAL_TRANSCODE_H265_QUALITY = {"high": 21, "balanced": 25, "small": 29}
 GENERAL_TRANSCODE_LONG_EDGE = {"original": None, "2160p": 3840, "1080p": 1920, "720p": 1280}
 GENERAL_TRANSCODE_FRAME_RATES = {"original": None, "24": 24, "25": 25, "30": 30, "50": 50, "60": 60}
 GENERAL_TRANSCODE_AUDIO = {"copy", "aac", "remove"}
+GENERAL_TRANSCODE_INPUT_EXTENSIONS = {
+    ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".wmv",
+    ".crm", ".mts", ".m2ts", ".ts",
+}
 
 
 class FFmpegTranscodeError(RuntimeError):
@@ -287,7 +292,7 @@ def validate_general_transcode_options(
         raise ValueError("不支持的输出帧率")
     if audio_mode not in GENERAL_TRANSCODE_AUDIO:
         raise ValueError("不支持的音频处理方式")
-    if output_mode not in {"new", "replace"}:
+    if output_mode not in {"new", "replace", "delete-original"}:
         raise ValueError("不支持的输出方式")
     if video_mode == "copy" and (resolution != "original" or frame_rate != "original"):
         raise ValueError("只更换封装时不能调整分辨率或帧率")
@@ -501,11 +506,10 @@ def transcode_video(
     destination_directory = os.path.abspath(destination_directory) if destination_directory else None
     if destination_directory:
         os.makedirs(destination_directory, exist_ok=True)
-    destination = input_path if output_mode == "replace" else _unique_transcode_output(
-        input_path,
-        container,
-        destination_directory,
-        add_transcode_suffix=not destination_directory,
+    replaces_same_path = output_mode in {"replace", "delete-original"} and not destination_directory and source_extension == output_extension
+    destination = input_path if replaces_same_path else _unique_transcode_output(
+        input_path, container, destination_directory,
+        add_transcode_suffix=output_mode == "new" and not destination_directory,
     )
     temporary = os.path.join(
         os.path.dirname(destination),
@@ -544,7 +548,31 @@ def transcode_video(
                 else:
                     if cancel_check:
                         cancel_check()
-                    _retry_windows_sharing_violation(lambda: os.replace(temporary, destination), cancel_check)
+                    if output_mode == "delete-original" and os.path.normcase(destination) == os.path.normcase(input_path):
+                        send2trash(input_path)
+                        try:
+                            # Once the original is in the recycle bin, finish the
+                            # commit even if cancellation is requested in this
+                            # very small window; abandoning it would lose the
+                            # verified replacement from the working folder.
+                            _retry_windows_sharing_violation(lambda: os.replace(temporary, destination))
+                        except OSError:
+                            recovery_output = _unique_transcode_output(input_path, container, add_transcode_suffix=True)
+                            _retry_windows_sharing_violation(lambda: os.replace(temporary, recovery_output))
+                            destination = recovery_output
+                            if on_log:
+                                on_log(f"原视频已移入回收站；新视频无法使用原文件名，已另存为：{recovery_output}")
+                    else:
+                        _retry_windows_sharing_violation(lambda: os.replace(temporary, destination), cancel_check)
+                        if output_mode == "delete-original":
+                            try:
+                                send2trash(input_path)
+                            except Exception as recycle_error:
+                                try:
+                                    _retry_windows_sharing_violation(lambda: os.remove(destination), cancel_check)
+                                except OSError:
+                                    pass
+                                raise FFmpegTranscodeError("无法将原视频移入回收站，已保留原视频") from recycle_error
                     if on_progress:
                         on_progress(100.0)
                     if on_log and encoder != "copy":
@@ -804,7 +832,7 @@ def run(args_list=None) -> int:
     parser.add_argument("--resolution", choices=tuple(GENERAL_TRANSCODE_LONG_EDGE), default="original")
     parser.add_argument("--frame-rate", choices=tuple(GENERAL_TRANSCODE_FRAME_RATES), default="original")
     parser.add_argument("--audio-mode", choices=sorted(GENERAL_TRANSCODE_AUDIO), default="aac")
-    parser.add_argument("--output-mode", choices=("new", "replace"), default="new")
+    parser.add_argument("--output-mode", choices=("new", "replace", "delete-original"), default="new")
     parser.add_argument("--source-folder", action="append", default=[], help="所选来源文件夹；输出到其同级转码目录")
     parser.add_argument("--cancel_file", default="")
     args = parser.parse_args(args_list)
@@ -812,8 +840,26 @@ def run(args_list=None) -> int:
         sys.stdout.reconfigure(encoding="utf-8")
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
 
-    paths = list(dict.fromkeys(os.path.abspath(value.strip('"').strip("'")) for value in args.paths))
+    raw_paths = list(dict.fromkeys(os.path.abspath(value.strip('"').strip("'")) for value in args.paths))
     source_folders = list(dict.fromkeys(os.path.abspath(value) for value in args.source_folder))
+    missing_paths: list[str] = []
+    paths: list[str] = []
+    for raw_path in raw_paths:
+        if os.path.isfile(raw_path):
+            paths.append(raw_path)
+            continue
+        if os.path.isdir(raw_path):
+            source_folders.append(raw_path)
+            for directory, directory_names, file_names in os.walk(raw_path):
+                directory_names.sort(key=str.casefold)
+                for file_name in sorted(file_names, key=str.casefold):
+                    candidate = os.path.join(directory, file_name)
+                    if os.path.splitext(candidate)[1].lower() in GENERAL_TRANSCODE_INPUT_EXTENSIONS:
+                        paths.append(candidate)
+            continue
+        missing_paths.append(raw_path)
+    paths = list(dict.fromkeys(paths))
+    source_folders = list(dict.fromkeys(source_folders))
     cancel_file = os.path.abspath(args.cancel_file) if args.cancel_file else ""
 
     class TranscodeCancelled(RuntimeError):
@@ -830,6 +876,10 @@ def run(args_list=None) -> int:
             resolution=args.resolution, frame_rate=args.frame_rate,
             audio_mode=args.audio_mode, output_mode=args.output_mode,
         )
+        if missing_paths:
+            raise FileNotFoundError(f"找不到输入路径：{missing_paths[0]}")
+        if not paths:
+            raise ValueError("所选文件或文件夹中没有可转码的视频")
         if args.output_mode == "replace" and len(paths) != 1:
             raise ValueError("替换原文件只支持单个视频任务")
         if args.output_mode == "replace" and source_folders:
@@ -859,6 +909,7 @@ def run(args_list=None) -> int:
         for source_folder, output_folder in folder_destinations.items():
             _emit_cli("log", f"文件夹输出：{source_folder} → {output_folder}")
         total_paths = len(paths)
+        failures: list[tuple[str, str]] = []
         for index, path in enumerate(paths):
             check_cancelled()
             name = os.path.basename(path)
@@ -893,30 +944,46 @@ def run(args_list=None) -> int:
                 index / total_paths * 100,
                 data={"fileStarted": True},
             )
-            output = transcode_video(
-                path,
-                container=args.container,
-                video_mode=args.video_mode,
-                quality=args.quality,
-                resolution=args.resolution,
-                frame_rate=args.frame_rate,
-                audio_mode=args.audio_mode,
-                output_mode=args.output_mode,
-                destination_directory=destination_directories.get(path),
-                on_progress=emit_transcode_progress,
-                on_log=emit_transcode_log,
-                cancel_check=check_cancelled,
-            )
+            try:
+                output = transcode_video(
+                    path,
+                    container=args.container,
+                    video_mode=args.video_mode,
+                    quality=args.quality,
+                    resolution=args.resolution,
+                    frame_rate=args.frame_rate,
+                    audio_mode=args.audio_mode,
+                    output_mode=args.output_mode,
+                    destination_directory=destination_directories.get(path),
+                    on_progress=emit_transcode_progress,
+                    on_log=emit_transcode_log,
+                    cancel_check=check_cancelled,
+                )
+            except TranscodeCancelled:
+                raise
+            except Exception as error:
+                if args.output_mode != "delete-original":
+                    raise
+                failures.append((path, str(error)))
+                _emit_cli("warning", f"{name} 转码失败，原视频已保留：{error}")
+                continue
             outputs.append(output)
             _emit_cli("log", f"已生成：{output}")
+        if failures and not outputs:
+            raise RuntimeError(f"全部 {len(failures)} 个视频转码失败，原视频均已保留")
+        completed_message = f"视频转码完成，共处理 {len(outputs)} 个文件"
+        if failures:
+            completed_message += f"，失败 {len(failures)} 个（原视频已保留）"
         _emit_cli(
             "success",
-            f"视频转码完成，共处理 {len(outputs)} 个文件",
+            completed_message,
             100,
             outputs=outputs,
+            failedCount=len(failures),
             folderOutputs=[
                 {"sourceFolder": source_folder, "outputFolder": output_folder}
                 for source_folder, output_folder in folder_destinations.items()
+                if any(_path_is_inside(output, output_folder) for output in outputs)
             ],
         )
         return 0

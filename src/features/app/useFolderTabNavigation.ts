@@ -1,4 +1,4 @@
-import { useRef, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { BrowserPageInstance } from './workspace-tab-model';
 
 type InspirationPageDraft = Omit<BrowserPageInstance, 'id'>;
@@ -20,6 +20,17 @@ export const useFolderTabNavigation = ({
 }) => {
   const [navigationRequests, setNavigationRequests] = useState<Record<string, { path: string; id: number }>>({});
   const navigationRequestIdRef = useRef(0);
+  const [sourceDragActive, setSourceDragActive] = useState(false);
+  useEffect(() => {
+    const start = () => setSourceDragActive(true);
+    const end = () => setSourceDragActive(false);
+    window.addEventListener('photoflow:folder-tab-drag-start', start);
+    window.addEventListener('photoflow:folder-tab-drag-end', end);
+    return () => {
+      window.removeEventListener('photoflow:folder-tab-drag-start', start);
+      window.removeEventListener('photoflow:folder-tab-drag-end', end);
+    };
+  }, []);
 
   const openInNewTab = (relativePath: string) => {
     createPage({ kind: 'inspiration', projectId: `inspiration:${rootPath}`, project: null, inspirationRootPath: rootPath, currentRelativePath: relativePath, initialRelativePath: relativePath, operation: null });
@@ -33,5 +44,5 @@ export const useFolderTabNavigation = ({
     } else requestInspirationPath(rootPath, relativePath);
     activateInspiration();
   };
-  return { navigationRequests, openInNewTab, navigateCurrent };
+  return { navigationRequests, openInNewTab, navigateCurrent, sourceDragActive };
 };

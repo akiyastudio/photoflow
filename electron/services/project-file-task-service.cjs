@@ -31,15 +31,17 @@ const createProjectFileTask = ({
     runningMessage: '正在统计',
     cancellable,
     pausable,
-    concurrencyGroup,
-    concurrencyLimit,
-    concurrencyWriteLimit,
+    metadata: { operation, projectName, phase: 'queued' },
+  };
+  const operationLeaseDefinition = {
+    capacities: [{ key: concurrencyGroup, access: 'write', limit: concurrencyLimit, writeLimit: concurrencyWriteLimit }],
     resourceAccess: 'write',
     resources,
-    metadata: { operation, projectName, phase: 'queued' },
+    runningMessage: '正在统计',
   };
   const handle = backgroundTasks?.create?.(definition) || null;
   const job = { cancelled: false, finishing: false, taskId: operationId };
+  let operationLease = null;
   let highestProgress = 0;
   if (handle?.context?.signal) {
     handle.context.signal.addEventListener('abort', () => { job.cancelled = true; }, { once: true });
@@ -74,10 +76,11 @@ const createProjectFileTask = ({
     job,
     publish,
     start: async nextResources => {
-      if (Array.isArray(nextResources)) definition.resources = nextResources;
+      if (Array.isArray(nextResources)) operationLeaseDefinition.resources = nextResources;
       if (!handle || handle.deduplicated) return;
       try {
         await handle.waitForStart();
+        operationLease = await handle.context.acquireResourceLease(operationLeaseDefinition);
       } catch (error) {
         if (handle.context.signal.aborted || error?.code === 'TASK_CANCELLED') {
           throw Object.assign(new Error('文件操作已取消'), { code: cancelledCode });
@@ -87,11 +90,25 @@ const createProjectFileTask = ({
     },
     cancel: () => backgroundTasks?.cancel?.(operationId),
     waitIfPaused: () => handle?.context?.waitIfPaused?.() || Promise.resolve(),
+    acquireResourceLease: definition => handle?.context?.acquireResourceLease?.(definition),
+    withResources: (definition, worker) => handle?.context?.withResources?.(definition, worker) || worker(),
     setPausable: pausableValue => handle?.context?.setPausable?.(pausableValue),
     saveCheckpoint: (checkpoint, progress, message, metadata) => handle?.context?.saveCheckpoint?.(checkpoint, progress, message, metadata),
-    complete: message => handle && !handle.deduplicated && handle.complete(message),
-    fail: error => handle && !handle.deduplicated && handle.fail(error),
-    cancelled: () => handle && !handle.deduplicated && handle.cancelled(),
+    complete: message => {
+      operationLease?.release();
+      operationLease = null;
+      if (handle && !handle.deduplicated) handle.complete(message);
+    },
+    fail: error => {
+      operationLease?.release();
+      operationLease = null;
+      if (handle && !handle.deduplicated) handle.fail(error);
+    },
+    cancelled: () => {
+      operationLease?.release();
+      operationLease = null;
+      if (handle && !handle.deduplicated) handle.cancelled();
+    },
     isFinished: () => !handle || handle.deduplicated || handle.isFinished(),
   };
 };

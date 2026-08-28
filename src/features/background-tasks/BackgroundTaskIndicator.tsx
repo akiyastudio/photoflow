@@ -20,7 +20,7 @@ const taskSummary = (task: BackgroundTask) => {
   return parts.join(' · ');
 };
 
-export const BackgroundTaskIndicator = ({ ownerPageIds, open, onOpenChange, drawerHostRef }: { ownerPageIds: ReadonlySet<string>; open: boolean; onOpenChange: (open: boolean) => void; drawerHostRef: RefObject<HTMLDivElement> }) => {
+export const BackgroundTaskIndicator = ({ ownerPageIds, open, onOpenChange, drawerHostRef }: { ownerPageIds: ReadonlySet<string>; open: boolean; onOpenChange: (open: boolean) => void; drawerHostRef: RefObject<HTMLDivElement | null> }) => {
   const { backgroundTasks: tasks, panelTasks, dismissPanelTask, dismissBackgroundTask, retryBackgroundTask, isTaskToastMinimized, restoreTaskToast } = useTaskCenter();
   const triggerRef = useRef<HTMLButtonElement>(null);
   const closeAndRestoreFocus = () => {
@@ -76,7 +76,7 @@ export const BackgroundTaskIndicator = ({ ownerPageIds, open, onOpenChange, draw
       <Activity size={15}/><span>{runningCount || failedCount || visibleCount}</span>
       {runningCount > 0 && <span className="absolute right-1 top-1 h-1.5 w-1.5 animate-pulse rounded-full bg-blue-500"/>}
     </button>
-    {open && drawerHostRef.current && createPortal(<aside id="background-task-drawer" className="flex h-full w-80 flex-col bg-white p-2" aria-label="后台任务抽屉">
+    {open && drawerHostRef.current && createPortal(<aside id="background-task-drawer" className="flex h-full w-full flex-col bg-white p-2" aria-label="后台任务抽屉">
       <div className="flex shrink-0 items-center justify-between px-2 py-1.5"><strong className="text-sm text-slate-800">后台任务</strong><button type="button" onClick={closeAndRestoreFocus} aria-label="关闭后台任务抽屉" className="rounded p-1 text-slate-400 hover:bg-slate-100"><X size={14}/></button></div>
       <div className="min-h-0 flex-1 space-y-1 overflow-y-auto">
         {visibleCount === 0 && <p className="px-2 py-6 text-center text-xs text-slate-400">暂无进行中的任务</p>}

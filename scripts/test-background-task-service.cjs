@@ -1,15 +1,18 @@
 const assert = require('assert');
 const { EventEmitter } = require('events');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
+const { createProjectFileTask } = require('../electron/services/project-file-task-service.cjs');
 const { normalizeExternalProgress, registerBackgroundTasksIpc } = require('../electron/modules/background-tasks-ipc.cjs');
-const { pythonToolResourcePaths } = require('../electron/modules/system-ipc.cjs');
+const { pythonToolResourcePaths, resolvePythonWorkerResourceLease } = require('../electron/modules/system-ipc.cjs');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const projectFileTaskSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'project-file-task-service.cjs'), 'utf8');
 const versionsIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
 const mediaScanSchedulerSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'media-tracking-scan-scheduler.cjs'), 'utf8');
+const brollImportSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'broll-import.cjs'), 'utf8');
 assert(projectFileTaskSource.includes("scanning: '正在统计'") && projectFileTaskSource.includes('concurrencyLimit = 3') && projectFileTaskSource.includes('concurrencyWriteLimit = 2'), 'file tasks must allow three total disk tasks while retaining the two-writer limit');
+assert(brollImportSource.includes("concurrencyGroup: 'disk-io'") && brollImportSource.includes("task.withResources({\n              capacities: [{ key: 'heavy-media'"), 'b-roll imports must reserve heavy media capacity only around their actual split/transcode phases');
 const deferredMediaScanStart = mediaScanSchedulerSource.indexOf("type: 'version-media-rescan'");
 const deferredMediaScanBlock = mediaScanSchedulerSource.slice(deferredMediaScanStart, mediaScanSchedulerSource.indexOf('runner = createDirtyCoalescingRunner', deferredMediaScanStart));
 assert(deferredMediaScanBlock.includes("{ path: projectPath, access: 'read' }") && deferredMediaScanBlock.includes('photoflow-workspace-database/'), 'deferred media maintenance must read project files while reserving the shared workspace database writer');
@@ -18,8 +21,12 @@ assert(versionsIpcSource.includes('scheduleMediaTrackingScan(workspaceRoot, proj
 const resourcePathsFor = (scriptName, args) => pythonToolResourcePaths(scriptName, args, path.win32).map(resource => resource.path);
 assert.deepStrictEqual(resourcePathsFor('png_to_jpg.py', ['--quality', '95', '--keep-original', 'C:\\project\\images\\a.png']), ['C:\\project\\images'], 'PNG conversion must lock the directory where it writes JPG output');
 assert.deepStrictEqual(resourcePathsFor('research.py', ['--path', 'C:\\project\\video\\clip.mp4', '--sensitivity', 'standard']), ['C:\\project\\video'], 'research must lock the directory where it exports frames');
-assert.deepStrictEqual(resourcePathsFor('ffmpeg_transcode.py', ['C:\\project\\video\\clip.mp4', '--output-mode', 'new', '--source-folder', 'C:\\project\\video']), ['C:\\project\\video', 'C:\\project'], 'folder transcode must lock both direct output directories and the parent where it creates its sibling output folder');
+assert.deepStrictEqual(resourcePathsFor('ffmpeg_transcode.py', ['C:\\project\\video\\clip.mp4', '--output-mode', 'new', '--source-folder', 'C:\\project\\video']), ['C:\\project\\video', 'photoflow-transcode-destination/c:/project/video'], 'folder transcode must coordinate its output family without locking unrelated sibling folders in the project');
 assert.deepStrictEqual(resourcePathsFor('cut_video.py', ['C:\\project\\video\\clip.mp4', '--output-dir', 'D:\\exports']), ['C:\\project\\video', 'D:\\exports'], 'video splitting must lock its source-adjacent and explicit output directories');
+const splitWorkerLease = resolvePythonWorkerResourceLease('classify.py', { leaseId: 'lease-12345678', profile: 'video-split', phase: '分割大视频' });
+assert.deepStrictEqual(splitWorkerLease.definition.capacities, [{ key: 'heavy-media', access: 'write', limit: 1, writeLimit: 1 }]);
+assert.equal(splitWorkerLease.definition.runningMessage, '分割大视频');
+assert.throws(() => resolvePythonWorkerResourceLease('classify.py', { leaseId: 'lease-12345678', profile: 'arbitrary-host-resource' }), /unsupported resource profile/);
 
 const queued = async promise => {
   let settled = false;
@@ -67,6 +74,22 @@ const main = async () => {
   assert.equal(selectionCompleteTask.state, 'completed', 'a real selection copy must still publish its terminal task state');
 
   const service = createBackgroundTaskService({ eventBus: new EventEmitter() });
+  const fileTask = createProjectFileTask({
+    backgroundTasks: service,
+    event: { sender: { isDestroyed: () => false, send: () => undefined } },
+    operationId: 'leased-file-task', operation: 'import', title: '导入文件', projectName: 'project',
+    resources: ['C:/projects/leased-target'],
+  });
+  await fileTask.start();
+  const conflictingFileTask = service.create({
+    id: 'conflicting-file-task', type: 'test', title: '冲突文件任务',
+    resources: ['C:/projects/leased-target/child'], concurrencyGroup: 'disk-io', concurrencyLimit: 3, concurrencyWriteLimit: 2,
+  });
+  const conflictingFileStart = conflictingFileTask.waitForStart();
+  assert.equal(await queued(conflictingFileStart), true, 'a project file task must protect its paths through an explicit operation lease');
+  fileTask.complete('导入完成');
+  await conflictingFileStart;
+  conflictingFileTask.complete();
   const monotonic = service.create({ id: 'monotonic', type: 'test', title: 'monotonic', concurrencyGroup: 'progress', concurrencyLimit: 1 });
   await monotonic.waitForStart();
   monotonic.context.report(60, 'phase one');
@@ -166,6 +189,74 @@ const main = async () => {
   focusedCompare.complete();
   await overlappingWriteStart;
   overlappingWrite.complete();
+
+  const activeTranscode = service.create({
+    id: 'active-transcode', type: 'python-tool', title: '视频转码',
+    concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1,
+    resources: pythonToolResourcePaths('ffmpeg_transcode.py', ['C:\\project\\mov\\clip.mp4', '--output-mode', 'new', '--source-folder', 'C:\\project\\mov'], path.win32),
+  });
+  await activeTranscode.waitForStart();
+  const phasedImport = service.create({
+    id: 'phased-import', type: 'project-file-operation', title: '导入花絮',
+    resources: ['C:/project/花絮'], concurrencyGroup: 'disk-io', concurrencyLimit: 3, concurrencyWriteLimit: 2,
+  });
+  await phasedImport.waitForStart();
+  assert.equal(service.get('phased-import').state, 'running', 'an import must be able to scan and copy while an unrelated video transcode is active');
+  let heavyPhaseStarted = false;
+  const heavyPhase = phasedImport.context.withResources({
+    concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1, runningMessage: '正在转码花絮视频',
+  }, async () => { heavyPhaseStarted = true; });
+  assert.equal(await queued(heavyPhase), true, 'only the import heavy-media phase must wait for the active transcode');
+  assert.equal(service.get('phased-import').state, 'running', 'waiting for a scoped phase must not put the whole import back into the queued state');
+  assert.match(service.get('phased-import').message, /等待“视频转码”完成/);
+  activeTranscode.complete();
+  await heavyPhase;
+  assert.equal(heavyPhaseStarted, true);
+  const laterTranscode = service.create({
+    id: 'later-transcode', type: 'python-tool', title: '后续视频转码',
+    concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1,
+  });
+  await laterTranscode.waitForStart();
+  assert.equal(service.get('later-transcode').state, 'running', 'the heavy-media slot must be released as soon as the import transcode phase ends');
+  laterTranscode.complete();
+  phasedImport.complete();
+
+  const cpuHolder = service.create({ id: 'cpu-holder', type: 'test', title: 'CPU holder' });
+  const gpuHolder = service.create({ id: 'gpu-holder', type: 'test', title: 'GPU holder' });
+  const multiResourceTask = service.create({ id: 'multi-resource', type: 'test', title: 'multi resource' });
+  await Promise.all([cpuHolder.waitForStart(), gpuHolder.waitForStart(), multiResourceTask.waitForStart()]);
+  const cpuLease = await cpuHolder.context.acquireResourceLease({ capacities: [{ key: 'cpu-heavy', limit: 1, writeLimit: 1 }] });
+  const gpuLease = await gpuHolder.context.acquireResourceLease({ capacities: [{ key: 'gpu-heavy', limit: 1, writeLimit: 1 }] });
+  let multiResourceStarted = false;
+  const multiResourceLease = multiResourceTask.context.acquireResourceLease({
+    capacities: [
+      { key: 'cpu-heavy', limit: 1, writeLimit: 1 },
+      { key: 'gpu-heavy', limit: 1, writeLimit: 1 },
+    ],
+    runningMessage: '正在执行 CPU/GPU 阶段',
+  }).then(lease => { multiResourceStarted = true; return lease; });
+  assert.equal(await queued(multiResourceLease), true, 'a phase requesting multiple capacities must wait until every capacity is available');
+  cpuLease.release();
+  assert.equal(await queued(multiResourceLease), true, 'a multi-capacity lease must not start after only one blocker is released');
+  assert.equal(multiResourceStarted, false);
+  gpuLease.release();
+  const acquiredMultiResourceLease = await multiResourceLease;
+  assert.equal(multiResourceStarted, true);
+  acquiredMultiResourceLease.release();
+  cpuHolder.complete();
+  gpuHolder.complete();
+  multiResourceTask.complete();
+
+  const terminationHolder = service.create({ id: 'termination-holder', type: 'test', title: 'termination holder' });
+  const terminatedWaiter = service.create({ id: 'terminated-waiter', type: 'test', title: 'terminated waiter' });
+  await Promise.all([terminationHolder.waitForStart(), terminatedWaiter.waitForStart()]);
+  const terminationLease = await terminationHolder.context.acquireResourceLease({ capacities: [{ key: 'termination-capacity', limit: 1, writeLimit: 1 }] });
+  const abandonedLeaseRequest = terminatedWaiter.context.acquireResourceLease({ capacities: [{ key: 'termination-capacity', limit: 1, writeLimit: 1 }] });
+  assert.equal(await queued(abandonedLeaseRequest), true);
+  terminatedWaiter.complete();
+  await assert.rejects(abandonedLeaseRequest, error => error?.code === 'TASK_FINISHED');
+  terminationLease.release();
+  terminationHolder.complete();
 
   const mediaIndex = service.create({
     id: 'workspace-media-index', type: 'test', title: 'media index',

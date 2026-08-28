@@ -8,10 +8,12 @@ import { useEscapeLayer } from '../../components/LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG, isRecycleBinFailure } from '../../utils/recycleBinFailure';
 import { InteractiveCropEditor, type CropRectangle } from '../../components/InteractiveCropEditor';
 import { ImportSourceControls, type ImportMaterialKind } from '../../components/ImportSourceControls';
+import { SourcePathPicker } from '../../components/SourcePathPicker';
+import { mergeSourcePaths, sourcePathIdentity } from '../../components/source-path-picker-model';
 import { PanelSwitch } from '../../components/PanelSwitch';
 import { appendImportSuccess, type ImportCompletion } from './import-completion-model';
 import { filenameSelectionOutputName, resolveFilenameSelectionSource } from './filename-selection-model';
-import { configuredSdDriveTypes, configuredSdSelectionPaths, isTrustedSdImportDevice, normalizeConfiguredSdDeviceRecords, reconcileConfiguredSdDevices, resolveConfiguredSdDevices, storageDeviceMatchesId, syncLegacySdMirrors, upsertConfiguredSdDevice } from './sd-startup-import-model';
+import { configuredSdDriveTypes, configuredSdDriveVideoActions, configuredSdSelectionPaths, isTrustedSdImportDevice, normalizeConfiguredSdDeviceRecords, reconcileConfiguredSdDevices, resolveConfiguredSdDevices, storageDeviceMatchesId, syncLegacySdMirrors, upsertConfiguredSdDevice } from './sd-startup-import-model';
 import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, shouldDeleteSourceForImportBatch, type StartupSdAutoImportRequest } from './startup-sd-auto-import-model';
 import { isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from './storage-device-inventory-model';
 import { useStorageDeviceInventory } from './use-storage-device-inventory';
@@ -198,6 +200,14 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   const [drivePickerOpen, setDrivePickerOpen] = useState(false);
   const selectedDrives = config ? (directSource ? (config.sdPaths?.length ? config.sdPaths : config.sdPath ? [config.sdPath] : []) : configuredSdSelectionPaths(config, storageDevices)) : [];
   const driveTypes = config ? configuredSdDriveTypes(config, storageDevices) : {};
+  const driveVideoActions = config ? configuredSdDriveVideoActions(config, storageDevices) : {};
+  const defaultVideoActionsForType = (type: 'work' | 'broll') => ({
+    splitVideosOnImport: type === 'broll' ? splitBrollVideosOnImport : splitVideosOnImport,
+    transcodeVideosOnImport: type === 'broll' ? transcodeBrollVideosOnImport : transcodeVideosOnImport,
+  });
+  const videoActionsForDrive = (sdPath: string, type: 'work' | 'broll') => directSource
+    ? defaultVideoActionsForType(type)
+    : driveVideoActions[sdPath] || defaultVideoActionsForType(type);
   // 【关键修改】使用 Ref 来做“防抖”锁，防止 SD 卡接触不良导致多次触发 startImport
   const isBusyRef = React.useRef(false);
   const handledStartupAutoImportRef = React.useRef(0);
@@ -410,7 +420,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
       if (removing && matchingRecord?.enabled && matchingRecord.confirmedAt > 0) {
         onImportConfigChange(syncLegacySdMirrors(config, records.map(record => storageDeviceMatchesId(device, record.deviceId) ? { ...record, deviceId: device.id, enabled: false } : record)));
       } else {
-        onImportConfigChange(upsertConfiguredSdDevice(config, device, driveTypes[sdPath] || 'work', Date.now()));
+        const type = driveTypes[sdPath] || 'work';
+        onImportConfigChange(upsertConfiguredSdDevice(config, device, type, Date.now(), defaultVideoActionsForType(type)));
       }
       return;
     }
@@ -726,10 +737,9 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     const args = ['--sd_path', currentDriveRef.current || selectedDrives[0] || config?.sdPath || '', '--dest_path', resolvedDestinationPath];
     if (Object.keys(resolvedRoutes).length) args.push('--project_routes', JSON.stringify(resolvedRoutes));
     if (!usesProjectRouting) args.push('--direct_project');
-    const shouldSplitVideos = type === 'broll' ? splitBrollVideosOnImport : splitVideosOnImport;
-    const shouldTranscodeVideos = type === 'broll' ? transcodeBrollVideosOnImport : transcodeVideosOnImport;
-    if (shouldSplitVideos) args.push('--split_import_videos');
-    if (shouldTranscodeVideos && transcodeSettings) args.push('--transcode_import_videos', '--transcode_settings', JSON.stringify(transcodeSettings));
+    const videoActions = videoActionsForDrive(currentDriveRef.current || selectedDrives[0] || '', type);
+    if (videoActions.splitVideosOnImport) args.push('--split_import_videos');
+    if (videoActions.transcodeVideosOnImport && transcodeSettings) args.push('--transcode_import_videos', '--transcode_settings', JSON.stringify(transcodeSettings));
     runCmd(type === 'broll' ? 'broll' : 'import', args);
   };
   continueRoutedImportRef.current = runActualImport;
@@ -766,7 +776,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     setProgress(0);
     setTransferStats(null);
     setLogs([]); // 清空日志准备开始
-    setStatusMsg(type === 'broll' ? `正在把 ${sdPath} 导入“花絮”` : `正在整理 ${sdPath} 的工作文件`);
+    setStatusMsg(type === 'broll' ? `正在把 ${sdPath} 导入“花絮”` : `正在整理 ${sdPath} 的原始素材`);
 
     if (usesProjectRouting) {
       setStatusMsg('正在导入素材…');
@@ -871,10 +881,9 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
       }
       args.push('--sd_path', currentDriveRef.current || selectedDrives[0] || config.sdPath);
       args.push('--dest_path', resolvedDestinationPath);
-      const shouldSplitVideos = currentDriveTypeRef.current === 'broll' ? splitBrollVideosOnImport : splitVideosOnImport;
-      const shouldTranscodeVideos = currentDriveTypeRef.current === 'broll' ? transcodeBrollVideosOnImport : transcodeVideosOnImport;
-      if (shouldSplitVideos) args.push('--split_import_videos');
-      if (shouldTranscodeVideos && transcodeSettings) args.push('--transcode_import_videos', '--transcode_settings', JSON.stringify(transcodeSettings));
+      const videoActions = videoActionsForDrive(currentDriveRef.current || selectedDrives[0] || '', currentDriveTypeRef.current);
+      if (videoActions.splitVideosOnImport) args.push('--split_import_videos');
+      if (videoActions.transcodeVideosOnImport && transcodeSettings) args.push('--transcode_import_videos', '--transcode_settings', JSON.stringify(transcodeSettings));
       // 添加用户决定的参数
       args.push('--should_split', split ? 'true' : 'false');
     }
@@ -934,10 +943,10 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     if (directSource && status === 'idle') return <ImportSourceControls
       selectionTitle="选择一个或多个原始素材文件，或选择素材文件夹"
       selectionDescription="可直接拖入文件或文件夹，也可使用下方选择入口"
-      selectedCount={selectedDrives.length}
+      selectedPaths={selectedDrives}
+      onSelectedPathsChange={paths => onDropSourcePaths?.(paths)}
       onChooseFiles={() => onChooseSourceFiles?.()}
       onChooseFolder={onChooseSourceFolder ? () => onChooseSourceFolder() : undefined}
-      onDropPaths={onDropSourcePaths}
       importKind={importKind}
       onImportKindChange={kind => onImportKindChange?.(kind, selectedDrives)}
       linkOnly={linkOnly}
@@ -983,7 +992,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
           {!directSource && <div ref={drivePickerRef} className="relative" onClick={event => event.stopPropagation()}>
             <button type="button" aria-haspopup="menu" aria-expanded={drivePickerOpen} onClick={() => setDrivePickerOpen(open => !open)} className="flex h-9 min-w-36 items-center justify-between gap-2 rounded-lg border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 hover:border-blue-400"><span className="max-w-40 truncate">{selectedDrives.length ? `已选 ${selectedDrives.length} 个盘符` : '选择盘符'}</span><ChevronDown size={15} className={`transition-transform ${drivePickerOpen ? 'rotate-180' : ''}`}/></button>
             {drivePickerOpen && <div role="menu" className="absolute right-0 top-full z-50 mt-1 max-h-64 min-w-72 overflow-y-auto rounded-lg border border-slate-200 bg-white p-2 shadow-xl">
-              {[...new Set([...selectedDrives, ...drives])].map(drive => <div key={drive} className="flex items-center gap-2 rounded-md px-2 py-2 text-sm hover:bg-slate-50"><label className="flex min-w-0 cursor-pointer items-center gap-2"><input type="checkbox" checked={selectedDrives.includes(drive)} onChange={() => toggleDrive(drive)}/><span className="font-mono">{drive}</span></label><select aria-label={`${drive} 导入类型`} value={driveTypes[drive] || 'work'} onChange={event => setDriveType(drive, event.target.value as 'work' | 'broll')} className="ml-auto rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600" disabled={!selectedDrives.includes(drive)}><option value="work">工作文件</option><option value="broll">花絮</option></select><span className={`text-xs ${drives.includes(drive) ? 'text-emerald-600' : 'text-slate-400'}`}>{drives.includes(drive) ? '已连接' : '未连接'}</span></div>)}
+              {[...new Set([...selectedDrives, ...drives])].map(drive => <div key={drive} className="flex items-center gap-2 rounded-md px-2 py-2 text-sm hover:bg-slate-50"><label className="flex min-w-0 cursor-pointer items-center gap-2"><input type="checkbox" checked={selectedDrives.includes(drive)} onChange={() => toggleDrive(drive)}/><span className="font-mono">{drive}</span></label><select aria-label={`${drive} 导入类型`} value={driveTypes[drive] || 'work'} onChange={event => setDriveType(drive, event.target.value as 'work' | 'broll')} className="ml-auto rounded-md border border-slate-200 bg-white px-2 py-1 text-xs text-slate-600" disabled={!selectedDrives.includes(drive)}><option value="work">原始素材</option><option value="broll">花絮</option></select><span className={`text-xs ${drives.includes(drive) ? 'text-emerald-600' : 'text-slate-400'}`}>{drives.includes(drive) ? '已连接' : '未连接'}</span></div>)}
               {!drives.length && !selectedDrives.length && <p className="px-2 py-1 text-xs text-slate-500">未检测到可用盘符</p>}
             </div>}
           </div>}
@@ -1464,37 +1473,9 @@ const HomePanel = ({ title, initiallyOpen = false, tone, children, onOpenChange,
   </section>;
 };
 
-const sourceFileDetails = (sourcePath: string) => {
-  const parts = sourcePath.split(/[\\/]/).filter(Boolean);
-  const name = parts.pop() || sourcePath;
-  const extension = name.includes('.') ? name.split('.').pop()?.toLocaleUpperCase() || '文件' : '文件';
-  return { name, extension, parent: parts.slice(-2).join(' / ') };
-};
-
-const SelectedToolSourceList = ({ paths, title, itemLabel, description, loading = false, disabled = false, onRemove }: { paths: string[]; title: string; itemLabel: string; description: string; loading?: boolean; disabled?: boolean; onRemove?: (path: string) => void }) => (
-  <section className="overflow-hidden rounded-xl border border-slate-200 bg-white">
-    <header className="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3">
-      <div className="min-w-0 flex-1">
-        <p className="text-sm font-bold text-slate-800">{loading ? '正在读取素材…' : `${title} ${paths.length} 个${itemLabel}`}</p>
-        <p className="mt-0.5 text-xs text-slate-500">{loading ? '正在从后台媒体索引读取文件列表' : description}</p>
-      </div>
-      <span className="rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-500">{loading ? <Loader2 size={12} className="animate-spin"/> : `${paths.length} 个${itemLabel}`}</span>
-    </header>
-    {paths.length > 0 ? <div className="max-h-52 divide-y divide-slate-100 overflow-y-auto">
-      {paths.map(sourcePath => {
-        const details = sourceFileDetails(sourcePath);
-        return <div key={sourcePath} className="flex items-center gap-3 px-4 py-2.5">
-          <span className="flex h-8 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[10px] font-bold text-blue-700">{details.extension}</span>
-          <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-slate-700" title={details.name}>{details.name}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400" title={details.parent}>{details.parent || '当前目录'} · 等待</span></span>
-          {onRemove && <button type="button" disabled={disabled || loading} onClick={() => onRemove(sourcePath)} title={`移除 ${details.name}`} className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"><X size={14}/></button>}
-        </div>;
-      })}
-    </div> : <div className="flex min-h-24 items-center justify-center px-4 py-5 text-xs text-slate-400">{loading ? '正在建立列表…' : '没有可处理的文件'}</div>}
-  </section>
-);
-
 const ConverterView = ({ embedded = false, initialTargetPath = "", initialTargetPaths, sourcesLoading = false }: { embedded?: boolean; initialTargetPath?: string; initialTargetPaths?: string[]; sourcesLoading?: boolean }) => {
   const [targetPaths, setTargetPaths] = useState<string[]>(() => initialTargetPaths?.filter(Boolean) || (initialTargetPath ? [initialTargetPath] : []));
+  const { pathKinds, resolvingKinds } = useSourcePathKinds(targetPaths);
   const [quality, setQuality] = useState(100);
   const [deleteOriginal, setDeleteOriginal] = useState(true);
   const { logs, isRunning, progress, start } = usePythonTask('png_to_jpg.py', '进度');
@@ -1502,6 +1483,17 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
   useEffect(() => {
     setTargetPaths(initialTargetPaths?.filter(Boolean) || (initialTargetPath ? [initialTargetPath] : []));
   }, [initialTargetPath, initialTargetPaths]);
+
+  const chooseFiles = async () => {
+    if (isRunning || sourcesLoading) return;
+    const result = await window.electronAPI.chooseProjectImportFiles();
+    if (!result.cancelled) setTargetPaths(current => mergeSourcePaths(current, result.paths));
+  };
+  const chooseFolder = async () => {
+    if (isRunning || sourcesLoading) return;
+    const result = await window.electronAPI.chooseWorkspaceDirectory('');
+    if (!result.cancelled && result.path) setTargetPaths(current => mergeSourcePaths(current, [result.path!]));
+  };
 
   const startConversion = () => {
     if (!targetPaths.length) return;
@@ -1513,7 +1505,7 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
       {!embedded && <h2 className="text-2xl font-bold text-slate-800">PNG 转 JPG </h2>}
       <div className={embedded ? 'space-y-6' : 'bg-white border border-slate-200 rounded-xl p-6 space-y-6'}>
 
-        <SelectedToolSourceList paths={targetPaths} loading={sourcesLoading} title="已选择" itemLabel="PNG 文件" description="包含所选文件及所选文件夹全部子目录中的 PNG"/>
+        <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} onChange={setTargetPaths} onChooseFiles={chooseFiles} onChooseFolder={chooseFolder} fileButtonLabel="追加 PNG" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="文件夹作为一个来源显示，执行时会递归处理其中的 PNG" emptyTitle="拖入 PNG 文件或文件夹"/>
         <p className="flex items-center gap-1 text-xs text-slate-600"><AlertCircle size={12}/>{deleteOriginal ? '转换并验证成功后，原始 PNG 会移入回收站' : '转换后保留原始 PNG'}</p>
 
         <div className="flex items-center justify-between gap-4 rounded-lg bg-slate-50 p-3 border border-slate-200">
@@ -1535,15 +1527,15 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
           idleMessage={isRunning ? '正在转换…' : '进度'}
           action={<button
                 onClick={startConversion}
-                disabled={!targetPaths.length || isRunning || sourcesLoading}
+                disabled={!targetPaths.length || isRunning || sourcesLoading || resolvingKinds}
                 className={`px-8 py-2 rounded-lg font-bold transition flex items-center gap-2 ${
-                  isRunning || !targetPaths.length || sourcesLoading
+                  isRunning || !targetPaths.length || sourcesLoading || resolvingKinds
                     ? 'bg-slate-100 text-slate-400 cursor-not-allowed border border-slate-200 shadow-none'
                     : 'bg-blue-600 text-white hover:bg-blue-500 shadow-lg shadow-blue-500/20'
                 }`}
              >
-                {isRunning || sourcesLoading ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} fill="currentColor" />}
-                {isRunning ? '转换中...' : sourcesLoading ? '正在读取' : '开始转换'}
+                {isRunning || sourcesLoading || resolvingKinds ? <Loader2 className="animate-spin" size={18} /> : <Play size={18} fill="currentColor" />}
+                {isRunning ? '转换中...' : sourcesLoading || resolvingKinds ? '正在读取' : '开始转换'}
              </button>}
         />
       </div>
@@ -1808,7 +1800,6 @@ const ResearchView = ({
   initialTargetPath = '',
   initialTargetPaths = [],
   sourcesLoading = false,
-  targetKind = 'file',
   hasTxtFiles = false,
 }: {
   embedded?: boolean;
@@ -1817,13 +1808,16 @@ const ResearchView = ({
   initialTargetPath?: string;
   initialTargetPaths?: string[];
   sourcesLoading?: boolean;
-  targetKind?: 'file' | 'folder';
   hasTxtFiles?: boolean;
 }) => {
   const { logs, isRunning, progress, statusMsg, start } = usePythonTask('research.py', '准备就绪');
   const initialTargetKey = (initialTargetPaths.length ? initialTargetPaths : initialTargetPath ? [initialTargetPath] : []).join('\n');
   const [targetPaths, setTargetPaths] = useState<string[]>(() => initialTargetKey.split('\n').filter(Boolean));
   const [organizeData, setOrganizeData] = useState(true);
+  const { pathKinds, resolvingKinds } = useSourcePathKinds(targetPaths);
+  const currentTargetKey = mergeSourcePaths(targetPaths).join('\n');
+  const currentFolderPaths = targetPaths.filter(path => pathKinds[sourcePathIdentity(path)] === 'folder');
+  const canOrganizeData = currentTargetKey === mergeSourcePaths(initialTargetKey.split('\n')).join('\n') && currentFolderPaths.length === 1 && hasTxtFiles;
 
   useEffect(() => {
     setTargetPaths([...new Set(initialTargetKey.split('\n').filter(Boolean))]);
@@ -1843,23 +1837,13 @@ const ResearchView = ({
     const result = await window.electronAPI.chooseVideoFolder();
     if (!result.cancelled && result.path) appendTargets([result.path]);
   };
-  const addDroppedTargets = (event: React.DragEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (isRunning || sourcesLoading) return;
-    appendTargets(Array.from(event.dataTransfer.files).map(file => {
-      try { return window.electronAPI.getPathForFile(file); }
-      catch { return ''; }
-    }));
-  };
-
   const runAnalysis = () => {
     const args = [
       ...targetPaths.flatMap(path => ['--path', path]),
       '--sensitivity', config.sensitivity,
       '--min_duration', config.minDuration.toString()
     ];
-    if (targetKind === 'folder' && hasTxtFiles && organizeData) args.push('--organize-data');
+    if (canOrganizeData && organizeData) args.push('--organize-data');
     start(args, '正在初始化引擎...');
   };
 
@@ -1870,12 +1854,7 @@ const ResearchView = ({
         <div className="space-y-2">
           <p className="mt-2 text-gray-600">识别视频转场，并从每个分镜导出清晰画面。</p>
         </div>
-        <section className="space-y-3">
-          <div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase text-slate-500">输入范围</p><p className="mt-1 text-xs text-slate-500">可添加视频或文件夹；文件夹会扫描子目录。</p></div><div className="flex items-center gap-2"><button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFolder()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><FolderInput size={14}/>添加文件夹</button><button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFiles()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>添加视频</button></div></div>
-          <div onDrop={addDroppedTargets} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} className={!targetPaths.length ? 'rounded-xl border border-dashed border-slate-300 bg-slate-50/70 p-2' : ''}>
-            {targetPaths.length ? <SelectedToolSourceList paths={targetPaths} loading={sourcesLoading} disabled={isRunning} onRemove={path => setTargetPaths(current => current.filter(value => value !== path))} title="已选择" itemLabel="项" description="文件夹与视频将按列表顺序批量处理"/> : <button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseFiles()} className="flex min-h-28 w-full flex-col items-center justify-center gap-2 rounded-lg text-sm text-slate-500 hover:bg-white disabled:opacity-50"><FolderInput size={24} className="text-slate-400"/><span>拖入文件或文件夹，或点击选择视频</span></button>}
-          </div>
-        </section>
+        <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} onChange={setTargetPaths} onChooseFiles={chooseFiles} onChooseFolder={chooseFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="文件夹会作为一个来源显示，并在执行时扫描子目录" emptyTitle="拖入视频或文件夹"/>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
             <label className="form-label">检测灵敏度</label>
@@ -1888,7 +1867,7 @@ const ResearchView = ({
             <p className="mt-1 text-xs leading-5 text-slate-500">数值越大，短暂画面会被过滤，最终导出的截图越少。</p>
           </div>
         </div>
-        {targetKind === 'folder' && hasTxtFiles && <PanelSwitch title="整理 data 文件" description="处理完成后，将当前目录中的 TXT 文件移入 data 文件夹。" checked={organizeData} onChange={setOrganizeData}/>}
+        {canOrganizeData && <PanelSwitch title="整理 data 文件" description="处理完成后，将所选文件夹根目录中的 TXT 文件移入 data 文件夹。" checked={organizeData} onChange={setOrganizeData}/>}
 
         <TaskProgress
           logs={logs}
@@ -1898,15 +1877,15 @@ const ResearchView = ({
           idleMessage={statusMsg}
           action={<button
                onClick={runAnalysis}
-               disabled={isRunning || sourcesLoading || !targetPaths.length}
+               disabled={isRunning || sourcesLoading || resolvingKinds || !targetPaths.length}
                className={`px-6 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
-                 isRunning || sourcesLoading || !targetPaths.length
+                 isRunning || sourcesLoading || resolvingKinds || !targetPaths.length
                   ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none'
                   : 'bg-blue-600 text-white hover:bg-blue-500 shadow-md shadow-blue-500/20'
                }`}
              >
-                {isRunning || sourcesLoading ? <Loader2 className="animate-spin" size={18}/> : <Play size={18} fill="currentColor" />}
-                {isRunning ? '处理中' : sourcesLoading ? '正在读取' : '开始处理'}
+                {isRunning || sourcesLoading || resolvingKinds ? <Loader2 className="animate-spin" size={18}/> : <Play size={18} fill="currentColor" />}
+                {isRunning ? '处理中' : sourcesLoading || resolvingKinds ? '正在读取' : '开始处理'}
              </button>}
         />
       </div>
@@ -2141,76 +2120,63 @@ type VideoTranscodeViewProps = {
   onFolderTranscodeComplete?: (folderOutputs: VideoTranscodeFolderOutput[]) => void | Promise<void>;
 };
 
-const normalizedWindowsPath = (value: string) => value.replace(/\//g, '\\').replace(/\\+$/g, '');
-const videoPathName = (value: string) => {
-  const normalized = normalizedWindowsPath(value);
-  return normalized.slice(normalized.lastIndexOf('\\') + 1) || normalized;
-};
-const videoPathDirectory = (value: string) => {
-  const normalized = normalizedWindowsPath(value);
-  const separator = normalized.lastIndexOf('\\');
-  return separator > 0 ? normalized.slice(0, separator) : normalized;
-};
-const videoPathIsInside = (value: string, folder: string) => {
-  const normalizedValue = normalizedWindowsPath(value).toLocaleLowerCase();
-  const normalizedFolder = normalizedWindowsPath(folder).toLocaleLowerCase();
-  return normalizedValue === normalizedFolder || normalizedValue.startsWith(`${normalizedFolder}\\`);
+const useSourcePathKinds = (paths: readonly string[], knownFolders: readonly string[] = []) => {
+  const pathsKey = paths.join('\n');
+  const foldersKey = knownFolders.join('\n');
+  const [pathKinds, setPathKinds] = useState<Record<string, 'file' | 'folder'>>(() => Object.fromEntries(
+    knownFolders.map(folder => [sourcePathIdentity(folder), 'folder' as const]),
+  ));
+  const [resolvingKinds, setResolvingKinds] = useState(false);
+  useEffect(() => {
+    let active = true;
+    const currentPaths = mergeSourcePaths(pathsKey.split('\n'));
+    const folderKeys = new Set(mergeSourcePaths(foldersKey.split('\n')).map(sourcePathIdentity));
+    const seeded = Object.fromEntries(currentPaths.flatMap(path => {
+      const identity = sourcePathIdentity(path);
+      if (folderKeys.has(identity)) return [[identity, 'folder' as const]];
+      return pathKinds[identity] ? [[identity, pathKinds[identity]]] : [];
+    }));
+    setPathKinds(seeded);
+    const unresolved = currentPaths.filter(path => !seeded[sourcePathIdentity(path)]);
+    if (!unresolved.length) {
+      setResolvingKinds(false);
+      return () => { active = false; };
+    }
+    setResolvingKinds(true);
+    void window.electronAPI.inspectSourcePaths(unresolved).then(result => {
+      if (!active) return;
+      setPathKinds(current => ({ ...current, ...Object.fromEntries(result.sources.map(source => [sourcePathIdentity(source.path), source.kind])) }));
+      setResolvingKinds(false);
+    }).catch(() => {
+      if (active) setResolvingKinds(false);
+    });
+    return () => { active = false; };
+  // pathKinds is intentionally read as a cache but not a dependency: path or
+  // known-folder changes are the only events that require a new filesystem check.
+  }, [foldersKey, pathsKey]);
+  return { pathKinds, resolvingKinds };
 };
 
 const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initialSourceFolders = [], sourcesLoading = false, initialSettings, onSettingsChange, settingsOnly = false, onFolderTranscodeComplete }: VideoTranscodeViewProps) => {
   const initialTargetKey = initialTargetPaths.join('\n');
   const initialSourceFolderKey = initialSourceFolders.join('\n');
-  const [pathsText, setPathsText] = useState(initialTargetKey);
-  const [sourceFolders, setSourceFolders] = useState(() => [...new Set(initialSourceFolders.filter(Boolean))]);
-  const [expandedVideoGroups, setExpandedVideoGroups] = useState<Set<string>>(() => new Set());
+  const [sourcePaths, setSourcePaths] = useState(() => mergeSourcePaths(initialTargetPaths));
   const [container, setContainer] = useState<VideoTranscodeSettings['container']>(initialSettings?.container ?? 'mp4');
   const [videoMode, setVideoMode] = useState<VideoTranscodeSettings['videoMode']>(initialSettings?.videoMode ?? 'h264');
   const [quality, setQuality] = useState<VideoTranscodeSettings['quality']>(initialSettings?.quality ?? 'balanced');
   const [resolution, setResolution] = useState<VideoTranscodeSettings['resolution']>(initialSettings?.resolution ?? 'original');
   const [frameRate, setFrameRate] = useState<VideoTranscodeSettings['frameRate']>(initialSettings?.frameRate ?? 'original');
   const [audioMode, setAudioMode] = useState<VideoTranscodeSettings['audioMode']>(initialSettings?.audioMode ?? 'aac');
-  const [outputMode, setOutputMode] = useState<'new' | 'replace'>('new');
+  const [outputMode, setOutputMode] = useState<'new' | 'delete-original'>('new');
   const onSettingsChangeRef = React.useRef(onSettingsChange);
   const { logs, isRunning, isCancelling, progress, statusMsg, completion, start, cancel } = usePythonTask('ffmpeg_transcode.py', '等待选择视频');
   const handledCompletionRef = React.useRef('');
-  const paths = useMemo(() => [...new Set(pathsText.split(/\r?\n/).map(value => value.trim().replace(/^"|"$/g, '')).filter(Boolean))], [pathsText]);
-  const activeSourceFolders = useMemo(() => sourceFolders.filter(folder => paths.some(path => videoPathIsInside(path, folder))), [paths, sourceFolders]);
-  const videoGroups = useMemo(() => {
-    const groups = new Map<string, Array<{ path: string; index: number }>>();
-    paths.forEach((path, index) => {
-      const directory = videoPathDirectory(path);
-      const items = groups.get(directory) || [];
-      items.push({ path, index });
-      groups.set(directory, items);
-    });
-    return [...groups.entries()].map(([directory, items]) => ({ directory, items }));
-  }, [paths]);
-  const activeItemMatch = statusMsg.match(/（(\d+)\/(\d+)）$/);
-  const activeItemIndex = activeItemMatch ? Number(activeItemMatch[1]) - 1 : -1;
-  const lastActiveItemIndexRef = React.useRef(-1);
-  if (activeItemIndex >= 0) lastActiveItemIndexRef.current = activeItemIndex;
-  const allLargeGroupsExpanded = videoGroups.every(group => group.items.length <= 3 || expandedVideoGroups.has(group.directory));
-
-  const itemState = (index: number) => {
-    if (!isRunning && progress >= 100) return { label: '已完成', className: 'bg-emerald-100 text-emerald-700' };
-    if (isRunning && activeItemIndex >= 0) {
-      if (index < activeItemIndex) return { label: '已完成', className: 'bg-emerald-100 text-emerald-700' };
-      if (index === activeItemIndex) return { label: '编码中', className: 'bg-blue-100 text-blue-700' };
-    }
-    if (!isRunning && statusMsg === '发生错误') {
-      if (index < lastActiveItemIndexRef.current) return { label: '已完成', className: 'bg-emerald-100 text-emerald-700' };
-      if (index === lastActiveItemIndexRef.current) return { label: '失败', className: 'bg-red-100 text-red-700' };
-    }
-    return { label: '等待', className: 'bg-slate-100 text-slate-500' };
-  };
-
+  const paths = sourcePaths;
+  const { pathKinds, resolvingKinds } = useSourcePathKinds(paths, initialSourceFolderKey.split('\n').filter(Boolean));
+  const activeSourceFolders = useMemo(() => paths.filter(path => pathKinds[sourcePathIdentity(path)] === 'folder'), [pathKinds, paths]);
   useEffect(() => {
-    setPathsText(initialTargetKey);
+    setSourcePaths(mergeSourcePaths(initialTargetKey.split('\n')));
   }, [initialTargetKey]);
-  useEffect(() => {
-    setSourceFolders([...new Set(initialSourceFolderKey.split('\n').filter(Boolean))]);
-    setExpandedVideoGroups(new Set());
-  }, [initialSourceFolderKey]);
   useEffect(() => {
     if (!initialSettings) return;
     setContainer(initialSettings.container);
@@ -2231,42 +2197,24 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
     setFrameRate('original');
   }, [videoMode]);
   useEffect(() => {
-    if ((paths.length !== 1 || activeSourceFolders.length) && outputMode === 'replace') setOutputMode('new');
-  }, [activeSourceFolders.length, paths.length, outputMode]);
-  useEffect(() => {
     if (!completion || handledCompletionRef.current === completion.requestId) return;
     handledCompletionRef.current = completion.requestId;
     const folderOutputs = Array.isArray(completion.event.folderOutputs) ? completion.event.folderOutputs : [];
     if (folderOutputs.length) void onFolderTranscodeComplete?.(folderOutputs);
   }, [completion, onFolderTranscodeComplete]);
 
-  const addDroppedFiles = (event: React.DragEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    const dropped = Array.from(event.dataTransfer.files)
-      .map(file => {
-        try { return window.electronAPI.getPathForFile(file); }
-        catch { return ''; }
-      })
-      .filter(Boolean);
-    if (!dropped.length) return;
-    setPathsText(current => [...new Set([...current.split(/\r?\n/).map(value => value.trim()).filter(Boolean), ...dropped])].join('\n'));
-  };
-  const removeVideoPath = (pathToRemove: string) => {
-    setPathsText(current => current.split(/\r?\n/).map(value => value.trim()).filter(value => value && value !== pathToRemove).join('\n'));
-  };
-  const clearVideoPaths = () => {
-    setPathsText('');
-    setSourceFolders([]);
-    setExpandedVideoGroups(new Set());
-  };
   const chooseVideos = async () => {
     const result = await window.electronAPI.chooseVideoFiles();
     if (result.cancelled || !result.paths.length) return;
-    setPathsText(current => [...new Set([...current.split(/\r?\n/).map(value => value.trim()).filter(Boolean), ...result.paths])].join('\n'));
+    setSourcePaths(current => mergeSourcePaths(current, result.paths));
+  };
+  const chooseVideoFolder = async () => {
+    const result = await window.electronAPI.chooseVideoFolder();
+    if (result.cancelled || !result.path) return;
+    setSourcePaths(current => mergeSourcePaths(current, [result.path!]));
   };
   const startTranscode = () => {
-    if (!paths.length || isRunning || sourcesLoading) return;
+    if (!paths.length || isRunning || sourcesLoading || resolvingKinds) return;
     start([
       ...paths,
       '--container', container,
@@ -2284,43 +2232,7 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
     {!embedded && <div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><Video size={25}/>视频转码</h2><p className="mt-1 text-sm text-slate-500">支持更换封装、H.264 和 H.265 转码。</p></div>}
     <div className={embedded ? 'space-y-6' : 'space-y-6 rounded-xl border border-slate-200 bg-white p-6'}>
       {sourcesLoading && <div role="status" className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-700"><Loader2 size={16} className="animate-spin"/>项目媒体索引正在建立，完成后会自动加入所选文件或文件夹中的视频。</div>}
-      {!settingsOnly && <section className="space-y-3">
-        <div className="flex flex-wrap items-center justify-between gap-3">
-          <div><p className="text-xs font-semibold uppercase text-slate-500">已选择 {paths.length} 个视频</p><p className="mt-1 text-xs text-slate-500">按文件夹分组，批量任务按列表顺序处理。</p></div>
-          <div className="flex items-center gap-2">
-            {videoGroups.some(group => group.items.length > 3) && <button type="button" disabled={isRunning || sourcesLoading} onClick={() => setExpandedVideoGroups(allLargeGroupsExpanded ? new Set() : new Set(videoGroups.map(group => group.directory)))} className="dialog-secondary px-3 py-1.5 text-xs disabled:opacity-50">{allLargeGroupsExpanded ? '全部收起' : '展开全部'}</button>}
-            <button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseVideos()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>追加视频</button>
-            <button type="button" disabled={isRunning || sourcesLoading || !paths.length} onClick={clearVideoPaths} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 disabled:opacity-50"><Trash2 size={14}/>清空</button>
-          </div>
-        </div>
-        <div onDrop={addDroppedFiles} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} className={`max-h-72 space-y-2 overflow-y-auto rounded-xl border p-2 ${paths.length ? 'border-slate-200 bg-slate-50' : 'border-dashed border-slate-300 bg-slate-50/70'}`}>
-          {!paths.length && <button type="button" disabled={isRunning || sourcesLoading} onClick={() => void chooseVideos()} className="flex min-h-28 w-full flex-col items-center justify-center gap-2 rounded-lg text-sm text-slate-500 hover:bg-white disabled:opacity-50"><FolderInput size={24} className="text-slate-400"/><span>{sourcesLoading ? '正在读取所选文件夹中的视频…' : '拖入视频，或点击追加视频'}</span></button>}
-          {videoGroups.map(group => {
-            const expanded = group.items.length <= 3 || expandedVideoGroups.has(group.directory);
-            return <div key={group.directory} className="overflow-hidden rounded-lg border border-slate-200 bg-white">
-              <button type="button" disabled={group.items.length <= 3} onClick={() => setExpandedVideoGroups(current => { const next = new Set(current); if (next.has(group.directory)) next.delete(group.directory); else next.add(group.directory); return next; })} className="flex w-full items-center gap-2 px-3 py-2 text-left disabled:cursor-default">
-                <FolderInput size={15} className="shrink-0 text-blue-500"/>
-                <span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-700" title={group.directory}>{videoPathName(group.directory)}</span>
-                <span className="shrink-0 text-xs text-slate-500">{group.items.length} 个文件</span>
-                {group.items.length > 3 && (expanded ? <ChevronUp size={15} className="text-slate-400"/> : <ChevronDown size={15} className="text-slate-400"/>)}
-              </button>
-              {expanded && <div className="border-t border-slate-100">
-                {group.items.map(item => { const state = itemState(item.index); return <div key={item.path} className={`flex items-center gap-2 border-b border-slate-100 px-3 py-2 last:border-b-0 ${state.label === '编码中' ? 'bg-blue-50/70' : ''}`}>
-                  <Video size={14} className="shrink-0 text-slate-400"/>
-                  <span className="min-w-0 flex-1 truncate text-xs text-slate-700" title={item.path}>{videoPathName(item.path)}</span>
-                  <span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${state.className}`}>{state.label}</span>
-                  <button type="button" disabled={isRunning || sourcesLoading} onClick={() => removeVideoPath(item.path)} aria-label={`移除 ${videoPathName(item.path)}`} title="移除" className="shrink-0 rounded p-1 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"><X size={13}/></button>
-                </div>; })}
-              </div>}
-            </div>;
-          })}
-        </div>
-        {activeSourceFolders.length > 0 && <p className="rounded-md bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700">来自 {activeSourceFolders.length} 个所选文件夹的视频将输出到原文件夹旁的新“_转码”文件夹，并保留子目录结构。</p>}
-        <details className="rounded-lg border border-slate-200 bg-white px-3 py-2">
-          <summary className="cursor-pointer text-xs font-bold text-slate-600">批量粘贴路径</summary>
-          <textarea value={pathsText} disabled={isRunning || sourcesLoading} onChange={event => setPathsText(event.target.value)} placeholder="每行粘贴一个视频的绝对路径" className="mt-2 h-28 w-full resize-y rounded-lg border border-slate-200 bg-slate-50 px-3 py-3 font-mono text-xs text-slate-900 outline-none transition focus:border-blue-500 disabled:opacity-60"/>
-        </details>
-      </section>}
+      {!settingsOnly && <><SourcePathPicker paths={paths} pathKinds={pathKinds} pathAnnotations={Object.fromEntries(activeSourceFolders.map(folder => [sourcePathIdentity(folder), '将递归处理其中的视频']))} onChange={setSourcePaths} onChooseFiles={chooseVideos} onChooseFolder={chooseVideoFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="文件夹作为一个来源显示，执行时会递归处理其中的视频" emptyTitle="拖入视频或文件夹"/>{activeSourceFolders.length > 0 && <p className="rounded-md bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700">已选择 {activeSourceFolders.length} 个文件夹；转码结果将保存到原文件夹旁的新“_转码”文件夹，并保留子目录结构。</p>}</>}
       <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
         <label className="text-xs font-bold text-slate-600">输出封装<select value={container} disabled={isRunning} onChange={event => setContainer(event.target.value as typeof container)} className="form-input mt-1"><option value="mp4">MP4</option><option value="mov">MOV</option><option value="mkv">MKV</option></select></label>
         <label className="text-xs font-bold text-slate-600">视频处理<select value={videoMode} disabled={isRunning} onChange={event => setVideoMode(event.target.value as typeof videoMode)} className="form-input mt-1"><option value="h264">H.264 · 兼容性优先</option><option value="h265">H.265 · 节省空间</option><option value="copy">仅更换封装</option></select></label>
@@ -2329,16 +2241,17 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
         <label className="text-xs font-bold text-slate-600">帧率<select value={frameRate} disabled={isRunning || videoMode === 'copy'} onChange={event => setFrameRate(event.target.value as typeof frameRate)} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原帧率</option>{['24', '25', '30', '50', '60'].map(value => <option key={value} value={value}>{value} fps</option>)}</select></label>
         <label className="text-xs font-bold text-slate-600">音频<select value={audioMode} disabled={isRunning} onChange={event => setAudioMode(event.target.value as typeof audioMode)} className="form-input mt-1"><option value="copy">保留原音频编码</option><option value="aac">转换为 AAC · 192 kbps</option><option value="remove">移除音频</option></select></label>
       </div>
-      {!settingsOnly && <div className="grid gap-3 md:grid-cols-2"><label className={`rounded-lg border p-3 text-sm ${outputMode === 'new' ? 'border-blue-400 bg-blue-50' : 'border-slate-200'}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="new" checked={outputMode === 'new'} disabled={isRunning} onChange={() => setOutputMode('new')} className="mt-0.5"/><span><b className="block text-slate-800">另存为新视频</b><span className="mt-1 block text-xs leading-5 text-slate-500">{activeSourceFolders.length ? '文件夹任务输出到原文件夹旁的新“_转码”目录。' : '保存在原视频旁边，文件名增加“_转码”。发生重名时自动编号。'}</span></span></span></label><label className={`rounded-lg border p-3 text-sm ${outputMode === 'replace' ? 'border-red-400 bg-red-50' : 'border-slate-200'} ${paths.length !== 1 || activeSourceFolders.length ? 'opacity-50' : ''}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="replace" checked={outputMode === 'replace'} disabled={isRunning || paths.length !== 1 || Boolean(activeSourceFolders.length)} onChange={() => setOutputMode('replace')} className="mt-0.5"/><span><b className="block text-slate-800">替换原视频</b><span className="mt-1 block text-xs leading-5 text-red-600">仅限直接选择的单个文件且封装不变。验证成功后原子替换，无法在软件内撤销。</span></span></span></label></div>}
+      {!settingsOnly && <div className="grid gap-3 md:grid-cols-2"><label className={`cursor-pointer rounded-lg border p-3 text-sm ${outputMode === 'new' ? 'border-blue-400 bg-blue-50' : 'border-slate-200'} ${isRunning ? 'cursor-not-allowed opacity-60' : ''}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="new" checked={outputMode === 'new'} disabled={isRunning} onChange={() => setOutputMode('new')} className="mt-0.5"/><span><b className="block text-slate-800">另存为新视频</b><span className="mt-1 block text-xs leading-5 text-slate-500">{activeSourceFolders.length ? '文件夹任务输出到原文件夹旁的新“_转码”目录。' : '保存在原视频旁边，文件名增加“_转码”。发生重名时自动编号。'}</span></span></span></label><label className={`cursor-pointer rounded-lg border p-3 text-sm ${outputMode === 'delete-original' ? 'border-blue-400 bg-blue-50' : 'border-slate-200'} ${isRunning ? 'cursor-not-allowed opacity-60' : ''}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="delete-original" checked={outputMode === 'delete-original'} disabled={isRunning} onChange={() => setOutputMode('delete-original')} className="mt-0.5"/><span><b className="block text-slate-800">转码成功后删除原视频</b><span className="mt-1 block text-xs leading-5 text-slate-500">新视频确认可以正常播放后，原视频会移入回收站。转码失败的视频不会删除。</span></span></span></label></div>}
       {videoMode === 'h264' && <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">H.264 兼容性更好；不保留 HDR 或 10-bit。可用时自动使用显卡。</div>}
       {videoMode === 'h265' && <div className="rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">H.265 文件更小，但兼容性较低；不保留 HDR 或 10-bit。可用时自动使用显卡。</div>}
-      {!settingsOnly && <TaskProgress logs={logs} progress={progress} isRunning={isRunning} reportToTaskCenter={false} idleMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} statusMessage={sourcesLoading ? '正在读取后台媒体索引…' : statusMsg} action={<button type="button" onClick={isRunning ? () => void cancel() : startTranscode} disabled={isCancelling || sourcesLoading || (!isRunning && !paths.length)} className={`flex items-center gap-2 rounded-lg px-6 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : paths.length && !sourcesLoading ? 'bg-blue-600 text-white hover:bg-blue-500' : 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400'}`}>{isRunning ? isCancelling ? <Loader2 size={17} className="animate-spin"/> : <X size={17}/> : sourcesLoading ? <Loader2 size={17} className="animate-spin"/> : <Play size={17} fill="currentColor"/>}{isRunning ? isCancelling ? '正在取消…' : '取消转码' : sourcesLoading ? '正在建立索引' : '开始转码'}</button>}/>}</div>
+      {!settingsOnly && <TaskProgress logs={logs} progress={progress} isRunning={isRunning} reportToTaskCenter={false} idleMessage={sourcesLoading || resolvingKinds ? '正在读取来源…' : statusMsg} statusMessage={sourcesLoading || resolvingKinds ? '正在读取来源…' : statusMsg} action={<button type="button" onClick={isRunning ? () => void cancel() : startTranscode} disabled={isCancelling || sourcesLoading || resolvingKinds || (!isRunning && !paths.length)} className={`flex items-center gap-2 rounded-lg px-6 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : paths.length && !sourcesLoading && !resolvingKinds ? 'bg-blue-600 text-white hover:bg-blue-500' : 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400'}`}>{isRunning ? isCancelling ? <Loader2 size={17} className="animate-spin"/> : <X size={17}/> : sourcesLoading || resolvingKinds ? <Loader2 size={17} className="animate-spin"/> : <Play size={17} fill="currentColor"/>}{isRunning ? isCancelling ? '正在取消…' : '取消转码' : sourcesLoading || resolvingKinds ? '正在读取来源' : '开始转码'}</button>}/>}</div>
   </div>;
 };
 
 const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTargetPaths = [], settingsOnly = false }: { embedded?: boolean; initialTargetPath?: string; initialTargetPaths?: string[]; settingsOnly?: boolean }) => {
   const initialTargetKey = (initialTargetPaths.length ? initialTargetPaths : initialTargetPath ? [initialTargetPath] : []).join('\n');
   const [targetPaths, setTargetPaths] = useState<string[]>(() => initialTargetKey.split('\n').filter(Boolean));
+  const { pathKinds, resolvingKinds } = useSourcePathKinds(targetPaths);
   const { logs, isRunning, isCancelling, progress, statusMsg, start, cancel } = usePythonTask('cut_video.py', '等待输入...');
 
   useEffect(() => {
@@ -2348,16 +2261,6 @@ const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTarge
   const appendTargets = (paths: string[]) => {
     setTargetPaths(current => [...new Set([...current, ...paths.map(value => value.trim()).filter(Boolean)])].slice(0, 120));
   };
-  const handleDrop = (event: React.DragEvent) => {
-    event.preventDefault();
-    event.stopPropagation();
-    if (isRunning) return;
-    appendTargets(Array.from(event.dataTransfer.files).map(file => {
-      try { return window.electronAPI.getPathForFile(file); }
-      catch { return ''; }
-    }));
-  };
-
   const startSplit = () => {
     if (!targetPaths.length) return;
     start(targetPaths, '正在扫描视频...');
@@ -2386,12 +2289,9 @@ const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTarge
           </p>
         </div>
 
-        {!settingsOnly && <><div className="flex flex-wrap items-center justify-between gap-2"><div><p className="text-xs font-semibold uppercase text-slate-500">输入范围</p><p className="mt-1 text-xs text-slate-500">可添加视频或文件夹；文件夹会扫描子目录。</p></div><div className="flex items-center gap-2"><button type="button" disabled={isRunning} onClick={() => void chooseFolder()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><FolderInput size={14}/>添加文件夹</button><button type="button" disabled={isRunning} onClick={() => void chooseVideos()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>添加视频</button>{targetPaths.length > 0 && <button type="button" disabled={isRunning} onClick={() => setTargetPaths([])} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 disabled:opacity-50"><Trash2 size={14}/>清空</button>}</div></div>
-        <div onDrop={handleDrop} onDragOver={event => { event.preventDefault(); event.stopPropagation(); }} className={!targetPaths.length ? 'rounded-xl border border-dashed border-slate-300 bg-slate-50/70 p-2' : ''}>
-          {targetPaths.length ? <SelectedToolSourceList paths={targetPaths} disabled={isRunning} onRemove={path => setTargetPaths(current => current.filter(value => value !== path))} title="已选择" itemLabel="项" description="原视频保留；各视频的分段写入其所在目录"/> : <button type="button" disabled={isRunning} onClick={() => void chooseVideos()} className="flex min-h-28 w-full flex-col items-center justify-center gap-2 rounded-lg text-sm text-slate-500 hover:bg-white disabled:opacity-50"><FolderInput size={24} className="text-slate-400"/><span>拖入文件或文件夹，或点击选择视频</span></button>}
-        </div></>}
+        {!settingsOnly && <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} onChange={setTargetPaths} onChooseFiles={chooseVideos} onChooseFolder={chooseFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="文件夹会作为一个来源显示；执行时扫描子目录，分段写入原目录" emptyTitle="拖入视频或文件夹"/>}
 
-        <div className="grid gap-3 md:grid-cols-2"><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">分段大小</span><span className="mt-1 block text-sm font-bold text-slate-700">约 3.95 GB（固定）</span></label><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">输出名称</span><span className="mt-1 block truncate font-mono text-sm font-bold text-slate-700">{targetPaths.length === 1 ? `${targetPaths[0].split(/[\\/]/).pop()?.replace(/(\.[^.]+)$/u, '_part001$1')}` : targetPaths.length > 1 ? `按 ${targetPaths.length} 个输入分别生成 _part001` : '视频名_part001.mp4'}</span></label></div>
+        <div className="grid gap-3 md:grid-cols-2"><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">分段大小</span><span className="mt-1 block text-sm font-bold text-slate-700">约 3.95 GB（固定）</span></label><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">输出名称</span><span className="mt-1 block truncate text-sm font-bold text-slate-700">{targetPaths.length === 1 && pathKinds[sourcePathIdentity(targetPaths[0])] === 'folder' ? '文件夹内每个视频分别生成 _part001' : targetPaths.length === 1 ? <span className="font-mono">{targetPaths[0].split(/[\\/]/).pop()?.replace(/(\.[^.]+)$/u, '_part001$1')}</span> : targetPaths.length > 1 ? `按 ${targetPaths.length} 个来源分别处理` : '视频名_part001.mp4'}</span></label></div>
 
         {!settingsOnly && <TaskProgress
           logs={logs}
@@ -2401,9 +2301,9 @@ const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTarge
           idleMessage={statusMsg}
           action={<button
             onClick={isRunning ? () => void cancel() : startSplit}
-            disabled={!targetPaths.length || isCancelling}
+            disabled={!targetPaths.length || isCancelling || resolvingKinds}
             className={`px-8 py-2.5 rounded-lg font-bold transition flex items-center gap-2 ${
-              !targetPaths.length || isCancelling
+              !targetPaths.length || isCancelling || resolvingKinds
                 ? 'bg-slate-100 text-slate-400 border border-slate-200 cursor-not-allowed shadow-none'
                 : isRunning ? 'bg-red-600 hover:bg-red-500 text-white shadow-lg shadow-red-500/20' : 'bg-blue-600 hover:bg-blue-500 text-white shadow-lg shadow-blue-500/20'
             }`}

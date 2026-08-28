@@ -21,6 +21,9 @@ class TestNode extends TestEventTarget {
   removeChild(child) { const index = this.childNodes.indexOf(child); if (index >= 0) this.childNodes.splice(index, 1); child.parentNode = null; return child; }
   get firstChild() { return this.childNodes[0] || null; }
   get lastChild() { return this.childNodes.at(-1) || null; }
+  get children() { return this.childNodes.filter(child => child.nodeType === 1); }
+  get childElementCount() { return this.childNodes.filter(child => child.nodeType === 1).length; }
+  getBoundingClientRect() { return { x: 0, y: 40, top: 40, bottom: this.childElementCount ? 140 : 40, width: 480, height: this.childElementCount ? 100 : 0 }; }
   get textContent() { return this.nodeType === 3 ? this.nodeValue : this.childNodes.map(child => child.textContent).join(''); }
   set textContent(value) { if (this.nodeType === 3) this.nodeValue = String(value); else this.childNodes = value ? [Object.assign(new TestNode(3, '#text', this.ownerDocument), { nodeValue: String(value), parentNode: this })] : []; }
   get innerHTML() { return this.textContent; }
@@ -42,9 +45,9 @@ let timerSequence = 0;
 const timers = new Map();
 let frameSequence = 0;
 const frames = new Map();
-const overlaySnapshots = [];
+const snapshots = [];
 const observers = [];
-class TestMutationObserver {
+class TestResizeObserver {
   constructor(callback) { this.callback = callback; observers.push(this); }
   observe() {}
   disconnect() {}
@@ -57,11 +60,12 @@ Object.assign(testWindow, {
   clearTimeout: id => timers.delete(id),
   requestAnimationFrame: callback => { const id = ++frameSequence; frames.set(id, callback); return id; },
   cancelAnimationFrame: id => frames.delete(id),
+  ResizeObserver: TestResizeObserver,
   electronAPI: {
     onComponentNotification: () => () => undefined,
     setComponentNotificationReady: async () => ({ ready: true, flushed: 0 }),
-    updateToastOverlay: async snapshot => { overlaySnapshots.push(snapshot); return { success: true }; },
-    onToastOverlayAction: () => () => undefined,
+    updateToastView: async snapshot => { snapshots.push(snapshot); return { success: true }; },
+    onToastViewAction: () => () => undefined,
   },
 });
 global.window = testWindow;
@@ -69,7 +73,7 @@ global.document = testDocument;
 global.navigator = { userAgent: 'node' };
 global.Node = TestNode;
 global.HTMLElement = TestNode;
-global.MutationObserver = TestMutationObserver;
+global.ResizeObserver = TestResizeObserver;
 global.IS_REACT_ACT_ENVIRONMENT = true;
 
 const compile = relativePath => ts.transpileModule(fs.readFileSync(path.join(__dirname, '..', relativePath), 'utf8'), {
@@ -86,10 +90,11 @@ const toneModel = evaluate(compile('src/features/app/top-toast-tone-model.ts'), 
   return require(request);
 });
 const icons = new Proxy({}, { get: () => () => null });
+const emptyTaskPresentation = { visibleTasks: [], overflowCount: 0, dismissBackgroundTask: () => undefined, minimizeTaskToast: () => undefined };
 const toastModule = evaluate(compile('src/features/app/useTopToastStack.tsx'), request => {
   if (request === 'lucide-react') return icons;
   if (request === '../../components/LayerProvider') return { useHostRendererToken: () => 'renderer-test' };
-  if (request === '../background-tasks/FileTransferToast') return { FileTransferToast: () => null };
+  if (request === '../background-tasks/FileTransferToast') return { FileTransferToast: () => null, useFileTransferToastPresentation: () => emptyTaskPresentation };
   if (request === './top-toast-notice-model') return model;
   if (request === './top-toast-tone-model') return toneModel;
   return require(request);
@@ -114,7 +119,7 @@ const flushFrames = timestamp => {
   await React.act(async () => root.render(React.createElement(toastModule.TopToastProvider, null,
     React.createElement(toastModule.TopToastViewport), React.createElement(Harness))));
   flushFrames(1);
-  assert.equal(overlaySnapshots.length, 1, 'initial viewport mount sends one overlay snapshot');
+  assert.equal(snapshots.length, 1, 'initial viewport mount publishes one structured Toast view snapshot');
 
   let first; let replacement;
   await React.act(async () => {
@@ -138,12 +143,14 @@ const flushFrames = timestamp => {
   assert(failedCard && failedCard.getAttribute('data-toast-tone') === 'error' && /处理失败/.test(failedCard.textContent), 'activity.fail in the creation tick updates the mounted card');
   assert(!cards.some(node => node.getAttribute('data-top-toast-id') === `notice:${dismissedActivity.id}`), 'activity.dismiss in the creation tick removes the card');
 
-  assert.equal(frames.size, 1, 'batched notice mutations schedule at most one pending overlay frame');
+  assert.equal(frames.size, 1, 'batched notice mutations schedule at most one pending Toast view frame');
   observers.forEach(observer => { observer.callback([]); observer.callback([]); observer.callback([]); });
-  assert.equal(frames.size, 1, 'repeated stack/theme mutation callbacks coalesce into the pending overlay frame');
+  assert.equal(frames.size, 1, 'repeated resize callbacks coalesce into the pending Toast view frame');
   flushFrames(2);
-  assert.equal(overlaySnapshots.length, 2, 'one animation frame produces only one additional overlay IPC snapshot');
+  assert.equal(snapshots.length, 2, 'one animation frame produces only one additional structured snapshot');
+  assert.equal(snapshots.at(-1).notices[0].message, '保存失败');
 
   await React.act(async () => root.unmount());
+  assert.equal(snapshots.at(-1).height, 0, 'unmount hides the persistent Toast view');
   console.log('top toast mounted hook tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

@@ -25,12 +25,6 @@ const componentSettingsPageKey = ({ componentId, pageId }) => ['application.sett
 const componentContributionKey = ({ componentId, contributionId, workspacePath, projectId }, surface) => [surface, componentId, contributionId, normalizeIdentity(workspacePath), String(projectId || '')].join(PAGE_KEY_SEPARATOR);
 const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
-const MIN_COMPONENT_SURFACE_HEIGHT = 120;
-const componentViewBoundsWithHostOverlay = (bounds, reservedBottom) => {
-  const maximumReservedBottom = bounds.y + Math.max(0, bounds.height - Math.min(bounds.height, MIN_COMPONENT_SURFACE_HEIGHT));
-  const bottom = Math.max(bounds.y, Math.min(maximumReservedBottom, Number(reservedBottom) || 0));
-  return { x: Math.round(bounds.x), y: Math.round(bottom), width: Math.round(bounds.width), height: Math.round(Math.max(0, bounds.y + bounds.height - bottom)) };
-};
 const selectComponentPreload = (descriptor, { core }) => {
   const contractVersion = Number(descriptor?.contractVersion);
   const hostApiVersion = Number(descriptor?.hostApiVersion);
@@ -43,7 +37,7 @@ const diagnosticToken = value => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, notificationService = null, clearComponentCapabilityState = null, writeLog = () => undefined }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, notificationService = null, clearComponentCapabilityState = null, writeLog = () => undefined, onViewStackChanged = () => undefined }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
@@ -53,6 +47,7 @@ class ComponentViewManager {
     this.writeLog = writeLog;
     this.serviceManager = serviceManager;
     this.notificationService = notificationService;
+    this.onViewStackChanged = onViewStackChanged;
     this.instances = new Map();
     this.instancesById = new Map();
     this.senderBindings = new Map();
@@ -60,7 +55,6 @@ class ComponentViewManager {
     this.resolvedTheme = 'light';
     this.activeInstanceId = '';
     this.hostSurfaceState = { rendererToken: '', revision: -1, suspended: false };
-    this.hostToastReservation = { rendererToken: '', revision: -1, bottom: 0 };
     this.registerComponentSdkIpc();
   }
 
@@ -250,6 +244,7 @@ class ComponentViewManager {
       if (![...this.senderBindings.values()].some(bound => bound.context.componentId === descriptor.componentId)) { this.notificationService?.clearComponent?.(descriptor.componentId); this.clearComponentCapabilityState?.(descriptor.componentId); }
     });
     this.mainWindow.contentView.addChildView(view);
+    this.onViewStackChanged();
     view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
     instance.readyPromise = Promise.resolve().then(() => view.webContents.loadFile(page.entry)).then(() => {
       if (this.instances.get(key) !== instance || view.webContents.isDestroyed()) throw new Error('Component page open was superseded');
@@ -303,6 +298,7 @@ class ComponentViewManager {
       this.applyVisibility(instance);
       this.applyBounds(instance);
     }
+    this.onViewStackChanged();
     return Boolean(instanceId);
   }
 
@@ -317,10 +313,6 @@ class ComponentViewManager {
     if (rendererToken === this.hostSurfaceState.rendererToken && revision <= this.hostSurfaceState.revision) return false;
     const rendererReloaded = Boolean(this.hostSurfaceState.rendererToken && rendererToken !== this.hostSurfaceState.rendererToken);
     this.hostSurfaceState = { rendererToken, revision, suspended: update.suspended };
-    if (rendererReloaded && this.hostToastReservation.rendererToken !== rendererToken) {
-      this.hostToastReservation = { rendererToken, revision: -1, bottom: 0 };
-      for (const instance of this.instances.values()) this.applyBounds(instance);
-    }
     if (rendererReloaded) this.activeInstanceId = '';
     for (const instance of this.instances.values()) {
       if (rendererReloaded && instance.logicalActive) {
@@ -342,21 +334,8 @@ class ComponentViewManager {
   }
 
   applyBounds(instance) {
-    const reservedBottom = instance.logicalActive && instance.instanceId === this.activeInstanceId ? this.hostToastReservation.bottom : 0;
-    instance.view.setBounds(componentViewBoundsWithHostOverlay(instance.requestedBounds, reservedBottom));
-  }
-
-  setHostToastReservation(update) {
-    const rendererToken = String(update?.rendererToken || '');
-    const revision = Number(update?.revision);
-    const bottom = Number(update?.bottom);
-    if (!rendererToken || rendererToken.length > 200 || !Number.isSafeInteger(revision) || revision < 0 || !Number.isSafeInteger(bottom) || bottom < 0 || bottom > 20000) throw new Error('Invalid host toast reservation');
-    if (rendererToken !== this.hostToastReservation.rendererToken) this.hostToastReservation = { rendererToken, revision: -1, bottom: 0 };
-    if (revision <= this.hostToastReservation.revision) return false;
-    const changed = bottom !== this.hostToastReservation.bottom;
-    this.hostToastReservation = { rendererToken, revision, bottom };
-    if (changed) for (const instance of this.instances.values()) this.applyBounds(instance);
-    return changed;
+    const bounds = instance.requestedBounds;
+    instance.view.setBounds({ x: Math.round(bounds.x), y: Math.round(bounds.y), width: Math.round(bounds.width), height: Math.round(bounds.height) });
   }
 
   setNotificationRendererReady(ready) { return this.notificationService?.setRendererReady?.(ready) || { ready: false, flushed: 0 }; }
@@ -394,4 +373,4 @@ class ComponentViewManager {
   destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); this.notificationService?.destroy?.(); }
 }
 
-module.exports = { MIN_COMPONENT_SURFACE_HEIGHT, ComponentViewManager, componentPageKey, componentSettingsPageKey, componentViewBoundsWithHostOverlay, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };
+module.exports = { ComponentViewManager, componentPageKey, componentSettingsPageKey, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };

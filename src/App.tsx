@@ -23,7 +23,7 @@ import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './feature
 import type { BuiltInSettingsSection, SettingsSection } from './features/settings/SettingsFeature';
 import { DashboardView, MatchView, VideoSplitView, type ImportCompletion } from './features/tools/ToolViews';
 import { useStartupSdAutoImport } from './features/tools/use-startup-sd-auto-import';
-import { normalizeSavedSdDeviceRecords } from './features/tools/sd-startup-import-model';
+import { normalizeSavedSdDeviceRecords, normalizeSavedSdDriveVideoActions } from './features/tools/sd-startup-import-model';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
 import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
 import type { AppConfig, AppUpdateInfo, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentSettingsPageContribution, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
@@ -39,6 +39,10 @@ interface PythonEvent { type: 'log' | 'error' | 'progress' | 'status' | 'ask_use
   scriptName?: string;
   requestId?: string;
 }
+const BACKGROUND_TASK_DRAWER_STORAGE_KEY = 'photoflow:background-task-drawer-width';
+const BACKGROUND_TASK_DRAWER_DEFAULT_WIDTH = 320;
+const BACKGROUND_TASK_DRAWER_MIN_WIDTH = 260;
+const BACKGROUND_TASK_DRAWER_MAX_WIDTH = 640;
 // --- 主组件 ---
 const App: React.FC = () => {
   const appDialog = useAppDialog();
@@ -68,6 +72,7 @@ const App: React.FC = () => {
   const [sidebarWidth, setSidebarWidth] = useState(() => readStoredNumber('photoflow:sidebar-width', 256));
   const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem('photoflow:sidebar-collapsed') === 'true');
   const [backgroundTaskDrawerOpen, setBackgroundTaskDrawerOpen] = useState(false);
+  const [backgroundTaskDrawerWidth, setBackgroundTaskDrawerWidth] = useState(() => clampNumber(readStoredNumber(BACKGROUND_TASK_DRAWER_STORAGE_KEY, BACKGROUND_TASK_DRAWER_DEFAULT_WIDTH), BACKGROUND_TASK_DRAWER_MIN_WIDTH, BACKGROUND_TASK_DRAWER_MAX_WIDTH));
   const backgroundTaskDrawerHostRef = useRef<HTMLDivElement>(null);
   const [backupStatus, setBackupStatus] = useState<BackupStatus>({ success: true, enabled: false, state: 'unconfigured', snapshots: [] });
   const [backupProjectFocus, setBackupProjectFocus] = useState<WorkspaceProject | null>(null);
@@ -111,6 +116,10 @@ const App: React.FC = () => {
   useEffect(() => {
     window.localStorage.setItem('photoflow:sidebar-width', String(Math.round(sidebarWidth)));
   }, [sidebarWidth]);
+
+  useEffect(() => {
+    window.localStorage.setItem(BACKGROUND_TASK_DRAWER_STORAGE_KEY, String(Math.round(backgroundTaskDrawerWidth)));
+  }, [backgroundTaskDrawerWidth]);
 
   useEffect(() => { if (activeTab !== 'component') void componentHost.deactivate(); }, [activeTab, componentHost.deactivate]);
 
@@ -233,6 +242,8 @@ const App: React.FC = () => {
   // The rendered width may shrink temporarily and returns automatically when
   // the window is enlarged again.
   const renderedSidebarWidth = clampNumber(sidebarWidth, 128, Math.min(420, Math.max(128, viewportWidth - 700)));
+  const backgroundTaskDrawerMaximumWidth = Math.min(BACKGROUND_TASK_DRAWER_MAX_WIDTH, Math.max(BACKGROUND_TASK_DRAWER_MIN_WIDTH, viewportWidth - (sidebarCollapsed ? 0 : renderedSidebarWidth) - 420));
+  const renderedBackgroundTaskDrawerWidth = clampNumber(backgroundTaskDrawerWidth, BACKGROUND_TASK_DRAWER_MIN_WIDTH, backgroundTaskDrawerMaximumWidth);
 
   useEffect(() => {
     const showTextCopyNotice = (event: ClipboardEvent) => {
@@ -341,7 +352,24 @@ const App: React.FC = () => {
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
             const savedSdPaths = (Array.isArray(fileConfig.smartImport?.sdPaths) && fileConfig.smartImport.sdPaths.length ? fileConfig.smartImport.sdPaths : fileConfig.smartImport?.sdPath ? [fileConfig.smartImport.sdPath] : []).map((drive: string) => isMac ? drive : drive.replace(/\\/g, '/').replace(/\/DCIM\/?$/i, '/'));
-            const savedSdDevices = normalizeSavedSdDeviceRecords(fileConfig.smartImport?.sdDevices, savedSdPaths, fileConfig.smartImport?.sdDeviceIds, fileConfig.smartImport?.sdDriveTypes);
+            const sdVideoActionDefaults = {
+              work: {
+                splitVideosOnImport: fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.smartImport?.splitLargeFiles ?? false,
+                transcodeVideosOnImport: fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false,
+              },
+              broll: {
+                splitVideosOnImport: fileConfig.brollImport?.splitVideosOnImport ?? fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.brollImport?.splitLargeFiles ?? false,
+                transcodeVideosOnImport: fileConfig.brollImport?.transcodeVideosOnImport ?? fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false,
+              },
+            };
+            const savedSdDevices = normalizeSavedSdDeviceRecords(
+              fileConfig.smartImport?.sdDevices,
+              savedSdPaths,
+              fileConfig.smartImport?.sdDeviceIds,
+              fileConfig.smartImport?.sdDriveTypes,
+              sdVideoActionDefaults,
+            );
+            const savedSdDriveVideoActions = normalizeSavedSdDriveVideoActions(fileConfig.smartImport?.sdDriveVideoActions, savedSdPaths, fileConfig.smartImport?.sdDriveTypes, sdVideoActionDefaults);
             const componentSettings: AppConfig['componentSettings'] = { ...fileConfig.componentSettings };
             delete componentSettings['video-playback-mpv'];
             delete componentSettings['research-tools'];
@@ -354,7 +382,7 @@ const App: React.FC = () => {
             delete legacyConfig.fileImport;
             const customProjectCategories = normalizeProjectCategories(fileConfig.customProjectCategories);
             const configuredWorkspacePaths = normalizeWorkspacePaths(fileConfig.workspacePath, fileConfig.workspacePaths);
-            let normalizedConfig = { ...legacyConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, customProjectCategories, projectCategoryOrder: normalizeProjectCategoryOrder(fileConfig.projectCategoryOrder, customProjectCategories), defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', itemOpenMode: fileConfig.itemOpenMode === 'double' || legacyFolderOpenMode === 'double' ? 'double' : 'single', favoriteDisplayMode: fileConfig.favoriteDisplayMode === 'stars' ? 'stars' : 'binary', usagePreferencesVersion: Number(fileConfig.usagePreferencesVersion) || 0, projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, pinInspirationLibrary: fileConfig.pinInspirationLibrary === true, componentSettings, videoPlayback, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, backup: { enabled: fileConfig.backup?.enabled === true, targetType: fileConfig.backup?.targetType === 'nas' || (fileConfig.backup?.targetType === undefined && fileConfig.backup?.targetPath?.startsWith('\\\\')) ? 'nas' : 'local', targetPath: fileConfig.backup?.targetPath ?? '', mode: fileConfig.backup?.mode === 'latest' ? 'latest' : 'history', automaticDaily: fileConfig.backup?.automaticDaily ?? true, afterImport: fileConfig.backup?.afterImport ?? true, retention: { daily: Math.max(1, Number(fileConfig.backup?.retention?.daily) || 7), weekly: Math.max(0, Number(fileConfig.backup?.retention?.weekly) || 4), monthly: Math.max(0, Number(fileConfig.backup?.retention?.monthly) || 12) }, nas: { credentialRef: fileConfig.backup?.nas?.credentialRef ?? '', limitEnabled: fileConfig.backup?.nas?.limitEnabled === true, bandwidthLimitMBps: Math.max(1, Number(fileConfig.backup?.nas?.bandwidthLimitMBps) || 20), limitStart: fileConfig.backup?.nas?.limitStart || '09:00', limitEnd: fileConfig.backup?.nas?.limitEnd || '18:00' } }, archive: { enabled: fileConfig.archive?.enabled === true, targetPath: fileConfig.archive?.targetPath ?? '' }, importDefaults: { deleteSourceAfterImport: fileConfig.importDefaults?.deleteSourceAfterImport ?? !(legacyFileImport?.preserveOriginal ?? false), generateJpgFromRaw: fileConfig.importDefaults?.generateJpgFromRaw ?? true, splitVideosOnImport: fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.smartImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, videoTools: { transcode: { container: fileConfig.videoTools?.transcode?.container ?? 'mp4', videoMode: fileConfig.videoTools?.transcode?.videoMode ?? 'h264', quality: fileConfig.videoTools?.transcode?.quality ?? 'balanced', resolution: fileConfig.videoTools?.transcode?.resolution ?? 'original', frameRate: fileConfig.videoTools?.transcode?.frameRate ?? 'original', audioMode: fileConfig.videoTools?.transcode?.audioMode ?? 'aac' } }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, sdDeviceIds: fileConfig.smartImport?.sdDeviceIds ?? {}, sdDevices: savedSdDevices, backupEnabled: false, generateVideoPreview: false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: false, dateFilter: fileConfig.smartImport?.dateFilter === 'today' || fileConfig.smartImport?.dateFilter === 'today_yesterday' ? fileConfig.smartImport.dateFilter : 'all' }, brollImport: { splitVideosOnImport: fileConfig.brollImport?.splitVideosOnImport ?? fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.brollImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.brollImport?.transcodeVideosOnImport ?? fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, inspirationLibrary, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: configuredImageSource === undefined || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: configuredVideoSource === undefined || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
+            let normalizedConfig = { ...legacyConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, customProjectCategories, projectCategoryOrder: normalizeProjectCategoryOrder(fileConfig.projectCategoryOrder, customProjectCategories), defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', itemOpenMode: fileConfig.itemOpenMode === 'double' || legacyFolderOpenMode === 'double' ? 'double' : 'single', favoriteDisplayMode: fileConfig.favoriteDisplayMode === 'stars' ? 'stars' : 'binary', usagePreferencesVersion: Number(fileConfig.usagePreferencesVersion) || 0, projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, pinInspirationLibrary: fileConfig.pinInspirationLibrary === true, componentSettings, videoPlayback, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, backup: { enabled: fileConfig.backup?.enabled === true, targetType: fileConfig.backup?.targetType === 'nas' || (fileConfig.backup?.targetType === undefined && fileConfig.backup?.targetPath?.startsWith('\\\\')) ? 'nas' : 'local', targetPath: fileConfig.backup?.targetPath ?? '', mode: fileConfig.backup?.mode === 'latest' ? 'latest' : 'history', automaticDaily: fileConfig.backup?.automaticDaily ?? true, afterImport: fileConfig.backup?.afterImport ?? true, retention: { daily: Math.max(1, Number(fileConfig.backup?.retention?.daily) || 7), weekly: Math.max(0, Number(fileConfig.backup?.retention?.weekly) || 4), monthly: Math.max(0, Number(fileConfig.backup?.retention?.monthly) || 12) }, nas: { credentialRef: fileConfig.backup?.nas?.credentialRef ?? '', limitEnabled: fileConfig.backup?.nas?.limitEnabled === true, bandwidthLimitMBps: Math.max(1, Number(fileConfig.backup?.nas?.bandwidthLimitMBps) || 20), limitStart: fileConfig.backup?.nas?.limitStart || '09:00', limitEnd: fileConfig.backup?.nas?.limitEnd || '18:00' } }, archive: { enabled: fileConfig.archive?.enabled === true, targetPath: fileConfig.archive?.targetPath ?? '' }, importDefaults: { deleteSourceAfterImport: fileConfig.importDefaults?.deleteSourceAfterImport ?? !(legacyFileImport?.preserveOriginal ?? false), generateJpgFromRaw: fileConfig.importDefaults?.generateJpgFromRaw ?? true, splitVideosOnImport: fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.smartImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, videoTools: { transcode: { container: fileConfig.videoTools?.transcode?.container ?? 'mp4', videoMode: fileConfig.videoTools?.transcode?.videoMode ?? 'h264', quality: fileConfig.videoTools?.transcode?.quality ?? 'balanced', resolution: fileConfig.videoTools?.transcode?.resolution ?? 'original', frameRate: fileConfig.videoTools?.transcode?.frameRate ?? 'original', audioMode: fileConfig.videoTools?.transcode?.audioMode ?? 'aac' } }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, sdDriveVideoActions: savedSdDriveVideoActions, sdDeviceIds: fileConfig.smartImport?.sdDeviceIds ?? {}, sdDevices: savedSdDevices, backupEnabled: false, generateVideoPreview: false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: false, dateFilter: fileConfig.smartImport?.dateFilter === 'today' || fileConfig.smartImport?.dateFilter === 'today_yesterday' ? fileConfig.smartImport.dateFilter : 'all' }, brollImport: { splitVideosOnImport: fileConfig.brollImport?.splitVideosOnImport ?? fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.brollImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.brollImport?.transcodeVideosOnImport ?? fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, inspirationLibrary, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: configuredImageSource === undefined || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: configuredVideoSource === undefined || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
             normalizedConfig.componentSettingsRevisions = { ...(fileConfig.componentSettingsRevisions || {}) }; normalizedConfig.videoTools.trim = { exportMode: fileConfig.videoTools?.trim?.exportMode === 'exact' ? 'exact' : 'fast' };
             normalizedConfig.folderAlphabetFilterEnabled = fileConfig.folderAlphabetFilterEnabled !== false;
             normalizedConfig.versionTreeEnabled = fileConfig.versionTreeEnabled !== false;
@@ -365,7 +393,7 @@ const App: React.FC = () => {
             if (!normalizedConfig.workspacePaths.length) setShowWorkspaceSetup(true);
             setStartupSdAutoStart(normalizedConfig.smartImport.autoStart === true); setConfig(normalizedConfig);
             if (fileConfig.videoTools?.trim?.exportMode !== normalizedConfig.videoTools.trim.exportMode && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
-            if ((JSON.stringify(fileConfig.workspacePaths) !== JSON.stringify(normalizedConfig.workspacePaths) || fileConfig.smartImport?.autoMoveProjectAfterSdImport === undefined || JSON.stringify(fileConfig.smartImport?.sdDevices) !== JSON.stringify(savedSdDevices) || fileConfig.folderAlphabetFilterEnabled === undefined || fileConfig.versionTreeEnabled === undefined || JSON.stringify(fileConfig.progressNamePresets) !== JSON.stringify(normalizedConfig.progressNamePresets)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
+            if ((JSON.stringify(fileConfig.workspacePaths) !== JSON.stringify(normalizedConfig.workspacePaths) || fileConfig.smartImport?.autoMoveProjectAfterSdImport === undefined || JSON.stringify(fileConfig.smartImport?.sdDevices) !== JSON.stringify(savedSdDevices) || JSON.stringify(fileConfig.smartImport?.sdDriveVideoActions) !== JSON.stringify(savedSdDriveVideoActions) || fileConfig.folderAlphabetFilterEnabled === undefined || fileConfig.versionTreeEnabled === undefined || JSON.stringify(fileConfig.progressNamePresets) !== JSON.stringify(normalizedConfig.progressNamePresets)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || JSON.stringify(fileConfig.customProjectCategories) !== JSON.stringify(normalizedConfig.customProjectCategories) || JSON.stringify(fileConfig.projectCategoryOrder) !== JSON.stringify(normalizedConfig.projectCategoryOrder) || fileConfig.defaultFolderSort === undefined || fileConfig.itemOpenMode !== normalizedConfig.itemOpenMode || fileConfig.favoriteDisplayMode !== normalizedConfig.favoriteDisplayMode || fileConfig.usagePreferencesVersion !== normalizedConfig.usagePreferencesVersion || legacyFolderOpenMode !== undefined || fileConfig.birthdayEnabled === undefined || fileConfig.pinInspirationLibrary === undefined || !fileConfig.backup || fileConfig.backup?.targetType === undefined || !fileConfig.backup?.nas || !fileConfig.archive || !fileConfig.importDefaults || fileConfig.importDefaults?.splitVideosOnImport === undefined || fileConfig.importDefaults?.transcodeVideosOnImport === undefined || !fileConfig.videoTools?.transcode || legacyFileImport !== undefined || legacyBrollClearSource !== undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || !fileConfig.smartImport?.sdDeviceIds || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || fileConfig.smartImport?.dateFilter !== normalizedConfig.smartImport.dateFilter || !fileConfig.brollImport || fileConfig.brollImport?.splitVideosOnImport === undefined || fileConfig.brollImport?.transcodeVideosOnImport === undefined || !fileConfig.inspirationLibrary || JSON.stringify(fileConfig.research) !== JSON.stringify(researchSettings) || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.projectToolbar) !== JSON.stringify(normalizedConfig.projectToolbar) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
             console.log('📋 Configuration loaded from file');
           } else {
@@ -673,7 +701,7 @@ const App: React.FC = () => {
     setProjectDestination(null);
     setActiveTab('inspiration');
   };
-  const { navigationRequests: browserNavigationRequests, openInNewTab: openInspirationDirectoryPage, navigateCurrent: navigateInspiration } = useFolderTabNavigation({ rootPath: config?.inspirationLibrary.rootPath.trim() || '', pages: projectPages, activePageId, createPage, requestInspirationPath, activateInspiration });
+  const { navigationRequests: browserNavigationRequests, openInNewTab: openInspirationDirectoryPage, navigateCurrent: navigateInspiration, sourceDragActive: folderTabSourceDragActive } = useFolderTabNavigation({ rootPath: config?.inspirationLibrary.rootPath.trim() || '', pages: projectPages, activePageId, createPage, requestInspirationPath, activateInspiration });
   const openSettingsTab = async () => {
     if (activeTab === 'component') await componentHost.deactivate(); setSettingsTabOpen(true);
     setActiveTab('settings');
@@ -779,7 +807,7 @@ const App: React.FC = () => {
             <span className="truncate text-sm font-bold text-slate-800">照片流</span>
           </div>
         </div>
-        <div aria-label="标签栏" className="relative flex min-w-0 flex-1">
+        <div data-folder-tab-drop-zone={folderTabSourceDragActive ? 'true' : undefined} aria-label="标签栏" className={`relative flex min-w-0 flex-1 transition-colors ${folderTabSourceDragActive ? 'app-titlebar-control bg-blue-50/70 ring-1 ring-inset ring-blue-400/70' : ''}`}>
           {titlebarTabScroll.overflow && <button type="button" aria-label="向左滚动标签" title="向左滚动标签" disabled={!titlebarTabScroll.canScrollLeft} onClick={() => scrollTitlebarTabs(-1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronLeft size={15}/></button>}
           <div ref={titlebarTabsRef} onWheel={handleTitlebarTabWheel} aria-label="已打开的窗口" className="titlebar-tabs-scroll scrollbar-hide flex min-w-0 shrink items-end gap-0 overflow-x-auto px-2 pt-1.5">
             <button type="button" {...titlebarTabDragProps('home')} data-active-tab={activeTab === 'home'} onClick={showHomeTab} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[92px] max-w-[180px] items-center gap-2 rounded-t-lg border px-3 text-xs font-medium transition ${activeTab === 'home' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
@@ -808,7 +836,7 @@ const App: React.FC = () => {
             {settingsTabOpen && <div {...titlebarTabDragProps('settings')} data-active-tab={activeTab === 'settings'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[108px] max-w-[180px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'settings' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openSettingsTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Settings size={14} className="shrink-0"/><span className="truncate">设置</span></button><button type="button" data-tab-drag-ignore="true" aria-label="关闭设置" title="关闭设置" onClick={closeSettingsTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
           </div>
           {titlebarTabScroll.overflow && <button type="button" aria-label="向右滚动标签" title="向右滚动标签" disabled={!titlebarTabScroll.canScrollRight} onClick={() => scrollTitlebarTabs(1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronRight size={15}/></button>}
-          <div aria-label="拖动窗口" className="app-window-drag-region min-w-8 flex-1"/>
+          <div aria-label={folderTabSourceDragActive ? '标签栏空白区域' : '拖动窗口'} className={`${folderTabSourceDragActive ? 'app-titlebar-control' : 'app-window-drag-region'} min-w-8 flex-1`}/>
         </div>
         <DomainHealthBanner components={components}/>
         <BackgroundTaskIndicator ownerPageIds={openPageIds} open={backgroundTaskDrawerOpen} onOpenChange={setBackgroundTaskDrawerOpen} drawerHostRef={backgroundTaskDrawerHostRef}/>
@@ -936,7 +964,15 @@ const App: React.FC = () => {
 
         {activeTab === 'video_split' && <VideoSplitView />}
       </main>
-      <div ref={backgroundTaskDrawerHostRef} className={backgroundTaskDrawerOpen ? 'w-80 shrink-0 overflow-hidden border-l border-slate-200 bg-white' : 'hidden'} />
+      {backgroundTaskDrawerOpen && <ColumnResizeHandle
+        label="调整后台任务面板宽度"
+        value={renderedBackgroundTaskDrawerWidth}
+        minimum={BACKGROUND_TASK_DRAWER_MIN_WIDTH}
+        maximum={backgroundTaskDrawerMaximumWidth}
+        onReset={() => setBackgroundTaskDrawerWidth(BACKGROUND_TASK_DRAWER_DEFAULT_WIDTH)}
+        onDrag={deltaX => setBackgroundTaskDrawerWidth(width => clampNumber(width - deltaX, BACKGROUND_TASK_DRAWER_MIN_WIDTH, backgroundTaskDrawerMaximumWidth))}
+      />}
+      <div ref={backgroundTaskDrawerHostRef} style={{ width: renderedBackgroundTaskDrawerWidth }} className={backgroundTaskDrawerOpen ? 'shrink-0 overflow-hidden border-l border-slate-200 bg-white' : 'hidden'}/>
       </div>}
     </div>
   );

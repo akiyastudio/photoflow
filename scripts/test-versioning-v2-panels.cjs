@@ -106,7 +106,9 @@ assert.equal(model.workflowInputLabel(legacyWorkflow), '组件工作流');
 assert.equal(model.workflowInputLabel(metadataWorkflow), '供应商流程');
 assert.deepEqual(model.selectableWorkflowInputs([ordinarySelection, ordinaryProgress, legacyWorkflow, metadataWorkflow], 'image').map(item => item.id), ['selection', 'legacy-workflow', 'metadata-workflow']);
 const panelSwitch = loadCommonJs(compile('src/components/PanelSwitch.tsx'));
-const importSourceControls = loadCommonJs(compile('src/components/ImportSourceControls.tsx'), request => request === './PanelSwitch' ? panelSwitch : require(request));
+const sourcePathPickerModel = loadCommonJs(compile('src/components/source-path-picker-model.ts'));
+const sourcePathPicker = loadCommonJs(compile('src/components/SourcePathPicker.tsx'), request => request === './source-path-picker-model' ? sourcePathPickerModel : require(request));
+const importSourceControls = loadCommonJs(compile('src/components/ImportSourceControls.tsx'), request => request === './PanelSwitch' ? panelSwitch : request === './SourcePathPicker' ? sourcePathPicker : require(request));
 const panel = loadCommonJs(compile('src/features/versioning/VersionProgressPanel.tsx'), request => request === './versioning-v2-model' ? model : request === '../../components/ImportSourceControls' ? importSourceControls : require(request));
 const folderMarkModel = loadCommonJs(compile('src/features/versioning/folder-mark-model.ts'), request => request === './versioning-v2-model' ? model : request === './VersionProgressPanel' ? panel : require(request));
 const folderMarkPanel = { ...folderMarkModel, ...loadCommonJs(compile('src/features/versioning/FolderMarkPanel.tsx'), request => request === './versioning-v2-model' ? model : request === './VersionProgressPanel' ? panel : request === './folder-mark-model' ? folderMarkModel : require(request)) };
@@ -253,7 +255,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(folderMarkPanel.defaultFolderMarkPurpose('客户/RAW', true), 'progress', 'a nested folder must default to progress even when it contains RAW files');
   assert.strictEqual(folderMarkPanel.defaultFolderMarkPurpose('客户\\RAW', true), 'progress', 'Windows-style nested paths must also default to progress');
   await React.act(async () => root.render(React.createElement(importSourceControls.ImportSourceControls, {
-    selectionTitle: '选择文件', selectionDescription: '选择文件', selectedCount: 0,
+    selectionTitle: '选择文件', selectionDescription: '选择文件', selectedPaths: [], onSelectedPathsChange() {},
     onChooseFiles() {}, deleteSourceAfterImport: false, onDeleteSourceAfterImportChange() {},
     deleteSourceDescription: '保留源文件', importKind: 'files', onImportKindChange() {}, onStart() {},
     disabledImportKinds: ['original', 'progress', 'broll'],
@@ -261,6 +263,28 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const inspirationImportKindButtons = allNodes(container).filter(node => node.nodeName === 'BUTTON' && ['原始素材', '进度', '花絮', '其他文件'].includes(node.textContent));
   assert.deepStrictEqual(inspirationImportKindButtons.filter(node => node.attributes.has('disabled')).map(node => node.textContent), ['原始素材', '进度', '花絮'], 'inspiration imports must disable project-only material kinds');
   assert(!inspirationImportKindButtons.find(node => node.textContent === '其他文件').attributes.has('disabled'), 'inspiration imports must keep other-file import available');
+  assert(!allNodes(container).some(node => node.nodeName === 'TEXTAREA'), 'batch path input must start collapsed');
+  const pastePathsButton = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent === '批量粘贴路径');
+  assert(pastePathsButton, 'source selection must render an explicit batch-path toggle button');
+  await React.act(async () => dispatch(pastePathsButton, 'click'));
+  assert(allNodes(container).some(node => node.nodeName === 'TEXTAREA'), 'clicking the batch-path toggle must reveal the path input');
+  const folderSource = 'C:\\Media\\Shoot.v1';
+  await React.act(async () => root.render(React.createElement(sourcePathPicker.SourcePathPicker, {
+    paths: [folderSource],
+    pathKinds: { [sourcePathPickerModel.sourcePathIdentity(folderSource)]: 'folder' },
+    onChange() {},
+  })));
+  assert(textContent(container).includes('目录') && textContent(container).includes('Shoot.v1'), 'known folders must remain one folder row even when their names contain a dot');
+  const manySources = Array.from({ length: 501 }, (_, index) => `C:\\Media\\clip-${index}.mov`);
+  let changedSources = [];
+  await React.act(async () => root.render(React.createElement(sourcePathPicker.SourcePathPicker, {
+    paths: manySources,
+    onChange(next) { changedSources = next; },
+  })));
+  const removeFirstSource = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.attributes.get('aria-label') === '移除 clip-0.mov');
+  await React.act(async () => dispatch(removeFirstSource, 'click'));
+  assert.strictEqual(changedSources.length, 500, 'removing one of 501 sources must keep all remaining sources');
+  assert(changedSources.includes(manySources[500]), 'removing a source must not discard entries after the old 500-item boundary');
   const secondOriginal = { ...folders[0], id: 'raw-two', versionKey: 'source-two', displayName: 'RAW 2', folderPath: 'C:/p/RAW 2' };
   const ambiguousOriginalDraft = folderMarkPanel.createFolderMarkDraft(markCommon, 'progress', [...folders, secondOriginal], 'image');
   assert.strictEqual(ambiguousOriginalDraft.progress.parentProgressId, '');

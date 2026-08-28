@@ -33,6 +33,6 @@ export default defineConfig({
   build: {
     outDir: 'artifacts/web',
     emptyOutDir: true,
-    rollupOptions: { input: { main: resolve(import.meta.dirname, 'index.html'), toastOverlay: resolve(import.meta.dirname, 'toast-overlay.html') } },
+    rollupOptions: { input: { main: resolve(import.meta.dirname, 'index.html'), toastView: resolve(import.meta.dirname, 'toast-view.html') } },
   },
 })

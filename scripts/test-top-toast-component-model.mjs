@@ -48,7 +48,7 @@ assert(css.includes('.file-transfer-toast * { animation:none!important; transiti
 assert(hook.includes("typeof options === 'string'") && hook.includes('hostNoticeTone(message)'), 'typed host notices accept an explicit tone while retaining inference');
 assert(hook.includes('value.notification.tone') && !hook.includes('value.notification.durationMs'), 'component notifications use the host lifecycle and cannot control duration');
 assert(hook.includes('value.notification.dedupeKey || value.id') && hook.includes('ToastActivityHandle'), 'component dedupe keys and typed activity handles feed the unified state');
-assert(hook.includes('new MutationObserver(scheduleOverlaySync)') && hook.includes("attributeFilter: ['class']") && hook.includes('requestAnimationFrame(flushOverlay)'), 'overlay mirrors child task and dark-mode changes through one frame-coalesced snapshot scheduler');
+assert(hook.includes('new ResizeObserver(scheduleSnapshot)') && hook.includes('requestAnimationFrame(flushSnapshot)') && hook.includes('updateToastView({') && !hook.includes('innerHTML'), 'host publishes structured Toast view state through one frame-coalesced scheduler');
 assert(!hook.slice(hook.indexOf('notices.map(')).includes('sourceComponentId ==='), 'source ownership never forks toast presentation');
 const app = fs.readFileSync(path.join(root, 'src/App.tsx'), 'utf8');
 assert(app.includes("result.success ? 'success' : 'error'") && app.includes("showNotice(result.error || '无法开始备份', 'error')") && !app.includes("showNotice('手动备份已开始', 'success')"), 'manual BackgroundTask startup failures remain visible without a duplicate started toast');

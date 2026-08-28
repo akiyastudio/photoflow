@@ -12,6 +12,7 @@ import hashlib
 import math
 import ctypes
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 import gc
 from PIL import Image
@@ -32,6 +33,7 @@ CAPTURE_TIME_MEMORY_CACHE = {}
 CAPTURE_TIME_MEMORY_CACHE_LIMIT = 100000
 
 CANCEL_FILE = ''
+RESOURCE_PROTOCOL_ENABLED = False
 
 
 class ImportCancelled(Exception):
@@ -42,9 +44,47 @@ class SourceIdentityMismatch(OSError):
     pass
 
 
+class ResourceLeaseDenied(RuntimeError):
+    pass
+
+
 def ensure_not_cancelled():
     if CANCEL_FILE and os.path.exists(CANCEL_FILE):
         raise ImportCancelled('导入已取消')
+
+
+@contextmanager
+def task_resource_lease(profile, phase):
+    """Wait for a host-owned phase lease before starting resource-intensive work."""
+    if not RESOURCE_PROTOCOL_ENABLED:
+        yield
+        return
+    lease_id = f'lease-{uuid.uuid4()}'
+    emit('resource_request', phase, data={'leaseId': lease_id, 'profile': profile, 'phase': phase})
+    granted = False
+    while True:
+        response_line = sys.stdin.readline()
+        if not response_line:
+            raise ResourceLeaseDenied('主程序已断开资源调度协议')
+        try:
+            response = json.loads(response_line)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if str(response.get('leaseId') or '') != lease_id:
+            continue
+        if response.get('type') == 'resource_granted':
+            granted = True
+            break
+        if response.get('type') == 'resource_denied':
+            if CANCEL_FILE and os.path.exists(CANCEL_FILE):
+                raise ImportCancelled('导入已取消')
+            raise ResourceLeaseDenied(str(response.get('error') or '主程序拒绝了阶段资源请求'))
+    try:
+        ensure_not_cancelled()
+        yield
+    finally:
+        if granted:
+            emit('resource_release', phase, data={'leaseId': lease_id, 'profile': profile})
 
 # --- 2. 辅助工具函数 ---
 def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None):
@@ -1423,10 +1463,13 @@ def generate_missing_raw_jpgs(target_folder, imported_paths, converter=generate_
         stem = os.path.splitext(os.path.basename(source_path))[0]
         target_path = os.path.join(jpg_dir, f'{stem}.jpg')
         try:
-            converter(source_path, target_path)
+            with task_resource_lease('raw-jpg', f'正在从 RAW 生成 JPG：{os.path.basename(source_path)}'):
+                converter(source_path, target_path)
             succeeded += 1
             if on_generated:
                 on_generated(target_path)
+        except (ImportCancelled, ResourceLeaseDenied):
+            raise
         except Exception as error:
             emit('warning', f'无法从 RAW 生成 JPG，已保留 RAW 文件 {os.path.basename(source_path)}：{error}')
         if on_progress:
@@ -1470,7 +1513,8 @@ def generate_video_previews(target_folder, quality='medium', on_generated=None, 
             output_path = os.path.join(output_dir, f"{Path(file_name).stem}_{int(time.time())}.mp4")
 
         try:
-            used_encoder = transcode_video_preview(input_path, output_path, quality, on_log=log_info)
+            with task_resource_lease('video-preview', f'正在生成视频预览：{file_name}'):
+                used_encoder = transcode_video_preview(input_path, output_path, quality, on_log=log_info)
             succeeded += 1
             if used_encoder and announced_encoder != used_encoder:
                 announced_encoder = used_encoder
@@ -1504,13 +1548,14 @@ def split_large_videos(target_folder, on_split=None, source_paths=None):
 
         log_info(f'正在将超过 4GB 的视频分割为约 3.95GB：{file_name}')
         try:
-            segment_paths = split_video_by_size(
-                input_path,
-                split_threshold_bytes=target_size,
-                target_segment_bytes=target_size,
-                maximum_segment_bytes=FOUR_GB,
-                cancel_check=ensure_not_cancelled,
-            )
+            with task_resource_lease('video-split', f'正在分割大视频：{file_name}'):
+                segment_paths = split_video_by_size(
+                    input_path,
+                    split_threshold_bytes=target_size,
+                    target_segment_bytes=target_size,
+                    maximum_segment_bytes=FOUR_GB,
+                    cancel_check=ensure_not_cancelled,
+                )
             if not segment_paths:
                 continue
             if on_split:
@@ -1537,19 +1582,20 @@ def transcode_imported_videos(target_folder, settings, on_transcoded=None, sourc
     for input_path in candidates:
         ensure_not_cancelled()
         try:
-            output_path = transcode_video(
-                input_path,
-                container=settings.get('container', 'mp4'),
-                video_mode=settings.get('videoMode', 'h264'),
-                quality=settings.get('quality', 'balanced'),
-                resolution=settings.get('resolution', 'original'),
-                frame_rate=settings.get('frameRate', 'original'),
-                audio_mode=settings.get('audioMode', 'aac'),
-                output_mode='new',
-                destination_directory=output_dir,
-                on_log=log_info,
-                cancel_check=ensure_not_cancelled,
-            )
+            with task_resource_lease('video-transcode', f'正在转码导入视频：{os.path.basename(input_path)}'):
+                output_path = transcode_video(
+                    input_path,
+                    container=settings.get('container', 'mp4'),
+                    video_mode=settings.get('videoMode', 'h264'),
+                    quality=settings.get('quality', 'balanced'),
+                    resolution=settings.get('resolution', 'original'),
+                    frame_rate=settings.get('frameRate', 'original'),
+                    audio_mode=settings.get('audioMode', 'aac'),
+                    output_mode='new',
+                    destination_directory=output_dir,
+                    on_log=log_info,
+                    cancel_check=ensure_not_cancelled,
+                )
             succeeded += 1
             outputs.append(output_path)
             if on_transcoded:
@@ -1565,14 +1611,15 @@ def split_broll_video(input_path, keep_original=False):
     ensure_not_cancelled()
     log_info(f'正在将超过 4GB 的花絮视频分割为约 3.95GB：{os.path.basename(input_path)}')
     try:
-        segments = split_video_by_size(
-            input_path,
-            split_threshold_bytes=FOUR_GB,
-            target_segment_bytes=SPLIT_TARGET_BYTES,
-            maximum_segment_bytes=FOUR_GB,
-            keep_original=keep_original,
-            cancel_check=ensure_not_cancelled,
-        )
+        with task_resource_lease('video-split', f'正在分割花絮视频：{os.path.basename(input_path)}'):
+            segments = split_video_by_size(
+                input_path,
+                split_threshold_bytes=FOUR_GB,
+                target_segment_bytes=SPLIT_TARGET_BYTES,
+                maximum_segment_bytes=FOUR_GB,
+                keep_original=keep_original,
+                cancel_check=ensure_not_cancelled,
+            )
     except FFmpegTranscodeError as error:
         raise IOError(f'无法安全分割 {os.path.basename(input_path)}：{error}') from error
     log_info(f'花絮视频分割完成：{os.path.basename(input_path)} → {len(segments)} 段')
@@ -2018,18 +2065,19 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                     if os.path.splitext(video_path)[1].lower() not in VIDEO_EXTENSIONS:
                         continue
                     try:
-                        output_path = transcode_video(
-                            video_path,
-                            container=(transcode_settings or {}).get('container', 'mp4'),
-                            video_mode=(transcode_settings or {}).get('videoMode', 'h264'),
-                            quality=(transcode_settings or {}).get('quality', 'balanced'),
-                            resolution=(transcode_settings or {}).get('resolution', 'original'),
-                            frame_rate=(transcode_settings or {}).get('frameRate', 'original'),
-                            audio_mode=(transcode_settings or {}).get('audioMode', 'aac'),
-                            output_mode='new',
-                            on_log=log_info,
-                            cancel_check=ensure_not_cancelled,
-                        )
+                        with task_resource_lease('video-transcode', f'正在转码花絮视频：{os.path.basename(video_path)}'):
+                            output_path = transcode_video(
+                                video_path,
+                                container=(transcode_settings or {}).get('container', 'mp4'),
+                                video_mode=(transcode_settings or {}).get('videoMode', 'h264'),
+                                quality=(transcode_settings or {}).get('quality', 'balanced'),
+                                resolution=(transcode_settings or {}).get('resolution', 'original'),
+                                frame_rate=(transcode_settings or {}).get('frameRate', 'original'),
+                                audio_mode=(transcode_settings or {}).get('audioMode', 'aac'),
+                                output_mode='new',
+                                on_log=log_info,
+                                cancel_check=ensure_not_cancelled,
+                            )
                         created_files.append(output_path)
                     except (FFmpegTranscodeError, OSError, ValueError) as error:
                         emit('warning', f'花絮视频转码失败，已保留原文件 {os.path.basename(video_path)}：{error}')
@@ -2167,11 +2215,13 @@ def run(args_list):
     parser.add_argument("--date_filter", choices=IMPORT_DATE_FILTERS, default="all")
     parser.add_argument("--exiftool_path", default="")
     parser.add_argument("--cancel_file", default="")
+    parser.add_argument("--resource_protocol", action="store_true")
 
     args, _ = parser.parse_known_args(args_list)
-    global CANCEL_FILE, EXIFTOOL_PATH
+    global CANCEL_FILE, EXIFTOOL_PATH, RESOURCE_PROTOCOL_ENABLED
     CANCEL_FILE = os.path.abspath(args.cancel_file) if args.cancel_file else ''
     EXIFTOOL_PATH = os.path.abspath(args.exiftool_path) if args.exiftool_path else ''
+    RESOURCE_PROTOCOL_ENABLED = bool(args.resource_protocol)
     try:
         source_paths = [str(value) for value in json.loads(args.source_paths or '[]') if str(value).strip()]
     except (TypeError, ValueError, json.JSONDecodeError):

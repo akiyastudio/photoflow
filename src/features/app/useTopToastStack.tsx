@@ -1,7 +1,7 @@
 import { createContext, useCallback, useContext, useEffect, useLayoutEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { useHostRendererToken } from '../../components/LayerProvider';
-import { FileTransferToast } from '../background-tasks/FileTransferToast';
+import { FileTransferToast, useFileTransferToastPresentation } from '../background-tasks/FileTransferToast';
 import { clearTopToastNoticeTimers, purgeComponentTopToastNotices, removeTopToastNotice, upsertTopToastNotice, type TopToastNotice } from './top-toast-notice-model';
 import { hostNoticeTone, topToastTonePolicy, topToastTonePresentation } from './top-toast-tone-model';
 
@@ -142,41 +142,64 @@ export const TopToastViewport = () => {
   const context = useContext(ToastContext);
   if (!context) throw new Error('TopToastViewport must be used inside TopToastProvider');
   const { notices, stackRef } = context;
-  const lastNotice = notices.at(-1);
-  const overlayFrameRef = useRef<number | null>(null);
-  const flushOverlay = useCallback(() => {
-    overlayFrameRef.current = null;
+  const presentation = useFileTransferToastPresentation();
+  const snapshotRevisionRef = useRef(0);
+  const snapshotFrameRef = useRef<number | null>(null);
+  const flushSnapshot = useCallback(() => {
+    snapshotFrameRef.current = null;
     const stack = stackRef.current;
-    if (stack) void window.electronAPI.updateToastOverlay({ html: stack.innerHTML, dark: document.documentElement.classList.contains('dark') }).catch(() => undefined);
-  }, [stackRef]);
-  const scheduleOverlaySync = useCallback(() => {
-    if (overlayFrameRef.current !== null) return;
-    overlayFrameRef.current = window.requestAnimationFrame(flushOverlay);
-  }, [flushOverlay]);
-  useLayoutEffect(() => {
-    scheduleOverlaySync();
-  }, [notices, scheduleOverlaySync]);
+    const rect = stack?.getBoundingClientRect();
+    const hasContent = Boolean(stack && stack.childElementCount > 0);
+    const contentWidth = hasContent && stack ? Math.max(...Array.from(stack.children, child => Math.ceil(child.getBoundingClientRect().width)), 0) : 0;
+    void window.electronAPI.updateToastView({
+      revision: snapshotRevisionRef.current++,
+      dark: document.documentElement.classList.contains('dark'),
+      top: hasContent && rect ? Math.max(0, Math.round(rect.top)) : 0,
+      width: contentWidth,
+      height: hasContent && rect ? Math.max(0, Math.ceil(rect.height)) : 0,
+      notices,
+      tasks: presentation.visibleTasks,
+      overflowCount: presentation.overflowCount,
+    }).catch(() => undefined);
+  }, [notices, presentation.overflowCount, presentation.visibleTasks, stackRef]);
+  const scheduleSnapshot = useCallback(() => {
+    if (snapshotFrameRef.current !== null) return;
+    snapshotFrameRef.current = window.requestAnimationFrame(flushSnapshot);
+  }, [flushSnapshot]);
+  useLayoutEffect(scheduleSnapshot, [notices, presentation.overflowCount, presentation.visibleTasks, scheduleSnapshot]);
   useEffect(() => {
     const stack = stackRef.current;
     if (!stack) return;
-    const observer = new MutationObserver(scheduleOverlaySync);
-    observer.observe(stack, { attributes: true, childList: true, characterData: true, subtree: true });
-    observer.observe(document.documentElement, { attributes: true, attributeFilter: ['class'] });
+    const observer = new ResizeObserver(scheduleSnapshot);
+    observer.observe(stack);
     return () => observer.disconnect();
-  }, [scheduleOverlaySync, stackRef]);
+  }, [scheduleSnapshot, stackRef]);
+  useEffect(() => window.electronAPI.onToastViewAction(value => {
+    if (value.action === 'notice-dismiss' && /^\d+$/.test(value.id)) {
+      context.api.dismiss(Number(value.id));
+      return;
+    }
+    const task = presentation.visibleTasks.find(item => item.id === value.id);
+    if (!task) return;
+    if (value.action === 'task-dismiss') void presentation.dismissBackgroundTask(task.id);
+    else if (value.action === 'task-minimize') presentation.minimizeTaskToast(task.id);
+    else if (value.action === 'task-pause' && task.capabilities.pausable) void window.electronAPI.pauseBackgroundTask(task.id);
+    else if (value.action === 'task-continue' && task.capabilities.pausable) void window.electronAPI.continueBackgroundTask(task.id);
+    else if (value.action === 'task-cancel' && task.cancellable) {
+      if (task.type === 'selection-operation') void window.electronAPI.cancelSelectionOperation(String(task.metadata?.operationId || ''));
+      else void window.electronAPI.cancelBackgroundTask(task.id);
+    }
+  }), [context.api, presentation]);
   useEffect(() => () => {
-    if (overlayFrameRef.current !== null) window.cancelAnimationFrame(overlayFrameRef.current);
+    if (snapshotFrameRef.current !== null) window.cancelAnimationFrame(snapshotFrameRef.current);
+    void window.electronAPI.updateToastView({ revision: snapshotRevisionRef.current++, dark: false, top: 0, width: 0, height: 0, notices: [], tasks: [], overflowCount: 0 }).catch(() => undefined);
   }, []);
-  useEffect(() => window.electronAPI.onToastOverlayAction(value => {
-    if (value.action === 'notice-dismiss' && /^\d+$/.test(value.id)) context.api.dismiss(Number(value.id));
-  }), [context.api]);
   return <>
-    <div ref={stackRef} className="top-toast-stack" data-host-toast-model aria-label="通知" aria-hidden="true">
+    <div ref={stackRef} className="top-toast-stack top-toast-stack--model" data-toast-view-model aria-hidden="true">
       {notices.map(notice => { const presentation = topToastTonePresentation(notice.tone || 'info'); const ToneIcon = presentation.icon === 'check' ? CheckCircle2 : presentation.icon === 'warning' ? AlertTriangle : presentation.icon === 'error' ? XCircle : Info; return <div key={notice.id} data-top-toast-id={`notice:${notice.id}`} data-toast-tone={presentation.tone} role={presentation.role} aria-live={presentation.ariaLive} className="app-notice-toast animate-in fade-in slide-in-from-top-2">
-        <ToneIcon size={16} aria-hidden="true" className="app-notice-toast__tone-icon shrink-0"/><span className="app-notice-toast__message">{notice.message}{notice.count > 1 && <span className="ml-2 text-xs font-bold text-slate-300">×{notice.count}</span>}</span><button data-toast-overlay-action="notice-dismiss" data-toast-overlay-id={String(notice.id)} onClick={() => context.api.dismiss(notice.id)} aria-label="关闭提示" className="rounded p-0.5 text-slate-300 hover:bg-white/15 hover:text-white"><X size={15}/></button>
+        <ToneIcon size={16} aria-hidden="true" className="app-notice-toast__tone-icon shrink-0"/><span className="app-notice-toast__message">{notice.message}{notice.count > 1 && <span className="ml-2 text-xs font-bold text-slate-300">×{notice.count}</span>}</span><button onClick={() => context.api.dismiss(notice.id)} aria-label="关闭提示" title="关闭提示" className="rounded p-0.5 text-slate-300 hover:bg-white/15 hover:text-white"><X size={15}/></button>
       </div>; })}
-      <FileTransferToast stackRef={stackRef}/>
+      <FileTransferToast stackRef={stackRef} presentation={presentation}/>
     </div>
-    <div className="sr-only" role={lastNotice?.tone === 'error' ? 'alert' : 'status'} aria-live={lastNotice?.tone === 'error' ? 'assertive' : 'polite'} aria-atomic="true">{lastNotice?.message || ''}</div>
   </>;
 };

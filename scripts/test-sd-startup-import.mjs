@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { reconcileConfiguredSdDevices, removeConfiguredSdDevice, resolveConfiguredSdDevices, storageDeviceMatchesId, upsertConfiguredSdDevice } from '../src/features/tools/sd-startup-import-model.ts';
+import { configuredSdDriveVideoActions, normalizeSavedSdDeviceRecords, normalizeSavedSdDriveVideoActions, reconcileConfiguredSdDevices, removeConfiguredSdDevice, resolveConfiguredSdDevices, storageDeviceMatchesId, upsertConfiguredSdDevice } from '../src/features/tools/sd-startup-import-model.ts';
 import { createStorageDeviceInventoryController, isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from '../src/features/tools/storage-device-inventory-model.ts';
 import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, shouldDeleteSourceForImportBatch } from '../src/features/tools/startup-sd-auto-import-model.ts';
 
@@ -13,11 +13,14 @@ const config = (paths, ids = {}, types = {}) => ({
   sdPath: paths[0] || '',
   sdPaths: paths,
   sdDriveTypes: types,
+  sdDriveVideoActions: {},
   sdDeviceIds: ids,
   sdDevices: Object.entries(ids).map(([lastMountPath, deviceId]) => ({
     deviceId,
     lastMountPath,
     type: types[lastMountPath] === 'broll' ? 'broll' : 'work',
+    splitVideosOnImport: false,
+    transcodeVideosOnImport: false,
     confirmedAt: 1,
     enabled: true,
   })),
@@ -125,6 +128,39 @@ const secondCardOnly = resolveConfiguredSdDevices(
   [device('card-b', 'I:/')],
 );
 assert.deepEqual(secondCardOnly.map(item => ({ path: item.mountPath, type: item.type })), [{ path: 'I:/', type: 'broll' }]);
+
+const perDeviceActionsConfig = config(['G:/', 'H:/'], { 'G:/': 'card-g', 'H:/': 'card-h' });
+perDeviceActionsConfig.sdDevices[0].transcodeVideosOnImport = true;
+perDeviceActionsConfig.sdDevices[1].splitVideosOnImport = true;
+assert.deepEqual(configuredSdDriveVideoActions(perDeviceActionsConfig, []), {
+  'G:/': { splitVideosOnImport: false, transcodeVideosOnImport: true },
+  'H:/': { splitVideosOnImport: true, transcodeVideosOnImport: false },
+}, 'each recorded card must retain its own video-processing behavior');
+assert.deepEqual(configuredSdDriveVideoActions(perDeviceActionsConfig, [device('card-g', 'K:/')])['K:/'], {
+  splitVideosOnImport: false,
+  transcodeVideosOnImport: true,
+}, 'per-card video behavior must follow the device identity when its drive letter changes');
+
+const migratedVideoActions = normalizeSavedSdDeviceRecords(
+  [{ deviceId: 'legacy-card', lastMountPath: 'G:/', type: 'broll', confirmedAt: 1, enabled: true }],
+  ['G:/'],
+  { 'G:/': 'legacy-card' },
+  { 'G:/': 'broll' },
+  { broll: { splitVideosOnImport: false, transcodeVideosOnImport: true } },
+);
+assert.equal(migratedVideoActions[0].transcodeVideosOnImport, true, 'legacy type-level video settings must migrate onto each recorded device');
+assert.deepEqual(normalizeSavedSdDriveVideoActions(undefined, ['G:/'], { 'G:/': 'work' }, {
+  work: { splitVideosOnImport: true, transcodeVideosOnImport: false },
+}), { 'G:/': { splitVideosOnImport: true, transcodeVideosOnImport: false } }, 'a legacy path-only record must receive its own migrated video behavior');
+
+const legacyPathWithActions = config(['g:/'], {}, { 'g:/': 'work' });
+legacyPathWithActions.sdDriveVideoActions = { 'g:/': { splitVideosOnImport: false, transcodeVideosOnImport: true } };
+assert.deepEqual(configuredSdDriveVideoActions(legacyPathWithActions, [])['g:/'], {
+  splitVideosOnImport: false,
+  transcodeVideosOnImport: true,
+}, 'a legacy path-only record must expose its configured action before identity confirmation');
+const enrolledLegacyPath = upsertConfiguredSdDevice(legacyPathWithActions, device('card-g', 'G:/'), 'work', 99);
+assert.equal(enrolledLegacyPath.sdDevices[0].transcodeVideosOnImport, true, 'identity confirmation must carry the legacy path behavior onto the device record');
 
 const movedCard = resolveConfiguredSdDevices(
   config(['H:/'], { 'H:/': 'card-a' }),

@@ -93,6 +93,8 @@ Promise.resolve()
 
     const main = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf8');
     const preload = fs.readFileSync(path.join(root, 'electron', 'preload.cjs'), 'utf8');
+    const toastViewPreload = fs.readFileSync(path.join(root, 'electron', 'toast-view-preload.cjs'), 'utf8');
+    const toastViewManager = fs.readFileSync(path.join(root, 'electron', 'services', 'toast-view-manager.cjs'), 'utf8');
     const workspaceIpc = fs.readFileSync(path.join(root, 'electron', 'modules', 'workspace-ipc.cjs'), 'utf8');
     const projectWorkspace = fs.readFileSync(path.join(root, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
     const toolViews = fs.readFileSync(path.join(root, 'src', 'features', 'tools', 'ToolViews.tsx'), 'utf8');
@@ -104,6 +106,9 @@ Promise.resolve()
     assert(securityPolicy.includes("webContents.on('will-navigate'"));
     assert(securityPolicy.includes('setPermissionRequestHandler'));
     assert(main.includes('sandbox: true'));
+    assert(main.includes('new ToastViewManager({ WebContentsView') && !/toast[^\n]{0,80}new BrowserWindow/i.test(main), 'Toast must use a sandboxed child view rather than a second window');
+    assert(toastViewManager.includes('sandbox: true') && toastViewManager.includes("setWindowOpenHandler(() => ({ action: 'deny' }))") && toastViewManager.includes('setPermissionRequestHandler'), 'Toast child view must deny navigation, windows, and permissions');
+    assert(toastViewPreload.includes("contextBridge.exposeInMainWorld('toastViewAPI'") && !toastViewPreload.includes('webUtils') && !toastViewPreload.includes('shell'), 'Toast preload must expose only its narrow IPC contract');
     assert(preload.includes('getPathForFile: (file) => webUtils.getPathForFile(file)'));
     assert(preload.includes("ipcRenderer.invoke('workspace-browse-shortcut-preview', workspacePath, status, name, relativePath)"), 'shortcut previews must accept only project identity and a project-relative shortcut path');
     assert(preload.includes("ipcRenderer.invoke('workspace-list-files', workspacePath, status, name, scopeRelativePath, pageSize, cursor, filter)") && preload.includes("ipcRenderer.invoke('workspace-cancel-list-files', cursor)"), 'recursive file listing and cancellation must expose only the bounded main-process IPC');
@@ -116,8 +121,11 @@ Promise.resolve()
     assert(listFilesHandler.includes('assertInside(root') && listFilesHandler.includes('assertExistingInside(root') && listFilesHandler.includes('maximumDirectoriesPerPage = 32') && listFilesHandler.includes('maximumInspectedEntriesPerPage = 1000') && listFilesHandler.includes('Math.min(200'), 'recursive listings must validate scope and enforce per-page work limits');
     assert(listFilesHandler.includes('projectFileListSessionMatches(session, root, scope, filter)'), 'file-list cursors must be bound to project root, scope, query, and file type filter');
     assert(!listFilesHandler.includes('readShortcutLink') && !listFilesHandler.includes('thumbnail') && !listFilesHandler.includes('xmp'), 'plain recursive listings must not follow shortcuts or read media content');
-    assert(projectWorkspace.includes('projectWorkspaceClient.getPathForFile(file)') && toolViews.includes('window.electronAPI.getPathForFile(file)'));
+    const sourcePathPicker = await fs.promises.readFile(path.join(root, 'src/components/SourcePathPicker.tsx'), 'utf8');
+    assert(projectWorkspace.includes('projectWorkspaceClient.getPathForFile(file)') && sourcePathPicker.includes('window.electronAPI.getPathForFile(file)'));
     assert(!projectWorkspace.includes('File & { path?: string }') && !toolViews.includes('File & { path?: string }'));
+    assert(preload.includes("ipcRenderer.invoke('inspect-source-paths', paths)"));
+    assert(systemIpc.includes("ipcMain.handle('inspect-source-paths'") && systemIpc.includes('.slice(0, 4096)') && systemIpc.includes('value.length <= 32768'), 'source-kind inspection must remain bounded');
     assert(systemIpc.includes('validateRendererPythonInvocation(scriptName, args, requestId)'));
     assert(html.includes('Content-Security-Policy'));
     assert(html.includes("object-src 'none'"));

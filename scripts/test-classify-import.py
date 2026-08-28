@@ -27,8 +27,37 @@ class ClassifyImportTests(unittest.TestCase):
     def tearDown(self):
         classify.CANCEL_FILE = ''
         classify.EXIFTOOL_PATH = ''
+        classify.RESOURCE_PROTOCOL_ENABLED = False
         classify.CAPTURE_TIME_MEMORY_CACHE.clear()
         classify.get_file_time.cache_clear()
+
+    def test_phase_resource_lease_waits_for_host_grant_and_releases(self):
+        lease_uuid = '00000000-0000-0000-0000-000000000001'
+        lease_id = f'lease-{lease_uuid}'
+        control = io.StringIO(json.dumps({'type': 'resource_granted', 'leaseId': lease_id}) + '\n')
+        events = []
+        classify.RESOURCE_PROTOCOL_ENABLED = True
+        with mock.patch.object(classify.uuid, 'uuid4', return_value=lease_uuid), \
+                mock.patch.object(classify.sys, 'stdin', control), \
+                mock.patch.object(classify, 'emit', side_effect=lambda event_type, message, data=None, **_kwargs: events.append((event_type, message, data))):
+            with classify.task_resource_lease('video-split', '正在分割视频'):
+                events.append(('worker', 'started', None))
+
+        self.assertEqual([event[0] for event in events], ['resource_request', 'worker', 'resource_release'])
+        self.assertEqual(events[0][2], {'leaseId': lease_id, 'profile': 'video-split', 'phase': '正在分割视频'})
+        self.assertEqual(events[-1][2]['leaseId'], lease_id)
+
+    def test_phase_resource_lease_never_runs_after_host_denial(self):
+        lease_uuid = '00000000-0000-0000-0000-000000000002'
+        lease_id = f'lease-{lease_uuid}'
+        control = io.StringIO(json.dumps({'type': 'resource_denied', 'leaseId': lease_id, 'error': '资源不可用'}) + '\n')
+        classify.RESOURCE_PROTOCOL_ENABLED = True
+        with mock.patch.object(classify.uuid, 'uuid4', return_value=lease_uuid), \
+                mock.patch.object(classify.sys, 'stdin', control), \
+                mock.patch.object(classify, 'emit'):
+            with self.assertRaisesRegex(classify.ResourceLeaseDenied, '资源不可用'):
+                with classify.task_resource_lease('video-split', '正在分割视频'):
+                    self.fail('未授权时不得执行阶段工作')
 
     def test_capture_time_prefers_exif_over_filesystem_mtime(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -349,8 +378,7 @@ class ClassifyImportTests(unittest.TestCase):
             with mock.patch.object(ffmpeg_transcode, 'transcode_video', side_effect=transcode), \
                     contextlib.redirect_stdout(output):
                 exit_code = ffmpeg_transcode.run([
-                    str(source), '--video-mode', 'h265',
-                    '--source-folder', str(source_folder),
+                    str(source_folder), '--video-mode', 'h265',
                 ])
 
             events = [json.loads(line) for line in output.getvalue().splitlines()]
@@ -371,10 +399,122 @@ class ClassifyImportTests(unittest.TestCase):
             replace_output = io.StringIO()
             with contextlib.redirect_stdout(replace_output):
                 replace_code = ffmpeg_transcode.run([
-                    str(source), '--source-folder', str(source_folder), '--output-mode', 'replace',
+                    str(source_folder), '--output-mode', 'replace',
                 ])
             self.assertEqual(replace_code, 1)
             self.assertIn('文件夹转码任务不能替换原视频', replace_output.getvalue())
+
+    def test_delete_original_mode_allows_format_change_after_verified_output(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'clip.mov'
+            source.write_bytes(b'original-video')
+
+            def run_attempt(command, _duration, _on_progress, _cancel_check):
+                Path(command[-1]).write_bytes(b'transcoded-video')
+                return 0, ''
+
+            def recycle(path):
+                Path(path).unlink()
+
+            with mock.patch.object(ffmpeg_transcode, 'get_ffmpeg_exe', return_value='ffmpeg'), \
+                    mock.patch.object(ffmpeg_transcode, 'general_transcode_encoder_candidates', return_value=['libx264']), \
+                    mock.patch.object(ffmpeg_transcode, 'probe_duration', return_value=10.0), \
+                    mock.patch.object(ffmpeg_transcode, '_run_general_transcode_attempt', side_effect=run_attempt), \
+                    mock.patch.object(ffmpeg_transcode, 'send2trash', side_effect=recycle) as send_to_trash:
+                output = ffmpeg_transcode.transcode_video(
+                    str(source), container='mp4', output_mode='delete-original',
+                )
+
+            self.assertEqual(Path(output), Path(temporary) / 'clip.mp4')
+            self.assertEqual(Path(output).read_bytes(), b'transcoded-video')
+            self.assertFalse(source.exists())
+            send_to_trash.assert_called_once_with(str(source))
+
+    def test_delete_original_mode_can_keep_the_same_name_and_format(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'clip.mp4'
+            source.write_bytes(b'original-video')
+
+            def run_attempt(command, _duration, _on_progress, _cancel_check):
+                Path(command[-1]).write_bytes(b'transcoded-video')
+                return 0, ''
+
+            with mock.patch.object(ffmpeg_transcode, 'get_ffmpeg_exe', return_value='ffmpeg'), \
+                    mock.patch.object(ffmpeg_transcode, 'general_transcode_encoder_candidates', return_value=['libx264']), \
+                    mock.patch.object(ffmpeg_transcode, 'probe_duration', return_value=10.0), \
+                    mock.patch.object(ffmpeg_transcode, '_run_general_transcode_attempt', side_effect=run_attempt), \
+                    mock.patch.object(ffmpeg_transcode, 'send2trash', side_effect=lambda path: Path(path).unlink()):
+                output = ffmpeg_transcode.transcode_video(
+                    str(source), container='mp4', output_mode='delete-original',
+                )
+
+            self.assertEqual(Path(output), source)
+            self.assertEqual(source.read_bytes(), b'transcoded-video')
+
+    def test_delete_original_mode_keeps_source_when_cancelled_before_commit(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'clip.mov'
+            source.write_bytes(b'original-video')
+            cancellation_checks = []
+
+            def run_attempt(command, _duration, _on_progress, _cancel_check):
+                Path(command[-1]).write_bytes(b'transcoded-video')
+                return 0, ''
+
+            def cancel_before_commit():
+                cancellation_checks.append(True)
+                if len(cancellation_checks) >= 2:
+                    raise RuntimeError('cancelled before commit')
+
+            with mock.patch.object(ffmpeg_transcode, 'get_ffmpeg_exe', return_value='ffmpeg'), \
+                    mock.patch.object(ffmpeg_transcode, 'general_transcode_encoder_candidates', return_value=['libx264']), \
+                    mock.patch.object(ffmpeg_transcode, 'probe_duration', return_value=10.0), \
+                    mock.patch.object(ffmpeg_transcode, '_run_general_transcode_attempt', side_effect=run_attempt), \
+                    mock.patch.object(ffmpeg_transcode, 'send2trash') as send_to_trash:
+                with self.assertRaisesRegex(RuntimeError, 'cancelled before commit'):
+                    ffmpeg_transcode.transcode_video(
+                        str(source), container='mp4', output_mode='delete-original',
+                        cancel_check=cancel_before_commit,
+                    )
+
+            self.assertEqual(source.read_bytes(), b'original-video')
+            self.assertFalse((Path(temporary) / 'clip.mp4').exists())
+            send_to_trash.assert_not_called()
+
+    def test_delete_original_folder_batch_keeps_failed_sources(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source_folder = Path(temporary) / '素材'
+            source_folder.mkdir()
+            first = source_folder / 'one.mov'
+            second = source_folder / 'two.mov'
+            first.write_bytes(b'video-one')
+            second.write_bytes(b'video-two')
+
+            def transcode(path, **kwargs):
+                if Path(path).name == 'two.mov':
+                    raise RuntimeError('simulated transcode failure')
+                destination = Path(kwargs['destination_directory']) / 'one.mp4'
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b'transcoded-one')
+                Path(path).unlink()
+                return str(destination)
+
+            output = io.StringIO()
+            with mock.patch.object(ffmpeg_transcode, 'transcode_video', side_effect=transcode), \
+                    contextlib.redirect_stdout(output):
+                exit_code = ffmpeg_transcode.run([
+                    str(source_folder), '--container', 'mp4', '--output-mode', 'delete-original',
+                ])
+
+            events = [json.loads(line) for line in output.getvalue().splitlines()]
+            success = next(event for event in events if event['type'] == 'success')
+            self.assertEqual(exit_code, 0)
+            self.assertFalse(first.exists())
+            self.assertTrue(second.exists())
+            self.assertEqual(success['failedCount'], 1)
+            self.assertIn('失败 1 个（原视频已保留）', success['message'])
+            self.assertTrue(any(event['type'] == 'warning' and 'two.mov 转码失败，原视频已保留' in event['message'] for event in events))
+            self.assertEqual(len(success['folderOutputs']), 1)
 
     def test_transcode_commit_retries_windows_sharing_violations(self):
         calls = []

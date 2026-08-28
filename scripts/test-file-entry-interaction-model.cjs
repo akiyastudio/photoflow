@@ -13,6 +13,7 @@ const { pathToFileURL } = require('url');
   const intent = overrides => fileEntryClickIntent({
     openMode: 'single',
     selectionCount: 0,
+    entrySelected: false,
     range: false,
     additive: false,
     ...overrides,
@@ -22,6 +23,8 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(intent({ openMode: 'double' }), 'select', 'double-click mode selects on its first click');
   assert.strictEqual(intent({ openMode: 'single', selectionCount: 1 }), 'add-and-preview', 'an existing selection makes a plain body click add the entry and synchronize open preview panes in single-click mode');
   assert.strictEqual(intent({ openMode: 'double', selectionCount: 1 }), 'add-and-preview', 'an existing selection makes a plain body click add the entry and synchronize open preview panes in double-click mode');
+  assert.strictEqual(intent({ selectionCount: 1, entrySelected: true }), 'toggle-select', 'plain-clicking a selected entry again removes it from the active selection');
+  assert.strictEqual(intent({ selectionCount: 3, entrySelected: true }), 'toggle-select', 'plain-clicking one member of a multi-selection removes only that entry');
   assert.strictEqual(intent({ additive: true }), 'toggle-select', 'Ctrl/Cmd click toggles selection without opening');
   assert.strictEqual(intent({ range: true, selectionCount: 2 }), 'range-select', 'Shift click retains range selection precedence');
   assert.strictEqual(intent({ selectionCount: 2, clickCount: 2 }), 'ignore-repeat', 'the second click in a double click must not undo the first selection change');
@@ -33,6 +36,7 @@ const { pathToFileURL } = require('url');
     const clickIntent = fileEntryClickIntent({
       openMode,
       selectionCount: selection.length,
+      entrySelected: selection.includes(pointer.path),
       range: pointer.range,
       additive: pointer.additive,
       clickCount: detail,
@@ -51,7 +55,7 @@ const { pathToFileURL } = require('url');
   }
   const doubleFirst = runPointerClickSequence({ surface: 'grid', openMode: 'double' });
   assert.deepStrictEqual(doubleFirst, { clickIntent: 'select', selection: ['素材/照片.jpg'], activated: false }, 'double mode first click selects without activating');
-  assert.strictEqual(fileEntryClickIntent({ openMode: 'double', selectionCount: doubleFirst.selection.length, range: false, additive: false, clickCount: 2 }), 'ignore-repeat', 'double mode second click leaves activation to the double-click handler');
+  assert.strictEqual(fileEntryClickIntent({ openMode: 'double', selectionCount: doubleFirst.selection.length, entrySelected: true, range: false, additive: false, clickCount: 2 }), 'ignore-repeat', 'double mode second click leaves activation to the double-click handler');
 
   assert.deepStrictEqual(mergeMarqueeSelection([], ['a.jpg'], false), ['a.jpg'], 'a marquee from no selection selects its hits');
   assert.deepStrictEqual(mergeMarqueeSelection(['a.jpg'], [], false), [], 'a non-additive marquee can clear an existing selection');

@@ -1,16 +1,16 @@
-import { useState } from 'react';
-import { Aperture, FileInput, Files, FolderInput, GitBranch, Loader2, Plus, Video } from 'lucide-react';
+import { Aperture, Files, GitBranch, Loader2, Video } from 'lucide-react';
 import { PanelSwitch } from './PanelSwitch';
+import { SourcePathPicker } from './SourcePathPicker';
 
 export type ImportMaterialKind = 'original' | 'progress' | 'broll' | 'files';
 
 type ImportSourceControlsProps = {
   selectionTitle: string;
   selectionDescription: string;
-  selectedCount: number;
+  selectedPaths: readonly string[];
+  onSelectedPathsChange: (paths: string[]) => void;
   onChooseFiles: () => void;
   onChooseFolder?: () => void;
-  onDropPaths?: (paths: string[]) => void;
   chooseFilesLabel?: string;
   chooseFolderLabel?: string;
   deleteSourceAfterImport: boolean;
@@ -32,10 +32,10 @@ type ImportSourceControlsProps = {
 export const ImportSourceControls = ({
   selectionTitle,
   selectionDescription,
-  selectedCount,
+  selectedPaths,
+  onSelectedPathsChange,
   onChooseFiles,
   onChooseFolder,
-  onDropPaths,
   chooseFilesLabel = '选择文件',
   chooseFolderLabel = '选择文件夹',
   deleteSourceAfterImport,
@@ -53,30 +53,6 @@ export const ImportSourceControls = ({
   startDisabled = false,
   onStart,
 }: ImportSourceControlsProps) => {
-  const [dragActive, setDragActive] = useState(false);
-  const acceptDrop = (event: React.DragEvent<HTMLDivElement>) => {
-    if (!onDropPaths || busy || !event.dataTransfer.types.includes('Files')) return;
-    event.preventDefault();
-    event.stopPropagation();
-    event.dataTransfer.dropEffect = 'copy';
-    setDragActive(true);
-  };
-  const leaveDropZone = (event: React.DragEvent<HTMLDivElement>) => {
-    if (event.currentTarget.contains(event.relatedTarget as Node | null)) return;
-    setDragActive(false);
-  };
-  const dropSources = (event: React.DragEvent<HTMLDivElement>) => {
-    if (!onDropPaths || busy) return;
-    event.preventDefault();
-    event.stopPropagation();
-    setDragActive(false);
-    const paths = Array.from(event.dataTransfer.files).map(file => {
-      try { return window.electronAPI.getPathForFile(file); }
-      catch { return ''; }
-    }).filter(Boolean);
-    if (paths.length) onDropPaths([...new Set(paths)]);
-  };
-
   const importKinds: Array<{ kind: ImportMaterialKind; label: string; icon: React.ReactNode }> = [
     { kind: 'original', label: '原始素材', icon: <Aperture size={16}/> },
     { kind: 'progress', label: '进度', icon: <GitBranch size={16}/> },
@@ -85,23 +61,20 @@ export const ImportSourceControls = ({
   ];
 
   return <div className="space-y-4">
-  <div
-    onDragEnter={acceptDrop}
-    onDragOver={acceptDrop}
-    onDragLeave={leaveDropZone}
-    onDrop={dropSources}
-    className={`grid min-h-44 place-items-center rounded-xl border border-dashed px-6 py-7 text-center transition ${dragActive ? 'border-blue-500 bg-blue-50 ring-2 ring-blue-500/20' : 'border-slate-300 bg-slate-50'}`}
-  >
-    <div>
-      <span className="mx-auto flex h-11 w-11 items-center justify-center rounded-xl bg-blue-50 text-blue-600"><Plus size={20}/></span>
-      <p className="mt-3 text-sm font-bold text-slate-700">{selectionTitle}</p>
-      <p className={`mt-1 text-xs ${dragActive ? 'font-medium text-blue-600' : 'text-slate-400'}`}>{dragActive ? '松开即可添加文件或文件夹' : selectionDescription}</p>
-      <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-        <button type="button" disabled={busy} onClick={onChooseFiles} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-50"><FileInput size={15}/>{chooseFilesLabel}</button>
-        {onChooseFolder && <button type="button" disabled={busy} onClick={onChooseFolder} className="dialog-secondary inline-flex items-center gap-2 disabled:opacity-50"><FolderInput size={15}/>{chooseFolderLabel}</button>}
-      </div>
-    </div>
-  </div>
+  <SourcePathPicker
+    paths={selectedPaths}
+    onChange={onSelectedPathsChange}
+    onChooseFiles={onChooseFiles}
+    onChooseFolder={onChooseFolder}
+    fileButtonLabel={selectedPaths.length ? `追加${chooseFilesLabel.replace(/^选择/, '')}` : chooseFilesLabel}
+    folderButtonLabel={selectedPaths.length ? `追加${chooseFolderLabel.replace(/^选择/, '')}` : chooseFolderLabel}
+    title="已选择"
+    description="所选文件和文件夹将按列表顺序导入"
+    emptyTitle={selectionTitle}
+    emptyDescription={selectionDescription}
+    disabled={busy}
+    itemLabel="个来源"
+  />
 
   {importKind && onImportKindChange && <fieldset>
     <legend className="mb-2 text-xs font-semibold text-slate-600">导入的内容</legend>
@@ -136,8 +109,8 @@ export const ImportSourceControls = ({
   )}
 
   <div className="flex items-center gap-3 border-t border-slate-200 pt-4">
-    <span className="mr-auto text-xs text-slate-400">{statusText || (selectedCount ? `已选择 ${selectedCount} 个来源` : '尚未选择来源')}</span>
-    <button type="button" onClick={onStart} disabled={busy || startDisabled || !selectedCount} className="dialog-primary inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50">
+    <span className="mr-auto text-xs text-slate-400">{statusText || (selectedPaths.length ? `已选择 ${selectedPaths.length} 个来源` : '尚未选择来源')}</span>
+    <button type="button" onClick={onStart} disabled={busy || startDisabled || !selectedPaths.length} className="dialog-primary inline-flex items-center gap-2 disabled:cursor-not-allowed disabled:opacity-50">
       {busy && <Loader2 size={15} className="animate-spin"/>}
       {busy ? busyLabel : startLabel}
     </button>

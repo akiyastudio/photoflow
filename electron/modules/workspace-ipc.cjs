@@ -1252,24 +1252,29 @@ const registerWorkspaceIpc = context => {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
       const requestedPaths = [...new Set((Array.isArray(relativePaths) ? relativePaths : [])
         .filter(value => typeof value === 'string' && value.length <= 32768))];
-      if (!requestedPaths.length) return { success: true, indexed: true, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [], folderPaths: [] };
+      if (!requestedPaths.length) return { success: true, indexed: true, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [], folderPaths: [], sources: [] };
       if (requestedPaths.length > 4096) throw new Error('一次最多处理 4096 个所选文件或文件夹');
       const resolutions = requestedPaths.map(relativePath => virtualPaths.resolve(root, relativePath, { externalRootMode: 'target' }));
       const targets = resolutions.map(item => item.physicalPath);
       const folderPaths = [];
+      const sources = [];
       for (const target of targets) {
         try {
-          if ((await fs.promises.stat(target)).isDirectory()) folderPaths.push(target);
+          const stat = await fs.promises.stat(target);
+          if (stat.isDirectory()) {
+            folderPaths.push(target);
+            sources.push({ path: target, kind: 'folder' });
+          } else if (stat.isFile()) sources.push({ path: target, kind: 'file' });
         } catch { /* inspectToolSources reports missing source details */ }
       }
       const inspectionRoot = resolutions.length === 1 && resolutions[0].viaExternalLink ? resolutions[0].mediaRoot : root;
       mediaService.grantRoot(inspectionRoot);
       const result = await thumbnailService.inspectToolSources(inspectionRoot, targets, collectVideos, collectDirectPng, collectRecursivePng);
       if (!result.indexed && !resolutions.some(item => item.viaExternalLink)) void thumbnailService.scanProject(root, mediaRuntimeState.activeMediaCacheConfig);
-      return { success: true, ...result, folderPaths };
+      return { success: true, ...result, folderPaths, sources };
     } catch (error) {
       writeLog('warn', 'Unable to read project tool-source index', { projectName, error: error.message || String(error) });
-      return { success: false, indexed: false, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [], folderPaths: [], error: error.message || String(error) };
+      return { success: false, indexed: false, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [], folderPaths: [], sources: [], error: error.message || String(error) };
     }
   });
 
@@ -2353,6 +2358,7 @@ const registerWorkspaceIpc = context => {
       title: `重新裁剪视频 · ${parsed.base}`,
       cancellable: true,
       resources: [sourcePath],
+      capacities: [{ key: 'heavy-media', access: 'write', limit: 1, writeLimit: 1 }],
       resumePolicy: 'safe-restart',
       metadata: { ...metadata, sourcePath, generatedPath, exportMode },
     }, async task => {
@@ -2448,6 +2454,7 @@ const registerWorkspaceIpc = context => {
         title: `${exportMode === 'fast' ? '快速裁剪视频' : '精确裁剪视频'} · ${parsed.base}`,
         cancellable: true,
         resources: [sourcePath],
+        capacities: [{ key: 'heavy-media', access: 'write', limit: 1, writeLimit: 1 }],
         resumePolicy: 'safe-restart',
         metadata: { operationId, workspacePath: path.resolve(workspacePath), projectStatus: status, projectName, sourcePath, sourceRelativePath, generatedPath, saveMode, exportMode, start, end, sourceDuration },
       });

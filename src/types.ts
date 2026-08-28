@@ -1,3 +1,5 @@
+import type { ToastViewAction, ToastViewApi, ToastViewSnapshot } from './features/app/toast-view-contract';
+
 export interface LogEntry {
   timestamp: string;
   message: string;
@@ -14,6 +16,10 @@ export type VideoTranscodeSettings = {
   resolution: 'original' | '2160p' | '1080p' | '720p';
   frameRate: 'original' | '24' | '25' | '30' | '50' | '60';
   audioMode: 'copy' | 'aac' | 'remove';
+};
+export type ProjectToolSource = {
+  path: string;
+  kind: 'file' | 'folder';
 };
 export type HomeCardId = 'birthday' | 'import' | 'inspiration';
 export const PROJECT_TOOLBAR_ACTION_IDS = [
@@ -295,6 +301,10 @@ export interface AppConfig {
     sdPath: string;
     sdPaths: string[];
     sdDriveTypes: Record<string, 'work' | 'broll'>;
+    sdDriveVideoActions: Record<string, {
+      splitVideosOnImport: boolean;
+      transcodeVideosOnImport: boolean;
+    }>;
     sdDeviceIds: Record<string, string>;
     sdDevices: ConfiguredSdDevice[];
     destPath: string;
@@ -329,6 +339,8 @@ export interface ConfiguredSdDevice {
   deviceId: string;
   lastMountPath: string;
   type: 'work' | 'broll';
+  splitVideosOnImport: boolean;
+  transcodeVideosOnImport: boolean;
   confirmedAt: number;
   enabled: boolean;
 }
@@ -933,8 +945,8 @@ export interface IElectronAPI {
   releaseComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean }>;
   activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
   setHostSurfaceSuspended: (update: { rendererToken: string; revision: number; suspended: boolean }) => Promise<{ success: boolean }>;
-  updateToastOverlay: (snapshot: { html: string; dark: boolean }) => Promise<{ success: boolean }>;
-  onToastOverlayAction: (callback: (value: { action: 'notice-dismiss' | 'task-dismiss' | 'task-minimize' | 'task-pause' | 'task-continue' | 'task-cancel'; id: string }) => void) => () => void;
+  updateToastView: (snapshot: ToastViewSnapshot) => Promise<{ success: boolean }>;
+  onToastViewAction: (callback: (action: ToastViewAction) => void) => () => void;
   setComponentNotificationReady: (update: { rendererToken: string; revision: number; ready: boolean }) => Promise<{ ready: boolean; flushed: number; stale?: boolean }>;
   setComponentPageBounds: (instanceId: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<{ success: boolean }>;
   closeComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
@@ -981,7 +993,7 @@ export interface IElectronAPI {
   watchFileRoot: (workspacePath: string, status: ProjectStatus, name: string, options?: { reconcile?: boolean }) => Promise<{ success: boolean; root?: string; requiredRoots?: number; watchedRoots?: number; failedRoots?: Array<{ virtualPath: string; external: boolean; error: string }>; offlineLinks?: number; externalFolderLinks?: number; degraded?: boolean; reconciled?: boolean; reconciliationFailed?: boolean; error?: string }>;
   unwatchFileRoot: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; error?: string }>;
   browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; viaExternalLink?: boolean; externalLinkRootRelativePath?: string; externalLinkOffline?: boolean; missingDirectory?: boolean; error?: string }>;
-  inspectProjectToolSources: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], collectVideos?: boolean, collectDirectPng?: boolean, collectRecursivePng?: boolean) => Promise<{ success: boolean; indexed: boolean; hasVideo: boolean; hasPng: boolean; videoPaths: string[]; pngPaths: string[]; folderPaths: string[]; error?: string }>;
+  inspectProjectToolSources: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], collectVideos?: boolean, collectDirectPng?: boolean, collectRecursivePng?: boolean) => Promise<{ success: boolean; indexed: boolean; hasVideo: boolean; hasPng: boolean; videoPaths: string[]; pngPaths: string[]; folderPaths: string[]; sources: ProjectToolSource[]; error?: string }>;
   resolveProjectShortcut: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; target?: string; targetKind?: 'folder' | 'file'; error?: string }>;
   materializeProjectExternalLinks: (workspacePath: string, status: ProjectStatus, name: string, relativePaths?: string[]) => Promise<{ success: boolean; count: number; items?: Array<{ shortcutPath: string; source: string; destination: string }>; error?: string }>;
   relinkProjectExternalFolder: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; cancelled?: boolean; relativePath?: string; target?: string; updatedProgressCount?: number; error?: string }>;
@@ -1126,6 +1138,7 @@ export interface IElectronAPI {
   chooseBrollSourceFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
   chooseVideoFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
   chooseVideoFolder: () => Promise<{ cancelled?: boolean; path?: string }>;
+  inspectSourcePaths: (paths: string[]) => Promise<{ success: boolean; sources: Array<{ path: string; kind: 'file' | 'folder' }>; missingPaths: string[]; error?: string }>;
   getMediaCacheInfo: (cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path: string; sizeBytes: number; fileCount: number; error?: string }>;
   clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number, options?: { origin?: 'manual' | 'daily-auto' }) => Promise<{ success: boolean; deletedCount?: number; prunedSourceCount?: number; taskId?: string; error?: string }>;
   getStorageUsageOverview: (force?: boolean) => Promise<StorageUsageOverview>;
@@ -1185,5 +1198,6 @@ export interface IElectronAPI {
 declare global {
   interface Window {
     electronAPI: IElectronAPI;
+    toastViewAPI: ToastViewApi;
   }
 }

@@ -397,6 +397,22 @@ def test_selection_mainline_repair(root: Path, db):
     assert db.execute("SELECT 1 FROM version_tree_layouts WHERE project_id=?", (project_id,)).fetchone() is None
     with db:
         assert workspace_db.repair_selection_workflow_mainlines(db, project_id) == 0
+
+    db.execute(
+        """DELETE FROM version_graph_edges WHERE project_id=? AND source_progress_id=?
+           AND target_progress_id=? AND edge_kind='workflow_input'""",
+        (project_id, selection["id"], progress["id"]),
+    )
+    db.commit()
+    refreshed = workspace_db.progress_locations_snapshot(
+        str(root), db, {"projectName": "selection-mainline-repair"},
+    )
+    assert any(
+        edge["sourceProgressId"] == selection["id"]
+        and edge["targetProgressId"] == progress["id"]
+        and edge["edgeKind"] == "workflow_input"
+        for edge in refreshed["graphEdges"]
+    ), "the renderer's location snapshot path must restore a missing selection input"
     workspace_db._check_integrity(db, force=True)
 
 

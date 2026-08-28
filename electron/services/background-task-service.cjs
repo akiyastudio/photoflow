@@ -26,6 +26,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   const retryContext = new AsyncLocalStorage();
   let persistenceTimer = null;
   let revision = 0;
+  let resourceLeaseSequence = 0;
 
   const normalizeResource = value => String(value || '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
   const normalizeResourceRequest = (value, defaultAccess) => {
@@ -35,17 +36,29 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     const requestedAccess = value && typeof value === 'object' ? value.access : defaultAccess;
     return { path: normalizedPath, access: requestedAccess === 'read' ? 'read' : 'write' };
   };
+  const normalizeCapacityRequest = (value, fallback = {}) => {
+    const key = String(value && typeof value === 'object' ? value.key || value.kind : value || '').trim();
+    if (!key) return null;
+    const access = value && typeof value === 'object' ? value.access : fallback.access;
+    const limit = value && typeof value === 'object' ? value.limit : fallback.limit;
+    const writeLimit = value && typeof value === 'object' ? value.writeLimit : fallback.writeLimit;
+    return {
+      key,
+      access: access === 'read' ? 'read' : 'write',
+      limit: Math.max(1, Number(limit) || 1),
+      writeLimit: Math.max(1, Number(writeLimit) || Number(limit) || 1),
+    };
+  };
   const resourcesConflict = (left, right) => left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
   const blockingReservationIds = waiter => {
     const blockers = new Set();
-    const activeReservations = [...reservations.entries()];
-    const group = waiter.group || '';
-    if (group) {
-      const activeInGroup = activeReservations.filter(([, item]) => item.group === group);
-      if (activeInGroup.length >= waiter.limit) activeInGroup.forEach(([id]) => blockers.add(id));
-      if (waiter.access === 'write') {
-        const activeWriters = activeInGroup.filter(([, item]) => item.access === 'write');
-        if (activeWriters.length >= waiter.writeLimit) activeWriters.forEach(([id]) => blockers.add(id));
+    const activeReservations = [...reservations.entries()].filter(([, item]) => item.taskId !== waiter.taskId);
+    for (const requestedCapacity of waiter.capacities) {
+      const activeInGroup = activeReservations.filter(([, item]) => item.capacities.some(capacity => capacity.key === requestedCapacity.key));
+      if (activeInGroup.length >= requestedCapacity.limit) activeInGroup.forEach(([id]) => blockers.add(id));
+      if (requestedCapacity.access === 'write') {
+        const activeWriters = activeInGroup.filter(([, item]) => item.capacities.some(capacity => capacity.key === requestedCapacity.key && capacity.access === 'write'));
+        if (activeWriters.length >= requestedCapacity.writeLimit) activeWriters.forEach(([id]) => blockers.add(id));
       }
     }
     for (const [id, active] of activeReservations) {
@@ -66,23 +79,31 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       }
       const blockerIds = blockingReservationIds(waiter);
       if (blockerIds.length) {
-        const task = tasks.get(waiter.id);
-        const blockerTitles = [...new Set(blockerIds.map(id => tasks.get(id)?.title).filter(Boolean))];
+        const task = tasks.get(waiter.taskId);
+        const blockerTaskIds = [...new Set(blockerIds.map(id => reservations.get(id)?.taskId || id).filter(id => id !== waiter.taskId))];
+        const blockerTitles = [...new Set(blockerTaskIds.map(id => tasks.get(id)?.title).filter(Boolean))];
         const message = blockerTitles.length
           ? `等待“${blockerTitles.slice(0, 2).join('、')}”完成${blockerTitles.length > 2 ? '等任务' : ''}`
           : '等待其他文件操作完成';
-        if (task?.state === 'queued' && (task.message !== message || String(task.blockedByTaskIds || '') !== String(blockerIds))) {
-          update(task, { message, blockedByTaskIds: blockerIds });
+        if (task && (task.state === 'queued' || waiter.scoped) && (task.message !== message || String(task.blockedByTaskIds || '') !== String(blockerTaskIds))) {
+          update(task, { message, blockedByTaskIds: blockerTaskIds });
         }
         index += 1;
         continue;
       }
       resourceWaiters.splice(index, 1);
-      reservations.set(waiter.id, { group: waiter.group, resources: waiter.resources, access: waiter.access });
-      waiter.resolve();
+      waiter.signal.removeEventListener('abort', waiter.abortListener);
+      reservations.set(waiter.id, { taskId: waiter.taskId, capacities: waiter.capacities, resources: waiter.resources });
+      if (waiter.scoped) {
+        const task = tasks.get(waiter.taskId);
+        if (task && (task.blockedByTaskIds?.length || waiter.runningMessage)) {
+          update(task, { blockedByTaskIds: [], ...(waiter.runningMessage ? { message: waiter.runningMessage } : {}) });
+        }
+      }
+      waiter.resolve(waiter.id);
     }
   };
-  const acquireResources = (task, definition) => {
+  const acquireResources = (task, definition, { reservationId = task.id, scoped = false } = {}) => {
     const defaultAccess = definition.resourceAccess === 'read' ? 'read' : 'write';
     const resourcesByIdentity = new Map();
     for (const requested of definition.resources || []) {
@@ -92,30 +113,62 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       if (!existing || resource.access === 'write') resourcesByIdentity.set(resource.path, resource);
     }
     const resources = [...resourcesByIdentity.values()];
-    const group = String(definition.concurrencyGroup || '');
     const access = resources.some(resource => resource.access === 'write') ? 'write' : defaultAccess;
-    if (!resources.length && !group) return Promise.resolve();
+    const capacitiesByKey = new Map();
+    for (const requested of definition.capacities || []) {
+      const capacity = normalizeCapacityRequest(requested);
+      if (capacity) capacitiesByKey.set(capacity.key, capacity);
+    }
+    const legacyGroup = String(definition.concurrencyGroup || '');
+    if (legacyGroup && !capacitiesByKey.has(legacyGroup)) {
+      const capacity = normalizeCapacityRequest(legacyGroup, {
+        access,
+        limit: definition.concurrencyLimit,
+        writeLimit: definition.concurrencyWriteLimit,
+      });
+      if (capacity) capacitiesByKey.set(capacity.key, capacity);
+    }
+    const capacities = [...capacitiesByKey.values()];
+    if (!resources.length && !capacities.length) return Promise.resolve('');
     return new Promise((resolve, reject) => {
       const waiter = {
-        id: task.id,
+        id: reservationId,
+        taskId: task.id,
         resources,
-        group,
-        limit: Math.max(1, Number(definition.concurrencyLimit) || 1),
-        writeLimit: Math.max(1, Number(definition.concurrencyWriteLimit) || Number(definition.concurrencyLimit) || 1),
-        access,
+        capacities,
+        scoped,
+        runningMessage: String(definition.runningMessage || ''),
         signal: task.controller.signal,
+        abortListener: drainResourceWaiters,
         resolve,
         reject,
       };
       resourceWaiters.push(waiter);
-      task.controller.signal.addEventListener('abort', drainResourceWaiters, { once: true });
+      task.controller.signal.addEventListener('abort', waiter.abortListener, { once: true });
       drainResourceWaiters();
     });
   };
-  const releaseResources = id => {
+  const releaseResourceReservation = id => {
+    if (!id) return;
     reservations.delete(id);
     const waiterIndex = resourceWaiters.findIndex(waiter => waiter.id === id);
-    if (waiterIndex >= 0) resourceWaiters.splice(waiterIndex, 1);
+    if (waiterIndex >= 0) {
+      const [waiter] = resourceWaiters.splice(waiterIndex, 1);
+      waiter.signal.removeEventListener('abort', waiter.abortListener);
+    }
+    drainResourceWaiters();
+  };
+  const releaseTaskResources = taskId => {
+    for (const [reservationId, reservation] of reservations) {
+      if (reservation.taskId === taskId) reservations.delete(reservationId);
+    }
+    for (let index = resourceWaiters.length - 1; index >= 0; index -= 1) {
+      if (resourceWaiters[index].taskId === taskId) {
+        const [waiter] = resourceWaiters.splice(index, 1);
+        waiter.signal.removeEventListener('abort', waiter.abortListener);
+        waiter.reject(Object.assign(new Error('任务已结束'), { code: 'TASK_FINISHED' }));
+      }
+    }
     drainResourceWaiters();
   };
 
@@ -352,23 +405,63 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
           throw error;
         }
       },
+      acquireResourceLease: async leaseDefinition => {
+        context.throwIfCancelled();
+        const reservationId = `${task.id}:lease:${++resourceLeaseSequence}`;
+        const acquiredId = await acquireResources(task, leaseDefinition || {}, { reservationId, scoped: true });
+        try { context.throwIfCancelled(); }
+        catch (error) {
+          releaseResourceReservation(acquiredId);
+          throw error;
+        }
+        let released = false;
+        return {
+          id: acquiredId,
+          release: () => {
+            if (released) return false;
+            released = true;
+            releaseResourceReservation(acquiredId);
+            return true;
+          },
+        };
+      },
+      withResources: async (leaseDefinition, worker) => {
+        const lease = await context.acquireResourceLease(leaseDefinition);
+        try { return await worker(); }
+        finally { lease.release(); }
+      },
     };
     let finished = false;
+    let legacyStartLease = null;
     const finish = patch => {
       if (finished) return;
       finished = true;
+      legacyStartLease?.release();
+      legacyStartLease = null;
       update(task, { ...patch, finishedAt: now() });
-      releaseResources(task.id);
+      releaseTaskResources(task.id);
       if (dedupeKey && activeByKey.get(dedupeKey) === task.id) activeByKey.delete(dedupeKey);
+    };
+    let lifecycleStarted = false;
+    const startLifecycle = () => {
+      if (lifecycleStarted) return;
+      lifecycleStarted = true;
+      context.throwIfCancelled();
+      update(task, { state: 'running', startedAt: now(), message: definition.runningMessage || task.message, blockedByTaskIds: [] });
     };
     return {
       deduplicated: false,
       task: publicTask(task),
       context,
+      startLifecycle,
       waitForStart: async () => {
-        await acquireResources(task, definition);
-        context.throwIfCancelled();
-        update(task, { state: 'running', startedAt: now(), message: definition.runningMessage || task.message, blockedByTaskIds: [] });
+        const requiresLease = Boolean(
+          (Array.isArray(definition.resources) && definition.resources.length)
+          || (Array.isArray(definition.capacities) && definition.capacities.length)
+          || definition.concurrencyGroup,
+        );
+        if (requiresLease) legacyStartLease = await context.acquireResourceLease(definition);
+        startLifecycle();
       },
       complete: (message = task.message || '已完成') => finish({ state: 'completed', progress: 100, message, checkpoint: undefined }),
       fail: error => finish({ state: 'failed', error: error?.message || String(error), message: error?.message || String(error) }),
@@ -386,8 +479,15 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     }
     const completion = (async () => {
       try {
-        await handle.waitForStart();
-        const result = await worker(handle.context);
+        handle.startLifecycle();
+        const requiresLease = Boolean(
+          (Array.isArray(definition.resources) && definition.resources.length)
+          || (Array.isArray(definition.capacities) && definition.capacities.length)
+          || definition.concurrencyGroup,
+        );
+        const result = requiresLease
+          ? await handle.context.withResources(definition, () => worker(handle.context))
+          : await worker(handle.context);
         handle.context.throwIfCancelled();
         handle.complete();
         return { task: tasks.has(handle.task.id) ? publicTask(tasks.get(handle.task.id)) : handle.snapshot(), result };

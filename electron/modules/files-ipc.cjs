@@ -32,7 +32,7 @@ const canUseSameVolumeCut = (platform, clipboardOperation, sourceStats, destinat
   && sourceStats.every(sourceStat => sameFilesystemDevice(sourceStat, destinationStat));
 
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resumeToastOverlayAfterNativeDrag, samePathIdentity, screen, selectionService, suspendToastOverlayForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resumeToastViewAfterNativeDrag, samePathIdentity, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const nativeFileDragFallbackIcon = createFallbackDragIcon(nativeImage);
   const resolveVirtual = (root, relativePath, options = {}) => projectVirtualPaths
@@ -299,30 +299,40 @@ const registerFileOperationsIpc = context => {
   const resolveFileDragSources = (workspacePath, status, projectName, relativePaths) => {
     if (!Array.isArray(relativePaths) || !relativePaths.length) throw new Error('没有可拖动的文件');
     const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-    const sources = Array.from(new Set(relativePaths.map(relativePath => {
+    const seenSources = new Set();
+    const sources = [];
+    const validatedPaths = [];
+    const sourceSummary = { directoryCount: 0, fileCount: 0, otherCount: 0 };
+    for (const relativePath of relativePaths) {
       if (typeof relativePath !== 'string' || !relativePath) throw new Error('无效的文件路径');
       const source = resolveVirtual(root, relativePath, { externalRootMode: 'target' }).physicalPath;
-      if (!fs.existsSync(source)) throw new Error(`文件不存在：${path.basename(source)}`);
-      return source;
-    })));
-    const sourceSummary = sources.reduce((summary, source) => {
-      const stat = fs.statSync(source);
-      if (stat.isDirectory()) summary.directoryCount += 1;
-      else if (stat.isFile()) summary.fileCount += 1;
-      else summary.otherCount += 1;
-      return summary;
-    }, { directoryCount: 0, fileCount: 0, otherCount: 0 });
+      const sourceKey = process.platform === 'win32' ? path.resolve(source).toLocaleLowerCase() : path.resolve(source);
+      if (seenSources.has(sourceKey)) continue;
+      let stat;
+      try { stat = fs.statSync(source); }
+      catch (error) {
+        if (error?.code === 'ENOENT') throw new Error(`文件不存在：${path.basename(source)}`);
+        throw error;
+      }
+      seenSources.add(sourceKey);
+      sources.push(source);
+      validatedPaths.push(String(relativePath).replace(/\\/g, '/'));
+      if (stat.isDirectory()) sourceSummary.directoryCount += 1;
+      else if (stat.isFile()) sourceSummary.fileCount += 1;
+      else sourceSummary.otherCount += 1;
+    }
+    if (!sources.length) throw new Error('没有可拖动的文件');
     return {
       sources,
       sourceSummary,
-      relativePaths: relativePaths.map(relativePath => String(relativePath).replace(/\\/g, '/')),
+      relativePaths: validatedPaths,
     };
   };
 
   ipcMain.on('workspace-start-file-drag', async (event, workspacePath, status, projectName, relativePaths = [], dragContext = {}) => {
     let validatedRelativePaths = [];
     let nativeDragStarted = false;
-    let overlaySuspended = false;
+    let toastViewSuspended = false;
     const sessionId = typeof dragContext?.sessionId === 'string' ? dragContext.sessionId.slice(0, 120) : '';
     const sourcePageId = typeof dragContext?.sourcePageId === 'string' ? dragContext.sourcePageId.slice(0, 200) : '';
     const origin = dragContext?.origin === 'version-tree' ? 'version-tree' : 'file-browser';
@@ -343,12 +353,6 @@ const registerFileOperationsIpc = context => {
     try {
       const resolved = resolveFileDragSources(workspacePath, status, projectName, relativePaths);
       validatedRelativePaths = resolved.relativePaths;
-      try {
-        suspendToastOverlayForNativeDrag?.();
-        overlaySuspended = true;
-      } catch (error) {
-        writeLog('warn', 'Unable to suspend toast overlay for native file drag', { error: error?.message || String(error) });
-      }
       let icon = nativeFileDragFallbackIcon;
       try {
         const shellIcon = await app.getFileIcon(resolved.sources[0], { size: 'normal' });
@@ -361,20 +365,19 @@ const registerFileOperationsIpc = context => {
       const startedAt = Date.now();
       const details = { count: resolved.sources.length, mode: resolved.sources.length === 1 ? 'file' : 'files', icon: icon === nativeFileDragFallbackIcon ? 'visible-fallback' : 'fresh-shell', ...resolved.sourceSummary };
       writeLog('info', 'Starting native project file drag', details);
+      suspendToastViewForNativeDrag?.();
+      toastViewSuspended = true;
       event.sender.startDrag(resolved.sources.length === 1
         ? { file: resolved.sources[0], icon }
         : { file: resolved.sources[0], files: resolved.sources, icon });
-      writeLog('info', 'Native project file drag ended', { ...details, durationMs: Math.max(0, Date.now() - startedAt) });
+      writeLog('info', 'Native project file drag ended', { ...details, gestureDurationMs: Math.max(0, Date.now() - startedAt) });
       nativeDragStarted = true;
     } catch (error) {
       writeLog('error', 'Unable to start native project file drag', error);
       if (!event.sender.isDestroyed()) event.sender.send('app-error', error.message || String(error));
     } finally {
+      if (toastViewSuspended) resumeToastViewAfterNativeDrag?.();
       sendDragEnded();
-      if (overlaySuspended) {
-        try { resumeToastOverlayAfterNativeDrag?.(); }
-        catch (error) { writeLog('warn', 'Unable to resume toast overlay after native file drag', { error: error?.message || String(error) }); }
-      }
     }
   });
   

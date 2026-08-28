@@ -89,12 +89,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   releaseComponentSettingsPage: request => ipcRenderer.invoke('component-host-settings-release', request),
   activateComponentPage: instanceId => ipcRenderer.invoke('component-host-activate', instanceId),
   setHostSurfaceSuspended: update => ipcRenderer.invoke('component-host-set-suspended', update),
-  updateToastOverlay: snapshot => ipcRenderer.invoke('toast-overlay:update', snapshot),
-  onToastOverlayAction: callback => {
-    if (typeof callback !== 'function') throw new TypeError('Toast overlay action callback must be a function');
-    const actions = new Set(['notice-dismiss', 'task-dismiss', 'task-minimize', 'task-pause', 'task-continue', 'task-cancel']);
-    const listener = (_event, value) => { if (value && actions.has(value.action) && typeof value.id === 'string' && value.id.length >= 1 && value.id.length <= 200) callback(Object.freeze({ action: value.action, id: value.id })); };
-    ipcRenderer.on('toast-overlay:action', listener); return () => ipcRenderer.removeListener('toast-overlay:action', listener);
+  updateToastView: snapshot => ipcRenderer.invoke('toast-view:update', snapshot),
+  onToastViewAction: callback => {
+    if (typeof callback !== 'function') throw new TypeError('Toast view action callback must be a function');
+    const listener = (_event, action) => callback(action);
+    ipcRenderer.on('toast-view:action', listener);
+    return () => ipcRenderer.removeListener('toast-view:action', listener);
   },
   setComponentNotificationReady: update => ipcRenderer.invoke('component-host-notifications-ready', update),
   setComponentPageBounds: (instanceId, bounds) => ipcRenderer.invoke('component-host-set-bounds', instanceId, bounds),
@@ -320,6 +320,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chooseBrollSourceFiles: () => ipcRenderer.invoke('choose-broll-source-files'),
   chooseVideoFiles: () => ipcRenderer.invoke('choose-video-files'),
   chooseVideoFolder: () => ipcRenderer.invoke('choose-video-folder'),
+  inspectSourcePaths: (paths) => ipcRenderer.invoke('inspect-source-paths', paths),
   getMediaCacheInfo: (cacheConfig) => ipcRenderer.invoke('media-cache-info', cacheConfig),
   clearMediaCache: (cacheConfig, olderThanDays, options) => ipcRenderer.invoke('media-cache-clear', cacheConfig, olderThanDays, options),
   getStorageUsageOverview: (force) => ipcRenderer.invoke('storage-usage-overview', force),

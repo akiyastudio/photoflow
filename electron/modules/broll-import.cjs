@@ -264,9 +264,9 @@ const registerBrollImportIpc = ({
         backgroundTasks, event, operationId, operation: 'import-broll', title: `导入花絮 · ${projectName}`,
         projectName,
         resources: [destinationDir, ...sources.map(source => source.path)],
-        concurrencyGroup: splitLargeFiles || transcodeVideos ? 'heavy-media' : 'disk-io',
-        concurrencyLimit: splitLargeFiles || transcodeVideos ? 1 : 3,
-        concurrencyWriteLimit: splitLargeFiles || transcodeVideos ? 1 : 2,
+        concurrencyGroup: 'disk-io',
+        concurrencyLimit: 3,
+        concurrencyWriteLimit: 2,
         cancelledCode: CANCELLED_CODE,
       });
       job = task.job;
@@ -309,7 +309,10 @@ const registerBrollImportIpc = ({
             targetPath = uniqueDestination(destinationDir, path.basename(item.path), reserved);
           }
           const outputStem = path.parse(targetPath).name;
-          const outputs = await runSplitter({
+          const outputs = await task.withResources({
+            capacities: [{ key: 'heavy-media', access: 'write', limit: 1, writeLimit: 1 }],
+            runningMessage: '正在分割视频',
+          }, () => runSplitter({
             getRunConfig,
             processSupervisor,
             source: item.path,
@@ -318,7 +321,7 @@ const registerBrollImportIpc = ({
             extension: item.extension,
             isCancelled: () => job.cancelled,
             onProgress: (progress, message) => report(item, item.stat.size * Math.max(0, Math.min(100, progress)) / 100, 'splitting', message),
-          });
+          }));
           createdPaths.push(...outputs);
           importedVideoPaths = outputs;
           splitCount += 1;
@@ -341,14 +344,17 @@ const registerBrollImportIpc = ({
         }
         if (transcodeVideos) {
           for (const videoPath of importedVideoPaths) {
-            const output = await runTranscoder({
+            const output = await task.withResources({
+              capacities: [{ key: 'heavy-media', access: 'write', limit: 1, writeLimit: 1 }],
+              runningMessage: '正在转码视频',
+            }, () => runTranscoder({
               getRunConfig,
               processSupervisor,
               source: videoPath,
               settings: transcodeSettings,
               isCancelled: () => job.cancelled,
               onProgress: (progress, message) => report(item, item.stat.size * Math.max(0, Math.min(100, progress)) / 100, 'transcoding', message),
-            });
+            }));
             createdPaths.push(output);
             transcodeCount += 1;
           }
