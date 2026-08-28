@@ -5,9 +5,10 @@ globalThis.HTMLMediaElement = { HAVE_FUTURE_DATA: 3 };
 globalThis.document = { createElement: name => { if (name !== 'track') throw new Error(`unexpected element ${name}`); const element = new EventTarget(); element.track = { mode: 'disabled', cues: [] }; element.remove = () => { element.removed = true; }; return element; } };
 
 class FakeVideo extends EventTarget {
-  constructor({ failLoad = false } = {}) {
+  constructor({ failLoad = false, failMessage = 'decode failed' } = {}) {
     super();
     this.failLoad = failLoad;
+    this.failMessage = failMessage;
     this.src = '';
     this.poster = 'poster';
     this.preload = '';
@@ -34,7 +35,7 @@ class FakeVideo extends EventTarget {
     if (!this.src) return;
     queueMicrotask(() => {
       if (this.failLoad) {
-        this.error = { message: 'decode failed' };
+        this.error = { message: this.failMessage };
         this.dispatchEvent(new Event('error'));
       } else this.dispatchEvent(new Event('loadedmetadata'));
     });
@@ -48,6 +49,8 @@ class FakeVideo extends EventTarget {
   removeAttribute(name) { if (name === 'src') this.src = ''; }
   getVideoPlaybackQuality() { return { totalVideoFrames: 120, droppedVideoFrames: 2 }; }
   appendChild(element) { queueMicrotask(() => element.dispatchEvent(new Event('load'))); return element; }
+  requestVideoFrameCallback(callback) { this.frameCallback = callback; return 1; }
+  emitFrame(mediaTime) { const callback = this.frameCallback; this.frameCallback = null; callback?.(0, { mediaTime }); }
 }
 
 const descriptor = { backendId: 'core.chromium', protocolVersion: 1, transport: 'chromium', displayName: 'Chromium', priority: 100, probe: { support: 'probably', basis: 'test' } };
@@ -68,16 +71,18 @@ const context = (video, states, failures, published, subtitleChoice = { success:
   assert.equal(chromiumContainerProbe(video, 'C:/project/clip.mp4'), 'probably');
   assert.equal(chromiumContainerProbe(video, 'C:/project/clip.mov'), 'unknown', 'extension hints must not claim unsupported codec capability');
   const session = await new ChromiumPlaybackBackend(descriptor).start(context(video, states, failures, published));
+  video.emitFrame(0); video.emitFrame(1 / 24);
   assert.equal(video.src, 'photoflow-media://file/token');
   assert(states.some(state => state.type === 'file-loaded'));
   assert(states.some(state => state.type === 'state' && state.paused === false));
   session.control({ action: 'pause' });
   session.control({ action: 'seek', value: 33 });
+  session.control({action:'frame-step'}); assert(Math.abs(video.currentTime-(33+1/24))<0.0001); session.control({action:'frame-back-step'});
   session.control({ action: 'volume', value: 40 });
   session.control({ action: 'mute', value: true });
   session.control({ action: 'speed', value: 1.5 });
   session.control({ action: 'transform', transform: { aspectMode: 'cover', rotation: 180, flipHorizontal: true, flipVertical: false } });
-  session.control({ action: 'statistics-level', statisticsLevel: 'basic' });
+  const statisticsBefore=states.filter(state=>state.type==='statistics').length;session.control({ action: 'statistics-level', statisticsLevel: 'detailed' });await new Promise(resolve=>setTimeout(resolve,550));const statisticsDelta=states.filter(state=>state.type==='statistics').length-statisticsBefore;assert(statisticsDelta>=2&&statisticsDelta<=3,'Chromium detailed statistics must be capped at 4 Hz plus immediate sample');
   assert.deepEqual({ paused: video.paused, time: video.currentTime, volume: video.volume, muted: video.muted, speed: video.playbackRate }, { paused: true, time: 33, volume: 0.4, muted: true, speed: 1.5 });
   assert.equal(video.style.objectFit, 'cover'); assert.match(video.style.transform, /rotate\(180deg\)/); assert(states.some(state => state.type === 'statistics' && state.statistics.droppedFrames === 2));
   const subtitle = await session.chooseSubtitle(); assert.equal(subtitle.success, true); await new Promise(resolve => setImmediate(resolve)); assert(states.some(state => state.type === 'subtitle-tracks' && state.subtitleTracks.some(track => track.format === 'vtt' && track.selected)));
@@ -103,7 +108,7 @@ const context = (video, states, failures, published, subtitleChoice = { success:
 }
 
 {
-  const video = new FakeVideo({ failLoad: true });
+  const video = new FakeVideo({ failLoad: true, failMessage: 'HEVC Main10 unsupported codec' });
   let componentStarts = 0;
   const component = {
     descriptor: { ...descriptor, backendId: 'fixture.component', transport: 'native-process-v1', priority: 80 },
@@ -115,6 +120,7 @@ const context = (video, states, failures, published, subtitleChoice = { success:
   const session = await startPlaybackSession({ backends: [new ChromiumPlaybackBackend(descriptor), component], context: context(video, [], [], []) });
   assert.equal(session.backendId, 'fixture.component');
   assert.equal(componentStarts, 1, 'a real Chromium metadata/decode failure must switch to the contributed backend exactly once');
+  assert.equal(session.attempts.filter(item=>item.backendId==='core.chromium')[0].errorCode,'UNSUPPORTED_CODEC');
   await session.close();
 }
 

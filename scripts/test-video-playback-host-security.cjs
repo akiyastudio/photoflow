@@ -9,6 +9,7 @@ const { createMediaInputSessionService } = require('../electron/services/media-i
 const { createNativeVideoSurfaceService } = require('../electron/services/native-video-surface-service.cjs');
 const { createPlaybackCaptureService } = require('../electron/services/playback-capture-service.cjs');
 const { createVideoDisplayOutputService } = require('../electron/services/video-display-output-service.cjs');
+const { createPlaybackSubtitleInputService } = require('../electron/services/playback-subtitle-input-service.cjs');
 
 const run = async () => {
   const inputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-input-session-')); const inputPath = path.join(inputRoot, 'clip.mp4'); fs.writeFileSync(inputPath, 'video'); let clock = 1000;
@@ -32,6 +33,7 @@ const run = async () => {
   const png = Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), Buffer.from([0,0,0,0,73,69,78,68,174,66,96,130])]); fs.writeFileSync(staged.stagePath, png);
   assert.equal(await captures.validate(stage.stageId, captureOwner), true); const committed = await captures.commit(stage.stageId, captureOwner, { deadlineAt: Date.now() + 100 }); assert(fs.existsSync(committed.path));
   const abandoned = await captures.create({ ...captureOwner, sourcePath: inputPath }); const abandonedPath = captures.resolve(abandoned.stageId, captureOwner).stagePath; fs.writeFileSync(abandonedPath, 'partial'); await captures.abort(abandoned.stageId); assert.equal(fs.existsSync(abandonedPath), false);
+  fs.writeFileSync(path.join(inputRoot,'clip.zh.srt'),'subtitle');fs.writeFileSync(path.join(inputRoot,'other.srt'),'other');const subtitleInputs=createPlaybackSubtitleInputService({fs,path,authorizeProjectMedia:async value=>{const resolved=path.resolve(value);if(path.dirname(resolved)!==inputRoot)throw new Error('denied');return resolved;}});assert.deepEqual(await subtitleInputs.discover(inputPath),[path.join(inputRoot,'clip.zh.srt')]);assert.equal(await subtitleInputs.authorizeSelected(path.join(inputRoot,'clip.zh.srt')),path.join(inputRoot,'clip.zh.srt'));
 
   const launches = [];
   const spawn = (_command, args) => {

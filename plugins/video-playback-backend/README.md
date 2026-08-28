@@ -24,7 +24,7 @@ npm run build -- --mpv-root C:\path\to\libmpv-runtime
 输出文件：
 
 ```text
-dist/PhotoFlow-video-playback-mpv-26.8.28.1-win32-x64.zip
+dist/PhotoFlow-video-playback-mpv-26.8.28.2-win32-x64.zip
 ```
 
 ## 仅使用已有运行时打包

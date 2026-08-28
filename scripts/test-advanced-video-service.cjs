@@ -120,6 +120,7 @@ const run = async () => {
   const screenshotCommand = stdinLines.at(-1);
   assert.strictEqual(screenshotCommand.command, 'screenshot');
   assert.strictEqual(screenshotCommand.requestId, 'session-2');
+  assert.strictEqual(screenshotCommand.captureMode, 'displayedFrame');
   assert.strictEqual(path.dirname(screenshotCommand.path), screenshotRoot);
   assert.match(path.basename(screenshotCommand.path), /^\.camera\.capture-stage-1\.photoflow-capture-stage\.png$/);
   const publicScreenshot = fs.readdirSync(screenshotRoot).find(name => name.startsWith('camera_截图_'));

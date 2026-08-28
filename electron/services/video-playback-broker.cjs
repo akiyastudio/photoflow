@@ -3,12 +3,12 @@ const { parseMediaPlaybackBackendContributions } = require('../contracts/media-p
 const supportRank = Object.freeze({ probably: 3, maybe: 2, unknown: 1, unsupported: 0 });
 const normalizeBrowserProbe = value => ['probably', 'maybe', 'unsupported'].includes(value) ? value : 'unknown';
 const CHROMIUM_FEATURES = Object.freeze({
-  transforms: Object.freeze(['source', 'contain', 'cover', '16:9', '4:3', '1:1', 'rotate', 'flip-horizontal', 'flip-vertical']),
-  hdr: Object.freeze({ modes: Object.freeze(['auto', 'sdr', 'tone-map']), requiresHdrDisplay: false }),
-  statistics: Object.freeze({ levels: Object.freeze(['basic']), maxUpdateHz: 4 }),
-  subtitles: Object.freeze({ formats: Object.freeze(['vtt']), externalFiles: true }),
-  hardwareDecoding: true,
-  capture: Object.freeze({ supported: true, appliesTransforms: true }),
+  transforms: Object.freeze({ aspectModes: Object.freeze(['source','contain','cover','16:9','4:3','1:1']), rotation:true, flip:true, crop:true }),
+  hdr: Object.freeze({ passthrough:false, toneMapping:false, algorithms:Object.freeze([]), targetPeakControl:false }),
+  statistics: Object.freeze({ basic:true, decode:false, hdr:false, timing:true, cache:false, gpu:false, maxUpdateHz:4 }),
+  subtitles: Object.freeze({ embedded:true, external:true, ass:false, styles:false }),
+  hardwareDecoding: Object.freeze({ supported:true, selectable:false, softwareFallback:true }),
+  capture: Object.freeze({ sourceFrame:true, displayedFrame:true }),
 });
 
 const createVideoPlaybackBroker = ({ pluginService, path }) => {

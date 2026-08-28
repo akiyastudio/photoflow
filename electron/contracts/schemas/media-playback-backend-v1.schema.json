@@ -29,12 +29,12 @@
       "type": "object", "additionalProperties": false,
       "required": ["transforms", "hdr", "statistics", "subtitles", "hardwareDecoding", "capture"],
       "properties": {
-        "transforms": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["source", "contain", "cover", "16:9", "4:3", "1:1", "rotate", "flip-horizontal", "flip-vertical"] } },
-        "hdr": { "type": "object", "additionalProperties": false, "required": ["modes", "requiresHdrDisplay"], "properties": { "modes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["auto", "sdr", "hdr-passthrough", "tone-map"] } }, "requiresHdrDisplay": { "type": "boolean" } } },
-        "statistics": { "type": "object", "additionalProperties": false, "required": ["levels", "maxUpdateHz"], "properties": { "levels": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["basic", "detailed"] } }, "maxUpdateHz": { "type": "number", "minimum": 0.2, "maximum": 30 } } },
-        "subtitles": { "type": "object", "additionalProperties": false, "required": ["formats", "externalFiles"], "properties": { "formats": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "enum": ["vtt", "srt", "ass", "ssa"] } }, "externalFiles": { "type": "boolean" } } },
-        "hardwareDecoding": { "type": "boolean" },
-        "capture": { "type": "object", "additionalProperties": false, "required": ["supported", "appliesTransforms"], "properties": { "supported": { "type": "boolean" }, "appliesTransforms": { "type": "boolean" } } }
+        "transforms": { "type":"object","additionalProperties":false,"required":["aspectModes","rotation","flip","crop"],"properties":{"aspectModes":{"type":"array","minItems":1,"uniqueItems":true,"items":{"enum":["source","contain","cover","16:9","4:3","1:1"]}},"rotation":{"type":"boolean"},"flip":{"type":"boolean"},"crop":{"type":"boolean"}} },
+        "hdr": { "type":"object","additionalProperties":false,"required":["passthrough","toneMapping","algorithms","targetPeakControl"],"properties":{"passthrough":{"type":"boolean"},"toneMapping":{"type":"boolean"},"algorithms":{"type":"array","minItems":1,"uniqueItems":true,"items":{"enum":["auto","bt2390","reinhard","mobius","hable"]}},"targetPeakControl":{"type":"boolean"}} },
+        "statistics": { "type":"object","additionalProperties":false,"required":["basic","decode","hdr","timing","cache","gpu","maxUpdateHz"],"properties":{"basic":{"type":"boolean"},"decode":{"type":"boolean"},"hdr":{"type":"boolean"},"timing":{"type":"boolean"},"cache":{"type":"boolean"},"gpu":{"type":"boolean"},"maxUpdateHz":{"type":"number","minimum":0.2,"maximum":4}} },
+        "subtitles": { "type":"object","additionalProperties":false,"required":["embedded","external","ass","styles"],"properties":{"embedded":{"type":"boolean"},"external":{"type":"boolean"},"ass":{"type":"boolean"},"styles":{"type":"boolean"}} },
+        "hardwareDecoding": { "type":"object","additionalProperties":false,"required":["supported","selectable","softwareFallback"],"properties":{"supported":{"type":"boolean"},"selectable":{"type":"boolean"},"softwareFallback":{"type":"boolean"}} },
+        "capture": { "type":"object","additionalProperties":false,"required":["sourceFrame","displayedFrame"],"properties":{"sourceFrame":{"type":"boolean"},"displayedFrame":{"type":"boolean"}} }
       }
     }
   },

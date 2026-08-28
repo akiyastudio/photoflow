@@ -293,7 +293,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   chooseVideoSubtitle: sessionId => ipcRenderer.invoke('video-player-subtitle-choose', sessionId),
   chooseVideoSubtitleFile: () => ipcRenderer.invoke('video-subtitle-choose-file'),
   addVideoSubtitle: (sessionId, filePath) => ipcRenderer.invoke('video-player-subtitle-add', sessionId, filePath),
-  captureVideoPlayerFrame: sessionId => ipcRenderer.invoke('video-player-screenshot', sessionId),
+  captureVideoPlayerFrame: (sessionId, mode) => ipcRenderer.invoke('video-player-screenshot', sessionId, mode),
   publishVideoPlayerFrame: (filePath, bytes) => ipcRenderer.invoke('video-player-publish-frame', filePath, bytes),
   stopVideoPlayer: sessionId => ipcRenderer.invoke('video-player-stop', sessionId),
   onVideoPlayerState: callback => { const subscription = (_event, value) => callback(value); ipcRenderer.on('video-player-state', subscription); return () => ipcRenderer.removeListener('video-player-state', subscription); },

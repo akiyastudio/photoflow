@@ -14,7 +14,7 @@ const normalizeSubtitleFontSize = value => {
 
 const createVideoPlaybackProcessService = ({
   BrowserWindow, captureService, crypto, displayOutputService = null, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor = null, spawn, writeLog,
-  startupTimeoutMs = START_TIMEOUT_MS, screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS,
+  startupTimeoutMs = START_TIMEOUT_MS, screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS, subtitleInputService = null,
 }) => {
   const sessions = new Map();
   const sessionsByPlayer = new Map();
@@ -171,6 +171,7 @@ const createVideoPlaybackProcessService = ({
         componentId: backendOwner.componentId,
         backendId,
         inputToken: inputGrant.token,
+        pendingAuthorizedSubtitles: [],
         surfaceAttachPromise: null,
         surfaceController: null,
         lastDisplayKey: '',
@@ -193,7 +194,7 @@ const createVideoPlaybackProcessService = ({
         rejectReady = reject;
         session.rejectReady = reject;
       });
-      const startupTimer = setTimeout(() => { const error = new Error('视频播放器启动超时，请在组件管理中修复或重新安装视频播放器运行时'); error.code = 'START_TIMEOUT'; rejectReady(error); }, startupTimeoutMs);
+      const startupTimer = setTimeout(() => { const error = new Error('视频播放器启动超时，请在组件管理中修复或重新安装视频播放器运行时'); error.code = 'STARTUP_TIMEOUT'; rejectReady(error); }, startupTimeoutMs);
       startupTimer.unref?.();
 
       const consumeLine = line => {
@@ -205,6 +206,7 @@ const createVideoPlaybackProcessService = ({
           return;
         }
         const value = { type: received.type, ...received.payload };
+        if(value.type==='file-loaded'&&session.pendingAuthorizedSubtitles.length){for(const subtitlePath of session.pendingAuthorizedSubtitles)sendCommand(session,{command:'subtitle-add',path:subtitlePath});session.pendingAuthorizedSubtitles=[];}
         if (value.type === 'diagnostic') {
           try { emit(session, { type: 'diagnostic', diagnostic: cleanPlaybackDiagnostics(value.diagnostic) }); }
           catch (error) { writeLog('warn', 'Playback backend emitted invalid diagnostics', { sessionId: session.id, error: error.message || String(error) }); }
@@ -285,6 +287,7 @@ const createVideoPlaybackProcessService = ({
 
       await readyPromise;
       assertCurrentLaunch();
+      if (settings.subtitlesEnabled === true && subtitleInputService) session.pendingAuthorizedSubtitles = await subtitleInputService.discover(authorizedPath);
       if (!sendCommand(session, { command: 'open', path: authorizedPath })) throw new Error('无法向视频播放器发送文件');
       sendCommand(session, { command: 'subtitle-style', fontSize: normalizeSubtitleFontSize(settings.subtitleSize), style: settings.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard' });
       if (!sendCommand(session, { command: 'play' })) throw new Error('无法启动视频播放器');
@@ -355,7 +358,7 @@ const createVideoPlaybackProcessService = ({
   const control = (event, sessionId, request = {}) => {
     const session = sessions.get(String(sessionId || ''));
     if (!session || session.sender.id !== event.sender.id) return;
-    const allowed = new Set(['play', 'pause', 'seek', 'volume', 'mute', 'speed', 'stop', 'subtitle-select', 'subtitle-visible', 'subtitle-delay', 'subtitle-style', 'transform', 'hdr-mode', 'statistics-level']);
+    const allowed = new Set(['play', 'pause', 'seek', 'frame-step', 'frame-back-step', 'volume', 'mute', 'speed', 'stop', 'subtitle-select', 'subtitle-visible', 'subtitle-delay', 'subtitle-style', 'audio-select', 'transform', 'hdr-mode', 'tone-mapping', 'statistics-level']);
     const command = String(request.action || '');
     if (!allowed.has(command)) return;
     sendCommand(session, {
@@ -365,6 +368,8 @@ const createVideoPlaybackProcessService = ({
       style: request.style,
       transform: command === 'transform' ? request.transform : undefined,
       hdrMode: command === 'hdr-mode' ? request.hdrMode : undefined,
+      toneMapping: command === 'tone-mapping' ? request.toneMapping : undefined,
+      targetPeakNits: command === 'tone-mapping' ? request.targetPeakNits : undefined,
       statisticsLevel: command === 'statistics-level' ? request.statisticsLevel : undefined,
     });
   };
@@ -381,7 +386,7 @@ const createVideoPlaybackProcessService = ({
     if (!sendCommand(session, { command: 'subtitle-add', path: filePath })) throw new Error('无法向视频播放器添加字幕');
   };
 
-  const screenshot = async (event, sessionId) => {
+  const screenshot = async (event, sessionId, requestedMode = 'displayedFrame') => {
     const session = sessions.get(String(sessionId || ''));
     if (!session || session.sender.id !== event.sender.id || session.stopped) throw new Error('视频播放会话不存在');
     const requestId = crypto.randomUUID();
@@ -399,7 +404,8 @@ const createVideoPlaybackProcessService = ({
         cancelled: false, phase: 'waiting',
       };
       session.pendingScreenshots.set(requestId, pending);
-      if (!sendCommand(session, { command: 'screenshot', requestId, stageId: stage.stageId, path: resolvedStage.stagePath })) {
+      const captureMode = requestedMode === 'sourceFrame' ? 'sourceFrame' : 'displayedFrame';
+      if (!sendCommand(session, { command: 'screenshot', requestId, stageId: stage.stageId, path: resolvedStage.stagePath, captureMode })) {
         rejectPendingScreenshot(session, requestId, pending, new Error('无法向视频解码组件发送截图命令'));
       }
     });

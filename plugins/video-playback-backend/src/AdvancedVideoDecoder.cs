@@ -76,8 +76,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private readonly MpvFree free;
         private readonly MpvTerminateDestroy terminateDestroy;
         private IntPtr context;
-        private string[] pendingSidecars = new string[0];
-        private string pendingVideoPath = string.Empty;
 
         internal LibMpv(IntPtr videoWindow, bool probeOnly = false)
         {
@@ -201,51 +199,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
         internal void Open(string filePath)
         {
-            pendingVideoPath = Path.GetFullPath(filePath);
-            pendingSidecars = DiscoverSidecars(filePath);
             Check(Run("loadfile", filePath, "replace"), "打开视频");
-        }
-
-        private static string[] DiscoverSidecars(string filePath)
-        {
-            var result = new List<string>();
-            string directory = Path.GetDirectoryName(filePath);
-            string baseName = Path.GetFileNameWithoutExtension(filePath);
-            if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(baseName) || !Directory.Exists(directory)) return result.ToArray();
-            try
-            {
-                foreach (string sidecar in Directory.GetFiles(directory))
-                {
-                    string extension = Path.GetExtension(sidecar).ToLowerInvariant();
-                    string stem = Path.GetFileNameWithoutExtension(sidecar);
-                    if ((extension == ".srt" || extension == ".ass" || extension == ".ssa" || extension == ".vtt")
-                        && (string.Equals(stem, baseName, StringComparison.OrdinalIgnoreCase) || stem.StartsWith(baseName + ".", StringComparison.OrdinalIgnoreCase)))
-                        result.Add(sidecar);
-                }
-            }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-            result.Sort(StringComparer.OrdinalIgnoreCase);
-            return result.ToArray();
-        }
-
-        internal bool LoadPendingSidecars()
-        {
-            string loadedPath = GetProperty("path");
-            try
-            {
-                if (string.IsNullOrWhiteSpace(loadedPath)
-                    || !string.Equals(Path.GetFullPath(loadedPath), pendingVideoPath, StringComparison.OrdinalIgnoreCase)) return false;
-            }
-            catch (Exception) { return false; }
-            string[] sidecars = pendingSidecars;
-            pendingSidecars = new string[0];
-            foreach (string sidecar in sidecars)
-            {
-                if (!File.Exists(sidecar)) continue;
-                if (Run("sub-add", sidecar, "auto") < 0) continue;
-            }
-            return true;
         }
 
         internal IList<Dictionary<string, object>> SubtitleTracks()
@@ -283,6 +237,11 @@ namespace PhotoFlow.AdvancedVideoDecoder
             }
             return result;
         }
+        internal IList<Dictionary<string, object>> AudioTracks()
+        {
+            var result=new List<Dictionary<string,object>>();int count;if(!int.TryParse(GetProperty("track-list/count"),out count))return result;var occurrences=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);
+            for(int index=0;index<count;index++){string prefix="track-list/"+index.ToString(CultureInfo.InvariantCulture)+"/";if(GetProperty(prefix+"type")!="audio")continue;string id=GetProperty(prefix+"id")??string.Empty,language=GetProperty(prefix+"lang")??string.Empty,title=GetProperty(prefix+"title")??string.Empty,codec=GetProperty(prefix+"codec")??string.Empty,identityBase="audio:"+language.ToLowerInvariant()+":"+title.ToLowerInvariant()+":"+codec.ToLowerInvariant();int occurrence;occurrences.TryGetValue(identityBase,out occurrence);occurrences[identityBase]=occurrence+1;result.Add(new Dictionary<string,object>{{"id",id},{"stableId",identityBase+":"+occurrence.ToString(CultureInfo.InvariantCulture)},{"language",language},{"title",title},{"codec",codec},{"channels",NumberValue(GetProperty(prefix+"demux-channel-count"))},{"sampleRate",NumberValue(GetProperty(prefix+"demux-samplerate"))},{"selected",IsYesValue(GetProperty(prefix+"selected"))}});}return result;
+        }
 
         internal void Play()
         {
@@ -306,15 +265,16 @@ namespace PhotoFlow.AdvancedVideoDecoder
             return IsYesValue(GetProperty("eof-reached"));
         }
 
-        internal void Screenshot(string filePath)
+        internal void Screenshot(string filePath, string mode)
         {
-            Check(Run("screenshot-to-file", filePath, "video"), "保存当前视频帧");
+            Check(Run("screenshot-to-file", filePath, mode == "displayedFrame" ? "subtitles" : "video"), "保存当前视频帧");
         }
 
         private static bool IsYesValue(string value)
         {
             return string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase) || value == "true";
         }
+        private static double NumberValue(string value) { double result; return double.TryParse(value,NumberStyles.Float,CultureInfo.InvariantCulture,out result)?result:0; }
 
         internal IList<Dictionary<string, object>> DrainEvents()
         {
@@ -374,12 +334,12 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private const string Protocol = "media-playback-backend-v1";
         private const int MaxFrameBytes = 256 * 1024;
         private static readonly Dictionary<string, string> CommandNames = new Dictionary<string, string> {
-            { "media.open", "open" }, { "playback.play", "play" }, { "playback.pause", "pause" }, { "playback.seek", "seek" }, { "audio.volume", "volume" }, { "audio.mute", "mute" }, { "playback.speed", "speed" }, { "playback.stop", "stop" },
+            { "media.open", "open" }, { "playback.play", "play" }, { "playback.pause", "pause" }, { "playback.seek", "seek" }, { "playback.frame-step", "frame-step" }, { "playback.frame-back-step", "frame-back-step" }, { "audio.volume", "volume" }, { "audio.mute", "mute" }, { "audio.track-select", "audio-select" }, { "playback.speed", "speed" }, { "playback.stop", "stop" },
             { "subtitles.select", "subtitle-select" }, { "subtitles.visible", "subtitle-visible" }, { "subtitles.delay", "subtitle-delay" }, { "subtitles.style", "subtitle-style" }, { "subtitles.add", "subtitle-add" },
-            { "capture.stage", "screenshot" }, { "video.transform", "transform" }, { "video.hdr-mode", "hdr-mode" }, { "statistics.level", "statistics-level" }, { "display.output", "display-output" }
+            { "capture.stage", "screenshot" }, { "video.transform", "transform" }, { "video.hdr-mode", "hdr-mode" }, { "video.tone-mapping", "tone-mapping" }, { "statistics.level", "statistics-level" }, { "display.output", "display-output" }
         };
         private static readonly Dictionary<string, string> EventNames = new Dictionary<string, string> {
-            { "ready", "runtime.ready" }, { "surface-created", "surface.created" }, { "state", "state.changed" }, { "loading", "state.loading" }, { "file-loaded", "media.loaded" }, { "ended", "media.ended" }, { "subtitle-tracks", "tracks.changed" }, { "statistics", "statistics.changed" }, { "input", "input.raw" }, { "screenshot-result", "capture.completed" }, { "diagnostic", "diagnostic" }, { "fatal", "fatal" }, { "error", "error" }, { "stopped", "terminated" }
+            { "ready", "runtime.ready" }, { "surface-created", "surface.created" }, { "state", "state.changed" }, { "loading", "state.loading" }, { "file-loaded", "media.loaded" }, { "ended", "media.ended" }, { "subtitle-tracks", "tracks.changed" }, { "audio-tracks", "audio-tracks.changed" }, { "statistics", "statistics.changed" }, { "input", "input.raw" }, { "screenshot-result", "capture.completed" }, { "diagnostic", "diagnostic" }, { "fatal", "fatal" }, { "error", "error" }, { "stopped", "terminated" }
         };
         private readonly string sessionId;
         private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
@@ -392,6 +352,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private string lastState = string.Empty;
         private bool loading;
         private string lastSubtitleState = string.Empty;
+        private string lastAudioState = string.Empty;
         private int lastPointerActivityTick;
         private Point lastPointerLocation;
         private bool hasLastPointerLocation;
@@ -401,6 +362,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private DateTime lastStatisticsAt = DateTime.MinValue;
         private string requestedHdrMode = "auto";
         private bool hdrDisplayAvailable;
+        private string toneMappingAlgorithm = "auto";
+        private int targetPeakNits = 400;
         private int recoveryStage;
 
         internal DecoderHost(string sessionId)
@@ -433,7 +396,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
             }
             catch (Exception error)
             {
-                Emit(new Dictionary<string, object> { { "type", "fatal" }, { "error", error.Message } });
+                Emit(new Dictionary<string, object> { { "type", "fatal" }, { "errorCode", "RENDER_INITIALIZATION_FAILED" }, { "error", error.Message } });
                 BeginInvoke(new Action(Close));
             }
         }
@@ -459,7 +422,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     string semantic = eventName.Substring("command.".Length), legacyName;
                     if (!CommandNames.TryGetValue(semantic, out legacyName)) throw new InvalidOperationException("播放协议命令未知");
                     command["command"] = legacyName;
-                    HandleCommand(command);
+                    try { HandleCommand(command); }
+                    catch (Exception commandError) { if(legacyName=="open")Emit(new Dictionary<string,object>{{"type","error"},{"errorCode","DECODE_INITIALIZATION_FAILED"},{"error",commandError.Message}});else Emit(new Dictionary<string, object> { { "type", "diagnostic" }, { "diagnostic", new Dictionary<string, object> { { "code", "COMMAND_REJECTED" }, { "severity", "warning" }, { "phase", "command" }, { "protocolVersion", 1 }, { "message", commandError.Message }, { "recoverable", true } } } }); }
                 }
             }
             catch (Exception error)
@@ -494,8 +458,11 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 else if (name == "play") player.Play();
                 else if (name == "pause") player.Pause();
                 else if (name == "seek") player.SeekAbsolute(ReadDouble(value, "value"));
+                else if (name == "frame-step") player.Run("frame-step");
+                else if (name == "frame-back-step") player.Run("frame-back-step");
                 else if (name == "volume") player.SetProperty("volume", Math.Max(0, Math.Min(100, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
                 else if (name == "mute") player.SetProperty("mute", ReadBool(value, "value") ? "yes" : "no");
+                else if (name == "audio-select") player.SetProperty("aid", ReadString(value,"value"));
                 else if (name == "speed") player.SetProperty("speed", Math.Max(0.25, Math.Min(4, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
                 else if (name == "subtitle-select")
                 {
@@ -513,13 +480,13 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     player.SetProperty("video-rotate", rotation.ToString(CultureInfo.InvariantCulture));
                     player.SetProperty("video-aspect-override", aspect == "16:9" ? "16:9" : aspect == "4:3" ? "4:3" : aspect == "1:1" ? "1:1" : "no");
                     player.SetProperty("panscan", aspect == "cover" ? "1" : "0");
-                    bool horizontal = ReadBool(transform, "flipHorizontal"), vertical = ReadBool(transform, "flipVertical");
-                    player.SetProperty("vf", horizontal && vertical ? "hflip,vflip" : horizontal ? "hflip" : vertical ? "vflip" : "");
+                    bool horizontal = ReadBool(transform, "flipHorizontal"), vertical = ReadBool(transform, "flipVertical");var filters=new List<string>();object cropRaw;var crop=transform!=null&&transform.TryGetValue("crop",out cropRaw)?cropRaw as Dictionary<string,object>:null;if(crop!=null)filters.Add(string.Format(CultureInfo.InvariantCulture,"crop=iw*{0}:ih*{1}:iw*{2}:ih*{3}",ReadDouble(crop,"width"),ReadDouble(crop,"height"),ReadDouble(crop,"x"),ReadDouble(crop,"y")));if(horizontal)filters.Add("hflip");if(vertical)filters.Add("vflip");player.SetProperty("vf",string.Join(",",filters.ToArray()));
                 }
                 else if (name == "hdr-mode")
                 {
                     requestedHdrMode = ReadString(value, "hdrMode"); ApplyHdrMode(player);
                 }
+                else if(name=="tone-mapping"){toneMappingAlgorithm=ReadString(value,"toneMapping");targetPeakNits=Math.Max(100,Math.Min(4000,ReadInt(value,"targetPeakNits")));ApplyHdrMode(player);}
                 else if (name == "display-output")
                 {
                     object raw; var output = value.TryGetValue("output", out raw) ? raw as Dictionary<string, object> : null;
@@ -533,7 +500,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     string extension = Path.GetExtension(subtitlePath).ToLowerInvariant();
                     if (extension != ".srt" && extension != ".ass" && extension != ".ssa" && extension != ".vtt") throw new InvalidOperationException("字幕格式不受支持");
                     int result = player.Run("sub-add", subtitlePath, "select");
-                    if (result < 0) throw new InvalidOperationException("字幕文件损坏或无法加载");
+                    if (result < 0) { Emit(new Dictionary<string, object> { { "type", "diagnostic" }, { "diagnostic", new Dictionary<string, object> { { "code", "BAD_SUBTITLE_SKIPPED" }, { "severity", "warning" }, { "phase", "subtitles" }, { "protocolVersion", 1 }, { "message", "字幕文件损坏或无法加载" }, { "recoverable", true } } } }); return; }
                     player.SetProperty("sub-visibility", "yes");
                 }
                 else if (name == "screenshot")
@@ -544,7 +511,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     {
                         if (string.IsNullOrWhiteSpace(targetPath) || !Path.IsPathRooted(targetPath))
                             throw new InvalidOperationException("截图保存路径无效");
-                        player.Screenshot(targetPath);
+                        player.Screenshot(targetPath, ReadString(value,"captureMode"));
                         if (!WaitForCompletePng(targetPath, 7000))
                             throw new IOException("视频截图文件在超时前未完整写入");
                         Emit(new Dictionary<string, object> {
@@ -644,7 +611,9 @@ namespace PhotoFlow.AdvancedVideoDecoder
         {
             bool passthrough = requestedHdrMode == "hdr-passthrough" && hdrDisplayAvailable;
             target.SetProperty("target-colorspace-hint", passthrough ? "yes" : "no");
-            target.SetProperty("tone-mapping", requestedHdrMode == "sdr" ? "clip" : "auto");
+            string algorithm=toneMappingAlgorithm=="bt2390"?"bt.2390":toneMappingAlgorithm;
+            target.SetProperty("tone-mapping", requestedHdrMode == "sdr" ? "clip" : algorithm);
+            target.SetProperty("target-peak", targetPeakNits.ToString(CultureInfo.InvariantCulture));
         }
 
         private bool TryRecoverPlayback(string error)
@@ -714,8 +683,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
                                 if (type == "error" && TryRecoverPlayback(ReadString(eventValue, "error"))) continue;
                                 if (type == "file-loaded")
                                 {
-                                    // Ignore a stale event from a superseded loadfile command.
-                                    if (!player.LoadPendingSidecars()) continue;
                                     loading = false;
                                 }
                                 Emit(eventValue);
@@ -729,6 +696,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                             };
                             string serializedSubtitleState = serializer.Serialize(subtitleState);
                             if (serializedSubtitleState != lastSubtitleState) { lastSubtitleState = serializedSubtitleState; Emit(subtitleState); }
+                            IList<Dictionary<string,object>> audioTracks=player.AudioTracks();var audioState=new Dictionary<string,object>{{"type","audio-tracks"},{"audioTracks",audioTracks},{"audioTrackId",player.GetProperty("aid")}};string serializedAudioState=serializer.Serialize(audioState);if(serializedAudioState!=lastAudioState){lastAudioState=serializedAudioState;Emit(audioState);}
                             var state = new Dictionary<string, object> {
                                 { "type", "state" },
                                 { "time", ReadNumber(player.GetProperty("time-pos")) },
@@ -754,15 +722,27 @@ namespace PhotoFlow.AdvancedVideoDecoder
                                 Emit(new Dictionary<string, object> {
                                     { "type", "statistics" }, { "statistics", new Dictionary<string, object> {
                                         { "level", statisticsLevel == "detailed" ? "detailed" : "basic" },
+                                        { "container", player.GetProperty("file-format") ?? string.Empty },
                                         { "videoCodec", player.GetProperty("video-codec") ?? string.Empty },
                                         { "audioCodec", player.GetProperty("audio-codec-name") ?? string.Empty },
                                         { "decoder", player.GetProperty("video-dec-params/codec") ?? string.Empty },
+                                        { "hardwareDecoder", player.GetProperty("hwdec-current") ?? string.Empty },
                                         { "hardwareDecoding", !string.IsNullOrWhiteSpace(player.GetProperty("hwdec-current")) },
+                                        { "pixelFormat", player.GetProperty("video-params/pixelformat") ?? string.Empty },
+                                        { "bitDepth", ReadNumber(player.GetProperty("video-params/bits-per-component")) },
+                                        { "colorPrimaries", player.GetProperty("video-params/primaries") ?? string.Empty },
+                                        { "transfer", player.GetProperty("video-params/gamma") ?? string.Empty },
+                                        { "colorMatrix", player.GetProperty("video-params/colormatrix") ?? string.Empty },
+                                        { "hdrFormat", player.GetProperty("video-params/gamma") ?? string.Empty },
+                                        { "sourceFps", ReadNumber(player.GetProperty("container-fps")) },
+                                        { "displayFps", ReadNumber(player.GetProperty("estimated-vf-fps")) },
                                         { "droppedFrames", ReadNumber(player.GetProperty("decoder-frame-drop-count")) },
-                                        { "fps", ReadNumber(player.GetProperty("estimated-vf-fps")) },
+                                        { "delayedFrames", ReadNumber(player.GetProperty("mistimed-frame-count")) },
                                         { "avSyncMs", ReadNumber(player.GetProperty("avsync")) * 1000 },
                                         { "cacheSeconds", ReadNumber(player.GetProperty("demuxer-cache-duration")) },
-                                        { "output", "D3D11/libmpv" }
+                                        { "cacheBytes", ReadNumber(player.GetProperty("demuxer-cache-state/fw-bytes")) },
+                                        { "gpuApi", "d3d11" }, { "gpuAdapter", player.GetProperty("gpu-context") ?? "d3d11" },
+                                        { "renderer", "D3D11/libmpv" }, { "toneMapping", toneMappingAlgorithm }
                                     } }
                                 });
                             }
@@ -771,7 +751,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 }
                 catch (Exception error)
                 {
-                    if (!shuttingDown && !TryRecoverPlayback(error.Message)) Emit(new Dictionary<string, object> { { "type", "error" }, { "error", error.Message }, { "errorCode", "DECODE_FAILED" } });
+                    if (!shuttingDown && !TryRecoverPlayback(error.Message)) Emit(new Dictionary<string, object> { { "type", "error" }, { "error", error.Message }, { "errorCode", "DECODE_INITIALIZATION_FAILED" } });
                 }
                 Thread.Sleep(150);
             }

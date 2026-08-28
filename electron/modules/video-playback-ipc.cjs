@@ -4,6 +4,7 @@ const { createNativeVideoSurfaceService } = require('../services/native-video-su
 const { createMediaInputSessionService } = require('../services/media-input-session-service.cjs');
 const { createVideoDisplayOutputService } = require('../services/video-display-output-service.cjs');
 const { createPlaybackCaptureService } = require('../services/playback-capture-service.cjs');
+const { createPlaybackSubtitleInputService } = require('../services/playback-subtitle-input-service.cjs');
 const { playbackError } = require('../contracts/playback-errors.cjs');
 
 const registerVideoPlaybackIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog }) => {
@@ -12,7 +13,8 @@ const registerVideoPlaybackIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcM
   const mediaInputSessionService = createMediaInputSessionService({ crypto, fs, path, authorizeProjectMedia: value => mediaService.authorizeInput(value) });
   const displayOutputService = createVideoDisplayOutputService({ screen });
   const captureService = createPlaybackCaptureService({ crypto, fs, path, authorizeProjectMedia: value => mediaService.authorizeInput(value) });
-  const service = createVideoPlaybackProcessService({ BrowserWindow, captureService, crypto, displayOutputService, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor, spawn, writeLog });
+  const subtitleInputService = createPlaybackSubtitleInputService({ fs, path, authorizeProjectMedia: value => mediaService.authorizeInput(value) });
+  const service = createVideoPlaybackProcessService({ BrowserWindow, captureService, crypto, displayOutputService, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor, spawn, subtitleInputService, writeLog });
   ipcMain.handle('video-display-capabilities', event => {
     try { return { success: true, display: displayOutputService.describe(BrowserWindow.fromWebContents(event.sender)) }; }
     catch (error) { return { success: false, display: { displayId: '', scaleFactor: 1, colorSpace: '', hdrAvailable: false, reason: error.message || String(error), bounds: null }, error: error.message || String(error) }; }
@@ -70,7 +72,7 @@ const registerVideoPlaybackIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcM
     try { return { success: true, ...(await service.start(event, filePath, settings, playerId, requestId, backendId)) }; }
     catch (error) {
       writeLog('warn', 'Video player start failed', { error: error.message || String(error) });
-      const normalized = playbackError(error, 'BACKEND_UNAVAILABLE'); return { success: false, error: normalized.message, errorCode: normalized.code };
+      const normalized = playbackError(error, 'BACKEND_UNAVAILABLE'); return { success: false, error: normalized.message, errorCode: normalized.code, recoverable: normalized.recoverable, suggestedFallback: normalized.suggestedFallback };
     }
   });
   ipcMain.on('advanced-video-bounds', (event, sessionId, bounds) => service.setBounds(event, sessionId, bounds));
@@ -106,8 +108,8 @@ const registerVideoPlaybackIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcM
     try { return { success: true, ...(await service.screenshot(event, sessionId)) }; }
     catch (error) { return { success: false, error: error.message || String(error) }; }
   });
-  ipcMain.handle('video-player-screenshot', async (event, sessionId) => {
-    try { return { success: true, ...(await service.screenshot(event, sessionId)) }; }
+  ipcMain.handle('video-player-screenshot', async (event, sessionId, mode) => {
+    try { return { success: true, ...(await service.screenshot(event, sessionId, mode)) }; }
     catch (error) { return { success: false, error: error.message || String(error) }; }
   });
   ipcMain.handle('video-player-stop', (event, sessionId) => ({ success: service.stop(sessionId, event.sender.id) }));

@@ -4,10 +4,8 @@ const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const EXTENSION = /^\.[a-z0-9]{1,12}$/;
 const MEDIA_TOKEN = /^[a-z0-9][a-z0-9.+_-]{0,63}$/i;
-const HDR_MODES = new Set(['auto', 'sdr', 'hdr-passthrough', 'tone-map']);
-const TRANSFORMS = new Set(['source', 'contain', 'cover', '16:9', '4:3', '1:1', 'rotate', 'flip-horizontal', 'flip-vertical']);
-const STATISTICS_LEVELS = new Set(['basic', 'detailed']);
-const SUBTITLE_FORMATS = new Set(['vtt', 'srt', 'ass', 'ssa']);
+const ASPECT_MODES = new Set(['source', 'contain', 'cover', '16:9', '4:3', '1:1']);
+const TONE_MAPPING_ALGORITHMS = new Set(['auto', 'bt2390', 'reinhard', 'mobius', 'hable']);
 
 const exactObject = (value, allowed, label) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error(`Invalid media playback backend ${label}`);
@@ -24,20 +22,24 @@ const boundedUniqueStrings = (value, { label, pattern = MEDIA_TOKEN, allowed = n
 
 const parseFeatures = value => {
   const raw = exactObject(value, ['transforms', 'hdr', 'statistics', 'subtitles', 'hardwareDecoding', 'capture'], 'features');
-  const hdr = exactObject(raw.hdr, ['modes', 'requiresHdrDisplay'], 'HDR features');
-  const statistics = exactObject(raw.statistics, ['levels', 'maxUpdateHz'], 'statistics features');
-  const subtitles = exactObject(raw.subtitles, ['formats', 'externalFiles'], 'subtitle features');
-  const capture = exactObject(raw.capture, ['supported', 'appliesTransforms'], 'capture features');
+  const transforms = exactObject(raw.transforms, ['aspectModes', 'rotation', 'flip', 'crop'], 'transform features');
+  const hdr = exactObject(raw.hdr, ['passthrough', 'toneMapping', 'algorithms', 'targetPeakControl'], 'HDR features');
+  const statistics = exactObject(raw.statistics, ['basic', 'decode', 'hdr', 'timing', 'cache', 'gpu', 'maxUpdateHz'], 'statistics features');
+  const subtitles = exactObject(raw.subtitles, ['embedded', 'external', 'ass', 'styles'], 'subtitle features');
+  const hardwareDecoding = exactObject(raw.hardwareDecoding, ['supported', 'selectable', 'softwareFallback'], 'hardware decoding features');
+  const capture = exactObject(raw.capture, ['sourceFrame', 'displayedFrame'], 'capture features');
   const maxUpdateHz = Number(statistics.maxUpdateHz);
-  if (!Number.isFinite(maxUpdateHz) || maxUpdateHz < 0.2 || maxUpdateHz > 30) throw new Error('Invalid media playback backend statistics maxUpdateHz');
-  if (typeof raw.hardwareDecoding !== 'boolean' || typeof hdr.requiresHdrDisplay !== 'boolean' || typeof subtitles.externalFiles !== 'boolean' || typeof capture.supported !== 'boolean' || typeof capture.appliesTransforms !== 'boolean') throw new Error('Invalid media playback backend feature flag');
+  if (!Number.isFinite(maxUpdateHz) || maxUpdateHz < 0.2 || maxUpdateHz > 4) throw new Error('Invalid media playback backend statistics maxUpdateHz');
+  const flags = [transforms.rotation, transforms.flip, transforms.crop, hdr.passthrough, hdr.toneMapping, hdr.targetPeakControl, statistics.basic, statistics.decode, statistics.hdr, statistics.timing, statistics.cache, statistics.gpu, subtitles.embedded, subtitles.external, subtitles.ass, subtitles.styles, hardwareDecoding.supported, hardwareDecoding.selectable, hardwareDecoding.softwareFallback, capture.sourceFrame, capture.displayedFrame];
+  if (flags.some(flag => typeof flag !== 'boolean')) throw new Error('Invalid media playback backend feature flag');
+  if (hardwareDecoding.selectable && !hardwareDecoding.supported || hardwareDecoding.softwareFallback && !hardwareDecoding.supported || capture.displayedFrame && !capture.sourceFrame || subtitles.ass && !subtitles.external || subtitles.styles && !subtitles.embedded && !subtitles.external || hdr.targetPeakControl && !hdr.toneMapping) throw new Error('Exaggerated media playback backend feature relationship');
   return Object.freeze({
-    transforms: boundedUniqueStrings(raw.transforms, { label: 'transforms', allowed: TRANSFORMS }),
-    hdr: Object.freeze({ modes: boundedUniqueStrings(hdr.modes, { label: 'HDR modes', allowed: HDR_MODES }), requiresHdrDisplay: hdr.requiresHdrDisplay }),
-    statistics: Object.freeze({ levels: boundedUniqueStrings(statistics.levels, { label: 'statistics levels', allowed: STATISTICS_LEVELS }), maxUpdateHz }),
-    subtitles: Object.freeze({ formats: boundedUniqueStrings(subtitles.formats, { label: 'subtitle formats', allowed: SUBTITLE_FORMATS }), externalFiles: subtitles.externalFiles }),
-    hardwareDecoding: raw.hardwareDecoding,
-    capture: Object.freeze({ supported: capture.supported, appliesTransforms: capture.appliesTransforms }),
+    transforms: Object.freeze({ aspectModes: boundedUniqueStrings(transforms.aspectModes, { label: 'aspect modes', allowed: ASPECT_MODES }), rotation: transforms.rotation, flip: transforms.flip, crop: transforms.crop }),
+    hdr: Object.freeze({ passthrough: hdr.passthrough, toneMapping: hdr.toneMapping, algorithms: boundedUniqueStrings(hdr.algorithms, { label: 'tone mapping algorithms', allowed: TONE_MAPPING_ALGORITHMS }), targetPeakControl: hdr.targetPeakControl }),
+    statistics: Object.freeze({ basic: statistics.basic, decode: statistics.decode, hdr: statistics.hdr, timing: statistics.timing, cache: statistics.cache, gpu: statistics.gpu, maxUpdateHz }),
+    subtitles: Object.freeze({ embedded: subtitles.embedded, external: subtitles.external, ass: subtitles.ass, styles: subtitles.styles }),
+    hardwareDecoding: Object.freeze({ supported: hardwareDecoding.supported, selectable: hardwareDecoding.selectable, softwareFallback: hardwareDecoding.softwareFallback }),
+    capture: Object.freeze({ sourceFrame: capture.sourceFrame, displayedFrame: capture.displayedFrame }),
   });
 };
 

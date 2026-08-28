@@ -6,7 +6,7 @@ assert(source.includes('OnMouseClick') && source.includes('"pointer-button"') &&
 for(const field of ['"code"','"key"','"ctrl"','"alt"','"shift"','"meta"','"repeat"','"clickCount"'])assert(source.includes(field),`raw input must include ${field}`);
 assert(source.includes('key == Keys.F4')&&source.includes('return base.ProcessCmdKey'), 'system-reserved keys must stay with Windows');
 assert(source.includes('SetOption("sub-auto", "no")') && source.includes('SubtitleTracks'));
-for(const extension of ['.srt','.ass','.ssa','.vtt'])assert(source.includes(`extension == "${extension}"`));
+for(const extension of ['.srt','.ass','.ssa','.vtt'])assert(source.includes(`"${extension}"`));
 for(const command of ['subtitle-select','subtitle-visible','subtitle-delay','subtitle-style','subtitle-add'])assert(source.includes(`name == "${command}"`));
 assert(source.includes('stableId')&&source.includes('external-filename')&&source.includes('GetProperty("track-list/count")')&&!source.includes('GetProperty("track-list")'));
 assert(!source.includes('SubtitleLanguageMatches')&&!source.includes('subtitlePreferredLanguages')&&!source.includes('set-subtitle-defaults'));
@@ -14,7 +14,9 @@ assert(!source.includes('SetParent') && !source.includes('--parent-hwnd') && !so
 assert(source.includes('MaxFrameBytes = 256 * 1024') && source.includes('Encoding.UTF8.GetByteCount'));
 assert(source.includes('"video.transform"')&&source.includes('video-aspect-override')&&source.includes('video-rotate')&&source.includes('flipHorizontal'));
 assert(source.includes('"video.hdr-mode"')&&source.includes('target-colorspace-hint')&&source.includes('hdrDisplayAvailable'));
+assert(source.includes('"video.tone-mapping"')&&source.includes('target-peak')&&source.includes('bt.2390'));
 assert(source.includes('"statistics.level"')&&source.includes('statisticsInterval')&&source.includes('decoder-frame-drop-count'));
+for(const field of ['container','videoCodec','audioCodec','decoder','hardwareDecoder','hardwareDecoding','pixelFormat','bitDepth','colorPrimaries','transfer','colorMatrix','hdrFormat','sourceFps','displayFps','droppedFrames','delayedFrames','avSyncMs','cacheSeconds','cacheBytes','gpuApi','gpuAdapter','renderer','toneMapping'])assert(source.includes(`"${field}"`),`missing statistics field ${field}`);assert(source.includes('statisticsLevel == "detailed" ? 250 : 1000'),'plugin detailed statistics must be capped at 4 Hz');
 for(const marker of ['vd-lavc-software-fallback','audio-fallback-to-null','fflags=+genpts+igndts','HARDWARE_DECODE_FALLBACK','GPU_SAFE_MODE','TIMESTAMP_CACHE_RECOVERY','AUDIO_DISABLED_RECOVERY'])assert(source.includes(marker),`missing bounded recovery stage ${marker}`);
-assert(source.includes('if (Run("sub-add", sidecar, "auto") < 0) continue;'),'bad sidecar subtitles must be skipped');
+assert(!source.includes('Directory.GetFiles')&&!source.includes('DiscoverSidecars')&&!source.includes('LoadPendingSidecars'),'plugin must not scan the media directory');assert(source.includes('BAD_SUBTITLE_SKIPPED')&&source.includes('commandError'),'bad authorized subtitles must be skipped without terminating playback');assert(source.includes('AudioTracks')&&source.includes('"audio.track-select"')&&source.includes('"audio-tracks"'));assert(source.includes('"playback.frame-step"')&&source.includes('"playback.frame-back-step"'));
 console.log('libmpv backend v1 protocol contract tests passed.');

@@ -12,11 +12,12 @@ const [contribution] = parseMediaPlaybackBackendContributions(manifest);
 assert.equal(contribution.protocolVersion, 1);
 assert.equal(contribution.displayName, 'Fixture decoder'); assert.equal(contribution.backendVersion, '1.2.3');
 assert(contribution.probe.containers.includes('mp4') && contribution.probe.codecs.video.includes('hevc'));
-assert(contribution.features.transforms.includes('rotate') && contribution.features.hdr.modes.includes('hdr-passthrough'));
-assert.deepEqual(contribution.features.statistics, { levels: ['basic', 'detailed'], maxUpdateHz: 10 });
-assert.equal(contribution.features.capture.appliesTransforms, true);
+assert(contribution.features.transforms.rotation && contribution.features.hdr.passthrough && contribution.features.hdr.algorithms.includes('bt2390'));
+assert.equal(contribution.features.statistics.maxUpdateHz, 4);assert.equal(contribution.features.statistics.gpu,true);
+assert.equal(contribution.features.capture.displayedFrame, true);
 for (const schema of ['component-manifest-v2.schema.json', 'media-playback-backend-v1.schema.json', 'media-playback-backend-wire-v1.schema.json']) JSON.parse(fs.readFileSync(path.join(root, 'electron/contracts/schemas', schema), 'utf8'));
 assert.throws(()=>parseMediaPlaybackBackendContributions({runtimeContributions:[{...manifest.runtimeContributions[0],unknown:true}]}),/Unknown/);assert.throws(()=>parseMediaPlaybackBackendContributions({runtimeContributions:[{...manifest.runtimeContributions[0],backendVersion:'latest'}]}),/backendVersion/);
+assert.throws(()=>parseMediaPlaybackBackendContributions({runtimeContributions:[{...manifest.runtimeContributions[0],features:{...manifest.runtimeContributions[0].features,capture:{sourceFrame:false,displayedFrame:true}}}]}),/Exaggerated/);assert.throws(()=>parseMediaPlaybackBackendContributions({runtimeContributions:[{...manifest.runtimeContributions[0],features:{...manifest.runtimeContributions[0].features,statistics:{...manifest.runtimeContributions[0].features.statistics,maxUpdateHz:5}}}]}),/maxUpdateHz/);
 
 let now = 1000; const sent = [];
 const writer = createPlaybackEnvelopeWriter({ sessionId: 'session-fixture', direction: 'event', send: value => sent.push(value), now: () => now, maxHighFrequencyHz: 10 });

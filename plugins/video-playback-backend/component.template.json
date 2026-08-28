@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "video-playback-mpv",
-  "version": "26.8.28.1",
+  "version": "26.8.28.2",
   "name": "视频播放器",
   "description": "使用独立 libmpv 进程、硬件解码和预读缓存播放相机原始视频。",
   "platforms": ["win32"],
@@ -19,7 +19,7 @@
       "protocolVersion": 1,
       "backendId": "advanced-video",
       "displayName": "libmpv 高级视频后端",
-      "backendVersion": "1.1.0",
+      "backendVersion": "1.2.0",
       "transport": "media-playback-backend-v1",
       "priority": 80,
       "probe": {
@@ -31,12 +31,12 @@
         "extensions": [".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".m2ts", ".webm"]
       },
       "features": {
-        "transforms": ["source", "contain", "cover", "16:9", "4:3", "1:1", "rotate", "flip-horizontal", "flip-vertical"],
-        "hdr": { "modes": ["auto", "sdr", "hdr-passthrough", "tone-map"], "requiresHdrDisplay": true },
-        "statistics": { "levels": ["basic", "detailed"], "maxUpdateHz": 10 },
-        "subtitles": { "formats": ["vtt", "srt", "ass", "ssa"], "externalFiles": true },
-        "hardwareDecoding": true,
-        "capture": { "supported": true, "appliesTransforms": true }
+        "transforms": { "aspectModes": ["source", "contain", "cover", "16:9", "4:3", "1:1"], "rotation": true, "flip": true, "crop": true },
+        "hdr": { "passthrough": true, "toneMapping": true, "algorithms": ["auto", "bt2390", "reinhard", "mobius", "hable"], "targetPeakControl": true },
+        "statistics": { "basic": true, "decode": true, "hdr": true, "timing": true, "cache": true, "gpu": true, "maxUpdateHz": 4 },
+        "subtitles": { "embedded": true, "external": true, "ass": true, "styles": true },
+        "hardwareDecoding": { "supported": true, "selectable": true, "softwareFallback": true },
+        "capture": { "sourceFrame": true, "displayedFrame": true }
       }
     }
   ]

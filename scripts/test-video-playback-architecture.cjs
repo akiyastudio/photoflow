@@ -18,6 +18,6 @@ assert(!rendererSession.includes("'chromium' | 'component'") && !player.includes
 assert(nativeService.includes('playbackBroker.resolveRunConfigAsync') && !nativeService.includes('COMPONENT_ID'), 'native session service must resolve opaque backend ids through the broker');
 assert(!broker.includes('video-playback-mpv') && broker.includes('parseMediaPlaybackBackendContributions'), 'the broker must require a declared contribution instead of manufacturing a fixed legacy backend');
 assert(rendererSession.includes('languageMatches'), 'subtitle default selection policy must live in the application session');
-assert(nativeService.includes('mediaInputSessionService') && nativeService.includes('captureService') && nativeService.includes('nativeSurfaceService'), 'the native adapter must use generic host security capabilities');
+assert(nativeService.includes('mediaInputSessionService') && nativeService.includes('captureService') && nativeService.includes('nativeSurfaceService') && nativeService.includes('subtitleInputService.discover'), 'the native adapter must use generic host security and host-authorized subtitle capabilities');
 
 console.log('Video playback architecture ownership tests passed.');

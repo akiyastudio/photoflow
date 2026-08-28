@@ -1,13 +1,13 @@
 const { createPlaybackEnvelopeWriter, validatePlaybackEnvelope } = require('../contracts/media-playback-backend-v1.cjs');
 
 const LEGACY_COMMAND_TO_V1 = Object.freeze({
-  open: 'media.open', play: 'playback.play', pause: 'playback.pause', seek: 'playback.seek', volume: 'audio.volume', mute: 'audio.mute', speed: 'playback.speed', stop: 'playback.stop',
+  open: 'media.open', play: 'playback.play', pause: 'playback.pause', seek: 'playback.seek', 'frame-step':'playback.frame-step', 'frame-back-step':'playback.frame-back-step', volume: 'audio.volume', mute: 'audio.mute', 'audio-select':'audio.track-select', speed: 'playback.speed', stop: 'playback.stop',
   'subtitle-select': 'subtitles.select', 'subtitle-visible': 'subtitles.visible', 'subtitle-delay': 'subtitles.delay', 'subtitle-style': 'subtitles.style', 'subtitle-add': 'subtitles.add',
   screenshot: 'capture.stage', transform: 'video.transform', 'hdr-mode': 'video.hdr-mode', 'statistics-level': 'statistics.level', 'display-output': 'display.output',
 });
 const V1_EVENT_TO_LEGACY = Object.freeze({
   'runtime.ready': 'ready', 'surface.created': 'surface-created', 'state.changed': 'state', 'state.loading': 'loading', 'media.loaded': 'file-loaded', 'media.ended': 'ended',
-  'tracks.changed': 'subtitle-tracks', 'statistics.changed': 'statistics', 'input.raw': 'input', 'capture.completed': 'screenshot-result', diagnostic: 'diagnostic', fatal: 'fatal', error: 'error', terminated: 'stopped',
+  'tracks.changed': 'subtitle-tracks', 'audio-tracks.changed':'audio-tracks', 'statistics.changed': 'statistics', 'input.raw': 'input', 'capture.completed': 'screenshot-result', diagnostic: 'diagnostic', fatal: 'fatal', error: 'error', terminated: 'stopped',
 });
 const LEGACY_EVENT_TO_V1 = Object.freeze(Object.fromEntries(Object.entries(V1_EVENT_TO_LEGACY).map(([key, value]) => [value, key])));
 

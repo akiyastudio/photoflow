@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { startPlaybackSession } from '../src/platform/video-playback/playback-session.ts';
 
-const settings = { arrowKeyAction: 'seek', subtitlesEnabled: true, subtitlePreferredLanguages: ['zh'], subtitleSize: 55, subtitleStyle: 'standard' };
+const settings = { arrowKeyAction: 'seek', subtitlesEnabled: true, subtitlePreferredLanguages: ['zh'], subtitleSize: 55, subtitleStyle: 'standard', hdrMode:'tone-map',toneMapping:'bt2390',targetPeakNits:600,shortcuts:{} };
 const nextTurn = () => new Promise(resolve => setImmediate(resolve));
 const descriptor = backendId => ({ backendId, protocolVersion: 1, transport: 'native-process-v1', displayName: backendId, priority: 50, probe: { support: 'probably', basis: 'test' } });
 
@@ -72,13 +72,16 @@ const contextFor = (states = []) => ({
   const states = [];
   const firstTrack = { id: 'native-3', stableId: 'embedded:zh:dialog:srt:0', source: 'embedded', language: 'zh-CN', selected: true };
   const restoredTrack = { ...firstTrack, id: 'fallback-9', selected: false };
+  const firstAudio={id:'audio-1',stableId:'audio:zh:main:aac:0',language:'zh',codec:'aac',selected:true},restoredAudio={...firstAudio,id:'audio-8',selected:false};
   const first = makeBackend('vendor.primary', { startStates: [
     { type: 'subtitle-tracks', subtitleTracks: [firstTrack], subtitleTrackId: firstTrack.id, subtitleVisible: true, subtitleDelay: 1.25 },
     { type: 'state', time: 42, duration: 100, paused: true, volume: 37, muted: true, speed: 1.5, buffering: false },
+    {type:'audio-tracks',audioTracks:[firstAudio],audioTrackId:'audio-1'},
   ] });
   const fallback = makeBackend('vendor.fallback', { startStates: [
     { type: 'subtitle-tracks', subtitleTracks: [restoredTrack], subtitleTrackId: null, subtitleVisible: false, subtitleDelay: 0 },
     { type: 'state', time: 0, duration: 100, paused: false, volume: 100, muted: false, speed: 1, buffering: false },
+    {type:'audio-tracks',audioTracks:[restoredAudio],audioTrackId:null},
   ] });
   const session = await startPlaybackSession({ backends: [first, fallback], context: contextFor(states) });
   session.control({ action: 'seek', value: 51 });
@@ -94,11 +97,13 @@ const contextFor = (states = []) => ({
     { action: 'seek', value: 51 },
     { action: 'subtitle-style', fontSize: 55, style: 'standard' },
     { action: 'transform', transform: { aspectMode: 'contain', rotation: 0, flipHorizontal: false, flipVertical: false } },
-    { action: 'hdr-mode', hdrMode: 'auto' },
+    { action: 'hdr-mode', hdrMode: 'tone-map' },
+    {action:'tone-mapping',toneMapping:'bt2390',targetPeakNits:600},
     { action: 'statistics-level', statisticsLevel: 'off' },
     { action: 'subtitle-delay', value: 1.25 },
     { action: 'subtitle-select', value: 'fallback-9' },
     { action: 'subtitle-visible', value: true },
+    {action:'audio-select',value:'audio-8'},
   ], 'fallback must restore normalized product state in a paused-first order');
   assert.equal(states.at(-1).time, 51);
   assert.equal(states.at(-1).paused, true);
@@ -110,6 +115,7 @@ const contextFor = (states = []) => ({
   assert.equal(restoredSubtitleState.subtitleTrackId, 'fallback-9');
   assert.equal(restoredSubtitleState.subtitleVisible, true);
   assert.equal(restoredSubtitleState.subtitleDelay, 1.25);
+  const restoredAudioState=[...states].reverse().find(state=>state.type==='audio-tracks');assert.equal(restoredAudioState.audioTrackId,'audio-8');
   await session.close();
 }
 
@@ -131,9 +137,9 @@ const contextFor = (states = []) => ({
 {
   const first = makeBackend('manual.chromium'); const advanced = makeBackend('manual.advanced');
   const session = await startPlaybackSession({ backends: [first, advanced], context: contextFor() });
-  session.control({ action: 'seek', value: 24 }); session.control({ action: 'pause' }); session.control({ action: 'transform', transform: { aspectMode: '1:1', rotation: 270, flipHorizontal: true, flipVertical: false } });
+  session.control({ action: 'seek', value: 24 }); session.control({ action: 'pause' }); session.control({ action: 'transform', transform: { aspectMode: '1:1', rotation: 270, flipHorizontal: true, flipVertical: false, crop:{x:.1,y:.2,width:.7,height:.6} } });
   const switched = await session.switchBackend('manual.advanced'); assert.equal(switched.success, true); assert.equal(session.backendId, 'manual.advanced');
-  assert(advanced.calls.controls.some(item => item.action === 'seek' && item.value === 24)); assert(advanced.calls.controls.some(item => item.action === 'transform' && item.transform.rotation === 270));
+  assert(advanced.calls.controls.some(item => item.action === 'seek' && item.value === 24)); assert(advanced.calls.controls.some(item => item.action === 'transform' && item.transform.rotation === 270 && item.transform.crop.width === .7));
   assert.equal((await session.switchBackend('manual.chromium')).success, false, 'manual switching cannot create an automatic retry loop for an already attempted backend'); await session.close();
 }
 
@@ -149,7 +155,7 @@ const contextFor = (states = []) => ({
   await nextTurn();
   assert.deepEqual([first.calls.starts, second.calls.starts], [1, 1], 'each descriptor may be attempted only once per generation');
   assert.equal(states.at(-1)?.type, 'fatal');
-  assert.equal(states.at(-1)?.errorCode, 'ALL_BACKENDS_FAILED'); assert.deepEqual(states.at(-1)?.attempts.map(item => item.backendId), ['loop.a','loop.a','loop.b','loop.b']);
+  assert.equal(states.at(-1)?.errorCode, 'BACKEND_UNAVAILABLE'); assert.equal(states.at(-1)?.suggestedFallback,'system-player'); assert.deepEqual(states.at(-1)?.attempts.map(item => item.backendId), ['loop.a','loop.a','loop.b','loop.b']);
   await session.close();
 }
 
