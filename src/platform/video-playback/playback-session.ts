@@ -1,11 +1,16 @@
 import type { VideoPlaybackBackendDescriptor, VideoPlaybackSettings, VideoPlayerState, VideoSubtitleTrack } from '../../types';
+import { chromiumVideoStyle, DEFAULT_VIDEO_TRANSFORM, drawTransformedVideoFrame, normalizeVideoTransform, transformedFrameSize } from '../../contracts/video-playback.ts';
+import type { VideoHdrMode, VideoStatisticsLevel, VideoTransform } from '../../contracts/video-playback.ts';
 
 export type PlaybackBackendId = string;
 export type PlaybackControl = {
-  action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay' | 'subtitle-style';
+  action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay' | 'subtitle-style' | 'transform' | 'hdr-mode' | 'statistics-level';
   value?: number | boolean | string;
   fontSize?: VideoPlaybackSettings['subtitleSize'];
   style?: VideoPlaybackSettings['subtitleStyle'];
+  transform?: VideoTransform;
+  hdrMode?: VideoHdrMode;
+  statisticsLevel?: VideoStatisticsLevel;
 };
 
 export type PlaybackBounds = {
@@ -22,10 +27,12 @@ export type PlaybackBounds = {
 export interface PlaybackSession {
   readonly id: string;
   readonly backendId: PlaybackBackendId;
+  readonly availableBackends?: VideoPlaybackBackendDescriptor[];
   control(request: PlaybackControl): void;
   setBounds(bounds: PlaybackBounds): void;
   capture(): Promise<{ success: boolean; path?: string; error?: string }>;
   chooseSubtitle(): Promise<{ success: boolean; cancelled?: boolean; path?: string; error?: string }>;
+  switchBackend?(backendId: string): Promise<{ success: boolean; error?: string }>;
   close(): Promise<void>;
 }
 
@@ -42,6 +49,9 @@ export type PlaybackSessionSnapshot = {
   speed: number;
   subtitle: { mode: 'default' | 'off' | 'track'; stableId?: string; visible: boolean; delay: number };
   subtitleStyle: { fontSize: VideoPlaybackSettings['subtitleSize']; style: VideoPlaybackSettings['subtitleStyle'] };
+  transform: VideoTransform;
+  hdrMode: VideoHdrMode;
+  statisticsLevel: VideoStatisticsLevel;
 };
 
 type ElectronApi = Window['electronAPI'];
@@ -88,6 +98,9 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
     let closed = false;
     let loaded = false;
     let runtimeFailureReported = false;
+    let transform = DEFAULT_VIDEO_TRANSFORM;
+    let statisticsLevel: VideoStatisticsLevel = 'off';
+    let statisticsTimer = 0;
     video.src = source.mediaUrl;
     video.poster = '';
     video.preload = 'auto';
@@ -114,6 +127,21 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
       if (closed || !loaded || runtimeFailureReported) return;
       runtimeFailureReported = true;
       context.onRuntimeFailure(video.error?.message || 'Chromium 视频解码失败');
+    };
+    const emitStatistics = () => {
+      if (statisticsLevel === 'off' || closed) return;
+      const quality = typeof video.getVideoPlaybackQuality === 'function' ? video.getVideoPlaybackQuality() : null;
+      context.onState(stateEnvelope(context, 'statistics', { statistics: {
+        level: statisticsLevel === 'detailed' ? 'detailed' : 'basic',
+        framesDecoded: quality?.totalVideoFrames,
+        droppedFrames: quality?.droppedVideoFrames,
+        hardwareDecoding: undefined,
+        output: 'Chromium HTMLVideoElement',
+      } }));
+    };
+    const updateStatisticsTimer = () => {
+      globalThis.clearInterval(statisticsTimer);
+      statisticsTimer = statisticsLevel === 'off' ? 0 : globalThis.setInterval(emitStatistics, statisticsLevel === 'detailed' ? 250 : 1000);
     };
     const events: Array<[keyof HTMLMediaElementEventMap, EventListener]> = [
       ['timeupdate', emitState as EventListener], ['durationchange', emitState as EventListener],
@@ -162,15 +190,19 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
         else if (request.action === 'volume') video.volume = Math.max(0, Math.min(1, (Number(request.value) || 0) / 100));
         else if (request.action === 'mute') video.muted = Boolean(request.value);
         else if (request.action === 'speed') video.playbackRate = Math.max(0.25, Math.min(4, Number(request.value) || 1));
+        else if (request.action === 'transform') { transform = normalizeVideoTransform(request.transform); Object.assign(video.style, chromiumVideoStyle(transform)); }
+        else if (request.action === 'statistics-level') { statisticsLevel = request.statisticsLevel || 'off'; updateStatisticsTimer(); emitStatistics(); }
         else if (request.action === 'stop') video.pause();
       },
       setBounds: () => undefined,
       capture: async () => {
         if (!video.videoWidth || !video.videoHeight) return { success: false, error: '当前视频帧尚未就绪' };
         const canvas = document.createElement('canvas');
-        canvas.width = video.videoWidth;
-        canvas.height = video.videoHeight;
-        canvas.getContext('2d')?.drawImage(video, 0, 0);
+        const size = transformedFrameSize(video.videoWidth, video.videoHeight, transform);
+        canvas.width = size.width; canvas.height = size.height;
+        const drawing = canvas.getContext('2d');
+        if (!drawing) return { success: false, error: '无法创建视频截图画布' };
+        drawTransformedVideoFrame(drawing, video, transform);
         const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
         if (!blob) return { success: false, error: '无法生成当前视频帧' };
         return context.electronApi.publishVideoPlayerFrame(context.filePath, new Uint8Array(await blob.arrayBuffer()));
@@ -179,6 +211,7 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
       close: async () => {
         if (closed) return;
         closed = true;
+        globalThis.clearInterval(statisticsTimer);
         events.forEach(([name, listener]) => video.removeEventListener(name, listener));
         video.pause();
         video.removeAttribute('src');
@@ -289,9 +322,10 @@ const initialSnapshot = (settings: VideoPlaybackSettings): PlaybackSessionSnapsh
   time: 0, paused: false, volume: 100, muted: false, speed: 1,
   subtitle: { mode: 'default', visible: settings.subtitlesEnabled === true, delay: 0 },
   subtitleStyle: { fontSize: settings.subtitleSize, style: settings.subtitleStyle },
+  transform: { ...DEFAULT_VIDEO_TRANSFORM }, hdrMode: settings.hdrMode || 'auto', statisticsLevel: 'off',
 });
 const cloneSnapshot = (value: PlaybackSessionSnapshot): PlaybackSessionSnapshot => ({
-  ...value, subtitle: { ...value.subtitle }, subtitleStyle: { ...value.subtitleStyle },
+  ...value, subtitle: { ...value.subtitle }, subtitleStyle: { ...value.subtitleStyle }, transform: { ...value.transform },
 });
 
 const selectedStableId = (state: VideoPlayerState) => state.subtitleTracks?.find(track => track.id === String(state.subtitleTrackId ?? '') || track.selected)?.stableId;
@@ -363,13 +397,17 @@ export const startPlaybackSession = async ({ backends, context }: {
     session.control({ action: 'speed', value: value.speed });
     session.control({ action: 'seek', value: value.time });
     session.control({ action: 'subtitle-style', fontSize: value.subtitleStyle.fontSize, style: value.subtitleStyle.style });
+    session.control({ action: 'transform', transform: value.transform });
+    session.control({ action: 'hdr-mode', hdrMode: value.hdrMode });
+    session.control({ action: 'statistics-level', statisticsLevel: value.statisticsLevel });
     applySubtitleSnapshot(session, currentTracks, value);
     if (!value.paused) session.control({ action: 'play' });
   };
 
-  const startNext = async (): Promise<PlaybackSession> => {
+  const startNext = async (preferredBackendId = ''): Promise<PlaybackSession> => {
     if (closed) throw new Error('视频播放会话已经关闭');
-    const backend = backends.find(candidate => !attempted.has(candidate.descriptor.backendId));
+    const backend = (preferredBackendId ? backends.find(candidate => candidate.descriptor.backendId === preferredBackendId && !attempted.has(candidate.descriptor.backendId)) : null)
+      || backends.find(candidate => !attempted.has(candidate.descriptor.backendId));
     if (!backend) throw new Error(lastError || 'Chromium 与高级视频解码组件均无法播放此视频');
     attempted.add(backend.descriptor.backendId);
     currentTracks = [];
@@ -391,7 +429,7 @@ export const startPlaybackSession = async ({ backends, context }: {
       return startNext();
     }
   };
-  const switchAfterFailure = async (error: string) => {
+  const switchAfterFailure = async (error: string, preferredBackendId = '') => {
     if (closed || switching) return;
     switching = true;
     suppressBackendState = true;
@@ -402,7 +440,7 @@ export const startPlaybackSession = async ({ backends, context }: {
     await failed?.close().catch(() => undefined);
     if (!closed) context.onState(stateEnvelope(context, 'loading', { buffering: true, subtitleTracks: [], subtitleTrackId: null, subtitleVisible: false }));
     try {
-      const next = await startNext();
+      const next = await startNext(preferredBackendId);
       if (closed) {
         await next.close();
         return;
@@ -426,8 +464,8 @@ export const startPlaybackSession = async ({ backends, context }: {
       switching = false;
     }
   };
-  const beginSwitch = (error: string) => {
-    if (!fallbackPromise) fallbackPromise = switchAfterFailure(error).finally(() => { fallbackPromise = null; });
+  const beginSwitch = (error: string, preferredBackendId = '') => {
+    if (!fallbackPromise) fallbackPromise = switchAfterFailure(error, preferredBackendId).finally(() => { fallbackPromise = null; });
     return fallbackPromise;
   };
 
@@ -452,6 +490,9 @@ export const startPlaybackSession = async ({ backends, context }: {
         const track = currentTracks.find(item => item.id === String(request.value || ''));
         snapshot.subtitle = track ? { ...snapshot.subtitle, mode: 'track', stableId: track.stableId } : { ...snapshot.subtitle, mode: 'off', stableId: undefined, visible: false };
       } else if (request.action === 'subtitle-style') snapshot.subtitleStyle = { fontSize: request.fontSize ?? snapshot.subtitleStyle.fontSize, style: request.style ?? snapshot.subtitleStyle.style };
+      else if (request.action === 'transform') snapshot.transform = normalizeVideoTransform(request.transform);
+      else if (request.action === 'hdr-mode') snapshot.hdrMode = request.hdrMode || 'auto';
+      else if (request.action === 'statistics-level') snapshot.statisticsLevel = request.statisticsLevel || 'off';
       current?.control(request);
     },
     setBounds: bounds => {
@@ -460,6 +501,15 @@ export const startPlaybackSession = async ({ backends, context }: {
     },
     capture: () => current?.capture() || Promise.resolve({ success: false, error: '视频播放会话不存在' }),
     chooseSubtitle: () => current?.chooseSubtitle() || Promise.resolve({ success: false, error: '视频播放会话不存在' }),
+    availableBackends: backends.map(item => item.descriptor),
+    switchBackend: async backendId => {
+      if (closed) return { success: false, error: '视频播放会话已经关闭' };
+      if (current?.backendId === backendId) return { success: true };
+      if (!backends.some(item => item.descriptor.backendId === backendId)) return { success: false, error: '播放后端不存在' };
+      if (attempted.has(backendId)) return { success: false, error: '当前媒体已尝试过此后端；请重新打开视频后再试' };
+      await beginSwitch('用户请求切换播放后端', backendId);
+      return current?.backendId === backendId ? { success: true } : { success: false, error: lastError || '无法切换播放后端' };
+    },
     close: async () => {
       closed = true;
       const active = current;

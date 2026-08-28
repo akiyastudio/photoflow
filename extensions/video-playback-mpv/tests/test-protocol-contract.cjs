@@ -1,0 +1,13 @@
+const assert = require('node:assert/strict'); const fs = require('node:fs'); const path = require('node:path');
+const source = fs.readFileSync(path.join(__dirname, '..', 'AdvancedVideoDecoder.cs'), 'utf8');
+assert(source.includes('media-playback-backend-v1') && source.includes('protocolVersion') && source.includes('commandSequence') && source.includes('eventSequence'));
+assert(source.includes('"media.open"') && source.includes('"playback.seek"') && source.includes('"capture.stage"'));
+assert(source.includes('OnMouseClick') && source.includes('"pointer-button"') && !source.includes('TogglePause'));
+assert(source.includes('SetOption("sub-auto", "no")') && source.includes('SubtitleTracks'));
+for(const extension of ['.srt','.ass','.ssa','.vtt'])assert(source.includes(`extension == "${extension}"`));
+for(const command of ['subtitle-select','subtitle-visible','subtitle-delay','subtitle-style','subtitle-add'])assert(source.includes(`name == "${command}"`));
+assert(source.includes('stableId')&&source.includes('external-filename')&&source.includes('GetProperty("track-list/count")')&&!source.includes('GetProperty("track-list")'));
+assert(!source.includes('SubtitleLanguageMatches')&&!source.includes('subtitlePreferredLanguages')&&!source.includes('set-subtitle-defaults'));
+assert(!source.includes('SetParent') && !source.includes('--parent-hwnd') && !source.includes('set-bounds') && source.includes('"surface-created"'));
+assert(source.includes('MaxFrameBytes = 256 * 1024') && source.includes('Encoding.UTF8.GetByteCount'));
+console.log('libmpv backend v1 protocol contract tests passed.');

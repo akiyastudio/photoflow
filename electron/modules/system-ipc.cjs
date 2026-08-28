@@ -699,6 +699,7 @@ const registerSystemIpc = context => {
       const capabilityBarrier = componentCapabilityBroker.blockComponent(componentId);
       try {
       componentViewManager?.closeComponent?.(componentId);
+      await processSupervisor?.stopWhere?.(status => status.owner?.componentId === componentId, 'component-uninstall');
       await componentServiceManager?.stop?.(componentId, 'component-uninstall');
       abortComponentNetworkRequests?.(componentId);
       await capabilityBarrier.drain({ timeoutMs: 7500 });

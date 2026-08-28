@@ -18,7 +18,9 @@
       "type": "media.playbackBackend",
       "protocolVersion": 1,
       "backendId": "advanced-video",
-      "transport": "native-process-v1",
+      "displayName": "libmpv 高级视频后端",
+      "backendVersion": "1.0.0",
+      "transport": "media-playback-backend-v1",
       "priority": 80,
       "probe": {
         "containers": ["avi", "matroska", "mov", "mp4", "mpegts", "webm"],

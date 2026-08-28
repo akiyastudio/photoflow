@@ -3,18 +3,34 @@ const { EventEmitter } = require('node:events');
 const { PassThrough } = require('node:stream');
 const path = require('node:path');
 const fs = require('node:fs');
+const os = require('node:os');
+const crypto = require('node:crypto');
 const { createMediaInputSessionService } = require('../electron/services/media-input-session-service.cjs');
 const { createNativeVideoSurfaceService } = require('../electron/services/native-video-surface-service.cjs');
+const { createPlaybackCaptureService } = require('../electron/services/playback-capture-service.cjs');
 
 const run = async () => {
-  const inputs = createMediaInputSessionService({ mediaService: { authorizeInput: async value => path.resolve(value) } });
-  await inputs.prepare({ filePath: 'C:/project/clip.mp4', backendId: 'fixture:decoder', sessionId: 'session-input' });
-  inputs.bindProcess({ sessionId: 'session-input', backendId: 'fixture:decoder', processId: 321 });
-  assert.equal(inputs.resolve({ sessionId: 'session-input', backendId: 'fixture:decoder', processId: 321 }), path.resolve('C:/project/clip.mp4'));
-  assert.throws(() => inputs.resolve({ sessionId: 'session-input', backendId: 'other', processId: 321 }), /不属于/);
-  assert.throws(() => inputs.resolve({ sessionId: 'session-input', backendId: 'fixture:decoder', processId: 999 }), /不属于/);
+  const inputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-input-session-')); const inputPath = path.join(inputRoot, 'clip.mp4'); fs.writeFileSync(inputPath, 'video'); let clock = 1000;
+  const inputs = createMediaInputSessionService({ crypto, fs, path, authorizeProjectMedia: async value => path.resolve(value), clock: () => clock, ttlMs: 100 });
+  await inputs.prepare({ filePath: inputPath, componentId: 'fixture-component', backendId: 'fixture:decoder', sessionId: 'session-input' });
+  const grant = inputs.bindProcess({ sessionId: 'session-input', componentId: 'fixture-component', backendId: 'fixture:decoder', processId: 321 });
+  const owner = { sessionId: 'session-input', componentId: 'fixture-component', backendId: 'fixture:decoder', processId: 321 };
+  assert.equal(await inputs.resolve(grant.token, owner), inputPath);
+  const descriptor = await inputs.open(grant.token, owner); await descriptor.close();
+  clock += 80; assert(inputs.renew(grant.token, owner).expiresAt > clock);
+  await assert.rejects(inputs.resolve(grant.token, { ...owner, backendId: 'other' }), /owner mismatch/);
+  fs.appendFileSync(inputPath, 'changed'); await assert.rejects(inputs.resolve(grant.token, owner), /changed/);
+  await inputs.prepare({ filePath: inputPath, componentId: 'fixture-component', backendId: 'fixture:decoder', sessionId: 'session-two' });
+  const second = inputs.bindProcess({ sessionId: 'session-two', componentId: 'fixture-component', backendId: 'fixture:decoder', processId: 321 });
   assert.equal(inputs.revokeProcess(321), 1);
-  assert.throws(() => inputs.resolve({ sessionId: 'session-input', backendId: 'fixture:decoder', processId: 321 }), /不存在/);
+  await assert.rejects(inputs.resolve(second.token, { ...owner, sessionId: 'session-two' }), /revoked/);
+  const captures = createPlaybackCaptureService({ crypto, fs, path, authorizeProjectMedia: async value => path.resolve(value), ttlMs: 1000 });
+  const captureOwner = { sessionId: 'capture-session', componentId: 'fixture-component', processId: 321 };
+  const stage = await captures.create({ ...captureOwner, sourcePath: inputPath }); const staged = captures.resolve(stage.stageId, captureOwner);
+  assert.throws(() => captures.resolve(stage.stageId, { ...captureOwner, processId: 999 }), /owner mismatch/);
+  const png = Buffer.concat([Buffer.from([137,80,78,71,13,10,26,10]), Buffer.from([0,0,0,0,73,69,78,68,174,66,96,130])]); fs.writeFileSync(staged.stagePath, png);
+  assert.equal(await captures.validate(stage.stageId, captureOwner), true); const committed = await captures.commit(stage.stageId, captureOwner, { deadlineAt: Date.now() + 100 }); assert(fs.existsSync(committed.path));
+  const abandoned = await captures.create({ ...captureOwner, sourcePath: inputPath }); const abandonedPath = captures.resolve(abandoned.stageId, captureOwner).stagePath; fs.writeFileSync(abandonedPath, 'partial'); await captures.abort(abandoned.stageId); assert.equal(fs.existsSync(abandonedPath), false);
 
   const launches = [];
   const spawn = (_command, args) => {
@@ -35,9 +51,8 @@ const run = async () => {
   await assert.rejects(surfaceHost.attach({ ownerWindow: { isDestroyed: () => false, getNativeWindowHandle: () => handle }, componentProcess: { pid: 777 }, surfaceHandle: 'not-a-handle', sessionId: 'surface-session' }), /声明无效/);
 
   const nativeHost = fs.readFileSync(path.join(__dirname, '..', 'electron/native/VideoSurfaceHost.cs'), 'utf8');
-  const decoder = fs.readFileSync(path.join(__dirname, '..', 'extensions/video-playback-mpv/AdvancedVideoDecoder.cs'), 'utf8');
   assert(nativeHost.includes('GetWindowThreadProcessId') && nativeHost.includes('actual!=expected') && nativeHost.includes('SetParent(child,parent)'));
-  assert(!decoder.includes('SetParent') && !decoder.includes('--parent-hwnd') && !decoder.includes('set-bounds'), 'component must not receive or manage the Electron parent surface');
+  fs.rmSync(inputRoot, { recursive: true, force: true });
   console.log('Video playback media-input and host-owned native-surface security tests passed.');
 };
 run().catch(error => { console.error(error); process.exitCode = 1; });

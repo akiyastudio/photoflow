@@ -337,6 +337,7 @@ const App: React.FC = () => {
               subtitlePreferredLanguages: Array.isArray(fileConfig.videoPlayback?.subtitlePreferredLanguages) ? fileConfig.videoPlayback.subtitlePreferredLanguages.map(value => String(value).trim().toLowerCase()).filter(Boolean).slice(0, 8) : ['zh', 'chi', 'zho'],
               subtitleSize: normalizeSubtitleFontSize(fileConfig.videoPlayback?.subtitleSize),
               subtitleStyle: fileConfig.videoPlayback?.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard',
+              hdrMode: ['sdr', 'hdr-passthrough', 'tone-map'].includes(String(fileConfig.videoPlayback?.hdrMode)) ? fileConfig.videoPlayback!.hdrMode : 'auto',
             };
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;

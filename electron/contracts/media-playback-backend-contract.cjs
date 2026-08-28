@@ -1,6 +1,7 @@
 const PLAYBACK_BACKEND_CONTRIBUTION_TYPE = 'media.playbackBackend';
 const PLAYBACK_BACKEND_PROTOCOL_VERSION = 1;
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
+const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 const EXTENSION = /^\.[a-z0-9]{1,12}$/;
 const MEDIA_TOKEN = /^[a-z0-9][a-z0-9.+_-]{0,63}$/i;
 const HDR_MODES = new Set(['auto', 'sdr', 'hdr-passthrough', 'tone-map']);
@@ -44,12 +45,14 @@ const parseMediaPlaybackBackendContributions = manifest => {
   const values = Array.isArray(manifest?.runtimeContributions) ? manifest.runtimeContributions : [];
   const seen = new Set();
   return values.filter(value => value?.type === PLAYBACK_BACKEND_CONTRIBUTION_TYPE).map(value => {
-    exactObject(value, ['type', 'protocolVersion', 'backendId', 'transport', 'priority', 'probe', 'features'], 'contribution');
+    exactObject(value, ['type', 'protocolVersion', 'backendId', 'displayName', 'backendVersion', 'transport', 'priority', 'probe', 'features'], 'contribution');
     if (Number(value.protocolVersion) !== PLAYBACK_BACKEND_PROTOCOL_VERSION) throw new Error(`Unsupported media playback backend protocol: ${value.protocolVersion}`);
     const backendId = String(value.backendId || '');
     if (!IDENTIFIER.test(backendId) || seen.has(backendId)) throw new Error('Invalid or duplicate media playback backendId');
     seen.add(backendId);
-    if (value.transport !== 'native-process-v1') throw new Error(`Unsupported media playback backend transport: ${value.transport}`);
+    const displayName = String(value.displayName || '').trim(); if (!displayName || displayName.length > 120) throw new Error('Invalid media playback backend displayName');
+    const backendVersion = String(value.backendVersion || ''); if (!SEMVER.test(backendVersion)) throw new Error('Invalid media playback backend backendVersion');
+    if (value.transport !== 'media-playback-backend-v1') throw new Error(`Unsupported media playback backend transport: ${value.transport}`);
     const priority = Number(value.priority);
     if (!Number.isInteger(priority) || priority < -1000 || priority > 1000) throw new Error('Invalid media playback backend priority');
     const probe = exactObject(value.probe, ['containers', 'codecs', 'extensions'], 'probe');
@@ -58,6 +61,8 @@ const parseMediaPlaybackBackendContributions = manifest => {
       type: PLAYBACK_BACKEND_CONTRIBUTION_TYPE,
       protocolVersion: PLAYBACK_BACKEND_PROTOCOL_VERSION,
       backendId,
+      displayName,
+      backendVersion,
       transport: value.transport,
       priority,
       probe: Object.freeze({

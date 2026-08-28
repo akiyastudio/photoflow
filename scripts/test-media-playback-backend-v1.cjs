@@ -3,16 +3,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { parseMediaPlaybackBackendContributions } = require('../electron/contracts/media-playback-backend-contract.cjs');
 const { MAX_FRAME_BYTES, PROTOCOL, createPlaybackEnvelopeWriter, validatePlaybackEnvelope } = require('../electron/contracts/media-playback-backend-v1.cjs');
+const { createMediaPlaybackProcessAdapter } = require('../electron/services/media-playback-process-adapter.cjs');
+const { cleanPlaybackDiagnostics } = require('../electron/contracts/playback-diagnostics.cjs');
 
 const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'extensions/video-playback-mpv/component.template.json'), 'utf8'));
 const [contribution] = parseMediaPlaybackBackendContributions(manifest);
 assert.equal(contribution.protocolVersion, 1);
+assert.equal(contribution.displayName, 'libmpv 高级视频后端'); assert.equal(contribution.backendVersion, '1.0.0');
 assert(contribution.probe.containers.includes('mp4') && contribution.probe.codecs.video.includes('hevc'));
 assert(contribution.features.transforms.includes('rotate') && contribution.features.hdr.modes.includes('hdr-passthrough'));
 assert.deepEqual(contribution.features.statistics, { levels: ['basic', 'detailed'], maxUpdateHz: 10 });
 assert.equal(contribution.features.capture.appliesTransforms, true);
-for (const schema of ['media-playback-backend-v1.schema.json', 'media-playback-backend-wire-v1.schema.json']) JSON.parse(fs.readFileSync(path.join(root, 'electron/contracts/schemas', schema), 'utf8'));
+for (const schema of ['component-manifest-v2.schema.json', 'media-playback-backend-v1.schema.json', 'media-playback-backend-wire-v1.schema.json']) JSON.parse(fs.readFileSync(path.join(root, 'electron/contracts/schemas', schema), 'utf8'));
+assert.throws(()=>parseMediaPlaybackBackendContributions({runtimeContributions:[{...manifest.runtimeContributions[0],unknown:true}]}),/Unknown/);assert.throws(()=>parseMediaPlaybackBackendContributions({runtimeContributions:[{...manifest.runtimeContributions[0],backendVersion:'latest'}]}),/backendVersion/);
 
 let now = 1000; const sent = [];
 const writer = createPlaybackEnvelopeWriter({ sessionId: 'session-fixture', direction: 'event', send: value => sent.push(value), now: () => now, maxHighFrequencyHz: 10 });
@@ -33,5 +37,7 @@ writer.close();
 assert.throws(() => writer.emit('state', {}), /closed/);
 receiveState.closed = true;
 assert.throws(() => validatePlaybackEnvelope(sent[1], receiveState, { direction: 'event', now: sent[1].timestamp }), /closed/);
+const processLines=[];const adapter=createMediaPlaybackProcessAdapter({sessionId:'adapter-session',writeLine:line=>processLines.push(JSON.parse(line)),now:()=>2000});adapter.sendLegacy('open',{path:'C:/media.mp4'});assert.equal(processLines[0].event,'command.media.open');const received=adapter.receiveLine(JSON.stringify({protocol:PROTOCOL,protocolVersion:1,sessionId:'adapter-session',sequence:1,timestamp:2000,event:'event.runtime.ready',payload:{}}));assert.equal(received.type,'ready');adapter.close();assert.throws(()=>adapter.sendLegacy('play'),/closed/);
+assert.deepEqual(cleanPlaybackDiagnostics({code:'GPU_DEVICE_LOST',severity:'warning',phase:'render',recoverable:true}),{code:'GPU_DEVICE_LOST',severity:'warning',phase:'render',recoverable:true});assert.throws(()=>cleanPlaybackDiagnostics({code:'X',severity:'info',environment:{PATH:'secret'}}),/unsupported/);
 
 console.log('Media playback backend v1 manifest and wire protocol tests passed.');

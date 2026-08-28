@@ -1,6 +1,6 @@
 const { StringDecoder } = require('string_decoder');
-const fs = require('fs');
-const { createPlaybackEnvelopeWriter, validatePlaybackEnvelope } = require('../contracts/media-playback-backend-v1.cjs');
+const { createMediaPlaybackProcessAdapter } = require('./media-playback-process-adapter.cjs');
+const { cleanPlaybackDiagnostics } = require('../contracts/playback-diagnostics.cjs');
 
 const START_TIMEOUT_MS = 8000;
 const SCREENSHOT_TIMEOUT_MS = 8000;
@@ -13,15 +13,14 @@ const normalizeSubtitleFontSize = value => {
 };
 
 const createAdvancedVideoService = ({
-  BrowserWindow, crypto, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor = null, spawn, writeLog,
-  fileSystem = fs, screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS,
+  BrowserWindow, captureService, crypto, displayOutputService = null, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor = null, spawn, writeLog,
+  screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS,
 }) => {
   const sessions = new Map();
   const sessionsByPlayer = new Map();
   const launches = new Map();
 
   const playerKey = (senderId, playerId) => `${senderId}:${playerId}`;
-  const unlinkScreenshotTemporary = pending => fileSystem.promises.unlink(pending.temporaryPath).catch(() => undefined);
   const rejectPendingScreenshot = (session, requestId, pending, error, allowPublishing = false) => {
     if (session.pendingScreenshots.get(requestId) !== pending) return;
     if (pending.phase === 'publishing' && !allowPublishing) return;
@@ -29,42 +28,14 @@ const createAdvancedVideoService = ({
     clearTimeout(pending.timer);
     pending.phase = 'settled';
     pending.cancelled = true;
-    void unlinkScreenshotTemporary(pending).finally(() => pending.reject(error));
+    void captureService.abort(pending.stageId).finally(() => pending.reject(error));
   };
-  const isCompletePng = async filePath => {
-    let handle;
-    try {
-      const stat = await fileSystem.promises.stat(filePath);
-      if (!stat.isFile() || stat.size < 20) return false;
-      handle = await fileSystem.promises.open(filePath, 'r');
-      const signature = Buffer.alloc(8);
-      const trailer = Buffer.alloc(12);
-      await handle.read(signature, 0, signature.length, 0);
-      await handle.read(trailer, 0, trailer.length, stat.size - trailer.length);
-      return signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-        && trailer.readUInt32BE(0) === 0 && trailer.subarray(4, 8).toString('ascii') === 'IEND';
-    } catch {
-      return false;
-    } finally {
-      await handle?.close().catch(() => undefined);
-    }
-  };
-  const publishScreenshot = async pending => {
-    while (!pending.cancelled && Date.now() < pending.deadlineAt) {
-      if (await isCompletePng(pending.temporaryPath)) {
-        if (pending.cancelled || pending.phase !== 'waiting') throw new Error('视频截图发布已取消');
-        // This synchronous state transition is the commit boundary. Once the
-        // same-directory rename has started, timeout/stop must not report a
-        // failure that could be followed by a visible public file.
-        pending.phase = 'publishing';
-        clearTimeout(pending.timer);
-        await fileSystem.promises.rename(pending.temporaryPath, pending.finalPath);
-        return pending.finalPath;
-      }
-      await new Promise(resolve => setTimeout(resolve, screenshotProbeMs));
-    }
-    if (pending.cancelled) throw new Error('视频截图发布已取消');
-    throw new Error('视频截图文件在超时前未完整写入');
+  const captureOwner = session => ({ sessionId: session.id, componentId: session.componentId, processId: session.child.pid });
+  const publishScreenshot = async (session, pending) => {
+    if (pending.cancelled || pending.phase !== 'waiting') throw new Error('视频截图发布已取消');
+    pending.phase = 'publishing'; clearTimeout(pending.timer);
+    const result = await captureService.commit(pending.stageId, captureOwner(session), { deadlineAt: pending.deadlineAt, probeMs: screenshotProbeMs });
+    return result.path;
   };
   const removeSession = session => {
     sessions.delete(session.id);
@@ -86,7 +57,7 @@ const createAdvancedVideoService = ({
     if (!session || session.stopped || !session.child.stdin.writable) return false;
     try {
       const { command, ...payload } = value;
-      session.commandWriter.emit(command, payload);
+      session.processAdapter.sendLegacy(command, payload);
       return true;
     } catch (error) {
       writeLog('warn', 'Unable to control advanced video decoder', { sessionId: session.id, error: error.message || String(error) });
@@ -100,8 +71,7 @@ const createAdvancedVideoService = ({
     removeSession(session);
     emit(session, { type: 'stopped' });
     session.stopped = true;
-    session.eventState.closed = true;
-    session.commandWriter?.close();
+    session.processAdapter?.close();
     session.surfaceController?.close();
     mediaInputSessionService.revoke(session.id);
     if (session.rejectReady) {
@@ -152,27 +122,36 @@ const createAdvancedVideoService = ({
       if (!ownerWindow || ownerWindow.isDestroyed()) throw new Error('照片流窗口已经关闭');
       const backendId = String(requestedBackendId || playbackBroker.defaultBackendId());
       if (!backendId) throw new Error('没有可用的高级视频播放后端');
+      const backendOwner = playbackBroker.ownerForBackend?.(backendId) || { componentId: 'playback-backend' };
       const id = crypto.randomUUID();
       inputSessionId = id;
-      await mediaInputSessionService.prepare({ filePath, backendId, sessionId: id });
+      await mediaInputSessionService.prepare({ filePath, componentId: backendOwner.componentId, backendId, sessionId: id });
       assertCurrentLaunch();
       const runConfig = await playbackBroker.resolveRunConfigAsync(backendId, ['--session-id', id]);
       assertCurrentLaunch();
       const managedProcess = processSupervisor?.launch({
         id: `component:advanced-video:${id}`,
-        kind: 'optional-component',
+        kind: 'media-playback-backend',
+        protocol: 'media-playback-backend-v1',
+        owner: { componentId: backendOwner.componentId, playbackSessionId: id, backendId },
         command: runConfig.command,
         args: runConfig.args,
         options: { cwd: path.dirname(runConfig.command), stdio: ['pipe', 'pipe', 'pipe'] },
         health: { startupTimeoutMs: START_TIMEOUT_MS },
+        onExitCleanup: ({ child: exitedChild }) => {
+          mediaInputSessionService.revokePlaybackSession?.(id);
+          captureService.abortSession?.(id);
+          if (exitedChild?.pid) { mediaInputSessionService.revokeProcess?.(exitedChild.pid); captureService.abortProcess?.(exitedChild.pid); }
+        },
         ephemeral: true,
       });
       const child = managedProcess?.child || spawn(runConfig.command, runConfig.args, {
         cwd: path.dirname(runConfig.command), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
       });
       launchedChild = child;
-      mediaInputSessionService.bindProcess({ backendId, sessionId: id, processId: child.pid });
-      const authorizedPath = mediaInputSessionService.resolve({ sessionId: id, backendId, processId: child.pid });
+      const inputGrant = mediaInputSessionService.bindProcess({ componentId: backendOwner.componentId, backendId, sessionId: id, processId: child.pid });
+      const inputOwner = { componentId: backendOwner.componentId, backendId, sessionId: id, processId: child.pid };
+      const authorizedPath = await mediaInputSessionService.resolve(inputGrant.token, inputOwner);
       session = {
         id,
         sender,
@@ -187,16 +166,18 @@ const createAdvancedVideoService = ({
         pendingScreenshots: new Map(),
         onSenderDestroyed: null,
         rejectReady: null,
-        eventState: { sessionId: id, lastSequence: 0, closed: false },
-        commandWriter: null,
+        processAdapter: null,
         ownerWindow,
+        componentId: backendOwner.componentId,
+        backendId,
+        inputToken: inputGrant.token,
         surfaceAttachPromise: null,
         surfaceController: null,
+        lastDisplayKey: '',
       };
-      session.commandWriter = createPlaybackEnvelopeWriter({
+      session.processAdapter = createMediaPlaybackProcessAdapter({
         sessionId: id,
-        direction: 'command',
-        send: envelope => session.child.stdin.write(`${JSON.stringify(envelope)}\n`),
+        writeLine: line => session.child.stdin.write(`${line}\n`),
       });
       sessions.set(id, session);
       sessionsByPlayer.set(key, id);
@@ -217,13 +198,18 @@ const createAdvancedVideoService = ({
 
       const consumeLine = line => {
         if (session.stopped || !line.trim()) return;
-        let envelope;
-        try { envelope = validatePlaybackEnvelope(JSON.parse(line), session.eventState, { direction: 'event' }); }
+        let received;
+        try { received = session.processAdapter.receiveLine(line); }
         catch {
           writeLog('warn', 'Advanced video decoder emitted an invalid v1 frame', { line: line.slice(0, 500) });
           return;
         }
-        const value = { type: envelope.event.slice('event.'.length), ...envelope.payload };
+        const value = { type: received.type, ...received.payload };
+        if (value.type === 'diagnostic') {
+          try { emit(session, { type: 'diagnostic', diagnostic: cleanPlaybackDiagnostics(value.diagnostic) }); }
+          catch (error) { writeLog('warn', 'Playback backend emitted invalid diagnostics', { sessionId: session.id, error: error.message || String(error) }); }
+          return;
+        }
         if (value.type === 'surface-created') {
           if (session.surfaceAttachPromise) return;
           session.surfaceAttachPromise = nativeSurfaceService.attach({ ownerWindow: session.ownerWindow, componentProcess: session.child, surfaceHandle: value.surfaceHandle, sessionId: session.id })
@@ -240,7 +226,7 @@ const createAdvancedVideoService = ({
             return;
           }
           pending.componentCompleted = true;
-          void publishScreenshot(pending).then(finalPath => {
+          void publishScreenshot(session, pending).then(finalPath => {
             if (session.pendingScreenshots.get(screenshotRequestId) !== pending) return;
             session.pendingScreenshots.delete(screenshotRequestId);
             clearTimeout(pending.timer);
@@ -285,8 +271,7 @@ const createAdvancedVideoService = ({
       });
       child.once('exit', code => {
         clearTimeout(startupTimer);
-        session.eventState.closed = true;
-        session.commandWriter?.close();
+        session.processAdapter?.close();
         session.surfaceController?.close();
         mediaInputSessionService.revoke(session.id);
         for (const [requestId, pending] of session.pendingScreenshots.entries()) {
@@ -356,12 +341,21 @@ const createAdvancedVideoService = ({
       cornerHoleWidth,
       cornerHoleHeight,
     });
+    if (displayOutputService) {
+      const output = displayOutputService.describe(session.ownerWindow, { x: number(bounds.x), y: number(bounds.y), width, height });
+      const displayKey = `${output.displayId}:${output.scaleFactor}:${output.colorSpace}:${output.hdrAvailable}`;
+      if (displayKey !== session.lastDisplayKey) {
+        session.lastDisplayKey = displayKey;
+        sendCommand(session, { command: 'display-output', output });
+        emit(session, { type: 'display-output', display: output });
+      }
+    }
   };
 
   const control = (event, sessionId, request = {}) => {
     const session = sessions.get(String(sessionId || ''));
     if (!session || session.sender.id !== event.sender.id) return;
-    const allowed = new Set(['play', 'pause', 'seek', 'volume', 'mute', 'speed', 'stop', 'subtitle-select', 'subtitle-visible', 'subtitle-delay', 'subtitle-style']);
+    const allowed = new Set(['play', 'pause', 'seek', 'volume', 'mute', 'speed', 'stop', 'subtitle-select', 'subtitle-visible', 'subtitle-delay', 'subtitle-style', 'transform', 'hdr-mode', 'statistics-level']);
     const command = String(request.action || '');
     if (!allowed.has(command)) return;
     sendCommand(session, {
@@ -369,6 +363,9 @@ const createAdvancedVideoService = ({
       value: request.value,
       fontSize: command === 'subtitle-style' ? normalizeSubtitleFontSize(request.fontSize ?? request.size) : undefined,
       style: request.style,
+      transform: command === 'transform' ? request.transform : undefined,
+      hdrMode: command === 'hdr-mode' ? request.hdrMode : undefined,
+      statisticsLevel: command === 'statistics-level' ? request.statisticsLevel : undefined,
     });
   };
 
@@ -388,13 +385,8 @@ const createAdvancedVideoService = ({
     const session = sessions.get(String(sessionId || ''));
     if (!session || session.sender.id !== event.sender.id || session.stopped) throw new Error('视频播放会话不存在');
     const requestId = crypto.randomUUID();
-    const now = new Date();
-    const two = value => String(value).padStart(2, '0');
-    const three = value => String(value).padStart(3, '0');
-    const timestamp = `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}${two(now.getMinutes())}${two(now.getSeconds())}-${three(now.getMilliseconds())}`;
-    const parsed = path.parse(session.filePath);
-    const targetPath = path.join(parsed.dir, `${parsed.name}_截图_${timestamp}_${requestId.slice(0, 8)}.png`);
-    const temporaryPath = path.join(parsed.dir, `.${parsed.name}.${requestId}.photoflow-transcode-screenshot.png`);
+    const stage = await captureService.create({ ...captureOwner(session), sourcePath: session.filePath });
+    const resolvedStage = captureService.resolve(stage.stageId, captureOwner(session));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         const pending = session.pendingScreenshots.get(requestId);
@@ -402,12 +394,12 @@ const createAdvancedVideoService = ({
       }, screenshotTimeoutMs);
       timer.unref?.();
       const pending = {
-        requestId, resolve, reject, timer, finalPath: targetPath, temporaryPath,
+        requestId, stageId: stage.stageId, resolve, reject, timer,
         deadlineAt: Date.now() + screenshotTimeoutMs, componentCompleted: false,
         cancelled: false, phase: 'waiting',
       };
       session.pendingScreenshots.set(requestId, pending);
-      if (!sendCommand(session, { command: 'screenshot', requestId, path: temporaryPath })) {
+      if (!sendCommand(session, { command: 'screenshot', requestId, stageId: stage.stageId, path: resolvedStage.stagePath })) {
         rejectPendingScreenshot(session, requestId, pending, new Error('无法向视频解码组件发送截图命令'));
       }
     });

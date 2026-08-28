@@ -24,7 +24,7 @@ const createVideoPlaybackBroker = ({ pluginService, path }) => {
     const chromiumSupport = normalizeBrowserProbe(browserProbe);
     const descriptors = [{
       backendId: 'core.chromium', protocolVersion: 1, transport: 'chromium',
-      displayName: 'Chromium', priority: 100,
+      displayName: 'Chromium', backendVersion: process.versions.chrome || '0.0.0', priority: 100,
       probe: { support: chromiumSupport, basis: 'html-media-can-play-type', containers: [], codecs: { video: [], audio: [] }, extensions: [extension].filter(Boolean) },
       features: CHROMIUM_FEATURES,
     }];
@@ -36,7 +36,8 @@ const createVideoPlaybackBroker = ({ pluginService, path }) => {
         backendId: item.backendId,
         protocolVersion: item.contribution.protocolVersion,
         transport: item.contribution.transport,
-        displayName: item.component.name || item.contribution.backendId,
+        displayName: item.contribution.displayName,
+        backendVersion: item.contribution.backendVersion,
         priority: item.contribution.priority,
         probe: { support, basis: 'manifest-extension-hint', ...item.contribution.probe },
         features: item.contribution.features,
@@ -54,19 +55,21 @@ const createVideoPlaybackBroker = ({ pluginService, path }) => {
       });
   };
 
-  const resolveRunConfigAsync = async (backendId, args) => {
+  const resolveRunConfigAsync = async (backendId, args = []) => {
     const match = contributions().find(item => item.backendId === backendId);
     if (!match) {
       const error = new Error('视频播放后端不可用或已经变更');
       error.code = 'PLAYBACK_BACKEND_MISSING';
       throw error;
     }
-    return pluginService.resolveRunConfigAsync(match.component.id, args);
+    const runConfig = await pluginService.resolveRunConfigAsync(match.component.id, args);
+    return { ...runConfig, componentId: match.component.id, descriptor: match.contribution };
   };
 
   const defaultBackendId = () => contributions()[0]?.backendId || '';
+  const ownerForBackend = backendId => { const match = contributions().find(item => item.backendId === backendId); return match ? { componentId: match.component.id, descriptor: match.contribution } : null; };
 
-  return { listDescriptors, resolveRunConfigAsync, defaultBackendId };
+  return { listDescriptors, resolveRunConfigAsync, defaultBackendId, ownerForBackend };
 };
 
 module.exports = { createVideoPlaybackBroker };

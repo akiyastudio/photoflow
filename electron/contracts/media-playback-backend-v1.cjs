@@ -17,8 +17,8 @@ const assertNoBinaryPayload = (value, depth = 0) => {
 
 const validatePlaybackEnvelope = (value, state, { direction, now = Date.now() } = {}) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid playback protocol envelope');
-  const unknown = Object.keys(value).filter(field => !['protocol', 'sessionId', 'sequence', 'timestamp', 'event', 'payload'].includes(field));
-  if (unknown.length || value.protocol !== PROTOCOL || !SESSION_ID.test(String(value.sessionId || '')) || !EVENT_NAME.test(String(value.event || ''))) throw new Error('Invalid playback protocol envelope');
+  const unknown = Object.keys(value).filter(field => !['protocol', 'protocolVersion', 'sessionId', 'sequence', 'timestamp', 'event', 'payload'].includes(field));
+  if (unknown.length || value.protocol !== PROTOCOL || value.protocolVersion !== 1 || !SESSION_ID.test(String(value.sessionId || '')) || !EVENT_NAME.test(String(value.event || ''))) throw new Error('Invalid playback protocol envelope');
   if (value.sessionId !== state.sessionId || state.closed) throw new Error('Playback protocol session is closed or mismatched');
   const sequence = Number(value.sequence); const timestamp = Number(value.timestamp);
   if (!Number.isSafeInteger(sequence) || sequence <= state.lastSequence || !Number.isFinite(timestamp) || Math.abs(now - timestamp) > 5 * 60 * 1000) throw new Error('Invalid playback protocol ordering');
@@ -41,7 +41,7 @@ const createPlaybackEnvelopeWriter = ({ sessionId, direction, send, now = Date.n
       return false;
     }
     lastHighFrequencyAt = options.highFrequency ? timestamp : lastHighFrequencyAt;
-    const envelope = { protocol: PROTOCOL, sessionId, sequence: ++sequence, timestamp, event: `${direction}.${event}`, payload };
+    const envelope = { protocol: PROTOCOL, protocolVersion: 1, sessionId, sequence: ++sequence, timestamp, event: `${direction}.${event}`, payload };
     if (byteLength(envelope) > MAX_FRAME_BYTES) throw new Error('Playback protocol frame exceeds 256 KiB');
     send(envelope);
     return true;

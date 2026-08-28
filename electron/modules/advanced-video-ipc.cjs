@@ -2,12 +2,20 @@ const { createAdvancedVideoService } = require('../services/advanced-video-servi
 const { createVideoPlaybackBroker } = require('../services/video-playback-broker.cjs');
 const { createNativeVideoSurfaceService } = require('../services/native-video-surface-service.cjs');
 const { createMediaInputSessionService } = require('../services/media-input-session-service.cjs');
+const { createVideoDisplayOutputService } = require('../services/video-display-output-service.cjs');
+const { createPlaybackCaptureService } = require('../services/playback-capture-service.cjs');
 
-const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog }) => {
+const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog }) => {
   const playbackBroker = createVideoPlaybackBroker({ pluginService, path });
   const nativeSurfaceService = createNativeVideoSurfaceService({ app, path, processSupervisor, spawn, writeLog });
-  const mediaInputSessionService = createMediaInputSessionService({ mediaService });
-  const service = createAdvancedVideoService({ BrowserWindow, crypto, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor, spawn, writeLog });
+  const mediaInputSessionService = createMediaInputSessionService({ crypto, fs, path, authorizeProjectMedia: value => mediaService.authorizeInput(value) });
+  const displayOutputService = createVideoDisplayOutputService({ screen });
+  const captureService = createPlaybackCaptureService({ crypto, fs, path, authorizeProjectMedia: value => mediaService.authorizeInput(value) });
+  const service = createAdvancedVideoService({ BrowserWindow, captureService, crypto, displayOutputService, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor, spawn, writeLog });
+  ipcMain.handle('video-display-capabilities', event => {
+    try { return { success: true, display: displayOutputService.describe(BrowserWindow.fromWebContents(event.sender)) }; }
+    catch (error) { return { success: false, display: { displayId: '', scaleFactor: 1, colorSpace: '', hdrAvailable: false, reason: error.message || String(error), bounds: null }, error: error.message || String(error) }; }
+  });
   const screenshotTarget = sourcePath => {
     const now = new Date();
     const pad = (value, length = 2) => String(value).padStart(length, '0');

@@ -284,6 +284,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   startAdvancedVideo: (filePath, arrowKeyAction, playerId, requestId) => ipcRenderer.invoke('advanced-video-start', filePath, arrowKeyAction, playerId, requestId),
   startVideoPlayer: (filePath, settings, playerId, requestId, backendId) => ipcRenderer.invoke('video-player-start', filePath, settings, playerId, requestId, backendId),
   getVideoPlaybackBackends: (filePath, browserProbe) => ipcRenderer.invoke('video-playback-backends', filePath, browserProbe),
+  getVideoDisplayCapabilities: () => ipcRenderer.invoke('video-display-capabilities'),
   getVideoPlaybackSource: filePath => ipcRenderer.invoke('video-playback-source', filePath),
   setVideoPlayerBounds: (sessionId, bounds) => ipcRenderer.send('video-player-bounds', sessionId, bounds),
   setAdvancedVideoBounds: (sessionId, bounds) => ipcRenderer.send('advanced-video-bounds', sessionId, bounds),
