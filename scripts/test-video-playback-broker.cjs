@@ -2,7 +2,7 @@ const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
-const { registerAdvancedVideoIpc } = require('../electron/modules/advanced-video-ipc.cjs');
+const { registerVideoPlaybackIpc: registerAdvancedVideoIpc } = require('../electron/modules/video-playback-ipc.cjs');
 const { createMediaFileResponse } = require('../electron/services/media-response-service.cjs');
 const { parseMediaPlaybackBackendContributions } = require('../electron/contracts/media-playback-backend-contract.cjs');
 

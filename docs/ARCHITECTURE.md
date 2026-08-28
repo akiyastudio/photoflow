@@ -121,6 +121,13 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   renderers cross the compatibility window.
   New renderer/domain code must depend only on generic descriptors and sessions.
 
+  The reference libmpv implementation is an independently versioned release
+  project under `plugins/video-playback-backend`; core build and tests do not
+  import its source, build script, executable/DLL names or integrity manifest.
+  Core independence tests physically hide that directory before compiling. The
+  `advanced-video-*` channels in the generic IPC registrar are the sole removable
+  compatibility layer and never bypass the v1 descriptor/protocol.
+
 ## Stable contracts
 
 Existing non-component preload and IPC method names are compatibility contracts. Internal

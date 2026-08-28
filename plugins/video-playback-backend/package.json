@@ -1,0 +1,17 @@
+{
+  "name": "@photoflow/video-playback-backend",
+  "private": true,
+  "version": "26.8.28-1",
+  "description": "Independent UI-less libmpv playback backend for PhotoFlow",
+  "scripts": {
+    "build": "node scripts/build.cjs",
+    "test": "node tests/test-protocol-contract.cjs && node tests/test-package-contract.cjs && node tests/test-lifecycle.cjs",
+    "sign": "node scripts/sign.cjs",
+    "verify": "node scripts/lifecycle.cjs verify",
+    "install": "node scripts/lifecycle.cjs install",
+    "repair": "node scripts/lifecycle.cjs repair",
+    "upgrade": "node scripts/lifecycle.cjs upgrade",
+    "uninstall": "node scripts/lifecycle.cjs uninstall"
+  },
+  "engines": { "node": ">=22" }
+}

@@ -1,5 +1,5 @@
 const assert = require('node:assert/strict'); const fs = require('node:fs'); const path = require('node:path');
-const source = fs.readFileSync(path.join(__dirname, '..', 'AdvancedVideoDecoder.cs'), 'utf8');
+const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'AdvancedVideoDecoder.cs'), 'utf8');
 assert(source.includes('media-playback-backend-v1') && source.includes('protocolVersion') && source.includes('commandSequence') && source.includes('eventSequence'));
 assert(source.includes('"media.open"') && source.includes('"playback.seek"') && source.includes('"capture.stage"'));
 assert(source.includes('OnMouseClick') && source.includes('"pointer-button"') && !source.includes('TogglePause'));

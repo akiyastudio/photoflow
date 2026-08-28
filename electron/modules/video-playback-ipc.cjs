@@ -1,4 +1,4 @@
-const { createAdvancedVideoService } = require('../services/advanced-video-service.cjs');
+const { createVideoPlaybackProcessService } = require('../services/video-playback-process-service.cjs');
 const { createVideoPlaybackBroker } = require('../services/video-playback-broker.cjs');
 const { createNativeVideoSurfaceService } = require('../services/native-video-surface-service.cjs');
 const { createMediaInputSessionService } = require('../services/media-input-session-service.cjs');
@@ -6,13 +6,13 @@ const { createVideoDisplayOutputService } = require('../services/video-display-o
 const { createPlaybackCaptureService } = require('../services/playback-capture-service.cjs');
 const { playbackError } = require('../contracts/playback-errors.cjs');
 
-const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog }) => {
+const registerVideoPlaybackIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog }) => {
   const playbackBroker = createVideoPlaybackBroker({ pluginService, path });
   const nativeSurfaceService = createNativeVideoSurfaceService({ app, path, processSupervisor, spawn, writeLog });
   const mediaInputSessionService = createMediaInputSessionService({ crypto, fs, path, authorizeProjectMedia: value => mediaService.authorizeInput(value) });
   const displayOutputService = createVideoDisplayOutputService({ screen });
   const captureService = createPlaybackCaptureService({ crypto, fs, path, authorizeProjectMedia: value => mediaService.authorizeInput(value) });
-  const service = createAdvancedVideoService({ BrowserWindow, captureService, crypto, displayOutputService, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor, spawn, writeLog });
+  const service = createVideoPlaybackProcessService({ BrowserWindow, captureService, crypto, displayOutputService, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor, spawn, writeLog });
   ipcMain.handle('video-display-capabilities', event => {
     try { return { success: true, display: displayOutputService.describe(BrowserWindow.fromWebContents(event.sender)) }; }
     catch (error) { return { success: false, display: { displayId: '', scaleFactor: 1, colorSpace: '', hdrAvailable: false, reason: error.message || String(error), bounds: null }, error: error.message || String(error) }; }
@@ -116,4 +116,4 @@ const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcM
   return service;
 };
 
-module.exports = { registerAdvancedVideoIpc };
+module.exports = { registerVideoPlaybackIpc };

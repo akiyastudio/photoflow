@@ -27,7 +27,7 @@ import { normalizeSavedSdDeviceRecords } from './features/tools/sd-startup-impor
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
 import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
 import type { AppConfig, AppUpdateInfo, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentSettingsPageContribution, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
-import { normalizeVideoShortcutBindings } from './contracts/video-shortcuts';
+import { normalizeVideoShortcutBindings } from './contracts/video-shortcuts'; import { LEGACY_VIDEO_PLAYBACK_SETTINGS_ID } from './compatibility/legacy-video-playback-settings';
 import { ColumnResizeHandle } from './features/app/AppShellLayout';
 import { clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
 import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, IMAGE_SELECTION_FOLDER_NAME, VIDEO_SELECTION_FOLDER_NAME, isMac, localDateKey, normalizeHomeOrder, normalizeMediaCacheSize, normalizeProjectCategories, normalizeProjectToolbar, normalizeVideoPreviewQuality } from './features/app/app-config';
@@ -331,7 +331,7 @@ const App: React.FC = () => {
               sensitivity: legacyResearch?.sensitivity ?? legacyInspiration?.sensitivity ?? (legacyThreshold !== undefined && legacyThreshold >= 0.98 ? 'high' : legacyThreshold !== undefined && legacyThreshold <= 0.85 ? 'low' : 'standard'),
               minDuration: legacyResearch?.minDuration ?? legacyInspiration?.minDuration ?? 0.2,
             };
-            const legacyAdvancedVideo = fileConfig.componentSettings?.['video-playback-mpv'];
+            const legacyAdvancedVideo = fileConfig.componentSettings?.[LEGACY_VIDEO_PLAYBACK_SETTINGS_ID] as Partial<AppConfig['videoPlayback']> | undefined;
             const videoPlayback: AppConfig['videoPlayback'] = {
               arrowKeyAction: fileConfig.videoPlayback?.arrowKeyAction === 'navigate' ? 'navigate' : fileConfig.videoPlayback?.arrowKeyAction === 'seek' ? 'seek' : legacyAdvancedVideo?.arrowKeyAction === 'navigate' ? 'navigate' : 'seek',
               subtitlesEnabled: fileConfig.videoPlayback?.subtitlesEnabled === true,
@@ -346,7 +346,7 @@ const App: React.FC = () => {
             const savedSdPaths = (Array.isArray(fileConfig.smartImport?.sdPaths) && fileConfig.smartImport.sdPaths.length ? fileConfig.smartImport.sdPaths : fileConfig.smartImport?.sdPath ? [fileConfig.smartImport.sdPath] : []).map((drive: string) => isMac ? drive : drive.replace(/\\/g, '/').replace(/\/DCIM\/?$/i, '/'));
             const savedSdDevices = normalizeSavedSdDeviceRecords(fileConfig.smartImport?.sdDevices, savedSdPaths, fileConfig.smartImport?.sdDeviceIds, fileConfig.smartImport?.sdDriveTypes);
             const componentSettings: AppConfig['componentSettings'] = { ...fileConfig.componentSettings };
-            delete componentSettings['video-playback-mpv'];
+            delete componentSettings[LEGACY_VIDEO_PLAYBACK_SETTINGS_ID];
             delete componentSettings['research-tools'];
             delete componentSettings['office-media-extractor'];
             const legacyConfig = { ...fileConfig } as AppConfig & { folderOpenMode?: 'single' | 'double'; fileImport?: { preserveOriginal?: boolean }; brollImport: AppConfig['brollImport'] & { clearSource?: boolean } };

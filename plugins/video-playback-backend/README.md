@@ -1,6 +1,6 @@
-# 视频播放器
+# PhotoFlow libmpv playback backend
 
-这是照片流“视频播放器”的可选原生运行时。它只提供兼容命名的 `advanced-video-decoder.exe`、libmpv 运行库、清单、完整性材料和许可证材料，在独立进程中运行 libmpv，通过 Win32 子窗口把视频画面嵌入照片流，并通过 JSON Lines 与 Electron 主进程交换播放状态和控制命令。
+这是照片流“视频播放器”的独立可选原生后端工程。它提供 `advanced-video-decoder.exe`、libmpv 运行库、签名/完整性材料和许可证材料，通过 `media-playback-backend-v1` 与 Host 通信。组件只注册自身 HWND；PhotoFlow core 验证进程所有权并负责嵌入、DPI、定位和裁切。
 
 播放器界面、裁剪、截图、键盘/鼠标语义、字幕默认选择和播放设置全部属于照片流主程序。运行时通过 `media.playbackBackend@v1` 声明无 UI 的解码/渲染能力，只上报原始输入、轨道和播放状态并执行通用控制命令。安装此运行时不安装任何 renderer bundle；缺少、卸载、启动失败或崩溃时，主程序可切换到尚未尝试的 Chromium 后端，只有所有后端均失败时才提示修复组件或使用系统播放器。
 
@@ -8,10 +8,10 @@
 
 ## 一键构建发布包
 
-在 Windows x64 的 MSYS2 UCRT64 环境中安装仓库工作流列出的工具，然后在仓库根目录运行：
+准备经过策略验证的 LGPL libmpv 运行目录后，在本工程目录运行：
 
 ```bash
-npm run build:advanced-video-release
+npm run build -- --mpv-root C:\path\to\libmpv-runtime
 ```
 
 该命令会完成以下工作：
@@ -24,7 +24,7 @@ npm run build:advanced-video-release
 输出文件：
 
 ```text
-artifacts/installers/PhotoFlow-video-playback-mpv-26.8.16.1-win32-x64.zip
+dist/PhotoFlow-video-playback-mpv-26.8.28.1-win32-x64.zip
 ```
 
 ## 仅使用已有运行时打包
@@ -32,7 +32,7 @@ artifacts/installers/PhotoFlow-video-playback-mpv-26.8.16.1-win32-x64.zip
 若已经拥有由上述流程生成的运行时，可以跳过依赖编译：
 
 ```powershell
-npm run build:advanced-video-decoder -- --mpv-root C:\path\to\libmpv-runtime
+npm run build -- --mpv-root C:\path\to\libmpv-runtime
 ```
 
 运行时目录必须包含版本 2 的 `runtime-manifest.json`、清单内声明的所有 DLL、`libmpv-lgpl-corresponding-source.zip` 和 `libmpv-lgpl-licenses.zip`。打包器会复核许可证、完整提交哈希、mpv/FFmpeg 构建参数和所有文件哈希；未知来源的 DLL 或手工编写的占位清单不会生成发布 ZIP。

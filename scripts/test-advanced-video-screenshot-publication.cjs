@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { PassThrough } = require('stream');
-const { createAdvancedVideoService } = require('../electron/services/advanced-video-service.cjs');
+const { createVideoPlaybackProcessService: createAdvancedVideoService } = require('../electron/services/video-playback-process-service.cjs');
 const { createPlaybackCaptureService } = require('../electron/services/playback-capture-service.cjs');
 const { LEGACY_COMMAND_TO_V1 } = require('../electron/services/media-playback-process-adapter.cjs');
 const v1ToLegacyCommand = Object.fromEntries(Object.entries(LEGACY_COMMAND_TO_V1).map(([legacy, semantic]) => [semantic, legacy]));
@@ -47,7 +47,7 @@ const run = async () => {
       mediaInputSessionService: makeMediaInputs(),
       nativeSurfaceService: { attach: async () => ({ setBounds: () => undefined, close: () => undefined }) },
       path,
-      playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }) },
+      playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\fixture-playback-backend.exe', args }) },
       spawn: (_command, args) => {
         const child = makeChild();
         children.push(child);
@@ -143,7 +143,7 @@ const run = async () => {
       mediaInputSessionService: makeMediaInputs(),
       nativeSurfaceService: { attach: async () => ({ setBounds: () => undefined, close: () => undefined }) },
       path,
-      playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }) },
+      playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\fixture-playback-backend.exe', args }) },
       spawn: (_command, args) => {
         const raceChild = makeChild();
         raceChildren.push(raceChild);

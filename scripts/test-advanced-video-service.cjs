@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const { PassThrough } = require('stream');
 const path = require('path');
-const { createAdvancedVideoService } = require('../electron/services/advanced-video-service.cjs');
+const { createVideoPlaybackProcessService: createAdvancedVideoService } = require('../electron/services/video-playback-process-service.cjs');
 const { nativeHandleValue: nativeWindowHandleValue } = require('../electron/services/native-video-surface-service.cjs');
 const { createPlaybackCaptureService } = require('../electron/services/playback-capture-service.cjs');
 const { readPeDependencies } = require('./media-runtime/pe-dependency-closure.cjs');
@@ -58,7 +58,7 @@ const run = async () => {
     nativeSurfaceService: { attach: async () => ({ setBounds: value => surfaceBounds.push(value), close: () => undefined }) },
     path,
     playbackBroker: { defaultBackendId: () => 'fixture-backend',
-      resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }),
+      resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\fixture-playback-backend.exe', args }),
     },
     spawn: (command, args, options) => {
       const child = makeChild();
@@ -145,7 +145,7 @@ const run = async () => {
     mediaInputSessionService: makeMediaInputs(),
     nativeSurfaceService: { attach: async () => ({ setBounds: () => undefined, close: () => undefined }) },
     path,
-    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }) },
+    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\fixture-playback-backend.exe', args }) },
     spawn: (_command, args) => {
       const cleanupChild = makeChild();
       cleanupChildren.push(cleanupChild);
@@ -188,9 +188,11 @@ const run = async () => {
   const nativeSurfaceHostSource = require('fs').readFileSync(path.join(__dirname, '..', 'electron', 'native', 'VideoSurfaceHost.cs'), 'utf8');
   const settingsSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'features', 'settings', 'SettingsFeature.tsx'), 'utf8');
   const appSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
+  const compatibilitySource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'compatibility', 'legacy-video-playback-settings.ts'), 'utf8');
   assert(!require('fs').existsSync(path.join(__dirname, '..', 'src', 'features', 'plugins', 'plugin-contributions.ts'))
     && settingsSource.includes("{ id: 'video', label: '视频'")
-    && appSource.includes("delete componentSettings['video-playback-mpv']"),
+    && appSource.includes('delete componentSettings[LEGACY_VIDEO_PLAYBACK_SETTINGS_ID]')
+    && compatibilitySource.includes("'video-playback-mpv'"),
   'advanced video UI and settings must ship with the app instead of the optional runtime');
   assert(playerSource.includes('onClick={togglePlayback}') && !playerSource.includes("key === 'BrowserBack'") && !playerSource.includes("key === 'MediaTrackPrevious'"), 'application player must own click semantics without repurposing browser/media keys');
   assert(playerSource.includes("group === 'arrows'") && playerSource.includes("return arrowKeyAction === 'navigate' ? 'seek' : 'navigate'") && playerSource.includes("videoDirectionalAction(keyboardSettings.arrowKeyAction, 'forward-back')"), 'application player must resolve seek versus navigation');
@@ -236,7 +238,7 @@ const run = async () => {
     mediaInputSessionService: makeMediaInputs(value => new Promise(resolve => pendingAuthorization.set(value, resolve))),
     nativeSurfaceService: { attach: async () => ({ setBounds: () => undefined, close: () => undefined }) },
     path,
-    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }) },
+    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\fixture-playback-backend.exe', args }) },
     spawn: (_command, args) => {
       const raceChild = makeChild();
       raceChildren.push(raceChild);
@@ -285,11 +287,11 @@ const run = async () => {
   const currentIntegrityStart = integrityRaceService.start({ sender }, newPath, 'seek', 'player-integrity-race', 'request-integrity-new');
   await new Promise(resolve => setImmediate(resolve));
   assert.strictEqual(pendingRunConfigs.length, 2);
-  pendingRunConfigs[0]({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] });
+  pendingRunConfigs[0]({ command: 'C:\\component\\fixture-playback-backend.exe', args: [] });
   const staleIntegrityError = await staleIntegrityStart;
   assert.match(staleIntegrityError?.message || '', /已被替换/);
   assert.strictEqual(integrityRaceChildren.length, 0, 'a superseded launch must not spawn after integrity verification finishes');
-  pendingRunConfigs[1]({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] });
+  pendingRunConfigs[1]({ command: 'C:\\component\\fixture-playback-backend.exe', args: [] });
   const currentIntegrity = await currentIntegrityStart;
   assert.strictEqual(integrityRaceChildren.length, 1);
   integrityRaceService.stop(currentIntegrity.sessionId, sender.id);

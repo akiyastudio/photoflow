@@ -7,10 +7,10 @@ const { createMediaPlaybackProcessAdapter } = require('../electron/services/medi
 const { cleanPlaybackDiagnostics } = require('../electron/contracts/playback-diagnostics.cjs');
 
 const root = path.resolve(__dirname, '..');
-const manifest = JSON.parse(fs.readFileSync(path.join(root, 'extensions/video-playback-mpv/component.template.json'), 'utf8'));
+const manifest = JSON.parse(fs.readFileSync(path.join(root, 'scripts/fixtures/playback-backend-manifest-v1.json'), 'utf8'));
 const [contribution] = parseMediaPlaybackBackendContributions(manifest);
 assert.equal(contribution.protocolVersion, 1);
-assert.equal(contribution.displayName, 'libmpv 高级视频后端'); assert.equal(contribution.backendVersion, '1.0.0');
+assert.equal(contribution.displayName, 'Fixture decoder'); assert.equal(contribution.backendVersion, '1.2.3');
 assert(contribution.probe.containers.includes('mp4') && contribution.probe.codecs.video.includes('hevc'));
 assert(contribution.features.transforms.includes('rotate') && contribution.features.hdr.modes.includes('hdr-passthrough'));
 assert.deepEqual(contribution.features.statistics, { levels: ['basic', 'detailed'], maxUpdateHz: 10 });

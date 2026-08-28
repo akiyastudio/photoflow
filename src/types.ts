@@ -50,8 +50,6 @@ export interface InspirationLibrarySettings {
   rootPath: string;
 }
 export interface ComponentSettingsMap {
-  /** Legacy location read during migration; video playback UI is owned by the app. */
-  'video-playback-mpv'?: VideoPlaybackSettings;
   /** Component-owned opaque JSON; the application never interprets component namespaces. */
   [componentId: string]: unknown;
 }

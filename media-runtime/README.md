@@ -34,6 +34,6 @@ bash scripts/media-runtime/build-libmpv-lgpl-windows.sh
 
 脚本会从实际 `ffmpeg.exe -buildconf` 读取配置，并把 FFmpeg 版本、完整提交哈希、依赖对应源码包和许可证包一起固化到 libmpv 清单中。
 
-把最终 DLL、许可证、精确对应源码包和 `runtime-manifest.json` 放入 `extensions/video-playback-mpv/vendor/`。组件打包脚本会再次验证 LGPL 声明、构建参数和每个文件哈希。
+把最终 DLL、许可证、精确对应源码包和 `runtime-manifest.json` 放入 `plugins/video-playback-backend/vendor/`。独立后端工程会再次验证 LGPL 声明、构建参数和每个文件哈希。
 
 `vendor/` 是本地或 CI 产物，不提交 Git；固定版本和构建脚本提交 Git。

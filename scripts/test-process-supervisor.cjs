@@ -183,7 +183,7 @@ const main = async () => {
     'electron/services/recycle-bin-service.cjs',
     'electron/services/file-clipboard-service.cjs',
     'electron/services/file-publication-service.cjs',
-    'electron/services/advanced-video-service.cjs',
+    'electron/services/video-playback-process-service.cjs',
     'electron/services/image-thumbnail-runtime.cjs',
     'electron/modules/broll-import.cjs',
   ]) {

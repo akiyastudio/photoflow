@@ -5,7 +5,7 @@ const { verifyPeDependencyClosure } = require('./pe-dependency-closure.cjs');
 
 const [kind = 'ffmpeg', rootArg] = process.argv.slice(2);
 const defaultRoot = kind === 'mpv'
-  ? path.resolve('extensions', 'video-playback-mpv', 'vendor')
+  ? path.resolve('plugins', 'video-playback-backend', 'vendor')
   : path.resolve('media-runtime', 'vendor', 'windows-x64');
 const root = path.resolve(rootArg || defaultRoot);
 const manifestName = kind === 'mpv' ? 'runtime-manifest.json' : 'ffmpeg-runtime-manifest.json';

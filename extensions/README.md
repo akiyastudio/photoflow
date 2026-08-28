@@ -83,9 +83,7 @@ the user's machine.
 `npm run build:components` builds the optional sample-component component. Components remain
 separate from the base PhotoFlow installer so the core application stays small.
 
-`npm run build:advanced-video-release` builds the pinned LGPL dependency stack,
-audited libmpv runtime, compliance archives, and installable video-player ZIP.
-If that runtime already exists, `npm run build:advanced-video-decoder --
---mpv-root <directory>` only performs the final component packaging step. The
-component remains outside `electron:build`, so the main installer does not
-depend on or include libmpv.
+The libmpv backend moved to `plugins/video-playback-backend`, an independent
+release project with its own build, test, signing and lifecycle commands. The
+core package has no plugin-specific build command or source dependency, and the
+main installer does not depend on or include libmpv.

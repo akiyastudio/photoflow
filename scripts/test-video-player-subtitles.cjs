@@ -6,7 +6,7 @@ const root = path.join(__dirname, '..');
 const read = value => fs.readFileSync(path.join(root, value), 'utf8');
 const player = read('src/components/AdvancedVideoPlayer.tsx');
 const preload = read('electron/preload.cjs');
-const ipc = read('electron/modules/advanced-video-ipc.cjs');
+const ipc = read('electron/modules/video-playback-ipc.cjs');
 const workspace = read('src/features/workspace/ProjectWorkspace.tsx');
 const hoverThumbnail = read('src/components/VideoHoverThumbnail.tsx');
 const versions = read('src/components/VersionManager.tsx');

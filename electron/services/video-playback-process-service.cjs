@@ -12,7 +12,7 @@ const normalizeSubtitleFontSize = value => {
   return Number.isFinite(migrated) ? Math.max(16, Math.min(120, Math.round(migrated))) : DEFAULT_SUBTITLE_FONT_SIZE;
 };
 
-const createAdvancedVideoService = ({
+const createVideoPlaybackProcessService = ({
   BrowserWindow, captureService, crypto, displayOutputService = null, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor = null, spawn, writeLog,
   startupTimeoutMs = START_TIMEOUT_MS, screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS,
 }) => {
@@ -412,4 +412,4 @@ const createAdvancedVideoService = ({
   return { start, setBounds, control, addSubtitle, ownsSession, screenshot, stop, dispose, sessions, sessionsByPlayer, launches };
 };
 
-module.exports = { createAdvancedVideoService };
+module.exports = { createVideoPlaybackProcessService };

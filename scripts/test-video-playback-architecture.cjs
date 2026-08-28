@@ -5,7 +5,7 @@ const path = require('node:path');
 const read = relative => fs.readFileSync(path.join(__dirname, '..', relative), 'utf8');
 const rendererSession = read('src/platform/video-playback/playback-session.ts');
 const player = read('src/components/AdvancedVideoPlayer.tsx');
-const nativeService = read('electron/services/advanced-video-service.cjs');
+const nativeService = read('electron/services/video-playback-process-service.cjs');
 const broker = read('electron/services/video-playback-broker.cjs');
 
 for (const source of [rendererSession, player, nativeService]) {

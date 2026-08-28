@@ -130,7 +130,7 @@ for binary in "$output_root"/*.dll; do
   fi
 done
 cp "$source_root/Copyright" "$output_root/mpv-Copyright"
-cp "$repo_root/extensions/video-playback-mpv/LICENSES.md" "$output_root/PhotoFlow-LICENSES.md"
+cp "$repo_root/plugins/video-playback-backend/LICENSES.md" "$output_root/PhotoFlow-LICENSES.md"
 cp "$repo_root/media-runtime.lock.json" "$output_root/media-runtime.lock.json"
 printf '%s\n' "$ffmpeg_configuration" > "$output_root/linked-ffmpeg-buildconf.txt"
 printf '%s\n' "$ffmpeg_version" > "$output_root/linked-ffmpeg-version.txt"
@@ -158,7 +158,7 @@ cp "$output_root/linked-ffmpeg-commit.txt" "$compliance_root/source/build-materi
 cp "$repo_root/media-runtime.lock.json" "$compliance_root/source/build-materials/media-runtime.lock.json"
 cp "$source_root/Copyright" "$compliance_root/licenses/mpv-Copyright"
 cp "$dependency_licenses" "$compliance_root/licenses/dependency-licenses.zip"
-cp "$repo_root/extensions/video-playback-mpv/LICENSES.md" "$compliance_root/licenses/PhotoFlow-LICENSES.md"
+cp "$repo_root/plugins/video-playback-backend/LICENSES.md" "$compliance_root/licenses/PhotoFlow-LICENSES.md"
 
 zip_directory() {
   local source="$1"
