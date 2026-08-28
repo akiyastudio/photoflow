@@ -98,11 +98,20 @@ Host API 7 contribution 为 `component.sidePanel`、`media.contextAction`、`pro
 
 无 UI 的运行时组件可在顶层 `runtimeContributions` 声明
 `media.playbackBackend`，当前协议版本为 1。声明包含组件内唯一的
-`backendId`、`native-process-v1` transport、优先级和受限容器扩展名提示。
+`backendId`、`native-process-v1` transport、优先级、容器/codec/扩展名 probe，
+以及 transforms、HDR、statistics、subtitles、hardware decoding、capture
+能力矩阵。清单由独立 JSON schema、安装注册表解析器和 component-sdk 类型共同约束。
 Electron 播放 broker 校验声明、结合 Chromium `canPlayType` probe 生成不含
 组件实现细节的 descriptor；扩展名只用于排序提示，不能替代实际启动探测。
 清单 priority 只比较多个组件后端，不能压过 Chromium 的 probably/maybe 信号。
 这类贡献不创建页面、设置入口或 renderer surface。
+
+组件进程协议使用 `media-playback-backend-v1` envelope：每帧包含 sessionId、
+单调 sequence、timestamp、event 和 payload。普通 JSON 帧上限 256 KiB，禁止
+传输图像、像素或音视频帧；状态/统计按声明频率限流合并，session 关闭后旧命令
+失效。媒体输入授权绑定 backend/process/session。组件只返回自己的 surface HWND；
+core surface host 校验 HWND 所属 PID 后负责 `SetParent`、窗口样式、DPI、定位与裁切，
+组件永远不会收到 Electron 主窗口句柄。截图目标只由主程序创建、验证并提交。
 
 Host API 7 的七项写能力必须设置 `minHostApiVersion = 7`，且各自声明上表中的最小权限。评分批量限制为 1–100，采用逐项语义；只支持图片/RAW 的 `rating`，视频、标签和选择状态写入拒绝。checked CAS 与宿主旧评分 outbox 共用同一 per-file 队列；ExifTool 成功后的索引指纹刷新是非致命维护步骤，不会把已发生的评分副作用报告成失败。版本更新/删除、进度节点与边变更均使用 `expectedUpdatedAt` CAS；删除权限独立。progress 的项目/scope 路径会在数据库事务内再次以 Windows case-insensitive path-key 语义验证，所有图端点必须在当前物理 scope 内、不得是 external link，并继续复用数据库角色和循环约束。
 

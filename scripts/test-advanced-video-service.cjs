@@ -5,17 +5,22 @@ const os = require('os');
 const { PassThrough } = require('stream');
 const { spawnSync } = require('child_process');
 const path = require('path');
-const { createAdvancedVideoService, nativeWindowHandleValue } = require('../electron/services/advanced-video-service.cjs');
+const { createAdvancedVideoService } = require('../electron/services/advanced-video-service.cjs');
+const { nativeHandleValue: nativeWindowHandleValue } = require('../electron/services/native-video-surface-service.cjs');
 const { normalizeDotnetAssembly } = require('./deterministic-dotnet-assembly.cjs');
 const { readPeDependencies } = require('./media-runtime/pe-dependency-closure.cjs');
+const backendEvent = (sessionId, sequence, type, payload = {}) => `${JSON.stringify({ protocol: 'media-playback-backend-v1', sessionId, sequence, timestamp: Date.now(), event: `event.${type}`, payload })}\n`;
+const backendStartup = sessionId => backendEvent(sessionId, 1, 'surface-created', { surfaceHandle: '4242', processId: 123 }) + backendEvent(sessionId, 2, 'ready');
+const makeMediaInputs = (authorize = async value => path.resolve(value)) => { const grants = new Map(); return { prepare: async request => { grants.set(request.sessionId, { ...request, processId: 0, authorizedPath: await authorize(request.filePath) }); }, bindProcess: request => { grants.get(request.sessionId).processId = request.processId; }, resolve: request => grants.get(request.sessionId).authorizedPath, revoke: sessionId => grants.delete(sessionId) }; };
 
 const makeChild = () => {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
+  child.pid = 123;
   child.stdinLines = [];
-  child.stdin.on('data', chunk => child.stdinLines.push(...chunk.toString('utf8').trim().split(/\r?\n/).filter(Boolean).map(JSON.parse)));
+  child.stdin.on('data', chunk => child.stdinLines.push(...chunk.toString('utf8').trim().split(/\r?\n/).filter(Boolean).map(line => { const envelope = JSON.parse(line); return { command: envelope.event.slice('command.'.length), ...envelope.payload }; })));
   child.killed = false;
   child.kill = () => { child.killed = true; child.emit('exit', 0); };
   return child;
@@ -69,11 +74,13 @@ const run = async () => {
   sender.send = (channel, value) => sender.sent.push({ channel, value });
   const children = [];
   const spawned = [];
+  const surfaceBounds = [];
   let uuidIndex = 0;
   const service = createAdvancedVideoService({
     BrowserWindow: { fromWebContents: () => ({ isDestroyed: () => false, getNativeWindowHandle: () => nativeHandle }) },
     crypto: { randomUUID: () => `session-${++uuidIndex}` },
-    mediaService: { authorizeInput: async value => path.resolve(value) },
+    mediaInputSessionService: makeMediaInputs(),
+    nativeSurfaceService: { attach: async () => ({ setBounds: value => surfaceBounds.push(value), close: () => undefined }) },
     path,
     playbackBroker: { defaultBackendId: () => 'fixture-backend',
       resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }),
@@ -82,7 +89,8 @@ const run = async () => {
       const child = makeChild();
       children.push(child);
       spawned.push({ command, args, options });
-      process.nextTick(() => child.stdout.write('{"type":"ready"}\n{"type":"state","time":2,"duration":10,"paused":false,"buffering":false}\n'));
+      const sessionId = args[args.indexOf('--session-id') + 1];
+      process.nextTick(() => child.stdout.write(backendStartup(sessionId) + backendEvent(sessionId, 3, 'state', { time: 2, duration: 10, paused: false, buffering: false })));
       return child;
     },
     writeLog: () => undefined,
@@ -93,7 +101,7 @@ const run = async () => {
   const stdinLines = child.stdinLines;
   assert.strictEqual(result.sessionId, 'session-1');
   assert.strictEqual(spawned[0].options.windowsHide, true);
-  assert.deepStrictEqual(spawned[0].args, ['--parent-hwnd', '123456']);
+  assert.deepStrictEqual(spawned[0].args, ['--session-id', 'session-1']);
   assert.deepStrictEqual(stdinLines[0], { command: 'open', path: path.resolve(sourceVideo) });
   assert.deepStrictEqual(stdinLines[1], { command: 'subtitle-style', fontSize: 55, style: 'standard' });
   assert.deepStrictEqual(stdinLines[2], { command: 'play' });
@@ -111,20 +119,20 @@ const run = async () => {
   service.control({ sender }, result.sessionId, { action: 'subtitle-style', fontSize: 73, style: 'high-contrast' });
   service.control({ sender }, result.sessionId, { action: 'arbitrary-command' });
   service.control({ sender: { id: 99 } }, result.sessionId, { action: 'pause' });
-  assert.deepStrictEqual(stdinLines[3], {
-    command: 'set-bounds', x: 10, y: 21, width: 300, height: 201, visible: true,
+  assert.deepStrictEqual(surfaceBounds[0], {
+    x: 10, y: 21, width: 300, height: 201, visible: true,
     holeX: 210, holeY: 80, holeWidth: 90, holeHeight: 121,
     controlsHoleX: 0, controlsHoleY: 150, controlsHoleWidth: 300, controlsHoleHeight: 51,
     cornerHoleX: 240, cornerHoleY: 0, cornerHoleWidth: 60, cornerHoleHeight: 72,
   });
-  assert.deepStrictEqual(stdinLines[4], { command: 'play' });
-  assert.deepStrictEqual(stdinLines.slice(5), [
+  assert.deepStrictEqual(stdinLines[3], { command: 'play' });
+  assert.deepStrictEqual(stdinLines.slice(4), [
     { command: 'subtitle-select', value: '3' },
     { command: 'subtitle-visible', value: false },
     { command: 'subtitle-delay', value: 1.5 },
     { command: 'subtitle-style', fontSize: 73, style: 'high-contrast' },
   ]);
-  assert.strictEqual(stdinLines.length, 9, 'only allowlisted commands from the owning renderer may reach the native session');
+  assert.strictEqual(stdinLines.length, 8, 'only allowlisted commands from the owning renderer may reach the native session');
 
   assert(sender.sent.some(item => item.channel === 'advanced-video-state'
     && item.value.sessionId === 'session-1'
@@ -143,7 +151,7 @@ const run = async () => {
   const pngSignature = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
   const pngIend = Buffer.from([0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130]);
   fs.writeFileSync(screenshotCommand.path, Buffer.concat([pngSignature, Buffer.from('partial')]));
-  child.stdout.write(`${JSON.stringify({ type: 'screenshot-result', requestId: screenshotCommand.requestId, success: true, path: screenshotCommand.path })}\n`);
+  child.stdout.write(backendEvent('session-1', 4, 'screenshot-result', { requestId: screenshotCommand.requestId, success: true, path: screenshotCommand.path }));
   await new Promise(resolve => setTimeout(resolve, 60));
   assert.equal(fs.readdirSync(screenshotRoot).some(name => name.startsWith('camera_截图_')), false, 'a partial PNG must remain hidden after a premature component success');
   fs.appendFileSync(screenshotCommand.path, pngIend);
@@ -157,13 +165,14 @@ const run = async () => {
   const cleanupService = createAdvancedVideoService({
     BrowserWindow: { fromWebContents: () => ({ isDestroyed: () => false, getNativeWindowHandle: () => nativeHandle }) },
     crypto: { randomUUID: () => `cleanup-${++cleanupUuid}` },
-    mediaService: { authorizeInput: async value => path.resolve(value) },
+    mediaInputSessionService: makeMediaInputs(),
+    nativeSurfaceService: { attach: async () => ({ setBounds: () => undefined, close: () => undefined }) },
     path,
-    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
-    spawn: () => {
+    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }) },
+    spawn: (_command, args) => {
       const cleanupChild = makeChild();
       cleanupChildren.push(cleanupChild);
-      process.nextTick(() => cleanupChild.stdout.write('{"type":"ready"}\n'));
+      process.nextTick(() => cleanupChild.stdout.write(backendStartup(args[args.indexOf('--session-id') + 1])));
       return cleanupChild;
     },
     screenshotTimeoutMs: 120,
@@ -174,7 +183,7 @@ const run = async () => {
   const failedCapture = cleanupService.screenshot({ sender }, cleanupSession.sessionId);
   const failedCommand = cleanupChildren[0].stdinLines.at(-1);
   fs.writeFileSync(failedCommand.path, 'partial');
-  cleanupChildren[0].stdout.write(`${JSON.stringify({ type: 'screenshot-result', requestId: failedCommand.requestId, success: false, error: 'capture failed' })}\n`);
+  cleanupChildren[0].stdout.write(backendEvent('cleanup-1', 3, 'screenshot-result', { requestId: failedCommand.requestId, success: false, error: 'capture failed' }));
   await assert.rejects(failedCapture, /capture failed/);
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(fs.existsSync(failedCommand.path), false, 'component errors must clean the internal screenshot file');
@@ -192,6 +201,7 @@ const run = async () => {
   const workspaceSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
   const systemIpcSource = require('fs').readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
   const decoderSource = require('fs').readFileSync(path.join(__dirname, '..', 'extensions', 'video-playback-mpv', 'AdvancedVideoDecoder.cs'), 'utf8');
+  const nativeSurfaceHostSource = require('fs').readFileSync(path.join(__dirname, '..', 'electron', 'native', 'VideoSurfaceHost.cs'), 'utf8');
   const decoderBuildSource = require('fs').readFileSync(path.join(__dirname, 'build-advanced-video-decoder.cjs'), 'utf8');
   const runtimeBuildSource = require('fs').readFileSync(path.join(__dirname, 'media-runtime', 'build-libmpv-dependencies-windows.sh'), 'utf8');
   const libmpvBuildSource = require('fs').readFileSync(path.join(__dirname, 'media-runtime', 'build-libmpv-lgpl-windows.sh'), 'utf8');
@@ -232,7 +242,7 @@ const run = async () => {
   assert(playerSource.includes('backwardControlLabel') && playerSource.includes('forwardControlLabel') && playerSource.includes('runForwardBackControl(-1)') && playerSource.includes('runForwardBackControl(1)'), 'the controls beside play/pause must expose their active seek or navigation behavior');
   assert(playerSource.includes('cyclePlaybackSpeed') && playerSource.includes("controlPanel === 'speed'") && playerSource.includes('absolute bottom-full') && playerSource.includes('PLAYBACK_SPEEDS.map') && playerSource.includes('currentSession.capture()'), 'video controls must expose a compact floating playback-speed panel, click-to-cycle speed, and backend-neutral current-frame capture');
   assert(playerSource.includes("controlPanel === 'volume'") && playerSource.includes('aria-label="调整音量"') && playerSource.includes("control('mute', !muted)"), 'volume must use a floating panel above its icon while icon clicks toggle mute');
-  assert(playerSource.includes('overlayHole') && playerSource.includes('controlsOverlayHole') && playerSource.includes('cornerOverlayHole') && decoderSource.includes('controlsHoleWidth') && decoderSource.includes('ApplyOverlayHoles') && decoderSource.includes('path.AddEllipse(bounds)'), 'the native video surface must expose floating panels and controls with rectangular holes and the full-screen close button with a circular hole');
+  assert(playerSource.includes('overlayHole') && playerSource.includes('controlsOverlayHole') && playerSource.includes('cornerOverlayHole') && nativeSurfaceHostSource.includes('"controlsHole"') && nativeSurfaceHostSource.includes('CreateEllipticRgn') && !decoderSource.includes('ApplyOverlayHoles'), 'the host-owned native surface must expose rectangular controls holes and a circular close-button hole');
   assert(playerSource.includes('useHostSurfaceState') && playerSource.includes('!hostSurfaceSuspended') && !playerSource.includes('hasVisibleExternalModal') && !playerSource.includes('MutationObserver'), 'native video surfaces must consume explicit host suspension instead of guessing from modal DOM');
   assert(playerSource.includes('topRightOverlayHole') && !playerSource.includes('marginTop: Math.max(0, topOverlayInset)') && workspaceSource.includes('topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 60 : 0}'), 'full-screen video must reach the top edge while keeping the close button interactive without exposing a rectangular patch');
   assert(playerSource.includes('controlsOverlay ? <div ref={controlsOverlayRef} className="absolute inset-x-0 bottom-0') && workspaceSource.includes('controlsVisible={!fullscreen || fullscreenControlsVisible}') && workspaceSource.includes('controlsOverlay={fullscreen}'), 'full-screen playback controls must float over a full-size video surface, hide with the close button, and return on pointer activity');
@@ -261,20 +271,21 @@ const run = async () => {
   assert.strictEqual(service.stop(second.sessionId, sender.id), true);
   assert.strictEqual(service.sessions.size, 0);
   assert.strictEqual(sender.listenerCount('destroyed'), 0, 'stopped sessions must remove their WebContents destroyed listener');
-  assert.strictEqual(children[2].stdinLines.at(-1).command, 'close');
+  assert.strictEqual(children[2].stdin.writableEnded, true);
 
   const pendingAuthorization = new Map();
   const raceChildren = [];
   const raceService = createAdvancedVideoService({
     BrowserWindow: { fromWebContents: () => ({ isDestroyed: () => false, getNativeWindowHandle: () => nativeHandle }) },
     crypto: { randomUUID: () => 'session-race' },
-    mediaService: { authorizeInput: value => new Promise(resolve => pendingAuthorization.set(value, resolve)) },
+    mediaInputSessionService: makeMediaInputs(value => new Promise(resolve => pendingAuthorization.set(value, resolve))),
+    nativeSurfaceService: { attach: async () => ({ setBounds: () => undefined, close: () => undefined }) },
     path,
-    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
-    spawn: () => {
+    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }) },
+    spawn: (_command, args) => {
       const raceChild = makeChild();
       raceChildren.push(raceChild);
-      process.nextTick(() => raceChild.stdout.write('{"type":"ready"}\n'));
+      process.nextTick(() => raceChild.stdout.write(backendStartup(args[args.indexOf('--session-id') + 1])));
       return raceChild;
     },
     writeLog: () => undefined,
@@ -296,16 +307,18 @@ const run = async () => {
 
   const pendingRunConfigs = [];
   const integrityRaceChildren = [];
+  let integrityUuid = 0;
   const integrityRaceService = createAdvancedVideoService({
     BrowserWindow: { fromWebContents: () => ({ isDestroyed: () => false, getNativeWindowHandle: () => nativeHandle }) },
-    crypto: { randomUUID: () => 'session-integrity-race' },
-    mediaService: { authorizeInput: async value => path.resolve(value) },
+    crypto: { randomUUID: () => `session-integrity-race-${++integrityUuid}` },
+    mediaInputSessionService: makeMediaInputs(),
+    nativeSurfaceService: { attach: async () => ({ setBounds: () => undefined, close: () => undefined }) },
     path,
-    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: () => new Promise(resolve => pendingRunConfigs.push(resolve)) },
-    spawn: () => {
+    playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: (_id, args) => new Promise(resolve => pendingRunConfigs.push(config => resolve({ ...config, args }))) },
+    spawn: (_command, args) => {
       const child = makeChild();
       integrityRaceChildren.push(child);
-      process.nextTick(() => child.stdout.write('{"type":"ready"}\n'));
+      process.nextTick(() => child.stdout.write(backendStartup(args[args.indexOf('--session-id') + 1])));
       return child;
     },
     writeLog: () => undefined,

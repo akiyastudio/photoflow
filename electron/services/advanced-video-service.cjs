@@ -1,5 +1,6 @@
 const { StringDecoder } = require('string_decoder');
 const fs = require('fs');
+const { createPlaybackEnvelopeWriter, validatePlaybackEnvelope } = require('../contracts/media-playback-backend-v1.cjs');
 
 const START_TIMEOUT_MS = 8000;
 const SCREENSHOT_TIMEOUT_MS = 8000;
@@ -11,14 +12,8 @@ const normalizeSubtitleFontSize = value => {
   return Number.isFinite(migrated) ? Math.max(16, Math.min(120, Math.round(migrated))) : DEFAULT_SUBTITLE_FONT_SIZE;
 };
 
-const nativeWindowHandleValue = window => {
-  const handle = window.getNativeWindowHandle();
-  if (!Buffer.isBuffer(handle) || handle.length < 4) throw new Error('无法读取照片流窗口句柄');
-  return handle.length >= 8 ? handle.readBigUInt64LE(0).toString() : String(handle.readUInt32LE(0));
-};
-
 const createAdvancedVideoService = ({
-  BrowserWindow, crypto, mediaService, path, playbackBroker, processSupervisor = null, spawn, writeLog,
+  BrowserWindow, crypto, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor = null, spawn, writeLog,
   fileSystem = fs, screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS,
 }) => {
   const sessions = new Map();
@@ -90,7 +85,8 @@ const createAdvancedVideoService = ({
   const sendCommand = (session, value) => {
     if (!session || session.stopped || !session.child.stdin.writable) return false;
     try {
-      session.child.stdin.write(`${JSON.stringify(value)}\n`);
+      const { command, ...payload } = value;
+      session.commandWriter.emit(command, payload);
       return true;
     } catch (error) {
       writeLog('warn', 'Unable to control advanced video decoder', { sessionId: session.id, error: error.message || String(error) });
@@ -104,6 +100,10 @@ const createAdvancedVideoService = ({
     removeSession(session);
     emit(session, { type: 'stopped' });
     session.stopped = true;
+    session.eventState.closed = true;
+    session.commandWriter?.close();
+    session.surfaceController?.close();
+    mediaInputSessionService.revoke(session.id);
     if (session.rejectReady) {
       session.rejectReady(new Error('视频播放启动已取消'));
       session.rejectReady = null;
@@ -115,7 +115,7 @@ const createAdvancedVideoService = ({
     for (const pending of session.pendingScreenshots.values()) {
       rejectPendingScreenshot(session, pending.requestId, pending, new Error('视频播放已经停止'));
     }
-    try { session.child.stdin.end(`${JSON.stringify({ command: 'close' })}\n`); } catch { /* process already exited */ }
+    try { session.child.stdin.end(); } catch { /* process already exited */ }
     const timer = setTimeout(() => {
       if (session.managedProcess) session.managedProcess.stop('advanced-video-stop');
       else if (!session.child.killed) session.child.kill();
@@ -144,17 +144,20 @@ const createAdvancedVideoService = ({
       if (launches.get(key) !== normalizedRequestId) throw new Error('视频播放器请求已被替换');
     };
     let session = null;
+    let inputSessionId = '';
+    let launchedChild = null;
 
     try {
-      const authorizedPath = await mediaService.authorizeInput(filePath);
-      assertCurrentLaunch();
       const ownerWindow = BrowserWindow.fromWebContents(sender);
       if (!ownerWindow || ownerWindow.isDestroyed()) throw new Error('照片流窗口已经关闭');
       const backendId = String(requestedBackendId || playbackBroker.defaultBackendId());
       if (!backendId) throw new Error('没有可用的高级视频播放后端');
-      const runConfig = await playbackBroker.resolveRunConfigAsync(backendId, ['--parent-hwnd', nativeWindowHandleValue(ownerWindow)]);
-      assertCurrentLaunch();
       const id = crypto.randomUUID();
+      inputSessionId = id;
+      await mediaInputSessionService.prepare({ filePath, backendId, sessionId: id });
+      assertCurrentLaunch();
+      const runConfig = await playbackBroker.resolveRunConfigAsync(backendId, ['--session-id', id]);
+      assertCurrentLaunch();
       const managedProcess = processSupervisor?.launch({
         id: `component:advanced-video:${id}`,
         kind: 'optional-component',
@@ -167,6 +170,9 @@ const createAdvancedVideoService = ({
       const child = managedProcess?.child || spawn(runConfig.command, runConfig.args, {
         cwd: path.dirname(runConfig.command), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
       });
+      launchedChild = child;
+      mediaInputSessionService.bindProcess({ backendId, sessionId: id, processId: child.pid });
+      const authorizedPath = mediaInputSessionService.resolve({ sessionId: id, backendId, processId: child.pid });
       session = {
         id,
         sender,
@@ -181,7 +187,17 @@ const createAdvancedVideoService = ({
         pendingScreenshots: new Map(),
         onSenderDestroyed: null,
         rejectReady: null,
+        eventState: { sessionId: id, lastSequence: 0, closed: false },
+        commandWriter: null,
+        ownerWindow,
+        surfaceAttachPromise: null,
+        surfaceController: null,
       };
+      session.commandWriter = createPlaybackEnvelopeWriter({
+        sessionId: id,
+        direction: 'command',
+        send: envelope => session.child.stdin.write(`${JSON.stringify(envelope)}\n`),
+      });
       sessions.set(id, session);
       sessionsByPlayer.set(key, id);
       session.onSenderDestroyed = () => stop(id, sender.id);
@@ -201,10 +217,17 @@ const createAdvancedVideoService = ({
 
       const consumeLine = line => {
         if (session.stopped || !line.trim()) return;
-        let value;
-        try { value = JSON.parse(line); }
+        let envelope;
+        try { envelope = validatePlaybackEnvelope(JSON.parse(line), session.eventState, { direction: 'event' }); }
         catch {
-          writeLog('warn', 'Advanced video decoder emitted invalid JSON', { line: line.slice(0, 500) });
+          writeLog('warn', 'Advanced video decoder emitted an invalid v1 frame', { line: line.slice(0, 500) });
+          return;
+        }
+        const value = { type: envelope.event.slice('event.'.length), ...envelope.payload };
+        if (value.type === 'surface-created') {
+          if (session.surfaceAttachPromise) return;
+          session.surfaceAttachPromise = nativeSurfaceService.attach({ ownerWindow: session.ownerWindow, componentProcess: session.child, surfaceHandle: value.surfaceHandle, sessionId: session.id })
+            .then(controller => { session.surfaceController = controller; return controller; });
           return;
         }
         if (value.type === 'screenshot-result') {
@@ -227,11 +250,15 @@ const createAdvancedVideoService = ({
           return;
         }
         if (value.type === 'ready') {
-          session.ready = true;
-          session.managedProcess?.markHealthy({ protocol: 'video-player-v1' });
-          session.rejectReady = null;
-          clearTimeout(startupTimer);
-          settleReady();
+          if (!session.surfaceAttachPromise) { rejectReady(new Error('视频后端未声明原生渲染表面')); return; }
+          void session.surfaceAttachPromise.then(() => {
+            if (session.stopped) return;
+            session.ready = true;
+            session.managedProcess?.markHealthy({ protocol: 'media-playback-backend-v1' });
+            session.rejectReady = null;
+            clearTimeout(startupTimer);
+            settleReady();
+          }, rejectReady);
         } else if (value.type === 'fatal') {
           session.lastError = String(value.error || '视频播放器启动失败');
           clearTimeout(startupTimer);
@@ -258,6 +285,10 @@ const createAdvancedVideoService = ({
       });
       child.once('exit', code => {
         clearTimeout(startupTimer);
+        session.eventState.closed = true;
+        session.commandWriter?.close();
+        session.surfaceController?.close();
+        mediaInputSessionService.revoke(session.id);
         for (const [requestId, pending] of session.pendingScreenshots.entries()) {
           rejectPendingScreenshot(session, requestId, pending, new Error('视频播放器在截图完成前退出'));
         }
@@ -276,7 +307,11 @@ const createAdvancedVideoService = ({
       return { sessionId: id, playerId: normalizedPlayerId, requestId: normalizedRequestId };
     } catch (error) {
       if (session) stop(session.id, sender.id);
-      else if (launches.get(key) === normalizedRequestId) launches.delete(key);
+      else {
+        if (inputSessionId) mediaInputSessionService.revoke(inputSessionId);
+        if (launchedChild && !launchedChild.killed) { try { launchedChild.kill(); } catch { /* launch already exited */ } }
+        if (launches.get(key) === normalizedRequestId) launches.delete(key);
+      }
       throw error;
     }
   };
@@ -302,8 +337,7 @@ const createAdvancedVideoService = ({
     const cornerHoleY = Math.max(0, Math.min(height, number(requestedCornerHole.y)));
     const cornerHoleWidth = Math.max(0, Math.min(width - cornerHoleX, number(requestedCornerHole.width)));
     const cornerHoleHeight = Math.max(0, Math.min(height - cornerHoleY, number(requestedCornerHole.height)));
-    sendCommand(session, {
-      command: 'set-bounds',
+    session.surfaceController?.setBounds({
       x: Math.max(-32768, Math.min(32768, number(bounds.x))),
       y: Math.max(-32768, Math.min(32768, number(bounds.y))),
       width,
@@ -386,4 +420,4 @@ const createAdvancedVideoService = ({
   return { start, setBounds, control, addSubtitle, ownsSession, screenshot, stop, dispose, sessions, sessionsByPlayer, launches };
 };
 
-module.exports = { createAdvancedVideoService, nativeWindowHandleValue };
+module.exports = { createAdvancedVideoService };

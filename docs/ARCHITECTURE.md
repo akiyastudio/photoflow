@@ -108,6 +108,11 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   position, pause, audio, rate and stable subtitle selection before resuming.
   Native surfaces report raw pointer/key activity and track facts; product input
   and subtitle-default policy are interpreted by the application. The current
+  v1 native transport is a bounded, sequenced envelope. Media grants are bound
+  to one backend process/session, while a core-owned surface helper validates
+  the declared HWND's process before owning parenting, DPI positioning and clip
+  regions; backend processes never receive the Electron window handle.
+  The current
   Electron `video-player-*` IPC names and `advanced-video-*` aliases are compatibility
   adapters around the generic broker. Packages without an explicit
   `media.playbackBackend@v1` declaration are not treated as playback backends,

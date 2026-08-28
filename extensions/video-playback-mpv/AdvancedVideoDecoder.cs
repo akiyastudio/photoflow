@@ -13,15 +13,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
 {
     internal static class NativeMethods
     {
-        internal const int GWL_STYLE = -16;
-        internal const long WS_CHILD = 0x40000000L;
-        internal const long WS_POPUP = 0x80000000L;
-        internal const long WS_CAPTION = 0x00C00000L;
-        internal const uint SWP_NOACTIVATE = 0x0010;
-        internal const uint SWP_SHOWWINDOW = 0x0040;
-        internal const int SW_HIDE = 0;
-        internal const int SW_SHOWNOACTIVATE = 4;
-
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         internal static extern IntPtr LoadLibrary(string fileName);
 
@@ -35,42 +26,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
         internal static extern bool SetDllDirectory(string path);
 
         [DllImport("user32.dll", SetLastError = true)]
-        internal static extern IntPtr SetParent(IntPtr child, IntPtr newParent);
-
-        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)]
-        internal static extern IntPtr GetWindowLongPtr64(IntPtr window, int index);
-
-        [DllImport("user32.dll", EntryPoint = "GetWindowLong", SetLastError = true)]
-        internal static extern IntPtr GetWindowLongPtr32(IntPtr window, int index);
-
-        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr", SetLastError = true)]
-        internal static extern IntPtr SetWindowLongPtr64(IntPtr window, int index, IntPtr value);
-
-        [DllImport("user32.dll", EntryPoint = "SetWindowLong", SetLastError = true)]
-        internal static extern IntPtr SetWindowLongPtr32(IntPtr window, int index, IntPtr value);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        internal static extern bool MoveWindow(IntPtr window, int x, int y, int width, int height, bool repaint);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        internal static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
-
-        [DllImport("user32.dll")]
-        internal static extern bool ShowWindow(IntPtr window, int command);
-
-        [DllImport("user32.dll", SetLastError = true)]
         internal static extern bool SetProcessDpiAwarenessContext(IntPtr value);
-
-        internal static IntPtr GetWindowStyle(IntPtr window)
-        {
-            return IntPtr.Size == 8 ? GetWindowLongPtr64(window, GWL_STYLE) : GetWindowLongPtr32(window, GWL_STYLE);
-        }
-
-        internal static void SetWindowStyle(IntPtr window, IntPtr value)
-        {
-            if (IntPtr.Size == 8) SetWindowLongPtr64(window, GWL_STYLE, value);
-            else SetWindowLongPtr32(window, GWL_STYLE, value);
-        }
+        [DllImport("kernel32.dll")] internal static extern uint GetCurrentProcessId();
     }
 
     internal sealed class LibMpv : IDisposable
@@ -411,7 +368,9 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
     internal sealed class DecoderHost : Form
     {
-        private readonly IntPtr parentWindow;
+        private const string Protocol = "media-playback-backend-v1";
+        private const int MaxFrameBytes = 256 * 1024;
+        private readonly string sessionId;
         private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
         private readonly object outputLock = new object();
         private readonly object playerLock = new object();
@@ -425,10 +384,13 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private int lastPointerActivityTick;
         private Point lastPointerLocation;
         private bool hasLastPointerLocation;
+        private long eventSequence;
+        private long commandSequence;
 
-        internal DecoderHost(IntPtr parentWindow)
+        internal DecoderHost(string sessionId)
         {
-            this.parentWindow = parentWindow;
+            this.sessionId = sessionId;
+            serializer.MaxJsonLength = MaxFrameBytes;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
@@ -445,13 +407,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
             try
             {
                 IntPtr handle = Handle;
-                long style = NativeMethods.GetWindowStyle(handle).ToInt64();
-                style = (style | NativeMethods.WS_CHILD) & ~NativeMethods.WS_POPUP & ~NativeMethods.WS_CAPTION;
-                NativeMethods.SetWindowStyle(handle, new IntPtr(style));
-                if (NativeMethods.SetParent(handle, parentWindow) == IntPtr.Zero && Marshal.GetLastWin32Error() != 0)
-                    throw new InvalidOperationException("无法把视频画面附着到 PhotoFlow 窗口");
-                NativeMethods.MoveWindow(handle, 0, 0, 1, 1, true);
                 player = new LibMpv(handle);
+                Emit(new Dictionary<string, object> { { "type", "surface-created" }, { "surfaceHandle", handle.ToInt64().ToString(CultureInfo.InvariantCulture) }, { "processId", NativeMethods.GetCurrentProcessId() } });
                 Emit(new Dictionary<string, object> { { "type", "ready" } });
                 inputThread = new Thread(ReadCommands) { IsBackground = true, Name = "PhotoFlow video command reader" };
                 pollThread = new Thread(PollState) { IsBackground = true, Name = "PhotoFlow video state poller" };
@@ -472,7 +429,18 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 string line;
                 while (!shuttingDown && (line = Console.In.ReadLine()) != null)
                 {
-                    Dictionary<string, object> command = serializer.Deserialize<Dictionary<string, object>>(line);
+                    if (Encoding.UTF8.GetByteCount(line) > MaxFrameBytes) throw new InvalidOperationException("播放协议帧超过 256 KiB");
+                    Dictionary<string, object> envelope = serializer.Deserialize<Dictionary<string, object>>(line);
+                    if (ReadString(envelope, "protocol") != Protocol || ReadString(envelope, "sessionId") != sessionId) throw new InvalidOperationException("播放协议会话不匹配");
+                    long sequence = (long)ReadDouble(envelope, "sequence");
+                    if (sequence <= commandSequence) throw new InvalidOperationException("播放协议命令顺序无效");
+                    commandSequence = sequence;
+                    string eventName = ReadString(envelope, "event");
+                    if (!eventName.StartsWith("command.", StringComparison.Ordinal)) throw new InvalidOperationException("播放协议命令类型无效");
+                    object rawPayload;
+                    Dictionary<string, object> command = envelope.TryGetValue("payload", out rawPayload) ? rawPayload as Dictionary<string, object> : null;
+                    if (command == null) command = new Dictionary<string, object>();
+                    command["command"] = eventName.Substring("command.".Length);
                     HandleCommand(command);
                 }
             }
@@ -489,42 +457,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private void HandleCommand(Dictionary<string, object> value)
         {
             string name = ReadString(value, "command");
-            if (name == "set-bounds")
-            {
-                int x = ReadInt(value, "x");
-                int y = ReadInt(value, "y");
-                int width = Math.Max(1, ReadInt(value, "width"));
-                int height = Math.Max(1, ReadInt(value, "height"));
-                int holeX = ReadInt(value, "holeX");
-                int holeY = ReadInt(value, "holeY");
-                int holeWidth = ReadInt(value, "holeWidth");
-                int holeHeight = ReadInt(value, "holeHeight");
-                int controlsHoleX = ReadInt(value, "controlsHoleX");
-                int controlsHoleY = ReadInt(value, "controlsHoleY");
-                int controlsHoleWidth = ReadInt(value, "controlsHoleWidth");
-                int controlsHoleHeight = ReadInt(value, "controlsHoleHeight");
-                int cornerHoleX = ReadInt(value, "cornerHoleX");
-                int cornerHoleY = ReadInt(value, "cornerHoleY");
-                int cornerHoleWidth = ReadInt(value, "cornerHoleWidth");
-                int cornerHoleHeight = ReadInt(value, "cornerHoleHeight");
-                bool visible = ReadBool(value, "visible") && ReadInt(value, "width") > 0 && ReadInt(value, "height") > 0;
-                BeginInvoke(new Action(() => {
-                    if (shuttingDown) return;
-                    NativeMethods.MoveWindow(Handle, x, y, width, height, true);
-                    ApplyOverlayHoles(
-                        width, height,
-                        holeX, holeY, holeWidth, holeHeight,
-                        controlsHoleX, controlsHoleY, controlsHoleWidth, controlsHoleHeight,
-                        cornerHoleX, cornerHoleY, cornerHoleWidth, cornerHoleHeight);
-                    if (visible)
-                    {
-                        NativeMethods.ShowWindow(Handle, NativeMethods.SW_SHOWNOACTIVATE);
-                        NativeMethods.SetWindowPos(Handle, IntPtr.Zero, x, y, width, height, NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
-                    }
-                    else NativeMethods.ShowWindow(Handle, NativeMethods.SW_HIDE);
-                }));
-                return;
-            }
             if (name == "close")
             {
                 BeginInvoke(new Action(Close));
@@ -625,49 +557,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
             player.SetProperty("sub-shadow-offset", style == "high-contrast" ? "2" : "1");
         }
 
-        private static void ExcludeOverlayHole(System.Drawing.Region region, int width, int height, int holeX, int holeY, int holeWidth, int holeHeight, bool ellipse)
-        {
-            if (holeWidth <= 0 || holeHeight <= 0) return;
-            int left = Math.Max(0, Math.Min(width, holeX));
-            int top = Math.Max(0, Math.Min(height, holeY));
-            int clippedWidth = Math.Max(0, Math.Min(width - left, holeWidth));
-            int clippedHeight = Math.Max(0, Math.Min(height - top, holeHeight));
-            if (clippedWidth <= 0 || clippedHeight <= 0) return;
-            var bounds = new Rectangle(left, top, clippedWidth, clippedHeight);
-            if (!ellipse)
-            {
-                region.Exclude(bounds);
-                return;
-            }
-            using (var path = new System.Drawing.Drawing2D.GraphicsPath())
-            {
-                path.AddEllipse(bounds);
-                region.Exclude(path);
-            }
-        }
-
-        private void ApplyOverlayHoles(
-            int width, int height,
-            int holeX, int holeY, int holeWidth, int holeHeight,
-            int controlsHoleX, int controlsHoleY, int controlsHoleWidth, int controlsHoleHeight,
-            int cornerHoleX, int cornerHoleY, int cornerHoleWidth, int cornerHoleHeight)
-        {
-            System.Drawing.Region previous = Region;
-            bool hasPanelHole = holeWidth > 0 && holeHeight > 0;
-            bool hasControlsHole = controlsHoleWidth > 0 && controlsHoleHeight > 0;
-            bool hasCornerHole = cornerHoleWidth > 0 && cornerHoleHeight > 0;
-            if (hasPanelHole || hasControlsHole || hasCornerHole)
-            {
-                var next = new System.Drawing.Region(new Rectangle(0, 0, width, height));
-                ExcludeOverlayHole(next, width, height, holeX, holeY, holeWidth, holeHeight, false);
-                ExcludeOverlayHole(next, width, height, controlsHoleX, controlsHoleY, controlsHoleWidth, controlsHoleHeight, false);
-                ExcludeOverlayHole(next, width, height, cornerHoleX, cornerHoleY, cornerHoleWidth, cornerHoleHeight, true);
-                Region = next;
-            }
-            else Region = null;
-            if (previous != null) previous.Dispose();
-        }
-
         protected override void OnMouseMove(MouseEventArgs eventArgs)
         {
             base.OnMouseMove(eventArgs);
@@ -762,7 +651,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                                 { "subtitleDelay", ReadNumber(player.GetProperty("sub-delay")) }
                             };
                             string serializedSubtitleState = serializer.Serialize(subtitleState);
-                            if (serializedSubtitleState != lastSubtitleState) { lastSubtitleState = serializedSubtitleState; EmitSerialized(serializedSubtitleState); }
+                            if (serializedSubtitleState != lastSubtitleState) { lastSubtitleState = serializedSubtitleState; Emit(subtitleState); }
                             var state = new Dictionary<string, object> {
                                 { "type", "state" },
                                 { "time", ReadNumber(player.GetProperty("time-pos")) },
@@ -779,7 +668,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                             if (serialized != lastState)
                             {
                                 lastState = serialized;
-                                EmitSerialized(serialized);
+                                Emit(state);
                             }
                         }
                     }
@@ -794,14 +683,19 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
         private void Emit(Dictionary<string, object> value)
         {
-            EmitSerialized(serializer.Serialize(value));
-        }
-
-        private void EmitSerialized(string value)
-        {
+            string eventName = ReadString(value, "type");
+            var payload = new Dictionary<string, object>(value);
+            payload.Remove("type");
+            var envelope = new Dictionary<string, object> {
+                { "protocol", Protocol }, { "sessionId", sessionId }, { "sequence", Interlocked.Increment(ref eventSequence) },
+                { "timestamp", (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds },
+                { "event", "event." + eventName }, { "payload", payload }
+            };
+            string serialized = serializer.Serialize(envelope);
+            if (Encoding.UTF8.GetByteCount(serialized) > MaxFrameBytes) throw new InvalidOperationException("播放协议事件帧超过 256 KiB");
             lock (outputLock)
             {
-                Console.Out.WriteLine(value);
+                Console.Out.WriteLine(serialized);
                 Console.Out.Flush();
             }
         }
@@ -868,11 +762,13 @@ namespace PhotoFlow.AdvancedVideoDecoder
             Console.InputEncoding = new UTF8Encoding(false);
             Console.OutputEncoding = new UTF8Encoding(false);
             try { NativeMethods.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
-            long parent = 0;
+            string sessionId = string.Empty;
             bool probeOnly = false;
             foreach (string argument in args) if (argument == "--probe") probeOnly = true;
             for (int index = 0; index + 1 < args.Length; index++)
-                if (args[index] == "--parent-hwnd") long.TryParse(args[index + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out parent);
+            {
+                if (args[index] == "--session-id") sessionId = args[index + 1];
+            }
             if (probeOnly)
             {
                 try
@@ -899,14 +795,14 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     return 3;
                 }
             }
-            if (parent == 0)
+            if (string.IsNullOrWhiteSpace(sessionId))
             {
-                Console.Out.WriteLine("{\"type\":\"fatal\",\"error\":\"缺少 PhotoFlow 父窗口句柄\"}");
+                Console.Error.WriteLine("缺少 PhotoFlow 宿主参数");
                 return 2;
             }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new DecoderHost(new IntPtr(parent)));
+            Application.Run(new DecoderHost(sessionId));
             return 0;
         }
     }

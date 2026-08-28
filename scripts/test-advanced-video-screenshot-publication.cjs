@@ -5,14 +5,18 @@ const os = require('os');
 const path = require('path');
 const { PassThrough } = require('stream');
 const { createAdvancedVideoService } = require('../electron/services/advanced-video-service.cjs');
+const backendEvent = (sessionId, sequence, type, payload = {}) => `${JSON.stringify({ protocol: 'media-playback-backend-v1', sessionId, sequence, timestamp: Date.now(), event: `event.${type}`, payload })}\n`;
+const backendStartup = sessionId => backendEvent(sessionId, 1, 'surface-created', { surfaceHandle: '4242', processId: 123 }) + backendEvent(sessionId, 2, 'ready');
+const makeMediaInputs = () => { const grants = new Map(); return { prepare: async request => { grants.set(request.sessionId, { ...request, processId: 0, authorizedPath: path.resolve(request.filePath) }); }, bindProcess: request => { grants.get(request.sessionId).processId = request.processId; }, resolve: request => grants.get(request.sessionId).authorizedPath, revoke: sessionId => grants.delete(sessionId) }; };
 
 const makeChild = () => {
   const child = new EventEmitter();
   child.stdin = new PassThrough();
   child.stdout = new PassThrough();
   child.stderr = new PassThrough();
+  child.pid = 123;
   child.stdinLines = [];
-  child.stdin.on('data', chunk => child.stdinLines.push(...chunk.toString('utf8').trim().split(/\r?\n/).filter(Boolean).map(JSON.parse)));
+  child.stdin.on('data', chunk => child.stdinLines.push(...chunk.toString('utf8').trim().split(/\r?\n/).filter(Boolean).map(line => { const envelope = JSON.parse(line); return { command: envelope.event.slice('command.'.length), ...envelope.payload }; })));
   child.killed = false;
   child.kill = () => { child.killed = true; child.emit('exit', 0); };
   return child;
@@ -34,13 +38,14 @@ const run = async () => {
     const service = createAdvancedVideoService({
       BrowserWindow: { fromWebContents: () => ({ isDestroyed: () => false, getNativeWindowHandle: () => nativeHandle }) },
       crypto: { randomUUID: () => `capture-${++sequence}` },
-      mediaService: { authorizeInput: async value => path.resolve(value) },
+      mediaInputSessionService: makeMediaInputs(),
+      nativeSurfaceService: { attach: async () => ({ setBounds: () => undefined, close: () => undefined }) },
       path,
-      playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
-      spawn: () => {
+      playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }) },
+      spawn: (_command, args) => {
         const child = makeChild();
         children.push(child);
-        process.nextTick(() => child.stdout.write('{"type":"ready"}\n'));
+        process.nextTick(() => child.stdout.write(backendStartup(args[args.indexOf('--session-id') + 1])));
         return child;
       },
       screenshotTimeoutMs: 140,
@@ -57,7 +62,7 @@ const run = async () => {
     const successCommand = screenshotCommand();
     assert.match(path.basename(successCommand.path), /^\.camera\.capture-2\.photoflow-transcode-screenshot\.png$/);
     fs.writeFileSync(successCommand.path, Buffer.concat([signature, Buffer.from('partial')]));
-    child.stdout.write(`${JSON.stringify({ type: 'screenshot-result', requestId: successCommand.requestId, success: true, path: successCommand.path })}\n`);
+    child.stdout.write(backendEvent('capture-1', 3, 'screenshot-result', { requestId: successCommand.requestId, success: true, path: successCommand.path }));
     await new Promise(resolve => setTimeout(resolve, 35));
     assert.equal(fs.readdirSync(root).some(name => name.startsWith('camera_截图_')), false);
     fs.appendFileSync(successCommand.path, iend);
@@ -69,7 +74,7 @@ const run = async () => {
     const incomplete = service.screenshot({ sender }, session.sessionId);
     const incompleteCommand = screenshotCommand();
     fs.writeFileSync(incompleteCommand.path, Buffer.concat([signature, Buffer.from('never completed')]));
-    child.stdout.write(`${JSON.stringify({ type: 'screenshot-result', requestId: incompleteCommand.requestId, success: true, path: incompleteCommand.path })}\n`);
+    child.stdout.write(backendEvent('capture-1', 4, 'screenshot-result', { requestId: incompleteCommand.requestId, success: true, path: incompleteCommand.path }));
     const incompleteKeepAlive = setTimeout(() => undefined, 250);
     await assert.rejects(incomplete, /超时|未完整写入/);
     clearTimeout(incompleteKeepAlive);
@@ -83,7 +88,7 @@ const run = async () => {
     const failed = service.screenshot({ sender }, session.sessionId);
     const failedCommand = screenshotCommand();
     fs.writeFileSync(failedCommand.path, 'partial');
-    child.stdout.write(`${JSON.stringify({ type: 'screenshot-result', requestId: failedCommand.requestId, success: false, error: 'capture failed' })}\n`);
+    child.stdout.write(backendEvent('capture-1', 5, 'screenshot-result', { requestId: failedCommand.requestId, success: false, error: 'capture failed' }));
     await assert.rejects(failed, /capture failed/);
     assert.equal(fs.existsSync(failedCommand.path), false);
 
@@ -122,14 +127,15 @@ const run = async () => {
     let raceSequence = 0;
     const raceService = createAdvancedVideoService({
       BrowserWindow: { fromWebContents: () => ({ isDestroyed: () => false, getNativeWindowHandle: () => nativeHandle }) },
-      crypto: { randomUUID: () => `race-${++raceSequence}` },
-      mediaService: { authorizeInput: async value => path.resolve(value) },
+      crypto: { randomUUID: () => `race-session-${++raceSequence}` },
+      mediaInputSessionService: makeMediaInputs(),
+      nativeSurfaceService: { attach: async () => ({ setBounds: () => undefined, close: () => undefined }) },
       path,
-      playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async () => ({ command: 'C:\\component\\advanced-video-decoder.exe', args: [] }) },
-      spawn: () => {
+      playbackBroker: { defaultBackendId: () => 'fixture-backend', resolveRunConfigAsync: async (_id, args) => ({ command: 'C:\\component\\advanced-video-decoder.exe', args }) },
+      spawn: (_command, args) => {
         const raceChild = makeChild();
         raceChildren.push(raceChild);
-        process.nextTick(() => raceChild.stdout.write('{"type":"ready"}\n'));
+        process.nextTick(() => raceChild.stdout.write(backendStartup(args[args.indexOf('--session-id') + 1])));
         return raceChild;
       },
       fileSystem: raceFileSystem,
@@ -141,7 +147,7 @@ const run = async () => {
     const raceCapture = raceService.screenshot({ sender }, raceSession.sessionId);
     const raceCommand = [...raceChildren[0].stdinLines].reverse().find(item => item.command === 'screenshot');
     fs.writeFileSync(raceCommand.path, Buffer.concat([signature, iend]));
-    raceChildren[0].stdout.write(`${JSON.stringify({ type: 'screenshot-result', requestId: raceCommand.requestId, success: true, path: raceCommand.path })}\n`);
+    raceChildren[0].stdout.write(backendEvent('race-session-1', 3, 'screenshot-result', { requestId: raceCommand.requestId, success: true, path: raceCommand.path }));
     await renameStarted;
     await new Promise(resolve => setTimeout(resolve, 80));
     raceService.stop(raceSession.sessionId, sender.id);

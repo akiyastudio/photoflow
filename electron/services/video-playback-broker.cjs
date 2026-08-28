@@ -2,6 +2,14 @@ const { parseMediaPlaybackBackendContributions } = require('../contracts/media-p
 
 const supportRank = Object.freeze({ probably: 3, maybe: 2, unknown: 1, unsupported: 0 });
 const normalizeBrowserProbe = value => ['probably', 'maybe', 'unsupported'].includes(value) ? value : 'unknown';
+const CHROMIUM_FEATURES = Object.freeze({
+  transforms: Object.freeze(['source', 'contain', 'cover', '16:9', '4:3', '1:1', 'rotate', 'flip-horizontal', 'flip-vertical']),
+  hdr: Object.freeze({ modes: Object.freeze(['auto', 'sdr', 'tone-map']), requiresHdrDisplay: false }),
+  statistics: Object.freeze({ levels: Object.freeze(['basic']), maxUpdateHz: 4 }),
+  subtitles: Object.freeze({ formats: Object.freeze(['vtt']), externalFiles: true }),
+  hardwareDecoding: true,
+  capture: Object.freeze({ supported: true, appliesTransforms: true }),
+});
 
 const createVideoPlaybackBroker = ({ pluginService, path }) => {
   const contributions = () => pluginService.list().flatMap(component => {
@@ -16,7 +24,9 @@ const createVideoPlaybackBroker = ({ pluginService, path }) => {
     const chromiumSupport = normalizeBrowserProbe(browserProbe);
     const descriptors = [{
       backendId: 'core.chromium', protocolVersion: 1, transport: 'chromium',
-      displayName: 'Chromium', priority: 100, probe: { support: chromiumSupport, basis: 'html-media-can-play-type' },
+      displayName: 'Chromium', priority: 100,
+      probe: { support: chromiumSupport, basis: 'html-media-can-play-type', containers: [], codecs: { video: [], audio: [] }, extensions: [extension].filter(Boolean) },
+      features: CHROMIUM_FEATURES,
     }];
     for (const item of contributions()) {
       // A declared extension proves only that the backend accepts the
@@ -28,7 +38,8 @@ const createVideoPlaybackBroker = ({ pluginService, path }) => {
         transport: item.contribution.transport,
         displayName: item.component.name || item.contribution.backendId,
         priority: item.contribution.priority,
-        probe: { support, basis: 'manifest-extension-hint' },
+        probe: { support, basis: 'manifest-extension-hint', ...item.contribution.probe },
+        features: item.contribution.features,
       });
     }
     const chromiumHasCapabilitySignal = chromiumSupport === 'probably' || chromiumSupport === 'maybe';

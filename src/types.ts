@@ -807,7 +807,21 @@ export interface VideoPlaybackBackendDescriptor {
   transport: 'chromium' | 'native-process-v1';
   displayName: string;
   priority: number;
-  probe: { support: 'probably' | 'maybe' | 'unknown'; basis: string };
+  probe: {
+    support: 'probably' | 'maybe' | 'unknown';
+    basis: string;
+    containers: string[];
+    codecs: { video: string[]; audio: string[] };
+    extensions: string[];
+  };
+  features: {
+    transforms: Array<'source' | 'contain' | 'cover' | '16:9' | '4:3' | '1:1' | 'rotate' | 'flip-horizontal' | 'flip-vertical'>;
+    hdr: { modes: Array<'auto' | 'sdr' | 'hdr-passthrough' | 'tone-map'>; requiresHdrDisplay: boolean };
+    statistics: { levels: Array<'basic' | 'detailed'>; maxUpdateHz: number };
+    subtitles: { formats: Array<'vtt' | 'srt' | 'ass' | 'ssa'>; externalFiles: boolean };
+    hardwareDecoding: boolean;
+    capture: { supported: boolean; appliesTransforms: boolean };
+  };
 }
 
 /** Legacy type alias for the compatibility IPC surface. */

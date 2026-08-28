@@ -21,7 +21,7 @@ const run = async () => {
       pluginService: {
         list: () => [{
           id: 'fixture-player', name: 'Fixture Player', installed: true, compatible: true,
-          manifest: { runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 1, backendId: 'decoder', transport: 'native-process-v1', priority: 1000, probe: { extensions: ['.mp4', '.mov'] } }] },
+          manifest: { runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 1, backendId: 'decoder', transport: 'native-process-v1', priority: 1000, probe: { containers: ['mp4', 'mov'], codecs: { video: ['h264', 'hevc'], audio: ['aac'] }, extensions: ['.mp4', '.mov'] }, features: { transforms: ['source', 'contain', 'cover', 'rotate'], hdr: { modes: ['auto', 'sdr', 'tone-map'], requiresHdrDisplay: false }, statistics: { levels: ['basic', 'detailed'], maxUpdateHz: 10 }, subtitles: { formats: ['vtt', 'srt'], externalFiles: true }, hardwareDecoding: true, capture: { supported: true, appliesTransforms: true } } }] },
         }, { id: 'undeclared-runtime', name: 'Old Runtime', installed: true, compatible: true, manifest: {} }],
         resolveRunConfigAsync: async () => ({ command: 'fixture.exe', args: [] }),
       },
@@ -37,7 +37,7 @@ const run = async () => {
     assert.equal(discovered.backends[1].probe.basis, 'manifest-extension-hint');
     const unknownChromium = await handlers.get('video-playback-backends')({}, sourcePath, 'unknown');
     assert.deepEqual(unknownChromium.backends.map(item => item.backendId), ['fixture-player:decoder', 'core.chromium'], 'an extension-matched component may lead when Chromium has no capability signal');
-    assert.throws(() => parseMediaPlaybackBackendContributions({ runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 99, backendId: 'bad', transport: 'native-process-v1', priority: 0, probe: { extensions: ['.mp4'] } }] }), /Unsupported/);
+    assert.throws(() => parseMediaPlaybackBackendContributions({ runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 99, backendId: 'bad', transport: 'native-process-v1', priority: 0, probe: { containers: ['mp4'], codecs: { video: [], audio: [] }, extensions: ['.mp4'] }, features: {} }] }), /Unsupported/);
 
     const png = Buffer.concat([
       Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]),

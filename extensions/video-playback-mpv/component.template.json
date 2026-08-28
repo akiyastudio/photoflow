@@ -21,7 +21,20 @@
       "transport": "native-process-v1",
       "priority": 80,
       "probe": {
+        "containers": ["avi", "matroska", "mov", "mp4", "mpegts", "webm"],
+        "codecs": {
+          "video": ["av1", "h264", "hevc", "mpeg2video", "prores", "vp9"],
+          "audio": ["aac", "ac3", "eac3", "flac", "mp3", "opus", "pcm"]
+        },
         "extensions": [".avi", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".mts", ".m2ts", ".webm"]
+      },
+      "features": {
+        "transforms": ["source", "contain", "cover", "16:9", "4:3", "1:1", "rotate", "flip-horizontal", "flip-vertical"],
+        "hdr": { "modes": ["auto", "sdr", "hdr-passthrough", "tone-map"], "requiresHdrDisplay": true },
+        "statistics": { "levels": ["basic", "detailed"], "maxUpdateHz": 10 },
+        "subtitles": { "formats": ["vtt", "srt", "ass", "ssa"], "externalFiles": true },
+        "hardwareDecoding": true,
+        "capture": { "supported": true, "appliesTransforms": true }
       }
     }
   ]

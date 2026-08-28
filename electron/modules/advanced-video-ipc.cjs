@@ -1,9 +1,13 @@
 const { createAdvancedVideoService } = require('../services/advanced-video-service.cjs');
 const { createVideoPlaybackBroker } = require('../services/video-playback-broker.cjs');
+const { createNativeVideoSurfaceService } = require('../services/native-video-surface-service.cjs');
+const { createMediaInputSessionService } = require('../services/media-input-session-service.cjs');
 
 const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog }) => {
   const playbackBroker = createVideoPlaybackBroker({ pluginService, path });
-  const service = createAdvancedVideoService({ BrowserWindow, crypto, mediaService, path, playbackBroker, processSupervisor, spawn, writeLog });
+  const nativeSurfaceService = createNativeVideoSurfaceService({ app, path, processSupervisor, spawn, writeLog });
+  const mediaInputSessionService = createMediaInputSessionService({ mediaService });
+  const service = createAdvancedVideoService({ BrowserWindow, crypto, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor, spawn, writeLog });
   const screenshotTarget = sourcePath => {
     const now = new Date();
     const pad = (value, length = 2) => String(value).padStart(length, '0');
