@@ -29,6 +29,10 @@ MEDIA_EXTENSIONS = {
     ".rwl": "raw", ".3fr": "raw", ".fff": "raw", ".iiq": "raw",
     ".pef": "raw", ".srw": "raw",
 }
+JPG_CONVERSION_EXTENSIONS = (
+    ".png", ".webp", ".heic", ".heif", ".hif", ".avif",
+    ".tif", ".tiff", ".bmp", ".gif",
+)
 
 
 def is_internal_transient_media_path(value: str) -> bool:
@@ -375,23 +379,30 @@ class ThumbnailDatabase:
         return {"fileCount": len(seen), "changedCount": changed_count, "pending": pending}
 
     def inspect_tool_sources(self, project_root: str, paths: list[str], collect_videos: bool = False,
-                             collect_direct_png: bool = False, collect_recursive_png: bool = False) -> dict:
+                             collect_direct_convertible_images: bool = False,
+                             collect_recursive_convertible_images: bool = False) -> dict:
         """Read tool availability from the existing background-built media index."""
         project_root = canonical(project_root)
         index_row = self.connection.execute(
             "SELECT state FROM project_indexes WHERE project_root=?", (project_root,)
         ).fetchone()
         if not index_row or index_row["state"] != "READY":
-            return {"indexed": False, "hasVideo": False, "hasPng": False, "videoPaths": [], "pngPaths": []}
+            return {"indexed": False, "hasVideo": False, "hasConvertibleImage": False,
+                    "videoPaths": [], "convertibleImagePaths": []}
 
         targets = list(dict.fromkeys(canonical(value) for value in paths if value))
         if not targets:
-            return {"indexed": True, "hasVideo": False, "hasPng": False, "videoPaths": [], "pngPaths": []}
+            return {"indexed": True, "hasVideo": False, "hasConvertibleImage": False,
+                    "videoPaths": [], "convertibleImagePaths": []}
 
         has_video = False
-        has_png = False
+        has_convertible_image = False
         video_paths = []
-        png_paths = []
+        convertible_image_paths = []
+        conversion_condition = "(" + " OR ".join(
+            "lower(path) LIKE ?" for _extension in JPG_CONVERSION_EXTENSIONS
+        ) + ")"
+        conversion_parameters = [f"%{extension}" for extension in JPG_CONVERSION_EXTENSIONS]
         # Keep every query comfortably below SQLite's host-parameter limit,
         # including when the renderer has selected thousands of individual files.
         for offset in range(0, len(targets), 200):
@@ -407,13 +418,14 @@ class ThumbnailDatabase:
                 f"SELECT 1 {base_query} AND kind='video' LIMIT 1", parameters
             ).fetchone() is not None
             has_video = has_video or chunk_has_video
-            if collect_recursive_png:
-                recursive_png_rows = self.connection.execute(
-                    f"SELECT path {base_query} AND lower(path) LIKE '%.png'", parameters
+            if collect_recursive_convertible_images:
+                recursive_image_rows = self.connection.execute(
+                    f"SELECT path {base_query} AND kind='image' AND {conversion_condition}",
+                    [*parameters, *conversion_parameters],
                 ).fetchall()
-                has_png = has_png or bool(recursive_png_rows)
-                png_paths.extend(row["path"] for row in recursive_png_rows)
-            elif collect_direct_png:
+                has_convertible_image = has_convertible_image or bool(recursive_image_rows)
+                convertible_image_paths.extend(row["path"] for row in recursive_image_rows)
+            elif collect_direct_convertible_images:
                 direct_conditions = []
                 direct_parameters: list[object] = [project_root]
                 for target in targets[offset:offset + 200]:
@@ -422,28 +434,33 @@ class ThumbnailDatabase:
                     direct_conditions.append("(path=? OR (path LIKE ? ESCAPE '\\' AND instr(substr(path, ?), ?) = 0))")
                     direct_parameters.extend((target, escaped_prefix + "%", len(direct_prefix) + 1, os.sep))
                 direct_scope = " OR ".join(direct_conditions)
-                direct_query = f"FROM files WHERE project_root=? AND exists_on_disk=1 AND ({direct_scope}) AND lower(path) LIKE '%.png'"
-                direct_png_rows = self.connection.execute(f"SELECT path {direct_query}", direct_parameters).fetchall()
-                has_png = has_png or bool(direct_png_rows)
-                png_paths.extend(row["path"] for row in direct_png_rows)
+                direct_query = (f"FROM files WHERE project_root=? AND exists_on_disk=1 AND ({direct_scope}) "
+                                f"AND kind='image' AND {conversion_condition}")
+                direct_image_rows = self.connection.execute(
+                    f"SELECT path {direct_query}", [*direct_parameters, *conversion_parameters]
+                ).fetchall()
+                has_convertible_image = has_convertible_image or bool(direct_image_rows)
+                convertible_image_paths.extend(row["path"] for row in direct_image_rows)
             else:
-                has_png = has_png or self.connection.execute(
-                    f"SELECT 1 {base_query} AND lower(path) LIKE '%.png' LIMIT 1", parameters
+                has_convertible_image = has_convertible_image or self.connection.execute(
+                    f"SELECT 1 {base_query} AND kind='image' AND {conversion_condition} LIMIT 1",
+                    [*parameters, *conversion_parameters],
                 ).fetchone() is not None
             if collect_videos and chunk_has_video:
                 video_paths.extend(row["path"] for row in self.connection.execute(
                     f"SELECT path {base_query} AND kind='video'", parameters
                 ).fetchall())
-            if not collect_videos and not collect_direct_png and not collect_recursive_png and has_video and has_png:
+            if (not collect_videos and not collect_direct_convertible_images
+                    and not collect_recursive_convertible_images and has_video and has_convertible_image):
                 break
         video_paths.sort(key=str.casefold)
-        png_paths = sorted(dict.fromkeys(png_paths), key=str.casefold)
+        convertible_image_paths = sorted(dict.fromkeys(convertible_image_paths), key=str.casefold)
         return {
             "indexed": True,
             "hasVideo": has_video,
-            "hasPng": has_png,
+            "hasConvertibleImage": has_convertible_image,
             "videoPaths": video_paths,
-            "pngPaths": png_paths,
+            "convertibleImagePaths": convertible_image_paths,
         }
 
     def sync_paths(self, project_root: str, paths: list[str], calculate_hash: bool = False) -> dict:

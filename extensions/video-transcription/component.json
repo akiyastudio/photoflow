@@ -1,0 +1,91 @@
+{
+  "apiVersion": 1,
+  "id": "video-transcription",
+  "version": "26.8.28.2",
+  "displayName": "视频语音识别 / 字幕",
+  "description": "本地批量语音识别、字幕搜索与受控 SRT 发布",
+  "icon": "ui/icon.svg",
+  "platforms": ["win32", "linux", "darwin"],
+  "architectures": ["x64", "arm64"],
+  "entrypoints": { "default": "service.cjs" },
+  "requiredFiles": [
+    "service.cjs",
+    "core.cjs",
+    "engine.py",
+    "ui/index.html",
+    "ui/settings.html",
+    "ui/app.js",
+    "ui/settings.js",
+    "ui/style.css",
+    "ui/icon.svg",
+    "README.md",
+    "LICENSES/README.md"
+  ],
+  "componentHost": {
+    "contractVersion": 2,
+    "compatibility": { "minHostApiVersion": 7, "maxHostApiVersion": 7 },
+    "contributions": [
+      { "type": "workspace.toolbarAction", "id": "open", "label": "视频字幕", "pageId": "main" },
+      { "type": "component.fullPage", "id": "main", "title": "视频语音识别 / 字幕", "entry": "ui/index.html" },
+      { "type": "application.settingsPage", "id": "settings", "label": "视频字幕", "title": "视频字幕设置", "entry": "ui/settings.html", "rpcMethods": ["transcript.settings.get.v1", "transcript.settings.update.v1", "transcript.runtime.status.v1"] },
+      { "type": "media.contextAction", "id": "transcribe-media", "label": "识别语音并生成字幕", "pageId": "main", "rpcMethods": [
+        "transcript.inputs.start.v1",
+        "transcript.project.start.v1",
+        "transcript.operation.run.v1",
+        "transcript.operation.list.v1",
+        "transcript.operation.get.v1",
+        "transcript.operation.cancel.v1",
+        "transcript.operation.resume.v1",
+        "transcript.search.v1",
+        "transcript.file.get.v1",
+        "transcript.output.publish.v1",
+        "transcript.output.open.v1",
+        "transcript.runtime.status.v1"
+      ] }
+    ],
+    "service": {
+      "protocolVersion": 1,
+      "runtime": "node",
+      "entrypoints": { "default": "service.cjs" },
+      "rpcMethods": [
+        "transcript.inputs.start.v1",
+        "transcript.project.start.v1",
+        "transcript.operation.run.v1",
+        "transcript.operation.list.v1",
+        "transcript.operation.get.v1",
+        "transcript.operation.cancel.v1",
+        "transcript.operation.resume.v1",
+        "transcript.search.v1",
+        "transcript.file.get.v1",
+        "transcript.output.publish.v1",
+        "transcript.output.open.v1",
+        "transcript.settings.get.v1",
+        "transcript.settings.update.v1",
+        "transcript.runtime.status.v1"
+      ],
+      "capabilities": [
+        "project.media.page.v7",
+        "project.media.variants.v7",
+        "project.input.tokens.v7",
+        "project.output.v7",
+        "tasks.v7",
+        "dialogs.v7",
+        "component.storage.v7",
+        "component.settings.v7",
+        "component.events.v7"
+      ],
+      "permissions": [
+        "project.media.read",
+        "project.input.read",
+        "project.output.write",
+        "tasks",
+        "dialogs",
+        "component.storage",
+        "component.settings",
+        "events"
+      ],
+      "events": ["transcript.operation.progress.v1"],
+      "runtimeActions": []
+    }
+  }
+}

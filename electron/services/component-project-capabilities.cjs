@@ -1,6 +1,7 @@
 const { COMPONENT_HOST_ERROR_CODES: CODES, hostError } = require('../contracts/component-host-errors.cjs');
 const { adoptLegacyStorageV1 } = require('./component-storage-adoption.cjs');
 const { nextComponentRevision, normalizeComponentRevision } = require('./config-mutation-service.cjs');
+const { pipeline } = require('node:stream/promises');
 
 const MAX_MEDIA_PAGE_SIZE = 200;
 const MAX_INPUT_TOKENS = 2000;
@@ -192,23 +193,26 @@ const registerComponentProjectCapabilities = ({
       || (bundle.versions || []).find(item => item.isCurrent) || (bundle.versions || []).at(-1);
     return { ...scope, bundle, version, filePath, ...boundary };
   };
-  const grantInput = (filePath, descriptor, context) => {
+  const grantInput = (filePath, descriptor, context, boundary = null) => {
     pruneExpiringMaps(Date.now());
     if (inputGrants.size >= MAX_INPUT_TOKENS) throw hostError(CODES.LIMIT_EXCEEDED, 'Too many active component input grants');
     const token = `component-input:v7:${crypto.randomUUID()}`;
     const expiresAt = Date.now() + INPUT_TOKEN_TTL_MS;
-    inputGrants.set(token, { filePath, scope: scopeKey(descriptor, context), expiresAt, usesRemaining: 1 });
+    const stat = fs.lstatSync(filePath);
+    inputGrants.set(token, { filePath, scope: scopeKey(descriptor, context), expiresAt, usesRemaining: 1, boundary,
+      identity: { dev: String(stat.dev), ino: String(stat.ino), size: stat.size, mtimeMs: stat.mtimeMs } });
     return { token, expiresAt };
   };
-  const consumeInput = (token, descriptor, context, consume = true) => {
+  const takeInputGrant = (token, descriptor, context, consume = true) => {
     pruneExpiringMaps(Date.now());
     const grant = inputGrants.get(String(token || ''));
     if (!grant) throw hostError(CODES.TOKEN_EXPIRED, 'Component input token is missing or expired');
     if (grant.scope !== scopeKey(descriptor, context)) throw hostError(CODES.TOKEN_SCOPE, 'Component input token belongs to another component or project');
     if (grant.reservedBy) throw hostError(CODES.CONFLICT, 'Component input token is reserved by another operation');
     if (consume && --grant.usesRemaining <= 0) inputGrants.delete(String(token));
-    return grant.filePath;
+    return grant;
   };
+  const consumeInput = (token, descriptor, context, consume = true) => takeInputGrant(token, descriptor, context, consume).filePath;
 
   broker.register('project.media.page.v7', async (payload, context, descriptor) => {
     const scope = bound(context, descriptor);
@@ -303,12 +307,27 @@ const registerComponentProjectCapabilities = ({
 
   broker.register('project.input.tokens.v7', async (payload, context, descriptor) => {
     if (payload.action !== 'materialize') throw hostError(CODES.INVALID_REQUEST, 'Unknown input token action');
-    const source = consumeInput(payload.token, descriptor, context);
+    const grant = takeInputGrant(payload.token, descriptor, context); const source = grant.filePath;
+    const sourceStat = await fs.promises.lstat(source).catch(() => null); const realSource = await fs.promises.realpath(source).catch(() => '');
+    const identityMatches = sourceStat && !sourceStat.isSymbolicLink() && sourceStat.isFile()
+      && String(sourceStat.dev) === grant.identity.dev && String(sourceStat.ino) === grant.identity.ino
+      && sourceStat.size === grant.identity.size && sourceStat.mtimeMs === grant.identity.mtimeMs;
+    if (!identityMatches || !realSource || path.resolve(realSource) !== path.resolve(source)
+      || grant.boundary && !inside(path, grant.boundary, realSource)) throw hostError(CODES.PERMISSION_DENIED, 'Component input changed after authorization');
     const scope = bound(context, descriptor);
     const directory = path.join(scope.componentRoot, 'inputs', crypto.randomUUID());
     await fs.promises.mkdir(directory, { recursive: true });
     const destination = path.join(directory, path.basename(source));
-    await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+    let handle;
+    try {
+      handle = await fs.promises.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      const opened = await handle.stat();
+      if (!opened.isFile() || String(opened.dev) !== grant.identity.dev || String(opened.ino) !== grant.identity.ino || opened.size !== grant.identity.size || opened.mtimeMs !== grant.identity.mtimeMs) throw hostError(CODES.PERMISSION_DENIED, 'Component input changed while opening');
+      await pipeline(handle.createReadStream({ autoClose: false }), fs.createWriteStream(destination, { flags: 'wx' }));
+    } catch (error) {
+      await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined);
+      throw error;
+    } finally { await handle?.close().catch(() => undefined); }
     return { apiVersion: 7, inputId: path.basename(directory), privatePath: destination, byteLength: (await fs.promises.stat(destination)).size };
   });
 
@@ -862,19 +881,74 @@ const registerComponentProjectCapabilities = ({
       const response = await dialog.showMessageBox(mainWindow, { type: 'question', title: String(payload.title || '组件确认').slice(0, 120), message: String(payload.message || '').slice(0, 1000), buttons: ['取消', '继续'], defaultId: 0, cancelId: 0, noLink: true });
       return { apiVersion: 7, confirmed: response.response === 1 };
     }
-    if (payload.kind !== 'openFiles') throw hostError(CODES.INVALID_REQUEST, 'Unknown safe dialog kind');
+    if (!['openFiles', 'openDirectory'].includes(payload.kind)) throw hostError(CODES.INVALID_REQUEST, 'Unknown safe dialog kind');
     const extensions = [...new Set((payload.extensions || []).map(value => String(value).replace(/^\./, '').toLowerCase()).filter(value => /^[a-z0-9]{1,12}$/.test(value)))].slice(0, 64);
-    const choice = await dialog.showOpenDialog(mainWindow, { title: String(payload.title || '选择输入文件').slice(0, 120), properties: ['openFile', ...(payload.multiple === false ? [] : ['multiSelections'])], ...(extensions.length ? { filters: [{ name: '允许的文件', extensions }] } : {}) });
+    const selectingDirectory = payload.kind === 'openDirectory';
+    const choice = await dialog.showOpenDialog(mainWindow, {
+      title: String(payload.title || (selectingDirectory ? '选择输入文件夹' : '选择输入文件')).slice(0, 120),
+      properties: selectingDirectory ? ['openDirectory'] : ['openFile', ...(payload.multiple === false ? [] : ['multiSelections'])],
+      ...(!selectingDirectory && extensions.length ? { filters: [{ name: '允许的文件', extensions }] } : {}),
+    });
     if (choice.canceled) return { apiVersion: 7, cancelled: true, inputs: [] };
+    pruneExpiringMaps(Date.now());
+    const availableTokens = Math.max(0, MAX_INPUT_TOKENS - inputGrants.size);
+    if (!availableTokens) throw hostError(CODES.LIMIT_EXCEEDED, 'Too many active component input grants');
     const inputs = [];
-    for (const selected of choice.filePaths.slice(0, MAX_INPUT_TOKENS)) {
-      const filePath = path.resolve(selected);
-      const stat = await fs.promises.lstat(filePath).catch(() => null);
-      if (!stat?.isFile() || stat.isSymbolicLink()) continue;
-      if (extensions.length && !extensions.includes(path.extname(filePath).slice(1).toLowerCase())) continue;
-      inputs.push({ name: path.basename(filePath), ...grantInput(filePath, descriptor, context) });
+    const selectedFiles = [];
+    let truncated = false;
+    if (selectingDirectory) {
+      const selectedRoot = String(choice.filePaths[0] || '');
+      if (!path.isAbsolute(selectedRoot)) throw hostError(CODES.INVALID_REQUEST, 'Selected input directory is invalid');
+      const root = path.resolve(selectedRoot);
+      const rootStat = await fs.promises.lstat(root).catch(() => null);
+      if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) throw hostError(CODES.INVALID_REQUEST, 'Selected input directory is unsafe');
+      const realRoot = await fs.promises.realpath(root);
+      const rootIdentity = { dev: String(rootStat.dev), ino: String(rootStat.ino) };
+      const pending = [realRoot];
+      let inspected = 0;
+      while (pending.length && selectedFiles.length < availableTokens && inspected < 20_000) {
+        const directory = pending.shift();
+        const directoryStat = await fs.promises.lstat(directory).catch(() => null);
+        const realDirectory = await fs.promises.realpath(directory).catch(() => '');
+        if (!directoryStat?.isDirectory() || directoryStat.isSymbolicLink() || !realDirectory || !insideOrEqual(path, realRoot, realDirectory)) { truncated = true; continue; }
+        let handle;
+        try { handle = await fs.promises.opendir(realDirectory); }
+        catch (error) { if (path.resolve(directory) === path.resolve(realRoot)) throw hostError(CODES.PERMISSION_DENIED, 'Selected input directory became unavailable'); truncated = true; continue; }
+        for await (const child of handle) {
+          inspected += 1;
+          if (inspected > 20_000) break;
+          if (selectedFiles.length >= availableTokens) break;
+          if (child.isSymbolicLink()) { truncated = true; continue; }
+          const candidate = path.join(realDirectory, child.name);
+          if (child.isDirectory()) { if (payload.recursive !== false) pending.push(candidate); continue; }
+          if (!child.isFile() || extensions.length && !extensions.includes(path.extname(child.name).slice(1).toLowerCase())) continue;
+          const realCandidate = await fs.promises.realpath(candidate).catch(() => '');
+          if (!realCandidate || !inside(path, realRoot, realCandidate)) { truncated = true; continue; }
+          selectedFiles.push({ filePath: realCandidate, relativeName: normalizeRelativePath(path.relative(realRoot, realCandidate)), boundary: realRoot });
+        }
+      }
+      const finalRootStat = await fs.promises.lstat(root).catch(() => null);
+      const finalRoot = await fs.promises.realpath(root).catch(() => '');
+      if (!finalRootStat?.isDirectory() || finalRootStat.isSymbolicLink() || path.resolve(finalRoot) !== path.resolve(realRoot)
+        || String(finalRootStat.dev) !== rootIdentity.dev || String(finalRootStat.ino) !== rootIdentity.ino) throw hostError(CODES.PERMISSION_DENIED, 'Selected input directory changed during enumeration');
+      truncated ||= pending.length > 0 || selectedFiles.length >= availableTokens || inspected >= 20_000;
+    } else {
+      truncated ||= choice.filePaths.length > availableTokens;
+      selectedFiles.push(...choice.filePaths.slice(0, availableTokens).map(filePath => ({ filePath: path.resolve(filePath), relativeName: path.basename(filePath), boundary: null })));
     }
-    return { apiVersion: 7, cancelled: false, inputs };
+    const minted = [];
+    try {
+      for (const selected of selectedFiles) {
+        const filePath = path.resolve(selected.filePath);
+        const stat = await fs.promises.lstat(filePath).catch(() => null);
+        const realFile = await fs.promises.realpath(filePath).catch(() => '');
+        if (!stat?.isFile() || stat.isSymbolicLink() || !realFile || path.resolve(realFile) !== filePath || selected.boundary && !inside(path, selected.boundary, realFile)) { truncated = true; continue; }
+        if (extensions.length && !extensions.includes(path.extname(filePath).slice(1).toLowerCase())) continue;
+        const grant = grantInput(filePath, descriptor, context, selected.boundary); minted.push(grant.token);
+        inputs.push({ name: path.basename(filePath), relativeName: selected.relativeName, ...grant });
+      }
+    } catch (error) { for (const token of minted) inputGrants.delete(token); throw error; }
+    return { apiVersion: 7, cancelled: false, inputs, ...(selectingDirectory ? { truncated } : {}) };
   });
 
   broker.register('component.events.v7', async (payload, context, descriptor) => {

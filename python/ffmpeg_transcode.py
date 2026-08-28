@@ -8,6 +8,7 @@ import json
 import os
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import tempfile
@@ -41,15 +42,25 @@ VIDEO_PREVIEW_QUALITY_PROFILES = {
 
 GPU_VIDEO_ENCODERS = ("h264_nvenc", "h264_qsv", "h264_amf", "h264_mf")
 H265_GPU_VIDEO_ENCODERS = ("hevc_nvenc", "hevc_qsv", "hevc_amf", "hevc_mf")
-ALL_GPU_VIDEO_ENCODERS = (*GPU_VIDEO_ENCODERS, *H265_GPU_VIDEO_ENCODERS)
+AV1_GPU_VIDEO_ENCODERS = ("av1_nvenc", "av1_qsv", "av1_amf")
+ALL_GPU_VIDEO_ENCODERS = (*GPU_VIDEO_ENCODERS, *H265_GPU_VIDEO_ENCODERS, *AV1_GPU_VIDEO_ENCODERS)
 SOFTWARE_VIDEO_ENCODER = "libx264"
 SOFTWARE_H265_VIDEO_ENCODER = "libx265"
+PRORES_VIDEO_ENCODER = "prores_ks"
 GENERAL_TRANSCODE_CONTAINERS = {"mp4": ".mp4", "mov": ".mov", "mkv": ".mkv"}
 GENERAL_TRANSCODE_QUALITY = {"high": 18, "balanced": 22, "small": 26}
 GENERAL_TRANSCODE_H265_QUALITY = {"high": 21, "balanced": 25, "small": 29}
+GENERAL_TRANSCODE_AV1_QUALITY = {"high": 24, "balanced": 29, "small": 34}
 GENERAL_TRANSCODE_LONG_EDGE = {"original": None, "2160p": 3840, "1080p": 1920, "720p": 1280}
 GENERAL_TRANSCODE_FRAME_RATES = {"original": None, "24": 24, "25": 25, "30": 30, "50": 50, "60": 60}
 GENERAL_TRANSCODE_AUDIO = {"copy", "aac", "remove"}
+GENERAL_TRANSCODE_SUBTITLES = {"copy", "burn", "remove"}
+GENERAL_TRANSCODE_COLOR_MODES = {"auto", "sdr", "hdr10", "hlg", "hdr-to-sdr"}
+GENERAL_TRANSCODE_BIT_DEPTHS = {"auto", "8", "10"}
+GENERAL_TRANSCODE_FRAME_RATE_MODES = {"preserve", "cfr", "vfr"}
+GENERAL_TRANSCODE_ROTATIONS = {"auto", "0", "90", "180", "270"}
+GENERAL_TRANSCODE_ASPECT_MODES = {"preserve", "square-pixels"}
+GENERAL_TRANSCODE_AUDIO_TRACKS = {"all", "first"}
 GENERAL_TRANSCODE_INPUT_EXTENSIONS = {
     ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".wmv",
     ".crm", ".mts", ".m2ts", ".ts",
@@ -101,6 +112,163 @@ def probe_duration(input_path: str, timeout: float | None = None) -> float:
     if duration <= 0:
         raise FFmpegTranscodeError("视频时长无效")
     return duration
+
+
+def _parse_ratio(value: str) -> float | None:
+    try:
+        numerator, separator, denominator = value.strip().partition("/")
+        result = float(numerator) / float(denominator) if separator else float(numerator)
+        return result if result > 0 else None
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def probe_media_info(input_path: str, timeout: float | None = 20) -> dict:
+    """Return the fields needed by presets, HDR routing and output estimation.
+
+    The audited runtime intentionally ships one FFmpeg executable instead of a
+    second, mostly duplicate ffprobe binary.  FFmpeg's stable stream summary is
+    parsed defensively; unknown fields remain explicit rather than being guessed.
+    """
+    input_path = os.path.abspath(input_path)
+    text = probe_media_text(input_path, timeout=timeout)
+    duration_match = re.search(r"Duration:\s*(\d+):(\d+):(\d+(?:\.\d+)?)", text)
+    duration = 0.0
+    if duration_match:
+        hours, minutes, seconds = duration_match.groups()
+        duration = int(hours) * 3600 + int(minutes) * 60 + float(seconds)
+    container_bitrate_match = re.search(r"Duration:.*?bitrate:\s*(\d+)\s*kb/s", text, re.S)
+    video_lines = re.findall(r"(?im)^\s*Stream\s+#\S+.*?:\s*Video:\s*(.+)$", text)
+    audio_lines = re.findall(r"(?im)^\s*Stream\s+#\S+.*?:\s*Audio:\s*(.+)$", text)
+    subtitle_lines = re.findall(r"(?im)^\s*Stream\s+#\S+.*?:\s*Subtitle:\s*(.+)$", text)
+    video = video_lines[0] if video_lines else ""
+    codec = video.split(",", 1)[0].strip().split()[0] if video else "unknown"
+    pixel_match = re.search(r",\s*([a-z][a-z0-9_]*(?:10|12|16)?(?:le|be)?)(?:\([^)]*\))?\s*,", video, re.I)
+    pixel_format = pixel_match.group(1).lower() if pixel_match else "unknown"
+    profile_match = re.search(r"\((Main 10|Main|High 10|High|[^,)]+)\)", video, re.I)
+    profile = profile_match.group(1) if profile_match else ""
+    bit_depth_match = re.search(r"(?:p|yuv\d+p|gbrp)(10|12|16)(?:le|be)?", pixel_format)
+    bit_depth = int(bit_depth_match.group(1)) if bit_depth_match else (10 if "10" in profile else 8)
+    dimensions = re.search(r"(?:^|,\s*)(\d{2,5})x(\d{2,5})(?:\s|,|$)", video)
+    width = int(dimensions.group(1)) if dimensions else 0
+    height = int(dimensions.group(2)) if dimensions else 0
+    fps_match = re.search(r"([\d.]+)\s*fps", video)
+    fps = float(fps_match.group(1)) if fps_match else 0.0
+    sar_match = re.search(r"SAR\s+(\d+:\d+)", video)
+    dar_match = re.search(r"DAR\s+(\d+:\d+)", video)
+    rotation_match = re.search(r"rotation of\s+(-?[\d.]+)\s*degrees", text, re.I)
+    color_values: list[str] = []
+    for group in re.findall(r"\(([^)]*)\)", video):
+        for value in re.split(r"[/,\s]+", group.lower()):
+            if value in {"bt2020", "bt2020nc", "bt2020ncl", "smpte2084", "arib-std-b67", "bt709", "smpte170m", "pc", "tv"}:
+                color_values.append(value)
+    transfer = next((value for value in color_values if value in {"smpte2084", "arib-std-b67", "bt709", "smpte170m"}), "unknown")
+    primaries = next((value for value in color_values if value in {"bt2020", "bt709"}), "unknown")
+    matrix = next((value for value in color_values if value in {"bt2020nc", "bt2020ncl", "bt709", "smpte170m"}), "unknown")
+    color_range = next((value for value in color_values if value in {"pc", "tv"}), "unknown")
+    hdr_kind = "HDR10" if transfer == "smpte2084" else "HLG" if transfer == "arib-std-b67" else "SDR"
+    dynamic_hdr = "Dolby Vision" if re.search(r"(?:DOVI|Dolby Vision|dvhe\.|dvh1\.)", text, re.I) else "HDR10+" if re.search(r"(?:HDR10\+|SMPTE\s*2094-40|dynamic HDR plus)", text, re.I) else ""
+    mastering_match = re.search(r"Mastering Display Metadata[^\n]*(?:\n\s*[^\n]+)?", text, re.I)
+    content_light_match = re.search(r"Content Light Level Metadata[^\n]*(?:\n\s*[^\n]+)?", text, re.I)
+    bitrate_matches = re.findall(r"(\d+)\s*kb/s", video)
+    video_bitrate = int(bitrate_matches[-1]) if bitrate_matches else 0
+    return {
+        "path": input_path,
+        "name": os.path.basename(input_path),
+        "duration": round(duration, 3),
+        "sizeBytes": os.path.getsize(input_path) if os.path.isfile(input_path) else 0,
+        "containerBitrateKbps": int(container_bitrate_match.group(1)) if container_bitrate_match else 0,
+        "videoBitrateKbps": video_bitrate,
+        "codec": codec,
+        "profile": profile,
+        "pixelFormat": pixel_format,
+        "bitDepth": bit_depth,
+        "width": width,
+        "height": height,
+        "frameRate": round(fps, 3),
+        "sar": sar_match.group(1) if sar_match else "unknown",
+        "dar": dar_match.group(1) if dar_match else "unknown",
+        "rotation": round(float(rotation_match.group(1))) if rotation_match else 0,
+        "transfer": transfer,
+        "primaries": primaries,
+        "matrix": matrix,
+        "range": color_range,
+        "hdr": hdr_kind != "SDR",
+        "hdrKind": hdr_kind,
+        "dynamicHdr": dynamic_hdr,
+        "masteringDisplay": mastering_match.group(0).strip() if mastering_match else "",
+        "contentLightLevel": content_light_match.group(0).strip() if content_light_match else "",
+        "audioTracks": len(audio_lines),
+        "subtitleTracks": len(subtitle_lines),
+    }
+
+
+@functools.lru_cache(maxsize=4)
+def available_transcode_capabilities(ffmpeg_exe: str) -> dict:
+    def output_for(*arguments: str) -> str:
+        try:
+            result = subprocess.run(
+                [ffmpeg_exe, "-hide_banner", *arguments], stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace",
+                timeout=20, check=False,
+            )
+            return result.stdout or ""
+        except (OSError, subprocess.SubprocessError):
+            return ""
+
+    encoders_text = output_for("-encoders")
+    filters_text = output_for("-filters")
+    encoder_names = {
+        match.group(1) for match in re.finditer(r"(?m)^\s*V\S*\s+([\w-]+)\s", encoders_text)
+    }
+    relevant = (
+        *GPU_VIDEO_ENCODERS, *H265_GPU_VIDEO_ENCODERS, *AV1_GPU_VIDEO_ENCODERS,
+        SOFTWARE_VIDEO_ENCODER, SOFTWARE_H265_VIDEO_ENCODER, PRORES_VIDEO_ENCODER,
+    )
+    pixel_formats = {}
+    for encoder_name in relevant:
+        if encoder_name not in encoder_names:
+            continue
+        help_text = output_for("-h", f"encoder={encoder_name}")
+        match = re.search(r"Supported pixel formats:\s*(.+)", help_text)
+        pixel_formats[encoder_name] = match.group(1).split() if match else []
+    usable_hardware: list[str] = []
+    usable_hardware_10bit: list[str] = []
+    for encoder_name in sorted(encoder_names.intersection(ALL_GPU_VIDEO_ENCODERS)):
+        try:
+            probe = subprocess.run(
+                [ffmpeg_exe, "-hide_banner", "-v", "error", "-f", "lavfi", "-i", "color=size=256x256:rate=1:duration=1",
+                 "-frames:v", "1", "-an", "-c:v", encoder_name, "-pix_fmt", "yuv420p", "-f", "null", "-"],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8, check=False,
+            )
+            if probe.returncode == 0:
+                usable_hardware.append(encoder_name)
+            if {"p010le", "yuv420p10le"}.intersection(pixel_formats.get(encoder_name, [])):
+                probe_10bit = subprocess.run(
+                    [ffmpeg_exe, "-hide_banner", "-v", "error", "-f", "lavfi", "-i", "color=size=256x256:rate=1:duration=1",
+                     "-frames:v", "1", "-an", "-vf", "format=p010le", "-c:v", encoder_name,
+                     "-pix_fmt", "p010le", "-f", "null", "-"],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=8, check=False,
+                )
+                if probe_10bit.returncode == 0:
+                    usable_hardware_10bit.append(encoder_name)
+        except (OSError, subprocess.SubprocessError):
+            continue
+    filter_names = {
+        match.group(1) for match in re.finditer(r"(?m)^\s*[\.A-Z|]{3,4}\s+([\w-]+)\s", filters_text)
+    }
+    return {
+        "encoders": sorted(encoder_names.intersection(relevant)),
+        "usableHardwareEncoders": usable_hardware,
+        "usableHardware10BitEncoders": usable_hardware_10bit,
+        "pixelFormats": pixel_formats,
+        "filters": sorted(filter_names.intersection({"zscale", "tonemap", "subtitles", "loudnorm"})),
+        "hdrToneMap": "zscale" in filter_names and "tonemap" in filter_names,
+        "subtitleBurn": "subtitles" in filter_names,
+        "av1Hardware": any(value in usable_hardware for value in AV1_GPU_VIDEO_ENCODERS),
+        "hevc10Bit": SOFTWARE_H265_VIDEO_ENCODER in encoder_names and bool({"p010le", "yuv420p10le"}.intersection(pixel_formats.get(SOFTWARE_H265_VIDEO_ENCODER, [])))
+        or any(value in usable_hardware_10bit for value in H265_GPU_VIDEO_ENCODERS),
+    }
 
 
 @functools.lru_cache(maxsize=4)
@@ -157,14 +325,29 @@ def available_h265_video_encoders(ffmpeg_exe: str) -> tuple[str, ...]:
         return ()
 
 
-def general_transcode_encoder_candidates(ffmpeg_exe: str, video_mode: str) -> list[str]:
+def general_transcode_encoder_candidates(
+    ffmpeg_exe: str, video_mode: str, bit_depth: str = "8",
+) -> list[str]:
     if video_mode == "copy":
         return ["copy"]
+    capabilities = available_transcode_capabilities(ffmpeg_exe)
+    available = set(capabilities["encoders"])
+    pixel_formats = capabilities["pixelFormats"]
     if video_mode == "h265":
-        available = set(available_h265_video_encoders(ffmpeg_exe))
-        return [
-            encoder for encoder in H265_GPU_VIDEO_ENCODERS if encoder in available
-        ] + [SOFTWARE_H265_VIDEO_ENCODER]
+        candidates = [encoder for encoder in H265_GPU_VIDEO_ENCODERS if encoder in available]
+        if SOFTWARE_H265_VIDEO_ENCODER in available:
+            candidates.append(SOFTWARE_H265_VIDEO_ENCODER)
+        if bit_depth == "10":
+            candidates = [
+                encoder for encoder in candidates
+                if {"p010le", "yuv420p10le"}.intersection(pixel_formats.get(encoder, []))
+            ]
+        return candidates
+    if video_mode == "av1":
+        usable = set(capabilities.get("usableHardwareEncoders", []))
+        return [encoder for encoder in AV1_GPU_VIDEO_ENCODERS if encoder in available and encoder in usable]
+    if video_mode == "prores":
+        return [PRORES_VIDEO_ENCODER] if PRORES_VIDEO_ENCODER in available else []
     return video_preview_encoder_candidates(ffmpeg_exe)
 
 
@@ -279,10 +462,19 @@ def validate_general_transcode_options(
     frame_rate: str,
     audio_mode: str,
     output_mode: str,
+    subtitle_mode: str = "copy",
+    color_mode: str = "auto",
+    bit_depth: str = "auto",
+    frame_rate_mode: str = "preserve",
+    rotation: str = "auto",
+    aspect_mode: str = "preserve",
+    audio_track: str = "all",
+    video_bitrate_mbps: float | None = None,
+    audio_bitrate_kbps: int = 192,
 ) -> None:
     if container not in GENERAL_TRANSCODE_CONTAINERS:
         raise ValueError("不支持的输出封装")
-    if video_mode not in {"copy", "h264", "h265"}:
+    if video_mode not in {"copy", "h264", "h265", "av1", "prores"}:
         raise ValueError("不支持的视频编码模式")
     if quality not in GENERAL_TRANSCODE_QUALITY:
         raise ValueError("不支持的画质预设")
@@ -292,10 +484,44 @@ def validate_general_transcode_options(
         raise ValueError("不支持的输出帧率")
     if audio_mode not in GENERAL_TRANSCODE_AUDIO:
         raise ValueError("不支持的音频处理方式")
+    if subtitle_mode not in GENERAL_TRANSCODE_SUBTITLES:
+        raise ValueError("不支持的字幕处理方式")
+    if color_mode not in GENERAL_TRANSCODE_COLOR_MODES:
+        raise ValueError("不支持的色彩处理方式")
+    if bit_depth not in GENERAL_TRANSCODE_BIT_DEPTHS:
+        raise ValueError("不支持的输出位深")
+    if frame_rate_mode not in GENERAL_TRANSCODE_FRAME_RATE_MODES:
+        raise ValueError("不支持的帧率模式")
+    if rotation not in GENERAL_TRANSCODE_ROTATIONS:
+        raise ValueError("不支持的旋转方式")
+    if aspect_mode not in GENERAL_TRANSCODE_ASPECT_MODES:
+        raise ValueError("不支持的像素宽高比模式")
+    if audio_track not in GENERAL_TRANSCODE_AUDIO_TRACKS:
+        raise ValueError("不支持的音轨选择")
+    if video_bitrate_mbps is not None and not 0.1 <= video_bitrate_mbps <= 800:
+        raise ValueError("视频码率必须在 0.1–800 Mbps 之间")
+    if audio_bitrate_kbps not in {96, 128, 160, 192, 256, 320}:
+        raise ValueError("不支持的 AAC 音频码率")
     if output_mode not in {"new", "replace", "delete-original"}:
         raise ValueError("不支持的输出方式")
-    if video_mode == "copy" and (resolution != "original" or frame_rate != "original"):
-        raise ValueError("只更换封装时不能调整分辨率或帧率")
+    if video_mode == "copy" and (
+        resolution != "original" or frame_rate != "original" or color_mode not in {"auto", "sdr"}
+        or bit_depth not in {"auto", "8"} or rotation != "auto" or aspect_mode != "preserve"
+        or subtitle_mode == "burn"
+    ):
+        raise ValueError("只更换封装时不能调整分辨率或帧率、画面、色彩、位深或烧录字幕")
+    if color_mode in {"hdr10", "hlg"} and video_mode not in {"h265", "av1", "prores"}:
+        raise ValueError("HDR10/HLG 输出需要 H.265、AV1 或 ProRes")
+    if bit_depth == "10" and video_mode == "h264":
+        raise ValueError("H.264 10-bit 兼容性过低，请选择 H.265、AV1 或 ProRes")
+    if video_mode == "prores" and container != "mov":
+        raise ValueError("ProRes 输出必须使用 MOV 封装")
+    if video_mode == "av1" and container == "mov":
+        raise ValueError("AV1 输出请使用 MP4 或 MKV 封装")
+
+
+def _escape_subtitle_filter_path(path_value: str) -> str:
+    return path_value.replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
 
 
 def build_general_transcode_command(
@@ -310,6 +536,16 @@ def build_general_transcode_command(
     frame_rate: str = "original",
     audio_mode: str = "aac",
     encoder: str | None = None,
+    subtitle_mode: str = "copy",
+    color_mode: str = "sdr",
+    bit_depth: str = "8",
+    frame_rate_mode: str = "preserve",
+    rotation: str = "auto",
+    aspect_mode: str = "preserve",
+    audio_track: str = "all",
+    video_bitrate_mbps: float | None = None,
+    audio_bitrate_kbps: int = 192,
+    encoder_preset: str = "balanced",
 ) -> list[str]:
     """Build a validated general-purpose video transcode command."""
     validate_general_transcode_options(
@@ -320,17 +556,27 @@ def build_general_transcode_command(
         frame_rate=frame_rate,
         audio_mode=audio_mode,
         output_mode="new",
+        subtitle_mode=subtitle_mode, color_mode=color_mode, bit_depth=bit_depth,
+        frame_rate_mode=frame_rate_mode, rotation=rotation, aspect_mode=aspect_mode,
+        audio_track=audio_track, video_bitrate_mbps=video_bitrate_mbps,
+        audio_bitrate_kbps=audio_bitrate_kbps,
     )
     command = [
         ffmpeg_exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+        *(["-noautorotate"] if rotation != "auto" else []),
         "-i", input_path,
-        "-map", "0:v:0", "-map", "0:a?",
+        "-map", "0:v:0", "-map", "0:a?" if audio_track == "all" else "0:a:0?",
         "-map_metadata", "0", "-map_chapters", "0",
     ]
+    if subtitle_mode == "copy":
+        command.extend(["-map", "0:s?"])
     if video_mode == "copy":
         command.extend(["-c:v", "copy"])
     else:
         filters: list[str] = []
+        if aspect_mode == "square-pixels":
+            filters.append("scale=trunc(iw*sar/2)*2:ih")
+            filters.append("setsar=1")
         long_edge = GENERAL_TRANSCODE_LONG_EDGE[resolution]
         if long_edge:
             filters.append(
@@ -340,19 +586,44 @@ def build_general_transcode_command(
         else:
             filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
         target_frame_rate = GENERAL_TRANSCODE_FRAME_RATES[frame_rate]
-        if target_frame_rate:
+        if target_frame_rate and frame_rate_mode in {"preserve", "cfr"}:
             filters.append(f"fps={target_frame_rate}")
+        if rotation == "90":
+            filters.append("transpose=clock")
+        elif rotation == "180":
+            filters.extend(["hflip", "vflip"])
+        elif rotation == "270":
+            filters.append("transpose=cclock")
+        if subtitle_mode == "burn":
+            filters.append(f"subtitles='{_escape_subtitle_filter_path(input_path)}':si=0")
+        output_bit_depth = "10" if color_mode in {"hdr10", "hlg"} or video_mode == "prores" else bit_depth
+        if color_mode == "hdr-to-sdr":
+            filters.extend([
+                "zscale=t=linear:npl=100", "format=gbrpf32le",
+                "zscale=p=bt709", "tonemap=tonemap=hable:desat=2",
+                "zscale=t=bt709:m=bt709:r=tv", "format=yuv420p",
+            ])
+            output_bit_depth = "8"
         if video_mode == "h265":
             allowed_encoders = (*H265_GPU_VIDEO_ENCODERS, SOFTWARE_H265_VIDEO_ENCODER)
             selected_encoder = encoder if encoder in allowed_encoders else SOFTWARE_H265_VIDEO_ENCODER
             quality_value = GENERAL_TRANSCODE_H265_QUALITY[quality]
+        elif video_mode == "av1":
+            allowed_encoders = AV1_GPU_VIDEO_ENCODERS
+            selected_encoder = encoder if encoder in allowed_encoders else AV1_GPU_VIDEO_ENCODERS[0]
+            quality_value = GENERAL_TRANSCODE_AV1_QUALITY[quality]
+        elif video_mode == "prores":
+            selected_encoder = PRORES_VIDEO_ENCODER
+            quality_value = GENERAL_TRANSCODE_QUALITY[quality]
         else:
             allowed_encoders = (*GPU_VIDEO_ENCODERS, SOFTWARE_VIDEO_ENCODER)
             selected_encoder = encoder if encoder in allowed_encoders else SOFTWARE_VIDEO_ENCODER
             quality_value = GENERAL_TRANSCODE_QUALITY[quality]
+        software_preset = {"fast": "fast", "balanced": "medium", "quality": "slow"}.get(encoder_preset, "medium")
+        nvenc_preset = {"fast": "p2", "balanced": "p4", "quality": "p6"}.get(encoder_preset, "p4")
         encoder_options = {
             "h264_nvenc": [
-                "-c:v", "h264_nvenc", "-preset", "p4", "-tune", "hq",
+                "-c:v", "h264_nvenc", "-preset", nvenc_preset, "-tune", "hq",
                 "-rc", "vbr", "-cq", str(quality_value), "-b:v", "0",
             ],
             "h264_qsv": [
@@ -369,11 +640,11 @@ def build_general_transcode_command(
                 "-quality", str({"high": 82, "balanced": 72, "small": 62}[quality]),
             ],
             SOFTWARE_VIDEO_ENCODER: [
-                "-c:v", SOFTWARE_VIDEO_ENCODER, "-preset", "medium",
+                "-c:v", SOFTWARE_VIDEO_ENCODER, "-preset", software_preset,
                 "-crf", str(quality_value),
             ],
             "hevc_nvenc": [
-                "-c:v", "hevc_nvenc", "-preset", "p4", "-tune", "hq",
+                "-c:v", "hevc_nvenc", "-preset", nvenc_preset, "-tune", "hq",
                 "-rc", "vbr", "-cq", str(quality_value), "-b:v", "0",
             ],
             "hevc_qsv": [
@@ -389,25 +660,54 @@ def build_general_transcode_command(
                 "-quality", str({"high": 82, "balanced": 72, "small": 62}[quality]),
             ],
             SOFTWARE_H265_VIDEO_ENCODER: [
-                "-c:v", SOFTWARE_H265_VIDEO_ENCODER, "-preset", "medium",
+                "-c:v", SOFTWARE_H265_VIDEO_ENCODER, "-preset", software_preset,
                 "-crf", str(quality_value),
+                *(["-x265-params", "hdr10-opt=1:repeat-headers=1"] if color_mode == "hdr10" else []),
+            ],
+            "av1_nvenc": [
+                "-c:v", "av1_nvenc", "-preset", nvenc_preset, "-tune", "hq",
+                "-rc", "vbr", "-cq", str(quality_value), "-b:v", "0",
+            ],
+            "av1_qsv": ["-c:v", "av1_qsv", "-global_quality", str(quality_value)],
+            "av1_amf": ["-c:v", "av1_amf", "-quality", "quality", "-qp_i", str(quality_value)],
+            PRORES_VIDEO_ENCODER: [
+                "-c:v", PRORES_VIDEO_ENCODER,
+                "-profile:v", str({"high": 4, "balanced": 3, "small": 2}[quality]),
+                "-vendor", "apl0", "-bits_per_mb", "8000",
             ],
         }[selected_encoder]
+        pixel_format = "yuv422p10le" if video_mode == "prores" else "p010le" if output_bit_depth == "10" and selected_encoder in ALL_GPU_VIDEO_ENCODERS else "yuv420p10le" if output_bit_depth == "10" else "yuv420p"
         command.extend([
             "-vf", ",".join(filters),
             *encoder_options,
-            "-pix_fmt", "yuv420p",
+            "-pix_fmt", pixel_format,
+            "-metadata:s:v:0", "rotate=0",
         ])
+        if video_bitrate_mbps is not None:
+            bitrate = f"{video_bitrate_mbps:g}M"
+            command.extend(["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{video_bitrate_mbps * 2:g}M"])
+        if color_mode == "hdr10":
+            command.extend(["-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc", "-color_range", "tv"])
+        elif color_mode == "hlg":
+            command.extend(["-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc", "-color_range", "tv"])
+        else:
+            command.extend(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"])
     if audio_mode == "remove":
         command.append("-an")
     elif audio_mode == "aac":
-        command.extend(["-c:a", "aac", "-b:a", "192k"])
+        command.extend(["-c:a", "aac", "-b:a", f"{audio_bitrate_kbps}k"])
     else:
         command.extend(["-c:a", "copy"])
+    if subtitle_mode == "copy":
+        command.extend(["-c:s", "copy"])
+    elif subtitle_mode == "remove" or subtitle_mode == "burn":
+        command.append("-sn")
     if container in {"mp4", "mov"}:
         if video_mode == "h265":
             command.extend(["-tag:v", "hvc1"])
         command.extend(["-movflags", "+faststart"])
+    if video_mode != "copy":
+        command.extend(["-fps_mode", "vfr" if frame_rate_mode == "vfr" else "cfr" if frame_rate_mode == "cfr" else "passthrough"])
     command.extend(["-progress", "pipe:1", "-nostats", output_path])
     return command
 
@@ -478,11 +778,22 @@ def transcode_video(
     resolution: str = "original",
     frame_rate: str = "original",
     audio_mode: str = "aac",
+    subtitle_mode: str = "copy",
+    color_mode: str = "auto",
+    bit_depth: str = "auto",
+    frame_rate_mode: str = "preserve",
+    rotation: str = "auto",
+    aspect_mode: str = "preserve",
+    audio_track: str = "all",
+    video_bitrate_mbps: float | None = None,
+    audio_bitrate_kbps: int = 192,
+    encoder_preset: str = "balanced",
     output_mode: str = "new",
     destination_directory: str | None = None,
     on_progress: Callable[[float], None] | None = None,
     on_log: Callable[[str], None] | None = None,
     cancel_check: Callable[[], None] | None = None,
+    pause_check: Callable[[], bool] | None = None,
 ) -> str:
     """Transcode one video through a temporary file, then commit atomically."""
     validate_general_transcode_options(
@@ -493,6 +804,10 @@ def transcode_video(
         frame_rate=frame_rate,
         audio_mode=audio_mode,
         output_mode=output_mode,
+        subtitle_mode=subtitle_mode, color_mode=color_mode, bit_depth=bit_depth,
+        frame_rate_mode=frame_rate_mode, rotation=rotation, aspect_mode=aspect_mode,
+        audio_track=audio_track, video_bitrate_mbps=video_bitrate_mbps,
+        audio_bitrate_kbps=audio_bitrate_kbps,
     )
     input_path = os.path.abspath(input_path)
     if not os.path.isfile(input_path):
@@ -516,8 +831,61 @@ def transcode_video(
         f".{os.path.splitext(os.path.basename(destination))[0]}.{uuid.uuid4().hex}.photoflow-transcode{output_extension}",
     )
     duration = probe_duration(input_path)
+    try:
+        source_info = probe_media_info(input_path)
+    except Exception:
+        source_info = {"hdr": False, "hdrKind": "SDR", "bitDepth": 8}
+    resolved_color_mode = color_mode
+    if color_mode == "auto":
+        if source_info.get("dynamicHdr") and video_mode != "copy":
+            raise FFmpegTranscodeError(f"暂不安全转码 {source_info['dynamicHdr']} 动态元数据；请选择仅更换封装，或明确转为 HDR10/SDR")
+        if source_info.get("hdr"):
+            resolved_color_mode = (
+                str(source_info.get("hdrKind", "")).lower()
+                if video_mode in {"h265", "av1", "prores", "copy"}
+                else "hdr-to-sdr"
+            )
+        else:
+            resolved_color_mode = "sdr"
+    if video_mode == "copy":
+        resolved_color_mode = "auto"
+    elif resolved_color_mode == "hdr-to-sdr" and not source_info.get("hdr"):
+        raise FFmpegTranscodeError("来源不是 HDR 视频，不需要执行 HDR→SDR 色调映射")
+    if source_info.get("hdr") and resolved_color_mode == "sdr":
+        raise FFmpegTranscodeError("HDR 来源不能仅改写为 SDR 标记；请选择“HDR 转 SDR”执行色调映射")
+    if resolved_color_mode == "hdr10" and source_info.get("transfer") != "smpte2084":
+        raise FFmpegTranscodeError("来源不是 HDR10/PQ，不能只改写为 HDR10；请选择自动保留或 HDR 转 SDR")
+    if resolved_color_mode == "hlg" and source_info.get("transfer") != "arib-std-b67":
+        raise FFmpegTranscodeError("来源不是 HLG，不能只改写为 HLG；请选择自动保留或 HDR 转 SDR")
+    resolved_bit_depth = bit_depth
+    if bit_depth == "auto":
+        resolved_bit_depth = "10" if int(source_info.get("bitDepth", 8) or 8) > 8 and video_mode in {"h265", "av1", "prores"} else "8"
+    if resolved_color_mode in {"hdr10", "hlg"}:
+        resolved_bit_depth = "10"
+    if video_mode == "copy":
+        resolved_bit_depth = "auto"
+    validate_general_transcode_options(
+        container=container, video_mode=video_mode, quality=quality,
+        resolution=resolution, frame_rate=frame_rate, audio_mode=audio_mode,
+        output_mode=output_mode, subtitle_mode=subtitle_mode,
+        color_mode=resolved_color_mode, bit_depth=resolved_bit_depth,
+        frame_rate_mode=frame_rate_mode, rotation=rotation, aspect_mode=aspect_mode,
+        audio_track=audio_track, video_bitrate_mbps=video_bitrate_mbps,
+        audio_bitrate_kbps=audio_bitrate_kbps,
+    )
     ffmpeg_exe = get_ffmpeg_exe()
-    encoder_candidates = general_transcode_encoder_candidates(ffmpeg_exe, video_mode)
+    capabilities = available_transcode_capabilities(ffmpeg_exe)
+    if resolved_color_mode == "hdr-to-sdr" and not capabilities["hdrToneMap"]:
+        raise FFmpegTranscodeError("当前媒体运行库缺少 HDR→SDR 色调映射滤镜，请重新安装或更新运行库")
+    if subtitle_mode == "burn" and not capabilities["subtitleBurn"]:
+        raise FFmpegTranscodeError("当前媒体运行库缺少字幕烧录滤镜，请重新安装或更新运行库")
+    encoder_candidates = general_transcode_encoder_candidates(ffmpeg_exe, video_mode, resolved_bit_depth)
+    if not encoder_candidates:
+        if video_mode == "av1":
+            raise FFmpegTranscodeError("未检测到支持 AV1 编码的显卡；AV1 Lite 模式需要 NVIDIA、Intel 或 AMD 的兼容硬件")
+        if resolved_bit_depth == "10":
+            raise FFmpegTranscodeError("没有可用的 10-bit 编码器；请更新显卡驱动或安装含 x265 10-bit 的媒体运行库")
+        raise FFmpegTranscodeError(f"当前媒体运行库没有可用的 {video_mode} 编码器")
     last_detail = "未知转码错误"
 
     try:
@@ -535,14 +903,64 @@ def transcode_video(
                 ffmpeg_exe, input_path, temporary,
                 container=container, video_mode=video_mode, quality=quality,
                 resolution=resolution, frame_rate=frame_rate, audio_mode=audio_mode,
-                encoder=encoder,
+                encoder=encoder, subtitle_mode=subtitle_mode,
+                color_mode=resolved_color_mode, bit_depth=resolved_bit_depth,
+                frame_rate_mode=frame_rate_mode, rotation=rotation,
+                aspect_mode=aspect_mode, audio_track=audio_track,
+                video_bitrate_mbps=video_bitrate_mbps,
+                audio_bitrate_kbps=audio_bitrate_kbps, encoder_preset=encoder_preset,
             )
-            code, stderr = _run_general_transcode_attempt(command, duration, on_progress, cancel_check)
+            attempt_arguments = (command, duration, on_progress, cancel_check)
+            code, stderr = _run_general_transcode_attempt(
+                *attempt_arguments, **({"pause_check": pause_check} if pause_check is not None else {}),
+            )
             if code == 0 and os.path.isfile(temporary) and os.path.getsize(temporary) > 0:
                 try:
-                    output_duration = probe_duration(temporary)
+                    try:
+                        output_info = probe_media_info(temporary)
+                        output_duration = float(output_info.get("duration", 0))
+                    except (FFmpegTranscodeError, OSError, subprocess.SubprocessError):
+                        output_duration = probe_duration(temporary)
+                        output_info = {
+                            "duration": output_duration, "codec": {"h265": "hevc"}.get(video_mode, video_mode),
+                            "pixelFormat": "yuv420p10le" if resolved_bit_depth == "10" else "yuv420p",
+                            "bitDepth": int(resolved_bit_depth), "width": 0, "height": 0,
+                            "hdrKind": resolved_color_mode.upper() if resolved_color_mode in {"hdr10", "hlg"} else "SDR",
+                            "transfer": {"hdr10": "smpte2084", "hlg": "arib-std-b67"}.get(resolved_color_mode, "bt709"),
+                        }
                     if output_duration <= 0 or abs(output_duration - duration) > max(2.0, duration * .05):
                         raise FFmpegTranscodeError("转码结果时长校验失败")
+                    if resolved_bit_depth == "10" and int(output_info.get("bitDepth", 0)) < 10:
+                        raise FFmpegTranscodeError("转码结果位深校验失败：预期 10-bit")
+                    expected_transfer = {"hdr10": "smpte2084", "hlg": "arib-std-b67"}.get(resolved_color_mode)
+                    if expected_transfer and output_info.get("transfer") != expected_transfer:
+                        raise FFmpegTranscodeError("转码结果 HDR 色彩标记校验失败")
+                    if resolved_color_mode == "hdr10" and source_info.get("masteringDisplay") and not output_info.get("masteringDisplay"):
+                        raise FFmpegTranscodeError("转码结果丢失 HDR10 Mastering Display 元数据")
+                    if resolved_color_mode == "hdr10" and source_info.get("contentLightLevel") and not output_info.get("contentLightLevel"):
+                        raise FFmpegTranscodeError("转码结果丢失 HDR10 Content Light Level 元数据")
+                    expected_codec = {"h264": "h264", "h265": "hevc", "av1": "av1", "prores": "prores"}.get(video_mode)
+                    if expected_codec and output_info.get("codec") not in {expected_codec, "unknown"}:
+                        raise FFmpegTranscodeError(f"转码结果编码校验失败：预期 {expected_codec}")
+                    long_edge_limit = GENERAL_TRANSCODE_LONG_EDGE.get(resolution)
+                    output_width = int(output_info.get("width", 0) or 0)
+                    output_height = int(output_info.get("height", 0) or 0)
+                    if long_edge_limit and max(output_width, output_height) > long_edge_limit + 2:
+                        raise FFmpegTranscodeError("转码结果分辨率校验失败")
+                    target_fps = GENERAL_TRANSCODE_FRAME_RATES.get(frame_rate)
+                    output_fps = float(output_info.get("frameRate", 0) or 0)
+                    if frame_rate_mode == "cfr" and target_fps and output_fps and abs(output_fps - target_fps) > .02:
+                        raise FFmpegTranscodeError("转码结果固定帧率校验失败")
+                    if aspect_mode == "square-pixels" and output_info.get("sar") not in {None, "unknown", "1:1"}:
+                        raise FFmpegTranscodeError("转码结果像素宽高比校验失败")
+                    if rotation != "auto" and output_info.get("rotation") not in {None, 0}:
+                        raise FFmpegTranscodeError("转码结果旋转元数据校验失败")
+                    if audio_mode == "remove" and int(output_info.get("audioTracks", 0) or 0) != 0:
+                        raise FFmpegTranscodeError("转码结果仍包含音轨")
+                    if audio_track == "first" and int(output_info.get("audioTracks", 0) or 0) > 1:
+                        raise FFmpegTranscodeError("转码结果音轨选择校验失败")
+                    if subtitle_mode in {"remove", "burn"} and int(output_info.get("subtitleTracks", 0) or 0) != 0:
+                        raise FFmpegTranscodeError("转码结果字幕轨处理校验失败")
                 except (FFmpegTranscodeError, OSError) as error:
                     last_detail = str(error)
                 else:
@@ -578,6 +996,10 @@ def transcode_video(
                     if on_log and encoder != "copy":
                         backend = "GPU" if encoder in ALL_GPU_VIDEO_ENCODERS else "CPU"
                         on_log(f"视频编码器：{encoder}（{backend}）")
+                        on_log(
+                            f"技术校验通过：{output_info.get('codec')} · {output_info.get('pixelFormat')} · "
+                            f"{output_info.get('width')}×{output_info.get('height')} · {output_info.get('hdrKind')}"
+                        )
                     return destination
             else:
                 detail_lines = (stderr or "").strip().splitlines()
@@ -599,6 +1021,7 @@ def _run_general_transcode_attempt(
     duration: float,
     on_progress: Callable[[float], None] | None,
     cancel_check: Callable[[], None] | None,
+    pause_check: Callable[[], bool] | None = None,
 ) -> tuple[int, str]:
     """Run one encoder attempt and return its exit code and diagnostic output."""
     error_output = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
@@ -613,15 +1036,41 @@ def _run_general_transcode_attempt(
     )
     cancellation_errors: list[BaseException] = []
     watcher_done = threading.Event()
+    process_paused = False
+
+    def set_process_paused(paused: bool) -> None:
+        nonlocal process_paused
+        if paused == process_paused or process.poll() is not None:
+            return
+        if sys.platform.startswith("win"):
+            import ctypes
+            access = 0x0800
+            handle = ctypes.windll.kernel32.OpenProcess(access, False, process.pid)
+            if not handle:
+                raise OSError("无法控制编码进程暂停状态")
+            try:
+                ntdll = ctypes.windll.ntdll
+                status = (ntdll.NtSuspendProcess if paused else ntdll.NtResumeProcess)(handle)
+                if status != 0:
+                    raise OSError(f"编码进程暂停控制失败：{status}")
+            finally:
+                ctypes.windll.kernel32.CloseHandle(handle)
+        else:
+            os.kill(process.pid, signal.SIGSTOP if paused else signal.SIGCONT)
+        process_paused = paused
 
     def watch_cancellation():
         while not watcher_done.wait(.2) and process.poll() is None:
-            if cancel_check is None:
-                continue
             try:
-                cancel_check()
+                if cancel_check is not None:
+                    cancel_check()
+                set_process_paused(bool(pause_check and pause_check()))
             except BaseException as error:
                 cancellation_errors.append(error)
+                try:
+                    set_process_paused(False)
+                except OSError:
+                    pass
                 process.terminate()
                 return
 
@@ -652,6 +1101,11 @@ def _run_general_transcode_attempt(
         return code, stderr
     finally:
         watcher_done.set()
+        if process_paused:
+            try:
+                set_process_paused(False)
+            except OSError:
+                pass
         if process.poll() is None:
             process.terminate()
             try:
@@ -823,18 +1277,62 @@ def _emit_cli(event_type: str, message: str, progress: float | None = None, **ex
     print(json.dumps(payload, ensure_ascii=False), flush=True)
 
 
+def estimate_transcode_size_bytes(media: dict, settings: dict) -> int:
+    """Return a transparent planning estimate, never a promised output size."""
+    duration = max(0.0, float(media.get("duration", 0) or 0))
+    if settings.get("video_mode") == "copy":
+        return int(media.get("sizeBytes", 0) or 0)
+    custom_rate = settings.get("video_bitrate_mbps")
+    if custom_rate:
+        video_mbps = float(custom_rate)
+    else:
+        width = max(1, int(media.get("width", 1920) or 1920))
+        height = max(1, int(media.get("height", 1080) or 1080))
+        fps = max(1.0, float(media.get("frameRate", 30) or 30))
+        target_long_edge = GENERAL_TRANSCODE_LONG_EDGE.get(settings.get("resolution"))
+        if target_long_edge and max(width, height) > target_long_edge:
+            dimension_scale = target_long_edge / max(width, height)
+            width = round(width * dimension_scale)
+            height = round(height * dimension_scale)
+        if settings.get("frame_rate_mode") == "cfr" and GENERAL_TRANSCODE_FRAME_RATES.get(settings.get("frame_rate")):
+            fps = float(GENERAL_TRANSCODE_FRAME_RATES[settings["frame_rate"]])
+        scale = width * height * fps / (1920 * 1080 * 30)
+        quality_factor = {"high": 10.0, "balanced": 6.0, "small": 3.5}.get(settings.get("quality"), 6.0)
+        codec_factor = {"h264": 1.0, "h265": .62, "av1": .52, "prores": 24.0}.get(settings.get("video_mode"), 1.0)
+        video_mbps = max(.5, quality_factor * codec_factor * scale)
+    audio_mbps = 0.0
+    if settings.get("audio_mode") == "aac":
+        audio_mbps = int(settings.get("audio_bitrate_kbps", 192)) / 1000
+    elif settings.get("audio_mode") == "copy":
+        audio_mbps = .256 * max(1, int(media.get("audioTracks", 1) or 1))
+    return round(duration * (video_mbps + audio_mbps) * 1_000_000 / 8 * 1.015)
+
+
 def run(args_list=None) -> int:
     parser = argparse.ArgumentParser(description="PhotoFlow general video transcoder")
-    parser.add_argument("paths", nargs="+", help="输入视频路径")
+    parser.add_argument("paths", nargs="*", help="输入视频路径")
     parser.add_argument("--container", choices=sorted(GENERAL_TRANSCODE_CONTAINERS), default="mp4")
-    parser.add_argument("--video-mode", choices=("h264", "h265", "copy"), default="h264")
+    parser.add_argument("--video-mode", choices=("h264", "h265", "av1", "prores", "copy"), default="h264")
     parser.add_argument("--quality", choices=sorted(GENERAL_TRANSCODE_QUALITY), default="balanced")
     parser.add_argument("--resolution", choices=tuple(GENERAL_TRANSCODE_LONG_EDGE), default="original")
     parser.add_argument("--frame-rate", choices=tuple(GENERAL_TRANSCODE_FRAME_RATES), default="original")
     parser.add_argument("--audio-mode", choices=sorted(GENERAL_TRANSCODE_AUDIO), default="aac")
+    parser.add_argument("--subtitle-mode", choices=sorted(GENERAL_TRANSCODE_SUBTITLES), default="copy")
+    parser.add_argument("--color-mode", choices=sorted(GENERAL_TRANSCODE_COLOR_MODES), default="auto")
+    parser.add_argument("--bit-depth", choices=sorted(GENERAL_TRANSCODE_BIT_DEPTHS), default="auto")
+    parser.add_argument("--frame-rate-mode", choices=sorted(GENERAL_TRANSCODE_FRAME_RATE_MODES), default="preserve")
+    parser.add_argument("--rotation", choices=sorted(GENERAL_TRANSCODE_ROTATIONS), default="auto")
+    parser.add_argument("--aspect-mode", choices=sorted(GENERAL_TRANSCODE_ASPECT_MODES), default="preserve")
+    parser.add_argument("--audio-track", choices=sorted(GENERAL_TRANSCODE_AUDIO_TRACKS), default="all")
+    parser.add_argument("--video-bitrate-mbps", type=float, default=None)
+    parser.add_argument("--audio-bitrate-kbps", type=int, default=192)
+    parser.add_argument("--encoder-preset", choices=("fast", "balanced", "quality"), default="balanced")
+    parser.add_argument("--retry-count", type=int, choices=range(0, 4), default=1)
+    parser.add_argument("--inspect-only", action="store_true")
     parser.add_argument("--output-mode", choices=("new", "replace", "delete-original"), default="new")
     parser.add_argument("--source-folder", action="append", default=[], help="所选来源文件夹；输出到其同级转码目录")
     parser.add_argument("--cancel_file", default="")
+    parser.add_argument("--pause_file", default="")
     args = parser.parse_args(args_list)
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8")
@@ -861,6 +1359,7 @@ def run(args_list=None) -> int:
     paths = list(dict.fromkeys(paths))
     source_folders = list(dict.fromkeys(source_folders))
     cancel_file = os.path.abspath(args.cancel_file) if args.cancel_file else ""
+    pause_file = os.path.abspath(args.pause_file) if args.pause_file else ""
 
     class TranscodeCancelled(RuntimeError):
         pass
@@ -869,17 +1368,52 @@ def run(args_list=None) -> int:
         if cancel_file and os.path.exists(cancel_file):
             raise TranscodeCancelled("视频转码已取消")
 
+    def check_paused() -> bool:
+        return bool(pause_file and os.path.exists(pause_file))
+
     outputs: list[str] = []
     try:
+        settings = {
+            "container": args.container, "video_mode": args.video_mode, "quality": args.quality,
+            "resolution": args.resolution, "frame_rate": args.frame_rate,
+            "audio_mode": args.audio_mode, "subtitle_mode": args.subtitle_mode,
+            "color_mode": args.color_mode, "bit_depth": args.bit_depth,
+            "frame_rate_mode": args.frame_rate_mode, "rotation": args.rotation,
+            "aspect_mode": args.aspect_mode, "audio_track": args.audio_track,
+            "video_bitrate_mbps": args.video_bitrate_mbps,
+            "audio_bitrate_kbps": args.audio_bitrate_kbps,
+        }
         validate_general_transcode_options(
             container=args.container, video_mode=args.video_mode, quality=args.quality,
             resolution=args.resolution, frame_rate=args.frame_rate,
             audio_mode=args.audio_mode, output_mode=args.output_mode,
+            subtitle_mode=args.subtitle_mode, color_mode=args.color_mode,
+            bit_depth=args.bit_depth, frame_rate_mode=args.frame_rate_mode,
+            rotation=args.rotation, aspect_mode=args.aspect_mode,
+            audio_track=args.audio_track, video_bitrate_mbps=args.video_bitrate_mbps,
+            audio_bitrate_kbps=args.audio_bitrate_kbps,
         )
         if missing_paths:
             raise FileNotFoundError(f"找不到输入路径：{missing_paths[0]}")
-        if not paths:
+        if not paths and not args.inspect_only:
             raise ValueError("所选文件或文件夹中没有可转码的视频")
+        capabilities = available_transcode_capabilities(get_ffmpeg_exe())
+        if args.inspect_only:
+            media_info = []
+            total_estimated_bytes = 0
+            for index, path in enumerate(paths):
+                check_cancelled()
+                _emit_cli("progress", f"正在分析：{os.path.basename(path)}（{index + 1}/{len(paths)}）", index / max(1, len(paths)) * 100)
+                info = probe_media_info(path)
+                info["estimatedOutputBytes"] = estimate_transcode_size_bytes(info, settings)
+                total_estimated_bytes += info["estimatedOutputBytes"]
+                media_info.append(info)
+            _emit_cli(
+                "success", f"媒体分析完成，共 {len(media_info)} 个视频", 100,
+                mediaInfo=media_info, capabilities=capabilities,
+                estimatedOutputBytes=total_estimated_bytes,
+            )
+            return 0
         if args.output_mode == "replace" and len(paths) != 1:
             raise ValueError("替换原文件只支持单个视频任务")
         if args.output_mode == "replace" and source_folders:
@@ -912,6 +1446,13 @@ def run(args_list=None) -> int:
         failures: list[tuple[str, str]] = []
         for index, path in enumerate(paths):
             check_cancelled()
+            pause_logged = False
+            while check_paused():
+                if not pause_logged:
+                    _emit_cli("status", "队列已暂停；恢复后继续处理")
+                    pause_logged = True
+                time.sleep(.2)
+                check_cancelled()
             name = os.path.basename(path)
             item_count = f"（{index + 1}/{total_paths}）"
             active_backend = ""
@@ -944,28 +1485,37 @@ def run(args_list=None) -> int:
                 index / total_paths * 100,
                 data={"fileStarted": True},
             )
-            try:
-                output = transcode_video(
-                    path,
-                    container=args.container,
-                    video_mode=args.video_mode,
-                    quality=args.quality,
-                    resolution=args.resolution,
-                    frame_rate=args.frame_rate,
-                    audio_mode=args.audio_mode,
-                    output_mode=args.output_mode,
-                    destination_directory=destination_directories.get(path),
-                    on_progress=emit_transcode_progress,
-                    on_log=emit_transcode_log,
-                    cancel_check=check_cancelled,
-                )
-            except TranscodeCancelled:
-                raise
-            except Exception as error:
-                if args.output_mode != "delete-original":
+            output = ""
+            last_error: Exception | None = None
+            for retry_index in range(args.retry_count + 1):
+                try:
+                    output = transcode_video(
+                        path,
+                        container=args.container, video_mode=args.video_mode,
+                        quality=args.quality, resolution=args.resolution,
+                        frame_rate=args.frame_rate, audio_mode=args.audio_mode,
+                        subtitle_mode=args.subtitle_mode, color_mode=args.color_mode,
+                        bit_depth=args.bit_depth, frame_rate_mode=args.frame_rate_mode,
+                        rotation=args.rotation, aspect_mode=args.aspect_mode,
+                        audio_track=args.audio_track,
+                        video_bitrate_mbps=args.video_bitrate_mbps,
+                        audio_bitrate_kbps=args.audio_bitrate_kbps,
+                        encoder_preset=args.encoder_preset,
+                        output_mode=args.output_mode,
+                        destination_directory=destination_directories.get(path),
+                        on_progress=emit_transcode_progress, on_log=emit_transcode_log,
+                        cancel_check=check_cancelled, pause_check=check_paused,
+                    )
+                    break
+                except TranscodeCancelled:
                     raise
-                failures.append((path, str(error)))
-                _emit_cli("warning", f"{name} 转码失败，原视频已保留：{error}")
+                except Exception as error:
+                    last_error = error
+                    if retry_index < args.retry_count:
+                        _emit_cli("warning", f"{name} 转码失败，正在重试（{retry_index + 1}/{args.retry_count}）：{error}")
+            if not output:
+                failures.append((path, str(last_error or "未知错误")))
+                _emit_cli("warning", f"{name} 转码失败，原视频已保留：{last_error}")
                 continue
             outputs.append(output)
             _emit_cli("log", f"已生成：{output}")
@@ -980,6 +1530,8 @@ def run(args_list=None) -> int:
             100,
             outputs=outputs,
             failedCount=len(failures),
+            failures=[{"path": path, "error": error} for path, error in failures],
+            report=[probe_media_info(output) for output in outputs],
             folderOutputs=[
                 {"sourceFolder": source_folder, "outputFolder": output_folder}
                 for source_folder, output_folder in folder_destinations.items()
@@ -997,6 +1549,11 @@ def run(args_list=None) -> int:
         if cancel_file:
             try:
                 os.remove(cancel_file)
+            except FileNotFoundError:
+                pass
+        if pause_file:
+            try:
+                os.remove(pause_file)
             except FileNotFoundError:
                 pass
 

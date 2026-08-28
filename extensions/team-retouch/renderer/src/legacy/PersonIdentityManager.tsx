@@ -3,19 +3,21 @@ import { legacyApi } from './legacy-api';
 import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import type { KeyboardEvent as ReactKeyboardEvent, PointerEvent as ReactPointerEvent } from 'react';
 import { createPortal } from 'react-dom';
-import { AlertTriangle, CheckCircle2, FolderOutput, GripVertical, Image as ImageIcon, Loader2, Settings, Trash2, Upload, UserRound, UsersRound, Wand2, X } from 'lucide-react';
+import { AlertTriangle, ArrowRight, CheckCircle2, ChevronDown, FolderOutput, GripVertical, Image as ImageIcon, Loader2, Maximize2, Trash2, Upload, UserRound, UsersRound, Wand2, X } from 'lucide-react';
 import type { AppConfig, TeamIdentity, TeamIdentityWorkspace, TeamPatchReturnBatchResult, TeamPatchReturnMatch, TeamPatchTask, TeamPersonAssignment, TeamProjectPhoto, TeamWorkflowGenerationProgress, WorkspaceProject } from './legacy-types';
 import { scheduleWorkflowWeeks } from '../workflow-schedule';
 import { useAppDialog } from './legacy-dialog-context';
 import { useEscapeLayer } from './legacy-layer';
-import { TeamRetouchSteps, type TeamRetouchStep } from './TeamRetouchSteps';
+import type { TeamRetouchStep } from './TeamRetouchSteps';
+import { TeamWorkflowHeader } from './TeamWorkflowHeader';
 import { TeamOutputProgressPicker } from './TeamRetouchOutputProgress';
 import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputProgress';
 import { ensureFaceRecognitionConsent } from './legacy-privacy';
 import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
-import { beginWorkflowReturnProgress, mergeAudit, relayChainForItems, returnMatchAssessment, returnModificationAssessment, updateWorkflowReturnProgress, type WorkflowReturnProgressState } from '../interaction-model';
+import { beginWorkflowReturnProgress, mergeAudit, relayChainForItems, returnMatchAssessment, returnModificationAssessment, updateWorkflowReturnProgress, workflowStageSummaries, WORKFLOW_STAGES, type WorkflowReturnProgressState } from '../interaction-model';
 import { createWorkspaceSeedGate, isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
 import { shouldEmitTerminalToast } from '../task-terminal-notice-model';
+import { IdentityPickerPanel } from './IdentityPickerPanel';
 
 type Props = {
   componentActive?: boolean;
@@ -71,12 +73,25 @@ const subjectsFromWorkspace = (workspace: TeamIdentityWorkspace): Subject[] => {
   return [...subjects.values()];
 };
 
+const SubjectFullscreenViewer = ({ url, filePath, cacheConfig, title, onClose }: { url: string; filePath: string; cacheConfig: AppConfig['mediaCache']; title: string; onClose: () => void }) => {
+  const [displayUrl, setDisplayUrl] = useState(url);
+  useEffect(() => {
+    let active = true;
+    setDisplayUrl(url);
+    void legacyApi.getMediaOriginal(filePath, 'image', cacheConfig).then(result => { if (active && result.mediaUrl) setDisplayUrl(result.mediaUrl); }).catch(() => undefined);
+    return () => { active = false; };
+  }, [url, filePath, cacheConfig.directory, cacheConfig.maxSizeGB]);
+  useEscapeLayer(true, onClose);
+  return createPortal(<div role="dialog" aria-modal="true" aria-label={`全窗口浏览：${title}`} className="fixed inset-0 z-[700] flex flex-col bg-slate-950/95" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><header className="flex h-14 shrink-0 items-center gap-3 border-b border-white/10 px-5 text-white"><h3 className="min-w-0 flex-1 truncate text-sm font-bold">{title}</h3><button type="button" onClick={onClose} title="关闭全窗口浏览" className="rounded-md p-2 text-slate-300 hover:bg-white/10 hover:text-white"><X size={20}/></button></header><div className="flex min-h-0 flex-1 items-center justify-center p-4" onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}><img src={displayUrl} alt={title} className="max-h-full max-w-full object-contain"/></div></div>, document.body);
+};
+
 const SubjectThumb = memo(({ subject, cacheConfig, active: componentActive = true, interactive = true, sourcePath }: { subject: Subject; cacheConfig: AppConfig['mediaCache']; active?: boolean; interactive?: boolean; sourcePath?: string }) => {
   const container = useRef<HTMLDivElement>(null);
   const imagePath = sourcePath || subject.task.patchPath;
   const mediaScope = legacyApi.getMediaAuthorizationScope();
   const [url, setUrl] = useState('');
   const [loadFailed, setLoadFailed] = useState(false);
+  const [fullscreen, setFullscreen] = useState(false);
   useEffect(() => {
     let active = true;
     if (!componentActive) return () => undefined;
@@ -112,12 +127,14 @@ const SubjectThumb = memo(({ subject, cacheConfig, active: componentActive = tru
   const openVisualPicker = () => {
     if (interactive) window.dispatchEvent(new CustomEvent('photoflow-team-person-pick', { detail: { key: subject.key } }));
   };
-  return <div ref={container} role={interactive ? 'button' : undefined} tabIndex={interactive ? 0 : undefined} onClick={openVisualPicker} onKeyDown={event => { if (interactive && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openVisualPicker(); } }} title={interactive ? '点击看图修改人物归属' : undefined} className={`group relative aspect-[4/3] overflow-hidden rounded-lg bg-slate-950 ${interactive ? 'cursor-pointer ring-blue-400 transition hover:ring-2 focus:outline-none focus:ring-2' : ''}`}>
+  const title = `${subject.photo.name} · 人物 ${subject.personIndex}`;
+  return <><div ref={container} role={interactive ? 'button' : undefined} tabIndex={interactive ? 0 : undefined} onClick={openVisualPicker} onKeyDown={event => { if (interactive && (event.key === 'Enter' || event.key === ' ')) { event.preventDefault(); openVisualPicker(); } }} title={interactive ? '点击看图修改人物归属' : undefined} className={`group relative aspect-[4/3] overflow-hidden rounded-lg bg-slate-950 ${interactive ? 'cursor-pointer ring-blue-400 transition hover:ring-2 focus:outline-none focus:ring-2' : ''}`}>
     {url ? <svg className="block h-full w-full overflow-hidden" overflow="hidden" viewBox={`${viewX} ${viewY} ${viewWidth} ${viewHeight}`} preserveAspectRatio="xMidYMid meet"><image href={url} width={subject.task.crop.width} height={subject.task.crop.height}/><rect x={x} y={y} width={boxWidth} height={boxHeight} fill="none" stroke="#facc15" strokeWidth={Math.max(3, viewWidth / 180)}/></svg> : <div className="absolute inset-0 flex flex-col items-center justify-center gap-2 text-slate-500"><UserRound/>{loadFailed && <span className="px-2 text-center text-[10px] text-amber-400">预览读取失败，请重新识别生成工作图</span>}</div>}
-    <span className="absolute inset-x-0 bottom-0 truncate bg-black/70 px-2 py-1 text-[10px] font-bold text-white">{subject.photo.name} · 人物 {subject.personIndex}</span>
+    <span className="absolute inset-x-0 bottom-0 truncate bg-black/70 py-1 pl-2 pr-11 text-[10px] font-bold text-white">{title}</span>
     {typeof subject.matchScore === 'number' && subject.matchScore >= 0 && <span className="absolute left-1.5 top-1.5 rounded bg-emerald-600/95 px-1.5 py-0.5 text-[9px] font-bold text-white">匹配度 {Math.round(subject.matchScore * 100)}% · {subject.matchEvidence === 'face+body' ? '脸+外观' : '外观辅助'}</span>}
     {interactive && <span className="absolute right-1.5 top-1.5 rounded bg-blue-600/90 px-1.5 py-0.5 text-[9px] font-bold text-white opacity-0 transition group-hover:opacity-100">看图改归属</span>}
-  </div>;
+    <button type="button" disabled={!url} onMouseDown={event => { event.preventDefault(); event.stopPropagation(); }} onClick={event => { event.preventDefault(); event.stopPropagation(); setFullscreen(true); }} title="全窗口浏览图片" aria-label={`全窗口浏览图片：${title}`} className="absolute bottom-1.5 right-1.5 z-20 rounded-md border border-white/20 bg-black/75 p-1.5 text-white shadow-lg transition hover:bg-blue-600 disabled:hidden"><Maximize2 size={14}/></button>
+  </div>{fullscreen && url && <SubjectFullscreenViewer url={url} filePath={imagePath} cacheConfig={cacheConfig} title={title} onClose={() => setFullscreen(false)}/>}</>;
 }, (previous, next) => {
   const previousCrop = previous.subject.task.crop;
   const nextCrop = next.subject.task.crop;
@@ -138,7 +155,9 @@ const SubjectThumb = memo(({ subject, cacheConfig, active: componentActive = tru
     && previousBox.height === nextBox.height
     && previous.cacheConfig.directory === next.cacheConfig.directory
     && previous.cacheConfig.maxSizeGB === next.cacheConfig.maxSizeGB
-    && previous.interactive === next.interactive;
+    && previous.interactive === next.interactive
+    && previous.active === next.active
+    && previous.sourcePath === next.sourcePath;
 });
 
 type ReturnCandidate = {
@@ -225,8 +244,8 @@ const WorkflowReturnReviewDialog = ({ result, cacheConfig, componentActive, busy
   componentActive: boolean;
   busy: string;
   onClose: () => void;
-  onConfirm: (match: TeamPatchReturnMatch, candidate: ReturnCandidate) => void;
-  onIgnore: (match: TeamPatchReturnMatch) => void;
+  onConfirm: (match: TeamPatchReturnMatch, candidate: ReturnCandidate) => Promise<boolean>;
+  onIgnore: (match: TeamPatchReturnMatch) => Promise<boolean>;
 }) => {
   const firstMatch = result.matches.find(match => !match.accepted) || result.matches[0];
   const [activeReturnId, setActiveReturnId] = useState(firstMatch?.returnId || '');
@@ -240,6 +259,22 @@ const WorkflowReturnReviewDialog = ({ result, cacheConfig, componentActive, busy
   const modificationAssessment = returnModificationAssessment(activeMatch || {});
   const usedTaskIds = new Set(result.matches.filter(match => match.accepted && match.taskId).map(match => match.taskId));
   const candidateAlreadyUsed = Boolean(activeCandidate?.taskId && usedTaskIds.has(activeCandidate.taskId) && !(activeMatch?.accepted && activeCandidate.taskId === activeMatch.taskId));
+  const nextPendingReturnId = () => {
+    if (!activeMatch) return '';
+    const activeIndex = result.matches.findIndex(match => match.returnId === activeMatch.returnId);
+    const following = [...result.matches.slice(activeIndex + 1), ...result.matches.slice(0, Math.max(0, activeIndex))];
+    return following.find(match => !match.accepted)?.returnId || '';
+  };
+  const confirmAndAdvance = async () => {
+    if (!activeMatch || !activeCandidate) return;
+    const nextReturnId = nextPendingReturnId();
+    if (await onConfirm(activeMatch, activeCandidate) && nextReturnId) setActiveReturnId(nextReturnId);
+  };
+  const ignoreAndAdvance = async () => {
+    if (!activeMatch) return;
+    const nextReturnId = nextPendingReturnId();
+    if (await onIgnore(activeMatch) && nextReturnId) setActiveReturnId(nextReturnId);
+  };
   useEffect(() => {
     if (!result.matches.some(match => match.returnId === activeReturnId)) setActiveReturnId(firstMatch?.returnId || '');
   }, [result.matches, activeReturnId, firstMatch?.returnId]);
@@ -260,7 +295,7 @@ const WorkflowReturnReviewDialog = ({ result, cacheConfig, componentActive, busy
           className="min-h-[360px]"
           leading={<><p className="truncate text-sm font-bold">{activeMatch.sourceName}</p><p className="mt-0.5 truncate text-[11px] text-slate-400">返图 ↔ {activeCandidate ? `${activeCandidate.photoName} · ${activeCandidate.personName}` : '暂无候选任务'}</p></>}
         />
-          <footer className="shrink-0 border-t border-white/10 bg-slate-900 px-4 py-3"><div className="flex items-end gap-3"><div className="min-w-0 flex-1"><p className="mb-2 text-xs font-bold text-slate-300">候选任务（点击缩略图可人工改匹配）</p><div className="flex gap-2 overflow-x-auto">{candidates.length ? candidates.map(candidate => { const used = Boolean(candidate.taskId && usedTaskIds.has(candidate.taskId) && !(activeMatch.accepted && candidate.taskId === activeMatch.taskId)); return <button type="button" key={candidate.taskId} disabled={used} onClick={() => setCandidateByReturn(current => ({ ...current, [activeMatch.returnId]: candidate.taskId || '' }))} className={`flex w-44 shrink-0 items-center gap-2 rounded-lg border p-1.5 text-left disabled:opacity-35 ${activeCandidate?.taskId === candidate.taskId ? 'border-blue-400 bg-blue-500/15' : 'border-white/10 bg-white/5 hover:border-white/25'}`}><ReturnImage active={componentActive} filePath={candidate.patchPath} cacheConfig={cacheConfig} className="h-12 w-16 shrink-0 rounded"/><span className="min-w-0"><span className="block truncate text-[11px] font-bold text-slate-200">{candidate.photoName || '未知照片'}</span><span className="mt-1 block truncate text-[10px] text-slate-400">{candidate.personName || '未知人物'} · {Math.round((candidate.score || 0) * 100)}%</span></span></button>; }) : <p className="py-3 text-xs text-slate-500">没有可用候选</p>}</div></div><div className="shrink-0 text-right">{activeMatch.accepted ? <div><span className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold ${activeMatch.relayState === 'failed' ? 'bg-red-500/15 text-red-300' : 'bg-emerald-500/15 text-emerald-300'}`}><CheckCircle2 size={14}/>{activeMatch.relayState === 'ready' ? '接力已就绪' : activeMatch.relayState === 'failed' ? '接力更新失败' : '返图已确认 · 接力准备中'}</span><p className="mt-1 text-[10px] text-slate-500">确认只归档返图；接力发布完成后才会显示就绪</p></div> : <div className="flex items-center gap-2"><button type="button" disabled={workflowBusy} onClick={() => onIgnore(activeMatch)} title="从本批审核中移除，不会完成任何任务，也不会删除原始文件" className="inline-flex items-center gap-2 rounded-lg border border-slate-600 px-3 py-2.5 text-xs font-bold text-slate-200 hover:border-amber-400 hover:text-amber-300 disabled:opacity-40">{busy === `workflow-ignore:${activeMatch.returnId}` ? <Loader2 size={14} className="animate-spin"/> : <X size={14}/>}忽略 · 不是任务返图</button><button type="button" disabled={!activeCandidate?.taskId || !activeCandidate.photoId || !activeCandidate.baseVersionId || activeCandidate.personIndex === undefined || candidateAlreadyUsed || workflowBusy} onClick={() => activeCandidate && onConfirm(activeMatch, activeCandidate)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40">{busy === `workflow-confirm:${activeMatch.returnId}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}确认返图</button></div>}{modificationAssessment.suspicious && <p className="mt-1 text-[10px] font-bold text-amber-300">返图疑似未修改，请先用对比模式核对</p>}{candidateAlreadyUsed && <p className="mt-1 text-[10px] text-amber-300">这个任务已被另一张返图占用</p>}</div></div></footer></> : null}</section>
+          <footer className="shrink-0 border-t border-white/10 bg-slate-900 px-4 py-3"><div className="flex items-end gap-3"><div className="min-w-0 flex-1"><p className="mb-2 text-xs font-bold text-slate-300">候选任务（点击缩略图可人工改匹配）</p><div className="flex gap-2 overflow-x-auto">{candidates.length ? candidates.map(candidate => { const used = Boolean(candidate.taskId && usedTaskIds.has(candidate.taskId) && !(activeMatch.accepted && candidate.taskId === activeMatch.taskId)); return <button type="button" key={candidate.taskId} disabled={used} onClick={() => setCandidateByReturn(current => ({ ...current, [activeMatch.returnId]: candidate.taskId || '' }))} className={`flex w-44 shrink-0 items-center gap-2 rounded-lg border p-1.5 text-left disabled:opacity-35 ${activeCandidate?.taskId === candidate.taskId ? 'border-blue-400 bg-blue-500/15' : 'border-white/10 bg-white/5 hover:border-white/25'}`}><ReturnImage active={componentActive} filePath={candidate.patchPath} cacheConfig={cacheConfig} className="h-12 w-16 shrink-0 rounded"/><span className="min-w-0"><span className="block truncate text-[11px] font-bold text-slate-200">{candidate.photoName || '未知照片'}</span><span className="mt-1 block truncate text-[10px] text-slate-400">{candidate.personName || '未知人物'} · {Math.round((candidate.score || 0) * 100)}%</span></span></button>; }) : <p className="py-3 text-xs text-slate-500">没有可用候选</p>}</div></div><div className="shrink-0 text-right">{activeMatch.accepted ? <div><span className={`inline-flex items-center gap-1.5 rounded-lg px-3 py-2 text-xs font-bold ${activeMatch.relayState === 'failed' ? 'bg-red-500/15 text-red-300' : 'bg-emerald-500/15 text-emerald-300'}`}><CheckCircle2 size={14}/>{activeMatch.relayState === 'ready' ? '接力已就绪' : activeMatch.relayState === 'failed' ? '接力更新失败' : '返图已确认 · 接力准备中'}</span><p className="mt-1 text-[10px] text-slate-500">确认只归档返图；接力发布完成后才会显示就绪</p></div> : <div className="flex items-center gap-2"><button type="button" disabled={workflowBusy} onClick={() => void ignoreAndAdvance()} title="从本批审核中移除，不会完成任何任务，也不会删除原始文件" className="inline-flex items-center gap-2 rounded-lg border border-slate-600 px-3 py-2.5 text-xs font-bold text-slate-200 hover:border-amber-400 hover:text-amber-300 disabled:opacity-40">{busy === `workflow-ignore:${activeMatch.returnId}` ? <Loader2 size={14} className="animate-spin"/> : <X size={14}/>}忽略 · 不是任务返图</button><button type="button" disabled={!activeCandidate?.taskId || !activeCandidate.photoId || !activeCandidate.baseVersionId || activeCandidate.personIndex === undefined || candidateAlreadyUsed || workflowBusy} onClick={() => void confirmAndAdvance()} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-xs font-bold text-white hover:bg-blue-500 disabled:cursor-not-allowed disabled:opacity-40">{busy === `workflow-confirm:${activeMatch.returnId}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}确认返图</button></div>}{modificationAssessment.suspicious && <p className="mt-1 text-[10px] font-bold text-amber-300">返图疑似未修改，请先用对比模式核对</p>}{candidateAlreadyUsed && <p className="mt-1 text-[10px] text-amber-300">这个任务已被另一张返图占用</p>}</div></div></footer></> : null}</section>
       </div> : result.success ? <div className="flex min-h-64 items-center justify-center text-sm text-slate-500">没有可确认的返图</div> : null}
       <div className="flex shrink-0 items-center justify-between gap-4 border-t border-slate-200 bg-slate-50 px-5 py-3"><span className="text-xs text-slate-500">点击四周不会关闭；退出时会保留或明确放弃未确认返图。</span><button type="button" onClick={onClose} disabled={workflowBusy} className="dialog-primary">{pendingReviewCount ? '退出审核…' : '完成并关闭'}</button></div>
     </div>
@@ -268,6 +303,17 @@ const WorkflowReturnReviewDialog = ({ result, cacheConfig, componentActive, busy
 };
 
 type WorkflowItem = Subject & { week: number; ready: boolean; blockedBy: string[]; workflowImagePath: string };
+
+const workflowWeekLabel = (week: number) => {
+  const value = Math.max(1, Math.floor(Number(week) || 1));
+  const digits = ['', '一', '二', '三', '四', '五', '六', '七', '八', '九'];
+  const text = value < 10 ? digits[value]
+    : value === 10 ? '十'
+      : value < 20 ? `十${digits[value - 10]}`
+        : value < 100 ? `${digits[Math.floor(value / 10)]}十${digits[value % 10]}`
+          : String(value);
+  return `第${text}周`;
+};
 
 const completedReturnPath = (subject: Subject) => subject.assignment?.completed
   && subject.assignment.completionKind === 'returned'
@@ -320,7 +366,7 @@ const buildWorkflow = (subjects: Subject[], identities: TeamIdentity[], preferre
   return items.sort((left, right) => left.week - right.week || orderOf(left) - orderOf(right) || left.photo.name.localeCompare(right.photo.name));
 };
 
-export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace, initialWorkspacePending = false, historyIssue, onRetryHistory, cacheConfig, componentActive = true, activeStep, onStepChange, stageSummaries, onBlockedStage, onClose, onNotice, onProjectChanged, onBusyChange }: Props) => {
+export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace, initialWorkspacePending = false, historyIssue, onRetryHistory, cacheConfig, componentActive = true, activeStep, onStepChange, onBlockedStage, onNotice, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const initialSeed = isUsableWorkspaceSeed(initialWorkspace) ? initialWorkspace : undefined;
   const seedScopeKey = workspaceSeedScopeKey(workspacePath, project);
@@ -334,7 +380,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const setResourcePending = (key: string, pending: boolean) => setPendingResources(current => { const next = new Set(current); if (pending) next.add(key); else next.delete(key); return next; });
   const tab = 'workflow' as const;
   const [assigningSubject, setAssigningSubject] = useState<Subject | null>(null);
-  useEscapeLayer(Boolean(assigningSubject), () => setAssigningSubject(null), !busy);
+  const identityPickerBusy = Boolean(busy) || Boolean(assigningSubject && pendingResources.has(assigningSubject.key));
   const [workflowReturnResult, setWorkflowReturnResult] = useState<TeamPatchReturnBatchResult | null>(null);
   const [workflowReturnReviewOpen, setWorkflowReturnReviewOpen] = useState(false);
   const pendingWorkflowReturnReviewCount = workflowReturnResult?.matches.filter(match => !match.accepted).length || 0;
@@ -386,6 +432,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const [workflowGeneration, setWorkflowGeneration] = useState<TeamWorkflowGenerationProgress | null>(null);
   const [similarities, setSimilarities] = useState<NonNullable<TeamIdentityWorkspace['similarities']>>([]);
   const [subjectPageSize, setSubjectPageSize] = useState(18);
+  const [relayChainsOpen, setRelayChainsOpen] = useState(false);
   const [draggedWorkflowIdentityId, setDraggedWorkflowIdentityId] = useState('');
   const [workflowDragTargetId, setWorkflowDragTargetId] = useState('');
   const workflowOrderDragRef = useRef<{ pointerId: number; sourceIdentityId: string; startX: number; startY: number; moved: boolean } | null>(null);
@@ -462,7 +509,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       const subject = subjects.find(item => item.key === key);
       if (subject) {
         if (tab === 'workflow' && subject.assignment?.completed) {
-          onNotice('该人物任务已经完成；请先撤销完成状态，再修改人物归属', 'warning');
+          onNotice('这个任务已经完成，不能再修改人物归属', 'warning');
           return;
         }
         setAssigningSubject(subject);
@@ -501,8 +548,25 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       };
     });
   }, [subjects, workspace.identities, workspace.workflowAvailableKeys, workspace.workflowAvailableSubjectKeys, workspace.workflowGenerated, preferredIdentityOrder, sameWeekIdentityIds]);
-  const preferredWorkflowIdentities = preferredIdentityOrder.map(identityId => workflowIdentityOptions.find(identity => identity.id === identityId)).filter((identity): identity is TeamIdentity => Boolean(identity));
-  const availableWorkflowIdentities = workflowIdentityOptions.filter(identity => !preferredIdentityOrder.includes(identity.id));
+  const workflowIdentitySequence = useMemo(() => {
+    const seen = new Set<string>();
+    const sequence: Array<{ identity: TeamIdentity; week: number }> = [];
+    for (const item of workflow) {
+      if (!item.identity || seen.has(item.identity.id)) continue;
+      seen.add(item.identity.id);
+      sequence.push({ identity: item.identity, week: item.week });
+    }
+    return sequence;
+  }, [workflow]);
+  const workflowIdentityWeeks = useMemo(() => {
+    const groups: Array<{ week: number; entries: typeof workflowIdentitySequence }> = [];
+    for (const entry of workflowIdentitySequence) {
+      const current = groups[groups.length - 1];
+      if (current?.week === entry.week) current.entries.push(entry);
+      else groups.push({ week: entry.week, entries: [entry] });
+    }
+    return groups;
+  }, [workflowIdentitySequence]);
   const workflowOrderLocked = workspace.assignments.some(assignment => assignment.completed || assignment.returnMissing)
     || workspace.photos.some(photo => photo.tasks.some(task => Boolean(task.editedPatchPath) || !['', 'exported'].includes(String(task.status || 'exported'))));
   const workflowReady = Boolean(workspace.workflowGenerated && !workspace.workflowNeedsRegeneration);
@@ -529,7 +593,8 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     return groups;
   }, [subjects, workspace.identities, assigningSubject, similarityByPair]);
   const pickerIdentities = useMemo(() => {
-    if (!assigningSubject) return workspace.identities;
+    const availableIdentities = workspace.identities.filter(identity => !isGeneratedIdentity(identity));
+    if (!assigningSubject) return availableIdentities;
     const bestScoreByIdentity = new Map<string, number>();
     for (const subject of subjects) {
       if (!subject.identity || subject.key === assigningSubject.key) continue;
@@ -538,7 +603,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     }
     // Similar identities are ordered only inside the picker. Reordering the
     // workspace identities made every section on the page move twice per mark.
-    return [...workspace.identities].sort((left, right) =>
+    return availableIdentities.sort((left, right) =>
       (bestScoreByIdentity.get(right.id) ?? -1) - (bestScoreByIdentity.get(left.id) ?? -1)
       || left.createdAt - right.createdAt
     );
@@ -596,6 +661,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (!result.success) onNotice(`保存姓名失败：${result.error || '未知错误'}`, 'error'); else { setWorkspace(current => ({ ...current, identities: current.identities.map(item => item.id === identity.id ? { ...item, name: name.trim(), updatedAt: Date.now() } : item) })); onNotice('人物姓名已更新', 'success'); }
   };
   const assign = async (subject: Subject, identityId: string) => {
+    if (pendingResources.has(subject.key)) return;
     const nextIdentityId = identityId || undefined;
     const previousAssignment = subject.assignment;
     const completed = previousAssignment?.identityId === nextIdentityId ? Boolean(previousAssignment?.completed) : false;
@@ -615,20 +681,13 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       if (assignment) assignments.push(assignment);
       return { ...current, assignments };
     };
-    const reopenPickerOnFailure = assigningSubject?.key === subject.key;
     preservePeopleScrollPosition(subject.key);
     setWorkspace(current => replaceAssignment(current, optimisticAssignment));
-    setAssigningSubject(null);
-    const result = await legacyApi.assignTeamIdentity(workspacePath, { projectName: project.name, photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, identityId: nextIdentityId, source: 'manual', confidence: 1, completed });
-    if (!result.success) {
-      preservePeopleScrollPosition(subject.key);
-      setWorkspace(current => {
-        const currentAssignment = current.assignments.find(item => assignmentKey(item.photoId, item.baseVersionId, item.personIndex) === subject.key);
-        return currentAssignment?.updatedAt === updatedAt ? replaceAssignment(current, previousAssignment) : current;
-      });
-      if (reopenPickerOnFailure) setAssigningSubject(subject);
-      onNotice(`标注人物失败：${result.error || '未知错误'}`, 'error');
-    } else {
+    setResourcePending(subject.key, true);
+    try {
+      const result = await legacyApi.assignTeamIdentity(workspacePath, { projectName: project.name, photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, identityId: nextIdentityId, source: 'manual', confidence: 1, completed });
+      if (!result.success) throw new Error(result.error || '未知错误');
+      setAssigningSubject(null);
       if (previousAssignment?.identityId && previousAssignment.identityId !== nextIdentityId) {
         preservePeopleScrollPosition(subject.key);
         setWorkspace(current => ({
@@ -637,22 +696,33 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         }));
       }
       if (tab === 'workflow' && previousAssignment?.identityId !== nextIdentityId) {
+        void load(false);
         onProjectChanged();
         onNotice('人物归属已更新。请重新生成协作流程。', 'warning');
       }
-    }
+    } catch (error) {
+      preservePeopleScrollPosition(subject.key);
+      setWorkspace(current => {
+        const currentAssignment = current.assignments.find(item => assignmentKey(item.photoId, item.baseVersionId, item.personIndex) === subject.key);
+        return currentAssignment?.updatedAt === updatedAt ? replaceAssignment(current, previousAssignment) : current;
+      });
+      onNotice(`标注人物失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally { setResourcePending(subject.key, false); }
   };
   const createIdentityForSubject = async (subject: Subject) => {
+    if (pendingResources.has(subject.key)) return;
     const answer = await appDialog.prompt({ title: '把这张图标记为新人物', message: '填写姓名或便于团队识别的称呼。', defaultValue: `人物 ${workspace.identities.length + 1}`, confirmLabel: '新建并归入' });
     if (!answer?.trim()) return;
-    const result = await legacyApi.saveTeamIdentity(workspacePath, { projectName: project.name, name: answer.trim(), assignments: [{ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, confidence: 1, source: 'manual' }] });
-    if (!result.success) onNotice(`新建人物失败：${result.error || '未知错误'}`, 'error'); else {
-      setAssigningSubject(null);
-      void load(false);
-      if (tab === 'workflow') {
-        onNotice('已添加人物。请重新生成协作流程。', 'warning');
+    setResourcePending(subject.key, true);
+    try {
+      const result = await legacyApi.saveTeamIdentity(workspacePath, { projectName: project.name, name: answer.trim(), assignments: [{ photoId: subject.photo.photoId, baseVersionId: subject.photo.baseVersionId, personIndex: subject.personIndex, confidence: 1, source: 'manual' }] });
+      if (!result.success) onNotice(`新建人物失败：${result.error || '未知错误'}`, 'error'); else {
+        setAssigningSubject(null);
+        void load(false);
+        if (tab === 'workflow') onNotice('已添加人物。请重新生成协作流程。', 'warning');
       }
-    }
+    } catch (error) { onNotice(`新建人物失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
+    finally { setResourcePending(subject.key, false); }
   };
   const removeIdentity = async (identity: TeamIdentity) => {
     const answer = await appDialog.confirm({ title: `删除人物“${identity.name}”？`, message: '只删除身份与归属标记，不会删除照片或团片协作工作图。', confirmLabel: '删除', tone: 'danger' });
@@ -677,24 +747,20 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     } catch (error) { onNotice(`保存开工顺序失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
     finally { setBusy(''); }
   };
-  const addPreferredIdentity = async (identityId: string) => {
-    if (!identityId || preferredIdentityOrder.includes(identityId)) return;
-    const identityName = workflowIdentityOptions.find(identity => identity.id === identityId)?.name || '该人物';
-    await savePreferredIdentityOrder([...preferredIdentityOrder, identityId], sameWeekIdentityIds, `已将“${identityName}”加入优先顺序。请重新生成协作流程。`);
-  };
-  const removePreferredIdentity = async (identityId: string) => {
-    const nextOrder = preferredIdentityOrder.filter(currentId => currentId !== identityId);
-    await savePreferredIdentityOrder(nextOrder, sameWeekIdentityIds.filter(currentId => currentId !== identityId), nextOrder.length ? '优先顺序已更新。请重新生成协作流程。' : '已恢复自动排期。请重新生成协作流程。');
-  };
   const movePreferredIdentity = async (sourceIdentityId: string, targetIdentityId: string) => {
     if (!sourceIdentityId || sourceIdentityId === targetIdentityId) return;
-    const sourceIndex = preferredIdentityOrder.indexOf(sourceIdentityId);
-    const targetIndex = preferredIdentityOrder.indexOf(targetIdentityId);
-    if (sourceIndex < 0 || targetIndex < 0) return;
-    const nextOrder = [...preferredIdentityOrder];
-    const [moved] = nextOrder.splice(sourceIndex, 1);
-    nextOrder.splice(targetIndex, 0, moved);
-    await savePreferredIdentityOrder(nextOrder, sameWeekIdentityIds, '开工顺序已保存。请重新生成协作流程。');
+    const weekGroups = workflowIdentityWeeks.map(group => group.entries.map(entry => entry.identity.id));
+    const sourceGroup = weekGroups.find(group => group.includes(sourceIdentityId));
+    const targetGroup = weekGroups.find(group => group.includes(targetIdentityId));
+    if (!sourceGroup || !targetGroup) return;
+    sourceGroup.splice(sourceGroup.indexOf(sourceIdentityId), 1);
+    const targetIndex = targetGroup.indexOf(targetIdentityId);
+    if (targetIndex < 0) return;
+    targetGroup.splice(targetIndex, 0, sourceIdentityId);
+    const compactGroups = weekGroups.filter(group => group.length);
+    const nextOrder = compactGroups.flat();
+    const nextSameWeekIdentityIds = compactGroups.flatMap(group => group.slice(1));
+    await savePreferredIdentityOrder(nextOrder, nextSameWeekIdentityIds, '人物顺序和工作周已保存。请重新生成协作流程。');
   };
   const workflowIdentityAtPoint = (clientX: number, clientY: number) => document
     .elementFromPoint(clientX, clientY)
@@ -735,24 +801,12 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     if (targetIdentityId && targetIdentityId !== drag.sourceIdentityId) void movePreferredIdentity(drag.sourceIdentityId, targetIdentityId);
   };
   const moveWorkflowIdentityWithKeyboard = (event: ReactKeyboardEvent<HTMLButtonElement>, identityId: string, index: number) => {
-    if (workflowOrderLocked || busy || !['ArrowLeft', 'ArrowRight'].includes(event.key)) return;
-    const targetIndex = event.key === 'ArrowLeft' ? index - 1 : index + 1;
-    const targetIdentity = preferredWorkflowIdentities[targetIndex];
+    if (workflowOrderLocked || busy || !['ArrowLeft', 'ArrowRight', 'ArrowUp', 'ArrowDown'].includes(event.key)) return;
+    const targetIndex = ['ArrowLeft', 'ArrowUp'].includes(event.key) ? index - 1 : index + 1;
+    const targetIdentity = workflowIdentitySequence[targetIndex]?.identity;
     if (!targetIdentity) return;
     event.preventDefault();
     void movePreferredIdentity(identityId, targetIdentity.id);
-  };
-  const toggleSameWeekIdentity = async (identityId: string) => {
-    if (!preferredIdentityOrder.slice(1).includes(identityId)) return;
-    const joinsPrevious = sameWeekIdentityIds.includes(identityId);
-    const nextSameWeekIdentityIds = joinsPrevious
-      ? sameWeekIdentityIds.filter(currentId => currentId !== identityId)
-      : [...sameWeekIdentityIds, identityId];
-    await savePreferredIdentityOrder(
-      preferredIdentityOrder,
-      nextSameWeekIdentityIds,
-      joinsPrevious ? '已改为下一周开始。请重新生成协作流程。' : '已改为同周开始。请重新生成协作流程。',
-    );
   };
   const toggleComplete = async (item: WorkflowItem) => {
     const completed = !item.assignment?.completed;
@@ -876,7 +930,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     }
   };
   const confirmWorkflowReturn = async (match: TeamPatchReturnMatch, candidate: ReturnCandidate) => {
-    if (!candidate.taskId || !candidate.photoId || !candidate.baseVersionId || candidate.personIndex === undefined) return;
+    if (!candidate.taskId || !candidate.photoId || !candidate.baseVersionId || candidate.personIndex === undefined) return false;
     const taskOrder = workflow
       .filter(item => item.photo.photoId === candidate.photoId && item.photo.baseVersionId === candidate.baseVersionId && item.task.id === candidate.taskId && item.identity)
       .sort((left, right) => left.week - right.week || left.personIndex - right.personIndex)
@@ -893,7 +947,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         taskId: candidate.taskId,
         taskOrder,
       });
-      if (!result.success) { onNotice(`确认返图失败：${result.error || '未知错误'}`, 'error'); return; }
+      if (!result.success) { onNotice(`确认返图失败：${result.error || '未知错误'}`, 'error'); return false; }
       setWorkflowReturnResult(current => {
         if (!current) return current;
         const wasAccepted = Boolean(current.matches.find(item => item.returnId === match.returnId)?.accepted);
@@ -921,15 +975,17 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         setWorkflowReturnResult(current => current ? { ...current, matches: current.matches.map(item => item.returnId === match.returnId ? { ...item, relayState: 'failed', relayError: error instanceof Error ? error.message : String(error) } : item) } : current);
         onNotice(`返图已确认，但接力更新失败：${error instanceof Error ? error.message : String(error)}`, 'error');
       });
+      return true;
     } catch (error) {
       onNotice(`确认返图失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+      return false;
     } finally { setBusy(''); }
   };
   const ignoreWorkflowReturn = async (match: TeamPatchReturnMatch) => {
     const reviewSessionId = workflowReturnResult?.reviewSessionId;
     if (!reviewSessionId) {
       onNotice('当前审核批次无法单独移除返图，请重新进入项目后重试', 'warning');
-      return;
+      return false;
     }
     const confirmed = await appDialog.confirm({
       title: '确认这不是任务返图？',
@@ -939,15 +995,15 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       cancelLabel: '继续核对',
       tone: 'danger',
     });
-    if (!confirmed) return;
+    if (!confirmed) return false;
     setBusy(`workflow-ignore:${match.returnId}`);
     let result;
     try { result = await legacyApi.ignoreTeamWorkflowReturnReview(workspacePath, project.name, reviewSessionId, match.returnId); }
-    catch (error) { onNotice(`移除非任务返图失败：${error instanceof Error ? error.message : String(error)}`, 'error'); return; }
+    catch (error) { onNotice(`移除非任务返图失败：${error instanceof Error ? error.message : String(error)}`, 'error'); return false; }
     finally { setBusy(''); }
     if (!result.success) {
       onNotice(`移除非任务返图失败：${result.error || '未知错误'}`, 'error');
-      return;
+      return false;
     }
     if (result.reviewSessionCompleted) {
       setWorkflowReturnReviewOpen(false);
@@ -960,6 +1016,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       } : current);
     }
     onNotice(`已将“${match.sourceName}”标记为不是任务返图；没有任务被完成`, 'success');
+    return true;
   };
 
   const workflowGroups = new Map<string, { identity: TeamIdentity; week: number; items: WorkflowItem[] }>();
@@ -1084,61 +1141,59 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     group.push(item); relayGroups.set(key, group);
   }
   const relayChains = [...relayGroups.entries()].map(([key, items]) => ({ key, items, nodes: relayChainForItems(items) }));
-  const stageDescription = activeStep === 'assignment' ? '阶段 2 · 自动排期为默认；接收人、顺序和高级同周选项在此确认。' : activeStep === 'relay' ? '阶段 3 · 按接力链分发工作图并接收返图。' : '阶段 4 · 同时核对匹配度与修改有效性，再合并输出。';
+  const currentStageSummaries = workflowStageSummaries(workspace, activeStep);
+  const nextStep = activeStep === 'assignment' ? 'relay' : activeStep === 'relay' ? 'review' : undefined;
+  const nextStage = nextStep ? WORKFLOW_STAGES.find(stage => stage.id === nextStep) : undefined;
+  const nextBlockedReason = nextStep ? currentStageSummaries.find(stage => stage.id === nextStep)?.blockedReason : undefined;
+  const assignmentSequence = <section data-assignment-sequence className={`mx-auto w-full max-w-3xl rounded-2xl border bg-white p-6 shadow-sm ${workspace.workflowNeedsRegeneration ? 'border-amber-200' : workflowReady ? 'border-emerald-200' : 'border-slate-200'}`}>
+    <header className="flex items-start gap-4 border-b border-slate-100 pb-5"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="font-bold text-slate-800">{workflowReady ? '已生成的人物顺序' : workspace.workflowNeedsRegeneration ? '已调整的人物顺序' : '设置人物工作周顺序'}</h3>{workflowReady && <span className="rounded-full bg-emerald-50 px-2.5 py-1 text-[11px] font-bold text-emerald-700">已完成</span>}{workspace.workflowNeedsRegeneration && <span className="rounded-full bg-amber-50 px-2.5 py-1 text-[11px] font-bold text-amber-700">待重新生成</span>}</div><p className="mt-1 text-xs leading-5 text-slate-500">每周独占一行；拖动人物可调整顺序，拖到另一周的人物卡上即可归入该周。本页不展示具体修图裁片。</p></div><button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void savePreferredIdentityOrder([], [], '已恢复自动排序。请重新生成协作流程。')} className="dialog-secondary shrink-0">恢复自动排序</button></header>
+    {workflowIdentityWeeks.length ? <div data-workflow-week-list>{workflowIdentityWeeks.map(group => <section key={group.week} data-workflow-week-row><header data-workflow-week-label><strong className="text-xs font-black">{workflowWeekLabel(group.week)}</strong><span className="mt-1 text-[10px] text-slate-400">{group.entries.length} 人</span></header><div data-workflow-week-people>{group.entries.map(entry => { const identity = entry.identity; const index = workflowIdentitySequence.findIndex(candidate => candidate.identity.id === identity.id); return <article key={identity.id} data-workflow-identity-id={identity.id} className={`flex items-center gap-3 rounded-xl border bg-white p-3 transition ${draggedWorkflowIdentityId === identity.id ? 'opacity-45' : ''} ${workflowDragTargetId === identity.id ? 'border-violet-400 ring-2 ring-violet-200' : 'border-slate-200'}`}><button type="button" disabled={workflowOrderLocked || Boolean(busy)} aria-label={`拖动调整“${identity.name}”的工作周顺序`} title="按住拖到目标人物前；也可用方向键调整" onPointerDown={event => startWorkflowIdentityPointerDrag(event, identity.id)} onPointerMove={moveWorkflowIdentityPointerDrag} onPointerUp={event => finishWorkflowIdentityPointerDrag(event)} onPointerCancel={event => finishWorkflowIdentityPointerDrag(event, true)} onKeyDown={event => moveWorkflowIdentityWithKeyboard(event, identity.id, index)} className="touch-none select-none rounded-md p-2 text-slate-400 hover:bg-slate-100 hover:text-violet-700 disabled:cursor-default disabled:opacity-40 enabled:cursor-grab enabled:active:cursor-grabbing"><GripVertical size={18}/></button><span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-violet-50 text-xs font-black text-violet-700">{index + 1}</span><span className="h-3 w-3 shrink-0 rounded-full" style={{ background: identity.color }}/><strong className="min-w-0 flex-1 truncate text-sm text-slate-800">{identity.name}</strong></article>; })}</div></section>)}</div> : <div className="mt-6 rounded-xl border border-dashed border-slate-300 p-10 text-center text-sm text-slate-500">没有可排序的人物，请先完成人物标记。</div>}
+    {workflowOrderLocked && <p className="mt-5 text-center text-xs font-bold text-amber-700">已有任务返图或完成，人物顺序已锁定。</p>}
+  </section>;
 
   return <div className="team-shell pf-canvas fixed inset-x-0 bottom-0 top-10 z-[315] flex flex-col">
-    <header className="team-workflow-header team-toolbar pf-toolbar flex min-h-16 flex-wrap items-center gap-3 px-5 py-3"><span className="team-icon-tile pf-icon-tile p-2"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">团片协作</h2><p className="mt-0.5 text-xs text-slate-500">{stageDescription}</p></div><TeamRetouchSteps value={activeStep} onChange={onStepChange} summaries={stageSummaries} onBlocked={onBlockedStage}/>{historyIssue && <button type="button" className="dialog-secondary ml-auto text-amber-700" title={historyIssue} onClick={onRetryHistory}>历史恢复需重试</button>}<button type="button" onClick={onClose} title="团片协作设置" aria-label="团片协作设置" className={historyIssue ? 'rounded-md p-2 text-slate-500 hover:bg-slate-100' : 'ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100'}><Settings size={20}/></button></header>
+    <TeamWorkflowHeader activeStep={activeStep} onStepChange={onStepChange} stageSummaries={currentStageSummaries} onBlockedStage={onBlockedStage}/>
     {!loading && Boolean(workspace.photos.length) && <>
       <div className="team-toolbar pf-toolbar flex min-h-14 flex-wrap items-center gap-3 px-5 py-2.5">
-        <span className="text-xs font-bold text-slate-700">{activeStep === 'assignment' ? '任务分配' : activeStep === 'relay' ? '接力进度' : '审核输出'}</span><span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-bold text-violet-700">{weeks.length} 周</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{personWeekCount} 个批次</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{splitIdentityCount} 人跨周</span>{Boolean(workspace.missingReturnCount) && <span title="返图文件已被外部删除或移动；恢复原路径后会自动重新连接" className="rounded-full bg-red-50 px-2.5 py-1 text-xs font-bold text-red-700">返图缺失 {workspace.missingReturnCount}</span>}
+        <span className="text-xs font-bold text-slate-700">{activeStep === 'assignment' ? '任务分配' : activeStep === 'relay' ? '接力进度' : '审核输出'}</span>{activeStep !== 'assignment' && <><span className="rounded-full bg-violet-50 px-2.5 py-1 text-xs font-bold text-violet-700">{weeks.length} 周</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{personWeekCount} 个批次</span><span className="rounded-full bg-slate-100 px-2.5 py-1 text-xs text-slate-600">{splitIdentityCount} 人跨周</span>{Boolean(workspace.missingReturnCount) && <span title="返图文件已被外部删除或移动；恢复原路径后会自动重新连接" className="rounded-full bg-red-50 px-2.5 py-1 text-xs font-bold text-red-700">返图缺失 {workspace.missingReturnCount}</span>}</>}{historyIssue && <button type="button" className="dialog-secondary text-amber-700" title={historyIssue} onClick={onRetryHistory}>历史恢复需重试</button>}
         {workflowGenerating && workflowGeneration && <><span role="status" aria-live="polite" className="max-w-72 truncate text-xs font-bold text-blue-700" title={`${workflowGeneration.message} · ${workflowGeneration.currentName}`}>{workflowGeneration.message} · {Math.round(workflowGeneration.progress)}% · {workflowGeneration.completedFiles}/{workflowGeneration.totalFiles || '—'} 张</span><button type="button" disabled={workflowGeneration.phase === 'cancelling'} onClick={() => void cancelWorkflowGeneration()} className="dialog-secondary text-blue-700">{workflowGeneration.phase === 'cancelling' ? '正在停止…' : '停止生成'}</button></>}
         {workflowReturnProgress?.active && <span role="status" aria-live="polite" data-workflow-return-progress data-phase={workflowReturnProgress.phase} className="max-w-72 truncate text-xs font-bold text-emerald-700" title={workflowReturnProgress.message}>{workflowReturnProgress.message} · {Math.round(workflowReturnProgress.progress)}%</span>}
-        {activeStep === 'assignment' && <><span className="text-xs text-slate-500">默认自动排期 · {workspace.workflowGenerated && !workspace.workflowNeedsRegeneration ? '已生成' : '待生成'}</span><button disabled={!workflowGroups.size || Boolean(busy) || workflowGenerating} onClick={() => void generateWorkflow()} className="dialog-primary ml-auto inline-flex items-center gap-2">{workflowGenerating ? <Loader2 size={15} className="animate-spin"/> : <FolderOutput size={15}/>} {workflowGenerating ? `生成中 ${Math.round(workflowGeneration.progress)}%` : workspace.workflowGenerated ? '按当前分配重新生成' : '确认分配并生成流程'}</button></>}
+        {activeStep === 'assignment' && <><span className={`text-xs ${workspace.workflowNeedsRegeneration ? 'font-bold text-amber-600' : workflowReady ? 'font-bold text-emerald-700' : 'text-slate-500'}`}>{workspace.workflowNeedsRegeneration ? '人物顺序已调整 · 待重新生成' : workflowReady ? '已生成最终人物顺序' : '拖拽人物调整顺序和所在周'}</span><button disabled={!workflowGroups.size || Boolean(busy) || workflowGenerating} onClick={() => void generateWorkflow()} className="dialog-primary ml-auto inline-flex items-center gap-2">{workflowGenerating ? <Loader2 size={15} className="animate-spin"/> : <FolderOutput size={15}/>} {workflowGenerating ? `生成中 ${Math.round(workflowGeneration.progress)}%` : workspace.workflowGenerated ? '按当前顺序重新生成' : '按当前顺序生成任务'}</button></>}
         {activeStep === 'relay' && <><span className="text-xs text-slate-500">可分发 {readyWorkflowItems.length} · 当前审核 {pendingWorkflowReturnReviewCount}</span>{workflowReturnResult?.reviewSessionId && !workflowReturnReviewOpen && <button disabled={Boolean(busy)} onClick={() => setWorkflowReturnReviewOpen(true)} className="dialog-secondary ml-auto inline-flex items-center gap-2"><CheckCircle2 size={15}/>恢复返图批次（{pendingWorkflowReturnReviewCount}）</button>}<button disabled={!workflowReady || !readyWorkflowItems.length || Boolean(busy) || Boolean(workflowReturnResult?.reviewSessionId)} title={workflowReturnResult?.reviewSessionId ? '请先恢复或放弃当前返图批次' : undefined} onClick={() => void receiveWorkflowBatch(readyWorkflowItems)} className="dialog-primary ml-auto inline-flex items-center gap-2">{busy === 'workflow-return' ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>}批量导入返图</button></>}
         {activeStep === 'review' && <><span className="text-xs text-slate-500">{mergeReport.blockers.length} 项阻断 · {mergeReport.completedPhotoCount}/{mergeReport.photoCount} 已输出</span><TeamOutputProgressPicker controller={outputProgress} disabled={Boolean(busy)}/>{workflowReturnResult?.reviewSessionId && <button disabled={Boolean(busy)} onClick={() => setWorkflowReturnReviewOpen(true)} className="dialog-secondary ml-auto inline-flex items-center gap-2"><CheckCircle2 size={15}/>继续返图审核（{pendingWorkflowReturnReviewCount}）</button>}<button disabled={!mergeablePhotos.length || Boolean(busy) || mergeReport.blockers.some(item => item.code !== 'incomplete-task')} onClick={() => void mergeCompletedPhotos()} className="dialog-primary ml-auto inline-flex items-center gap-2">{busy === 'merge-workflow' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}审核通过并合并（{mergeablePhotos.length}）</button></>}
       </div>
-      {activeStep === 'assignment' && <details className="border-b border-violet-100 bg-violet-50/70 px-5 py-2"><summary className="cursor-pointer text-xs font-bold text-violet-800">高级排期 · 拖拽顺序与同周选项（默认收起）</summary><div className="mt-2 flex min-h-10 flex-wrap items-center gap-2">
-        <label title={workflowOrderLocked ? '已有任务返图或完成，开工顺序已锁定' : '未加入高级队列的人物继续自动排期'} className="inline-flex items-center gap-2 rounded-md border border-violet-200 bg-white px-2.5 py-1.5 text-xs font-bold text-violet-700"><span>优先队列</span><select value="" disabled={Boolean(busy) || workflowOrderLocked || !availableWorkflowIdentities.length} onChange={event => void addPreferredIdentity(event.target.value)} className="max-w-44 bg-transparent text-xs font-medium outline-none disabled:text-slate-400"><option value="">{preferredIdentityOrder.length ? `已排序 ${preferredIdentityOrder.length} 人 · 添加` : '添加人物'}</option>{availableWorkflowIdentities.map(identity => <option key={identity.id} value={identity.id}>{identity.name}</option>)}</select></label>
-      {!!preferredWorkflowIdentities.length && <div className="contents">
-        <span className="mr-1 text-xs font-bold text-violet-800">拖拽开工顺序</span>
-        {preferredWorkflowIdentities.map((identity, index) => <div key={identity.id} className="contents">
-          {index > 0 && <button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void toggleSameWeekIdentity(identity.id)} title={sameWeekIdentityIds.includes(identity.id) ? `“${identity.name}”与前一人物同周开始，点击改为下一周` : `“${identity.name}”在前一人物之后开始，点击改为同周`} className={`rounded-full border px-2 py-1 text-xs font-black transition disabled:opacity-40 ${sameWeekIdentityIds.includes(identity.id) ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-violet-200 bg-white text-violet-500'}`}>{sameWeekIdentityIds.includes(identity.id) ? '＋' : '→'}</button>}
-          <div
-            data-workflow-identity-id={identity.id}
-            className={`inline-flex items-center gap-1.5 rounded-full border border-violet-200 bg-white py-1 pl-1 pr-2 text-xs font-bold text-violet-800 shadow-sm transition ${draggedWorkflowIdentityId === identity.id ? 'opacity-45' : ''} ${workflowDragTargetId === identity.id ? 'ring-2 ring-violet-400 ring-offset-1' : ''}`}
-          >
-            <button
-              type="button"
-              disabled={workflowOrderLocked || Boolean(busy)}
-              aria-label={`拖动调整“${identity.name}”的开工顺序`}
-              title="按住拖到另一人物；也可用左右方向键调整"
-              onPointerDown={event => startWorkflowIdentityPointerDrag(event, identity.id)}
-              onPointerMove={moveWorkflowIdentityPointerDrag}
-              onPointerUp={event => finishWorkflowIdentityPointerDrag(event)}
-              onPointerCancel={event => finishWorkflowIdentityPointerDrag(event, true)}
-              onKeyDown={event => moveWorkflowIdentityWithKeyboard(event, identity.id, index)}
-              className="touch-none select-none rounded-full p-0.5 text-violet-400 hover:bg-violet-100 hover:text-violet-700 disabled:cursor-default disabled:opacity-40 enabled:cursor-grab enabled:active:cursor-grabbing"
-            ><GripVertical size={14}/></button>
-            <span className="flex h-5 min-w-5 items-center justify-center rounded-full bg-violet-100 px-1 text-[10px] text-violet-700">{index + 1}</span>
-            <span className="max-w-32 truncate">{identity.name}</span>
-            <button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void removePreferredIdentity(identity.id)} title={`将“${identity.name}”交回自动排期`} className="ml-0.5 rounded-full p-0.5 text-violet-400 hover:bg-violet-100 hover:text-violet-700 disabled:opacity-40"><X size={12}/></button>
-          </div>
-        </div>)}
-        <span className="text-[11px] text-violet-600">按住六点拖到另一人物；点击 ＋/→ 切换同周或下一周；其他人物自动排期。</span>
-        <button type="button" disabled={workflowOrderLocked || Boolean(busy)} onClick={() => void savePreferredIdentityOrder([], [], '已恢复自动排期。请重新生成协作流程。')} className="ml-auto text-xs font-bold text-violet-700 hover:text-violet-900 disabled:opacity-40">全部恢复自动</button>
-      </div>} {!preferredWorkflowIdentities.length && <span className="text-[11px] text-violet-600">当前全部使用自动排期。</span>}</div></details>}
     </>}
     {!!pendingResources.size && <div role="status" aria-live="polite" className="border-b border-emerald-100 bg-emerald-50 px-5 py-2 text-xs font-bold text-emerald-700">正在安全保存 {pendingResources.size} 个任务；其他照片仍可操作</div>}
     {loading ? <div className="flex flex-1 items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 animate-spin"/>正在读取团片历史人物…</div> : workspaceLoadError ? <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"><AlertTriangle size={28} className="text-red-500"/><h3 className="font-bold text-red-700">团片历史人物读取失败</h3><p className="max-w-2xl text-xs leading-5 text-slate-500">{workspaceLoadError}</p><button type="button" className="dialog-primary" onClick={() => void load(true)}>重新读取团片历史</button></div> : !workspace.photos.length ? <div className="flex flex-1 flex-col items-center justify-center text-center"><UsersRound size={42} className="text-slate-300"/><h3 className="mt-4 font-bold text-slate-700">尚未识别人物</h3><p className="mt-2 text-sm text-slate-500">请先加入图片并识别人物。</p><button onClick={() => onStepChange('detect')} className="dialog-primary mt-5">返回人物识别</button></div> : <main ref={peopleScrollRef} className="min-h-0 flex-1 overflow-y-auto p-6"><div className="mx-auto min-h-full max-w-[1800px]"><div className="workflow-board-view">
-      {activeStep === 'review' ? <div className="grid gap-5 lg:grid-cols-[minmax(280px,.7fr)_minmax(0,1.3fr)]" data-merge-audit><section className="rounded-xl border border-slate-200 bg-white p-5"><h3 className="font-bold text-slate-800">合并前阻断清单</h3><p className="mt-1 text-xs text-slate-500">阻断归零后才能输出；未知证据仍需人工核对。</p><div className="mt-4 space-y-2">{mergeReport.blockers.length ? mergeReport.blockers.map(item => <div key={item.code} className="flex items-center justify-between rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800"><span>{item.label}</span><span>{item.count}</span></div>) : <div className="rounded-lg bg-emerald-50 px-3 py-3 text-xs font-bold text-emerald-700">没有阻断项，可以合并</div>}</div></section><section className="rounded-xl border border-slate-200 bg-white p-5"><h3 className="font-bold text-slate-800">质量指标与目标进度</h3><div className="mt-4 grid gap-3 sm:grid-cols-3"><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">任务匹配</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.taskMatchRate === undefined ? '未知 · 需核对' : `${Math.round(workspace.qualityMetrics.taskMatchRate * 100)}%`}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">修改有效性</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.effectiveEditRate === undefined ? '未知 · 需核对' : `${Math.round(workspace.qualityMetrics.effectiveEditRate * 100)}%`}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">逐图结果</p><p className="mt-1 font-bold text-slate-800">{mergeablePhotos.length} 待合并 · {mergeReport.completedPhotoCount} 已输出</p></div></div><div className="mt-5 space-y-2">{workspace.photos.map(photo => { const tasks = photo.tasks || []; const mergedCount = tasks.filter(task => task.status === 'merged').length; return <div key={`${photo.photoId}:${photo.baseVersionId}`} className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-2 text-xs"><span className="truncate font-bold text-slate-700">{photo.name || photo.displayName || photo.photoId}</span><span className={mergedCount === tasks.length && tasks.length ? 'text-emerald-700' : 'text-slate-500'}>{mergedCount === tasks.length && tasks.length ? '已输出' : `${tasks.filter(task => Boolean(task.editedPatchPath)).length}/${tasks.length} 返图就绪`}</span></div>; })}</div></section></div> : <>{activeStep === 'relay' && <section className="mb-5 rounded-xl border border-slate-200 bg-white p-4" data-relay-chains><div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-bold text-slate-800">接力链</h3><span className="text-xs text-slate-500">原始裁图 → 前一位返图 → 下一位；每条链明确当前持有人和等待原因。</span></div><div className="mt-4 grid gap-3 xl:grid-cols-2">{relayChains.map(chain => <article key={chain.key} className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="mb-2 truncate text-xs font-bold text-slate-700">{chain.items[0]?.photo.name} · 工作图 {chain.items[0]?.task.taskOrder || chain.items[0]?.task.id}</p><ol className="flex min-w-0 items-stretch gap-1 overflow-x-auto" aria-label="修图接力链">{chain.nodes.map((node, index) => <li key={node.key} className="flex shrink-0 items-center gap-1">{index > 0 && <span aria-hidden className="text-slate-300">→</span>}<div className={`min-w-28 rounded-md border px-2.5 py-2 text-[11px] ${node.state === 'current' ? 'border-blue-300 bg-blue-50 text-blue-800' : node.state === 'warning' ? 'border-red-300 bg-red-50 text-red-700' : node.state === 'done' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'}`}><strong className="block truncate">{node.label}</strong><span className="mt-0.5 block truncate">{node.reason || (node.state === 'done' ? '已就绪' : '等待')}</span></div></li>)}</ol></article>)}</div></section>}
+      {activeStep === 'assignment' ? assignmentSequence : activeStep === 'review' ? <div className="grid gap-5 lg:grid-cols-[minmax(280px,.7fr)_minmax(0,1.3fr)]" data-merge-audit><section className="rounded-xl border border-slate-200 bg-white p-5"><h3 className="font-bold text-slate-800">合并前阻断清单</h3><p className="mt-1 text-xs text-slate-500">阻断归零后才能输出；未知证据仍需人工核对。</p><div className="mt-4 space-y-2">{mergeReport.blockers.length ? mergeReport.blockers.map(item => <div key={item.code} className="flex items-center justify-between rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800"><span>{item.label}</span><span>{item.count}</span></div>) : <div className="rounded-lg bg-emerald-50 px-3 py-3 text-xs font-bold text-emerald-700">没有阻断项，可以合并</div>}</div></section><section className="rounded-xl border border-slate-200 bg-white p-5"><h3 className="font-bold text-slate-800">质量指标与目标进度</h3><div className="mt-4 grid gap-3 sm:grid-cols-3"><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">任务匹配</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.taskMatchRate === undefined ? '未知 · 需核对' : `${Math.round(workspace.qualityMetrics.taskMatchRate * 100)}%`}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">修改有效性</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.effectiveEditRate === undefined ? '未知 · 需核对' : `${Math.round(workspace.qualityMetrics.effectiveEditRate * 100)}%`}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">逐图结果</p><p className="mt-1 font-bold text-slate-800">{mergeablePhotos.length} 待合并 · {mergeReport.completedPhotoCount} 已输出</p></div></div><div className="mt-5 space-y-2">{workspace.photos.map(photo => { const tasks = photo.tasks || []; const mergedCount = tasks.filter(task => task.status === 'merged').length; return <div key={`${photo.photoId}:${photo.baseVersionId}`} className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-2 text-xs"><span className="truncate font-bold text-slate-700">{photo.name || photo.displayName || photo.photoId}</span><span className={mergedCount === tasks.length && tasks.length ? 'text-emerald-700' : 'text-slate-500'}>{mergedCount === tasks.length && tasks.length ? '已输出' : `${tasks.filter(task => Boolean(task.editedPatchPath)).length}/${tasks.length} 返图就绪`}</span></div>; })}</div></section></div> : <>{activeStep === 'relay' && <section className="mb-5 overflow-hidden rounded-xl border border-slate-200 bg-white" data-relay-chains><button type="button" aria-expanded={relayChainsOpen} onClick={() => setRelayChainsOpen(current => !current)} className="flex w-full items-center gap-3 p-4 text-left transition hover:bg-slate-50"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-bold text-slate-800">接力链（{relayChains.length}）</h3><span className="text-xs text-slate-500">原始裁图 → 前一位返图 → 下一位</span></div><p className="mt-1 text-[11px] text-slate-400">{relayChainsOpen ? '点击收起接力关系' : '点击展开，查看当前持有人和等待原因'}</p></div><ChevronDown size={17} className={`shrink-0 text-slate-400 transition-transform ${relayChainsOpen ? 'rotate-180' : ''}`}/></button>{relayChainsOpen && <div className="grid gap-3 border-t border-slate-100 p-4 xl:grid-cols-2">{relayChains.map(chain => <article key={chain.key} className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="mb-2 truncate text-xs font-bold text-slate-700">{chain.items[0]?.photo.name} · 工作图 {chain.items[0]?.task.taskOrder || chain.items[0]?.task.id}</p><ol className="flex min-w-0 items-stretch gap-1 overflow-x-auto" aria-label="修图接力链">{chain.nodes.map((node, index) => <li key={node.key} className="flex shrink-0 items-center gap-1">{index > 0 && <span aria-hidden className="text-slate-300">→</span>}<div className={`min-w-28 rounded-md border px-2.5 py-2 text-[11px] ${node.state === 'current' ? 'border-blue-300 bg-blue-50 text-blue-800' : node.state === 'warning' ? 'border-red-300 bg-red-50 text-red-700' : node.state === 'done' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'}`}><strong className="block truncate">{node.label}</strong><span className="mt-0.5 block truncate">{node.reason || (node.state === 'done' ? '已就绪' : '等待')}</span></div></li>)}</ol></article>)}</div>}</section>}
       {tab === 'people' ? <><div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4"><div className="min-w-0 flex-1"><h3 className="text-sm font-bold text-blue-800">请确认自动分组</h3><p className="mt-1 text-xs leading-5 text-blue-700">系统会结合人脸和外观分组，无法确认的人保持未标注。请点击缩略图核对。</p></div>{subjects.length > subjectPageSize && <button onClick={() => setSubjectPageSize(current => current + 18)} className="dialog-secondary" aria-label="加载更多人物实例">再加载 18 张</button>}<button disabled={Boolean(busy)} onClick={() => void suggest()} className="dialog-primary inline-flex items-center gap-2">{busy === 'suggest' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动识别同一个人</button><button onClick={() => void createIdentity()} className="dialog-secondary">新建人物</button></div>
         <div className="space-y-5">{[...workspace.identities, { id: '__unassigned__', name: '未标注人物', color: '#64748b', createdAt: 0, updatedAt: 0 }].map(identity => { const items = grouped.get(identity.id) || []; if (!items.length && identity.id === '__unassigned__') return null; const visibleItems = items.slice(0, subjectPageSize); return <section key={identity.id} className="team-card pf-card overflow-hidden"><header className="flex items-center gap-3 border-b border-slate-100 px-4 py-3"><span className="h-3 w-3 rounded-full" style={{ background: identity.color }}/>{identity.id === '__unassigned__' ? <h3 className="font-bold text-slate-700">未标注人物</h3> : <input defaultValue={identity.name} onBlur={event => void renameIdentity(identity, event.target.value)} className="min-w-40 rounded border border-transparent px-1 py-1 font-bold text-slate-800 hover:border-slate-200 focus:border-blue-400 focus:outline-none"/>}<span className="text-xs text-slate-400">{items.length} 张人物实例 · {new Set(items.map(item => item.photo.photoId)).size} 张照片{items.length > visibleItems.length ? ` · 当前显示 ${visibleItems.length} 张` : ''}</span>{identity.id !== '__unassigned__' && <button onClick={() => void removeIdentity(identity)} title="删除人物身份" className="ml-auto rounded p-2 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 size={15}/></button>}</header><div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6">{visibleItems.map(subject => <div key={subject.key} data-team-person-key={subject.key} className="space-y-2"><SubjectThumb active={componentActive} subject={subject} cacheConfig={cacheConfig}/><select value={subject.identity?.id || ''} onChange={event => void assign(subject, event.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700"><option value="">未标注</option>{workspace.identities.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}</select>{subject.assignment?.source === 'suggested' && <p className="text-[10px] text-amber-600">自动候选 · {Math.round(subject.assignment.confidence * 100)}% · 请人工确认</p>}</div>)}</div></section>; })}</div></> : <>{!workspace.identities.length ? <div className="team-card pf-card border-dashed p-10 text-center text-sm text-slate-500">请先在“标记人物”中确认身份。</div> : <div className="space-y-7">{weeks.map(week => <section key={week}><h3 className="mb-3 text-sm font-bold text-slate-700">第 {week} 周</h3><div className="space-y-4">{[...workflowGroups.values()].filter(group => group.week === week).map(group => {
           const pending = group.items.filter(item => !item.assignment?.completed);
           const ready = workflowReady ? pending.filter(item => item.ready) : [];
-          return <article key={`${week}:${group.identity.id}`} className="workflow-person-lane team-card pf-card overflow-hidden"><header className="workflow-person-summary flex items-center gap-3 border-b border-slate-100 p-4"><span className="h-3 w-3 shrink-0 rounded-full" style={{ background: group.identity.color }}/><div className="min-w-0"><h4 className="truncate font-bold text-slate-800">{group.identity.name}</h4><p className="mt-1 text-xs leading-5 text-slate-400">本周 {group.items.length} 张<br/>可分发 {ready.length} 张 · 已完成 {group.items.length - pending.length} 张</p></div>{activeStep === 'relay' && <><button disabled={!workflowReady || Boolean(busy) || !ready.length} onClick={() => void markWeekNoRetouch(group.identity, week, group.items)} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : `将“${group.identity.name}”本周当前可分发的 ${ready.length} 个未上传任务标记为不用修`} className="dialog-secondary ml-auto inline-flex shrink-0 items-center gap-2">{busy === `skip:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}标记本周不用修</button><button disabled={!workflowReady || Boolean(busy) || !ready.length} title={!workspace.workflowGenerated ? '请先生成协作流程' : workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : !ready.length ? '等待上一位返图' : '打开当前可分发任务文件夹'} onClick={() => void openTaskFolder(group.identity, week)} className="dialog-secondary inline-flex shrink-0 items-center gap-2">{busy === `open:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <FolderOutput size={14}/>}打开任务文件夹</button></>}</header><div className="workflow-task-strip">{group.items.map(item => { const returnMissing = Boolean(item.assignment?.returnMissing); const returned = item.assignment?.completionKind === 'returned' && Boolean(item.assignment.editedPatchPath) && !returnMissing; return <div key={item.key} className="workflow-task-card p-3"><div className="workflow-task-thumbnail shrink-0"><SubjectThumb active={componentActive} subject={item} cacheConfig={cacheConfig} sourcePath={item.workflowImagePath}/></div><div className="min-w-0"><p className="truncate text-sm font-bold text-slate-700">{item.photo.name} · 人物 {item.personIndex}</p><p className={`mt-1 truncate text-xs ${workspace.workflowNeedsRegeneration ? 'font-bold text-amber-600' : returnMissing ? 'font-bold text-red-600' : item.assignment?.completed ? 'text-emerald-600' : item.ready ? 'text-blue-600' : 'text-amber-600'}`} title={workspace.workflowNeedsRegeneration ? '排期已调整，请重新生成协作流程' : returnMissing ? '返图文件已被外部删除或移动；恢复原路径后会自动重新连接，也可以重新上传' : item.blockedBy.join('、')}>{workspace.workflowNeedsRegeneration ? '排期已调整，等待重新生成' : returnMissing ? '返图文件丢失' : item.assignment?.completed ? returned ? '已返图' : '不用修' : item.ready ? '可以分发' : `等待 ${item.blockedBy.join('、')} 完成`}</p></div>{activeStep === 'relay' && <><button disabled={!workflowReady || !item.ready || Boolean(busy)} onClick={() => void upload(item)} className="workflow-task-action dialog-secondary inline-flex items-center justify-center">{busy === `upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : <Upload size={12}/>}上传返图</button><button disabled={!workflowReady || !item.assignment || Boolean(busy) || !item.ready && !item.assignment.completed} onClick={() => void (item.assignment?.completed && returned ? removeUpload(item) : toggleComplete(item))} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : returnMissing ? '返图文件已丢失；可以重新上传，或明确标记为不用修' : item.assignment?.completed ? returned ? '删除返图并撤销完成标记' : '撤销不用修' : '该任务不用修，直接标记完成'} className={`workflow-task-action group inline-flex items-center justify-center rounded-md border font-bold transition ${returnMissing ? 'border-red-200 bg-red-50 text-red-700' : item.assignment?.completed ? returned ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600' : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-amber-200 hover:bg-amber-50 hover:text-amber-700' : 'border-slate-200 text-slate-600'}`}>{busy === `complete:${item.key}` || busy === `remove-upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : item.assignment?.completed ? <><CheckCircle2 size={12} className="group-hover:hidden"/>{returned ? <Trash2 size={12} className="hidden group-hover:block"/> : <X size={12} className="hidden group-hover:block"/>}</> : <AlertTriangle size={12}/>} {item.assignment?.completed ? <><span className="group-hover:hidden">{returned ? '已返图' : '不用修'}</span><span className="hidden group-hover:inline">{returned ? '删除返图' : '撤销不用修'}</span></> : returnMissing ? '返图丢失' : '不用修'}</button></>}</div>; })}</div></article>;
-        })}</div></section>)}</div>}</>}</>}
+          return <article key={`${week}:${group.identity.id}`} className="workflow-person-lane team-card pf-card overflow-hidden"><header className="workflow-person-summary flex items-center gap-3 border-b border-slate-100 p-4"><span className="h-3 w-3 shrink-0 rounded-full" style={{ background: group.identity.color }}/><div className="min-w-0"><h4 className="truncate font-bold text-slate-800">{group.identity.name}</h4><p className="mt-1 text-xs leading-5 text-slate-400">本周 {group.items.length} 张<br/>可分发 {ready.length} 张 · 已完成 {group.items.length - pending.length} 张</p></div>{activeStep === 'relay' && <><button disabled={!workflowReady || Boolean(busy) || !ready.length} onClick={() => void markWeekNoRetouch(group.identity, week, group.items)} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : `将“${group.identity.name}”本周当前可分发的 ${ready.length} 个未上传任务标记为不用修`} className="dialog-secondary ml-auto inline-flex shrink-0 items-center gap-2">{busy === `skip:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}标记本周不用修</button><button disabled={!workflowReady || Boolean(busy) || !ready.length} title={!workspace.workflowGenerated ? '请先生成协作流程' : workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : !ready.length ? '等待上一位返图' : '打开当前可分发任务文件夹'} onClick={() => void openTaskFolder(group.identity, week)} className="dialog-secondary inline-flex shrink-0 items-center gap-2">{busy === `open:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <FolderOutput size={14}/>}打开任务文件夹</button></>}</header><div className="workflow-task-strip">{group.items.map(item => { const returnMissing = Boolean(item.assignment?.returnMissing); const returned = item.assignment?.completionKind === 'returned' && Boolean(item.assignment.editedPatchPath) && !returnMissing; return <div key={item.key} className="workflow-task-card p-3"><div className="workflow-task-thumbnail shrink-0"><SubjectThumb active={componentActive} subject={item} cacheConfig={cacheConfig} sourcePath={item.workflowImagePath} interactive={!item.assignment?.completed}/></div><div className="min-w-0"><p className="truncate text-sm font-bold text-slate-700">{item.photo.name} · 人物 {item.personIndex}</p><p className={`mt-1 truncate text-xs ${workspace.workflowNeedsRegeneration ? 'font-bold text-amber-600' : returnMissing ? 'font-bold text-red-600' : item.assignment?.completed ? 'text-emerald-600' : item.ready ? 'text-blue-600' : 'text-amber-600'}`} title={workspace.workflowNeedsRegeneration ? '排期已调整，请重新生成协作流程' : returnMissing ? '返图文件已被外部删除或移动；恢复原路径后会自动重新连接，也可以重新上传' : item.blockedBy.join('、')}>{workspace.workflowNeedsRegeneration ? '排期已调整，等待重新生成' : returnMissing ? '返图文件丢失' : item.assignment?.completed ? returned ? '已返图' : '不用修' : item.ready ? '可以分发' : `等待 ${item.blockedBy.join('、')} 完成`}</p></div>{activeStep === 'relay' && <><button disabled={!workflowReady || !item.ready || Boolean(busy)} onClick={() => void upload(item)} className="workflow-task-action dialog-secondary inline-flex items-center justify-center">{busy === `upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : <Upload size={12}/>}上传返图</button><button disabled={!workflowReady || !item.assignment || Boolean(busy) || !item.ready && !item.assignment.completed} onClick={() => void (item.assignment?.completed && returned ? removeUpload(item) : toggleComplete(item))} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : returnMissing ? '返图文件已丢失；可以重新上传，或明确标记为不用修' : item.assignment?.completed ? returned ? '删除返图并撤销完成标记' : '撤销不用修' : '该任务不用修，直接标记完成'} className={`workflow-task-action group inline-flex items-center justify-center rounded-md border font-bold transition ${returnMissing ? 'border-red-200 bg-red-50 text-red-700' : item.assignment?.completed ? returned ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600' : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-amber-200 hover:bg-amber-50 hover:text-amber-700' : 'border-slate-200 text-slate-600'}`}>{busy === `complete:${item.key}` || busy === `remove-upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : item.assignment?.completed ? <><CheckCircle2 size={12} className="group-hover:hidden"/>{returned ? <Trash2 size={12} className="hidden group-hover:block"/> : <X size={12} className="hidden group-hover:block"/>}</> : <AlertTriangle size={12}/>} {item.assignment?.completed ? <><span className="group-hover:hidden">{returned ? '已返图' : '不用修'}</span><span className="hidden group-hover:inline">{returned ? '删除返图' : '撤销不用修'}</span></> : returnMissing ? '返图丢失' : '不用修'}</button></>}</div>; })}</div></article>;
+        })}</div></section>)}</div>}</>}</>}{nextStep && <footer className="team-next-step mt-6 flex justify-center pt-5"><button type="button" disabled={Boolean(busy) || Boolean(nextBlockedReason)} onClick={() => onStepChange(nextStep)} className="dialog-primary inline-flex items-center gap-2" title={nextBlockedReason || `进入${nextStage?.label || '下一个任务'}`}>下一步：{nextStage?.label}<ArrowRight size={15}/></button></footer>}
     </div></div></main>}
-    {workflowReturnResult && workflowReturnReviewOpen && createPortal(<WorkflowReturnReviewDialog componentActive={componentActive} result={workflowReturnResult} cacheConfig={cacheConfig} busy={busy} onClose={() => void requestCloseWorkflowReturnReview()} onConfirm={(match, candidate) => void confirmWorkflowReturn(match, candidate)} onIgnore={match => void ignoreWorkflowReturn(match)}/>, document.body)}
-    {assigningSubject && <div role="dialog" aria-modal="true" aria-label="看图修改人物归属" className="fixed inset-0 z-[450] flex items-center justify-center bg-slate-950/70 p-5" onMouseDown={event => { if (event.target === event.currentTarget) setAssigningSubject(null); }}><div className="flex max-h-[92vh] w-full max-w-6xl flex-col overflow-hidden rounded-2xl border border-slate-200 bg-white shadow-2xl"><header className="flex items-center gap-3 border-b border-slate-200 px-5 py-4"><div><h3 className="font-bold text-slate-900">这是谁？</h3><p className="mt-1 text-xs text-slate-500">从右侧选择同一个人，或新建人物。</p></div><button onClick={() => setAssigningSubject(null)} className="ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100"><X size={19}/></button></header><div className="grid min-h-0 flex-1 grid-cols-[300px_minmax(0,1fr)]"><aside className="border-r border-slate-200 bg-slate-50 p-5"><p className="mb-2 text-xs font-bold text-slate-500">待修改</p><SubjectThumb active={componentActive} subject={assigningSubject} cacheConfig={cacheConfig} interactive={false}/><p className="mt-3 text-sm font-bold text-slate-800">{assigningSubject.photo.name} · 人物 {assigningSubject.personIndex}</p><p className="mt-1 text-xs text-slate-500">当前：{assigningSubject.identity?.name || '未标注'}</p><div className="mt-5 space-y-2"><button onClick={() => void assign(assigningSubject, '')} className="dialog-secondary w-full">设为未标注</button><button onClick={() => void createIdentityForSubject(assigningSubject)} className="dialog-primary w-full">这是一个新人物</button></div></aside><section className="min-h-0 overflow-y-auto p-5"><h4 className="mb-3 text-sm font-bold text-slate-700">选择同一个人</h4><div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">{pickerIdentities.map(identity => { const examples = grouped.get(identity.id) || []; const representative = examples.find(item => item.key !== assigningSubject.key) || examples[0]; return <button key={identity.id} onClick={() => void assign(assigningSubject, identity.id)} className={`overflow-hidden rounded-xl border bg-white text-left transition hover:border-blue-400 hover:shadow-md ${assigningSubject.identity?.id === identity.id ? 'border-blue-500 ring-2 ring-blue-100' : 'border-slate-200'}`}>{representative ? <SubjectThumb active={componentActive} subject={representative} cacheConfig={cacheConfig} interactive={false}/> : <div className="flex aspect-[4/3] items-center justify-center bg-slate-100 text-slate-400"><UserRound/></div>}<div className="flex items-center gap-2 p-3"><span className="h-2.5 w-2.5 rounded-full" style={{ background: identity.color }}/><span className="min-w-0 flex-1 truncate text-sm font-bold text-slate-800">{identity.name}</span><span className="text-[10px] text-slate-400">{examples.length} 张</span></div></button>; })}</div></section></div></div></div>}
+    {workflowReturnResult && workflowReturnReviewOpen && createPortal(<WorkflowReturnReviewDialog componentActive={componentActive} result={workflowReturnResult} cacheConfig={cacheConfig} busy={busy} onClose={() => void requestCloseWorkflowReturnReview()} onConfirm={confirmWorkflowReturn} onIgnore={ignoreWorkflowReturn}/>, document.body)}
+    {assigningSubject && <IdentityPickerPanel
+      description="从已有身份中选择同一个人，或新建人物；本次只修改当前未完成任务。"
+      badge="修改当前人物"
+      currentPreview={<SubjectThumb active={componentActive} subject={assigningSubject} cacheConfig={cacheConfig} interactive={false}/>}
+      currentName={assigningSubject.identity && !isGeneratedIdentity(assigningSubject.identity) ? assigningSubject.identity.name : '未标记'}
+      currentStatus={`${assigningSubject.photo.name} · 人物 ${assigningSubject.personIndex}`}
+      identities={pickerIdentities}
+      selectedIdentityId={assigningSubject.identity?.id}
+      identityCount={identity => (grouped.get(identity.id) || []).length}
+      renderIdentityPreview={identity => {
+        const examples = grouped.get(identity.id) || [];
+        const representative = examples.find(item => item.key !== assigningSubject.key) || examples[0];
+        return representative ? <SubjectThumb active={componentActive} subject={representative} cacheConfig={cacheConfig} interactive={false}/> : null;
+      }}
+      onSelect={identity => void assign(assigningSubject, identity.id)}
+      onCreate={() => void createIdentityForSubject(assigningSubject)}
+      onClear={() => void assign(assigningSubject, '')}
+      onClose={() => setAssigningSubject(null)}
+      busy={identityPickerBusy}
+      selectionDescription="点击人物卡片后，只修改左侧当前人物的归属。"
+    />}
   </div>;
 };

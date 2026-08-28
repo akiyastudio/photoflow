@@ -1,0 +1,34 @@
+{
+  "name": "@photoflow/video-transcription",
+  "version": "26.8.28.2",
+  "private": true,
+  "scripts": {
+    "build": "node scripts/verify-layout.cjs",
+    "test": "node tests/test-core.cjs && node tests/test-engine.cjs && node tests/test-service.cjs && node tests/test-manifest-security.cjs",
+    "package": "node scripts/package-component.cjs",
+    "package:host": "node scripts/package-component.cjs"
+  },
+  "photoflowComponent": {
+    "manifest": "component.json",
+    "development": {
+      "prepare": "build",
+      "runtime": { "command": "dev-python.cmd", "entry": "engine.py", "argsPrefix": ["-u"] },
+      "files": {
+        "service.cjs": "service.cjs",
+        "core.cjs": "core.cjs",
+        "engine.py": "engine.py",
+        "ui/index.html": "ui/index.html",
+        "ui/settings.html": "ui/settings.html",
+        "ui/app.js": "ui/app.js",
+        "ui/settings.js": "ui/settings.js",
+        "ui/style.css": "ui/style.css",
+        "ui/icon.svg": "ui/icon.svg",
+        "README.md": "README.md",
+        "LICENSES/README.md": "LICENSES/README.md"
+      }
+    },
+    "tests": {
+      "package-layout": ["tests/test-manifest-security.cjs"]
+    }
+  }
+}

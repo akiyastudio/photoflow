@@ -1,0 +1,8 @@
+dist/
+.venv/
+__pycache__/
+*.db
+*.sqlite3
+models/
+_internal/transcriber.exe
+_internal/transcriber

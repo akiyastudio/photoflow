@@ -46,8 +46,8 @@ export type TaskAction = 'start' | 'report' | 'status' | 'cancel' | 'resume' | '
 export interface TasksRequest { action: TaskAction; operationId: string; title?: string; message?: string; progress?: number; phase?: string; checkpoint?: JsonObject; error?: string }
 export interface ComponentTaskSnapshot { id: string; state: string; checkpoint?: JsonObject; progress?: number; message?: string; error?: string }
 export interface TasksResponse { apiVersion: 7; task: ComponentTaskSnapshot | null; cancelled: boolean; checkpoint?: JsonObject }
-export type DialogsRequest = { kind: 'confirm'; title?: string; message?: string } | { kind: 'openFiles'; title?: string; extensions?: string[]; multiple?: boolean } | { kind: 'openOutput' | 'revealOutput'; commitId: string; artifactId: string };
-export type DialogsResponse = { apiVersion: 7; confirmed: boolean } | { apiVersion: 7; cancelled: boolean; inputs: Array<{ name: string; token: string; expiresAt: number }> } | { apiVersion: 7; opened: true; outputRef: { commitId: string; artifactId: string } };
+export type DialogsRequest = { kind: 'confirm'; title?: string; message?: string } | { kind: 'openFiles'; title?: string; extensions?: string[]; multiple?: boolean } | { kind: 'openDirectory'; title?: string; extensions?: string[]; recursive?: boolean } | { kind: 'openOutput' | 'revealOutput'; commitId: string; artifactId: string };
+export type DialogsResponse = { apiVersion: 7; confirmed: boolean } | { apiVersion: 7; cancelled: boolean; inputs: Array<{ name: string; relativeName: string; token: string; expiresAt: number }>; truncated?: boolean } | { apiVersion: 7; opened: true; outputRef: { commitId: string; artifactId: string } };
 export interface ComponentEventRequest<T extends JsonObject = JsonObject> { topic: VersionedName; event: T }
 export interface ComponentEventResponse { apiVersion: 7; emitted: true }
 export type ComponentLifecycleRequest = { action: 'describe' } | { action: 'preflight' | 'install' | 'repair' | 'uninstall' };

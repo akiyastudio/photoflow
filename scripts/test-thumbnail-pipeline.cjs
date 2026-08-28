@@ -620,14 +620,14 @@ const run = async () => {
     const indexedCalls = [];
     indexedPipeline.database.call = async (operation, args) => {
       indexedCalls.push({ operation, args });
-      return { indexed: true, hasVideo: true, hasPng: false, videoPaths: [missingVideo], pngPaths: [] };
+      return { indexed: true, hasVideo: true, hasConvertibleImage: false, videoPaths: [missingVideo], convertibleImagePaths: [] };
     };
     const indexedResult = await indexedPipeline.inspectToolSources(temporaryRoot, [missingVideo], true, true);
     assert.equal(indexedResult.hasVideo, true);
     assert.equal(indexedCalls[0]?.operation, 'inspect_tool_sources', 'tool availability must read the existing project index');
-    assert.equal(indexedCalls[0]?.args.collect_direct_png, true, 'folder menu inspection must request direct PNG children');
+    assert.equal(indexedCalls[0]?.args.collect_direct_convertible_images, true, 'folder menu inspection must request direct convertible image children');
     await indexedPipeline.inspectToolSources(temporaryRoot, [missingVideo], false, false, true);
-    assert.equal(indexedCalls[1]?.args.collect_recursive_png, true, 'PNG conversion must request recursive PNG source collection');
+    assert.equal(indexedCalls[1]?.args.collect_recursive_convertible_images, true, 'image conversion must request recursive convertible image source collection');
     indexedPipeline.projectScans.set(path.resolve(temporaryRoot), Promise.resolve());
     const buildingResult = await indexedPipeline.inspectToolSources(temporaryRoot, [missingVideo], true);
     assert.equal(buildingResult.indexed, false, 'tool availability must report a queued background project scan as building');

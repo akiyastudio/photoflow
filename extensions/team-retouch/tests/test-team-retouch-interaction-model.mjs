@@ -81,6 +81,10 @@ assert.equal(canEnterWorkflowStage(confirmedWorkspace, 'assignment').allowed, tr
 assert.equal(canEnterWorkflowStage(confirmedWorkspace, 'relay').allowed, false, 'stage 3 must wait for generated assignment workflow');
 const generatedWorkspace = { ...confirmedWorkspace, workflowGenerated: true, workflowNeedsRegeneration: false, workflowParticipantKeys: ['p1:v1:1'] };
 assert.equal(canEnterWorkflowStage(generatedWorkspace, 'relay').allowed, true);
+assert.equal(canEnterWorkflowStage(generatedWorkspace, 'review').allowed, false, 'stage 4 must wait until every relay task is complete');
+assert.match(canEnterWorkflowStage(generatedWorkspace, 'review').reason, /1 个接力任务未完成/);
+const returnedWorkspace = { ...generatedWorkspace, assignments: [{ ...confirmedWorkspace.assignments[0], completed: true, completionKind: 'returned' }] };
+assert.equal(canEnterWorkflowStage(returnedWorkspace, 'review').allowed, true, 'stage 4 unlocks after relay completion');
 const stageStates = workflowStageSummaries(generatedWorkspace, 'relay');
 assert.equal(stageStates.find(item => item.id === 'detect').complete, true);
 assert.equal(stageStates.find(item => item.id === 'relay').state, 'current');

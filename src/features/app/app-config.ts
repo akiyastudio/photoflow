@@ -103,7 +103,7 @@ export const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   archive: { enabled: false, targetPath: '' },
   importDefaults: { deleteSourceAfterImport: true, generateJpgFromRaw: true, splitVideosOnImport: false, transcodeVideosOnImport: false },
   videoTools: {
-    transcode: { container: 'mp4', videoMode: 'h264', quality: 'balanced', resolution: 'original', frameRate: 'original', audioMode: 'aac' },
+    transcode: { container: 'mp4', videoMode: 'h264', quality: 'balanced', resolution: 'original', frameRate: 'original', audioMode: 'aac', subtitleMode: 'copy', colorMode: 'auto', bitDepth: 'auto', frameRateMode: 'preserve', rotation: 'auto', aspectMode: 'preserve', audioTrack: 'all', videoBitrateMbps: null, audioBitrateKbps: 192, encoderPreset: 'balanced', retryCount: 1 },
     trim: { exportMode: 'fast' },
   },
   smartImport: {

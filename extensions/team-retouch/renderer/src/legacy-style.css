@@ -53,6 +53,9 @@ button, input, select, textarea { font: inherit; }
 .team-card { border-color: var(--pf-border-subtle); background: var(--pf-surface); box-shadow: var(--pf-shadow-sm); }
 .team-modal { border-color: var(--pf-border); background: var(--pf-elevated); box-shadow: var(--pf-shadow-lg); }
 .team-icon-tile { background: var(--pf-primary-soft); color: var(--pf-primary); }
+.team-brand { height: 100%; }
+.team-brand-icon { display: block; border-radius: 7px; }
+.team-brand-title { line-height: 1; }
 
 /* Weeks stack vertically. Each person gets one compact horizontal task lane. */
 .workflow-board-view { display: flex; min-width: 0; min-height: 100%; flex-direction: column; }
@@ -73,15 +76,48 @@ main:has(> div > .workflow-board-view) > div { width: 100%; height: auto; min-he
 .workflow-task-thumbnail > [role="button"] { width: 100%; height: 100%; aspect-ratio: auto; overflow: hidden; }
 .workflow-board-view [role="button"] { cursor: pointer; }
 
-/* Four-stage shell: complete at desktop, scrollable mid-size, icon-only narrow. */
-.team-stage-nav { max-width: min(100%, 920px); overflow-x: auto; overscroll-behavior-x: contain; background: var(--pf-subtle); }
-.team-stage-button[aria-current="step"] { background: var(--pf-surface); color: var(--pf-primary); box-shadow: var(--pf-shadow-sm); }
-.team-stage-button[aria-disabled="true"] { cursor: not-allowed; color: var(--pf-muted); opacity: .62; }
+/* Assignment is grouped by week: one week per row, no relationship chips or task imagery. */
+[data-assignment-sequence] { max-width: 72rem; padding: var(--pf-space-5); }
+[data-assignment-sequence] > header { padding-bottom: var(--pf-space-4); }
+[data-workflow-week-list] { display: grid; gap: var(--pf-space-3); margin-top: var(--pf-space-4); }
+[data-workflow-week-row] { display: grid; min-width: 0; grid-template-columns: 5rem minmax(0, 1fr); align-items: stretch; gap: var(--pf-space-3); }
+[data-workflow-week-label] { display: flex; flex-direction: column; align-items: center; justify-content: center; border: 1px solid var(--pf-border-subtle); border-radius: var(--pf-radius-sm); background: var(--pf-subtle); color: var(--pf-text); }
+[data-workflow-week-people] { display: flex; min-width: 0; gap: var(--pf-space-3); overflow-x: auto; padding-bottom: 2px; scrollbar-width: thin; }
+[data-assignment-sequence] [data-workflow-identity-id] { min-width: 0; gap: var(--pf-space-2); border-radius: var(--pf-radius-sm); padding: var(--pf-space-2); }
+[data-workflow-week-people] [data-workflow-identity-id] { min-width: 11.5rem; flex: 1 1 0; }
+[data-assignment-sequence] [data-workflow-identity-id] > button { padding: var(--pf-space-1); }
+[data-assignment-sequence] [data-workflow-identity-id] > .h-8 { width: 1.75rem; height: 1.75rem; }
+[data-assignment-sequence] [data-workflow-identity-id] > strong { font-size: .75rem; }
+
+@media (max-width: 900px) {
+  [data-workflow-week-row] { grid-template-columns: 4.25rem minmax(0, 1fr); }
+}
+
+@media (max-width: 640px) {
+  [data-workflow-week-row] { grid-template-columns: 3.75rem minmax(0, 1fr); gap: var(--pf-space-2); }
+  [data-workflow-week-people] [data-workflow-identity-id] { min-width: 10.5rem; }
+}
+
+/* Four tasks live as tabs in the compact plugin title bar. */
+.team-workflow-header { min-width: 0; overflow: hidden; }
+.team-stage-nav { width: min(920px, calc(100% - 124px)); max-width: 920px; flex: 0 1 920px; grid-template-columns: repeat(4, minmax(0, 1fr)); overflow-x: auto; overscroll-behavior-x: contain; background: transparent; scrollbar-width: none; }
+.team-stage-nav::-webkit-scrollbar { display: none; }
+.team-stage-button { height: 100%; min-width: 0; border: 0; border-bottom: 2px solid transparent; border-radius: 0; background: transparent; color: var(--pf-muted); box-shadow: none; }
+.team-stage-button:hover:not(:disabled):not([aria-disabled="true"]) { background: color-mix(in srgb, var(--pf-subtle) 70%, transparent); }
+.team-stage-button[data-tone="complete"] { color: var(--pf-success); }
+.team-stage-button[data-tone="progress"] { color: var(--pf-primary); }
+.team-stage-button[data-tone="other"] { color: var(--pf-muted); }
+.team-stage-button[data-selected="true"][data-tone="complete"] { border-bottom-color: var(--pf-success); background: color-mix(in srgb, var(--pf-success-soft) 48%, transparent); }
+.team-stage-button[data-selected="true"][data-tone="progress"] { border-bottom-color: var(--pf-primary); background: color-mix(in srgb, var(--pf-primary-soft) 52%, transparent); }
+.team-stage-button[data-selected="true"][data-tone="other"] { border-bottom-color: var(--pf-muted); background: color-mix(in srgb, var(--pf-subtle) 72%, transparent); }
+.team-stage-button[data-tone="complete"] .team-stage-index { background: var(--pf-success-soft); color: var(--pf-success); }
+.team-stage-button[data-tone="progress"] .team-stage-index { background: var(--pf-primary-soft); color: var(--pf-primary); }
+.team-stage-button[data-tone="other"] .team-stage-index { background: var(--pf-subtle); color: var(--pf-muted); }
+.team-stage-button[aria-disabled="true"] { cursor: not-allowed; color: var(--pf-muted); opacity: .48; }
 [data-relay-chains] ol { scrollbar-width: thin; }
 
 @media (max-width: 1120px) {
-  .team-workflow-header { align-items: flex-start; padding: var(--pf-space-3) var(--pf-space-4); }
-  .team-stage-nav { order: 3; width: 100%; margin-left: 0; }
+  .team-workflow-header { padding-inline: var(--pf-space-3); }
   .team-stage-actions { width: 100%; margin-left: 0; flex-wrap: wrap; }
   .team-stage-actions > button { max-width: 100%; }
   .team-photo-layout { grid-template-columns: minmax(0, 1fr); }
@@ -94,11 +130,11 @@ main:has(> div > .workflow-board-view) > div { width: 100%; height: auto; min-he
 }
 
 @media (max-width: 760px) {
-  .team-workflow-header { gap: var(--pf-space-2); }
-  .team-stage-nav { display: grid; grid-template-columns: repeat(4, minmax(2.5rem, 1fr)); }
-  .team-stage-button { justify-content: center; padding-inline: var(--pf-space-2); }
-  .team-stage-label, .team-stage-count { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
-  .team-stage-actions .dialog-primary { margin-left: auto; }
+  .team-brand { min-width: 0; }
+  .team-brand-title { display: none; }
+  .team-stage-nav { display: flex; margin-left: var(--pf-space-2); }
+  .team-stage-button { min-width: 9rem; flex: 0 0 auto; padding-inline: var(--pf-space-3); }
+  .team-stage-count { display: none; }
   main { padding: var(--pf-space-3) !important; }
   [role="dialog"] { max-width: calc(100vw - 16px); max-height: calc(100vh - 16px); }
   [role="dialog"][aria-label="批量返图图片确认"] > div > .grid { grid-template-columns: minmax(0, 1fr); }

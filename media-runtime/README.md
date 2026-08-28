@@ -4,7 +4,7 @@
 
 ## FFmpeg
 
-桌面转码运行库固定启用静态 `libx264` 与 `libx265`，并使用固定版本的 `nv-codec-headers` 编入 NVIDIA NVENC：H.264/H.265 都优先使用可用的 NVENC 或 Windows Media Foundation 硬件编码器，硬件失败时分别回退对应的软件编码器。NVENC 在运行时动态使用显卡驱动，不要求随应用分发 CUDA 工具包或额外 DLL。构建环境除基础编译工具外还需要 CMake 与 Ninja 来构建 x265。
+桌面转码运行库固定启用静态 `libx264`、x265 8/10-bit multilib、zimg 与 libass 字幕栈，并使用固定版本的 `nv-codec-headers` 编入 NVIDIA NVENC。运行库提供 H.264、HEVC Main/Main10、AV1 硬件编码、ProRes、HDR10/HLG 保留、HDR→SDR 色调映射和字幕烧录；硬件失败时在存在兼容软件编码器的模式下回退 CPU。NVENC 在运行时动态使用显卡驱动，不要求随应用分发 CUDA 工具包或额外 DLL。构建环境需要 CMake、Ninja、Meson、Autoconf、Automake 与 Libtool。
 
 1. 在 GitHub Actions 运行 `Build audited media runtime`，或在 MSYS2 UCRT64 中运行 `bash scripts/media-runtime/build-ffmpeg-windows.sh`。
 2. 下载完整工作流产物，并原样放入 `media-runtime/vendor/windows-x64/`。

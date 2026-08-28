@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, HardDrive, Loader2, X } from 'lucide-react';
+import { ChevronDown, ChevronRight, Folder, FolderInput, FolderOpen, FolderPlus, HardDrive, Loader2, Plus, Search, X } from 'lucide-react';
 import { normalizeProjectCategoryOrder, normalizeWorkspacePaths, projectStatusLabel } from '../types';
 import type { BackupStatus, ProjectDate, ProjectStatus, WorkspaceProject, WorkspaceStatusGroup } from '../types';
 import { useAppDialog } from './AppDialogProvider';
@@ -154,6 +154,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const [dragTargetStatus, setDragTargetStatus] = useState<ProjectStatus | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [showCreateMenu, setShowCreateMenu] = useState(false);
+  const [projectSearchQuery, setProjectSearchQuery] = useState('');
   const [showExistingProjectImport, setShowExistingProjectImport] = useState(false);
   const [existingProjectDragActive, setExistingProjectDragActive] = useState(false);
   const [choosingExistingProject, setChoosingExistingProject] = useState(false);
@@ -631,23 +632,36 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       ? { ...group, projects: [...group.projects, { ...pendingProjectAction.project, status: pendingProjectAction.targetStatus! }] }
       : group);
   }, [groups, pendingProjectAction]);
+  const normalizedProjectSearchQuery = projectSearchQuery.trim().toLocaleLowerCase();
+  const projectMatchesSearch = (project: WorkspaceProject) => !normalizedProjectSearchQuery
+    || project.name.toLocaleLowerCase().includes(normalizedProjectSearchQuery);
+  const visibleStatuses = statuses.filter(status => {
+    const projects = presentedGroups.find(group => group.status === status)?.projects || [];
+    if (normalizedProjectSearchQuery) return projects.some(projectMatchesSearch);
+    return status !== '未分类' || projects.length > 0;
+  });
   return <>
-    <div className="relative px-4 pt-4" onClick={event => event.stopPropagation()}>
-      <div className="flex w-full shadow-md shadow-blue-500/20">
-        <button onClick={openNewProject} className="min-w-0 flex-1 rounded-l-lg bg-blue-600 px-3 py-2.5 text-sm font-bold text-white hover:bg-blue-500"><span className="flex items-center justify-center gap-2"><FolderPlus size={17}/>新建项目</span></button>
-        <button type="button" disabled={choosingExistingProject} aria-haspopup="menu" aria-expanded={showCreateMenu} aria-label="更多项目创建方式" title="更多项目创建方式" onClick={() => setShowCreateMenu(current => !current)} className="flex w-10 items-center justify-center rounded-r-lg border-l border-blue-400 bg-blue-600 text-white hover:bg-blue-500 disabled:opacity-60">{choosingExistingProject ? <Loader2 size={16} className="animate-spin"/> : <ChevronDown size={16}/>}</button>
+    <div className="relative px-3 pt-2" onClick={event => event.stopPropagation()}>
+      <div className="flex w-full items-center gap-1.5">
+        <label className="relative min-w-0 flex-1">
+          <span className="sr-only">按项目名搜索</span>
+          <Search aria-hidden="true" size={14} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-slate-400"/>
+          <input type="search" value={projectSearchQuery} onChange={event => setProjectSearchQuery(event.target.value)} onFocus={() => setShowCreateMenu(false)} placeholder="搜索项目" aria-label="按项目名搜索" autoComplete="off" className="h-8 w-full rounded-md border border-slate-200 bg-slate-50 pl-8 pr-2.5 text-xs text-slate-700 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:bg-white focus:ring-2 focus:ring-blue-500/15"/>
+        </label>
+        <button type="button" disabled={choosingExistingProject} aria-haspopup="menu" aria-expanded={showCreateMenu} aria-label="添加项目" title="添加项目" onClick={() => setShowCreateMenu(current => !current)} className={`flex h-8 w-8 shrink-0 items-center justify-center rounded-md bg-transparent transition disabled:opacity-60 ${showCreateMenu ? 'text-blue-600' : 'text-slate-500 hover:bg-slate-100 hover:text-slate-900'}`}>{choosingExistingProject ? <Loader2 size={15} className="animate-spin"/> : <Plus size={17}/>}</button>
       </div>
-      {showCreateMenu && <div role="menu" className="absolute left-4 right-4 top-full z-[250] mt-1 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button role="menuitem" type="button" onClick={openExistingProjectImport} className="project-menu-item"><FolderInput size={15}/>导入项目</button></div>}
+      {showCreateMenu && <div role="menu" className="project-create-menu absolute right-3 top-full z-[250] mt-1 w-40 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button role="menuitem" type="button" onClick={openNewProject} className="project-menu-item"><FolderPlus size={15}/>新建项目</button><button role="menuitem" type="button" onClick={openExistingProjectImport} className="project-menu-item"><FolderInput size={15}/>导入项目</button></div>}
     </div>
     <nav className="project-navigator-scroll flex-1 overflow-y-auto p-4 pt-2">
-      {statuses.filter(status => status !== '未分类' || (presentedGroups.find(group => group.status === status)?.projects.length || 0) > 0).map(status => {
-        const projects = (presentedGroups.find(group => group.status === status)?.projects || []).slice().sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
-        const isOpen = expanded[status];
+      {visibleStatuses.map(status => {
+        const projects = (presentedGroups.find(group => group.status === status)?.projects || []).filter(projectMatchesSearch).slice().sort((a, b) => a.name.localeCompare(b.name, 'zh-CN', { numeric: true, sensitivity: 'base' }));
+        const isOpen = normalizedProjectSearchQuery ? true : expanded[status];
         return <section key={status} onDragEnter={event => dragProjectOverStatus(event, status)} onDragOver={event => dragProjectOverStatus(event, status)} onDragLeave={event => leaveProjectStatus(event, status)} onDrop={event => dropProjectOnStatus(event, status)} className={`border-t py-2 first:border-t-0 transition ${dragTargetStatus === status ? 'rounded-lg border-blue-400 bg-blue-50 ring-2 ring-inset ring-blue-400' : 'border-slate-200'}`}>
-          <button type="button" onClick={() => setExpanded(current => ({ ...current, [status]: !current[status] }))} className="flex w-full items-center gap-1.5 rounded-md px-2 py-2 text-left text-xs font-bold tracking-wide text-slate-500 hover:bg-slate-100 hover:text-slate-800">{isOpen ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{projectStatusLabel(status)}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{projects.length}</span></button>
+          <button type="button" aria-expanded={isOpen} onClick={() => { if (!normalizedProjectSearchQuery) setExpanded(current => ({ ...current, [status]: !current[status] })); }} className={`flex w-full items-center gap-1.5 rounded-md px-2 py-2 text-left text-xs font-bold tracking-wide text-slate-500 ${normalizedProjectSearchQuery ? 'cursor-default' : 'hover:bg-slate-100 hover:text-slate-800'}`}>{isOpen ? <ChevronDown size={14}/> : <ChevronRight size={14}/>}<span>{projectStatusLabel(status)}</span><span className="ml-auto font-mono text-[10px] text-slate-400">{projects.length}</span></button>
           {isOpen && <div className="mt-1 space-y-1">{projects.map(project => { const unavailable = project.availability === 'missing'; return <div key={project.path} onContextMenu={event => { event.preventDefault(); window.dispatchEvent(new Event('photoflow-menu-open')); setMenu({ project, x: event.clientX, y: event.clientY }); }} className={`project-row group flex items-center gap-1 rounded-lg text-sm transition ${draggedProject?.path === project.path ? 'opacity-50' : ''} ${unavailable ? 'bg-amber-50 text-amber-700' : selectedProject?.path === project.path ? 'bg-blue-600 text-white' : 'text-slate-600 hover:bg-slate-100 hover:text-slate-900'}`}><button draggable={!unavailable} onDragStart={event => { setDraggedProject(project); event.dataTransfer.effectAllowed = 'move'; event.dataTransfer.setData('application/x-photoflow-project', project.path); event.dataTransfer.setData('text/plain', project.name); }} onDragEnd={() => { setDraggedProject(null); setDragTargetStatus(null); }} title={unavailable ? `${project.name}（${project.archived ? '归档盘未连接' : '文件夹不可用，数据已保留'}）` : `${project.name}（拖到其他分类可更改分类）`} disabled={unavailable} onClick={() => onSelectProject(project)} className="flex min-w-0 flex-1 items-center gap-2 px-2 py-2 text-left disabled:cursor-not-allowed"><Folder size={15} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{project.name}</span>{project.archived && !unavailable && <HardDrive size={13} className="shrink-0 opacity-60"/>}{unavailable && <span className="shrink-0 rounded bg-amber-100 px-1.5 py-0.5 text-[10px] font-bold text-amber-700">{project.archived ? '归档盘离线' : '离线'}</span>}</button><button type="button" aria-label="打开项目文件夹" title={unavailable ? '项目文件夹不可用' : '打开项目文件夹'} disabled={unavailable} onClick={() => openProject(project)} className="project-open-button mr-1 rounded p-1.5 disabled:cursor-not-allowed disabled:opacity-40"><FolderOpen size={15}/></button></div>; })}{!projects.length && <p className="px-7 py-1 text-xs text-slate-400">暂无项目</p>}</div>}
         </section>;
       })}
+      {normalizedProjectSearchQuery && !visibleStatuses.length && <p className="px-2 py-8 text-center text-xs text-slate-400">未找到匹配的项目</p>}
       {error && <p className="mt-2 px-2 text-xs text-red-500">{error}</p>}
     </nav>
     {menu && (backupEnabled || menu.project.availability !== 'missing' || menu.project.archived) && (() => { const hasProjectBackup = backupStatus.snapshots.some(snapshot => snapshot.projectItems?.some(project => project.name === menu.project.name)); return <div className="fixed z-[300] w-52 rounded-lg border border-slate-200 bg-white p-1 shadow-xl" style={{ left: Math.min(menu.x, window.innerWidth - 221), top: Math.min(menu.y, window.innerHeight - 350) }} onClick={event => event.stopPropagation()}>{menu.project.availability !== 'missing' && <><button className="project-menu-item" onClick={() => { openRenameProject(menu.project); setMenu(null); }}>重命名</button>{menu.project.archived && <button className="project-menu-item" onClick={() => { const project = menu.project; setMenu(null); void moveBack(project); }}>移回工作盘</button>}{backupEnabled && <div className="my-1 border-t border-slate-100"/>}</>}{backupEnabled && <><button className="project-menu-item" onClick={() => { const project = menu.project; setMenu(null); onOpenBackup(project); }}>查看项目备份</button>{menu.project.availability === 'missing' && <button disabled={!hasProjectBackup} title={hasProjectBackup ? '选择一个项目快照进行恢复' : '没有可恢复的项目快照'} className="project-menu-item disabled:cursor-not-allowed disabled:text-slate-300" onClick={() => { if (!hasProjectBackup) return; const project = menu.project; setMenu(null); onOpenBackup(project); }}>从备份恢复此项目…</button>}</>}{!backupEnabled && menu.project.archived && menu.project.availability === 'missing' && <button className="project-menu-item" onClick={() => { setMenu(null); onOpenBackup(); }}>查看归档设置</button>}{menu.project.availability !== 'missing' && <><div className="my-1 border-t border-slate-100"/><p className="px-2 py-1 text-[11px] font-bold text-slate-400">更改状态</p>{statuses.filter(status => status !== '未分类').map(status => { const isCurrentStatus = status === menu.project.status; return <button key={status} aria-current={isCurrentStatus ? 'true' : undefined} className={`project-menu-item ${isCurrentStatus ? 'bg-blue-50 font-bold text-blue-700' : ''}`} onClick={() => { move(menu.project, status); setMenu(null); }}>{projectStatusLabel(status)}{isCurrentStatus ? '（当前）' : ''}</button>; })}<div className="my-1 border-t border-slate-100"/>{menu.project.archived ? <p className="px-2 py-1 text-[11px] leading-4 text-amber-600">删除前请先移回工作盘</p> : <button className="project-menu-item text-red-500 hover:bg-red-50" onClick={() => { trash(menu.project); setMenu(null); }}>删除项目</button>}</>}</div>; })()}

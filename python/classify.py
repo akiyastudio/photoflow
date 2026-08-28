@@ -1567,6 +1567,28 @@ def split_large_videos(target_folder, on_split=None, source_paths=None):
     return split_count
 
 
+def video_transcode_settings_kwargs(settings):
+    settings = settings or {}
+    return {
+        'container': settings.get('container', 'mp4'),
+        'video_mode': settings.get('videoMode', 'h264'),
+        'quality': settings.get('quality', 'balanced'),
+        'resolution': settings.get('resolution', 'original'),
+        'frame_rate': settings.get('frameRate', 'original'),
+        'audio_mode': settings.get('audioMode', 'aac'),
+        'subtitle_mode': settings.get('subtitleMode', 'copy'),
+        'color_mode': settings.get('colorMode', 'auto'),
+        'bit_depth': settings.get('bitDepth', 'auto'),
+        'frame_rate_mode': settings.get('frameRateMode', 'preserve'),
+        'rotation': settings.get('rotation', 'auto'),
+        'aspect_mode': settings.get('aspectMode', 'preserve'),
+        'audio_track': settings.get('audioTrack', 'all'),
+        'video_bitrate_mbps': settings.get('videoBitrateMbps'),
+        'audio_bitrate_kbps': settings.get('audioBitrateKbps', 192),
+        'encoder_preset': settings.get('encoderPreset', 'balanced'),
+    }
+
+
 def transcode_imported_videos(target_folder, settings, on_transcoded=None, source_paths=None):
     """Apply the shared video-transcode panel settings to this import batch."""
     source_dir = os.path.join(target_folder, 'mov')
@@ -1585,12 +1607,7 @@ def transcode_imported_videos(target_folder, settings, on_transcoded=None, sourc
             with task_resource_lease('video-transcode', f'正在转码导入视频：{os.path.basename(input_path)}'):
                 output_path = transcode_video(
                     input_path,
-                    container=settings.get('container', 'mp4'),
-                    video_mode=settings.get('videoMode', 'h264'),
-                    quality=settings.get('quality', 'balanced'),
-                    resolution=settings.get('resolution', 'original'),
-                    frame_rate=settings.get('frameRate', 'original'),
-                    audio_mode=settings.get('audioMode', 'aac'),
+                    **video_transcode_settings_kwargs(settings),
                     output_mode='new',
                     destination_directory=output_dir,
                     on_log=log_info,
@@ -2068,12 +2085,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                         with task_resource_lease('video-transcode', f'正在转码花絮视频：{os.path.basename(video_path)}'):
                             output_path = transcode_video(
                                 video_path,
-                                container=(transcode_settings or {}).get('container', 'mp4'),
-                                video_mode=(transcode_settings or {}).get('videoMode', 'h264'),
-                                quality=(transcode_settings or {}).get('quality', 'balanced'),
-                                resolution=(transcode_settings or {}).get('resolution', 'original'),
-                                frame_rate=(transcode_settings or {}).get('frameRate', 'original'),
-                                audio_mode=(transcode_settings or {}).get('audioMode', 'aac'),
+                                **video_transcode_settings_kwargs(transcode_settings),
                                 output_mode='new',
                                 on_log=log_info,
                                 cancel_check=ensure_not_cancelled,

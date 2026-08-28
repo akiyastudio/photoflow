@@ -502,6 +502,7 @@ const restoreManifestDirectory = () => {
     await invoke('team.identity.assign.v1', { photoId: 'photo', baseVersionId: 'base', personIndex: 1, identityId: null, completed: false });
     const cleared = await invoke('team.project.get.v1');
     assert.equal(cleared.assignments.find(item => item.personIndex === 1).identityId, null, 'explicit empty identity assignment restores the unlabelled state');
+    assert.equal(cleared.workflowNeedsRegeneration, true, 'changing a generated workflow participant identity must require regeneration after reload');
     console.log('Team-retouch workflow task-chain reconciliation tests passed');
   } finally {
     lines.close();

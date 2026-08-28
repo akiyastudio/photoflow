@@ -15,6 +15,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "python"))
 
 from thumbnail_image import HEIF_DECODER_AVAILABLE, generate  # noqa: E402
+from png_to_jpg import run as run_image_converter  # noqa: E402
 
 
 ENCODABLE_FORMATS = {
@@ -102,6 +103,42 @@ def assert_worker_protocol(jpeg_source: Path, heif_source: Path, root: Path) -> 
         worker.wait(timeout=10)
 
 
+def assert_image_converter(root: Path) -> None:
+    converter_root = root / "converter"
+    converter_root.mkdir()
+    create_source(converter_root / "web.webp", "WEBP")
+    create_source(converter_root / "photo.tiff", "TIFF")
+    create_source(converter_root / "bitmap.bmp", "BMP")
+    create_source(converter_root / "animation.gif", "GIF")
+    transparent = Image.new("RGBA", (40, 30), (255, 0, 0, 0))
+    transparent.putpixel((20, 15), (255, 0, 0, 255))
+    transparent.save(converter_root / "transparent.png", format="PNG")
+    transparent.close()
+
+    collision_source = converter_root / "collision.png"
+    create_source(collision_source, "PNG")
+    create_source(converter_root / "collision.jpg", "JPEG")
+
+    heic_source = converter_root / "phone.heic"
+    heic_source.write_bytes(HEIC_SAMPLE)
+    run_image_converter(["--quality", "90", "--keep-original", str(converter_root)])
+
+    expected = ["web.jpg", "photo.jpg", "bitmap.jpg", "animation.jpg", "transparent.jpg", "collision_转换.jpg"]
+    if HEIF_DECODER_AVAILABLE:
+        expected.append("phone.jpg")
+    for name in expected:
+        target = converter_root / name
+        with Image.open(target) as decoded:
+            decoded.load()
+            assert decoded.format == "JPEG", f"{name} is not a JPEG"
+            assert decoded.mode == "RGB", f"{name} was not normalized to RGB"
+
+    with Image.open(converter_root / "transparent.jpg") as decoded:
+        corner = decoded.convert("RGB").getpixel((0, 0))
+        assert min(corner) >= 240, f"transparent pixels were not composited onto white: {corner}"
+    assert collision_source.exists(), "--keep-original must preserve source images"
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--runtime", type=Path, help="optional packaged tools executable")
@@ -144,6 +181,7 @@ def main() -> None:
             assert_jpeg(target)
             print(f"ok: {extension}")
         assert_worker_protocol(root / "source.jpg", root / "source.heic", root)
+        assert_image_converter(root)
 
 
 if __name__ == "__main__":

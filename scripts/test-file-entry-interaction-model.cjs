@@ -4,7 +4,7 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 
 (async () => {
-  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, fileEntryDragPaths, fileEntryPointerModifiers, fileEntrySelectionAfterDragStart, mergeRefreshedEntryMetadata, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
+  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, fileEntryDragPaths, fileEntryPointerModifiers, fileEntrySelectionAfterDragStart, mergeRefreshedEntryMetadata, mergeRefreshedRecursiveDirectoryEntries, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath, retainStableGroupOrder } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
   const { mergeMarqueeSelection } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'marquee-selection-model.ts')).href);
   const { directoryPreviewCacheKey, directoryPreviewCacheKeyWithin, folderCoverEntryAfterLoad, pendingDirectoryPreviewSourceCacheKey, remapDirectoryPreviewCacheKey, remapPendingDirectoryPreviewEntries, settlePendingDirectoryPreviewRenameCaches, shouldCacheDirectoryPreviewResult } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'directory-preview-cache-model.ts')).href);
   const { FOLDER_COVER_MAX_CONSECUTIVE_LOAD_FAILURES, createFolderCoverMediaState, folderCoverRequestKey, reduceFolderCoverMediaState } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'folder-cover-media-model.ts')).href);
@@ -79,6 +79,12 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(directoryEntryToRevealOnReturn('客户', '客户/婚礼'), '', 'entering a child directory does not request a return reveal');
   assert.strictEqual(directoryEntryToRevealOnReturn('客户/婚礼', '归档'), '', 'navigating to an unrelated directory does not request a return reveal');
   const workspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
+  assert(workspaceSource.includes('mergeRefreshedRecursiveDirectoryEntries(current, nextDirectoryEntries, directoryPath)'), 'recursive folder refreshes must preserve retained metadata instead of resetting the group sort key');
+  assert(workspaceSource.includes('retainStableGroupOrder(recursiveGroupOrderRef.current.paths'), 'all-files folder groups must retain their established visual order across incremental refreshes');
+  const toolAvailabilitySource = workspaceSource.slice(workspaceSource.indexOf('const canExtractScreenshotMainImage'), workspaceSource.indexOf('const projectToolbarAvailability'));
+  assert(!toolAvailabilitySource.includes('!selectedContainsShortcutContent'), 'media-processing tools must accept media reached through external links and inspiration shortcuts');
+  const photoshopOpenSource = workspaceSource.slice(workspaceSource.indexOf('const openProjectEntriesInPhotoshop'), workspaceSource.indexOf('const copyEntryPath'));
+  assert(!photoshopOpenSource.includes('viaShortcut'), 'Photoshop opening must delegate shortcut validation to the trusted backend resolver');
   const normalOfficeResult = presentOfficeExtractionResult({ success: true, documentCount: 1, successfulCount: 1, imageCount: 2, results: [{ document: 'C:/项目/方案.docx', documentName: '方案.docx', success: true, count: 2, outputFolder: 'C:/项目/方案_media', publishSuccess: true }] }, 1);
   assert.strictEqual(normalOfficeResult.state, 'success');
   const partialOfficeResult = presentOfficeExtractionResult({ success: true, documentCount: 2, successfulCount: 1, failedCount: 1, imageCount: 2, results: [{ document: 'ok.docx', documentName: 'ok.docx', success: true, count: 2, outputFolder: 'ok_media' }, { document: 'bad.docx', documentName: 'bad.docx', success: false, count: 0, error: '文档损坏' }] }, 2);
@@ -282,6 +288,20 @@ const { pathToFileURL } = require('url');
     { relativePath: '客户/旧文件夹', size: -1, createdAt: 0, updatedAt: 0 },
   ], [{ relativePath: '客户/新建文件夹', size: 0, createdAt: 100, updatedAt: 200 }]);
   assert.deepStrictEqual(refreshedMutationEntries[0], { relativePath: '客户/新建文件夹', size: 0, createdAt: 100, updatedAt: 200 }, 'authoritative browse results must retain optimistic mutation metadata so date sorting cannot move the selected target twice');
+  const recursiveEntries = mergeRefreshedRecursiveDirectoryEntries([
+    { relativePath: '固定/保留.jpg', parentRelativePath: '固定', size: 10, createdAt: 100, updatedAt: 500 },
+    { relativePath: '刷新/原图.jpg', parentRelativePath: '刷新', size: 20, createdAt: 200, updatedAt: 400 },
+    { relativePath: '刷新/已删除.jpg', parentRelativePath: '刷新', size: 30, createdAt: 300, updatedAt: 300, viaShortcut: true },
+  ], [
+    { relativePath: '刷新/原图.jpg', parentRelativePath: '刷新', size: -1, createdAt: 0, updatedAt: 0 },
+    { relativePath: '刷新/新增.jpg', parentRelativePath: '刷新', size: -1, createdAt: 0, updatedAt: 0 },
+  ], '刷新');
+  assert.deepStrictEqual(recursiveEntries, [
+    { relativePath: '固定/保留.jpg', parentRelativePath: '固定', size: 10, createdAt: 100, updatedAt: 500 },
+    { relativePath: '刷新/原图.jpg', parentRelativePath: '刷新', size: 20, createdAt: 200, updatedAt: 400 },
+    { relativePath: '刷新/新增.jpg', parentRelativePath: '刷新', size: -1, createdAt: 0, updatedAt: 0 },
+  ], 'a recursive directory refresh must atomically replace only that folder, retain metadata for surviving files, and remove deleted shortcut descendants');
+  assert.deepStrictEqual(retainStableGroupOrder(['根目录', '刷新', '末尾'], ['刷新', '根目录', '新增']), ['根目录', '刷新', '末尾', '新增'], 'known folder positions survive refresh-time timestamp changes while new groups append without displacing them');
 
   assert.strictEqual(folderAlphabetKey('Alice'), 'A', 'Latin folder names use their first letter');
   assert.strictEqual(folderAlphabetKey('崩坏'), 'B', 'Chinese folder names use their pinyin initial');

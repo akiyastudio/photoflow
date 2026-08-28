@@ -17,6 +17,7 @@ const REQUIRED_FFMPEG_FLAGS = [
   '--disable-autodetect',
   '--disable-network',
 ];
+const REQUIRED_ENCODER_LITE_FLAGS = ['--enable-libass', '--enable-libzimg'];
 const REQUIRED_GPU_FFMPEG_FLAGS = [
   '--enable-mediafoundation',
   '--enable-d3d11va',
@@ -37,13 +38,14 @@ function assertHash(filePath, expected, label = path.basename(filePath)) {
 }
 
 function validateFfmpegManifest(manifest, artifactRoot) {
-  if (![1, 2].includes(manifest.schemaVersion) || manifest.kind !== 'photoflow-ffmpeg-runtime') throw new Error('FFmpeg 运行时清单格式无效');
+  if (![1, 2, 3].includes(manifest.schemaVersion) || manifest.kind !== 'photoflow-ffmpeg-runtime') throw new Error('FFmpeg 运行时清单格式无效');
   if (manifest.platform !== 'windows-x64') throw new Error(`FFmpeg 运行时平台不受支持：${manifest.platform || '未声明'}`);
   if (manifest.license !== 'GPL-2.0-or-later') throw new Error(`FFmpeg 运行时许可证必须是 GPL-2.0-or-later，实际为 ${manifest.license || '未声明'}`);
   if (manifest.reproducibleSource !== true) throw new Error('FFmpeg 清单未确认包含精确对应源码与构建材料');
   if (!manifest.ffmpeg?.version || !/^[a-f0-9]{40}$/i.test(String(manifest.ffmpeg?.commit || ''))) throw new Error('FFmpeg 清单缺少精确版本或完整提交哈希');
   const flags = asFlags(manifest.configureFlags);
   for (const flag of REQUIRED_FFMPEG_FLAGS) if (!flags.includes(flag)) throw new Error(`FFmpeg 缺少必需构建参数：${flag}`);
+  if (manifest.schemaVersion >= 3) for (const flag of REQUIRED_ENCODER_LITE_FLAGS) if (!flags.includes(flag)) throw new Error(`FFmpeg 缺少 Media Encoder Lite 构建参数：${flag}`);
   if (manifest.schemaVersion >= 2) {
     for (const flag of REQUIRED_GPU_FFMPEG_FLAGS) if (!flags.includes(flag)) throw new Error(`FFmpeg 缺少硬件加速构建参数：${flag}`);
   }
@@ -54,6 +56,12 @@ function validateFfmpegManifest(manifest, artifactRoot) {
   if (!x265 || !/^[a-f0-9]{40}$/i.test(String(x265.commit || ''))) throw new Error('FFmpeg 清单未声明固定版本和完整提交哈希的 x265');
   const zlib = Array.isArray(manifest.components) ? manifest.components.find(item => item.name === 'zlib') : null;
   if (!zlib || !/^[a-f0-9]{40}$/i.test(String(zlib.commit || ''))) throw new Error('FFmpeg 清单未声明固定版本和完整提交哈希的 zlib');
+  if (manifest.schemaVersion >= 3) {
+    for (const name of ['zimg', 'freetype', 'fribidi', 'harfbuzz', 'libass']) {
+      const component = Array.isArray(manifest.components) ? manifest.components.find(item => item.name === name) : null;
+      if (!component || !/^[a-f0-9]{40}$/i.test(String(component.commit || ''))) throw new Error(`FFmpeg 清单未声明固定版本和完整提交哈希的 ${name}`);
+    }
+  }
   const nvCodecHeaders = Array.isArray(manifest.components) ? manifest.components.find(item => item.name === 'nv-codec-headers') : null;
   if (manifest.schemaVersion >= 2 && (!nvCodecHeaders || !/^[a-f0-9]{40}$/i.test(String(nvCodecHeaders.commit || '')))) {
     throw new Error('FFmpeg 清单未声明固定版本和完整提交哈希的 nv-codec-headers');

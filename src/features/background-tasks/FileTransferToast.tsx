@@ -1,9 +1,10 @@
 /* eslint-disable react-refresh/only-export-components */
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { CheckCircle2, Clock3, Loader2, Minimize2, Pause, Play, X, XCircle } from 'lucide-react';
 import type { BackgroundTask } from '../../types';
 import { useTaskCenter } from './TaskCenter';
 import { selectProjectFileTaskToasts, taskToastExpiresAt, taskToastLiveRole } from './task-toast-model';
+import { useToastStackReflow } from '../app/useToastStackReflow';
 
 const formatBytes = (value: number) => value >= 1024 ** 3
   ? `${(value / 1024 ** 3).toFixed(1)} GB`
@@ -59,7 +60,7 @@ export const FileTransferToastItem = ({ task, onMinimize, onDismiss, onPause, on
           : <button type="button" onClick={() => onMinimize(task.id)} aria-label="收起到任务中心" title="收起到任务中心，任务会继续运行" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md border border-blue-200 bg-white/70 text-blue-700 transition hover:border-blue-300 hover:bg-blue-100"><Minimize2 size={15}/></button>}
         {(task.state === 'running' || task.state === 'resuming') && task.capabilities.pausable && <button type="button" onClick={() => onPause(task.id)} aria-label="暂停任务" title="暂停任务" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-amber-700 transition hover:bg-amber-50"><Pause size={15}/></button>}
         {(paused || pausing) && task.capabilities.pausable && <button type="button" onClick={() => onContinue(task.id)} aria-label="继续任务" title="继续任务" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-blue-700 transition hover:bg-blue-50"><Play size={15}/></button>}
-        {task.cancellable && <button type="button" onClick={() => onCancel(task)} aria-label="取消任务" title="取消任务" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-red-600 transition hover:bg-red-50"><X size={16}/></button>}
+        {!failed && !completed && task.cancellable && <button type="button" onClick={() => onCancel(task)} aria-label="取消任务" title="取消任务" className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-md text-red-600 transition hover:bg-red-50"><X size={16}/></button>}
       </div>
     </div>
   </div>;
@@ -88,26 +89,9 @@ export const useFileTransferToastPresentation = () => {
   return { visibleTasks, overflowCount, dismissBackgroundTask, minimizeTaskToast };
 };
 
-export const FileTransferToast = ({ stackRef, presentation }: { stackRef: React.RefObject<HTMLDivElement | null>; presentation: ReturnType<typeof useFileTransferToastPresentation> }) => {
+export const FileTransferToast = ({ stackRef, presentation, reflowKey }: { stackRef: React.RefObject<HTMLDivElement | null>; presentation: ReturnType<typeof useFileTransferToastPresentation>; reflowKey: string }) => {
   const { visibleTasks, overflowCount, dismissBackgroundTask, minimizeTaskToast } = presentation;
-  const previousPositionsRef = useRef(new Map<string, number>());
-
-  useLayoutEffect(() => {
-    const stack = stackRef.current;
-    if (!stack) return;
-    const nextPositions = new Map<string, number>();
-    for (const element of stack.querySelectorAll<HTMLElement>('[data-top-toast-id]')) {
-      const id = element.dataset.topToastId;
-      if (!id) continue;
-      const top = element.getBoundingClientRect().top;
-      nextPositions.set(id, top);
-      const previousTop = previousPositionsRef.current.get(id);
-      if (previousTop === undefined || Math.abs(previousTop - top) < 1) continue;
-      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) continue;
-      element.animate([{ transform: `translateY(${previousTop - top}px)` }, { transform: 'translateY(0)' }], { duration: 200, easing: 'ease-out' });
-    }
-    previousPositionsRef.current = nextPositions;
-  });
+  useToastStackReflow(stackRef, reflowKey);
 
   if (!visibleTasks.length) return null;
 

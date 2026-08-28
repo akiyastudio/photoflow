@@ -6,6 +6,10 @@ export type ToastViewAction = {
   id: string;
 };
 
+export type ToastViewPresentation = {
+  visible: boolean;
+};
+
 export type ToastViewSnapshot = {
   revision: number;
   dark: boolean;
@@ -20,5 +24,5 @@ export type ToastViewSnapshot = {
 export type ToastViewApi = {
   onSnapshot: (callback: (snapshot: ToastViewSnapshot) => void) => () => void;
   sendAction: (action: ToastViewAction) => void;
-  reportLayout: (layout: { revision: number; height: number }) => void;
+  reportLayout: (layout: { revision: number; height: number; reflowMs?: number }) => void;
 };

@@ -1731,6 +1731,10 @@ const workspaceSnapshot = async (parentId, context) => {
     const generatedOrder = uniqueText(generatedSettings?.preferredIdentityOrder);
     const generatedSameWeek = new Set(uniqueText(generatedSettings?.sameWeekIdentityIds));
     const workflowItems = (manifest?.groups || []).flatMap(group => group.items || []);
+    const assignmentIdentityBySubject = new Map(normalizedAssignments.map(item => [`${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`, String(item.identityId || '')]));
+    const generatedIdentityChanged = Boolean(manifest && (manifest.groups || []).some(group => (group.items || []).some(item =>
+      assignmentIdentityBySubject.get(`${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`) !== String(group.identityId || '')
+    )));
     const workflowAvailableItems = workflowItems.filter(item => item.available && item.relativePath);
     const calibratedCount = registered.filter(row => Number(row.calibrated_at) > 0).length;
     return {
@@ -1740,8 +1744,8 @@ const workspaceSnapshot = async (parentId, context) => {
       stale: calibratedCount < registered.length,
       calibration: { calibratedCount, pendingCount: Math.max(0, registered.length - calibratedCount) },
       workflowGenerated: Boolean(manifest && Number(manifest.version) >= 2),
-      workflowNeedsRegeneration: Boolean(manifest && generatedSettings && (JSON.stringify(generatedOrder) !== JSON.stringify(preferredIdentityOrder)
-        || JSON.stringify(generatedOrder.slice(1).filter(id => generatedSameWeek.has(id))) !== JSON.stringify(sameWeekIdentityIds))),
+      workflowNeedsRegeneration: Boolean(manifest && (generatedIdentityChanged || generatedSettings && (JSON.stringify(generatedOrder) !== JSON.stringify(preferredIdentityOrder)
+        || JSON.stringify(generatedOrder.slice(1).filter(id => generatedSameWeek.has(id))) !== JSON.stringify(sameWeekIdentityIds)))),
       workflowAvailableKeys: workflowAvailableItems.map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`),
       workflowAvailableSubjectKeys: workflowAvailableItems.map(item => `${item.baseVersionId}:${Number(item.personIndex)}`),
       workflowParticipantKeys: workflowItems.map(item => `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`),

@@ -130,6 +130,17 @@ const runTranscoder = async ({ getRunConfig, processSupervisor, source, settings
     '--resolution', settings?.resolution || 'original',
     '--frame-rate', settings?.frameRate || 'original',
     '--audio-mode', settings?.audioMode || 'aac',
+    '--subtitle-mode', settings?.subtitleMode || 'copy',
+    '--color-mode', settings?.colorMode || 'auto',
+    '--bit-depth', settings?.bitDepth || 'auto',
+    '--frame-rate-mode', settings?.frameRateMode || 'preserve',
+    '--rotation', settings?.rotation || 'auto',
+    '--aspect-mode', settings?.aspectMode || 'preserve',
+    '--audio-track', settings?.audioTrack || 'all',
+    '--audio-bitrate-kbps', String(settings?.audioBitrateKbps || 192),
+    '--encoder-preset', settings?.encoderPreset || 'balanced',
+    '--retry-count', String(settings?.retryCount ?? 1),
+    ...(Number(settings?.videoBitrateMbps) > 0 ? ['--video-bitrate-mbps', String(settings.videoBitrateMbps)] : []),
     '--output-mode', 'new',
   ];
   const runConfig = getRunConfig('ffmpeg_transcode.py', args);

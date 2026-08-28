@@ -12,7 +12,7 @@ export type ProjectWorkspaceApiKey =
   | 'getPathForFile' | 'getPhotoshopStatus' | 'getProgressFolders' | 'getProjectContents'
   | 'getProjectEntryDetails' | 'getProjectFileClipboardStatus' | 'getProjectFileDetails' | 'getShellNewFileTypes'
   | 'getVersionBatchOperations' | 'getWorkspaceProjects' | 'importBroll'
-  | 'importProgressFiles' | 'importProjectFiles' | 'inspectProjectToolSources' | 'listProjectFiles'
+  | 'importProgressFiles' | 'importProjectFiles' | 'inspectProjectToolSources' | 'listProjectFiles' | 'listWorkspaceFolders'
   | 'listRecentProjectFiles' | 'moveWorkspaceProject' | 'onBackgroundTaskChanged' | 'onProjectFileDragEnd'
   | 'onProjectFileOperationProgress' | 'onThumbnailStateChanged' | 'onWorkspaceFilesChanged' | 'openMediaVersion'
   | 'openProjectEntriesInPhotoshop' | 'openProjectEntry' | 'openWorkspaceProject' | 'preflightManualSelection' | 'materializeProjectExternalLinks'

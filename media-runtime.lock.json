@@ -2,7 +2,8 @@
   "schemaVersion": 1,
   "ffmpeg": {
     "version": "7.1.1",
-    "repository": "https://git.ffmpeg.org/ffmpeg.git",
+    "repository": "https://github.com/FFmpeg/FFmpeg.git",
+    "mirrorRepository": "https://git.ffmpeg.org/ffmpeg.git",
     "commit": "68af2cc3feb8c78aec2722c728fd87f03515fa7c",
     "license": "GPL-2.0-or-later"
   },
@@ -23,6 +24,13 @@
     "repository": "https://github.com/madler/zlib.git",
     "commit": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
     "license": "Zlib"
+  },
+  "zimg": {
+    "version": "3.0.6",
+    "repository": "https://github.com/sekrit-twc/zimg.git",
+    "ref": "release-3.0.6",
+    "commit": "f819b14e8f39d1282400b0d9543e8ef73c1b2bbd",
+    "license": "WTFPL-2.0"
   },
   "nvCodecHeaders": {
     "version": "12.1.14.0",

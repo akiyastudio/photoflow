@@ -4,6 +4,7 @@ import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { FileTransferToastItem } from './features/background-tasks/FileTransferToast';
 import type { ToastViewAction, ToastViewSnapshot } from './features/app/toast-view-contract';
 import { topToastTonePresentation } from './features/app/top-toast-tone-model';
+import { TOAST_STACK_REFLOW_MS, useToastStackReflow } from './features/app/useToastStackReflow';
 import './index.css';
 
 const EMPTY_SNAPSHOT: ToastViewSnapshot = { revision: 0, dark: false, top: 40, width: 0, height: 0, notices: [], tasks: [], overflowCount: 0 };
@@ -12,13 +13,20 @@ const sendAction = (action: ToastViewAction['action'], id: string | number) => w
 export const ToastView = () => {
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const stackRef = useRef<HTMLDivElement>(null);
+  const reflowKey = JSON.stringify({
+    notices: snapshot.notices.map(notice => [notice.id, notice.message, notice.count]),
+    tasks: snapshot.tasks.map(task => [task.id, task.state]),
+    overflow: snapshot.overflowCount > 0,
+  });
+  useToastStackReflow(stackRef, reflowKey);
 
   useEffect(() => window.toastViewAPI.onSnapshot(setSnapshot), []);
   useLayoutEffect(() => {
     document.documentElement.classList.toggle('dark', snapshot.dark);
     const stack = stackRef.current;
     if (!stack) return;
-    const report = () => window.toastViewAPI.reportLayout({ revision: snapshot.revision, height: Math.max(0, Math.ceil(stack.getBoundingClientRect().height)) });
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const report = () => window.toastViewAPI.reportLayout({ revision: snapshot.revision, height: Math.max(0, Math.ceil(stack.scrollHeight)), reflowMs: reducedMotion ? 0 : TOAST_STACK_REFLOW_MS });
     const observer = new ResizeObserver(report);
     observer.observe(stack);
     report();

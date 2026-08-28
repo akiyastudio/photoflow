@@ -23,6 +23,7 @@ class TestNode extends TestEventTarget {
   get lastChild() { return this.childNodes.at(-1) || null; }
   get children() { return this.childNodes.filter(child => child.nodeType === 1); }
   get childElementCount() { return this.childNodes.filter(child => child.nodeType === 1).length; }
+  get scrollHeight() { return this.getBoundingClientRect().height; }
   getBoundingClientRect() { return { x: 0, y: 40, top: 40, bottom: this.childElementCount ? 140 : 40, width: 480, height: this.childElementCount ? 100 : 0 }; }
   get textContent() { return this.nodeType === 3 ? this.nodeValue : this.childNodes.map(child => child.textContent).join(''); }
   set textContent(value) { if (this.nodeType === 3) this.nodeValue = String(value); else this.childNodes = value ? [Object.assign(new TestNode(3, '#text', this.ownerDocument), { nodeValue: String(value), parentNode: this })] : []; }
@@ -46,6 +47,7 @@ const timers = new Map();
 let frameSequence = 0;
 const frames = new Map();
 const snapshots = [];
+let presentationListener = null;
 const observers = [];
 class TestResizeObserver {
   constructor(callback) { this.callback = callback; observers.push(this); }
@@ -66,6 +68,7 @@ Object.assign(testWindow, {
     setComponentNotificationReady: async () => ({ ready: true, flushed: 0 }),
     updateToastView: async snapshot => { snapshots.push(snapshot); return { success: true }; },
     onToastViewAction: () => () => undefined,
+    onToastViewPresentation: callback => { presentationListener = callback; return () => { presentationListener = null; }; },
   },
 });
 global.window = testWindow;
@@ -118,8 +121,9 @@ const flushFrames = timestamp => {
   const root = createRoot(container);
   await React.act(async () => root.render(React.createElement(toastModule.TopToastProvider, null,
     React.createElement(toastModule.TopToastViewport), React.createElement(Harness))));
-  flushFrames(1);
+  await React.act(async () => flushFrames(1));
   assert.equal(snapshots.length, 1, 'initial viewport mount publishes one structured Toast view snapshot');
+  assert(!findAll(container, node => node.getAttribute?.('data-toast-view-model'))[0].getAttribute('class').includes('top-toast-stack--model'), 'the host fallback remains visible until the native view confirms the current revision');
 
   let first; let replacement;
   await React.act(async () => {
@@ -146,9 +150,18 @@ const flushFrames = timestamp => {
   assert.equal(frames.size, 1, 'batched notice mutations schedule at most one pending Toast view frame');
   observers.forEach(observer => { observer.callback([]); observer.callback([]); observer.callback([]); });
   assert.equal(frames.size, 1, 'repeated resize callbacks coalesce into the pending Toast view frame');
-  flushFrames(2);
+  await React.act(async () => flushFrames(2));
   assert.equal(snapshots.length, 2, 'one animation frame produces only one additional structured snapshot');
   assert.equal(snapshots.at(-1).notices[0].message, '保存失败');
+  await React.act(async () => presentationListener({ visible: true }));
+  assert(findAll(container, node => node.getAttribute?.('data-toast-view-model'))[0].getAttribute('class').includes('top-toast-stack--model'), 'the host fallback hides only after native presentation acknowledgement');
+  await React.act(async () => {
+    toast.show('继续处理', { tone: 'info', durationMs: 900 });
+  });
+  await React.act(async () => flushFrames(3));
+  assert(findAll(container, node => node.getAttribute?.('data-toast-view-model'))[0].getAttribute('class').includes('top-toast-stack--model'), 'new progress snapshots keep the stable native presentation lease instead of flashing the fallback');
+  await React.act(async () => presentationListener({ visible: false }));
+  assert(!findAll(container, node => node.getAttribute?.('data-toast-view-model'))[0].getAttribute('class').includes('top-toast-stack--model'), 'the host fallback returns when the native surface becomes unavailable');
 
   await React.act(async () => root.unmount());
   assert.equal(snapshots.at(-1).height, 0, 'unmount hides the persistent Toast view');

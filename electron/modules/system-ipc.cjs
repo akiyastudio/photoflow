@@ -37,7 +37,7 @@ const finalizeComponentRuntimeInstall = async ({ componentId, destination, backu
 };
 
 const PYTHON_BACKGROUND_TASK_PROFILES = Object.freeze({
-  'png_to_jpg.py': Object.freeze({ title: 'PNG 转 JPG', type: 'python-tool', concurrencyGroup: 'disk-io', concurrencyLimit: 3, concurrencyWriteLimit: 2 }),
+  'png_to_jpg.py': Object.freeze({ title: '图片转 JPG', type: 'python-tool', concurrencyGroup: 'disk-io', concurrencyLimit: 3, concurrencyWriteLimit: 2 }),
   'research.py': Object.freeze({ title: '截取分镜帧', type: 'python-tool', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1 }),
   'ffmpeg_transcode.py': Object.freeze({ title: '视频转码', type: 'python-tool', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1 }),
   'cut_video.py': Object.freeze({ title: '视频切割', type: 'python-tool', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1 }),
@@ -105,7 +105,7 @@ const pythonToolResourcePaths = (scriptName, args, pathApi) => {
     const valueOptions = new Set(scriptName === 'png_to_jpg.py'
       ? ['--quality']
       : scriptName === 'ffmpeg_transcode.py'
-        ? ['--container', '--video-mode', '--quality', '--resolution', '--frame-rate', '--audio-mode', '--output-mode', '--source-folder']
+        ? ['--container', '--video-mode', '--quality', '--resolution', '--frame-rate', '--audio-mode', '--subtitle-mode', '--color-mode', '--bit-depth', '--frame-rate-mode', '--rotation', '--aspect-mode', '--audio-track', '--video-bitrate-mbps', '--audio-bitrate-kbps', '--encoder-preset', '--retry-count', '--output-mode', '--source-folder']
         : ['--output-dir', '--output-stem', '--trim-start', '--trim-end', '--output-path', '--timeline-frames']);
     for (let index = 0; index < args.length; index += 1) {
       const value = args[index];
@@ -794,6 +794,20 @@ const registerSystemIpc = context => {
     }
   });
 
+  ipcMain.handle('control-python', async (_event, requestId, action) => {
+    const tasks = [...(activePythonTasks.get(String(requestId || ''))?.values() || [])];
+    if (!['pause', 'resume'].includes(action)) return { success: false, error: '不支持的任务控制操作。' };
+    const pauseFiles = [...new Set(tasks.map(task => task.pauseFile).filter(Boolean))];
+    if (!pauseFiles.length) return { success: false, error: '任务已经结束或不支持暂停。' };
+    try {
+      if (action === 'pause') await Promise.all(pauseFiles.map(filePath => fs.promises.writeFile(filePath, 'pause', 'utf8')));
+      else await Promise.all(pauseFiles.map(filePath => fs.promises.rm(filePath, { force: true })));
+      return { success: true };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
   ipcMain.on('run-python', async (event, scriptName, args = [], requestId = '', requestedPresentation) => {
     let command;
     let spawnArgs;
@@ -818,7 +832,9 @@ const registerSystemIpc = context => {
     const cancellableClassify = scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage);
     const cancellable = (scriptName === 'catch.py' || scriptName === 'cut_video.py' || scriptName === 'ffmpeg_transcode.py' || cancellableClassify) && /^[a-z0-9-]{8,80}$/i.test(normalizedRequestId);
     const cancelFile = cancellable ? path.join(app.getPath('temp'), `photoflow-cancel-${normalizedRequestId}.flag`) : '';
+    const pauseFile = scriptName === 'ffmpeg_transcode.py' && cancellable ? path.join(app.getPath('temp'), `photoflow-pause-${normalizedRequestId}.flag`) : '';
     let runtimeArgs = cancellable ? [...args, '--cancel_file', cancelFile] : [...args];
+    if (pauseFile) runtimeArgs.push('--pause_file', pauseFile);
     if (scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage)) {
       if (['import', 'broll'].includes(classifyStage)) runtimeArgs.push('--resource_protocol');
       try {
@@ -862,7 +878,7 @@ const registerSystemIpc = context => {
         metadata: { operation: directSource ? 'import-negative' : 'import-sd', importStage: classifyStage, projectName: destinationName, phase: classifyStage === 'plan' ? 'scanning' : 'queued', destinationPath: importDestination, requestId: normalizedRequestId },
       }) || null;
       if (importTask && !importTask.deduplicated) {
-        if (cancelFile) rememberPythonTask(normalizedRequestId, invocationId, { process: null, cancelFile, backgroundTaskId });
+        if (cancelFile) rememberPythonTask(normalizedRequestId, invocationId, { process: null, cancelFile, pauseFile, backgroundTaskId });
         importTask.context.signal.addEventListener('abort', () => {
           if (cancelFile) fs.promises.writeFile(cancelFile, 'cancel', 'utf8').catch(() => undefined);
         }, { once: true });
@@ -904,7 +920,7 @@ const registerSystemIpc = context => {
         metadata: { scriptName, requestId: normalizedRequestId, phase: 'queued', ...presentationMetadata },
       }) || null;
       if (toolTask && !toolTask.deduplicated) {
-        if (cancelFile) rememberPythonTask(normalizedRequestId, invocationId, { process: null, cancelFile, backgroundTaskId });
+        if (cancelFile) rememberPythonTask(normalizedRequestId, invocationId, { process: null, cancelFile, pauseFile, backgroundTaskId });
         toolTask.context.signal.addEventListener('abort', () => {
           if (cancelFile) fs.promises.writeFile(cancelFile, 'cancel', 'utf8').catch(() => undefined);
         }, { once: true });
@@ -966,6 +982,7 @@ const registerSystemIpc = context => {
     };
     try {
       if (cancelFile) fs.rmSync(cancelFile, { force: true });
+      if (pauseFile) fs.rmSync(pauseFile, { force: true });
       ({ command, args: spawnArgs } = getRunConfig(scriptName, runtimeArgs));
       if (writesImportFiles) {
         for (const targetPath of importTargets) {
@@ -1011,7 +1028,7 @@ const registerSystemIpc = context => {
         kind: 'python-job', command, args: spawnArgs, options: {}, ephemeral: true,
       });
       const pyProcess = managedProcess?.child || spawn(command, spawnArgs, { windowsHide: true });
-      if (cancellable) rememberPythonTask(normalizedRequestId, invocationId, { process: pyProcess, cancelFile, backgroundTaskId });
+      if (cancellable) rememberPythonTask(normalizedRequestId, invocationId, { process: pyProcess, cancelFile, pauseFile, backgroundTaskId });
       let stdoutBuffer = '';
       let importFailed = false;
       let importCancelled = false;
@@ -1199,6 +1216,7 @@ const registerSystemIpc = context => {
         if (cancellable) {
           forgetPythonTask(normalizedRequestId, invocationId);
           fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
+          if (pauseFile) fs.promises.rm(pauseFile, { force: true }).catch(() => undefined);
         }
         if (importTask && !importTask.deduplicated) {
           if (importCancelled || importTask.context.signal.aborted) importTask.cancelled();
@@ -1224,6 +1242,7 @@ const registerSystemIpc = context => {
          if (cancellable) {
            forgetPythonTask(normalizedRequestId, invocationId);
            fs.promises.rm(cancelFile, { force: true }).catch(() => undefined);
+           if (pauseFile) fs.promises.rm(pauseFile, { force: true }).catch(() => undefined);
          }
          console.error('Failed to start process:', err);
          mainWindow.webContents.send('python-event', {

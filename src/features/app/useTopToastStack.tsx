@@ -143,6 +143,7 @@ export const TopToastViewport = () => {
   if (!context) throw new Error('TopToastViewport must be used inside TopToastProvider');
   const { notices, stackRef } = context;
   const presentation = useFileTransferToastPresentation();
+  const [nativePresentationVisible, setNativePresentationVisible] = useState(false);
   const snapshotRevisionRef = useRef(0);
   const snapshotFrameRef = useRef<number | null>(null);
   const flushSnapshot = useCallback(() => {
@@ -151,12 +152,15 @@ export const TopToastViewport = () => {
     const rect = stack?.getBoundingClientRect();
     const hasContent = Boolean(stack && stack.childElementCount > 0);
     const contentWidth = hasContent && stack ? Math.max(...Array.from(stack.children, child => Math.ceil(child.getBoundingClientRect().width)), 0) : 0;
+    const viewWidth = hasContent && rect ? Math.min(Math.ceil(rect.width), Math.max(320, contentWidth + 32)) : 0;
+    const viewHeight = hasContent && rect ? Math.min(448, Math.max(1, Math.ceil(rect.height) + 8)) : 0;
+    const revision = snapshotRevisionRef.current++;
     void window.electronAPI.updateToastView({
-      revision: snapshotRevisionRef.current++,
+      revision,
       dark: document.documentElement.classList.contains('dark'),
       top: hasContent && rect ? Math.max(0, Math.round(rect.top)) : 0,
-      width: contentWidth,
-      height: hasContent && rect ? Math.max(0, Math.ceil(rect.height)) : 0,
+      width: viewWidth,
+      height: viewHeight,
       notices,
       tasks: presentation.visibleTasks,
       overflowCount: presentation.overflowCount,
@@ -190,16 +194,25 @@ export const TopToastViewport = () => {
       else void window.electronAPI.cancelBackgroundTask(task.id);
     }
   }), [context.api, presentation]);
+  useEffect(() => window.electronAPI.onToastViewPresentation(value => {
+    if (typeof value?.visible === 'boolean') setNativePresentationVisible(value.visible);
+  }), []);
   useEffect(() => () => {
     if (snapshotFrameRef.current !== null) window.cancelAnimationFrame(snapshotFrameRef.current);
     void window.electronAPI.updateToastView({ revision: snapshotRevisionRef.current++, dark: false, top: 0, width: 0, height: 0, notices: [], tasks: [], overflowCount: 0 }).catch(() => undefined);
   }, []);
+  const nativeOwnsPresentation = nativePresentationVisible;
+  const reflowKey = JSON.stringify({
+    notices: notices.map(notice => [notice.id, notice.message, notice.count]),
+    tasks: presentation.visibleTasks.map(task => [task.id, task.state]),
+    overflow: presentation.overflowCount > 0,
+  });
   return <>
-    <div ref={stackRef} className="top-toast-stack top-toast-stack--model" data-toast-view-model aria-hidden="true">
+    <div ref={stackRef} className={`top-toast-stack${nativeOwnsPresentation ? ' top-toast-stack--model' : ''}`} data-toast-view-model aria-hidden={nativeOwnsPresentation ? 'true' : undefined}>
       {notices.map(notice => { const presentation = topToastTonePresentation(notice.tone || 'info'); const ToneIcon = presentation.icon === 'check' ? CheckCircle2 : presentation.icon === 'warning' ? AlertTriangle : presentation.icon === 'error' ? XCircle : Info; return <div key={notice.id} data-top-toast-id={`notice:${notice.id}`} data-toast-tone={presentation.tone} role={presentation.role} aria-live={presentation.ariaLive} className="app-notice-toast animate-in fade-in slide-in-from-top-2">
         <ToneIcon size={16} aria-hidden="true" className="app-notice-toast__tone-icon shrink-0"/><span className="app-notice-toast__message">{notice.message}{notice.count > 1 && <span className="ml-2 text-xs font-bold text-slate-300">×{notice.count}</span>}</span><button onClick={() => context.api.dismiss(notice.id)} aria-label="关闭提示" title="关闭提示" className="rounded p-0.5 text-slate-300 hover:bg-white/15 hover:text-white"><X size={15}/></button>
       </div>; })}
-      <FileTransferToast stackRef={stackRef} presentation={presentation}/>
+      <FileTransferToast stackRef={stackRef} presentation={presentation} reflowKey={reflowKey}/>
     </div>
   </>;
 };

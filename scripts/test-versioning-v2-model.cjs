@@ -14,6 +14,9 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(model.exportedImageFolderCandidate('工作目录/jpeg/one.jpg'), '工作目录/jpeg');
   assert.strictEqual(model.exportedImageFolderCandidate('工作目录/客户_导出/one.jpg'), '工作目录/客户_导出');
   assert.strictEqual(model.exportedImageFolderCandidate('工作目录/普通文件夹/one.jpg'), '', 'ordinary folders must not trigger export-version onboarding');
+  assert.deepStrictEqual(model.exportedImageFolderCandidates([
+    '工作目录/JPG', '工作目录/JPG/子文件夹', '工作目录/客户_导出', '普通文件夹',
+  ]), ['工作目录/JPG', '工作目录/客户_导出'], 'activation reconciliation must deduplicate discovered export folders');
   const queuedTreeTask = {
     type: 'version-tree-update', state: 'queued', progress: 0,
     message: '等待“完善版本文件校验信息”完成',

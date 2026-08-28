@@ -149,6 +149,27 @@ export const mergeRefreshedEntryMetadata = <T extends { relativePath: string; si
   });
 };
 
+export const mergeRefreshedRecursiveDirectoryEntries = <T extends { relativePath: string; parentRelativePath?: string; size: number; createdAt: number; updatedAt: number }>(
+  currentEntries: readonly T[],
+  refreshedEntries: readonly T[],
+  directoryPath: string,
+) => {
+  const directoryKey = normalizeDirectoryPath(directoryPath).toLocaleLowerCase('zh-CN');
+  const belongsToDirectory = (entry: T) => normalizeDirectoryPath(
+    entry.parentRelativePath ?? normalizeDirectoryPath(entry.relativePath).split('/').slice(0, -1).join('/'),
+  ).toLocaleLowerCase('zh-CN') === directoryKey;
+  const previousDirectoryEntries = currentEntries.filter(belongsToDirectory);
+  return [
+    ...currentEntries.filter(entry => !belongsToDirectory(entry)),
+    ...mergeRefreshedEntryMetadata(refreshedEntries, previousDirectoryEntries),
+  ];
+};
+
+export const retainStableGroupOrder = (previousOrder: readonly string[], availableOrder: readonly string[]) => {
+  const known = new Set(previousOrder);
+  return [...previousOrder, ...availableOrder.filter(key => !known.has(key))];
+};
+
 export const renamedEntryDestinationPath = (
   sourceRelativePath: string,
   nextName: string,

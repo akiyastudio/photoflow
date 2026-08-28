@@ -1,0 +1,24 @@
+const assert = require('node:assert/strict');
+const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const { normalizeDialogInputs, isSupportedMediaName, srtNameFor, normalizeSettings, redactError, openDatabase, LEGACY_UNSCOPED_PROJECT } = require('../core.cjs');
+assert.equal(isSupportedMediaName('A.MP4'), true); assert.equal(isSupportedMediaName('note.txt'), false);
+assert.deepEqual(normalizeDialogInputs([{ name: 'a.MP4', token: 'component-input:v7:one' }, { name: 'skip.exe', token: 'component-input:v7:two' }, { name: 'x.wav', relativeName: '../nested/x.wav', token: 'component-input:v7:three' }]).map(item => item.relativeName), ['a.MP4', 'nested/x.wav']);
+assert.equal(srtNameFor('folder/movie.mkv'), 'folder/movie.srt');
+assert.deepEqual(normalizeSettings({ language: 'auto', model: '../../bad model', device: 'cpu', computeType: 'wat', beamSize: 99 }).language, null);
+assert.equal(normalizeSettings({ device: 'cpu', computeType: 'wat' }).computeType, 'int8');
+assert.equal(normalizeSettings(normalizeSettings({ language: 'auto' })).language, null, 'automatic language survives settings round trips');
+assert(!redactError('failed at C:\\secret\\input.mp4').includes('C:\\secret'));
+const root = fs.mkdtempSync(path.join(os.tmpdir(), 'video-transcription-core-'));
+try {
+  const db = openDatabase(path.join(root, 'index.sqlite3'));
+  const now = Date.now(); db.prepare('INSERT INTO transcript_operations(id,project_id,state,source_kind,total,created_at,updated_at,settings_json) VALUES(?,?,?,?,?,?,?,?)').run('op', 'project-a', 'completed', 'external-files', 1, now, now, '{}');
+  db.prepare('INSERT INTO transcript_files(id,operation_id,ordinal,display_name,relative_name,source_kind,state) VALUES(?,?,?,?,?,?,?)').run('file', 'op', 0, '测试.mp4', '测试.mp4', 'external-files', 'completed');
+  db.prepare('INSERT INTO transcript_segments(file_id,seq,start,end,text) VALUES(?,?,?,?,?)').run('file', 1, 0, 1, '可搜索字幕');
+  assert.equal(db.prepare('SELECT text FROM transcript_segments WHERE text LIKE ?').get('%搜索%').text, '可搜索字幕'); db.close();
+  const legacyPath = path.join(root, 'legacy.sqlite3'); const legacy = new DatabaseSync(legacyPath);
+  legacy.exec('CREATE TABLE transcript_operations(id TEXT PRIMARY KEY,state TEXT NOT NULL,source_kind TEXT NOT NULL,total INTEGER NOT NULL DEFAULT 0,succeeded INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,settings_json TEXT NOT NULL,error TEXT NOT NULL DEFAULT "");');
+  legacy.prepare('INSERT INTO transcript_operations(id,state,source_kind,created_at,updated_at,settings_json) VALUES(?,?,?,?,?,?)').run('legacy', 'completed', 'external-files', now, now, '{}'); legacy.close();
+  const migrated = openDatabase(legacyPath); assert.equal(migrated.prepare('SELECT project_id FROM transcript_operations WHERE id=?').get('legacy').project_id, LEGACY_UNSCOPED_PROJECT, 'legacy shared rows are quarantined instead of assigned to whichever project opens the DB first'); migrated.close();
+} finally { fs.rmSync(root, { recursive: true, force: true }); }
+console.log('video-transcription core, filtering, SRT naming, and SQLite tests passed');

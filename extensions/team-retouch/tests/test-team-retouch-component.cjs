@@ -7,6 +7,7 @@ const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.
 const sdk = fs.readFileSync(path.join(root, 'renderer', 'src', 'sdk.ts'), 'utf8');
 const service = fs.readFileSync(path.join(root, 'service.cjs'), 'utf8');
 const packageScript = fs.readFileSync(path.join(root, 'scripts', 'package-component.cjs'), 'utf8');
+const icon = fs.readFileSync(path.join(root, 'renderer', 'team-retouch.svg'), 'utf8');
 const sha256 = file => crypto.createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 assert.deepEqual(manifest.componentHost.adoptionGrants, ['component.storage.previous.v1', 'project.output.existing.v1']);
 assert(manifest.componentHost.service.capabilities.every(capability => /\.v[2-9]$/.test(capability)));
@@ -22,4 +23,6 @@ assert(packageScript.includes("require.resolve('vite/package.json'") && packageS
 assert(packageScript.includes("require('./package-layout.cjs')") && packageScript.includes('copyServiceRuntime(root,packageRoot)'), 'production packaging must stage the complete isolated service runtime');
 for (const action of Object.values(manifest.componentHost.service.lifecycleActions)) assert.equal(action.sha256, sha256(path.join(root, action.entry)));
 for (const entry of ['renderer/index.html','renderer/settings.html','renderer/team-retouch.svg','service.cjs','workflow-generation.cjs','workflow-artifact.cjs','workflow-manifest.cjs','package.json','package-lock.json']) assert(fs.existsSync(path.join(root, entry)), `missing plugin-owned file: ${entry}`);
+assert(icon.includes('fill="#05193c"') && icon.includes('stroke="#1c60e6"') && icon.includes('M18 21a8 8 0 0 0-16 0'), 'team-retouch brand icon must retain the original dark-blue UsersRound appearance');
+assert(!icon.includes('linearGradient') && !icon.includes('#6558e8') && !icon.includes('#a45de5'), 'team-retouch brand icon must not regress to the purple filled redesign');
 console.log('Team-retouch independent component boundary tests passed');

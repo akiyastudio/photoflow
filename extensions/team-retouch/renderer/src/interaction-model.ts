@@ -112,7 +112,7 @@ export const workflowStageSummaries = (value: Json | undefined, active: Workflow
     detect: '',
     assignment: verifiedWorkflow ? '' : !workspace.photos.length ? '请先明确选择并识别工作图' : cropReview ? `还有 ${cropReview} 张工作图需要复核` : confirmed < subjects.length ? `还有 ${subjects.length - confirmed} 个人物需要人工确认` : '',
     relay: !stageComplete.detect ? '请先完成识别、裁剪和人物确认' : !stageComplete.assignment ? '请先确认接收人和排期并生成协作流程' : '',
-    review: !stageComplete.detect ? '请先完成识别、裁剪和人物确认' : !stageComplete.assignment ? '请先生成协作流程' : '',
+    review: !stageComplete.detect ? '请先完成识别、裁剪和人物确认' : !stageComplete.assignment ? '请先生成协作流程' : !stageComplete.relay ? missingReturns ? `还有 ${missingReturns} 个返图文件缺失` : pendingReviews ? `还有 ${pendingReviews} 张返图等待确认` : `还有 ${Math.max(0, eligible.length - completed)} 个接力任务未完成` : '',
   };
   const counts: Record<WorkflowStage, string> = {
     detect: verifiedWorkflow ? `${eligible.length}/${eligible.length} 人已进入历史流程` : `${confirmed}/${subjects.length} 人已确认`,

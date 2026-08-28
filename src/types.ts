@@ -1,4 +1,4 @@
-import type { ToastViewAction, ToastViewApi, ToastViewSnapshot } from './features/app/toast-view-contract';
+import type { ToastViewAction, ToastViewApi, ToastViewPresentation, ToastViewSnapshot } from './features/app/toast-view-contract';
 
 export interface LogEntry {
   timestamp: string;
@@ -11,11 +11,22 @@ export type ToolType = 'home' | 'inspiration' | 'project' | 'project-version' | 
 export type Theme = 'light' | 'dark' | 'system';
 export type VideoTranscodeSettings = {
   container: 'mp4' | 'mov' | 'mkv';
-  videoMode: 'h264' | 'h265' | 'copy';
+  videoMode: 'h264' | 'h265' | 'av1' | 'prores' | 'copy';
   quality: 'high' | 'balanced' | 'small';
   resolution: 'original' | '2160p' | '1080p' | '720p';
   frameRate: 'original' | '24' | '25' | '30' | '50' | '60';
   audioMode: 'copy' | 'aac' | 'remove';
+  subtitleMode: 'copy' | 'burn' | 'remove';
+  colorMode: 'auto' | 'sdr' | 'hdr10' | 'hlg' | 'hdr-to-sdr';
+  bitDepth: 'auto' | '8' | '10';
+  frameRateMode: 'preserve' | 'cfr' | 'vfr';
+  rotation: 'auto' | '0' | '90' | '180' | '270';
+  aspectMode: 'preserve' | 'square-pixels';
+  audioTrack: 'all' | 'first';
+  videoBitrateMbps: number | null;
+  audioBitrateKbps: 96 | 128 | 160 | 192 | 256 | 320;
+  encoderPreset: 'fast' | 'balanced' | 'quality';
+  retryCount: 0 | 1 | 2 | 3;
 };
 export type ProjectToolSource = {
   path: string;
@@ -921,6 +932,7 @@ export interface IElectronAPI {
   onPythonEvent: any;
   runScript: (scriptName: string, args?: string[], requestId?: string, presentation?: { ownerPageId: string; panelKind: string; title?: string }) => void;
   cancelPythonTask: (requestId: string) => Promise<{ success: boolean; error?: string }>;
+  controlPythonTask: (requestId: string, action: 'pause' | 'resume') => Promise<{ success: boolean; error?: string }>;
   getBirthdays: () => Promise<Record<string, string>>;
   saveBirthdays: (data: Record<string, string>) => Promise<{success: boolean, error?: string}>;
   loadConfig: () => Promise<AppConfig | null>;
@@ -947,6 +959,7 @@ export interface IElectronAPI {
   setHostSurfaceSuspended: (update: { rendererToken: string; revision: number; suspended: boolean }) => Promise<{ success: boolean }>;
   updateToastView: (snapshot: ToastViewSnapshot) => Promise<{ success: boolean }>;
   onToastViewAction: (callback: (action: ToastViewAction) => void) => () => void;
+  onToastViewPresentation: (callback: (presentation: ToastViewPresentation) => void) => () => void;
   setComponentNotificationReady: (update: { rendererToken: string; revision: number; ready: boolean }) => Promise<{ ready: boolean; flushed: number; stale?: boolean }>;
   setComponentPageBounds: (instanceId: string, bounds: { x: number; y: number; width: number; height: number }) => Promise<{ success: boolean }>;
   closeComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
@@ -993,7 +1006,7 @@ export interface IElectronAPI {
   watchFileRoot: (workspacePath: string, status: ProjectStatus, name: string, options?: { reconcile?: boolean }) => Promise<{ success: boolean; root?: string; requiredRoots?: number; watchedRoots?: number; failedRoots?: Array<{ virtualPath: string; external: boolean; error: string }>; offlineLinks?: number; externalFolderLinks?: number; degraded?: boolean; reconciled?: boolean; reconciliationFailed?: boolean; error?: string }>;
   unwatchFileRoot: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; error?: string }>;
   browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; viaExternalLink?: boolean; externalLinkRootRelativePath?: string; externalLinkOffline?: boolean; missingDirectory?: boolean; error?: string }>;
-  inspectProjectToolSources: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], collectVideos?: boolean, collectDirectPng?: boolean, collectRecursivePng?: boolean) => Promise<{ success: boolean; indexed: boolean; hasVideo: boolean; hasPng: boolean; videoPaths: string[]; pngPaths: string[]; folderPaths: string[]; sources: ProjectToolSource[]; error?: string }>;
+  inspectProjectToolSources: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], collectVideos?: boolean, collectDirectConvertibleImages?: boolean, collectRecursiveConvertibleImages?: boolean) => Promise<{ success: boolean; indexed: boolean; hasVideo: boolean; hasConvertibleImage: boolean; videoPaths: string[]; convertibleImagePaths: string[]; folderPaths: string[]; sources: ProjectToolSource[]; error?: string }>;
   resolveProjectShortcut: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; target?: string; targetKind?: 'folder' | 'file'; error?: string }>;
   materializeProjectExternalLinks: (workspacePath: string, status: ProjectStatus, name: string, relativePaths?: string[]) => Promise<{ success: boolean; count: number; items?: Array<{ shortcutPath: string; source: string; destination: string }>; error?: string }>;
   relinkProjectExternalFolder: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; cancelled?: boolean; relativePath?: string; target?: string; updatedProgressCount?: number; error?: string }>;

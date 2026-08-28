@@ -28,6 +28,7 @@ const readDirectories = [];
 const watchedRoots = [];
 const releasedRoots = [];
 const grantedRoots = [];
+const inspectedToolSources = [];
 let inspirationTrackingReconciliations = 0;
 const shortcutDescriptions = new Map();
 const shortcutDescriptionsByTarget = new Map();
@@ -100,7 +101,20 @@ registerWorkspaceIpc({
       return grantedRoot;
     },
   },
-  thumbnailService: { indexDirectory: async () => false, scanProject: async () => undefined },
+  thumbnailService: {
+    indexDirectory: async () => false,
+    scanProject: async () => undefined,
+    inspectToolSources: async (inspectionRoot, targets) => {
+      inspectedToolSources.push({ inspectionRoot: path.resolve(inspectionRoot), targets: targets.map(target => path.resolve(target)) });
+      return {
+        indexed: true,
+        hasVideo: false,
+        hasConvertibleImage: targets.some(target => path.extname(target).toLowerCase() === '.jpg'),
+        videoPaths: [],
+        convertibleImagePaths: targets.filter(target => path.extname(target).toLowerCase() === '.jpg'),
+      };
+    },
+  },
   versionService: { detectProgressStale: async () => { inspirationTrackingReconciliations += 1; throw new Error('virtual inspiration roots are not catalog projects'); } },
   scheduleMediaTrackingScan: () => undefined,
   shell: shortcutShell,
@@ -156,6 +170,9 @@ registerWorkspaceIpc({
     const externalRecent = await handlers.get('workspace-recent-files')({}, temporaryRoot, '策划中', '项目', '外部素材.lnk', 20);
     assert.strictEqual(externalRecent.success, true, externalRecent.error);
     assert(externalRecent.entries.some(entry => entry.name === '深层灵感.jpg' && entry.viaExternalLink === true), 'recent recursive browsing must work from a managed external-folder scope');
+    const inspectManagedExternal = await handlers.get('workspace-inspect-tool-sources')({}, temporaryRoot, '策划中', '项目', ['外部素材.lnk/二级目录/深层灵感.jpg'], false, false, true);
+    assert.strictEqual(inspectManagedExternal.success, true, inspectManagedExternal.error);
+    assert.deepStrictEqual(inspectManagedExternal.convertibleImagePaths.map(value => path.resolve(value)), [path.resolve(managedExternalTarget, '二级目录', '深层灵感.jpg')], 'managed external links must remain valid media-tool sources');
     fs.rmSync(managedExternalShortcut, { force: true });
     shortcutDescriptions.delete(path.resolve(managedExternalShortcut));
     const searchFiles = handlers.get('workspace-search-files');
@@ -176,6 +193,25 @@ registerWorkspaceIpc({
     assert.strictEqual(fs.readFileSync(path.join(targetRoot, '策划', '参考目录.lnk'), 'utf8'), path.join(sourceRoot, '参考目录'));
     const planningBrowse = await browseFiles({}, temporaryRoot, '策划中', '项目', '策划');
     assert.strictEqual(planningBrowse.entries.find(entry => entry.name === '参考目录.lnk')?.sourceChannel, 'inspiration', 'shortcuts gathered from the inspiration library must retain their display channel');
+    const inspirationToolImages = ['工具图-1.jpg', '工具图-2.jpg', '工具图-3.jpg'].map(name => path.join(sourceRoot, '参考目录', name));
+    for (const imagePath of inspirationToolImages) fs.writeFileSync(imagePath, 'tool image');
+    const inspectToolSources = handlers.get('workspace-inspect-tool-sources');
+    assert(inspectToolSources, 'tool-source inspection IPC handler was not registered');
+    const inspirationInspection = await inspectToolSources({}, temporaryRoot, '策划中', '项目', inspirationToolImages.map(imagePath => `策划/参考目录.lnk/${path.basename(imagePath)}`), false, false, true);
+    assert.strictEqual(inspirationInspection.success, true, inspirationInspection.error);
+    assert.strictEqual(inspirationInspection.indexed, true);
+    assert.deepStrictEqual(inspirationInspection.convertibleImagePaths.map(value => path.resolve(value)).sort(), inspirationToolImages.map(value => path.resolve(value)).sort(), 'inspiration shortcuts must be accepted as media-tool sources');
+    assert.deepStrictEqual(inspectedToolSources.at(-1), { inspectionRoot: path.resolve(sourceRoot, '参考目录'), targets: inspirationToolImages.map(value => path.resolve(value)) }, 'multiple selected shortcut files must share their validated inspiration target boundary');
+    const ordinaryTarget = path.join(sourceRoot, '普通目录');
+    fs.mkdirSync(ordinaryTarget);
+    fs.writeFileSync(path.join(ordinaryTarget, '工具图-1.jpg'), 'ordinary tool image');
+    const ordinaryShortcutPath = path.join(targetRoot, '策划', '普通目录.lnk');
+    fs.writeFileSync(ordinaryShortcutPath, ordinaryTarget);
+    const ordinaryInspection = await inspectToolSources({}, temporaryRoot, '策划中', '项目', ['策划/普通目录.lnk/工具图-1.jpg'], false, false, true);
+    assert.strictEqual(ordinaryInspection.success, false, 'an unmarked ordinary shortcut must not gain external tool access');
+    for (const imagePath of inspirationToolImages) fs.rmSync(imagePath, { force: true });
+    fs.rmSync(ordinaryShortcutPath, { force: true });
+    fs.rmSync(ordinaryTarget, { recursive: true, force: true });
     if (process.platform === 'win32') {
       const resolveShortcut = handlers.get('workspace-resolve-shortcut');
       assert(resolveShortcut, 'shortcut resolution IPC handler was not registered');

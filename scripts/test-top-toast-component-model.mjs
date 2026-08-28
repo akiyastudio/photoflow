@@ -40,7 +40,8 @@ let keyed = model.upsertTopToastNotice([], { id: 30, message: 'first', persisten
 keyed = model.upsertTopToastNotice(keyed, { id: 31, message: 'replacement', persistent: true, count: 1, tone: 'error', dedupeKey: 'same' }).notices;
 assert.deepEqual(keyed.map(item => ({ id: item.id, message: item.message, tone: item.tone, persistent: item.persistent })), [{ id: 30, message: 'replacement', tone: 'error', persistent: true }], 'same dedupeKey replaces the existing card while preserving identity');
 const taskToast = fs.readFileSync(path.join(root, 'src/features/background-tasks/FileTransferToast.tsx'), 'utf8');
-assert(taskToast.includes("matchMedia('(prefers-reduced-motion: reduce)').matches") && taskToast.indexOf('matchMedia') < taskToast.indexOf('element.animate'), 'task reordering skips Web Animations when reduced motion is requested');
+const toastReflow = fs.readFileSync(path.join(root, 'src/features/app/useToastStackReflow.ts'), 'utf8');
+assert(taskToast.includes('useToastStackReflow(stackRef, reflowKey)') && toastReflow.includes('[layoutKey, stackRef]') && toastReflow.includes("matchMedia('(prefers-reduced-motion: reduce)').matches") && toastReflow.indexOf('matchMedia') < toastReflow.indexOf('element.animate'), 'shared Toast reordering runs only for structural changes and skips Web Animations when reduced motion is requested');
 const taskToastModel = await import(pathToFileURL(path.join(root, 'src/features/background-tasks/task-toast-model.ts')).href);
 assert.equal(taskToastModel.taskToastLiveRole('running'), undefined); assert.equal(taskToastModel.taskToastLiveRole('paused'), undefined); assert.equal(taskToastModel.taskToastLiveRole('completed'), 'status'); assert.equal(taskToastModel.taskToastLiveRole('failed'), 'alert', 'only terminal task cards are live regions');
 assert(taskToast.includes('role={taskToastLiveRole(task.state)}'), 'rendered task cards consume the terminal-only accessibility model');

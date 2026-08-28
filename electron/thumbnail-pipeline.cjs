@@ -1091,15 +1091,15 @@ class ThumbnailPipeline {
     this.assertMaintenanceBoundary(control, phase, control.processedCount || 0);
   }
 
-  async inspectToolSources(projectRoot, filePaths, collectVideos = false, collectDirectPng = false, collectRecursivePng = false) {
+  async inspectToolSources(projectRoot, filePaths, collectVideos = false, collectDirectConvertibleImages = false, collectRecursiveConvertibleImages = false) {
     const root = path.resolve(projectRoot);
-    if (this.projectScans.has(root) || (this.projectIndexUpdates.get(root) || 0) > 0) return { indexed: false, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [] };
+    if (this.projectScans.has(root) || (this.projectIndexUpdates.get(root) || 0) > 0) return { indexed: false, hasVideo: false, hasConvertibleImage: false, videoPaths: [], convertibleImagePaths: [] };
     return this.withIndexer(() => this.database.call('inspect_tool_sources', {
       project_root: root,
       paths: filePaths.map(filePath => path.resolve(filePath)),
       collect_videos: Boolean(collectVideos),
-      collect_direct_png: Boolean(collectDirectPng),
-      collect_recursive_png: Boolean(collectRecursivePng),
+      collect_direct_convertible_images: Boolean(collectDirectConvertibleImages),
+      collect_recursive_convertible_images: Boolean(collectRecursiveConvertibleImages),
     }));
   }
 

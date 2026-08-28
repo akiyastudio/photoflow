@@ -164,6 +164,7 @@ invalidManifest(value => { value.componentHost.service.backupRestore.sources[0].
 const capabilitySchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api-v7.schema.json'), 'utf8'));
 const schemaMethods = Object.values(capabilitySchema.$defs).map(value => value?.properties?.method?.const).filter(Boolean).sort();
 assert.deepEqual(schemaMethods, [...HOST_CAPABILITIES].sort(), 'machine-readable schema must discriminate every supported capability method');
+const dialogResults = capabilitySchema.$defs.dialogs.properties.result.oneOf; assert.equal(dialogResults.length, 3); const selectionResult = dialogResults.find(item => item.required?.includes('inputs')); assert.equal(selectionResult.additionalProperties, false); assert.equal(selectionResult.properties.inputs.maxItems, 2000); assert.equal(selectionResult.properties.inputs.items.additionalProperties, false); assert.equal(selectionResult.properties.truncated.type, 'boolean', 'dialogs schema and SDK expose the bounded directory truncation flag');
 const runtimeSources = [
   'electron/services/component-project-capabilities.cjs',
   'electron/services/component-project-read-capabilities.cjs',
@@ -244,6 +245,7 @@ const atomicJson = async ({ filePath, value }) => {
   await fs.promises.rm(filePath, { force: true });
   await fs.promises.rename(temporary, filePath);
 };
+let safeOpenDialogResult = { canceled: true, filePaths: [] };
 const registrationOptions = overrides => ({
   broker, ensureWorkspace: value => path.resolve(value), getWorkspaceDataRoot: () => dataRoot,
   resolveProjectEntry: (_workspace, _status, _name, relative) => projectVirtualPaths.resolve(projectRoot, relative, { externalRootMode: 'target' }).physicalPath,
@@ -252,7 +254,7 @@ const registrationOptions = overrides => ({
   readConfig: async () => config,
   mutateConfig: async mutator => { config = await mutator(config); await atomicJson({ filePath: configPath, value: config }); return config; },
   getProjectPath: () => projectRoot,
-  dialog: { showOpenDialog: async () => ({ canceled: true, filePaths: [] }), showMessageBox: async () => ({ response: 1 }) }, mainWindow: {},
+  dialog: { showOpenDialog: async () => safeOpenDialogResult, showMessageBox: async () => ({ response: 1 }) }, mainWindow: {},
   mediaService, backgroundTasks, ensureTrackedVersionThumbnail: async () => undefined, shell,
   getBoundProject: () => ({ id: 'project-1', name: 'Project', status: 'active' }),
   projectVirtualPaths,
@@ -452,6 +454,20 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   const cancelled = await broker.invoke(descriptor, 'tasks.v7', { action: 'cancel', operationId: 'fixture-task' }, context);
   assert(started.task && resumed.task.checkpoint.page === 1 && cancelled.cancelled);
   assert((await broker.invoke(descriptor, 'dialogs.v7', { kind: 'confirm', title: 'Confirm', message: 'Continue?' }, context)).confirmed);
+  const selectedDirectory = path.join(sandbox, 'dialog-directory'); const nestedDirectory = path.join(selectedDirectory, 'nested');
+  fs.mkdirSync(nestedDirectory, { recursive: true }); fs.writeFileSync(path.join(selectedDirectory, 'voice.mp3'), 'audio'); fs.writeFileSync(path.join(nestedDirectory, 'clip.MP4'), 'video'); fs.writeFileSync(path.join(nestedDirectory, 'ignored.txt'), 'text');
+  safeOpenDialogResult = { canceled: false, filePaths: [selectedDirectory] };
+  const directoryInputs = await broker.invoke(descriptor, 'dialogs.v7', { kind: 'openDirectory', title: 'Media folder', extensions: ['mp3', 'mp4'], recursive: true }, context);
+  assert.deepEqual(directoryInputs.inputs.map(item => item.relativeName).sort(), ['nested/clip.MP4', 'voice.mp3']);
+  assert(directoryInputs.inputs.every(item => item.token.startsWith('component-input:v7:') && !JSON.stringify(item).includes(selectedDirectory)), 'directory dialog returns bounded tokens and relative display names, never a selected path');
+  const directoryMaterialized = await broker.invoke(descriptor, 'project.input.tokens.v7', { action: 'materialize', token: directoryInputs.inputs[0].token }, context);
+  assert(directoryMaterialized.privatePath.startsWith(path.join(dataRoot, 'components', descriptor.componentId)), 'directory inputs materialize only inside component-private storage');
+  safeOpenDialogResult = { canceled: false, filePaths: [selectedDirectory] }; const shallowInputs = await broker.invoke(descriptor, 'dialogs.v7', { kind: 'openDirectory', extensions: ['mp3', 'mp4'], recursive: false }, context); assert.deepEqual(shallowInputs.inputs.map(item => item.relativeName), ['voice.mp3'], 'recursive:false never enumerates child directories');
+  const escapedDirectory = path.join(sandbox, 'dialog-escape'); fs.mkdirSync(escapedDirectory); fs.writeFileSync(path.join(escapedDirectory, 'secret.mp4'), 'secret');
+  try { const childLink = path.join(selectedDirectory, 'escape-link'); fs.symlinkSync(escapedDirectory, childLink, process.platform === 'win32' ? 'junction' : 'dir'); safeOpenDialogResult = { canceled: false, filePaths: [selectedDirectory] }; const linkedInputs = await broker.invoke(descriptor, 'dialogs.v7', { kind: 'openDirectory', extensions: ['mp4'], recursive: true }, context); assert(!linkedInputs.inputs.some(item => item.relativeName.includes('secret')) && linkedInputs.truncated, 'child symlink escapes are skipped and completeness is reported conservatively'); const rootLink = path.join(sandbox, 'dialog-root-link'); fs.symlinkSync(selectedDirectory, rootLink, process.platform === 'win32' ? 'junction' : 'dir'); safeOpenDialogResult = { canceled: false, filePaths: [rootLink] }; await assert.rejects(broker.invoke(descriptor, 'dialogs.v7', { kind: 'openDirectory', extensions: ['mp4'], recursive: true }, context), error => error.code === 'COMPONENT_HOST_INVALID_REQUEST', 'symlinked directory roots fail closed'); } catch (error) { if (!['EPERM', 'EACCES'].includes(error?.code)) throw error; }
+  const changedDirectory = path.join(sandbox, 'dialog-changed'); const changedFile = path.join(changedDirectory, 'changed.mp4'); fs.mkdirSync(changedDirectory); fs.writeFileSync(changedFile, 'authorized'); safeOpenDialogResult = { canceled: false, filePaths: [changedDirectory] }; const changedInputs = await broker.invoke(descriptor, 'dialogs.v7', { kind: 'openDirectory', extensions: ['mp4'], recursive: true }, context); fs.writeFileSync(changedFile, 'changed-after-authorization'); await assert.rejects(broker.invoke(descriptor, 'project.input.tokens.v7', { action: 'materialize', token: changedInputs.inputs[0].token }, context), error => error.code === 'COMPONENT_HOST_PERMISSION_DENIED', 'materialization rejects a file changed after directory authorization');
+  const hugeDirectory = path.join(sandbox, 'dialog-huge'); fs.mkdirSync(hugeDirectory); for (let index = 0; index < 2000; index += 1) fs.writeFileSync(path.join(hugeDirectory, `${String(index).padStart(4, '0')}.mp4`), 'x'); safeOpenDialogResult = { canceled: false, filePaths: [hugeDirectory] }; const hugeInputs = await broker.invoke(descriptor, 'dialogs.v7', { kind: 'openDirectory', extensions: ['mp4'], recursive: true }, context); assert(hugeInputs.truncated && hugeInputs.inputs.length < 2000, 'directory enumeration reports truncation at the global token/resource bound'); assert(!JSON.stringify(hugeInputs).includes(hugeDirectory), 'truncated results still never echo an absolute path');
+  safeOpenDialogResult = { canceled: true, filePaths: [] };
   await broker.invoke(descriptor, 'component.events.v7', { topic: 'fixture.progress.v1', event: { progress: 50 } }, context);
   assert.deepEqual(context.lastEvent, { topic: 'fixture.progress.v1', event: { progress: 50 } });
   assert.equal((await broker.invoke(descriptor, 'component.lifecycle.v7', { action: 'describe' }, context)).negotiatedHostApiVersion, 7);

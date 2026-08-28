@@ -69,6 +69,48 @@ const registerWorkspaceIpc = context => {
       return description.startsWith('灵感库：') ? 'inspiration' : undefined;
     } catch { return undefined; }
   };
+  const resolveToolSource = (rootValue, relativePath) => {
+    const root = path.resolve(rootValue);
+    try {
+      return virtualPaths.resolve(root, relativePath, { externalRootMode: 'target' });
+    } catch (managedError) {
+      const normalized = String(relativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+      const segments = normalized ? normalized.split('/') : [];
+      if (!segments.length || segments.some(segment => !segment || segment === '.' || segment === '..' || segment.includes('\0'))) throw managedError;
+      const shortcutIndex = segments.findIndex(segment => path.extname(segment).toLowerCase() === '.lnk');
+      if (shortcutIndex < 0) throw managedError;
+      const shortcutVirtualPath = segments.slice(0, shortcutIndex + 1).join('/');
+      const shortcutPath = assertExistingInside(root, path.resolve(root, ...segments.slice(0, shortcutIndex + 1)), '灵感库快捷方式');
+      if (shortcutSourceChannel(shortcutPath) !== 'inspiration') throw managedError;
+      const details = shell.readShortcutLink(shortcutPath);
+      const target = details?.target ? path.resolve(String(details.target)) : '';
+      if (!target || !fs.existsSync(target)) throw Object.assign(new Error('灵感库快捷方式目标当前不可用'), { code: 'EXTERNAL_LINK_OFFLINE' });
+      const targetStat = fs.statSync(target);
+      const childSegments = segments.slice(shortcutIndex + 1);
+      if (targetStat.isFile()) {
+        if (childSegments.length) throw new Error('灵感库文件快捷方式不能包含子路径');
+        const physicalPath = fs.realpathSync(target);
+        return {
+          projectRoot: root, virtualPath: normalized, physicalPath, mediaRoot: path.dirname(physicalPath),
+          shortcutPath, shortcutVirtualPath, externalTargetRoot: physicalPath, externalTargetKind: 'file',
+          externalDisplayName: path.basename(shortcutPath, path.extname(shortcutPath)), viaExternalLink: true,
+          viaInspirationShortcut: true, isExternalLinkRoot: true, writable: true, offline: false,
+        };
+      }
+      if (!targetStat.isDirectory()) throw new Error('灵感库快捷方式目标类型不受支持');
+      const externalTargetRoot = fs.realpathSync(target);
+      const requestedPath = assertInside(externalTargetRoot, path.resolve(externalTargetRoot, ...childSegments), '灵感库快捷方式内容', true);
+      if (!fs.existsSync(requestedPath)) throw Object.assign(new Error('灵感库快捷方式中的文件或文件夹不存在'), { code: 'ENOENT' });
+      const physicalPath = fs.realpathSync(requestedPath);
+      assertInside(externalTargetRoot, physicalPath, '灵感库快捷方式内容', true);
+      return {
+        projectRoot: root, virtualPath: normalized, physicalPath, mediaRoot: externalTargetRoot,
+        shortcutPath, shortcutVirtualPath, externalTargetRoot, externalTargetKind: 'folder',
+        externalDisplayName: path.basename(shortcutPath, path.extname(shortcutPath)), viaExternalLink: true,
+        viaInspirationShortcut: true, isExternalLinkRoot: childSegments.length === 0, writable: true, offline: false,
+      };
+    }
+  };
   const notifyComponentArtifactRelocation = async () => [];
   const { selectWorkspaceForWrite } = createWorkspaceStoragePolicy({ fs, path, ensureWorkspace });
   const { acknowledgeImportReceipt, commitImportManifest, importStagingRoots, readImportReceipt, receiptLocationsForSession } = createImportReceiptService({ crypto, fs, path, pathExists, versionService });
@@ -1247,14 +1289,14 @@ const registerWorkspaceIpc = context => {
     }
   });
 
-  ipcMain.handle('workspace-inspect-tool-sources', async (_event, workspacePath, status, projectName, relativePaths = [], collectVideos = false, collectDirectPng = false, collectRecursivePng = false) => {
+  ipcMain.handle('workspace-inspect-tool-sources', async (_event, workspacePath, status, projectName, relativePaths = [], collectVideos = false, collectDirectConvertibleImages = false, collectRecursiveConvertibleImages = false) => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
       const requestedPaths = [...new Set((Array.isArray(relativePaths) ? relativePaths : [])
         .filter(value => typeof value === 'string' && value.length <= 32768))];
-      if (!requestedPaths.length) return { success: true, indexed: true, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [], folderPaths: [], sources: [] };
+      if (!requestedPaths.length) return { success: true, indexed: true, hasVideo: false, hasConvertibleImage: false, videoPaths: [], convertibleImagePaths: [], folderPaths: [], sources: [] };
       if (requestedPaths.length > 4096) throw new Error('一次最多处理 4096 个所选文件或文件夹');
-      const resolutions = requestedPaths.map(relativePath => virtualPaths.resolve(root, relativePath, { externalRootMode: 'target' }));
+      const resolutions = requestedPaths.map(relativePath => resolveToolSource(root, relativePath));
       const targets = resolutions.map(item => item.physicalPath);
       const folderPaths = [];
       const sources = [];
@@ -1267,14 +1309,32 @@ const registerWorkspaceIpc = context => {
           } else if (stat.isFile()) sources.push({ path: target, kind: 'file' });
         } catch { /* inspectToolSources reports missing source details */ }
       }
-      const inspectionRoot = resolutions.length === 1 && resolutions[0].viaExternalLink ? resolutions[0].mediaRoot : root;
-      mediaService.grantRoot(inspectionRoot);
-      const result = await thumbnailService.inspectToolSources(inspectionRoot, targets, collectVideos, collectDirectPng, collectRecursivePng);
-      if (!result.indexed && !resolutions.some(item => item.viaExternalLink)) void thumbnailService.scanProject(root, mediaRuntimeState.activeMediaCacheConfig);
+      const targetGroups = new Map();
+      resolutions.forEach((resolution, index) => {
+        const inspectionRoot = path.resolve(resolution.viaExternalLink ? resolution.mediaRoot : root);
+        const group = targetGroups.get(inspectionRoot) || [];
+        group.push(targets[index]);
+        targetGroups.set(inspectionRoot, group);
+      });
+      const inspectedGroups = [];
+      for (const [inspectionRoot, groupTargets] of targetGroups) {
+        mediaService.grantRoot(inspectionRoot);
+        const result = await thumbnailService.inspectToolSources(inspectionRoot, groupTargets, collectVideos, collectDirectConvertibleImages, collectRecursiveConvertibleImages);
+        inspectedGroups.push(result);
+        if (!result.indexed) void thumbnailService.scanProject(inspectionRoot, mediaRuntimeState.activeMediaCacheConfig);
+      }
+      const indexed = inspectedGroups.every(result => result.indexed);
+      const result = {
+        indexed,
+        hasVideo: inspectedGroups.some(item => item.hasVideo),
+        hasConvertibleImage: inspectedGroups.some(item => item.hasConvertibleImage),
+        videoPaths: [...new Set(inspectedGroups.flatMap(item => item.videoPaths || []))],
+        convertibleImagePaths: [...new Set(inspectedGroups.flatMap(item => item.convertibleImagePaths || []))],
+      };
       return { success: true, ...result, folderPaths, sources };
     } catch (error) {
       writeLog('warn', 'Unable to read project tool-source index', { projectName, error: error.message || String(error) });
-      return { success: false, indexed: false, hasVideo: false, hasPng: false, videoPaths: [], pngPaths: [], folderPaths: [], sources: [], error: error.message || String(error) };
+      return { success: false, indexed: false, hasVideo: false, hasConvertibleImage: false, videoPaths: [], convertibleImagePaths: [], folderPaths: [], sources: [], error: error.message || String(error) };
     }
   });
 
@@ -2166,7 +2226,7 @@ const registerWorkspaceIpc = context => {
         };
       }
       const projectRoot = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const resolutions = requestedPaths.map(relativePath => virtualPaths.resolve(projectRoot, relativePath, { externalRootMode: 'target' }));
+      const resolutions = requestedPaths.map(relativePath => resolveToolSource(projectRoot, relativePath));
       const targets = resolutions.map(resolution => resolution.physicalPath);
       for (const target of targets) {
         if (!fs.statSync(target).isFile() || !officeOpenXmlExtensions.has(path.extname(target).toLowerCase())) {
@@ -2245,7 +2305,7 @@ const registerWorkspaceIpc = context => {
       const requestedPaths = Array.isArray(relativePaths) ? relativePaths.slice(0, 2000) : [];
       if (!requestedPaths.length) throw new Error('没有选择图片');
       const projectRoot = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const targetResolutions = requestedPaths.map(relativePath => virtualPaths.resolve(projectRoot, relativePath, { externalRootMode: 'target' }));
+      const targetResolutions = requestedPaths.map(relativePath => resolveToolSource(projectRoot, relativePath));
       const targets = targetResolutions.map(resolution => resolution.physicalPath);
       if (confirmedCrops && confirmedCrops.length !== targets.length) throw new Error('确认的裁剪范围与图片数量不一致');
       for (const target of targets) {
@@ -2583,7 +2643,7 @@ const registerWorkspaceIpc = context => {
       const paths = Array.isArray(relativePaths) ? relativePaths : [relativePaths];
       if (!paths.length) throw new Error('没有选择要打开的文件');
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const targets = await Promise.all(paths.map(async relativePath => (await resolveManagedExternalScope(root, relativePath))?.currentPath || resolveProjectEntry(workspacePath, status, projectName, relativePath)));
+      const targets = paths.map(relativePath => resolveToolSource(root, relativePath).physicalPath);
       if (targets.some(target => !fs.statSync(target).isFile())) throw new Error('只能用 Photoshop 打开文件');
       return await new Promise(resolve => {
         const child = spawn(executable, targets, { detached: true, stdio: 'ignore', windowsHide: false });

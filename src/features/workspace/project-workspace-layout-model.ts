@@ -37,6 +37,12 @@ export const fitProjectColumnWidths = (preferred: ProjectColumnWidths, container
   };
 };
 
+export const shouldRetainGroupedResultsDuringRefresh = (previousIdentity: string, nextIdentity: string, resultCount: number) =>
+  Boolean(previousIdentity) && previousIdentity === nextIdentity && resultCount > 0;
+
+export const groupedResultsAreInitiallyLoading = (loading: boolean, visibleGroupCount: number) =>
+  loading && visibleGroupCount === 0;
+
 export const fitFileListColumnWidths = (preferred: FileListColumnWidths, availableWidth: number): FileListColumnWidths => {
   const normalized = Object.fromEntries(FILE_LIST_COLUMN_KEYS.map(key => {
     const value = Number(preferred[key]);

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
-import type { DragEvent as ReactDragEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
+import type { DragEvent as ReactDragEvent, MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode } from 'react';
 import type { ProgressFolder, ProjectFileEntry, VersionGraphEdge } from '../types';
 import { layoutVersionTree, DEFAULT_VERSION_TREE_SPACING, versionTreeAreaSize, versionTreeCanvasBounds, allowedVersionTreeRelationKinds, versionTreeEdgeGeometry, versionTreeEdgePath, versionTreeEdgePresentation, versionTreeRelationLabel, type VersionTreeEdgeKind, type VersionTreeSupplementalEdgeKind, useVersionTreeCanvas, type VersionTreeDragState, progressRelationChangeError, projectVisibleVersionGraph, resolveVersionTreeEntryMapping, trackingStateLabel, versionTreeReactKey } from '../features/versioning/public';
 import { FILE_GRID_GAP } from '../features/workspace/marquee-selection-model';
@@ -30,6 +30,7 @@ type ProjectVersionTreeProps = {
   onRequestSupplementalEdgeCreate?: (sourceProgressId: string, targetProgressId: string, edgeKind: VersionTreeSupplementalEdgeKind) => void;
   onRequestCreateVersion?: (source: ProgressFolder, target: ProjectFileEntry) => void;
   onRequestCreateEmptyVersion?: (source: ProgressFolder, branch: boolean) => void;
+  onRequestEntryContextMenu?: (event: ReactMouseEvent<HTMLDivElement>, entry: ProjectFileEntry) => void;
   onStartFileDrag?: (event: ReactDragEvent<HTMLDivElement>, entry: ProjectFileEntry) => void;
   canUndoRelation?: boolean;
   canRedoRelation?: boolean;
@@ -72,7 +73,7 @@ const afterVersionTreePaint = (callback: () => void) => typeof window.requestAni
   ? window.requestAnimationFrame(callback)
   : globalThis.setTimeout(callback, 0);
 
-export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onRequestCreateVersion, onRequestCreateEmptyVersion, onStartFileDrag, canUndoRelation = false, canRedoRelation = false, onUndoRelation, onRedoRelation, onCancelRelationEdit, onNotice, onCanvasControllerChange, onViewportScrollChange }: ProjectVersionTreeProps) => {
+export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY_VERSION_TREE_EDGES, entries, structureEntries = entries, selectedRelativePaths = EMPTY_VERSION_TREE_IDS, filterActive = false, activeRelativePath, gridIconSize, workspacePath, projectName, projectRelativePath, renderEntry, pendingChildId, hoverParentId, mutatingChildIds = EMPTY_VERSION_TREE_IDS, onBeginRelationEdit, onHoverRelationParent, onRequestRelationChange, onRequestSupplementalEdgeDelete, onRequestSupplementalEdgeReconnect, onRequestSupplementalEdgeCreate, onRequestCreateVersion, onRequestCreateEmptyVersion, onRequestEntryContextMenu, onStartFileDrag, canUndoRelation = false, canRedoRelation = false, onUndoRelation, onRedoRelation, onCancelRelationEdit, onNotice, onCanvasControllerChange, onViewportScrollChange }: ProjectVersionTreeProps) => {
   const [pointerPoint, setPointerPoint] = useState<{ x: number; y: number } | null>(null);
   const [selectedEdgeId, setSelectedEdgeId] = useState('');
   const [dragState, setDragState] = useState<VersionTreeDragState>(null);
@@ -713,7 +714,11 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
           }
         }} onDragEnd={() => {
           nativeFileDragRef.current = null;
-        }} onFocusCapture={() => setSelectedNodeKey(item.key)} onContextMenu={event => { event.preventDefault(); event.stopPropagation(); }} className={`group/version-node absolute z-20 cursor-grab rounded-xl active:cursor-grabbing ${createVersionTargetKey === item.key ? 'ring-2 ring-emerald-400 ring-offset-2' : ''}`} data-node-role={item.folder?.nodeRole} data-tracking-label={item.folder ? trackingStateLabel(item.folder) : undefined} style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight, touchAction: 'none' }}>
+        }} onFocusCapture={() => setSelectedNodeKey(item.key)} onContextMenu={event => {
+          event.preventDefault();
+          event.stopPropagation();
+          onRequestEntryContextMenu?.(event, item.entry);
+        }} className={`group/version-node absolute z-20 cursor-grab rounded-xl active:cursor-grabbing ${createVersionTargetKey === item.key ? 'ring-2 ring-emerald-400 ring-offset-2' : ''}`} data-node-role={item.folder?.nodeRole} data-tracking-label={item.folder ? trackingStateLabel(item.folder) : undefined} style={{ left: item.x, top: item.y, width: nodeWidth, minHeight: nodeHeight, touchAction: 'none' }}>
         {renderEntry(item.entry, item.folder, item.sourceKind)}
         {item.folder && <>
           {canAcceptInput && <button type="button" data-version-tree-port="true" disabled={mutatingIds.has(item.folder.id)} aria-label={hasInputRelation ? `断开 ${item.folder.displayName} 的输入连接` : `${item.folder.displayName} 等待输入连接`} title={mutatingIds.has(item.folder.id) ? '关系正在更新' : hasInputRelation ? '按下只会断开左侧输入连接' : '空输入端：请从来源节点右侧输出端拖入'} onPointerDown={event => { if (event.button !== 0) return; event.preventDefault(); event.stopPropagation(); if (hasInputRelation) removeNodeInput(item.folder!); else onNotice('左侧触点只用于断开已有连接；请从来源节点右侧拖出新线。'); }} onClick={event => { event.preventDefault(); event.stopPropagation(); }} className="absolute -left-2.5 top-1/2 z-20 flex h-5 w-5 -translate-y-1/2 items-center justify-center opacity-0 transition-opacity group-hover/version-node:opacity-100 group-focus-within/version-node:opacity-100 focus:opacity-100 disabled:cursor-not-allowed disabled:opacity-40"><span aria-hidden className={`h-2.5 w-2.5 rounded-full border-2 shadow ${hasInputRelation ? 'border-white bg-red-500' : 'border-slate-400 bg-white'}`}/></button>}

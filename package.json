@@ -111,6 +111,7 @@
     "test:office-media": ".venv\\Scripts\\python.exe scripts\\test-office-media-extractor.py && node scripts/test-office-image-extraction-ipc.cjs",
     "test:research": ".venv\\Scripts\\python.exe scripts\\test-research.py",
     "test:video-split": ".venv\\Scripts\\python.exe scripts\\test-cut-video.py",
+    "test:media-encoder": ".venv\\Scripts\\python.exe scripts\\test-media-encoder.py && node scripts/test-video-transcode-model.mjs && node scripts/media-runtime/test-runtime-policy.cjs",
     "test:source-path-picker": "node scripts/test-source-path-picker.cjs",
     "test:tool-source-selection": "node scripts/test-tool-source-selection.cjs",
     "test:video-trim": "node scripts/test-video-trim-commit.cjs",

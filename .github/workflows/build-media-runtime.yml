@@ -22,6 +22,9 @@ jobs:
           update: true
           install: >-
             base-devel
+            autoconf
+            automake
+            libtool
             git
             make
             diffutils
@@ -31,6 +34,7 @@ jobs:
             mingw-w64-ucrt-x86_64-cmake
             mingw-w64-ucrt-x86_64-gcc
             mingw-w64-ucrt-x86_64-ninja
+            mingw-w64-ucrt-x86_64-meson
       - name: Build minimal FFmpeg and compliance archives
         shell: msys2 {0}
         run: bash scripts/media-runtime/build-ffmpeg-windows.sh

@@ -9,7 +9,7 @@ const lock = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', '..', 'med
 const configureFlags = fs.readFileSync(path.resolve(configureFileArg), 'utf8').trim().split(/\s+/).filter(Boolean);
 const artifact = file => ({ file, sha256: sha256File(path.join(root, file)) });
 const manifest = {
-  schemaVersion: 2,
+  schemaVersion: 3,
   kind: 'photoflow-ffmpeg-runtime',
   platform: 'windows-x64',
   license: 'GPL-2.0-or-later',
@@ -19,6 +19,8 @@ const manifest = {
     { name: 'x264', repository: lock.x264.repository, commit: lock.x264.commit, license: lock.x264.license },
     { name: 'x265', version: lock.x265.version, repository: lock.x265.repository, commit: lock.x265.commit, license: lock.x265.license },
     { name: 'zlib', version: lock.zlib.version, repository: lock.zlib.repository, commit: lock.zlib.commit, license: lock.zlib.license },
+    { name: 'zimg', version: lock.zimg.version, repository: lock.zimg.repository, commit: lock.zimg.commit, license: lock.zimg.license },
+    ...['freetype', 'fribidi', 'harfbuzz', 'libass'].map(name => ({ name, version: lock.mpvDependencies[name].version, repository: lock.mpvDependencies[name].repository, commit: lock.mpvDependencies[name].commit, license: lock.mpvDependencies[name].license })),
     { name: 'nv-codec-headers', version: lock.nvCodecHeaders.version, repository: lock.nvCodecHeaders.repository, commit: lock.nvCodecHeaders.commit, license: lock.nvCodecHeaders.license },
   ],
   configureFlags,

@@ -33,7 +33,7 @@ const TOOL_MODAL_DETAILS: Record<string, { description: string; icon: React.Reac
   research: { description: '识别视频转场并挑选清晰画面。', icon: <Video size={18}/> },
   'video-transcode': { description: '转换视频封装、编码、画质与音频。', icon: <Gauge size={18}/> },
   'video-split': { description: '批量将视频无损切成约 3.95 GB 的连续分段。', icon: <Cut size={18}/> },
-  converter: { description: '批量将 PNG 转换为 JPG。', icon: <ImageIcon size={18}/> },
+  converter: { description: '批量将常见图片格式转换为 JPG。', icon: <ImageIcon size={18}/> },
   'screenshot-main-image': { description: '先分析候选范围，确认后再生成主图。', icon: <Crop size={18}/> },
   'office-extract': { description: '提取 Word、PowerPoint 或 Excel 中的图片。', icon: <FileImage size={18}/> },
   trash: { description: '将整个项目及其内容移入系统回收站。', icon: <Trash2 size={18}/> },

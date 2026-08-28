@@ -65,6 +65,10 @@ export const exportedImageFolderCandidate = (relativePath: string) => {
   return exportIndex < 0 ? '' : parts.slice(0, exportIndex + 1).join('/');
 };
 
+export const exportedImageFolderCandidates = (relativePaths: readonly string[]) => [...new Set(relativePaths
+  .map(exportedImageFolderCandidate)
+  .filter(Boolean))];
+
 export const isUserVersionKey = (value: string) => /^\d+(?:_\d+)*$/.test(value);
 
 export const versionKeyWithFinalIndex = (suggestedVersionKey: string, value: string) => {

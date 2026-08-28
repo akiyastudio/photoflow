@@ -51,6 +51,7 @@ const fileTransferToastModule = { exports: {} };
 const fileTransferToastRequire = request => {
   if (request === './TaskCenter') return { useTaskCenter: () => { throw new Error('not used by FileTransferToastItem'); } };
   if (request === './task-toast-model') return toastModelModule.exports;
+  if (request === '../app/useToastStackReflow') return { useToastStackReflow: () => undefined };
   return require(request);
 };
 new Function('module', 'exports', 'require', compiledFileTransferToast)(fileTransferToastModule, fileTransferToastModule.exports, fileTransferToastRequire);
@@ -214,9 +215,10 @@ assert(indicator.includes('drawerHostRef.current') && indicator.includes('create
 assert(!indicator.includes('useHostSurfaceSuspension') && !indicator.includes('useEscapeLayer(open, closeAndRestoreFocus, true, true)'), 'the docked task drawer must not suspend native plugin surfaces');
 assert(main.includes('<TaskCenterProvider>') && main.includes('<TopToastProvider>') && main.includes('<TopToastViewport />') && !main.includes('<FileTransferToast') && !app.includes('topToastStack') && topToastStack.includes('top-toast-stack--model') && topToastStack.includes('updateToastView({') && topToastStack.includes('presentation={presentation}'), 'ordinary notices and file task progress must publish from one hidden host model to the persistent Toast view');
 assert(projectToolModal.includes("const reportBusyAsPanelTask = !panelKind.startsWith('version-')") && workspace.includes('progressSubmittingRef.current'), 'version operations must not create a duplicate panel task and must synchronously reject repeated submissions');
-const closePngConverter = workspace.slice(workspace.indexOf('const closePngConverterPanel'), workspace.indexOf('const openPngConverter'));
-assert(closePngConverter.includes('conversionInspectionSequenceRef.current += 1') && closePngConverter.includes('setConversionCollecting(false)') && closePngConverter.includes('setPanel(null)'), 'closing an idle converter must invalidate source inspection and clear its collecting state');
-assert(workspace.includes("triggerAction === 'restore'") && workspace.includes("setPanel('converter')") && workspace.includes('onClose={closePngConverterPanel}'), 'running converter triggers must restore the persistent panel while every real close uses the same cleanup path');
+const closeImageConverter = workspace.slice(workspace.indexOf('const closeImageConverterPanel'), workspace.indexOf('const openImageConverter'));
+assert(closeImageConverter.includes('conversionInspectionSequenceRef.current += 1') && closeImageConverter.includes('setConversionCollecting(false)') && closeImageConverter.includes('setPanel(null)'), 'closing an idle converter must invalidate source inspection and clear its collecting state');
+assert(workspace.includes("triggerAction === 'restore'") && workspace.includes("setPanel('converter')") && workspace.includes('onClose={closeImageConverterPanel}'), 'running converter triggers must restore the persistent panel while every real close uses the same cleanup path');
+assert(workspace.includes('openImageConverter(selectedEntries.map(entry => entry.relativePath))') && workspace.includes('fileMenuEntries.map(entry => entry.relativePath)'), 'image converter entry points must send project-relative paths to the virtual path inspection API');
 assert(app.includes('photoflow:restore-panel-task') && app.includes('item.id === ownerPageId') && app.includes("setActiveTab('project')") && app.includes("setActiveTab('inspiration')"), 'restoring a component task must activate its exact owning project or inspiration page');
 const closeProjectPage = app.slice(app.indexOf('const closeProjectTab'), app.indexOf('const closeAllPagesForProject'));
 assert(closeProjectPage.includes('disposePageOwnedUi([pageId])') && app.includes('dismissPanelTasksByOwnerPageId(pageId)') && !closeProjectPage.includes('cancelBackgroundTask'), 'closing a page must remove its page-owned panel and tool state without cancelling shared main-process tasks');

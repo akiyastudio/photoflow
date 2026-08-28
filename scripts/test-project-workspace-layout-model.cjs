@@ -19,8 +19,17 @@ const {
   DEFAULT_FILE_LIST_COLUMN_WIDTHS,
   MIN_FILE_LIST_COLUMN_WIDTHS,
   fitFileListColumnWidths,
+  groupedResultsAreInitiallyLoading,
   resizeFileListColumnBoundary,
+  shouldRetainGroupedResultsDuringRefresh,
 } = moduleUnderTest.exports;
+
+assert.strictEqual(shouldRetainGroupedResultsDuringRefresh('same', 'same', 12), true, 'a background refresh of the same grouped request must retain visible files');
+assert.strictEqual(shouldRetainGroupedResultsDuringRefresh('old', 'new', 12), false, 'a new search or scope must not retain unrelated results');
+assert.strictEqual(shouldRetainGroupedResultsDuringRefresh('same', 'same', 0), false, 'an empty first load has nothing to retain');
+assert.strictEqual(groupedResultsAreInitiallyLoading(true, 0), true, 'an empty grouped request must show its initial loading state');
+assert.strictEqual(groupedResultsAreInitiallyLoading(true, 3), false, 'a background refresh must not replace visible folder groups with a loading screen');
+assert.strictEqual(groupedResultsAreInitiallyLoading(false, 0), false);
 
 const sumWidths = widths => Object.values(widths).reduce((total, value) => total + value, 0);
 const approximatelyEqual = (left, right) => Math.abs(left - right) < 0.001;
@@ -53,6 +62,8 @@ const recovered = fitFileListColumnWidths({ name: NaN, modified: -1, type: 0, si
 assert(approximatelyEqual(sumWidths(recovered), 920), 'invalid persisted widths must fall back to finite defaults');
 
 assert(workspace.includes('const [versionTreeHeaderCollapsed, setVersionTreeHeaderCollapsed] = useState(false)') && workspace.includes("versionTreeHeaderCollapsed ? 'grid-rows-[0fr]' : 'mb-3 grid-rows-[1fr]'"), 'version-tree mode must show the project overview initially and smoothly collapse it after scrolling');
+assert(workspace.includes('groupedResultsAreInitiallyLoading(groupedLoading, searchResultGroups.length)') && workspace.includes('groupedInitialLoading ?'), 'grouped file refreshes must keep existing folder sections mounted instead of replacing them with the initial loading screen');
+assert(workspace.includes('shouldRetainGroupedResultsDuringRefresh(') && workspace.includes('if (!retainExistingEntries) setSearchEntries([])'), 'same-scope all-files refreshes must retain the previous entries until refreshed data is ready');
 assert(workspace.includes('onViewportScrollChange={setVersionTreeHeaderCollapsed}'), 'the version-tree viewport must drive the project overview collapse state');
 assert(workspace.includes('onWheelCapture={handleFilesColumnWheelCapture}') && workspace.includes("viewport.scrollTop <= 2) setVersionTreeHeaderCollapsed(false)"), 'the version-tree file column must collapse on downward wheel input and reveal on upward input when its viewport is already at the top');
 assert(versionTree.includes('if (nextScrollTop > 1) onViewportScrollChange?.(true)') && versionTree.includes('else if (nextScrollTop < previousScrollTop) onViewportScrollChange?.(false)'), 'vertical version-tree scrolling must not immediately undo a wheel-triggered collapse while still at the top');

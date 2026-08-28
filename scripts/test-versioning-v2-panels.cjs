@@ -122,6 +122,9 @@ assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next
 const initialLayoutLoadSource = canvasHookSource.slice(canvasHookSource.indexOf('const loadServerLayout'), canvasHookSource.indexOf('useEffect(() => {\n    disposedRef.current = false'));
 assert(!initialLayoutLoadSource.includes('scrollTop = 0') && !initialLayoutLoadSource.includes('scrollLeft = 0'), 'an asynchronous saved-layout load must preserve a viewport the user already scrolled');
 assert(projectWorkspaceSource.includes('setFolderMarkSetup(createFolderMarkDraft') && projectWorkspaceSource.includes('<FolderMarkPanel'), 'ordinary folders must open the unified purpose-marking panel');
+assert(projectWorkspaceSource.includes('const scanExistingCandidates = async () =>')
+  && projectWorkspaceSource.includes('projectWorkspaceClient.listWorkspaceFolders(workspacePath, project.status, project.name)')
+  && projectWorkspaceSource.includes('for (const candidate of candidates) scheduleCandidate(candidate)'), 'export-folder onboarding must reconcile candidates that were created before the live watcher started');
 assert(projectWorkspaceSource.includes("draft.purpose === 'progress'") && projectWorkspaceSource.includes('await submitProgressSetup(setup)')
   && projectWorkspaceSource.includes("draft.purpose === 'broll' ? 'mixed' : draft.mediaKind"), 'the unified panel must route progress through graph registration and original/broll through restricted purpose adoption');
 assert(projectWorkspaceSource.includes("[browserRootLabel, normalizeProjectRelativePath(fileImportTarget)]"), 'file-import destination labels must show the active browser name instead of an internal inspiration workspace name');
@@ -168,6 +171,18 @@ const inlineRenameSource = projectWorkspaceSource.slice(
 );
 assert(inlineRenameSource.includes('activeFileEntries.find') && inlineRenameSource.includes('if (finalViewOpen) {')
   && inlineRenameSource.includes('await loadFinalViewEntries()'), 'favorite-view rename must resolve the real active entry and refresh the aggregate after committing');
+const fileShortcutSource = projectWorkspaceSource.slice(
+  projectWorkspaceSource.indexOf('const handleFileShortcut'),
+  projectWorkspaceSource.indexOf("window.addEventListener('keydown', handleFileShortcut)"),
+);
+assert(fileShortcutSource.indexOf("event.key === 'F2' && versionTreeOpen && selectedPaths.length") < fileShortcutSource.indexOf('!insideFileSurface'),
+  'F2 must rename the selected version-tree folder even when canvas focus is reported outside the inner file entry');
+const registeredProgressEntrySource = projectWorkspaceSource.slice(
+  projectWorkspaceSource.indexOf('const registeredProgressFolderForEntry'),
+  projectWorkspaceSource.indexOf('const entryIsInsideProgressFolder'),
+);
+assert(registeredProgressEntrySource.includes('folderPath === entryPath || folderRelativePath === entryRelativePath'),
+  'registered version folders must retain their dedicated rename route when physical entry metadata is stale but the version-relative path still matches');
 const beginRenameSource = projectWorkspaceSource.slice(
   projectWorkspaceSource.indexOf('const beginRename'),
   projectWorkspaceSource.indexOf('const batchRenameNames', projectWorkspaceSource.indexOf('const beginRename')),
@@ -529,6 +544,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   const supplementalCreates = [];
   const createVersionRequests = [];
   const nativeFileDragRequests = [];
+  const entryContextMenuRequests = [];
   const layoutNotices = [];
   const viewportScrollStates = [];
   let canvasController = null;
@@ -556,6 +572,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     onRequestSupplementalEdgeDelete(edge) { supplementalDeletes.push(edge); },
     onRequestSupplementalEdgeCreate(sourceProgressId, targetProgressId, edgeKind) { supplementalCreates.push({ sourceProgressId, targetProgressId, edgeKind }); },
     onRequestCreateVersion(source, target) { createVersionRequests.push({ sourceId: source.id, targetName: target.name }); },
+    onRequestEntryContextMenu(event, entry) { entryContextMenuRequests.push({ defaultPrevented: event.defaultPrevented, relativePath: entry.relativePath }); },
     onStartFileDrag(event, entry) { event.preventDefault(); nativeFileDragRequests.push(entry.relativePath); },
     onCancelRelationEdit() {},
     onNotice(message) { layoutNotices.push(message); },
@@ -623,6 +640,9 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(renameProbeMounts, 2, 'relinking the graph node to a new folderId must mount a fresh cover');
   assert.strictEqual(renameProbeUnmounts, 1, 'relinking must discard the previous physical folder cover');
   await React.act(async () => root.render(React.createElement(tree.ProjectVersionTree, treeProps)));
+  const trackedContextNode = allNodes(container).find(node => node.attributes.get('data-version-progress-id') === 'tracked');
+  await React.act(async () => dispatch(trackedContextNode, 'contextmenu', { button: 2, clientX: 200, clientY: 200 }));
+  assert.deepStrictEqual(entryContextMenuRequests, [{ defaultPrevented: true, relativePath: 'Tracked' }], 'the complete version-tree node surface must forward its context menu to file actions');
   const brollCanvasNodes = allNodes(container).filter(node => node.attributes.get('data-version-progress-id') === 'broll');
   assert.strictEqual(brollCanvasNodes.length, 1, 'a persisted mixed broll folder must render exactly once in the Other shelf');
   assert(brollCanvasNodes[0].textContent.includes('花絮'), 'broll must render a dedicated 花絮 badge instead of original/companion/preview');

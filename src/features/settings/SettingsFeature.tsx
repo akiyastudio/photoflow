@@ -343,7 +343,7 @@ const PROJECT_TOOLBAR_ITEMS: Record<ProjectToolbarActionId, { label: string; des
   'filename-selection': { label: '从文件名选片', description: '按文件名把选中的素材整理到选片文件夹', icon: <FileText size={17}/> },
   'select-media': { label: '选片', description: '把当前选择的图片或视频加入选片结果', icon: <CheckCircle2 size={17}/> },
   'video-tools': { label: '视频工具', description: '截取分镜帧、视频转码和视频切割', icon: <Video size={17}/> },
-  'image-tools': { label: '图片工具', description: 'PNG 转 JPG 和提取截图主图', icon: <ImageIcon size={17}/> },
+  'image-tools': { label: '图片工具', description: '图片转 JPG 和提取截图主图', icon: <ImageIcon size={17}/> },
   photoshop: { label: '用 Photoshop 打开', description: '用 Photoshop 打开所选图片、RAW 或 PSD/PSB', icon: <span className="flex h-[17px] w-[17px] items-center justify-center rounded border border-blue-400 text-[9px] font-bold text-blue-600">Ps</span> },
   'office-extract': { label: '提取文档图片', description: '提取 Word、PowerPoint 和 Excel 中的图片', icon: <FileImage size={17}/> },
   'version-management': { label: '版本管理', description: '管理素材版本或标记文件夹用途', icon: <GitBranch size={17}/> },

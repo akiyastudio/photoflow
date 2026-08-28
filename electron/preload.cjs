@@ -56,6 +56,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.send('run-python', invocation.scriptName, invocation.args, invocation.requestId, normalizePythonTaskPresentation(presentation));
   },
   cancelPythonTask: (requestId) => ipcRenderer.invoke('cancel-python', requestId),
+  controlPythonTask: (requestId, action) => ipcRenderer.invoke('control-python', requestId, action),
   getBirthdays: () => ipcRenderer.invoke('get-birthdays'),
   saveBirthdays: (data) => ipcRenderer.invoke('save-birthdays', data),
   onPythonEvent: (callback) => {
@@ -95,6 +96,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     const listener = (_event, action) => callback(action);
     ipcRenderer.on('toast-view:action', listener);
     return () => ipcRenderer.removeListener('toast-view:action', listener);
+  },
+  onToastViewPresentation: callback => {
+    if (typeof callback !== 'function') throw new TypeError('Toast view presentation callback must be a function');
+    const listener = (_event, presentation) => callback(presentation);
+    ipcRenderer.on('toast-view:presentation', listener);
+    return () => ipcRenderer.removeListener('toast-view:presentation', listener);
   },
   setComponentNotificationReady: update => ipcRenderer.invoke('component-host-notifications-ready', update),
   setComponentPageBounds: (instanceId, bounds) => ipcRenderer.invoke('component-host-set-bounds', instanceId, bounds),
@@ -138,7 +145,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   watchFileRoot: (workspacePath, status, name, options) => ipcRenderer.invoke('workspace-watch-file-root', workspacePath, status, name, options),
   unwatchFileRoot: (workspacePath, status, name) => ipcRenderer.invoke('workspace-unwatch-file-root', workspacePath, status, name),
   browseProjectFiles: (workspacePath, status, name, relativePath, cacheConfig) => ipcRenderer.invoke('workspace-browse-files', workspacePath, status, name, relativePath, cacheConfig),
-  inspectProjectToolSources: (workspacePath, status, name, relativePaths, collectVideos, collectDirectPng, collectRecursivePng) => ipcRenderer.invoke('workspace-inspect-tool-sources', workspacePath, status, name, relativePaths, collectVideos, collectDirectPng, collectRecursivePng),
+  inspectProjectToolSources: (workspacePath, status, name, relativePaths, collectVideos, collectDirectConvertibleImages, collectRecursiveConvertibleImages) => ipcRenderer.invoke('workspace-inspect-tool-sources', workspacePath, status, name, relativePaths, collectVideos, collectDirectConvertibleImages, collectRecursiveConvertibleImages),
   resolveProjectShortcut: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-resolve-shortcut', workspacePath, status, name, relativePath),
   materializeProjectExternalLinks: (workspacePath, status, name, relativePaths) => ipcRenderer.invoke('workspace-materialize-external-links', workspacePath, status, name, relativePaths),
   relinkProjectExternalFolder: (workspacePath, status, name, relativePath) => ipcRenderer.invoke('workspace-relink-external-folder', workspacePath, status, name, relativePath),

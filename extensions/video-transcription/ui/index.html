@@ -1,0 +1,17 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'">
+  <title>视频语音识别 / 字幕</title><link rel="stylesheet" href="style.css">
+</head>
+<body><main>
+  <header class="hero"><div><span class="eyebrow">LOCAL TRANSCRIPTION</span><h1>视频语音识别 <i>/</i> 字幕</h1><p>媒体只会通过 PhotoFlow 受限令牌进入组件私有存储。</p></div><div class="status" id="runtime-status">正在检查运行时…</div></header>
+  <section class="source-grid" aria-label="选择输入">
+    <button data-start="file"><strong>一个文件</strong><span>视频或音频</span></button><button data-start="files"><strong>多个文件</strong><span>批量选择</span></button><button data-start="folder"><strong>一个文件夹</strong><span>递归发现媒体</span></button><button data-project="selected"><strong>当前所选媒体</strong><span id="selection-label">来自项目</span></button><button data-project="all"><strong>全部项目视频</strong><span>扫描当前项目</span></button>
+  </section>
+  <div class="notice" id="notice" hidden></div>
+  <section class="workspace"><aside><div class="section-title"><h2>识别任务</h2><button id="refresh">刷新</button></div><div id="operations" class="operation-list"></div></aside><article><div class="section-title"><div><h2 id="detail-title">选择一个任务</h2><p id="detail-summary">逐文件进度、失败与 checkpoint 会保存在组件 SQLite 中。</p></div><div id="detail-actions"></div></div><div id="files" class="file-list empty">尚未选择任务</div></article></section>
+  <section class="search-panel"><div class="section-title"><div><h2>全文搜索</h2><p>搜索所有已识别字幕片段</p></div><form id="search-form"><input id="search-input" type="search" maxlength="200" placeholder="输入字幕关键词"><button>搜索</button></form></div><div id="search-results" class="results"></div></section>
+  <dialog id="segments-dialog"><form method="dialog"><button class="close" aria-label="关闭">×</button></form><h2 id="segments-title"></h2><div id="segments"></div></dialog>
+</main><script src="app.js"></script></body></html>

@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo } from 'react';
-import { FolderInput, ScanSearch, HardDrive, Play, Trash2, AlertCircle, Edit, X, Plus, User, Loader2, RotateCcw, Download, Scissors, Video, ChevronDown, ChevronUp, Crop, CheckCircle2 } from 'lucide-react';
+import { FolderInput, ScanSearch, HardDrive, Play, Pause, Save, Trash2, AlertCircle, Edit, X, Plus, User, Loader2, RotateCcw, Download, Scissors, Video, ChevronDown, ChevronUp, Crop, CheckCircle2 } from 'lucide-react';
 import { TaskProgress } from '../../components/TaskStatus';
 import { useTaskPresentation } from '../../components/useTaskPresentation';
 import type { AppConfig, LogEntry, MediaWorkflowImportManifest, ProjectStatus, SelectionPreflightResult, StorageDevice, VideoTranscodeSettings, WorkspaceProject } from '../../types';
@@ -18,6 +18,7 @@ import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, should
 import { isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from './storage-device-inventory-model';
 import { useStorageDeviceInventory } from './use-storage-device-inventory';
 import { getWorkspaceCatalog, readWorkspaceCatalogSnapshot, workspaceCatalogEventMatches } from '../../platform/workspace-catalog-client';
+import { BUILTIN_VIDEO_TRANSCODE_PRESETS, formatMediaBytes, normalizeVideoTranscodeSettings, readCustomVideoTranscodePresets, videoTranscodeWarnings, writeCustomVideoTranscodePresets, type VideoTranscodeCapabilities, type VideoTranscodeMediaInfo, type VideoTranscodePreset } from './video-transcode-model';
 
 export type { ImportCompletion } from './import-completion-model';
 
@@ -30,6 +31,11 @@ interface PythonEvent {
   requestId?: string;
   outputs?: string[];
   folderOutputs?: VideoTranscodeFolderOutput[];
+  mediaInfo?: VideoTranscodeMediaInfo[];
+  capabilities?: VideoTranscodeCapabilities;
+  estimatedOutputBytes?: number;
+  report?: VideoTranscodeMediaInfo[];
+  failedCount?: number;
 }
 
 export type VideoTranscodeFolderOutput = { sourceFolder: string; outputFolder: string };
@@ -65,6 +71,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [isRunning, setIsRunning] = useState(false);
   const [isCancelling, setIsCancelling] = useState(false);
+  const [isPaused, setIsPausedState] = useState(false);
   const [progress, setProgress] = useState(0);
   const [statusMsg, setStatusMsg] = useState(initialStatus);
   const [preview, setPreview] = useState<Record<string, any> | null>(null);
@@ -125,6 +132,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
         appendLog(event.message || '任务已取消。', 'warning');
         setIsRunning(false);
         setIsCancelling(false);
+        setIsPausedState(false);
         setProgress(0);
         setStatusMsg('已取消并回滚');
       } else if (event.type === 'complete') {
@@ -133,6 +141,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
         const failed = exitCode !== 0 || (taskHadErrorRef.current && !taskHadSuccessRef.current);
         setIsRunning(false);
         setIsCancelling(false);
+        setIsPausedState(false);
         if (failed) {
           setStatusMsg('发生错误');
         } else {
@@ -160,6 +169,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
     setProgress(0);
     setIsRunning(true);
     setIsCancelling(false);
+    setIsPausedState(false);
     setStatusMsg(startingStatus);
     const requestId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random().toString(16).slice(2)}`;
     requestIdRef.current = requestId;
@@ -183,7 +193,17 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
     return result.success;
   };
 
-  return { logs, isRunning, isCancelling, progress, statusMsg, preview, completion, clearPreview: () => setPreview(null), start, cancel };
+  const setPaused = async (paused: boolean) => {
+    if (!isRunning || !requestIdRef.current || isCancelling) return false;
+    const result = await window.electronAPI.controlPythonTask(requestIdRef.current, paused ? 'pause' : 'resume');
+    if (result.success) {
+      setIsPausedState(paused);
+      setStatusMsg(paused ? '队列已暂停' : '正在恢复编码…');
+    } else appendLog(result.error || '无法更改暂停状态。', 'error');
+    return result.success;
+  };
+
+  return { logs, isRunning, isCancelling, isPaused, progress, statusMsg, preview, completion, clearPreview: () => setPreview(null), start, cancel, setPaused };
 };
 
 const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath, brollDestinationPath, workspacePath, workspaceProjects, active = true, directSource = false, startupAutoImportRequest = null, startupAutoImportReady = false, startupAutoImportError = null, startupAutoImportSelections = [], importKind, onImportKindChange, deleteSourceAfterImport = true, generateJpgFromRaw = false, splitVideosOnImport = false, transcodeVideosOnImport = false, splitBrollVideosOnImport = false, transcodeBrollVideosOnImport = false, transcodeSettings, onChooseSourceFiles, onChooseSourceFolder, onDropSourcePaths, onLinkOnlyImport, onBusyChange, onImportConfigChange, onImportComplete, completedActionLabel = '继续导入', onCompletedAction }: { config?: AppConfig['smartImport'], drives?: string[], storageDevices?: StorageDevice[], destinationPath?: string | null, brollDestinationPath?: string | null, workspacePath?: string | null, workspaceProjects?: WorkspaceProject[], active?: boolean, directSource?: boolean, startupAutoImportRequest?: StartupSdAutoImportRequest | null, startupAutoImportReady?: boolean, startupAutoImportError?: string | null, startupAutoImportSelections?: Array<{ path: string; type: 'work' | 'broll' }>, importKind?: ImportMaterialKind, onImportKindChange?: (kind: ImportMaterialKind, sourcePaths: string[]) => void, deleteSourceAfterImport?: boolean, generateJpgFromRaw?: boolean, splitVideosOnImport?: boolean, transcodeVideosOnImport?: boolean, splitBrollVideosOnImport?: boolean, transcodeBrollVideosOnImport?: boolean, transcodeSettings?: VideoTranscodeSettings, onChooseSourceFiles?: () => void, onChooseSourceFolder?: () => void, onDropSourcePaths?: (paths: string[]) => void, onLinkOnlyImport?: (paths: string[]) => void | Promise<void>, onBusyChange?: (busy: boolean) => void, onImportConfigChange?: (config: AppConfig['smartImport']) => void, onImportComplete?: (result: ImportCompletion) => void | Promise<void>, completedActionLabel?: string, onCompletedAction?: () => void }) => {
@@ -1502,11 +1522,11 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
 
   return (
     <div className="w-full space-y-6">
-      {!embedded && <h2 className="text-2xl font-bold text-slate-800">PNG 转 JPG </h2>}
+      {!embedded && <h2 className="text-2xl font-bold text-slate-800">图片转 JPG</h2>}
       <div className={embedded ? 'space-y-6' : 'bg-white border border-slate-200 rounded-xl p-6 space-y-6'}>
 
-        <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} onChange={setTargetPaths} onChooseFiles={chooseFiles} onChooseFolder={chooseFolder} fileButtonLabel="追加 PNG" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="文件夹作为一个来源显示，执行时会递归处理其中的 PNG" emptyTitle="拖入 PNG 文件或文件夹"/>
-        <p className="flex items-center gap-1 text-xs text-slate-600"><AlertCircle size={12}/>{deleteOriginal ? '转换并验证成功后，原始 PNG 会移入回收站' : '转换后保留原始 PNG'}</p>
+        <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} onChange={setTargetPaths} onChooseFiles={chooseFiles} onChooseFolder={chooseFolder} fileButtonLabel="追加图片" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="支持 PNG、WebP、HEIC/HEIF、AVIF、TIFF、BMP 和 GIF；动态图片取第一帧，文件夹会递归处理" emptyTitle="拖入图片或文件夹"/>
+        <p className="flex items-center gap-1 text-xs text-slate-600"><AlertCircle size={12}/>{deleteOriginal ? '转换并验证成功后，原始图片会移入回收站' : '转换后保留原始图片'}</p>
 
         <div className="flex items-center justify-between gap-4 rounded-lg bg-slate-50 p-3 border border-slate-200">
           <label className="text-sm font-medium text-slate-700">JPG 画质</label>
@@ -1517,7 +1537,7 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
             <option value={75}>节省空间（75）</option>
           </select>
         </div>
-        <PanelSwitch title="转换成功后删除原始 PNG" description="JPG 生成并验证成功后，将原 PNG 移入回收站。" checked={deleteOriginal} disabled={isRunning} onChange={setDeleteOriginal}/>
+        <PanelSwitch title="转换成功后删除原始图片" description="JPG 生成并验证成功后，将原图片移入回收站；已有同名 JPG 不会被覆盖。" checked={deleteOriginal} disabled={isRunning} onChange={setDeleteOriginal}/>
         {/* Progress & Actions */}
         <TaskProgress
           logs={logs}
@@ -2120,6 +2140,24 @@ type VideoTranscodeViewProps = {
   onFolderTranscodeComplete?: (folderOutputs: VideoTranscodeFolderOutput[]) => void | Promise<void>;
 };
 
+const TranscodeOutputChoice = ({ selected, disabled, title, description, onSelect }: {
+  selected: boolean;
+  disabled: boolean;
+  title: string;
+  description: string;
+  onSelect: () => void;
+}) => <button
+  type="button"
+  role="radio"
+  aria-checked={selected}
+  disabled={disabled}
+  onClick={onSelect}
+  className={`flex w-full items-start gap-2 rounded-lg border p-3 text-left text-sm transition ${selected ? 'border-blue-400 bg-blue-50' : 'border-slate-200'} ${disabled ? 'cursor-not-allowed opacity-60' : 'cursor-pointer hover:border-blue-300 hover:bg-blue-50/40'}`}
+>
+  <span aria-hidden className={`mt-0.5 flex h-3.5 w-3.5 shrink-0 items-center justify-center rounded-full border ${selected ? 'border-blue-500' : 'border-slate-400'}`}>{selected && <span className="h-2 w-2 rounded-full bg-blue-500"/>}</span>
+  <span><b className="block text-slate-800">{title}</b><span className="mt-1 block text-xs leading-5 text-slate-500">{description}</span></span>
+</button>;
+
 const useSourcePathKinds = (paths: readonly string[], knownFolders: readonly string[] = []) => {
   const pathsKey = paths.join('\n');
   const foldersKey = knownFolders.join('\n');
@@ -2161,90 +2199,126 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   const initialTargetKey = initialTargetPaths.join('\n');
   const initialSourceFolderKey = initialSourceFolders.join('\n');
   const [sourcePaths, setSourcePaths] = useState(() => mergeSourcePaths(initialTargetPaths));
-  const [container, setContainer] = useState<VideoTranscodeSettings['container']>(initialSettings?.container ?? 'mp4');
-  const [videoMode, setVideoMode] = useState<VideoTranscodeSettings['videoMode']>(initialSettings?.videoMode ?? 'h264');
-  const [quality, setQuality] = useState<VideoTranscodeSettings['quality']>(initialSettings?.quality ?? 'balanced');
-  const [resolution, setResolution] = useState<VideoTranscodeSettings['resolution']>(initialSettings?.resolution ?? 'original');
-  const [frameRate, setFrameRate] = useState<VideoTranscodeSettings['frameRate']>(initialSettings?.frameRate ?? 'original');
-  const [audioMode, setAudioMode] = useState<VideoTranscodeSettings['audioMode']>(initialSettings?.audioMode ?? 'aac');
+  const [settings, setSettings] = useState(() => normalizeVideoTranscodeSettings(initialSettings));
   const [outputMode, setOutputMode] = useState<'new' | 'delete-original'>('new');
+  const [customPresets, setCustomPresets] = useState<VideoTranscodePreset[]>(() => readCustomVideoTranscodePresets(window.localStorage));
+  const [presetId, setPresetId] = useState('');
+  const [presetName, setPresetName] = useState('');
+  const [mediaInfo, setMediaInfo] = useState<VideoTranscodeMediaInfo[]>([]);
+  const [capabilities, setCapabilities] = useState<VideoTranscodeCapabilities | null>(null);
   const onSettingsChangeRef = React.useRef(onSettingsChange);
-  const { logs, isRunning, isCancelling, progress, statusMsg, completion, start, cancel } = usePythonTask('ffmpeg_transcode.py', '等待选择视频');
+  const task = usePythonTask('ffmpeg_transcode.py', '等待选择视频');
+  const inspection = usePythonTask('ffmpeg_transcode.py', '尚未分析媒体');
   const handledCompletionRef = React.useRef('');
+  const handledInspectionRef = React.useRef('');
   const paths = sourcePaths;
   const { pathKinds, resolvingKinds } = useSourcePathKinds(paths, initialSourceFolderKey.split('\n').filter(Boolean));
   const activeSourceFolders = useMemo(() => paths.filter(path => pathKinds[sourcePathIdentity(path)] === 'folder'), [pathKinds, paths]);
-  useEffect(() => {
-    setSourcePaths(mergeSourcePaths(initialTargetKey.split('\n')));
-  }, [initialTargetKey]);
+  const presets = [...BUILTIN_VIDEO_TRANSCODE_PRESETS, ...customPresets];
+  const warnings = videoTranscodeWarnings(settings, capabilities);
+  const estimatedOutputBytes = mediaInfo.reduce((sum, item) => sum + Number(item.estimatedOutputBytes || 0), 0);
+  const setSetting = <K extends keyof VideoTranscodeSettings>(key: K, value: VideoTranscodeSettings[K]) => setSettings(current => ({ ...current, [key]: value }));
+
+  useEffect(() => setSourcePaths(mergeSourcePaths(initialTargetKey.split('\n'))), [initialTargetKey]);
   useEffect(() => {
     if (!initialSettings) return;
-    setContainer(initialSettings.container);
-    setVideoMode(initialSettings.videoMode);
-    setQuality(initialSettings.quality);
-    setResolution(initialSettings.resolution);
-    setFrameRate(initialSettings.frameRate);
-    setAudioMode(initialSettings.audioMode);
+    const normalized = normalizeVideoTranscodeSettings(initialSettings);
+    setSettings(current => JSON.stringify(current) === JSON.stringify(normalized) ? current : normalized);
   }, [initialSettings]);
   useEffect(() => { onSettingsChangeRef.current = onSettingsChange; }, [onSettingsChange]);
+  useEffect(() => { onSettingsChangeRef.current?.(settings); }, [settings]);
+  useEffect(() => { setMediaInfo([]); }, [settings]);
   useEffect(() => {
-    onSettingsChangeRef.current?.({ container, videoMode, quality, resolution, frameRate, audioMode });
-  }, [audioMode, container, frameRate, quality, resolution, videoMode]);
-
+    if (settings.videoMode === 'copy') setSettings(current => ({ ...current, resolution: 'original', frameRate: 'original', frameRateMode: 'preserve', colorMode: 'auto', bitDepth: 'auto', rotation: 'auto', aspectMode: 'preserve', subtitleMode: current.subtitleMode === 'burn' ? 'copy' : current.subtitleMode }));
+    else if (settings.videoMode === 'prores') setSettings(current => ({ ...current, container: 'mov', bitDepth: '10' }));
+    else if (settings.videoMode === 'av1' && settings.container === 'mov') setSettings(current => ({ ...current, container: 'mp4' }));
+  }, [settings.videoMode]);
   useEffect(() => {
-    if (videoMode !== 'copy') return;
-    setResolution('original');
-    setFrameRate('original');
-  }, [videoMode]);
-  useEffect(() => {
-    if (!completion || handledCompletionRef.current === completion.requestId) return;
-    handledCompletionRef.current = completion.requestId;
-    const folderOutputs = Array.isArray(completion.event.folderOutputs) ? completion.event.folderOutputs : [];
+    if (!task.completion || handledCompletionRef.current === task.completion.requestId) return;
+    handledCompletionRef.current = task.completion.requestId;
+    const folderOutputs = Array.isArray(task.completion.event.folderOutputs) ? task.completion.event.folderOutputs : [];
     if (folderOutputs.length) void onFolderTranscodeComplete?.(folderOutputs);
-  }, [completion, onFolderTranscodeComplete]);
+  }, [task.completion, onFolderTranscodeComplete]);
+  useEffect(() => {
+    if (!inspection.completion || handledInspectionRef.current === inspection.completion.requestId) return;
+    handledInspectionRef.current = inspection.completion.requestId;
+    setMediaInfo(Array.isArray(inspection.completion.event.mediaInfo) ? inspection.completion.event.mediaInfo : []);
+    if (inspection.completion.event.capabilities) setCapabilities(inspection.completion.event.capabilities);
+  }, [inspection.completion]);
 
-  const chooseVideos = async () => {
-    const result = await window.electronAPI.chooseVideoFiles();
-    if (result.cancelled || !result.paths.length) return;
-    setSourcePaths(current => mergeSourcePaths(current, result.paths));
+  const taskArguments = () => [
+    ...paths, '--container', settings.container, '--video-mode', settings.videoMode,
+    '--quality', settings.quality, '--resolution', settings.resolution,
+    '--frame-rate', settings.frameRate, '--audio-mode', settings.audioMode,
+    '--subtitle-mode', settings.subtitleMode, '--color-mode', settings.colorMode,
+    '--bit-depth', settings.bitDepth, '--frame-rate-mode', settings.frameRateMode,
+    '--rotation', settings.rotation, '--aspect-mode', settings.aspectMode,
+    '--audio-track', settings.audioTrack, '--audio-bitrate-kbps', String(settings.audioBitrateKbps),
+    '--encoder-preset', settings.encoderPreset, '--retry-count', String(settings.retryCount),
+    ...(settings.videoBitrateMbps ? ['--video-bitrate-mbps', String(settings.videoBitrateMbps)] : []),
+    ...activeSourceFolders.flatMap(folder => ['--source-folder', folder]),
+  ];
+  const chooseVideos = async () => { const result = await window.electronAPI.chooseVideoFiles(); if (!result.cancelled) setSourcePaths(current => mergeSourcePaths(current, result.paths)); };
+  const chooseVideoFolder = async () => { const result = await window.electronAPI.chooseVideoFolder(); if (!result.cancelled && result.path) setSourcePaths(current => mergeSourcePaths(current, [result.path!])); };
+  const analyze = () => { if (paths.length && !inspection.isRunning && !task.isRunning) inspection.start([...taskArguments(), '--inspect-only'], '正在分析编码能力、色彩和轨道…'); };
+  const startTranscode = () => { if (paths.length && !task.isRunning && !inspection.isRunning && !sourcesLoading && !resolvingKinds) task.start([...taskArguments(), '--output-mode', outputMode], '正在准备视频转码队列…'); };
+  const applyPreset = (id: string) => { setPresetId(id); const selected = presets.find(value => value.id === id); if (selected) setSettings(selected.settings); };
+  const savePreset = () => {
+    const name = presetName.trim();
+    if (!name) return;
+    const next = [...customPresets, { id: globalThis.crypto?.randomUUID?.() || `preset-${Date.now()}`, name: name.slice(0, 40), settings }].slice(-30);
+    setCustomPresets(next); writeCustomVideoTranscodePresets(window.localStorage, next); setPresetName('');
   };
-  const chooseVideoFolder = async () => {
-    const result = await window.electronAPI.chooseVideoFolder();
-    if (result.cancelled || !result.path) return;
-    setSourcePaths(current => mergeSourcePaths(current, [result.path!]));
+  const deletePreset = () => {
+    if (!presetId || BUILTIN_VIDEO_TRANSCODE_PRESETS.some(value => value.id === presetId)) return;
+    const next = customPresets.filter(value => value.id !== presetId);
+    setCustomPresets(next); writeCustomVideoTranscodePresets(window.localStorage, next); setPresetId('');
   };
-  const startTranscode = () => {
-    if (!paths.length || isRunning || sourcesLoading || resolvingKinds) return;
-    start([
-      ...paths,
-      '--container', container,
-      '--video-mode', videoMode,
-      '--quality', quality,
-      '--resolution', resolution,
-      '--frame-rate', frameRate,
-      '--audio-mode', audioMode,
-      '--output-mode', outputMode,
-      ...activeSourceFolders.flatMap(folder => ['--source-folder', folder]),
-    ], '正在准备视频转码…');
-  };
+  const disabled = task.isRunning || inspection.isRunning;
+  const videoDisabled = disabled || settings.videoMode === 'copy';
 
-  return <div className={embedded ? 'w-full space-y-6' : 'mx-auto w-full max-w-5xl space-y-6'}>
-    {!embedded && <div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><Video size={25}/>视频转码</h2><p className="mt-1 text-sm text-slate-500">支持更换封装、H.264 和 H.265 转码。</p></div>}
+  return <div className={embedded ? 'w-full space-y-6' : 'mx-auto w-full max-w-6xl space-y-6'}>
+    {!embedded && <div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><Video size={25}/>Media Encoder Lite</h2><p className="mt-1 text-sm text-slate-500">H.264、HEVC 8/10-bit、AV1 硬件、ProRes、HDR、音轨与字幕批量处理。</p></div>}
     <div className={embedded ? 'space-y-6' : 'space-y-6 rounded-xl border border-slate-200 bg-white p-6'}>
-      {sourcesLoading && <div role="status" className="flex items-center gap-2 rounded-lg border border-blue-100 bg-blue-50 px-3 py-2 text-sm text-blue-700"><Loader2 size={16} className="animate-spin"/>项目媒体索引正在建立，完成后会自动加入所选文件或文件夹中的视频。</div>}
-      {!settingsOnly && <><SourcePathPicker paths={paths} pathKinds={pathKinds} pathAnnotations={Object.fromEntries(activeSourceFolders.map(folder => [sourcePathIdentity(folder), '将递归处理其中的视频']))} onChange={setSourcePaths} onChooseFiles={chooseVideos} onChooseFolder={chooseVideoFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="文件夹作为一个来源显示，执行时会递归处理其中的视频" emptyTitle="拖入视频或文件夹"/>{activeSourceFolders.length > 0 && <p className="rounded-md bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-700">已选择 {activeSourceFolders.length} 个文件夹；转码结果将保存到原文件夹旁的新“_转码”文件夹，并保留子目录结构。</p>}</>}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-3">
-        <label className="text-xs font-bold text-slate-600">输出封装<select value={container} disabled={isRunning} onChange={event => setContainer(event.target.value as typeof container)} className="form-input mt-1"><option value="mp4">MP4</option><option value="mov">MOV</option><option value="mkv">MKV</option></select></label>
-        <label className="text-xs font-bold text-slate-600">视频处理<select value={videoMode} disabled={isRunning} onChange={event => setVideoMode(event.target.value as typeof videoMode)} className="form-input mt-1"><option value="h264">H.264 · 兼容性优先</option><option value="h265">H.265 · 节省空间</option><option value="copy">仅更换封装</option></select></label>
-        <label className="text-xs font-bold text-slate-600">画质<select value={quality} disabled={isRunning || videoMode === 'copy'} onChange={event => setQuality(event.target.value as typeof quality)} className="form-input mt-1 disabled:opacity-50"><option value="high">高质量</option><option value="balanced">平衡</option><option value="small">更小文件</option></select></label>
-        <label className="text-xs font-bold text-slate-600">分辨率<select value={resolution} disabled={isRunning || videoMode === 'copy'} onChange={event => setResolution(event.target.value as typeof resolution)} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原分辨率</option><option value="2160p">最长边 4K</option><option value="1080p">最长边 1080p</option><option value="720p">最长边 720p</option></select></label>
-        <label className="text-xs font-bold text-slate-600">帧率<select value={frameRate} disabled={isRunning || videoMode === 'copy'} onChange={event => setFrameRate(event.target.value as typeof frameRate)} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原帧率</option>{['24', '25', '30', '50', '60'].map(value => <option key={value} value={value}>{value} fps</option>)}</select></label>
-        <label className="text-xs font-bold text-slate-600">音频<select value={audioMode} disabled={isRunning} onChange={event => setAudioMode(event.target.value as typeof audioMode)} className="form-input mt-1"><option value="copy">保留原音频编码</option><option value="aac">转换为 AAC · 192 kbps</option><option value="remove">移除音频</option></select></label>
+      {!settingsOnly && <SourcePathPicker paths={paths} pathKinds={pathKinds} pathAnnotations={Object.fromEntries(activeSourceFolders.map(folder => [sourcePathIdentity(folder), '递归加入编码队列']))} onChange={setSourcePaths} onChooseFiles={chooseVideos} onChooseFolder={chooseVideoFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={disabled} title="编码队列来源" itemLabel="个来源" description="文件夹会递归扫描，输出保留原子目录结构" emptyTitle="拖入视频或文件夹"/>}
+      <section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
+        <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
+          <label className="text-xs font-bold text-slate-600">编码预设<select value={presetId} disabled={disabled} onChange={event => applyPreset(event.target.value)} className="form-input mt-1"><option value="">自定义设置</option>{presets.map(value => <option key={value.id} value={value.id}>{value.builtIn ? '内置 · ' : ''}{value.name}</option>)}</select></label>
+          <label className="text-xs font-bold text-slate-600">保存为用户预设<input value={presetName} disabled={disabled} maxLength={40} onChange={event => setPresetName(event.target.value)} placeholder="输入预设名称" className="form-input mt-1"/></label>
+          <button type="button" disabled={disabled || !presetName.trim()} onClick={savePreset} className="mt-5 inline-flex items-center justify-center gap-1 rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white disabled:opacity-40"><Save size={14}/>保存</button>
+          <button type="button" disabled={disabled || !presetId || BUILTIN_VIDEO_TRANSCODE_PRESETS.some(value => value.id === presetId)} onClick={deletePreset} className="mt-5 inline-flex items-center justify-center gap-1 rounded-md border border-slate-300 px-3 py-2 text-xs font-bold text-slate-600 disabled:opacity-40"><Trash2 size={14}/>删除</button>
+        </div>
+      </section>
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
+        <label className="text-xs font-bold text-slate-600">输出封装<select value={settings.container} disabled={disabled || settings.videoMode === 'prores'} onChange={event => setSetting('container', event.target.value as VideoTranscodeSettings['container'])} className="form-input mt-1"><option value="mp4">MP4</option><option value="mov">MOV</option><option value="mkv">MKV</option></select></label>
+        <label className="text-xs font-bold text-slate-600">视频编码<select value={settings.videoMode} disabled={disabled} onChange={event => setSetting('videoMode', event.target.value as VideoTranscodeSettings['videoMode'])} className="form-input mt-1"><option value="h264">H.264</option><option value="h265">HEVC / H.265</option><option value="av1">AV1 · 硬件</option><option value="prores">Apple ProRes</option><option value="copy">仅更换封装</option></select></label>
+        <label className="text-xs font-bold text-slate-600">画质<select value={settings.quality} disabled={videoDisabled} onChange={event => setSetting('quality', event.target.value as VideoTranscodeSettings['quality'])} className="form-input mt-1 disabled:opacity-50"><option value="high">高质量</option><option value="balanced">平衡</option><option value="small">更小文件</option></select></label>
+        <label className="text-xs font-bold text-slate-600">编码速度<select value={settings.encoderPreset} disabled={videoDisabled} onChange={event => setSetting('encoderPreset', event.target.value as VideoTranscodeSettings['encoderPreset'])} className="form-input mt-1 disabled:opacity-50"><option value="fast">快速</option><option value="balanced">平衡</option><option value="quality">质量优先</option></select></label>
+        <label className="text-xs font-bold text-slate-600">色彩处理<select value={settings.colorMode} disabled={videoDisabled} onChange={event => setSetting('colorMode', event.target.value as VideoTranscodeSettings['colorMode'])} className="form-input mt-1 disabled:opacity-50"><option value="auto">自动识别并保留</option><option value="sdr">Rec.709 SDR</option><option value="hdr10">HDR10 · PQ/BT.2020</option><option value="hlg">HLG · BT.2020</option><option value="hdr-to-sdr">HDR 转 Rec.709 SDR</option></select></label>
+        <label className="text-xs font-bold text-slate-600">位深<select value={settings.bitDepth} disabled={videoDisabled || ['hdr10', 'hlg'].includes(settings.colorMode) || settings.videoMode === 'prores'} onChange={event => setSetting('bitDepth', event.target.value as VideoTranscodeSettings['bitDepth'])} className="form-input mt-1 disabled:opacity-50"><option value="auto">跟随来源</option><option value="8">8-bit</option><option value="10">10-bit</option></select></label>
+        <label className="text-xs font-bold text-slate-600">分辨率<select value={settings.resolution} disabled={videoDisabled} onChange={event => setSetting('resolution', event.target.value as VideoTranscodeSettings['resolution'])} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原分辨率</option><option value="2160p">最长边 4K</option><option value="1080p">最长边 1080p</option><option value="720p">最长边 720p</option></select></label>
+        <label className="text-xs font-bold text-slate-600">帧率模式<select value={settings.frameRateMode} disabled={videoDisabled} onChange={event => setSetting('frameRateMode', event.target.value as VideoTranscodeSettings['frameRateMode'])} className="form-input mt-1 disabled:opacity-50"><option value="preserve">保持时间戳</option><option value="cfr">CFR 固定帧率</option><option value="vfr">VFR 可变帧率</option></select></label>
+        <label className="text-xs font-bold text-slate-600">目标帧率<select value={settings.frameRate} disabled={videoDisabled || settings.frameRateMode !== 'cfr'} onChange={event => setSetting('frameRate', event.target.value as VideoTranscodeSettings['frameRate'])} className="form-input mt-1 disabled:opacity-50"><option value="original">来源帧率</option>{['24', '25', '30', '50', '60'].map(value => <option key={value} value={value}>{value} fps</option>)}</select></label>
+        <label className="text-xs font-bold text-slate-600">旋转<select value={settings.rotation} disabled={videoDisabled} onChange={event => setSetting('rotation', event.target.value as VideoTranscodeSettings['rotation'])} className="form-input mt-1 disabled:opacity-50"><option value="auto">自动应用来源方向</option><option value="0">不旋转</option><option value="90">顺时针 90°</option><option value="180">180°</option><option value="270">逆时针 90°</option></select></label>
+        <label className="text-xs font-bold text-slate-600">像素宽高比<select value={settings.aspectMode} disabled={videoDisabled} onChange={event => setSetting('aspectMode', event.target.value as VideoTranscodeSettings['aspectMode'])} className="form-input mt-1 disabled:opacity-50"><option value="preserve">保留 SAR/DAR</option><option value="square-pixels">转为方形像素</option></select></label>
+        <label className="text-xs font-bold text-slate-600">自定义视频码率<input type="number" min="0.1" max="800" step="0.1" value={settings.videoBitrateMbps ?? ''} disabled={videoDisabled || settings.videoMode === 'prores'} onChange={event => setSetting('videoBitrateMbps', event.target.value ? Number(event.target.value) : null)} placeholder="自动（Mbps）" className="form-input mt-1 disabled:opacity-50"/></label>
+        <label className="text-xs font-bold text-slate-600">音轨<select value={settings.audioTrack} disabled={disabled || settings.audioMode === 'remove'} onChange={event => setSetting('audioTrack', event.target.value as VideoTranscodeSettings['audioTrack'])} className="form-input mt-1"><option value="all">全部音轨</option><option value="first">仅第一音轨</option></select></label>
+        <label className="text-xs font-bold text-slate-600">音频处理<select value={settings.audioMode} disabled={disabled} onChange={event => setSetting('audioMode', event.target.value as VideoTranscodeSettings['audioMode'])} className="form-input mt-1"><option value="copy">复制编码</option><option value="aac">AAC</option><option value="remove">移除音频</option></select></label>
+        <label className="text-xs font-bold text-slate-600">AAC 码率<select value={settings.audioBitrateKbps} disabled={disabled || settings.audioMode !== 'aac'} onChange={event => setSetting('audioBitrateKbps', Number(event.target.value) as VideoTranscodeSettings['audioBitrateKbps'])} className="form-input mt-1 disabled:opacity-50">{[96, 128, 160, 192, 256, 320].map(value => <option key={value} value={value}>{value} kbps</option>)}</select></label>
+        <label className="text-xs font-bold text-slate-600">字幕<select value={settings.subtitleMode} disabled={disabled} onChange={event => setSetting('subtitleMode', event.target.value as VideoTranscodeSettings['subtitleMode'])} className="form-input mt-1"><option value="copy">复制字幕轨</option><option value="burn">烧录第一字幕轨</option><option value="remove">移除字幕</option></select></label>
+        <label className="text-xs font-bold text-slate-600">失败自动重试<select value={settings.retryCount} disabled={disabled} onChange={event => setSetting('retryCount', Number(event.target.value) as VideoTranscodeSettings['retryCount'])} className="form-input mt-1">{[0, 1, 2, 3].map(value => <option key={value} value={value}>{value} 次</option>)}</select></label>
       </div>
-      {!settingsOnly && <div className="grid gap-3 md:grid-cols-2"><label className={`cursor-pointer rounded-lg border p-3 text-sm ${outputMode === 'new' ? 'border-blue-400 bg-blue-50' : 'border-slate-200'} ${isRunning ? 'cursor-not-allowed opacity-60' : ''}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="new" checked={outputMode === 'new'} disabled={isRunning} onChange={() => setOutputMode('new')} className="mt-0.5"/><span><b className="block text-slate-800">另存为新视频</b><span className="mt-1 block text-xs leading-5 text-slate-500">{activeSourceFolders.length ? '文件夹任务输出到原文件夹旁的新“_转码”目录。' : '保存在原视频旁边，文件名增加“_转码”。发生重名时自动编号。'}</span></span></span></label><label className={`cursor-pointer rounded-lg border p-3 text-sm ${outputMode === 'delete-original' ? 'border-blue-400 bg-blue-50' : 'border-slate-200'} ${isRunning ? 'cursor-not-allowed opacity-60' : ''}`}><span className="flex items-start gap-2"><input type="radio" name="transcode-output" value="delete-original" checked={outputMode === 'delete-original'} disabled={isRunning} onChange={() => setOutputMode('delete-original')} className="mt-0.5"/><span><b className="block text-slate-800">转码成功后删除原视频</b><span className="mt-1 block text-xs leading-5 text-slate-500">新视频确认可以正常播放后，原视频会移入回收站。转码失败的视频不会删除。</span></span></span></label></div>}
-      {videoMode === 'h264' && <div className="rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800">H.264 兼容性更好；不保留 HDR 或 10-bit。可用时自动使用显卡。</div>}
-      {videoMode === 'h265' && <div className="rounded-lg bg-blue-50 px-3 py-2 text-xs leading-5 text-blue-800">H.265 文件更小，但兼容性较低；不保留 HDR 或 10-bit。可用时自动使用显卡。</div>}
-      {!settingsOnly && <TaskProgress logs={logs} progress={progress} isRunning={isRunning} reportToTaskCenter={false} idleMessage={sourcesLoading || resolvingKinds ? '正在读取来源…' : statusMsg} statusMessage={sourcesLoading || resolvingKinds ? '正在读取来源…' : statusMsg} action={<button type="button" onClick={isRunning ? () => void cancel() : startTranscode} disabled={isCancelling || sourcesLoading || resolvingKinds || (!isRunning && !paths.length)} className={`flex items-center gap-2 rounded-lg px-6 py-2.5 font-bold transition ${isRunning ? 'bg-red-600 text-white hover:bg-red-500' : paths.length && !sourcesLoading && !resolvingKinds ? 'bg-blue-600 text-white hover:bg-blue-500' : 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400'}`}>{isRunning ? isCancelling ? <Loader2 size={17} className="animate-spin"/> : <X size={17}/> : sourcesLoading || resolvingKinds ? <Loader2 size={17} className="animate-spin"/> : <Play size={17} fill="currentColor"/>}{isRunning ? isCancelling ? '正在取消…' : '取消转码' : sourcesLoading || resolvingKinds ? '正在读取来源' : '开始转码'}</button>}/>}</div>
+      {settingsOnly && <div className="flex items-center gap-3"><button type="button" disabled={inspection.isRunning || task.isRunning} onClick={() => inspection.start(['--inspect-only'], '正在检测媒体运行库与硬件编码能力…')} className="rounded-md border border-blue-300 px-4 py-2 text-sm font-bold text-blue-700 disabled:opacity-40">{inspection.isRunning ? '正在检测…' : '检测编码器与滤镜能力'}</button><span className="text-xs text-slate-500">{capabilities ? `可用硬件：${capabilities.usableHardwareEncoders?.join('、') || '无'}；滤镜：${capabilities.filters.join('、') || '基础集'}` : inspection.statusMsg}</span></div>}
+      {warnings.map(message => <div key={message} className="flex gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800"><AlertCircle size={15} className="mt-0.5 shrink-0"/>{message}</div>)}
+      {mediaInfo.filter(item => item.dynamicHdr).map(item => <div key={`dynamic-hdr:${item.path}`} className="flex gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800"><AlertCircle size={15} className="mt-0.5 shrink-0"/>{item.name} 含 {item.dynamicHdr} 动态元数据；自动模式会阻止有损转码，请改用仅换封装或明确转换为 HDR10/SDR。</div>)}
+      {!settingsOnly && <>
+        <div className="flex flex-wrap items-center gap-3"><button type="button" disabled={!paths.length || disabled || resolvingKinds} onClick={analyze} className="rounded-md border border-blue-300 px-4 py-2 text-sm font-bold text-blue-700 disabled:opacity-40">{inspection.isRunning ? '正在分析…' : '分析媒体与设备'}</button><span className="text-sm text-slate-600">{mediaInfo.length > 0 ? `${mediaInfo.length} 个视频 · 预计输出 ${formatMediaBytes(estimatedOutputBytes)}` : inspection.statusMsg}</span></div>
+        {mediaInfo.length > 0 && <div className="max-h-56 overflow-auto rounded-lg border border-slate-200"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-100 text-slate-600"><tr><th className="p-2">文件</th><th className="p-2">画面</th><th className="p-2">色彩</th><th className="p-2">轨道</th><th className="p-2">预计输出</th></tr></thead><tbody>{mediaInfo.map(item => <tr key={item.path} className="border-t border-slate-100"><td className="max-w-48 truncate p-2" title={item.path}>{item.name}</td><td className="p-2">{item.codec} · {item.pixelFormat}<br/>{item.width}×{item.height} · {item.frameRate} fps<br/>SAR {item.sar} / DAR {item.dar} / {item.rotation}°</td><td className="p-2">{item.hdrKind} · {item.bitDepth}-bit<br/>{item.primaries}/{item.transfer}/{item.matrix}</td><td className="p-2">音频 {item.audioTracks} · 字幕 {item.subtitleTracks}</td><td className="p-2">{formatMediaBytes(item.estimatedOutputBytes)}</td></tr>)}</tbody></table></div>}
+        <div role="radiogroup" aria-label="转码后如何保存" className="grid gap-3 md:grid-cols-2"><TranscodeOutputChoice selected={outputMode === 'new'} disabled={disabled} title="另存为新视频" description={activeSourceFolders.length ? '输出到来源文件夹旁的新“_转码”目录，并保留目录结构。' : '保存在原视频旁，文件名增加“_转码”。'} onSelect={() => setOutputMode('new')}/><TranscodeOutputChoice selected={outputMode === 'delete-original'} disabled={disabled} title="验证成功后移入回收站" description="只有时长、位深和 HDR 色彩标记校验通过后才替换；失败文件保留原视频。" onSelect={() => setOutputMode('delete-original')}/></div>
+        {task.completion?.event.report?.length ? <div className="rounded-lg bg-emerald-50 px-3 py-2 text-xs text-emerald-800">技术校验完成：{task.completion.event.report.length} 个输出有效{task.completion.event.failedCount ? `，${task.completion.event.failedCount} 个失败` : ''}。</div> : null}
+        <TaskProgress logs={task.logs} progress={task.progress} isRunning={task.isRunning} reportToTaskCenter={false} idleMessage={sourcesLoading || resolvingKinds ? '正在读取来源…' : task.statusMsg} statusMessage={sourcesLoading || resolvingKinds ? '正在读取来源…' : task.statusMsg} action={<div className="flex gap-2">{task.isRunning && !task.isCancelling && <button type="button" onClick={() => void task.setPaused(!task.isPaused)} className="flex items-center gap-2 rounded-lg border border-slate-300 bg-white px-4 py-2.5 font-bold text-slate-700">{task.isPaused ? <Play size={17}/> : <Pause size={17}/>}{task.isPaused ? '继续' : '暂停'}</button>}<button type="button" onClick={task.isRunning ? () => void task.cancel() : startTranscode} disabled={task.isCancelling || inspection.isRunning || sourcesLoading || resolvingKinds || (!task.isRunning && !paths.length)} className={`flex items-center gap-2 rounded-lg px-6 py-2.5 font-bold transition ${task.isRunning ? 'bg-red-600 text-white hover:bg-red-500' : paths.length && !disabled && !resolvingKinds ? 'bg-blue-600 text-white hover:bg-blue-500' : 'cursor-not-allowed border border-slate-200 bg-slate-100 text-slate-400'}`}>{task.isRunning ? task.isCancelling ? <Loader2 size={17} className="animate-spin"/> : <X size={17}/> : <Play size={17} fill="currentColor"/>}{task.isRunning ? task.isCancelling ? '正在取消…' : '取消队列' : '开始编码'}</button></div>}/>
+      </>}
+    </div>
   </div>;
 };
 

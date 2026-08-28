@@ -794,7 +794,7 @@ html.dark .usage-onboarding__panel { box-shadow:0 30px 90px rgba(0,0,0,.42),0 0 
 .toast-view-page,
 .toast-view-page body,
 .toast-view-page #toast-view-root { width:100%; min-height:0; margin:0; overflow:hidden; background:transparent!important; }
-.top-toast-stack--view { position:relative; left:auto; top:auto; width:100%; max-height:100vh; transform:none; padding-right:.25rem; }
+.top-toast-stack--view { position:relative; left:auto; top:auto; box-sizing:border-box; width:100%; max-height:100vh; transform:none; overflow-y:auto; padding-right:.25rem; }
 .app-notice-toast {
   display:flex;
   align-self:center;

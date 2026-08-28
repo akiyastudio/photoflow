@@ -18,14 +18,14 @@ try {
     licenseArchive: create('licenses.zip'),
   };
   const ffmpeg = {
-    schemaVersion: 2,
+    schemaVersion: 3,
     kind: 'photoflow-ffmpeg-runtime',
     platform: 'windows-x64',
     license: 'GPL-2.0-or-later',
     reproducibleSource: true,
     ffmpeg: { version: '7.1.1', commit: 'a'.repeat(40) },
-    configureFlags: ['--enable-gpl', '--enable-libx264', '--enable-libx265', '--enable-zlib', '--enable-mediafoundation', '--enable-d3d11va', '--enable-ffnvcodec', '--enable-nvenc', '--disable-autodetect', '--disable-network'],
-    components: [{ name: 'x264', commit: 'b'.repeat(40) }, { name: 'x265', commit: 'c'.repeat(40) }, { name: 'zlib', commit: 'e'.repeat(40) }, { name: 'nv-codec-headers', commit: 'f'.repeat(40) }],
+    configureFlags: ['--enable-gpl', '--enable-libx264', '--enable-libx265', '--enable-libass', '--enable-libzimg', '--enable-zlib', '--enable-mediafoundation', '--enable-d3d11va', '--enable-ffnvcodec', '--enable-nvenc', '--disable-autodetect', '--disable-network'],
+    components: ['x264', 'x265', 'zlib', 'zimg', 'freetype', 'fribidi', 'harfbuzz', 'libass', 'nv-codec-headers'].map(name => ({ name, commit: 'b'.repeat(40) })),
     artifacts,
   };
   assert.doesNotThrow(() => validateFfmpegManifest(ffmpeg, root));

@@ -2,9 +2,10 @@
 import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
-import { AlertTriangle, Loader2, Settings, UsersRound, X } from 'lucide-react';
+import { AlertTriangle, Loader2, Settings, X } from 'lucide-react';
 import { TeamRetouchManager } from './legacy/TeamRetouchManager';
 import { PersonIdentityManager } from './legacy/PersonIdentityManager';
+import { TeamRetouchBrand } from './legacy/TeamRetouchBrand';
 import { LegacyDialogProvider } from './legacy/legacy-dialog';
 import type { TeamRetouchStep } from './legacy/TeamRetouchSteps';
 import { notify, rpc, type ComponentContext } from './sdk';
@@ -47,7 +48,7 @@ const applyResolvedTheme = (resolvedTheme: 'light' | 'dark') => {
 const TeamHistoryLoadSurface = ({ initialLoading, loadError, entriesLoaded, entryCount, retry, openSettings }: { initialLoading: boolean; loadError: string; entriesLoaded: boolean; entryCount: number; retry: () => void; openSettings: () => void }) => {
   const presentation = historyLoadPresentation({ initialLoading, loadError, entriesLoaded, entryCount });
   return <div className="team-shell pf-canvas fixed inset-x-0 bottom-0 top-0 z-[310] flex flex-col">
-    <header className="team-toolbar pf-toolbar flex min-h-16 items-center gap-3 px-5 py-3"><span className="team-icon-tile pf-icon-tile p-2"><UsersRound size={20}/></span><div><h2 className="font-bold text-slate-900">{presentation.title}</h2><p className="mt-0.5 text-xs text-slate-500">恢复已登记历史，再合并本次明确选择的图片。</p></div><button type="button" onClick={openSettings} title="团片协作设置" className="ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100"><Settings size={20}/></button></header>
+    <header className="team-toolbar pf-toolbar flex min-h-14 items-center gap-3 px-4 py-2"><TeamRetouchBrand/><div><h2 className="text-sm font-bold text-slate-900">{presentation.title.replace(/^团片协作 · /, '')}</h2><p className="mt-0.5 text-xs text-slate-500">恢复已登记历史，再合并本次明确选择的图片。</p></div><button type="button" onClick={openSettings} title="团片协作设置" className="ml-auto rounded-md p-2 text-slate-500 hover:bg-slate-100"><Settings size={18}/></button></header>
     <main className="flex min-h-0 flex-1 items-center justify-center p-6">{presentation.phase === 'loading' ? <div role="status" aria-live="polite" className="team-card pf-card flex min-h-52 w-full max-w-3xl items-center justify-center text-sm font-bold text-slate-600"><Loader2 size={18} className="mr-2 animate-spin text-blue-600"/>正在读取团片历史…</div> : <div role="alert" className="team-card pf-card flex min-h-52 w-full max-w-3xl flex-col items-center justify-center gap-3 px-6 text-center"><AlertTriangle size={24} className="text-red-600"/><p className="font-bold text-red-700">团片历史读取失败</p><p className="max-w-2xl text-xs leading-5 text-slate-500">{loadError || '暂时无法读取团片历史，请重试。'}</p><button type="button" className="pf-button-primary dialog-primary" onClick={retry}>重新读取团片历史</button></div>}</main>
   </div>;
 };
