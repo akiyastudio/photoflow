@@ -167,6 +167,12 @@ const main = async () => {
   await assert.rejects(expiredRunner({ command: 'python', args: [] }, 'expired-json', 1000, undefined, undefined, Date.now() - 1), error => error.code === 'PROCESS_TIMEOUT');
   assert.equal(expiredSpawned, false, 'expired JSON commands must not spawn a child');
 
+  let playbackCleanup = 0;
+  supervisor.launch({ id: 'playback:owned', kind: 'media-playback-backend', protocol: 'media-playback-backend-v1', owner: { componentId: 'fixture-player', playbackSessionId: 'session-owned' }, command: 'player.exe', onExitCleanup: () => { playbackCleanup += 1; } });
+  assert.equal(supervisor.list().find(item => item.id === 'playback:owned').owner.componentId, 'fixture-player');
+  assert.equal(await supervisor.stopWhere(status => status.owner?.componentId === 'fixture-player', 'component-uninstall'), 1);
+  await delay(5); assert.equal(playbackCleanup, 1, 'owner-scoped stop must run playback cleanup exactly once');
+
   await supervisor.stopAll();
   assert.deepStrictEqual(supervisor.list(), []);
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
@@ -177,7 +183,7 @@ const main = async () => {
     'electron/services/recycle-bin-service.cjs',
     'electron/services/file-clipboard-service.cjs',
     'electron/services/file-publication-service.cjs',
-    'electron/services/advanced-video-service.cjs',
+    'electron/services/video-playback-process-service.cjs',
     'electron/services/image-thumbnail-runtime.cjs',
     'electron/modules/broll-import.cjs',
   ]) {

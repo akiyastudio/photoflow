@@ -269,7 +269,7 @@ const VersionResource = ({ version, cacheConfig, videoPlaybackSettings, classNam
     setVideoPlayerError(message);
     window.electronAPI.reportRendererError('Video player failed in version manager', `${version.filePath}: ${message}`);
   }} onMetadata={() => undefined}/></div>;
-  if (kind === 'video' && videoPlayback && videoPlaybackFailed) return <div role="alert" style={contentStyle} className={`flex flex-col items-center justify-center bg-slate-950 p-4 text-center text-white ${className}`}><AlertTriangle size={26} className="text-red-400"/><p className="mt-2 text-sm font-bold">视频播放器无法启动</p><p className="mt-1 max-w-sm text-xs text-slate-300">{videoPlayerError || '请修复或重新安装视频播放器运行时。'}</p></div>;
+  if (kind === 'video' && videoPlayback && videoPlaybackFailed) return <div role="alert" style={contentStyle} className={`flex flex-col items-center justify-center bg-slate-950 p-4 text-center text-white ${className}`}><AlertTriangle size={26} className="text-red-400"/><p className="mt-2 text-sm font-bold">视频播放器无法启动</p><p className="mt-1 max-w-sm text-xs text-slate-300">{videoPlayerError || 'Chromium 与高级解码组件均无法播放此视频；请安装或修复高级解码组件，或使用系统播放器。'}</p></div>;
   return <div className={`relative flex items-center justify-center overflow-hidden bg-slate-100 ${className}`}>
     {resource.url ? <OrientedVersionImage src={resource.url} alt={version.versionName} orientationMatrix={resource.orientationMatrix} contentStyle={contentStyle}/> : <ImageIcon size={28} className="text-slate-400"/>}
     {loading && <span className="absolute rounded-full bg-slate-900/70 p-2 text-white"><Loader2 size={16} className="animate-spin"/></span>}

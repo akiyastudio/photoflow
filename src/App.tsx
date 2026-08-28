@@ -12,7 +12,7 @@ import { browserPageActivation } from './features/app/workspace-tab-model';
 import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundTaskIndicator';
 import { useTaskCenter } from './features/background-tasks/TaskCenter';
 import { useUserFacingToast } from './features/app/useUserFacingToast';
-import { rendererErrorFingerprint, rendererErrorNoticeSummary, shouldReportRendererError, type RendererErrorOccurrence } from './features/app/renderer-error-notice-model';
+import { useRendererErrorReporting } from './features/app/useRendererErrorReporting';
 import { DomainHealthBanner } from './features/app/DomainHealthBanner';
 import { ComponentPageSurface } from './features/components/ComponentPageSurface'; import { ComponentSettingsPageSurface } from './features/components/ComponentSettingsPageSurface';
 import { ComponentContributionDock } from './features/components/ComponentContributionDock';
@@ -27,18 +27,11 @@ import { normalizeSavedSdDeviceRecords, normalizeSavedSdDriveVideoActions } from
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
 import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
 import type { AppConfig, AppUpdateInfo, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentSettingsPageContribution, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
-import { ColumnResizeHandle } from './features/app/AppShellLayout';
+import { normalizeVideoShortcutBindings } from './contracts/video-shortcuts'; import { LEGACY_VIDEO_PLAYBACK_SETTINGS_ID } from './compatibility/legacy-video-playback-settings'; import { ColumnResizeHandle } from './features/app/AppShellLayout';
 import { clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
 import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, IMAGE_SELECTION_FOLDER_NAME, VIDEO_SELECTION_FOLDER_NAME, isMac, localDateKey, normalizeHomeOrder, normalizeMediaCacheSize, normalizeProjectCategories, normalizeProjectToolbar, normalizeVideoPreviewQuality } from './features/app/app-config';
 import { normalizeSubtitleFontSize } from './features/app/video-player-settings';
 type WorkspaceToolKind = 'version'; type WorkspaceToolTab = { ownerPageId: string; projectId: string; projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
-interface PythonEvent { type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview';
-  message: string;
-  data?: any;
-  progress?: number;
-  scriptName?: string;
-  requestId?: string;
-}
 const BACKGROUND_TASK_DRAWER_STORAGE_KEY = 'photoflow:background-task-drawer-width';
 const BACKGROUND_TASK_DRAWER_DEFAULT_WIDTH = 320;
 const BACKGROUND_TASK_DRAWER_MIN_WIDTH = 260;
@@ -65,7 +58,7 @@ const App: React.FC = () => {
   const showNotice = useCallback((message: string, durationOrTone?: number | 'info' | 'success' | 'warning' | 'error') => {
     toast.show(message, durationOrTone);
   }, [toast]);
-  const autoBackedUpImportTasksRef = useRef(new Set<string>()); const lastRendererErrorRef = useRef<RendererErrorOccurrence | null>(null);
+  const autoBackedUpImportTasksRef = useRef(new Set<string>());
   const cacheCleanupCheckedRef = useRef(false);
   const [homeOrder, setHomeOrder] = useState<HomeCardId[]>(DEFAULT_HOME_ORDER);
   const [draggedHomeCard, setDraggedHomeCard] = useState<HomeCardId | null>(null);
@@ -292,37 +285,7 @@ const App: React.FC = () => {
     window.localStorage.setItem('photoflow:components-cache', JSON.stringify(nextComponents));
     setComponentInstallPath(result.installPath || '');
   }), []);
-  useEffect(() => {
-    const report = (message: string, details?: string) => {
-      const now = Date.now(); if (!shouldReportRendererError(lastRendererErrorRef.current, message, now)) return;
-      lastRendererErrorRef.current = { fingerprint: rendererErrorFingerprint(message), reportedAt: now }; showNotice(`发生错误：${rendererErrorNoticeSummary(message)}`);
-      window.electronAPI?.reportRendererError?.(message, details);
-    };
-    const originalConsoleError = console.error;
-    console.error = (...values: unknown[]) => {
-      originalConsoleError(...values);
-      const message = values.map(value => value instanceof Error ? value.message : String(value)).join(' ');
-      report(message || '界面操作失败', values.map(value => value instanceof Error ? value.stack : String(value)).join('\n'));
-    };
-    const handleWindowError = (event: ErrorEvent) => report(event.message || '界面运行异常', event.error?.stack);
-    const handleUnhandledRejection = (event: PromiseRejectionEvent) => {
-      const reason = event.reason;
-      report(reason instanceof Error ? reason.message : String(reason || '异步操作失败'), reason instanceof Error ? reason.stack : undefined);
-    };
-    const removePythonListener = window.electronAPI?.onPythonEvent?.((event: PythonEvent) => {
-      if (event.type === 'error') report(event.message || `${event.scriptName || '后台任务'}执行失败`);
-    });
-    const removeMainErrorListener = window.electronAPI?.onAppError?.(message => report(message));
-    window.addEventListener('error', handleWindowError);
-    window.addEventListener('unhandledrejection', handleUnhandledRejection);
-    return () => {
-      console.error = originalConsoleError;
-      window.removeEventListener('error', handleWindowError);
-      window.removeEventListener('unhandledrejection', handleUnhandledRejection);
-      removePythonListener?.();
-      removeMainErrorListener?.();
-    };
-  }, [showNotice]);
+  useRendererErrorReporting(showNotice);
 
   useEffect(() => {
     const loadConfig = async () => {
@@ -341,13 +304,16 @@ const App: React.FC = () => {
               sensitivity: legacyResearch?.sensitivity ?? legacyInspiration?.sensitivity ?? (legacyThreshold !== undefined && legacyThreshold >= 0.98 ? 'high' : legacyThreshold !== undefined && legacyThreshold <= 0.85 ? 'low' : 'standard'),
               minDuration: legacyResearch?.minDuration ?? legacyInspiration?.minDuration ?? 0.2,
             };
-            const legacyAdvancedVideo = fileConfig.componentSettings?.['video-playback-mpv'];
+            const legacyAdvancedVideo = fileConfig.componentSettings?.[LEGACY_VIDEO_PLAYBACK_SETTINGS_ID] as Partial<AppConfig['videoPlayback']> | undefined;
             const videoPlayback: AppConfig['videoPlayback'] = {
               arrowKeyAction: fileConfig.videoPlayback?.arrowKeyAction === 'navigate' ? 'navigate' : fileConfig.videoPlayback?.arrowKeyAction === 'seek' ? 'seek' : legacyAdvancedVideo?.arrowKeyAction === 'navigate' ? 'navigate' : 'seek',
               subtitlesEnabled: fileConfig.videoPlayback?.subtitlesEnabled === true,
               subtitlePreferredLanguages: Array.isArray(fileConfig.videoPlayback?.subtitlePreferredLanguages) ? fileConfig.videoPlayback.subtitlePreferredLanguages.map(value => String(value).trim().toLowerCase()).filter(Boolean).slice(0, 8) : ['zh', 'chi', 'zho'],
               subtitleSize: normalizeSubtitleFontSize(fileConfig.videoPlayback?.subtitleSize),
               subtitleStyle: fileConfig.videoPlayback?.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard',
+              hdrMode: ['sdr', 'hdr-passthrough', 'tone-map'].includes(String(fileConfig.videoPlayback?.hdrMode)) ? fileConfig.videoPlayback!.hdrMode : 'auto',
+              toneMapping: ['bt2390', 'reinhard', 'mobius', 'hable'].includes(String(fileConfig.videoPlayback?.toneMapping)) ? fileConfig.videoPlayback!.toneMapping : 'auto', targetPeakNits: Math.max(100, Math.min(4000, Number(fileConfig.videoPlayback?.targetPeakNits) || 400)),
+              shortcuts: normalizeVideoShortcutBindings(fileConfig.videoPlayback?.shortcuts),
             };
             const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
             const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
@@ -371,7 +337,7 @@ const App: React.FC = () => {
             );
             const savedSdDriveVideoActions = normalizeSavedSdDriveVideoActions(fileConfig.smartImport?.sdDriveVideoActions, savedSdPaths, fileConfig.smartImport?.sdDriveTypes, sdVideoActionDefaults);
             const componentSettings: AppConfig['componentSettings'] = { ...fileConfig.componentSettings };
-            delete componentSettings['video-playback-mpv'];
+            delete componentSettings[LEGACY_VIDEO_PLAYBACK_SETTINGS_ID];
             delete componentSettings['research-tools'];
             delete componentSettings['office-media-extractor'];
             const legacyConfig = { ...fileConfig } as AppConfig & { folderOpenMode?: 'single' | 'double'; fileImport?: { preserveOriginal?: boolean }; brollImport: AppConfig['brollImport'] & { clearSource?: boolean } };

@@ -43,6 +43,10 @@ export interface VideoPlaybackSettings {
   subtitlePreferredLanguages: string[];
   subtitleSize: number;
   subtitleStyle: 'standard' | 'high-contrast';
+  hdrMode: 'auto' | 'sdr' | 'hdr-passthrough' | 'tone-map';
+  toneMapping: 'auto' | 'bt2390' | 'reinhard' | 'mobius' | 'hable';
+  targetPeakNits: number;
+  shortcuts: Record<string, string[]>;
 }
 export interface ResearchSettings {
   sensitivity: 'low' | 'standard' | 'high';
@@ -54,8 +58,6 @@ export interface InspirationLibrarySettings {
   rootPath: string;
 }
 export interface ComponentSettingsMap {
-  /** Legacy location read during migration; video playback UI is owned by the app. */
-  'video-playback-mpv'?: VideoPlaybackSettings;
   /** Component-owned opaque JSON; the application never interprets component namespaces. */
   [componentId: string]: unknown;
 }
@@ -786,7 +788,7 @@ export interface VideoPlayerState {
   sessionId: string;
   playerId: string;
   requestId: string;
-  type: 'ready' | 'loading' | 'file-loaded' | 'state' | 'subtitle-tracks' | 'ended' | 'navigate' | 'context-menu' | 'pointer-activity' | 'escape' | 'stopped' | 'error' | 'fatal';
+  type: 'ready' | 'loading' | 'file-loaded' | 'state' | 'subtitle-tracks' | 'audio-tracks' | 'statistics' | 'display-output' | 'diagnostic' | 'ended' | 'input' | 'navigate' | 'context-menu' | 'pointer-activity' | 'escape' | 'stopped' | 'error' | 'fatal';
   time?: number;
   duration?: number;
   paused?: boolean;
@@ -800,10 +802,58 @@ export interface VideoPlayerState {
   x?: number;
   y?: number;
   error?: string;
+  errorCode?: PlaybackErrorCode;
+  attempts?: PlaybackAttempt[];
+  suggestedFallback?: 'chromium' | 'component' | 'system-player' | 'none';
   subtitleTracks?: VideoSubtitleTrack[];
   subtitleTrackId?: string | null;
   subtitleVisible?: boolean;
   subtitleDelay?: number;
+  audioTracks?: VideoAudioTrack[];
+  audioTrackId?: string | null;
+  input?: {
+    kind: 'pointer-button' | 'key' | 'pointer-move';
+    button?: 'left' | 'right';
+    key?: string;
+    code?: string;
+    ctrl?: boolean;
+    alt?: boolean;
+    shift?: boolean;
+    meta?: boolean;
+    repeat?: boolean;
+    clickCount?: number;
+    x?: number;
+    y?: number;
+  };
+  statistics?: VideoPlaybackStatistics;
+  display?: { displayId: string; scaleFactor: number; colorSpace: string; hdrAvailable: boolean; reason: string; bounds: { x: number; y: number; width: number; height: number } | null };
+  diagnostic?: { code: string; severity: 'debug' | 'info' | 'warning' | 'error'; phase?: string; backendId?: string; backendVersion?: string; protocolVersion?: number; exitCode?: number; message?: string; recoverable?: boolean };
+}
+
+export interface VideoPlaybackStatistics { level: 'basic' | 'detailed'; container?: string; videoCodec?: string; audioCodec?: string; decoder?: string; hardwareDecoder?: string; hardwareDecoding?: boolean; pixelFormat?: string; bitDepth?: number; colorPrimaries?: string; transfer?: string; colorMatrix?: string; hdrFormat?: string; sourceFps?: number; displayFps?: number; droppedFrames?: number; delayedFrames?: number; avSyncMs?: number; cacheSeconds?: number; cacheBytes?: number; gpuApi?: string; gpuAdapter?: string; renderer?: string; toneMapping?: string }
+
+export interface VideoPlaybackBackendDescriptor {
+  backendId: string;
+  protocolVersion: 1;
+  transport: 'chromium' | 'media-playback-backend-v1';
+  displayName: string;
+  backendVersion: string;
+  priority: number;
+  probe: {
+    support: 'probably' | 'maybe' | 'unknown';
+    basis: string;
+    containers: string[];
+    codecs: { video: string[]; audio: string[] };
+    extensions: string[];
+  };
+  features: {
+    transforms: { aspectModes: Array<'source' | 'contain' | 'cover' | '16:9' | '4:3' | '1:1'>; rotation: boolean; flip: boolean; crop: boolean };
+    hdr: { passthrough: boolean; toneMapping: boolean; algorithms: Array<'auto' | 'bt2390' | 'reinhard' | 'mobius' | 'hable'>; targetPeakControl: boolean };
+    statistics: { basic: boolean; decode: boolean; hdr: boolean; timing: boolean; cache: boolean; gpu: boolean; maxUpdateHz: number };
+    subtitles: { embedded: boolean; external: boolean; ass: boolean; styles: boolean };
+    hardwareDecoding: { supported: boolean; selectable: boolean; softwareFallback: boolean };
+    capture: { sourceFrame: boolean; displayedFrame: boolean };
+  };
 }
 
 /** Legacy type alias for the compatibility IPC surface. */
@@ -819,6 +869,7 @@ export interface VideoSubtitleTrack {
   path?: string;
   selected: boolean;
 }
+export interface VideoAudioTrack { id: string; stableId: string; language?: string; title?: string; codec?: string; channels?: number; sampleRate?: number; selected: boolean }
 
 export interface ProjectFileOperationProgress {
   operationId: string;
@@ -1094,7 +1145,10 @@ export interface IElectronAPI {
   getMediaThumbnail: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache'], requestedSize?: number, priority?: 0 | 1 | 2 | 3, queueOrder?: number) => Promise<{ success: boolean; taskId?: string; state?: ThumbnailState; previewUrl?: string; mediaUrl?: string; usingImportedPreview?: boolean; importedVideoWithoutPreview?: boolean; cacheLayer?: 'memory' | 'disk' | 'source'; error?: string }>;
   cancelMediaThumbnail: (filePath: string, requestedSize?: number) => Promise<{ success: boolean; cancelled: boolean; error?: string }>;
   onThumbnailStateChanged: (callback: (update: { filePath: string; state: ThumbnailState; previewUrls?: Partial<Record<'small' | 'medium' | 'large', string>>; sourceMtimeMs?: number; sourceSize?: number; error?: string }) => void) => () => void;
-  startVideoPlayer: (filePath: string, settings: VideoPlaybackSettings, playerId: string, requestId: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string }>;
+  startVideoPlayer: (filePath: string, settings: VideoPlaybackSettings, playerId: string, requestId: string, backendId?: string) => Promise<{ success: boolean; sessionId?: string; playerId?: string; requestId?: string; error?: string; errorCode?: PlaybackErrorCode; recoverable?: boolean; suggestedFallback?: 'chromium'|'component'|'system-player'|'none' }>;
+  getVideoPlaybackBackends: (filePath: string, browserProbe: 'probably' | 'maybe' | 'unsupported' | 'unknown') => Promise<{ success: boolean; backends: VideoPlaybackBackendDescriptor[]; error?: string }>;
+  getVideoDisplayCapabilities: () => Promise<{ success: boolean; display: { displayId: string; scaleFactor: number; colorSpace: string; hdrAvailable: boolean; reason: string; bounds: { x: number; y: number; width: number; height: number } | null }; error?: string }>;
+  getVideoPlaybackSource: (filePath: string) => Promise<{ success: boolean; mediaUrl?: string; error?: string }>;
   setVideoPlayerBounds: (sessionId: string, bounds: { x: number; y: number; width: number; height: number; visible: boolean; overlayHole?: { x: number; y: number; width: number; height: number }; controlsOverlayHole?: { x: number; y: number; width: number; height: number }; cornerOverlayHole?: { x: number; y: number; width: number; height: number } }) => void;
   setAdvancedVideoBounds: (sessionId: string, bounds: {
     x: number;
@@ -1106,10 +1160,12 @@ export interface IElectronAPI {
     controlsOverlayHole?: { x: number; y: number; width: number; height: number };
     cornerOverlayHole?: { x: number; y: number; width: number; height: number };
   }) => void;
-  controlVideoPlayer: (sessionId: string, request: { action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay' | 'subtitle-style'; value?: number | boolean | string; fontSize?: VideoPlaybackSettings['subtitleSize']; style?: VideoPlaybackSettings['subtitleStyle'] }) => void;
+  controlVideoPlayer: (sessionId: string, request: { action: 'play' | 'pause' | 'seek' | 'frame-step' | 'frame-back-step' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay' | 'subtitle-style' | 'audio-select' | 'transform' | 'hdr-mode' | 'tone-mapping' | 'statistics-level'; value?: number | boolean | string; fontSize?: VideoPlaybackSettings['subtitleSize']; style?: VideoPlaybackSettings['subtitleStyle']; transform?: { aspectMode: 'source' | 'contain' | 'cover' | '16:9' | '4:3' | '1:1'; rotation: 0 | 90 | 180 | 270; flipHorizontal: boolean; flipVertical: boolean; crop?: {x:number;y:number;width:number;height:number} }; hdrMode?: VideoPlaybackSettings['hdrMode']; toneMapping?:VideoPlaybackSettings['toneMapping'];targetPeakNits?:number; statisticsLevel?: 'off' | 'basic' | 'detailed' }) => void;
   chooseVideoSubtitle: (sessionId: string) => Promise<{ success: boolean; cancelled?: boolean; path?: string; error?: string }>;
+  chooseVideoSubtitleFile: () => Promise<{ success: boolean; cancelled?: boolean; format?: 'vtt' | 'srt' | 'ass' | 'ssa'; name?: string; mediaUrl?: string; error?: string }>;
   addVideoSubtitle: (sessionId: string, filePath: string) => Promise<{ success: boolean; error?: string }>;
-  captureVideoPlayerFrame: (sessionId: string) => Promise<{ success: boolean; path?: string; error?: string }>;
+  captureVideoPlayerFrame: (sessionId: string, mode?: 'sourceFrame'|'displayedFrame') => Promise<{ success: boolean; path?: string; error?: string }>;
+  publishVideoPlayerFrame: (filePath: string, bytes: Uint8Array) => Promise<{ success: boolean; path?: string; error?: string }>;
   stopVideoPlayer: (sessionId: string) => Promise<{ success: boolean }>;
   onVideoPlayerState: (callback: (state: VideoPlayerState) => void) => () => void;
   captureAdvancedVideoFrame: (sessionId: string) => Promise<{ success: boolean; path?: string; error?: string }>;
@@ -1201,3 +1257,4 @@ declare global {
     toastViewAPI: ToastViewApi;
   }
 }
+import type { PlaybackAttempt, PlaybackErrorCode } from './contracts/playback-errors';

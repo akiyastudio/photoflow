@@ -13,15 +13,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
 {
     internal static class NativeMethods
     {
-        internal const int GWL_STYLE = -16;
-        internal const long WS_CHILD = 0x40000000L;
-        internal const long WS_POPUP = 0x80000000L;
-        internal const long WS_CAPTION = 0x00C00000L;
-        internal const uint SWP_NOACTIVATE = 0x0010;
-        internal const uint SWP_SHOWWINDOW = 0x0040;
-        internal const int SW_HIDE = 0;
-        internal const int SW_SHOWNOACTIVATE = 4;
-
         [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         internal static extern IntPtr LoadLibrary(string fileName);
 
@@ -35,42 +26,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
         internal static extern bool SetDllDirectory(string path);
 
         [DllImport("user32.dll", SetLastError = true)]
-        internal static extern IntPtr SetParent(IntPtr child, IntPtr newParent);
-
-        [DllImport("user32.dll", EntryPoint = "GetWindowLongPtr", SetLastError = true)]
-        internal static extern IntPtr GetWindowLongPtr64(IntPtr window, int index);
-
-        [DllImport("user32.dll", EntryPoint = "GetWindowLong", SetLastError = true)]
-        internal static extern IntPtr GetWindowLongPtr32(IntPtr window, int index);
-
-        [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr", SetLastError = true)]
-        internal static extern IntPtr SetWindowLongPtr64(IntPtr window, int index, IntPtr value);
-
-        [DllImport("user32.dll", EntryPoint = "SetWindowLong", SetLastError = true)]
-        internal static extern IntPtr SetWindowLongPtr32(IntPtr window, int index, IntPtr value);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        internal static extern bool MoveWindow(IntPtr window, int x, int y, int width, int height, bool repaint);
-
-        [DllImport("user32.dll", SetLastError = true)]
-        internal static extern bool SetWindowPos(IntPtr window, IntPtr insertAfter, int x, int y, int width, int height, uint flags);
-
-        [DllImport("user32.dll")]
-        internal static extern bool ShowWindow(IntPtr window, int command);
-
-        [DllImport("user32.dll", SetLastError = true)]
         internal static extern bool SetProcessDpiAwarenessContext(IntPtr value);
-
-        internal static IntPtr GetWindowStyle(IntPtr window)
-        {
-            return IntPtr.Size == 8 ? GetWindowLongPtr64(window, GWL_STYLE) : GetWindowLongPtr32(window, GWL_STYLE);
-        }
-
-        internal static void SetWindowStyle(IntPtr window, IntPtr value)
-        {
-            if (IntPtr.Size == 8) SetWindowLongPtr64(window, GWL_STYLE, value);
-            else SetWindowLongPtr32(window, GWL_STYLE, value);
-        }
+        [DllImport("kernel32.dll")] internal static extern uint GetCurrentProcessId();
     }
 
     internal sealed class LibMpv : IDisposable
@@ -119,8 +76,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private readonly MpvFree free;
         private readonly MpvTerminateDestroy terminateDestroy;
         private IntPtr context;
-        private string[] pendingSidecars = new string[0];
-        private string pendingVideoPath = string.Empty;
 
         internal LibMpv(IntPtr videoWindow, bool probeOnly = false)
         {
@@ -159,10 +114,13 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 SetOption("gpu-api", "d3d11");
                 SetOption("hwdec", "auto-safe");
                 SetOption("hwdec-codecs", "all");
+                SetOptionalOption("vd-lavc-software-fallback", "3");
+                SetOptionalOption("audio-fallback-to-null", "yes");
             }
             SetOption("cache", "yes");
             SetOption("demuxer-readahead-secs", "5");
             SetOption("demuxer-max-bytes", "256MiB");
+            SetOptionalOption("demuxer-lavf-o", "fflags=+genpts+igndts");
             SetOption("keep-open", "yes");
             SetOption("idle", "yes");
             // Discovery is explicit so camera telemetry and sidecars never become visible automatically.
@@ -241,51 +199,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
         internal void Open(string filePath)
         {
-            pendingVideoPath = Path.GetFullPath(filePath);
-            pendingSidecars = DiscoverSidecars(filePath);
             Check(Run("loadfile", filePath, "replace"), "打开视频");
-        }
-
-        private static string[] DiscoverSidecars(string filePath)
-        {
-            var result = new List<string>();
-            string directory = Path.GetDirectoryName(filePath);
-            string baseName = Path.GetFileNameWithoutExtension(filePath);
-            if (string.IsNullOrWhiteSpace(directory) || string.IsNullOrWhiteSpace(baseName) || !Directory.Exists(directory)) return result.ToArray();
-            try
-            {
-                foreach (string sidecar in Directory.GetFiles(directory))
-                {
-                    string extension = Path.GetExtension(sidecar).ToLowerInvariant();
-                    string stem = Path.GetFileNameWithoutExtension(sidecar);
-                    if ((extension == ".srt" || extension == ".ass" || extension == ".ssa" || extension == ".vtt")
-                        && (string.Equals(stem, baseName, StringComparison.OrdinalIgnoreCase) || stem.StartsWith(baseName + ".", StringComparison.OrdinalIgnoreCase)))
-                        result.Add(sidecar);
-                }
-            }
-            catch (IOException) { }
-            catch (UnauthorizedAccessException) { }
-            result.Sort(StringComparer.OrdinalIgnoreCase);
-            return result.ToArray();
-        }
-
-        internal bool LoadPendingSidecars()
-        {
-            string loadedPath = GetProperty("path");
-            try
-            {
-                if (string.IsNullOrWhiteSpace(loadedPath)
-                    || !string.Equals(Path.GetFullPath(loadedPath), pendingVideoPath, StringComparison.OrdinalIgnoreCase)) return false;
-            }
-            catch (Exception) { return false; }
-            string[] sidecars = pendingSidecars;
-            pendingSidecars = new string[0];
-            foreach (string sidecar in sidecars)
-            {
-                if (!File.Exists(sidecar)) continue;
-                Check(Run("sub-add", sidecar, "auto"), "发现外挂字幕");
-            }
-            return true;
         }
 
         internal IList<Dictionary<string, object>> SubtitleTracks()
@@ -323,15 +237,10 @@ namespace PhotoFlow.AdvancedVideoDecoder
             }
             return result;
         }
-
-        internal void TogglePause()
+        internal IList<Dictionary<string, object>> AudioTracks()
         {
-            if (IsAtEnd())
-            {
-                Play();
-                return;
-            }
-            SetProperty("pause", IsYesValue(GetProperty("pause")) ? "no" : "yes");
+            var result=new List<Dictionary<string,object>>();int count;if(!int.TryParse(GetProperty("track-list/count"),out count))return result;var occurrences=new Dictionary<string,int>(StringComparer.OrdinalIgnoreCase);
+            for(int index=0;index<count;index++){string prefix="track-list/"+index.ToString(CultureInfo.InvariantCulture)+"/";if(GetProperty(prefix+"type")!="audio")continue;string id=GetProperty(prefix+"id")??string.Empty,language=GetProperty(prefix+"lang")??string.Empty,title=GetProperty(prefix+"title")??string.Empty,codec=GetProperty(prefix+"codec")??string.Empty,identityBase="audio:"+language.ToLowerInvariant()+":"+title.ToLowerInvariant()+":"+codec.ToLowerInvariant();int occurrence;occurrences.TryGetValue(identityBase,out occurrence);occurrences[identityBase]=occurrence+1;result.Add(new Dictionary<string,object>{{"id",id},{"stableId",identityBase+":"+occurrence.ToString(CultureInfo.InvariantCulture)},{"language",language},{"title",title},{"codec",codec},{"channels",NumberValue(GetProperty(prefix+"demux-channel-count"))},{"sampleRate",NumberValue(GetProperty(prefix+"demux-samplerate"))},{"selected",IsYesValue(GetProperty(prefix+"selected"))}});}return result;
         }
 
         internal void Play()
@@ -351,32 +260,21 @@ namespace PhotoFlow.AdvancedVideoDecoder
             Check(Run("seek", Math.Max(0, seconds).ToString(CultureInfo.InvariantCulture), "absolute+exact"), "跳转视频");
         }
 
-        internal void SeekRelative(double seconds)
-        {
-            if (IsAtEnd())
-            {
-                double duration;
-                if (!double.TryParse(GetProperty("duration"), NumberStyles.Float, CultureInfo.InvariantCulture, out duration)) duration = 0;
-                SeekAbsolute(duration + seconds);
-                return;
-            }
-            Check(Run("seek", seconds.ToString(CultureInfo.InvariantCulture), "relative+exact"), "跳转视频");
-        }
-
         internal bool IsAtEnd()
         {
             return IsYesValue(GetProperty("eof-reached"));
         }
 
-        internal void Screenshot(string filePath)
+        internal void Screenshot(string filePath, string mode)
         {
-            Check(Run("screenshot-to-file", filePath, "video"), "保存当前视频帧");
+            Check(Run("screenshot-to-file", filePath, mode == "displayedFrame" ? "subtitles" : "video"), "保存当前视频帧");
         }
 
         private static bool IsYesValue(string value)
         {
             return string.Equals(value, "yes", StringComparison.OrdinalIgnoreCase) || value == "true";
         }
+        private static double NumberValue(string value) { double result; return double.TryParse(value,NumberStyles.Float,CultureInfo.InvariantCulture,out result)?result:0; }
 
         internal IList<Dictionary<string, object>> DrainEvents()
         {
@@ -433,7 +331,17 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
     internal sealed class DecoderHost : Form
     {
-        private readonly IntPtr parentWindow;
+        private const string Protocol = "media-playback-backend-v1";
+        private const int MaxFrameBytes = 256 * 1024;
+        private static readonly Dictionary<string, string> CommandNames = new Dictionary<string, string> {
+            { "media.open", "open" }, { "playback.play", "play" }, { "playback.pause", "pause" }, { "playback.seek", "seek" }, { "playback.frame-step", "frame-step" }, { "playback.frame-back-step", "frame-back-step" }, { "audio.volume", "volume" }, { "audio.mute", "mute" }, { "audio.track-select", "audio-select" }, { "playback.speed", "speed" }, { "playback.stop", "stop" },
+            { "subtitles.select", "subtitle-select" }, { "subtitles.visible", "subtitle-visible" }, { "subtitles.delay", "subtitle-delay" }, { "subtitles.style", "subtitle-style" }, { "subtitles.add", "subtitle-add" },
+            { "capture.stage", "screenshot" }, { "video.transform", "transform" }, { "video.hdr-mode", "hdr-mode" }, { "video.tone-mapping", "tone-mapping" }, { "statistics.level", "statistics-level" }, { "display.output", "display-output" }
+        };
+        private static readonly Dictionary<string, string> EventNames = new Dictionary<string, string> {
+            { "ready", "runtime.ready" }, { "surface-created", "surface.created" }, { "state", "state.changed" }, { "loading", "state.loading" }, { "file-loaded", "media.loaded" }, { "ended", "media.ended" }, { "subtitle-tracks", "tracks.changed" }, { "audio-tracks", "audio-tracks.changed" }, { "statistics", "statistics.changed" }, { "input", "input.raw" }, { "screenshot-result", "capture.completed" }, { "diagnostic", "diagnostic" }, { "fatal", "fatal" }, { "error", "error" }, { "stopped", "terminated" }
+        };
+        private readonly string sessionId;
         private readonly JavaScriptSerializer serializer = new JavaScriptSerializer();
         private readonly object outputLock = new object();
         private readonly object playerLock = new object();
@@ -443,18 +351,25 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private Thread pollThread;
         private string lastState = string.Empty;
         private bool loading;
-        private bool arrowKeysNavigate;
-        private bool subtitleDefaultEnabled;
-        private string[] subtitlePreferredLanguages = new string[0];
-        private bool subtitleDefaultsPending;
         private string lastSubtitleState = string.Empty;
+        private string lastAudioState = string.Empty;
         private int lastPointerActivityTick;
         private Point lastPointerLocation;
         private bool hasLastPointerLocation;
+        private long eventSequence;
+        private long commandSequence;
+        private string statisticsLevel = "off";
+        private DateTime lastStatisticsAt = DateTime.MinValue;
+        private string requestedHdrMode = "auto";
+        private bool hdrDisplayAvailable;
+        private string toneMappingAlgorithm = "auto";
+        private int targetPeakNits = 400;
+        private int recoveryStage;
 
-        internal DecoderHost(IntPtr parentWindow)
+        internal DecoderHost(string sessionId)
         {
-            this.parentWindow = parentWindow;
+            this.sessionId = sessionId;
+            serializer.MaxJsonLength = MaxFrameBytes;
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
             StartPosition = FormStartPosition.Manual;
@@ -471,13 +386,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
             try
             {
                 IntPtr handle = Handle;
-                long style = NativeMethods.GetWindowStyle(handle).ToInt64();
-                style = (style | NativeMethods.WS_CHILD) & ~NativeMethods.WS_POPUP & ~NativeMethods.WS_CAPTION;
-                NativeMethods.SetWindowStyle(handle, new IntPtr(style));
-                if (NativeMethods.SetParent(handle, parentWindow) == IntPtr.Zero && Marshal.GetLastWin32Error() != 0)
-                    throw new InvalidOperationException("无法把视频画面附着到 PhotoFlow 窗口");
-                NativeMethods.MoveWindow(handle, 0, 0, 1, 1, true);
                 player = new LibMpv(handle);
+                Emit(new Dictionary<string, object> { { "type", "surface-created" }, { "surfaceHandle", handle.ToInt64().ToString(CultureInfo.InvariantCulture) }, { "processId", NativeMethods.GetCurrentProcessId() } });
                 Emit(new Dictionary<string, object> { { "type", "ready" } });
                 inputThread = new Thread(ReadCommands) { IsBackground = true, Name = "PhotoFlow video command reader" };
                 pollThread = new Thread(PollState) { IsBackground = true, Name = "PhotoFlow video state poller" };
@@ -486,7 +396,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
             }
             catch (Exception error)
             {
-                Emit(new Dictionary<string, object> { { "type", "fatal" }, { "error", error.Message } });
+                Emit(new Dictionary<string, object> { { "type", "fatal" }, { "errorCode", "RENDER_INITIALIZATION_FAILED" }, { "error", error.Message } });
                 BeginInvoke(new Action(Close));
             }
         }
@@ -498,8 +408,22 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 string line;
                 while (!shuttingDown && (line = Console.In.ReadLine()) != null)
                 {
-                    Dictionary<string, object> command = serializer.Deserialize<Dictionary<string, object>>(line);
-                    HandleCommand(command);
+                    if (Encoding.UTF8.GetByteCount(line) > MaxFrameBytes) throw new InvalidOperationException("播放协议帧超过 256 KiB");
+                    Dictionary<string, object> envelope = serializer.Deserialize<Dictionary<string, object>>(line);
+                    if (ReadString(envelope, "protocol") != Protocol || ReadInt(envelope, "protocolVersion") != 1 || ReadString(envelope, "sessionId") != sessionId) throw new InvalidOperationException("播放协议会话不匹配");
+                    long sequence = (long)ReadDouble(envelope, "sequence");
+                    if (sequence <= commandSequence) throw new InvalidOperationException("播放协议命令顺序无效");
+                    commandSequence = sequence;
+                    string eventName = ReadString(envelope, "event");
+                    if (!eventName.StartsWith("command.", StringComparison.Ordinal)) throw new InvalidOperationException("播放协议命令类型无效");
+                    object rawPayload;
+                    Dictionary<string, object> command = envelope.TryGetValue("payload", out rawPayload) ? rawPayload as Dictionary<string, object> : null;
+                    if (command == null) command = new Dictionary<string, object>();
+                    string semantic = eventName.Substring("command.".Length), legacyName;
+                    if (!CommandNames.TryGetValue(semantic, out legacyName)) throw new InvalidOperationException("播放协议命令未知");
+                    command["command"] = legacyName;
+                    try { HandleCommand(command); }
+                    catch (Exception commandError) { if(legacyName=="open")Emit(new Dictionary<string,object>{{"type","error"},{"errorCode","DECODE_INITIALIZATION_FAILED"},{"error",commandError.Message}});else Emit(new Dictionary<string, object> { { "type", "diagnostic" }, { "diagnostic", new Dictionary<string, object> { { "code", "COMMAND_REJECTED" }, { "severity", "warning" }, { "phase", "command" }, { "protocolVersion", 1 }, { "message", commandError.Message }, { "recoverable", true } } } }); }
                 }
             }
             catch (Exception error)
@@ -515,65 +439,9 @@ namespace PhotoFlow.AdvancedVideoDecoder
         private void HandleCommand(Dictionary<string, object> value)
         {
             string name = ReadString(value, "command");
-            if (name == "set-bounds")
-            {
-                int x = ReadInt(value, "x");
-                int y = ReadInt(value, "y");
-                int width = Math.Max(1, ReadInt(value, "width"));
-                int height = Math.Max(1, ReadInt(value, "height"));
-                int holeX = ReadInt(value, "holeX");
-                int holeY = ReadInt(value, "holeY");
-                int holeWidth = ReadInt(value, "holeWidth");
-                int holeHeight = ReadInt(value, "holeHeight");
-                int controlsHoleX = ReadInt(value, "controlsHoleX");
-                int controlsHoleY = ReadInt(value, "controlsHoleY");
-                int controlsHoleWidth = ReadInt(value, "controlsHoleWidth");
-                int controlsHoleHeight = ReadInt(value, "controlsHoleHeight");
-                int cornerHoleX = ReadInt(value, "cornerHoleX");
-                int cornerHoleY = ReadInt(value, "cornerHoleY");
-                int cornerHoleWidth = ReadInt(value, "cornerHoleWidth");
-                int cornerHoleHeight = ReadInt(value, "cornerHoleHeight");
-                bool visible = ReadBool(value, "visible") && ReadInt(value, "width") > 0 && ReadInt(value, "height") > 0;
-                BeginInvoke(new Action(() => {
-                    if (shuttingDown) return;
-                    NativeMethods.MoveWindow(Handle, x, y, width, height, true);
-                    ApplyOverlayHoles(
-                        width, height,
-                        holeX, holeY, holeWidth, holeHeight,
-                        controlsHoleX, controlsHoleY, controlsHoleWidth, controlsHoleHeight,
-                        cornerHoleX, cornerHoleY, cornerHoleWidth, cornerHoleHeight);
-                    if (visible)
-                    {
-                        NativeMethods.ShowWindow(Handle, NativeMethods.SW_SHOWNOACTIVATE);
-                        NativeMethods.SetWindowPos(Handle, IntPtr.Zero, x, y, width, height, NativeMethods.SWP_NOACTIVATE | NativeMethods.SWP_SHOWWINDOW);
-                    }
-                    else NativeMethods.ShowWindow(Handle, NativeMethods.SW_HIDE);
-                }));
-                return;
-            }
             if (name == "close")
             {
                 BeginInvoke(new Action(Close));
-                return;
-            }
-            if (name == "set-keyboard-mode")
-            {
-                arrowKeysNavigate = ReadString(value, "value") == "navigate";
-                return;
-            }
-            if (name == "set-subtitle-defaults")
-            {
-                subtitleDefaultEnabled = ReadBool(value, "enabled");
-                object languages;
-                var list = new List<string>();
-                if (value.TryGetValue("preferredLanguages", out languages) && languages is object[])
-                    foreach (object language in (object[])languages) if (language != null) list.Add(language.ToString().Trim().ToLowerInvariant());
-                subtitlePreferredLanguages = list.ToArray();
-                subtitleDefaultsPending = true;
-                lock (playerLock)
-                {
-                    if (player != null) ApplySubtitleStyle(player, ReadSubtitleFontSize(value), ReadString(value, "style"));
-                }
                 return;
             }
             lock (playerLock)
@@ -583,15 +451,18 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 {
                     string path = ReadString(value, "path");
                     if (string.IsNullOrWhiteSpace(path)) throw new InvalidOperationException("视频路径为空");
+                    recoveryStage = 0;
                     loading = true;
-                    subtitleDefaultsPending = true;
                     player.Open(path);
                 }
                 else if (name == "play") player.Play();
                 else if (name == "pause") player.Pause();
                 else if (name == "seek") player.SeekAbsolute(ReadDouble(value, "value"));
+                else if (name == "frame-step") player.Run("frame-step");
+                else if (name == "frame-back-step") player.Run("frame-back-step");
                 else if (name == "volume") player.SetProperty("volume", Math.Max(0, Math.Min(100, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
                 else if (name == "mute") player.SetProperty("mute", ReadBool(value, "value") ? "yes" : "no");
+                else if (name == "audio-select") player.SetProperty("aid", ReadString(value,"value"));
                 else if (name == "speed") player.SetProperty("speed", Math.Max(0.25, Math.Min(4, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
                 else if (name == "subtitle-select")
                 {
@@ -602,6 +473,26 @@ namespace PhotoFlow.AdvancedVideoDecoder
                 else if (name == "subtitle-visible") player.SetProperty("sub-visibility", ReadBool(value, "value") ? "yes" : "no");
                 else if (name == "subtitle-delay") player.SetProperty("sub-delay", Math.Max(-30, Math.Min(30, ReadDouble(value, "value"))).ToString(CultureInfo.InvariantCulture));
                 else if (name == "subtitle-style") ApplySubtitleStyle(player, ReadSubtitleFontSize(value), ReadString(value, "style"));
+                else if (name == "transform")
+                {
+                    object raw; var transform = value.TryGetValue("transform", out raw) ? raw as Dictionary<string, object> : null;
+                    string aspect = ReadString(transform, "aspectMode"); int rotation = ReadInt(transform, "rotation");
+                    player.SetProperty("video-rotate", rotation.ToString(CultureInfo.InvariantCulture));
+                    player.SetProperty("video-aspect-override", aspect == "16:9" ? "16:9" : aspect == "4:3" ? "4:3" : aspect == "1:1" ? "1:1" : "no");
+                    player.SetProperty("panscan", aspect == "cover" ? "1" : "0");
+                    bool horizontal = ReadBool(transform, "flipHorizontal"), vertical = ReadBool(transform, "flipVertical");var filters=new List<string>();object cropRaw;var crop=transform!=null&&transform.TryGetValue("crop",out cropRaw)?cropRaw as Dictionary<string,object>:null;if(crop!=null)filters.Add(string.Format(CultureInfo.InvariantCulture,"crop=iw*{0}:ih*{1}:iw*{2}:ih*{3}",ReadDouble(crop,"width"),ReadDouble(crop,"height"),ReadDouble(crop,"x"),ReadDouble(crop,"y")));if(horizontal)filters.Add("hflip");if(vertical)filters.Add("vflip");player.SetProperty("vf",string.Join(",",filters.ToArray()));
+                }
+                else if (name == "hdr-mode")
+                {
+                    requestedHdrMode = ReadString(value, "hdrMode"); ApplyHdrMode(player);
+                }
+                else if(name=="tone-mapping"){toneMappingAlgorithm=ReadString(value,"toneMapping");targetPeakNits=Math.Max(100,Math.Min(4000,ReadInt(value,"targetPeakNits")));ApplyHdrMode(player);}
+                else if (name == "display-output")
+                {
+                    object raw; var output = value.TryGetValue("output", out raw) ? raw as Dictionary<string, object> : null;
+                    hdrDisplayAvailable = ReadBool(output, "hdrAvailable"); ApplyHdrMode(player);
+                }
+                else if (name == "statistics-level") statisticsLevel = ReadString(value, "statisticsLevel");
                 else if (name == "subtitle-add")
                 {
                     string subtitlePath = ReadString(value, "path");
@@ -609,7 +500,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     string extension = Path.GetExtension(subtitlePath).ToLowerInvariant();
                     if (extension != ".srt" && extension != ".ass" && extension != ".ssa" && extension != ".vtt") throw new InvalidOperationException("字幕格式不受支持");
                     int result = player.Run("sub-add", subtitlePath, "select");
-                    if (result < 0) throw new InvalidOperationException("字幕文件损坏或无法加载");
+                    if (result < 0) { Emit(new Dictionary<string, object> { { "type", "diagnostic" }, { "diagnostic", new Dictionary<string, object> { { "code", "BAD_SUBTITLE_SKIPPED" }, { "severity", "warning" }, { "phase", "subtitles" }, { "protocolVersion", 1 }, { "message", "字幕文件损坏或无法加载" }, { "recoverable", true } } } }); return; }
                     player.SetProperty("sub-visibility", "yes");
                 }
                 else if (name == "screenshot")
@@ -620,7 +511,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     {
                         if (string.IsNullOrWhiteSpace(targetPath) || !Path.IsPathRooted(targetPath))
                             throw new InvalidOperationException("截图保存路径无效");
-                        player.Screenshot(targetPath);
+                        player.Screenshot(targetPath, ReadString(value,"captureMode"));
                         if (!WaitForCompletePng(targetPath, 7000))
                             throw new IOException("视频截图文件在超时前未完整写入");
                         Emit(new Dictionary<string, object> {
@@ -645,16 +536,15 @@ namespace PhotoFlow.AdvancedVideoDecoder
         {
             base.OnMouseClick(eventArgs);
             if (shuttingDown) return;
-            if (eventArgs.Button == MouseButtons.Left)
-            {
-                lock (playerLock)
-                {
-                    if (player != null) player.TogglePause();
-                }
-            }
-            else if (eventArgs.Button == MouseButtons.Right)
+            if (eventArgs.Button == MouseButtons.Left || eventArgs.Button == MouseButtons.Right)
                 Emit(new Dictionary<string, object> {
-                    { "type", "context-menu" }, { "x", eventArgs.X }, { "y", eventArgs.Y }
+                    { "type", "input" },
+                    { "input", new Dictionary<string, object> {
+                        { "kind", "pointer-button" },
+                        { "button", eventArgs.Button == MouseButtons.Left ? "left" : "right" },
+                        { "x", eventArgs.X }, { "y", eventArgs.Y }, { "clickCount", eventArgs.Clicks },
+                        { "ctrl", (Control.ModifierKeys & Keys.Control) != 0 }, { "alt", (Control.ModifierKeys & Keys.Alt) != 0 }, { "shift", (Control.ModifierKeys & Keys.Shift) != 0 }, { "meta", false }
+                    } }
                 });
         }
 
@@ -674,58 +564,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
             player.SetProperty("sub-shadow-offset", style == "high-contrast" ? "2" : "1");
         }
 
-        private static bool SubtitleLanguageMatches(string trackLanguage, string preferredLanguage)
-        {
-            string track = (trackLanguage ?? string.Empty).Trim().Replace('_', '-');
-            string preferred = (preferredLanguage ?? string.Empty).Trim().Replace('_', '-');
-            return string.Equals(track, preferred, StringComparison.OrdinalIgnoreCase)
-                || track.StartsWith(preferred + "-", StringComparison.OrdinalIgnoreCase)
-                || preferred.StartsWith(track + "-", StringComparison.OrdinalIgnoreCase);
-        }
-
-        private static void ExcludeOverlayHole(System.Drawing.Region region, int width, int height, int holeX, int holeY, int holeWidth, int holeHeight, bool ellipse)
-        {
-            if (holeWidth <= 0 || holeHeight <= 0) return;
-            int left = Math.Max(0, Math.Min(width, holeX));
-            int top = Math.Max(0, Math.Min(height, holeY));
-            int clippedWidth = Math.Max(0, Math.Min(width - left, holeWidth));
-            int clippedHeight = Math.Max(0, Math.Min(height - top, holeHeight));
-            if (clippedWidth <= 0 || clippedHeight <= 0) return;
-            var bounds = new Rectangle(left, top, clippedWidth, clippedHeight);
-            if (!ellipse)
-            {
-                region.Exclude(bounds);
-                return;
-            }
-            using (var path = new System.Drawing.Drawing2D.GraphicsPath())
-            {
-                path.AddEllipse(bounds);
-                region.Exclude(path);
-            }
-        }
-
-        private void ApplyOverlayHoles(
-            int width, int height,
-            int holeX, int holeY, int holeWidth, int holeHeight,
-            int controlsHoleX, int controlsHoleY, int controlsHoleWidth, int controlsHoleHeight,
-            int cornerHoleX, int cornerHoleY, int cornerHoleWidth, int cornerHoleHeight)
-        {
-            System.Drawing.Region previous = Region;
-            bool hasPanelHole = holeWidth > 0 && holeHeight > 0;
-            bool hasControlsHole = controlsHoleWidth > 0 && controlsHoleHeight > 0;
-            bool hasCornerHole = cornerHoleWidth > 0 && cornerHoleHeight > 0;
-            if (hasPanelHole || hasControlsHole || hasCornerHole)
-            {
-                var next = new System.Drawing.Region(new Rectangle(0, 0, width, height));
-                ExcludeOverlayHole(next, width, height, holeX, holeY, holeWidth, holeHeight, false);
-                ExcludeOverlayHole(next, width, height, controlsHoleX, controlsHoleY, controlsHoleWidth, controlsHoleHeight, false);
-                ExcludeOverlayHole(next, width, height, cornerHoleX, cornerHoleY, cornerHoleWidth, cornerHoleHeight, true);
-                Region = next;
-            }
-            else Region = null;
-            if (previous != null) previous.Dispose();
-        }
-
         protected override void OnMouseMove(MouseEventArgs eventArgs)
         {
             base.OnMouseMove(eventArgs);
@@ -735,35 +573,62 @@ namespace PhotoFlow.AdvancedVideoDecoder
             int now = Environment.TickCount;
             if (unchecked(now - lastPointerActivityTick) < 200) return;
             lastPointerActivityTick = now;
-            Emit(new Dictionary<string, object> { { "type", "pointer-activity" } });
+            Emit(new Dictionary<string, object> {
+                { "type", "input" },
+                { "input", new Dictionary<string, object> { { "kind", "pointer-move" }, { "x", eventArgs.X }, { "y", eventArgs.Y } } }
+            });
         }
 
         protected override bool ProcessCmdKey(ref Message message, Keys keyData)
         {
             Keys key = keyData & Keys.KeyCode;
-            if (key == Keys.Escape)
-            {
-                Emit(new Dictionary<string, object> { { "type", "escape" } });
-                return base.ProcessCmdKey(ref message, keyData);
-            }
-            if (key == Keys.Left || key == Keys.Right)
-            {
-                HandleArrowKeyInput(key == Keys.Right ? 1 : -1);
+            if ((key == Keys.F4 && (keyData & Keys.Alt) != 0) || key == Keys.LWin || key == Keys.RWin) return base.ProcessCmdKey(ref message, keyData);
+            string code = DomCode(key);
+            if (!string.IsNullOrEmpty(code)) {
+                string rawKey = key == Keys.Space ? " " : key == Keys.Escape ? "Escape" : key.ToString();
+                Emit(new Dictionary<string, object> {
+                    { "type", "input" },
+                    { "input", new Dictionary<string, object> { { "kind", "key" }, { "key", rawKey }, { "code", code },
+                        { "ctrl", (keyData & Keys.Control) != 0 }, { "alt", (keyData & Keys.Alt) != 0 }, { "shift", (keyData & Keys.Shift) != 0 }, { "meta", false },
+                        { "repeat", (message.LParam.ToInt64() & (1L << 30)) != 0 } } }
+                });
                 return true;
             }
             return base.ProcessCmdKey(ref message, keyData);
         }
 
-        private void HandleArrowKeyInput(int direction)
+        private static string DomCode(Keys key)
         {
-            if (arrowKeysNavigate)
-            {
-                Emit(new Dictionary<string, object> { { "type", "navigate" }, { "direction", direction } });
-                return;
-            }
+            if (key >= Keys.A && key <= Keys.Z) return "Key" + key.ToString();
+            if (key >= Keys.D0 && key <= Keys.D9) return "Digit" + ((int)key - (int)Keys.D0).ToString(CultureInfo.InvariantCulture);
+            if (key == Keys.Left) return "ArrowLeft"; if (key == Keys.Right) return "ArrowRight"; if (key == Keys.Up) return "ArrowUp"; if (key == Keys.Down) return "ArrowDown";
+            if (key == Keys.Space) return "Space"; if (key == Keys.Escape) return "Escape"; if (key == Keys.PageUp) return "PageUp"; if (key == Keys.PageDown) return "PageDown";
+            if (key == Keys.Oemcomma) return "Comma"; if (key == Keys.OemPeriod) return "Period"; if (key == Keys.OemOpenBrackets) return "BracketLeft"; if (key == Keys.OemCloseBrackets) return "BracketRight"; if (key == Keys.OemPipe) return "Backslash";
+            return string.Empty;
+        }
+
+        private void ApplyHdrMode(LibMpv target)
+        {
+            bool passthrough = requestedHdrMode == "hdr-passthrough" && hdrDisplayAvailable;
+            target.SetProperty("target-colorspace-hint", passthrough ? "yes" : "no");
+            string algorithm=toneMappingAlgorithm=="bt2390"?"bt.2390":toneMappingAlgorithm;
+            target.SetProperty("tone-mapping", requestedHdrMode == "sdr" ? "clip" : algorithm);
+            target.SetProperty("target-peak", targetPeakNits.ToString(CultureInfo.InvariantCulture));
+        }
+
+        private bool TryRecoverPlayback(string error)
+        {
             lock (playerLock)
             {
-                if (player != null) player.SeekRelative(direction * 5);
+                if (player == null || recoveryStage >= 4) return false;
+                recoveryStage++;
+                string code;
+                if (recoveryStage == 1) { player.SetProperty("hwdec", "no"); code = "HARDWARE_DECODE_FALLBACK"; }
+                else if (recoveryStage == 2) { player.SetProperty("gpu-dumb-mode", "yes"); player.SetProperty("scale", "bilinear"); code = "GPU_SAFE_MODE"; }
+                else if (recoveryStage == 3) { player.SetProperty("demuxer-lavf-o", "fflags=+genpts+igndts"); player.SetProperty("cache", "yes"); code = "TIMESTAMP_CACHE_RECOVERY"; }
+                else { player.SetProperty("audio", "no"); code = "AUDIO_DISABLED_RECOVERY"; }
+                Emit(new Dictionary<string, object> { { "type", "diagnostic" }, { "diagnostic", new Dictionary<string, object> { { "code", code }, { "severity", "warning" }, { "phase", "runtime-recovery" }, { "protocolVersion", 1 }, { "message", error ?? string.Empty }, { "recoverable", true } } } });
+                return true;
             }
         }
 
@@ -815,37 +680,14 @@ namespace PhotoFlow.AdvancedVideoDecoder
                             foreach (Dictionary<string, object> eventValue in player.DrainEvents())
                             {
                                 string type = ReadString(eventValue, "type");
+                                if (type == "error" && TryRecoverPlayback(ReadString(eventValue, "error"))) continue;
                                 if (type == "file-loaded")
                                 {
-                                    // Ignore a stale event from a superseded loadfile command.
-                                    if (!player.LoadPendingSidecars()) continue;
                                     loading = false;
-                                    subtitleDefaultsPending = true;
                                 }
                                 Emit(eventValue);
                             }
                             IList<Dictionary<string, object>> subtitleTracks = player.SubtitleTracks();
-                            if (subtitleDefaultsPending && !loading)
-                            {
-                                subtitleDefaultsPending = false;
-                                string selectedId = null;
-                                if (subtitleDefaultEnabled)
-                                {
-                                    foreach (string language in subtitlePreferredLanguages)
-                                    {
-                                        foreach (Dictionary<string, object> track in subtitleTracks)
-                                        {
-                                            if (!SubtitleLanguageMatches(Convert.ToString(track["language"]), language)) continue;
-                                            selectedId = Convert.ToString(track["id"]);
-                                            break;
-                                        }
-                                        if (selectedId != null) break;
-                                    }
-                                    if (selectedId == null && subtitleTracks.Count > 0) selectedId = Convert.ToString(subtitleTracks[0]["id"]);
-                                }
-                                player.SetProperty("sid", selectedId ?? "no");
-                                player.SetProperty("sub-visibility", selectedId == null ? "no" : "yes");
-                            }
                             var subtitleState = new Dictionary<string, object> {
                                 { "type", "subtitle-tracks" }, { "subtitleTracks", subtitleTracks },
                                 { "subtitleTrackId", player.GetProperty("sid") },
@@ -853,7 +695,8 @@ namespace PhotoFlow.AdvancedVideoDecoder
                                 { "subtitleDelay", ReadNumber(player.GetProperty("sub-delay")) }
                             };
                             string serializedSubtitleState = serializer.Serialize(subtitleState);
-                            if (serializedSubtitleState != lastSubtitleState) { lastSubtitleState = serializedSubtitleState; EmitSerialized(serializedSubtitleState); }
+                            if (serializedSubtitleState != lastSubtitleState) { lastSubtitleState = serializedSubtitleState; Emit(subtitleState); }
+                            IList<Dictionary<string,object>> audioTracks=player.AudioTracks();var audioState=new Dictionary<string,object>{{"type","audio-tracks"},{"audioTracks",audioTracks},{"audioTrackId",player.GetProperty("aid")}};string serializedAudioState=serializer.Serialize(audioState);if(serializedAudioState!=lastAudioState){lastAudioState=serializedAudioState;Emit(audioState);}
                             var state = new Dictionary<string, object> {
                                 { "type", "state" },
                                 { "time", ReadNumber(player.GetProperty("time-pos")) },
@@ -870,14 +713,45 @@ namespace PhotoFlow.AdvancedVideoDecoder
                             if (serialized != lastState)
                             {
                                 lastState = serialized;
-                                EmitSerialized(serialized);
+                                Emit(state);
+                            }
+                            int statisticsInterval = statisticsLevel == "detailed" ? 250 : 1000;
+                            if (statisticsLevel != "off" && (DateTime.UtcNow - lastStatisticsAt).TotalMilliseconds >= statisticsInterval)
+                            {
+                                lastStatisticsAt = DateTime.UtcNow;
+                                Emit(new Dictionary<string, object> {
+                                    { "type", "statistics" }, { "statistics", new Dictionary<string, object> {
+                                        { "level", statisticsLevel == "detailed" ? "detailed" : "basic" },
+                                        { "container", player.GetProperty("file-format") ?? string.Empty },
+                                        { "videoCodec", player.GetProperty("video-codec") ?? string.Empty },
+                                        { "audioCodec", player.GetProperty("audio-codec-name") ?? string.Empty },
+                                        { "decoder", player.GetProperty("video-dec-params/codec") ?? string.Empty },
+                                        { "hardwareDecoder", player.GetProperty("hwdec-current") ?? string.Empty },
+                                        { "hardwareDecoding", !string.IsNullOrWhiteSpace(player.GetProperty("hwdec-current")) },
+                                        { "pixelFormat", player.GetProperty("video-params/pixelformat") ?? string.Empty },
+                                        { "bitDepth", ReadNumber(player.GetProperty("video-params/bits-per-component")) },
+                                        { "colorPrimaries", player.GetProperty("video-params/primaries") ?? string.Empty },
+                                        { "transfer", player.GetProperty("video-params/gamma") ?? string.Empty },
+                                        { "colorMatrix", player.GetProperty("video-params/colormatrix") ?? string.Empty },
+                                        { "hdrFormat", player.GetProperty("video-params/gamma") ?? string.Empty },
+                                        { "sourceFps", ReadNumber(player.GetProperty("container-fps")) },
+                                        { "displayFps", ReadNumber(player.GetProperty("estimated-vf-fps")) },
+                                        { "droppedFrames", ReadNumber(player.GetProperty("decoder-frame-drop-count")) },
+                                        { "delayedFrames", ReadNumber(player.GetProperty("mistimed-frame-count")) },
+                                        { "avSyncMs", ReadNumber(player.GetProperty("avsync")) * 1000 },
+                                        { "cacheSeconds", ReadNumber(player.GetProperty("demuxer-cache-duration")) },
+                                        { "cacheBytes", ReadNumber(player.GetProperty("demuxer-cache-state/fw-bytes")) },
+                                        { "gpuApi", "d3d11" }, { "gpuAdapter", player.GetProperty("gpu-context") ?? "d3d11" },
+                                        { "renderer", "D3D11/libmpv" }, { "toneMapping", toneMappingAlgorithm }
+                                    } }
+                                });
                             }
                         }
                     }
                 }
                 catch (Exception error)
                 {
-                    if (!shuttingDown) Emit(new Dictionary<string, object> { { "type", "error" }, { "error", error.Message } });
+                    if (!shuttingDown && !TryRecoverPlayback(error.Message)) Emit(new Dictionary<string, object> { { "type", "error" }, { "error", error.Message }, { "errorCode", "DECODE_INITIALIZATION_FAILED" } });
                 }
                 Thread.Sleep(150);
             }
@@ -885,14 +759,21 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
         private void Emit(Dictionary<string, object> value)
         {
-            EmitSerialized(serializer.Serialize(value));
-        }
-
-        private void EmitSerialized(string value)
-        {
+            string eventName = ReadString(value, "type");
+            var payload = new Dictionary<string, object>(value);
+            payload.Remove("type");
+            string semanticEvent;
+            if (!EventNames.TryGetValue(eventName, out semanticEvent)) throw new InvalidOperationException("播放协议事件未知");
+            var envelope = new Dictionary<string, object> {
+                { "protocol", Protocol }, { "protocolVersion", 1 }, { "sessionId", sessionId }, { "sequence", Interlocked.Increment(ref eventSequence) },
+                { "timestamp", (long)(DateTime.UtcNow - new DateTime(1970, 1, 1)).TotalMilliseconds },
+                { "event", "event." + semanticEvent }, { "payload", payload }
+            };
+            string serialized = serializer.Serialize(envelope);
+            if (Encoding.UTF8.GetByteCount(serialized) > MaxFrameBytes) throw new InvalidOperationException("播放协议事件帧超过 256 KiB");
             lock (outputLock)
             {
-                Console.Out.WriteLine(value);
+                Console.Out.WriteLine(serialized);
                 Console.Out.Flush();
             }
         }
@@ -959,11 +840,13 @@ namespace PhotoFlow.AdvancedVideoDecoder
             Console.InputEncoding = new UTF8Encoding(false);
             Console.OutputEncoding = new UTF8Encoding(false);
             try { NativeMethods.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
-            long parent = 0;
+            string sessionId = string.Empty;
             bool probeOnly = false;
             foreach (string argument in args) if (argument == "--probe") probeOnly = true;
             for (int index = 0; index + 1 < args.Length; index++)
-                if (args[index] == "--parent-hwnd") long.TryParse(args[index + 1], NumberStyles.Integer, CultureInfo.InvariantCulture, out parent);
+            {
+                if (args[index] == "--session-id") sessionId = args[index + 1];
+            }
             if (probeOnly)
             {
                 try
@@ -990,14 +873,14 @@ namespace PhotoFlow.AdvancedVideoDecoder
                     return 3;
                 }
             }
-            if (parent == 0)
+            if (string.IsNullOrWhiteSpace(sessionId))
             {
-                Console.Out.WriteLine("{\"type\":\"fatal\",\"error\":\"缺少 PhotoFlow 父窗口句柄\"}");
+                Console.Error.WriteLine("缺少 PhotoFlow 宿主参数");
                 return 2;
             }
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
-            Application.Run(new DecoderHost(new IntPtr(parent)));
+            Application.Run(new DecoderHost(sessionId));
             return 0;
         }
     }

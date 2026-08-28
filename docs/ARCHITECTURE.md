@@ -86,12 +86,47 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   repositories and version IPC implementations remain a compatibility backend
   during the next extraction stage; they are not exposed to the main renderer.
 - Advanced video UI is built into the application: `AdvancedVideoPlayer`,
-  Chromium fallback playback, trimming, screenshots, keyboard controls and the
-  `videoPlayback` preference all ship in the main renderer. The optional
-  `video-playback-mpv` component contributes only the supervised native decoder
-  process and libmpv runtime capability; installing it never installs a renderer
-  bundle. Configurations saved under the former component-settings key are
-  migrated into `videoPlayback` on load.
+  Chromium playback, trimming, screenshots, keyboard controls and the
+  `videoPlayback` preference all ship in the main renderer. `PlaybackSession`
+  and `VideoPlaybackBackend` are application-owned contracts. The Electron
+  playback broker discovers versioned, UI-less `media.playbackBackend@v1`
+  manifest contributions and combines their container-extension hints with Chromium's
+  `HTMLMediaElement.canPlayType` probe. Extensions are hints rather than codec
+  conclusions, and manifest priority orders contributed backends only—it cannot
+  outrank a positive Chromium capability signal. Actual backend startup remains
+  the final capability check. The
+  optional advanced component contributes only a supervised decoder/rendering
+  backend. A media
+  generation records attempted backends and never automatically attempts the
+  same backend twice. Startup failure or runtime loss may select the other
+  untried backend; only exhaustion of both backends produces the install/repair
+  or system-player guidance. Installing the component never installs product UI.
+  Configurations saved under the former component-settings key are migrated into
+  `videoPlayback` on load.
+
+  Playback state is normalized and owned by `PlaybackSession`; fallback restores
+  position, pause, audio, rate and stable subtitle selection before resuming.
+  Native surfaces report raw pointer/key activity and track facts; product input
+  and subtitle-default policy are interpreted by the application. The current
+  v1 native transport is a bounded, sequenced envelope. Media grants are bound
+  to one backend process/session, while a core-owned surface helper validates
+  the declared HWND's process before owning parenting, DPI positioning and clip
+  regions; backend processes never receive the Electron window handle.
+  The current
+  Electron `video-player-*` IPC names and `advanced-video-*` aliases are compatibility
+  adapters around the generic broker. Packages without an explicit
+  `media.playbackBackend@v1` declaration are not treated as playback backends,
+  because their input/default-policy behavior cannot satisfy the v1 ownership
+  contract. Removal plan: retire the IPC aliases after all supported installed
+  renderers cross the compatibility window.
+  New renderer/domain code must depend only on generic descriptors and sessions.
+
+  The reference libmpv implementation is an independently versioned release
+  project under `plugins/video-playback-backend`; core build and tests do not
+  import its source, build script, executable/DLL names or integrity manifest.
+  Core independence tests physically hide that directory before compiling. The
+  `advanced-video-*` channels in the generic IPC registrar are the sole removable
+  compatibility layer and never bypass the v1 descriptor/protocol.
 
 ## Stable contracts
 

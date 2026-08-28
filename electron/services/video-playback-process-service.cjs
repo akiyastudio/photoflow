@@ -1,8 +1,7 @@
 const { StringDecoder } = require('string_decoder');
-const fs = require('fs');
+const { createMediaPlaybackProcessAdapter } = require('./media-playback-process-adapter.cjs');
+const { cleanPlaybackDiagnostics } = require('../contracts/playback-diagnostics.cjs');
 
-// Legacy installation boundary: published runtimes are already installed under this immutable id.
-const COMPONENT_ID = 'video-playback-mpv';
 const START_TIMEOUT_MS = 8000;
 const SCREENSHOT_TIMEOUT_MS = 8000;
 const SCREENSHOT_PROBE_MS = 40;
@@ -13,22 +12,15 @@ const normalizeSubtitleFontSize = value => {
   return Number.isFinite(migrated) ? Math.max(16, Math.min(120, Math.round(migrated))) : DEFAULT_SUBTITLE_FONT_SIZE;
 };
 
-const nativeWindowHandleValue = window => {
-  const handle = window.getNativeWindowHandle();
-  if (!Buffer.isBuffer(handle) || handle.length < 4) throw new Error('无法读取照片流窗口句柄');
-  return handle.length >= 8 ? handle.readBigUInt64LE(0).toString() : String(handle.readUInt32LE(0));
-};
-
-const createAdvancedVideoService = ({
-  BrowserWindow, crypto, mediaService, path, pluginService, processSupervisor = null, spawn, writeLog,
-  fileSystem = fs, screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS,
+const createVideoPlaybackProcessService = ({
+  BrowserWindow, captureService, crypto, displayOutputService = null, mediaInputSessionService, nativeSurfaceService, path, playbackBroker, processSupervisor = null, spawn, writeLog,
+  startupTimeoutMs = START_TIMEOUT_MS, screenshotTimeoutMs = SCREENSHOT_TIMEOUT_MS, screenshotProbeMs = SCREENSHOT_PROBE_MS, subtitleInputService = null,
 }) => {
   const sessions = new Map();
   const sessionsByPlayer = new Map();
   const launches = new Map();
 
   const playerKey = (senderId, playerId) => `${senderId}:${playerId}`;
-  const unlinkScreenshotTemporary = pending => fileSystem.promises.unlink(pending.temporaryPath).catch(() => undefined);
   const rejectPendingScreenshot = (session, requestId, pending, error, allowPublishing = false) => {
     if (session.pendingScreenshots.get(requestId) !== pending) return;
     if (pending.phase === 'publishing' && !allowPublishing) return;
@@ -36,42 +28,14 @@ const createAdvancedVideoService = ({
     clearTimeout(pending.timer);
     pending.phase = 'settled';
     pending.cancelled = true;
-    void unlinkScreenshotTemporary(pending).finally(() => pending.reject(error));
+    void captureService.abort(pending.stageId).finally(() => pending.reject(error));
   };
-  const isCompletePng = async filePath => {
-    let handle;
-    try {
-      const stat = await fileSystem.promises.stat(filePath);
-      if (!stat.isFile() || stat.size < 20) return false;
-      handle = await fileSystem.promises.open(filePath, 'r');
-      const signature = Buffer.alloc(8);
-      const trailer = Buffer.alloc(12);
-      await handle.read(signature, 0, signature.length, 0);
-      await handle.read(trailer, 0, trailer.length, stat.size - trailer.length);
-      return signature.equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))
-        && trailer.readUInt32BE(0) === 0 && trailer.subarray(4, 8).toString('ascii') === 'IEND';
-    } catch {
-      return false;
-    } finally {
-      await handle?.close().catch(() => undefined);
-    }
-  };
-  const publishScreenshot = async pending => {
-    while (!pending.cancelled && Date.now() < pending.deadlineAt) {
-      if (await isCompletePng(pending.temporaryPath)) {
-        if (pending.cancelled || pending.phase !== 'waiting') throw new Error('视频截图发布已取消');
-        // This synchronous state transition is the commit boundary. Once the
-        // same-directory rename has started, timeout/stop must not report a
-        // failure that could be followed by a visible public file.
-        pending.phase = 'publishing';
-        clearTimeout(pending.timer);
-        await fileSystem.promises.rename(pending.temporaryPath, pending.finalPath);
-        return pending.finalPath;
-      }
-      await new Promise(resolve => setTimeout(resolve, screenshotProbeMs));
-    }
-    if (pending.cancelled) throw new Error('视频截图发布已取消');
-    throw new Error('视频截图文件在超时前未完整写入');
+  const captureOwner = session => ({ sessionId: session.id, componentId: session.componentId, processId: session.child.pid });
+  const publishScreenshot = async (session, pending) => {
+    if (pending.cancelled || pending.phase !== 'waiting') throw new Error('视频截图发布已取消');
+    pending.phase = 'publishing'; clearTimeout(pending.timer);
+    const result = await captureService.commit(pending.stageId, captureOwner(session), { deadlineAt: pending.deadlineAt, probeMs: screenshotProbeMs });
+    return result.path;
   };
   const removeSession = session => {
     sessions.delete(session.id);
@@ -92,7 +56,8 @@ const createAdvancedVideoService = ({
   const sendCommand = (session, value) => {
     if (!session || session.stopped || !session.child.stdin.writable) return false;
     try {
-      session.child.stdin.write(`${JSON.stringify(value)}\n`);
+      const { command, ...payload } = value;
+      session.processAdapter.sendLegacy(command, payload);
       return true;
     } catch (error) {
       writeLog('warn', 'Unable to control advanced video decoder', { sessionId: session.id, error: error.message || String(error) });
@@ -106,6 +71,9 @@ const createAdvancedVideoService = ({
     removeSession(session);
     emit(session, { type: 'stopped' });
     session.stopped = true;
+    session.processAdapter?.close();
+    session.surfaceController?.close();
+    mediaInputSessionService.revoke(session.id);
     if (session.rejectReady) {
       session.rejectReady(new Error('视频播放启动已取消'));
       session.rejectReady = null;
@@ -117,7 +85,7 @@ const createAdvancedVideoService = ({
     for (const pending of session.pendingScreenshots.values()) {
       rejectPendingScreenshot(session, pending.requestId, pending, new Error('视频播放已经停止'));
     }
-    try { session.child.stdin.end(`${JSON.stringify({ command: 'close' })}\n`); } catch { /* process already exited */ }
+    try { session.child.stdin.end(); } catch { /* process already exited */ }
     const timer = setTimeout(() => {
       if (session.managedProcess) session.managedProcess.stop('advanced-video-stop');
       else if (!session.child.killed) session.child.kill();
@@ -131,7 +99,7 @@ const createAdvancedVideoService = ({
     if (id) stop(id, senderId);
   };
 
-  const start = async (event, filePath, requestedSettings = {}, playerId, requestId) => {
+  const start = async (event, filePath, requestedSettings = {}, playerId, requestId, requestedBackendId = '') => {
     const settings = typeof requestedSettings === 'string'
       ? { arrowKeyAction: requestedSettings }
       : requestedSettings && typeof requestedSettings === 'object' ? requestedSettings : {};
@@ -146,27 +114,44 @@ const createAdvancedVideoService = ({
       if (launches.get(key) !== normalizedRequestId) throw new Error('视频播放器请求已被替换');
     };
     let session = null;
+    let inputSessionId = '';
+    let launchedChild = null;
 
     try {
-      const authorizedPath = await mediaService.authorizeInput(filePath);
-      assertCurrentLaunch();
       const ownerWindow = BrowserWindow.fromWebContents(sender);
       if (!ownerWindow || ownerWindow.isDestroyed()) throw new Error('照片流窗口已经关闭');
-      const runConfig = await pluginService.resolveRunConfigAsync(COMPONENT_ID, ['--parent-hwnd', nativeWindowHandleValue(ownerWindow)]);
-      assertCurrentLaunch();
+      const backendId = String(requestedBackendId || playbackBroker.defaultBackendId());
+      if (!backendId) throw new Error('没有可用的高级视频播放后端');
+      const backendOwner = playbackBroker.ownerForBackend?.(backendId) || { componentId: 'playback-backend' };
       const id = crypto.randomUUID();
+      inputSessionId = id;
+      await mediaInputSessionService.prepare({ filePath, componentId: backendOwner.componentId, backendId, sessionId: id });
+      assertCurrentLaunch();
+      const runConfig = await playbackBroker.resolveRunConfigAsync(backendId, ['--session-id', id]);
+      assertCurrentLaunch();
       const managedProcess = processSupervisor?.launch({
         id: `component:advanced-video:${id}`,
-        kind: 'optional-component',
+        kind: 'media-playback-backend',
+        protocol: 'media-playback-backend-v1',
+        owner: { componentId: backendOwner.componentId, playbackSessionId: id, backendId },
         command: runConfig.command,
         args: runConfig.args,
         options: { cwd: path.dirname(runConfig.command), stdio: ['pipe', 'pipe', 'pipe'] },
-        health: { startupTimeoutMs: START_TIMEOUT_MS },
+        health: { startupTimeoutMs },
+        onExitCleanup: ({ child: exitedChild }) => {
+          mediaInputSessionService.revokePlaybackSession?.(id);
+          captureService.abortSession?.(id);
+          if (exitedChild?.pid) { mediaInputSessionService.revokeProcess?.(exitedChild.pid); captureService.abortProcess?.(exitedChild.pid); }
+        },
         ephemeral: true,
       });
       const child = managedProcess?.child || spawn(runConfig.command, runConfig.args, {
         cwd: path.dirname(runConfig.command), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
       });
+      launchedChild = child;
+      const inputGrant = mediaInputSessionService.bindProcess({ componentId: backendOwner.componentId, backendId, sessionId: id, processId: child.pid });
+      const inputOwner = { componentId: backendOwner.componentId, backendId, sessionId: id, processId: child.pid };
+      const authorizedPath = await mediaInputSessionService.resolve(inputGrant.token, inputOwner);
       session = {
         id,
         sender,
@@ -181,7 +166,20 @@ const createAdvancedVideoService = ({
         pendingScreenshots: new Map(),
         onSenderDestroyed: null,
         rejectReady: null,
+        processAdapter: null,
+        ownerWindow,
+        componentId: backendOwner.componentId,
+        backendId,
+        inputToken: inputGrant.token,
+        pendingAuthorizedSubtitles: [],
+        surfaceAttachPromise: null,
+        surfaceController: null,
+        lastDisplayKey: '',
       };
+      session.processAdapter = createMediaPlaybackProcessAdapter({
+        sessionId: id,
+        writeLine: line => session.child.stdin.write(`${line}\n`),
+      });
       sessions.set(id, session);
       sessionsByPlayer.set(key, id);
       session.onSenderDestroyed = () => stop(id, sender.id);
@@ -196,15 +194,28 @@ const createAdvancedVideoService = ({
         rejectReady = reject;
         session.rejectReady = reject;
       });
-      const startupTimer = setTimeout(() => rejectReady(new Error('视频播放器启动超时，请在组件管理中修复或重新安装视频播放器运行时')), START_TIMEOUT_MS);
+      const startupTimer = setTimeout(() => { const error = new Error('视频播放器启动超时，请在组件管理中修复或重新安装视频播放器运行时'); error.code = 'STARTUP_TIMEOUT'; rejectReady(error); }, startupTimeoutMs);
       startupTimer.unref?.();
 
       const consumeLine = line => {
         if (session.stopped || !line.trim()) return;
-        let value;
-        try { value = JSON.parse(line); }
+        let received;
+        try { received = session.processAdapter.receiveLine(line); }
         catch {
-          writeLog('warn', 'Advanced video decoder emitted invalid JSON', { line: line.slice(0, 500) });
+          writeLog('warn', 'Advanced video decoder emitted an invalid v1 frame', { line: line.slice(0, 500) });
+          return;
+        }
+        const value = { type: received.type, ...received.payload };
+        if(value.type==='file-loaded'&&session.pendingAuthorizedSubtitles.length){for(const subtitlePath of session.pendingAuthorizedSubtitles)sendCommand(session,{command:'subtitle-add',path:subtitlePath});session.pendingAuthorizedSubtitles=[];}
+        if (value.type === 'diagnostic') {
+          try { emit(session, { type: 'diagnostic', diagnostic: cleanPlaybackDiagnostics(value.diagnostic) }); }
+          catch (error) { writeLog('warn', 'Playback backend emitted invalid diagnostics', { sessionId: session.id, error: error.message || String(error) }); }
+          return;
+        }
+        if (value.type === 'surface-created') {
+          if (session.surfaceAttachPromise) return;
+          session.surfaceAttachPromise = nativeSurfaceService.attach({ ownerWindow: session.ownerWindow, componentProcess: session.child, surfaceHandle: value.surfaceHandle, sessionId: session.id, onLost: error => { if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'SURFACE_LOST', error: error.message }); } })
+            .then(controller => { session.surfaceController = controller; return controller; });
           return;
         }
         if (value.type === 'screenshot-result') {
@@ -217,7 +228,7 @@ const createAdvancedVideoService = ({
             return;
           }
           pending.componentCompleted = true;
-          void publishScreenshot(pending).then(finalPath => {
+          void publishScreenshot(session, pending).then(finalPath => {
             if (session.pendingScreenshots.get(screenshotRequestId) !== pending) return;
             session.pendingScreenshots.delete(screenshotRequestId);
             clearTimeout(pending.timer);
@@ -227,11 +238,15 @@ const createAdvancedVideoService = ({
           return;
         }
         if (value.type === 'ready') {
-          session.ready = true;
-          session.managedProcess?.markHealthy({ protocol: 'video-player-v1' });
-          session.rejectReady = null;
-          clearTimeout(startupTimer);
-          settleReady();
+          if (!session.surfaceAttachPromise) { rejectReady(new Error('视频后端未声明原生渲染表面')); return; }
+          void session.surfaceAttachPromise.then(() => {
+            if (session.stopped) return;
+            session.ready = true;
+            session.managedProcess?.markHealthy({ protocol: 'media-playback-backend-v1' });
+            session.rejectReady = null;
+            clearTimeout(startupTimer);
+            settleReady();
+          }, rejectReady);
         } else if (value.type === 'fatal') {
           session.lastError = String(value.error || '视频播放器启动失败');
           clearTimeout(startupTimer);
@@ -254,36 +269,37 @@ const createAdvancedVideoService = ({
         session.lastError = error.message || String(error);
         clearTimeout(startupTimer);
         rejectReady(error);
-        if (!session.stopped) emit(session, { type: 'fatal', error: session.lastError });
+        if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'BACKEND_CRASHED', error: session.lastError });
       });
       child.once('exit', code => {
         clearTimeout(startupTimer);
+        session.processAdapter?.close();
+        session.surfaceController?.close();
+        mediaInputSessionService.revoke(session.id);
         for (const [requestId, pending] of session.pendingScreenshots.entries()) {
           rejectPendingScreenshot(session, requestId, pending, new Error('视频播放器在截图完成前退出'));
         }
         removeSession(session);
         if (!session.ready) rejectReady(new Error(session.lastError || stderr.trim() || `视频播放器退出（${code ?? '未知'}），请修复或重新安装视频播放器运行时`));
-        else if (!session.stopped) emit(session, { type: 'fatal', error: session.lastError || stderr.trim() || '视频播放器意外退出，请重新打开视频；若持续失败请修复视频播放器运行时' });
+        else if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'BACKEND_CRASHED', error: session.lastError || stderr.trim() || '视频播放器意外退出，请重新打开视频；若持续失败请修复视频播放器运行时' });
         writeLog(code === 0 || session.stopped ? 'info' : 'warn', 'Advanced video decoder exited', { sessionId: id, code, error: stderr.trim() });
       });
 
       await readyPromise;
       assertCurrentLaunch();
-      sendCommand(session, { command: 'set-keyboard-mode', value: settings.arrowKeyAction === 'navigate' ? 'navigate' : 'seek' });
-      sendCommand(session, {
-        command: 'set-subtitle-defaults',
-        enabled: settings.subtitlesEnabled === true,
-        preferredLanguages: Array.isArray(settings.subtitlePreferredLanguages) ? settings.subtitlePreferredLanguages.slice(0, 8) : [],
-        fontSize: normalizeSubtitleFontSize(settings.subtitleSize),
-        style: settings.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard',
-      });
+      if (settings.subtitlesEnabled === true && subtitleInputService) session.pendingAuthorizedSubtitles = await subtitleInputService.discover(authorizedPath);
       if (!sendCommand(session, { command: 'open', path: authorizedPath })) throw new Error('无法向视频播放器发送文件');
+      sendCommand(session, { command: 'subtitle-style', fontSize: normalizeSubtitleFontSize(settings.subtitleSize), style: settings.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard' });
       if (!sendCommand(session, { command: 'play' })) throw new Error('无法启动视频播放器');
       writeLog('info', 'Advanced video decoder started', { sessionId: id, filePath: authorizedPath });
       return { sessionId: id, playerId: normalizedPlayerId, requestId: normalizedRequestId };
     } catch (error) {
       if (session) stop(session.id, sender.id);
-      else if (launches.get(key) === normalizedRequestId) launches.delete(key);
+      else {
+        if (inputSessionId) mediaInputSessionService.revoke(inputSessionId);
+        if (launchedChild && !launchedChild.killed) { try { launchedChild.kill(); } catch { /* launch already exited */ } }
+        if (launches.get(key) === normalizedRequestId) launches.delete(key);
+      }
       throw error;
     }
   };
@@ -309,8 +325,7 @@ const createAdvancedVideoService = ({
     const cornerHoleY = Math.max(0, Math.min(height, number(requestedCornerHole.y)));
     const cornerHoleWidth = Math.max(0, Math.min(width - cornerHoleX, number(requestedCornerHole.width)));
     const cornerHoleHeight = Math.max(0, Math.min(height - cornerHoleY, number(requestedCornerHole.height)));
-    sendCommand(session, {
-      command: 'set-bounds',
+    session.surfaceController?.setBounds({
       x: Math.max(-32768, Math.min(32768, number(bounds.x))),
       y: Math.max(-32768, Math.min(32768, number(bounds.y))),
       width,
@@ -329,12 +344,21 @@ const createAdvancedVideoService = ({
       cornerHoleWidth,
       cornerHoleHeight,
     });
+    if (displayOutputService) {
+      const output = displayOutputService.describe(session.ownerWindow, { x: number(bounds.x), y: number(bounds.y), width, height });
+      const displayKey = `${output.displayId}:${output.scaleFactor}:${output.colorSpace}:${output.hdrAvailable}`;
+      if (displayKey !== session.lastDisplayKey) {
+        session.lastDisplayKey = displayKey;
+        sendCommand(session, { command: 'display-output', output });
+        emit(session, { type: 'display-output', display: output });
+      }
+    }
   };
 
   const control = (event, sessionId, request = {}) => {
     const session = sessions.get(String(sessionId || ''));
     if (!session || session.sender.id !== event.sender.id) return;
-    const allowed = new Set(['play', 'pause', 'seek', 'volume', 'mute', 'speed', 'stop', 'subtitle-select', 'subtitle-visible', 'subtitle-delay', 'subtitle-style']);
+    const allowed = new Set(['play', 'pause', 'seek', 'frame-step', 'frame-back-step', 'volume', 'mute', 'speed', 'stop', 'subtitle-select', 'subtitle-visible', 'subtitle-delay', 'subtitle-style', 'audio-select', 'transform', 'hdr-mode', 'tone-mapping', 'statistics-level']);
     const command = String(request.action || '');
     if (!allowed.has(command)) return;
     sendCommand(session, {
@@ -342,6 +366,11 @@ const createAdvancedVideoService = ({
       value: request.value,
       fontSize: command === 'subtitle-style' ? normalizeSubtitleFontSize(request.fontSize ?? request.size) : undefined,
       style: request.style,
+      transform: command === 'transform' ? request.transform : undefined,
+      hdrMode: command === 'hdr-mode' ? request.hdrMode : undefined,
+      toneMapping: command === 'tone-mapping' ? request.toneMapping : undefined,
+      targetPeakNits: command === 'tone-mapping' ? request.targetPeakNits : undefined,
+      statisticsLevel: command === 'statistics-level' ? request.statisticsLevel : undefined,
     });
   };
 
@@ -357,17 +386,12 @@ const createAdvancedVideoService = ({
     if (!sendCommand(session, { command: 'subtitle-add', path: filePath })) throw new Error('无法向视频播放器添加字幕');
   };
 
-  const screenshot = async (event, sessionId) => {
+  const screenshot = async (event, sessionId, requestedMode = 'displayedFrame') => {
     const session = sessions.get(String(sessionId || ''));
     if (!session || session.sender.id !== event.sender.id || session.stopped) throw new Error('视频播放会话不存在');
     const requestId = crypto.randomUUID();
-    const now = new Date();
-    const two = value => String(value).padStart(2, '0');
-    const three = value => String(value).padStart(3, '0');
-    const timestamp = `${now.getFullYear()}${two(now.getMonth() + 1)}${two(now.getDate())}-${two(now.getHours())}${two(now.getMinutes())}${two(now.getSeconds())}-${three(now.getMilliseconds())}`;
-    const parsed = path.parse(session.filePath);
-    const targetPath = path.join(parsed.dir, `${parsed.name}_截图_${timestamp}_${requestId.slice(0, 8)}.png`);
-    const temporaryPath = path.join(parsed.dir, `.${parsed.name}.${requestId}.photoflow-transcode-screenshot.png`);
+    const stage = await captureService.create({ ...captureOwner(session), sourcePath: session.filePath });
+    const resolvedStage = captureService.resolve(stage.stageId, captureOwner(session));
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         const pending = session.pendingScreenshots.get(requestId);
@@ -375,12 +399,13 @@ const createAdvancedVideoService = ({
       }, screenshotTimeoutMs);
       timer.unref?.();
       const pending = {
-        requestId, resolve, reject, timer, finalPath: targetPath, temporaryPath,
+        requestId, stageId: stage.stageId, resolve, reject, timer,
         deadlineAt: Date.now() + screenshotTimeoutMs, componentCompleted: false,
         cancelled: false, phase: 'waiting',
       };
       session.pendingScreenshots.set(requestId, pending);
-      if (!sendCommand(session, { command: 'screenshot', requestId, path: temporaryPath })) {
+      const captureMode = requestedMode === 'sourceFrame' ? 'sourceFrame' : 'displayedFrame';
+      if (!sendCommand(session, { command: 'screenshot', requestId, stageId: stage.stageId, path: resolvedStage.stagePath, captureMode })) {
         rejectPendingScreenshot(session, requestId, pending, new Error('无法向视频解码组件发送截图命令'));
       }
     });
@@ -393,4 +418,4 @@ const createAdvancedVideoService = ({
   return { start, setBounds, control, addSubtitle, ownsSession, screenshot, stop, dispose, sessions, sessionsByPlayer, launches };
 };
 
-module.exports = { COMPONENT_ID, createAdvancedVideoService, nativeWindowHandleValue };
+module.exports = { createVideoPlaybackProcessService };

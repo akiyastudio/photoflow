@@ -23,7 +23,7 @@ const { registerMediaIpc } = require('./modules/media-ipc.cjs');
 const { registerMediaRatingIpc } = require('./modules/media-rating-ipc.cjs');
 const { registerVersionIpc } = require('./modules/versions-ipc.cjs');
 const { registerSelectionIpc } = require('./modules/selection-ipc.cjs');
-const { registerAdvancedVideoIpc } = require('./modules/advanced-video-ipc.cjs');
+const { registerVideoPlaybackIpc } = require('./modules/video-playback-ipc.cjs');
 const { registerBackupIpc } = require('./modules/backup-ipc.cjs');
 const { registerArchiveIpc } = require('./modules/archive-ipc.cjs');
 const { registerStorageUsageIpc } = require('./modules/storage-usage-ipc.cjs');
@@ -1862,7 +1862,7 @@ app.whenReady().then(async () => {
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
   registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });
   registerSelectionIpc({ ipcMain, path, fs, selectionService, workspaceCatalogs });
-  registerAdvancedVideoIpc({ BrowserWindow, app, crypto, dialog, ipcMain, mediaService, path, pluginService, processSupervisor, spawn, writeLog });
+  registerVideoPlaybackIpc({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog });
   const credentialService = createCredentialService({ writeLog });
   const recoveryClients = [
     workspaceDatabase,

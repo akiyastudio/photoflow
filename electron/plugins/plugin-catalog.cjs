@@ -1,17 +1,6 @@
 const PLUGIN_API_VERSION = 1;
 
-const PLUGIN_DEFINITIONS = Object.freeze({
-  'video-playback-mpv': {
-    id: 'video-playback-mpv',
-    runtimeOnly: true,
-    version: '26.8.16.1',
-    name: '视频播放器',
-    description: '使用独立 libmpv 进程、硬件解码和预读缓存播放相机原始视频。',
-    // Legacy capability token retained for already published package metadata.
-    capabilities: ['video-playback.advanced'],
-    integrityManifest: 'video-playback-mpv-integrity.json',
-  },
-});
+const PLUGIN_DEFINITIONS = Object.freeze({});
 
 const findPluginByCapability = capability => Object.values(PLUGIN_DEFINITIONS)
   .find(definition => definition.capabilities.includes(capability));

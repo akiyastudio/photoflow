@@ -5,7 +5,7 @@ const { sha256File } = require('./runtime-policy.cjs');
 const [artifactRootArg] = process.argv.slice(2);
 if (!artifactRootArg) throw new Error('用法：node create-mpv-manifest.cjs <产物目录>');
 const root = path.resolve(artifactRootArg);
-const lock = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', '..', 'media-runtime.lock.json'), 'utf8'));
+const lock = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'media-runtime.lock.json'), 'utf8'));
 const configureFlags = fs.readFileSync(path.join(root, 'linked-ffmpeg-buildconf.txt'), 'utf8')
   .split(/\s+/).filter(flag => flag.startsWith('--'));
 const mpvCommit = fs.readFileSync(path.join(root, 'mpv-commit.txt'), 'utf8').trim();
