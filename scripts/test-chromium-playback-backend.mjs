@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { ChromiumPlaybackBackend, chromiumContainerProbe, startPlaybackSession } from '../src/platform/video-playback/playback-session.ts';
 
 globalThis.HTMLMediaElement = { HAVE_FUTURE_DATA: 3 };
+globalThis.document = { createElement: name => { if (name !== 'track') throw new Error(`unexpected element ${name}`); const element = new EventTarget(); element.track = { mode: 'disabled', cues: [] }; element.remove = () => { element.removed = true; }; return element; } };
 
 class FakeVideo extends EventTarget {
   constructor({ failLoad = false } = {}) {
@@ -20,6 +21,7 @@ class FakeVideo extends EventTarget {
     this.playbackRate = 1;
     this.videoWidth = 1920;
     this.videoHeight = 1080;
+    this.style = {};
     this.error = null;
     this.loads = 0;
     this.listenerBalance = 0;
@@ -44,15 +46,18 @@ class FakeVideo extends EventTarget {
   }
   pause() { this.paused = true; this.dispatchEvent(new Event('pause')); }
   removeAttribute(name) { if (name === 'src') this.src = ''; }
+  getVideoPlaybackQuality() { return { totalVideoFrames: 120, droppedVideoFrames: 2 }; }
+  appendChild(element) { queueMicrotask(() => element.dispatchEvent(new Event('load'))); return element; }
 }
 
 const descriptor = { backendId: 'core.chromium', protocolVersion: 1, transport: 'chromium', displayName: 'Chromium', priority: 100, probe: { support: 'probably', basis: 'test' } };
 const settings = { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: [], subtitleSize: 55, subtitleStyle: 'standard' };
-const context = (video, states, failures, published) => ({
+const context = (video, states, failures, published, subtitleChoice = { success: true, format: 'vtt', name: 'dialog.zh.vtt', mediaUrl: 'photoflow-media://file/subtitle' }) => ({
   filePath: 'C:/project/clip.mp4', settings, playerId: 'player-real', requestId: 'request-real', video,
   electronApi: {
     async getVideoPlaybackSource() { return { success: true, mediaUrl: 'photoflow-media://file/token' }; },
     async publishVideoPlayerFrame(filePath, bytes) { published.push({ filePath, bytes }); return { success: true, path: 'C:/project/frame.png' }; },
+    async chooseVideoSubtitleFile() { return subtitleChoice; },
   },
   onState: state => states.push(state), onRuntimeFailure: error => failures.push(error),
 });
@@ -71,7 +76,11 @@ const context = (video, states, failures, published) => ({
   session.control({ action: 'volume', value: 40 });
   session.control({ action: 'mute', value: true });
   session.control({ action: 'speed', value: 1.5 });
+  session.control({ action: 'transform', transform: { aspectMode: 'cover', rotation: 180, flipHorizontal: true, flipVertical: false } });
+  session.control({ action: 'statistics-level', statisticsLevel: 'basic' });
   assert.deepEqual({ paused: video.paused, time: video.currentTime, volume: video.volume, muted: video.muted, speed: video.playbackRate }, { paused: true, time: 33, volume: 0.4, muted: true, speed: 1.5 });
+  assert.equal(video.style.objectFit, 'cover'); assert.match(video.style.transform, /rotate\(180deg\)/); assert(states.some(state => state.type === 'statistics' && state.statistics.droppedFrames === 2));
+  const subtitle = await session.chooseSubtitle(); assert.equal(subtitle.success, true); await new Promise(resolve => setImmediate(resolve)); assert(states.some(state => state.type === 'subtitle-tracks' && state.subtitleTracks.some(track => track.format === 'vtt' && track.selected)));
   video.error = { message: 'runtime decode failure' };
   video.dispatchEvent(new Event('error'));
   assert.deepEqual(failures, ['runtime decode failure']);
@@ -79,6 +88,11 @@ const context = (video, states, failures, published) => ({
   assert.equal(video.src, '');
   assert.equal(video.paused, true);
   assert.equal(video.listenerBalance, 0, 'close must remove every Chromium media listener');
+}
+
+{
+  const video = new FakeVideo(); const backend = new ChromiumPlaybackBackend(descriptor); const session = await backend.start(context(video, [], [], [], { success: true, format: 'ass', name: 'styled.ass' }));
+  const result = await session.chooseSubtitle(); assert.equal(result.success, false); assert.equal(result.requiresFeature, 'subtitle-format:ass'); assert.match(result.error, /高级播放后端/); await session.close();
 }
 
 {

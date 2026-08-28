@@ -1136,6 +1136,7 @@ export interface IElectronAPI {
   }) => void;
   controlVideoPlayer: (sessionId: string, request: { action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay' | 'subtitle-style' | 'transform' | 'hdr-mode' | 'statistics-level'; value?: number | boolean | string; fontSize?: VideoPlaybackSettings['subtitleSize']; style?: VideoPlaybackSettings['subtitleStyle']; transform?: { aspectMode: 'source' | 'contain' | 'cover' | '16:9' | '4:3' | '1:1'; rotation: 0 | 90 | 180 | 270; flipHorizontal: boolean; flipVertical: boolean }; hdrMode?: VideoPlaybackSettings['hdrMode']; statisticsLevel?: 'off' | 'basic' | 'detailed' }) => void;
   chooseVideoSubtitle: (sessionId: string) => Promise<{ success: boolean; cancelled?: boolean; path?: string; error?: string }>;
+  chooseVideoSubtitleFile: () => Promise<{ success: boolean; cancelled?: boolean; format?: 'vtt' | 'srt' | 'ass' | 'ssa'; name?: string; mediaUrl?: string; error?: string }>;
   addVideoSubtitle: (sessionId: string, filePath: string) => Promise<{ success: boolean; error?: string }>;
   captureVideoPlayerFrame: (sessionId: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   publishVideoPlayerFrame: (filePath: string, bytes: Uint8Array) => Promise<{ success: boolean; path?: string; error?: string }>;

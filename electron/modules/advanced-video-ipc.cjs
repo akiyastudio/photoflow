@@ -87,6 +87,16 @@ const registerAdvancedVideoIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcM
       return { success: true, path: result.filePaths[0] };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });
+  ipcMain.handle('video-subtitle-choose-file', async event => {
+    try {
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      const result = await dialog.showOpenDialog(owner, { title: '添加本地字幕', properties: ['openFile'], filters: [{ name: '字幕文件', extensions: ['vtt', 'srt', 'ass', 'ssa'] }] });
+      if (result.canceled || !result.filePaths[0]) return { success: true, cancelled: true };
+      const subtitlePath = path.resolve(result.filePaths[0]); const format = path.extname(subtitlePath).slice(1).toLowerCase();
+      if (!['vtt', 'srt', 'ass', 'ssa'].includes(format) || !fs.existsSync(subtitlePath)) throw new Error('字幕文件不存在或格式不受支持');
+      return { success: true, format, name: path.basename(subtitlePath), mediaUrl: format === 'vtt' ? mediaService.toUrl(subtitlePath, true) : undefined };
+    } catch (error) { return { success: false, error: error.message || String(error) }; }
+  });
   ipcMain.handle('video-player-subtitle-add', async (event, sessionId, filePath) => {
     try { service.addSubtitle(event, sessionId, await mediaService.authorizeInput(filePath)); return { success: true }; }
     catch (error) { return { success: false, error: error.message || String(error) }; }

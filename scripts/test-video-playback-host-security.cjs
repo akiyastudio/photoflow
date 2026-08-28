@@ -8,6 +8,7 @@ const crypto = require('node:crypto');
 const { createMediaInputSessionService } = require('../electron/services/media-input-session-service.cjs');
 const { createNativeVideoSurfaceService } = require('../electron/services/native-video-surface-service.cjs');
 const { createPlaybackCaptureService } = require('../electron/services/playback-capture-service.cjs');
+const { createVideoDisplayOutputService } = require('../electron/services/video-display-output-service.cjs');
 
 const run = async () => {
   const inputRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-input-session-')); const inputPath = path.join(inputRoot, 'clip.mp4'); fs.writeFileSync(inputPath, 'video'); let clock = 1000;
@@ -52,6 +53,8 @@ const run = async () => {
 
   const nativeHost = fs.readFileSync(path.join(__dirname, '..', 'electron/native/VideoSurfaceHost.cs'), 'utf8');
   assert(nativeHost.includes('GetWindowThreadProcessId') && nativeHost.includes('actual!=expected') && nativeHost.includes('SetParent(child,parent)'));
+  const sdrDisplay = createVideoDisplayOutputService({ screen: { getDisplayMatching: () => ({ id: 1, scaleFactor: 1.5, colorSpace: 'srgb', hdrEnabled: false, bounds: { x: 0, y: 0, width: 100, height: 100 } }) } }).describe(null, { x: 0, y: 0, width: 10, height: 10 }); assert.equal(sdrDisplay.hdrAvailable, false); assert.match(sdrDisplay.reason, /未明确报告/);
+  const hdrDisplay = createVideoDisplayOutputService({ screen: { getDisplayMatching: () => ({ id: 2, scaleFactor: 2, colorSpace: 'rec2100-pq', hdrEnabled: true, bounds: { x: 100, y: 0, width: 100, height: 100 } }) } }).describe(null, { x: 120, y: 0, width: 10, height: 10 }); assert.equal(hdrDisplay.hdrAvailable, true); assert.equal(hdrDisplay.displayId, '2');
   fs.rmSync(inputRoot, { recursive: true, force: true });
   console.log('Video playback media-input and host-owned native-surface security tests passed.');
 };

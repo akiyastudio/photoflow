@@ -1,13 +1,15 @@
 /* eslint-disable react-refresh/only-export-components -- directional input helpers are intentionally colocated with the player contract */
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
-import { Camera, Captions, Gauge, Loader2, Pause, Play, Plus, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
-import type { VideoPlayerState, VideoPlaybackSettings, VideoSubtitleTrack } from '../types';
+import { Camera, Captions, Gauge, Info, Loader2, Pause, Play, Plus, Settings2, SkipBack, SkipForward, Volume2, VolumeX } from 'lucide-react';
+import type { VideoPlaybackBackendDescriptor, VideoPlayerState, VideoPlaybackSettings, VideoSubtitleTrack } from '../types';
 import { useHostSurfaceState } from './LayerProvider';
 import { readSubtitleMemory, resolveRememberedSubtitle, writeSubtitleMemory } from './video-subtitle-memory';
 import { DEFAULT_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../features/app/video-player-settings';
 import { discoverPlaybackBackends, startPlaybackSession } from '../platform/video-playback/playback-session';
 import type { PlaybackSession } from '../platform/video-playback/playback-session';
+import { DEFAULT_VIDEO_TRANSFORM, hdrModeAvailability, playbackCapabilityPresentation } from '../contracts/video-playback';
+import type { VideoTransform } from '../contracts/video-playback';
 
 const formatTime = (seconds: number) => {
   if (!Number.isFinite(seconds) || seconds < 0) return '0:00';
@@ -106,7 +108,11 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const [starting, setStarting] = useState(true);
   const [capturing, setCapturing] = useState(false);
   const [captureNotice, setCaptureNotice] = useState<{ text: string; error?: boolean } | null>(null);
-  const [controlPanel, setControlPanel] = useState<'speed' | 'volume' | 'subtitles' | null>(null);
+  const [controlPanel, setControlPanel] = useState<'speed' | 'volume' | 'subtitles' | 'display' | 'info' | null>(null);
+  const [videoTransform, setVideoTransform] = useState<VideoTransform>(DEFAULT_VIDEO_TRANSFORM);
+  const [activeBackendId, setActiveBackendId] = useState('');
+  const [availableBackends, setAvailableBackends] = useState<VideoPlaybackBackendDescriptor[]>([]);
+  const [displayCapability, setDisplayCapability] = useState({ hdrAvailable: false, reason: '尚未检测当前显示器' });
   const [subtitleFontSize, setSubtitleFontSize] = useState(() => normalizeSubtitleFontSize(keyboardSettings.subtitleSize));
   const subtitleMemoryRestoredRef = useRef(false);
   const rememberAddedSubtitleRef = useRef(false);
@@ -127,11 +133,15 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     setCapturing(false);
     setCaptureNotice(null);
     setControlPanel(null);
+    setVideoTransform(DEFAULT_VIDEO_TRANSFORM);
+    setActiveBackendId('');
+    setAvailableBackends([]);
     subtitleMemoryRestoredRef.current = false;
     rememberAddedSubtitleRef.current = false;
     setState(initialState());
     const handleState = (update: VideoPlayerState) => {
       if (update.playerId !== playerIdRef.current || update.requestId !== requestIdRef.current) return;
+      if (sessionRef.current) setActiveBackendId(sessionRef.current.backendId);
       if (update.type === 'input' && update.input) {
         const input = update.input;
         if (input.kind === 'pointer-move') onPointerActivityRef.current?.();
@@ -221,6 +231,8 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         return;
       }
       sessionRef.current = session;
+      setActiveBackendId(session.backendId);
+      setAvailableBackends(session.availableBackends || []);
       setSessionId(requestId);
     }).catch(error => {
       if (active && !errorReportedRef.current) {
@@ -271,6 +283,20 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   useEffect(() => {
     if (!controlsVisible) setControlPanel(null);
   }, [controlsVisible]);
+
+  useEffect(() => {
+    if (!sessionRef.current) return;
+    const descriptor = sessionRef.current.availableBackends?.find(item => item.backendId === sessionRef.current?.backendId);
+    const level = descriptor?.features.statistics.levels.includes('detailed') ? 'detailed' : 'basic';
+    sessionRef.current.control({ action: 'statistics-level', statisticsLevel: controlPanel === 'info' ? level : 'off' });
+  }, [activeBackendId, controlPanel, sessionId]);
+
+  useEffect(() => {
+    if (controlPanel !== 'display') return;
+    void window.electronAPI.getVideoDisplayCapabilities().then(result => {
+      if (result.success) setDisplayCapability({ hdrAvailable: result.display.hdrAvailable, reason: result.display.reason });
+    });
+  }, [controlPanel]);
 
   const syncBounds = useCallback(() => {
     const surface = surfaceRef.current;
@@ -491,9 +517,22 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     // Choosing a new subtitle is an explicit override of a remembered "off" state.
     subtitleMemoryRestoredRef.current = true;
     const chosen = await sessionRef.current.chooseSubtitle();
-    if (!chosen.success) setCaptureNotice({ text: chosen.error || '字幕加载失败', error: true });
+    if (!chosen.success) setCaptureNotice({ text: chosen.requiresFeature ? `${chosen.error}；可在显示设置中切换后端` : chosen.error || '字幕加载失败', error: true });
     else if (!chosen.cancelled) rememberAddedSubtitleRef.current = true;
   };
+  const changeTransform = (patch: Partial<VideoTransform>) => {
+    const next = { ...videoTransform, ...patch };
+    setVideoTransform(next);
+    sessionRef.current?.control({ action: 'transform', transform: next });
+  };
+  const switchPlaybackBackend = async (backendId: string) => {
+    const result = await sessionRef.current?.switchBackend?.(backendId);
+    if (!result?.success) setCaptureNotice({ text: result?.error || '无法切换播放后端', error: true });
+    else { setActiveBackendId(sessionRef.current?.backendId || backendId); setCaptureNotice({ text: '播放后端已切换' }); }
+  };
+  const activeBackend = availableBackends.find(item => item.backendId === activeBackendId);
+  const capabilityPresentation = playbackCapabilityPresentation(activeBackend?.features, displayCapability.hdrAvailable);
+  const hdrAvailability = hdrModeAvailability({ requested: keyboardSettings.hdrMode, backendModes: activeBackend?.features.hdr.modes || ['sdr'], hdrDisplayAvailable: displayCapability.hdrAvailable });
 
   const forwardBackAction = videoDirectionalAction(keyboardSettings.arrowKeyAction, 'forward-back');
   const runForwardBackControl = (direction: -1 | 1) => {
@@ -536,6 +575,20 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
             </div>
           </div>}
           <button type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'subtitles' ? null : 'subtitles')} title="字幕" aria-label="字幕菜单" aria-expanded={controlPanel === 'subtitles'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'subtitles' ? 'bg-white/10' : ''}`}><Captions size={17}/></button>
+        </div>
+        <div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
+          {controlPanel === 'display' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-80 pb-2" onClick={event => event.stopPropagation()}><div className="max-h-96 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-3 text-xs text-slate-200 shadow-2xl shadow-black/70">
+            <div className="mb-2 font-bold">显示与播放后端</div>
+            <div className="mb-2 grid grid-cols-2 gap-1">{availableBackends.map(backend => <button key={backend.backendId} type="button" aria-pressed={backend.backendId === activeBackendId} onClick={() => void switchPlaybackBackend(backend.backendId)} className={`truncate rounded px-2 py-1.5 text-left ${backend.backendId === activeBackendId ? 'bg-blue-500 text-white' : 'bg-white/5 hover:bg-white/15'}`}>{backend.displayName}</button>)}</div>
+            <div className="border-t border-white/10 pt-2"><span className="text-slate-400">画面比例</span><div className="mt-1 grid grid-cols-3 gap-1">{(['source','contain','cover','16:9','4:3','1:1'] as const).filter(mode => capabilityPresentation.transformControls.includes(mode)).map(mode => <button key={mode} type="button" aria-pressed={videoTransform.aspectMode === mode} onClick={() => changeTransform({ aspectMode: mode })} className={`rounded px-1 py-1 ${videoTransform.aspectMode === mode ? 'bg-blue-500 text-white' : 'bg-white/5 hover:bg-white/15'}`}>{mode}</button>)}</div></div>
+            <div className="mt-2 flex gap-1"><button type="button" onClick={() => changeTransform({ rotation: ((videoTransform.rotation + 90) % 360) as VideoTransform['rotation'] })} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">旋转 90°</button><button type="button" aria-pressed={videoTransform.flipHorizontal} onClick={() => changeTransform({ flipHorizontal: !videoTransform.flipHorizontal })} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">水平翻转</button><button type="button" aria-pressed={videoTransform.flipVertical} onClick={() => changeTransform({ flipVertical: !videoTransform.flipVertical })} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">垂直翻转</button></div>
+            <div className="mt-2 border-t border-white/10 pt-2"><span>HDR：{keyboardSettings.hdrMode}</span><p className={`mt-1 text-[10px] ${hdrAvailability.available ? 'text-emerald-300' : 'text-amber-300'}`}>{hdrAvailability.available ? `当前后端可用${keyboardSettings.hdrMode === 'hdr-passthrough' ? '，显示器已报告 HDR' : ''}` : hdrAvailability.reason || displayCapability.reason}</p></div>
+          </div></div>}
+          <button type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'display' ? null : 'display')} title="显示设置" aria-label="显示设置" aria-expanded={controlPanel === 'display'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40 ${controlPanel === 'display' ? 'bg-white/10' : ''}`}><Settings2 size={16}/></button>
+        </div>
+        <div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
+          {controlPanel === 'info' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-64 pb-2" onClick={event => event.stopPropagation()}><div className="rounded-lg border border-white/15 bg-[#101827] p-3 text-[11px] text-slate-200 shadow-2xl shadow-black/70"><div className="mb-2 font-bold">播放信息</div>{state.statistics ? <dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1"><dt>视频</dt><dd>{state.statistics.videoCodec || '未知'}</dd><dt>音频</dt><dd>{state.statistics.audioCodec || '未知'}</dd><dt>解码</dt><dd>{state.statistics.decoder || (state.statistics.hardwareDecoding ? '硬件' : '未报告')}</dd><dt>帧率</dt><dd>{state.statistics.fps?.toFixed(2) || '—'}</dd><dt>丢帧</dt><dd>{state.statistics.droppedFrames ?? '—'}</dd><dt>输出</dt><dd>{state.statistics.output || activeBackend?.displayName || '—'}</dd></dl> : <p className="text-slate-400">正在采集当前后端可提供的信息…</p>}</div></div>}
+          <button type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'info' ? null : 'info')} title="播放信息" aria-label="播放信息" aria-expanded={controlPanel === 'info'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40 ${controlPanel === 'info' ? 'bg-white/10' : ''}`}><Info size={16}/></button>
         </div>
         <div className="relative shrink-0" onPointerEnter={() => setControlPanel('volume')} onPointerLeave={() => setControlPanel(null)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
           {controlPanel === 'volume' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-44 pb-2" onClick={event => event.stopPropagation()}>

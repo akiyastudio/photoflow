@@ -291,6 +291,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   controlAdvancedVideo: (sessionId, request) => ipcRenderer.send('advanced-video-control', sessionId, request),
   controlVideoPlayer: (sessionId, request) => ipcRenderer.send('video-player-control', sessionId, request),
   chooseVideoSubtitle: sessionId => ipcRenderer.invoke('video-player-subtitle-choose', sessionId),
+  chooseVideoSubtitleFile: () => ipcRenderer.invoke('video-subtitle-choose-file'),
   addVideoSubtitle: (sessionId, filePath) => ipcRenderer.invoke('video-player-subtitle-add', sessionId, filePath),
   captureVideoPlayerFrame: sessionId => ipcRenderer.invoke('video-player-screenshot', sessionId),
   publishVideoPlayerFrame: (filePath, bytes) => ipcRenderer.invoke('video-player-publish-frame', filePath, bytes),

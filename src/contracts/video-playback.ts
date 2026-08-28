@@ -25,6 +25,13 @@ export const hdrModeAvailability = ({ requested, backendModes, hdrDisplayAvailab
   if (requested === 'hdr-passthrough' && !hdrDisplayAvailable) return { available: false, reason: '当前显示器未报告可用 HDR 输出' };
   return { available: true, reason: '' };
 };
+export const playbackCapabilityPresentation = (features: { transforms: string[]; hdr: { modes: string[] }; statistics: { levels: string[] }; subtitles: { formats: string[] }; capture: { supported: boolean } } | undefined, hdrDisplayAvailable: boolean) => ({
+  transformControls: features?.transforms || [],
+  hdrModes: (features?.hdr.modes || ['sdr']).map(mode => ({ mode, available: mode !== 'hdr-passthrough' || hdrDisplayAvailable })),
+  statisticsLevels: features?.statistics.levels || [],
+  subtitleFormats: features?.subtitles.formats || [],
+  captureAvailable: features?.capture.supported === true,
+});
 
 export const transformedFrameSize = (width: number, height: number, value: VideoTransform) => {
   const rotated = value.rotation === 90 || value.rotation === 270;

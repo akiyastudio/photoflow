@@ -31,7 +31,7 @@ export interface PlaybackSession {
   control(request: PlaybackControl): void;
   setBounds(bounds: PlaybackBounds): void;
   capture(): Promise<{ success: boolean; path?: string; error?: string }>;
-  chooseSubtitle(): Promise<{ success: boolean; cancelled?: boolean; path?: string; error?: string }>;
+  chooseSubtitle(): Promise<{ success: boolean; cancelled?: boolean; path?: string; error?: string; requiresFeature?: string }>;
   switchBackend?(backendId: string): Promise<{ success: boolean; error?: string }>;
   close(): Promise<void>;
 }
@@ -101,6 +101,20 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
     let transform = DEFAULT_VIDEO_TRANSFORM;
     let statisticsLevel: VideoStatisticsLevel = 'off';
     let statisticsTimer = 0;
+    let subtitleDelay = 0;
+    let subtitleSequence = 0;
+    const browserSubtitles = new Map<string, { element: HTMLTrackElement; stableId: string; name: string; originalTimes: WeakMap<TextTrackCue, { start: number; end: number }> }>();
+    const emitSubtitles = () => {
+      const tracks = [...browserSubtitles.entries()].map(([id, item]) => ({ id, stableId: item.stableId, source: 'external' as const, title: item.name, format: 'vtt', selected: item.element.track.mode !== 'disabled' }));
+      const selected = tracks.find(item => item.selected);
+      context.onState(stateEnvelope(context, 'subtitle-tracks', { subtitleTracks: tracks, subtitleTrackId: selected?.id || null, subtitleVisible: selected ? browserSubtitles.get(selected.id)?.element.track.mode === 'showing' : false, subtitleDelay }));
+    };
+    const applyBrowserSubtitleDelay = () => {
+      for (const item of browserSubtitles.values()) for (const cue of Array.from(item.element.track.cues || [])) {
+        const original = item.originalTimes.get(cue) || { start: cue.startTime, end: cue.endTime }; item.originalTimes.set(cue, original);
+        cue.startTime = Math.max(0, original.start + subtitleDelay); cue.endTime = Math.max(cue.startTime, original.end + subtitleDelay);
+      }
+    };
     video.src = source.mediaUrl;
     video.poster = '';
     video.preload = 'auto';
@@ -192,6 +206,9 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
         else if (request.action === 'speed') video.playbackRate = Math.max(0.25, Math.min(4, Number(request.value) || 1));
         else if (request.action === 'transform') { transform = normalizeVideoTransform(request.transform); Object.assign(video.style, chromiumVideoStyle(transform)); }
         else if (request.action === 'statistics-level') { statisticsLevel = request.statisticsLevel || 'off'; updateStatisticsTimer(); emitStatistics(); }
+        else if (request.action === 'subtitle-select') { for (const [id, item] of browserSubtitles) item.element.track.mode = id === String(request.value || '') ? 'showing' : 'disabled'; emitSubtitles(); }
+        else if (request.action === 'subtitle-visible') { const selected = [...browserSubtitles.values()].find(item => item.element.track.mode !== 'disabled'); if (selected) selected.element.track.mode = request.value ? 'showing' : 'hidden'; emitSubtitles(); }
+        else if (request.action === 'subtitle-delay') { subtitleDelay = Math.max(-30, Math.min(30, Number(request.value) || 0)); applyBrowserSubtitleDelay(); emitSubtitles(); }
         else if (request.action === 'stop') video.pause();
       },
       setBounds: () => undefined,
@@ -207,12 +224,22 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
         if (!blob) return { success: false, error: '无法生成当前视频帧' };
         return context.electronApi.publishVideoPlayerFrame(context.filePath, new Uint8Array(await blob.arrayBuffer()));
       },
-      chooseSubtitle: async () => ({ success: false, error: '当前视频需要高级解码组件才能加载外部字幕' }),
+      chooseSubtitle: async () => {
+        const chosen = await context.electronApi.chooseVideoSubtitleFile();
+        if (!chosen.success || chosen.cancelled) return chosen;
+        if (chosen.format !== 'vtt' || !chosen.mediaUrl) return { success: false, error: `${String(chosen.format || '').toUpperCase()} 字幕需要支持该格式的高级播放后端`, requiresFeature: `subtitle-format:${chosen.format || 'unknown'}` };
+        const id = `chromium-vtt-${++subtitleSequence}`; const name = chosen.name || `字幕 ${subtitleSequence}`;
+        const element = document.createElement('track'); element.kind = 'subtitles'; element.label = name; element.src = chosen.mediaUrl; element.default = true;
+        const item = { element, stableId: `external:${name.toLowerCase()}:0`, name, originalTimes: new WeakMap<TextTrackCue, { start: number; end: number }>() };
+        browserSubtitles.set(id, item); element.addEventListener('load', () => { element.track.mode = 'showing'; applyBrowserSubtitleDelay(); emitSubtitles(); }, { once: true });
+        video.appendChild(element); element.track.mode = 'showing'; emitSubtitles(); return { success: true, path: name };
+      },
       close: async () => {
         if (closed) return;
         closed = true;
         globalThis.clearInterval(statisticsTimer);
         events.forEach(([name, listener]) => video.removeEventListener(name, listener));
+        for (const item of browserSubtitles.values()) item.element.remove(); browserSubtitles.clear();
         video.pause();
         video.removeAttribute('src');
         video.load();
@@ -474,6 +501,8 @@ export const startPlaybackSession = async ({ backends, context }: {
   // resolves. Apply only the application-owned subtitle policy here; full
   // state restoration is reserved for an actual backend switch.
   if (currentTracks.length) applySubtitleSnapshot(current, currentTracks);
+  current.control({ action: 'transform', transform: snapshot.transform });
+  current.control({ action: 'hdr-mode', hdrMode: snapshot.hdrMode });
   return {
     get id() { return current?.id || context.requestId; },
     get backendId() { return current?.backendId || backends[0]?.descriptor.backendId || 'unavailable'; },

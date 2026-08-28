@@ -50,7 +50,7 @@ const contextFor = (states = []) => ({
     { type: 'subtitle-tracks', subtitleTracks: startupTracks, subtitleTrackId: 'en-1', subtitleVisible: true, subtitleDelay: 0 },
   ] });
   const session = await startPlaybackSession({ backends: [backend], context: contextFor() });
-  assert.deepEqual(backend.calls.controls.slice(-3), [
+  assert.deepEqual(backend.calls.controls.filter(request => request.action.startsWith('subtitle-')), [
     { action: 'subtitle-delay', value: 0 },
     { action: 'subtitle-select', value: 'zh-7' },
     { action: 'subtitle-visible', value: true },
@@ -126,6 +126,15 @@ const contextFor = (states = []) => ({
   await closing;
   assert.equal(delayed.calls.starts, 1);
   assert.equal(delayed.calls.closes, 1, 'a fallback that finishes after close must be closed immediately');
+}
+
+{
+  const first = makeBackend('manual.chromium'); const advanced = makeBackend('manual.advanced');
+  const session = await startPlaybackSession({ backends: [first, advanced], context: contextFor() });
+  session.control({ action: 'seek', value: 24 }); session.control({ action: 'pause' }); session.control({ action: 'transform', transform: { aspectMode: '1:1', rotation: 270, flipHorizontal: true, flipVertical: false } });
+  const switched = await session.switchBackend('manual.advanced'); assert.equal(switched.success, true); assert.equal(session.backendId, 'manual.advanced');
+  assert(advanced.calls.controls.some(item => item.action === 'seek' && item.value === 24)); assert(advanced.calls.controls.some(item => item.action === 'transform' && item.transform.rotation === 270));
+  assert.equal((await session.switchBackend('manual.chromium')).success, false, 'manual switching cannot create an automatic retry loop for an already attempted backend'); await session.close();
 }
 
 {

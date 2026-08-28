@@ -10,4 +10,7 @@ assert(source.includes('stableId')&&source.includes('external-filename')&&source
 assert(!source.includes('SubtitleLanguageMatches')&&!source.includes('subtitlePreferredLanguages')&&!source.includes('set-subtitle-defaults'));
 assert(!source.includes('SetParent') && !source.includes('--parent-hwnd') && !source.includes('set-bounds') && source.includes('"surface-created"'));
 assert(source.includes('MaxFrameBytes = 256 * 1024') && source.includes('Encoding.UTF8.GetByteCount'));
+assert(source.includes('"video.transform"')&&source.includes('video-aspect-override')&&source.includes('video-rotate')&&source.includes('flipHorizontal'));
+assert(source.includes('"video.hdr-mode"')&&source.includes('target-colorspace-hint')&&source.includes('hdrDisplayAvailable'));
+assert(source.includes('"statistics.level"')&&source.includes('statisticsInterval')&&source.includes('decoder-frame-drop-count'));
 console.log('libmpv backend v1 protocol contract tests passed.');
