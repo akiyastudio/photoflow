@@ -43,12 +43,11 @@ const createVideoPlaybackBroker = ({ pluginService, path }) => {
         features: item.contribution.features,
       });
     }
-    const chromiumHasCapabilitySignal = chromiumSupport === 'probably' || chromiumSupport === 'maybe';
     return descriptors.filter(item => item.probe.support !== 'unsupported')
       .sort((left, right) => {
-        // Manifest priority compares contributed backends only. A container
-        // extension hint may never outrank a positive Chromium capability signal.
-        if (chromiumHasCapabilitySignal && left.transport !== right.transport) return left.transport === 'chromium' ? -1 : 1;
+        // An available contributed decoder is the installed playback upgrade.
+        // Chromium remains the automatic fallback when that backend rejects or fails.
+        if (left.transport !== right.transport) return left.transport === 'chromium' ? 1 : -1;
         return supportRank[right.probe.support] - supportRank[left.probe.support]
           || right.priority - left.priority
           || left.backendId.localeCompare(right.backendId);

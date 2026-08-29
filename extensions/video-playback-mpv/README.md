@@ -1,6 +1,6 @@
 # PhotoFlow libmpv playback backend
 
-这是照片流“视频播放器”的独立可选原生后端工程。它提供 `advanced-video-decoder.exe`、libmpv 运行库、签名/完整性材料和许可证材料，通过 `media-playback-backend-v1` 与 Host 通信。组件只注册自身 HWND；PhotoFlow core 验证进程所有权并负责嵌入、DPI、定位和裁切。
+这是照片流“高级视频解码”的独立可选原生后端工程。它提供 `advanced-video-decoder.exe`、libmpv 运行库、签名/完整性材料和许可证材料，通过 `media-playback-backend-v1` 与 Host 通信。组件只注册自身 HWND；PhotoFlow core 验证进程所有权并负责嵌入、DPI、定位和裁切。
 
 播放器界面、裁剪、截图、键盘/鼠标语义、字幕默认选择和播放设置全部属于照片流主程序。运行时通过 `media.playbackBackend@v1` 声明无 UI 的解码/渲染能力，只上报原始输入、轨道和播放状态并执行通用控制命令。安装此运行时不安装任何 renderer bundle；缺少、卸载、启动失败或崩溃时，主程序可切换到尚未尝试的 Chromium 后端，只有所有后端均失败时才提示修复组件或使用系统播放器。
 

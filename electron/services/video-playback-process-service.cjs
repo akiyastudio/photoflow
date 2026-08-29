@@ -287,7 +287,7 @@ const createVideoPlaybackProcessService = ({
 
       await readyPromise;
       assertCurrentLaunch();
-      if (settings.subtitlesEnabled === true && subtitleInputService) session.pendingAuthorizedSubtitles = await subtitleInputService.discover(authorizedPath);
+      if (subtitleInputService) session.pendingAuthorizedSubtitles = await subtitleInputService.discover(authorizedPath);
       if (!sendCommand(session, { command: 'open', path: authorizedPath })) throw new Error('无法向视频播放器发送文件');
       sendCommand(session, { command: 'subtitle-style', fontSize: normalizeSubtitleFontSize(settings.subtitleSize), style: settings.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard' });
       if (!sendCommand(session, { command: 'play' })) throw new Error('无法启动视频播放器');

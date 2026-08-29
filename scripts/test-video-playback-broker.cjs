@@ -32,9 +32,9 @@ const run = async () => {
     assert.deepEqual(source, { success: true, mediaUrl: 'photoflow-media://file/clip.mp4' });
     const discovered = await handlers.get('video-playback-backends')({}, sourcePath, 'maybe');
     assert.equal(discovered.success, true);
-    assert.deepEqual(discovered.backends.map(item => item.backendId), ['core.chromium', 'fixture-player:decoder'], 'ordinary MP4 must prefer core Chromium even when a component declares maximum priority');
+    assert.deepEqual(discovered.backends.map(item => item.backendId), ['fixture-player:decoder', 'core.chromium'], 'an installed and available playback component must become the automatic primary backend');
     assert.equal(discovered.backends.some(item => item.backendId.includes('undeclared-runtime')), false, 'an undeclared historical runtime must not be promoted into the v1 protocol');
-    assert.equal(discovered.backends[1].probe.basis, 'manifest-extension-hint');
+    assert.equal(discovered.backends[0].probe.basis, 'manifest-extension-hint');
     const unknownChromium = await handlers.get('video-playback-backends')({}, sourcePath, 'unknown');
     assert.deepEqual(unknownChromium.backends.map(item => item.backendId), ['fixture-player:decoder', 'core.chromium'], 'an extension-matched component may lead when Chromium has no capability signal');
     assert.throws(() => parseMediaPlaybackBackendContributions({ runtimeContributions: [{ type: 'media.playbackBackend', protocolVersion: 99, backendId: 'bad', displayName: 'Bad', backendVersion: '1.0.0', transport: 'media-playback-backend-v1', priority: 0, probe: { containers: ['mp4'], codecs: { video: [], audio: [] }, extensions: ['.mp4'] }, features: {} }] }), /Unsupported/);

@@ -305,10 +305,10 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     const rect = surface.getBoundingClientRect();
     const scale = window.devicePixelRatio || 1;
     const panelRect = controlPanelRef.current?.getBoundingClientRect();
-    const panelLeft = panelRect ? Math.max(rect.left, panelRect.left - 2) : 0;
-    const panelTop = panelRect ? Math.max(rect.top, panelRect.top - 2) : 0;
-    const panelRight = panelRect ? Math.min(rect.right, panelRect.right + 2) : 0;
-    const panelBottom = panelRect ? Math.min(rect.bottom, panelRect.bottom + 2) : 0;
+    const panelLeft = panelRect ? Math.max(rect.left, panelRect.left) : 0;
+    const panelTop = panelRect ? Math.max(rect.top, panelRect.top) : 0;
+    const panelRight = panelRect ? Math.min(rect.right, panelRect.right) : 0;
+    const panelBottom = panelRect ? Math.min(rect.bottom, panelRect.bottom) : 0;
     const overlayHole = panelRect && panelRight > panelLeft && panelBottom > panelTop ? {
       x: Math.round((panelLeft - rect.left) * scale),
       y: Math.round((panelTop - rect.top) * scale),
