@@ -4,13 +4,14 @@ set -euo pipefail
 # Builds the complete release-ready libmpv runtime. By default it first builds
 # a pinned LGPL-compatible dependency prefix; advanced callers may still pass
 # their own audited prefix and compliance archives through the LGPL_* variables.
-repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
 source_root="${MPV_SOURCE_ROOT:-$repo_root/.cache/media-runtime-build/mpv/src}"
 build_root="${MPV_BUILD_ROOT:-$repo_root/.cache/media-runtime-build/mpv/build}"
 output_root="${PHOTOFLOW_MPV_OUTPUT_ROOT:-$repo_root/artifacts/installers/media-runtime/libmpv-lgpl-windows-x64}"
 dependency_root="${PHOTOFLOW_MPV_DEPENDENCY_ROOT:-$repo_root/.cache/media-runtime-build/mpv-dependencies}"
 if [[ -z "${LGPL_PREFIX:-}" ]]; then
-  bash "$repo_root/scripts/media-runtime/build-libmpv-dependencies-windows.sh"
+  bash "$repo_root/media-runtime/build-libmpv-dependencies-windows.sh"
   prefix="$dependency_root/prefix"
   dependency_sources="$dependency_root/artifacts/dependency-corresponding-source.zip"
   dependency_licenses="$dependency_root/artifacts/dependency-licenses.zip"
@@ -60,7 +61,7 @@ if [[ -n "$bootstrap_source_archive" && ! -d "$source_root" ]]; then
   bootstrap_source_archive="$(realpath "$bootstrap_source_archive")"
   bootstrap_license_archive="$(realpath "${bootstrap_license_archive:?Set PHOTOFLOW_MPV_BOOTSTRAP_LICENSE_ARCHIVE with the bootstrap source archive}")"
   bootstrap_manifest="$(realpath "${bootstrap_manifest:?Set PHOTOFLOW_MPV_BOOTSTRAP_MANIFEST with the bootstrap archives}")"
-  node "$repo_root/scripts/media-runtime/verify-bootstrap-archives.cjs" \
+  node "$repo_root/media-runtime/verify-bootstrap-archives.cjs" \
     "$bootstrap_manifest" "$bootstrap_source_archive" "$bootstrap_license_archive"
   bootstrap_extract_root="$build_root-bootstrap-source"
   rm -rf "$bootstrap_extract_root"
@@ -130,7 +131,7 @@ for binary in "$output_root"/*.dll; do
   fi
 done
 cp "$source_root/Copyright" "$output_root/mpv-Copyright"
-cp "$repo_root/extensions/video-playback-mpv/LICENSES.md" "$output_root/PhotoFlow-LICENSES.md"
+cp "$repo_root/LICENSES.md" "$output_root/PhotoFlow-LICENSES.md"
 cp "$repo_root/media-runtime.lock.json" "$output_root/media-runtime.lock.json"
 printf '%s\n' "$ffmpeg_configuration" > "$output_root/linked-ffmpeg-buildconf.txt"
 printf '%s\n' "$ffmpeg_version" > "$output_root/linked-ffmpeg-version.txt"
@@ -145,11 +146,11 @@ else
   git -C "$source_root" archive HEAD | tar -x -C "$compliance_root/source/mpv"
 fi
 cp "$dependency_sources" "$compliance_root/source/dependency-corresponding-source.zip"
-cp "$repo_root/scripts/media-runtime/build-libmpv-lgpl-windows.sh" "$compliance_root/source/build-materials/build-libmpv-lgpl-windows.sh"
-cp "$repo_root/scripts/media-runtime/build-libmpv-dependencies-windows.sh" "$compliance_root/source/build-materials/build-libmpv-dependencies-windows.sh"
-cp "$repo_root/scripts/media-runtime/verify-bootstrap-archives.cjs" "$compliance_root/source/build-materials/verify-bootstrap-archives.cjs"
+cp "$repo_root/media-runtime/build-libmpv-lgpl-windows.sh" "$compliance_root/source/build-materials/build-libmpv-lgpl-windows.sh"
+cp "$repo_root/media-runtime/build-libmpv-dependencies-windows.sh" "$compliance_root/source/build-materials/build-libmpv-dependencies-windows.sh"
+cp "$repo_root/media-runtime/verify-bootstrap-archives.cjs" "$compliance_root/source/build-materials/verify-bootstrap-archives.cjs"
 mkdir -p "$compliance_root/source/build-materials/patches"
-cp "$repo_root/scripts/media-runtime/patches/"*.patch "$compliance_root/source/build-materials/patches/"
+cp "$repo_root/media-runtime/patches/"*.patch "$compliance_root/source/build-materials/patches/"
 cp "$output_root/meson-configure.txt" "$compliance_root/source/build-materials/meson-configure.txt"
 cp "$output_root/mpv-meson-options.txt" "$compliance_root/source/build-materials/mpv-meson-options.txt"
 cp "$output_root/linked-ffmpeg-buildconf.txt" "$compliance_root/source/build-materials/linked-ffmpeg-buildconf.txt"
@@ -158,7 +159,7 @@ cp "$output_root/linked-ffmpeg-commit.txt" "$compliance_root/source/build-materi
 cp "$repo_root/media-runtime.lock.json" "$compliance_root/source/build-materials/media-runtime.lock.json"
 cp "$source_root/Copyright" "$compliance_root/licenses/mpv-Copyright"
 cp "$dependency_licenses" "$compliance_root/licenses/dependency-licenses.zip"
-cp "$repo_root/extensions/video-playback-mpv/LICENSES.md" "$compliance_root/licenses/PhotoFlow-LICENSES.md"
+cp "$repo_root/LICENSES.md" "$compliance_root/licenses/PhotoFlow-LICENSES.md"
 
 zip_directory() {
   local source="$1"
@@ -171,7 +172,7 @@ zip_directory() {
 }
 zip_directory "$compliance_root/source" "$output_root/libmpv-lgpl-corresponding-source.zip"
 zip_directory "$compliance_root/licenses" "$output_root/libmpv-lgpl-licenses.zip"
-node "$repo_root/scripts/media-runtime/create-mpv-manifest.cjs" "$output_root"
-node "$repo_root/scripts/media-runtime/verify-runtime.cjs" mpv "$output_root"
+node "$repo_root/media-runtime/create-mpv-manifest.cjs" "$output_root"
+node "$repo_root/media-runtime/verify-runtime.cjs" mpv "$output_root"
 echo "libmpv was built and verified with -Dgpl=false and an LGPL-only dependency prefix."
 echo "Output: $output_root"

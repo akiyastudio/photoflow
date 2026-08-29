@@ -4,7 +4,7 @@ import { AlertTriangle, CheckCircle2, Info, X, XCircle } from 'lucide-react';
 import { FileTransferToastItem } from './features/background-tasks/FileTransferToast';
 import type { ToastViewAction, ToastViewSnapshot } from './features/app/toast-view-contract';
 import { topToastTonePresentation } from './features/app/top-toast-tone-model';
-import { TOAST_STACK_REFLOW_MS, useToastStackReflow } from './features/app/useToastStackReflow';
+import { TOAST_STACK_REFLOW_MS, useToastStackReflow } from './components/toast-stack-reflow';
 import './index.css';
 
 const EMPTY_SNAPSHOT: ToastViewSnapshot = { revision: 0, dark: false, top: 40, width: 0, height: 0, notices: [], tasks: [], overflowCount: 0 };

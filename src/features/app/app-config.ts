@@ -5,6 +5,7 @@ import {
 } from '../../types';
 import type { AppConfig, HomeCardId, ProjectToolbarActionId } from '../../types';
 import { DEFAULT_SUBTITLE_FONT_SIZE } from './video-player-settings';
+import { defaultVideoShortcutBindings } from '../../contracts/video-shortcuts';
 
 export const DEFAULT_HOME_ORDER: HomeCardId[] = ['birthday', 'import', 'inspiration'];
 const RESERVED_PROJECT_CATEGORIES = new Set<string>(['未分类', ...BUILT_IN_PROJECT_STATUSES]);
@@ -88,7 +89,7 @@ export const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   pinInspirationLibrary: false,
   componentSettings: {},
   componentSettingsRevisions: {},
-  videoPlayback: { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: ['zh', 'chi', 'zho'], subtitleSize: DEFAULT_SUBTITLE_FONT_SIZE, subtitleStyle: 'standard' },
+  videoPlayback: { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: ['zh', 'chi', 'zho'], subtitleSize: DEFAULT_SUBTITLE_FONT_SIZE, subtitleStyle: 'standard', hdrMode: 'auto', toneMapping: 'auto', targetPeakNits: 400, shortcuts: defaultVideoShortcutBindings() },
   mediaCache: { maxSizeGB: 50, directory: '', autoCleanup30Days: false },
   backup: {
     enabled: false,

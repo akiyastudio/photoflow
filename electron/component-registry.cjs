@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { parseMediaPlaybackBackendContributions } = require('./contracts/media-playback-backend-contract.cjs');
 const zlib = require('zlib');
 const { PLUGIN_API_VERSION, PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
 const { COMPONENT_HOST_API_VERSION, COMPONENT_HOST_CONTRACT_VERSION, parseComponentHostManifest } = require('./component-host-contract.cjs');
@@ -112,6 +113,8 @@ const manifestCompatibilityError = (manifest, platform, arch) => {
   if (!COMPONENT_ID.test(String(manifest?.id || ''))) return '组件 ID 缺失或格式无效';
   if (!String(manifest?.version || '').trim()) return '组件版本缺失';
   if (Number(manifest.apiVersion) !== COMPONENT_API_VERSION) return `组件接口版本不兼容：${manifest.apiVersion || '未填写'}`;
+  try { parseMediaPlaybackBackendContributions(manifest); }
+  catch (error) { return error.message || String(error); }
   if (Array.isArray(manifest.platforms) && !manifest.platforms.includes(platform)) return `组件不支持 ${platform}`;
   if (Array.isArray(manifest.architectures) && !manifest.architectures.includes(arch)) return `组件不支持 ${arch}`;
   if (manifest.componentHost !== undefined) {

@@ -4,7 +4,7 @@ import { CheckCircle2, Clock3, Loader2, Minimize2, Pause, Play, X, XCircle } fro
 import type { BackgroundTask } from '../../types';
 import { useTaskCenter } from './TaskCenter';
 import { selectProjectFileTaskToasts, taskToastExpiresAt, taskToastLiveRole } from './task-toast-model';
-import { useToastStackReflow } from '../app/useToastStackReflow';
+import { useToastStackReflow } from '../../components/toast-stack-reflow';
 
 const formatBytes = (value: number) => value >= 1024 ** 3
   ? `${(value / 1024 ** 3).toFixed(1)} GB`

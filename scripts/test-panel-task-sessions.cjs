@@ -52,7 +52,7 @@ const fileTransferToastModule = { exports: {} };
 const fileTransferToastRequire = request => {
   if (request === './TaskCenter') return { useTaskCenter: () => { throw new Error('not used by FileTransferToastItem'); } };
   if (request === './task-toast-model') return toastModelModule.exports;
-  if (request === '../app/useToastStackReflow') return { useToastStackReflow: () => undefined };
+  if (request === '../../components/toast-stack-reflow') return { useToastStackReflow: () => undefined };
   return require(request);
 };
 new Function('module', 'exports', 'require', compiledFileTransferToast)(fileTransferToastModule, fileTransferToastModule.exports, fileTransferToastRequire);

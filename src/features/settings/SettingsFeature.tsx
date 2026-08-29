@@ -12,6 +12,7 @@ import { MAX_SUBTITLE_FONT_SIZE, MIN_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSi
 import { componentSettingsSectionKey, type ComponentSettingsSection } from './component-settings-page-model';
 import { restoredWorkspaceConfig } from './restored-workspace-config';
 import { useUserFacingToast } from '../app/useUserFacingToast';
+import { defaultVideoShortcutBindings, exportVideoShortcuts, importVideoShortcuts, normalizeVideoShortcutBindings, VIDEO_ACTIONS, videoShortcutConflicts } from '../../contracts/video-shortcuts';
 
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
@@ -526,6 +527,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const [editingProgressNamePreset, setEditingProgressNamePreset] = useState('');
   const [editingProgressNamePresetValue, setEditingProgressNamePresetValue] = useState('');
   const [restoreProjects, setRestoreProjects] = useState<Record<string, string>>({});
+  const [shortcutTransfer, setShortcutTransfer] = useState('');
   const pendingSaveRef = useRef<AppConfig | null>(null);
   const savingRef = useRef(false);
   const backupSnapshotsRef = useRef<HTMLDivElement>(null);
@@ -804,6 +806,13 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const videoPlaybackSettings = draft.videoPlayback;
   const inspirationLibrarySettings = draft.inspirationLibrary;
   const updateVideoPlaybackSettings = (next: AppConfig['videoPlayback']) => commitSettings({ ...draft, videoPlayback: next });
+  const shortcutBindings = normalizeVideoShortcutBindings(videoPlaybackSettings.shortcuts);
+  const shortcutConflicts = videoShortcutConflicts(shortcutBindings);
+  const updateShortcut = (actionId: string, value: string) => {
+    const next = normalizeVideoShortcutBindings({ ...shortcutBindings, [actionId]: value.split(',').map(item => item.trim()).filter(Boolean).slice(0, 4) });
+    const conflict = videoShortcutConflicts(next)[0]; if (conflict) { onNotice(`快捷键冲突：${conflict.chord}`, 4000); return; }
+    updateVideoPlaybackSettings({ ...videoPlaybackSettings, shortcuts: next });
+  };
   const updateInspirationLibrarySettings = (next: AppConfig['inspirationLibrary']) => commitSettings({ ...draft, inspirationLibrary: next });
   const updateInspirationLibraryRoot = (rootPath: string) => updateInspirationLibrarySettings({ ...inspirationLibrarySettings, rootPath });
   const visibleBackupSnapshots = backupProjectFocus ? backupStatus.snapshots.filter(snapshot => snapshot.projectItems?.some(project => project.name === backupProjectFocus.name)) : backupStatus.snapshots;
@@ -911,6 +920,15 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="字幕首选语言" description="按顺序匹配语言代码，用逗号分隔，例如 zh, chi, zho, en。"><input value={videoPlaybackSettings.subtitlePreferredLanguages.join(', ')} onChange={event => updateVideoPlaybackSettings({ ...videoPlaybackSettings, subtitlePreferredLanguages: event.target.value.split(',').map(value => value.trim().toLowerCase()).filter(Boolean).slice(0, 8) })} className="form-input ml-auto max-w-sm"/></SettingsRow>
       <SettingsRow title="字幕字号" description="设置视频播放器字幕的默认字号，可按 1 递增调整。"><div className="ml-auto flex w-full max-w-sm items-center gap-3"><input type="range" min={MIN_SUBTITLE_FONT_SIZE} max={MAX_SUBTITLE_FONT_SIZE} step={1} value={videoPlaybackSettings.subtitleSize} onChange={event => updateVideoPlaybackSettings({ ...videoPlaybackSettings, subtitleSize: normalizeSubtitleFontSize(event.target.value) })} aria-label="字幕字号" className="min-w-0 flex-1 accent-blue-500"/><output aria-live="polite" className="w-10 rounded-md border border-slate-300 bg-white px-2 py-1 text-center text-sm font-bold tabular-nums text-slate-700">{videoPlaybackSettings.subtitleSize}</output></div></SettingsRow>
       <SettingsRow title="字幕样式" description="高对比度样式使用更明显的描边和阴影。"><select value={videoPlaybackSettings.subtitleStyle} onChange={event => updateVideoPlaybackSettings({ ...videoPlaybackSettings, subtitleStyle: event.target.value as AppConfig['videoPlayback']['subtitleStyle'] })} className="form-input ml-auto max-w-sm"><option value="standard">标准</option><option value="high-contrast">高对比度</option></select></SettingsRow>
+      <SettingsRow title="HDR 输出" description="HDR 直通仅在后端与当前显示器均明确支持时可用；否则保持 SDR 或色调映射。"><select value={videoPlaybackSettings.hdrMode} onChange={event => updateVideoPlaybackSettings({ ...videoPlaybackSettings, hdrMode: event.target.value as AppConfig['videoPlayback']['hdrMode'] })} className="form-input ml-auto max-w-sm"><option value="auto">自动</option><option value="sdr">强制 SDR</option><option value="tone-map">HDR 色调映射到 SDR</option><option value="hdr-passthrough">HDR 直通（需 HDR 显示器）</option></select></SettingsRow>
+      <SettingsRow title="色调映射算法" description="仅在播放后端声明支持色调映射时生效。"><select value={videoPlaybackSettings.toneMapping} onChange={event => updateVideoPlaybackSettings({ ...videoPlaybackSettings, toneMapping: event.target.value as AppConfig['videoPlayback']['toneMapping'] })} className="form-input ml-auto max-w-sm"><option value="auto">自动</option><option value="bt2390">BT.2390</option><option value="reinhard">Reinhard</option><option value="mobius">Mobius</option><option value="hable">Hable</option></select></SettingsRow>
+      <SettingsRow title="目标峰值亮度" description="100–4000 nits；仅在后端支持 target peak 控制时生效。"><div className="ml-auto flex w-full max-w-sm items-center gap-3"><input type="range" min={100} max={4000} step={50} value={videoPlaybackSettings.targetPeakNits} onChange={event => updateVideoPlaybackSettings({ ...videoPlaybackSettings, targetPeakNits: Math.max(100, Math.min(4000, Number(event.target.value))) })} className="min-w-0 flex-1"/><output className="w-20 text-right text-sm">{videoPlaybackSettings.targetPeakNits} nits</output></div></SettingsRow>
+      <SettingsPageGroup title="视频快捷键">
+        <p className="text-xs text-slate-500">支持单键和 Ctrl/Alt/Shift/Meta 组合键。用逗号分隔同一动作的多个按键；系统保留键会被拒绝。</p>
+        {VIDEO_ACTIONS.map(action => <SettingsRow key={action.id} title={action.label} description={`${action.id} · ${{global:'全局',workspace:'工作区',player:'播放器'}[action.scope]} scope`}><div className="ml-auto flex w-full max-w-md gap-2"><input aria-label={`${action.label}快捷键`} value={shortcutBindings[action.id].join(', ')} onChange={event => updateShortcut(action.id, event.target.value)} className="form-input min-w-0 flex-1"/><button type="button" onClick={() => updateVideoPlaybackSettings({ ...videoPlaybackSettings, shortcuts: { ...shortcutBindings, [action.id]: [...action.defaults] } })} className="rounded border border-slate-300 px-2 text-xs hover:bg-slate-50">重置</button></div></SettingsRow>)}
+        {shortcutConflicts.length > 0 && <p role="alert" className="rounded-md bg-amber-50 px-3 py-2 text-xs text-amber-700">快捷键冲突：{shortcutConflicts.map(item => `${item.chord}（${item.actions.join(' / ')}）`).join('；')}</p>}
+        <div className="rounded-lg border border-slate-200 p-3"><textarea aria-label="视频快捷键导入导出" value={shortcutTransfer} onChange={event => setShortcutTransfer(event.target.value)} placeholder="快捷键 JSON" className="form-input h-28 w-full font-mono text-xs"/><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => setShortcutTransfer(exportVideoShortcuts(shortcutBindings))} className="rounded bg-slate-700 px-3 py-1.5 text-xs font-bold text-white">导出配置</button><button type="button" onClick={() => { try { updateVideoPlaybackSettings({ ...videoPlaybackSettings, shortcuts: importVideoShortcuts(shortcutTransfer) }); onNotice('快捷键配置已导入'); } catch (error) { onNotice(error instanceof Error ? error.message : '快捷键配置无效', 5000); } }} className="rounded bg-blue-600 px-3 py-1.5 text-xs font-bold text-white">导入配置</button><button type="button" onClick={() => updateVideoPlaybackSettings({ ...videoPlaybackSettings, shortcuts: defaultVideoShortcutBindings() })} className="rounded border border-slate-300 px-3 py-1.5 text-xs font-bold">全部重置</button></div></div>
+      </SettingsPageGroup>
     </SettingsPageGroup>
     <SettingsPageGroup title="视频剪辑">
       <SettingsRow title="裁剪导出方式" description={draft.videoTools.trim.exportMode === 'fast' ? '快速导出不重新编码，不降低画质；边界可能按关键帧产生少量偏差。' : '精确导出会重新编码所选片段，边界精确但耗时更长。'}><select value={draft.videoTools.trim.exportMode} onChange={event => update('videoTools', { ...draft.videoTools, trim: { exportMode: event.target.value as AppConfig['videoTools']['trim']['exportMode'] } })} className="form-input ml-auto max-w-sm"><option value="fast">快速导出（默认）</option><option value="exact">精确导出</option></select></SettingsRow>

@@ -63,9 +63,9 @@ The current component IDs are:
   whole sample-component workflow is unavailable.
 - `video-playback-mpv`: “视频播放器”. The legacy installation ID is retained
   for package compatibility. It runs libmpv in an isolated process and embeds
-  the native video surface in PhotoFlow. It is preferred when installed; when
-  it is absent or cannot start, the built-in player keeps the same controls and
-  falls back to Chromium playback. It is a runtime-only backend
+  the native video surface in PhotoFlow. It declares the UI-less,
+  versioned `media.playbackBackend` capability; startup or decoding failures may
+  fall back to another untried backend under the application session. It is a runtime-only backend
   capability: the player, controls, trimming, screenshots and settings remain
   in the main application, and the component package must not contain renderer
   JavaScript, HTML or CSS.
@@ -83,9 +83,7 @@ the user's machine.
 `npm run build:components` builds the optional sample-component component. Components remain
 separate from the base PhotoFlow installer so the core application stays small.
 
-`npm run build:advanced-video-release` builds the pinned LGPL dependency stack,
-audited libmpv runtime, compliance archives, and installable video-player ZIP.
-If that runtime already exists, `npm run build:advanced-video-decoder --
---mpv-root <directory>` only performs the final component packaging step. The
-component remains outside `electron:build`, so the main installer does not
-depend on or include libmpv.
+The libmpv backend moved to `plugins/video-playback-backend`, an independent
+release project with its own build, test, signing and lifecycle commands. The
+core package has no plugin-specific build command or source dependency, and the
+main installer does not depend on or include libmpv.

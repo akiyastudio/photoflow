@@ -2,23 +2,29 @@ const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { readJson, validateMpvManifest } = require('./media-runtime/runtime-policy.cjs');
-const { createComponentIntegrityManifest } = require('../electron/component-integrity.cjs');
-const { normalizeDotnetAssembly } = require('./deterministic-dotnet-assembly.cjs');
-const { verifyPeDependencyClosure } = require('./media-runtime/pe-dependency-closure.cjs');
-
-if (process.platform !== 'win32' || process.arch !== 'x64') {
-  throw new Error('“视频播放器”组件当前只支持 Windows x64');
-}
-
 const root = path.resolve(__dirname, '..');
-const sourceRoot = path.join(root, 'extensions', 'video-playback-mpv');
+const { readJson, validateMpvManifest } = require(path.join(root, 'scripts', 'vendor', 'runtime-policy.cjs'));
+const { createComponentIntegrityManifest } = require(path.join(root, 'scripts', 'vendor', 'component-integrity.cjs'));
+const { normalizeDotnetAssembly } = require(path.join(root, 'scripts', 'vendor', 'deterministic-dotnet-assembly.cjs'));
+const { verifyPeDependencyClosure } = require(path.join(root, 'scripts', 'vendor', 'pe-dependency-closure.cjs'));
+
+const sourceRoot = root;
 const templatePath = path.join(sourceRoot, 'component.template.json');
 const manifest = JSON.parse(fs.readFileSync(templatePath, 'utf8'));
 const argumentValue = name => {
   const index = process.argv.indexOf(name);
   return index >= 0 ? process.argv[index + 1] : '';
 };
+if (process.argv.includes('--dry-run')) {
+  for (const required of ['media-runtime.lock.json', 'component.template.json', 'src/AdvancedVideoDecoder.cs', 'media-runtime/build-libmpv-lgpl-windows.sh']) {
+    if (!fs.existsSync(path.join(root, required))) throw new Error(`独立构建资源缺失：${required}`);
+  }
+  console.log(`视频播放器组件独立构建边界验证通过：${root}`);
+  process.exit(0);
+}
+if (process.platform !== 'win32' || process.arch !== 'x64') {
+  throw new Error('“视频播放器”组件当前只支持 Windows x64');
+}
 const configuredRoot = argumentValue('--mpv-root') || process.env.PHOTOFLOW_MPV_ROOT;
 const mpvRoot = path.resolve(configuredRoot || path.join(sourceRoot, 'vendor'));
 const runtimeManifestPath = path.join(mpvRoot, 'runtime-manifest.json');
@@ -136,7 +142,7 @@ const frameworkRoots = [
 const frameworkRoot = frameworkRoots.find(candidate => fs.existsSync(path.join(candidate, 'csc.exe')));
 if (!frameworkRoot) throw new Error('找不到 Windows C# 编译器，无法构建视频播放器桥接程序');
 
-const releaseRoot = path.join(root, 'artifacts', 'installers');
+const releaseRoot = path.join(root, 'dist');
 const outputRoot = path.resolve(argumentValue('--output-root') || path.join(releaseRoot, 'components'));
 const relativeOutputRoot = path.relative(releaseRoot, outputRoot);
 if (relativeOutputRoot.startsWith('..') || path.isAbsolute(relativeOutputRoot)) throw new Error(`组件输出目录必须位于安装包目录内：${outputRoot}`);
@@ -152,7 +158,7 @@ const compile = spawnSync(path.join(frameworkRoot, 'csc.exe'), [
   `/reference:${path.join(frameworkRoot, 'System.Windows.Forms.dll')}`,
   `/reference:${path.join(frameworkRoot, 'System.Drawing.dll')}`,
   `/reference:${path.join(frameworkRoot, 'System.Web.Extensions.dll')}`,
-  path.join(sourceRoot, 'AdvancedVideoDecoder.cs'),
+  path.join(sourceRoot, 'src', 'AdvancedVideoDecoder.cs'),
 ], { cwd: root, encoding: 'utf8', windowsHide: true });
 if (compile.status !== 0) throw new Error(`视频播放器桥接程序构建失败：${compile.stderr || compile.stdout}`);
 normalizeDotnetAssembly(executable);
@@ -182,7 +188,6 @@ fs.copyFileSync(templatePath, path.join(target, 'component.json'));
 const integrityManifest = createComponentIntegrityManifest(target, manifest.id, manifest.version);
 const serializedIntegrity = `${JSON.stringify(integrityManifest, null, 2)}\n`;
 fs.writeFileSync(path.join(target, 'component-integrity.json'), serializedIntegrity, 'utf8');
-fs.writeFileSync(path.join(root, 'electron', 'plugins', 'video-playback-mpv-integrity.json'), serializedIntegrity, 'utf8');
 
 const files = fs.readdirSync(target, { withFileTypes: true })
   .filter(entry => entry.isFile())

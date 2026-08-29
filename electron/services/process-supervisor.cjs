@@ -12,6 +12,8 @@ class ManagedProcess extends EventEmitter {
     this.specification = specification;
     this.id = specification.id;
     this.kind = specification.kind || 'process';
+    this.protocol = String(specification.protocol || '');
+    this.owner = specification.owner && typeof specification.owner === 'object' ? Object.freeze({ ...specification.owner }) : null;
     this.child = null;
     this.generation = 0;
     this.state = 'idle';
@@ -118,6 +120,8 @@ class ManagedProcess extends EventEmitter {
     return {
       id: this.id,
       kind: this.kind,
+      protocol: this.protocol || undefined,
+      owner: this.owner || undefined,
       state: this.state,
       pid: this.child?.pid || null,
       generation: this.generation,
@@ -152,6 +156,10 @@ class ManagedProcess extends EventEmitter {
     this.lastExit = { at: this.supervisor.now(), generation, code, signal, expected, stderr: this.stderrTail.trim() };
     this.state = expected ? 'stopped' : 'exited';
     this.supervisor.log(expected || code === 0 ? 'info' : 'warn', 'Managed process exited', this.details(this.lastExit));
+    try {
+      const cleanup = this.specification.onExitCleanup?.({ owner: this.owner, child, exit: this.lastExit, managedProcess: this });
+      Promise.resolve(cleanup).catch(error => this.supervisor.log('warn', 'Managed process exit cleanup failed', this.details({ error: safeError(error) })));
+    } catch (error) { this.supervisor.log('warn', 'Managed process exit cleanup failed', this.details({ error: safeError(error) })); }
     this.emit('exit', this.lastExit, child);
     if (this.specification.ephemeral) this.release();
     else if (!expected) this._scheduleRestart(this._restartReason || 'unexpected-exit');
@@ -224,6 +232,12 @@ class ProcessSupervisor {
 
   list() {
     return [...this.processes.values()].map(process => process.status()).sort((left, right) => left.id.localeCompare(right.id));
+  }
+
+  async stopWhere(predicate, reason = 'owner-revoked') {
+    const matches = [...this.processes.values()].filter(process => predicate(process.status()));
+    await Promise.all(matches.map(process => process.stop(reason)));
+    return matches.length;
   }
 
   async stopAll(reason = 'application-shutdown') {

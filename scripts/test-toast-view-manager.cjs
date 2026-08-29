@@ -138,7 +138,7 @@ const mainSource = fs.readFileSync(path.join(root, 'electron', 'main.cjs'), 'utf
 const managerSource = fs.readFileSync(path.join(root, 'electron', 'services', 'toast-view-manager.cjs'), 'utf8');
 const hostSource = fs.readFileSync(path.join(root, 'src', 'features', 'app', 'useTopToastStack.tsx'), 'utf8');
 const rendererSource = fs.readFileSync(path.join(root, 'src', 'toast-view.tsx'), 'utf8');
-const reflowSource = fs.readFileSync(path.join(root, 'src', 'features', 'app', 'useToastStackReflow.ts'), 'utf8');
+const reflowSource = fs.readFileSync(path.join(root, 'src', 'components', 'toast-stack-reflow.ts'), 'utf8');
 const filesSource = fs.readFileSync(path.join(root, 'electron', 'modules', 'files-ipc.cjs'), 'utf8');
 assert(mainSource.includes('new ToastViewManager({ WebContentsView') && !/toast[^\n]{0,80}new BrowserWindow/i.test(mainSource), 'Toast uses a child WebContentsView, never a second BrowserWindow');
 assert(hostSource.includes('updateToastView({') && !hostSource.includes('innerHTML'), 'host publishes structured state rather than cloned HTML');
@@ -153,7 +153,7 @@ const compile = relative => ts.transpileModule(fs.readFileSync(path.join(root, r
 const evaluate = (compiled, requireModule) => { const module = { exports: {} }; new Function('module', 'exports', 'require', compiled)(module, module.exports, requireModule); return module.exports; };
 const icons = new Proxy({}, { get: (_target, name) => function Icon() { return name; } });
 const taskModel = evaluate(compile('src/features/background-tasks/task-toast-model.ts'), require);
-const taskModule = evaluate(compile('src/features/background-tasks/FileTransferToast.tsx'), request => request === 'lucide-react' ? icons : request === './TaskCenter' ? { useTaskCenter: () => ({}) } : request === './task-toast-model' ? taskModel : request === '../app/useToastStackReflow' ? { useToastStackReflow: () => undefined } : require(request));
+const taskModule = evaluate(compile('src/features/background-tasks/FileTransferToast.tsx'), request => request === 'lucide-react' ? icons : request === './TaskCenter' ? { useTaskCenter: () => ({}) } : request === './task-toast-model' ? taskModel : request === '../../components/toast-stack-reflow' ? { useToastStackReflow: () => undefined } : require(request));
 const actions = [];
 const task = { id: 'task-stable', type: 'project-file-operation', title: '导入', state: 'running', progress: 10, message: '正在导入', createdAt: 1, updatedAt: 2, cancellable: true, capabilities: { pausable: true }, metadata: {} };
 const tree = taskModule.FileTransferToastItem({ task, onMinimize: id => actions.push(['minimize', id]), onDismiss: id => actions.push(['dismiss', id]), onPause: id => actions.push(['pause', id]), onContinue: id => actions.push(['continue', id]), onCancel: value => actions.push(['cancel', value.id]) });

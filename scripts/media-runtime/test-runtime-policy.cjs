@@ -3,7 +3,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { validateFfmpegManifest, validateMpvManifest } = require('./runtime-policy.cjs');
+const { validateFfmpegManifest } = require('./runtime-policy.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-media-policy-'));
 try {
@@ -43,29 +43,6 @@ try {
   assert.throws(() => validateFfmpegManifest({ ...ffmpeg, configureFlags: ffmpeg.configureFlags.filter(flag => flag !== '--enable-nvenc') }, root), /硬件加速构建参数/);
   assert.throws(() => validateFfmpegManifest({ ...ffmpeg, components: ffmpeg.components.filter(component => component.name !== 'nv-codec-headers') }, root), /未声明固定版本.*nv-codec-headers/);
 
-  const dll = create('libmpv-2.dll');
-  const sourceArchive = create('libmpv-source.zip');
-  const licenseArchive = create('libmpv-licenses.zip');
-  const mpv = {
-    schemaVersion: 2,
-    kind: 'photoflow-libmpv-runtime',
-    platform: 'windows-x64',
-    license: 'LGPL-2.1-or-later',
-    reproducibleSource: true,
-    mpv: { version: '0.41.0', commit: 'c'.repeat(40) },
-    components: ['zlib', 'freetype', 'fribidi', 'harfbuzz', 'libass', 'spirvCross', 'libplacebo']
-      .map(name => ({ name, version: '1.0.0', commit: 'e'.repeat(40), license: 'LGPL-2.1-or-later' })),
-    mesonOptions: ['-Dgpl=false', '-Dlibmpv=true', '-Dauto_features=disabled', '-Dwasapi=enabled', '-Dd3d11=enabled', '-Dd3d-hwaccel=enabled', '-Dzlib=enabled'],
-    linkedFfmpeg: { version: '7.1.1', commit: 'd'.repeat(40), license: 'LGPL-2.1-or-later', configureFlags: ['--disable-autodetect', '--disable-network', '--disable-gpl', '--disable-nonfree'] },
-    files: [dll],
-    complianceArtifacts: { sourceArchive, licenseArchive },
-  };
-  assert.doesNotThrow(() => validateMpvManifest(mpv, root));
-  assert.throws(() => validateMpvManifest({ ...mpv, mesonOptions: mpv.mesonOptions.filter(option => option !== '-Dgpl=false') }, root), /-Dgpl=false/);
-  assert.throws(() => validateMpvManifest({ ...mpv, reproducibleSource: false }, root), /对应源码/);
-  assert.throws(() => validateMpvManifest({ ...mpv, components: mpv.components.filter(component => component.name !== 'libplacebo') }, root), /libplacebo/);
-  assert.throws(() => validateMpvManifest({ ...mpv, linkedFfmpeg: { license: 'GPL-2.0-or-later', configureFlags: ['--enable-gpl'] } }, root), /必须是 LGPL/);
-  assert.throws(() => validateMpvManifest({ ...mpv, linkedFfmpeg: { ...mpv.linkedFfmpeg, configureFlags: [...mpv.linkedFfmpeg.configureFlags, '--enable-libx265'] } }, root), /GPL\/nonfree/);
   console.log('媒体运行时策略测试通过');
 } finally {
   fs.rmSync(root, { recursive: true, force: true });
