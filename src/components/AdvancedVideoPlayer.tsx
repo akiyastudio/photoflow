@@ -304,7 +304,9 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     if (!surface || !sessionRef.current) return;
     const rect = surface.getBoundingClientRect();
     const scale = window.devicePixelRatio || 1;
-    const panelRect = controlPanelRef.current?.getBoundingClientRect();
+    const panelElement = controlPanelRef.current?.firstElementChild as HTMLElement | null;
+    const panelRect = panelElement?.getBoundingClientRect();
+    const panelRadius = panelElement ? Number.parseFloat(window.getComputedStyle(panelElement).borderTopLeftRadius) || 0 : 0;
     const panelLeft = panelRect ? Math.max(rect.left, panelRect.left) : 0;
     const panelTop = panelRect ? Math.max(rect.top, panelRect.top) : 0;
     const panelRight = panelRect ? Math.min(rect.right, panelRect.right) : 0;
@@ -314,6 +316,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       y: Math.round((panelTop - rect.top) * scale),
       width: Math.round((panelRight - panelLeft) * scale),
       height: Math.round((panelBottom - panelTop) * scale),
+      radius: Math.round(panelRadius * scale),
     } : undefined;
     const controlsRect = controlsOverlay && controlsVisible ? controlsOverlayRef.current?.getBoundingClientRect() : undefined;
     const controlsLeft = controlsRect ? Math.max(rect.left, controlsRect.left) : 0;

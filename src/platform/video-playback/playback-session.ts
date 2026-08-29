@@ -23,7 +23,7 @@ export type PlaybackBounds = {
   width: number;
   height: number;
   visible: boolean;
-  overlayHole?: { x: number; y: number; width: number; height: number };
+  overlayHole?: { x: number; y: number; width: number; height: number; radius?: number };
   controlsOverlayHole?: { x: number; y: number; width: number; height: number };
   cornerOverlayHole?: { x: number; y: number; width: number; height: number };
 };

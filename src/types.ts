@@ -1167,14 +1167,14 @@ export interface IElectronAPI {
   getVideoPlaybackBackends: (filePath: string, browserProbe: 'probably' | 'maybe' | 'unsupported' | 'unknown') => Promise<{ success: boolean; backends: VideoPlaybackBackendDescriptor[]; error?: string }>;
   getVideoDisplayCapabilities: () => Promise<{ success: boolean; display: { displayId: string; scaleFactor: number; colorSpace: string; hdrAvailable: boolean; reason: string; bounds: { x: number; y: number; width: number; height: number } | null }; error?: string }>;
   getVideoPlaybackSource: (filePath: string) => Promise<{ success: boolean; mediaUrl?: string; error?: string }>;
-  setVideoPlayerBounds: (sessionId: string, bounds: { x: number; y: number; width: number; height: number; visible: boolean; overlayHole?: { x: number; y: number; width: number; height: number }; controlsOverlayHole?: { x: number; y: number; width: number; height: number }; cornerOverlayHole?: { x: number; y: number; width: number; height: number } }) => void;
+  setVideoPlayerBounds: (sessionId: string, bounds: { x: number; y: number; width: number; height: number; visible: boolean; overlayHole?: { x: number; y: number; width: number; height: number; radius?: number }; controlsOverlayHole?: { x: number; y: number; width: number; height: number }; cornerOverlayHole?: { x: number; y: number; width: number; height: number } }) => void;
   setAdvancedVideoBounds: (sessionId: string, bounds: {
     x: number;
     y: number;
     width: number;
     height: number;
     visible: boolean;
-    overlayHole?: { x: number; y: number; width: number; height: number };
+    overlayHole?: { x: number; y: number; width: number; height: number; radius?: number };
     controlsOverlayHole?: { x: number; y: number; width: number; height: number };
     cornerOverlayHole?: { x: number; y: number; width: number; height: number };
   }) => void;

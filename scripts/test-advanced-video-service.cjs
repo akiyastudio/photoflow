@@ -83,7 +83,7 @@ const run = async () => {
 
   service.setBounds({ sender }, result.sessionId, {
     x: 10.4, y: 20.6, width: 300.2, height: 200.8, visible: true,
-    overlayHole: { x: 210.2, y: 80.4, width: 120.7, height: 150.1 },
+    overlayHole: { x: 210.2, y: 80.4, width: 120.7, height: 150.1, radius: 8.4 },
     controlsOverlayHole: { x: 0, y: 150.2, width: 300.2, height: 60.1 },
     cornerOverlayHole: { x: 240.4, y: 0, width: 80.2, height: 72.1 },
   });
@@ -96,7 +96,7 @@ const run = async () => {
   service.control({ sender: { id: 99 } }, result.sessionId, { action: 'pause' });
   assert.deepStrictEqual(surfaceBounds[0], {
     x: 10, y: 21, width: 300, height: 201, visible: true,
-    holeX: 210, holeY: 80, holeWidth: 90, holeHeight: 121,
+    holeX: 210, holeY: 80, holeWidth: 90, holeHeight: 121, holeRadius: 8,
     controlsHoleX: 0, controlsHoleY: 150, controlsHoleWidth: 300, controlsHoleHeight: 51,
     cornerHoleX: 240, cornerHoleY: 0, cornerHoleWidth: 60, cornerHoleHeight: 72,
   });
@@ -200,7 +200,7 @@ const run = async () => {
   assert(playerSource.includes('backwardControlLabel') && playerSource.includes('forwardControlLabel') && playerSource.includes('runForwardBackControl(-1)') && playerSource.includes('runForwardBackControl(1)'), 'the controls beside play/pause must expose their active seek or navigation behavior');
   assert(playerSource.includes('cyclePlaybackSpeed') && playerSource.includes("controlPanel === 'speed'") && playerSource.includes('absolute bottom-full') && playerSource.includes('PLAYBACK_SPEEDS.map') && playerSource.includes('currentSession.capture()'), 'video controls must expose a compact floating playback-speed panel, click-to-cycle speed, and backend-neutral current-frame capture');
   assert(playerSource.includes("controlPanel === 'volume'") && playerSource.includes('aria-label="调整音量"') && playerSource.includes("control('mute', !muted)"), 'volume must use a floating panel above its icon while icon clicks toggle mute');
-  assert(playerSource.includes('overlayHole') && playerSource.includes('controlsOverlayHole') && playerSource.includes('cornerOverlayHole') && nativeSurfaceHostSource.includes('"controlsHole"') && nativeSurfaceHostSource.includes('CreateEllipticRgn'), 'the host-owned native surface must expose rectangular controls holes and a circular close-button hole');
+  assert(playerSource.includes('overlayHole') && playerSource.includes('panelElement?.getBoundingClientRect()') && playerSource.includes('borderTopLeftRadius') && nativeSurfaceHostSource.includes('CreateRoundRectRgn') && nativeSurfaceHostSource.includes('CreateEllipticRgn'), 'the host-owned native surface must match the actual rounded floating panel and circular close-button holes');
   assert(!playerSource.includes('panelRect.left - 2') && !playerSource.includes('panelRect.right + 2'), 'native overlay holes must match floating panels exactly instead of exposing a black ring around them');
   assert(playerSource.includes('useHostSurfaceState') && playerSource.includes('!hostSurfaceSuspended') && !playerSource.includes('hasVisibleExternalModal') && !playerSource.includes('MutationObserver'), 'native video surfaces must consume explicit host suspension instead of guessing from modal DOM');
   assert(playerSource.includes('topRightOverlayHole') && !playerSource.includes('marginTop: Math.max(0, topOverlayInset)') && workspaceSource.includes('topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 60 : 0}'), 'full-screen video must reach the top edge while keeping the close button interactive without exposing a rectangular patch');

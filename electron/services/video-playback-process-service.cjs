@@ -315,6 +315,7 @@ const createVideoPlaybackProcessService = ({
     const holeY = Math.max(0, Math.min(height, number(requestedHole.y)));
     const holeWidth = Math.max(0, Math.min(width - holeX, number(requestedHole.width)));
     const holeHeight = Math.max(0, Math.min(height - holeY, number(requestedHole.height)));
+    const holeRadius = Math.max(0, Math.min(Math.min(holeWidth, holeHeight) / 2, number(requestedHole.radius)));
     const requestedControlsHole = bounds.controlsOverlayHole && typeof bounds.controlsOverlayHole === 'object' ? bounds.controlsOverlayHole : {};
     const controlsHoleX = Math.max(0, Math.min(width, number(requestedControlsHole.x)));
     const controlsHoleY = Math.max(0, Math.min(height, number(requestedControlsHole.y)));
@@ -335,6 +336,7 @@ const createVideoPlaybackProcessService = ({
       holeY,
       holeWidth,
       holeHeight,
+      holeRadius,
       controlsHoleX,
       controlsHoleY,
       controlsHoleWidth,

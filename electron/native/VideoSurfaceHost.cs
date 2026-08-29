@@ -22,6 +22,7 @@ internal static class Native
     [DllImport("user32.dll", SetLastError=true)] internal static extern bool SetProcessDpiAwarenessContext(IntPtr value);
     [DllImport("gdi32.dll")] internal static extern IntPtr CreateRectRgn(int left, int top, int right, int bottom);
     [DllImport("gdi32.dll")] internal static extern IntPtr CreateEllipticRgn(int left, int top, int right, int bottom);
+    [DllImport("gdi32.dll")] internal static extern IntPtr CreateRoundRectRgn(int left, int top, int right, int bottom, int ellipseWidth, int ellipseHeight);
     [DllImport("gdi32.dll")] internal static extern int CombineRgn(IntPtr destination, IntPtr source1, IntPtr source2, int mode);
     [DllImport("gdi32.dll")] internal static extern bool DeleteObject(IntPtr value);
     internal static IntPtr GetStyle(IntPtr window) { return IntPtr.Size == 8 ? GetWindowLongPtr64(window, GWL_STYLE) : GetWindowLongPtr32(window, GWL_STYLE); }
@@ -33,8 +34,8 @@ internal static class Program
     private static int ReadInt(Dictionary<string, object> value, string key) { object raw; double number; return value.TryGetValue(key, out raw) && double.TryParse(Convert.ToString(raw, CultureInfo.InvariantCulture), out number) ? (int)Math.Round(number) : 0; }
     private static void Cut(IntPtr region, Dictionary<string, object> value, string prefix, bool ellipse)
     {
-        int x=ReadInt(value,prefix+"X"), y=ReadInt(value,prefix+"Y"), w=ReadInt(value,prefix+"Width"), h=ReadInt(value,prefix+"Height"); if(w<=0||h<=0)return;
-        IntPtr hole=ellipse?Native.CreateEllipticRgn(x,y,x+w,y+h):Native.CreateRectRgn(x,y,x+w,y+h); Native.CombineRgn(region,region,hole,Native.RGN_DIFF); Native.DeleteObject(hole);
+        int x=ReadInt(value,prefix+"X"), y=ReadInt(value,prefix+"Y"), w=ReadInt(value,prefix+"Width"), h=ReadInt(value,prefix+"Height"), radius=Math.Max(0,ReadInt(value,prefix+"Radius")); if(w<=0||h<=0)return;
+        IntPtr hole=ellipse?Native.CreateEllipticRgn(x,y,x+w,y+h):radius>0?Native.CreateRoundRectRgn(x,y,x+w,y+h,radius*2,radius*2):Native.CreateRectRgn(x,y,x+w,y+h); Native.CombineRgn(region,region,hole,Native.RGN_DIFF); Native.DeleteObject(hole);
     }
     private static void Bounds(IntPtr child, Dictionary<string, object> value)
     {
