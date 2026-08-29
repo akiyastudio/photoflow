@@ -46,6 +46,7 @@ media-runtime/vendor/
 /extensions/video-playback-mpv/runtime/
 /extensions/video-playback-mpv/vendor/
 /extensions/video-playback-mpv/runtime.backup-*/
+/components1/
 
 # 系统文件
 .DS_Store
