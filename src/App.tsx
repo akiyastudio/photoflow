@@ -16,6 +16,7 @@ import { useRendererErrorReporting } from './features/app/useRendererErrorReport
 import { DomainHealthBanner } from './features/app/DomainHealthBanner';
 import { ComponentPageSurface } from './features/components/ComponentPageSurface'; import { ComponentSettingsPageSurface } from './features/components/ComponentSettingsPageSurface';
 import { ComponentContributionDock } from './features/components/ComponentContributionDock';
+import { componentRuntimeIsAvailable } from './features/components/component-availability-model';
 import { useComponentPages } from './features/components/useComponentPages';
 import { ComponentIcon } from './components/ComponentIcon';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature'; import { componentSettingsSectionKey } from './features/settings/component-settings-page-model';
@@ -102,6 +103,7 @@ const App: React.FC = () => {
   const selectedComponentSettingsPage = useMemo(() => componentSettingsPages.find(page => componentSettingsSectionKey(page) === settingsSection), [componentSettingsPages, settingsSection]);
   const reportComponentSettingsError = useCallback((message: string) => showNotice(`打开组件设置页失败：${message}`), [showNotice]);
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id)), [components]);
+  const videoToolsAvailable = useMemo(() => componentRuntimeIsAvailable(components, 'video-tools'), [components]);
   const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); } });
   const { actions: componentHostActions, contributions: componentContributions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
 
@@ -856,9 +858,9 @@ const App: React.FC = () => {
             }
           };
           const content = card === 'birthday'
-            ? <DashboardView section="birthday" initialBirthdays={startupBirthdays || undefined} workspacePath={config.workspacePath} config={config.smartImport} importDefaults={config.importDefaults} brollConfig={config.brollImport} videoTools={config.videoTools} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} dragProps={dragProps}/>
+            ? <DashboardView section="birthday" initialBirthdays={startupBirthdays || undefined} workspacePath={config.workspacePath} config={config.smartImport} importDefaults={config.importDefaults} brollConfig={config.brollImport} videoTools={config.videoTools} videoToolsAvailable={videoToolsAvailable} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} dragProps={dragProps}/>
             : card === 'import'
-              ? <DashboardView section="import" active={activeTab === 'home'} startupAutoImportRequest={startupSdImportRequest} workspacePath={config.workspacePath} config={config.smartImport} importDefaults={config.importDefaults} brollConfig={config.brollImport} videoTools={config.videoTools} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onImportComplete={handleHomeImportComplete} dragProps={dragProps}/>
+              ? <DashboardView section="import" active={activeTab === 'home'} startupAutoImportRequest={startupSdImportRequest} workspacePath={config.workspacePath} config={config.smartImport} importDefaults={config.importDefaults} brollConfig={config.brollImport} videoTools={config.videoTools} videoToolsAvailable={videoToolsAvailable} onImportConfigChange={(smartImport: AppConfig['smartImport']) => handleConfigUpdate({ ...config, smartImport })} onImportComplete={handleHomeImportComplete} dragProps={dragProps}/>
               : <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                   <button type="button" onClick={openInspirationTab} className="group flex min-w-0 items-center gap-4 rounded-xl border border-slate-200 bg-white px-5 py-5 text-left transition hover:border-blue-400 hover:bg-blue-50 hover:shadow-sm">
                     <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-amber-50 text-amber-600"><Lightbulb size={22}/></span>
@@ -884,6 +886,7 @@ const App: React.FC = () => {
             workspacePath={project.workspacePath || config.workspacePath}
             inspirationLibraryRootPath={config.inspirationLibrary.rootPath}
             installedComponentIds={installedComponentIds}
+            videoToolsAvailable={videoToolsAvailable}
             componentHostActions={componentHostActions} componentContributions={componentContributions} onOpenComponentPage={(action, scope) => void openComponentPage(action, project, project.workspacePath || config.workspacePath, scope)}
             videoPlaybackSettings={config.videoPlayback}
             projectToolbar={config.projectToolbar}

@@ -4,6 +4,7 @@ import { readFileSync } from 'node:fs';
 import { configuredSdDriveVideoActions, normalizeSavedSdDeviceRecords, normalizeSavedSdDriveVideoActions, reconcileConfiguredSdDevices, removeConfiguredSdDevice, resolveConfiguredSdDevices, storageDeviceMatchesId, upsertConfiguredSdDevice } from '../src/features/tools/sd-startup-import-model.ts';
 import { createStorageDeviceInventoryController, isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from '../src/features/tools/storage-device-inventory-model.ts';
 import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, shouldDeleteSourceForImportBatch } from '../src/features/tools/startup-sd-auto-import-model.ts';
+import { availableComponentIds, componentRuntimeIsAvailable, componentUnavailableMessage } from '../src/features/components/component-availability-model.ts';
 
 const require = createRequire(import.meta.url);
 const { listWindowsStorageDevices, normalizeMountPath, parseDiskutilInfoPlist, parseWindowsLogicalDisks, parseWindowsMountvolOutput, parseWindowsVolOutput, probeWindowsStorageDevice, summarizeDarwinStorageDeviceResults } = require('../electron/services/storage-device-service.cjs');
@@ -291,5 +292,21 @@ assert.equal(isFreshStorageDeviceInventory(snapshots.at(-1), now), false, 'an er
 unsubscribeFirst();
 unsubscribeSecond();
 assert.equal(cancelled.length, 1, 'the shared poll must stop after its final subscriber unmounts');
+
+const settingsSource = readFileSync(new URL('../src/features/settings/SettingsFeature.tsx', import.meta.url), 'utf8');
+const toolsSource = readFileSync(new URL('../src/features/tools/ToolViews.tsx', import.meta.url), 'utf8');
+const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
+const workspaceSource = readFileSync(new URL('../src/features/workspace/ProjectWorkspace.tsx', import.meta.url), 'utf8');
+assert(settingsSource.includes('需要安装视频处理组件') || settingsSource.includes("componentUnavailableMessage(components, 'video-tools', '视频处理组件')"));
+assert(settingsSource.includes('disabled={!videoToolsAvailable}') && settingsSource.includes('视频切割、转码及参数入口已停用'), 'missing video-tools disables per-device actions and explains why');
+assert(toolsSource.includes("if (!videoToolsAvailable) return { splitVideosOnImport: false, transcodeVideosOnImport: false }"), 'saved legacy flags must not reach the import worker when video-tools is unavailable');
+assert(appSource.includes('videoToolsAvailable={videoToolsAvailable}'));
+assert(workspaceSource.includes('videoToolsAvailable={videoToolsAvailable}'), 'project and direct-source imports must share the runtime availability gate');
+const availableVideoTools = { id: 'video-tools', installed: true, enabled: true, compatible: true, runtimeAvailable: true, status: 'installed' };
+assert.equal(componentRuntimeIsAvailable([availableVideoTools], 'video-tools'), true);
+assert.equal(componentRuntimeIsAvailable([{ ...availableVideoTools, enabled: false }], 'video-tools'), false);
+assert.equal(componentRuntimeIsAvailable([{ ...availableVideoTools, runtimeAvailable: false }], 'video-tools'), false);
+assert.equal(availableComponentIds([availableVideoTools]).has('video-tools'), true);
+assert.equal(componentUnavailableMessage([], 'video-tools', '视频处理组件'), '需要安装视频处理组件');
 
 console.log('SD startup import model tests passed.');

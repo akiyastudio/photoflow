@@ -10,6 +10,7 @@ import { VideoSplitView, VideoTranscodeView } from '../tools/ToolViews';
 import { normalizeConfiguredSdDeviceRecords, removeConfiguredSdDevice, syncLegacySdMirrors } from '../tools/sd-startup-import-model';
 import { MAX_SUBTITLE_FONT_SIZE, MIN_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../app/video-player-settings';
 import { componentSettingsSectionKey, type ComponentSettingsSection } from './component-settings-page-model';
+import { componentRuntimeIsAvailable, componentUnavailableMessage } from '../components/component-availability-model';
 import { restoredWorkspaceConfig } from './restored-workspace-config';
 import { useUserFacingToast } from '../app/useUserFacingToast';
 import { defaultVideoShortcutBindings, exportVideoShortcuts, formatVideoShortcutChord, importVideoShortcuts, isModifierOnlyVideoShortcutInput, isReservedVideoShortcut, normalizeVideoShortcutBindings, shortcutChord, shortcutInputFromKeyboardEvent, VIDEO_ACTIONS, videoShortcutConflicts } from '../../contracts/video-shortcuts';
@@ -409,7 +410,7 @@ const ProjectToolbarSettingsEditor = ({ value, onChange }: { value: AppConfig['p
   </div>;
 };
 
-const SdDriveHistorySettings = ({ value, onChange, onOpenVideoPanel }: { value: AppConfig['smartImport']; onChange: (value: AppConfig['smartImport']) => void; onOpenVideoPanel: (panel: 'split' | 'transcode') => void }) => {
+const SdDriveHistorySettings = ({ value, videoToolsAvailable, videoToolsUnavailableMessage, onChange, onOpenVideoPanel }: { value: AppConfig['smartImport']; videoToolsAvailable: boolean; videoToolsUnavailableMessage: string; onChange: (value: AppConfig['smartImport']) => void; onOpenVideoPanel: (panel: 'split' | 'transcode') => void }) => {
   const appDialog = useAppDialog();
   const records = normalizeConfiguredSdDeviceRecords(value.sdDevices);
   const selectedPaths = [...new Set(value.sdPaths?.length ? value.sdPaths : value.sdPath ? [value.sdPath] : [])];
@@ -464,6 +465,7 @@ const SdDriveHistorySettings = ({ value, onChange, onOpenVideoPanel }: { value: 
     onChange({ ...value, sdPath: '', sdPaths: [], sdDriveTypes: {}, sdDriveVideoActions: {}, sdDeviceIds: {}, sdDevices: [] });
   };
   return <div className="settings-group-card overflow-hidden rounded-xl border border-slate-200 bg-white">
+    {!videoToolsAvailable && <div role="status" className="border-b border-amber-200 bg-amber-50 px-4 py-3 text-xs font-bold text-amber-700">{videoToolsUnavailableMessage}；视频切割、转码及参数入口已停用。</div>}
     {entryCount ? <div className="divide-y divide-slate-200">
       {records.map(record => <div key={record.deviceId} className="px-4 py-3.5">
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-center">
@@ -472,8 +474,8 @@ const SdDriveHistorySettings = ({ value, onChange, onOpenVideoPanel }: { value: 
           <button type="button" onClick={() => removeRecord(record.deviceId)} aria-label={`删除 ${record.lastMountPath} 的历史记录`} title="删除历史记录" className="inline-flex w-fit items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>删除</button>
         </div>
         <div className="mt-3 grid gap-2 border-t border-slate-100 pt-3 sm:grid-cols-2">
-          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700"><input type="checkbox" checked={record.splitVideosOnImport} onChange={event => setRecordVideoAction(record.deviceId, 'splitVideosOnImport', event.target.checked)}/>导入时切割视频</label><button type="button" className="text-xs font-bold text-blue-600 hover:text-blue-700" onClick={() => onOpenVideoPanel('split')}>切割规则</button></div>
-          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700"><input type="checkbox" checked={record.transcodeVideosOnImport} onChange={event => setRecordVideoAction(record.deviceId, 'transcodeVideosOnImport', event.target.checked)}/>导入时转码视频</label><button type="button" className="text-xs font-bold text-blue-600 hover:text-blue-700" onClick={() => onOpenVideoPanel('transcode')}>转码参数</button></div>
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className={`inline-flex items-center gap-2 text-xs font-medium ${videoToolsAvailable ? 'cursor-pointer text-slate-700' : 'cursor-not-allowed text-slate-400'}`} title={!videoToolsAvailable ? videoToolsUnavailableMessage : undefined}><input type="checkbox" disabled={!videoToolsAvailable} checked={record.splitVideosOnImport} onChange={event => setRecordVideoAction(record.deviceId, 'splitVideosOnImport', event.target.checked)}/>导入时切割视频</label><button type="button" disabled={!videoToolsAvailable} title={!videoToolsAvailable ? videoToolsUnavailableMessage : undefined} className="text-xs font-bold text-blue-600 hover:text-blue-700 disabled:cursor-not-allowed disabled:text-slate-400" onClick={() => onOpenVideoPanel('split')}>切割规则</button></div>
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className={`inline-flex items-center gap-2 text-xs font-medium ${videoToolsAvailable ? 'cursor-pointer text-slate-700' : 'cursor-not-allowed text-slate-400'}`} title={!videoToolsAvailable ? videoToolsUnavailableMessage : undefined}><input type="checkbox" disabled={!videoToolsAvailable} checked={record.transcodeVideosOnImport} onChange={event => setRecordVideoAction(record.deviceId, 'transcodeVideosOnImport', event.target.checked)}/>导入时转码视频</label><button type="button" disabled={!videoToolsAvailable} title={!videoToolsAvailable ? videoToolsUnavailableMessage : undefined} className="text-xs font-bold text-blue-600 hover:text-blue-700 disabled:cursor-not-allowed disabled:text-slate-400" onClick={() => onOpenVideoPanel('transcode')}>转码参数</button></div>
         </div>
       </div>)}
       {legacyPaths.map(path => {
@@ -489,8 +491,8 @@ const SdDriveHistorySettings = ({ value, onChange, onOpenVideoPanel }: { value: 
           <button type="button" onClick={() => removeLegacy(path)} aria-label={`删除 ${path} 的历史记录`} title="删除历史记录" className="inline-flex w-fit items-center gap-1.5 rounded-md border border-red-200 px-2.5 py-2 text-xs font-bold text-red-600 hover:bg-red-50"><Trash2 size={13}/>删除</button>
         </div>
         <div className="mt-3 grid gap-2 border-t border-slate-100 pt-3 sm:grid-cols-2">
-          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700"><input type="checkbox" checked={videoActions.splitVideosOnImport} onChange={event => setLegacyVideoAction(path, 'splitVideosOnImport', event.target.checked)}/>导入时切割视频</label><button type="button" className="text-xs font-bold text-blue-600 hover:text-blue-700" onClick={() => onOpenVideoPanel('split')}>切割规则</button></div>
-          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className="inline-flex cursor-pointer items-center gap-2 text-xs font-medium text-slate-700"><input type="checkbox" checked={videoActions.transcodeVideosOnImport} onChange={event => setLegacyVideoAction(path, 'transcodeVideosOnImport', event.target.checked)}/>导入时转码视频</label><button type="button" className="text-xs font-bold text-blue-600 hover:text-blue-700" onClick={() => onOpenVideoPanel('transcode')}>转码参数</button></div>
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className={`inline-flex items-center gap-2 text-xs font-medium ${videoToolsAvailable ? 'cursor-pointer text-slate-700' : 'cursor-not-allowed text-slate-400'}`} title={!videoToolsAvailable ? videoToolsUnavailableMessage : undefined}><input type="checkbox" disabled={!videoToolsAvailable} checked={videoActions.splitVideosOnImport} onChange={event => setLegacyVideoAction(path, 'splitVideosOnImport', event.target.checked)}/>导入时切割视频</label><button type="button" disabled={!videoToolsAvailable} title={!videoToolsAvailable ? videoToolsUnavailableMessage : undefined} className="text-xs font-bold text-blue-600 hover:text-blue-700 disabled:cursor-not-allowed disabled:text-slate-400" onClick={() => onOpenVideoPanel('split')}>切割规则</button></div>
+          <div className="flex items-center justify-between gap-3 rounded-lg bg-slate-50 px-3 py-2.5"><label className={`inline-flex items-center gap-2 text-xs font-medium ${videoToolsAvailable ? 'cursor-pointer text-slate-700' : 'cursor-not-allowed text-slate-400'}`} title={!videoToolsAvailable ? videoToolsUnavailableMessage : undefined}><input type="checkbox" disabled={!videoToolsAvailable} checked={videoActions.transcodeVideosOnImport} onChange={event => setLegacyVideoAction(path, 'transcodeVideosOnImport', event.target.checked)}/>导入时转码视频</label><button type="button" disabled={!videoToolsAvailable} title={!videoToolsAvailable ? videoToolsUnavailableMessage : undefined} className="text-xs font-bold text-blue-600 hover:text-blue-700 disabled:cursor-not-allowed disabled:text-slate-400" onClick={() => onOpenVideoPanel('transcode')}>转码参数</button></div>
         </div>
       </div>;
     })}</div> : <div className="px-4 py-8 text-center"><HardDrive size={26} className="mx-auto text-slate-300"/><p className="mt-3 text-sm font-medium text-slate-500">还没有记录过 SD 卡设备</p><p className="mt-1 text-xs text-slate-400">在导入模块中选择设备后会自动出现在这里。</p></div>}
@@ -536,6 +538,9 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const [projectCategoryError, setProjectCategoryError] = useState('');
   const [addingProjectCategory, setAddingProjectCategory] = useState(false);
   const [importVideoPanel, setImportVideoPanel] = useState<'split' | 'transcode' | null>(null);
+  const videoToolsAvailable = componentRuntimeIsAvailable(components, 'video-tools');
+  const videoToolsUnavailableMessage = componentsLoading ? '正在检查视频处理组件' : componentUnavailableMessage(components, 'video-tools', '视频处理组件');
+  useEffect(() => { if (!videoToolsAvailable && importVideoPanel) setImportVideoPanel(null); }, [importVideoPanel, videoToolsAvailable]);
   const [draggedProjectCategory, setDraggedProjectCategory] = useState('');
   const [newProgressNamePreset, setNewProgressNamePreset] = useState('');
   const [progressNamePresetError, setProgressNamePresetError] = useState('');
@@ -972,10 +977,10 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     <SettingsPageGroup title="从 SD 卡导入">
       <SettingsRow title="启动时自动从 SD 卡导入" description="应用完成启动后，检查已确认身份且包含相机媒体目录的可移动 SD 卡；无人值守导入始终保留卡内源文件。"><SettingsToggle label="启动时自动从 SD 卡导入" checked={draft.smartImport.autoStart} onChange={checked => update('smartImport', { ...draft.smartImport, autoStart: checked })}/></SettingsRow>
       <SettingsRow title="导入日期范围" description="限制从真实 SD 卡读取的素材拍摄日期。"><select value={draft.smartImport.dateFilter} onChange={event => update('smartImport', { ...draft.smartImport, dateFilter: event.target.value as AppConfig['smartImport']['dateFilter'] })} className="form-input ml-auto max-w-sm"><option value="all">全部素材</option><option value="today">仅今天拍摄的素材</option><option value="today_yesterday">今天和昨天拍摄的素材</option></select></SettingsRow>
-      <SettingsRow title="已记录的 SD 卡设备" description="为每张卡分别设置导入类型和视频处理行为；例如 G 盘可以转码，其他卡可以不处理。" align="start"><SdDriveHistorySettings value={draft.smartImport} onChange={smartImport => update('smartImport', smartImport)} onOpenVideoPanel={setImportVideoPanel}/></SettingsRow>
+      <SettingsRow title="已记录的 SD 卡设备" description="为每张卡分别设置导入类型和视频处理行为；例如 G 盘可以转码，其他卡可以不处理。" align="start"><SdDriveHistorySettings value={draft.smartImport} videoToolsAvailable={videoToolsAvailable} videoToolsUnavailableMessage={videoToolsUnavailableMessage} onChange={smartImport => update('smartImport', smartImport)} onOpenVideoPanel={setImportVideoPanel}/></SettingsRow>
     </SettingsPageGroup>
-    {importVideoPanel === 'split' && <SettingsPanel title="视频切割设置" onClose={() => setImportVideoPanel(null)}><VideoSplitView embedded settingsOnly/></SettingsPanel>}
-    {importVideoPanel === 'transcode' && <SettingsPanel title="视频转码设置" onClose={() => setImportVideoPanel(null)}><VideoTranscodeView embedded settingsOnly initialSettings={draft.videoTools.transcode} onSettingsChange={transcode => update('videoTools', { ...draft.videoTools, transcode })}/></SettingsPanel>}
+    {videoToolsAvailable && importVideoPanel === 'split' && <SettingsPanel title="视频切割设置" onClose={() => setImportVideoPanel(null)}><VideoSplitView embedded settingsOnly/></SettingsPanel>}
+    {videoToolsAvailable && importVideoPanel === 'transcode' && <SettingsPanel title="视频转码设置" onClose={() => setImportVideoPanel(null)}><VideoTranscodeView embedded settingsOnly initialSettings={draft.videoTools.transcode} onSettingsChange={transcode => update('videoTools', { ...draft.videoTools, transcode })}/></SettingsPanel>}
     </>}
     {activeSection === 'about' && <AboutSettings/>}
     {activeSection === 'feedback' && <FeedbackSettings onNotice={onNotice}/>}
