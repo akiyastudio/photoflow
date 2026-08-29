@@ -1329,6 +1329,7 @@ def run(args_list=None) -> int:
     parser.add_argument("--encoder-preset", choices=("fast", "balanced", "quality"), default="balanced")
     parser.add_argument("--retry-count", type=int, choices=range(0, 4), default=1)
     parser.add_argument("--inspect-only", action="store_true")
+    parser.add_argument("--skip-capability-probe", action="store_true")
     parser.add_argument("--output-mode", choices=("new", "replace", "delete-original"), default="new")
     parser.add_argument("--source-folder", action="append", default=[], help="所选来源文件夹；输出到其同级转码目录")
     parser.add_argument("--cancel_file", default="")
@@ -1397,7 +1398,7 @@ def run(args_list=None) -> int:
             raise FileNotFoundError(f"找不到输入路径：{missing_paths[0]}")
         if not paths and not args.inspect_only:
             raise ValueError("所选文件或文件夹中没有可转码的视频")
-        capabilities = available_transcode_capabilities(get_ffmpeg_exe())
+        capabilities = {} if args.skip_capability_probe else available_transcode_capabilities(get_ffmpeg_exe())
         if args.inspect_only:
             media_info = []
             total_estimated_bytes = 0

@@ -8,6 +8,15 @@ import ffmpeg_transcode
 
 
 class MediaEncoderLiteTests(unittest.TestCase):
+    def test_automatic_inspection_can_defer_capability_probe(self):
+        emitted = []
+        with mock.patch.object(ffmpeg_transcode, 'available_transcode_capabilities') as capabilities, \
+                mock.patch.object(ffmpeg_transcode, '_emit_cli', side_effect=lambda *args, **kwargs: emitted.append((args, kwargs))):
+            result = ffmpeg_transcode.run(['--inspect-only', '--skip-capability-probe'])
+        self.assertEqual(result, 0)
+        capabilities.assert_not_called()
+        self.assertEqual(emitted[-1][1]['capabilities'], {})
+
     def test_probe_parses_hdr10_ten_bit_tracks_and_geometry(self):
         summary = """
 Duration: 00:01:02.50, start: 0.000000, bitrate: 52000 kb/s

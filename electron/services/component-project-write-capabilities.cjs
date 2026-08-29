@@ -338,7 +338,7 @@ const registerComponentProjectWriteCapabilities = ({
     };
     if (action === 'video.transcode.inspect') {
       assertFields(payload, ['action', 'relativePaths', 'inputTokens', 'settings'], ['action', 'relativePaths', 'inputTokens', 'settings']); const sources = await resolveVideoToolSources(payload.relativePaths, payload.inputTokens); let inspection = null;
-      await runPythonJsonAction('ffmpeg_transcode.py', [...sources.map(item => item.filePath), ...videoTranscodeArgs(payload.settings), ...sources.filter(item => item.directory).flatMap(item => ['--source-folder', item.filePath]), '--inspect-only'], 20 * 60 * 1000, message => { if (message?.mediaInfo || message?.capabilities) inspection = message; });
+      await runPythonJsonAction('ffmpeg_transcode.py', [...sources.map(item => item.filePath), ...videoTranscodeArgs(payload.settings), ...sources.filter(item => item.directory).flatMap(item => ['--source-folder', item.filePath]), '--inspect-only', '--skip-capability-probe'], 20 * 60 * 1000, message => { if (message?.mediaInfo || message?.capabilities) inspection = message; });
       return { apiVersion: 7, action, mediaInfo: Array.isArray(inspection?.mediaInfo) ? inspection.mediaInfo : [], capabilities: inspection?.capabilities || null, estimatedOutputBytes: Number(inspection?.estimatedOutputBytes) || 0 };
     }
     if (['status', 'cancel', 'pause', 'resume'].includes(action)) {
