@@ -110,11 +110,11 @@ const inspectDevelopmentComponent = (componentRoot, { platform = process.platfor
   const commandDeclaration = runtime.command;
   const commandRelative = typeof commandDeclaration === 'string' ? commandDeclaration : commandDeclaration?.[`${platform}-${arch}`] || commandDeclaration?.[platform] || commandDeclaration?.default;
   const command = safeFile(componentRoot, commandRelative, 'component development runtime command');
-  const entry = safeFile(componentRoot, runtime.entry, 'component development runtime entry');
+  const entry = runtime.entry === undefined ? '' : safeFile(componentRoot, runtime.entry, 'component development runtime entry');
   const argsPrefix = runtime.argsPrefix === undefined ? [] : runtime.argsPrefix;
   if (!Array.isArray(argsPrefix) || argsPrefix.length > 16 || argsPrefix.some(value => typeof value !== 'string' || !value.startsWith('-') || value.length > 128)) throw new Error('Component development runtime argsPrefix must contain bounded option flags');
   if (development.prepare !== undefined && (typeof development.prepare !== 'string' || !/^[a-z0-9:._-]{1,80}$/i.test(development.prepare) || !packageManifest.scripts?.[development.prepare])) throw new Error('Component development prepare must name a package script');
-  return Object.freeze({ componentRoot, packagePath, packageManifest, manifestPath, manifest, id: manifest.id, files: Object.freeze(resolvedFiles), command, argsPrefix: Object.freeze([...argsPrefix, entry]), prepare: development.prepare || '' });
+  return Object.freeze({ componentRoot, packagePath, packageManifest, manifestPath, manifest, id: manifest.id, files: Object.freeze(resolvedFiles), command, argsPrefix: Object.freeze([...argsPrefix, ...(entry ? [entry] : [])]), prepare: development.prepare || '' });
 };
 
 const discoverDevelopmentComponents = options => {

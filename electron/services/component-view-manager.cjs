@@ -22,7 +22,7 @@ const normalizeOpenScope = request => {
 };
 const componentPageKey = ({ componentId, workspacePath, projectId }) => ['project', componentId, normalizeIdentity(workspacePath), String(projectId || '').trim()].join(PAGE_KEY_SEPARATOR);
 const componentSettingsPageKey = ({ componentId, pageId }) => ['application.settings', componentId, String(pageId || '').trim()].join(PAGE_KEY_SEPARATOR);
-const componentContributionKey = ({ componentId, contributionId, workspacePath, projectId }, surface) => [surface, componentId, contributionId, normalizeIdentity(workspacePath), String(projectId || '')].join(PAGE_KEY_SEPARATOR);
+const componentContributionKey = ({ componentId, contributionId, workspacePath, projectId, sourcePageId }, surface) => [surface, componentId, contributionId, normalizeIdentity(workspacePath), String(projectId || ''), surface === 'component.sidePanel' ? String(sourcePageId || '').trim() : ''].join(PAGE_KEY_SEPARATOR);
 const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
 const selectComponentPreload = (descriptor, { core }) => {
@@ -96,7 +96,7 @@ class ComponentViewManager {
   }
 
   listToolbarActions() {
-    return this.registry.list().map(item => ({
+    return this.registry.list().filter(item => item.toolbarAction && item.fullPage).map(item => ({
       componentId: item.componentId,
       componentVersion: item.componentVersion,
       contractVersion: item.contractVersion,

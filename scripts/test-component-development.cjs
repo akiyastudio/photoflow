@@ -26,6 +26,7 @@ const env = { PHOTOFLOW_COMPONENT_DEV_ROOTS: developmentRoot, PHOTOFLOW_COMPONEN
 try {
   const validRoot = writeFixture('sample-dev');
   const registry = createComponentRegistry({ projectRoot, userComponentRoot: path.join(sandbox, 'installed'), isPackaged: false, environment: env });
+  assert.equal(registry.installRoot, path.join(sandbox, 'installed'), 'development package installation remains rooted in user data, not the source checkout');
   const component = registry.inspect('sample-dev');
   assert.equal(component.source, 'development'); assert.equal(component.installed, true); assert.equal(component.integrityStatus, 'development');
   assert.equal(component.command, path.join(validRoot, 'runtime.bin')); assert.deepEqual(component.argsPrefix, ['--fixture', path.join(validRoot, 'algorithm.js')]);
@@ -36,6 +37,13 @@ try {
   const action = ComponentViewManager.prototype.listToolbarActions.call({ registry: host })[0]; const settingsPage = ComponentViewManager.prototype.listSettingsPages.call({ registry: host })[0];
   assert.equal(action.development, true); assert.equal(action.label, 'Open'); assert.equal(action.pageTitle, 'Fixture');
   assert.equal(settingsPage.development, true); assert.equal(settingsPage.label, 'Settings');
+
+  const directExecutableRoot = writeFixture('direct-executable', ({ packageManifest }) => {
+    packageManifest.photoflowComponent.development.runtime = { command: 'runtime.bin' };
+  });
+  const directExecutable = registry.inspect('direct-executable');
+  assert.equal(directExecutable.command, path.join(directExecutableRoot, 'runtime.bin'));
+  assert.deepEqual(directExecutable.argsPrefix, [], 'a native development executable must not receive a fabricated script entry argument');
 
   const packaged = createComponentRegistry({ projectRoot, userComponentRoot: path.join(sandbox, 'production-components'), isPackaged: true, environment: env });
   assert.equal(packaged.list().length, 0, 'production must never discover source registrations'); assert.equal(packaged.hostCandidates().length, 0);

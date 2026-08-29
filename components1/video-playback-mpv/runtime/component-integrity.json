@@ -1,0 +1,102 @@
+{
+  "schemaVersion": 1,
+  "componentId": "video-playback-mpv",
+  "version": "26.8.16.1",
+  "files": [
+    {
+      "file": "advanced-video-decoder.exe",
+      "sizeBytes": 23040,
+      "sha256": "3d621c9f6f1a9b78e8664f0c0d9840a2e73922027b81803ee857a71dbeee5674"
+    },
+    {
+      "file": "avcodec-61.dll",
+      "sizeBytes": 15388672,
+      "sha256": "eaa5a47feb3f3e3caa68a878749c4b52454cc951920cecbb084b1e899044a89c"
+    },
+    {
+      "file": "avdevice-61.dll",
+      "sizeBytes": 151040,
+      "sha256": "c222d712a4105f5fd69bf96bff186ab4b00ec4ccc1bffdd1765c06009c226acd"
+    },
+    {
+      "file": "avfilter-10.dll",
+      "sizeBytes": 4201472,
+      "sha256": "adaf0f59aa9c31d08a8a50e49236ddbb22c44b185264f703ccffe0f9d37cbd50"
+    },
+    {
+      "file": "avformat-61.dll",
+      "sizeBytes": 2354688,
+      "sha256": "f693de92be7bd29608fd1ccc72a5966c27ae9ca3b478f652b5f3adf602ebe243"
+    },
+    {
+      "file": "avutil-59.dll",
+      "sizeBytes": 1088512,
+      "sha256": "013c30283296896a5bde251aeb1cfbd98087925803853709bc5eb701c3d83e8f"
+    },
+    {
+      "file": "component.json",
+      "sizeBytes": 426,
+      "sha256": "f24a59aeae8f65bd11596dfa5d531cf7b8eb555ae9f3c3f3c699ace43e40676a"
+    },
+    {
+      "file": "libass-9.dll",
+      "sizeBytes": 777033,
+      "sha256": "722fd0346090cabe7911ec70babe31c7adb61f2f5c015bc7964eefe2d7efcc70"
+    },
+    {
+      "file": "libfreetype-6.dll",
+      "sizeBytes": 883277,
+      "sha256": "5457396a4d20a2b532904bfd5e09c9f6fa14973cd4f8890ac95038c0ea2b69f7"
+    },
+    {
+      "file": "libfribidi-0.dll",
+      "sizeBytes": 206392,
+      "sha256": "045af62e4089bb1a7d6032cddf9923f4caa04e34ea648bd4987b3e4dddbc18ad"
+    },
+    {
+      "file": "libharfbuzz-0.dll",
+      "sizeBytes": 1949509,
+      "sha256": "9aefb56532c0a6aab8dc9b1316b284d22a49ff382d2a72298fd839798e206603"
+    },
+    {
+      "file": "libharfbuzz-subset-0.dll",
+      "sizeBytes": 2173422,
+      "sha256": "f7ffd5de9258cf52b90fdc24c6f7e6068dd3fc154e30f1df9cb731ee75b706d1"
+    },
+    {
+      "file": "libmpv-2.dll",
+      "sizeBytes": 3175093,
+      "sha256": "23d0103f4f88490b4edf432963c978f29b8952dec4cd1c11cd6f6506a5f188e3"
+    },
+    {
+      "file": "libplacebo-351.dll",
+      "sizeBytes": 1691744,
+      "sha256": "628a7481a73f48be16ee091a1db458a39a82cc44f2c6e813eace65b3f7dc41a6"
+    },
+    {
+      "file": "libshaderc_shared.dll",
+      "sizeBytes": 10588655,
+      "sha256": "31a24d149f9c3f716eda4277abf6fff8023e2fe1c0f8dfa3ce9f83231fbe4bbe"
+    },
+    {
+      "file": "libspirv-cross-c-shared.dll",
+      "sizeBytes": 4661263,
+      "sha256": "c7721dd53df0d1a4f5d67a16f2270f7dd1bba749386ef0a002e082b864d6720d"
+    },
+    {
+      "file": "runtime-manifest.json",
+      "sizeBytes": 5949,
+      "sha256": "ba984ca2e265f98d2be25470ef6587adeca009f71d8662d5b035be4826d30f80"
+    },
+    {
+      "file": "swresample-5.dll",
+      "sizeBytes": 121344,
+      "sha256": "a95469ebc5fde67d989eeb56cba57b01eac33144c5614a2d047e6a7b02be0281"
+    },
+    {
+      "file": "swscale-8.dll",
+      "sizeBytes": 660480,
+      "sha256": "fea00f8c707f27b899f0b0339843133b7d4ffe022f56659b26e4b49454315a7e"
+    }
+  ]
+}

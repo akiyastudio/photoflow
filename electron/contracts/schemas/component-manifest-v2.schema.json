@@ -37,6 +37,7 @@
         },
         "contributions": {
           "type": "array", "minItems": 2, "maxItems": 32,
+          "contains": { "type": "object", "required": ["type"], "properties": { "type": { "enum": ["workspace.toolbarAction", "component.sidePanel"] } } },
           "items": {
             "oneOf": [
               { "type": "object", "additionalProperties": false, "required": ["type", "id", "label", "pageId"], "properties": { "type": { "const": "workspace.toolbarAction" }, "id": { "$ref": "#/$defs/id" }, "label": { "type": "string", "minLength": 1, "maxLength": 80 }, "pageId": { "$ref": "#/$defs/id" } } },

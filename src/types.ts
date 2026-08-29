@@ -1128,7 +1128,7 @@ export interface IElectronAPI {
   captureAdvancedVideoFrame: (sessionId: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   stopAdvancedVideo: (sessionId: string) => Promise<{ success: boolean }>;
   onAdvancedVideoState: (callback: (state: AdvancedVideoState) => void) => () => void;
-  getMediaOriginal: (filePath: string, kind: 'image' | 'raw', cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; mediaUrl?: string; original?: boolean; orientation?: { matrix: number[]; swapsAxes: boolean; rawOrientation: number; embeddedOrientation: number }; error?: string }>;
+  getMediaOriginal: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; mediaUrl?: string; original?: boolean; orientation?: { matrix: number[]; swapsAxes: boolean; rawOrientation: number; embeddedOrientation: number }; error?: string }>;
   getMediaMetadata: (filePath: string) => Promise<{ success: boolean; fields: MediaMetadataField[]; error?: string }>;
   reportRendererError: (message: string, details?: string) => void;
   reportRendererInfo: (message: string, details?: string) => void;

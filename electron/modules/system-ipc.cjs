@@ -43,6 +43,9 @@ const PYTHON_BACKGROUND_TASK_PROFILES = Object.freeze({
   'cut_video.py': Object.freeze({ title: '视频切割', type: 'python-tool', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1 }),
 });
 
+const shouldTrackPythonToolAsBackgroundTask = (scriptName, args = []) => Boolean(PYTHON_BACKGROUND_TASK_PROFILES[scriptName])
+  && !args.includes('--inspect-only');
+
 const PYTHON_WORKER_RESOURCE_PROFILES = Object.freeze({
   'classify.py': Object.freeze({
     'video-split': Object.freeze({ capacities: [Object.freeze({ key: 'heavy-media', access: 'write', limit: 1, writeLimit: 1 })] }),
@@ -901,7 +904,7 @@ const registerSystemIpc = context => {
       }
     }
     const toolProfile = PYTHON_BACKGROUND_TASK_PROFILES[scriptName];
-    if (!tracksImportTask && toolProfile && normalizedRequestId) {
+    if (!tracksImportTask && shouldTrackPythonToolAsBackgroundTask(scriptName, args) && normalizedRequestId) {
       backgroundTaskId = `python-tool:${normalizedRequestId}`;
       const presentationMetadata = taskPresentation ? {
         presentationOwnerPageId: taskPresentation.ownerPageId,
@@ -1499,4 +1502,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease };
+module.exports = { finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, shouldTrackPythonToolAsBackgroundTask };

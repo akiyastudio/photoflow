@@ -242,9 +242,10 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     }
   }
   if (settingsPages.length > 16) throw new Error('Component settings page contributions must be bounded');
-  if (pages.size < 1 || pages.size > 16 || actions.length !== 1) throw new Error('Component Host requires exactly one toolbar action and 1-16 full pages');
-  if (!pages.has(actions[0].pageId)) throw new Error(`Component toolbar action references an unknown page: ${actions[0].pageId}`);
-  const page = pages.get(actions[0].pageId);
+  if (pages.size < 1 || pages.size > 16 || actions.length > 1) throw new Error('Component Host requires 1-16 full pages and at most one toolbar action');
+  if (!actions.length && !api7Contributions.some(contribution => contribution.type === 'component.sidePanel')) throw new Error('Component Host requires a toolbar action or side panel contribution');
+  if (actions[0] && !pages.has(actions[0].pageId)) throw new Error(`Component toolbar action references an unknown page: ${actions[0].pageId}`);
+  const page = actions[0] ? pages.get(actions[0].pageId) : null;
   for (const contribution of api7Contributions) if (!pages.has(contribution.pageId)) throw new Error(`${contribution.type} references an unknown page: ${contribution.pageId}`);
   let service = null;
   if (host.service === undefined) throw new Error('Component Host V2 requires a service declaration');
@@ -400,8 +401,8 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     compatibility: { minHostApiVersion: min, maxHostApiVersion: max },
     adoptionGrants: Object.freeze([...adoptionGrants]),
     legacySettingsAdoptions: Object.freeze(legacySettingsAdoptions),
-    toolbarAction: Object.freeze({ ...actions[0], pageTitle: page.title }),
-    fullPage: Object.freeze(page),
+    toolbarAction: actions[0] ? Object.freeze({ ...actions[0], pageTitle: page.title }) : null,
+    fullPage: page ? Object.freeze(page) : null,
     pages: Object.freeze([...pages.values()].map(value => Object.freeze(value))),
     settingsPages: Object.freeze(settingsPages),
     contributions: Object.freeze(api7Contributions),
