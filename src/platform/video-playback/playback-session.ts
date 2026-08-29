@@ -95,16 +95,25 @@ const chromiumPlaybackFailure = (video: HTMLVideoElement): PlaybackFailure => {
 };
 
 const benignPlayRejection = (error: unknown) => error instanceof DOMException && (error.name === 'NotAllowedError' || error.name === 'AbortError');
+const chromiumVideoOwners = new WeakMap<HTMLVideoElement, string>();
 
-const waitForChromiumReady = (video: HTMLVideoElement) => new Promise<void>((resolve, reject) => {
+const withPlaybackTimeout = <T,>(promise: Promise<T>, timeoutMs: number, failure: () => PlaybackFailure) => new Promise<T>((resolve, reject) => {
+  const timer = globalThis.setTimeout(() => reject(failure()), timeoutMs);
+  promise.then(value => { globalThis.clearTimeout(timer); resolve(value); }, error => { globalThis.clearTimeout(timer); reject(error); });
+});
+
+const waitForChromiumReady = (video: HTMLVideoElement, timeoutMs = 8000) => new Promise<void>((resolve, reject) => {
+  let timer = 0;
   const ready = () => { cleanup(); resolve(); };
   const failed = () => { cleanup(); reject(chromiumPlaybackFailure(video)); };
   const cleanup = () => {
+    globalThis.clearTimeout(timer);
     video.removeEventListener('loadedmetadata', ready);
     video.removeEventListener('error', failed);
   };
   video.addEventListener('loadedmetadata', ready, { once: true });
   video.addEventListener('error', failed, { once: true });
+  timer = globalThis.setTimeout(() => { cleanup(); reject(new PlaybackFailure('STARTUP_TIMEOUT', `Chromium 等待视频元数据超时（readyState=${video.readyState}，networkState=${video.networkState}）`)); }, timeoutMs);
   video.load();
 });
 
@@ -113,9 +122,11 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
   constructor(descriptor: VideoPlaybackBackendDescriptor) { this.descriptor = descriptor; }
 
   async start(context: PlaybackBackendContext): Promise<PlaybackSession> {
-    const source = await context.electronApi.getVideoPlaybackSource(context.filePath);
-    if (!source.success || !source.mediaUrl) throw new Error(source.error || '无法授权 Chromium 读取视频');
     const { video } = context;
+    const ownerId = `${context.playerId}:${context.requestId}`;
+    chromiumVideoOwners.set(video, ownerId);
+    const ownsVideo = () => chromiumVideoOwners.get(video) === ownerId;
+    const requireOwnership = () => { if (!ownsVideo()) throw new PlaybackFailure('CANCELLED', 'Chromium 播放请求已被新的会话替换', false, [], 'none'); };
     let closed = false;
     let loaded = false;
     let runtimeFailureReported = false;
@@ -137,12 +148,12 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
         cue.startTime = Math.max(0, original.start + subtitleDelay); cue.endTime = Math.max(cue.startTime, original.end + subtitleDelay);
       }
     };
-    video.src = source.mediaUrl;
     video.poster = '';
     video.preload = 'auto';
     video.playsInline = true;
 
     const emitState = () => {
+      if (!ownsVideo()) return;
       const time = Number(video.currentTime) || 0;
       context.onState(stateEnvelope(context, 'state', {
         time,
@@ -156,11 +167,11 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
         height: video.videoHeight,
       }));
     };
-    const onWaiting = () => context.onState(stateEnvelope(context, 'loading', { buffering: true }));
-    const onPlaying = () => { loaded = true; emitState(); };
-    const onEnded = () => context.onState(stateEnvelope(context, 'ended', { paused: true, time: Number(video.duration) || Number(video.currentTime) || 0 }));
+    const onWaiting = () => { if (ownsVideo()) context.onState(stateEnvelope(context, 'loading', { buffering: true })); };
+    const onPlaying = () => { if (ownsVideo()) { loaded = true; emitState(); } };
+    const onEnded = () => { if (ownsVideo()) context.onState(stateEnvelope(context, 'ended', { paused: true, time: Number(video.duration) || Number(video.currentTime) || 0 })); };
     const onError = () => {
-      if (closed || !loaded || runtimeFailureReported) return;
+      if (closed || !ownsVideo() || !loaded || runtimeFailureReported) return;
       runtimeFailureReported = true;
       const failure = chromiumPlaybackFailure(video);
       context.onRuntimeFailure(failure.message, failure.code);
@@ -194,7 +205,29 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
     events.forEach(([name, listener]) => video.addEventListener(name, listener));
 
     try {
-      await waitForChromiumReady(video);
+      let startupFailure: PlaybackFailure | null = null;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        try {
+          requireOwnership();
+          const source = await withPlaybackTimeout(context.electronApi.getVideoPlaybackSource(context.filePath), 5000, () => new PlaybackFailure('STARTUP_TIMEOUT', 'Chromium 媒体源授权超时'));
+          requireOwnership();
+          if (!source.success || !source.mediaUrl) throw new PlaybackFailure('MEDIA_IO_FAILED', source.error || '无法授权 Chromium 读取视频');
+          video.src = source.mediaUrl;
+          await waitForChromiumReady(video);
+          requireOwnership();
+          startupFailure = null;
+          break;
+        } catch (error) {
+          startupFailure = classifyPlaybackError(error, 'DECODE_INITIALIZATION_FAILED');
+          if (!ownsVideo()) throw startupFailure;
+          const retryable = ['STARTUP_TIMEOUT', 'MEDIA_IO_FAILED', 'CANCELLED'].includes(startupFailure.code);
+          if (attempt > 0 || !retryable) throw startupFailure;
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        }
+      }
+      if (startupFailure) throw startupFailure;
       loaded = true;
       context.onState(stateEnvelope(context, 'file-loaded', {
         duration: Number.isFinite(video.duration) ? video.duration : 0,
@@ -213,8 +246,11 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
       video.requestVideoFrameCallback?.(sampleFrameRate);
     } catch (error) {
       events.forEach(([name, listener]) => video.removeEventListener(name, listener));
-      video.removeAttribute('src');
-      video.load();
+      if (ownsVideo()) {
+        chromiumVideoOwners.delete(video);
+        video.removeAttribute('src');
+        video.load();
+      }
       throw error;
     }
 
@@ -273,9 +309,12 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
         globalThis.clearInterval(statisticsTimer);
         events.forEach(([name, listener]) => video.removeEventListener(name, listener));
         for (const item of browserSubtitles.values()) item.element.remove(); browserSubtitles.clear();
-        video.pause();
-        video.removeAttribute('src');
-        video.load();
+        if (ownsVideo()) {
+          chromiumVideoOwners.delete(video);
+          video.pause();
+          video.removeAttribute('src');
+          video.load();
+        }
       },
     };
   }

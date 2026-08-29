@@ -104,6 +104,24 @@ const context = (video, states, failures, published, subtitleChoice = { success:
 }
 
 {
+  const video = new FakeVideo(); const states = []; const failures = []; const published = []; const retryContext = context(video, states, failures, published); let sourceRequests = 0;
+  retryContext.electronApi.getVideoPlaybackSource = async () => { sourceRequests += 1; if (sourceRequests === 1) throw new Error('媒体读取暂时失败'); return { success: true, mediaUrl: 'photoflow-media://file/fresh-token' }; };
+  const session = await new ChromiumPlaybackBackend(descriptor).start(retryContext);
+  assert.equal(sourceRequests, 2, 'a transient Chromium source failure must retry once with a fresh authorization token'); assert.equal(video.src, 'photoflow-media://file/fresh-token'); await session.close();
+}
+
+{
+  const video = new FakeVideo(); const first = context(video, [], [], []); first.requestId = 'request-stale'; let resolveFirstSource; first.electronApi.getVideoPlaybackSource = () => new Promise(resolve => { resolveFirstSource = resolve; });
+  const staleStart = new ChromiumPlaybackBackend(descriptor).start(first);
+  const second = context(video, [], [], []); second.requestId = 'request-current'; second.electronApi.getVideoPlaybackSource = async () => ({ success: true, mediaUrl: 'photoflow-media://file/current-token' });
+  const currentSession = await new ChromiumPlaybackBackend(descriptor).start(second);
+  resolveFirstSource({ success: true, mediaUrl: 'photoflow-media://file/stale-token' });
+  await assert.rejects(staleStart, /新的会话替换/);
+  assert.equal(video.src, 'photoflow-media://file/current-token', 'a stale Chromium session may not clear or replace the current session source');
+  await currentSession.close(); assert.equal(video.src, ''); assert.equal(video.listenerBalance, 0);
+}
+
+{
   const video = new FakeVideo({ failLoad: true });
   await assert.rejects(new ChromiumPlaybackBackend(descriptor).start(context(video, [], [], [])), /decode failed/);
   assert.equal(video.src, '');
