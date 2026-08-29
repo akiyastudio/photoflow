@@ -21,8 +21,8 @@ const handle = async frame => {
     return { revision: result.revision, settings: normalizeSettings(result.settings?.transcode) };
   }
   if (method === 'video-tools.sources.choose.v1') {
-    const folder = payload.kind === 'folder'; const result = await callHost(id, 'dialogs.v7', folder ? { kind: 'openDirectory', title: '追加视频文件夹', extensions: ['mp4','mov','m4v','mkv','avi','webm','crm','mts','m2ts','ts'], recursive: true } : { kind: 'openFiles', title: '追加视频', extensions: ['mp4','mov','m4v','mkv','avi','webm','crm','mts','m2ts','ts'], multiple: true });
-    return { cancelled: result.cancelled === true, sources: (result.inputs || []).slice(0, 120).map(item => ({ token: item.token, name: item.relativeName || item.name })) };
+    const folder = payload.kind === 'folder'; const result = await callHost(id, 'dialogs.v7', folder ? { kind: 'openDirectory', title: '追加视频文件夹', extensions: ['mp4','mov','m4v','mkv','avi','webm','crm','mts','m2ts','ts'], recursive: true, directoryToken: true } : { kind: 'openFiles', title: '追加视频', extensions: ['mp4','mov','m4v','mkv','avi','webm','crm','mts','m2ts','ts'], multiple: true });
+    return { cancelled: result.cancelled === true, sources: (result.inputs || []).slice(0, 120).map(item => ({ token: item.token, name: item.relativeName || item.name, kind: item.kind === 'directory' ? 'folder' : 'file' })) };
   }
   if (method === 'video-tools.settings.update.v1') {
     const settings = normalizeSettings(payload.settings);

@@ -17,7 +17,7 @@ const createComponentHostCapabilityRuntime = dependencies => {
   componentCapabilityBroker.register('component.secrets.v7', secretsService.invoke);
   componentCapabilityBroker.register('network.fetch.v7', networkService.invoke);
   const clearComponentCapabilityState = componentId => { projectDomain?.clearComponent?.(componentId); writeDomain?.clearComponent?.(componentId); };
-  return { componentCapabilityBroker, componentNotificationService, clearComponentCapabilityState, clearComponentSecretData: secretsService.removeComponentData, abortComponentNetworkRequests: networkService.clearComponent };
+  return { componentCapabilityBroker, componentInputGrants: projectDomain, componentNotificationService, clearComponentCapabilityState, clearComponentSecretData: secretsService.removeComponentData, abortComponentNetworkRequests: networkService.clearComponent };
 };
 
 module.exports = { createComponentHostCapabilityRuntime };

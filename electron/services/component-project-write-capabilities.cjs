@@ -325,8 +325,8 @@ const registerComponentProjectWriteCapabilities = ({
       }
       for (const token of [...new Set(inputTokenValues.map(String))]) {
         const candidate = inputTokens.peekInput(token, descriptor, context); const stat = await fs.promises.lstat(candidate).catch(() => null); const canonical = await fs.promises.realpath(candidate).catch(() => null);
-        if (!stat?.isFile() || stat.isSymbolicLink() || !canonical || !VIDEO_EXTENSIONS.has(path.extname(candidate).toLowerCase())) throw hostError(CODES.INVALID_REQUEST, 'External video source is missing or unsupported');
-        values.push({ relativePath: '', filePath: candidate, directory: false });
+        if (!stat || stat.isSymbolicLink() || !canonical || !stat.isDirectory() && (!stat.isFile() || !VIDEO_EXTENSIONS.has(path.extname(candidate).toLowerCase()))) throw hostError(CODES.INVALID_REQUEST, 'External video source is missing or unsupported');
+        values.push({ relativePath: '', filePath: candidate, directory: stat.isDirectory() });
       }
       return values;
     };

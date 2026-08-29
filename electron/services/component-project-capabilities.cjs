@@ -904,6 +904,10 @@ const registerComponentProjectCapabilities = ({
       if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) throw hostError(CODES.INVALID_REQUEST, 'Selected input directory is unsafe');
       const realRoot = await fs.promises.realpath(root);
       const rootIdentity = { dev: String(rootStat.dev), ino: String(rootStat.ino) };
+      if (payload.directoryToken === true) {
+        const grant = grantInput(realRoot, descriptor, context, realRoot);
+        return { apiVersion: 7, cancelled: false, inputs: [{ name: path.basename(realRoot), relativeName: path.basename(realRoot), kind: 'directory', ...grant }], truncated: false };
+      }
       const pending = [realRoot];
       let inspected = 0;
       while (pending.length && selectedFiles.length < availableTokens && inspected < 20_000) {
@@ -945,7 +949,7 @@ const registerComponentProjectCapabilities = ({
         if (!stat?.isFile() || stat.isSymbolicLink() || !realFile || path.resolve(realFile) !== filePath || selected.boundary && !inside(path, selected.boundary, realFile)) { truncated = true; continue; }
         if (extensions.length && !extensions.includes(path.extname(filePath).slice(1).toLowerCase())) continue;
         const grant = grantInput(filePath, descriptor, context, selected.boundary); minted.push(grant.token);
-        inputs.push({ name: path.basename(filePath), relativeName: selected.relativeName, ...grant });
+        inputs.push({ name: path.basename(filePath), relativeName: selected.relativeName, kind: 'file', ...grant });
       }
     } catch (error) { for (const token of minted) inputGrants.delete(token); throw error; }
     return { apiVersion: 7, cancelled: false, inputs, ...(selectingDirectory ? { truncated } : {}) };
@@ -959,6 +963,27 @@ const registerComponentProjectCapabilities = ({
     return { apiVersion: 7, emitted: true };
   });
   return {
+    grantDroppedInputs: async (filePaths, descriptor, context) => {
+      const uniquePaths = [...new Set((Array.isArray(filePaths) ? filePaths : []).map(value => String(value || '')).filter(Boolean))].slice(0, 120);
+      const inputs = [];
+      const minted = [];
+      try {
+        for (const rawPath of uniquePaths) {
+          if (!path.isAbsolute(rawPath)) continue;
+          const candidate = path.resolve(rawPath);
+          const stat = await fs.promises.lstat(candidate).catch(() => null);
+          const canonical = await fs.promises.realpath(candidate).catch(() => '');
+          if (!stat || stat.isSymbolicLink() || !canonical || path.resolve(canonical) !== candidate || !stat.isFile() && !stat.isDirectory()) continue;
+          const grant = grantInput(candidate, descriptor, context, stat.isDirectory() ? candidate : null);
+          minted.push(grant.token);
+          inputs.push({ name: path.basename(candidate), relativeName: path.basename(candidate), kind: stat.isDirectory() ? 'directory' : 'file', ...grant });
+        }
+      } catch (error) {
+        for (const token of minted) inputGrants.delete(token);
+        throw error;
+      }
+      return { apiVersion: 7, inputs };
+    },
     consumeInput: (token, descriptor, context) => consumeInput(token, descriptor, context, true),
     peekInput: (token, descriptor, context) => consumeInput(token, descriptor, context, false),
     reserveInputs: (tokens, descriptor, context, reservationId) => {

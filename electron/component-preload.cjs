@@ -1,4 +1,4 @@
-const { contextBridge, ipcRenderer } = require('electron');
+const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
 const notificationFailure = (code, message) => Object.freeze({ apiVersion: 7, accepted: false, error: Object.freeze({ code, message, retryable: false }) });
 const normalizeNotification = value => {
@@ -23,6 +23,12 @@ contextBridge.exposeInMainWorld('photoFlowComponent', Object.freeze({
   // Bridge ABI version; Host API negotiation is reported by getContext().
   contractVersion: 1,
   getContext: () => ipcRenderer.invoke('component-sdk:get-context'),
+  authorizeFiles: files => {
+    const filePaths = Array.from(files || []).slice(0, 120).map(file => {
+      try { return webUtils.getPathForFile(file); } catch { return ''; }
+    }).filter(Boolean);
+    return ipcRenderer.invoke('component-sdk:authorize-files', filePaths);
+  },
   notify,
   rpc: (method, payload) => ipcRenderer.invoke('component-sdk:rpc', String(method || ''), payload),
   onEvent: (topic, callback) => {

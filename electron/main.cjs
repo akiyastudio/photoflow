@@ -1858,7 +1858,7 @@ app.whenReady().then(async () => {
   // not load renderer code until every channel has been registered.
   createWindow(false);
 
-  const { componentCapabilityBroker, componentNotificationService, clearComponentCapabilityState, clearComponentSecretData, abortComponentNetworkRequests } = createComponentHostCapabilityRuntime({
+  const { componentCapabilityBroker, componentInputGrants, componentNotificationService, clearComponentCapabilityState, clearComponentSecretData, abortComponentNetworkRequests } = createComponentHostCapabilityRuntime({
     ensureWorkspace,
     getWorkspaceDataRoot,
     resolveProjectEntry,
@@ -1882,7 +1882,7 @@ app.whenReady().then(async () => {
     registry: componentHostRegistry,
     preloadPath: path.join(__dirname, 'component-preload.cjs'),
     ipcMain: electronIpcMain,
-    serviceManager: componentServiceManager, notificationService: componentNotificationService, clearComponentCapabilityState,
+    serviceManager: componentServiceManager, inputGrantService: componentInputGrants, notificationService: componentNotificationService, clearComponentCapabilityState,
     writeLog,
     onViewStackChanged: () => toastViewManager?.bringToFront(),
   });

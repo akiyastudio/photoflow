@@ -23,7 +23,7 @@ const manifest = {
       { type: 'component.fullPage', id: 'panel-ui', title: 'Fixture panel', entry: 'ui/panel.html' },
       { type: 'component.sidePanel', id: 'panel', label: 'Fixture', title: 'Fixture panel', pageId: 'panel-ui', rpcMethods: ['fixture.run.v1'] },
     ],
-    service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1'], capabilities: [], permissions: [], events: [] },
+    service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1'], capabilities: ['dialogs.v7'], permissions: ['dialogs'], events: [] },
   },
 };
 
@@ -77,6 +77,7 @@ class View {
       preloadPath: 'component-preload.cjs',
       ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
       serviceManager: { supports: () => true, invoke: async () => ({ ok: true }) },
+      inputGrantService: { grantDroppedInputs: async paths => ({ apiVersion: 7, inputs: paths.map((name, index) => ({ name, token: `token-${index}` })) }) },
     });
     assert.deepEqual(manager.listToolbarActions(), [], 'panel-only components must not create a new-page toolbar action');
 
@@ -97,6 +98,8 @@ class View {
     assert.notEqual(first.instanceId, second.instanceId, 'each file page must own its component panel instance');
     assert.equal(views.length, 2);
     assert.equal((await open('page-a')).instanceId, first.instanceId, 'the same file page must reuse its panel instance');
+    const authorizedDrop = await handlers.get('component-sdk:authorize-files')({ sender: views[0].webContents }, ['dropped.mp4']);
+    assert.deepEqual(authorizedDrop.inputs, [{ name: 'dropped.mp4', token: 'token-0' }], 'component preload can exchange real dropped File objects for scoped input tokens');
     let escapePrevented = false;
     views[0].webContents.emit('before-input-event', { preventDefault: () => { escapePrevented = true; } }, { type: 'keyDown', key: 'Escape' });
     assert.equal(escapePrevented, true);

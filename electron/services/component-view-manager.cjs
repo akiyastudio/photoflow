@@ -37,7 +37,7 @@ const diagnosticToken = value => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, notificationService = null, clearComponentCapabilityState = null, writeLog = () => undefined, onViewStackChanged = () => undefined }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, writeLog = () => undefined, onViewStackChanged = () => undefined }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
@@ -46,6 +46,7 @@ class ComponentViewManager {
     this.clearComponentCapabilityState = clearComponentCapabilityState;
     this.writeLog = writeLog;
     this.serviceManager = serviceManager;
+    this.inputGrantService = inputGrantService;
     this.notificationService = notificationService;
     this.onViewStackChanged = onViewStackChanged;
     this.instances = new Map();
@@ -86,6 +87,12 @@ class ComponentViewManager {
       if (!instance || instance.view.webContents !== event.sender) { const error = new Error('Unauthorized component sender'); error.code = 'NOTIFICATION_UNAUTHORIZED_SENDER'; throw error; }
       if (!this.notificationService) { const error = new Error('Component notification service is unavailable'); error.code = 'NOTIFICATION_HOST_UNAVAILABLE'; throw error; }
       return this.notificationService.publish(instance.descriptor, payload, instance.context);
+    });
+    this.ipcMain.handle('component-sdk:authorize-files', (event, filePaths) => {
+      const instance = this.senderBindings.get(event.sender.id);
+      if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
+      if (!instance.descriptor.service?.permissions?.includes('dialogs') || !this.inputGrantService?.grantDroppedInputs) throw new Error('Component dropped-file authorization is unavailable');
+      return this.inputGrantService.grantDroppedInputs(filePaths, instance.descriptor, instance.context);
     });
   }
 
