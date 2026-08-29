@@ -20,6 +20,6 @@ assert(!packageJson.includes('"to": "python/ffmpeg.zip"'), 'base installer must 
 assert(!fs.existsSync(path.join(repo, 'media-runtime.lock.json')) && !fs.existsSync(path.join(repo, 'media-runtime')) && !fs.existsSync(path.join(repo, 'scripts', 'prepare-ffmpeg.cjs')) && !fs.existsSync(path.join(repo, 'scripts', 'media-runtime')), 'encoder build materials must not remain at repository root');
 const packageScript = fs.readFileSync(path.join(root, 'scripts', 'package-component.cjs'), 'utf8');
 assert(!packageScript.includes("path.resolve(root, '..', '..')") && !packageScript.includes('artifacts/python') && packageScript.includes("path.join(root, '.venv'"), 'component packaging must use only component-local build inputs');
-const playback = fs.readFileSync(path.join(repo, 'plugins', 'video-playback-backend', 'src', 'AdvancedVideoDecoder.cs'), 'utf8');
+const playback = fs.readFileSync(path.join(repo, 'extensions', 'video-playback-mpv', 'src', 'AdvancedVideoDecoder.cs'), 'utf8');
 assert(playback.includes('--timeline-request') && playback.includes('ExtractTimelineFrames'));
 console.log('Video tools runtime is physically isolated and playback owns timeline extraction');

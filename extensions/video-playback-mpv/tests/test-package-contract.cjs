@@ -32,7 +32,7 @@ for (const required of [
 ]) assert(fs.existsSync(path.join(root, required)), `missing standalone resource ${required}`);
 for (const schema of ['component-manifest-v2.schema.json', 'media-playback-backend-v1.schema.json', 'media-playback-backend-wire-v1.schema.json']) JSON.parse(fs.readFileSync(path.join(root, 'protocol', schema), 'utf8'));
 const ownedBuildSources = ['scripts/build.cjs', 'scripts/build-release.cjs', 'media-runtime/build-libmpv-lgpl-windows.sh', 'media-runtime/build-libmpv-dependencies-windows.sh'].map(file => fs.readFileSync(path.join(root, file), 'utf8'));
-for (const buildSource of ownedBuildSources) assert(!buildSource.includes('repoRoot') && !buildSource.includes('scripts/media-runtime') && !buildSource.includes('plugins/video-playback-backend'), 'build may not reference an enclosing repository');
+for (const buildSource of ownedBuildSources) assert(!buildSource.includes('repoRoot') && !buildSource.includes('scripts/media-runtime') && !buildSource.includes('extensions/video-playback-mpv'), 'build may not reference an enclosing repository');
 if (process.platform === 'win32') {
   const framework = ['Framework64', 'Framework'].map(name => path.join(process.env.WINDIR || 'C:\\Windows', 'Microsoft.NET', name, 'v4.0.30319')).find(value => fs.existsSync(path.join(value, 'csc.exe')));
   const output = path.join(os.tmpdir(), `photoflow-playback-backend-${process.pid}.exe`);

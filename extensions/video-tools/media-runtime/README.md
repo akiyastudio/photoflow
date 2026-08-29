@@ -20,4 +20,4 @@
 
 `prepare-ffmpeg.cjs` 会验证许可证、必需/禁止构建参数及三个归档的 SHA-256，任何一项不合格都会中止安装包构建。
 
-libmpv 的固定版本、源码构建、许可证材料与发布说明由独立工程 `plugins/video-playback-backend/` 完整拥有；本目录仅负责 `video-tools` 的编码 FFmpeg 工具链。
+libmpv 的固定版本、源码构建、许可证材料与发布说明由独立工程 `extensions/video-playback-mpv/` 完整拥有；本目录仅负责 `video-tools` 的编码 FFmpeg 工具链。

@@ -122,7 +122,7 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   New renderer/domain code must depend only on generic descriptors and sessions.
 
   The reference libmpv implementation is an independently versioned release
-  project under `plugins/video-playback-backend`; core build and tests do not
+  project under `extensions/video-playback-mpv`; core build and tests do not
   import its source, build script, executable/DLL names or integrity manifest.
   Core independence tests physically hide that directory before compiling. The
   `advanced-video-*` channels in the generic IPC registrar are the sole removable
