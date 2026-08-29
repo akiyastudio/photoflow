@@ -83,9 +83,22 @@ const stateEnvelope = (context: Omit<PlaybackBackendContext, 'onRuntimeFailure'>
   ...state,
 });
 
+const chromiumPlaybackFailure = (video: HTMLVideoElement): PlaybackFailure => {
+  const mediaError = video.error;
+  const detail = String(mediaError?.message || '').trim();
+  const state = `readyState=${video.readyState}，networkState=${video.networkState}`;
+  if (mediaError?.code === 1) return new PlaybackFailure('CANCELLED', detail || `Chromium 媒体读取已中止（${state}）`, true, [], 'none');
+  if (mediaError?.code === 2) return new PlaybackFailure('MEDIA_IO_FAILED', detail || `Chromium 读取视频数据失败（MEDIA_ERR_NETWORK，${state}）`);
+  if (mediaError?.code === 3) return new PlaybackFailure('DECODE_INITIALIZATION_FAILED', detail || `Chromium 解码视频数据失败（MEDIA_ERR_DECODE，${state}）`);
+  if (mediaError?.code === 4) return new PlaybackFailure('UNSUPPORTED_CODEC', detail || `Chromium 不支持该媒体源（MEDIA_ERR_SRC_NOT_SUPPORTED，${state}）`);
+  return classifyPlaybackError(detail || `Chromium 视频播放失败（未提供 MediaError，${state}）`, 'DECODE_INITIALIZATION_FAILED');
+};
+
+const benignPlayRejection = (error: unknown) => error instanceof DOMException && (error.name === 'NotAllowedError' || error.name === 'AbortError');
+
 const waitForChromiumReady = (video: HTMLVideoElement) => new Promise<void>((resolve, reject) => {
   const ready = () => { cleanup(); resolve(); };
-  const failed = () => { cleanup(); reject(new Error(video.error?.message || 'Chromium 无法解码此视频')); };
+  const failed = () => { cleanup(); reject(chromiumPlaybackFailure(video)); };
   const cleanup = () => {
     video.removeEventListener('loadedmetadata', ready);
     video.removeEventListener('error', failed);
@@ -149,7 +162,8 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
     const onError = () => {
       if (closed || !loaded || runtimeFailureReported) return;
       runtimeFailureReported = true;
-      context.onRuntimeFailure(video.error?.message || 'Chromium 视频解码失败', 'UNSUPPORTED_CODEC');
+      const failure = chromiumPlaybackFailure(video);
+      context.onRuntimeFailure(failure.message, failure.code);
     };
     const emitStatistics = () => {
       if (statisticsLevel === 'off' || closed) return;
@@ -193,7 +207,7 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
       } catch (error) {
         // A host autoplay policy is not a decoder failure. Keep the Chromium
         // session ready so the existing play control can satisfy user gesture.
-        if (!(error instanceof DOMException) || error.name !== 'NotAllowedError') throw error;
+        if (!benignPlayRejection(error)) throw error;
         emitState();
       }
       video.requestVideoFrameCallback?.(sampleFrameRate);
@@ -210,8 +224,11 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
       control: request => {
         if (closed) return;
         if (request.action === 'play') void video.play().catch(error => {
-          if (error instanceof DOMException && error.name === 'NotAllowedError') emitState();
-          else onError();
+          if (benignPlayRejection(error)) emitState();
+          else {
+            const failure = classifyPlaybackError(error, 'DECODE_INITIALIZATION_FAILED');
+            context.onRuntimeFailure(`Chromium 播放请求失败：${failure.message}`, failure.code);
+          }
         });
         else if (request.action === 'pause') video.pause();
         else if (request.action === 'seek') video.currentTime = Math.max(0, Number(request.value) || 0);

@@ -3,7 +3,7 @@ const { createPlaybackEnvelopeWriter, validatePlaybackEnvelope } = require('../c
 const LEGACY_COMMAND_TO_V1 = Object.freeze({
   open: 'media.open', play: 'playback.play', pause: 'playback.pause', seek: 'playback.seek', 'frame-step':'playback.frame-step', 'frame-back-step':'playback.frame-back-step', volume: 'audio.volume', mute: 'audio.mute', 'audio-select':'audio.track-select', speed: 'playback.speed', stop: 'playback.stop',
   'subtitle-select': 'subtitles.select', 'subtitle-visible': 'subtitles.visible', 'subtitle-delay': 'subtitles.delay', 'subtitle-style': 'subtitles.style', 'subtitle-add': 'subtitles.add',
-  screenshot: 'capture.stage', transform: 'video.transform', 'hdr-mode': 'video.hdr-mode', 'statistics-level': 'statistics.level', 'display-output': 'display.output',
+  screenshot: 'capture.stage', transform: 'video.transform', 'hdr-mode': 'video.hdr-mode', 'tone-mapping': 'video.tone-mapping', 'statistics-level': 'statistics.level', 'display-output': 'display.output',
 });
 const V1_EVENT_TO_LEGACY = Object.freeze({
   'runtime.ready': 'ready', 'surface.created': 'surface-created', 'state.changed': 'state', 'state.loading': 'loading', 'media.loaded': 'file-loaded', 'media.ended': 'ended',

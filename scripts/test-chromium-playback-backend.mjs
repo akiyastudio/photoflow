@@ -24,6 +24,7 @@ class FakeVideo extends EventTarget {
     this.videoHeight = 1080;
     this.style = {};
     this.error = null;
+    this.nextPlayError = null;
     this.loads = 0;
     this.listenerBalance = 0;
   }
@@ -43,6 +44,7 @@ class FakeVideo extends EventTarget {
   async play() {
     this.paused = false;
     this.dispatchEvent(new Event('play'));
+    if (this.nextPlayError) { const error = this.nextPlayError; this.nextPlayError = null; throw error; }
     this.dispatchEvent(new Event('playing'));
   }
   pause() { this.paused = true; this.dispatchEvent(new Event('pause')); }
@@ -85,8 +87,9 @@ const context = (video, states, failures, published, subtitleChoice = { success:
   const statisticsBefore=states.filter(state=>state.type==='statistics').length;session.control({ action: 'statistics-level', statisticsLevel: 'detailed' });await new Promise(resolve=>setTimeout(resolve,550));const statisticsDelta=states.filter(state=>state.type==='statistics').length-statisticsBefore;assert(statisticsDelta>=2&&statisticsDelta<=3,'Chromium detailed statistics must be capped at 4 Hz plus immediate sample');
   assert.deepEqual({ paused: video.paused, time: video.currentTime, volume: video.volume, muted: video.muted, speed: video.playbackRate }, { paused: true, time: 33, volume: 0.4, muted: true, speed: 1.5 });
   assert.equal(video.style.objectFit, 'cover'); assert.match(video.style.transform, /rotate\(180deg\)/); assert(states.some(state => state.type === 'statistics' && state.statistics.droppedFrames === 2));
+  video.nextPlayError = new DOMException('The play() request was interrupted by a call to pause().', 'AbortError'); session.control({ action: 'play' }); await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(failures, [], 'an interrupted Chromium play promise is a lifecycle race, not a decoder failure');
   const subtitle = await session.chooseSubtitle(); assert.equal(subtitle.success, true); await new Promise(resolve => setImmediate(resolve)); assert(states.some(state => state.type === 'subtitle-tracks' && state.subtitleTracks.some(track => track.format === 'vtt' && track.selected)));
-  video.error = { message: 'runtime decode failure' };
+  video.error = { code: 3, message: 'runtime decode failure' };
   video.dispatchEvent(new Event('error'));
   assert.deepEqual(failures, ['runtime decode failure']);
   await session.close();
