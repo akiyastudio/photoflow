@@ -212,6 +212,7 @@ class ComponentViewManager {
       sandbox: true,
       webviewTag: false,
     } });
+    if (surface === 'component.sidePanel' && typeof view.setBorderRadius === 'function') view.setBorderRadius(15);
     const instance = {
       key, instanceId, view, descriptor, page, settingsPage, contribution,
       readyPromise: null,

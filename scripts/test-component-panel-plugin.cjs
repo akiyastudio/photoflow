@@ -42,6 +42,7 @@ class Contents extends EventEmitter {
 class View {
   constructor() { this.webContents = new Contents(); views.push(this); }
   setBounds(value) { this.bounds = value; }
+  setBorderRadius(value) { this.borderRadius = value; }
   setVisible(value) { this.visible = value; }
 }
 
@@ -101,6 +102,7 @@ class View {
     const second = await open('page-b');
     assert.notEqual(first.instanceId, second.instanceId, 'each file page must own its component panel instance');
     assert.equal(views.length, 2);
+    assert(views.every(view => view.borderRadius === 15), 'native component side-panel views must clip to the Host panel radius instead of covering the bottom corners');
     assert.equal((await open('page-a')).instanceId, first.instanceId, 'the same file page must reuse its panel instance');
     assert(views.every(view => view.webContents.insertedCss.includes('::-webkit-scrollbar') && view.webContents.insertedCss.includes('::-webkit-scrollbar-button{display:none') && view.webContents.insertedCss.includes('--pf-panel-body:#ffffff') && view.webContents.insertedCss.includes('.pf-panel-section') && view.webContents.insertedCss.includes('body{margin:0;padding:22px}') && view.webContents.insertedCss.includes('padding:.55rem .9rem;font-size:.875rem')), 'every isolated component panel inherits Host spacing, controls, tokens, primitives, and scrollbar styling');
     const context = await handlers.get('component-sdk:get-context')({ sender: views[0].webContents });
