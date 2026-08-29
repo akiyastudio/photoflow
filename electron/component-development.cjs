@@ -117,6 +117,20 @@ const inspectDevelopmentComponent = (componentRoot, { platform = process.platfor
   return Object.freeze({ componentRoot, packagePath, packageManifest, manifestPath, manifest, id: manifest.id, files: Object.freeze(resolvedFiles), command, argsPrefix: Object.freeze([...argsPrefix, ...(entry ? [entry] : [])]), prepare: development.prepare || '' });
 };
 
+const developmentManifestForError = componentRoot => {
+  try {
+    const packagePath = safeFile(componentRoot, 'package.json', 'component package metadata');
+    const packageManifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    const component = packageManifest.photoflowComponent;
+    if (!component || typeof component !== 'object' || Array.isArray(component)) return null;
+    const manifestPath = safeFile(componentRoot, relativeFile(component.manifest, 'component manifest'), 'component development manifest');
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    return manifest && typeof manifest === 'object' && !Array.isArray(manifest) ? manifest : null;
+  } catch {
+    return null;
+  }
+};
+
 const discoverDevelopmentComponents = options => {
   const results = [];
   for (const root of developmentRoots(options)) for (const componentRoot of componentDirectories(root)) {
@@ -124,7 +138,8 @@ const discoverDevelopmentComponents = options => {
       const component = inspectDevelopmentComponent(componentRoot, options);
       if (component) results.push({ ...component, developmentRoot: root });
     } catch (error) {
-      results.push({ componentRoot, developmentRoot: root, id: path.basename(componentRoot), error: error.message || String(error) });
+      const manifest = developmentManifestForError(componentRoot);
+      results.push({ componentRoot, developmentRoot: root, id: String(manifest?.id || path.basename(componentRoot)), ...(manifest ? { manifest } : {}), error: error.message || String(error) });
     }
   }
   return results;

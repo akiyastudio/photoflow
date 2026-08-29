@@ -15,5 +15,23 @@
     "upgrade": "node scripts/lifecycle.cjs upgrade",
     "uninstall": "node scripts/lifecycle.cjs uninstall"
   },
-  "engines": { "node": ">=22" }
+  "engines": { "node": ">=22" },
+  "photoflowComponent": {
+    "manifest": "component.template.json",
+    "development": {
+      "runtime": {
+        "command": "dist/components/video-playback-mpv/advanced-video-decoder.exe"
+      },
+      "files": {
+        "advanced-video-decoder.exe": "dist/components/video-playback-mpv/advanced-video-decoder.exe",
+        "libmpv-2.dll": "dist/components/video-playback-mpv/libmpv-2.dll"
+      }
+    },
+    "tests": {
+      "package-layout": [
+        "tests/test-protocol-contract.cjs",
+        "tests/test-package-contract.cjs"
+      ]
+    }
+  }
 }
