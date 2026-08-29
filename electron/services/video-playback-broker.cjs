@@ -6,7 +6,7 @@ const CHROMIUM_FEATURES = Object.freeze({
   transforms: Object.freeze({ aspectModes: Object.freeze(['source','contain','cover','16:9','4:3','1:1']), rotation:true, flip:true, crop:true }),
   hdr: Object.freeze({ passthrough:false, toneMapping:false, algorithms:Object.freeze([]), targetPeakControl:false }),
   statistics: Object.freeze({ basic:true, decode:false, hdr:false, timing:true, cache:false, gpu:false, maxUpdateHz:4 }),
-  subtitles: Object.freeze({ embedded:true, external:true, ass:false, styles:false }),
+  subtitles: Object.freeze({ embedded:false, external:false, ass:false, styles:false }),
   hardwareDecoding: Object.freeze({ supported:true, selectable:false, softwareFallback:true }),
   capture: Object.freeze({ sourceFrame:true, displayedFrame:true }),
 });

@@ -96,6 +96,13 @@ const chromiumPlaybackFailure = (video: HTMLVideoElement): PlaybackFailure => {
 
 const benignPlayRejection = (error: unknown) => error instanceof DOMException && (error.name === 'NotAllowedError' || error.name === 'AbortError');
 const chromiumVideoOwners = new WeakMap<HTMLVideoElement, string>();
+const waitForChromiumFrame = (video: HTMLVideoElement, timeoutMs = 300) => new Promise<void>(resolve => {
+  let settled = false;
+  const finish = () => { if (!settled) { settled = true; globalThis.clearTimeout(timer); resolve(); } };
+  const timer = globalThis.setTimeout(finish, timeoutMs);
+  if (typeof video.requestVideoFrameCallback === 'function') video.requestVideoFrameCallback(() => finish());
+  else globalThis.requestAnimationFrame(() => finish());
+});
 
 const withPlaybackTimeout = <T,>(promise: Promise<T>, timeoutMs: number, failure: () => PlaybackFailure) => new Promise<T>((resolve, reject) => {
   const timer = globalThis.setTimeout(() => reject(failure()), timeoutMs);
@@ -135,7 +142,6 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
     let statisticsTimer = 0;
     let estimatedFps = 0; let lastFrameMediaTime = -1;
     let subtitleDelay = 0;
-    let subtitleSequence = 0;
     const browserSubtitles = new Map<string, { element: HTMLTrackElement; stableId: string; name: string; originalTimes: WeakMap<TextTrackCue, { start: number; end: number }> }>();
     const emitSubtitles = () => {
       const tracks = [...browserSubtitles.entries()].map(([id, item]) => ({ id, stableId: item.stableId, source: 'external' as const, title: item.name, format: 'vtt', selected: item.element.track.mode !== 'disabled' }));
@@ -151,6 +157,7 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
     video.poster = '';
     video.preload = 'auto';
     video.playsInline = true;
+    video.crossOrigin = 'anonymous';
 
     const emitState = () => {
       if (!ownsVideo()) return;
@@ -281,28 +288,28 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
       },
       setBounds: () => undefined,
       capture: async mode => {
-        if (!video.videoWidth || !video.videoHeight) return { success: false, error: '当前视频帧尚未就绪' };
-        const canvas = document.createElement('canvas');
-        const captureTransform = mode === 'sourceFrame' ? DEFAULT_VIDEO_TRANSFORM : transform;
-        const size = transformedFrameSize(video.videoWidth, video.videoHeight, captureTransform);
-        canvas.width = size.width; canvas.height = size.height;
-        const drawing = canvas.getContext('2d');
-        if (!drawing) return { success: false, error: '无法创建视频截图画布' };
-        drawTransformedVideoFrame(drawing, video, captureTransform);
-        const blob = await new Promise<Blob | null>(resolve => canvas.toBlob(resolve, 'image/png'));
-        if (!blob) return { success: false, error: '无法生成当前视频帧' };
-        return context.electronApi.publishVideoPlayerFrame(context.filePath, new Uint8Array(await blob.arrayBuffer()));
+        if (closed || !ownsVideo()) return { success: false, error: '当前 Chromium 播放会话已结束' };
+        if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return { success: false, error: '当前视频帧尚未就绪' };
+        try {
+          await waitForChromiumFrame(video);
+          const canvas = document.createElement('canvas');
+          const captureTransform = mode === 'sourceFrame' ? DEFAULT_VIDEO_TRANSFORM : transform;
+          const size = transformedFrameSize(video.videoWidth, video.videoHeight, captureTransform);
+          canvas.width = size.width; canvas.height = size.height;
+          const drawing = canvas.getContext('2d');
+          if (!drawing) return { success: false, error: '无法创建视频截图画布' };
+          drawTransformedVideoFrame(drawing, video, captureTransform);
+          const blob = await new Promise<Blob | null>(resolve => {
+            const timer = globalThis.setTimeout(() => resolve(null), 5000);
+            canvas.toBlob(value => { globalThis.clearTimeout(timer); resolve(value); }, 'image/png');
+          });
+          if (!blob) return { success: false, error: 'Chromium 生成截图超时或失败' };
+          return await context.electronApi.publishVideoPlayerFrame(context.filePath, new Uint8Array(await blob.arrayBuffer()));
+        } catch (error) {
+          return { success: false, error: `Chromium 截图失败：${error instanceof Error ? error.message : String(error)}` };
+        }
       },
-      chooseSubtitle: async () => {
-        const chosen = await context.electronApi.chooseVideoSubtitleFile();
-        if (!chosen.success || chosen.cancelled) return chosen;
-        if (chosen.format !== 'vtt' || !chosen.mediaUrl) return { success: false, error: `${String(chosen.format || '').toUpperCase()} 字幕需要支持该格式的高级播放后端`, requiresFeature: `subtitle-format:${chosen.format || 'unknown'}` };
-        const id = `chromium-vtt-${++subtitleSequence}`; const name = chosen.name || `字幕 ${subtitleSequence}`;
-        const element = document.createElement('track'); element.kind = 'subtitles'; element.label = name; element.src = chosen.mediaUrl; element.default = true;
-        const item = { element, stableId: `external:${name.toLowerCase()}:0`, name, originalTimes: new WeakMap<TextTrackCue, { start: number; end: number }>() };
-        browserSubtitles.set(id, item); element.addEventListener('load', () => { element.track.mode = 'showing'; applyBrowserSubtitleDelay(); emitSubtitles(); }, { once: true });
-        video.appendChild(element); element.track.mode = 'showing'; emitSubtitles(); return { success: true, path: name };
-      },
+      chooseSubtitle: async () => ({ success: false, error: 'Chromium 模式未启用字幕功能', requiresFeature: 'subtitles' }),
       close: async () => {
         if (closed) return;
         closed = true;

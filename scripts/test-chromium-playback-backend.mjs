@@ -2,7 +2,8 @@ import assert from 'node:assert/strict';
 import { ChromiumPlaybackBackend, chromiumContainerProbe, startPlaybackSession } from '../src/platform/video-playback/playback-session.ts';
 
 globalThis.HTMLMediaElement = { HAVE_FUTURE_DATA: 3 };
-globalThis.document = { createElement: name => { if (name !== 'track') throw new Error(`unexpected element ${name}`); const element = new EventTarget(); element.track = { mode: 'disabled', cues: [] }; element.remove = () => { element.removed = true; }; return element; } };
+globalThis.requestAnimationFrame = callback => { queueMicrotask(() => callback(0)); return 1; };
+globalThis.document = { createElement: name => { if (name === 'canvas') return { width: 0, height: 0, getContext: () => ({ save() {}, translate() {}, rotate() {}, scale() {}, drawImage() {}, restore() {} }), toBlob: callback => callback(new Blob(['png'], { type: 'image/png' })) }; if (name !== 'track') throw new Error(`unexpected element ${name}`); const element = new EventTarget(); element.track = { mode: 'disabled', cues: [] }; element.remove = () => { element.removed = true; }; return element; } };
 
 class FakeVideo extends EventTarget {
   constructor({ failLoad = false, failMessage = 'decode failed' } = {}) {
@@ -13,6 +14,7 @@ class FakeVideo extends EventTarget {
     this.poster = 'poster';
     this.preload = '';
     this.playsInline = false;
+    this.crossOrigin = null;
     this.currentTime = 0;
     this.duration = 120;
     this.paused = true;
@@ -75,6 +77,7 @@ const context = (video, states, failures, published, subtitleChoice = { success:
   const session = await new ChromiumPlaybackBackend(descriptor).start(context(video, states, failures, published));
   video.emitFrame(0); video.emitFrame(1 / 24);
   assert.equal(video.src, 'photoflow-media://file/token');
+  assert.equal(video.crossOrigin, 'anonymous', 'Chromium media must opt into CORS before loading so frame capture is not canvas-tainted');
   assert(states.some(state => state.type === 'file-loaded'));
   assert(states.some(state => state.type === 'state' && state.paused === false));
   session.control({ action: 'pause' });
@@ -88,7 +91,8 @@ const context = (video, states, failures, published, subtitleChoice = { success:
   assert.deepEqual({ paused: video.paused, time: video.currentTime, volume: video.volume, muted: video.muted, speed: video.playbackRate }, { paused: true, time: 33, volume: 0.4, muted: true, speed: 1.5 });
   assert.equal(video.style.objectFit, 'cover'); assert.match(video.style.transform, /rotate\(180deg\)/); assert(states.some(state => state.type === 'statistics' && state.statistics.droppedFrames === 2));
   video.nextPlayError = new DOMException('The play() request was interrupted by a call to pause().', 'AbortError'); session.control({ action: 'play' }); await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(failures, [], 'an interrupted Chromium play promise is a lifecycle race, not a decoder failure');
-  const subtitle = await session.chooseSubtitle(); assert.equal(subtitle.success, true); await new Promise(resolve => setImmediate(resolve)); assert(states.some(state => state.type === 'subtitle-tracks' && state.subtitleTracks.some(track => track.format === 'vtt' && track.selected)));
+  const capture = await session.capture(); assert.equal(capture.success, true); assert.equal(published.length, 1, 'Chromium capture must publish a generated PNG frame');
+  const subtitle = await session.chooseSubtitle(); assert.equal(subtitle.success, false); assert.equal(subtitle.requiresFeature, 'subtitles');
   video.error = { code: 3, message: 'runtime decode failure' };
   video.dispatchEvent(new Event('error'));
   assert.deepEqual(failures, ['runtime decode failure']);
@@ -100,7 +104,7 @@ const context = (video, states, failures, published, subtitleChoice = { success:
 
 {
   const video = new FakeVideo(); const backend = new ChromiumPlaybackBackend(descriptor); const session = await backend.start(context(video, [], [], [], { success: true, format: 'ass', name: 'styled.ass' }));
-  const result = await session.chooseSubtitle(); assert.equal(result.success, false); assert.equal(result.requiresFeature, 'subtitle-format:ass'); assert.match(result.error, /高级播放后端/); await session.close();
+  const result = await session.chooseSubtitle(); assert.equal(result.success, false); assert.equal(result.requiresFeature, 'subtitles'); assert.match(result.error, /Chromium 模式未启用字幕/); await session.close();
 }
 
 {

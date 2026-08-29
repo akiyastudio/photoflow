@@ -31,9 +31,9 @@ export const hdrModeAvailability = ({ requested, hdrFeatures, hdrDisplayAvailabl
 };
 export const playbackCapabilityPresentation = (features: { transforms: {aspectModes:string[];rotation:boolean;flip:boolean;crop:boolean}; hdr: {passthrough:boolean;toneMapping:boolean;algorithms:string[];targetPeakControl:boolean}; statistics:{basic:boolean;decode:boolean;hdr:boolean;timing:boolean;cache:boolean;gpu:boolean}; subtitles:{embedded:boolean;external:boolean;ass:boolean;styles:boolean}; capture:{sourceFrame:boolean;displayedFrame:boolean} } | undefined, hdrDisplayAvailable: boolean) => ({
   transformControls: features?.transforms.aspectModes || [], rotationAvailable:features?.transforms.rotation===true,flipAvailable:features?.transforms.flip===true,cropAvailable:features?.transforms.crop===true,
-  hdrPassthroughAvailable:features?.hdr.passthrough===true&&hdrDisplayAvailable,toneMappingAvailable:features?.hdr.toneMapping===true,toneMappingAlgorithms:features?.hdr.algorithms||[],targetPeakControl:features?.hdr.targetPeakControl===true,
+  hdrControlsAvailable:features?.hdr.passthrough===true||features?.hdr.toneMapping===true,hdrPassthroughAvailable:features?.hdr.passthrough===true&&hdrDisplayAvailable,toneMappingAvailable:features?.hdr.toneMapping===true,toneMappingAlgorithms:features?.hdr.algorithms||[],targetPeakControl:features?.hdr.targetPeakControl===true,
   statisticsGroups:features?.statistics||{basic:false,decode:false,hdr:false,timing:false,cache:false,gpu:false},
-  subtitleFormats:[...(features?.subtitles.external?['vtt','srt']:[]),...(features?.subtitles.ass?['ass','ssa']:[])],
+  subtitlesAvailable:features?.subtitles.embedded===true||features?.subtitles.external===true,subtitleFormats:[...(features?.subtitles.external?['vtt','srt']:[]),...(features?.subtitles.ass?['ass','ssa']:[])],
   captureAvailable: features?.capture.displayedFrame === true,displayedCaptureAvailable:features?.capture.displayedFrame===true,
 });
 
