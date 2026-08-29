@@ -635,8 +635,9 @@ const loadMainWindowRenderer = () => {
 };
 
 // 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'cut_video', 'ffmpeg_transcode', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'video_preview', 'workspace_db', 'operations_db', 'backup_db']);
+const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'workspace_db', 'operations_db', 'backup_db']);
 const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
+const VIDEO_COMPONENT_TOOLS = new Set(['cut_video', 'ffmpeg_transcode', 'video_preview']);
 
 const getDevelopmentPython = createDevelopmentPythonResolver({ projectRoot });
 let pluginService;
@@ -645,7 +646,7 @@ const getRunConfig = (scriptName, args) => {
   // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
   const normalizedScriptName = normalizeBundledPythonTool(scriptName);
   const baseName = normalizedScriptName.slice(0, -3);
-  if (!MERGED_PYTHON_TOOLS.has(baseName) && !INSPIRATION_PYTHON_TOOLS.has(baseName)) {
+  if (!MERGED_PYTHON_TOOLS.has(baseName) && !INSPIRATION_PYTHON_TOOLS.has(baseName) && !VIDEO_COMPONENT_TOOLS.has(baseName)) {
     throw new Error(`Unknown bundled Python tool: ${normalizedScriptName}`);
   }
   if (!Array.isArray(args) || args.some(value => typeof value !== 'string' || /\0/.test(value))) {
@@ -653,6 +654,24 @@ const getRunConfig = (scriptName, args) => {
   }
 
   const isWin = process.platform === 'win32';
+
+  if (VIDEO_COMPONENT_TOOLS.has(baseName)) {
+    if (!pluginService) {
+      const error = new Error('视频处理插件服务尚未初始化');
+      error.code = 'PLUGIN_MISSING';
+      throw error;
+    }
+    return pluginService.resolveRunConfig('video-tools', [baseName, ...args]);
+  }
+  if (baseName === 'rename') {
+    if (!pluginService) {
+      const error = new Error('视频处理插件服务尚未初始化');
+      error.code = 'PLUGIN_MISSING';
+      throw error;
+    }
+    const videoRuntime = pluginService.resolveRunConfig('video-tools', []);
+    args = [...args, '--video_tools_command', videoRuntime.command, ...videoRuntime.args.flatMap(value => ['--video_tools_arg', value])];
+  }
 
   if (app.isPackaged) {
     // 生产环境：根据平台决定是否有 .exe 后缀
@@ -697,6 +716,22 @@ const runJsonCommand = createJsonCommandRunner({
 });
 
 pluginService = createPluginService({ app, registry: componentRegistry, runJsonCommand });
+
+const extractVideoTimelineFrames = async (filePath, times) => {
+  const operationId = crypto.randomUUID();
+  const requestRoot = path.join(app.getPath('temp'), 'photoflow', 'video-playback-timeline', operationId);
+  const requestPath = path.join(requestRoot, 'request.json');
+  const outputDirectory = path.join(requestRoot, 'frames');
+  await fs.promises.mkdir(outputDirectory, { recursive: true });
+  await fs.promises.writeFile(requestPath, JSON.stringify({ filePath: path.resolve(filePath), times, outputDirectory }), 'utf8');
+  try {
+    const result = await pluginService.runJson('video-playback-mpv', ['--timeline-request', requestPath], 2 * 60 * 1000);
+    if (!result?.success || !Array.isArray(result.frames)) throw new Error(result?.error || '播放器组件未返回时间线帧');
+    return result.frames;
+  } finally {
+    await fs.promises.rm(requestRoot, { recursive: true, force: true }).catch(() => undefined);
+  }
+};
 
 const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage, signal, deadlineAt) =>
   runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs, onMessage, signal, deadlineAt);
@@ -1831,7 +1866,7 @@ app.whenReady().then(async () => {
     IMAGE_EXTENSIONS,
     path, fs, crypto, getConfigPath, readSavedConfig, readConfig: configMutationService.read, mutateConfig: configMutationService.mutate,
     getProjectPath, dialog, mainWindow, mediaService, mediaRatingService, exiftool, shell, backgroundTasks,
-    uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths, fileSystemService, runPythonJsonAction, safeStorage, secretsRoot: path.join(app.getPath('userData'), 'component-secrets'),
+    uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths, fileSystemService, runPythonJsonAction, extractVideoTimelineFrames, safeStorage, secretsRoot: path.join(app.getPath('userData'), 'component-secrets'),
     getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
     RAW_EXTENSIONS, VIDEO_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS,
   });
@@ -1856,7 +1891,7 @@ app.whenReady().then(async () => {
 
   registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   for (const descriptor of componentHostRegistry.list()) componentCapabilityBroker.assertCapabilities(descriptor);
-  const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
+  const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, extractVideoTimelineFrames, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, publishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resumeToastViewAfterNativeDrag, samePathIdentity, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });

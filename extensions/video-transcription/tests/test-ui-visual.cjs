@@ -15,7 +15,7 @@ assert(style.includes('var(--pf-canvas)')); assert(style.includes('var(--pf-bord
 assert(icon.includes('#2563eb')); assert(!/#191713|#e9a23b/i.test(icon));
 assert(index.includes('host-api-ui.css')); assert(settingsHtml.includes('host-api-ui.css')); assert(!index.includes('source-grid')); assert(!index.includes('class="hero"'));
 for (const source of [app, autoStart, index, settingsHtml, settings]) { assert(!source.includes('data-start')); assert(!source.includes('openFiles')); assert(!source.includes('openDirectory')); assert(!source.includes('transcript.inputs.start.v1')); }
-assert(autoStart.includes("context?.surface === 'project.contextAction'")); assert(!autoStart.includes("surface === 'media.contextAction'")); assert(app.includes("rpc('transcript.project.start.v1'")); assert(app.includes("rpc('transcript.operation.run.v1'"));
+assert(autoStart.includes("context?.surface === 'project.contextAction'")); assert(autoStart.includes("context?.surface === 'project'")); assert(!autoStart.includes("surface === 'media.contextAction'")); assert(app.includes("rpc('transcript.project.start.v1'")); assert(app.includes("rpc('transcript.operation.run.v1'"));
 assert(autoStart.includes("storage.getItem(key)")); assert(autoStart.includes("storage.setItem(key, 'started')")); assert(app.includes('api.onContextChange')); assert(app.includes('autoStartGate.contextChanged(context)')); assert(!/onActivate\([^)]*startCurrentSelection/.test(app));
 assert(index.includes('auto-start-model.js') && index.indexOf('auto-start-model.js') < index.indexOf('app.js'));
 for (const source of [app, settings]) { assert(source.includes("classList.toggle('dark'")); assert(source.includes('style.colorScheme')); assert(source.includes('onThemeChange')); }

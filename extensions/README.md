@@ -71,8 +71,10 @@ The current component IDs are:
   JavaScript, HTML or CSS.
 - `video-tools`: “视频处理”. It contributes the existing “视频转码” and
   “视频切割” panels at their original positions under the file-page “视频工具”
-  menu. Both entries share one component service, settings namespace and the
-  audited Host media-processing runtime.
+  menu. Both entries share one component service, settings namespace and a
+  component-owned audited FFmpeg encoder runtime. Transcode, split, trim,
+  import post-processing and video thumbnail extraction resolve through this
+  component; timeline-frame extraction belongs to `video-playback-mpv`.
 
 The inspiration library, scene organizer, and Office image extractor are part
 of the main application and are not component IDs.

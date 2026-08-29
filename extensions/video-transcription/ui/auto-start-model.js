@@ -6,8 +6,8 @@
 })(typeof globalThis === 'object' ? globalThis : this, () => {
   'use strict';
   const selectedPaths = context => Array.isArray(context?.selectedRelativePaths) ? context.selectedRelativePaths.filter(value => typeof value === 'string' && value.trim()) : [];
-  const isSelectionEntry = context => context?.surface === 'project.contextAction' && selectedPaths(context).length > 0;
-  const contextKey = context => `photoflow.video-transcription.autostart:${context?.projectId || ''}:${context?.sourcePageId || ''}:${context?.scopeRelativePath || ''}:${selectedPaths(context).map(value => value.toLocaleLowerCase('en-US')).sort().join('|')}`;
+  const isSelectionEntry = context => (context?.surface === 'project.contextAction' || context?.surface === 'project') && selectedPaths(context).length > 0;
+  const contextKey = context => `photoflow.video-transcription.autostart:${context?.surface || ''}:${context?.projectId || ''}:${context?.sourcePageId || ''}:${context?.scopeRelativePath || ''}:${selectedPaths(context).map(value => value.toLocaleLowerCase('en-US')).sort().join('|')}`;
   const createAutoStartGate = storage => {
     let pending = false;
     const begin = () => { if (pending) return false; pending = true; return true; };

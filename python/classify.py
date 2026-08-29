@@ -17,15 +17,6 @@ from pathlib import Path
 import gc
 from PIL import Image
 from event_protocol import ask_user, emit, log_error, log_info, log_progress, log_status, log_success
-from ffmpeg_transcode import (
-    FFmpegTranscodeError,
-    VIDEO_PREVIEW_QUALITY_PROFILES,
-    normalize_video_preview_quality,
-    probe_creation_time_values,
-    split_video_by_size,
-    transcode_video,
-    transcode_video_preview,
-)
 from thumbnail_image import _embedded_jpeg
 
 EXIFTOOL_PATH = ''
@@ -34,6 +25,102 @@ CAPTURE_TIME_MEMORY_CACHE_LIMIT = 100000
 
 CANCEL_FILE = ''
 RESOURCE_PROTOCOL_ENABLED = False
+VIDEO_TOOL_REQUEST_SEQUENCE = 0
+VIDEO_PREVIEW_QUALITY_PROFILES = {
+    'low': {'label': '低', 'preset': 'fast'},
+    'medium': {'label': '中', 'preset': 'medium'},
+    'high': {'label': '高', 'preset': 'slow'},
+}
+
+
+class FFmpegTranscodeError(RuntimeError):
+    pass
+
+
+def normalize_video_preview_quality(value):
+    return value if value in VIDEO_PREVIEW_QUALITY_PROFILES else 'medium'
+
+
+def request_video_tool(action, payload):
+    global VIDEO_TOOL_REQUEST_SEQUENCE
+    if not RESOURCE_PROTOCOL_ENABLED:
+        raise FFmpegTranscodeError('视频处理插件协议未启用')
+    VIDEO_TOOL_REQUEST_SEQUENCE += 1
+    request_id = f'video-{VIDEO_TOOL_REQUEST_SEQUENCE}'
+    emit('video_tool_request', action, data={'requestId': request_id, 'action': action, 'payload': payload})
+    while True:
+        response_line = sys.stdin.readline()
+        if not response_line:
+            raise FFmpegTranscodeError('视频处理插件已断开')
+        try:
+            response = json.loads(response_line)
+        except json.JSONDecodeError:
+            continue
+        if response.get('requestId') != request_id:
+            continue
+        if response.get('type') == 'video_tool_progress':
+            message = str(response.get('message') or '').strip()
+            if message:
+                log_info(message)
+            continue
+        if response.get('type') != 'video_tool_result':
+            continue
+        if response.get('ok') is not True:
+            raise FFmpegTranscodeError(str(response.get('error') or '视频处理失败'))
+        return response.get('result') or {}
+
+
+def probe_creation_time_values(input_path, timeout=15):
+    del timeout
+    return tuple(request_video_tool('probe-creation-time', {'inputPath': input_path}).get('values') or [])
+
+
+def transcode_video_preview(input_path, output_path, quality, on_log=None):
+    result = request_video_tool('preview', {'inputPath': input_path, 'outputPath': output_path, 'quality': quality})
+    if on_log:
+        on_log(f"视频预览编码器：{result.get('encoder') or '自动'}")
+    return result.get('encoder') or ''
+
+
+def split_video_by_size(input_path, split_threshold_bytes=None, target_segment_bytes=None,
+                        maximum_segment_bytes=None, keep_original=False, cancel_check=None):
+    if cancel_check:
+        cancel_check()
+    result = request_video_tool('split', {
+        'inputPath': input_path,
+        'splitThresholdBytes': split_threshold_bytes,
+        'targetSegmentBytes': target_segment_bytes,
+        'maximumSegmentBytes': maximum_segment_bytes,
+        'keepOriginal': keep_original,
+        'cancelFile': CANCEL_FILE,
+    })
+    return list(result.get('outputs') or [])
+
+
+def transcode_video(input_path, container='mp4', video_mode='h264', quality='balanced',
+                    resolution='original', frame_rate='original', audio_mode='aac',
+                    subtitle_mode='copy', color_mode='auto', bit_depth='auto',
+                    frame_rate_mode='preserve', rotation='auto', aspect_mode='preserve',
+                    audio_track='all', video_bitrate_mbps=None, audio_bitrate_kbps=192,
+                    encoder_preset='balanced', output_mode='new', destination_directory=None,
+                    on_log=None, cancel_check=None, **_unused):
+    if cancel_check:
+        cancel_check()
+    result = request_video_tool('transcode', {
+        'inputPath': input_path, 'outputMode': output_mode, 'destinationDirectory': destination_directory,
+        'cancelFile': CANCEL_FILE,
+        'settings': {
+            'container': container, 'videoMode': video_mode, 'quality': quality,
+            'resolution': resolution, 'frameRate': frame_rate, 'audioMode': audio_mode,
+            'subtitleMode': subtitle_mode, 'colorMode': color_mode, 'bitDepth': bit_depth,
+            'frameRateMode': frame_rate_mode, 'rotation': rotation, 'aspectMode': aspect_mode,
+            'audioTrack': audio_track, 'videoBitrateMbps': video_bitrate_mbps,
+            'audioBitrateKbps': audio_bitrate_kbps, 'encoderPreset': encoder_preset,
+        },
+    })
+    if on_log:
+        on_log(f"视频转码完成：{os.path.basename(result.get('outputPath') or input_path)}")
+    return result.get('outputPath')
 
 
 class ImportCancelled(Exception):

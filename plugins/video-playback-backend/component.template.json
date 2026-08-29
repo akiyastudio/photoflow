@@ -36,7 +36,7 @@
         "statistics": { "basic": true, "decode": true, "hdr": true, "timing": true, "cache": true, "gpu": true, "maxUpdateHz": 4 },
         "subtitles": { "embedded": true, "external": true, "ass": true, "styles": true },
         "hardwareDecoding": { "supported": true, "selectable": false, "softwareFallback": true },
-        "capture": { "sourceFrame": false, "displayedFrame": true }
+        "capture": { "sourceFrame": true, "displayedFrame": true }
       }
     }
   ]

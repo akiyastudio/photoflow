@@ -840,7 +840,7 @@ const registerSystemIpc = context => {
     let runtimeArgs = cancellable ? [...args, '--cancel_file', cancelFile] : [...args];
     if (pauseFile) runtimeArgs.push('--pause_file', pauseFile);
     if (scriptName === 'classify.py' && ['plan', 'import', 'broll'].includes(classifyStage)) {
-      if (['import', 'broll'].includes(classifyStage)) runtimeArgs.push('--resource_protocol');
+      if (['plan', 'import', 'broll'].includes(classifyStage)) runtimeArgs.push('--resource_protocol');
       try {
         const bundledExifTool = await exiftoolPath();
         if (bundledExifTool) runtimeArgs.push('--exiftool_path', String(bundledExifTool));
@@ -1043,6 +1043,7 @@ const registerSystemIpc = context => {
       let workerClosed = false;
       const pendingWorkerResourceLeases = new Set();
       const activeWorkerResourceLeases = new Map();
+      const pendingWorkerVideoTools = new Set();
       const sendWorkerControl = payload => {
         if (workerClosed || !pyProcess.stdin?.writable) return false;
         pyProcess.stdin.write(`${JSON.stringify(payload)}\n`, error => {
@@ -1094,6 +1095,24 @@ const registerSystemIpc = context => {
           sendWorkerControl({ type: 'resource_denied', leaseId: request.leaseId, error: error.message || String(error) });
         });
       };
+      const requestWorkerVideoTool = payload => {
+        const requestId = String(payload?.requestId || '');
+        const action = String(payload?.action || '');
+        if (!/^video-[1-9][0-9]{0,5}$/.test(requestId) || !['probe-creation-time', 'preview', 'split', 'transcode'].includes(action) || !payload?.payload || typeof payload.payload !== 'object' || Array.isArray(payload.payload) || Buffer.byteLength(JSON.stringify(payload.payload)) > 256 * 1024 || pendingWorkerVideoTools.has(requestId)) {
+          sendWorkerControl({ type: 'video_tool_result', requestId, ok: false, error: 'Invalid video tool request' });
+          return;
+        }
+        pendingWorkerVideoTools.add(requestId);
+        const encoded = Buffer.from(JSON.stringify({ ...payload.payload, action }), 'utf8').toString('base64url');
+        Promise.resolve().then(() => pluginService.runJson('video-tools', ['bridge', encoded], 4 * 60 * 60 * 1000, message => {
+          const text = String(message?.message || '').slice(0, 500);
+          if (text) sendWorkerControl({ type: 'video_tool_progress', requestId, message: text, progress: Math.max(0, Math.min(100, Number(message?.progress) || 0)) });
+        })).then(result => {
+          sendWorkerControl({ type: 'video_tool_result', requestId, ok: true, result: result?.result || {} });
+        }).catch(error => {
+          sendWorkerControl({ type: 'video_tool_result', requestId, ok: false, error: error.message || String(error) });
+        }).finally(() => pendingWorkerVideoTools.delete(requestId));
+      };
       const handlePythonOutputLine = line => {
         const trimmed = line.trim();
         if (!trimmed) return;
@@ -1106,6 +1125,10 @@ const registerSystemIpc = context => {
           }
           if (jsonMsg.type === 'resource_release') {
             releaseWorkerResourceLease(String(jsonMsg.data?.leaseId || ''));
+            return;
+          }
+          if (jsonMsg.type === 'video_tool_request') {
+            requestWorkerVideoTool(jsonMsg.data);
             return;
           }
           mainWindow.webContents.send('python-event', { ...jsonMsg, scriptName, requestId });

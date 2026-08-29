@@ -2,12 +2,15 @@ import os
 import shutil
 import sys
 import argparse
-import io
 import subprocess
 import json
+import base64
+import tempfile
 from event_protocol import emit, log_error, log_info, log_progress, log_success
 from PIL import Image
-from ffmpeg_utils import get_ffmpeg_exe
+
+VIDEO_TOOLS_COMMAND = ''
+VIDEO_TOOLS_ARGS = []
 
 try:
     from pi_heif import register_heif_opener
@@ -71,17 +74,15 @@ def visual_reference_path(reference_path, jpg_proxy_index):
 def load_visual_frame(media_path):
     extension = os.path.splitext(media_path)[1].lower()
     if extension in VIDEO_EXTENSIONS or extension in FFMPEG_IMAGE_EXTENSIONS:
-        ffmpeg_exe = get_ffmpeg_exe()
-        if not ffmpeg_exe:
-            raise RuntimeError('FFmpeg 未安装，无法分析此媒体版本')
-        command = [ffmpeg_exe, '-hide_banner', '-loglevel', 'error']
-        if extension in VIDEO_EXTENSIONS:
-            command.extend(['-ss', '0.2'])
-        command.extend(['-i', media_path, '-frames:v', '1', '-vf', 'scale=640:-2', '-f', 'image2pipe', '-vcodec', 'png', 'pipe:1'])
-        result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=60)
-        if result.returncode != 0 or not result.stdout:
-            raise RuntimeError(result.stderr.decode('utf-8', errors='replace').strip() or '无法提取视频画面')
-        return Image.open(io.BytesIO(result.stdout))
+        if not VIDEO_TOOLS_COMMAND:
+            raise RuntimeError('视频处理插件未安装，无法分析此媒体版本')
+        output = os.path.join(tempfile.gettempdir(), f'photoflow-version-frame-{os.getpid()}-{abs(hash(media_path))}.png')
+        payload = base64.urlsafe_b64encode(json.dumps({'action': 'frame', 'inputPath': media_path, 'outputPath': output}).encode('utf-8')).decode('ascii')
+        result = subprocess.run([VIDEO_TOOLS_COMMAND, *VIDEO_TOOLS_ARGS, 'bridge', payload], stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, encoding='utf-8', errors='replace', timeout=60)
+        if result.returncode != 0 or not os.path.isfile(output):
+            raise RuntimeError(result.stderr.strip() or '无法提取视频画面')
+        image = Image.open(output); image.load(); os.remove(output)
+        return image
     return Image.open(media_path)
 
 def calculate_hashes(media_path):
@@ -416,6 +417,7 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     return True
 
 def run(args_list):
+    global VIDEO_TOOLS_COMMAND, VIDEO_TOOLS_ARGS
     if sys.platform.startswith('win'):
         sys.stdout.reconfigure(encoding='utf-8')
         sys.stderr.reconfigure(encoding='utf-8')
@@ -429,7 +431,11 @@ def run(args_list):
     parser.add_argument("--move_unmatched", action="store_true")
     parser.add_argument("--source_files", default="")
     parser.add_argument("--source_files_file", default="")
+    parser.add_argument("--video_tools_command", default="")
+    parser.add_argument("--video_tools_arg", action="append", default=[])
     args = parser.parse_args(args_list)
+    VIDEO_TOOLS_COMMAND = args.video_tools_command
+    VIDEO_TOOLS_ARGS = list(args.video_tools_arg)
 
     # 清理路径
     fa = args.folder_a.strip('"').strip("'")

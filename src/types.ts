@@ -772,13 +772,13 @@ export interface ComponentSettingsPageContribution {
 export interface ComponentPageOpenScope {
   /** Folder visible when the toolbar action was invoked. */
   scopeRelativePath: string;
-  /** Explicit image selection; an empty list means restore component history only. */
+  /** Complete safe project selection supplied by the Host; an empty list means restore component history only. */
   selectedRelativePaths: string[];
   /** Owning browser page used for auditable reopen context. */
   sourcePageId: string;
 }
 export type ComponentContributionType = 'component.sidePanel' | 'media.contextAction' | 'project.contextAction' | 'project.importProvider' | 'project.exportProvider' | 'application.command';
-export interface ComponentContribution { componentId: string; componentVersion: string; hostApiVersion: 7; contributionId: string; type: ComponentContributionType; label: string; title: string; pageId: string; rpcMethods: string[]; placement?: 'workspace.videoTools'; iconUrl?: string }
+export interface ComponentContribution { componentId: string; componentVersion: string; hostApiVersion: 7; contributionId: string; type: ComponentContributionType; label: string; title: string; pageId: string; rpcMethods: string[]; /** Only component.sidePanel and project.contextAction may use this grouped Host placement. */ placement?: 'workspace.videoTools'; iconUrl?: string }
 
 export interface ComponentPageInstance {
   identity: string;

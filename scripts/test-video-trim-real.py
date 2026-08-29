@@ -12,6 +12,7 @@ import sys
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "extensions" / "video-tools" / "runtime"))
 sys.path.insert(0, str(ROOT / "python"))
 
 from cut_video import trim_video_exactly  # noqa: E402
@@ -84,7 +85,7 @@ def main():
         cancelled_process = subprocess.Popen(
             [
                 sys.executable,
-                str(ROOT / "python" / "cut_video.py"),
+                str(ROOT / "extensions" / "video-tools" / "runtime" / "cut_video.py"),
                 str(source),
                 "--trim-start", "0.5",
                 "--trim-end", "5.5",

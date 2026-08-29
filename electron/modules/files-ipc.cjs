@@ -34,7 +34,7 @@ const canUseSameVolumeCut = (platform, clipboardOperation, sourceStats, destinat
 const registerFileOperationsIpc = context => {
   const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resumeToastViewAfterNativeDrag, samePathIdentity, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
-  const nativeFileDragFallbackIcon = createFallbackDragIcon(nativeImage);
+  const nativeFileDragFallbackIcon = nativeImage ? createFallbackDragIcon(nativeImage) : null;
   const resolveVirtual = (root, relativePath, options = {}) => projectVirtualPaths
     ? projectVirtualPaths.resolve(root, relativePath, options)
     : (() => {
@@ -361,6 +361,7 @@ const registerFileOperationsIpc = context => {
       } catch (error) {
         writeLog('warn', 'Unable to create native project file drag icon', { projectName, error: error?.message || String(error) });
       }
+      if (!icon) throw new Error('无法创建原生拖拽图标');
       if (event.sender.isDestroyed()) return;
       const startedAt = Date.now();
       const details = { count: resolved.sources.length, mode: resolved.sources.length === 1 ? 'file' : 'files', icon: icon === nativeFileDragFallbackIcon ? 'visible-fallback' : 'fresh-shell', ...resolved.sourceSummary };

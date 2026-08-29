@@ -1,6 +1,6 @@
 # PhotoFlow 视频转文字组件
 
-这是一个 Component Host contractVersion 2、Host API 7 的官方沙箱组件。用户从 PhotoFlow 文件页面选择一个或多个视频、文件夹或混合条目，再通过工具栏或右键菜单中唯一的“视频转文字”入口执行；组件不会弹出文件选择器，也不会取得绝对路径。所选文件夹由服务通过分页视频目录递归解析，项目视频在实际运行时由 `project.media.variants.v7` 重新授权。成功结果持久化后会安全回收完整视频副本，只保留 SRT、字幕段和发布 receipt。
+这是一个 Component Host contractVersion 2、Host API 7 的官方沙箱组件。用户从 PhotoFlow 文件页面选择一个或多个视频、文件夹或混合条目，再通过原有工具栏小图标或文件右键“视频工具”子菜单中的唯一“视频转文字”入口执行；组件不会弹出文件选择器，也不会取得绝对路径。所选文件夹由服务通过分页视频目录递归解析，项目视频在实际运行时由 `project.media.variants.v7` 重新授权。成功结果持久化后会安全回收完整视频副本，只保留 SRT、字幕段和发布 receipt。
 
 ## 架构
 
@@ -9,7 +9,7 @@
 - `storage.sqlite3`：由 `component.storage.v7` 分配，保存 operation、逐文件状态和字幕片段；UI 搜索使用 SQLite，FTS5 可用时同时维护全文索引。
 - `component.settings.v7`：保存 language、model、device、compute type、beam size、VAD、简体转换和 CPU 回退开关。
 
-从唯一的 `project.contextAction` 打开时，页面会按 Host 绑定的 `scopeRelativePath` 与完整 `selectedRelativePaths` 自动创建一次 operation，并立即调用 `transcript.operation.run.v1`。工具栏打开的是历史页，空选择不会启动任务；页面只允许重新处理当前 Host 选择。任务只有在所有可处理文件都结束后才进入终态：全部成功为 `completed`，部分成功为 `partial_failure`，全部失败为 `failed`，用户取消为 `cancelled`。失败文件和已完成文件都可在 UI 检查，取消或失败任务可从持久化 checkpoint 恢复。
+从 `project.contextAction` 或携带选择的原工具栏 `project` surface 打开时，页面会按 Host 绑定的共同 `scopeRelativePath` 与完整 `selectedRelativePaths` 自动创建一次 operation，并立即调用 `transcript.operation.run.v1`。工具栏空选择仍打开历史页且不会启动任务；页面只允许重新处理当前 Host 选择。同一视图刷新或激活不重复启动，新的 Host context 可再次执行，并发 context 在启动 pending 期间会被抑制。任务只有在所有可处理文件都结束后才进入终态：全部成功为 `completed`，部分成功为 `partial_failure`，全部失败为 `failed`，用户取消为 `cancelled`。失败文件和已完成文件都可在 UI 检查，取消或失败任务可从持久化 checkpoint 恢复。
 
 ## 开发运行时发现
 
@@ -36,7 +36,7 @@ npm run package --prefix extensions/video-transcription
 npm run build:components -- --only video-transcription
 ```
 
-普通 Windows x64 打包生成 `PhotoFlow-video-transcription-26.8.29.1-win32-x64.zip` thin package，并保留清晰的缺失运行时诊断。正式离线包可指定已审计的 PyInstaller 产物及模型：
+普通 Windows x64 打包生成 `PhotoFlow-video-transcription-26.8.29.2-win32-x64.zip` thin package，并保留清晰的缺失运行时诊断。正式离线包可指定已审计的 PyInstaller 产物及模型：
 
 ```powershell
 node extensions/video-transcription/scripts/package-component.cjs --runtime C:\release\transcriber.exe --model-root C:\release\models

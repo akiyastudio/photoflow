@@ -14,12 +14,18 @@ def _ffmpeg_archive_candidates():
             os.path.join(os.path.dirname(executable_dir), "ffmpeg.zip"),
         ]
 
-    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    return [os.path.join(project_root, "artifacts", "python", "ffmpeg.zip")]
+    runtime_root = os.path.dirname(os.path.abspath(__file__))
+    component_root = os.path.dirname(runtime_root)
+    repository_root = os.path.dirname(os.path.dirname(component_root))
+    return [
+        os.path.join(runtime_root, "ffmpeg.zip"),
+        os.path.join(component_root, "ffmpeg.zip"),
+        os.path.join(repository_root, "artifacts", "python", "ffmpeg.zip"),
+    ]
 
 
 def get_ffmpeg_exe():
-    """返回开发环境或应用资源目录中的共享 FFmpeg。"""
+    """Return the component-owned audited FFmpeg executable."""
     executable_name = "ffmpeg.exe" if sys.platform.startswith("win") else "ffmpeg"
     archive_candidates = _ffmpeg_archive_candidates()
     archive_path = next((candidate for candidate in archive_candidates if os.path.isfile(candidate)), None)

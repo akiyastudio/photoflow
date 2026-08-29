@@ -583,6 +583,7 @@ const run = async () => {
           context: {
             signal: dragImportAbort.signal,
             report: (progress, message, metadata) => dragImportReports.push({ progress, message, metadata }),
+            acquireResourceLease: async () => ({ release: () => true }),
           },
           waitForStart: async () => {},
           complete: message => { dragImportCompleted = message; },
@@ -630,7 +631,7 @@ const run = async () => {
       backgroundTasks: {
         create: () => ({
           deduplicated: false,
-          context: { signal: cancelledDragAbort.signal, report: () => {} },
+          context: { signal: cancelledDragAbort.signal, report: () => {}, acquireResourceLease: async () => ({ release: () => true }) },
           waitForStart: async () => {},
           complete: () => {},
           fail: () => {},

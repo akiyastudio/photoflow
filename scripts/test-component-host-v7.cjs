@@ -148,6 +148,14 @@ const validateComponentManifest = new Ajv({ allErrors: true }).compile(component
 const schemaFixture = structuredClone(restoreManifest);
 schemaFixture.componentHost.legacySettingsAdoptions = [{ topLevelKey: 'legacyFixtureSettings' }];
 assert.equal(validateComponentManifest(schemaFixture), true, JSON.stringify(validateComponentManifest.errors));
+const placedProjectActionSchemaFixture = structuredClone(schemaFixture);
+placedProjectActionSchemaFixture.componentHost.contributions.push({ type: 'project.contextAction', id: 'video-action', label: 'Video action', pageId: 'main', placement: 'workspace.videoTools', rpcMethods: ['fixture.run.v1'] });
+assert.equal(validateComponentManifest(placedProjectActionSchemaFixture), true, JSON.stringify(validateComponentManifest.errors), 'schema accepts project.contextAction in workspace.videoTools');
+for (const invalidType of ['media.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command']) {
+  const invalidPlacedContribution = structuredClone(placedProjectActionSchemaFixture);
+  invalidPlacedContribution.componentHost.contributions.at(-1).type = invalidType;
+  assert.equal(validateComponentManifest(invalidPlacedContribution), false, `schema rejects ${invalidType} in workspace.videoTools`);
+}
 const invalidManifest = mutate => { const value = structuredClone(schemaFixture); mutate(value); assert.equal(validateComponentManifest(value), false, 'strict component manifest schema must reject an invalid adoption/restore declaration'); };
 invalidManifest(value => { value.componentHost.legacySettingsAdoptions[0].unknown = true; });
 invalidManifest(value => { value.componentHost.legacySettingsAdoptions.push(structuredClone(value.componentHost.legacySettingsAdoptions[0])); });

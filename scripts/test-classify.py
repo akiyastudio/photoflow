@@ -9,6 +9,7 @@ from pathlib import Path
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "extensions" / "video-tools" / "runtime"))
 sys.path.insert(0, str(ROOT / "python"))
 
 import classify  # noqa: E402

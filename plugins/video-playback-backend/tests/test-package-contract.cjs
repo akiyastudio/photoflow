@@ -12,7 +12,7 @@ assert.equal(backend.backendVersion, '1.2.1');
 assert.equal(backend.protocolVersion, 1);
 assert.equal(backend.features.transforms.crop, false);
 assert.equal(backend.features.hardwareDecoding.selectable, false);
-assert.deepEqual(backend.features.capture, { sourceFrame: false, displayedFrame: true });
+assert.deepEqual(backend.features.capture, { sourceFrame: true, displayedFrame: true });
 for (const script of ['build', 'build:runtime', 'build:release', 'test', 'sign', 'verify', 'install', 'repair', 'upgrade', 'uninstall']) assert(pkg.scripts[script]);
 for (const required of [
   'media-runtime.lock.json',

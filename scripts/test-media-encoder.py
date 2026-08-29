@@ -3,6 +3,7 @@ import sys
 import unittest
 from unittest import mock
 
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'extensions', 'video-tools', 'runtime'))
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'python'))
 import ffmpeg_transcode
 

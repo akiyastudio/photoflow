@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import shutil
@@ -271,32 +270,6 @@ def trim_video_fast(
 trim_video_losslessly = trim_video_exactly
 
 
-def extract_timeline_frames(input_file: str, times: list[float]):
-    """Return small JPEG data URLs for the trim rail using FFmpeg decoding."""
-    input_file = os.path.abspath(input_file)
-    if not os.path.isfile(input_file):
-        raise FileNotFoundError(f"找不到文件：{input_file}")
-    ffmpeg_exe = get_ffmpeg_exe()
-    duration = probe_duration(input_file)
-    frames = []
-    for requested_time in times[:16]:
-        frame_time = max(0.0, min(max(0.0, duration - 0.01), float(requested_time)))
-        command = [
-            ffmpeg_exe, "-hide_banner", "-loglevel", "error", "-nostdin",
-            "-ss", f"{frame_time:.6f}", "-i", input_file,
-            "-frames:v", "1", "-vf", "scale=240:-2", "-q:v", "4",
-            "-f", "image2pipe", "-vcodec", "mjpeg", "pipe:1",
-        ]
-        completed = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False)
-        if completed.returncode != 0 or not completed.stdout:
-            error = completed.stderr.decode("utf-8", errors="replace").strip()
-            raise RuntimeError(error[-2000:] or f"无法读取 {frame_time:.2f} 秒处的视频画面")
-        frames.append("data:image/jpeg;base64," + base64.b64encode(completed.stdout).decode("ascii"))
-    result = {"success": True, "frames": frames}
-    print(json.dumps(result, ensure_ascii=False), flush=True)
-    return result
-
-
 def fast_lossless_split(
     input_file: str,
     output_dir: str | None = None,
@@ -517,18 +490,9 @@ def run(args_list=None):
     parser.add_argument("--trim-end", type=float)
     parser.add_argument("--output-path")
     parser.add_argument("--trim-mode", choices=("fast", "exact"), default="fast")
-    parser.add_argument("--timeline-frames", default="")
     parser.add_argument("--cancel_file", default="")
     args = parser.parse_args(args_list)
     try:
-        if args.timeline_frames:
-            if len(args.video_path) != 1:
-                raise ValueError("视频时间轴画面仅支持单个输入文件")
-            extract_timeline_frames(
-                args.video_path[0].strip('"').strip("'"),
-                [float(value) for value in args.timeline_frames.split(",") if value.strip()],
-            )
-            return 0
         trim_requested = args.trim_start is not None or args.trim_end is not None or args.output_path is not None
         if trim_requested:
             if len(args.video_path) != 1:

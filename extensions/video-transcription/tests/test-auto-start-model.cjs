@@ -5,8 +5,10 @@ const values = new Map();
 const storage = { getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value) };
 const context = { surface: 'project.contextAction', projectId: 'project-1', sourcePageId: 'files', scopeRelativePath: 'video', selectedRelativePaths: ['video/a.mp4'] };
 assert.equal(isSelectionEntry(context), true);
+assert.equal(isSelectionEntry({ ...context, surface: 'project' }), true, 'toolbar project surface starts when the Host supplied a selection');
 assert.equal(isSelectionEntry({ ...context, surface: 'media.contextAction' }), false, 'legacy media actions are not direct entry surfaces');
 assert.equal(isSelectionEntry({ ...context, selectedRelativePaths: [] }), false);
+assert.equal(isSelectionEntry({ ...context, surface: 'project', selectedRelativePaths: [] }), false, 'empty toolbar project surface remains history-only');
 
 const firstView = createAutoStartGate(storage); let starts = 0;
 if (firstView.initial(context)) starts += 1;
@@ -24,5 +26,8 @@ firstView.finish();
 
 const refreshedView = createAutoStartGate(storage);
 assert.equal(refreshedView.initial(context), false, 'a refreshed View observes the persisted initial-start marker');
+const toolbarView = createAutoStartGate(storage);
+assert.equal(toolbarView.initial({ ...context, surface: 'project' }), true, 'toolbar and context action invocations have independent persisted identities');
+toolbarView.finish();
 assert.equal(starts, 3);
 console.log('video-transcription context auto-start gate tests passed');

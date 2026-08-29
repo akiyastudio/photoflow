@@ -13,12 +13,16 @@ const { createDeletedProjectCleanup } = require('./workspace/deleted-project-cle
 const { formatProjectDate, normalizeProjectDate, readProjectDate } = require('./workspace/project-date.cjs');
 const { runWorkspaceMaintenanceWithRetry, workspaceDatabaseTaskResource } = require('./workspace/workspace-maintenance.cjs');
 const { publishPathNoClobber: defaultPublishPathNoClobber } = require('../services/file-transfer-service.cjs');
+const { registerVideoTimelineIpc } = require('./workspace/video-timeline-ipc.cjs');
+const { registerEntryUtilityIpc } = require('./workspace/entry-utility-ipc.cjs');
 
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
 const registerWorkspaceIpc = context => {
   const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation = () => false, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
+  const extractTimelineFrames = context.extractVideoTimelineFrames;
+  registerVideoTimelineIpc({ ipcMain, extractVideoTimelineFrames: extractTimelineFrames, resolveProjectEntry, fs, path, VIDEO_EXTENSIONS, writeLog });
   const logSlowWorkspaceInteraction = (operation, startedAt, details = {}) => {
     const elapsedMs = Date.now() - startedAt;
     if (elapsedMs >= 150) writeLog('info', 'Slow workspace interaction', { operation, elapsedMs, ...details });
@@ -1220,6 +1224,7 @@ const registerWorkspaceIpc = context => {
     if (!resolution.viaExternalLink) return null;
     return { ...resolution, currentPath: resolution.physicalPath, normalizedRelativePath: resolution.virtualPath };
   };
+  registerEntryUtilityIpc({ ipcMain, findLatestPhotoshop, path, getProjectPath, resolveToolSource, fs, spawn, resolveManagedExternalScope, resolveProjectEntry, clipboard, mediaService, app });
   
   ipcMain.handle('workspace-browse-files', async (_event, workspacePath, status, projectName, relativePath = '', cacheConfig = {}) => {
     const startedAt = Date.now();
@@ -2619,62 +2624,6 @@ const registerWorkspaceIpc = context => {
     return { success: true, cancelled: true };
   });
 
-  ipcMain.handle('workspace-video-timeline-frames', async (_event, workspacePath, status, projectName, relativePath, times = []) => {
-    try {
-      const sourcePath = resolveProjectEntry(workspacePath, status, projectName, relativePath);
-      const stat = await fs.promises.stat(sourcePath);
-      if (!stat.isFile() || !VIDEO_EXTENSIONS.has(path.extname(sourcePath).toLowerCase())) throw new Error('请选择项目中的视频文件');
-      const safeTimes = (Array.isArray(times) ? times : []).slice(0, 16).map(Number);
-      if (!safeTimes.length || safeTimes.some(time => !Number.isFinite(time) || time < 0)) throw new Error('视频时间轴位置无效');
-      const result = await runPythonJsonAction('cut_video.py', [sourcePath, '--timeline-frames', safeTimes.join(',')], 2 * 60 * 1000);
-      return result?.success && Array.isArray(result.frames)
-        ? { success: true, frames: result.frames }
-        : { success: false, error: result?.error || '无法生成视频时间轴画面' };
-    } catch (error) {
-      writeLog('warn', 'Video timeline frame extraction failed', { projectName, relativePath, error: error.message || String(error) });
-      return { success: false, error: error.message || String(error) };
-    }
-  });
-  
-  ipcMain.handle('workspace-open-entry-photoshop', async (_event, workspacePath, status, projectName, relativePaths) => {
-    try {
-      const executable = await findLatestPhotoshop();
-      if (!executable) throw new Error('未检测到 Photoshop');
-      const paths = Array.isArray(relativePaths) ? relativePaths : [relativePaths];
-      if (!paths.length) throw new Error('没有选择要打开的文件');
-      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const targets = paths.map(relativePath => resolveToolSource(root, relativePath).physicalPath);
-      if (targets.some(target => !fs.statSync(target).isFile())) throw new Error('只能用 Photoshop 打开文件');
-      return await new Promise(resolve => {
-        const child = spawn(executable, targets, { detached: true, stdio: 'ignore', windowsHide: false });
-        child.once('error', error => resolve({ success: false, error: error.message || String(error) }));
-        child.once('spawn', () => {
-          child.unref();
-          resolve({ success: true, count: targets.length });
-        });
-      });
-    } catch (error) { return { success: false, error: error.message || String(error) }; }
-  });
-  
-  ipcMain.handle('workspace-copy-entry-path', async (_event, workspacePath, status, projectName, relativePath) => {
-    try {
-      const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const externalEntry = await resolveManagedExternalScope(root, relativePath);
-      const target = externalEntry?.currentPath || resolveProjectEntry(workspacePath, status, projectName, relativePath);
-      clipboard.writeText(target);
-      return { success: true };
-    } catch (error) { return { success: false, error: error.message || String(error) }; }
-  });
-  
-  ipcMain.handle('workspace-entry-file-icon', async (_event, filePath) => {
-    try {
-      const target = await mediaService.authorizeInput(filePath);
-      if (!(await fs.promises.stat(target)).isFile()) throw new Error('文件不存在');
-      const icon = await app.getFileIcon(target, { size: 'normal' });
-      return { success: !icon.isEmpty(), dataUrl: icon.isEmpty() ? undefined : icon.toDataURL() };
-    } catch (error) { return { success: false, error: error.message || String(error) }; }
-  });
-  
   ipcMain.handle('workspace-import-files', async (event, workspacePath, status, projectName, relativePath = '', options = {}) => {
     const operationId = crypto.randomUUID();
     let taskNotificationOwned = false;

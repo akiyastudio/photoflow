@@ -16,6 +16,7 @@ from PIL import Image
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / 'extensions' / 'video-tools' / 'runtime'))
 sys.path.insert(0, str(ROOT / 'python'))
 
 import classify  # noqa: E402
@@ -24,6 +25,23 @@ import workspace_db  # noqa: E402
 
 
 class ClassifyImportTests(unittest.TestCase):
+    def test_video_tool_request_uses_host_protocol(self):
+        emitted = []
+        response = json.dumps({"type": "video_tool_result", "requestId": "video-1", "ok": True, "result": {"values": ["2026-08-29T12:00:00Z"]}}) + "\n"
+        previous_protocol = classify.RESOURCE_PROTOCOL_ENABLED
+        previous_sequence = classify.VIDEO_TOOL_REQUEST_SEQUENCE
+        try:
+            classify.RESOURCE_PROTOCOL_ENABLED = True
+            classify.VIDEO_TOOL_REQUEST_SEQUENCE = 0
+            with mock.patch.object(classify, 'emit', side_effect=lambda event_type, message, data=None, **_extra: emitted.append((event_type, message, data))), mock.patch.object(classify.sys, 'stdin', io.StringIO(response)):
+                values = classify.probe_creation_time_values('clip.mov')
+            self.assertEqual(values, ('2026-08-29T12:00:00Z',))
+            self.assertEqual(emitted[0][0], 'video_tool_request')
+            self.assertEqual(emitted[0][2]['action'], 'probe-creation-time')
+        finally:
+            classify.RESOURCE_PROTOCOL_ENABLED = previous_protocol
+            classify.VIDEO_TOOL_REQUEST_SEQUENCE = previous_sequence
+
     def tearDown(self):
         classify.CANCEL_FILE = ''
         classify.EXIFTOOL_PATH = ''

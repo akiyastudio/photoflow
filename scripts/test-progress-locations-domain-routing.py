@@ -97,7 +97,8 @@ def main() -> None:
         result = response["result"]
         assert {item["displayName"] for item in result["progressFolders"]} == set(names)
         assert len(result["progressFolders"]) == 5
-        assert len(result["graphEdges"]) == 2
+        assert len(result["graphEdges"]) == 3
+        assert any(edge["sourceProgressId"] == "selection" and edge["targetProgressId"] == "color" and edge["edgeKind"] == "workflow_input" for edge in result["graphEdges"])
         by_name = {item["displayName"]: item for item in result["progressFolders"]}
         assert all(by_name[name]["folderId"] for name in names if name != "修脸2"), "online location identities must persist"
         assert by_name["修脸2"]["folderMissing"] is True and by_name["修脸2"]["missingSince"] is not None

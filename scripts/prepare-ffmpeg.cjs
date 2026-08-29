@@ -22,8 +22,8 @@ const lock = readJson(path.join(root, 'media-runtime.lock.json'));
 const x264 = manifest.components.find(item => item.name === 'x264');
 const x265 = manifest.components.find(item => item.name === 'x265');
 const zlib = manifest.components.find(item => item.name === 'zlib');
-const lockedOptionalComponents = ['zimg', 'freetype', 'fribidi', 'harfbuzz', 'libass'];
-const componentMismatch = lockedOptionalComponents.some(name => manifest.components.find(item => item.name === name)?.commit !== (name === 'zimg' ? lock.zimg.commit : lock.mpvDependencies[name].commit));
+const lockedOptionalComponents = { zimg: lock.zimg, ...(lock.mpvDependencies || {}) };
+const componentMismatch = Object.entries(lockedOptionalComponents).some(([name, locked]) => manifest.components.find(item => item.name === name)?.commit !== locked?.commit);
 if (manifest.ffmpeg?.version !== lock.ffmpeg.version || manifest.ffmpeg?.commit !== lock.ffmpeg.commit || x264?.commit !== lock.x264.commit || x265?.commit !== lock.x265.commit || zlib?.commit !== lock.zlib.commit || componentMismatch) {
   throw new Error('FFmpeg 及其固定媒体依赖与 media-runtime.lock.json 版本不一致');
 }

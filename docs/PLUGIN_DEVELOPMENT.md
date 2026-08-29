@@ -59,7 +59,7 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 
 组件仍须声明被引用的 `component.fullPage`，但仅面板组件不需要声明 `workspace.toolbarAction`。面板内部监听 `onThemeChange`、`onContextChange`、`onActivate` 和 `onDeactivate`；长任务继续使用 `tasks.v7`。可运行示例见 `examples/panel-only-v7`。
 
-需要保留宿主工具分组时，sidePanel 可以声明 `"placement":"workspace.videoTools"`。宿主只负责把入口放入文件页“视频工具”菜单，面板页面、RPC 与权限仍完全属于组件。`extensions/video-tools` 展示了同一组件贡献“视频转码”和“视频切割”两个分组面板入口。
+需要保留宿主工具分组时，`component.sidePanel` 或 `project.contextAction` 可以声明 `"placement":"workspace.videoTools"`。宿主只负责把入口放入文件页“视频工具”菜单；placed project action 不会再出现在统一工具栏或右键根菜单，并且只在文件选择右键菜单中接收完整安全 selection。面板页面、RPC 与权限仍完全属于组件。其他 contribution type 声明该 placement 会被拒绝。`extensions/video-tools` 展示了同一组件贡献“视频转码”和“视频切割”两个分组面板入口。
 
 渲染层通常调用组件自有 RPC，而不是直接调用 Host 能力。唯一的受控 UI 快捷桥是 Host API 7 `notify`：它只接受严格的纯文本结构，不能携带 HTML、回调、URL、路径或任意 channel。组件服务是后端协议端点，只能请求清单授权的 Host 能力；只有后端自身产生短状态时才使用 `notifications.v7`。长任务和确认仍分别使用 `tasks.v7` 与 `dialogs.v7`。
 

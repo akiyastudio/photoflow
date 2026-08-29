@@ -14,6 +14,7 @@ from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "extensions" / "video-tools" / "runtime"))
 sys.path.insert(0, str(ROOT / "python"))
 
 import cut_video  # noqa: E402
@@ -29,18 +30,22 @@ def main():
         development_archive.parent.mkdir(parents=True)
         with zipfile.ZipFile(development_archive, "w") as bundle:
             bundle.writestr(executable_name, b"audited ffmpeg runtime")
-        fake_module_path = root / "python" / "ffmpeg_utils.py"
+        fake_module_path = root / "extensions" / "video-tools" / "runtime" / "ffmpeg_utils.py"
         development_cache = root / "development-cache"
         with mock.patch.object(ffmpeg_utils, "__file__", str(fake_module_path)), \
                 mock.patch.object(ffmpeg_utils.sys, "frozen", False, create=True), \
                 mock.patch.object(ffmpeg_utils.tempfile, "gettempdir", return_value=str(development_cache)):
-            assert ffmpeg_utils._ffmpeg_archive_candidates() == [str(development_archive)]
+            assert ffmpeg_utils._ffmpeg_archive_candidates() == [
+                str(fake_module_path.parent / "ffmpeg.zip"),
+                str(fake_module_path.parent.parent / "ffmpeg.zip"),
+                str(development_archive),
+            ]
             development_executable = Path(ffmpeg_utils.get_ffmpeg_exe())
         assert development_executable.read_bytes() == b"audited ffmpeg runtime"
 
-        packaged_python_root = root / "packaged" / "python"
-        packaged_worker = packaged_python_root / "PhotoFlowImportWorker" / ("PhotoFlowImportWorker.exe" if sys.platform.startswith("win") else "PhotoFlowImportWorker")
-        packaged_archive = packaged_python_root / "ffmpeg.zip"
+        packaged_runtime_root = root / "packaged" / "components" / "video-tools" / "runtime"
+        packaged_worker = packaged_runtime_root / ("video-tools-worker.exe" if sys.platform.startswith("win") else "video-tools-worker")
+        packaged_archive = packaged_runtime_root / "ffmpeg.zip"
         packaged_worker.parent.mkdir(parents=True)
         with zipfile.ZipFile(packaged_archive, "w") as bundle:
             bundle.writestr(executable_name, b"packaged audited runtime")
@@ -50,7 +55,7 @@ def main():
                 mock.patch.object(ffmpeg_utils.tempfile, "gettempdir", return_value=str(packaged_cache)):
             assert ffmpeg_utils._ffmpeg_archive_candidates() == [
                 str(packaged_worker.parent / "ffmpeg.zip"),
-                str(packaged_archive),
+                str(packaged_worker.parent.parent / "ffmpeg.zip"),
             ]
             packaged_executable = Path(ffmpeg_utils.get_ffmpeg_exe())
         assert packaged_executable.read_bytes() == b"packaged audited runtime"
@@ -61,7 +66,7 @@ def main():
         [
             sys.executable,
             "-c",
-            f"import sys; sys.path.insert(0, {str(ROOT / 'python')!r}); import cut_video; cut_video.emit('log', '视频大小 4.86 GB，预计分为 2 段')",
+            f"import sys; sys.path.insert(0, {str(ROOT / 'extensions' / 'video-tools' / 'runtime')!r}); import cut_video; cut_video.emit('log', '视频大小 4.86 GB，预计分为 2 段')",
         ],
         capture_output=True,
         env=child_environment,

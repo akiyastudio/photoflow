@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Globalization;
@@ -834,6 +835,66 @@ namespace PhotoFlow.AdvancedVideoDecoder
 
     internal static class Program
     {
+        private static bool CompleteTimelineImage(string filePath)
+        {
+            try
+            {
+                if (!File.Exists(filePath) || new FileInfo(filePath).Length < 12) return false;
+                byte[] header = new byte[8];
+                using (var stream = File.OpenRead(filePath)) if (stream.Read(header, 0, header.Length) != header.Length) return false;
+                byte[] png = { 137, 80, 78, 71, 13, 10, 26, 10 };
+                bool isPng = true;
+                for (int index = 0; index < png.Length; index++) if (header[index] != png[index]) { isPng = false; break; }
+                if (isPng) return true;
+                if (header[0] != 0xff || header[1] != 0xd8) return false;
+                using (var stream = File.OpenRead(filePath)) { stream.Seek(-2, SeekOrigin.End); return stream.ReadByte() == 0xff && stream.ReadByte() == 0xd9; }
+            }
+            catch { return false; }
+        }
+
+        private static int ExtractTimelineFrames(string requestPath)
+        {
+            var serializer = new JavaScriptSerializer();
+            try
+            {
+                var request = serializer.Deserialize<Dictionary<string, object>>(File.ReadAllText(requestPath, Encoding.UTF8));
+                string filePath = Convert.ToString(request["filePath"], CultureInfo.InvariantCulture);
+                string outputDirectory = Convert.ToString(request["outputDirectory"], CultureInfo.InvariantCulture);
+                Directory.CreateDirectory(outputDirectory);
+                var times = new List<double>();
+                var rawTimes = request["times"] as IEnumerable;
+                if (rawTimes != null) foreach (object value in rawTimes) times.Add(Convert.ToDouble(value, CultureInfo.InvariantCulture));
+                var frames = new List<string>();
+                using (var player = new LibMpv(IntPtr.Zero, true))
+                {
+                    player.Open(filePath);
+                    DateTime readyDeadline = DateTime.UtcNow.AddSeconds(12);
+                    while (DateTime.UtcNow < readyDeadline && string.IsNullOrWhiteSpace(player.GetProperty("duration"))) Thread.Sleep(25);
+                    player.SetProperty("pause", "yes");
+                    for (int index = 0; index < times.Count; index++)
+                    {
+                        string output = Path.Combine(outputDirectory, "frame-" + index.ToString(CultureInfo.InvariantCulture) + ".jpg");
+                        player.SeekAbsolute(times[index]);
+                        Thread.Sleep(120);
+                        player.Screenshot(output, "sourceFrame");
+                        DateTime frameDeadline = DateTime.UtcNow.AddSeconds(7);
+                        while (DateTime.UtcNow < frameDeadline && !CompleteTimelineImage(output)) Thread.Sleep(25);
+                        if (!CompleteTimelineImage(output)) throw new InvalidOperationException("时间线帧提取超时");
+                        frames.Add("data:image/jpeg;base64," + Convert.ToBase64String(File.ReadAllBytes(output)));
+                    }
+                }
+                Console.Out.WriteLine(serializer.Serialize(new Dictionary<string, object> { { "success", true }, { "frames", frames } }));
+                Console.Out.Flush();
+                return 0;
+            }
+            catch (Exception error)
+            {
+                Console.Out.WriteLine(serializer.Serialize(new Dictionary<string, object> { { "success", false }, { "error", error.Message } }));
+                Console.Out.Flush();
+                return 4;
+            }
+        }
+
         [STAThread]
         private static int Main(string[] args)
         {
@@ -841,12 +902,15 @@ namespace PhotoFlow.AdvancedVideoDecoder
             Console.OutputEncoding = new UTF8Encoding(false);
             try { NativeMethods.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
             string sessionId = string.Empty;
+            string timelineRequest = string.Empty;
             bool probeOnly = false;
             foreach (string argument in args) if (argument == "--probe") probeOnly = true;
             for (int index = 0; index + 1 < args.Length; index++)
             {
                 if (args[index] == "--session-id") sessionId = args[index + 1];
+                if (args[index] == "--timeline-request") timelineRequest = args[index + 1];
             }
+            if (!string.IsNullOrWhiteSpace(timelineRequest)) return ExtractTimelineFrames(timelineRequest);
             if (probeOnly)
             {
                 try

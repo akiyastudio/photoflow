@@ -159,14 +159,6 @@
           "to": "python/inspiration-tools"
         },
         {
-          "from": "artifacts/python/ffmpeg.zip",
-          "to": "python/ffmpeg.zip"
-        },
-        {
-          "from": "artifacts/python/ffmpeg-runtime-manifest.json",
-          "to": "python/ffmpeg-runtime-manifest.json"
-        },
-        {
           "from": "electron/bin/shell-thumbnail.exe",
           "to": "shell-thumbnail.exe"
         },
@@ -213,10 +205,6 @@
         {
           "from": "artifacts/python/inspiration-tools",
           "to": "python/inspiration-tools"
-        },
-        {
-          "from": "artifacts/python/ffmpeg.zip",
-          "to": "python/ffmpeg.zip"
         },
         {
           "from": "electron/bin/file-publication-service",
