@@ -16,11 +16,10 @@ def _ffmpeg_archive_candidates():
 
     runtime_root = os.path.dirname(os.path.abspath(__file__))
     component_root = os.path.dirname(runtime_root)
-    repository_root = os.path.dirname(os.path.dirname(component_root))
     return [
         os.path.join(runtime_root, "ffmpeg.zip"),
         os.path.join(component_root, "ffmpeg.zip"),
-        os.path.join(repository_root, "artifacts", "python", "ffmpeg.zip"),
+        os.path.join(component_root, "media-runtime", "vendor", "windows-x64", "ffmpeg-runtime-windows-x64.zip"),
     ]
 
 

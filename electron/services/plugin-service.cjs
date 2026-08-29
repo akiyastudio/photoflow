@@ -31,7 +31,7 @@ const createPluginService = ({ app, registry, runJsonCommand }) => {
     const definition = findPluginByCapability(capability);
     if (!definition) throw new Error(`未知插件能力：${capability}`);
     const plugin = inspect(definition.id);
-    if (!plugin?.installed) {
+    if (!plugin?.installed || plugin.enabled === false) {
       const error = new Error(`未安装“${definition.name}”插件`);
       error.code = 'PLUGIN_MISSING';
       throw error;
@@ -50,6 +50,8 @@ const createPluginService = ({ app, registry, runJsonCommand }) => {
     verifyComponentDirectoryAsync: (pluginId, componentRoot, force = true) => registry.verifyDirectoryAsync(pluginId, componentRoot, force),
     componentIntegrityToken: (pluginId, componentRoot) => registry.componentIntegrityToken(pluginId, componentRoot),
     seedIntegrityToken: (pluginId, componentRoot, token) => registry.seedIntegrityToken(pluginId, componentRoot, token),
+    setComponentEnabled: (pluginId, enabled) => registry.setComponentEnabled(pluginId, enabled),
+    clearComponentEnabledState: pluginId => registry.clearComponentEnabledState(pluginId),
     requireCapability,
     runJson: (pluginId, args, timeoutMs, onMessage) => runJsonCommand(resolveRunConfig(pluginId, args), `Plugin ${pluginId}`, timeoutMs, onMessage),
     installRoot: registry.installRoot,

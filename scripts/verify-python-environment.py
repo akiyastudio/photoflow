@@ -139,11 +139,12 @@ def main() -> None:
     if not quick:
         python_paths = sorted((ROOT / "python").rglob("*.py"))
         video_tool_paths = sorted((ROOT / "extensions" / "video-tools" / "runtime").rglob("*.py"))
+        video_tool_requirements = read_requirements(ROOT / "extensions" / "video-tools" / "requirements.txt")
         script_paths = sorted((ROOT / "scripts").glob("*.py"))
         all_local_paths = python_paths + video_tool_paths + script_paths
 
         failures += audit_scope("主 Python worker", python_paths, root_requirements)
-        failures += audit_scope("视频处理组件", video_tool_paths, root_requirements)
+        failures += audit_scope("视频处理组件", video_tool_paths, video_tool_requirements)
         failures += audit_scope(
             "开发与测试脚本",
             script_paths,

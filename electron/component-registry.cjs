@@ -11,6 +11,7 @@ const COMPONENT_API_VERSION = PLUGIN_API_VERSION;
 const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PLUGIN_DEFINITIONS).map(([id, definition]) => [id, { ...definition, capability: definition.capabilities[0] }])));
 const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
+const COMPONENT_STATE_VERSION = 1;
 const normalizeRelativeFile = value => String(value || '').replace(/\\/g, '/');
 const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -177,6 +178,21 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
   // source discovery is a separate overlay and must never redirect installs
   // into the repository checkout.
   const installRoot = path.resolve(userComponentRoot);
+  const componentStatePath = path.join(installRoot, '.component-state.json');
+  const disabledComponentIds = new Set();
+  try {
+    const savedState = JSON.parse(fs.readFileSync(componentStatePath, 'utf8'));
+    if (Number(savedState?.version) === COMPONENT_STATE_VERSION && Array.isArray(savedState.disabledComponentIds)) {
+      for (const id of savedState.disabledComponentIds.slice(0, 1024)) if (COMPONENT_ID.test(String(id || ''))) disabledComponentIds.add(String(id));
+    }
+  } catch { /* Component enablement state is optional and defaults to enabled. */ }
+  const persistComponentState = () => {
+    fs.mkdirSync(installRoot, { recursive: true });
+    fs.writeFileSync(componentStatePath, JSON.stringify({ version: COMPONENT_STATE_VERSION, disabledComponentIds: [...disabledComponentIds].sort() }), 'utf8');
+  };
+  const withEnablementState = component => component && component.installed
+    ? { ...component, enabled: !disabledComponentIds.has(component.id), ...(disabledComponentIds.has(component.id) ? { status: 'disabled' } : {}) }
+    : component;
   const roots = [{ source: 'user', path: installRoot }];
   const developmentComponents = () => isPackaged ? [] : discoverDevelopmentComponents({ projectRoot, environment, platform, arch });
   const integrityCache = new Map(); const integrityPending = new Map(); const expectedIntegrity = new Map();
@@ -301,14 +317,14 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
         const container = path.join(root.path, entry.name); const runtime = path.join(container, 'runtime');
         const componentRoot = fs.existsSync(path.join(runtime, 'component.json')) ? runtime : container;
         const inspected = inspectRoot(componentRoot, root.source, entry.name);
-        if (inspected && !byId.has(inspected.id)) byId.set(inspected.id, inspected);
+        if (inspected && !byId.has(inspected.id)) byId.set(inspected.id, withEnablementState(inspected));
       }
     }
     for (const development of developmentComponents()) {
       const inspected = inspectDevelopment(development);
       // Current source must win over an older user installation while running
       // an unpackaged development build of the same component.
-      if (inspected) byId.set(inspected.id, inspected);
+      if (inspected) byId.set(inspected.id, withEnablementState(inspected));
     }
     return byId;
   };
@@ -345,23 +361,23 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     return [...ids].map(id => {
       const current = installed.get(id); const available = packages.get(id);
       if (!current) return available;
-      if (current.source === 'development') return { ...current, status: current.compatible ? 'installed' : 'invalid' };
-      if (!available) return { ...current, status: current.compatible ? 'installed' : 'invalid' };
+      if (current.source === 'development') return current;
+      if (!available) return { ...current, status: current.enabled === false ? 'disabled' : (current.compatible ? 'installed' : 'invalid') };
       const update = current.compatible && available.compatible && compareVersions(current.version, available.packageVersion) < 0;
       return { ...current, packagePath: available.packagePath, packageSizeBytes: available.packageSizeBytes, packageVersion: available.packageVersion, packageCompatible: available.compatible,
-        packageError: available.error, status: update ? 'update-available' : (current.compatible ? 'installed' : 'invalid'), updateAvailable: update };
+        packageError: available.error, status: current.enabled === false ? 'disabled' : update ? 'update-available' : (current.compatible ? 'installed' : 'invalid'), updateAvailable: update };
     }).sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN'));
   };
   const inspect = id => list().find(item => item.id === id) || null;
   const resolve = (id, { verifyIntegrity = false } = {}) => {
     const component = installedComponents().get(id) || null;
-    if (component?.installed && component.compatible && verifyIntegrity && component.source === 'user') verifyDirectory(id, component.path, true);
-    return component?.installed && component.compatible ? component : null;
+    if (component?.installed && component.enabled !== false && component.compatible && verifyIntegrity && component.source === 'user') verifyDirectory(id, component.path, true);
+    return component?.installed && component.enabled !== false && component.compatible ? component : null;
   };
   const resolveAsync = async (id, { verifyIntegrity = false } = {}) => {
     const component = installedComponents().get(id) || null;
-    if (component?.installed && component.compatible && verifyIntegrity && component.source === 'user') await verifyDirectoryAsync(id, component.path, true);
-    return component?.installed && component.compatible ? component : null;
+    if (component?.installed && component.enabled !== false && component.compatible && verifyIntegrity && component.source === 'user') await verifyDirectoryAsync(id, component.path, true);
+    return component?.installed && component.enabled !== false && component.compatible ? component : null;
   };
   const ensureInstallRoot = () => { fs.mkdirSync(installRoot, { recursive: true }); return installRoot; };
   const listWithSizes = async () => Promise.all(list().map(async component => {
@@ -383,19 +399,40 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     for (const root of roots) {
       let entries = []; try { entries = fs.readdirSync(root.path, { withFileTypes: true }); } catch { continue; }
       for (const entry of entries) {
-        if (!entry.isDirectory() || !COMPONENT_ID.test(entry.name)) continue;
+        if (!entry.isDirectory() || !COMPONENT_ID.test(entry.name) || disabledComponentIds.has(entry.name)) continue;
         const container = path.join(root.path, entry.name); const runtime = path.join(container, 'runtime');
         const componentRoot = fs.existsSync(path.join(runtime, 'component.json')) ? runtime : container;
         if (fs.existsSync(path.join(componentRoot, 'component.json'))) values.push({ componentRoot, expectedId: entry.name, source: root.source });
       }
     }
-    for (const development of developmentComponents()) if (!development.error) values.push({
+    for (const development of developmentComponents()) if (!development.error && !disabledComponentIds.has(development.id)) values.push({
       componentRoot: development.componentRoot, manifestPath: development.manifestPath, manifest: development.manifest, expectedId: development.id, source: 'development',
       developmentFiles: { componentRoot: development.componentRoot, files: development.files }, developmentRuntime: { command: development.command, argsPrefix: development.argsPrefix },
     });
     return values;
   };
-  return { inspect, list, listWithSizes, resolve, resolveAsync, resolvePackage, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots, hostCandidates };
+  const setComponentEnabled = (componentId, enabled) => {
+    const id = String(componentId || '').trim();
+    if (!COMPONENT_ID.test(id)) throw new Error('组件 ID 无效');
+    const component = installedComponents().get(id);
+    if (!component?.installed) throw new Error('组件尚未安装或发现');
+    const shouldEnable = enabled === true;
+    const wasDisabled = disabledComponentIds.has(id);
+    if (wasDisabled === !shouldEnable) return { componentId: id, enabled: shouldEnable };
+    if (shouldEnable) disabledComponentIds.delete(id); else disabledComponentIds.add(id);
+    try { persistComponentState(); }
+    catch (error) {
+      if (wasDisabled) disabledComponentIds.add(id); else disabledComponentIds.delete(id);
+      throw error;
+    }
+    return { componentId: id, enabled: shouldEnable };
+  };
+  const clearComponentEnabledState = componentId => {
+    const id = String(componentId || '').trim();
+    if (!disabledComponentIds.delete(id)) return false;
+    persistComponentState(); return true;
+  };
+  return { inspect, list, listWithSizes, resolve, resolveAsync, resolvePackage, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots, hostCandidates, componentStatePath, setComponentEnabled, clearComponentEnabledState };
 };
 
 module.exports = { COMPONENT_API_VERSION, COMPONENT_DEFINITIONS, compareVersions, readComponentPackageManifest, readZipEntries, createComponentRegistry };

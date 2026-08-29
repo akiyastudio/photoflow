@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "video-transcription",
-  "version": "26.8.29.2",
+  "version": "26.8.29.3",
   "displayName": "视频转文字",
   "description": "本地批量语音识别、字幕搜索与受控 SRT 发布",
   "icon": "ui/icon.svg",
@@ -17,6 +17,7 @@
     "ui/app.js",
     "ui/auto-start-model.js",
     "ui/settings.js",
+    "ui/settings-save-model.js",
     "ui/host-api-ui.css",
     "ui/style.css",
     "ui/icon.svg",

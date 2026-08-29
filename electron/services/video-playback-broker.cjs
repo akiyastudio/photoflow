@@ -13,7 +13,7 @@ const CHROMIUM_FEATURES = Object.freeze({
 
 const createVideoPlaybackBroker = ({ pluginService, path }) => {
   const contributions = () => pluginService.list().flatMap(component => {
-    if (!component?.installed || !component.compatible) return [];
+    if (!component?.installed || component.enabled === false || !component.compatible) return [];
     let declared = [];
     try { declared = parseMediaPlaybackBackendContributions(component.manifest); } catch { return []; }
     return declared.map(contribution => ({ component, contribution, backendId: `${component.id}:${contribution.backendId}` }));

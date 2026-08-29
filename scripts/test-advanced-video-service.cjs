@@ -7,7 +7,7 @@ const path = require('path');
 const { createVideoPlaybackProcessService: createAdvancedVideoService } = require('../electron/services/video-playback-process-service.cjs');
 const { nativeHandleValue: nativeWindowHandleValue } = require('../electron/services/native-video-surface-service.cjs');
 const { createPlaybackCaptureService } = require('../electron/services/playback-capture-service.cjs');
-const { readPeDependencies } = require('./media-runtime/pe-dependency-closure.cjs');
+const { readPeDependencies } = require('../plugins/video-playback-backend/scripts/vendor/pe-dependency-closure.cjs');
 const { LEGACY_COMMAND_TO_V1 } = require('../electron/services/media-playback-process-adapter.cjs');
 const v1ToLegacyCommand = Object.fromEntries(Object.entries(LEGACY_COMMAND_TO_V1).map(([legacy, semantic]) => [semantic, legacy]));
 const backendEventNames = { ready: 'runtime.ready', 'surface-created': 'surface.created', state: 'state.changed', 'screenshot-result': 'capture.completed' };

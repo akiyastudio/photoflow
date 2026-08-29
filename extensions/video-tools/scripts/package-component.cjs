@@ -3,16 +3,19 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 
 const root = path.resolve(__dirname, '..');
-const repo = path.resolve(root, '..', '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.json'), 'utf8'));
 const dist = path.join(root, 'dist');
 const packageRoot = path.join(dist, 'component');
 const buildRoot = path.join(dist, 'pyinstaller');
-const python = process.platform === 'win32' ? path.join(repo, '.venv', 'Scripts', 'python.exe') : path.join(repo, '.venv', 'bin', 'python');
-const ffmpegArchive = path.join(repo, 'artifacts', 'python', 'ffmpeg.zip');
-const ffmpegManifest = path.join(repo, 'artifacts', 'python', 'ffmpeg-runtime-manifest.json');
-if (!fs.existsSync(python)) throw new Error('Python environment is missing; run npm run setup:python');
-if (!fs.existsSync(ffmpegArchive) || !fs.existsSync(ffmpegManifest)) throw new Error('Audited FFmpeg artifacts are missing; run npm run build:python preparation first');
+const python = process.platform === 'win32' ? path.join(root, '.venv', 'Scripts', 'python.exe') : path.join(root, '.venv', 'bin', 'python');
+const vendorRoot = path.join(root, 'media-runtime', 'vendor', 'windows-x64');
+const ffmpegArchive = path.join(vendorRoot, 'ffmpeg-runtime-windows-x64.zip');
+const ffmpegManifest = path.join(vendorRoot, 'ffmpeg-runtime-manifest.json');
+if (!fs.existsSync(python)) throw new Error('Component Python environment is missing; run npm run setup');
+if (!fs.existsSync(ffmpegArchive) || !fs.existsSync(ffmpegManifest)) throw new Error('Component-owned audited FFmpeg artifacts are missing');
+const prepare = spawnSync(process.execPath, [path.join(root, 'scripts', 'prepare-ffmpeg.cjs')], { cwd: root, stdio: 'inherit' });
+if (prepare.error) throw prepare.error;
+if ((prepare.status ?? 1) !== 0) process.exit(prepare.status ?? 1);
 
 fs.rmSync(dist, { recursive: true, force: true });
 fs.mkdirSync(packageRoot, { recursive: true });
@@ -34,6 +37,7 @@ if (!fs.existsSync(builtExecutable)) throw new Error('Video tools worker executa
 for (const name of ['worker.py', 'ffmpeg_transcode.py', 'cut_video.py', 'ffmpeg_utils.py', 'video_preview.py']) fs.copyFileSync(path.join(root, 'runtime', name), path.join(runtimeRoot, name));
 fs.copyFileSync(ffmpegArchive, path.join(runtimeRoot, 'ffmpeg.zip'));
 fs.copyFileSync(ffmpegManifest, path.join(runtimeRoot, 'ffmpeg-runtime-manifest.json'));
+for (const name of ['ffmpeg-corresponding-source.zip', 'ffmpeg-licenses.zip', 'SHA256SUMS.txt']) fs.copyFileSync(path.join(vendorRoot, name), path.join(packageRoot, 'LICENSES', name));
 for (const file of manifest.requiredFiles) if (!fs.statSync(path.join(packageRoot, file), { throwIfNoEntry: false })?.isFile()) throw new Error(`Missing ${file}`);
 
 const archive = path.join(dist, `PhotoFlow-${manifest.id}-${manifest.version}-${process.platform}-${process.arch}.zip`);

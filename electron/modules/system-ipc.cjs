@@ -36,6 +36,31 @@ const finalizeComponentRuntimeInstall = async ({ componentId, destination, backu
   }
 };
 
+const transitionComponentEnabled = async ({ componentId, enabled, pluginService, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests }) => {
+  const id = String(componentId || '').trim();
+  if (typeof enabled !== 'boolean') throw new TypeError('组件启用状态必须是布尔值');
+  const component = pluginService.list().find(item => item.id === id);
+  if (!component?.installed) throw new Error('组件尚未安装或发现');
+  const currentlyEnabled = component.enabled !== false;
+  if (currentlyEnabled === enabled) return { componentId: id, enabled };
+  if (enabled) return pluginService.setComponentEnabled(id, true);
+  if (!component.compatible) throw new Error('组件当前不可用，无需禁用');
+  const capabilityBarrier = componentCapabilityBroker.blockComponent(id);
+  let stateChanged = false;
+  try {
+    pluginService.setComponentEnabled(id, false); stateChanged = true;
+    componentViewManager?.closeComponent?.(id);
+    await processSupervisor?.stopWhere?.(status => status.owner?.componentId === id, 'component-disabled');
+    await componentServiceManager?.stop?.(id, 'component-disabled');
+    abortComponentNetworkRequests?.(id);
+    await capabilityBarrier.drain({ timeoutMs: 7500 });
+    return { componentId: id, enabled: false };
+  } catch (error) {
+    if (stateChanged) pluginService.setComponentEnabled(id, true);
+    throw error;
+  } finally { capabilityBarrier.release(); }
+};
+
 const PYTHON_BACKGROUND_TASK_PROFILES = Object.freeze({
   'png_to_jpg.py': Object.freeze({ title: '图片转 JPG', type: 'python-tool', concurrencyGroup: 'disk-io', concurrencyLimit: 3, concurrencyWriteLimit: 2 }),
   'research.py': Object.freeze({ title: '截取分镜帧', type: 'python-tool', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1 }),
@@ -580,12 +605,23 @@ const registerSystemIpc = context => {
       if (componentId) {
         const known = pluginService.list().find(component => component.id === componentId);
         if (!known) throw new Error(`未知组件：${componentId}`);
-        installPath = componentRoot(componentId);
-        await fs.promises.mkdir(installPath, { recursive: true });
+        installPath = known.source === 'development' ? known.path : componentRoot(componentId);
+        if (known.source !== 'development') await fs.promises.mkdir(installPath, { recursive: true });
       }
       const error = await shell.openPath(installPath);
       if (error) throw new Error(error);
       return { success: true, path: installPath };
+    } catch (error) {
+      return { success: false, error: error.message || String(error) };
+    }
+  });
+
+  ipcMain.handle('components-set-enabled', async (_event, componentId, enabled) => {
+    try {
+      const result = await transitionComponentEnabled({ componentId, enabled, pluginService, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests });
+      invalidateComponentStatus();
+      writeLog('info', result.enabled ? 'Component enabled' : 'Component disabled', { componentId: result.componentId });
+      return { success: true, enabled: result.enabled };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -774,6 +810,8 @@ const registerSystemIpc = context => {
         }
         try { await clearComponentSecretData?.(componentId); } catch (error) { cleanupWarnings.push(`组件秘密：${error.message || String(error)}`); }
       }
+      try { pluginService.clearComponentEnabledState(componentId); }
+      catch (error) { cleanupWarnings.push(`组件启用状态：${error.message || String(error)}`); }
       invalidateComponentStatus();
       writeLog('info', 'Component uninstalled', { componentId, componentPath: uninstallPath, clearUserData, cleanupWarnings });
       return { success: true, dataCleared: clearUserData && cleanupWarnings.length === 0, cleanupWarnings };
@@ -1526,4 +1564,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, shouldTrackPythonToolAsBackgroundTask };
+module.exports = { finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, shouldTrackPythonToolAsBackgroundTask, transitionComponentEnabled };

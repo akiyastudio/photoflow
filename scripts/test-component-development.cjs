@@ -37,6 +37,12 @@ try {
   const action = ComponentViewManager.prototype.listToolbarActions.call({ registry: host })[0]; const settingsPage = ComponentViewManager.prototype.listSettingsPages.call({ registry: host })[0];
   assert.equal(action.development, true); assert.equal(action.label, 'Open'); assert.equal(action.pageTitle, 'Fixture');
   assert.equal(settingsPage.development, true); assert.equal(settingsPage.label, 'Settings');
+  registry.setComponentEnabled('sample-dev', false);
+  assert.equal(registry.inspect('sample-dev').enabled, false, 'development components expose the same disable control');
+  assert.equal(registry.resolve('sample-dev'), null, 'a disabled development runtime cannot resolve');
+  assert.equal(host.resolve('sample-dev'), null, 'a disabled development component contributes no Host UI');
+  registry.setComponentEnabled('sample-dev', true);
+  assert.equal(host.resolve('sample-dev').componentId, 'sample-dev', 're-enabling restores development Host discovery');
 
   const directExecutableRoot = writeFixture('direct-executable', ({ packageManifest }) => {
     packageManifest.photoflowComponent.development.runtime = { command: 'runtime.bin' };

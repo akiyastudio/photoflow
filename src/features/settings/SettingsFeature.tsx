@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback } from 'react';
-import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, Loader2, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X, FileImage, Pencil } from 'lucide-react';
+import { Folder, FolderOpen, HardDrive, Palette, Trash2, RotateCcw, Settings, Download, Puzzle, Loader2, ExternalLink, AtSign, GripVertical, FileText, CheckCircle2, Video, Image as ImageIcon, GitBranch, ChevronUp, ChevronDown, ShieldCheck, MessageSquareText, Send, LockKeyhole, Plus, X, FileImage, Pencil, Power } from 'lucide-react';
 import { BUILT_IN_PROJECT_STATUSES, PROJECT_TOOLBAR_ACTION_IDS, normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from '../../types';
 import type { AppConfig, BackupSpaceStatus, BackupStatus, ComponentSettingsPageContribution, ComponentStatus, LegalDocumentId, PrivacyConsentState, ProjectToolbarActionId, StorageUsageOverview, WorkspaceProject } from '../../types';
 import { ComponentIcon } from '../../components/ComponentIcon';
@@ -256,6 +256,7 @@ const LogSettings = ({ onNotice }: { onNotice: (message: string, duration?: numb
 const ComponentSettings = ({ components, installPath, loading, onRefresh, onComponentsChanged, onComponentDataCleared, onNotice }: { components: ComponentStatus[]; installPath: string; loading: boolean; onRefresh: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onComponentDataCleared: (componentId: string) => void | Promise<void>; onNotice: (message: string, duration?: number) => void }) => {
   const appDialog = useAppDialog();
   const [busyId, setBusyId] = useState('');
+  const [busyAction, setBusyAction] = useState<'install' | 'toggle' | 'uninstall' | ''>('');
   const openFolder = async (componentId?: string) => {
     const result = await window.electronAPI.openComponentsFolder(componentId);
     if (!result.success) onNotice(`打开组件文件夹失败：${result.error || '未知错误'}`);
@@ -263,6 +264,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
   const install = async (component: ComponentStatus) => {
     if (busyId) return;
     setBusyId(component.id);
+    setBusyAction('install');
     try {
       const result = await window.electronAPI.installComponent(component.id);
       if (result.cancelled) return;
@@ -270,7 +272,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
       onNotice(`已安装“${component.name}”`);
       await offerPackageCleanup({ appDialog, kind: 'component', componentId: component.id, label: `“${component.name}”组件`, packageSizeBytes: result.packageSizeBytes, onNotice });
       await onComponentsChanged();
-    } finally { setBusyId(''); }
+    } finally { setBusyId(''); setBusyAction(''); }
   };
   const uninstall = async (component: ComponentStatus) => {
     if (busyId) return;
@@ -288,6 +290,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     if (!choice) return;
     const clearUserData = choice === 'clear';
     setBusyId(component.id);
+    setBusyAction('uninstall');
     try {
       const result = await window.electronAPI.uninstallComponent(component.id, { clearUserData });
       if (!result.success) { onNotice(`卸载“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
@@ -297,12 +300,24 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
         ? `已卸载“${component.name}”，但部分数据未能清理：${cleanupWarning}`
         : clearUserData ? `已卸载“${component.name}”并清空用户数据和相关缓存` : `已卸载“${component.name}”，用户数据已保留`, cleanupWarning ? 7000 : 4000);
       await onComponentsChanged();
-    } finally { setBusyId(''); }
+    } finally { setBusyId(''); setBusyAction(''); }
+  };
+  const setEnabled = async (component: ComponentStatus, enabled: boolean) => {
+    if (busyId) return;
+    setBusyId(component.id);
+    setBusyAction('toggle');
+    try {
+      const result = await window.electronAPI.setComponentEnabled(component.id, enabled);
+      if (!result.success) { onNotice(`${enabled ? '启用' : '禁用'}“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
+      onNotice(enabled ? `已启用“${component.name}”` : `已禁用“${component.name}”；组件文件和用户数据均已保留`);
+      await onComponentsChanged();
+    } finally { setBusyId(''); setBusyAction(''); }
   };
   return <SettingsPageGroup title="组件安装与卸载">
     <SettingsRow title="组件根目录" description="将预编译 ZIP 放入此目录后，可在对应组件行中安装。"><div className="flex min-w-0 gap-2"><input readOnly value={installPath || '正在读取组件根目录'} className="form-input min-w-0 flex-1 font-mono text-xs"/><button type="button" onClick={() => void onRefresh()} disabled={loading} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><RotateCcw size={15} className={loading ? 'animate-spin' : ''}/>刷新</button><button type="button" onClick={() => void openFolder()} className="dialog-secondary inline-flex shrink-0 items-center gap-2"><FolderOpen size={15}/>打开</button></div></SettingsRow>
     {components.map(component => {
-      const stateText = component.status === 'package-invalid' ? '安装包损坏或清单无效'
+      const stateText = component.enabled === false ? '已禁用'
+        : component.status === 'package-invalid' ? '安装包损坏或清单无效'
         : component.status === 'integrity-invalid' ? '完整性校验失败'
           : component.status === 'update-available' ? `可更新至 ${component.packageVersion}`
             : component.source === 'development' ? (component.compatible ? '开发组件' : '开发组件不可用')
@@ -310,10 +325,11 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
                 : component.compatible ? '已安装' : '已安装但不可用';
       const busy = busyId === component.id;
       const canUninstall = component.installed && component.source === 'user';
+      const canToggle = component.installed && (component.enabled === false || component.compatible);
       const hasInstallablePackage = Boolean(component.source !== 'development' && component.packagePath && (component.packageCompatible ?? component.compatible) && component.status !== 'package-invalid');
       const trustText = component.integrityStatus === 'verified' ? '完整性已验证' : component.integrityMessage || '';
       const details = [component.description, stateText, component.version ? `版本 ${component.version}` : '', component.installed ? formatComponentSize(component.sizeBytes) : '', trustText, component.error || component.packageError || ''].filter(Boolean).join(' · ');
-      return <SettingsRow key={component.id} title={component.name} description={details}><div className="ml-auto flex w-fit items-center gap-2"><button type="button" onClick={() => void openFolder(component.installed ? component.id : undefined)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>目录</button>{hasInstallablePackage && (!component.installed || component.updateAvailable || !component.compatible) && <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}{component.updateAvailable ? '更新' : component.installed ? '重新安装' : '安装'}</button>}{canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && <Loader2 size={14} className="animate-spin"/>}卸载</button> : component.source === 'development' ? <span className="text-xs font-bold text-amber-600">开发组件</span> : component.installed ? <span className="text-xs text-slate-400">系统组件</span> : null}</div></SettingsRow>;
+      return <SettingsRow key={component.id} title={component.name} description={details}><div className="ml-auto flex w-fit items-center gap-2"><button type="button" onClick={() => void openFolder(component.installed ? component.id : undefined)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>目录</button>{hasInstallablePackage && (!component.installed || component.updateAvailable || !component.compatible) && <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && busyAction === 'install' && <Loader2 size={14} className="animate-spin"/>}{component.updateAvailable ? '更新' : component.installed ? '重新安装' : '安装'}</button>}{canToggle && <button type="button" onClick={() => void setEnabled(component, component.enabled === false)} disabled={Boolean(busyId)} className="dialog-secondary inline-flex items-center gap-1.5 disabled:opacity-45">{busy && busyAction === 'toggle' ? <Loader2 size={13} className="animate-spin"/> : <Power size={13}/>} {component.enabled === false ? '启用' : '禁用'}</button>}{canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && busyAction === 'uninstall' && <Loader2 size={13} className="animate-spin"/>}卸载</button> : component.source === 'development' ? <span className="text-xs font-bold text-amber-600">开发组件</span> : component.installed ? <span className="text-xs text-slate-400">系统组件</span> : null}</div></SettingsRow>;
     })}
     {!loading && !components.length && <SettingsRow title="组件状态" description="组件目录中没有安装包或已安装组件。"><span className="ml-auto block w-fit text-xs text-slate-400">暂无组件</span></SettingsRow>}
   </SettingsPageGroup>;
@@ -330,7 +346,7 @@ const SettingsNavigator = ({ activeSection, componentPages, onSelect }: { active
     ...componentPages.map(page => ({ id: componentSettingsSectionKey(page), label: page.label, description: page.pageTitle, icon: <ComponentIcon src={page.iconUrl} size={18}/> })),
   ];
   const renderItem = (item: typeof items[number]) => <button key={item.id} type="button" aria-current={activeSection === item.id ? 'page' : undefined} onClick={() => onSelect(item.id)} className={`flex w-full items-center gap-3 rounded-lg px-3 py-2.5 text-left transition ${activeSection === item.id ? 'bg-blue-50 text-blue-700' : 'text-slate-600 hover:bg-slate-50 hover:text-slate-900'}`}><span className={`shrink-0 ${activeSection === item.id ? 'text-blue-600' : 'text-slate-400'}`}>{item.icon}</span><span className="min-w-0 truncate text-sm font-bold">{item.label}</span></button>;
-  return <nav aria-label="设置分类" className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain border-r border-slate-200 p-3">
+  return <nav aria-label="设置分类" className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain p-3">
     <div className="flex items-center gap-2 px-3 pb-3 pt-2 text-sm font-bold text-slate-800"><Settings size={17} className="text-blue-600"/>设置</div>
     <div className="space-y-1">{items.map(renderItem)}</div>
     <div className="mt-3 space-y-1 border-t border-slate-200 pt-3">

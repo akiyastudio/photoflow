@@ -101,7 +101,7 @@ const App: React.FC = () => {
   const [componentSettingsPages, setComponentSettingsPages] = useState<ComponentSettingsPageContribution[]>([]);
   const selectedComponentSettingsPage = useMemo(() => componentSettingsPages.find(page => componentSettingsSectionKey(page) === settingsSection), [componentSettingsPages, settingsSection]);
   const reportComponentSettingsError = useCallback((message: string) => showNotice(`打开组件设置页失败：${message}`), [showNotice]);
-  const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed).map(component => component.id)), [components]);
+  const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id)), [components]);
   const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); } });
   const { actions: componentHostActions, contributions: componentContributions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
 
@@ -939,7 +939,7 @@ const App: React.FC = () => {
         onReset={() => setBackgroundTaskDrawerWidth(BACKGROUND_TASK_DRAWER_DEFAULT_WIDTH)}
         onDrag={deltaX => setBackgroundTaskDrawerWidth(width => clampNumber(width - deltaX, BACKGROUND_TASK_DRAWER_MIN_WIDTH, backgroundTaskDrawerMaximumWidth))}
       />}
-      <div ref={backgroundTaskDrawerHostRef} style={{ width: renderedBackgroundTaskDrawerWidth }} className={backgroundTaskDrawerOpen ? 'shrink-0 overflow-hidden border-l border-slate-200 bg-white' : 'hidden'}/>
+      <div ref={backgroundTaskDrawerHostRef} style={{ width: renderedBackgroundTaskDrawerWidth }} className={backgroundTaskDrawerOpen ? 'shrink-0 overflow-hidden bg-white' : 'hidden'}/>
       </div>}
     </div>
   );

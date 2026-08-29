@@ -10,6 +10,8 @@ const app = read('src/App.tsx');
 const indicator = read('src/features/background-tasks/BackgroundTaskIndicator.tsx');
 const resizeHandle = read('src/features/app/AppShellLayout.tsx');
 const resizeModel = read('src/features/app/app-shell-layout-model.ts');
+const inspirationLibrary = read('src/features/inspiration/InspirationLibrary.tsx');
+const settingsFeature = read('src/features/settings/SettingsFeature.tsx');
 const toast = read('src/features/app/useTopToastStack.tsx');
 const toastView = read('src/toast-view.tsx');
 const taskToast = read('src/features/background-tasks/FileTransferToast.tsx');
@@ -19,7 +21,8 @@ const vite = read('vite.config.ts');
 
 assert(!fs.existsSync(path.join(root, 'src', 'components', 'GlobalOverlayProvider.tsx')) && !main.includes('GlobalOverlayProvider'), 'the retired task overlay outlet must be removed');
 assert(app.includes('backgroundTaskDrawerHostRef') && indicator.includes('drawerHostRef.current') && indicator.includes('createPortal('), 'the task panel must portal into the right-hand layout drawer');
-assert(app.includes('style={{ width: renderedBackgroundTaskDrawerWidth }}') && app.includes("backgroundTaskDrawerOpen ? 'shrink-0 overflow-hidden border-l") && app.includes(": 'hidden'"), 'the open drawer must occupy layout width and the closed drawer must leave no border or gap');
+assert(app.includes('style={{ width: renderedBackgroundTaskDrawerWidth }}') && app.includes("backgroundTaskDrawerOpen ? 'shrink-0 overflow-hidden bg-white'") && app.includes(": 'hidden'"), 'the open drawer must occupy layout width and the closed drawer must leave no gap');
+assert(!app.includes("backgroundTaskDrawerOpen ? 'shrink-0 overflow-hidden border-l") && !inspirationLibrary.includes('aria-label="灵感库导航" className="flex min-h-0 flex-1 flex-col border-r') && !settingsFeature.includes('aria-label="设置分类" className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain border-r'), 'resize handles must be the single visual divider for side panels');
 assert(indicator.includes('useEscapeLayer(open, closeAndRestoreFocus)') && !indicator.includes('suspendExternalSurfaces') && !indicator.includes('useHostSurfaceSuspension'), 'opening the drawer must not suspend native plugin surfaces');
 
 assert(app.includes("photoflow:background-task-drawer-width") && app.includes('readStoredNumber(BACKGROUND_TASK_DRAWER_STORAGE_KEY') && app.includes('localStorage.setItem(BACKGROUND_TASK_DRAWER_STORAGE_KEY'), 'drawer width must persist across renderer sessions');

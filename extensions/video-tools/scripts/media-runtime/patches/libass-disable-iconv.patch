@@ -1,0 +1,11 @@
+diff --git a/meson.build b/meson.build
+index 0a2e9b1..ef9e3b5 100644
+--- a/meson.build
++++ b/meson.build
+@@ -89,6 +89,0 @@
+-iconv_dep = dependency('iconv', required: false)
+-if iconv_dep.found()
+-    deps += iconv_dep
+-    conf.set('CONFIG_ICONV', 1)
+-endif
+-

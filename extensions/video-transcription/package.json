@@ -1,10 +1,10 @@
 {
   "name": "@photoflow/video-transcription",
-  "version": "26.8.29.2",
+  "version": "26.8.29.3",
   "private": true,
   "scripts": {
     "build": "node scripts/verify-layout.cjs",
-    "test": "node tests/test-core.cjs && node tests/test-engine.cjs && node tests/test-service.cjs && node tests/test-manifest-security.cjs && node tests/test-ui-visual.cjs && node tests/test-auto-start-model.cjs",
+    "test": "node tests/test-core.cjs && node tests/test-engine.cjs && node tests/test-service.cjs && node tests/test-manifest-security.cjs && node tests/test-ui-visual.cjs && node tests/test-settings-behavior.cjs && node tests/test-auto-start-model.cjs",
     "package": "node scripts/package-component.cjs",
     "package:host": "node scripts/package-component.cjs"
   },
@@ -22,6 +22,7 @@
         "ui/app.js": "ui/app.js",
         "ui/auto-start-model.js": "ui/auto-start-model.js",
         "ui/settings.js": "ui/settings.js",
+        "ui/settings-save-model.js": "ui/settings-save-model.js",
         "ui/host-api-ui.css": "ui/host-api-ui.css",
         "ui/style.css": "ui/style.css",
         "ui/icon.svg": "ui/icon.svg",

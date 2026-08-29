@@ -34,9 +34,9 @@ export const bindComponentPageInstance = (pages: ComponentPageInstance[], identi
 
 export const closeComponentPage = (pages: ComponentPageInstance[], identity: string) => pages.filter(page => page.identity !== identity);
 
-export const componentPageIsAvailable = (page: ComponentPageInstance, components: Array<{ id: string; version: string; installed: boolean; compatible: boolean; status?: string }>) => {
+export const componentPageIsAvailable = (page: ComponentPageInstance, components: Array<{ id: string; version: string; installed: boolean; enabled?: boolean; compatible: boolean; status?: string }>) => {
   const component = components.find(item => item.id === page.componentId);
-  return Boolean(component?.installed && component.compatible && component.version === page.componentVersion && !['invalid', 'integrity-invalid', 'incompatible'].includes(String(component.status || '')));
+  return Boolean(component?.installed && component.enabled !== false && component.compatible && component.version === page.componentVersion && !['disabled', 'invalid', 'integrity-invalid', 'incompatible'].includes(String(component.status || '')));
 };
 export const componentPageActivationSucceeded = (result: { success?: boolean } | null | undefined) => result?.success === true;
 

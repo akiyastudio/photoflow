@@ -1,0 +1,120 @@
+{
+  "schemaVersion": 3,
+  "kind": "photoflow-ffmpeg-runtime",
+  "platform": "windows-x64",
+  "license": "GPL-2.0-or-later",
+  "reproducibleSource": true,
+  "ffmpeg": {
+    "version": "7.1.1",
+    "repository": "https://github.com/FFmpeg/FFmpeg.git",
+    "commit": "68af2cc3feb8c78aec2722c728fd87f03515fa7c"
+  },
+  "components": [
+    {
+      "name": "x264",
+      "repository": "https://code.videolan.org/videolan/x264.git",
+      "commit": "3a21e97bf23676a0bf4616df8bc2207c9fd7b1d3",
+      "license": "GPL-2.0-or-later"
+    },
+    {
+      "name": "x265",
+      "version": "4.2",
+      "repository": "https://github.com/Multicorewareinc/x265.git",
+      "commit": "e444744c03978c1fb4e037168967020cf2648427",
+      "license": "GPL-2.0-or-later"
+    },
+    {
+      "name": "zlib",
+      "version": "1.3.1",
+      "repository": "https://github.com/madler/zlib.git",
+      "commit": "51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf",
+      "license": "Zlib"
+    },
+    {
+      "name": "zimg",
+      "version": "3.0.6",
+      "repository": "https://github.com/sekrit-twc/zimg.git",
+      "commit": "f819b14e8f39d1282400b0d9543e8ef73c1b2bbd",
+      "license": "WTFPL-2.0"
+    },
+    {
+      "name": "freetype",
+      "version": "2.13.3",
+      "repository": "https://gitlab.freedesktop.org/freetype/freetype.git",
+      "commit": "42608f77f20749dd6ddc9e0536788eaad70ea4b5",
+      "license": "FTL-or-GPL-2.0-or-later"
+    },
+    {
+      "name": "fribidi",
+      "version": "1.0.16",
+      "repository": "https://github.com/fribidi/fribidi.git",
+      "commit": "68162babff4f39c4e2dc164a5e825af93bda9983",
+      "license": "LGPL-2.1-or-later"
+    },
+    {
+      "name": "harfbuzz",
+      "version": "10.2.0",
+      "repository": "https://github.com/harfbuzz/harfbuzz.git",
+      "commit": "7b27c8edd46c674e01dd226fa9e1aa7549f5c436",
+      "license": "MIT"
+    },
+    {
+      "name": "libass",
+      "version": "0.17.4",
+      "repository": "https://github.com/libass/libass.git",
+      "commit": "bbb3c7f1570a4a021e52683f3fbdf74fe492ae84",
+      "license": "ISC"
+    },
+    {
+      "name": "nv-codec-headers",
+      "version": "12.1.14.0",
+      "repository": "https://github.com/FFmpeg/nv-codec-headers.git",
+      "commit": "1889e62e2d35ff7aa9baca2bceb14f053785e6f1",
+      "license": "MIT"
+    }
+  ],
+  "configureFlags": [
+    "--prefix=/c/dev/app1/.cache/media-runtime-build/ffmpeg-lite/prefix",
+    "--arch=x86_64",
+    "--target-os=mingw32",
+    "--enable-gpl",
+    "--enable-libx264",
+    "--enable-libx265",
+    "--enable-libass",
+    "--enable-libzimg",
+    "--enable-zlib",
+    "--enable-mediafoundation",
+    "--enable-d3d11va",
+    "--enable-ffnvcodec",
+    "--enable-nvenc",
+    "--enable-static",
+    "--disable-shared",
+    "--disable-autodetect",
+    "--disable-network",
+    "--disable-debug",
+    "--disable-doc",
+    "--disable-ffplay",
+    "--disable-ffprobe",
+    "--pkg-config=pkg-config",
+    "--pkg-config-flags=--static",
+    "--extra-cflags=-I/c/dev/app1/.cache/media-runtime-build/ffmpeg-lite/prefix/include",
+    "--extra-ldflags=-static",
+    "-static-libgcc",
+    "-static-libstdc++",
+    "-L/c/dev/app1/.cache/media-runtime-build/ffmpeg-lite/prefix/lib"
+  ],
+  "artifacts": {
+    "runtimeArchive": {
+      "file": "ffmpeg-runtime-windows-x64.zip",
+      "sha256": "a95f788953e5820a6deb41289900c590d0d436bee76dc5be5f09f32e66b84249"
+    },
+    "sourceArchive": {
+      "file": "ffmpeg-corresponding-source.zip",
+      "sha256": "bf08d96cfa2b8fbc885a1432ee302e40d879434d78c70fd1e4133f49d3e0b4df"
+    },
+    "licenseArchive": {
+      "file": "ffmpeg-licenses.zip",
+      "sha256": "5187a492843f8f3614567471dec8773227b09f84632d6c595f466e362ee93947"
+    }
+  }
+}

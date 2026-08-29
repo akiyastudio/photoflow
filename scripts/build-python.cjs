@@ -20,7 +20,7 @@ const compatibilityHiddenImports = readdirSync(compatibilityRoot, { recursive: t
 
 // These workers now share the tools runtime. Remove stale standalone outputs
 // so local release inspection cannot mistake them for packaged resources.
-for (const retiredOutput of ['thumbnail-image-worker', 'workspace-db-worker', 'tools', 'tools.exe', sharedWorkerName, 'thumbnail-image-worker.exe', 'workspace-db-worker.exe']) {
+for (const retiredOutput of ['thumbnail-image-worker', 'workspace-db-worker', 'tools', 'tools.exe', sharedWorkerName, 'thumbnail-image-worker.exe', 'workspace-db-worker.exe', 'ffmpeg.zip', 'ffmpeg-runtime-manifest.json']) {
   rmSync(join(pythonDistRoot, retiredOutput), { recursive: true, force: true });
 }
 rmSync(join(releaseRoot, 'components', 'raw-decoder-libraw'), { recursive: true, force: true });

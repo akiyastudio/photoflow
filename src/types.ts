@@ -723,13 +723,15 @@ export interface ComponentStatus {
   description: string;
   capability: string;
   installed: boolean;
+  /** False when the installed component is intentionally disabled by the user. */
+  enabled?: boolean;
   compatible: boolean;
   version: string;
   path: string;
   source: 'user' | 'development' | 'missing' | string;
   sizeBytes: number;
   error?: string;
-  status?: 'pending-install' | 'installed' | 'update-available' | 'incompatible' | 'invalid' | 'integrity-invalid' | 'package-invalid' | string;
+  status?: 'pending-install' | 'installed' | 'disabled' | 'update-available' | 'incompatible' | 'invalid' | 'integrity-invalid' | 'package-invalid' | string;
   integrityStatus?: 'verified' | 'pinned-unverified' | 'unsigned' | 'invalid' | string;
   integrityMessage?: string;
   packageVersion?: string;
@@ -1023,6 +1025,7 @@ export interface IElectronAPI {
   clearInterfaceCache: () => Promise<{ success: boolean; clearedBytes?: number; error?: string }>;
   getCursorScreenPoint: () => Promise<{ x: number; y: number }>;
   installComponent: (componentId: string) => Promise<{ success: boolean; cancelled?: boolean; packageSizeBytes?: number; error?: string }>;
+  setComponentEnabled: (componentId: string, enabled: boolean) => Promise<{ success: boolean; enabled?: boolean; error?: string }>;
   deleteComponentPackage: (kind: 'component' | 'advanced', componentId?: string) => Promise<{ success: boolean; deletedBytes?: number; error?: string }>;
   uninstallComponent: (componentId: string, options: { clearUserData: boolean }) => Promise<{ success: boolean; dataCleared?: boolean; cleanupWarnings?: string[]; error?: string }>;
   getStorageDevices: () => Promise<StorageDeviceInventoryResult>;

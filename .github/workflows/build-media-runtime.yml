@@ -4,8 +4,8 @@ on:
   workflow_dispatch:
   push:
     paths:
-      - media-runtime.lock.json
-      - scripts/media-runtime/**
+      - extensions/video-tools/media-runtime.lock.json
+      - extensions/video-tools/scripts/media-runtime/**
       - .github/workflows/build-media-runtime.yml
 
 permissions:
@@ -37,11 +37,11 @@ jobs:
             mingw-w64-ucrt-x86_64-meson
       - name: Build minimal FFmpeg and compliance archives
         shell: msys2 {0}
-        run: bash scripts/media-runtime/build-ffmpeg-windows.sh
+        run: bash extensions/video-tools/scripts/media-runtime/build-ffmpeg-windows.sh
       - name: Upload runtime and corresponding source together
         uses: actions/upload-artifact@v4
         with:
           name: photoflow-media-runtime-windows-x64
-          path: artifacts/installers/media-runtime/*
+          path: extensions/video-tools/artifacts/installers/media-runtime/*
           if-no-files-found: error
           retention-days: 90

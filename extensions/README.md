@@ -49,6 +49,11 @@ Packaged builds scan only this location:
 
 Components beside `Photoflow.exe` or inside `resources\components` are ignored.
 
+Installed and development components can be disabled from Component Management
+without uninstalling them or deleting their data. Disabling closes their pages,
+stops their services and worker processes, removes their Host contributions, and
+persists across application restarts until the component is enabled again.
+
 ## Manifest contract
 
 `component.json` uses API version 1 and must contain a known component `id`, a

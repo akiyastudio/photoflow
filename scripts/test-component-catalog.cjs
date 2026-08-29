@@ -59,6 +59,18 @@ try {
   fs.writeFileSync(path.join(installed, 'tool.exe'), 'binary');
   status = registry.list().find(item => item.id === 'third-party-tool');
   assert.strictEqual(status.status, 'update-available');
+  registry.setComponentEnabled('third-party-tool', false);
+  status = registry.list().find(item => item.id === 'third-party-tool');
+  assert.strictEqual(status.enabled, false, 'an installed production component can be disabled without removing it');
+  assert.strictEqual(status.status, 'disabled');
+  assert.strictEqual(registry.resolve('third-party-tool'), null, 'disabled components cannot resolve a runtime');
+  assert(!registry.hostCandidates().some(item => item.expectedId === 'third-party-tool'), 'disabled components are absent from Host discovery');
+  const restartedDisabledRegistry = createComponentRegistry({ projectRoot: sandbox, userComponentRoot: componentRoot, isPackaged: true, platform: 'win32', arch: 'x64' });
+  assert.strictEqual(restartedDisabledRegistry.inspect('third-party-tool').enabled, false, 'disabled state survives application restart');
+  restartedDisabledRegistry.setComponentEnabled('third-party-tool', true);
+  const restartedEnabledRegistry = createComponentRegistry({ projectRoot: sandbox, userComponentRoot: componentRoot, isPackaged: true, platform: 'win32', arch: 'x64' });
+  assert.strictEqual(restartedEnabledRegistry.inspect('third-party-tool').enabled, true, 're-enabled state survives application restart');
+  registry.setComponentEnabled('third-party-tool', true);
   fs.unlinkSync(archive);
   assert.strictEqual(registry.list().find(item => item.id === 'third-party-tool').status, 'installed', 'installed entry survives package deletion');
   fs.rmSync(path.join(componentRoot, 'third-party-tool'), { recursive: true, force: true });

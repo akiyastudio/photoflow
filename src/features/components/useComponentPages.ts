@@ -26,7 +26,7 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
   useEffect(() => { let active = true; void window.electronAPI.getComponentContributions().then(result => { if (active) setContributions(result.success ? result.contributions || [] : []); }).catch(() => { if (active) setContributions([]); }); return () => { active = false; }; }, [components]);
 
   useEffect(() => {
-    const installedIds = new Set(components.filter(component => component.installed).map(component => component.id));
+    const installedIds = new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id));
     const unavailablePages = pages.filter(page => !installedIds.has(page.componentId));
     if (!unavailablePages.length) return;
     unavailablePages.forEach(page => { if (page.instanceId) void window.electronAPI.closeComponentPage(page.instanceId).catch(() => undefined); });
