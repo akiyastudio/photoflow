@@ -35,6 +35,12 @@ const diagnosticToken = value => {
   const token = String(value || '').trim();
   return /^[a-z0-9_.:-]{1,80}$/i.test(token) ? token : 'unknown';
 };
+const componentScrollbarCss = theme => {
+  const dark = theme === 'dark';
+  const thumb = dark ? '#374151' : '#cbd5e1';
+  const hover = dark ? '#4b5563' : '#94a3b8';
+  return `:root{--photoflow-scrollbar-thumb:${thumb};--photoflow-scrollbar-thumb-hover:${hover}}::-webkit-scrollbar{width:12px;height:12px;background:transparent}::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent}::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:9999px;background-color:var(--photoflow-scrollbar-thumb);background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background-color:var(--photoflow-scrollbar-thumb-hover)}::-webkit-scrollbar-button{display:none;width:0;height:0}`;
+};
 
 class ComponentViewManager {
   constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, writeLog = () => undefined, onViewStackChanged = () => undefined }) {
@@ -130,7 +136,7 @@ class ComponentViewManager {
       ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
     })));
   }
-  listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, hostApiVersion: item.hostApiVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(contribution.placement ? { placement: contribution.placement } : {}), ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
+  listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, hostApiVersion: item.hostApiVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, ...(contribution.description ? { description: contribution.description } : {}), pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(contribution.placement ? { placement: contribution.placement } : {}), ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
 
   async open(request) {
     return this.openSurface(request, 'project');
@@ -260,7 +266,7 @@ class ComponentViewManager {
     view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
     instance.readyPromise = Promise.resolve().then(() => view.webContents.loadFile(page.entry)).then(() => {
       if (this.instances.get(key) !== instance || view.webContents.isDestroyed()) throw new Error('Component page open was superseded');
-      return instance;
+      return this.applyScrollbarStyle(instance).then(() => instance);
     });
     try { await instance.readyPromise; }
     catch (error) { if (this.instances.get(key) === instance) this.close(instanceId); throw error; }
@@ -289,11 +295,26 @@ class ComponentViewManager {
     };
   }
 
+  async applyScrollbarStyle(instance) {
+    const contents = instance?.view?.webContents;
+    if (!contents || contents.isDestroyed() || typeof contents.insertCSS !== 'function') return;
+    const previousKey = instance.scrollbarCssKey;
+    let nextKey;
+    try { nextKey = await contents.insertCSS(componentScrollbarCss(this.resolvedTheme)); }
+    catch (error) { this.writeLog('warn', 'Unable to apply component scrollbar style', { componentId: instance.descriptor?.componentId || '', error: error?.message || String(error) }); return; }
+    if (contents.isDestroyed() || this.instancesById.get(instance.instanceId) !== instance) {
+      if (nextKey && typeof contents.removeInsertedCSS === 'function') await contents.removeInsertedCSS(nextKey).catch(() => undefined);
+      return;
+    }
+    instance.scrollbarCssKey = nextKey;
+    if (previousKey && typeof contents.removeInsertedCSS === 'function') await contents.removeInsertedCSS(previousKey).catch(() => undefined);
+  }
+
   setResolvedTheme(value) {
     const resolvedTheme = normalizeResolvedTheme(value);
     if (this.resolvedTheme === resolvedTheme) return false;
     this.resolvedTheme = resolvedTheme;
-    for (const instance of this.instances.values()) if (!instance.view.webContents.isDestroyed()) instance.view.webContents.send('component-sdk:theme-changed', { contractVersion: 1, resolvedTheme });
+    for (const instance of this.instances.values()) if (!instance.view.webContents.isDestroyed()) { instance.view.webContents.send('component-sdk:theme-changed', { contractVersion: 1, resolvedTheme }); void this.applyScrollbarStyle(instance); }
     return true;
   }
 

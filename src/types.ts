@@ -780,7 +780,7 @@ export interface ComponentPageOpenScope {
   sourcePageId: string;
 }
 export type ComponentContributionType = 'component.sidePanel' | 'media.contextAction' | 'project.contextAction' | 'project.importProvider' | 'project.exportProvider' | 'application.command';
-export interface ComponentContribution { componentId: string; componentVersion: string; hostApiVersion: 7; contributionId: string; type: ComponentContributionType; label: string; title: string; pageId: string; rpcMethods: string[]; /** Only component.sidePanel and project.contextAction may use this grouped Host placement. */ placement?: 'workspace.videoTools'; iconUrl?: string }
+export interface ComponentContribution { componentId: string; componentVersion: string; hostApiVersion: 7; contributionId: string; type: ComponentContributionType; label: string; title: string; description?: string; pageId: string; rpcMethods: string[]; /** Only component.sidePanel and project.contextAction may use this grouped Host placement. */ placement?: 'workspace.videoTools'; iconUrl?: string }
 
 export interface ComponentPageInstance {
   identity: string;

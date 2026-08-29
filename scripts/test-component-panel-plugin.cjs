@@ -21,7 +21,7 @@ const manifest = {
     compatibility: { minHostApiVersion: 7, maxHostApiVersion: 7 },
     contributions: [
       { type: 'component.fullPage', id: 'panel-ui', title: 'Fixture panel', entry: 'ui/panel.html' },
-      { type: 'component.sidePanel', id: 'panel', label: 'Fixture', title: 'Fixture panel', pageId: 'panel-ui', rpcMethods: ['fixture.run.v1'] },
+      { type: 'component.sidePanel', id: 'panel', label: 'Fixture', title: 'Fixture panel', description: 'Fixture panel description.', pageId: 'panel-ui', rpcMethods: ['fixture.run.v1'] },
     ],
     service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1'], capabilities: ['dialogs.v7'], permissions: ['dialogs'], events: [] },
   },
@@ -35,6 +35,8 @@ class Contents extends EventEmitter {
   loadFile() { return Promise.resolve(); }
   send() {}
   setWindowOpenHandler() {}
+  insertCSS(value) { this.insertedCss = value; return Promise.resolve(`css-${this.id}`); }
+  removeInsertedCSS() { return Promise.resolve(); }
   close() { this.destroyed = true; this.emit('destroyed'); }
 }
 class View {
@@ -67,6 +69,7 @@ class View {
     assert.equal(validate(videoToolsManifest), true, JSON.stringify(validate.errors));
     const videoToolsDescriptor = parseComponentHostManifest(videoToolsManifest, videoToolsRoot);
     assert.deepEqual(videoToolsDescriptor.contributions.map(item => [item.id, item.placement]), [['transcode', 'workspace.videoTools'], ['split', 'workspace.videoTools']]);
+    assert.equal(videoToolsDescriptor.contributions.find(item => item.id === 'transcode').description, '转换视频封装、编码、画质与音频。');
 
     const handlers = new Map();
     const hostMessages = [];
@@ -80,6 +83,7 @@ class View {
       inputGrantService: { grantDroppedInputs: async paths => ({ apiVersion: 7, inputs: paths.map((name, index) => ({ name, token: `token-${index}` })) }) },
     });
     assert.deepEqual(manager.listToolbarActions(), [], 'panel-only components must not create a new-page toolbar action');
+    assert.equal(manager.listContributions()[0].description, 'Fixture panel description.', 'panel descriptions pass through the generic Host contribution contract');
 
     const open = sourcePageId => manager.openContribution({
       componentId: descriptor.componentId,
@@ -98,6 +102,7 @@ class View {
     assert.notEqual(first.instanceId, second.instanceId, 'each file page must own its component panel instance');
     assert.equal(views.length, 2);
     assert.equal((await open('page-a')).instanceId, first.instanceId, 'the same file page must reuse its panel instance');
+    assert(views.every(view => view.webContents.insertedCss.includes('::-webkit-scrollbar') && view.webContents.insertedCss.includes('::-webkit-scrollbar-button{display:none')), 'every isolated component page inherits the Host scrollbar shape without exposing Host CSS');
     const authorizedDrop = await handlers.get('component-sdk:authorize-files')({ sender: views[0].webContents }, ['dropped.mp4']);
     assert.deepEqual(authorizedDrop.inputs, [{ name: 'dropped.mp4', token: 'token-0' }], 'component preload can exchange real dropped File objects for scoped input tokens');
     let escapePrevented = false;
@@ -108,6 +113,7 @@ class View {
 
     const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'components', 'ComponentToolPanelSurface.tsx'), 'utf8');
     for (const marker of ['tool-panel-backdrop', 'tool-panel-window', 'tool-panel-header', 'tool-panel-body', '关闭插件面板', 'setComponentPageBounds']) assert(panelSource.includes(marker));
+    assert(panelSource.includes('contribution.description') && !panelSource.includes('>插件面板<'), 'component panels render the declared native-panel description instead of a plugin-only subtitle');
     const dockSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'components', 'ComponentContributionDock.tsx'), 'utf8');
     assert(dockSource.includes("opened?.contribution.type === 'component.sidePanel'") && dockSource.includes('<ComponentToolPanelSurface'), 'side panels must use the unified file-page panel surface');
     const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');

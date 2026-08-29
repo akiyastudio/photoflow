@@ -73,7 +73,7 @@ export const ComponentToolPanelSurface = ({ contribution, instanceId, open, onCl
       <section ref={dialogRef} role="dialog" aria-modal="true" aria-label={contribution.title} style={{ height: 'min(720px, 90vh)' }} className="tool-panel-window flex w-full max-w-[960px] flex-col overflow-hidden border bg-white">
         <header className="tool-panel-header flex shrink-0 items-center gap-3 border-b border-slate-200 px-5">
           <span className="tool-panel-title-icon flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] bg-blue-50 text-blue-600"><ComponentIcon src={contribution.iconUrl} size={18}/></span>
-          <div className="min-w-0 flex-1"><h3 className="truncate text-[15px] font-bold text-slate-800">{contribution.title}</h3><p className="mt-0.5 truncate text-[10px] text-slate-400">插件面板</p></div>
+          <div className="min-w-0 flex-1"><h3 className="truncate text-[15px] font-bold text-slate-800">{contribution.title}</h3>{contribution.description && <p className="mt-0.5 truncate text-[10px] text-slate-400">{contribution.description}</p>}</div>
           <button type="button" onClick={onClose} aria-label="关闭插件面板" title="关闭" className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100"><X size={18}/></button>
         </header>
         <div className="tool-panel-body relative min-h-0 flex-1 overflow-hidden"><div ref={surfaceRef} data-component-view-host aria-label={`${contribution.title} 插件内容`} className="absolute inset-0"/></div>
