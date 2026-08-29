@@ -58,6 +58,7 @@ export const normalizeVideoTranscodeSettings = (value?: Partial<VideoTranscodeSe
   ...DEFAULT_VIDEO_TRANSCODE_SETTINGS,
   ...(value || {}),
   videoBitrateMbps: Number(value?.videoBitrateMbps) > 0 ? Number(value?.videoBitrateMbps) : null,
+  retryCount: 1,
 });
 
 const preset = (id: string, name: string, settings: Partial<VideoTranscodeSettings>): VideoTranscodePreset => ({

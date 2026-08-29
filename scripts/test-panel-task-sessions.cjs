@@ -9,6 +9,7 @@ const main = read('src/main.tsx');
 const app = read('src/App.tsx');
 const taskCenter = read('src/features/background-tasks/TaskCenter.tsx');
 const taskStatus = read('src/components/TaskStatus.tsx');
+const toolViews = read('src/features/tools/ToolViews.tsx');
 const indicator = read('src/features/background-tasks/BackgroundTaskIndicator.tsx');
 const fileTransferToast = read('src/features/background-tasks/FileTransferToast.tsx');
 const toastModelSource = read('src/features/background-tasks/task-toast-model.ts');
@@ -21,6 +22,7 @@ const projectToolModal = read('src/features/workspace/ProjectToolModal.tsx');
 const projectVersionTree = read('src/components/ProjectVersionTree.tsx');
 const trackingConfirmation = read('src/features/versioning/TrackingConfirmationPanel.tsx');
 const versionManager = read('src/components/VersionManager.tsx');
+const videoToolsUi = read('extensions/video-tools/ui/app.js');
 
 const compiledFileTransferToast = ts.transpileModule(fileTransferToast, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
 
@@ -196,7 +198,10 @@ assert(taskCenter.includes('onBackgroundTaskChanged') && taskCenter.includes('re
 assert(taskStatus.includes('usePanelTaskReporter') && taskStatus.includes("const state: TaskCenterProgressReport['state'] = isRunning ? 'running'"), 'the shared progress component must report panel task state without per-panel adapters');
 assert(indicator.includes('useTaskCenter()') && !indicator.includes('onBackgroundTaskChanged('), 'the background indicator must consume the shared provider instead of creating a duplicate subscription');
 assert(workspace.includes('mountedPanels.has') && workspace.includes("open={panel === 'research'}") && workspace.includes("open={panel === 'converter'}"), 'component panels must stay mounted while their modal is minimized');
-assert(projectToolModal.includes('isActivePresentedBackgroundTaskForPanel(candidate, ownerPageId, panelKind)') && projectToolModal.includes("aria-label={effectiveBusy ? '收起到后台' : '关闭'}") && projectToolModal.includes('if (event.target === event.currentTarget && !effectiveBusy)'), 'renderer and main-process running tasks must minimize explicitly and ignore accidental backdrop clicks');
+assert(projectToolModal.includes('isActivePresentedBackgroundTaskForPanel(candidate, ownerPageId, panelKind)') && projectToolModal.includes("aria-label={effectiveBusy ? '收起到后台' : '关闭'}") && projectToolModal.includes("window.addEventListener('pointerdown', interceptOutsidePointer, true)") && projectToolModal.includes('event.preventDefault()') && projectToolModal.includes('event.stopImmediatePropagation()') && projectToolModal.includes('if (!effectiveBusy) onClose()'), 'the capture-phase backdrop boundary must consume every outside pointer and close only idle panels');
+assert(projectToolModal.includes('useBackgroundTaskBusyFallback && backgroundTaskActive') && !workspace.includes('busy={videoTranscodeBusy}') && videoToolsUi.includes("event.eventType!=='complete'") && videoToolsUi.includes('video-tools.operation.current.v1'), 'plugin video transcode must use live component events and recover the current Host task instead of a stale renderer snapshot');
+assert(toolViews.includes('const transcodeBusy = task.isRunning;') && toolViews.includes('onBusyChange?.(transcodeBusy)') && toolViews.includes('onBusyChange?.(true)'), 'only real encoding, not automatic output estimation, may put the video transcode panel in busy mode');
+assert(toolViews.includes('AUTO_TRANSCODE_INSPECTION_DELAY_MS') && toolViews.includes("startInspectionRef.current([...taskArguments, '--inspect-only']") && toolViews.includes('lastRequestedInspectionKeyRef.current === inspectionKey') && !toolViews.includes('分析媒体与设备'), 'video transcode configuration changes must debounce an automatic output estimate without a manual analysis button');
 for (const inlineLayerState of ['progressCompare', 'progressRepair', 'pendingProgressFolders.length', 'draggingChildId || pendingRelationChange', 'batchRenameOpen', 'confirmDelete']) {
   assert(workspace.includes(`useEscapeLayer(active && Boolean(${inlineLayerState})`) || workspace.includes(`useEscapeLayer(active && ${inlineLayerState}`), `inline ${inlineLayerState} host suspension must release when its project page becomes inactive`);
 }

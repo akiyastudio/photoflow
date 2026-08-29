@@ -22,7 +22,7 @@ const normalizeOpenScope = request => {
 };
 const componentPageKey = ({ componentId, workspacePath, projectId }) => ['project', componentId, normalizeIdentity(workspacePath), String(projectId || '').trim()].join(PAGE_KEY_SEPARATOR);
 const componentSettingsPageKey = ({ componentId, pageId }) => ['application.settings', componentId, String(pageId || '').trim()].join(PAGE_KEY_SEPARATOR);
-const componentContributionKey = ({ componentId, contributionId, workspacePath, projectId }, surface) => [surface, componentId, contributionId, normalizeIdentity(workspacePath), String(projectId || '')].join(PAGE_KEY_SEPARATOR);
+const componentContributionKey = ({ componentId, contributionId, workspacePath, projectId, sourcePageId }, surface) => [surface, componentId, contributionId, normalizeIdentity(workspacePath), String(projectId || ''), surface === 'component.sidePanel' ? String(sourcePageId || '').trim() : ''].join(PAGE_KEY_SEPARATOR);
 const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
 const selectComponentPreload = (descriptor, { core }) => {
@@ -96,7 +96,7 @@ class ComponentViewManager {
   }
 
   listToolbarActions() {
-    return this.registry.list().map(item => ({
+    return this.registry.list().filter(item => item.toolbarAction && item.fullPage).map(item => ({
       componentId: item.componentId,
       componentVersion: item.componentVersion,
       contractVersion: item.contractVersion,
@@ -123,7 +123,7 @@ class ComponentViewManager {
       ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
     })));
   }
-  listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, hostApiVersion: item.hostApiVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
+  listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, hostApiVersion: item.hostApiVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(contribution.placement ? { placement: contribution.placement } : {}), ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
 
   async open(request) {
     return this.openSurface(request, 'project');
@@ -231,6 +231,11 @@ class ComponentViewManager {
       const details = typeof detailsOrLevel === 'object' ? detailsOrLevel : { level: detailsOrLevel, message, lineNumber };
       if (!['error', 3].includes(details?.level)) return;
       diagnostic('error', 'Component renderer console error', { lineNumber: Number(details?.lineNumber) || 0, messageLength: Math.min(String(details?.message || '').length, 10000) });
+    });
+    view.webContents.on('before-input-event', (event, input) => {
+      if (instance.context.surface !== 'component.sidePanel' || !instance.logicalActive || input?.type !== 'keyDown' || input?.key !== 'Escape') return;
+      event.preventDefault();
+      if (!this.mainWindow?.isDestroyed?.()) this.mainWindow?.webContents?.send?.('component-host:panel-close-requested', instance.instanceId);
     });
     view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     view.webContents.on('will-navigate', event => event.preventDefault());

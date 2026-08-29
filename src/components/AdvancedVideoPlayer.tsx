@@ -26,6 +26,7 @@ const createPlaybackToken = () => globalThis.crypto?.randomUUID?.() || `video_${
 
 type VideoDirectionalInputGroup = 'arrows' | 'forward-back';
 type VideoDirectionalAction = 'navigate' | 'seek';
+type VideoPlaybackBackend = 'native' | 'chromium';
 
 const videoDirectionalAction = (arrowKeyAction: VideoPlaybackSettings['arrowKeyAction'], group: VideoDirectionalInputGroup): VideoDirectionalAction => {
   if (group === 'arrows') return arrowKeyAction === 'navigate' ? 'navigate' : 'seek';
@@ -76,12 +77,14 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const showNavigation = Boolean(onNavigate);
   const playerRootRef = useRef<HTMLDivElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const chromiumVideoRef = useRef<HTMLVideoElement>(null);
   const controlPanelRef = useRef<HTMLDivElement>(null);
   const controlsOverlayRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef('');
   const playerIdRef = useRef(createPlaybackToken());
   const requestIdRef = useRef('');
   const errorReportedRef = useRef(false);
+  const chromiumErrorReportedRef = useRef(false);
   const metadataKeyRef = useRef('');
   const onErrorRef = useRef(onError);
   const onMetadataRef = useRef(onMetadata);
@@ -91,6 +94,8 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const onEscapeRef = useRef(onEscape);
   const onPlaybackStateRef = useRef(onPlaybackState);
   const playbackPositionRef = useRef({ time: 0, duration: 0 });
+  const fallbackStartTimeRef = useRef(0);
+  const backendRef = useRef<VideoPlaybackBackend>('native');
   const nativeContextMenuOpenRef = useRef(false);
   onErrorRef.current = onError;
   onMetadataRef.current = onMetadata;
@@ -100,6 +105,8 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   onEscapeRef.current = onEscape;
   onPlaybackStateRef.current = onPlaybackState;
   const [sessionId, setSessionId] = useState('');
+  const [backend, setBackend] = useState<VideoPlaybackBackend>('native');
+  const [chromiumUrl, setChromiumUrl] = useState('');
   const [starting, setStarting] = useState(true);
   const [capturing, setCapturing] = useState(false);
   const [captureNotice, setCaptureNotice] = useState<{ text: string; error?: boolean } | null>(null);
@@ -108,6 +115,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const subtitleMemoryRestoredRef = useRef(false);
   const rememberAddedSubtitleRef = useRef(false);
   const [state, setState] = useState<VideoPlayerState>(initialState);
+  backendRef.current = backend;
 
   useEffect(() => setSubtitleFontSize(normalizeSubtitleFontSize(keyboardSettings.subtitleSize)), [keyboardSettings.subtitleSize]);
 
@@ -118,7 +126,12 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     sessionRef.current = '';
     nativeContextMenuOpenRef.current = false;
     errorReportedRef.current = false;
+    chromiumErrorReportedRef.current = false;
     metadataKeyRef.current = '';
+    fallbackStartTimeRef.current = 0;
+    backendRef.current = 'native';
+    setBackend('native');
+    setChromiumUrl('');
     setStarting(true);
     setSessionId('');
     setCapturing(false);
@@ -127,6 +140,24 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     subtitleMemoryRestoredRef.current = false;
     rememberAddedSubtitleRef.current = false;
     setState(initialState());
+    const fallbackToChromium = (reason: string) => {
+      if (!active || errorReportedRef.current) return;
+      errorReportedRef.current = true;
+      fallbackStartTimeRef.current = playbackPositionRef.current.time;
+      backendRef.current = 'chromium';
+      setBackend('chromium');
+      setStarting(true);
+      setControlPanel(null);
+      setCaptureNotice({ text: reason ? '原生组件不可用，已切换到 Chromium 播放' : '已切换到 Chromium 播放' });
+      const currentSession = sessionRef.current;
+      sessionRef.current = '';
+      setSessionId('');
+      if (currentSession) {
+        window.electronAPI.setVideoPlayerBounds(currentSession, { x: 0, y: 0, width: 0, height: 0, visible: false });
+        void window.electronAPI.stopVideoPlayer(currentSession);
+      }
+      setState(initialState());
+    };
     const unsubscribe = window.electronAPI.onVideoPlayerState(update => {
       if (update.playerId !== playerIdRef.current || update.requestId !== requestIdRef.current) return;
       if (sessionRef.current && update.sessionId !== sessionRef.current) return;
@@ -153,10 +184,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         return;
       }
       if (update.type === 'fatal' || update.type === 'error' || update.type === 'stopped') {
-        if (!errorReportedRef.current) {
-          errorReportedRef.current = true;
-          onErrorRef.current(update.error || (update.type === 'stopped' ? '视频播放器会话已停止' : '视频播放器失败，请修复或重新安装视频播放器运行时'));
-        }
+        fallbackToChromium(update.error || (update.type === 'stopped' ? '视频播放器会话已停止' : '原生视频播放器失败'));
         return;
       }
       if (update.type === 'subtitle-tracks') {
@@ -173,19 +201,16 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     });
     void window.electronAPI.startVideoPlayer(filePath, keyboardSettings, playerIdRef.current, requestId).then(result => {
       if (!result.success || !result.sessionId) {
-        if (active && !errorReportedRef.current) {
-          errorReportedRef.current = true;
-          onErrorRef.current(result.error || '视频播放器无法启动，请在组件管理中修复或重新安装视频播放器运行时');
-        }
+        fallbackToChromium(result.error || '原生视频播放器无法启动');
         return;
       }
-      if (!active || requestIdRef.current !== requestId) {
+      if (!active || requestIdRef.current !== requestId || backendRef.current !== 'native') {
         void window.electronAPI.stopVideoPlayer(result.sessionId);
         return;
       }
       sessionRef.current = result.sessionId;
       setSessionId(result.sessionId);
-    });
+    }).catch(error => fallbackToChromium(error instanceof Error ? error.message : '原生视频播放器无法启动'));
     return () => {
       active = false;
       if (requestIdRef.current === requestId) requestIdRef.current = '';
@@ -198,6 +223,26 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       }
     };
   }, [filePath, keyboardSettings.arrowKeyAction, keyboardSettings.subtitlesEnabled, keyboardSettings.subtitlePreferredLanguages.join(','), keyboardSettings.subtitleSize, keyboardSettings.subtitleStyle]);
+
+  useEffect(() => {
+    if (backend !== 'chromium') return;
+    let active = true;
+    setChromiumUrl('');
+    void window.electronAPI.getMediaOriginal(filePath, 'video').then(result => {
+      if (!active) return;
+      if (!result.success || !result.mediaUrl) {
+        setStarting(false);
+        onErrorRef.current(result.error || 'Chromium 无法读取视频文件');
+        return;
+      }
+      setChromiumUrl(result.mediaUrl);
+    }).catch(error => {
+      if (!active) return;
+      setStarting(false);
+      onErrorRef.current(error instanceof Error ? error.message : 'Chromium 无法读取视频文件');
+    });
+    return () => { active = false; };
+  }, [backend, filePath]);
 
   useEffect(() => {
     if (!sessionId || subtitleMemoryRestoredRef.current || !state.subtitleTracks?.length) return;
@@ -323,9 +368,21 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   }, [state.width, state.height, state.duration]);
 
   const control = (action: 'play' | 'pause' | 'seek' | 'volume' | 'mute' | 'speed' | 'stop' | 'subtitle-select' | 'subtitle-visible' | 'subtitle-delay', value?: number | boolean | string) => {
+    if (backendRef.current === 'chromium') {
+      const video = chromiumVideoRef.current;
+      if (!video) return;
+      if (action === 'play') void video.play().catch(() => undefined);
+      else if (action === 'pause' || action === 'stop') video.pause();
+      else if (action === 'seek') video.currentTime = Math.max(0, Math.min(Number.isFinite(video.duration) ? video.duration : Number.MAX_SAFE_INTEGER, Number(value) || 0));
+      else if (action === 'volume') video.volume = Math.max(0, Math.min(1, (Number(value) || 0) / 100));
+      else if (action === 'mute') video.muted = Boolean(value);
+      else if (action === 'speed') video.playbackRate = Math.max(0.25, Math.min(4, Number(value) || 1));
+      return;
+    }
     if (!sessionRef.current) return;
     window.electronAPI.controlVideoPlayer(sessionRef.current, { action, value });
   };
+  const playbackReady = Boolean(sessionId || backend === 'chromium' && chromiumUrl);
   const paused = state.paused !== false;
   const duration = Math.max(0, Number(state.duration) || 0);
   const time = Math.max(0, Math.min(duration || Number.MAX_SAFE_INTEGER, Number(state.time) || 0));
@@ -349,17 +406,16 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   }, [time, duration, paused]);
 
   useEffect(() => {
-    if (!sessionId || !editorSeekRequest) return;
+    if (!playbackReady || !editorSeekRequest) return;
     if (editorSeekRequest.pause) control('pause');
     control('seek', editorSeekRequest.time);
-  }, [sessionId, editorSeekRequest?.id]);
+  }, [playbackReady, editorSeekRequest?.id]);
   const seekRelative = useCallback((seconds: number) => {
-    if (!sessionRef.current) return;
     const current = playbackPositionRef.current;
-    window.electronAPI.controlVideoPlayer(sessionRef.current, {
-      action: 'seek',
-      value: Math.max(0, Math.min(current.duration || Number.MAX_SAFE_INTEGER, current.time + seconds)),
-    });
+    const value = Math.max(0, Math.min(current.duration || Number.MAX_SAFE_INTEGER, current.time + seconds));
+    if (backendRef.current === 'chromium') {
+      if (chromiumVideoRef.current) chromiumVideoRef.current.currentTime = value;
+    } else if (sessionRef.current) window.electronAPI.controlVideoPlayer(sessionRef.current, { action: 'seek', value });
   }, []);
 
   useEffect(() => {
@@ -405,7 +461,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   }, [keyboardSettings.arrowKeyAction, seekRelative]);
   const captureFrame = async () => {
     const currentSession = sessionRef.current;
-    if (!currentSession || capturing) return;
+    if (backendRef.current !== 'native' || !currentSession || capturing) return;
     setCapturing(true);
     setCaptureNotice(null);
     try {
@@ -461,10 +517,32 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   };
   const backwardControlLabel = forwardBackAction === 'navigate' ? '上一个视频' : '快退 5 秒';
   const forwardControlLabel = forwardBackAction === 'navigate' ? '下一个视频' : '快进 5 秒';
+  const syncChromiumPlaybackState = (video: HTMLVideoElement, buffering = false) => {
+    setStarting(false);
+    setState(current => ({
+      ...current,
+      paused: video.paused,
+      buffering,
+      volume: Math.round(video.volume * 100),
+      muted: video.muted,
+      speed: video.playbackRate,
+      time: Number.isFinite(video.currentTime) ? video.currentTime : 0,
+      duration: Number.isFinite(video.duration) ? video.duration : 0,
+      width: video.videoWidth || undefined,
+      height: video.videoHeight || undefined,
+    }));
+  };
+  const reportChromiumError = (video: HTMLVideoElement) => {
+    if (chromiumErrorReportedRef.current) return;
+    chromiumErrorReportedRef.current = true;
+    setStarting(false);
+    const code = video.error?.code;
+    onErrorRef.current(code ? `Chromium 无法解码该视频（媒体错误 ${code}）` : 'Chromium 无法解码该视频');
+  };
 
   const playbackControls = bottomControls || <div className={`relative z-20 flex h-12 shrink-0 items-center gap-1 px-2 text-white ${controlsOverlay ? 'bg-[#070b15]/95 shadow-[0_-10px_24px_rgba(0,0,0,.35)]' : 'border-t border-white/10 bg-[#070b15]'}`}>
         {showNavigation && <button type="button" onClick={() => runForwardBackControl(-1)} title={backwardControlLabel} aria-label={backwardControlLabel} className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipBack size={16}/></button>}
-        <button type="button" disabled={!sessionId} onClick={togglePlayback} title={paused ? '播放' : '暂停'} aria-label={paused ? '播放' : '暂停'} className="rounded p-1.5 text-slate-100 hover:bg-white/10 disabled:opacity-40">{paused ? <Play size={17} fill="currentColor"/> : <Pause size={17} fill="currentColor"/>}</button>
+        <button type="button" disabled={!playbackReady} onClick={togglePlayback} title={paused ? '播放' : '暂停'} aria-label={paused ? '播放' : '暂停'} className="rounded p-1.5 text-slate-100 hover:bg-white/10 disabled:opacity-40">{paused ? <Play size={17} fill="currentColor"/> : <Pause size={17} fill="currentColor"/>}</button>
         {showNavigation && <button type="button" onClick={() => runForwardBackControl(1)} title={forwardControlLabel} aria-label={forwardControlLabel} className="rounded p-1.5 text-slate-100 hover:bg-white/10"><SkipForward size={16}/></button>}
         <span className="w-10 text-right text-[11px] tabular-nums text-slate-300">{formatTime(time)}</span>
         <input type="range" min={0} max={Math.max(0.01, duration)} step={0.01} value={Math.min(time, Math.max(0.01, duration))} disabled={!duration} onChange={event => control('seek', Number(event.currentTarget.value))} aria-label="播放进度" className="min-w-12 flex-1 accent-blue-500 disabled:opacity-40"/>
@@ -478,9 +556,9 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
               </div>
             </div>
           </div>}
-          <button type="button" disabled={!sessionId} onFocus={() => setControlPanel('speed')} onClick={cyclePlaybackSpeed} title={`播放速度 ${speed}×；单击切换，悬停选择`} aria-label={`当前播放速度 ${speed} 倍，单击切换到下一档`} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'speed' ? 'bg-white/10' : ''}`}><Gauge size={16}/></button>
+          <button type="button" disabled={!playbackReady} onFocus={() => setControlPanel('speed')} onClick={cyclePlaybackSpeed} title={`播放速度 ${speed}×；单击切换，悬停选择`} aria-label={`当前播放速度 ${speed} 倍，单击切换到下一档`} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'speed' ? 'bg-white/10' : ''}`}><Gauge size={16}/></button>
         </div>
-        <button type="button" disabled={!sessionId || starting || capturing} onClick={() => void captureFrame()} title="截取当前视频帧并保存到原视频目录" aria-label="截取当前视频帧" className="rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40">{capturing ? <Loader2 size={16} className="animate-spin"/> : <Camera size={16}/>}</button>
+        <button type="button" disabled={backend !== 'native' || !sessionId || starting || capturing} onClick={() => void captureFrame()} title={backend === 'chromium' ? 'Chromium 回退模式暂不支持截图' : '截取当前视频帧并保存到原视频目录'} aria-label="截取当前视频帧" className="rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40">{capturing ? <Loader2 size={16} className="animate-spin"/> : <Camera size={16}/>}</button>
         <div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
           {controlPanel === 'subtitles' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-72 pb-2" onClick={event => event.stopPropagation()}>
             <div role="menu" aria-label="字幕" className="max-h-80 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-2 text-xs shadow-2xl shadow-black/70">
@@ -494,7 +572,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
               </div>
             </div>
           </div>}
-          <button type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'subtitles' ? null : 'subtitles')} title="字幕" aria-label="字幕菜单" aria-expanded={controlPanel === 'subtitles'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'subtitles' ? 'bg-white/10' : ''}`}><Captions size={17}/></button>
+          <button type="button" disabled={backend !== 'native' || !sessionId} onClick={() => setControlPanel(current => current === 'subtitles' ? null : 'subtitles')} title={backend === 'chromium' ? 'Chromium 回退模式暂不支持组件字幕控制' : '字幕'} aria-label="字幕菜单" aria-expanded={controlPanel === 'subtitles'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'subtitles' ? 'bg-white/10' : ''}`}><Captions size={17}/></button>
         </div>
         <div className="relative shrink-0" onPointerEnter={() => setControlPanel('volume')} onPointerLeave={() => setControlPanel(null)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
           {controlPanel === 'volume' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-44 pb-2" onClick={event => event.stopPropagation()}>
@@ -503,7 +581,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
               <input type="range" min={0} max={100} step={1} value={muted ? 0 : volume} onChange={event => changeVolume(Number(event.currentTarget.value))} aria-label="调整音量" className="block w-full accent-blue-500"/>
             </div>
           </div>}
-          <button type="button" disabled={!sessionId} onFocus={() => setControlPanel('volume')} onClick={() => control('mute', !muted)} title={`${muted ? '开启声音' : '关闭声音'}；悬停调整音量`} aria-label={muted ? '开启声音' : '关闭声音'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'volume' ? 'bg-white/10' : ''}`}>{muted || volume === 0 ? <VolumeX size={16}/> : <Volume2 size={16}/>}</button>
+          <button type="button" disabled={!playbackReady} onFocus={() => setControlPanel('volume')} onClick={() => control('mute', !muted)} title={`${muted ? '开启声音' : '关闭声音'}；悬停调整音量`} aria-label={muted ? '开启声音' : '关闭声音'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'volume' ? 'bg-white/10' : ''}`}>{muted || volume === 0 ? <VolumeX size={16}/> : <Volume2 size={16}/>}</button>
         </div>
         {(starting || state.buffering) && <span role="status" className="inline-flex items-center gap-1 whitespace-nowrap text-[11px] text-blue-200"><Loader2 size={13} className="animate-spin"/>加载中</span>}
         {captureNotice && <span role="status" aria-live="polite" title={captureNotice.text} className={`max-w-24 truncate whitespace-nowrap text-[11px] ${captureNotice.error ? 'text-red-300' : 'text-emerald-300'}`}>{captureNotice.text}</span>}
@@ -516,6 +594,12 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       tabIndex={0}
       aria-label={paused ? '播放视频' : '暂停视频'}
       onClick={togglePlayback}
+      onPointerMove={() => { if (backend === 'chromium') onPointerActivityRef.current?.(); }}
+      onContextMenu={event => {
+        if (backend !== 'chromium' || !onContextMenuAtRef.current) return;
+        event.preventDefault();
+        onContextMenuAtRef.current(event.clientX, event.clientY);
+      }}
       onKeyDown={event => {
         if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
@@ -524,7 +608,33 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       }}
       className="relative min-h-0 flex-1 cursor-pointer bg-black bg-contain bg-center bg-no-repeat outline-none"
       style={poster ? { backgroundImage: `url(${JSON.stringify(poster).slice(1, -1)})` } : undefined}
-    />
+    >
+      {backend === 'chromium' && chromiumUrl && <video
+        ref={chromiumVideoRef}
+        src={chromiumUrl}
+        poster={poster}
+        autoPlay
+        playsInline
+        preload="auto"
+        draggable={false}
+        className="pointer-events-none h-full w-full object-contain"
+        onLoadedMetadata={event => {
+          const video = event.currentTarget;
+          const resumeAt = Math.max(0, Math.min(Number.isFinite(video.duration) ? video.duration : Number.MAX_SAFE_INTEGER, fallbackStartTimeRef.current));
+          if (resumeAt > 0) video.currentTime = resumeAt;
+          syncChromiumPlaybackState(video, true);
+        }}
+        onCanPlay={event => syncChromiumPlaybackState(event.currentTarget, false)}
+        onPlaying={event => syncChromiumPlaybackState(event.currentTarget, false)}
+        onPause={event => syncChromiumPlaybackState(event.currentTarget, false)}
+        onTimeUpdate={event => syncChromiumPlaybackState(event.currentTarget, false)}
+        onVolumeChange={event => syncChromiumPlaybackState(event.currentTarget, false)}
+        onRateChange={event => syncChromiumPlaybackState(event.currentTarget, false)}
+        onWaiting={event => { setState(current => ({ ...current, buffering: true })); setStarting(event.currentTarget.readyState < HTMLMediaElement.HAVE_CURRENT_DATA); }}
+        onEnded={event => syncChromiumPlaybackState(event.currentTarget, false)}
+        onError={event => reportChromiumError(event.currentTarget)}
+      />}
+    </div>
     {controlsVisible && (controlsOverlay ? <div ref={controlsOverlayRef} className="absolute inset-x-0 bottom-0 z-20">{playbackControls}</div> : playbackControls)}
   </div>;
 };

@@ -44,14 +44,37 @@ const TOOL_MODAL_DETAILS: Record<string, { description: string; icon: React.Reac
   'folder-mark': { description: '将文件夹标记为原始素材、进度或花絮。', icon: <GitBranch size={18}/> },
 };
 
-export const ToolModal = ({ title, ownerPageId, panelKind, open, busy = false, onClose, children }: { title: string; ownerPageId: string; panelKind: string; open: boolean; busy?: boolean; onClose: () => void; children: React.ReactNode }) => {
+export const ToolModal = ({ title, ownerPageId, panelKind, open, busy = false, useBackgroundTaskBusyFallback = true, onClose, children }: { title: string; ownerPageId: string; panelKind: string; open: boolean; busy?: boolean; useBackgroundTaskBusyFallback?: boolean; onClose: () => void; children: React.ReactNode }) => {
   const { backgroundTasks, panelTasks, reportPanelTask, dismissPanelTask } = useTaskCenter();
+  const backdropRef = useRef<HTMLDivElement>(null);
+  const dialogRef = useRef<HTMLElement>(null);
   const taskKey = panelTaskSessionKey(ownerPageId, panelKind);
   const task = panelTasks[taskKey];
   const manualBusyRef = useRef(false);
   const backgroundTaskActive = backgroundTasks.some(candidate => isActivePresentedBackgroundTaskForPanel(candidate, ownerPageId, panelKind));
-  const effectiveBusy = busy || task?.state === 'running' || backgroundTaskActive;
+  const effectiveBusy = busy || task?.state === 'running' || useBackgroundTaskBusyFallback && backgroundTaskActive;
   useEscapeLayer(open, onClose, true, true);
+
+  useEffect(() => {
+    if (!open) return;
+    const interceptOutsidePointer = (event: PointerEvent) => {
+      const backdrop = backdropRef.current;
+      const dialog = dialogRef.current;
+      if (!backdrop || !dialog) return;
+      const bounds = backdrop.getBoundingClientRect();
+      if (event.clientX < bounds.left || event.clientX > bounds.right || event.clientY < bounds.top || event.clientY > bounds.bottom) return;
+      const path = event.composedPath();
+      if (path.includes(dialog)) return;
+      const target = event.target instanceof Element ? event.target : null;
+      const higherDialog = target?.closest('[role="dialog"]');
+      if (higherDialog && higherDialog !== dialog) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      if (!effectiveBusy) onClose();
+    };
+    window.addEventListener('pointerdown', interceptOutsidePointer, true);
+    return () => window.removeEventListener('pointerdown', interceptOutsidePointer, true);
+  }, [effectiveBusy, onClose, open]);
 
   const reportBusyAsPanelTask = !panelKind.startsWith('version-');
   useEffect(() => {
@@ -65,7 +88,7 @@ export const ToolModal = ({ title, ownerPageId, panelKind, open, busy = false, o
   }, [busy, dismissPanelTask, ownerPageId, panelKind, reportBusyAsPanelTask, reportPanelTask, task, taskKey, title]);
 
   const detail = TOOL_MODAL_DETAILS[panelKind];
-  return createPortal(<div aria-hidden={!open} className={open ? 'tool-panel-backdrop fixed inset-x-0 bottom-0 top-10 z-[360] flex items-center justify-center p-4' : 'hidden'} onMouseDown={event => { if (event.target === event.currentTarget && !effectiveBusy) onClose(); }}><PanelTaskScope ownerPageId={ownerPageId} panelKind={panelKind} title={title}><section role="dialog" aria-modal="true" aria-label={title} className="tool-panel-window flex max-h-[90vh] w-full max-w-[960px] flex-col overflow-hidden border bg-white"><header className="tool-panel-header flex shrink-0 items-center gap-3 border-b border-slate-200 px-5"><span className="tool-panel-title-icon flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] bg-blue-50 text-blue-600">{detail?.icon}</span><div className="min-w-0 flex-1"><h3 className="truncate text-[15px] font-bold text-slate-800">{title}</h3>{detail?.description && <p className="mt-0.5 truncate text-[10px] text-slate-400">{detail.description}</p>}</div><button type="button" onClick={onClose} aria-label={effectiveBusy ? '收起到后台' : '关闭'} title={effectiveBusy ? '收起到后台，任务会继续运行' : '关闭'} className={`rounded-md text-slate-500 hover:bg-slate-100 ${effectiveBusy ? 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold' : 'p-1.5'}`}>{effectiveBusy ? <><Minimize2 size={15}/>收起到后台</> : <X size={18}/>}</button></header><div className="tool-panel-body min-h-0 flex-1 overflow-y-auto p-[22px]">{children}</div></section></PanelTaskScope></div>, document.body);
+  return createPortal(<div ref={backdropRef} aria-hidden={!open} className={open ? 'tool-panel-backdrop fixed inset-x-0 bottom-0 top-10 z-[360] flex cursor-default items-center justify-center p-4' : 'hidden'}><PanelTaskScope ownerPageId={ownerPageId} panelKind={panelKind} title={title}><section ref={dialogRef} role="dialog" aria-modal="true" aria-label={title} className="tool-panel-window flex max-h-[90vh] w-full max-w-[960px] flex-col overflow-hidden border bg-white"><header className="tool-panel-header flex shrink-0 items-center gap-3 border-b border-slate-200 px-5"><span className="tool-panel-title-icon flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] bg-blue-50 text-blue-600">{detail?.icon}</span><div className="min-w-0 flex-1"><h3 className="truncate text-[15px] font-bold text-slate-800">{title}</h3>{detail?.description && <p className="mt-0.5 truncate text-[10px] text-slate-400">{detail.description}</p>}</div><button type="button" onClick={onClose} aria-label={effectiveBusy ? '收起到后台' : '关闭'} title={effectiveBusy ? '收起到后台，任务会继续运行' : '关闭'} className={`rounded-md text-slate-500 hover:bg-slate-100 ${effectiveBusy ? 'inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-bold' : 'p-1.5'}`}>{effectiveBusy ? <><Minimize2 size={15}/>收起到后台</> : <X size={18}/>}</button></header><div className="tool-panel-body min-h-0 flex-1 overflow-y-auto p-[22px]">{children}</div></section></PanelTaskScope></div>, document.body);
 };
 
 export const ImportCompletionNotice = ({ message, onClose }: { message: string; onClose: () => void }) => (

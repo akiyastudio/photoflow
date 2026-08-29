@@ -11,7 +11,7 @@ import type { CropRectangle } from '../../components/InteractiveCropEditor';
 import { ProjectVersionTree, type VersionTreeCanvasController } from '../../components/ProjectVersionTree';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
-import { ConverterView, ImportCard, MatchView, ResearchView, ScreenshotMainImageView, VideoSplitView, VideoTranscodeView, type ImportCompletion, type VideoTranscodeFolderOutput } from '../tools/ToolViews';
+import { ConverterView, ImportCard, MatchView, ResearchView, ScreenshotMainImageView, type ImportCompletion } from '../tools/ToolViews';
 import { resolveInspectedToolSources } from '../tools/tool-source-selection-model';
 import { PROJECT_FILE_BROWSER_CONTEXT } from '../file-browser/browser-context';
 import type { FileBrowserContext } from '../file-browser/browser-context';
@@ -75,7 +75,7 @@ type DirectoryPreviewLoadResult = { entries: ProjectFileEntry[]; authoritative: 
 
 type CompareMatch = { source: string; reference: string; target: string; confidence: string; distance: number };
 
-type ProjectPanel = 'import' | 'negative-import' | 'broll' | 'file-import' | 'match' | 'research' | 'video-transcode' | 'video-split' | 'converter' | 'screenshot-main-image' | 'office-extract' | 'trash' | null;
+type ProjectPanel = 'import' | 'negative-import' | 'broll' | 'file-import' | 'match' | 'research' | 'converter' | 'screenshot-main-image' | 'office-extract' | 'trash' | null;
 type MountedProjectPanel = Exclude<ProjectPanel, null>;
 const PROJECT_PANEL_TITLES: Record<MountedProjectPanel, string> = {
   import: '从 SD 卡导入',
@@ -84,8 +84,6 @@ const PROJECT_PANEL_TITLES: Record<MountedProjectPanel, string> = {
   'file-import': '导入 · 其他文件',
   match: '从文件名选片',
   research: '截取分镜帧',
-  'video-transcode': '视频转码',
-  'video-split': '视频切割',
   converter: '图片转 JPG',
   'screenshot-main-image': '提取截图主图',
   'office-extract': '提取文档图片',
@@ -667,15 +665,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [researchTargetPaths, setResearchTargetPaths] = useState<string[]>([]);
   const [researchCollecting, setResearchCollecting] = useState(false);
   const [researchTargetHasTxt, setResearchTargetHasTxt] = useState(false);
-  const [videoTranscodeTargets, setVideoTranscodeTargets] = useState<string[]>([]);
-  const [videoTranscodeSourceFolders, setVideoTranscodeSourceFolders] = useState<string[]>([]);
-  const [videoTranscodeCollecting, setVideoTranscodeCollecting] = useState(false);
-  const [videoSplitTargets, setVideoSplitTargets] = useState<string[]>([]);
   const [officeExtractEntries, setOfficeExtractEntries] = useState<ProjectFileEntry[]>([]);
   const [officeExtractBusy, setOfficeExtractBusy] = useState(false);
   const [officeExtractResult, setOfficeExtractResult] = useState<OfficeExtractionPresentation | null>(null);
   const [officeExtractError, setOfficeExtractError] = useState('');
-  const videoTranscodeInspectionSequenceRef = useRef(0);
   const researchInspectionSequenceRef = useRef(0);
   useEffect(() => {
     if (!panel) return;
@@ -4876,6 +4869,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     return () => window.removeEventListener('keydown', handleFileShortcut);
   });
   const selectedEntries = useMemo(() => activeFileEntries.filter(entry => selectedPaths.includes(entry.relativePath)), [activeFileEntries, selectedPaths]);
+  const selectedRelativePaths = useMemo(() => selectedEntries.map(entry => entry.relativePath), [selectedEntries]);
+  const componentHostSelectedRelativePaths = useMemo(() => selectedEntries
+    .filter(entry => entry.kind === 'image' || isFolderLikeEntry(entry))
+    .map(entry => entry.relativePath), [selectedEntries]);
   const selectedContainsShortcutContent = selectedEntries.some(isUnsupportedShortcutContent);
   const registeredProgressFolderForEntry = (entry?: ProjectFileEntry) => {
     if (!entry) return undefined;
@@ -5441,40 +5438,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       await new Promise<void>(resolve => window.setTimeout(resolve, 800));
     }
   };
-  const openVideoTranscode = async (targetRelativePaths = selectedPaths) => {
-    setShowVideoToolsMenu(false);
-    if (projectPanelIsRunning('video-transcode')) {
-      setPanel('video-transcode');
-      return;
-    }
-    if (!targetRelativePaths.length) {
-      onNotice('请先选择包含视频的文件或文件夹');
-      return;
-    }
-    const sequence = ++videoTranscodeInspectionSequenceRef.current;
-    setVideoTranscodeTargets([]);
-    setVideoTranscodeSourceFolders([]);
-    setVideoTranscodeCollecting(true);
-    setPanel('video-transcode');
-    while (sequence === videoTranscodeInspectionSequenceRef.current) {
-      const result = await projectWorkspaceClient.inspectProjectToolSources(workspacePath, project.status, project.name, targetRelativePaths, true);
-      if (sequence !== videoTranscodeInspectionSequenceRef.current) return;
-      if (!result.success) {
-        setVideoTranscodeCollecting(false);
-        onNotice(`读取视频索引失败：${result.error || '未知错误'}`);
-        return;
-      }
-      if (result.indexed) {
-        const sources = resolveInspectedToolSources(result.sources, result.folderPaths, result.videoPaths);
-        setVideoTranscodeTargets(sources.map(source => source.path));
-        setVideoTranscodeSourceFolders(sources.filter(source => source.kind === 'folder').map(source => source.path));
-        setVideoTranscodeCollecting(false);
-        if (!result.videoPaths.length) onNotice('所选文件或文件夹中没有视频');
-        return;
-      }
-      await new Promise<void>(resolve => window.setTimeout(resolve, 800));
-    }
-  };
   const selectMediaFiles = async (targetPaths = selectedPaths) => {
     if (finalViewOpen) { onNotice('喜爱图片浏览是只读视图，请回到原文件夹进行选片'); return; }
     const targetEntries = activeFileEntries.filter(entry => targetPaths.includes(entry.relativePath));
@@ -6016,47 +5979,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     onNotice(mode === 'original' ? `已将“${entry.name}”设为${mediaKind === 'image' ? '图片' : '视频'}原始素材。` : `已将“${entry.name}”标记为花絮。`);
     return true;
   };
-  const registerVideoTranscodeOutputs = useCallback(async (folderOutputs: VideoTranscodeFolderOutput[]) => {
-    const normalizedProjectRoot = project.path.replace(/\\/g, '/').replace(/\/+$/g, '');
-    const projectRootKey = normalizedProjectRoot.toLocaleLowerCase('zh-CN');
-    const latestFolders = await loadProgressFolders();
-    const folders = latestFolders.length ? latestFolders : progressFoldersRef.current;
-    let registeredCount = 0;
-    const skipped: string[] = [];
-    for (const mapping of folderOutputs) {
-      const sourceKey = mapping.sourceFolder.replace(/\\/g, '/').replace(/\/+$/g, '').toLocaleLowerCase('zh-CN');
-      const source = folders.find(folder => folder.folderPath.replace(/\\/g, '/').replace(/\/+$/g, '').toLocaleLowerCase('zh-CN') === sourceKey);
-      const sourceIsValid = source?.mediaKind === 'video' && !source.folderMissing
-        && (source.nodeRole === 'original' && !source.artifactKind
-          || source.nodeRole === 'progress' && Boolean(source.parentProgressId) && source.relationKind === 'main');
-      const normalizedOutput = mapping.outputFolder.replace(/\\/g, '/').replace(/\/+$/g, '');
-      const outputKey = normalizedOutput.toLocaleLowerCase('zh-CN');
-      if (!sourceIsValid || !outputKey.startsWith(`${projectRootKey}/`)) {
-        skipped.push(normalizedOutput.split('/').pop() || normalizedOutput);
-        continue;
-      }
-      const relativePath = normalizedOutput.slice(normalizedProjectRoot.length + 1);
-      const adopted = await projectWorkspaceClient.adoptVersionTreeFolder(workspacePath, project.status, {
-        projectName: project.name,
-        relativePath,
-        mode: 'transcode',
-        mediaKind: 'video',
-        sourceProgressId: source.id,
-      });
-      if (!adopted.success || !adopted.progressFolder) {
-        skipped.push(`${relativePath}：${adopted.error || '登记失败'}`);
-        continue;
-      }
-      registeredCount += 1;
-    }
-    if (registeredCount) {
-      await loadProgressFolders();
-      directoryEntriesCacheRef.current.clear();
-      await refresh('');
-    }
-    if (skipped.length) onNotice(`转码文件已生成，但 ${skipped.length} 个输出未进入版本树：${skipped[0]}`, 7000);
-    else if (registeredCount) onNotice(`已建立 ${registeredCount} 条转码产物连线。`);
-  }, [loadProgressFolders, onNotice, project.name, project.path, project.status, refresh, workspacePath]);
   const renderVersionTreeEntry = (entry: ProjectFileEntry, progressFolder?: ProgressFolder, sourceKind?: 'image' | 'video') => {
     const selected = selectedPaths.includes(entry.relativePath);
     const previewed = entryHasPreviewState(entry);
@@ -6120,6 +6042,13 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const fileMenuHasVideoTarget = fileMenuEntries.length > 0 && fileMenuEntries.every(entry => isFolderLikeEntry(entry) || entry.kind === 'video');
   const fileMenuHasConvertibleImageTarget = fileMenuEntries.some(entry => isFolderLikeEntry(entry) || JPG_CONVERSION_EXTENSIONS.has(entry.extension.toLocaleLowerCase()));
   const fileMenuHasVideoSplitTarget = !finalViewOpen && fileMenuHasVideoTarget;
+  const videoToolPanelContributions = componentContributions.filter(item => item.type === 'component.sidePanel' && item.placement === 'workspace.videoTools');
+  const videoTranscodeContribution = videoToolPanelContributions.find(item => item.contributionId === 'transcode');
+  const videoSplitContribution = videoToolPanelContributions.find(item => item.contributionId === 'split');
+  const openVideoToolContribution = (contribution: ComponentContribution | undefined, relativePaths: string[]) => {
+    if (!contribution) { onNotice('视频处理插件未安装或不可用'); return; }
+    window.dispatchEvent(new CustomEvent('photoflow:open-component-contribution', { detail: { contribution, scope: { scopeRelativePath: currentRelativePath, selectedRelativePaths: relativePaths, sourcePageId: pageId } } }));
+  };
   const fileMenuOfficeEntries = !finalViewOpen && fileMenuEntries.length > 0 && fileMenuEntries.every(isOfficeOpenXmlEntry) ? fileMenuEntries : [];
   const fileMenuHasToolActions = Boolean(fileMenu && (fileMenuHasVideoTarget || fileMenuHasConvertibleImageTarget || fileMenuScreenshotMainImageEntries.length || fileMenuOfficeEntries.length));
   const selectedCanSetVersionProgress = Boolean(projectWorkflows && selectedProgressFolder && !selectedRegisteredProgressFolder && !isUnsupportedShortcutContent(selectedProgressFolder));
@@ -6137,7 +6066,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const projectToolbarButtons: Record<ProjectToolbarActionId, React.ReactNode> = {
     'filename-selection': <button onClick={() => togglePanel('match')} title="从文件名选片" aria-label="从文件名选片" className="project-action-button"><FileText size={16}/>从文件名选片</button>,
     'select-media': <button disabled={!canSelectMedia} title={canSelectMedia ? '选片：把所选素材加入图片或视频选片结果' : unavailableProjectToolbarTitle('选片', finalViewOpen ? '喜爱图片为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '需选择选片源素材使用')} aria-label="选片" onClick={() => void selectMediaFiles()} className="project-action-button"><CheckCircle2 size={16}/>选片</button>,
-    'video-tools': <div className="project-toolbar-tool-group relative" onClick={event => event.stopPropagation()}><button type="button" disabled={!projectToolbarAvailability['video-tools']} onClick={() => { const next = !showVideoToolsMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowVideoToolsMenu(next); }} title="视频工具" aria-label="视频工具" aria-haspopup="menu" aria-expanded={showVideoToolsMenu} className={`project-action-button ${showVideoToolsMenu || panel === 'research' || panel === 'video-transcode' || panel === 'video-split' ? 'bg-blue-50 text-blue-600' : ''}`}><Video size={16}/>视频工具<ChevronDown size={13}/></button>{showVideoToolsMenu && <div className="project-toolbar-tool-submenu absolute left-0 top-full z-50 mt-1 w-48 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button type="button" disabled={!selectedResearchTargets.length} title={selectedResearchTargets.length ? `从所选 ${selectedResearchTargets.length} 个视频或文件夹中提取代表性画面` : '请选择视频或文件夹'} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); if (selectedResearchTargets.length) void openResearchForEntries(selectedResearchTargets); }} className="project-menu-item"><Video size={14}/>截取分镜帧</button><button type="button" disabled={!videoToolsToolbarAvailable} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); void openVideoTranscode(); }} className="project-menu-item"><Gauge size={14}/>视频转码</button><button type="button" disabled={!selectedVideoSplitTargets.length} title={selectedVideoSplitTargets.length ? `将所选 ${selectedVideoSplitTargets.length} 个视频或文件夹中的视频无损切成约 3.95 GB 的连续分段` : '请选择视频或文件夹'} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); if (!selectedVideoSplitTargets.length) { onNotice('请先选择视频或文件夹'); return; } setVideoSplitTargets(selectedVideoSplitTargets.map(entry => entry.path)); setPanel('video-split'); }} className="project-menu-item"><Cut size={14}/>视频切割</button></div>}</div>,
+    'video-tools': <div className="project-toolbar-tool-group relative" onClick={event => event.stopPropagation()}><button type="button" disabled={!projectToolbarAvailability['video-tools']} onClick={() => { const next = !showVideoToolsMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowVideoToolsMenu(next); }} title="视频工具" aria-label="视频工具" aria-haspopup="menu" aria-expanded={showVideoToolsMenu} className={`project-action-button ${showVideoToolsMenu || panel === 'research' ? 'bg-blue-50 text-blue-600' : ''}`}><Video size={16}/>视频工具<ChevronDown size={13}/></button>{showVideoToolsMenu && <div className="project-toolbar-tool-submenu absolute left-0 top-full z-50 mt-1 w-48 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button type="button" disabled={!selectedResearchTargets.length} title={selectedResearchTargets.length ? `从所选 ${selectedResearchTargets.length} 个视频或文件夹中提取代表性画面` : '请选择视频或文件夹'} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); if (selectedResearchTargets.length) void openResearchForEntries(selectedResearchTargets); }} className="project-menu-item"><Video size={14}/>截取分镜帧</button>{videoTranscodeContribution && <button type="button" disabled={!videoToolsToolbarAvailable} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); openVideoToolContribution(videoTranscodeContribution, selectedEntries.map(entry => entry.relativePath)); }} className="project-menu-item"><Gauge size={14}/>视频转码</button>}{videoSplitContribution && <button type="button" disabled={!selectedVideoSplitTargets.length} title={selectedVideoSplitTargets.length ? `将所选 ${selectedVideoSplitTargets.length} 个视频或文件夹中的视频无损切成约 3.95 GB 的连续分段` : '请选择视频或文件夹'} onClick={event => { event.stopPropagation(); setShowVideoToolsMenu(false); setShowToolbarOverflowMenu(false); if (!selectedVideoSplitTargets.length) { onNotice('请先选择视频或文件夹'); return; } openVideoToolContribution(videoSplitContribution, selectedVideoSplitTargets.map(entry => entry.relativePath)); }} className="project-menu-item"><Cut size={14}/>视频切割</button>}</div>}</div>,
     'image-tools': <div className="project-toolbar-tool-group relative" onClick={event => event.stopPropagation()}><button type="button" disabled={!projectToolbarAvailability['image-tools']} onClick={() => { const next = !showImageToolsMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowImageToolsMenu(next); }} title="图片工具" aria-label="图片工具" aria-haspopup="menu" aria-expanded={showImageToolsMenu} className={`project-action-button ${showImageToolsMenu || panel === 'converter' || panel === 'screenshot-main-image' ? 'bg-blue-50 text-blue-600' : ''}`}><ImageIcon size={16}/>图片工具<ChevronDown size={13}/></button>{showImageToolsMenu && <div className="project-toolbar-tool-submenu absolute left-0 top-full z-50 mt-1 w-52 rounded-lg border border-slate-200 bg-white p-1 shadow-xl"><button type="button" disabled={!imageConverterToolbarAvailable} onClick={event => { event.stopPropagation(); setShowImageToolsMenu(false); setShowToolbarOverflowMenu(false); void openImageConverter(selectedEntries.map(entry => entry.relativePath)); }} title={imageConverterToolbarAvailable ? selectedEntries.length > 1 ? `图片转 JPG：转换所选 ${selectedEntries.length} 个文件或文件夹中的图片` : '图片转 JPG：转换所选文件或文件夹中的图片' : unavailableProjectToolbarTitle('图片转 JPG', finalViewOpen ? '喜爱图片为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '请选择可转换的图片或文件夹')} className="project-menu-item"><ImageIcon size={14}/>图片转 JPG</button><button type="button" disabled={!canExtractScreenshotMainImage} onClick={event => { event.stopPropagation(); setShowImageToolsMenu(false); setShowToolbarOverflowMenu(false); if (!selectedScreenshotMainImageEntries.length) { onNotice('请先选择要提取主图的截图'); return; } openScreenshotMainImage(selectedScreenshotMainImageEntries); }} title={canExtractScreenshotMainImage ? selectedScreenshotMainImageEntries.length > 1 ? `提取截图主图：批量识别并裁出所选 ${selectedScreenshotMainImageEntries.length} 张截图中的主要图片区域` : '提取截图主图：识别并裁出所选截图中的主要图片区域' : unavailableProjectToolbarTitle('提取截图主图', finalViewOpen ? '喜爱图片为只读' : selectedContainsShortcutContent ? '快捷方式内容为只读' : '需选择截图图片使用')} className="project-menu-item"><Crop size={14}/>提取截图主图{selectedScreenshotMainImageEntries.length > 1 ? `（${selectedScreenshotMainImageEntries.length} 张）` : ''}</button></div>}</div>,
     photoshop: <button disabled={!photoshopToolbarAvailable} onClick={() => void openProjectEntriesInPhotoshop(selectedEntries)} title={photoshopToolbarAvailable ? selectedEntries.length > 1 ? `用 Photoshop 打开：把所选 ${selectedEntries.length} 个图片、RAW 或 Photoshop 文档发送到 Photoshop` : '用 Photoshop 打开所选图片或文档' : unavailableProjectToolbarTitle('用 Photoshop 打开', !photoshopAvailable ? '未检测到 Photoshop' : '需选择图片、RAW 或 PSD/PSB 使用')} aria-label="在 Photoshop 中打开所选图片、RAW 或 Photoshop 文档" className="project-action-button"><PhotoshopIcon size={16}/>用 Photoshop 打开{selectedEntries.length > 1 && photoshopToolbarAvailable ? `（${selectedEntries.length} 个）` : ''}</button>,
     'office-extract': <button type="button" disabled={!selectedOfficeExtractEntries.length} onClick={() => openOfficeImageExtractor(selectedOfficeExtractEntries)} aria-pressed={panel === 'office-extract'} title={selectedOfficeExtractEntries.length ? `从所选 ${selectedOfficeExtractEntries.length} 个 Office 文档提取图片` : '请选择 Office 文档'} className={`project-action-button ${panel === 'office-extract' ? 'bg-blue-50 text-blue-600' : ''}`}><FileImage size={16}/>提取文档图片</button>,
@@ -6202,10 +6131,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         {projectWorkflows && canSelectFileMenuMedia && <><button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); selectMediaFiles(targets); }}><CheckCircle2 size={14}/>选片</button><div className="my-1 border-t border-slate-100"/></>}
         {(fileMenu.entry.kind === 'image' || fileMenu.entry.kind === 'raw' || fileMenu.entry.kind === 'video') && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; const restoreSelection = fileMenuSelectionWasImplicitRef.current ? fileMenuSelectionSnapshotRef.current : null; setFileMenu(null); if (restoreSelection) { selectionAnchorPathRef.current = fileMenuSelectionAnchorSnapshotRef.current; setSelectedPaths(restoreSelection); } openPreviewFromMenu(entry); }}><PanelLeftOpen size={14}/>预览</button>}
         {mediaContributionScope(fileMenuEntries, fileMenu.entry, pageId) && componentContributions.filter(item => item.type === 'media.contextAction').map(item => <button key={`${item.componentId}:${item.contributionId}`} className="project-menu-item" onClick={() => { const scope = mediaContributionScope(fileMenuEntries, fileMenu.entry, pageId)!; setFileMenu(null); window.dispatchEvent(new CustomEvent('photoflow:open-component-contribution', { detail: { contribution: item, scope } })); }}><Plus size={14}/>{item.label}</button>)}
+        {componentContributions.filter(item => item.type === 'project.contextAction').map(item => <button key={`${item.componentId}:${item.contributionId}`} className="project-menu-item" onClick={() => { const scope = projectContributionScope(currentRelativePath, pageId, fileMenuEntries.map(entry => entry.relativePath)); setFileMenu(null); window.dispatchEvent(new CustomEvent('photoflow:open-component-contribution', { detail: { contribution: item, scope } })); }}><Plus size={14}/>{item.label}</button>)}
         {!isFolderLikeEntry(fileMenu.entry) && <button className="project-menu-item" onClick={() => { const entry = fileMenu.entry; setFileMenu(null); void openProjectEntry(entry); }}><ExternalLink size={14}/>{fileMenu.entry.kind === 'shortcut' ? '打开快捷方式' : '用默认方式打开'}</button>}
         {fileMenu.entry.externalLink && <><button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; setFileMenu(null); void relinkExternalFolder(path); }}><RefreshCw size={14}/>重新定位外链</button><button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; setFileMenu(null); void materializeExternalLinks([path]); }}><FolderInput size={14}/>移动外链{fileMenu.entry.externalLinkTargetKind === 'file' ? '文件' : '文件夹'}到项目内</button></>}
         {fileMenu.entry.kind === 'shortcut' && !fileMenu.entry.externalLink && <button className="project-menu-item" onClick={() => { const path = fileMenu.entry.relativePath; setFileMenu(null); void relinkExternalFolder(path); }}><RefreshCw size={14}/>重新接管旧版外链…</button>}
-        {fileMenuHasVideoTarget && <div className="group/submenu relative"><button type="button" className="project-menu-item w-full"><Video size={14}/>视频工具<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100"><button className="project-menu-item" onClick={() => { const entries = fileMenuEntries; setFileMenu(null); void openResearchForEntries(entries); }}><Video size={14}/>截取分镜帧</button><button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); void openVideoTranscode(targets); }}><Gauge size={14}/>视频转码</button><button disabled={!fileMenuHasVideoSplitTarget} title={fileMenuHasVideoSplitTarget ? `将所选 ${fileMenuEntries.length} 个视频或文件夹中的视频无损切成约 3.95 GB 的连续分段` : '请选择视频或文件夹'} className="project-menu-item" onClick={() => { const targets = fileMenuEntries.map(entry => entry.path); setFileMenu(null); if (!targets.length) return; setVideoSplitTargets(targets); setPanel('video-split'); }}><Cut size={14}/>视频切割</button></div></div>}
+        {fileMenuHasVideoTarget && <div className="group/submenu relative"><button type="button" className="project-menu-item w-full"><Video size={14}/>视频工具<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100"><button className="project-menu-item" onClick={() => { const entries = fileMenuEntries; setFileMenu(null); void openResearchForEntries(entries); }}><Video size={14}/>截取分镜帧</button>{videoTranscodeContribution && <button className="project-menu-item" onClick={() => { const targets = fileMenuTargetPaths; setFileMenu(null); openVideoToolContribution(videoTranscodeContribution, targets); }}><Gauge size={14}/>视频转码</button>}{videoSplitContribution && <button disabled={!fileMenuHasVideoSplitTarget} title={fileMenuHasVideoSplitTarget ? `将所选 ${fileMenuEntries.length} 个视频或文件夹中的视频无损切成约 3.95 GB 的连续分段` : '请选择视频或文件夹'} className="project-menu-item" onClick={() => { const targets = fileMenuEntries.map(entry => entry.relativePath); setFileMenu(null); if (!targets.length) return; openVideoToolContribution(videoSplitContribution, targets); }}><Cut size={14}/>视频切割</button>}</div></div>}
         {(fileMenuHasConvertibleImageTarget || fileMenuScreenshotMainImageEntries.length > 0) && <div className="group/submenu relative"><button type="button" className="project-menu-item w-full"><ImageIcon size={14}/>图片工具<span className="ml-auto">›</span></button><div className="invisible absolute left-full top-0 z-[302] ml-1 w-52 rounded-lg border border-slate-200 bg-white p-1 opacity-0 shadow-xl transition group-hover/submenu:visible group-hover/submenu:opacity-100">{fileMenuHasConvertibleImageTarget && <button className="project-menu-item" onClick={() => { const targets = fileMenuEntries.map(entry => entry.relativePath); setFileMenu(null); void openImageConverter(targets); }}><ImageIcon size={14}/>图片转 JPG</button>}<button disabled={!fileMenuScreenshotMainImageEntries.length} title={fileMenuScreenshotMainImageEntries.length ? fileMenuScreenshotMainImageEntries.length > 1 ? `批量提取 ${fileMenuScreenshotMainImageEntries.length} 张截图中的主图` : '提取截图中的主图' : '需选择截图图片使用'} className="project-menu-item" onClick={() => { const entries = fileMenuScreenshotMainImageEntries; setFileMenu(null); openScreenshotMainImage(entries); }}><Crop size={14}/>提取截图主图{fileMenuScreenshotMainImageEntries.length > 1 ? `（${fileMenuScreenshotMainImageEntries.length} 张）` : ''}</button></div></div>}
         {officeImageExtractorAvailable && fileMenuOfficeEntries.length > 0 && <button className="project-menu-item" onClick={() => { const entries = fileMenuOfficeEntries; setFileMenu(null); openOfficeImageExtractor(entries); }}><FileImage size={14}/>提取文档图片{fileMenuOfficeEntries.length > 1 ? `（${fileMenuOfficeEntries.length} 个文档）` : ''}</button>}
         {photoshopAvailable && isPhotoshopOpenEntry(fileMenu.entry) && <button className="project-menu-item" onClick={() => { const entries = selectedPaths.includes(fileMenu.entry.relativePath) ? selectedEntries.filter(isPhotoshopOpenEntry) : [fileMenu.entry]; setFileMenu(null); void openProjectEntriesInPhotoshop(entries); }}><PhotoshopIcon size={14}/>用 Photoshop 打开{selectedPaths.includes(fileMenu.entry.relativePath) && selectedEntries.filter(isPhotoshopOpenEntry).length > 1 ? `（${selectedEntries.filter(isPhotoshopOpenEntry).length} 个）` : ''}</button>}
@@ -6305,7 +6235,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         </div>
         {gatherToProject && !hiddenProjectToolbarActions.has('video-tools') && projectToolbarAvailability['video-tools'] && projectToolbarButtons['video-tools']}
         </div>
-        <div className="project-toolbar-component-actions contents">{projectWorkflows && <ComponentToolbarActions actions={componentHostActions} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: selectedEntries.filter(entry => entry.kind === 'image').map(entry => entry.relativePath), sourcePageId: pageId }} onOpen={onOpenComponentPage}/>}<ComponentContributionDock contributions={componentContributions.filter(item => item.type !== 'application.command')} project={project} workspacePath={workspacePath} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: selectedEntries.map(entry => entry.relativePath), sourcePageId: pageId }} active={active}/></div>
+        <div className="project-toolbar-component-actions contents">{projectWorkflows && <ComponentToolbarActions actions={componentHostActions} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: componentHostSelectedRelativePaths, sourcePageId: pageId }} onOpen={onOpenComponentPage}/>}<ComponentContributionDock contributions={componentContributions.filter(item => item.type !== 'application.command')} project={project} workspacePath={workspacePath} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths, sourcePageId: pageId }} active={active}/></div>
         <div className="project-toolbar-overflow relative" onClick={event => event.stopPropagation()}>
           <button type="button" onClick={() => { const next = !showToolbarOverflowMenu; window.dispatchEvent(new Event('photoflow-menu-open')); setShowToolbarOverflowMenu(next); }} aria-label="展开工具栏操作" aria-haspopup="menu" aria-expanded={showToolbarOverflowMenu} className={`project-action-button ${showToolbarOverflowMenu ? 'bg-blue-50 text-blue-600' : ''}`}><ChevronDown size={17} className={`transition-transform ${showToolbarOverflowMenu ? 'rotate-180' : ''}`}/></button>
           {showToolbarOverflowMenu && <div role="menu" aria-label="更多工具栏操作" className="project-toolbar-overflow-menu absolute left-0 top-full z-50 mt-1 w-56 overflow-visible rounded-lg border border-slate-200 bg-white p-1 shadow-xl" onKeyDown={event => { if (event.key === 'Escape') { event.preventDefault(); setShowToolbarOverflowMenu(false); (event.currentTarget.previousElementSibling as HTMLButtonElement | null)?.focus(); } }} onClick={event => { const button = (event.target as HTMLElement).closest('button'); if (button && button.getAttribute('aria-haspopup') !== 'menu') setShowToolbarOverflowMenu(false); }}>
@@ -6339,7 +6269,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
               {gatherToProject && !hiddenProjectToolbarActions.has('image-tools') && projectToolbarAvailability['image-tools'] && projectToolbarButtons['image-tools']}
               {projectWorkflows && visibleProjectToolbarActionIds.map(id => <React.Fragment key={`overflow-${id}`}>{projectToolbarButtons[id]}</React.Fragment>)}
               {gatherToProject && !hiddenProjectToolbarActions.has('video-tools') && projectToolbarAvailability['video-tools'] && projectToolbarButtons['video-tools']}
-              {projectWorkflows && componentHostActions.length > 0 && <><div className="my-1 border-t border-slate-100"/><ComponentToolbarActions overflow actions={componentHostActions} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: selectedEntries.filter(entry => entry.kind === 'image').map(entry => entry.relativePath), sourcePageId: pageId }} onOpen={onOpenComponentPage}/></>}
+              {projectWorkflows && componentHostActions.length > 0 && <><div className="my-1 border-t border-slate-100"/><ComponentToolbarActions overflow actions={componentHostActions} scope={{ scopeRelativePath: currentRelativePath, selectedRelativePaths: componentHostSelectedRelativePaths, sourcePageId: pageId }} onOpen={onOpenComponentPage}/></>}
             </div>
           </div>}
         </div>
@@ -6501,8 +6431,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       </ToolModal>}
       {mountedPanels.has('match') && <ToolModal title={PROJECT_PANEL_TITLES.match} ownerPageId={pageId} panelKind="match" open={panel === 'match'} onClose={() => setPanel(null)}><MatchView embedded config={matchConfig} projectPath={project.path} folderOptions={folders} onUpdateConfig={onMatchConfigChange}/></ToolModal>}
       {mountedPanels.has('research') && <ToolModal title={PROJECT_PANEL_TITLES.research} ownerPageId={pageId} panelKind="research" open={panel === 'research'} onClose={() => { researchInspectionSequenceRef.current += 1; setResearchCollecting(false); setPanel(null); }}><ResearchView embedded initialTargetPath={researchTargetPath} initialTargetPaths={researchTargetPaths} sourcesLoading={researchCollecting} hasTxtFiles={researchTargetHasTxt} config={researchConfig} onUpdateConfig={onResearchConfigChange}/></ToolModal>}
-      {mountedPanels.has('video-transcode') && <ToolModal title={PROJECT_PANEL_TITLES['video-transcode']} ownerPageId={pageId} panelKind="video-transcode" open={panel === 'video-transcode'} onClose={() => { videoTranscodeInspectionSequenceRef.current += 1; setVideoTranscodeCollecting(false); setPanel(null); }}><VideoTranscodeView embedded initialTargetPaths={videoTranscodeTargets} initialSourceFolders={videoTranscodeSourceFolders} sourcesLoading={videoTranscodeCollecting} onFolderTranscodeComplete={registerVideoTranscodeOutputs}/></ToolModal>}
-      {mountedPanels.has('video-split') && <ToolModal title={PROJECT_PANEL_TITLES['video-split']} ownerPageId={pageId} panelKind="video-split" open={panel === 'video-split'} onClose={() => setPanel(null)}><VideoSplitView embedded initialTargetPaths={videoSplitTargets}/></ToolModal>}
       {mountedPanels.has('office-extract') && <ToolModal title={PROJECT_PANEL_TITLES['office-extract']} ownerPageId={pageId} panelKind="office-extract" open={panel === 'office-extract'} busy={officeExtractBusy} onClose={() => setPanel(null)}>
         {officeExtractResult ? <div className={`flex min-h-64 flex-col items-center justify-center rounded-xl border px-6 py-10 text-center ${officeExtractResult.state === 'success' ? 'border-emerald-200 bg-emerald-50/70' : 'border-amber-200 bg-amber-50/70'}`}>{officeExtractResult.state === 'success' ? <CheckCircle2 size={42} className="text-emerald-600"/> : <AlertTriangle size={42} className="text-amber-600"/>}<p className="mt-4 text-lg font-bold text-slate-800">{officeExtractResult.state === 'publication-failed' ? '图片已提取，但发布失败' : officeExtractResult.state === 'partial' ? '图片提取完成（部分文档失败）' : '图片提取完成'}</p><p className="mt-2 text-sm text-slate-600">共处理 {officeExtractResult.documents} 个文档，成功提取 {officeExtractResult.successful} 个，提取 {officeExtractResult.images} 张图片{officeExtractResult.failed ? `，文档失败 ${officeExtractResult.failed} 个` : ''}{officeExtractResult.publicationFailures.length ? `，发布失败 ${officeExtractResult.publicationFailures.length} 个` : ''}。</p>{officeExtractResult.warning && <p className="mt-3 max-w-2xl rounded-lg border border-amber-200 bg-white/70 px-3 py-2 text-sm font-medium leading-6 text-amber-800">{officeExtractResult.warning} 请勿盲目重试提取。</p>}{officeExtractResult.extractionFailures.length > 0 && <ul className="mt-3 max-w-2xl space-y-1 text-left text-xs text-slate-600">{officeExtractResult.extractionFailures.map(item => <li key={`extract-${item.documentName}`}>提取失败：{item.documentName} — {item.error}</li>)}</ul>}{officeExtractResult.publicationFailures.length > 0 && <ul className="mt-3 max-w-2xl space-y-2 text-left text-xs text-amber-800">{officeExtractResult.publicationFailures.map(item => <li key={`publish-${item.documentName}`} className="rounded-md bg-white/70 px-3 py-2"><span className="font-bold">发布失败：{item.documentName}</span><span className="block">{item.error}</span>{item.outputFolder && <span className="mt-1 block break-all text-slate-600">恢复目录：{item.outputFolder}</span>}</li>)}</ul>}{officeExtractResult.outputFolders.length > 0 && <p className="mt-3 max-w-2xl break-all text-xs leading-5 text-slate-500">输出目录：{officeExtractResult.outputFolders.join('；')}</p>}<button type="button" onClick={() => { setOfficeExtractResult(null); setOfficeExtractEntries([]); setPanel(null); }} className="dialog-primary mt-6">关闭</button></div> : officeExtractError ? <div className="flex min-h-64 flex-col items-center justify-center rounded-xl border border-red-200 bg-red-50/70 px-6 py-10 text-center"><AlertTriangle size={42} className="text-red-600"/><p className="mt-4 text-lg font-bold text-slate-800">图片提取失败</p><p className="mt-2 max-w-2xl break-words text-sm text-slate-600">{officeExtractError}</p><div className="mt-6 flex items-center gap-2"><button type="button" onClick={() => { setOfficeExtractError(''); setOfficeExtractEntries([]); setPanel(null); }} className="dialog-secondary">重新选择</button><button type="button" onClick={() => void extractOfficeImages()} className="dialog-primary">重试</button></div></div> : <div className="space-y-4">
           <section className="overflow-hidden rounded-xl border border-slate-200 bg-white"><header className="flex items-center gap-3 border-b border-slate-200 bg-slate-50 px-4 py-3"><FileImage size={18} className="text-blue-600"/><div className="min-w-0 flex-1"><p className="text-sm font-bold text-slate-800">已选择 {officeExtractEntries.length} 个 Office 文档</p><p className="mt-0.5 text-xs text-slate-500">支持 Word、PowerPoint 和 Excel 文档</p></div><span className="rounded-full border border-slate-200 bg-white px-2 py-1 text-[10px] text-slate-500">{officeExtractEntries.length} 个文件</span></header><div className="max-h-52 divide-y divide-slate-100 overflow-y-auto">{officeExtractEntries.map(entry => <div key={entry.relativePath} className="flex items-center gap-3 px-4 py-2.5"><span className="flex h-8 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[10px] font-bold text-blue-700">{entry.extension.slice(1).toUpperCase()}</span><span className="min-w-0 flex-1 truncate text-sm font-medium text-slate-700">{entry.name}</span><span className="text-[10px] font-bold text-slate-400">{officeExtractBusy ? '处理中' : '等待'}</span></div>)}</div></section>
@@ -7370,7 +7298,7 @@ const MediaPreviewPane = ({ entry, cacheConfig, width, pinned, keyboardSettings,
       {!entry && <div className="max-w-[220px] text-center"><ImageIcon size={38} strokeWidth={1.4} className="mx-auto text-slate-600"/><p className="mt-3 text-sm font-medium text-slate-300">点击图片、RAW 或视频文件</p><p className="mt-1 text-xs leading-5 text-slate-500">此处显示图片或视频预览。</p></div>}
       {entry && entry.kind === 'video' && trimBusy && <div className="absolute inset-0 flex min-h-0 flex-col bg-black"><div className="flex min-h-0 flex-1 items-center justify-center overflow-hidden">{resource.previewUrl ? <img src={resource.previewUrl} alt="" draggable={false} className="max-h-full max-w-full object-contain opacity-70"/> : <Video size={52} strokeWidth={1.3} className="text-slate-700"/>}</div>{videoTrimControls}</div>}
       {useVideoPlayer && entry && !trimBusy && <VideoPlayer filePath={entry.path} poster={resource.previewUrl} keyboardSettings={keyboardSettings} bottomControls={trimEditor ? videoTrimControls : undefined} controlsVisible={!fullscreen || fullscreenControlsVisible} controlsOverlay={fullscreen} editorSeekRequest={videoEditorSeek} onPlaybackState={playback => setVideoPlaybackTime(playback.time)} onError={handleVideoPlayerError} onMetadata={metadata => { setLoading(false); setVideoDuration(Number(metadata.duration) || 0); onTechnicalMetadata(metadata); }} onNavigate={onNavigate} onContextMenuAt={onContextMenuAt} onPointerActivity={revealFullscreenControls} topRightOverlayHole={fullscreen && fullscreenControlsVisible ? 60 : 0} onEscape={() => setFullscreen(false)}/>}
-      {entry && entry.kind === 'video' && videoPlaybackFailed && !trimBusy && <div role="alert" className="flex max-h-full w-full flex-col items-center justify-center gap-4 text-center">{resource.previewUrl ? <img src={resource.previewUrl} alt={entry.name} draggable={false} className="max-h-[70%] max-w-full object-contain opacity-60"/> : <Video size={52} strokeWidth={1.3} className="text-slate-600"/>}<div className="max-w-sm px-6"><p className="text-sm font-bold text-red-600">视频播放器无法启动</p><p className="mt-1 text-xs leading-5 text-slate-500">{videoPlayerError || '请在组件管理中修复或重新安装视频播放器运行时，然后重新打开视频。'}</p><p className="mt-1 text-xs leading-5 text-slate-500">不会改用 Chromium 播放，以避免不同入口出现不同的解码与字幕行为。</p><button type="button" onClick={onOpen} className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-500"><ExternalLink size={14}/>使用系统播放器打开</button></div></div>}
+      {entry && entry.kind === 'video' && videoPlaybackFailed && !trimBusy && <div role="alert" className="flex max-h-full w-full flex-col items-center justify-center gap-4 text-center">{resource.previewUrl ? <img src={resource.previewUrl} alt={entry.name} draggable={false} className="max-h-[70%] max-w-full object-contain opacity-60"/> : <Video size={52} strokeWidth={1.3} className="text-slate-600"/>}<div className="max-w-sm px-6"><p className="text-sm font-bold text-red-600">视频播放器无法启动</p><p className="mt-1 text-xs leading-5 text-slate-500">{videoPlayerError || '原生视频组件和 Chromium 均无法解码该视频。'}</p><p className="mt-1 text-xs leading-5 text-slate-500">可以尝试修复原生视频组件，或使用系统播放器打开。</p><button type="button" onClick={onOpen} className="mt-3 inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-2 text-xs font-bold text-white hover:bg-blue-500"><ExternalLink size={14}/>使用系统播放器打开</button></div></div>}
       {entry && entry.kind === 'image' && displayedImageUrl && imageCropEditor && <div className="absolute inset-0 bg-slate-950">
         <InteractiveCropEditor embedded snapEnabled snapGuides={imageCropEditor.snapGuides} previewUrl={displayedImageUrl} imageSize={imageCropEditor.originalSize} crop={imageCropEditor.crop} onChange={crop => { if (imageCropPhase === 'editing') setImageCropEditor(current => current ? { ...current, crop } : current); }}/>
         <span className="pointer-events-none absolute bottom-4 left-4 rounded-md bg-slate-950/80 px-2.5 py-1.5 text-[11px] font-bold text-cyan-200 shadow-lg">磁吸边缘已开启</span>

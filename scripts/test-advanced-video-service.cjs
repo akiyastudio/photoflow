@@ -192,6 +192,9 @@ const run = async () => {
   const playerSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'components', 'AdvancedVideoPlayer.tsx'), 'utf8');
   const workspaceSource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
   const systemIpcSource = require('fs').readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
+  const mediaIpcSource = require('fs').readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'media-ipc.cjs'), 'utf8');
+  const componentDevelopmentSource = require('fs').readFileSync(path.join(__dirname, '..', 'electron', 'component-development.cjs'), 'utf8');
+  const videoComponentPackage = JSON.parse(require('fs').readFileSync(path.join(__dirname, '..', 'extensions', 'video-playback-mpv', 'package.json'), 'utf8'));
   const decoderSource = require('fs').readFileSync(path.join(__dirname, '..', 'extensions', 'video-playback-mpv', 'AdvancedVideoDecoder.cs'), 'utf8');
   const decoderBuildSource = require('fs').readFileSync(path.join(__dirname, 'build-advanced-video-decoder.cjs'), 'utf8');
   const runtimeBuildSource = require('fs').readFileSync(path.join(__dirname, 'media-runtime', 'build-libmpv-dependencies-windows.sh'), 'utf8');
@@ -216,6 +219,11 @@ const run = async () => {
     && settingsSource.includes("{ id: 'video', label: '视频'")
     && appSource.includes("delete componentSettings['video-playback-mpv']"),
   'advanced video UI and settings must ship with the app instead of the optional runtime');
+  assert(videoComponentPackage.photoflowComponent?.manifest === 'component.template.json'
+    && videoComponentPackage.photoflowComponent?.development?.runtime?.command === 'runtime/advanced-video-decoder.exe'
+    && !('entry' in videoComponentPackage.photoflowComponent.development.runtime)
+    && componentDevelopmentSource.includes("runtime.entry === undefined ? ''"),
+  'the native decoder must register as a directly executable development component without a fabricated script entry');
   assert(decoderSource.includes('SetOption("vo", probeOnly ? "null" : "gpu")')
     && !decoderSource.includes('"gpu-next')
     && decoderSource.includes('SetOption("gpu-api", "d3d11")')
@@ -241,7 +249,9 @@ const run = async () => {
   assert(workspaceSource.includes('FULLSCREEN_CONTROLS_HIDE_DELAY_MS = 1800'), 'full-screen media controls must hide after exactly 1.8 seconds of inactivity');
   assert(workspaceSource.includes('projectWorkspaceClient.setWindowFullscreen(true)') && workspaceSource.includes('projectWorkspaceClient.setWindowFullscreen(false)') && systemIpcSource.includes("setAlwaysOnTop(true, 'screen-saver', 1)") && systemIpcSource.includes('targetWindow.setKiosk(true)') && systemIpcSource.includes('targetWindow.focus()'), 'media preview full-screen must focus a Windows kiosk window above the taskbar without requiring a follow-up click');
   assert(!playerSource.includes('title="单击播放或暂停"'), 'the video surface must not show a redundant hover tooltip for its click action');
-  assert(!workspaceSource.includes('autoPlay controls') && workspaceSource.includes('不会改用 Chromium 播放'), 'advanced playback failures must not silently switch to a divergent Chromium decoder path');
+  assert(playerSource.includes("backend === 'chromium'") && playerSource.includes("getMediaOriginal(filePath, 'video')") && playerSource.includes('原生组件不可用，已切换到 Chromium 播放')
+    && mediaIpcSource.includes("kind === 'video' ? VIDEO_EXTENSIONS.has(extension)") && mediaIpcSource.includes('mediaService.toUrl(sourcePath, true)'),
+  'missing or failed native playback must retain the shared player UI and use an authorized range-capable Chromium media URL');
   assert(!playerSource.includes('高级解码</span>'), 'the advanced-decoder label must not remain in the control bar');
   assert(workspaceSource.includes("previewMediaEntries.filter(entry => entry.kind === 'video')"), 'previous and next controls must navigate between videos only');
   assert(workspaceSource.includes("!['image', 'raw'].includes(previewEntry.kind)"), 'image and raw previews must retain left and right navigation');

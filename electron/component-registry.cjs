@@ -124,8 +124,9 @@ const manifestCompatibilityError = (manifest, platform, arch) => {
     const toolbarCount = contributions.filter(item => item?.type === 'workspace.toolbarAction').length;
     const pageCount = contributions.filter(item => item?.type === 'component.fullPage').length;
     const settingsPageCount = contributions.filter(item => item?.type === 'application.settingsPage').length;
+    const sidePanelCount = contributions.filter(item => item?.type === 'component.sidePanel').length;
     const api7Count = contributions.filter(item => ['component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(item?.type)).length;
-    if (toolbarCount !== 1 || pageCount < 1 || pageCount > 16 || settingsPageCount > 16 || contributions.length !== toolbarCount + pageCount + settingsPageCount + api7Count) return '页面组件必须贡献一个 toolbarAction、1-16 个 fullPage，并可选贡献设置页或 Host API 7 入口';
+    if (toolbarCount > 1 || toolbarCount + sidePanelCount < 1 || pageCount < 1 || pageCount > 16 || settingsPageCount > 16 || contributions.length !== toolbarCount + pageCount + settingsPageCount + api7Count) return '页面组件必须贡献 toolbarAction 或 sidePanel、1-16 个 fullPage，并可选贡献设置页或其他 Host API 7 入口';
   }
   const entrypoints = manifest.entrypoints || {};
   const relativeEntry = entrypoints[`${platform}-${arch}`] || entrypoints[platform] || entrypoints.default;
@@ -168,9 +169,12 @@ const directorySize = async root => {
 };
 
 const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, platform = process.platform, arch = process.arch, integrityManifests = null, environment = process.env }) => {
-  if (isPackaged && !userComponentRoot) throw new Error('打包版本必须提供用户组件目录');
-  const installRoot = isPackaged ? path.resolve(userComponentRoot) : path.join(projectRoot, 'components');
-  const roots = [{ source: isPackaged ? 'user' : 'development-install', path: installRoot }];
+  if (!userComponentRoot) throw new Error('必须提供用户组件目录');
+  // ZIP discovery and installed runtimes always live in user data. Development
+  // source discovery is a separate overlay and must never redirect installs
+  // into the repository checkout.
+  const installRoot = path.resolve(userComponentRoot);
+  const roots = [{ source: 'user', path: installRoot }];
   const developmentComponents = () => isPackaged ? [] : discoverDevelopmentComponents({ projectRoot, environment, platform, arch });
   const integrityCache = new Map(); const integrityPending = new Map(); const expectedIntegrity = new Map();
   const definitionFor = (id, manifest = null) => COMPONENT_DEFINITIONS[id] || { ...manifestIdentity(manifest), id, capability: manifest?.capabilities?.[0] || '', capabilities: manifest?.capabilities || [] };
@@ -299,7 +303,9 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     }
     for (const development of developmentComponents()) {
       const inspected = inspectDevelopment(development);
-      if (inspected && !byId.has(inspected.id)) byId.set(inspected.id, inspected);
+      // Current source must win over an older user installation while running
+      // an unpackaged development build of the same component.
+      if (inspected) byId.set(inspected.id, inspected);
     }
     return byId;
   };

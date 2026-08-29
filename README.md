@@ -20,7 +20,7 @@
 
 1. 复制 `examples/hello-component`，并把目录改成自己的组件 ID。
 2. 在 `component.json` 中将 `contractVersion` 设为 `2`，并将 `minHostApiVersion`、`maxHostApiVersion` 都设为 `7`。
-3. 声明一个 `workspace.toolbarAction`、一个相连的 `component.fullPage`、包内 UI 入口和服务入口。
+3. 声明一个 `workspace.toolbarAction` 或 `component.sidePanel`、一个相连的 `component.fullPage`、包内 UI 入口和服务入口。仅面板插件可以不声明 toolbarAction。
 4. 显式列出服务 RPC、Host 能力、权限和事件。
 5. 用服务模拟器验证 JSON Lines 协议：
 
@@ -122,6 +122,8 @@ window.addEventListener('pagehide', stop, { once: true });
 ```
 
 页面运行时关闭 Node 集成、WebView、任意导航、新窗口和浏览器权限。界面应跟随宿主主题，支持键盘与可见焦点，页面停用或销毁时释放订阅和计时器。
+
+`component.sidePanel` 会在当前文件页的统一工具面板中打开，并绑定触发时的目录、选择项和文件页。宿主负责面板外框、插件图标、标题、遮罩、关闭和尺寸同步；组件页面只绘制内容区域。同一项目的不同文件页拥有独立面板实例。完整的仅面板示例见 `examples/panel-only-v7`。
 
 ### 插件服务
 

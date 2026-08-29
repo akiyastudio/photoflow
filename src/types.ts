@@ -776,7 +776,7 @@ export interface ComponentPageOpenScope {
   sourcePageId: string;
 }
 export type ComponentContributionType = 'component.sidePanel' | 'media.contextAction' | 'project.contextAction' | 'project.importProvider' | 'project.exportProvider' | 'application.command';
-export interface ComponentContribution { componentId: string; componentVersion: string; hostApiVersion: 7; contributionId: string; type: ComponentContributionType; label: string; title: string; pageId: string; rpcMethods: string[]; iconUrl?: string }
+export interface ComponentContribution { componentId: string; componentVersion: string; hostApiVersion: 7; contributionId: string; type: ComponentContributionType; label: string; title: string; pageId: string; rpcMethods: string[]; placement?: 'workspace.videoTools'; iconUrl?: string }
 
 export interface ComponentPageInstance {
   identity: string;
@@ -954,6 +954,7 @@ export interface IElectronAPI {
   openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus; scopeRelativePath?: string; selectedRelativePaths?: string[]; sourcePageId?: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
   openComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string; surface: 'application.settings'; leaseId: string }; error?: string }>;
   openComponentContribution: (request: { componentId: string; contributionId: string; type: ComponentContributionType; workspacePath?: string; projectId?: string; projectName?: string; projectStatus?: ProjectStatus; scopeRelativePath?: string; selectedRelativePaths?: string[]; sourcePageId?: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string; surface: ComponentContributionType }; error?: string }>;
+  onComponentPanelCloseRequested: (callback: (instanceId: string) => void) => () => void;
   releaseComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean }>;
   activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
   setHostSurfaceSuspended: (update: { rendererToken: string; revision: number; suspended: boolean }) => Promise<{ success: boolean }>;
@@ -1128,7 +1129,7 @@ export interface IElectronAPI {
   captureAdvancedVideoFrame: (sessionId: string) => Promise<{ success: boolean; path?: string; error?: string }>;
   stopAdvancedVideo: (sessionId: string) => Promise<{ success: boolean }>;
   onAdvancedVideoState: (callback: (state: AdvancedVideoState) => void) => () => void;
-  getMediaOriginal: (filePath: string, kind: 'image' | 'raw', cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; mediaUrl?: string; original?: boolean; orientation?: { matrix: number[]; swapsAxes: boolean; rawOrientation: number; embeddedOrientation: number }; error?: string }>;
+  getMediaOriginal: (filePath: string, kind: 'image' | 'raw' | 'video', cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; mediaUrl?: string; original?: boolean; orientation?: { matrix: number[]; swapsAxes: boolean; rawOrientation: number; embeddedOrientation: number }; error?: string }>;
   getMediaMetadata: (filePath: string) => Promise<{ success: boolean; fields: MediaMetadataField[]; error?: string }>;
   reportRendererError: (message: string, details?: string) => void;
   reportRendererInfo: (message: string, details?: string) => void;

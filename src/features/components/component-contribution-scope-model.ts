@@ -7,4 +7,8 @@ export const mediaContributionScope = (entries: ProjectFileEntry[], _clicked: Pr
   for (const directory of directories.slice(1)) while (common.length && (directory.length < common.length || common.some((part, index) => part.toLocaleLowerCase() !== directory[index].toLocaleLowerCase()))) common.pop();
   return { scopeRelativePath: common.join('/'), selectedRelativePaths, sourcePageId };
 };
-export const projectContributionScope = (scopeRelativePath: string, sourcePageId: string): ComponentPageOpenScope => ({ scopeRelativePath, selectedRelativePaths: [], sourcePageId });
+export const projectContributionScope = (scopeRelativePath: string, sourcePageId: string, selectedRelativePaths: string[] = []): ComponentPageOpenScope => ({
+  scopeRelativePath,
+  selectedRelativePaths: selectedRelativePaths.map(relativePath => relativePath.replace(/\\/g, '/')),
+  sourcePageId,
+});

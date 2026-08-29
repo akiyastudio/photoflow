@@ -6,7 +6,7 @@ PhotoFlow 把可选扩展包称为 **组件（Component）**。文件名保留�
 
 1. 把 `examples/hello-component` 复制到以组件 ID 命名的目录。
 2. 所有组件只使用 Host API `7`，并同时设置 `minHostApiVersion:7` 与 `maxHostApiVersion:7`；旧 Host 2–6 清单和能力名均会拒绝。
-3. 添加一个 `workspace.toolbarAction`、一个与之相连的 `component.fullPage`、包内 UI 入口和服务入口。需要全局设置时，可额外贡献 `application.settingsPage`。
+3. 添加一个 `workspace.toolbarAction` 或 `component.sidePanel`、一个与之相连的 `component.fullPage`、包内 UI 入口和服务入口。仅面板组件可以省略 toolbarAction；需要全局设置时，可额外贡献 `application.settingsPage`。
 4. 声明全部服务 RPC、Host 能力、权限和发出的事件。未声明的访问会默认拒绝。升级历史数据时，可声明 `component.storage.previous.v1` 和/或 `project.output.existing.v1` adoption grant；不要把组件业务表或路径字段加入宿主代码。
 5. 运行 `node scripts/mock-component-service.cjs path/to/service.cjs`，不启动 Electron 也能验证按行分隔的服务协议。
 6. 把目录放入 PhotoFlow 用户组件目录；源码开发时也可以放到 `extensions/`。发行包使用 `component.json`；源码开发可以使用 `component.template.json` 和现有组件构建流程。
@@ -41,6 +41,25 @@ window.addEventListener('pagehide', stop, { once: true });
 ```
 
 UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航、新窗口和浏览器权限都被关闭。使用上下文中解析后的明暗主题，并监听主题/上下文变化。控件应支持键盘操作、显示可见焦点、为表单提供标签、尊重“减少动态效果”，并且不能假设宿主页面始终激活。页面停用或销毁时释放计时器和订阅。
+
+### 文件页面板
+
+`component.sidePanel` 使用与内置工具相同的面板外框。宿主负责标题、组件图标、遮罩、关闭按钮和内容 View 的尺寸；插件 UI 负责内容区域，不要自行再绘制一层模态窗口。面板上下文的 `surface` 为 `component.sidePanel`，`scopeRelativePath`、`selectedRelativePaths` 和 `sourcePageId` 绑定打开它的文件页。不同文件页使用不同实例，关闭文件页、卸载或升级组件会关闭所属面板。
+
+```json
+{
+  "type": "component.sidePanel",
+  "id": "panel",
+  "label": "批量处理",
+  "title": "批量处理图片",
+  "pageId": "panel-ui",
+  "rpcMethods": ["my-component.run.v1"]
+}
+```
+
+组件仍须声明被引用的 `component.fullPage`，但仅面板组件不需要声明 `workspace.toolbarAction`。面板内部监听 `onThemeChange`、`onContextChange`、`onActivate` 和 `onDeactivate`；长任务继续使用 `tasks.v7`。可运行示例见 `examples/panel-only-v7`。
+
+需要保留宿主工具分组时，sidePanel 可以声明 `"placement":"workspace.videoTools"`。宿主只负责把入口放入文件页“视频工具”菜单，面板页面、RPC 与权限仍完全属于组件。`extensions/video-tools` 展示了同一组件贡献“视频转码”和“视频切割”两个分组面板入口。
 
 渲染层通常调用组件自有 RPC，而不是直接调用 Host 能力。唯一的受控 UI 快捷桥是 Host API 7 `notify`：它只接受严格的纯文本结构，不能携带 HTML、回调、URL、路径或任意 channel。组件服务是后端协议端点，只能请求清单授权的 Host 能力；只有后端自身产生短状态时才使用 `notifications.v7`。长任务和确认仍分别使用 `tasks.v7` 与 `dialogs.v7`。
 

@@ -233,18 +233,21 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       const label = requiredExactStringText(raw.label, 'settings page label', 80);
       settingsPages.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, 'settings page title'), entry, relativeEntry, rpcMethods: Object.freeze(rpcMethods) }));
     } else {
-      rejectUnknownFields(raw, ['type', 'id', 'label', 'title', 'pageId', 'rpcMethods'], `${raw.type} contribution`);
+      rejectUnknownFields(raw, ['type', 'id', 'label', 'title', 'pageId', 'rpcMethods', 'placement'], `${raw.type} contribution`);
       const label = requiredExactStringText(raw.label, `${raw.type} label`, 80); const pageId = requiredExactId(raw.pageId, `${raw.type} pageId`);
+      const placement = raw.placement === undefined ? '' : requiredExactStringText(raw.placement, `${raw.type} placement`, 80);
+      if (placement && (raw.type !== 'component.sidePanel' || placement !== 'workspace.videoTools')) throw new Error(`Invalid ${raw.type} placement`);
       if (!Array.isArray(raw.rpcMethods) || raw.rpcMethods.length < 1 || raw.rpcMethods.length > 16) throw new Error(`${raw.type} RPC methods must be a bounded allowlist`);
       const rpcMethods = raw.rpcMethods.map(method => requiredExactStringText(method, `${raw.type} RPC method`, 128));
       if (new Set(rpcMethods).size !== rpcMethods.length || rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error(`${raw.type} RPC methods must be unique versioned methods`);
-      api7Contributions.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, `${raw.type} title`, 160), pageId, rpcMethods: Object.freeze(rpcMethods) }));
+      api7Contributions.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, `${raw.type} title`, 160), pageId, rpcMethods: Object.freeze(rpcMethods), ...(placement ? { placement } : {}) }));
     }
   }
   if (settingsPages.length > 16) throw new Error('Component settings page contributions must be bounded');
-  if (pages.size < 1 || pages.size > 16 || actions.length !== 1) throw new Error('Component Host requires exactly one toolbar action and 1-16 full pages');
-  if (!pages.has(actions[0].pageId)) throw new Error(`Component toolbar action references an unknown page: ${actions[0].pageId}`);
-  const page = pages.get(actions[0].pageId);
+  if (pages.size < 1 || pages.size > 16 || actions.length > 1) throw new Error('Component Host requires 1-16 full pages and at most one toolbar action');
+  if (!actions.length && !api7Contributions.some(contribution => contribution.type === 'component.sidePanel')) throw new Error('Component Host requires a toolbar action or side panel contribution');
+  if (actions[0] && !pages.has(actions[0].pageId)) throw new Error(`Component toolbar action references an unknown page: ${actions[0].pageId}`);
+  const page = actions[0] ? pages.get(actions[0].pageId) : null;
   for (const contribution of api7Contributions) if (!pages.has(contribution.pageId)) throw new Error(`${contribution.type} references an unknown page: ${contribution.pageId}`);
   let service = null;
   if (host.service === undefined) throw new Error('Component Host V2 requires a service declaration');
@@ -400,8 +403,8 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     compatibility: { minHostApiVersion: min, maxHostApiVersion: max },
     adoptionGrants: Object.freeze([...adoptionGrants]),
     legacySettingsAdoptions: Object.freeze(legacySettingsAdoptions),
-    toolbarAction: Object.freeze({ ...actions[0], pageTitle: page.title }),
-    fullPage: Object.freeze(page),
+    toolbarAction: actions[0] ? Object.freeze({ ...actions[0], pageTitle: page.title }) : null,
+    fullPage: page ? Object.freeze(page) : null,
     pages: Object.freeze([...pages.values()].map(value => Object.freeze(value))),
     settingsPages: Object.freeze(settingsPages),
     contributions: Object.freeze(api7Contributions),

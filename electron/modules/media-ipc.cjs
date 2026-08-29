@@ -65,8 +65,11 @@ const registerMediaIpc = context => {
       thumbnailService?.noteForegroundActivity();
       const sourcePath = await mediaService.authorizeInput(filePath);
       const extension = path.extname(sourcePath).toLowerCase();
-      const supported = kind === 'raw' ? RAW_EXTENSIONS.has(extension) : kind === 'image' ? IMAGE_EXTENSIONS.has(extension) : false;
-      if (!supported || !fs.existsSync(sourcePath)) throw new Error('图片不存在或格式不受支持');
+      const supported = kind === 'raw' ? RAW_EXTENSIONS.has(extension) : kind === 'image' ? IMAGE_EXTENSIONS.has(extension) : kind === 'video' ? VIDEO_EXTENSIONS.has(extension) : false;
+      if (!supported || !fs.existsSync(sourcePath)) throw new Error('媒体不存在或格式不受支持');
+      if (kind === 'video') {
+        return { success: true, mediaUrl: mediaService.toUrl(sourcePath, true), original: true };
+      }
       if (kind === 'image' && !IMAGE_PREVIEW_CONVERSION_EXTENSIONS.has(extension)) {
         return { success: true, mediaUrl: mediaService.toUrl(sourcePath, true), original: true };
       }

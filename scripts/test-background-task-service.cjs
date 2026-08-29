@@ -3,7 +3,7 @@ const { EventEmitter } = require('events');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
 const { createProjectFileTask } = require('../electron/services/project-file-task-service.cjs');
 const { normalizeExternalProgress, registerBackgroundTasksIpc } = require('../electron/modules/background-tasks-ipc.cjs');
-const { pythonToolResourcePaths, resolvePythonWorkerResourceLease } = require('../electron/modules/system-ipc.cjs');
+const { pythonToolResourcePaths, resolvePythonWorkerResourceLease, shouldTrackPythonToolAsBackgroundTask } = require('../electron/modules/system-ipc.cjs');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
@@ -23,6 +23,9 @@ assert.deepStrictEqual(resourcePathsFor('png_to_jpg.py', ['--quality', '95', '--
 assert.deepStrictEqual(resourcePathsFor('research.py', ['--path', 'C:\\project\\video\\clip.mp4', '--sensitivity', 'standard']), ['C:\\project\\video'], 'research must lock the directory where it exports frames');
 assert.deepStrictEqual(resourcePathsFor('ffmpeg_transcode.py', ['C:\\project\\video\\clip.mp4', '--output-mode', 'new', '--source-folder', 'C:\\project\\video']), ['C:\\project\\video', 'photoflow-transcode-destination/c:/project/video'], 'folder transcode must coordinate its output family without locking unrelated sibling folders in the project');
 assert.deepStrictEqual(resourcePathsFor('cut_video.py', ['C:\\project\\video\\clip.mp4', '--output-dir', 'D:\\exports']), ['C:\\project\\video', 'D:\\exports'], 'video splitting must lock its source-adjacent and explicit output directories');
+assert.equal(shouldTrackPythonToolAsBackgroundTask('ffmpeg_transcode.py', ['C:\\project\\video\\clip.mp4', '--output-mode', 'new']), true, 'real video encoding must remain a formal background task');
+assert.equal(shouldTrackPythonToolAsBackgroundTask('ffmpeg_transcode.py', ['C:\\project\\video\\clip.mp4', '--inspect-only']), false, 'automatic media inspection must remain panel-local and stay out of the background task center');
+assert.equal(shouldTrackPythonToolAsBackgroundTask('cut_video.py', ['C:\\project\\video\\clip.mp4']), true, 'other real Python tools must retain their background task identity');
 const splitWorkerLease = resolvePythonWorkerResourceLease('classify.py', { leaseId: 'lease-12345678', profile: 'video-split', phase: '分割大视频' });
 assert.deepStrictEqual(splitWorkerLease.definition.capacities, [{ key: 'heavy-media', access: 'write', limit: 1, writeLimit: 1 }]);
 assert.equal(splitWorkerLease.definition.runningMessage, '分割大视频');

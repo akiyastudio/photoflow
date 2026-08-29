@@ -1,0 +1,23 @@
+{
+  "name": "@photoflow/video-tools",
+  "version": "26.8.29.1",
+  "private": true,
+  "scripts": { "build": "node scripts/verify-layout.cjs", "test": "node tests/test-service.cjs", "package": "node scripts/package-component.cjs", "package:host": "node scripts/package-component.cjs" },
+  "photoflowComponent": {
+    "manifest": "component.json",
+    "development": {
+      "prepare": "build",
+      "runtime": { "command": "dev-node.cmd", "argsPrefix": [] },
+      "files": {
+        "service.cjs": "service.cjs",
+        "ui/transcode.html": "ui/transcode.html",
+        "ui/split.html": "ui/split.html",
+        "ui/app.js": "ui/app.js",
+        "ui/style.css": "ui/style.css",
+        "ui/icon.svg": "ui/icon.svg",
+        "README.md": "README.md"
+      }
+    },
+    "tests": { "package-layout": ["tests/test-service.cjs"] }
+  }
+}

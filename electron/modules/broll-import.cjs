@@ -139,7 +139,7 @@ const runTranscoder = async ({ getRunConfig, processSupervisor, source, settings
     '--audio-track', settings?.audioTrack || 'all',
     '--audio-bitrate-kbps', String(settings?.audioBitrateKbps || 192),
     '--encoder-preset', settings?.encoderPreset || 'balanced',
-    '--retry-count', String(settings?.retryCount ?? 1),
+    '--retry-count', '1',
     ...(Number(settings?.videoBitrateMbps) > 0 ? ['--video-bitrate-mbps', String(settings.videoBitrateMbps)] : []),
     '--output-mode', 'new',
   ];
