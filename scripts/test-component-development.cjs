@@ -60,7 +60,8 @@ try {
   writeFixture('unsafe-test', ({ packageManifest }) => { packageManifest.photoflowComponent.tests['package-layout'] = ['../outside.cjs']; });
   writeFixture('undeclared-map', ({ packageManifest }) => { packageManifest.photoflowComponent.development.files['private/secret.js'] = 'algorithm.js'; });
   writeFixture('permission-default-deny', ({ manifest }) => { delete manifest.componentHost.service.permissions; });
-  for (const [id, pattern] of [['missing-build', /missing or unsafe/], ['path-escape', /component-local relative file/], ['unknown-field', /Unknown component development field/], ['unsafe-test', /component-local relative file/], ['undeclared-map', /undeclared component file/], ['permission-default-deny', /Host API 7 permissions must be exact and unique/]]) {
+  writeFixture('batch-runtime', ({ root, packageManifest }) => { fs.writeFileSync(path.join(root, 'runtime.cmd'), '@echo off\r\n'); packageManifest.photoflowComponent.development.runtime.command = 'runtime.cmd'; });
+  for (const [id, pattern] of [['missing-build', /missing or unsafe/], ['path-escape', /component-local relative file/], ['unknown-field', /Unknown component development field/], ['unsafe-test', /component-local relative file/], ['undeclared-map', /undeclared component file/], ['permission-default-deny', /Host API 7 permissions must be exact and unique/], ['batch-runtime', /directly spawnable executable/]]) {
     const invalid = registry.inspect(id); assert.equal(invalid.source, 'development'); assert.equal(invalid.compatible, false); assert.equal(invalid.name, `Fixture ${id}`, 'invalid development builds retain their safe manifest identity in Component Management'); assert.match(invalid.error, pattern);
   }
 

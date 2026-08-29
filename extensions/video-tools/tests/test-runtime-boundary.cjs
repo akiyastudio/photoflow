@@ -1,6 +1,7 @@
 const assert = require('assert').strict;
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
 const root = path.resolve(__dirname, '..');
 const repo = path.resolve(root, '..', '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.json'), 'utf8'));
@@ -18,6 +19,18 @@ assert(!buildPython.includes("'--hidden-import', 'ffmpeg_transcode'") && !buildP
 const packageJson = fs.readFileSync(path.join(repo, 'package.json'), 'utf8');
 assert(!packageJson.includes('"to": "python/ffmpeg.zip"'), 'base installer must not carry the encoder FFmpeg archive');
 assert(!fs.existsSync(path.join(repo, 'media-runtime.lock.json')) && !fs.existsSync(path.join(repo, 'media-runtime')) && !fs.existsSync(path.join(repo, 'scripts', 'prepare-ffmpeg.cjs')) && !fs.existsSync(path.join(repo, 'scripts', 'media-runtime')), 'encoder build materials must not remain at repository root');
+const componentPackage = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+const developmentRuntime = componentPackage.photoflowComponent.development.runtime;
+assert.equal(componentPackage.photoflowComponent.development.prepare, 'prepare:dev');
+assert.equal(developmentRuntime.command.win32, '.venv/Scripts/python.exe');
+assert(!fs.existsSync(path.join(root, 'dev-python.cmd')), 'development runtime must not pass a batch file directly to child_process.spawn');
+if (process.platform === 'win32') {
+  const command = path.join(root, developmentRuntime.command.win32);
+  const result = spawnSync(command, [...developmentRuntime.argsPrefix, path.join(root, developmentRuntime.entry), 'ffmpeg_transcode', '--inspect-only', '--skip-capability-probe'], { cwd: root, encoding: 'utf8', windowsHide: true });
+  assert.equal(result.error, undefined, `direct development runtime spawn failed: ${result.error?.message || ''}`);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /"type":\s*"success"/, 'direct development runtime must complete a real JSONL inspection');
+}
 const packageScript = fs.readFileSync(path.join(root, 'scripts', 'package-component.cjs'), 'utf8');
 assert(!packageScript.includes("path.resolve(root, '..', '..')") && !packageScript.includes('artifacts/python') && packageScript.includes("path.join(root, '.venv'"), 'component packaging must use only component-local build inputs');
 const playback = fs.readFileSync(path.join(repo, 'extensions', 'video-playback-mpv', 'src', 'AdvancedVideoDecoder.cs'), 'utf8');

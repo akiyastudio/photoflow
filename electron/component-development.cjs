@@ -110,6 +110,7 @@ const inspectDevelopmentComponent = (componentRoot, { platform = process.platfor
   const commandDeclaration = runtime.command;
   const commandRelative = typeof commandDeclaration === 'string' ? commandDeclaration : commandDeclaration?.[`${platform}-${arch}`] || commandDeclaration?.[platform] || commandDeclaration?.default;
   const command = safeFile(componentRoot, commandRelative, 'component development runtime command');
+  if (/\.(?:cmd|bat)$/i.test(command)) throw new Error('Component development runtime command must be a directly spawnable executable, not a batch wrapper');
   const entry = runtime.entry === undefined ? '' : safeFile(componentRoot, runtime.entry, 'component development runtime entry');
   const argsPrefix = runtime.argsPrefix === undefined ? [] : runtime.argsPrefix;
   if (!Array.isArray(argsPrefix) || argsPrefix.length > 16 || argsPrefix.some(value => typeof value !== 'string' || !value.startsWith('-') || value.length > 128)) throw new Error('Component development runtime argsPrefix must contain bounded option flags');
