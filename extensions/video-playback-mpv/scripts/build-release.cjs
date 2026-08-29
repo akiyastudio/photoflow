@@ -12,10 +12,10 @@ if (process.argv.includes('--dry-run')) {
   console.log(`视频播放器组件一键源码构建边界验证通过：${root}`);
   process.exit(0);
 }
-const runtimeRoot = path.join(root, 'vendor');
+const runtimeRoot = path.join(root, 'artifacts', 'installers', 'media-runtime', 'libmpv-lgpl-windows-x64');
 const runtime = spawnSync('bash', [runtimeScript], {
   cwd: root,
-  env: { ...process.env, PHOTOFLOW_MPV_OUTPUT_ROOT: runtimeRoot },
+  env: process.env,
   encoding: 'utf8',
   windowsHide: true,
   stdio: 'inherit',

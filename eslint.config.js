@@ -7,7 +7,7 @@ import tseslint from 'typescript-eslint'
 const sourceFiles = ['src/**/*.{ts,tsx}']
 
 export default [
-  { ignores: ['artifacts/**', '.cache/**', '.venv', 'node_modules'] },
+  { ignores: ['artifacts/**', '.cache/**', '**/artifacts/**', '**/.cache/**', '**/dist/**', '.venv', 'node_modules'] },
   { ...js.configs.recommended, files: sourceFiles },
   ...tseslint.configs.recommended.map(config => ({ ...config, files: sourceFiles })),
   {

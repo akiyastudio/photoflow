@@ -46,6 +46,9 @@ media-runtime/vendor/
 /extensions/video-playback-mpv/runtime/
 /extensions/video-playback-mpv/vendor/
 /extensions/video-playback-mpv/runtime.backup-*/
+/extensions/video-playback-mpv/.cache/
+/extensions/video-playback-mpv/artifacts/
+/extensions/video-playback-mpv/dist/
 /components1/
 
 # 系统文件

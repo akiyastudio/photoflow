@@ -11,7 +11,7 @@ if (process.env.PHOTOFLOW_STANDALONE_COPY_TEST !== '1') {
   try {
     fs.cpSync(source, copy, {
       recursive: true,
-      filter: candidate => !['dist', 'installed', 'vendor'].some(name => path.resolve(candidate) === path.join(source, name)),
+      filter: candidate => !['.cache', 'artifacts', 'dist', 'installed', 'vendor'].some(name => path.resolve(candidate) === path.join(source, name)),
     });
     const npmCli = process.env.npm_execpath;
     assert(npmCli && fs.existsSync(npmCli), 'npm CLI path is required for the standalone copy test');

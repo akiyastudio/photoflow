@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { sha256File } = require('./runtime-policy.cjs');
+const { sha256File } = require('../scripts/vendor/runtime-policy.cjs');
 
 const [artifactRootArg] = process.argv.slice(2);
 if (!artifactRootArg) throw new Error('用法：node create-mpv-manifest.cjs <产物目录>');
