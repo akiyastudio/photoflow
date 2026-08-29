@@ -12,7 +12,8 @@ import { MAX_SUBTITLE_FONT_SIZE, MIN_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSi
 import { componentSettingsSectionKey, type ComponentSettingsSection } from './component-settings-page-model';
 import { restoredWorkspaceConfig } from './restored-workspace-config';
 import { useUserFacingToast } from '../app/useUserFacingToast';
-import { defaultVideoShortcutBindings, exportVideoShortcuts, importVideoShortcuts, normalizeVideoShortcutBindings, VIDEO_ACTIONS, videoShortcutConflicts } from '../../contracts/video-shortcuts';
+import { defaultVideoShortcutBindings, exportVideoShortcuts, formatVideoShortcutChord, importVideoShortcuts, isModifierOnlyVideoShortcutInput, isReservedVideoShortcut, normalizeVideoShortcutBindings, shortcutChord, shortcutInputFromKeyboardEvent, VIDEO_ACTIONS, videoShortcutConflicts } from '../../contracts/video-shortcuts';
+import type { VideoActionId } from '../../contracts/video-shortcuts';
 
 const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
   const number = Number(value);
@@ -528,6 +529,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const [editingProgressNamePresetValue, setEditingProgressNamePresetValue] = useState('');
   const [restoreProjects, setRestoreProjects] = useState<Record<string, string>>({});
   const [shortcutTransfer, setShortcutTransfer] = useState('');
+  const [recordingShortcutAction, setRecordingShortcutAction] = useState<VideoActionId | ''>('');
   const pendingSaveRef = useRef<AppConfig | null>(null);
   const savingRef = useRef(false);
   const backupSnapshotsRef = useRef<HTMLDivElement>(null);
@@ -808,10 +810,19 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const updateVideoPlaybackSettings = (next: AppConfig['videoPlayback']) => commitSettings({ ...draft, videoPlayback: next });
   const shortcutBindings = normalizeVideoShortcutBindings(videoPlaybackSettings.shortcuts);
   const shortcutConflicts = videoShortcutConflicts(shortcutBindings);
-  const updateShortcut = (actionId: string, value: string) => {
-    const next = normalizeVideoShortcutBindings({ ...shortcutBindings, [actionId]: value.split(',').map(item => item.trim()).filter(Boolean).slice(0, 4) });
-    const conflict = videoShortcutConflicts(next)[0]; if (conflict) { onNotice(`快捷键冲突：${conflict.chord}`, 4000); return; }
+  const captureShortcut = (actionId: VideoActionId, event: React.KeyboardEvent<HTMLButtonElement>) => {
+    if (recordingShortcutAction !== actionId) return;
+    event.preventDefault(); event.stopPropagation();
+    const input = shortcutInputFromKeyboardEvent(event);
+    if (isModifierOnlyVideoShortcutInput(input)) return;
+    const chord = shortcutChord(input);
+    if (!chord) return;
+    if (isReservedVideoShortcut(chord)) { onNotice(`“${formatVideoShortcutChord(chord)}”是系统保留快捷键，请按其他组合键`, 4500); return; }
+    const next = normalizeVideoShortcutBindings({ ...shortcutBindings, [actionId]: [chord] });
+    const conflict = videoShortcutConflicts(next)[0];
+    if (conflict) { onNotice(`“${formatVideoShortcutChord(conflict.chord)}”已用于其他操作`, 4500); return; }
     updateVideoPlaybackSettings({ ...videoPlaybackSettings, shortcuts: next });
+    setRecordingShortcutAction('');
   };
   const updateInspirationLibrarySettings = (next: AppConfig['inspirationLibrary']) => commitSettings({ ...draft, inspirationLibrary: next });
   const updateInspirationLibraryRoot = (rootPath: string) => updateInspirationLibrarySettings({ ...inspirationLibrarySettings, rootPath });
@@ -925,8 +936,11 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="目标峰值亮度" description="100–4000 nits；仅在后端支持 target peak 控制时生效。"><div className="ml-auto flex w-full max-w-sm items-center gap-3"><input type="range" min={100} max={4000} step={50} value={videoPlaybackSettings.targetPeakNits} onChange={event => updateVideoPlaybackSettings({ ...videoPlaybackSettings, targetPeakNits: Math.max(100, Math.min(4000, Number(event.target.value))) })} className="min-w-0 flex-1"/><output className="w-20 text-right text-sm">{videoPlaybackSettings.targetPeakNits} nits</output></div></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="视频快捷键">
-      <div className="px-4 py-3.5"><p className="text-xs leading-5 text-slate-500">支持单键和 Ctrl/Alt/Shift/Meta 组合键。用逗号分隔同一动作的多个按键；系统保留键会被拒绝。</p></div>
-      {VIDEO_ACTIONS.map(action => <SettingsRow key={action.id} title={action.label} description={`${action.id} · ${{global:'全局',workspace:'工作区',player:'播放器'}[action.scope]} scope`} align="start"><div className="ml-auto flex w-full max-w-md items-center gap-2"><input aria-label={`${action.label}快捷键`} value={shortcutBindings[action.id].join(', ')} onChange={event => updateShortcut(action.id, event.target.value)} className="form-input min-w-0 flex-1"/><button type="button" onClick={() => updateVideoPlaybackSettings({ ...videoPlaybackSettings, shortcuts: { ...shortcutBindings, [action.id]: [...action.defaults] } })} className="dialog-secondary h-10 shrink-0 px-3 text-xs">重置</button></div></SettingsRow>)}
+      <div className="px-4 py-3.5"><p className="text-xs leading-5 text-slate-500">点击“修改”后，直接按下单键或组合键即可。修改会替换该操作的现有按键；系统保留键和冲突按键不会保存。</p></div>
+      {VIDEO_ACTIONS.map(action => {
+        const recording = recordingShortcutAction === action.id;
+        return <SettingsRow key={action.id} title={action.label}><div className="ml-auto flex w-full max-w-md items-center gap-2"><div aria-label={`${action.label}当前快捷键`} className="flex min-h-10 min-w-0 flex-1 flex-wrap items-center gap-1.5 rounded-md border border-slate-300 bg-slate-50 px-3 py-1.5">{shortcutBindings[action.id].map(chord => <kbd key={chord} className="rounded border border-slate-300 bg-white px-2 py-1 text-xs font-bold text-slate-700 shadow-sm">{formatVideoShortcutChord(chord)}</kbd>)}</div><button type="button" aria-label={`修改${action.label}快捷键`} aria-pressed={recording} onClick={() => setRecordingShortcutAction(current => current === action.id ? '' : action.id)} onKeyDown={event => captureShortcut(action.id, event)} onBlur={() => setRecordingShortcutAction(current => current === action.id ? '' : current)} className={`h-10 shrink-0 rounded-md px-3 text-xs font-bold ${recording ? 'bg-blue-600 text-white ring-2 ring-blue-300' : 'dialog-secondary'}`}>{recording ? '请按键…' : '修改'}</button><button type="button" onClick={() => { updateVideoPlaybackSettings({ ...videoPlaybackSettings, shortcuts: { ...shortcutBindings, [action.id]: [...action.defaults] } }); setRecordingShortcutAction(''); }} className="dialog-secondary h-10 shrink-0 px-3 text-xs">重置</button></div></SettingsRow>;
+      })}
       {shortcutConflicts.length > 0 && <div className="px-4 py-3.5"><p role="alert" className="rounded-md bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">快捷键冲突：{shortcutConflicts.map(item => `${item.chord}（${item.actions.join(' / ')}）`).join('；')}</p></div>}
       <div className="p-4"><div className="rounded-lg border border-slate-200 bg-slate-50 p-3"><textarea aria-label="视频快捷键导入导出" value={shortcutTransfer} onChange={event => setShortcutTransfer(event.target.value)} placeholder="快捷键 JSON" className="form-input h-28 w-full resize-y font-mono text-xs"/><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => setShortcutTransfer(exportVideoShortcuts(shortcutBindings))} className="rounded bg-slate-700 px-3 py-1.5 text-xs font-bold text-white">导出配置</button><button type="button" onClick={() => { try { updateVideoPlaybackSettings({ ...videoPlaybackSettings, shortcuts: importVideoShortcuts(shortcutTransfer) }); onNotice('快捷键配置已导入'); } catch (error) { onNotice(error instanceof Error ? error.message : '快捷键配置无效', 5000); } }} className="rounded bg-blue-600 px-3 py-1.5 text-xs font-bold text-white">导入配置</button><button type="button" onClick={() => updateVideoPlaybackSettings({ ...videoPlaybackSettings, shortcuts: defaultVideoShortcutBindings() })} className="rounded border border-slate-300 bg-white px-3 py-1.5 text-xs font-bold">全部重置</button></div></div></div>
     </SettingsPageGroup>
