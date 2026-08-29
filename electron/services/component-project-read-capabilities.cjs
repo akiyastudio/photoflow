@@ -70,7 +70,7 @@ const registerComponentProjectReadCapabilities = ({
     return IMAGE_EXTENSIONS.has(extension) ? 'image' : RAW_EXTENSIONS.has(extension) ? 'raw' : VIDEO_EXTENSIONS.has(extension) ? 'video' : 'file';
   };
   const bound = async (context, descriptor) => {
-    if (!context || context.surface !== 'project') throw hostError(CODES.PERMISSION_DENIED, 'Capability requires a bound project surface');
+    if (!context || !['project', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider'].includes(context.surface)) throw hostError(CODES.PERMISSION_DENIED, 'Capability requires a bound project surface');
     const workspaceRoot = ensureWorkspace(context.workspacePath);
     const project = getBoundProject?.(workspaceRoot, context.projectName);
     if (!project || String(project.id || '') !== String(context.projectId || '')) throw hostError(CODES.NOT_FOUND, 'Bound project is unavailable');

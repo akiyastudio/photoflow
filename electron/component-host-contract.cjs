@@ -233,12 +233,14 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       const label = requiredExactStringText(raw.label, 'settings page label', 80);
       settingsPages.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, 'settings page title'), entry, relativeEntry, rpcMethods: Object.freeze(rpcMethods) }));
     } else {
-      rejectUnknownFields(raw, ['type', 'id', 'label', 'title', 'pageId', 'rpcMethods'], `${raw.type} contribution`);
+      rejectUnknownFields(raw, ['type', 'id', 'label', 'title', 'pageId', 'rpcMethods', 'placement'], `${raw.type} contribution`);
       const label = requiredExactStringText(raw.label, `${raw.type} label`, 80); const pageId = requiredExactId(raw.pageId, `${raw.type} pageId`);
+      const placement = raw.placement === undefined ? '' : requiredExactStringText(raw.placement, `${raw.type} placement`, 80);
+      if (placement && (raw.type !== 'component.sidePanel' || placement !== 'workspace.videoTools')) throw new Error(`Invalid ${raw.type} placement`);
       if (!Array.isArray(raw.rpcMethods) || raw.rpcMethods.length < 1 || raw.rpcMethods.length > 16) throw new Error(`${raw.type} RPC methods must be a bounded allowlist`);
       const rpcMethods = raw.rpcMethods.map(method => requiredExactStringText(method, `${raw.type} RPC method`, 128));
       if (new Set(rpcMethods).size !== rpcMethods.length || rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error(`${raw.type} RPC methods must be unique versioned methods`);
-      api7Contributions.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, `${raw.type} title`, 160), pageId, rpcMethods: Object.freeze(rpcMethods) }));
+      api7Contributions.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, `${raw.type} title`, 160), pageId, rpcMethods: Object.freeze(rpcMethods), ...(placement ? { placement } : {}) }));
     }
   }
   if (settingsPages.length > 16) throw new Error('Component settings page contributions must be bounded');

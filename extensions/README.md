@@ -69,6 +69,10 @@ The current component IDs are:
   capability: the player, controls, trimming, screenshots and settings remain
   in the main application, and the component package must not contain renderer
   JavaScript, HTML or CSS.
+- `video-tools`: “视频处理”. It contributes the existing “视频转码” and
+  “视频切割” panels at their original positions under the file-page “视频工具”
+  menu. Both entries share one component service, settings namespace and the
+  audited Host media-processing runtime.
 
 The inspiration library, scene organizer, and Office image extractor are part
 of the main application and are not component IDs.

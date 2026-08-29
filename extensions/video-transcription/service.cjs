@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const readline = require('node:readline');
 const { spawn } = require('node:child_process');
 const {
-  MEDIA_EXTENSIONS, TERMINAL_STATES, normalizeDialogInputs, normalizeSettings,
+  TERMINAL_STATES, normalizeSettings,
   isSupportedMediaName, cleanName, cleanRelativeName, redactError, srtNameFor,
   openDatabase, operationSnapshot,
 } = require('./core.cjs');
@@ -103,69 +103,59 @@ const insertOperation = (db, projectId, sourceKind, settings, files, operationId
   } catch (error) { db.exec('ROLLBACK'); throw error; }
   return operationId;
 };
-const startHostTask = (parentId, operationId, total) => callHost(parentId, 'tasks.v7', { action: 'start', operationId, title: '视频语音识别', message: `等待处理 ${total} 个媒体文件`, progress: 0, checkpoint: { nextOrdinal: 0, total } });
-const mapBounded = async (items, concurrency, worker) => {
-  const result = new Array(items.length); let cursor = 0;
-  await Promise.all(Array.from({ length: Math.min(Math.max(1, concurrency), items.length) }, async () => {
-    while (cursor < items.length) { const index = cursor++; result[index] = await worker(items[index], index); }
-  }));
-  return result;
-};
+const startHostTask = (parentId, operationId, total) => callHost(parentId, 'tasks.v7', { action: 'start', operationId, title: '视频转文字', message: `等待处理 ${total} 个视频文件`, progress: 0, checkpoint: { nextOrdinal: 0, total } });
 const validateMaterializedPath = (dataPath, response) => {
   const privatePath = path.resolve(String(response?.privatePath || ''));
   if (!inside(dataPath, privatePath) || privatePath === path.resolve(dataPath)) throw new Error('宿主返回了无效的组件私有输入');
   return privatePath;
 };
-const startDialogOperation = async (parentId, payload) => {
-  const mode = ['file', 'files', 'folder'].includes(payload.mode) ? payload.mode : 'files';
-  const dialog = await callHost(parentId, 'dialogs.v7', mode === 'folder'
-    ? { kind: 'openDirectory', title: '选择要递归识别的媒体文件夹', extensions: MEDIA_EXTENSIONS, recursive: true }
-    : { kind: 'openFiles', title: mode === 'file' ? '选择一个媒体文件' : '选择多个媒体文件', extensions: MEDIA_EXTENSIONS, multiple: mode !== 'file' });
-  if (dialog.cancelled) return { cancelled: true };
-  const inputs = normalizeDialogInputs(dialog.inputs);
-  if (!inputs.length) throw new Error('没有选择受支持的视频或音频文件');
-  const operationId = crypto.randomUUID();
-  const storagePromise = storageFor(parentId); const settingsPromise = readSettings(parentId);
-  await startHostTask(parentId, operationId, inputs.length); // Arms the Host long-request deadline before a large copy batch.
-  let storage; let settings;
-  try { [storage, settings] = await Promise.all([storagePromise, settingsPromise]); }
-  catch (error) { await callHost(parentId, 'tasks.v7', { action: 'fail', operationId, error: '无法准备组件私有存储' }).catch(() => undefined); throw error; }
-  const files = await mapBounded(inputs, 4, async input => {
-    try {
-      const materialized = await callHost(parentId, 'project.input.tokens.v7', { action: 'materialize', token: input.token });
-      return { name: input.name, relativeName: input.relativeName, privatePath: validateMaterializedPath(storage.dataPath, materialized) };
-    } catch (error) {
-      return { name: input.name, relativeName: input.relativeName, state: 'failed', error: `输入物化失败：${redactError(error)}` };
-    }
-  });
-  try { insertOperation(storage.db, storage.projectId, mode === 'folder' ? 'external-folder' : 'external-files', settings, files, operationId); }
-  catch (error) {
-    await Promise.all(files.filter(file => file.privatePath).map(file => removePrivateInput(storage, file.privatePath).catch(() => false)));
-    await callHost(parentId, 'tasks.v7', { action: 'fail', operationId, error: '无法登记识别任务' }).catch(() => undefined);
-    throw error;
-  }
-  const failedInputs = files.filter(file => file.state === 'failed').length;
-  const materializedInputs = files.length - failedInputs;
-  await callHost(parentId, 'tasks.v7', { action: 'report', operationId, progress: 0, phase: 'materializing', message: `已准备 ${materializedInputs} 个输入，${failedInputs} 个失败`, checkpoint: { nextOrdinal: 0, total: files.length, materialized: materializedInputs, failed: failedInputs, truncated: dialog.truncated === true } }).catch(() => undefined);
-  const warnings = [];
-  if (dialog.truncated) warnings.push('文件夹过大，Host 已按安全上限截断；请拆分文件夹后继续处理。');
-  if (failedInputs) warnings.push(`${failedInputs} 个输入未能在令牌有效期内物化，已隔离为失败项。`);
-  return { accepted: true, operationId, operation: operationSnapshot(storage.db, storage.projectId, operationId), preparation: { selected: files.length, materialized: materializedInputs, failed: failedInputs, truncated: dialog.truncated === true }, ...(warnings.length ? { warning: warnings.join(' ') } : {}) };
+const normalizeProjectRelativePath = value => {
+  const raw = String(value || '').replace(/\\/g, '/').trim().replace(/\/+$/, '');
+  if (!raw || raw.startsWith('/') || /^[A-Za-z]:/.test(raw) || raw.includes('\0')) return '';
+  const parts = raw.split('/');
+  if (parts.some(part => !part || part === '.' || part === '..')) return '';
+  return parts.map(cleanName).join('/').slice(0, 1024);
+};
+const isWithinProjectScope = (relativeName, scopeRelativePath) => {
+  if (!scopeRelativePath) return true;
+  const name = relativeName.toLocaleLowerCase('en-US');
+  const scope = scopeRelativePath.toLocaleLowerCase('en-US');
+  return name === scope || name.startsWith(`${scope}/`);
 };
 const collectProjectMedia = async (parentId, payload, context) => {
-  const requested = payload.scope === 'all' ? [] : (Array.isArray(payload.relativePaths) ? payload.relativePaths : context.selectedRelativePaths || []);
-  if (requested.length) return [...new Set(requested.map(cleanRelativeName).filter(isSupportedMediaName))].slice(0, 2000).map(relativeName => ({ name: path.posix.basename(relativeName), relativeName, mediaRef: { relativePath: relativeName } }));
-  const files = []; let cursor = null;
+  // The Host-provided page context is forwarded by the renderer in current Component
+  // Service V1 frames. Older hosts may still attach the selection to service context.
+  const requestedInput = Array.isArray(payload?.relativePaths) ? payload.relativePaths
+    : Array.isArray(context?.selectedRelativePaths) ? context.selectedRelativePaths : [];
+  const requested = [...new Map(requestedInput.slice(0, 2000).map(normalizeProjectRelativePath).filter(Boolean).map(value => [value.toLocaleLowerCase('en-US'), value])).values()];
+  if (!requested.length) return [];
+  const rawScope = payload?.scopeRelativePath ?? context?.scopeRelativePath;
+  const scopeRelativePath = normalizeProjectRelativePath(rawScope);
+  if (rawScope && !scopeRelativePath) throw new Error('当前选择范围无效');
+  if (requested.some(value => !isWithinProjectScope(value, scopeRelativePath))) throw new Error('当前选择超出文件页面范围');
+
+  const requestedKeys = requested.map(value => value.toLocaleLowerCase('en-US'));
+  const files = []; const seenMedia = new Set();
+  let cursor = null; let pages = 0;
   do {
     const page = await callHost(parentId, 'project.media.page.v7', { pageSize: 200, cursor, kinds: ['video'] });
-    for (const item of page.items || []) if (isSupportedMediaName(item.relativePath || item.name)) files.push({ name: item.name, relativeName: item.relativePath || item.name, mediaRef: item.mediaRef || { relativePath: item.relativePath } });
-    cursor = page.page?.hasMore ? page.page.cursor : null;
-  } while (cursor && files.length < 2000);
+    pages += 1;
+    for (const item of Array.isArray(page?.items) ? page.items : []) {
+      const relativeName = normalizeProjectRelativePath(item?.relativePath || item?.name);
+      if (!relativeName || !isSupportedMediaName(relativeName) || !isWithinProjectScope(relativeName, scopeRelativePath)) continue;
+      const key = relativeName.toLocaleLowerCase('en-US');
+      if (!requestedKeys.some(selected => key === selected || key.startsWith(`${selected}/`)) || seenMedia.has(key)) continue;
+      seenMedia.add(key);
+      files.push({ name: cleanName(item?.name || path.posix.basename(relativeName)), relativeName, mediaRef: item?.mediaRef || { relativePath: relativeName } });
+      if (files.length >= 2000) break;
+    }
+    cursor = page?.page?.hasMore ? String(page.page.cursor || '') : null;
+  } while (cursor && files.length < 2000 && pages < 1000);
   return files;
 };
 const startProjectOperation = async (parentId, payload, context) => {
   const [storage, settings, files] = await Promise.all([storageFor(parentId), readSettings(parentId), collectProjectMedia(parentId, payload, context)]);
-  if (!files.length) throw new Error(payload.scope === 'all' ? '项目中没有支持的视频媒体' : '当前选择中没有支持的视频媒体');
+  if (!files.length) throw new Error('当前选择中没有可处理的视频文件');
   const operationId = insertOperation(storage.db, storage.projectId, 'project-media', settings, files);
   await startHostTask(parentId, operationId, files.length);
   return { accepted: true, operationId, operation: operationSnapshot(storage.db, storage.projectId, operationId) };
@@ -275,7 +265,7 @@ const runOperation = async (parentId, payload, context) => {
   let engine = null;
   try {
     db.prepare("UPDATE transcript_operations SET state='running',error='',updated_at=? WHERE id=? AND project_id=?").run(Date.now(), operationId, projectId);
-    await callHost(parentId, 'tasks.v7', { action: 'resume', operationId, title: '视频语音识别', message: '正在恢复识别', checkpoint: { nextOrdinal: 0, total: operation.total } });
+    await callHost(parentId, 'tasks.v7', { action: 'resume', operationId, title: '视频转文字', message: '正在恢复转写', checkpoint: { nextOrdinal: 0, total: operation.total } });
     const settings = normalizeSettings(JSON.parse(operation.settings_json || '{}'));
     const rows = db.prepare(`SELECT f.* FROM transcript_files f JOIN transcript_operations o ON o.id=f.operation_id
       WHERE f.operation_id=? AND o.project_id=? AND (f.state IN ('pending','running') OR (f.state='failed' AND (f.private_path!='' OR f.source_kind='project-media'))) ORDER BY f.ordinal`).all(operationId, projectId);
@@ -389,13 +379,12 @@ const cancelOperation = async (parentId, payload) => {
 };
 
 const handlers = {
-  'transcript.inputs.start.v1': startDialogOperation,
   'transcript.project.start.v1': startProjectOperation,
   'transcript.operation.run.v1': runOperation,
   'transcript.operation.list.v1': async parentId => { const { db, projectId } = await storageFor(parentId); return { operations: db.prepare('SELECT id FROM transcript_operations WHERE project_id=? ORDER BY created_at DESC LIMIT 100').all(projectId).map(row => operationSnapshot(db, projectId, row.id, false)) }; },
   'transcript.operation.get.v1': async (parentId, payload) => { const { db, projectId } = await storageFor(parentId); const operation = operationSnapshot(db, projectId, String(payload.operationId || '')); if (!operation) throw new Error('找不到识别任务'); return { operation }; },
   'transcript.operation.cancel.v1': cancelOperation,
-  'transcript.operation.resume.v1': async (parentId, payload) => { const { db, projectId } = await storageFor(parentId); const operationId = String(payload.operationId || ''); if (!db.prepare('SELECT 1 FROM transcript_operations WHERE id=? AND project_id=?').get(operationId, projectId)) throw new Error('找不到识别任务'); db.prepare("UPDATE transcript_operations SET state='queued',updated_at=? WHERE id=? AND project_id=? AND state IN ('cancelled','failed','partial_failure')").run(Date.now(), operationId, projectId); await callHost(parentId, 'tasks.v7', { action: 'resume', operationId, title: '视频语音识别', message: '准备恢复识别', checkpoint: { resumed: true } }); return { accepted: true, operationId }; },
+  'transcript.operation.resume.v1': async (parentId, payload) => { const { db, projectId } = await storageFor(parentId); const operationId = String(payload.operationId || ''); if (!db.prepare('SELECT 1 FROM transcript_operations WHERE id=? AND project_id=?').get(operationId, projectId)) throw new Error('找不到识别任务'); db.prepare("UPDATE transcript_operations SET state='queued',updated_at=? WHERE id=? AND project_id=? AND state IN ('cancelled','failed','partial_failure')").run(Date.now(), operationId, projectId); await callHost(parentId, 'tasks.v7', { action: 'resume', operationId, title: '视频转文字', message: '准备恢复转写', checkpoint: { resumed: true } }); return { accepted: true, operationId }; },
   'transcript.search.v1': search,
   'transcript.file.get.v1': getFile,
   'transcript.output.publish.v1': publishOutput,
@@ -424,4 +413,4 @@ const startService = () => {
 };
 if (require.main === module) startService();
 process.once('exit', () => { for (const value of runningOperations.values()) value.cancel(); for (const db of databaseCache.values()) db.close(); });
-module.exports = { startService, handlers, resolveRuntime, runtimeStatus, runEngine, createEngineSession, removePrivateInput };
+module.exports = { startService, handlers, resolveRuntime, runtimeStatus, runEngine, createEngineSession, removePrivateInput, collectProjectMedia };

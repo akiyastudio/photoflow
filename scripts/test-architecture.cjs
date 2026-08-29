@@ -39,7 +39,7 @@ const policy=JSON.parse(fs.readFileSync(adoptionPolicyPath,'utf8'));
 assert.deepEqual(Object.keys(policy).sort(),['legacyDomainDatabaseOwners','legacySettingsAdoptions','version']);
 assert.equal(policy.version,1);
 assert.deepEqual(policy.legacyDomainDatabaseOwners,[{componentId:isolatedId,paths:[`${isolatedId}.sqlite3`]}]);
-assert.deepEqual(policy.legacySettingsAdoptions,[{componentId:isolatedId,topLevelKey:['person','Detection'].join('')}]);
+assert.deepEqual(policy.legacySettingsAdoptions,[{componentId:isolatedId,topLevelKey:['person','Detection'].join('')},{componentId:'video-tools',topLevelKey:'videoTools'}]);
 const policyApi=require('../electron/compatibility/component-data-adoption-policy.cjs');
 assert(Object.isFrozen(policyApi.defaultComponentDataAdoptionPolicy));
 assert(Object.isFrozen(policyApi.defaultComponentDataAdoptionPolicy.legacyDomainDatabaseOwners));

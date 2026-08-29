@@ -94,7 +94,7 @@ Host API 7 的项目只读扩展要求 `minHostApiVersion = 7`。`project.files.
 
 `network.fetch.v7` 要求 canonical `origin` 与 URL origin 完全相同并属于 manifest `networkOrigins`。headers/secrets 必须为 plain object，mode、timeout、body 类型严格校验，GET/HEAD 禁止 body，base64 必须为 canonical 编码。单一总 deadline 与卸载 controller 从 secret 解析前开始，覆盖秘密锁/磁盘等待、DNS、连接、redirect 与响应；每跳过滤非 global 地址，并把验证地址直接交给 `agent:false` TLS transport lookup，原 hostname 用于 SNI、Host 和证书。跨 origin redirect 剥离 authorization/cookie/proxy header；301/302/303 转 GET 并清 body。secret 只能通过 `secretBindings` 注入固定 header。卸载经 capability barrier abort 活动请求，计数只在 finally 释放；普通 view 关闭不修改网络并发状态。
 
-Host API 7 contribution 为 `component.sidePanel`、`media.contextAction`、`project.contextAction`、`project.importProvider`、`project.exportProvider`、`application.command`。每项声明 `id`、`label`、`pageId` 和独立 `rpcMethods` allowlist；pageId 必须引用包内 fullPage，RPC 必须属于 service。项目入口绑定触发时的 scope 与 selection；跨目录媒体选择以共同祖先为 scope。application command 使用无项目 application context，且只有实际含命令的全局 Dock 注册 `Ctrl/Cmd+Shift+P`。宿主 UI 分别在项目工具栏/可调侧面板、媒体与项目右键菜单、导入/导出菜单及可搜索命令入口发现并打开这些 contribution。所有 surface 使用同一 sandbox preload，禁止导航、新窗口和 Node 集成；组件卸载、升级或项目关闭会关闭对应 view。
+Host API 7 contribution 为 `component.sidePanel`、`media.contextAction`、`project.contextAction`、`project.importProvider`、`project.exportProvider`、`application.command`。每项声明 `id`、`label`、`pageId` 和独立 `rpcMethods` allowlist；pageId 必须引用包内 fullPage，RPC 必须属于 service。组件必须声明一个 `workspace.toolbarAction` 或至少一个 `component.sidePanel`；因此仅面板组件不需要创建新的组件标签页。项目入口绑定触发时的 scope 与 selection；跨目录媒体选择以共同祖先为 scope。sidePanel 还按 sourcePageId 隔离实例，并使用文件页统一工具面板外框。application command 使用无项目 application context，且只有实际含命令的全局 Dock 注册 `Ctrl/Cmd+Shift+P`。宿主 UI 分别在项目工具栏/统一工具面板、媒体与项目右键菜单、导入/导出菜单及可搜索命令入口发现并打开这些 contribution。所有 surface 使用同一 sandbox preload，禁止导航、新窗口和 Node 集成；组件卸载、升级、项目或所属文件页关闭会关闭对应 view。
 
 无 UI 的运行时组件可在顶层 `runtimeContributions` 声明
 `media.playbackBackend`，当前协议版本为 1。声明包含组件内唯一的
@@ -122,6 +122,8 @@ Host API 7 的七项写能力必须设置 `minHostApiVersion = 7`，且各自声
 undo 本身同样使用逐项 intent/applied 日志。move undo 复核原 mutation 的摘要/目录 identity；mkdir undo 只移除仍属于原 mkdir 且为空的目录；recycle restore 在 originalPath 不存在时先 probe PIDL，probe 不确定或项目目标身份不匹配会返回人工恢复错误，绝不重复 restore。
 
 `project.media.process.v7` 当前完整处理动作是 `video.timelineFrames`、`video.trim` 和 `office.extractImages`；长处理还支持用相同幂等键及 `processAction` 调用 `status`/`cancel`。当前调用采用 await 语义：处理调用在宿主长请求租约内等待完成，同时后台任务提供进度、checkpoint 和协作式取消；发布前持久化确定性 target、owner 与摘要。Office 即使没有图片也先在组件私有 stage 创建空目录和 operation owner marker，再原子 move 到输出位置，消除 createDirectory 与 marker 之间的恢复空窗；同名目录被其他主体抢占时拒绝。receipt 恢复成功时会把对应后台 task 终态纠正为 `completed`，使 status 与收据一致。组件卸载会取消该组件仍活动的 import/process，in-flight 幂等锁会保留至实际 settle，阻止同 ID 重装后并发重放。renderer 没有这些 IPC 通道，只能由受监管服务调用领域能力。
+
+视频处理组件还通过同一能力使用 `video.transcode.inspect`、`video.transcode` 和 `video.split`。来源为当前项目 scope 内的相对路径，或用户通过 `dialogs.v7` 明确选择后获得的短时 input token；Host 解析真实路径并调用受监管媒体运行时，不向 renderer 暴露绝对路径。转码和切割使用相同幂等键执行 `status`/`cancel`，转码额外支持 `pause`/`resume`，进度同时进入任务中心并通过组件声明事件返回面板。
 
 `project.output.v7` 动作：
 

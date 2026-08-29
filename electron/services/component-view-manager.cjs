@@ -123,7 +123,7 @@ class ComponentViewManager {
       ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
     })));
   }
-  listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, hostApiVersion: item.hostApiVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
+  listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, hostApiVersion: item.hostApiVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(contribution.placement ? { placement: contribution.placement } : {}), ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
 
   async open(request) {
     return this.openSurface(request, 'project');
@@ -231,6 +231,11 @@ class ComponentViewManager {
       const details = typeof detailsOrLevel === 'object' ? detailsOrLevel : { level: detailsOrLevel, message, lineNumber };
       if (!['error', 3].includes(details?.level)) return;
       diagnostic('error', 'Component renderer console error', { lineNumber: Number(details?.lineNumber) || 0, messageLength: Math.min(String(details?.message || '').length, 10000) });
+    });
+    view.webContents.on('before-input-event', (event, input) => {
+      if (instance.context.surface !== 'component.sidePanel' || !instance.logicalActive || input?.type !== 'keyDown' || input?.key !== 'Escape') return;
+      event.preventDefault();
+      if (!this.mainWindow?.isDestroyed?.()) this.mainWindow?.webContents?.send?.('component-host:panel-close-requested', instance.instanceId);
     });
     view.webContents.setWindowOpenHandler(() => ({ action: 'deny' }));
     view.webContents.on('will-navigate', event => event.preventDefault());

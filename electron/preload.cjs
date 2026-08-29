@@ -87,6 +87,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
   openComponentPage: request => ipcRenderer.invoke('component-host-open', request),
   openComponentSettingsPage: request => ipcRenderer.invoke('component-host-settings-open', request),
   openComponentContribution: request => ipcRenderer.invoke('component-host-contribution-open', request),
+  onComponentPanelCloseRequested: callback => {
+    if (typeof callback !== 'function') throw new TypeError('Component panel close callback must be a function');
+    const listener = (_event, instanceId) => callback(String(instanceId || ''));
+    ipcRenderer.on('component-host:panel-close-requested', listener);
+    return () => ipcRenderer.removeListener('component-host:panel-close-requested', listener);
+  },
   releaseComponentSettingsPage: request => ipcRenderer.invoke('component-host-settings-release', request),
   activateComponentPage: instanceId => ipcRenderer.invoke('component-host-activate', instanceId),
   setHostSurfaceSuspended: update => ipcRenderer.invoke('component-host-set-suspended', update),
