@@ -46,6 +46,10 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 
 `component.sidePanel` 使用与内置工具相同的面板外框。宿主负责标题、组件图标、遮罩、关闭按钮和内容 View 的尺寸；插件 UI 负责内容区域，不要自行再绘制一层模态窗口。面板上下文的 `surface` 为 `component.sidePanel`，`scopeRelativePath`、`selectedRelativePaths` 和 `sourcePageId` 绑定打开它的文件页。不同文件页使用不同实例，关闭文件页、卸载或升级组件会关闭所属面板。
 
+宿主会在面板显示前自动注入 `component-sdk/ui.css` 对应的稳定颜色、间距、圆角、表单、按钮、卡片和滚动条契约；上下文中的 `panelStyleContractVersion` 表示当前样式契约。组件可以直接使用 `--pf-*` 变量以及 `.pf-panel-card`、`.pf-panel-section`、`.pf-form-label`、`.pf-form-input`、`.pf-button`、`.pf-button-primary`，不应复制主程序内部 Tailwind 实现。
+
+面板高度由组件预加载层自动测量正文并上报，宿主按实际内容高度收缩，最高为 `90vh`，超出后才在正文 View 内滚动；上下文中的 `panelLayoutContractVersion` 表示此布局契约。组件正文应保持自然高度，不要给 `html`、`body` 或顶层容器设置 `height:100vh`、固定高度或非必要的 `min-height`，否则该声明会成为上报的内容高度。
+
 ```json
 {
   "type": "component.sidePanel",

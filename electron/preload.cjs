@@ -93,6 +93,12 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('component-host:panel-close-requested', listener);
     return () => ipcRenderer.removeListener('component-host:panel-close-requested', listener);
   },
+  onComponentPanelContentSizeChanged: callback => {
+    if (typeof callback !== 'function') throw new TypeError('Component panel content-size callback must be a function');
+    const listener = (_event, value) => callback(value);
+    ipcRenderer.on('component-host:panel-content-size', listener);
+    return () => ipcRenderer.removeListener('component-host:panel-content-size', listener);
+  },
   releaseComponentSettingsPage: request => ipcRenderer.invoke('component-host-settings-release', request),
   activateComponentPage: instanceId => ipcRenderer.invoke('component-host-activate', instanceId),
   setHostSurfaceSuspended: update => ipcRenderer.invoke('component-host-set-suspended', update),

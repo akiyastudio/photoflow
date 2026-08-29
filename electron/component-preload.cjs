@@ -11,6 +11,32 @@ const normalizeNotification = value => {
   return Object.freeze({ tone: value.tone, message: value.message.trim(), ...(value.dedupeKey ? { dedupeKey: value.dedupeKey } : {}) });
 };
 const notify = payload => { const normalized = normalizeNotification(payload); return normalized.accepted === false ? Promise.resolve(normalized) : ipcRenderer.invoke('component-sdk:notify', normalized); };
+let contentSizeFrame = 0;
+let lastContentSize = '';
+const reportContentSize = () => {
+  contentSizeFrame = 0;
+  const body = document.body;
+  if (!body) return;
+  const rect = body.getBoundingClientRect();
+  const computed = getComputedStyle(body);
+  const marginX = (Number.parseFloat(computed.marginLeft) || 0) + (Number.parseFloat(computed.marginRight) || 0);
+  const marginY = (Number.parseFloat(computed.marginTop) || 0) + (Number.parseFloat(computed.marginBottom) || 0);
+  const size = { width: Math.ceil(rect.width + marginX), height: Math.ceil(rect.height + marginY) };
+  if (size.width < 1 || size.height < 1 || size.width > 20000 || size.height > 20000) return;
+  const identity = `${size.width}:${size.height}`;
+  if (identity === lastContentSize) return;
+  lastContentSize = identity;
+  void ipcRenderer.invoke('component-sdk:content-size', size).catch(() => undefined);
+};
+const scheduleContentSize = () => { if (!contentSizeFrame) contentSizeFrame = requestAnimationFrame(reportContentSize); };
+window.addEventListener('DOMContentLoaded', () => {
+  const observer = new ResizeObserver(scheduleContentSize);
+  observer.observe(document.documentElement);
+  if (document.body) observer.observe(document.body);
+  const mutations = new MutationObserver(scheduleContentSize);
+  if (document.body) mutations.observe(document.body, { attributes: true, childList: true, subtree: true });
+  scheduleContentSize();
+}, { once: true });
 
 const subscribe = (channel, callback) => {
   if (typeof callback !== 'function') throw new TypeError('Component lifecycle callback must be a function');

@@ -102,7 +102,12 @@ class View {
     assert.notEqual(first.instanceId, second.instanceId, 'each file page must own its component panel instance');
     assert.equal(views.length, 2);
     assert.equal((await open('page-a')).instanceId, first.instanceId, 'the same file page must reuse its panel instance');
-    assert(views.every(view => view.webContents.insertedCss.includes('::-webkit-scrollbar') && view.webContents.insertedCss.includes('::-webkit-scrollbar-button{display:none')), 'every isolated component page inherits the Host scrollbar shape without exposing Host CSS');
+    assert(views.every(view => view.webContents.insertedCss.includes('::-webkit-scrollbar') && view.webContents.insertedCss.includes('::-webkit-scrollbar-button{display:none') && view.webContents.insertedCss.includes('--pf-panel-body:#ffffff') && view.webContents.insertedCss.includes('.pf-panel-section')), 'every isolated component panel inherits Host tokens, primitives, and scrollbar styling');
+    const context = await handlers.get('component-sdk:get-context')({ sender: views[0].webContents });
+    assert.equal(context.panelStyleContractVersion, 1); assert.equal(context.panelLayoutContractVersion, 1);
+    const measured = await handlers.get('component-sdk:content-size')({ sender: views[0].webContents }, { width: 928, height: 412 });
+    assert.deepEqual(measured, { accepted: true, changed: true });
+    assert.deepEqual(hostMessages.at(-1), ['component-host:panel-content-size', { instanceId: first.instanceId, width: 928, height: 412 }], 'isolated component content height is forwarded to the owning Host panel');
     const authorizedDrop = await handlers.get('component-sdk:authorize-files')({ sender: views[0].webContents }, ['dropped.mp4']);
     assert.deepEqual(authorizedDrop.inputs, [{ name: 'dropped.mp4', token: 'token-0' }], 'component preload can exchange real dropped File objects for scoped input tokens');
     let escapePrevented = false;
@@ -112,7 +117,8 @@ class View {
     manager.destroy();
 
     const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'components', 'ComponentToolPanelSurface.tsx'), 'utf8');
-    for (const marker of ['tool-panel-backdrop', 'tool-panel-window', 'tool-panel-header', 'tool-panel-body', '关闭插件面板', 'setComponentPageBounds']) assert(panelSource.includes(marker));
+    for (const marker of ['tool-panel-backdrop', 'tool-panel-window', 'tool-panel-header', 'tool-panel-body', '关闭插件面板', 'setComponentPageBounds', 'onComponentPanelContentSizeChanged', 'contentHeight + 60']) assert(panelSource.includes(marker));
+    assert(!panelSource.includes("height: 'min(720px, 90vh)'"), 'component panels must not retain a fixed 720px body');
     assert(panelSource.includes('contribution.description') && !panelSource.includes('>插件面板<'), 'component panels render the declared native-panel description instead of a plugin-only subtitle');
     const dockSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'components', 'ComponentContributionDock.tsx'), 'utf8');
     assert(dockSource.includes("opened?.contribution.type === 'component.sidePanel'") && dockSource.includes('<ComponentToolPanelSurface'), 'side panels must use the unified file-page panel surface');
@@ -121,6 +127,8 @@ class View {
     assert(!workspaceSource.includes("open={panel === 'video-transcode'}") && !workspaceSource.includes("open={panel === 'video-split'}"), 'the file page must not retain duplicate built-in transcode or split panels');
     const nativePanelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectToolModal.tsx'), 'utf8');
     assert(!nativePanelSource.includes('ComponentToolPanelSurface'), 'existing native panel properties and behavior must remain independent');
+    const componentPreload = fs.readFileSync(path.join(__dirname, '..', 'electron', 'component-preload.cjs'), 'utf8');
+    assert(componentPreload.includes("ipcRenderer.invoke('component-sdk:content-size'") && componentPreload.includes('new ResizeObserver(scheduleContentSize)'), 'component preload reports live intrinsic content size without exposing DOM access to Host renderer');
     console.log('Panel-only component manifest, file-page ownership, and unified panel host tests passed');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

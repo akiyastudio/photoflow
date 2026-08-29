@@ -1,23 +1,32 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { X } from 'lucide-react';
 import { ComponentIcon } from '../../components/ComponentIcon';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import type { ComponentContribution } from '../../types';
 
-export const ComponentToolPanelSurface = ({ contribution, instanceId, open, onClose }: {
+export const ComponentToolPanelSurface = ({ contribution, instanceId, initialContentHeight = 0, open, onClose }: {
   contribution: ComponentContribution;
   instanceId: string;
+  initialContentHeight?: number;
   open: boolean;
   onClose: () => void;
 }) => {
   const backdropRef = useRef<HTMLDivElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const [contentHeight, setContentHeight] = useState(() => Math.max(0, Number(initialContentHeight) || 0));
 
   // A component panel is itself a native host surface, so it must remain
   // visible while the renderer-owned modal chrome is open.
   useEscapeLayer(open, onClose, true, false);
+
+  useEffect(() => {
+    setContentHeight(Math.max(0, Number(initialContentHeight) || 0));
+    return window.electronAPI.onComponentPanelContentSizeChanged(value => {
+      if (value.instanceId === instanceId && Number.isFinite(value.height) && value.height > 0) setContentHeight(Math.ceil(value.height));
+    });
+  }, [initialContentHeight, instanceId]);
 
   useEffect(() => {
     if (!open) return;
@@ -70,7 +79,7 @@ export const ComponentToolPanelSurface = ({ contribution, instanceId, open, onCl
   if (!open) return null;
   return createPortal(
     <div ref={backdropRef} className="tool-panel-backdrop fixed inset-x-0 bottom-0 top-10 z-[360] flex cursor-default items-center justify-center p-4">
-      <section ref={dialogRef} role="dialog" aria-modal="true" aria-label={contribution.title} style={{ height: 'min(720px, 90vh)' }} className="tool-panel-window flex w-full max-w-[960px] flex-col overflow-hidden border bg-white">
+      <section ref={dialogRef} role="dialog" aria-modal="true" aria-label={contribution.title} style={{ height: contentHeight > 0 ? `min(${contentHeight + 60}px, 90vh)` : 'min(360px, 90vh)', maxHeight: '90vh' }} className="tool-panel-window flex w-full max-w-[960px] flex-col overflow-hidden border bg-white">
         <header className="tool-panel-header flex shrink-0 items-center gap-3 border-b border-slate-200 px-5">
           <span className="tool-panel-title-icon flex h-[34px] w-[34px] shrink-0 items-center justify-center rounded-[10px] bg-blue-50 text-blue-600"><ComponentIcon src={contribution.iconUrl} size={18}/></span>
           <div className="min-w-0 flex-1"><h3 className="truncate text-[15px] font-bold text-slate-800">{contribution.title}</h3>{contribution.description && <p className="mt-0.5 truncate text-[10px] text-slate-400">{contribution.description}</p>}</div>

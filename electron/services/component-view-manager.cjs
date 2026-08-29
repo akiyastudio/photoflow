@@ -35,11 +35,15 @@ const diagnosticToken = value => {
   const token = String(value || '').trim();
   return /^[a-z0-9_.:-]{1,80}$/i.test(token) ? token : 'unknown';
 };
-const componentScrollbarCss = theme => {
+const componentSurfaceCss = (theme, surface) => {
   const dark = theme === 'dark';
   const thumb = dark ? '#374151' : '#cbd5e1';
   const hover = dark ? '#4b5563' : '#94a3b8';
-  return `:root{--photoflow-scrollbar-thumb:${thumb};--photoflow-scrollbar-thumb-hover:${hover}}::-webkit-scrollbar{width:12px;height:12px;background:transparent}::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent}::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:9999px;background-color:var(--photoflow-scrollbar-thumb);background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background-color:var(--photoflow-scrollbar-thumb-hover)}::-webkit-scrollbar-button{display:none;width:0;height:0}`;
+  const tokens = dark
+    ? '--pf-canvas:#030407;--pf-surface:#090c12;--pf-subtle:#111827;--pf-elevated:#0d1119;--pf-border:#374151;--pf-border-subtle:#1f2937;--pf-text:#e2e8f0;--pf-text-strong:#f8fafc;--pf-muted:#9ca3af;--pf-primary:#2563eb;--pf-primary-hover:#3b82f6;--pf-primary-soft:#071a3d;--pf-focus:#3b82f6;--pf-success:#6ee7b7;--pf-success-soft:#052e2b;--pf-warn:#fcd34d;--pf-warn-soft:#291b05;--pf-danger:#fca5a5;--pf-danger-soft:#2b0b0d;--pf-panel-body:#0b1220;--pf-control-bg:#080e19'
+    : '--pf-canvas:#f8fafc;--pf-surface:#ffffff;--pf-subtle:#f1f5f9;--pf-elevated:#ffffff;--pf-border:#cbd5e1;--pf-border-subtle:#e2e8f0;--pf-text:#1e293b;--pf-text-strong:#0f172a;--pf-muted:#64748b;--pf-primary:#2563eb;--pf-primary-hover:#1d4ed8;--pf-primary-soft:#eff6ff;--pf-focus:#3b82f6;--pf-success:#047857;--pf-success-soft:#ecfdf5;--pf-warn:#b45309;--pf-warn-soft:#fffbeb;--pf-danger:#dc2626;--pf-danger-soft:#fef2f2;--pf-panel-body:#ffffff;--pf-control-bg:#ffffff';
+  const primitives = surface === 'component.sidePanel' ? `html,body{font-family:Inter,"Segoe UI","Microsoft YaHei",sans-serif;background:var(--pf-panel-body);color:var(--pf-text)}*{box-sizing:border-box}button,input,select,textarea{font:inherit}input,select,textarea,.pf-input,.pf-form-input{min-height:36px;border:1px solid var(--pf-border);border-radius:8px;background:var(--pf-control-bg);color:var(--pf-text);outline:none}input:focus,select:focus,textarea:focus,.pf-input:focus,.pf-form-input:focus{border-color:var(--pf-focus);box-shadow:0 0 0 2px color-mix(in srgb,var(--pf-focus) 15%,transparent)}button,.pf-button,.pf-dialog-secondary{border:1px solid var(--pf-border);border-radius:8px;background:var(--pf-surface);color:var(--pf-text)}button:hover:not(:disabled),.pf-button:hover:not(:disabled),.pf-dialog-secondary:hover:not(:disabled){background:var(--pf-subtle)}button:disabled,input:disabled,select:disabled,textarea:disabled{cursor:not-allowed;opacity:.45}.pf-button-primary,.pf-dialog-primary{border-color:var(--pf-primary);background:var(--pf-primary);color:#fff}.pf-button-primary:hover:not(:disabled),.pf-dialog-primary:hover:not(:disabled){border-color:var(--pf-primary-hover);background:var(--pf-primary-hover)}.pf-panel-card,.pf-panel-section,.pf-card{border:1px solid var(--pf-border-subtle);border-radius:12px;background:var(--pf-canvas);color:var(--pf-text)}.pf-form-label{color:var(--pf-muted);font-size:12px;font-weight:700}` : '';
+  return `:root{color-scheme:${dark ? 'dark' : 'light'};${tokens};--pf-radius-sm:8px;--pf-radius-md:10px;--pf-radius-lg:12px;--pf-shadow-sm:0 1px 2px rgb(15 23 42 / 8%);--pf-space-1:4px;--pf-space-2:8px;--pf-space-3:12px;--pf-space-4:16px;--pf-space-5:20px;--pf-control-sm:30px;--pf-control-md:36px;--pf-control-lg:40px;--photoflow-scrollbar-thumb:${thumb};--photoflow-scrollbar-thumb-hover:${hover}}${surface === 'component.sidePanel' ? 'body{margin:0}' : ''}${primitives}::-webkit-scrollbar{width:12px;height:12px;background:transparent}::-webkit-scrollbar-track,::-webkit-scrollbar-corner{background:transparent}::-webkit-scrollbar-thumb{border:2px solid transparent;border-radius:9999px;background-color:var(--photoflow-scrollbar-thumb);background-clip:padding-box}::-webkit-scrollbar-thumb:hover{background-color:var(--photoflow-scrollbar-thumb-hover)}::-webkit-scrollbar-button{display:none;width:0;height:0}`;
 };
 
 class ComponentViewManager {
@@ -99,6 +103,17 @@ class ComponentViewManager {
       if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
       if (!instance.descriptor.service?.permissions?.includes('dialogs') || !this.inputGrantService?.grantDroppedInputs) throw new Error('Component dropped-file authorization is unavailable');
       return this.inputGrantService.grantDroppedInputs(filePaths, instance.descriptor, instance.context);
+    });
+    this.ipcMain.handle('component-sdk:content-size', (event, value) => {
+      const instance = this.senderBindings.get(event.sender.id);
+      if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
+      if (instance.context.surface !== 'component.sidePanel') return { accepted: false };
+      const width = Math.ceil(Number(value?.width)); const height = Math.ceil(Number(value?.height));
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1 || width > 20000 || height > 20000) throw new Error('Invalid component content size');
+      if (instance.contentSize?.width === width && instance.contentSize?.height === height) return { accepted: true, changed: false };
+      instance.contentSize = Object.freeze({ width, height });
+      if (!this.mainWindow?.isDestroyed?.()) this.mainWindow?.webContents?.send?.('component-host:panel-content-size', { instanceId: instance.instanceId, width, height });
+      return { accepted: true, changed: true };
     });
   }
 
@@ -266,7 +281,7 @@ class ComponentViewManager {
     view.setBounds({ x: 0, y: 0, width: 0, height: 0 });
     instance.readyPromise = Promise.resolve().then(() => view.webContents.loadFile(page.entry)).then(() => {
       if (this.instances.get(key) !== instance || view.webContents.isDestroyed()) throw new Error('Component page open was superseded');
-      return this.applyScrollbarStyle(instance).then(() => instance);
+      return this.applySurfaceStyle(instance).then(() => instance);
     });
     try { await instance.readyPromise; }
     catch (error) { if (this.instances.get(key) === instance) this.close(instanceId); throw error; }
@@ -276,7 +291,7 @@ class ComponentViewManager {
   }
 
   publicInstance(instance, leaseId = '') {
-    return { instanceId: instance.instanceId, componentId: instance.descriptor.componentId, pageId: instance.page.id, pageTitle: instance.page.title, surface: instance.context.surface, ...(leaseId ? { leaseId } : {}) };
+    return { instanceId: instance.instanceId, componentId: instance.descriptor.componentId, pageId: instance.page.id, pageTitle: instance.page.title, surface: instance.context.surface, ...(instance.contentSize?.height ? { contentHeight: instance.contentSize.height } : {}), ...(leaseId ? { leaseId } : {}) };
   }
 
   publicContext(instance) {
@@ -291,22 +306,24 @@ class ComponentViewManager {
       permissions,
       events: applicationSurface ? [] : instance.descriptor.service?.events || [],
       themeContractVersion: 1,
+      panelStyleContractVersion: 1,
+      panelLayoutContractVersion: 1,
       resolvedTheme: this.resolvedTheme,
     };
   }
 
-  async applyScrollbarStyle(instance) {
+  async applySurfaceStyle(instance) {
     const contents = instance?.view?.webContents;
     if (!contents || contents.isDestroyed() || typeof contents.insertCSS !== 'function') return;
-    const previousKey = instance.scrollbarCssKey;
+    const previousKey = instance.surfaceCssKey;
     let nextKey;
-    try { nextKey = await contents.insertCSS(componentScrollbarCss(this.resolvedTheme)); }
-    catch (error) { this.writeLog('warn', 'Unable to apply component scrollbar style', { componentId: instance.descriptor?.componentId || '', error: error?.message || String(error) }); return; }
+    try { nextKey = await contents.insertCSS(componentSurfaceCss(this.resolvedTheme, instance.context.surface)); }
+    catch (error) { this.writeLog('warn', 'Unable to apply component surface style', { componentId: instance.descriptor?.componentId || '', error: error?.message || String(error) }); return; }
     if (contents.isDestroyed() || this.instancesById.get(instance.instanceId) !== instance) {
       if (nextKey && typeof contents.removeInsertedCSS === 'function') await contents.removeInsertedCSS(nextKey).catch(() => undefined);
       return;
     }
-    instance.scrollbarCssKey = nextKey;
+    instance.surfaceCssKey = nextKey;
     if (previousKey && typeof contents.removeInsertedCSS === 'function') await contents.removeInsertedCSS(previousKey).catch(() => undefined);
   }
 
@@ -314,7 +331,7 @@ class ComponentViewManager {
     const resolvedTheme = normalizeResolvedTheme(value);
     if (this.resolvedTheme === resolvedTheme) return false;
     this.resolvedTheme = resolvedTheme;
-    for (const instance of this.instances.values()) if (!instance.view.webContents.isDestroyed()) { instance.view.webContents.send('component-sdk:theme-changed', { contractVersion: 1, resolvedTheme }); void this.applyScrollbarStyle(instance); }
+    for (const instance of this.instances.values()) if (!instance.view.webContents.isDestroyed()) { instance.view.webContents.send('component-sdk:theme-changed', { contractVersion: 1, resolvedTheme }); void this.applySurfaceStyle(instance); }
     return true;
   }
 
@@ -406,4 +423,4 @@ class ComponentViewManager {
   destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); this.notificationService?.destroy?.(); }
 }
 
-module.exports = { ComponentViewManager, componentPageKey, componentSettingsPageKey, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };
+module.exports = { ComponentViewManager, componentPageKey, componentSettingsPageKey, componentSurfaceCss, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };

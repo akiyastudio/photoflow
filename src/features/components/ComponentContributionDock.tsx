@@ -5,12 +5,12 @@ import type { ComponentContribution, ComponentPageOpenScope, WorkspaceProject } 
 import { clampCommandIndex, nextCommandIndex, shouldRegisterCommandShortcut } from './component-command-palette-model';
 import { ComponentToolPanelSurface } from './ComponentToolPanelSurface';
 
-type Opened = { contribution: ComponentContribution; instanceId: string };
+type Opened = { contribution: ComponentContribution; instanceId: string; contentHeight?: number };
 export const ComponentContributionDock = ({ contributions, project, workspacePath = '', scope = { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }, active = true }: { contributions: ComponentContribution[]; project?: WorkspaceProject; workspacePath?: string; scope?: ComponentPageOpenScope; active?: boolean }) => {
   const [opened, setOpened] = useState<Opened | null>(null); const [commandsOpen, setCommandsOpen] = useState(false); const [query, setQuery] = useState(''); const [activeCommandIndex, setActiveCommandIndex] = useState(-1); const panelRef = useRef<HTMLDivElement>(null); const focusBeforeCommand = useRef<HTMLElement | null>(null); const [width, setWidth] = useState(360);
   useHostSurfaceSuspension(commandsOpen);
   const projectEntries = project ? contributions.filter(item => ['component.sidePanel', 'project.contextAction', 'project.exportProvider'].includes(item.type) && !item.placement) : []; const commands = contributions.filter(item => item.type === 'application.command'); const filtered = useMemo(() => commands.filter(item => item.label.toLocaleLowerCase().includes(query.toLocaleLowerCase())), [commands, query]); const resolvedCommandIndex = clampCommandIndex(activeCommandIndex, filtered.length);
-  const open = async (contribution: ComponentContribution, triggerScope = scope) => { const application = contribution.type === 'application.command'; if (!application && !project) return; const result = await window.electronAPI.openComponentContribution({ componentId: contribution.componentId, contributionId: contribution.contributionId, type: contribution.type, ...(application ? {} : { workspacePath, projectId: project!.id, projectName: project!.name, projectStatus: project!.status, ...triggerScope }) }); if (result.success && result.page) { setOpened({ contribution, instanceId: result.page.instanceId }); closeCommands(); } };
+  const open = async (contribution: ComponentContribution, triggerScope = scope) => { const application = contribution.type === 'application.command'; if (!application && !project) return; const result = await window.electronAPI.openComponentContribution({ componentId: contribution.componentId, contributionId: contribution.contributionId, type: contribution.type, ...(application ? {} : { workspacePath, projectId: project!.id, projectName: project!.name, projectStatus: project!.status, ...triggerScope }) }); if (result.success && result.page) { setOpened({ contribution, instanceId: result.page.instanceId, contentHeight: result.page.contentHeight }); closeCommands(); } };
   const showCommands = () => { focusBeforeCommand.current = document.activeElement instanceof HTMLElement ? document.activeElement : null; setQuery(''); setActiveCommandIndex(0); setCommandsOpen(true); };
   const closeCommands = () => { setCommandsOpen(false); window.requestAnimationFrame(() => focusBeforeCommand.current?.focus()); };
   useEffect(() => { if (!shouldRegisterCommandShortcut(commands.length)) return; const listener = (event: KeyboardEvent) => { if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLocaleLowerCase() === 'p') { event.preventDefault(); if (commandsOpen) closeCommands(); else showCommands(); } else if (event.key === 'Escape' && commandsOpen) closeCommands(); }; window.addEventListener('keydown', listener); return () => window.removeEventListener('keydown', listener); });
@@ -27,6 +27,7 @@ export const ComponentContributionDock = ({ contributions, project, workspacePat
     {opened?.contribution.type === 'component.sidePanel' && <ComponentToolPanelSurface
       contribution={opened.contribution}
       instanceId={opened.instanceId}
+      initialContentHeight={opened.contentHeight}
       open
       onClose={() => { void window.electronAPI.closeComponentPage(opened.instanceId); setOpened(null); }}
     />}
