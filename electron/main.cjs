@@ -91,6 +91,7 @@ if (smokeTestEnabled) {
   // Latin-only directory name.
   app.setPath('userData', path.join(app.getPath('appData'), 'Photoflow'));
 }
+if (process.platform === 'win32') app.commandLine.appendSwitch('disable-features', 'DirectCompositionVideoOverlays');
 app.setName('照片流');
 const hasSingleInstanceLock = app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) app.quit();

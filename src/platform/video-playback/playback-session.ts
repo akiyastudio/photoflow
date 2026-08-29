@@ -158,6 +158,10 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
     video.preload = 'auto';
     video.playsInline = true;
     video.crossOrigin = 'anonymous';
+    const applyChromiumTransform = () => Object.assign(video.style, chromiumVideoStyle(transform, video.clientWidth || video.parentElement?.clientWidth || video.videoWidth, video.clientHeight || video.parentElement?.clientHeight || video.videoHeight));
+    const transformResizeObserver = typeof globalThis.ResizeObserver === 'function' ? new globalThis.ResizeObserver(() => applyChromiumTransform()) : null;
+    transformResizeObserver?.observe(video.parentElement || video);
+    applyChromiumTransform();
 
     const emitState = () => {
       if (!ownsVideo()) return;
@@ -253,6 +257,7 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
       video.requestVideoFrameCallback?.(sampleFrameRate);
     } catch (error) {
       events.forEach(([name, listener]) => video.removeEventListener(name, listener));
+      transformResizeObserver?.disconnect();
       if (ownsVideo()) {
         chromiumVideoOwners.delete(video);
         video.removeAttribute('src');
@@ -279,7 +284,7 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
         else if (request.action === 'volume') video.volume = Math.max(0, Math.min(1, (Number(request.value) || 0) / 100));
         else if (request.action === 'mute') video.muted = Boolean(request.value);
         else if (request.action === 'speed') video.playbackRate = Math.max(0.25, Math.min(4, Number(request.value) || 1));
-        else if (request.action === 'transform') { transform = normalizeVideoTransform(request.transform); Object.assign(video.style, chromiumVideoStyle(transform)); }
+        else if (request.action === 'transform') { transform = normalizeVideoTransform(request.transform); applyChromiumTransform(); }
         else if (request.action === 'statistics-level') { statisticsLevel = request.statisticsLevel || 'off'; updateStatisticsTimer(); emitStatistics(); }
         else if (request.action === 'subtitle-select') { for (const [id, item] of browserSubtitles) item.element.track.mode = id === String(request.value || '') ? 'showing' : 'disabled'; emitSubtitles(); }
         else if (request.action === 'subtitle-visible') { const selected = [...browserSubtitles.values()].find(item => item.element.track.mode !== 'disabled'); if (selected) selected.element.track.mode = request.value ? 'showing' : 'hidden'; emitSubtitles(); }
@@ -314,6 +319,7 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
         if (closed) return;
         closed = true;
         globalThis.clearInterval(statisticsTimer);
+        transformResizeObserver?.disconnect();
         events.forEach(([name, listener]) => video.removeEventListener(name, listener));
         for (const item of browserSubtitles.values()) item.element.remove(); browserSubtitles.clear();
         if (ownsVideo()) {

@@ -13,13 +13,25 @@ export const normalizeVideoTransform = (value?: Partial<VideoTransform>): VideoT
   flipVertical: value?.flipVertical === true,
   ...(value?.crop && [value.crop.x,value.crop.y,value.crop.width,value.crop.height].every(Number.isFinite) ? { crop: { x: Math.max(0,Math.min(1,value.crop.x)), y: Math.max(0,Math.min(1,value.crop.y)), width: Math.max(0.001,Math.min(1,value.crop.width)), height: Math.max(0.001,Math.min(1,value.crop.height)) } } : {}),
 });
-export const chromiumVideoStyle = (value: VideoTransform): Record<string, string | number | undefined> => {
-  const ratio = value.aspectMode === '16:9' ? '16 / 9' : value.aspectMode === '4:3' ? '4 / 3' : value.aspectMode === '1:1' ? '1 / 1' : undefined;
+export const chromiumVideoStyle = (value: VideoTransform, viewportWidth = 0, viewportHeight = 0): Record<string, string | number | undefined> => {
+  const targetRatio = value.aspectMode === '16:9' ? 16 / 9 : value.aspectMode === '4:3' ? 4 / 3 : value.aspectMode === '1:1' ? 1 : 0;
+  let ratioScaleX = 1; let ratioScaleY = 1;
+  if (targetRatio > 0 && viewportWidth > 0 && viewportHeight > 0) {
+    const viewportRatio = viewportWidth / viewportHeight;
+    const fittedWidth = viewportRatio > targetRatio ? viewportHeight * targetRatio : viewportWidth;
+    const fittedHeight = viewportRatio > targetRatio ? viewportHeight : viewportWidth / targetRatio;
+    if (value.rotation === 90 || value.rotation === 270) {
+      ratioScaleX = fittedHeight / viewportWidth; ratioScaleY = fittedWidth / viewportHeight;
+    } else {
+      ratioScaleX = fittedWidth / viewportWidth; ratioScaleY = fittedHeight / viewportHeight;
+    }
+  }
   return {
-    objectFit: value.aspectMode === 'cover' ? 'cover' : 'contain',
-    aspectRatio: ratio,
-    width: ratio ? '100%' : '100%', height: ratio ? 'auto' : '100%', maxWidth: '100%', maxHeight: '100%',
-    transform: `rotate(${value.rotation}deg) scaleX(${value.flipHorizontal ? -1 : 1}) scaleY(${value.flipVertical ? -1 : 1})`,
+    objectFit: targetRatio > 0 ? 'fill' : value.aspectMode === 'cover' ? 'cover' : 'contain',
+    aspectRatio: 'auto',
+    width: '100%', height: '100%', maxWidth: '100%', maxHeight: '100%',
+    margin: '0', backgroundColor: '#000', willChange: 'transform',
+    transform: `rotate(${value.rotation}deg) scaleX(${ratioScaleX * (value.flipHorizontal ? -1 : 1)}) scaleY(${ratioScaleY * (value.flipVertical ? -1 : 1)})`,
     clipPath:value.crop?`inset(${value.crop.y*100}% ${(1-value.crop.x-value.crop.width)*100}% ${(1-value.crop.y-value.crop.height)*100}% ${value.crop.x*100}%)`:undefined,
   };
 };

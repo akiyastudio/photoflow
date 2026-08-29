@@ -649,9 +649,9 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         }
       }}
       className="relative min-h-0 flex-1 cursor-pointer bg-black bg-contain bg-center bg-no-repeat outline-none"
-      style={poster ? { backgroundImage: `url(${JSON.stringify(poster).slice(1, -1)})` } : undefined}
+      style={poster && !sessionId ? { backgroundImage: `url(${JSON.stringify(poster).slice(1, -1)})` } : undefined}
     >
-      <video ref={videoRef} className="pointer-events-none absolute inset-0 h-full w-full object-contain" aria-hidden="true"/>
+      <video ref={videoRef} className="pointer-events-none absolute inset-0 h-full w-full bg-black object-contain" aria-hidden="true"/>
     </div>
     {controlsVisible && (controlsOverlay ? <div ref={controlsOverlayRef} className="absolute inset-x-0 bottom-0 z-20">{playbackControls}</div> : playbackControls)}
   </div>;
