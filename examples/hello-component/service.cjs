@@ -18,9 +18,14 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line
     return;
   }
   if (frame.type !== 'request') return;
-  Promise.resolve(frame.method === 'sample.context.v1'
-    ? { context: frame.context }
-    : capability(frame.id, 'project.media.page.v7', { pageSize: 20, kinds: ['image', 'raw'] }))
+  let operation;
+  if (frame.method === 'sample.context.v1') operation = { context: frame.context };
+  else if (frame.method === 'sample.media-page.v1') operation = capability(frame.id, 'project.media.page.v7', { pageSize: 20, kinds: ['image', 'raw'] });
+  else {
+    send({ type: 'response', id: frame.id, ok: false, error: 'Unknown component RPC method', errorCode: 'COMPONENT_RPC_UNKNOWN' });
+    return;
+  }
+  Promise.resolve(operation)
     .then(result => send({ type: 'response', id: frame.id, ok: true, result }))
     .catch(error => send({ type: 'response', id: frame.id, ok: false, error: error.message, errorCode: error.code || 'COMPONENT_SERVICE_FAILED' }));
 });

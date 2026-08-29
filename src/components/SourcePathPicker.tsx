@@ -1,5 +1,5 @@
 import { useEffect, useId, useMemo, useState } from 'react';
-import { ChevronDown, FileInput, FolderInput, Plus, Trash2, X } from 'lucide-react';
+import { ChevronDown, File, FileInput, FolderInput, Plus, Trash2, X } from 'lucide-react';
 import { mergeSourcePaths, parseSourcePathText, removeSourcePath, sourcePathIdentity } from './source-path-picker-model';
 
 const sourcePathDetails = (sourcePath: string, kind?: 'file' | 'folder') => {
@@ -32,6 +32,15 @@ type SourcePathPickerProps = {
   maxPaths?: number;
   pathKinds?: Readonly<Record<string, 'file' | 'folder'>>;
   pathAnnotations?: Readonly<Record<string, string>>;
+  folderPreviewExtensions?: readonly string[];
+};
+
+type FolderPreview = {
+  count: number;
+  files: string[];
+  truncated: boolean;
+  loading?: boolean;
+  error?: string;
 };
 
 export const SourcePathPicker = ({
@@ -52,17 +61,57 @@ export const SourcePathPicker = ({
   maxPaths = 4096,
   pathKinds = {},
   pathAnnotations = {},
+  folderPreviewExtensions = [],
 }: SourcePathPickerProps) => {
   const normalizedPaths = useMemo(() => mergeSourcePaths(paths), [paths]);
   const [dragActive, setDragActive] = useState(false);
   const [pasteDraft, setPasteDraft] = useState('');
   const [pasteOpen, setPasteOpen] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState<Set<string>>(() => new Set());
+  const [folderPreviews, setFolderPreviews] = useState<Record<string, FolderPreview>>({});
   const pastePanelId = useId();
+  const previewExtensionsKey = [...folderPreviewExtensions].map(value => value.replace(/^\./, '').toLocaleLowerCase()).sort().join(',');
+  const folderPaths = useMemo(() => normalizedPaths.filter(sourcePath => pathKinds[sourcePathIdentity(sourcePath)] === 'folder'), [normalizedPaths, pathKinds]);
+  const folderPathsKey = folderPaths.map(sourcePathIdentity).join('\n');
+  const allFoldersExpanded = folderPaths.length > 0 && folderPaths.every(sourcePath => expandedFolders.has(sourcePathIdentity(sourcePath)));
 
   useEffect(() => {
     if (!disabled) return;
     setDragActive(false);
   }, [disabled]);
+
+  useEffect(() => {
+    const activeIdentities = new Set(folderPaths.map(sourcePathIdentity));
+    setExpandedFolders(current => new Set([...current].filter(identity => activeIdentities.has(identity))));
+    setFolderPreviews(current => Object.fromEntries(Object.entries(current).filter(([identity]) => activeIdentities.has(identity))));
+    if (!folderPaths.length) return;
+    let active = true;
+    setFolderPreviews(current => ({ ...current, ...Object.fromEntries(folderPaths.map(sourcePath => {
+      const identity = sourcePathIdentity(sourcePath);
+      return [identity, { ...(current[identity] || { count: 0, files: [], truncated: false }), loading: true, error: undefined }];
+    })) }));
+    void window.electronAPI.inspectSourcePaths(folderPaths, {
+      includeFolderFiles: true,
+      extensions: previewExtensionsKey ? previewExtensionsKey.split(',') : [],
+    }).then(result => {
+      if (!active) return;
+      const returned = Object.fromEntries(result.sources.flatMap(source => source.kind === 'folder' && source.preview
+        ? [[sourcePathIdentity(source.path), { ...source.preview, loading: false } satisfies FolderPreview]]
+        : []));
+      setFolderPreviews(current => ({ ...current, ...Object.fromEntries(folderPaths.map(sourcePath => {
+        const identity = sourcePathIdentity(sourcePath);
+        return [identity, returned[identity] || { ...(current[identity] || { count: 0, files: [], truncated: false }), loading: false, error: result.error || '无法读取文件夹' }];
+      })) }));
+    }).catch(error => {
+      if (!active) return;
+      const message = error instanceof Error ? error.message : String(error);
+      setFolderPreviews(current => ({ ...current, ...Object.fromEntries(folderPaths.map(sourcePath => {
+        const identity = sourcePathIdentity(sourcePath);
+        return [identity, { ...(current[identity] || { count: 0, files: [], truncated: false }), loading: false, error: message }];
+      })) }));
+    });
+    return () => { active = false; };
+  }, [folderPathsKey, previewExtensionsKey]);
 
   const append = (nextPaths: readonly string[]) => onChange(mergeSourcePaths(normalizedPaths, nextPaths).slice(0, maxPaths));
   const applyPastedPaths = (text = pasteDraft) => {
@@ -96,6 +145,7 @@ export const SourcePathPicker = ({
         <p className="mt-1 text-xs text-slate-500">{loading ? '正在建立可处理文件列表' : description}</p>
       </div>
       <div className="flex flex-wrap items-center gap-2">
+        {folderPaths.length > 0 && <button type="button" disabled={loading} onClick={() => setExpandedFolders(allFoldersExpanded ? new Set() : new Set(folderPaths.map(sourcePathIdentity)))} className="dialog-secondary px-3 py-1.5 text-xs disabled:opacity-50">{allFoldersExpanded ? '全部收起' : '展开全部'}</button>}
         {onChooseFolder && <button type="button" disabled={disabled || loading} onClick={() => void onChooseFolder()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><FolderInput size={14}/>{folderButtonLabel}</button>}
         {onChooseFiles && <button type="button" disabled={disabled || loading} onClick={() => void onChooseFiles()} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs disabled:opacity-50"><Plus size={14}/>{fileButtonLabel}</button>}
         <button type="button" disabled={disabled || loading || !normalizedPaths.length} onClick={() => onChange([])} className="dialog-secondary inline-flex items-center gap-1.5 px-3 py-1.5 text-xs text-red-600 disabled:opacity-50"><Trash2 size={14}/>清空</button>
@@ -114,10 +164,21 @@ export const SourcePathPicker = ({
           const identity = sourcePathIdentity(sourcePath);
           const details = sourcePathDetails(sourcePath, pathKinds[identity]);
           const annotation = pathAnnotations[identity];
-          return <div key={sourcePathIdentity(sourcePath)} className="flex items-center gap-3 border-b border-slate-100 px-3 py-2.5 last:border-0">
-            <span className="flex h-8 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[10px] font-bold text-blue-700">{details.badge}</span>
-            <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-slate-700" title={sourcePath}>{details.name}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400" title={sourcePath}>{annotation || details.parent || sourcePath}</span></span>
-            <button type="button" disabled={disabled || loading} onClick={() => onChange(removeSourcePath(normalizedPaths, sourcePath))} aria-label={`移除 ${details.name}`} title="移除" className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"><X size={14}/></button>
+          const folder = pathKinds[identity] === 'folder';
+          const preview = folderPreviews[identity];
+          const expanded = expandedFolders.has(identity);
+          return <div key={identity} className="border-b border-slate-100 last:border-0">
+            <div className="flex items-center gap-3 px-3 py-2.5">
+              <span className="flex h-8 w-10 shrink-0 items-center justify-center rounded-md bg-blue-50 text-[10px] font-bold text-blue-700">{details.badge}</span>
+              <span className="min-w-0 flex-1"><span className="block truncate text-sm font-medium text-slate-700" title={sourcePath}>{details.name}</span><span className="mt-0.5 block truncate text-[10px] text-slate-400" title={sourcePath}>{annotation || details.parent || sourcePath}</span></span>
+              {folder && <span className="shrink-0 text-xs text-slate-500">{preview?.loading ? '正在读取…' : preview?.error ? '读取失败' : `${preview?.count ?? 0} 个文件${preview?.truncated ? '+' : ''}`}</span>}
+              {folder && <button type="button" aria-expanded={expanded} onClick={() => setExpandedFolders(current => { const next = new Set(current); if (next.has(identity)) next.delete(identity); else next.add(identity); return next; })} aria-label={`${expanded ? '收起' : '展开'} ${details.name}`} title={expanded ? '收起' : '展开'} className="rounded-md p-1.5 text-slate-400 hover:bg-slate-100 hover:text-slate-600"><ChevronDown size={14} className={`transition-transform ${expanded ? 'rotate-180' : '-rotate-90'}`}/></button>}
+              <button type="button" disabled={disabled || loading} onClick={() => onChange(removeSourcePath(normalizedPaths, sourcePath))} aria-label={`移除 ${details.name}`} title="移除" className="rounded-md p-1.5 text-slate-400 hover:bg-red-50 hover:text-red-600 disabled:opacity-40"><X size={14}/></button>
+            </div>
+            {folder && expanded && <div className="border-t border-slate-100 bg-slate-50/70 px-3 py-1.5">
+              {preview?.loading ? <p className="px-2 py-2 text-xs text-slate-400">正在读取文件夹中的媒体文件…</p> : preview?.error ? <p className="px-2 py-2 text-xs text-red-500">{preview.error}</p> : preview?.files.length ? preview.files.map(relativePath => <div key={relativePath} className="flex items-center gap-2 border-b border-slate-100 px-2 py-1.5 last:border-0"><File size={13} className="shrink-0 text-slate-400"/><span className="min-w-0 flex-1 truncate text-xs text-slate-600" title={relativePath}>{relativePath}</span></div>) : <p className="px-2 py-2 text-xs text-slate-400">没有找到匹配的媒体文件</p>}
+              {preview?.truncated && <p className="px-2 py-1.5 text-[10px] text-amber-600">文件较多，列表仅显示前 {preview.files.length} 个。</p>}
+            </div>}
           </div>;
         })}
       </div>}

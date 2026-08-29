@@ -19,6 +19,7 @@ const settingsHtml = read('renderer/settings.html');
 const html = read('renderer/index.html');
 const legacyStyle = read('renderer/src/legacy-style.css');
 const settingsStyle = read('renderer/src/settings-style.css');
+const hostUi = read('renderer/src/host-api-ui.css');
 const style = read('renderer/src/legacy-style.css');
 const compactStyle = style.replace(/\s+/g, '');
 const manifest = JSON.parse(read('component.template.json'));
@@ -87,8 +88,8 @@ assert(/setBusy\('workflow-review-discard'\);\r?\n\s*try\s*\{[\s\S]*?await legac
 assert(people.includes('const wasAccepted = Boolean(current.matches.find(item => item.returnId === match.returnId)?.accepted);') && people.includes('const acceptedDelta = wasAccepted ? 0 : 1;') && !people.includes('acceptedCount: (current.acceptedCount || 0) + (result.idempotent ? 0 : 1)'), 'an idempotent confirmation retry must reconcile counters from the previous local match state');
 for (const stateCopy of ['返图已确认 · 接力准备中', '接力已就绪', '接力更新失败']) assert(people.includes(stateCopy), `manual confirmation UI must distinguish state: ${stateCopy}`);
 assert(!people.includes('确认返图并完成任务') && people.includes('确认返图</button>'), 'the fast confirmation action must not claim relay publication is already complete');
-assert(settingsEntry.includes("context.surface !== 'application.settings'") && settingsEntry.includes('<TeamSettingsContent') && !settingsEntry.includes('pf-modal-backdrop') && !settingsEntry.includes('aria-label="关闭设置"'), 'the application settings entry must render the shared content as a non-modal root');
-assert(settingsHtml.includes('class="component-settings-root"') && settingsStyle.includes('overflow-x:hidden; overflow-y:auto') && settingsStyle.includes('height:auto; min-height:100%; overflow:visible'), 'the independent settings root must scroll without horizontal overflow in a small WebContentsView');
+assert(settingsEntry.includes("context.surface !== 'application.settings'") && settingsEntry.includes('<TeamSettingsContent') && settingsEntry.includes('team.settings.get.v1') && settingsEntry.includes('team.settings.update.v1') && !settingsEntry.includes('pf-modal-backdrop') && !settingsEntry.includes('aria-label="关闭设置"'), 'the application settings entry renders ordinary preferences and advanced lifecycle controls in one plugin page');
+assert(settingsHtml.includes('class="component-settings-root"') && settingsStyle.includes('height:100%; min-width:0; min-height:0') && settingsStyle.includes('overflow:hidden') && hostUi.includes('overflow-y: auto'), 'the independent settings root must constrain the WebContentsView while the shared settings page owns vertical scrolling');
 assert(settingsContent.includes('aria-label="优先使用 GPU"') && settingsContent.includes('aria-label="超大人物裁剪方式"'), 'team settings controls must expose explicit accessible names');
 assert(settingsEntry.includes("import './settings-style.css'") && !settingsEntry.includes("import './legacy-style.css'"), 'the official settings surface must use its small Host-contract stylesheet instead of the legacy workspace stylesheet');
 assert(settingsEntry.includes('data-settings-contract="host-v1"') && settingsContent.includes('data-settings-visual-contract="official-host-v1"') && settingsContent.includes('data-settings-row'), 'official settings structure must retain the Host visual contract markers');

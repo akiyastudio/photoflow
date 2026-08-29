@@ -32,4 +32,9 @@ const afterRemoval = removeSourcePath(manyPaths, manyPaths[10]);
 assert.strictEqual(afterRemoval.length, 500, 'removing one visible item must retain every other path beyond the old 500-item display boundary');
 assert(afterRemoval.includes(manyPaths[500]), 'paths after the old display boundary must not be discarded');
 
-console.log('Source path picker tests passed.');
+const pickerSource = fs.readFileSync('src/components/SourcePathPicker.tsx', 'utf8');
+for (const marker of ['folderPreviewExtensions', 'includeFolderFiles: true', 'expandedFolders', '全部收起', '展开全部', '个文件']) assert(pickerSource.includes(marker), `source picker folder preview is missing ${marker}`);
+const systemIpcSource = fs.readFileSync('electron/modules/system-ipc.cjs', 'utf8');
+assert(systemIpcSource.includes("ipcMain.handle('inspect-source-paths'") && systemIpcSource.includes('previewFolder') && systemIpcSource.includes('files.length < 2_000'), 'folder preview scanning must stay bounded in the host');
+
+console.log('Source path picker and folder preview tests passed.');

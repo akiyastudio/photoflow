@@ -142,8 +142,10 @@ const createImageThumbnailRuntime = ({
           try { return JSON.parse(line); } catch { return null; }
         }).filter(Boolean);
         const payload = [...payloads].reverse().find(item => Array.isArray(item.frames) && item.frames.length);
-        const errorPayload = [...payloads].reverse().find(item => item?.error);
-        if (code !== 0 || !payload || !fs.existsSync(payload.frames[0])) throw new Error(stderr.trim() || errorPayload?.error || 'FFmpeg 未能生成视频封面');
+        const errorPayload = [...payloads].reverse().find(item => item?.error || item?.message);
+        if (code !== 0 || !payload || !fs.existsSync(payload.frames[0])) {
+          throw new Error(stderr.trim() || errorPayload?.error || errorPayload?.message || 'FFmpeg 未能生成视频封面');
+        }
         resolve(payload.frames[0]);
       } catch (error) { reject(error); }
     });

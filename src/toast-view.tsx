@@ -38,7 +38,7 @@ export const ToastView = () => {
       const presentation = topToastTonePresentation(notice.tone || 'info');
       const ToneIcon = presentation.icon === 'check' ? CheckCircle2 : presentation.icon === 'warning' ? AlertTriangle : presentation.icon === 'error' ? XCircle : Info;
       return <div key={notice.id} data-top-toast-id={`notice:${notice.id}`} data-toast-tone={presentation.tone} role={presentation.role} aria-live={presentation.ariaLive} className="app-notice-toast animate-in fade-in slide-in-from-top-2">
-        <ToneIcon size={16} aria-hidden="true" className="app-notice-toast__tone-icon shrink-0"/><span className="app-notice-toast__message">{notice.message}{notice.count > 1 && <span className="ml-2 text-xs font-bold text-slate-300">×{notice.count}</span>}</span><button onClick={() => sendAction('notice-dismiss', notice.id)} aria-label="关闭提示" title="关闭提示" className="rounded p-0.5 text-slate-300 hover:bg-white/15 hover:text-white"><X size={15}/></button>
+        <ToneIcon size={16} aria-hidden="true" className="app-notice-toast__tone-icon shrink-0"/><span className="app-notice-toast__message">{notice.message}{notice.count > 1 && <span className="app-notice-toast__count">×{notice.count}</span>}</span><button type="button" onClick={() => sendAction('notice-dismiss', notice.id)} aria-label="关闭提示" title="关闭提示" className="app-notice-toast__dismiss"><X size={15}/></button>
       </div>;
     })}
     {snapshot.tasks.map(task => <FileTransferToastItem key={task.id} task={task} onMinimize={id => sendAction('task-minimize', id)} onDismiss={id => sendAction('task-dismiss', id)} onPause={id => sendAction('task-pause', id)} onContinue={id => sendAction('task-continue', id)} onCancel={value => sendAction('task-cancel', value.id)}/>) }

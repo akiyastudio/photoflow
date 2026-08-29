@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { ThumbnailPipeline, PRIORITY, isThumbnailSizeSufficient } = require('../electron/thumbnail-pipeline.cjs');
+const { isInternalWorkspacePath } = require('../electron/infrastructure/internal-workspace-path.cjs');
 
 const jpeg = Buffer.concat([Buffer.from([0xff, 0xd8]), Buffer.alloc(124), Buffer.from([0xff, 0xd9])]);
 
@@ -605,11 +606,17 @@ const run = async () => {
     );
     const transientVideo = path.join(temporaryRoot, '.clip.123.photoflow-transcode.mp4');
     fs.writeFileSync(transientVideo, 'incomplete transcode');
+    assert.equal(isInternalWorkspacePath(transientVideo), true);
+    assert.equal(isInternalWorkspacePath(path.join(temporaryRoot, '.clip.123.photoflow-capture-stage.png')), true);
+    assert.equal(isInternalWorkspacePath(path.join(temporaryRoot, '.clip.123.photoflow-chromium-screenshot.png')), true);
     const watcherCallCount = watcherCalls.length;
     const transientSync = await watcherPipeline.syncChangedPaths(temporaryRoot, [transientVideo], {});
     assert.equal(transientSync.queued, 0, 'an in-progress transcode must not queue thumbnail generation');
     assert.equal(transientSync.projectScanScheduled, false, 'an in-progress transcode must not trigger a project scan');
     assert.equal(watcherCalls.length, watcherCallCount, 'an in-progress transcode must not enter the persistent media index');
+    const transientRequest = await watcherPipeline.request({ filePath: transientVideo, kind: 'video', requestedSize: 640, priority: PRIORITY.visible });
+    assert.equal(transientRequest.state, 'NOT_READY', 'a stale renderer entry must not decode an in-progress transcode');
+    assert.equal(watcherPipeline.tasks.size, 0, 'an internal staging path must not create a thumbnail task');
     watcherPipeline.stop();
 
     const indexedPipeline = createPipeline({

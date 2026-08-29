@@ -2,8 +2,8 @@ const assert = require('node:assert/strict'); const fs = require('node:fs'); con
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'video-transcription-engine-'));
 (async () => { try {
   const inputPath = path.join(root, 'fixture.mp4'); const outputPath = path.join(root, 'fixture.srt'); fs.writeFileSync(inputPath, '第一句\n第二句');
-  const configured = String(process.env.PHOTOFLOW_TRANSCRIPTION_PYTHON || ''); const app3 = 'C:\\dev\\app3\\.venv\\Scripts\\python.exe';
-  const command = configured || (process.platform === 'win32' && fs.existsSync(app3) ? app3 : process.platform === 'win32' ? 'py' : 'python3'); const prefix = command === 'py' ? ['-3'] : [];
+  const configured = String(process.env.PHOTOFLOW_TRANSCRIPTION_PYTHON || ''); const privatePython = process.platform === 'win32' ? path.resolve(__dirname, '..', '.venv', 'Scripts', 'python.exe') : path.resolve(__dirname, '..', '.venv', 'bin', 'python');
+  const command = configured || (fs.existsSync(privatePython) ? privatePython : process.platform === 'win32' ? 'py' : 'python3'); const prefix = command === 'py' ? ['-3'] : [];
   const secondInput = path.join(root, 'second.wav'); const secondOutput = path.join(root, 'second.srt'); fs.writeFileSync(secondInput, '第三句');
   const requests = [
     { type: 'transcribe', requestId: 'one', inputPath, outputPath, options: { language: 'zh', simplifyChinese: true } },

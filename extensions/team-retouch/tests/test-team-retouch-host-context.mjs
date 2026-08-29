@@ -121,7 +121,7 @@ assert(entry.includes('onThemeChange') && entry.includes('onContextChange') && e
 const style = fs.readFileSync(new URL('../renderer/src/legacy-style.css', import.meta.url), 'utf8');
 const sharedUi = fs.readFileSync(new URL('../renderer/src/host-api-ui.css', import.meta.url), 'utf8');
 for (const tokenUse of ['var(--pf-canvas)', 'var(--pf-surface)', 'var(--pf-border-subtle)', 'var(--pf-text)', 'var(--pf-primary)']) assert(style.includes(tokenUse), `legacy renderer is missing shared token use ${tokenUse}`);
-assert(sharedUi.includes('html.dark') && sharedUi.includes('--pf-canvas:#030407') && !style.includes('@media (prefers-color-scheme: dark)'), 'host-resolved dark theme must come from the shared contract, never OS preference overrides');
+assert(sharedUi.includes('html.dark') && sharedUi.includes('--pf-canvas: #030407') && !style.includes('@media (prefers-color-scheme: dark)'), 'host-resolved dark theme must come from the shared contract, never OS preference overrides');
 assert(entry.includes("document.body.classList.add('legacy-root', 'pf-canvas')"), 'settings, confirmation, review, and preview portals must inherit the active renderer theme scope');
 
 console.log('Team-retouch host theme and historical entry-scope tests passed');

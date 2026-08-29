@@ -6,13 +6,14 @@ const {
   isOwnedLegacyComponentDomainDatabase,
   authorizesLegacySettingsAdoption,
 } = require('./compatibility/component-data-adoption-policy.cjs');
+const { parseComponentSettingsForm } = require('./contracts/component-settings-form-contract.cjs');
 
 const COMPONENT_HOST_CONTRACT_VERSION = 2;
 const COMPONENT_HOST_MIN_API_VERSION = 7;
 const COMPONENT_HOST_MAX_API_VERSION = 7;
 const COMPONENT_HOST_API_VERSION = COMPONENT_HOST_MAX_API_VERSION;
 const COMPONENT_SERVICE_PROTOCOL_VERSION = 1;
-const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage', 'application.settingsPage', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command']);
+const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage', 'application.settingsPage', 'application.settingsForm', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command']);
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const VERSIONED_METHOD = /^[a-z][a-z0-9.-]{0,119}\.v[1-9][0-9]*$/;
 const HOST_CAPABILITIES = new Set([
@@ -206,11 +207,12 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   const pages = new Map();
   const actions = [];
   const settingsPages = [];
+  const settingsForms = [];
   const api7Contributions = [];
   for (const raw of host.contributions) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component host contribution');
     if (!CONTRIBUTION_TYPES.has(raw.type)) throw new Error(`Unknown component host contribution type: ${raw.type || 'missing'}`);
-    const id = raw.type === 'application.settingsPage' ? requiredExactId(raw.id, 'application settings page id') : requiredId(raw.id, `${raw.type} id`);
+    const id = raw.type === 'application.settingsPage' ? requiredExactId(raw.id, 'application settings page id') : raw.type === 'application.settingsForm' ? requiredExactId(raw.id, 'application settings form id') : requiredId(raw.id, `${raw.type} id`);
     const key = id;
     if (seen.has(key)) throw new Error(`Duplicate component host contribution: ${key}`);
     seen.add(key);
@@ -232,6 +234,21 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       if (rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error('Component settings page RPC methods must be a bounded versioned allowlist');
       const label = requiredExactStringText(raw.label, 'settings page label', 80);
       settingsPages.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, 'settings page title'), entry, relativeEntry, rpcMethods: Object.freeze(rpcMethods) }));
+    } else if (raw.type === 'application.settingsForm') {
+      rejectUnknownFields(raw, ['type', 'id', 'label', 'title', 'form', 'customPage'], 'application settingsForm contribution');
+      const label = requiredExactStringText(raw.label, 'settings form label', 80);
+      let customPage = null;
+      if (raw.customPage !== undefined) {
+        if (!raw.customPage || typeof raw.customPage !== 'object' || Array.isArray(raw.customPage)) throw new Error('Invalid declarative settings custom page');
+        rejectUnknownFields(raw.customPage, ['title', 'entry', 'rpcMethods'], 'declarative settings custom page');
+        const relativeEntry = requiredExactStringText(raw.customPage.entry, 'declarative settings custom page entry', 512).replace(/\\/g, '/');
+        const entry = resolvePackageFile({ relativeEntry, componentRoot, developmentOverride: developmentOverrideFor(developmentFiles, relativeEntry) || developmentFiles?.settingsPages?.[id], label: 'Declarative settings custom page entry' });
+        if (!Array.isArray(raw.customPage.rpcMethods) || raw.customPage.rpcMethods.length < 1 || raw.customPage.rpcMethods.length > 32 || raw.customPage.rpcMethods.some(method => typeof method !== 'string')) throw new Error('Declarative settings custom page RPC methods must be a bounded versioned allowlist');
+        const rpcMethods = raw.customPage.rpcMethods.map(value => requiredExactStringText(value, 'declarative settings custom page RPC method', 128));
+        if (new Set(rpcMethods).size !== rpcMethods.length || rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error('Declarative settings custom page RPC methods must be unique versioned methods');
+        customPage = Object.freeze({ title: raw.customPage.title === undefined ? label : requiredExactStringText(raw.customPage.title, 'declarative settings custom page title'), entry, relativeEntry, rpcMethods: Object.freeze(rpcMethods) });
+      }
+      settingsForms.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, 'settings form title'), form: parseComponentSettingsForm(raw.form), customPage }));
     } else {
       rejectUnknownFields(raw, ['type', 'id', 'label', 'title', 'description', 'pageId', 'rpcMethods', 'placement'], `${raw.type} contribution`);
       const label = requiredExactStringText(raw.label, `${raw.type} label`, 80); const pageId = requiredExactId(raw.pageId, `${raw.type} pageId`);
@@ -244,7 +261,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       api7Contributions.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, `${raw.type} title`, 160), ...(description ? { description } : {}), pageId, rpcMethods: Object.freeze(rpcMethods), ...(placement ? { placement } : {}) }));
     }
   }
-  if (settingsPages.length > 16) throw new Error('Component settings page contributions must be bounded');
+  if (settingsPages.length + settingsForms.length > 16) throw new Error('Component settings contributions must be bounded');
   if (pages.size < 1 || pages.size > 16 || actions.length > 1) throw new Error('Component Host requires 1-16 full pages and at most one toolbar action');
   if (!actions.length && !api7Contributions.some(contribution => contribution.type === 'component.sidePanel')) throw new Error('Component Host requires a toolbar action or side panel contribution');
   if (actions[0] && !pages.has(actions[0].pageId)) throw new Error(`Component toolbar action references an unknown page: ${actions[0].pageId}`);
@@ -382,6 +399,12 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       if (unknownMethod) throw new Error(`Component settings page RPC method is not declared by the service: ${unknownMethod}`);
       if (settingsPage.rpcMethods.some(method => hostOnlyRpcMethods.includes(method))) throw new Error('Component settings page cannot expose a host-only RPC method');
     }
+    if (settingsForms.length && (!capabilities.includes('component.settings.v7') || !permissions.includes('component.settings'))) throw new Error('Declarative settings forms require component.settings.v7 and component.settings permission');
+    for (const settingsForm of settingsForms) {
+      const unknownMethod = settingsForm.customPage?.rpcMethods.find(method => !rpcMethods.includes(method));
+      if (unknownMethod) throw new Error(`Declarative settings custom page RPC method is not declared by the service: ${unknownMethod}`);
+      if (settingsForm.customPage?.rpcMethods.some(method => hostOnlyRpcMethods.includes(method))) throw new Error('Declarative settings custom page cannot expose a host-only RPC method');
+    }
     for (const contribution of api7Contributions) { const unknownMethod = contribution.rpcMethods.find(method => !rpcMethods.includes(method)); if (unknownMethod) throw new Error(`${contribution.type} RPC method is not declared by the service: ${unknownMethod}`); if (contribution.rpcMethods.some(method => hostOnlyRpcMethods.includes(method))) throw new Error(`${contribution.type} cannot expose a host-only RPC method`); }
   }
   let advancedRuntime = null;
@@ -408,6 +431,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     fullPage: page ? Object.freeze(page) : null,
     pages: Object.freeze([...pages.values()].map(value => Object.freeze(value))),
     settingsPages: Object.freeze(settingsPages),
+    settingsForms: Object.freeze(settingsForms),
     contributions: Object.freeze(api7Contributions),
     icon,
     service,

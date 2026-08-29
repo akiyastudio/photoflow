@@ -1528,8 +1528,41 @@ const registerSystemIpc = context => {
     return choice.canceled ? { cancelled: true } : { path: choice.filePaths[0] };
   });
 
-  ipcMain.handle('inspect-source-paths', async (_event, requestedPaths = []) => {
+  ipcMain.handle('inspect-source-paths', async (_event, requestedPaths = [], options = {}) => {
     try {
+      const includeFolderFiles = options?.includeFolderFiles === true;
+      const previewExtensions = new Set((Array.isArray(options?.extensions) ? options.extensions : [])
+        .map(value => String(value || '').replace(/^\./, '').toLocaleLowerCase())
+        .filter(value => /^[a-z0-9]{1,12}$/.test(value))
+        .slice(0, 64));
+      const previewFolder = async rootPath => {
+        const files = [];
+        const pending = [rootPath];
+        let count = 0;
+        let inspected = 0;
+        let truncated = false;
+        while (pending.length && inspected < 20_000) {
+          const directory = pending.shift();
+          let handle;
+          try { handle = await fs.promises.opendir(directory); }
+          catch { truncated = true; continue; }
+          for await (const child of handle) {
+            inspected += 1;
+            if (inspected > 20_000) { truncated = true; break; }
+            if (child.isSymbolicLink()) { truncated = true; continue; }
+            const candidate = path.join(directory, child.name);
+            if (child.isDirectory()) { pending.push(candidate); continue; }
+            if (!child.isFile()) continue;
+            const extension = path.extname(child.name).slice(1).toLocaleLowerCase();
+            if (previewExtensions.size && !previewExtensions.has(extension)) continue;
+            count += 1;
+            if (files.length < 2_000) files.push(path.relative(rootPath, candidate).replace(/\\/g, '/'));
+            else truncated = true;
+          }
+        }
+        if (pending.length) truncated = true;
+        return { count, files, truncated };
+      };
       const sourceRequests = (Array.isArray(requestedPaths) ? requestedPaths : [])
         .filter(value => typeof value === 'string' && value.trim() && value.length <= 32768)
         .map(value => value.trim().replace(/^["']+|["']+$/g, ''))
@@ -1547,7 +1580,7 @@ const registerSystemIpc = context => {
       for (const source of sourceRequests) {
         try {
           const stat = await fs.promises.stat(source.resolvedPath);
-          if (stat.isDirectory()) sources.push({ path: source.path, kind: 'folder' });
+          if (stat.isDirectory()) sources.push({ path: source.path, kind: 'folder', ...(includeFolderFiles ? { preview: await previewFolder(source.resolvedPath) } : {}) });
           else if (stat.isFile()) sources.push({ path: source.path, kind: 'file' });
           else missingPaths.push(source.path);
         } catch { missingPaths.push(source.path); }

@@ -74,6 +74,41 @@ const run = async () => {
       'a failed native fallback must preserve the original decoder diagnostic',
     );
     diagnosticRuntime.stop();
+
+    const videoSource = path.join(root, 'still-writing.mp4');
+    const videoTarget = path.join(root, '.staging', 'video.jpg');
+    fs.writeFileSync(videoSource, 'incomplete video');
+    const videoDiagnosticRuntime = createImageThumbnailRuntime({
+      crypto,
+      fs,
+      nativeImage: { createEmpty: () => ({ isEmpty: () => true }) },
+      spawn: () => {
+        const child = new EventEmitter();
+        child.stdout = new PassThrough();
+        child.stderr = new PassThrough();
+        child.killed = false;
+        child.kill = () => { child.killed = true; child.emit('close', 1); };
+        process.nextTick(() => {
+          child.stdout.write(`${JSON.stringify({ type: 'error', success: false, message: 'moov atom not found' })}\n`);
+          child.emit('close', 1);
+        });
+        return child;
+      },
+      getRunConfig: () => ({ command: 'video-preview-worker', args: [] }),
+      runPythonJsonAction: async () => { throw new Error('unused'); },
+      getMediaCacheDir: () => root,
+      mediaThumbnailCacheFile: () => videoTarget,
+      copyWindowsShellThumbnail: async () => false,
+      thumbnailVersion: 4,
+    });
+    await assert.rejects(
+      videoDiagnosticRuntime.generateThumbnailSet(videoSource, fs.statSync(videoSource), 'video', {}, [
+        { label: 'small', pixels: 320, path: videoTarget },
+      ]),
+      /moov atom not found/,
+      'the video-tools worker message must survive as the thumbnail diagnostic',
+    );
+    videoDiagnosticRuntime.stop();
     console.log('image thumbnail runtime tests passed');
   } finally {
     fs.rmSync(root, { recursive: true, force: true });

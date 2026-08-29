@@ -72,6 +72,7 @@ const { createPrivacyService } = require('./privacy-service.cjs');
 const { createFileRootWatcherService } = require('./services/file-root-watcher-service.cjs');
 const { describeActionableWatchChanges, forgetMissingWatchChanges, recordActionableWatchEntry } = require('./services/watch-change-filter.cjs');
 const { createProjectVirtualPathService } = require('./services/project-virtual-path-service.cjs');
+const { isInternalWorkspacePath } = require('./infrastructure/internal-workspace-path.cjs');
 const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
 const { createElectronSecurity, normalizeBundledPythonTool, normalizeDevelopmentRendererUrl, normalizeExternalUrl } = require('./security-policy.cjs');
@@ -120,7 +121,7 @@ const componentRegistry = createComponentRegistry({
 const componentHostRegistry = createComponentHostRegistry({
   roots: componentRegistry.roots,
   candidateProvider: componentRegistry.hostCandidates,
-  admitDescriptor: (descriptor, componentRoot) => { const component = componentRegistry.resolve(descriptor.componentId, { verifyIntegrity: true }); return Boolean(component && path.resolve(component.path) === path.resolve(componentRoot)); },
+  admitDescriptor: componentRegistry.admitHostDescriptor,
 });
 configureProtectedProjectFolderRegistry({ descriptorProvider: componentHostRegistry.list });
 let componentViewManager; let componentServiceManager; let configMutationService; let toastViewManager;
@@ -249,12 +250,7 @@ const workspaceWatchChanges = new Map();
 const workspaceWatchKnownEntries = new Map();
 const workspaceWatchSuppressions = new Map();
 let mediaTrackingScanScheduler = null;
-const isInternalWorkspaceChange = fileName => String(fileName || '')
-  .split(/[\\/]/)
-  .some(segment => { const normalized = segment.toLowerCase(); return normalized.includes('.photoflow-part')
-    || ['.photoflow-workspace-id', '_photoflow_safety_temp'].includes(normalized)
-    || normalized.startsWith('.') && normalized.includes('.photoflow-transcode')
-    || /^\.photoflow-(?:import-|paste|replace|split-|undo|team-workflow-)/i.test(normalized); });
+const isInternalWorkspaceChange = isInternalWorkspacePath;
 const comparableWorkspacePath = value => {
   const resolved = path.resolve(value);
   return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved;
@@ -1144,7 +1140,8 @@ const mutateWorkspaceCatalog = workspaceService.mutateCatalog;
 const getProjectPath = workspaceService.getProjectPath;
 const cleanProjectName = workspaceService.cleanProjectName;
 
-const stopWorkspaceWatcher = () => {
+const stopWorkspaceWatcher = (stopSchedulers = false) => {
+  const previousWorkspaceRoot = watchedWorkspacePath;
   if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
   workspaceWatchTimer = null;
   if (workspaceWatcher) workspaceWatcher.close();
@@ -1156,8 +1153,11 @@ const stopWorkspaceWatcher = () => {
   if (workspaceReconciliationTimer) clearInterval(workspaceReconciliationTimer);
   workspaceReconciliationTimer = null;
   workspaceReconcileTask.reset();
-  mediaTrackingScanScheduler?.stop();
-  versionStaleDetectionService.stop();
+  if (previousWorkspaceRoot) for (const project of workspaceCatalogs.get(previousWorkspaceRoot)?.projects || []) mediaTrackingScanScheduler?.cancel(previousWorkspaceRoot, project.name);
+  if (stopSchedulers) {
+    mediaTrackingScanScheduler?.stop();
+    versionStaleDetectionService.stop();
+  }
 };
 
 const stopFileRootWatchers = () => {
@@ -1883,7 +1883,7 @@ app.whenReady().then(async () => {
     registry: componentHostRegistry,
     preloadPath: path.join(__dirname, 'component-preload.cjs'),
     ipcMain: electronIpcMain,
-    serviceManager: componentServiceManager, inputGrantService: componentInputGrants, notificationService: componentNotificationService, clearComponentCapabilityState,
+    serviceManager: componentServiceManager, capabilityBroker: componentCapabilityBroker, inputGrantService: componentInputGrants, notificationService: componentNotificationService, clearComponentCapabilityState,
     writeLog,
     onViewStackChanged: () => toastViewManager?.bringToFront(),
   });
@@ -1971,7 +1971,7 @@ registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutat
   void componentServiceManager?.destroy();
   telemetryService?.stop();
   pluginService?.stop?.();
-  stopWorkspaceWatcher();
+  stopWorkspaceWatcher(true);
   stopFileRootWatchers();
   stopShellThumbnailProcess();
   workspaceDatabase.stop();

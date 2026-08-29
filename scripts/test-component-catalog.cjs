@@ -86,6 +86,25 @@ try {
   assert.equal(registry.list().find(item => item.id === 'settings-fixture').status, 'pending-install', 'a final component ZIP containing the declared settings entry remains installable');
   fs.unlinkSync(completeSettingsArchive);
 
+  const declarativeSettingsManifest = structuredClone(settingsManifest);
+  declarativeSettingsManifest.id = 'settings-form-fixture';
+  declarativeSettingsManifest.componentHost.contributions = declarativeSettingsManifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { type: 'application.settingsForm', id: 'settings', label: 'Fixture', form: { schemaVersion: 1, groups: [{ id: 'general', title: 'General', fields: [{ id: 'enabled', type: 'toggle', label: 'Enabled', default: true }] }] } } : item);
+  declarativeSettingsManifest.componentHost.service.capabilities = ['component.settings.v7'];
+  declarativeSettingsManifest.componentHost.service.permissions = ['component.settings'];
+  const declarativeSettingsArchive = path.join(componentRoot, 'settings-form.zip');
+  writeZip(declarativeSettingsArchive, { 'component.json': JSON.stringify(declarativeSettingsManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>' });
+  assert.equal(registry.list().find(item => item.id === 'settings-form-fixture').status, 'pending-install', 'a declarative settings form needs no component-owned settings HTML entry');
+  fs.unlinkSync(declarativeSettingsArchive);
+  declarativeSettingsManifest.componentHost.contributions.find(item => item.type === 'application.settingsForm').customPage = { title: 'Advanced', entry: 'ui/advanced.html', rpcMethods: ['fixture.settings.v1'] };
+  const missingHybridArchive = path.join(componentRoot, 'settings-form-hybrid-missing.zip');
+  writeZip(missingHybridArchive, { 'component.json': JSON.stringify(declarativeSettingsManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>' });
+  assert.match(registry.list().find(item => item.id === 'settings-form-fixture').error, /ui\/advanced\.html/, 'a hybrid settings form requires its declared custom page entry');
+  fs.unlinkSync(missingHybridArchive);
+  const completeHybridArchive = path.join(componentRoot, 'settings-form-hybrid.zip');
+  writeZip(completeHybridArchive, { 'component.json': JSON.stringify(declarativeSettingsManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>', 'ui/advanced.html': '<!doctype html>' });
+  assert.equal(registry.list().find(item => item.id === 'settings-form-fixture').status, 'pending-install');
+  fs.unlinkSync(completeHybridArchive);
+
   const legacyHostArchive = path.join(componentRoot, 'legacy-host-api.zip');
   const legacyHostManifest = { ...settingsManifest, id: 'legacy-host-fixture', componentHost: { ...settingsManifest.componentHost, compatibility: { minHostApiVersion: 6, maxHostApiVersion: 6 } } };
   writeZip(legacyHostArchive, { 'component.json': JSON.stringify(legacyHostManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>', 'ui/settings.html': '<!doctype html>' });

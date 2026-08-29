@@ -38,7 +38,7 @@ const layout = fs.readFileSync(path.join(root, 'src/features/workspace/ProjectWo
 const workspace = fs.readFileSync(path.join(root, 'src/features/workspace/ProjectWorkspace.tsx'), 'utf8');
 const css = fs.readFileSync(path.join(root, 'src/index.css'), 'utf8');
 assert(layout.includes("overflow ? 'project-menu-item' : 'project-action-button'") && layout.includes("role={overflow ? 'menuitem' : undefined}"), 'component contributions have a normal accessible overflow-menu rendering');
-assert(workspace.includes('<ComponentToolbarActions overflow actions={componentHostActions}') && css.includes('.project-toolbar-component-actions { display:none !important; }'), 'the contextual breakpoint swaps independent component entries for menu entries');
+assert(workspace.includes('<ComponentToolbarActions overflow actions={visibleComponentHostActions}') && css.includes('.project-toolbar-component-actions { display:none !important; }'), 'the contextual breakpoint swaps only visible independent component entries for menu entries');
 assert(workspace.includes('event.key === \'Escape\'') && workspace.includes('previousElementSibling'), 'Escape closes the overflow menu and restores trigger focus');
 assert(workspace.includes("window.visualViewport?.addEventListener('resize', closeToolbarOverflow)") && workspace.includes('setShowToolbarOverflowMenu(false)'), 'window resize and display zoom close stale overflow menus before responsive placement changes');
 assert(workspace.includes("project-toolbar--has-selection") && workspace.includes('project-toolbar-view-mode-actions'), 'the toolbar exposes explicit selection and view-control layout hooks');

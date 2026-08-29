@@ -305,13 +305,24 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
   };
   const setEnabled = async (component: ComponentStatus, enabled: boolean) => {
     if (busyId) return;
+    const setComponentEnabled = window.electronAPI?.setComponentEnabled;
+    if (typeof setComponentEnabled !== 'function') {
+      onNotice('组件管理接口已更新，请完全退出并重新启动应用后再试', 6000);
+      return;
+    }
     setBusyId(component.id);
     setBusyAction('toggle');
     try {
-      const result = await window.electronAPI.setComponentEnabled(component.id, enabled);
+      const result = await setComponentEnabled(component.id, enabled);
       if (!result.success) { onNotice(`${enabled ? '启用' : '禁用'}“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
       onNotice(enabled ? `已启用“${component.name}”` : `已禁用“${component.name}”；组件文件和用户数据均已保留`);
       await onComponentsChanged();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error || '未知错误');
+      const requiresRestart = /No handler registered|components-set-enabled|is not a function/i.test(message);
+      onNotice(requiresRestart
+        ? '组件管理接口已更新，请完全退出并重新启动应用后再试'
+        : `${enabled ? '启用' : '禁用'}“${component.name}”失败：${message}`, requiresRestart ? 6000 : 5000);
     } finally { setBusyId(''); setBusyAction(''); }
   };
   return <SettingsPageGroup title="组件安装与卸载">
@@ -330,7 +341,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
       const hasInstallablePackage = Boolean(component.source !== 'development' && component.packagePath && (component.packageCompatible ?? component.compatible) && component.status !== 'package-invalid');
       const trustText = component.integrityStatus === 'verified' ? '完整性已验证' : component.integrityMessage || '';
       const details = [component.description, stateText, component.version ? `版本 ${component.version}` : '', component.installed ? formatComponentSize(component.sizeBytes) : '', trustText, component.error || component.packageError || ''].filter(Boolean).join(' · ');
-      return <SettingsRow key={component.id} title={component.name} description={details}><div className="ml-auto flex w-fit items-center gap-2"><button type="button" onClick={() => void openFolder(component.installed ? component.id : undefined)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>目录</button>{hasInstallablePackage && (!component.installed || component.updateAvailable || !component.compatible) && <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && busyAction === 'install' && <Loader2 size={14} className="animate-spin"/>}{component.updateAvailable ? '更新' : component.installed ? '重新安装' : '安装'}</button>}{canToggle && <button type="button" onClick={() => void setEnabled(component, component.enabled === false)} disabled={Boolean(busyId)} className="dialog-secondary inline-flex items-center gap-1.5 disabled:opacity-45">{busy && busyAction === 'toggle' ? <Loader2 size={13} className="animate-spin"/> : <Power size={13}/>} {component.enabled === false ? '启用' : '禁用'}</button>}{canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && busyAction === 'uninstall' && <Loader2 size={13} className="animate-spin"/>}卸载</button> : component.source === 'development' ? <span className="text-xs font-bold text-amber-600">开发组件</span> : component.installed ? <span className="text-xs text-slate-400">系统组件</span> : null}</div></SettingsRow>;
+      return <SettingsRow key={component.id} title={component.name} description={details}><div className="ml-auto flex w-fit items-center gap-2"><button type="button" onClick={() => void openFolder(component.installed ? component.id : undefined)} className="dialog-secondary inline-flex items-center gap-1.5"><FolderOpen size={13}/>目录</button>{hasInstallablePackage && (!component.installed || component.updateAvailable || !component.compatible) && <button type="button" onClick={() => void install(component)} disabled={Boolean(busyId)} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{busy && busyAction === 'install' && <Loader2 size={14} className="animate-spin"/>}{component.updateAvailable ? '更新' : component.installed ? '重新安装' : '安装'}</button>}{canToggle && <button type="button" onClick={() => void setEnabled(component, component.enabled === false)} disabled={Boolean(busyId)} className={`dialog-secondary inline-flex items-center gap-1.5 disabled:opacity-45 ${component.enabled === false ? '!border-emerald-500' : ''}`}>{busy && busyAction === 'toggle' ? <Loader2 size={13} className="animate-spin"/> : <Power size={13}/>} {component.enabled === false ? '启用' : '禁用'}</button>}{canUninstall ? <button type="button" onClick={() => void uninstall(component)} disabled={Boolean(busyId)} className="inline-flex items-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50 disabled:opacity-45">{busy && busyAction === 'uninstall' && <Loader2 size={13} className="animate-spin"/>}卸载</button> : component.source === 'development' ? <span className="text-xs font-bold text-amber-600">开发组件</span> : component.installed ? <span className="text-xs text-slate-400">系统组件</span> : null}</div></SettingsRow>;
     })}
     {!loading && !components.length && <SettingsRow title="组件状态" description="组件目录中没有安装包或已安装组件。"><span className="ml-auto block w-fit text-xs text-slate-400">暂无组件</span></SettingsRow>}
   </SettingsPageGroup>;
@@ -857,7 +868,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     const defaults = await getDefaultSettings();
     commitSettings({ ...defaults, workspacePath: draft.workspacePath.trim() || defaults.workspacePath, workspacePaths: normalizeWorkspacePaths(draft.workspacePath, draft.workspacePaths), componentSettings: draft.componentSettings, componentSettingsRevisions: draft.componentSettingsRevisions });
   };
-  return <section className="min-h-full w-full bg-white"><div className="mx-auto w-full max-w-6xl space-y-10 px-8 py-10 lg:px-12">
+  return <section className="min-h-full w-full bg-slate-50"><div className="mx-auto w-full max-w-6xl space-y-10 px-8 py-10 lg:px-12">
     <h2 className="text-2xl font-bold text-slate-900">{SETTINGS_SECTION_LABELS[activeSection]}</h2>
     {activeSection === 'general' && <>
     <SettingsPageGroup title="外观">

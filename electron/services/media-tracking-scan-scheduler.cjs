@@ -85,11 +85,13 @@ const createMediaTrackingScanScheduler = ({
   };
 
   const enqueueRetry = (key, batch, restartTask = null) => {
+    if (stopped) return Promise.resolve({ skipped: true, reason: 'scheduler-stopped' });
     const ticket = runner.enqueue(key, { ...batch, restartTask });
     return runner.flush(ticket);
   };
 
   const executeWrapper = async ({ key, batch }) => {
+    if (stopped) return { skipped: true, reason: 'scheduler-stopped' };
     const project = getProject(batch.root, batch.projectName);
     if (!project || project.availability === 'missing') {
       if (batch.restartTask?.id) throw new Error('项目目录尚未加载，自动索引将在目录可用后重试');
@@ -192,6 +194,7 @@ const createMediaTrackingScanScheduler = ({
   });
 
   const schedule = (root, projectName, changes = [], fullScan = false) => {
+    if (stopped) return null;
     if (!projectName) return null;
     const project = getProject(root, projectName);
     if (!project || project.availability === 'missing') return null;

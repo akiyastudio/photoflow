@@ -461,6 +461,8 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   const resumed = await broker.invoke(descriptor, 'tasks.v7', { action: 'resume', operationId: 'fixture-task', checkpoint: { page: 1 } }, context);
   const cancelled = await broker.invoke(descriptor, 'tasks.v7', { action: 'cancel', operationId: 'fixture-task' }, context);
   assert(started.task && resumed.task.checkpoint.page === 1 && cancelled.cancelled);
+  const panelTask = await broker.invoke(descriptor, 'tasks.v7', { action: 'start', operationId: 'fixture-panel-task', title: 'Panel fixture' }, { ...context, surface: 'component.sidePanel', sourcePageId: 'project-page-1', contributionId: 'panel' });
+  assert.deepEqual({ ownerPageId: panelTask.task.metadata.presentationOwnerPageId, panelKind: panelTask.task.metadata.presentationPanelKind }, { ownerPageId: 'project-page-1', panelKind: `component:${descriptor.componentId}:panel` }, 'component panel tasks retain their owning page and contribution for task-center restoration');
   assert((await broker.invoke(descriptor, 'dialogs.v7', { kind: 'confirm', title: 'Confirm', message: 'Continue?' }, context)).confirmed);
   const selectedDirectory = path.join(sandbox, 'dialog-directory'); const nestedDirectory = path.join(selectedDirectory, 'nested');
   fs.mkdirSync(nestedDirectory, { recursive: true }); fs.writeFileSync(path.join(selectedDirectory, 'voice.mp3'), 'audio'); fs.writeFileSync(path.join(nestedDirectory, 'clip.MP4'), 'video'); fs.writeFileSync(path.join(nestedDirectory, 'ignored.txt'), 'text');

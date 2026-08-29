@@ -6,7 +6,7 @@ PhotoFlow 把可选扩展包称为 **组件（Component）**。文件名保留�
 
 1. 把 `examples/hello-component` 复制到以组件 ID 命名的目录。
 2. 所有组件只使用 Host API `7`，并同时设置 `minHostApiVersion:7` 与 `maxHostApiVersion:7`；旧 Host 2–6 清单和能力名均会拒绝。
-3. 添加一个 `workspace.toolbarAction` 或 `component.sidePanel`、一个与之相连的 `component.fullPage`、包内 UI 入口和服务入口。仅面板组件可以省略 toolbarAction；需要全局设置时，可额外贡献 `application.settingsPage`。
+3. 添加一个 `workspace.toolbarAction` 或 `component.sidePanel`、一个与之相连的 `component.fullPage`、包内 UI 入口和服务入口。仅面板组件可以省略 toolbarAction；标准全局设置优先贡献 `application.settingsForm`，只有需要自定义交互时才使用 `application.settingsPage`。
 4. 声明全部服务 RPC、Host 能力、权限和发出的事件。未声明的访问会默认拒绝。升级历史数据时，可声明 `component.storage.previous.v1` 和/或 `project.output.existing.v1` adoption grant；不要把组件业务表或路径字段加入宿主代码。
 5. 运行 `node scripts/mock-component-service.cjs path/to/service.cjs`，不启动 Electron 也能验证按行分隔的服务协议。
 6. 把目录放入 PhotoFlow 用户组件目录；源码开发时也可以放到 `extensions/`。发行包使用 `component.json`；源码开发可以使用 `component.template.json` 和现有组件构建流程。
@@ -67,9 +67,11 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 
 渲染层通常调用组件自有 RPC，而不是直接调用 Host 能力。唯一的受控 UI 快捷桥是 Host API 7 `notify`：它只接受严格的纯文本结构，不能携带 HTML、回调、URL、路径或任意 channel。组件服务是后端协议端点，只能请求清单授权的 Host 能力；只有后端自身产生短状态时才使用 `notifications.v7`。长任务和确认仍分别使用 `tasks.v7` 与 `dialogs.v7`。
 
-### 可选的应用设置页
+### 可选的应用设置
 
-`application.settingsPage` 是 Host API 7 特性，会在已安装且校验成功后动态出现在“组件管理”之后。它与项目整页一样使用独立的 sandboxed `WebContentsView` 和组件 preload，但 `context.surface` 为 `application.settings`，项目字段为空。
+标准偏好使用 `application.settingsForm`。字段结构写在清单中，由 PhotoFlow 原生渲染、校验并通过 `component.settings.v7` 保存，因此不需要组件维护另一套设置页面。完整示例见 `examples/declarative-settings-v1`。
+
+需要清单字段无法表达的自定义交互时，可以使用 `application.settingsPage`。它是 Host API 7 特性，会在已安装且校验成功后动态出现在“组件管理”之后。它与项目整页一样使用独立的 sandboxed `WebContentsView` 和组件 preload，但 `context.surface` 为 `application.settings`，项目字段为空。
 
 ```json
 {

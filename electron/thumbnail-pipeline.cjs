@@ -5,6 +5,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { spawn } = require('child_process');
 const { ThumbnailCoordinator } = require('./services/thumbnail-coordinator.cjs');
 const { stopProcessAndWait } = require('./infrastructure/process-termination.cjs');
+const { isInternalWorkspacePath } = require('./infrastructure/internal-workspace-path.cjs');
 
 // v3 switches media covers from square crops to full-frame thumbnails.
 // v4 rejects undersized Windows Shell images that were previously cached as
@@ -18,13 +19,6 @@ const THUMBNAIL_SIZES = [
 ];
 const PRIORITY = { visible: 0, nearby: 1, directory: 2, project: 3 };
 const pathKey = filePath => process.platform === 'win32' ? path.resolve(filePath).toLocaleLowerCase() : path.resolve(filePath);
-const isInternalTransientMediaPath = filePath => path.resolve(filePath)
-  .split(path.sep)
-  .some(segment => {
-    const normalized = segment.toLowerCase();
-    return normalized.startsWith('.') && normalized.includes('.photoflow-transcode')
-      || /^\.photoflow-(?:import-|paste|replace|split-|undo|team-workflow-)/i.test(normalized);
-  });
 const taskCompletion = () => {
   let resolve;
   const promise = new Promise(accepted => { resolve = accepted; });
@@ -540,8 +534,18 @@ class ThumbnailPipeline {
   }
 
   async request({ filePath, kind, cacheConfig = {}, requestedSize = 640, priority = PRIORITY.visible, queueOrder = Number.MAX_SAFE_INTEGER, requireDisk = false, forceRegenerate = false }) {
-    if (priority <= PRIORITY.nearby) this.noteForegroundActivity();
     const sourcePath = path.resolve(filePath);
+    // Renderer file lists and watcher events are asynchronous. A just-created
+    // publication staging file can therefore survive in one stale render even
+    // after directory filtering. Never decode or persist PhotoFlow-owned
+    // staging paths: they are deliberately incomplete until atomically renamed.
+    if (isInternalWorkspacePath(sourcePath)) {
+      return {
+        success: false, state: 'NOT_READY', error: '媒体文件仍在发布中', cacheLayer: 'source',
+        mediaUrl: kind === 'video' ? null : undefined,
+      };
+    }
+    if (priority <= PRIORITY.nearby) this.noteForegroundActivity();
     const size = chooseSize(requestedSize);
     let stat;
     try {
@@ -1159,7 +1163,7 @@ class ThumbnailPipeline {
     const videoExtensions = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv']);
     const rawExtensions = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
     const mediaExtensions = new Set([...imageExtensions, ...videoExtensions, ...rawExtensions]);
-    const visibleFilePaths = filePaths.filter(filePath => !isInternalTransientMediaPath(filePath));
+    const visibleFilePaths = filePaths.filter(filePath => !isInternalWorkspacePath(filePath));
     const mediaPaths = [...new Map(visibleFilePaths
       .filter(filePath => mediaExtensions.has(path.extname(filePath).toLowerCase()))
       .map(filePath => [pathKey(filePath), path.resolve(filePath)])).values()];

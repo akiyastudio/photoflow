@@ -37,7 +37,7 @@ const run = async () => {
   try {
     const v7Public = await manager.open(request(v7));
     const v7Instance = manager.instances.get(componentPageKey(request(v7)));
-    const v7Mounted = await v7Instance.view.webContents.executeJavaScript(`({ api: !!window.photoFlowComponent, notify: typeof window.photoFlowComponent?.notify === 'function', bridgeContract: window.photoFlowComponent?.contractVersion, root: document.getElementById('root')?.textContent })`);
+    const v7Mounted = await v7Instance.view.webContents.executeJavaScript(`({ api: !!window.photoFlowComponent, notify: typeof window.photoFlowComponent?.notify === 'function', dialog: typeof window.photoFlowComponent?.dialog === 'function', bridgeContract: window.photoFlowComponent?.contractVersion, root: document.getElementById('root')?.textContent })`);
     v7Instance.context.emitComponentEvent('sample.changed.v2', { value: 'delivered-v7' });
     await new Promise(resolve => setTimeout(resolve, 50));
     const v7Event = await v7Instance.view.webContents.executeJavaScript(`window.receivedEvent`);

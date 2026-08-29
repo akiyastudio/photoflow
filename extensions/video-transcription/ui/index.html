@@ -1,15 +1,12 @@
 <!doctype html>
-<html lang="zh-CN">
-<head>
-  <meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'">
-  <title>视频转文字</title><link rel="stylesheet" href="host-api-ui.css"><link rel="stylesheet" href="style.css">
-</head>
+<html lang="zh-CN"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1"><meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' data:"><title>视频转文字</title><link rel="stylesheet" href="host-api-ui.css"><link rel="stylesheet" href="style.css"></head>
 <body class="pf-canvas"><main class="app-shell">
-  <header class="app-toolbar pf-toolbar"><div><h1>视频转文字</h1><p id="selection-summary">读取当前选择…</p></div><div class="toolbar-actions"><span class="pf-status" id="runtime-status">正在检查运行时…</span><button class="pf-button" id="reprocess" type="button" disabled>重新处理当前选择</button><button class="pf-button" id="refresh" type="button">刷新</button></div></header>
+  <header class="app-toolbar pf-toolbar"><div><h1>视频转文字</h1><p id="selection-summary">读取当前选择…</p></div><div class="toolbar-actions"><span class="pf-status" id="runtime-status">正在检查本地识别…</span><button class="pf-button pf-button-primary" id="reprocess" type="button" disabled>请在文件页选择视频或文件夹</button><button class="pf-button" id="refresh" type="button">刷新</button></div></header>
   <div class="pf-banner notice" id="notice" hidden role="status"></div>
   <section class="empty-selection pf-card" id="empty-selection" hidden><h2>尚未选择可处理内容</h2><p>请回到文件页面，选择一个或多个视频或包含视频的文件夹，然后点击“视频转文字”。</p></section>
-  <section class="workspace pf-card" aria-label="识别工作区"><aside><div class="section-heading"><div><h2>识别任务</h2><p>项目内的处理历史</p></div></div><div id="operations" class="operation-list"></div></aside><article><div class="section-heading detail-heading"><div><h2 id="detail-title">选择一个任务</h2><p id="detail-summary">查看逐文件进度和识别结果</p></div><div id="detail-actions" class="inline-actions"></div></div><div id="files" class="file-list empty">尚未选择任务</div></article></section>
-  <section class="search-panel pf-card"><div class="section-heading search-heading"><div><h2>字幕搜索</h2><p>搜索所有已识别的字幕片段</p></div><form id="search-form"><input class="pf-input" id="search-input" type="search" maxlength="200" placeholder="输入字幕关键词"><button class="pf-button" type="submit">搜索</button></form></div><div id="search-results" class="results"></div></section>
-  <dialog class="pf-modal" id="segments-dialog"><form method="dialog"><button class="close pf-button" aria-label="关闭">×</button></form><h2 id="segments-title"></h2><div id="segments"></div></dialog>
-</main><script src="auto-start-model.js"></script><script src="app.js"></script></body></html>
+  <section class="workspace pf-card" aria-label="字幕浏览器">
+    <aside class="directory-pane"><div class="pane-heading"><label for="operation-select">目录</label><select class="pf-input" id="operation-select" aria-label="任务历史"><option>读取任务历史…</option></select><p id="operation-summary">项目内的处理历史</p><div id="operation-actions" class="inline-actions"></div></div><nav id="file-tree" class="file-tree" aria-label="任务文件目录">读取文件…</nav></aside>
+    <article class="transcript-pane"><div class="section-heading detail-heading"><div><h2 id="transcript-title">识别文字</h2><p id="transcript-status">从左侧目录选择文件</p></div><div class="inline-actions"><button class="pf-button" id="browse-all" type="button">浏览全部</button><div id="file-actions" class="inline-actions"></div></div></div><div id="transcript-list" class="transcript-list" data-state="empty" tabindex="0"></div></article>
+    <aside class="search-panel"><div class="section-heading search-heading"><div><h2>字幕搜索</h2><p>搜索当前项目所有已识别字幕</p></div></div><form id="search-form"><input class="pf-input" id="search-input" type="search" maxlength="200" placeholder="输入字幕关键词"><button class="pf-button search-submit" type="submit" aria-label="搜索" title="搜索"><svg aria-hidden="true" viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"></circle><path d="m20 20-4-4"></path></svg></button></form><div id="search-results" class="results" aria-live="polite"></div><button class="pf-button search-more" id="search-more" type="button" hidden>加载更多结果</button></aside>
+  </section>
+</main><script src="explicit-start-model.js"></script><script src="selection-preview-model.js"></script><script src="transcript-browser-model.js"></script><script src="refresh-coordinator.js"></script><script src="app.js"></script></body></html>

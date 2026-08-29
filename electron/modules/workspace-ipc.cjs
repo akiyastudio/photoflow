@@ -15,6 +15,7 @@ const { runWorkspaceMaintenanceWithRetry, workspaceDatabaseTaskResource } = requ
 const { publishPathNoClobber: defaultPublishPathNoClobber } = require('../services/file-transfer-service.cjs');
 const { registerVideoTimelineIpc } = require('./workspace/video-timeline-ipc.cjs');
 const { registerEntryUtilityIpc } = require('./workspace/entry-utility-ipc.cjs');
+const { isInternalWorkspacePathSegment } = require('../infrastructure/internal-workspace-path.cjs');
 
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
@@ -130,13 +131,7 @@ const registerWorkspaceIpc = context => {
       return true;
     });
   };
-  const isInternalFileOperationEntry = name => {
-    const normalized = name.toLowerCase();
-    return normalized.includes('.photoflow-part')
-      || normalized === '_photoflow_safety_temp'
-      || normalized.startsWith('.') && normalized.includes('.photoflow-transcode')
-      || /^\.photoflow-(?:import-|paste|replace|split-|trim-|undo|team-workflow-)/i.test(normalized);
-  };
+  const isInternalFileOperationEntry = isInternalWorkspacePathSegment;
   const officeOpenXmlExtensions = new Set([
     '.docx', '.docm', '.dotx', '.dotm',
     '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam',

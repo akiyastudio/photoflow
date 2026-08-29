@@ -1,18 +1,20 @@
 {
   "name": "@photoflow/video-transcription",
-  "version": "26.8.29.3",
+  "version": "26.8.29.9",
   "private": true,
   "scripts": {
+    "setup": "node scripts/setup-python.cjs",
+    "prepare:dev": "node scripts/setup-python.cjs && node scripts/verify-layout.cjs",
     "build": "node scripts/verify-layout.cjs",
-    "test": "node tests/test-core.cjs && node tests/test-engine.cjs && node tests/test-service.cjs && node tests/test-manifest-security.cjs && node tests/test-ui-visual.cjs && node tests/test-settings-behavior.cjs && node tests/test-auto-start-model.cjs",
+    "test": "node tests/test-core.cjs && node tests/test-engine.cjs && node tests/test-service.cjs && node tests/test-runtime-models.cjs && node tests/test-manifest-security.cjs && node tests/test-ui-visual.cjs && node tests/test-settings-behavior.cjs && node tests/test-explicit-start-model.cjs && node tests/test-selection-preview-model.cjs && node tests/test-transcript-browser-model.cjs && node tests/test-refresh-coordinator.cjs",
     "package": "node scripts/package-component.cjs",
     "package:host": "node scripts/package-component.cjs"
   },
   "photoflowComponent": {
     "manifest": "component.json",
     "development": {
-      "prepare": "build",
-      "runtime": { "command": "dev-python.cmd", "entry": "engine.py", "argsPrefix": ["-u"] },
+      "prepare": "prepare:dev",
+      "runtime": { "command": { "win32": ".venv/Scripts/python.exe", "default": ".venv/bin/python" }, "entry": "engine.py", "argsPrefix": ["-u"] },
       "files": {
         "service.cjs": "service.cjs",
         "core.cjs": "core.cjs",
@@ -20,7 +22,10 @@
         "ui/index.html": "ui/index.html",
         "ui/settings.html": "ui/settings.html",
         "ui/app.js": "ui/app.js",
-        "ui/auto-start-model.js": "ui/auto-start-model.js",
+        "ui/explicit-start-model.js": "ui/explicit-start-model.js",
+        "ui/selection-preview-model.js": "ui/selection-preview-model.js",
+        "ui/transcript-browser-model.js": "ui/transcript-browser-model.js",
+        "ui/refresh-coordinator.js": "ui/refresh-coordinator.js",
         "ui/settings.js": "ui/settings.js",
         "ui/settings-save-model.js": "ui/settings-save-model.js",
         "ui/host-api-ui.css": "ui/host-api-ui.css",

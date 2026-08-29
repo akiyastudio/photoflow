@@ -1,6 +1,11 @@
 const registerComponentHostIpc = ({ ipcMain, manager, mainWindow }) => {
+  const mainRenderer = event => {
+    if (!mainWindow || mainWindow.isDestroyed() || event.sender !== mainWindow.webContents) throw new Error('Unauthorized declarative settings sender');
+  };
   ipcMain.handle('component-host-list', () => ({ success: true, actions: manager.listToolbarActions() }));
   ipcMain.handle('component-host-settings-list', () => ({ success: true, pages: manager.listSettingsPages() }));
+  ipcMain.handle('component-host-settings-form-read', (event, request) => { mainRenderer(event); return manager.readSettingsForm(request).then(result => ({ success: true, ...result }), error => ({ success: false, error: error.message || String(error) })); });
+  ipcMain.handle('component-host-settings-form-update', (event, request) => { mainRenderer(event); return manager.updateSettingsForm(request).then(result => ({ success: true, ...result }), error => ({ success: false, error: error.message || String(error) })); });
   ipcMain.handle('component-host-contributions-list', () => ({ success: true, contributions: manager.listContributions() }));
   ipcMain.handle('component-host-open', (_event, request) => manager.open(request).then(page => ({ success: true, page }), error => ({ success: false, error: error.message || String(error) })));
   ipcMain.handle('component-host-settings-open', (_event, request) => manager.openSettings(request).then(page => ({ success: true, page }), error => ({ success: false, error: error.message || String(error) })));

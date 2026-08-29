@@ -19,6 +19,8 @@ const projectPanelLifecycleSource = read('src/features/workspace/project-panel-l
 const panelTaskSessionModelSource = read('src/features/background-tasks/panel-task-session-model.ts');
 const workspace = read('src/features/workspace/ProjectWorkspace.tsx');
 const projectToolModal = read('src/features/workspace/ProjectToolModal.tsx');
+const componentToolPanel = read('src/features/components/ComponentToolPanelSurface.tsx');
+const componentDock = read('src/features/components/ComponentContributionDock.tsx');
 const projectVersionTree = read('src/components/ProjectVersionTree.tsx');
 const trackingConfirmation = read('src/features/versioning/TrackingConfirmationPanel.tsx');
 const versionManager = read('src/components/VersionManager.tsx');
@@ -44,7 +46,7 @@ const { converterTriggerAction } = projectPanelLifecycleModule.exports;
 const compiledPanelTaskSessionModel = ts.transpileModule(panelTaskSessionModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const panelTaskSessionModelModule = { exports: {} };
 new Function('module', 'exports', compiledPanelTaskSessionModel)(panelTaskSessionModelModule, panelTaskSessionModelModule.exports);
-const { isActivePresentedBackgroundTaskForPanel, isPanelTaskRestoreForPage, nextPanelTaskStartedAt, panelTaskRestoreDetail, panelTaskSessionKey, removePanelTasksByOwnerPageId } = panelTaskSessionModelModule.exports;
+const { componentPanelTaskKind, isActivePresentedBackgroundTaskForPanel, isPanelTaskRestoreForPage, nextPanelTaskStartedAt, panelTaskRestoreDetail, panelTaskSessionKey, removePanelTasksByOwnerPageId } = panelTaskSessionModelModule.exports;
 const compiledTopToastNoticeModel = ts.transpileModule(topToastNoticeModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const topToastNoticeModelModule = { exports: {} };
 new Function('module', 'exports', compiledTopToastNoticeModel)(topToastNoticeModelModule, topToastNoticeModelModule.exports);
@@ -152,6 +154,7 @@ const sharedProjectPath = 'C:\\projects\\shared';
 const pageA = { id: 'page-a', projectPath: sharedProjectPath };
 const pageB = { id: 'page-b', projectPath: sharedProjectPath };
 const panelKind = 'converter';
+assert.strictEqual(componentPanelTaskKind('video-tools', 'transcode'), 'component:video-tools:transcode', 'component side panels use a stable task-center presentation identity');
 const panelTasks = new Map([
   [panelTaskSessionKey(pageA.id, panelKind), { ownerPageId: pageA.id, panelKind, state: 'running' }],
   [panelTaskSessionKey(pageB.id, panelKind), { ownerPageId: pageB.id, panelKind, state: 'running' }],
@@ -200,6 +203,7 @@ assert(indicator.includes('useTaskCenter()') && !indicator.includes('onBackgroun
 assert(workspace.includes('mountedPanels.has') && workspace.includes("open={panel === 'research'}") && workspace.includes("open={panel === 'converter'}"), 'component panels must stay mounted while their modal is minimized');
 assert(projectToolModal.includes('isActivePresentedBackgroundTaskForPanel(candidate, ownerPageId, panelKind)') && projectToolModal.includes("aria-label={effectiveBusy ? '收起到后台' : '关闭'}") && projectToolModal.includes("window.addEventListener('pointerdown', interceptOutsidePointer, true)") && projectToolModal.includes('event.preventDefault()') && projectToolModal.includes('event.stopImmediatePropagation()') && projectToolModal.includes('if (!effectiveBusy) onClose()'), 'the capture-phase backdrop boundary must consume every outside pointer and close only idle panels');
 assert(projectToolModal.includes('useBackgroundTaskBusyFallback && backgroundTaskActive') && !workspace.includes('busy={videoTranscodeBusy}') && videoToolsUi.includes("event.eventType!=='complete'") && videoToolsUi.includes('video-tools.operation.current.v1'), 'plugin video transcode must use live component events and recover the current Host task instead of a stale renderer snapshot');
+assert(componentToolPanel.includes('isActivePresentedBackgroundTaskForPanel') && componentToolPanel.includes("backgroundTaskActive ? '收起到后台' : '关闭插件面板'") && componentDock.includes('photoflow:restore-panel-task') && componentDock.includes('componentPanelTaskKind'), 'plugin side panels must inherit native panel minimize and task-center restore behavior');
 assert(toolViews.includes('const transcodeBusy = task.isRunning;') && toolViews.includes('onBusyChange?.(transcodeBusy)') && toolViews.includes('onBusyChange?.(true)'), 'only real encoding, not automatic output estimation, may put the video transcode panel in busy mode');
 assert(toolViews.includes('AUTO_TRANSCODE_INSPECTION_DELAY_MS') && toolViews.includes("startInspectionRef.current([...taskArguments, '--inspect-only']") && toolViews.includes('lastRequestedInspectionKeyRef.current === inspectionKey') && !toolViews.includes('分析媒体与设备'), 'video transcode configuration changes must debounce an automatic output estimate without a manual analysis button');
 for (const inlineLayerState of ['progressCompare', 'progressRepair', 'pendingProgressFolders.length', 'draggingChildId || pendingRelationChange', 'batchRenameOpen', 'confirmDelete']) {

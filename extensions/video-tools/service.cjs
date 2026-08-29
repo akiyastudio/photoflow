@@ -24,6 +24,7 @@ const handle = async frame => {
     const folder = payload.kind === 'folder'; const result = await callHost(id, 'dialogs.v7', folder ? { kind: 'openDirectory', title: '追加视频文件夹', extensions: ['mp4','mov','m4v','mkv','avi','webm','crm','mts','m2ts','ts'], recursive: true, directoryToken: true } : { kind: 'openFiles', title: '追加视频', extensions: ['mp4','mov','m4v','mkv','avi','webm','crm','mts','m2ts','ts'], multiple: true });
     return { cancelled: result.cancelled === true, sources: (result.inputs || []).slice(0, 120).map(item => ({ token: item.token, name: item.relativeName || item.name, kind: item.kind === 'directory' ? 'folder' : 'file' })) };
   }
+  if (method === 'video-tools.sources.preview.v1') return callHost(id, 'project.media.process.v7', { action: 'video.sources.preview', relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [] });
   if (method === 'video-tools.settings.update.v1') {
     const settings = normalizeSettings(payload.settings);
     const result = await callHost(id, 'component.settings.v7', { action: 'merge', settings: { transcode: settings } });

@@ -106,7 +106,7 @@ class View {
     assert.equal((await open('page-a')).instanceId, first.instanceId, 'the same file page must reuse its panel instance');
     assert(views.every(view => view.webContents.insertedCss.includes('::-webkit-scrollbar') && view.webContents.insertedCss.includes('::-webkit-scrollbar-button{display:none') && view.webContents.insertedCss.includes('--pf-panel-body:#ffffff') && view.webContents.insertedCss.includes('.pf-panel-section') && view.webContents.insertedCss.includes('body{margin:0;padding:22px}') && view.webContents.insertedCss.includes('padding:.55rem .9rem;font-size:.875rem')), 'every isolated component panel inherits Host spacing, controls, tokens, primitives, and scrollbar styling');
     const context = await handlers.get('component-sdk:get-context')({ sender: views[0].webContents });
-    assert.equal(context.panelStyleContractVersion, 1); assert.equal(context.panelLayoutContractVersion, 1);
+    assert.equal(context.uiContractVersion, 1); assert.equal(context.panelStyleContractVersion, 1); assert.equal(context.panelLayoutContractVersion, 1);
     const measured = await handlers.get('component-sdk:content-size')({ sender: views[0].webContents }, { width: 928, height: 412 });
     assert.deepEqual(measured, { accepted: true, changed: true });
     assert.deepEqual(hostMessages.at(-1), ['component-host:panel-content-size', { instanceId: first.instanceId, width: 928, height: 412 }], 'isolated component content height is forwarded to the owning Host panel');
@@ -119,11 +119,12 @@ class View {
     manager.destroy();
 
     const panelSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'components', 'ComponentToolPanelSurface.tsx'), 'utf8');
-    for (const marker of ['tool-panel-backdrop', 'tool-panel-window', 'tool-panel-header', 'tool-panel-body', '关闭插件面板', 'setComponentPageBounds', 'onComponentPanelContentSizeChanged', 'contentHeight + 60']) assert(panelSource.includes(marker));
+    for (const marker of ['tool-panel-backdrop', 'tool-panel-window', 'tool-panel-header', 'tool-panel-body', '关闭插件面板', '收起到后台', 'isActivePresentedBackgroundTaskForPanel', 'onComponentPanelCloseRequested', 'setComponentPageBounds', 'onComponentPanelContentSizeChanged', 'contentHeight + 60']) assert(panelSource.includes(marker));
     assert(!panelSource.includes("height: 'min(720px, 90vh)'"), 'component panels must not retain a fixed 720px body');
     assert(panelSource.includes('contribution.description') && !panelSource.includes('>插件面板<'), 'component panels render the declared native-panel description instead of a plugin-only subtitle');
     const dockSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'components', 'ComponentContributionDock.tsx'), 'utf8');
     assert(dockSource.includes("opened?.contribution.type === 'component.sidePanel'") && dockSource.includes('<ComponentToolPanelSurface'), 'side panels must use the unified file-page panel surface');
+    assert(dockSource.includes('componentPanelTaskKind') && dockSource.includes('photoflow:restore-panel-task') && dockSource.includes('setComponentPanelOpen(false)') && !dockSource.includes('if (!active && opened) { void window.electronAPI.setComponentPageBounds(opened.instanceId, { x: 0, y: 0, width: 0, height: 0 }); void window.electronAPI.activateComponentPage(\'\'); void window.electronAPI.closeComponentPage'), 'component panels preserve their live instance while minimized and restore through the shared task center');
     const workspaceSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
     assert(workspaceSource.includes("item.placement === 'workspace.videoTools'") && workspaceSource.includes('videoTranscodeContribution') && workspaceSource.includes('videoSplitContribution'), 'grouped video component panels must remain under the file-page video tools menu');
     assert(!workspaceSource.includes("open={panel === 'video-transcode'}") && !workspaceSource.includes("open={panel === 'video-split'}"), 'the file page must not retain duplicate built-in transcode or split panels');

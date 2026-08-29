@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Folder, X, Settings, PanelLeftClose, PanelLeftOpen, ChevronLeft, ChevronRight, GitBranch, Home, Lightbulb, Pin } from 'lucide-react';
+import { Folder, X, Settings, PanelLeftClose, PanelLeftOpen, ChevronLeft, ChevronRight, GitBranch, Home, Lightbulb, Pin, Search } from 'lucide-react';
 import { useAppDialog } from './components/AppDialogProvider';
 import { ProjectNavigator } from './components/ProjectNavigator';
 import { ProjectWorkspace } from './features/workspace/ProjectWorkspace';
@@ -15,9 +15,10 @@ import { useUserFacingToast } from './features/app/useUserFacingToast';
 import { useRendererErrorReporting } from './features/app/useRendererErrorReporting';
 import { DomainHealthBanner } from './features/app/DomainHealthBanner';
 import { ComponentPageSurface } from './features/components/ComponentPageSurface'; import { ComponentSettingsPageSurface } from './features/components/ComponentSettingsPageSurface';
+import { ComponentDeclarativeSettingsSurface } from './features/components/ComponentDeclarativeSettingsSurface';
 import { ComponentContributionDock } from './features/components/ComponentContributionDock';
 import { componentRuntimeIsAvailable } from './features/components/component-availability-model';
-import { useComponentPages } from './features/components/useComponentPages';
+import { componentHostCatalogKey, useComponentPages } from './features/components/useComponentPages';
 import { ComponentIcon } from './components/ComponentIcon';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature'; import { componentSettingsSectionKey } from './features/settings/component-settings-page-model';
 import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './features/settings/UsagePreferencesOnboarding';
@@ -27,6 +28,7 @@ import { useStartupSdAutoImport } from './features/tools/use-startup-sd-auto-imp
 import { normalizeSavedSdDeviceRecords, normalizeSavedSdDriveVideoActions } from './features/tools/sd-startup-import-model';
 import { normalizeVideoTranscodeSettings } from './features/tools/video-transcode-model';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
+import { SearchAllPage, type GlobalSearchSource } from './features/search/SearchAllPage';
 import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
 import type { AppConfig, AppUpdateInfo, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentSettingsPageContribution, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
 import { normalizeVideoShortcutBindings } from './contracts/video-shortcuts'; import { LEGACY_VIDEO_PLAYBACK_SETTINGS_ID } from './compatibility/legacy-video-playback-settings'; import { ColumnResizeHandle } from './features/app/AppShellLayout';
@@ -42,6 +44,7 @@ const BACKGROUND_TASK_DRAWER_MAX_WIDTH = 640;
 const App: React.FC = () => {
   const appDialog = useAppDialog();
   const [activeTab, setActiveTab] = useState<ToolType>('home');
+  const [searchAllTabOpen, setSearchAllTabOpen] = useState(false);
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
   const [showWorkspaceSetup, setShowWorkspaceSetup] = useState(false);
@@ -100,6 +103,7 @@ const App: React.FC = () => {
   const [componentInstallPath, setComponentInstallPath] = useState('');
   const [componentsLoading, setComponentsLoading] = useState(true);
   const [componentSettingsPages, setComponentSettingsPages] = useState<ComponentSettingsPageContribution[]>([]);
+  const componentCatalogKey = componentHostCatalogKey(components);
   const selectedComponentSettingsPage = useMemo(() => componentSettingsPages.find(page => componentSettingsSectionKey(page) === settingsSection), [componentSettingsPages, settingsSection]);
   const reportComponentSettingsError = useCallback((message: string) => showNotice(`打开组件设置页失败：${message}`), [showNotice]);
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id)), [components]);
@@ -126,7 +130,7 @@ const App: React.FC = () => {
       setSettingsSection(current => current.startsWith('component:') && !pages.some(page => componentSettingsSectionKey(page) === current) ? 'components' : current);
     }).catch(() => { if (active) setComponentSettingsPages([]); });
     return () => { active = false; };
-  }, [components]);
+  }, [componentCatalogKey]);
 
   useEffect(() => { window.localStorage.setItem('photoflow:sidebar-collapsed', String(sidebarCollapsed)); }, [sidebarCollapsed]);
   const previousInspirationRootRef = useRef<string>(); const previousInspirationPinnedRef = useRef<boolean>();
@@ -157,6 +161,7 @@ const App: React.FC = () => {
     projectPages: titlebarPages.projects,
     toolTabs: workspaceToolTabs,
     componentPages,
+    searchAllOpen: searchAllTabOpen,
     settingsOpen: settingsTabOpen,
   });
   const updateTitlebarTabScroll = useCallback(() => {
@@ -640,6 +645,26 @@ const App: React.FC = () => {
   const showHomeTab = () => {
     setSelectedProject(null); setProjectDestination(null); setActiveTab('home');
   };
+  const openSearchAllTab = () => {
+    setSearchAllTabOpen(true);
+    setSelectedProject(null);
+    setProjectDestination(null);
+    setActiveTab('search-all');
+  };
+  const closeSearchAllTab = () => {
+    setSearchAllTabOpen(false);
+    if (activeTab === 'search-all') showHomeTab();
+  };
+  const openGlobalSearchFolder = (source: GlobalSearchSource, relativePath: string) => {
+    if (source.kind === 'inspiration') {
+      requestInspirationPath(source.workspacePath, relativePath);
+      setSelectedProject(null);
+      setProjectDestination(null);
+      setActiveTab('inspiration');
+      return;
+    }
+    openProjectDirectoryPage(source.project, relativePath);
+  };
   const openInspirationTab = () => {
     if (!config) return;
     requestInspirationPath(config.inspirationLibrary.rootPath.trim(), '');
@@ -782,6 +807,10 @@ const App: React.FC = () => {
             <button type="button" {...titlebarTabDragProps('home')} title="主页" data-active-tab={activeTab === 'home'} onClick={showHomeTab} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[92px] max-w-[180px] items-center gap-2 rounded-t-lg border px-3 text-xs font-medium transition ${activeTab === 'home' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
               <Home size={14} className="shrink-0"/><span className="truncate">主页</span>
             </button>
+            {searchAllTabOpen && <div {...titlebarTabDragProps('search-all')} title="全局搜索" data-active-tab={activeTab === 'search-all'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[116px] max-w-[190px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'search-all' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
+              <button type="button" onClick={openSearchAllTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Search size={14} className="shrink-0"/><span className="truncate">全局搜索</span></button>
+              <button type="button" data-tab-drag-ignore="true" aria-label="关闭全局搜索" title="关闭全局搜索" onClick={closeSearchAllTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
+            </div>}
             {projectPages.filter(page => page.kind === 'inspiration').map(page => { const folderName = page.currentRelativePath.split('/').filter(Boolean).pop(); const label = page.currentRelativePath ? `灵感库 · ${folderName || page.currentRelativePath}` : '灵感库'; const pinnedRoot = config.pinInspirationLibrary && page.initialRelativePath === ''; const isActive = activePageId === page.id && activeTab === 'inspiration'; return <div key={page.id} {...titlebarTabDragProps(inspirationTabId(page.id))} title={label} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[112px] max-w-[210px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={() => { activatePage(page.id); setSelectedProject(null); setActiveTab('inspiration'); }} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Lightbulb size={14} className="shrink-0"/><span className="truncate">{label}</span></button>{pinnedRoot ? <span aria-label="灵感库已固定" title="灵感库已固定" className="mr-2 text-blue-500"><Pin size={12}/></span> : <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${label}`} title={`关闭 ${label}`} onClick={() => closeInspirationTab(page.id)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>}</div>; })}
             {projectPages.filter(page => page.project).map(page => { const project = page.project!; const folderName = page.currentRelativePath.split('/').filter(Boolean).pop(); const label = page.initialRelativePath ? `${project.name} · ${folderName || page.initialRelativePath}` : project.name; return <React.Fragment key={page.id}>
               <div {...titlebarTabDragProps(projectTabId(page.id))} title={label} data-active-tab={activePageId === page.id && activeTab === 'project'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[120px] max-w-[220px] items-center rounded-t-lg border text-xs font-medium transition ${activePageId === page.id && activeTab === 'project' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
@@ -844,7 +873,7 @@ const App: React.FC = () => {
       {!sidebarCollapsed && <ColumnResizeHandle label="调整项目栏宽度" onDrag={deltaX => setSidebarWidth(width => clampNumber(width + deltaX, 128, 420))}/>}
 
       {/* Main Content */}
-      <main className={`relative min-w-0 flex-1 bg-slate-50 ${activeTab.startsWith('project') || activeTab === 'inspiration' || activeTab === 'component' || (activeTab === 'settings' && selectedComponentSettingsPage) ? 'overflow-hidden p-0' : activeTab === 'settings' ? 'overflow-auto p-0' : 'overflow-auto p-8'}`}>
+      <main className={`relative min-w-0 flex-1 bg-slate-50 ${activeTab.startsWith('project') || activeTab === 'search-all' || activeTab === 'inspiration' || activeTab === 'component' || (activeTab === 'settings' && selectedComponentSettingsPage) ? 'overflow-hidden p-0' : activeTab === 'settings' ? 'overflow-auto p-0' : 'overflow-auto p-8'}`}>
         <div className={activeTab === 'home' ? 'mx-auto max-w-6xl space-y-4' : 'hidden'}>{homeOrder.filter(card => card !== 'birthday' || config.birthdayEnabled).map(card => {
           const dragProps = {
             draggable: true,
@@ -868,12 +897,19 @@ const App: React.FC = () => {
                     <ChevronRight size={19} className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500"/>
                   </button>
                   <BackupHomeCard status={backupStatus} onOpen={openBackupSettings} onRun={() => { void window.electronAPI.runBackup(config.workspacePath, 'manual').then(result => { if (!result.success) showNotice(result.error || '无法开始备份', 'error'); else void refreshBackupStatus(); }); }}/>
+                  <button type="button" onClick={openSearchAllTab} className="group flex min-w-0 items-center gap-4 rounded-xl border border-slate-200 bg-white px-5 py-5 text-left transition hover:border-blue-400 hover:bg-blue-50 hover:shadow-sm">
+                    <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600"><Search size={22}/></span>
+                    <span className="min-w-0 flex-1"><span className="block text-base font-bold text-slate-800">全局搜索</span><span className="mt-1 block truncate text-xs text-slate-500">检索工作目录和灵感库文件</span></span>
+                    <ChevronRight size={19} className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500"/>
+                  </button>
                 </div>;
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>
+        {searchAllTabOpen && <div className={activeTab === 'search-all' ? 'h-full w-full' : 'hidden'}><SearchAllPage active={activeTab === 'search-all'} config={config} onOpenFolder={openGlobalSearchFolder} onNotice={showNotice}/></div>}
         {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} navigationRequest={browserNavigationRequests[page.id]} config={config} components={components} onUpdateConfig={handleConfigUpdate} onDirectoryChange={updatePagePath} onOpenDirectoryPage={openInspirationDirectoryPage}/></div>; })}
         {activeTab === 'settings' && !selectedComponentSettingsPage && <SettingsPage activeSection={settingsSection as BuiltInSettingsSection} backupProjectFocus={backupProjectFocus} onClearBackupProjectFocus={() => setBackupProjectFocus(null)} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={() => refreshComponents(true)} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} onConfigRestored={setConfig} getDefaultSettings={getDefaultSettings}/>}
-        {activeTab === 'settings' && selectedComponentSettingsPage && <ComponentSettingsPageSurface key={`${selectedComponentSettingsPage.componentId}:${selectedComponentSettingsPage.pageId}:${selectedComponentSettingsPage.componentVersion}`} page={selectedComponentSettingsPage} onError={reportComponentSettingsError}/>}
+        {activeTab === 'settings' && selectedComponentSettingsPage?.renderMode === 'custom' && <ComponentSettingsPageSurface key={`${selectedComponentSettingsPage.componentId}:${selectedComponentSettingsPage.pageId}:${selectedComponentSettingsPage.componentVersion}`} page={selectedComponentSettingsPage} onError={reportComponentSettingsError}/>}
+        {activeTab === 'settings' && ['declarative', 'hybrid'].includes(selectedComponentSettingsPage?.renderMode || '') && <ComponentDeclarativeSettingsSurface key={`${selectedComponentSettingsPage!.componentId}:${selectedComponentSettingsPage!.pageId}:${selectedComponentSettingsPage!.componentVersion}`} page={selectedComponentSettingsPage as Extract<ComponentSettingsPageContribution, { renderMode: 'declarative' | 'hybrid' }>}/>}
         {componentPages.map(page => <ComponentPageSurface key={page.identity} page={page} active={activeTab === 'component' && activeComponentPageIdentity === page.identity}/>)}
         {projectPages.filter(page => page.project).map(page => { const project = page.project!;
           const active = activeTab.startsWith('project') && activePageId === page.id;

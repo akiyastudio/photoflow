@@ -5,6 +5,11 @@ import { useUserFacingToast } from '../app/useUserFacingToast';
 
 type ComponentHostBrowserPage = { id: string; projectId: string; project?: WorkspaceProject | null };
 
+export const componentHostCatalogKey = (components: ComponentStatus[]) => components
+  .map(component => [component.id, component.version, component.installed ? 1 : 0, component.enabled === false ? 0 : 1, component.compatible ? 1 : 0, component.status || ''].join(':'))
+  .sort()
+  .join('|');
+
 export const useComponentPages = ({ browserPages, components, onProjectFallback, onHomeFallback }: {
   browserPages: ComponentHostBrowserPage[];
   components: ComponentStatus[];
@@ -16,14 +21,15 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
   const [contributions, setContributions] = useState<ComponentContribution[]>([]);
   const [pages, setPages] = useState<ComponentPageInstance[]>([]);
   const [activeIdentity, setActiveIdentity] = useState('');
+  const catalogKey = componentHostCatalogKey(components);
 
   useEffect(() => {
     let active = true;
     void window.electronAPI.getComponentHostActions().then(result => { if (active) setActions(result.success ? result.actions || [] : []); })
       .catch(() => { if (active) setActions([]); });
     return () => { active = false; };
-  }, [components]);
-  useEffect(() => { let active = true; void window.electronAPI.getComponentContributions().then(result => { if (active) setContributions(result.success ? result.contributions || [] : []); }).catch(() => { if (active) setContributions([]); }); return () => { active = false; }; }, [components]);
+  }, [catalogKey]);
+  useEffect(() => { let active = true; void window.electronAPI.getComponentContributions().then(result => { if (active) setContributions(result.success ? result.contributions || [] : []); }).catch(() => { if (active) setContributions([]); }); return () => { active = false; }; }, [catalogKey]);
 
   useEffect(() => {
     const installedIds = new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id));

@@ -1,5 +1,5 @@
 # Logs
-logs
+logs/
 *.log
 npm-debug.log*
 yarn-debug.log*
@@ -7,50 +7,58 @@ yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
 
-node_modules
-dist-ssr
+# JavaScript dependencies, build caches, and test output
+node_modules/
+dist-ssr/
 *.local
+coverage/
+.nyc_output/
+.eslintcache
+*.tsbuildinfo
 
-# Editor directories and files
+# Editor and operating-system files
 .vscode/*
 !.vscode/extensions.json
-.idea
+.idea/
 .DS_Store
+Thumbs.db
+Desktop.ini
 *.suo
 *.ntvs*
 *.njsproj
 *.sln
 *.sw?
 
-# Python 编译和打包生成的文件夹
-python/*.egg-info/
+# Python environments, caches, and test output
 __pycache__/
 *.pyc
-
-# 虚拟环境（如果你有的话）
-venv/
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
 .venv/
+venv/
 env/
 
 # Local build tools, downloaded models, compiler caches, and stale cleanup remnants
 /.cache/
 /.tmp/
 
-# Electron 和 前端构建文件 (常规建议一起加上)
-node_modules/
+# Application build and packaging output
 /artifacts/*
 !/artifacts/publish-release.bat
-out/
-electron/bin/
-media-runtime/vendor/
+/out/
+/electron/bin/
+/media-runtime/vendor/
+/components1/
+
+# Optional-component development and packaging output
 /extensions/video-playback-mpv/runtime/
 /extensions/video-playback-mpv/vendor/
 /extensions/video-playback-mpv/runtime.backup-*/
 /extensions/video-playback-mpv/.cache/
 /extensions/video-playback-mpv/artifacts/
 /extensions/video-playback-mpv/dist/
-/components1/
-
-# 系统文件
-.DS_Store
-Thumbs.db

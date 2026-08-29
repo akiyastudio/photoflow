@@ -5,6 +5,8 @@ const { spawnSync } = require('child_process');
 const root = path.resolve(__dirname, '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.json'), 'utf8'));
 const dist = path.join(root, 'dist');
+const outputOption = process.argv.indexOf('--output-dir');
+const archiveRoot = outputOption >= 0 ? path.resolve(process.argv[outputOption + 1]) : dist;
 const packageRoot = path.join(dist, 'component');
 const buildRoot = path.join(dist, 'pyinstaller');
 const python = process.platform === 'win32' ? path.join(root, '.venv', 'Scripts', 'python.exe') : path.join(root, '.venv', 'bin', 'python');
@@ -40,7 +42,9 @@ fs.copyFileSync(ffmpegManifest, path.join(runtimeRoot, 'ffmpeg-runtime-manifest.
 for (const name of ['ffmpeg-corresponding-source.zip', 'ffmpeg-licenses.zip', 'SHA256SUMS.txt']) fs.copyFileSync(path.join(vendorRoot, name), path.join(packageRoot, 'LICENSES', name));
 for (const file of manifest.requiredFiles) if (!fs.statSync(path.join(packageRoot, file), { throwIfNoEntry: false })?.isFile()) throw new Error(`Missing ${file}`);
 
-const archive = path.join(dist, `PhotoFlow-${manifest.id}-${manifest.version}-${process.platform}-${process.arch}.zip`);
+fs.mkdirSync(archiveRoot, { recursive: true });
+const archive = path.join(archiveRoot, `PhotoFlow-${manifest.id}-${manifest.version}-${process.platform}-${process.arch}.zip`);
+fs.rmSync(archive, { force: true });
 const quote = value => `'${String(value).replace(/'/g, "''")}'`;
 const result = process.platform === 'win32'
   ? spawnSync('powershell.exe', ['-NoProfile', '-Command', `Compress-Archive -LiteralPath ${quote(packageRoot)} -DestinationPath ${quote(archive)} -CompressionLevel Optimal -Force`], { stdio: 'inherit' })

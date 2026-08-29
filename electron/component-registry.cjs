@@ -5,7 +5,7 @@ const zlib = require('zlib');
 const { PLUGIN_API_VERSION, PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
 const { COMPONENT_HOST_API_VERSION, COMPONENT_HOST_CONTRACT_VERSION, parseComponentHostManifest } = require('./component-host-contract.cjs');
 const { listIntegrityFiles, readPinnedComponentIntegrity, validateComponentIntegrity, validateComponentIntegrityAsync } = require('./component-integrity.cjs');
-const { discoverDevelopmentComponents, safeFile } = require('./component-development.cjs');
+const { developmentComponentMetadataToken, discoverDevelopmentComponents, safeFile } = require('./component-development.cjs');
 
 const COMPONENT_API_VERSION = PLUGIN_API_VERSION;
 const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PLUGIN_DEFINITIONS).map(([id, definition]) => [id, { ...definition, capability: definition.capabilities[0] }])));
@@ -128,9 +128,10 @@ const manifestCompatibilityError = (manifest, platform, arch) => {
     const toolbarCount = contributions.filter(item => item?.type === 'workspace.toolbarAction').length;
     const pageCount = contributions.filter(item => item?.type === 'component.fullPage').length;
     const settingsPageCount = contributions.filter(item => item?.type === 'application.settingsPage').length;
+    const settingsFormCount = contributions.filter(item => item?.type === 'application.settingsForm').length;
     const sidePanelCount = contributions.filter(item => item?.type === 'component.sidePanel').length;
     const api7Count = contributions.filter(item => ['component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(item?.type)).length;
-    if (toolbarCount > 1 || toolbarCount + sidePanelCount < 1 || pageCount < 1 || pageCount > 16 || settingsPageCount > 16 || contributions.length !== toolbarCount + pageCount + settingsPageCount + api7Count) return '页面组件必须贡献 toolbarAction 或 sidePanel、1-16 个 fullPage，并可选贡献设置页或其他 Host API 7 入口';
+    if (toolbarCount > 1 || toolbarCount + sidePanelCount < 1 || pageCount < 1 || pageCount > 16 || settingsPageCount + settingsFormCount > 16 || contributions.length !== toolbarCount + pageCount + settingsPageCount + settingsFormCount + api7Count) return '页面组件必须贡献 toolbarAction 或 sidePanel、1-16 个 fullPage，并可选贡献设置页、声明式设置表单或其他 Host API 7 入口';
   }
   const entrypoints = manifest.entrypoints || {};
   const relativeEntry = entrypoints[`${platform}-${arch}`] || entrypoints[platform] || entrypoints.default;
@@ -148,6 +149,7 @@ const packageContentsError = (packageManifest, platform, arch) => {
     entrypoints[`${platform}-${arch}`] || entrypoints[platform] || entrypoints.default,
     ...(Array.isArray(packageManifest.manifest.requiredFiles) ? packageManifest.manifest.requiredFiles : []),
     ...(Array.isArray(host?.contributions) ? host.contributions.filter(item => ['component.fullPage', 'application.settingsPage'].includes(item?.type)).map(item => item.entry) : []),
+    ...(Array.isArray(host?.contributions) ? host.contributions.filter(item => item?.type === 'application.settingsForm').map(item => item.customPage?.entry) : []),
     ...(host?.service ? [serviceEntries[`${platform}-${arch}`] || serviceEntries[platform] || serviceEntries.default] : []),
     ...Object.values(host?.service?.lifecycleActions || {}).map(action => action?.entry),
   ].filter(Boolean);
@@ -194,7 +196,17 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     ? { ...component, enabled: !disabledComponentIds.has(component.id), ...(disabledComponentIds.has(component.id) ? { status: 'disabled' } : {}) }
     : component;
   const roots = [{ source: 'user', path: installRoot }];
-  const developmentComponents = () => isPackaged ? [] : discoverDevelopmentComponents({ projectRoot, environment, platform, arch });
+  let developmentCache = { token: '', components: [] };
+  let inspectedDevelopmentCache = { components: null, inspected: [] };
+  const developmentOptions = { projectRoot, environment, platform, arch };
+  const developmentComponents = () => {
+    if (isPackaged) return [];
+    const token = developmentComponentMetadataToken(developmentOptions);
+    if (developmentCache.token === token) return developmentCache.components;
+    const components = discoverDevelopmentComponents(developmentOptions);
+    developmentCache = { token, components };
+    return components;
+  };
   const integrityCache = new Map(); const integrityPending = new Map(); const expectedIntegrity = new Map();
   const definitionFor = (id, manifest = null) => COMPONENT_DEFINITIONS[id] || { ...manifestIdentity(manifest), id, capability: manifest?.capabilities?.[0] || '', capabilities: manifest?.capabilities || [] };
   const getExpectedIntegrity = definition => {
@@ -218,6 +230,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     const serviceEntry = serviceEntries[`${platform}-${arch}`] || serviceEntries[platform] || serviceEntries.default;
     const declaredEntries = [
       ...(Array.isArray(host.contributions) ? host.contributions.map(item => item?.entry) : []),
+      ...(Array.isArray(host.contributions) ? host.contributions.map(item => item?.customPage?.entry) : []),
       serviceEntry,
       ...Object.values(host.service?.lifecycleActions || {}).map(action => action?.entry),
     ];
@@ -300,13 +313,20 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
       parseComponentHostManifest(manifest, development.componentRoot, { componentRoot: development.componentRoot, files: development.files });
       const identity = manifestIdentity(manifest, definitionFor(id, manifest)); const definition = definitionFor(id, manifest);
       return { ...definition, ...identity, capability: definition.capability || identity.capabilities[0] || '', installed: true, compatible: true, version: String(manifest.version), path: development.componentRoot,
-        source: 'development', sizeBytes: 0, command: development.command, argsPrefix: [...development.argsPrefix], manifest, developmentFiles: development.files,
+        source: 'development', sizeBytes: 0, command: development.command, argsPrefix: [...development.argsPrefix], manifest, manifestPath: development.manifestPath, developmentFiles: development.files,
         status: 'installed', integrityStatus: 'development', integrityMessage: '开发组件（源码/开发构建）；未经正式安装包完整性验证' };
     } catch (error) {
       const definition = definitionFor(id, manifest);
       return { ...definition, ...manifestIdentity(manifest, definition), id, capability: definition.capability || '', installed: false, compatible: false, version: String(manifest?.version || ''), path: development.componentRoot,
         source: 'development', sizeBytes: 0, manifest, status: 'invalid', integrityStatus: 'invalid', error: `开发组件不可用：${error.message || String(error)}。请在组件目录运行声明的 prepare/build 脚本。` };
     }
+  };
+  const inspectedDevelopmentComponents = () => {
+    const components = developmentComponents();
+    if (inspectedDevelopmentCache.components === components) return inspectedDevelopmentCache.inspected;
+    const inspected = components.map(inspectDevelopment).filter(Boolean);
+    inspectedDevelopmentCache = { components, inspected };
+    return inspected;
   };
   const installedComponents = () => {
     const byId = new Map();
@@ -320,11 +340,10 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
         if (inspected && !byId.has(inspected.id)) byId.set(inspected.id, withEnablementState(inspected));
       }
     }
-    for (const development of developmentComponents()) {
-      const inspected = inspectDevelopment(development);
+    for (const inspected of inspectedDevelopmentComponents()) {
       // Current source must win over an older user installation while running
       // an unpackaged development build of the same component.
-      if (inspected) byId.set(inspected.id, withEnablementState(inspected));
+      byId.set(inspected.id, withEnablementState(inspected));
     }
     return byId;
   };
@@ -394,22 +413,22 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     if (!component.compatible || component.status === 'package-invalid') throw new Error(component.error || '组件包无效或不兼容');
     return component;
   };
+  let admittedHostCandidates = new Set();
+  const hostCandidateKey = (componentId, componentRoot) => `${process.platform === 'win32' ? path.resolve(componentRoot).toLowerCase() : path.resolve(componentRoot)}\0${componentId}`;
   const hostCandidates = () => {
-    const values = [];
-    for (const root of roots) {
-      let entries = []; try { entries = fs.readdirSync(root.path, { withFileTypes: true }); } catch { continue; }
-      for (const entry of entries) {
-        if (!entry.isDirectory() || !COMPONENT_ID.test(entry.name) || disabledComponentIds.has(entry.name)) continue;
-        const container = path.join(root.path, entry.name); const runtime = path.join(container, 'runtime');
-        const componentRoot = fs.existsSync(path.join(runtime, 'component.json')) ? runtime : container;
-        if (fs.existsSync(path.join(componentRoot, 'component.json'))) values.push({ componentRoot, expectedId: entry.name, source: root.source });
-      }
-    }
-    for (const development of developmentComponents()) if (!development.error && !disabledComponentIds.has(development.id)) values.push({
-      componentRoot: development.componentRoot, manifestPath: development.manifestPath, manifest: development.manifest, expectedId: development.id, source: 'development',
-      developmentFiles: { componentRoot: development.componentRoot, files: development.files }, developmentRuntime: { command: development.command, argsPrefix: development.argsPrefix },
-    });
+    const values = [...installedComponents().values()]
+      .filter(component => component.installed && component.enabled !== false && component.compatible && component.manifest?.componentHost)
+      .map(component => component.source === 'development' ? {
+        componentRoot: component.path, manifestPath: component.manifestPath, manifest: component.manifest, expectedId: component.id, source: component.source,
+        developmentFiles: { componentRoot: component.path, files: component.developmentFiles }, developmentRuntime: { command: component.command, argsPrefix: component.argsPrefix },
+      } : { componentRoot: component.path, manifestPath: path.join(component.path, 'component.json'), manifest: component.manifest, expectedId: component.id, source: component.source });
+    admittedHostCandidates = new Set(values.map(candidate => hostCandidateKey(candidate.expectedId, candidate.componentRoot)));
     return values;
+  };
+  const admitHostDescriptor = (descriptor, componentRoot) => {
+    if (!descriptor || !admittedHostCandidates.has(hostCandidateKey(descriptor.componentId, componentRoot))) return false;
+    if (COMPONENT_DEFINITIONS[descriptor.componentId]?.integrityManifest) verifyDirectory(descriptor.componentId, componentRoot, true);
+    return true;
   };
   const setComponentEnabled = (componentId, enabled) => {
     const id = String(componentId || '').trim();
@@ -432,7 +451,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     if (!disabledComponentIds.delete(id)) return false;
     persistComponentState(); return true;
   };
-  return { inspect, list, listWithSizes, resolve, resolveAsync, resolvePackage, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots, hostCandidates, componentStatePath, setComponentEnabled, clearComponentEnabledState };
+  return { inspect, list, listWithSizes, resolve, resolveAsync, resolvePackage, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots, hostCandidates, admitHostDescriptor, componentStatePath, setComponentEnabled, clearComponentEnabledState };
 };
 
 module.exports = { COMPONENT_API_VERSION, COMPONENT_DEFINITIONS, compareVersions, readComponentPackageManifest, readZipEntries, createComponentRegistry };

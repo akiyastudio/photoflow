@@ -29,6 +29,7 @@ const activeRequestControls = new Map();
 const injectedTestFaults = new Set();
 const schemaReadyPaths = new Set();
 let advancedRuntimeProbeCache = null;
+const advancedRuntimeProbePending = new Map();
 let nextCapabilityId = 1;
 let restoreLeaseHeld = false;
 let restoreHold = null;
@@ -674,9 +675,8 @@ const advancedRuntimeFailureStatus = (error, { development = Boolean(hostAlgorit
     message: notInstalled ? '当前使用基础人物检测；可在设置中安装增强版' : '当前使用基础人物检测；可在设置中检查或修复增强版',
   };
 };
-const advancedRuntimeStatus = async (parentId, { refresh = false, full = false } = {}) => {
+const performAdvancedRuntimeStatus = async (parentId, { full = false } = {}) => {
   const now = Date.now();
-  if (!refresh && advancedRuntimeProbeCache?.expiresAt > now) return advancedRuntimeProbeCache.value;
   try {
     // Page-open status is intentionally a lightweight WSL/file probe. A full
     // CUDA/model load belongs to install verification and real detection, not
@@ -686,14 +686,24 @@ const advancedRuntimeStatus = async (parentId, { refresh = false, full = false }
     const advancedAvailable = full ? probe?.pairDetrReady === true && probe?.sam2Ready === true : probe?.advancedAvailable === true;
     if (!advancedAvailable && probe?.advancedError) {
       const value = advancedRuntimeFailureStatus(probe.advancedError);
-      advancedRuntimeProbeCache = { expiresAt: now + 10_000, value }; return value;
+      advancedRuntimeProbeCache = { expiresAt: now + 60_000, value }; return value;
     }
     const value = { success: true, advancedAvailable, installed: advancedAvailable, state: advancedAvailable ? 'ready' : 'repair-needed', errorCategory: advancedAvailable ? '' : 'runtime-incomplete', runtimeSource: hostAlgorithmRuntime ? 'development' : 'packaged', verification: full ? 'runtime' : 'installation', pairDetrReady: probe?.pairDetrReady === true, sam2Ready: probe?.sam2Ready === true, message: advancedAvailable ? '增强人物检测运行时已就绪' : '增强人物检测未完全就绪；基础人物检测仍可正常使用' };
     advancedRuntimeProbeCache = { expiresAt: now + (advancedAvailable ? 5 * 60_000 : 10_000), value }; return value;
   } catch (error) {
     const value = advancedRuntimeFailureStatus(error);
-    advancedRuntimeProbeCache = { expiresAt: now + 10_000, value }; return value;
+    advancedRuntimeProbeCache = { expiresAt: now + 60_000, value }; return value;
   }
+};
+const advancedRuntimeStatus = async (parentId, { refresh = false, full = false } = {}) => {
+  const now = Date.now();
+  if (!refresh && advancedRuntimeProbeCache?.expiresAt > now) return advancedRuntimeProbeCache.value;
+  const key = full ? 'full' : 'installation';
+  if (!refresh && advancedRuntimeProbePending.has(key)) return advancedRuntimeProbePending.get(key);
+  const pending = performAdvancedRuntimeStatus(parentId, { full });
+  if (!refresh) advancedRuntimeProbePending.set(key, pending);
+  try { return await pending; }
+  finally { if (advancedRuntimeProbePending.get(key) === pending) advancedRuntimeProbePending.delete(key); }
 };
 
 const taskRows = (db, photoId, baseVersionId, projectId = activeProjectId()) => db.prepare(`SELECT * FROM team_patch_tasks WHERE project_id=? AND photo_id=? AND (?='' OR base_version_id=?) AND is_deleted=0 ORDER BY created_at,person_index`).all(String(projectId), String(photoId), String(baseVersionId || ''), String(baseVersionId || ''));

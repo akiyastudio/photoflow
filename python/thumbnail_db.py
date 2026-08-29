@@ -38,12 +38,11 @@ JPG_CONVERSION_EXTENSIONS = (
 def is_internal_transient_media_path(value: str) -> bool:
     for segment in Path(value).parts:
         normalized = segment.lower()
-        if normalized.startswith(".") and ".photoflow-transcode" in normalized:
+        if ".photoflow-part" in normalized:
             return True
-        if normalized.startswith((
-            ".photoflow-import-", ".photoflow-paste", ".photoflow-replace",
-            ".photoflow-split-", ".photoflow-undo", ".photoflow-team-workflow-",
-        )):
+        if normalized in (".photoflow-workspace-id", "_photoflow_safety_temp"):
+            return True
+        if normalized.startswith(".") and ".photoflow-" in normalized:
             return True
     return False
 

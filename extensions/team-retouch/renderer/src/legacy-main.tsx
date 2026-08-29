@@ -1,5 +1,5 @@
 /* eslint-disable react-refresh/only-export-components -- packaged renderer entry defines and mounts its private root components */
-import { StrictMode, useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
 import { createPortal } from 'react-dom';
 import { AlertTriangle, Loader2, Settings, X } from 'lucide-react';
@@ -270,4 +270,4 @@ const App = () => {
     {settingsOpen && <TeamSettingsDialog state={settingsState} patch={settingsController.patch} retry={() => void settingsController.refresh()} close={() => setSettingsOpen(false)} notice={notify}/>}
   </div></LegacyDialogProvider>;
 };
-createRoot(document.getElementById('app')!).render(<StrictMode><App/></StrictMode>);
+createRoot(document.getElementById('app')!).render(<App/>);

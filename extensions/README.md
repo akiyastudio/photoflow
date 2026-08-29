@@ -60,6 +60,20 @@ persists across application restarts until the component is enabled again.
 version, supported platforms/architectures, and a relative executable path.
 Entrypoints that escape the component directory are rejected.
 
+Standard preferences should use the Host-rendered `application.settingsForm`
+contribution (schema version 1). It supports toggle, select, text, number, and
+range fields; PhotoFlow validates defaults and updates, renders the native
+settings layout, and persists values through `component.settings.v7`. Declare
+that capability and the matching `component.settings` permission. See
+`examples/declarative-settings-v1` for a complete component.
+
+Use the form contribution's optional `customPage` when the same component also
+needs complex UI; Host renders both regions under one settings navigation item.
+Use standalone `application.settingsPage` only when no declarative fields are
+needed. Custom pages must vendor `component-sdk/ui.css` and use the versioned theme,
+RPC, notification, dialog, and lifecycle interfaces documented in
+`component-sdk/README.md`. Custom CSS never grants Host capabilities.
+
 The current component IDs are:
 
 - `sample-component`: the complete multi-person patch workflow. It contains ONNX

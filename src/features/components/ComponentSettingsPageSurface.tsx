@@ -1,9 +1,24 @@
 import { useEffect, useRef, useState } from 'react';
 import type { ComponentSettingsPageContribution } from '../../types';
 
-export const ComponentSettingsPageSurface = ({ page, onError }: { page: ComponentSettingsPageContribution; onError: (message: string) => void }) => {
+type CustomSettingsPage = Extract<ComponentSettingsPageContribution, { renderMode: 'custom' }> | Extract<ComponentSettingsPageContribution, { renderMode: 'hybrid' }>;
+type ComponentSettingsPageSurfaceProps = {
+  page: CustomSettingsPage;
+  onError: (message: string) => void;
+  onReady?: () => void;
+  visible?: boolean;
+};
+
+const hiddenBounds = { x: 0, y: 0, width: 0, height: 0 };
+
+export const ComponentSettingsPageSurface = ({ page, onError, onReady, visible = true }: ComponentSettingsPageSurfaceProps) => {
   const surfaceRef = useRef<HTMLDivElement>(null);
+  const onErrorRef = useRef(onError);
+  const onReadyRef = useRef(onReady);
   const [instanceId, setInstanceId] = useState('');
+
+  useEffect(() => { onErrorRef.current = onError; }, [onError]);
+  useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
 
   useEffect(() => {
     let disposed = false;
@@ -11,16 +26,20 @@ export const ComponentSettingsPageSurface = ({ page, onError }: { page: Componen
     void window.electronAPI.openComponentSettingsPage({ componentId: page.componentId, pageId: page.pageId, leaseId }).then(result => {
       if (!result.success || !result.page) throw new Error(result.error || '打开组件设置页失败');
       if (result.page.leaseId !== leaseId) throw new Error('组件设置页 lease 不匹配');
-      if (!disposed) setInstanceId(result.page.instanceId);
-    }).catch(error => { if (!disposed) onError(error instanceof Error ? error.message : String(error)); });
+      if (!disposed) { setInstanceId(result.page.instanceId); onReadyRef.current?.(); }
+    }).catch(error => { if (!disposed) onErrorRef.current(error instanceof Error ? error.message : String(error)); });
     return () => {
       disposed = true;
       void window.electronAPI.releaseComponentSettingsPage({ componentId: page.componentId, pageId: page.pageId, leaseId }).catch(() => undefined);
     };
-  }, [onError, page.componentId, page.componentVersion, page.pageId]);
+  }, [page.componentId, page.componentVersion, page.pageId]);
 
   useEffect(() => {
     if (!instanceId) return;
+    if (!visible) {
+      void window.electronAPI.setComponentPageBounds(instanceId, hiddenBounds);
+      return;
+    }
     const surface = surfaceRef.current;
     if (!surface) return;
     let frame = 0;
@@ -33,15 +52,17 @@ export const ComponentSettingsPageSurface = ({ page, onError }: { page: Componen
     const observer = new ResizeObserver(schedule);
     observer.observe(surface);
     window.addEventListener('resize', schedule);
+    window.addEventListener('scroll', schedule, true);
     void window.electronAPI.activateComponentPage(instanceId);
     schedule();
     return () => {
       observer.disconnect();
       window.removeEventListener('resize', schedule);
+      window.removeEventListener('scroll', schedule, true);
       if (frame) window.cancelAnimationFrame(frame);
+      void window.electronAPI.setComponentPageBounds(instanceId, hiddenBounds);
     };
-  }, [instanceId]);
+  }, [instanceId, visible]);
 
-  return <div ref={surfaceRef} aria-label={`${page.pageTitle} 组件设置页`} className="h-full w-full bg-white"/>;
+  return <div ref={surfaceRef} aria-label={`${page.pageTitle} 组件设置页`} className="pf-canvas h-full w-full"/>;
 };
-

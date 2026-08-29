@@ -22,6 +22,9 @@ import { BUILTIN_VIDEO_TRANSCODE_PRESETS, formatMediaBytes, normalizeVideoTransc
 
 export type { ImportCompletion } from './import-completion-model';
 
+const VIDEO_SOURCE_PREVIEW_EXTENSIONS = ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'crm', 'mts', 'm2ts', 'ts'];
+const IMAGE_SOURCE_PREVIEW_EXTENSIONS = ['png', 'webp', 'heic', 'heif', 'avif', 'tif', 'tiff', 'bmp', 'gif'];
+
 interface PythonEvent {
   type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview' | 'cancelled' | 'complete';
   message: string;
@@ -1528,7 +1531,7 @@ const ConverterView = ({ embedded = false, initialTargetPath = "", initialTarget
       {!embedded && <h2 className="text-2xl font-bold text-slate-800">图片转 JPG</h2>}
       <div className={embedded ? 'space-y-6' : 'bg-white border border-slate-200 rounded-xl p-6 space-y-6'}>
 
-        <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} onChange={setTargetPaths} onChooseFiles={chooseFiles} onChooseFolder={chooseFolder} fileButtonLabel="追加图片" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="支持 PNG、WebP、HEIC/HEIF、AVIF、TIFF、BMP 和 GIF；动态图片取第一帧，文件夹会递归处理" emptyTitle="拖入图片或文件夹"/>
+        <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} folderPreviewExtensions={IMAGE_SOURCE_PREVIEW_EXTENSIONS} onChange={setTargetPaths} onChooseFiles={chooseFiles} onChooseFolder={chooseFolder} fileButtonLabel="追加图片" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="支持 PNG、WebP、HEIC/HEIF、AVIF、TIFF、BMP 和 GIF；动态图片取第一帧，文件夹会递归处理" emptyTitle="拖入图片或文件夹"/>
         <p className="flex items-center gap-1 text-xs text-slate-600"><AlertCircle size={12}/>{deleteOriginal ? '转换并验证成功后，原始图片会移入回收站' : '转换后保留原始图片'}</p>
 
         <div className="flex items-center justify-between gap-4 rounded-lg bg-slate-50 p-3 border border-slate-200">
@@ -1877,7 +1880,7 @@ const ResearchView = ({
         <div className="space-y-2">
           <p className="mt-2 text-gray-600">识别视频转场，并从每个分镜导出清晰画面。</p>
         </div>
-        <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} onChange={setTargetPaths} onChooseFiles={chooseFiles} onChooseFolder={chooseFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="文件夹会作为一个来源显示，并在执行时扫描子目录" emptyTitle="拖入视频或文件夹"/>
+        <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} folderPreviewExtensions={VIDEO_SOURCE_PREVIEW_EXTENSIONS} onChange={setTargetPaths} onChooseFiles={chooseFiles} onChooseFolder={chooseFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="文件夹会作为一个来源显示，并在执行时扫描子目录" emptyTitle="拖入视频或文件夹"/>
         <div className="grid gap-4 md:grid-cols-2">
           <div>
             <label className="form-label">检测灵敏度</label>
@@ -2314,7 +2317,7 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   return <div className={embedded ? 'w-full space-y-6' : 'mx-auto w-full max-w-6xl space-y-6'}>
     {!embedded && <div><h2 className="flex items-center gap-2 text-2xl font-bold text-slate-800"><Video size={25}/>Media Encoder Lite</h2><p className="mt-1 text-sm text-slate-500">H.264、HEVC 8/10-bit、AV1 硬件、ProRes、HDR、音轨与字幕批量处理。</p></div>}
     <div className={embedded ? 'space-y-6' : 'space-y-6 rounded-xl border border-slate-200 bg-white p-6'}>
-      {!settingsOnly && <SourcePathPicker paths={paths} pathKinds={pathKinds} pathAnnotations={Object.fromEntries(activeSourceFolders.map(folder => [sourcePathIdentity(folder), '递归加入编码队列']))} onChange={setSourcePaths} onChooseFiles={chooseVideos} onChooseFolder={chooseVideoFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={disabled} title="编码队列来源" itemLabel="个来源" description="文件夹会递归扫描，输出保留原子目录结构" emptyTitle="拖入视频或文件夹"/>}
+      {!settingsOnly && <SourcePathPicker paths={paths} pathKinds={pathKinds} pathAnnotations={Object.fromEntries(activeSourceFolders.map(folder => [sourcePathIdentity(folder), '递归加入编码队列']))} folderPreviewExtensions={VIDEO_SOURCE_PREVIEW_EXTENSIONS} onChange={setSourcePaths} onChooseFiles={chooseVideos} onChooseFolder={chooseVideoFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={sourcesLoading || resolvingKinds} disabled={disabled} title="编码队列来源" itemLabel="个来源" description="文件夹会递归扫描，输出保留原子目录结构" emptyTitle="拖入视频或文件夹"/>}
       <section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
         <div className="grid gap-3 md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_auto_auto]">
           <label className="text-xs font-bold text-slate-600">编码预设<select value={presetId} disabled={disabled} onChange={event => applyPreset(event.target.value)} className="form-input mt-1"><option value="">自定义设置</option>{presets.map(value => <option key={value.id} value={value.id}>{value.builtIn ? '内置 · ' : ''}{value.name}</option>)}</select></label>
@@ -2416,7 +2419,7 @@ const VideoSplitView = ({ embedded = false, initialTargetPath = '', initialTarge
           </p>
         </div>
 
-        {!settingsOnly && <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} onChange={setTargetPaths} onChooseFiles={chooseVideos} onChooseFolder={chooseFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="文件夹会作为一个来源显示；执行时扫描子目录，分段写入原目录" emptyTitle="拖入视频或文件夹"/>}
+        {!settingsOnly && <SourcePathPicker paths={targetPaths} pathKinds={pathKinds} folderPreviewExtensions={VIDEO_SOURCE_PREVIEW_EXTENSIONS} onChange={setTargetPaths} onChooseFiles={chooseVideos} onChooseFolder={chooseFolder} fileButtonLabel="追加视频" folderButtonLabel="追加文件夹" loading={resolvingKinds} disabled={isRunning} title="已选择" itemLabel="个来源" description="文件夹会作为一个来源显示；执行时扫描子目录，分段写入原目录" emptyTitle="拖入视频或文件夹"/>}
 
         <div className="grid gap-3 md:grid-cols-2"><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">分段大小</span><span className="mt-1 block text-sm font-bold text-slate-700">约 3.95 GB（固定）</span></label><label className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-3"><span className="block text-[10px] font-bold uppercase tracking-wide text-slate-400">输出名称</span><span className="mt-1 block truncate text-sm font-bold text-slate-700">{targetPaths.length === 1 && pathKinds[sourcePathIdentity(targetPaths[0])] === 'folder' ? '文件夹内每个视频分别生成 _part001' : targetPaths.length === 1 ? <span className="font-mono">{targetPaths[0].split(/[\\/]/).pop()?.replace(/(\.[^.]+)$/u, '_part001$1')}</span> : targetPaths.length > 1 ? `按 ${targetPaths.length} 个来源分别处理` : '视频名_part001.mp4'}</span></label></div>
 

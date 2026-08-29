@@ -5,6 +5,8 @@ export type PanelTaskRestoreDetail = {
 
 export const panelTaskSessionKey = (ownerPageId: string, panelKind: string) => `${ownerPageId}:${panelKind}`;
 
+export const componentPanelTaskKind = (componentId: string, contributionId: string) => `component:${componentId}:${contributionId}`;
+
 export const panelTaskRestoreDetail = (ownerPageId: string, panelKind: string): PanelTaskRestoreDetail => ({
   ownerPageId,
   panelKind,

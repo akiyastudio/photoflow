@@ -122,7 +122,7 @@ label {
   padding: 10px 12px;
 }
 
-.source-row:last-child { border-bottom: 0; }
+.source-group:last-child > .source-row:last-child { border-bottom: 0; }
 .source-badge {
   display: flex;
   width: 40px;
@@ -148,6 +148,8 @@ label {
 
 .source-name { color: var(--pf-text); font-size: 14px; font-weight: 500; }
 .source-detail { margin-top: 2px; color: var(--pf-muted); font-size: 10px; }
+.source-count { flex: none; color: var(--pf-muted); font-size: 12px; }
+.source-toggle,
 .source-remove {
   display: flex;
   min-height: 0;
@@ -159,7 +161,20 @@ label {
   color: var(--pf-muted);
 }
 
+.source-toggle:hover:not(:disabled) { background: var(--pf-subtle); color: var(--pf-text); }
+.source-toggle .ui-icon { transform: rotate(0deg); transition: transform .15s; }
+.source-toggle.expanded .ui-icon { transform: rotate(90deg); }
 .source-remove:hover:not(:disabled) { background: var(--pf-danger-soft); color: var(--pf-danger); }
+.source-children { border-bottom: 1px solid var(--pf-border-subtle); background: color-mix(in srgb, var(--pf-canvas) 70%, transparent); padding: 6px 12px; }
+.source-group:last-child .source-children { border-bottom: 0; }
+.source-child { display: flex; align-items: center; gap: 8px; border-bottom: 1px solid var(--pf-border-subtle); padding: 6px 8px; }
+.source-child:last-of-type { border-bottom: 0; }
+.source-child span { min-width: 0; overflow: hidden; color: var(--pf-muted); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.source-empty-row,
+.source-error-row,
+.source-truncated { margin: 0; padding: 8px; color: var(--pf-muted); font-size: 11px; }
+.source-error-row { color: var(--pf-danger); }
+.source-truncated { color: var(--pf-warning, #d97706); }
 .paste-section { overflow: hidden; }
 .paste-toggle {
   display: flex;

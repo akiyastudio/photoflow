@@ -33,6 +33,7 @@ if (process.platform === 'win32') {
 }
 const packageScript = fs.readFileSync(path.join(root, 'scripts', 'package-component.cjs'), 'utf8');
 assert(!packageScript.includes("path.resolve(root, '..', '..')") && !packageScript.includes('artifacts/python') && packageScript.includes("path.join(root, '.venv'"), 'component packaging must use only component-local build inputs');
+assert(packageScript.includes("process.argv.indexOf('--output-dir')") && packageScript.includes('path.join(archiveRoot, `PhotoFlow-${manifest.id}-'), 'component packaging must honor the host build output directory');
 const playback = fs.readFileSync(path.join(repo, 'extensions', 'video-playback-mpv', 'src', 'AdvancedVideoDecoder.cs'), 'utf8');
 assert(playback.includes('--timeline-request') && playback.includes('ExtractTimelineFrames'));
 console.log('Video tools runtime is physically isolated and playback owns timeline extraction');

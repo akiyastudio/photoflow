@@ -5,7 +5,7 @@
   <p>
     <a href="docs/PLUGIN_DEVELOPMENT.md">开发教程</a>
     · <a href="docs/PLUGIN_HOST_API.md">Host API V7</a>
-    · <a href="examples/hello-component">完整示例</a>
+    · <a href="examples/README.md">示例目录</a>
   </p>
 </div>
 
@@ -67,23 +67,15 @@ hello-component/
         "id": "main",
         "title": "示例插件",
         "entry": "ui/index.html"
-      },
-      {
-        "type": "application.settingsPage",
-        "id": "settings",
-        "label": "示例插件",
-        "title": "示例插件设置",
-        "entry": "ui/settings.html",
-        "rpcMethods": ["hello.settings.get.v1", "hello.settings.update.v1"]
       }
     ],
     "service": {
       "protocolVersion": 1,
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
-      "rpcMethods": ["hello.load.v1", "hello.settings.get.v1", "hello.settings.update.v1"],
-      "capabilities": ["project.media.page.v7", "component.settings.v7"],
-      "permissions": ["project.media.read", "component.settings"],
+      "rpcMethods": ["sample.context.v1", "sample.media-page.v1"],
+      "capabilities": ["project.media.page.v7"],
+      "permissions": ["project.media.read"],
       "events": []
     }
   }
@@ -91,6 +83,8 @@ hello-component/
 ```
 
 实际字段和机器约束以 `electron/contracts/schemas/component-manifest-v2.schema.json` 为准。
+
+标准设置优先使用由宿主原生渲染和保存的 `application.settingsForm`；完整示例见 `examples/declarative-settings-v1`。只有确实需要自定义交互时才使用沙箱化的 `application.settingsPage`。
 
 ## 运行模型
 
@@ -118,12 +112,15 @@ const context = await host.getContext();
 assertHostApiV7(context);
 const page = await host.rpc('my-component.load.v1', { cursor: null });
 const stop = host.onEvent('my-component.progress.v1', update => render(update));
+if (host.notify) await host.notify({ tone: 'success', message: '设置已保存', dedupeKey: 'settings.saved' });
 window.addEventListener('pagehide', stop, { once: true });
 ```
 
 页面运行时关闭 Node 集成、WebView、任意导航、新窗口和浏览器权限。界面应跟随宿主主题，支持键盘与可见焦点，页面停用或销毁时释放订阅和计时器。
 
 `component.sidePanel` 会在当前文件页的统一工具面板中打开，并绑定触发时的目录、选择项和文件页。宿主负责面板外框、插件图标、标题、遮罩、关闭和尺寸同步；组件页面只绘制内容区域。同一项目的不同文件页拥有独立面板实例。完整的仅面板示例见 `examples/panel-only-v7`。
+
+普通偏好优先使用宿主原生渲染的 `application.settingsForm`；复杂授权、环境安装或诊断可以通过同一表单的 `customPage` 扩展。自定义页面复用 `component-sdk/ui.css`，CSS 类不会授予任何 Host 能力。
 
 ### 插件服务
 
@@ -157,6 +154,14 @@ window.addEventListener('pagehide', stop, { once: true });
 | `project.media.metadata.v7` | `project.media.read` | Host API 7：读取白名单媒体元数据 |
 | `project.versions.page.v7` / `project.version.graph.v7` | `project.versions.read` | Host API 7：只读版本快照与来源图 |
 | `project.media.ratings.v7` | `project.media.ratings.read` | Host API 7：批量读取实际评分支持 |
+| `project.media.ratings.write.v7` | `project.media.ratings.write` | 逐项 CAS 写入图片/RAW 评分 |
+| `project.version.update.v7` / `project.version.delete.v7` | 独立版本写/删权限 | 原子版本 CAS 更新或高风险删除 |
+| `project.import.v7` | `project.import` | 一次性令牌的多文件事务导入 |
+| `project.files.mutate.v7` | `project.files.write` | 文件变更计划、提交、收据与撤销 |
+| `project.media.process.v7` | `project.media.process` | 视频处理、时间线帧和 Office 图片提取 |
+| `component.secrets.v7` | `component.secrets` | safeStorage 加密的组件隔离秘密 |
+| `network.fetch.v7` | `network.fetch` | origin 白名单与秘密绑定的 HTTPS 请求 |
+| `notifications.v7` | `notifications` | 宿主管理的短暂纯文本状态 |
 
 完整参数、限制、错误码和迁移规则见 [Host API V7 参考](docs/PLUGIN_HOST_API.md)。
 
@@ -181,6 +186,13 @@ stage 元数据和登记文件保留 24 小时，宿主重启后仍可继续校�
 - 只有宿主可以把内容发布进项目；双方都不能直接修改对方数据库。
 - 卸载插件只删除代码，不自动删除插件数据。
 
+## 当前组件
+
+- `team-retouch`（团片协作）：人物检测、身份确认、协作返图与高分辨率合回。
+- `video-playback-mpv`（高级视频解码）：无 UI 的独立 libmpv 播放后端。
+- `video-tools`（视频处理）：文件页视频转码、无损切割及组件自有 FFmpeg 运行时。
+- `video-transcription`（视频转文字）：本地批量语音识别、字幕搜索与受控 SRT 发布。
+
 ## 测试
 
 ```powershell
@@ -196,7 +208,7 @@ npm run test:architecture
 - 用 `component-manifest-v2.schema.json` 校验清单。
 - 安装包只包含构建后的 UI、服务和运行资源。
 - 为清单声明的生命周期脚本计算并填写 SHA-256。
-- 在干净用户配置中测试安装、取消、宿主重启、升级和降级。
+- 在干净用户配置中测试安装、停用/启用、取消、宿主重启、升级和降级。
 - 使用真实 V1 数据验证迁移，并保留 V1 来源。
 - 每次发布提升组件业务版本；只有破坏语义兼容时才提升 RPC 或事件的 `.vN`。
 

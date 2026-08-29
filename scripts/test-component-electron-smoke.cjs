@@ -18,7 +18,7 @@ child.once('exit', code => {
   const line = stdout.split(/\r?\n/).find(value => value.startsWith('PHOTOFLOW_COMPONENT_SMOKE_RESULT='));
   assert(line, `missing component smoke evidence\n${stdout}\n${stderr}`);
   const evidence = JSON.parse(line.slice('PHOTOFLOW_COMPONENT_SMOKE_RESULT='.length));
-  assert.deepEqual(evidence.v7Mounted, { api: true, notify: true, bridgeContract: 1, root: 'v7-mounted' });
+  assert.deepEqual(evidence.v7Mounted, { api: true, notify: true, dialog: true, bridgeContract: 1, root: 'v7-mounted' });
   assert.deepEqual(evidence.v7Event, { value: 'delivered-v7' });
   assert.equal(evidence.legacyRejected, true);
   assert.deepEqual(evidence.failures, []);

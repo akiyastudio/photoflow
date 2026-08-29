@@ -846,7 +846,13 @@ const registerComponentProjectCapabilities = ({
           id: `component:${descriptor.componentId}:${context.projectId}:${operationId}`,
           type: 'component-operation', title: String(payload.title || '组件任务').slice(0, 120), message: String(payload.message || '').slice(0, 500),
           cancellable: true, resumable: true, resumePolicy: 'checkpoint', checkpoint: payload.checkpoint,
-          metadata: { componentId: descriptor.componentId, projectId: context.projectId, operationId },
+          metadata: {
+            componentId: descriptor.componentId, projectId: context.projectId, operationId,
+            ...(context.surface === 'component.sidePanel' && context.sourcePageId && context.contributionId ? {
+              presentationOwnerPageId: String(context.sourcePageId),
+              presentationPanelKind: `component:${descriptor.componentId}:${context.contributionId}`,
+            } : {}),
+          },
         });
         await handle.waitForStart(); componentTaskHandles.set(key, handle);
       }

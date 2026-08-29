@@ -56,6 +56,7 @@ contextBridge.exposeInMainWorld('photoFlowComponent', Object.freeze({
     return ipcRenderer.invoke('component-sdk:authorize-files', filePaths);
   },
   notify,
+  dialog: payload => ipcRenderer.invoke('component-sdk:dialog', payload),
   rpc: (method, payload) => ipcRenderer.invoke('component-sdk:rpc', String(method || ''), payload),
   onEvent: (topic, callback) => {
     const normalizedTopic = String(topic || '');

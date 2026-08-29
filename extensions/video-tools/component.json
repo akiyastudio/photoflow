@@ -16,14 +16,14 @@
     "contributions": [
       { "type": "component.fullPage", "id": "transcode-ui", "title": "视频转码", "entry": "ui/transcode.html" },
       { "type": "component.fullPage", "id": "split-ui", "title": "视频切割", "entry": "ui/split.html" },
-      { "type": "component.sidePanel", "id": "transcode", "label": "视频转码", "title": "视频转码", "description": "转换视频封装、编码、画质与音频。", "pageId": "transcode-ui", "placement": "workspace.videoTools", "rpcMethods": ["video-tools.sources.choose.v1", "video-tools.settings.get.v1", "video-tools.settings.update.v1", "video-tools.inspect.v1", "video-tools.transcode.v1", "video-tools.operation.current.v1", "video-tools.operation.control.v1"] },
-      { "type": "component.sidePanel", "id": "split", "label": "视频切割", "title": "视频切割", "description": "批量将视频无损切成约 3.95 GB 的连续分段。", "pageId": "split-ui", "placement": "workspace.videoTools", "rpcMethods": ["video-tools.sources.choose.v1", "video-tools.split.v1", "video-tools.operation.current.v1", "video-tools.operation.control.v1"] }
+      { "type": "component.sidePanel", "id": "transcode", "label": "视频转码", "title": "视频转码", "description": "转换视频封装、编码、画质与音频。", "pageId": "transcode-ui", "placement": "workspace.videoTools", "rpcMethods": ["video-tools.sources.choose.v1", "video-tools.sources.preview.v1", "video-tools.settings.get.v1", "video-tools.settings.update.v1", "video-tools.inspect.v1", "video-tools.transcode.v1", "video-tools.operation.current.v1", "video-tools.operation.control.v1"] },
+      { "type": "component.sidePanel", "id": "split", "label": "视频切割", "title": "视频切割", "description": "批量将视频无损切成约 3.95 GB 的连续分段。", "pageId": "split-ui", "placement": "workspace.videoTools", "rpcMethods": ["video-tools.sources.choose.v1", "video-tools.sources.preview.v1", "video-tools.split.v1", "video-tools.operation.current.v1", "video-tools.operation.control.v1"] }
     ],
     "service": {
       "protocolVersion": 1,
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
-      "rpcMethods": ["video-tools.sources.choose.v1", "video-tools.settings.get.v1", "video-tools.settings.update.v1", "video-tools.inspect.v1", "video-tools.transcode.v1", "video-tools.split.v1", "video-tools.operation.current.v1", "video-tools.operation.control.v1"],
+      "rpcMethods": ["video-tools.sources.choose.v1", "video-tools.sources.preview.v1", "video-tools.settings.get.v1", "video-tools.settings.update.v1", "video-tools.inspect.v1", "video-tools.transcode.v1", "video-tools.split.v1", "video-tools.operation.current.v1", "video-tools.operation.control.v1"],
       "capabilities": ["component.settings.v7", "project.media.process.v7", "dialogs.v7", "component.events.v7"],
       "permissions": ["component.settings", "project.media.process", "dialogs", "events"],
       "events": ["video-tools.operation.progress.v1"],

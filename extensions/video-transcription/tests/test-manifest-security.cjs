@@ -1,22 +1,35 @@
 const assert = require('node:assert/strict'); const fs = require('node:fs'); const path = require('node:path'); const { EventEmitter } = require('node:events');
 const root = path.resolve(__dirname, '..'); const repo = path.resolve(root, '..', '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(root, 'component.json'), 'utf8'));
+const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 const { parseComponentHostManifest } = require(path.join(repo, 'electron', 'component-host-contract.cjs'));
 const { ComponentViewManager } = require(path.join(repo, 'electron', 'services', 'component-view-manager.cjs'));
 const descriptor = parseComponentHostManifest(manifest, root);
 assert.equal(manifest.componentHost.contractVersion, 2); assert.deepEqual(manifest.componentHost.compatibility, { minHostApiVersion: 7, maxHostApiVersion: 7 }); assert.equal(descriptor.hostApiVersion, 7);
 const projectAction = manifest.componentHost.contributions.find(item => item.type === 'project.contextAction'); assert(projectAction); assert.equal(projectAction.label, '视频转文字'); assert.equal(projectAction.placement, 'workspace.videoTools'); assert.equal(descriptor.contributions.find(item => item.id === projectAction.id).placement, 'workspace.videoTools');
 assert.equal(manifest.componentHost.contributions.filter(item => item.type === 'workspace.toolbarAction').length, 1, 'the original toolbar icon remains the only toolbar action');
+assert.equal(descriptor.settingsForms.length, 0); assert.equal(descriptor.settingsPages.length, 1); assert.equal(descriptor.settingsPages[0].id, 'settings'); assert.equal(descriptor.settingsPages[0].title, '视频转文字设置');
+const settingsPage = manifest.componentHost.contributions.find(item => item.type === 'application.settingsPage' && item.id === 'settings'); const settingsSource = fs.readFileSync(path.join(root, 'ui', 'settings.js'), 'utf8'); const settingsMethods = [...new Set(settingsSource.match(/transcript\.[a-z.-]+\.v1/g) || [])].sort(); assert.deepEqual([...settingsPage.rpcMethods].sort(), settingsMethods, 'single-page settings RPC allowlist exactly matches its implementation'); for (const relative of ['ui/settings.html', 'ui/settings.js', 'ui/settings-save-model.js']) { assert(fs.statSync(path.join(root, relative), { throwIfNoEntry: false })?.isFile(), `${relative} must exist for the settings page`); assert(manifest.requiredFiles.includes(relative), `${relative} must be required by the manifest`); assert.equal(packageJson.photoflowComponent.development.files[relative], relative, `${relative} must be mapped into the development component`); }
 assert.equal(manifest.componentHost.contributions.filter(item => item.type === 'project.contextAction' && item.placement === 'workspace.videoTools').length, 1, 'the video tools submenu contains exactly one transcription action');
 const directActions = manifest.componentHost.contributions.filter(item => ['project.contextAction', 'media.contextAction'].includes(item.type)); assert.deepEqual(directActions.map(item => item.type), ['project.contextAction'], 'one unified direct context action prevents duplicate menu entries');
-const appSource = fs.readFileSync(path.join(root, 'ui', 'app.js'), 'utf8'); const pageMethods = [...new Set(appSource.match(/transcript\.[a-z.]+\.v1/g) || [])].filter(method => method !== 'transcript.operation.progress.v1').sort();
+const appSource = fs.readFileSync(path.join(root, 'ui', 'app.js'), 'utf8'); const pageMethods = [...new Set(appSource.match(/transcript\.[a-z.-]+\.v1/g) || [])].filter(method => method !== 'transcript.operation.progress.v1').sort();
 assert.deepEqual([...projectAction.rpcMethods].sort(), pageMethods, 'project context action allowlist exactly matches the RPCs used by its main page'); assert(projectAction.rpcMethods.length <= 16); assert(!projectAction.rpcMethods.includes('transcript.settings.update.v1'));
+const serviceSource = fs.readFileSync(path.join(root, 'service.cjs'), 'utf8'); const handlerMethods = [...serviceSource.matchAll(/^  '(transcript\.[a-z.-]+\.v1)':/gm)].map(match => match[1]).sort(); assert.deepEqual([...manifest.componentHost.service.rpcMethods].sort(), handlerMethods, 'service RPC allowlist exactly matches implemented public handlers');
 assert(!manifest.componentHost.service.rpcMethods.includes('transcript.inputs.start.v1'), 'external input picker RPC is not exposed');
 assert.deepEqual(new Set(manifest.componentHost.service.permissions), new Set(['project.media.read', 'project.input.read', 'project.output.write', 'tasks', 'dialogs', 'component.storage', 'component.settings', 'events']));
 assert(!manifest.componentHost.service.permissions.includes('network.fetch')); assert(!manifest.componentHost.service.permissions.includes('project.files.read'));
 for (const name of ['index.html', 'settings.html', 'app.js', 'settings.js']) { const source = fs.readFileSync(path.join(root, 'ui', name), 'utf8'); assert(!/[A-Za-z]:\\|\\\\[^\s]+|file:\/\//.test(source), `${name} leaks an absolute path`); }
 const schema = fs.readFileSync(path.join(repo, 'electron', 'contracts', 'schemas', 'component-host-api-v7.schema.json'), 'utf8'); assert(schema.includes('"openDirectory"'));
-for (const forbidden of ['.venv', 'subtitle_index.db', 'large-v3/model.bin']) assert(!fs.existsSync(path.join(root, forbidden)), `${forbidden} must not be copied into the component`);
+const development = packageJson.photoflowComponent.development;
+const runtimeCommand = typeof development.runtime.command === 'string'
+  ? development.runtime.command
+  : development.runtime.command[process.platform] || development.runtime.command.default;
+assert(runtimeCommand, 'development runtime command is required');
+assert(!/\.(?:cmd|bat)$/i.test(runtimeCommand), 'development runtime must be a directly spawnable executable, not a batch wrapper');
+assert.equal(runtimeCommand, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
+assert(!fs.existsSync(path.join(root, 'dev-python.cmd')), 'the obsolete batch runtime wrapper must be removed');
+for (const copiedPath of Object.values(development.files)) assert(!copiedPath.startsWith('.venv/'), '.venv must not be copied into the packaged component');
+assert(!fs.existsSync(path.join(root, 'subtitle_index.db'))); assert(fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split(/\r?\n/).includes('models/'), 'plugin-local models remain ignored and outside the default package file list'); assert(!Object.values(development.files).some(value => value.startsWith('models/')), 'development contribution copying does not bundle models');
 let nextViewId = 1; const handlers = new Map(); const views = [];
 class Contents extends EventEmitter { constructor() { super(); this.id = nextViewId++; this.session = { setPermissionCheckHandler() {}, setPermissionRequestHandler() {} }; } isDestroyed() { return false; } loadFile() { return Promise.resolve(); } send() {} setWindowOpenHandler() {} close() { this.emit('destroyed'); } }
 class View { constructor() { this.webContents = new Contents(); views.push(this); } setBounds() {} setVisible() {} }

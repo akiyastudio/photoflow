@@ -499,6 +499,7 @@ export const InspirationLibraryPage = ({
     updatedAt: Date.now(),
   };
   const installedComponentIds = new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id));
+  const videoToolsAvailable = components.some(component => component.id === 'video-tools' && component.installed && component.enabled !== false && component.compatible);
   return <FileBrowserWorkspace
     pageId={pageId}
     active={active}
@@ -512,6 +513,7 @@ export const InspirationLibraryPage = ({
     workspacePath={rootPath}
     inspirationTargetWorkspacePath={config.workspacePath}
     installedComponentIds={installedComponentIds}
+    videoToolsAvailable={videoToolsAvailable}
     videoPlaybackSettings={config.videoPlayback}
     initialPanel={null}
     importConfig={config.smartImport}

@@ -62,11 +62,50 @@ const componentDirectories = root => {
   return values;
 };
 
+const fileMetadataToken = filePath => {
+  const stat = fs.statSync(filePath, { throwIfNoEntry: false });
+  return stat?.isFile() ? `${stat.size}:${stat.mtimeMs}:${stat.ctimeMs}` : 'missing';
+};
+
+// Discovery is called by several independent renderer catalog requests.  A
+// cheap metadata token lets the registry reuse the fully validated result
+// while still noticing package/manifest edits and added or removed components.
+const developmentComponentMetadataToken = options => {
+  const values = [];
+  for (const root of developmentRoots(options)) {
+    values.push(`root:${root}`);
+    for (const componentRoot of componentDirectories(root)) {
+      const packagePath = path.join(componentRoot, 'package.json');
+      values.push(`package:${componentRoot}:${fileMetadataToken(packagePath)}`);
+      try {
+        const packageManifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+        const component = packageManifest?.photoflowComponent;
+        const manifestRelative = component?.manifest;
+        if (typeof manifestRelative === 'string' && manifestRelative) {
+          const manifestPath = path.resolve(componentRoot, manifestRelative);
+          values.push(`manifest:${manifestPath}:${isInside(componentRoot, manifestPath) ? fileMetadataToken(manifestPath) : 'unsafe'}`);
+        }
+        const development = component?.development;
+        const runtimeCommands = typeof development?.runtime?.command === 'string' ? [development.runtime.command] : Object.values(development?.runtime?.command || {});
+        const developmentFiles = [...Object.values(development?.files || {}), ...runtimeCommands, development?.runtime?.entry].filter(value => typeof value === 'string' && value);
+        for (const relative of developmentFiles) {
+          const candidate = path.resolve(componentRoot, relative);
+          values.push(`file:${relative}:${isInside(componentRoot, candidate) ? fileMetadataToken(candidate) : 'unsafe'}`);
+        }
+      } catch {
+        values.push('package-invalid');
+      }
+    }
+  }
+  return values.join('|');
+};
+
 const declaredDevelopmentFiles = manifest => new Set([
   manifest.icon,
   ...Object.values(manifest.entrypoints || {}),
   ...(manifest.requiredFiles || []),
   ...(manifest.componentHost?.contributions || []).map(item => item?.entry),
+  ...(manifest.componentHost?.contributions || []).map(item => item?.customPage?.entry),
   ...Object.values(manifest.componentHost?.service?.entrypoints || {}),
   ...Object.values(manifest.componentHost?.service?.lifecycleActions || {}).map(item => item?.entry),
 ].filter(Boolean).map(value => relativeFile(value, 'manifest file declaration')));
@@ -146,4 +185,4 @@ const discoverDevelopmentComponents = options => {
   return results;
 };
 
-module.exports = { developmentRoots, discoverDevelopmentComponents, inspectDevelopmentComponent, relativeFile, safeFile };
+module.exports = { developmentRoots, developmentComponentMetadataToken, discoverDevelopmentComponents, inspectDevelopmentComponent, relativeFile, safeFile };

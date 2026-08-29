@@ -2,8 +2,7 @@
 """Private JSONL transcription engine for the PhotoFlow component.
 
 Paths are accepted only over the service-private pipe and are never emitted.
-The implementation is extracted from C:\\dev\\app3\\subtitle_tool.py without
-importing or mutating that CLI or its database.
+The engine and its models are owned by this plugin directory.
 """
 from __future__ import annotations
 
@@ -29,6 +28,11 @@ PROMPT_ARTIFACT_RE = re.compile(r"^(?:请?使用简体中文)+$")
 
 
 CURRENT_REQUEST_ID = ""
+SUPPORTED_MODELS = frozenset({
+    "tiny", "tiny.en", "base", "base.en", "small", "small.en", "medium", "medium.en",
+    "large-v1", "large-v2", "large-v3", "large-v3-turbo", "distil-large-v2",
+    "distil-large-v3", "distil-medium.en", "distil-small.en",
+})
 
 
 def emit(value: dict) -> None:
@@ -82,12 +86,28 @@ def write_srt(output_path: Path, segments: list[Segment]) -> None:
 
 
 def model_source(model: str) -> str:
-    packaged = Path(__file__).resolve().parent / "models" / model
-    roots = [Path(value) for value in [os.environ.get("PHOTOFLOW_WHISPER_MODEL_ROOT", ""), r"C:\dev\app3\models"] if value]
-    for candidate in [packaged, *(root / model for root in roots)]:
-        if candidate.is_dir():
-            return str(candidate)
-    return model
+    if model not in SUPPORTED_MODELS:
+        raise RuntimeError("不支持的语音识别模型")
+    component_root = Path(__file__).resolve().parent
+    try:
+        root = (component_root / "models").resolve(strict=True)
+        root.relative_to(component_root)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise RuntimeError("插件模型根目录缺失或不安全") from exc
+    candidate = root / model
+    try:
+        resolved = candidate.resolve(strict=True)
+        resolved.relative_to(root)
+    except (FileNotFoundError, OSError, ValueError) as exc:
+        raise RuntimeError(f"模型 {model} 未安装；请将完整模型放入插件 models/{model} 目录") from exc
+    required = ("config.json", "model.bin", "tokenizer.json")
+    try:
+        valid_files = all((resolved / name).is_file() and (resolved / name).resolve(strict=True).is_relative_to(resolved) for name in required)
+    except (FileNotFoundError, OSError):
+        valid_files = False
+    if not resolved.is_dir() or not valid_files:
+        raise RuntimeError(f"模型 {model} 不完整；需要 config.json、model.bin 和 tokenizer.json")
+    return str(resolved)
 
 
 def configure_windows_cuda() -> None:
@@ -158,7 +178,7 @@ def transcribe(request: dict, session: ModelSession) -> dict:
         try:
             __import__("faster_whisper")
         except ImportError as exc:
-            raise RuntimeError("缺少 faster-whisper；开发模式可使用 C:\\dev\\app3\\.venv，发布包需内置 transcriber.exe") from exc
+            raise RuntimeError("缺少 faster-whisper；请先在插件目录运行 npm run setup") from exc
         model, fallback = session.get(options)
         iterator, info = model.transcribe(
             request["inputPath"], language=options.get("language"), task="transcribe",

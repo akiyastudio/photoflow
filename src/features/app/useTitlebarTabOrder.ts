@@ -59,6 +59,7 @@ export const useTitlebarTabOrder = ({
   projectPages,
   toolTabs,
   componentPages,
+  searchAllOpen = false,
   settingsOpen,
 }: {
   inspirationPages: Array<{ id: string; currentRelativePath: string }>;
@@ -66,6 +67,7 @@ export const useTitlebarTabOrder = ({
   projectPages: Array<{ id: string; projectPath: string }>;
   toolTabs: Array<{ ownerPageId: string; projectPath: string; kind: string }>;
   componentPages?: Array<{ identity: string; insertAfterTabId: string }>;
+  searchAllOpen?: boolean;
   settingsOpen: boolean;
 }) => {
   const [order, setOrder] = useState<string[]>(() => {
@@ -93,6 +95,7 @@ export const useTitlebarTabOrder = ({
 
   const visibleIds = useMemo(() => [
     'home',
+    ...(searchAllOpen ? ['search-all'] : []),
     ...inspirationPages.map(page => inspirationTabId(page.id)),
     ...projectPages.flatMap(page => [
       projectTabId(page.id),
@@ -100,7 +103,7 @@ export const useTitlebarTabOrder = ({
     ]),
     ...(componentPages || []).map(page => componentTabId(page.identity)),
     ...(settingsOpen ? ['settings'] : []),
-  ], [componentPages, inspirationPages, projectPages, settingsOpen, toolTabs]);
+  ], [componentPages, inspirationPages, projectPages, searchAllOpen, settingsOpen, toolTabs]);
 
   const completeOrder = useCallback((current: string[]) => insertNewTabsAfterAnchors(
     current,

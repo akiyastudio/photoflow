@@ -14,6 +14,8 @@ npm run package
 
 The root application never imports this source tree. It discovers installed `component.json` manifests and interacts only through Component Host V2 capabilities. `team.*.v1` methods are private UI-to-service RPC owned here; service-to-Host requests use only the declared project media/output/version/progress, tasks, dialogs, component storage/settings/events/lifecycle/media, and notifications capabilities.
 
+GPU and crop preferences plus advanced PairDETR/SAM environment status and lifecycle management use one sandboxed `application.settingsPage`. The page reuses the shared Host UI contract for the standard settings layout without splitting the experience across Host and component renderers; the legacy in-workflow dialog remains only as a compatibility fallback.
+
 ## Migration and recovery
 
 The manifest requests the versioned `component.storage.previous.v1` and `project.output.existing.v1` adoption grants. The Host performs bounded copy/verification or project-local ownership adoption and returns generic receipts. `service.cjs` owns all old table/path interpretation, validates the receipt before rewriting paths, fails mutations closed while adoption is pending, checkpoints output migration, uses stable migration IDs, and leaves the previous source intact for rollback. The helpers under `compatibility/python/` exist only for plugin-owned legacy snapshot/restore tests and are not registered by PhotoFlow.

@@ -6,7 +6,7 @@ export interface LogEntry {
   type: 'info' | 'success' | 'warning' | 'error';
 }
 
-export type ToolType = 'home' | 'inspiration' | 'project' | 'project-version' | 'component' | 'settings' | 'dashboard' | 'match' | 'video_split';
+export type ToolType = 'home' | 'search-all' | 'inspiration' | 'project' | 'project-version' | 'component' | 'settings' | 'dashboard' | 'match' | 'video_split';
 
 export type Theme = 'light' | 'dark' | 'system';
 export type VideoTranscodeSettings = {
@@ -759,7 +759,16 @@ export interface ComponentHostAction {
   iconUrl?: string;
 }
 
-export interface ComponentSettingsPageContribution {
+export type ComponentSettingsValue = string | number | boolean;
+export interface ComponentSettingsFormOption { value: string; label: string; description?: string }
+export type ComponentSettingsFormField =
+  | { id: string; type: 'toggle'; label: string; description?: string; default: boolean }
+  | { id: string; type: 'select'; label: string; description?: string; default: string; options: ComponentSettingsFormOption[] }
+  | { id: string; type: 'text'; label: string; description?: string; default: string; placeholder?: string; maxLength: number }
+  | { id: string; type: 'number' | 'range'; label: string; description?: string; default: number; min: number; max: number; step: number; suffix?: string };
+export interface ComponentSettingsFormGroup { id: string; title: string; description?: string; fields: ComponentSettingsFormField[] }
+export interface ComponentSettingsForm { schemaVersion: 1; groups: ComponentSettingsFormGroup[] }
+export type ComponentSettingsPageContribution = {
   componentId: string;
   componentVersion: string;
   contractVersion: 2;
@@ -769,7 +778,7 @@ export interface ComponentSettingsPageContribution {
   pageTitle: string;
   development?: boolean;
   iconUrl?: string;
-}
+} & ({ renderMode: 'custom'; form?: never; customPageTitle?: never } | { renderMode: 'declarative'; form: ComponentSettingsForm; customPageTitle?: never } | { renderMode: 'hybrid'; form: ComponentSettingsForm; customPageTitle: string });
 
 export interface ComponentPageOpenScope {
   /** Folder visible when the toolbar action was invoked. */
@@ -1003,6 +1012,8 @@ export interface IElectronAPI {
   getComponents: (force?: boolean) => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
   getComponentHostActions: () => Promise<{ success: boolean; actions: ComponentHostAction[]; error?: string }>;
   getComponentSettingsPages: () => Promise<{ success: boolean; pages: ComponentSettingsPageContribution[]; error?: string }>;
+  readComponentSettingsForm: (request: { componentId: string; pageId: string }) => Promise<{ success: boolean; apiVersion?: 1; revision?: number; values?: Record<string, ComponentSettingsValue>; error?: string }>;
+  updateComponentSettingsForm: (request: { componentId: string; pageId: string; patch: Record<string, ComponentSettingsValue> }) => Promise<{ success: boolean; apiVersion?: 1; revision?: number; values?: Record<string, ComponentSettingsValue>; error?: string }>;
   getComponentContributions: () => Promise<{ success: boolean; contributions: ComponentContribution[]; error?: string }>;
   openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus; scopeRelativePath?: string; selectedRelativePaths?: string[]; sourcePageId?: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
   openComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string; surface: 'application.settings'; leaseId: string }; error?: string }>;
@@ -1212,7 +1223,7 @@ export interface IElectronAPI {
   chooseBrollSourceFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
   chooseVideoFiles: () => Promise<{ cancelled?: boolean; paths: string[] }>;
   chooseVideoFolder: () => Promise<{ cancelled?: boolean; path?: string }>;
-  inspectSourcePaths: (paths: string[]) => Promise<{ success: boolean; sources: Array<{ path: string; kind: 'file' | 'folder' }>; missingPaths: string[]; error?: string }>;
+  inspectSourcePaths: (paths: string[], options?: { includeFolderFiles?: boolean; extensions?: string[] }) => Promise<{ success: boolean; sources: Array<{ path: string; kind: 'file' | 'folder'; preview?: { count: number; files: string[]; truncated: boolean } }>; missingPaths: string[]; error?: string }>;
   getMediaCacheInfo: (cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path: string; sizeBytes: number; fileCount: number; error?: string }>;
   clearMediaCache: (cacheConfig?: AppConfig['mediaCache'], olderThanDays?: number, options?: { origin?: 'manual' | 'daily-auto' }) => Promise<{ success: boolean; deletedCount?: number; prunedSourceCount?: number; taskId?: string; error?: string }>;
   getStorageUsageOverview: (force?: boolean) => Promise<StorageUsageOverview>;

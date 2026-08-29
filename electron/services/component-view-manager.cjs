@@ -1,4 +1,5 @@
 const path = require('path');
+const { normalizeComponentSettingsFormValues, validateComponentSettingsFormPatch } = require('../contracts/component-settings-form-contract.cjs');
 
 const PAGE_KEY_SEPARATOR = '\u001f';
 const normalizeIdentity = value => String(value || '').trim().replace(/\\/g, '/').toLocaleLowerCase();
@@ -47,7 +48,7 @@ const componentSurfaceCss = (theme, surface) => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, writeLog = () => undefined, onViewStackChanged = () => undefined }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
@@ -56,9 +57,11 @@ class ComponentViewManager {
     this.clearComponentCapabilityState = clearComponentCapabilityState;
     this.writeLog = writeLog;
     this.serviceManager = serviceManager;
+    this.capabilityBroker = capabilityBroker;
     this.inputGrantService = inputGrantService;
     this.notificationService = notificationService;
     this.onViewStackChanged = onViewStackChanged;
+    this.settingsCloseGraceMs = Math.max(0, Number(settingsCloseGraceMs) || 0);
     this.instances = new Map();
     this.instancesById = new Map();
     this.senderBindings = new Map();
@@ -98,6 +101,12 @@ class ComponentViewManager {
       if (!this.notificationService) { const error = new Error('Component notification service is unavailable'); error.code = 'NOTIFICATION_HOST_UNAVAILABLE'; throw error; }
       return this.notificationService.publish(instance.descriptor, payload, instance.context);
     });
+    this.ipcMain.handle('component-sdk:dialog', (event, payload) => {
+      const instance = this.senderBindings.get(event.sender.id);
+      if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
+      if (!this.capabilityBroker) throw new Error('Component dialog service is unavailable');
+      return this.capabilityBroker.invoke(instance.descriptor, 'dialogs.v7', payload, instance.context);
+    });
     this.ipcMain.handle('component-sdk:authorize-files', (event, filePaths) => {
       const instance = this.senderBindings.get(event.sender.id);
       if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
@@ -107,7 +116,7 @@ class ComponentViewManager {
     this.ipcMain.handle('component-sdk:content-size', (event, value) => {
       const instance = this.senderBindings.get(event.sender.id);
       if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
-      if (instance.context.surface !== 'component.sidePanel') return { accepted: false };
+      if (!['component.sidePanel', 'application.settings'].includes(instance.context.surface)) return { accepted: false };
       const width = Math.ceil(Number(value?.width)); const height = Math.ceil(Number(value?.height));
       if (!Number.isFinite(width) || !Number.isFinite(height) || width < 1 || height < 1 || width > 20000 || height > 20000) throw new Error('Invalid component content size');
       if (instance.contentSize?.width === width && instance.contentSize?.height === height) return { accepted: true, changed: false };
@@ -139,17 +148,45 @@ class ComponentViewManager {
   }
 
   listSettingsPages() {
-    return this.registry.list().flatMap(item => (item.settingsPages || []).map(page => ({
-      componentId: item.componentId,
-      componentVersion: item.componentVersion,
-      contractVersion: item.contractVersion,
-      hostApiVersion: item.hostApiVersion,
-      pageId: page.id,
-      label: page.label,
-      pageTitle: page.title,
-      development: item.development === true,
-      ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
-    })));
+    return this.registry.list().flatMap(item => [
+      ...(item.settingsForms || []).map(form => ({
+        componentId: item.componentId, componentVersion: item.componentVersion, contractVersion: item.contractVersion, hostApiVersion: item.hostApiVersion,
+        pageId: form.id, label: form.label, pageTitle: form.title, renderMode: form.customPage ? 'hybrid' : 'declarative', form: form.form, ...(form.customPage ? { customPageTitle: form.customPage.title } : {}), development: item.development === true,
+        ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
+      })),
+      ...(item.settingsPages || []).map(page => ({
+        componentId: item.componentId, componentVersion: item.componentVersion, contractVersion: item.contractVersion, hostApiVersion: item.hostApiVersion,
+        pageId: page.id, label: page.label, pageTitle: page.title, renderMode: 'custom', development: item.development === true,
+        ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
+      })),
+    ]);
+  }
+
+  settingsForm(request) {
+    const componentId = String(request?.componentId || ''); const pageId = String(request?.pageId || '');
+    const descriptor = this.registry.resolve(componentId);
+    const contribution = descriptor?.settingsForms?.find(item => item.id === pageId);
+    if (!descriptor || !contribution) throw new Error('Unknown declarative component settings form');
+    return { descriptor, contribution };
+  }
+
+  declarativeSettingsContext(descriptor) {
+    return Object.freeze({ componentId: descriptor.componentId, componentVersion: descriptor.componentVersion, surface: 'application.settings', projectId: '', projectName: '', projectStatus: '', scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '', contributionId: '' });
+  }
+
+  async readSettingsForm(request) {
+    if (!this.capabilityBroker) throw new Error('Declarative component settings are unavailable');
+    const { descriptor, contribution } = this.settingsForm(request);
+    const result = await this.capabilityBroker.invoke(descriptor, 'component.settings.v7', { action: 'get' }, this.declarativeSettingsContext(descriptor));
+    return { apiVersion: 1, revision: Number(result.revision) || 0, values: normalizeComponentSettingsFormValues(contribution.form, result.settings) };
+  }
+
+  async updateSettingsForm(request) {
+    if (!this.capabilityBroker) throw new Error('Declarative component settings are unavailable');
+    const { descriptor, contribution } = this.settingsForm(request);
+    const patch = validateComponentSettingsFormPatch(contribution.form, request?.patch);
+    const result = await this.capabilityBroker.invoke(descriptor, 'component.settings.v7', { action: 'merge', settings: patch }, this.declarativeSettingsContext(descriptor));
+    return { apiVersion: 1, revision: Number(result.revision) || 0, values: normalizeComponentSettingsFormValues(contribution.form, result.settings) };
   }
   listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, hostApiVersion: item.hostApiVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, ...(contribution.description ? { description: contribution.description } : {}), pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(contribution.placement ? { placement: contribution.placement } : {}), ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
 
@@ -168,20 +205,38 @@ class ComponentViewManager {
     const instance = this.instances.get(key);
     if (!instance || instance.context.surface !== 'application.settings' || !instance.settingsLeases?.delete(leaseId)) return false;
     const generation = ++instance.leaseGeneration;
-    setImmediate(() => {
+    clearTimeout(instance.settingsCloseTimer);
+    instance.settingsCloseTimer = setTimeout(() => {
+      instance.settingsCloseTimer = null;
       if (this.instances.get(key) === instance && instance.leaseGeneration === generation && instance.settingsLeases.size === 0) this.close(instance.instanceId);
-    });
+    }, this.settingsCloseGraceMs);
+    instance.settingsCloseTimer.unref?.();
     return true;
   }
 
   async openSurface(request, surface) {
-    const descriptor = this.registry.resolve(request.componentId);
-    const settingsPage = surface === 'application.settings' ? descriptor?.settingsPages?.find(page => page.id === request.pageId) : null; const contribution = request.contribution || null;
-    const page = surface === 'application.settings' ? settingsPage : contribution ? descriptor?.pages?.find(item => item.id === contribution.pageId) : descriptor?.fullPage;
-    if (!descriptor || !page || page.id !== request.pageId) throw new Error('Unknown component page');
-    const applicationLevel = surface === 'application.settings' || surface === 'application.command'; const key = surface === 'application.settings' ? componentSettingsPageKey(request) : contribution ? componentContributionKey(request, surface) : componentPageKey(request);
+    const settingsKey = surface === 'application.settings' ? componentSettingsPageKey(request) : '';
     const leaseId = surface === 'application.settings' ? String(request.leaseId || '') : '';
     if (surface === 'application.settings' && !/^[a-z0-9._:-]{8,160}$/i.test(leaseId)) throw new Error('Invalid component settings page lease');
+    const retainedSettings = settingsKey ? this.instances.get(settingsKey) : null;
+    if (retainedSettings?.context.surface === 'application.settings') {
+      clearTimeout(retainedSettings.settingsCloseTimer);
+      retainedSettings.settingsCloseTimer = null;
+      retainedSettings.settingsLeases.add(leaseId);
+      retainedSettings.leaseGeneration += 1;
+      await retainedSettings.readyPromise;
+      if (this.instances.get(settingsKey) !== retainedSettings || retainedSettings.view.webContents.isDestroyed()) throw new Error('Component page open was superseded');
+      if (!retainedSettings.settingsLeases.has(leaseId)) throw new Error('Component settings page lease was released');
+      this.activate(retainedSettings.instanceId);
+      return this.publicInstance(retainedSettings, leaseId);
+    }
+    const descriptor = this.registry.resolve(request.componentId);
+    const settingsFormCustomPage = surface === 'application.settings' ? descriptor?.settingsForms?.find(form => form.id === request.pageId)?.customPage : null;
+    const declaredSettingsPage = surface === 'application.settings' ? descriptor?.settingsPages?.find(page => page.id === request.pageId) : null;
+    const settingsPage = declaredSettingsPage || (settingsFormCustomPage ? { ...settingsFormCustomPage, id: String(request.pageId) } : null); const contribution = request.contribution || null;
+    const page = surface === 'application.settings' ? settingsPage : contribution ? descriptor?.pages?.find(item => item.id === contribution.pageId) : descriptor?.fullPage;
+    if (!descriptor || !page || page.id !== request.pageId) throw new Error('Unknown component page');
+    const applicationLevel = surface === 'application.settings' || surface === 'application.command'; const key = settingsKey || (contribution ? componentContributionKey(request, surface) : componentPageKey(request));
     this.writeLog('info', 'Component page context bound', { componentId: request.componentId, surface, contributionId: contribution?.id || '', projectId: applicationLevel ? '' : String(request.projectId || ''), projectName: applicationLevel ? '' : String(request.projectName || ''), projectStatus: applicationLevel ? '' : String(request.projectStatus || ''), sourcePageId: applicationLevel ? '' : String(request.sourcePageId || '') });
     let existing = this.instances.get(key);
     if (existing && (existing.descriptor.componentVersion !== descriptor.componentVersion || existing.page.entry !== page.entry)) {
@@ -189,7 +244,7 @@ class ComponentViewManager {
       existing = null;
     }
     if (existing) {
-      if (surface === 'application.settings') { existing.settingsLeases.add(leaseId); existing.leaseGeneration += 1; }
+      if (surface === 'application.settings') { clearTimeout(existing.settingsCloseTimer); existing.settingsCloseTimer = null; existing.settingsLeases.add(leaseId); existing.leaseGeneration += 1; }
       await existing.readyPromise;
       if (this.instances.get(key) !== existing || existing.view.webContents.isDestroyed()) throw new Error('Component page open was superseded');
       if (surface === 'application.settings' && !existing.settingsLeases.has(leaseId)) throw new Error('Component settings page lease was released');
@@ -218,6 +273,7 @@ class ComponentViewManager {
       readyPromise: null,
       settingsLeases: new Set(surface === 'application.settings' ? [leaseId] : []),
       leaseGeneration: 1,
+      settingsCloseTimer: null,
       logicalActive: false,
       requestedBounds: { x: 0, y: 0, width: 0, height: 0 },
       context: Object.freeze({
@@ -307,6 +363,7 @@ class ComponentViewManager {
       permissions,
       events: applicationSurface ? [] : instance.descriptor.service?.events || [],
       themeContractVersion: 1,
+      uiContractVersion: 1,
       panelStyleContractVersion: 1,
       panelLayoutContractVersion: 1,
       resolvedTheme: this.resolvedTheme,
@@ -394,6 +451,8 @@ class ComponentViewManager {
   close(instanceId) {
     const instance = this.instancesById.get(instanceId);
     if (!instance) return false;
+    clearTimeout(instance.settingsCloseTimer);
+    instance.settingsCloseTimer = null;
     if (this.instances.get(instance.key) === instance) this.instances.delete(instance.key);
     if (this.instancesById.get(instanceId) === instance) this.instancesById.delete(instanceId);
     if (this.activeInstanceId === instanceId) this.activeInstanceId = '';

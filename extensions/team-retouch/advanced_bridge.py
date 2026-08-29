@@ -210,7 +210,7 @@ class AdvancedBatchSession:
         return sorted(sam_root.glob("mask-*.png"))
 
 
-def probe_advanced():
+def probe_advanced(timeout=8):
     try:
         pair_script = wsl_path(script_path("pairdetr_service.py"))
         sam_script = wsl_path(script_path("sam2_service.py"))
@@ -220,7 +220,7 @@ def probe_advanced():
             "test -s $HOME/model-lab/checkpoints/sam2/sam2.1_hiera_large.pt",
             f"test -r {shlex.quote(pair_script)}", f"test -r {shlex.quote(sam_script)}",
         ])
-        run_shell(command, 60)
+        run_shell(command, timeout)
         return True, ""
     except Exception as error:
         return False, str(error)

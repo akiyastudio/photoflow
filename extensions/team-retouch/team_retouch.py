@@ -18,14 +18,16 @@ import sys
 import uuid
 from pathlib import Path
 
-import cv2
-import numpy as np
-from PIL import Image, ImageOps
-
-from identity_engine import IdentityRuntime, add_occlusion_estimates, constrained_clusters, ranked_similarity_pairs
-
-
-Image.MAX_IMAGE_PIXELS = None
+# Installation probes only need the standard library and advanced_bridge.  Do
+# not pay the OpenCV/NumPy/ONNX import cost before deciding which action runs.
+_LIGHTWEIGHT_ACTIONS = {"probe-advanced-installation", "probe-advanced-runtime"}
+_LIGHTWEIGHT_STARTUP = len(sys.argv) > 1 and sys.argv[1] in _LIGHTWEIGHT_ACTIONS
+if not _LIGHTWEIGHT_STARTUP:
+    import cv2
+    import numpy as np
+    from PIL import Image, ImageOps
+    from identity_engine import IdentityRuntime, add_occlusion_estimates, constrained_clusters, ranked_similarity_pairs
+    Image.MAX_IMAGE_PIXELS = None
 
 RTMDET_INPUT_SIZE = 640
 RTMDET_SCORE_THRESHOLD = 0.45
