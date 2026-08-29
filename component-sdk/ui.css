@@ -73,16 +73,21 @@ html.dark {
 .pf-surface { background: var(--pf-surface); border-color: var(--pf-border-subtle); color: var(--pf-text); }
 .pf-card { border: 1px solid var(--pf-border-subtle); border-radius: var(--pf-radius-lg); background: var(--pf-surface); color: var(--pf-text); box-shadow: var(--pf-shadow-sm); }
 .pf-panel-card, .pf-panel-section { border: 1px solid var(--pf-border-subtle); border-radius: var(--pf-radius-lg); background: var(--pf-canvas); color: var(--pf-text); }
+.pf-panel-section { padding: 16px; }
 .pf-form-label { color: var(--pf-muted); font-size: 12px; font-weight: 700; }
-.pf-form-input { min-height: var(--pf-control-md); border: 1px solid var(--pf-border); border-radius: var(--pf-radius-sm); background: var(--pf-control-bg); color: var(--pf-text); }
+.pf-form-input { min-height: var(--pf-control-md); border: 1px solid var(--pf-border); border-radius: var(--pf-radius-sm); background: var(--pf-control-bg); color: var(--pf-text); padding: .55rem .7rem; outline: none; }
+.pf-form-input:focus { border-color: var(--pf-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--pf-focus) 15%, transparent); }
 .pf-toolbar { border-bottom: 1px solid var(--pf-border-subtle); background: var(--pf-surface); color: var(--pf-text); }
 .pf-modal-backdrop { background: var(--pf-overlay); }
 .pf-modal { border: 1px solid var(--pf-border); border-radius: var(--pf-radius-lg); background: var(--pf-elevated); color: var(--pf-text); box-shadow: var(--pf-shadow-lg); }
-.pf-button { min-height: var(--pf-control-md); border-radius: var(--pf-radius-sm); border: 1px solid var(--pf-border); background: var(--pf-surface); color: var(--pf-text); }
+.pf-button { min-height: var(--pf-control-md); border-radius: var(--pf-radius-sm); border: 1px solid var(--pf-border); background: var(--pf-surface); color: var(--pf-text); padding: .55rem .9rem; font-size: .875rem; font-weight: 700; transition: background .15s, color .15s; cursor: pointer; }
 .pf-button:hover:not(:disabled) { background: var(--pf-subtle); }
 .pf-button-primary { border-color: var(--pf-primary); background: var(--pf-primary); color: #fff; }
 .pf-button-primary:hover:not(:disabled) { border-color: var(--pf-primary-hover); background: var(--pf-primary-hover); }
-.pf-input { min-height: var(--pf-control-md); border: 1px solid var(--pf-border); border-radius: var(--pf-radius-sm); background: var(--pf-canvas); color: var(--pf-text); }
+.pf-button-danger { border-color: color-mix(in srgb, var(--pf-danger) 45%, var(--pf-border)); color: var(--pf-danger); }
+.pf-button-danger:hover:not(:disabled) { background: var(--pf-danger-soft); }
+.pf-input { min-height: var(--pf-control-md); border: 1px solid var(--pf-border); border-radius: var(--pf-radius-sm); background: var(--pf-control-bg); color: var(--pf-text); padding: .55rem .7rem; outline: none; }
+.pf-input:focus { border-color: var(--pf-focus); box-shadow: 0 0 0 2px color-mix(in srgb, var(--pf-focus) 15%, transparent); }
 .pf-button:disabled, .pf-button-primary:disabled, .pf-input:disabled { cursor: not-allowed; opacity: .48; }
 .pf-icon-tile { display: inline-flex; align-items: center; justify-content: center; border-radius: var(--pf-radius-sm); background: var(--pf-primary-soft); color: var(--pf-primary); }
 .pf-banner { border: 1px solid var(--pf-border); border-radius: var(--pf-radius-md); background: var(--pf-elevated); color: var(--pf-text); box-shadow: var(--pf-shadow-sm); }

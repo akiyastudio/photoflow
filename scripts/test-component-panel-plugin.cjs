@@ -102,7 +102,7 @@ class View {
     assert.notEqual(first.instanceId, second.instanceId, 'each file page must own its component panel instance');
     assert.equal(views.length, 2);
     assert.equal((await open('page-a')).instanceId, first.instanceId, 'the same file page must reuse its panel instance');
-    assert(views.every(view => view.webContents.insertedCss.includes('::-webkit-scrollbar') && view.webContents.insertedCss.includes('::-webkit-scrollbar-button{display:none') && view.webContents.insertedCss.includes('--pf-panel-body:#ffffff') && view.webContents.insertedCss.includes('.pf-panel-section')), 'every isolated component panel inherits Host tokens, primitives, and scrollbar styling');
+    assert(views.every(view => view.webContents.insertedCss.includes('::-webkit-scrollbar') && view.webContents.insertedCss.includes('::-webkit-scrollbar-button{display:none') && view.webContents.insertedCss.includes('--pf-panel-body:#ffffff') && view.webContents.insertedCss.includes('.pf-panel-section') && view.webContents.insertedCss.includes('body{margin:0;padding:22px}') && view.webContents.insertedCss.includes('padding:.55rem .9rem;font-size:.875rem')), 'every isolated component panel inherits Host spacing, controls, tokens, primitives, and scrollbar styling');
     const context = await handlers.get('component-sdk:get-context')({ sender: views[0].webContents });
     assert.equal(context.panelStyleContractVersion, 1); assert.equal(context.panelLayoutContractVersion, 1);
     const measured = await handlers.get('component-sdk:content-size')({ sender: views[0].webContents }, { width: 928, height: 412 });
