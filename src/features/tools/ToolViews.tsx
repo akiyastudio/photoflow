@@ -18,7 +18,7 @@ import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, should
 import { isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from './storage-device-inventory-model';
 import { useStorageDeviceInventory } from './use-storage-device-inventory';
 import { getWorkspaceCatalog, readWorkspaceCatalogSnapshot, workspaceCatalogEventMatches } from '../../platform/workspace-catalog-client';
-import { BUILTIN_VIDEO_TRANSCODE_PRESETS, formatMediaBytes, normalizeVideoTranscodeSettings, readCustomVideoTranscodePresets, videoTranscodeWarnings, writeCustomVideoTranscodePresets, type VideoTranscodeCapabilities, type VideoTranscodeMediaInfo, type VideoTranscodePreset } from './video-transcode-model';
+import { BUILTIN_VIDEO_TRANSCODE_PRESETS, formatMediaBytes, normalizeVideoTranscodeSettings, readCustomVideoTranscodePresets, videoTranscodeBlockingErrors, videoTranscodeWarnings, writeCustomVideoTranscodePresets, type VideoTranscodeCapabilities, type VideoTranscodeMediaInfo, type VideoTranscodePreset } from './video-transcode-model';
 
 export type { ImportCompletion } from './import-completion-model';
 
@@ -2242,9 +2242,13 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   ], [activeSourceFolders, paths, settings]);
   const inspectionKey = JSON.stringify(taskArguments);
   const presets = [...BUILTIN_VIDEO_TRANSCODE_PRESETS, ...customPresets];
-  const warnings = videoTranscodeWarnings(settings, capabilities);
+  const blockingErrors = videoTranscodeBlockingErrors(settings, capabilities, mediaInfo);
+  const warnings = videoTranscodeWarnings(settings, capabilities, mediaInfo).filter(message => !blockingErrors.includes(message));
   const estimatedOutputBytes = mediaInfo.reduce((sum, item) => sum + Number(item.estimatedOutputBytes || 0), 0);
-  const setSetting = <K extends keyof VideoTranscodeSettings>(key: K, value: VideoTranscodeSettings[K]) => setSettings(current => ({ ...current, [key]: value }));
+  const setSetting = <K extends keyof VideoTranscodeSettings>(key: K, value: VideoTranscodeSettings[K]) => {
+    setPresetId('');
+    setSettings(current => ({ ...current, [key]: value }));
+  };
 
   useEffect(() => setSourcePaths(mergeSourcePaths(initialTargetKey.split('\n'))), [initialTargetKey]);
   useEffect(() => {
@@ -2258,8 +2262,8 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   useEffect(() => () => onBusyChange?.(false), [onBusyChange]);
   useEffect(() => { setMediaInfo([]); }, [inspectionKey]);
   useEffect(() => {
-    if (settings.videoMode === 'copy') setSettings(current => ({ ...current, resolution: 'original', frameRate: 'original', frameRateMode: 'preserve', colorMode: 'auto', bitDepth: 'auto', rotation: 'auto', aspectMode: 'preserve', subtitleMode: current.subtitleMode === 'burn' ? 'copy' : current.subtitleMode }));
-    else if (settings.videoMode === 'prores') setSettings(current => ({ ...current, container: 'mov', bitDepth: '10' }));
+    if (settings.videoMode === 'copy') setSettings(current => ({ ...current, resolution: 'original', frameRate: 'original', frameRateMode: 'preserve', colorMode: 'auto', bitDepth: 'auto', rotation: 'auto', aspectMode: 'preserve', videoBitrateMbps: null, subtitleMode: current.subtitleMode === 'burn' ? 'copy' : current.subtitleMode }));
+    else if (settings.videoMode === 'prores') setSettings(current => ({ ...current, container: 'mov', bitDepth: '10', videoBitrateMbps: null }));
     else if (settings.videoMode === 'av1' && settings.container === 'mov') setSettings(current => ({ ...current, container: 'mp4' }));
   }, [settings.videoMode]);
   useEffect(() => {
@@ -2307,7 +2311,7 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   };
   const disabled = task.isRunning;
   const videoDisabled = disabled || settings.videoMode === 'copy';
-  const canStartTranscode = paths.length > 0 && !task.isRunning && !inspection.isRunning && !sourcesLoading && !resolvingKinds;
+  const canStartTranscode = paths.length > 0 && !task.isRunning && !inspection.isRunning && !sourcesLoading && !resolvingKinds && blockingErrors.length === 0;
   const automaticEstimateStatus = !paths.length
     ? '添加视频后自动估算预计输出'
     : inspection.isRunning || lastRequestedInspectionKeyRef.current !== inspectionKey
@@ -2331,17 +2335,17 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
           <h3 className="mb-4 text-sm font-bold text-slate-800">输出与编码</h3>
           <div className="grid gap-4 md:grid-cols-2">
             <label className="text-xs font-bold text-slate-600">输出封装<select value={settings.container} disabled={disabled || settings.videoMode === 'prores'} onChange={event => setSetting('container', event.target.value as VideoTranscodeSettings['container'])} className="form-input mt-1"><option value="mp4">MP4</option><option value="mov">MOV</option><option value="mkv">MKV</option></select></label>
-            <label className="text-xs font-bold text-slate-600">视频编码<select value={settings.videoMode} disabled={disabled} onChange={event => setSetting('videoMode', event.target.value as VideoTranscodeSettings['videoMode'])} className="form-input mt-1"><option value="h264">H.264</option><option value="h265">HEVC / H.265</option><option value="av1">AV1 · 硬件</option><option value="prores">Apple ProRes</option><option value="copy">仅更换封装</option></select></label>
-            <label className="text-xs font-bold text-slate-600">画质<select value={settings.quality} disabled={videoDisabled} onChange={event => setSetting('quality', event.target.value as VideoTranscodeSettings['quality'])} className="form-input mt-1 disabled:opacity-50"><option value="high">高质量</option><option value="balanced">平衡</option><option value="small">更小文件</option></select></label>
+            <label className="text-xs font-bold text-slate-600">视频编码<select value={settings.videoMode} disabled={disabled} onChange={event => setSetting('videoMode', event.target.value as VideoTranscodeSettings['videoMode'])} className="form-input mt-1"><option value="h264">H.264</option><option value="h265">HEVC / H.265</option><option value="av1">AV1 · 硬件</option><option value="prores">Apple ProRes</option><option value="copy">复制视频流</option></select></label>
+            <label className="text-xs font-bold text-slate-600">{settings.videoMode === 'prores' ? 'ProRes 规格' : '画质'}<select value={settings.quality} disabled={videoDisabled || settings.videoBitrateMbps !== null} onChange={event => setSetting('quality', event.target.value as VideoTranscodeSettings['quality'])} className="form-input mt-1 disabled:opacity-50">{settings.videoMode === 'prores' ? <><option value="high">422 HQ</option><option value="balanced">422</option><option value="small">422 LT</option></> : <><option value="high">高质量</option><option value="balanced">平衡</option><option value="small">更小文件</option></>}</select></label>
             <label className="text-xs font-bold text-slate-600">编码速度<select value={settings.encoderPreset} disabled={videoDisabled} onChange={event => setSetting('encoderPreset', event.target.value as VideoTranscodeSettings['encoderPreset'])} className="form-input mt-1 disabled:opacity-50"><option value="fast">快速</option><option value="balanced">平衡</option><option value="quality">质量优先</option></select></label>
-            <label className="text-xs font-bold text-slate-600">自定义视频码率<input type="number" min="0.1" max="800" step="0.1" value={settings.videoBitrateMbps ?? ''} disabled={videoDisabled || settings.videoMode === 'prores'} onChange={event => setSetting('videoBitrateMbps', event.target.value ? Number(event.target.value) : null)} placeholder="自动（Mbps）" className="form-input mt-1 disabled:opacity-50"/></label>
+            <label className="text-xs font-bold text-slate-600">目标视频码率<input type="number" min="0.1" max="800" step="0.1" value={settings.videoBitrateMbps ?? ''} disabled={videoDisabled || settings.videoMode === 'prores'} onChange={event => setSetting('videoBitrateMbps', event.target.value ? Number(event.target.value) : null)} placeholder="自动（Mbps）" className="form-input mt-1 disabled:opacity-50"/></label>
           </div>
         </section>
         <section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
           <h3 className="mb-4 text-sm font-bold text-slate-800">画面与色彩</h3>
           <div className="grid gap-4 md:grid-cols-2">
-            <label className="text-xs font-bold text-slate-600">分辨率<select value={settings.resolution} disabled={videoDisabled} onChange={event => setSetting('resolution', event.target.value as VideoTranscodeSettings['resolution'])} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原分辨率</option><option value="2160p">最长边 4K</option><option value="1080p">最长边 1080p</option><option value="720p">最长边 720p</option></select></label>
-            <label className="text-xs font-bold text-slate-600">色彩处理<select value={settings.colorMode} disabled={videoDisabled} onChange={event => setSetting('colorMode', event.target.value as VideoTranscodeSettings['colorMode'])} className="form-input mt-1 disabled:opacity-50"><option value="auto">自动识别并保留</option><option value="sdr">Rec.709 SDR</option><option value="hdr10">HDR10 · PQ/BT.2020</option><option value="hlg">HLG · BT.2020</option><option value="hdr-to-sdr">HDR 转 Rec.709 SDR</option></select></label>
+            <label className="text-xs font-bold text-slate-600">分辨率<select value={settings.resolution} disabled={videoDisabled} onChange={event => setSetting('resolution', event.target.value as VideoTranscodeSettings['resolution'])} className="form-input mt-1 disabled:opacity-50"><option value="original">保持原分辨率</option><option value="2160p">最大 4K</option><option value="1080p">最大 1080p</option><option value="720p">最大 720p</option></select></label>
+            <label className="text-xs font-bold text-slate-600">输出色彩<select value={settings.colorMode} disabled={videoDisabled} onChange={event => { setPresetId(''); setSettings(current => ({ ...current, colorMode: event.target.value as VideoTranscodeSettings['colorMode'], ...(['hdr10', 'hlg'].includes(event.target.value) ? { bitDepth: '10' as const } : {}) })); }} className="form-input mt-1 disabled:opacity-50"><option value="auto">跟随来源</option><option value="sdr">Rec.709 SDR</option><option value="hdr10">HDR10 · PQ/BT.2020</option><option value="hlg">HLG · BT.2020</option></select></label>
             <label className="text-xs font-bold text-slate-600">位深<select value={settings.bitDepth} disabled={videoDisabled || ['hdr10', 'hlg'].includes(settings.colorMode) || settings.videoMode === 'prores'} onChange={event => setSetting('bitDepth', event.target.value as VideoTranscodeSettings['bitDepth'])} className="form-input mt-1 disabled:opacity-50"><option value="auto">跟随来源</option><option value="8">8-bit</option><option value="10">10-bit</option></select></label>
             <label className="text-xs font-bold text-slate-600">旋转<select value={settings.rotation} disabled={videoDisabled} onChange={event => setSetting('rotation', event.target.value as VideoTranscodeSettings['rotation'])} className="form-input mt-1 disabled:opacity-50"><option value="auto">自动应用来源方向</option><option value="0">不旋转</option><option value="90">顺时针 90°</option><option value="180">180°</option><option value="270">逆时针 90°</option></select></label>
             <label className="text-xs font-bold text-slate-600">像素宽高比<select value={settings.aspectMode} disabled={videoDisabled} onChange={event => setSetting('aspectMode', event.target.value as VideoTranscodeSettings['aspectMode'])} className="form-input mt-1 disabled:opacity-50"><option value="preserve">保留 SAR/DAR</option><option value="square-pixels">转为方形像素</option></select></label>
@@ -2350,7 +2354,7 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
         <section className="rounded-lg border border-slate-200 bg-slate-50 p-4">
           <h3 className="mb-4 text-sm font-bold text-slate-800">帧率</h3>
           <div className="grid gap-4 md:grid-cols-2">
-            <label className="text-xs font-bold text-slate-600">帧率模式<select value={settings.frameRateMode} disabled={videoDisabled} onChange={event => setSetting('frameRateMode', event.target.value as VideoTranscodeSettings['frameRateMode'])} className="form-input mt-1 disabled:opacity-50"><option value="preserve">保持时间戳</option><option value="cfr">CFR 固定帧率</option><option value="vfr">VFR 可变帧率</option></select></label>
+            <label className="text-xs font-bold text-slate-600">帧率模式<select value={settings.frameRateMode} disabled={videoDisabled} onChange={event => { setPresetId(''); setSettings(current => ({ ...current, frameRateMode: event.target.value as VideoTranscodeSettings['frameRateMode'], ...(event.target.value === 'cfr' ? {} : { frameRate: 'original' as const }) })); }} className="form-input mt-1 disabled:opacity-50"><option value="preserve">保持时间戳</option><option value="cfr">CFR 固定帧率</option><option value="vfr">VFR 可变帧率</option></select></label>
             {settings.frameRateMode === 'cfr' && <label className="text-xs font-bold text-slate-600">目标帧率<select value={settings.frameRate} disabled={videoDisabled} onChange={event => setSetting('frameRate', event.target.value as VideoTranscodeSettings['frameRate'])} className="form-input mt-1 disabled:opacity-50"><option value="original">来源帧率</option>{['24', '25', '30', '50', '60'].map(value => <option key={value} value={value}>{value} fps</option>)}</select></label>}
           </div>
         </section>
@@ -2365,8 +2369,9 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
         </section>
       </div>
       {settingsOnly && <div className="flex items-center gap-3"><button type="button" disabled={inspection.isRunning || task.isRunning} onClick={() => inspection.start(['--inspect-only'], '正在检测媒体运行库与硬件编码能力…')} className="rounded-md border border-blue-300 px-4 py-2 text-sm font-bold text-blue-700 disabled:opacity-40">{inspection.isRunning ? '正在检测…' : '检测编码器与滤镜能力'}</button><span className="text-xs text-slate-500">{capabilities ? `可用硬件：${capabilities.usableHardwareEncoders?.join('、') || '无'}；滤镜：${capabilities.filters.join('、') || '基础集'}` : inspection.statusMsg}</span></div>}
+      {blockingErrors.map(message => <div key={message} className="flex gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-800"><AlertCircle size={15} className="mt-0.5 shrink-0"/>{message}</div>)}
       {warnings.map(message => <div key={message} className="flex gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800"><AlertCircle size={15} className="mt-0.5 shrink-0"/>{message}</div>)}
-      {mediaInfo.filter(item => item.dynamicHdr).map(item => <div key={`dynamic-hdr:${item.path}`} className="flex gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800"><AlertCircle size={15} className="mt-0.5 shrink-0"/>{item.name} 含 {item.dynamicHdr} 动态元数据；自动模式会阻止有损转码，请改用仅换封装或明确转换为 HDR10/SDR。</div>)}
+      {mediaInfo.filter(item => item.dynamicHdr).map(item => <div key={`dynamic-hdr:${item.path}`} className="flex gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800"><AlertCircle size={15} className="mt-0.5 shrink-0"/>{item.name} 含 {item.dynamicHdr} 动态元数据；跟随来源模式会阻止有损转码，请复制视频流或明确指定 SDR/HDR10/HLG 输出。</div>)}
       {!settingsOnly && <>
         <div className="flex flex-wrap items-center gap-3"><span className="text-sm text-slate-600">{mediaInfo.length > 0 && !inspection.isRunning && lastRequestedInspectionKeyRef.current === inspectionKey ? `${mediaInfo.length} 个视频 · 预计输出 ${formatMediaBytes(estimatedOutputBytes)}` : automaticEstimateStatus}</span></div>
         {mediaInfo.length > 0 && <div className="max-h-56 overflow-auto rounded-lg border border-slate-200"><table className="w-full text-left text-xs"><thead className="sticky top-0 bg-slate-100 text-slate-600"><tr><th className="p-2">文件</th><th className="p-2">画面</th><th className="p-2">色彩</th><th className="p-2">轨道</th><th className="p-2">预计输出</th></tr></thead><tbody>{mediaInfo.map(item => <tr key={item.path} className="border-t border-slate-100"><td className="max-w-48 truncate p-2" title={item.path}>{item.name}</td><td className="p-2">{item.codec} · {item.pixelFormat}<br/>{item.width}×{item.height} · {item.frameRate} fps<br/>SAR {item.sar} / DAR {item.dar} / {item.rotation}°</td><td className="p-2">{item.hdrKind} · {item.bitDepth}-bit<br/>{item.primaries}/{item.transfer}/{item.matrix}</td><td className="p-2">音频 {item.audioTracks} · 字幕 {item.subtitleTracks}</td><td className="p-2">{formatMediaBytes(item.estimatedOutputBytes)}</td></tr>)}</tbody></table></div>}

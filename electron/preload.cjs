@@ -14,8 +14,8 @@ const normalizeComponentNotificationRendererEvent = value => {
 const subscribeComponentNotification = callback => {
   if (typeof callback !== 'function') throw new TypeError('Component notification callback must be a function');
   const listener = (_event, value) => { const normalized = normalizeComponentNotificationRendererEvent(value); if (normalized) callback(normalized); };
-  ipcRenderer.on('component-host:notification.v7', listener);
-  return () => ipcRenderer.removeListener('component-host:notification.v7', listener);
+  ipcRenderer.on('component-host:notification', listener);
+  return () => ipcRenderer.removeListener('component-host:notification', listener);
 };
 
 for (const channel of ['workspace-screenshot-main-image-progress', 'workspace-selection-progress']) {

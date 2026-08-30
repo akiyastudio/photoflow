@@ -25,8 +25,8 @@ assert.throws(() => parseComponentHostManifest(invalidHybrid, root), /not declar
 
 let settings = { enabled: false, mode: 'not-valid', quality: 90 }; let revision = 3; let serviceInvocations = 0;
 const broker = { invoke: async (_descriptor, method, payload, context) => {
-  if (method === 'dialogs.v7') return { apiVersion: 7, confirmed: true };
-  assert.equal(method, 'component.settings.v7'); assert.equal(context.surface, 'application.settings');
+  if (method === 'dialogs') return { apiVersion: 7, confirmed: true };
+  assert.equal(method, 'component.settings'); assert.equal(context.surface, 'application.settings');
   if (payload.action === 'merge') { settings = { ...settings, ...payload.settings }; revision += 1; }
   return { apiVersion: 7, revision, settings };
 } };
@@ -49,7 +49,7 @@ const manager = new ComponentViewManager({
     assert.deepEqual(await handlers.get('component-sdk:dialog')({ sender }, { kind: 'confirm', title: 'Confirm' }), { apiVersion: 7, confirmed: true }, 'custom settings pages receive the versioned frontend dialog interface');
     manager.senderBindings.delete(sender.id);
     const missingCapability = structuredClone(manifest); missingCapability.componentHost.service.capabilities = [];
-    assert.throws(() => parseComponentHostManifest(missingCapability, root), /require component.settings.v7/);
+    assert.throws(() => parseComponentHostManifest(missingCapability, root), /require component.settings/);
     console.log('Declarative component settings Host rendering/storage contract tests passed');
   } finally { manager.destroy(); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

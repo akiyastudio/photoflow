@@ -108,6 +108,7 @@ const App: React.FC = () => {
   const reportComponentSettingsError = useCallback((message: string) => showNotice(`打开组件设置页失败：${message}`), [showNotice]);
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id)), [components]);
   const videoToolsAvailable = useMemo(() => componentRuntimeIsAvailable(components, 'video-tools'), [components]);
+  const advancedVideoPlaybackAvailable = useMemo(() => componentRuntimeIsAvailable(components, 'video-playback-mpv'), [components]);
   const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); } });
   const { actions: componentHostActions, contributions: componentContributions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
 
@@ -896,7 +897,7 @@ const App: React.FC = () => {
                     <span className="min-w-0 flex-1"><span className="block text-base font-bold text-slate-800">灵感库</span><span className="mt-1 block truncate text-xs text-slate-500">整理和浏览灵感素材</span></span>
                     <ChevronRight size={19} className="shrink-0 text-slate-300 transition group-hover:translate-x-0.5 group-hover:text-blue-500"/>
                   </button>
-                  <BackupHomeCard status={backupStatus} onOpen={openBackupSettings} onRun={() => { void window.electronAPI.runBackup(config.workspacePath, 'manual').then(result => { if (!result.success) showNotice(result.error || '无法开始备份', 'error'); else void refreshBackupStatus(); }); }}/>
+                  <BackupHomeCard status={backupStatus} onOpen={() => openBackupSettings()} onRun={() => { void window.electronAPI.runBackup(config.workspacePath, 'manual').then(result => { if (!result.success) showNotice(result.error || '无法开始备份', 'error'); else void refreshBackupStatus(); }); }}/>
                   <button type="button" onClick={openSearchAllTab} className="group flex min-w-0 items-center gap-4 rounded-xl border border-slate-200 bg-white px-5 py-5 text-left transition hover:border-blue-400 hover:bg-blue-50 hover:shadow-sm">
                     <span className="flex h-11 w-11 shrink-0 items-center justify-center rounded-xl bg-blue-50 text-blue-600"><Search size={22}/></span>
                     <span className="min-w-0 flex-1"><span className="block text-base font-bold text-slate-800">全局搜索</span><span className="mt-1 block truncate text-xs text-slate-500">检索工作目录和灵感库文件</span></span>
@@ -923,6 +924,7 @@ const App: React.FC = () => {
             inspirationLibraryRootPath={config.inspirationLibrary.rootPath}
             installedComponentIds={installedComponentIds}
             videoToolsAvailable={videoToolsAvailable}
+            advancedVideoPlaybackAvailable={advancedVideoPlaybackAvailable}
             componentHostActions={componentHostActions} componentContributions={componentContributions} onOpenComponentPage={(action, scope) => void openComponentPage(action, project, project.workspacePath || config.workspacePath, scope)}
             videoPlaybackSettings={config.videoPlayback}
             projectToolbar={config.projectToolbar}

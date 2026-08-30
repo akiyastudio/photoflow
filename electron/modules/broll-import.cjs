@@ -13,8 +13,8 @@ const {
 } = require('../services/file-transfer-service.cjs');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
 
-const BROLL_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif', '.mp4', '.mov', '.avi', '.m4v', '.mkv']);
-const BROLL_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.m4v', '.mkv']);
+const BROLL_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif', '.mp4', '.mov', '.avi', '.m4v', '.mkv', '.mpeg', '.mpg', '.mts', '.m2ts']);
+const BROLL_VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.avi', '.m4v', '.mkv', '.mpeg', '.mpg', '.mts', '.m2ts']);
 const FOUR_GB = 4 * 1024 * 1024 * 1024;
 let brollProcessSequence = 0;
 

@@ -1,6 +1,6 @@
 # PhotoFlow component UI contract
 
-Use `application.settingsForm` for ordinary component preferences. PhotoFlow validates the declaration, renders native settings rows, applies defaults, and persists values through `component.settings.v7` without loading component HTML.
+Use `application.settingsForm` for ordinary component preferences. PhotoFlow validates the declaration, renders native settings rows, applies defaults, and persists values through `component.settings` without loading component HTML.
 
 When ordinary preferences also need account authorization, environment installation, or diagnostics, add `customPage` to the same `application.settingsForm`. PhotoFlow keeps one navigation item and renders the native form together with the isolated advanced region. Standalone `application.settingsPage` remains available for pages with no declarative fields. Custom pages should import `component-sdk/ui.css` and call `mountUiTheme()` from `component-sdk/index.js`.
 

@@ -2,7 +2,7 @@ const fs = require('fs');
 const path = require('path');
 
 const RECENT_CONTENT_CHANGE_MS = 2 * 60 * 1000;
-const MEDIA_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif', '.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
+const MEDIA_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif', '.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.mpeg', '.mpg', '.mts', '.m2ts', '.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
 
 // Recursive Windows watchers can report directory metadata and old-file
 // attribute/access changes while a scan is merely reading the tree. Feeding

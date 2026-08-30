@@ -1,8 +1,8 @@
 const { CAPABILITY_PERMISSIONS, HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 
 const MAX_PAYLOAD_BYTES = 2 * 1024 * 1024;
-const APPLICATION_SETTINGS_CAPABILITIES = new Set(['component.settings.v7', 'component.lifecycle.v7', 'dialogs.v7', 'notifications.v7', 'component.secrets.v7']);
-const APPLICATION_COMMAND_CAPABILITIES = new Set([...APPLICATION_SETTINGS_CAPABILITIES, 'network.fetch.v7']);
+const APPLICATION_SETTINGS_CAPABILITIES = new Set(['component.settings', 'component.lifecycle', 'dialogs', 'notifications', 'component.secrets']);
+const APPLICATION_COMMAND_CAPABILITIES = new Set([...APPLICATION_SETTINGS_CAPABILITIES, 'network.fetch']);
 
 const clonePayload = payload => {
   if (payload === undefined || payload === null) return {};

@@ -77,4 +77,4 @@ with tempfile.TemporaryDirectory() as temporary:
     assert deleted["versionId"] == "v1"
     db.close()
 
-print("Component Host API V7 database CAS tests passed")
+print("Component Host API database CAS tests passed")

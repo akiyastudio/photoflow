@@ -41,7 +41,7 @@ IMAGE_EXTENSIONS = {
     ".heic", ".heif", ".hif", ".avif", ".cr2", ".cr3", ".nef", ".arw", ".raf", ".orf",
     ".rw2", ".dng", ".rwl", ".3fr", ".fff", ".iiq", ".pef", ".srw",
 }
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".crm"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".webm", ".avi", ".mkv", ".mpeg", ".mpg", ".mts", ".m2ts", ".crm"}
 SQLITE_BUSY_TIMEOUT_MS = 15_000
 LEGACY_PROGRESS_MIGRATION_KEY = "legacy_progress_folders_migrated"
 LEGACY_MEDIA_WORKFLOW_MIGRATION_KEY = "legacy_media_workflow_graph_migrated_v1"

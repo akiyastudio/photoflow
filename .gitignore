@@ -49,6 +49,7 @@ env/
 
 # Application build and packaging output
 /artifacts/*
+!/artifacts/set-version.bat
 !/artifacts/publish-release.bat
 /out/
 /electron/bin/

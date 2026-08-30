@@ -26,7 +26,7 @@ const inside = (root, candidate) => {
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
 };
 const storageFor = async parentId => {
-  const storage = await callHost(parentId, 'component.storage.v7', {});
+  const storage = await callHost(parentId, 'component.storage', {});
   if (!storage?.databasePath || !storage?.dataPath || storage.ownership !== 'component-private') throw new Error('组件私有存储尚未就绪');
   const databasePath = path.resolve(storage.databasePath);
   let db = databaseCache.get(databasePath);
@@ -34,7 +34,7 @@ const storageFor = async parentId => {
   return { db, dataPath: path.resolve(storage.dataPath), databasePath, projectId: String(storage.projectId || '') };
 };
 const readSettings = async parentId => {
-  const response = await callHost(parentId, 'component.settings.v7', { action: 'get' });
+  const response = await callHost(parentId, 'component.settings', { action: 'get' });
   return normalizeSettings(response.settings);
 };
 const MODEL_ROOT = path.join(__dirname, 'models');
@@ -67,7 +67,7 @@ const saveSettings = async (parentId, patch) => {
     if (!WHISPER_MODEL_IDS.has(requested)) throw new Error('不支持的语音识别模型');
     if (!isCompleteModelDirectory(requested)) throw new Error(`模型 ${requested} 未安装；请将完整模型放入插件 models/${requested} 目录`);
   }
-  const result = await callHost(parentId, 'component.settings.v7', { action: 'replace', settings });
+  const result = await callHost(parentId, 'component.settings', { action: 'replace', settings });
   return { settings: normalizeSettings(result.settings), revision: result.revision };
 };
 
@@ -133,7 +133,7 @@ const insertOperation = (db, projectId, sourceKind, settings, files, operationId
   } catch (error) { db.exec('ROLLBACK'); throw error; }
   return operationId;
 };
-const startHostTask = (parentId, operationId, total) => callHost(parentId, 'tasks.v7', { action: 'start', operationId, title: '视频转文字', message: `等待处理 ${total} 个视频文件`, progress: 0, checkpoint: { nextOrdinal: 0, total } });
+const startHostTask = (parentId, operationId, total) => callHost(parentId, 'tasks', { action: 'start', operationId, title: '视频转文字', message: `等待处理 ${total} 个视频文件`, progress: 0, checkpoint: { nextOrdinal: 0, total } });
 const validateMaterializedPath = (dataPath, response) => {
   const privatePath = path.resolve(String(response?.privatePath || ''));
   if (!inside(dataPath, privatePath) || privatePath === path.resolve(dataPath)) throw new Error('宿主返回了无效的组件私有输入');
@@ -170,7 +170,7 @@ const collectProjectMediaResult = async (parentId, payload, context) => {
   const files = []; const seenMedia = new Set();
   let cursor = null; let pages = 0;
   do {
-    const page = await callHost(parentId, 'project.media.page.v7', { pageSize: 200, cursor, kinds: ['video'] });
+    const page = await callHost(parentId, 'project.media.page', { pageSize: 200, cursor, kinds: ['video'] });
     pages += 1;
     for (const item of Array.isArray(page?.items) ? page.items : []) {
       const relativeName = normalizeProjectRelativePath(item?.relativePath || item?.name);
@@ -206,9 +206,9 @@ const startProjectOperation = async (parentId, payload, context) => {
 
 const materializeProjectFile = async (parentId, dataPath, row) => {
   const mediaRef = JSON.parse(row.media_ref_json || '{}');
-  const variant = await callHost(parentId, 'project.media.variants.v7', { ...mediaRef, variants: ['original'] });
+  const variant = await callHost(parentId, 'project.media.variants', { ...mediaRef, variants: ['original'] });
   if (!variant.input?.token) throw new Error('项目媒体没有可用的受限输入令牌');
-  const materialized = await callHost(parentId, 'project.input.tokens.v7', { action: 'materialize', token: variant.input.token });
+  const materialized = await callHost(parentId, 'project.input.tokens', { action: 'materialize', token: variant.input.token });
   return validateMaterializedPath(dataPath, materialized);
 };
 const removePrivateInput = async (storage, candidate) => {
@@ -293,7 +293,7 @@ const refreshCounts = (db, projectId, operationId) => {
   db.prepare('UPDATE transcript_operations SET total=?,succeeded=?,failed=?,updated_at=? WHERE id=? AND project_id=?').run(Number(counts.total) || 0, Number(counts.succeeded) || 0, Number(counts.failed) || 0, Date.now(), operationId, projectId);
   return counts;
 };
-const emitProgress = (parentId, snapshot, file) => callHost(parentId, 'component.events.v7', { topic: 'transcript.operation.progress.v1', event: { operationId: snapshot.id, state: snapshot.state, total: snapshot.total, succeeded: snapshot.succeeded, failed: snapshot.failed, file: file ? { id: file.id, displayName: file.displayName, state: file.state, progress: file.progress } : null } }).catch(() => undefined);
+const emitProgress = (parentId, snapshot, file) => callHost(parentId, 'component.events', { topic: 'transcript.operation.progress.v1', event: { operationId: snapshot.id, state: snapshot.state, total: snapshot.total, succeeded: snapshot.succeeded, failed: snapshot.failed, file: file ? { id: file.id, displayName: file.displayName, state: file.state, progress: file.progress } : null } }).catch(() => undefined);
 const runOperation = async (parentId, payload, context) => {
   const operationId = String(payload.operationId || '');
   if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(operationId)) throw new Error('无效的 operationId');
@@ -310,12 +310,12 @@ const runOperation = async (parentId, payload, context) => {
   let engine = null;
   try {
     db.prepare("UPDATE transcript_operations SET state='running',error='',updated_at=? WHERE id=? AND project_id=?").run(Date.now(), operationId, projectId);
-    await callHost(parentId, 'tasks.v7', { action: 'resume', operationId, title: '视频转文字', message: '正在恢复转写', checkpoint: { nextOrdinal: 0, total: operation.total } });
+    await callHost(parentId, 'tasks', { action: 'resume', operationId, title: '视频转文字', message: '正在恢复转写', checkpoint: { nextOrdinal: 0, total: operation.total } });
     const rows = db.prepare(`SELECT f.* FROM transcript_files f JOIN transcript_operations o ON o.id=f.operation_id
       WHERE f.operation_id=? AND o.project_id=? AND (f.state IN ('pending','running') OR (f.state='failed' AND (f.private_path!='' OR f.source_kind='project-media'))) ORDER BY f.ordinal`).all(operationId, projectId);
     for (const row of rows) {
       if (control.signal.aborted) break;
-      const task = await callHost(parentId, 'tasks.v7', { action: 'status', operationId });
+      const task = await callHost(parentId, 'tasks', { action: 'status', operationId });
       if (task.cancelled) { control.abort(); break; }
       try {
         if (!row.private_path) {
@@ -332,7 +332,7 @@ const runOperation = async (parentId, payload, context) => {
           if (progress !== null) db.prepare('UPDATE transcript_files SET progress=? WHERE id=?').run(progress, row.id);
           const completedBefore = db.prepare("SELECT COUNT(*) count FROM transcript_files f JOIN transcript_operations o ON o.id=f.operation_id WHERE f.operation_id=? AND o.project_id=? AND f.state IN ('completed','failed')").get(operationId, projectId).count;
           const overall = ((Number(completedBefore) + (Number(progress) || 0) / 100) / Math.max(1, operation.total)) * 100;
-          const report = await callHost(parentId, 'tasks.v7', { action: 'report', operationId, progress: overall, phase: 'transcribing', message: message || `正在识别 ${row.display_name}`, checkpoint: { nextOrdinal: row.ordinal, currentFileId: row.id, total: operation.total } });
+          const report = await callHost(parentId, 'tasks', { action: 'report', operationId, progress: overall, phase: 'transcribing', message: message || `正在识别 ${row.display_name}`, checkpoint: { nextOrdinal: row.ordinal, currentFileId: row.id, total: operation.total } });
           if (report.cancelled) control.abort();
         });
         replaceSegments(db, row.id, result.segments);
@@ -356,9 +356,9 @@ const runOperation = async (parentId, payload, context) => {
     else if (counts.succeeded > 0) { state = 'partial_failure'; message = `${counts.succeeded} 个完成，${counts.failed} 个失败`; }
     else { state = 'failed'; message = `${counts.failed} 个文件全部识别失败`; }
     db.prepare('UPDATE transcript_operations SET state=?,error=?,updated_at=? WHERE id=? AND project_id=?').run(state, state === 'failed' ? message : '', Date.now(), operationId, projectId);
-    if (state === 'cancelled') await callHost(parentId, 'tasks.v7', { action: 'cancel', operationId });
-    else if (state === 'failed') await callHost(parentId, 'tasks.v7', { action: 'fail', operationId, error: message });
-    else await callHost(parentId, 'tasks.v7', { action: 'complete', operationId, message });
+    if (state === 'cancelled') await callHost(parentId, 'tasks', { action: 'cancel', operationId });
+    else if (state === 'failed') await callHost(parentId, 'tasks', { action: 'fail', operationId, error: message });
+    else await callHost(parentId, 'tasks', { action: 'complete', operationId, message });
     const snapshot = operationSnapshot(db, projectId, operationId); await emitProgress(parentId, snapshot, null); return snapshot;
   } catch (error) {
     db.prepare("UPDATE transcript_files SET state='pending',progress=0 WHERE operation_id=? AND state='running' AND operation_id IN (SELECT id FROM transcript_operations WHERE project_id=?)").run(operationId, projectId);
@@ -378,21 +378,21 @@ const publishOutput = async (parentId, payload) => {
   const content = fs.readFileSync(row.srt_path); const sha256 = crypto.createHash('sha256').update(content).digest('hex'); const size = content.length;
   const previous = JSON.parse(row.output_json || '{}');
   if (previous.commitId && previous.artifactId && previous.sha256 === sha256) return { published: true, fileId, output: previous, idempotent: true, message: previous.controlled ? '外部输入无法原路旁写；字幕已发布到当前 PhotoFlow 项目的受控输出。' : '同名 SRT 已发布到项目媒体旁。' };
-  const stage = await callHost(parentId, 'project.output.v7', { action: 'stage' });
+  const stage = await callHost(parentId, 'project.output', { action: 'stage' });
   const srtName = srtNameFor(row.relative_name);
   const outputRelativePath = row.source_kind === 'project-media' ? srtName : cleanRelativeName(`视频字幕/${row.operation_id}/${srtName}`);
   try {
     const replacement = previous.commitId && previous.artifactId && previous.sha256
       ? { replace: true, previousCommitId: previous.commitId, previousArtifactId: previous.artifactId, expectedDigest: previous.sha256 }
       : {};
-    await callHost(parentId, 'project.output.v7', { action: 'write', stageId: stage.stageId, name: path.posix.basename(srtName), outputRelativePath, base64: content.toString('base64'), ...replacement });
-    await callHost(parentId, 'project.output.v7', { action: 'validate', stageId: stage.stageId });
+    await callHost(parentId, 'project.output', { action: 'write', stageId: stage.stageId, name: path.posix.basename(srtName), outputRelativePath, base64: content.toString('base64'), ...replacement });
+    await callHost(parentId, 'project.output', { action: 'validate', stageId: stage.stageId });
     const idempotencyKey = `srt-${crypto.createHash('sha256').update(`${row.id}\0${sha256}`).digest('hex')}`;
-    const committed = await callHost(parentId, 'project.output.v7', { action: 'commit', stageId: stage.stageId, idempotencyKey });
+    const committed = await callHost(parentId, 'project.output', { action: 'commit', stageId: stage.stageId, idempotencyKey });
     const artifact = committed.outputs?.[0]; const output = { commitId: committed.commitId, artifactId: artifact?.artifactId, relativePath: artifact?.relativePath || outputRelativePath, sha256: artifact?.sha256 || sha256, size: Number(artifact?.size ?? artifact?.byteLength ?? size), controlled: row.source_kind !== 'project-media' };
     db.prepare(`UPDATE transcript_files SET output_json=? WHERE id=? AND operation_id IN (SELECT id FROM transcript_operations WHERE project_id=?)`).run(JSON.stringify(output), row.id, projectId);
     return { published: true, fileId, output, message: output.controlled ? '外部输入无法原路旁写；字幕已发布到当前 PhotoFlow 项目的受控输出。' : '同名 SRT 已发布到项目媒体旁。' };
-  } catch (error) { await callHost(parentId, 'project.output.v7', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); throw error; }
+  } catch (error) { await callHost(parentId, 'project.output', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); throw error; }
 };
 const publishAllOutputs = async (parentId, payload) => {
   const { db, projectId } = await storageFor(parentId); const operationId = String(payload.operationId || '');
@@ -402,10 +402,10 @@ const publishAllOutputs = async (parentId, payload) => {
     WHERE f.operation_id=? AND o.project_id=? AND f.state='completed' ORDER BY f.ordinal`).all(operationId, projectId);
   const taskId = `publish-${operationId}-${crypto.randomUUID().slice(0, 8)}`;
   const summary = { operationId, taskId, total: rows.length, published: 0, idempotent: 0, failed: 0, cancelled: false, failures: [] };
-  await callHost(parentId, 'tasks.v7', { action: 'start', operationId: taskId, title: '发布全部 SRT', message: `准备发布 ${rows.length} 个字幕`, progress: 0, checkpoint: { operationId, nextOrdinal: 0, total: rows.length } });
+  await callHost(parentId, 'tasks', { action: 'start', operationId: taskId, title: '发布全部 SRT', message: `准备发布 ${rows.length} 个字幕`, progress: 0, checkpoint: { operationId, nextOrdinal: 0, total: rows.length } });
   try {
     for (const [index, row] of rows.entries()) {
-      const status = await callHost(parentId, 'tasks.v7', { action: 'status', operationId: taskId });
+      const status = await callHost(parentId, 'tasks', { action: 'status', operationId: taskId });
       if (status.cancelled) { summary.cancelled = true; break; }
       try {
         const result = await publishOutput(parentId, { fileId: row.id });
@@ -415,18 +415,18 @@ const publishAllOutputs = async (parentId, payload) => {
         if (summary.failures.length < 20) summary.failures.push({ fileId: row.id, relativeName: cleanRelativeName(row.relative_name), error: redactError(error) });
       }
       const processed = index + 1;
-      const report = await callHost(parentId, 'tasks.v7', { action: 'report', operationId: taskId, progress: (processed / Math.max(1, rows.length)) * 100, phase: 'publishing', message: `已处理 ${processed}/${rows.length} 个字幕`, checkpoint: { operationId, nextOrdinal: processed, total: rows.length, published: summary.published, idempotent: summary.idempotent, failed: summary.failed } });
+      const report = await callHost(parentId, 'tasks', { action: 'report', operationId: taskId, progress: (processed / Math.max(1, rows.length)) * 100, phase: 'publishing', message: `已处理 ${processed}/${rows.length} 个字幕`, checkpoint: { operationId, nextOrdinal: processed, total: rows.length, published: summary.published, idempotent: summary.idempotent, failed: summary.failed } });
       if (report.cancelled) { summary.cancelled = true; break; }
     }
-    if (summary.cancelled) await callHost(parentId, 'tasks.v7', { action: 'cancel', operationId: taskId });
+    if (summary.cancelled) await callHost(parentId, 'tasks', { action: 'cancel', operationId: taskId });
     else if (summary.failed === summary.total && summary.total > 0) {
       const first = summary.failures[0]; const detail = first ? `；首个失败：${first.relativeName}：${first.error}` : '';
-      await callHost(parentId, 'tasks.v7', { action: 'fail', operationId: taskId, error: `${summary.failed} 个字幕发布失败${detail}` });
+      await callHost(parentId, 'tasks', { action: 'fail', operationId: taskId, error: `${summary.failed} 个字幕发布失败${detail}` });
     }
-    else await callHost(parentId, 'tasks.v7', { action: 'complete', operationId: taskId, message: summary.failed ? `${summary.published + summary.idempotent} 个成功，${summary.failed} 个失败` : `全部 ${summary.total} 个字幕发布完成` });
+    else await callHost(parentId, 'tasks', { action: 'complete', operationId: taskId, message: summary.failed ? `${summary.published + summary.idempotent} 个成功，${summary.failed} 个失败` : `全部 ${summary.total} 个字幕发布完成` });
     return summary;
   } catch (error) {
-    await callHost(parentId, 'tasks.v7', { action: 'fail', operationId: taskId, error: redactError(error) }).catch(() => undefined);
+    await callHost(parentId, 'tasks', { action: 'fail', operationId: taskId, error: redactError(error) }).catch(() => undefined);
     throw error;
   }
 };
@@ -434,7 +434,7 @@ const openOutput = async (parentId, payload) => {
   const { db, projectId } = await storageFor(parentId); const row = db.prepare('SELECT f.output_json FROM transcript_files f JOIN transcript_operations o ON o.id=f.operation_id WHERE f.id=? AND o.project_id=?').get(String(payload.fileId || ''), projectId);
   const output = JSON.parse(row?.output_json || '{}');
   if (!output.commitId || !output.artifactId) throw new Error('请先发布字幕');
-  await callHost(parentId, 'dialogs.v7', { kind: payload.reveal ? 'revealOutput' : 'openOutput', commitId: output.commitId, artifactId: output.artifactId });
+  await callHost(parentId, 'dialogs', { kind: payload.reveal ? 'revealOutput' : 'openOutput', commitId: output.commitId, artifactId: output.artifactId });
   return { opened: true, fileId: String(payload.fileId || '') };
 };
 const encodeCursor = value => Buffer.from(JSON.stringify(value), 'utf8').toString('base64url');
@@ -489,7 +489,7 @@ const cancelOperation = async (parentId, payload) => {
   if (!db.prepare('SELECT 1 FROM transcript_operations WHERE id=? AND project_id=?').get(operationId, projectId)) throw new Error('找不到识别任务');
   runningOperations.get(`${projectId}\0${operationId}`)?.cancel();
   db.prepare("UPDATE transcript_operations SET state='cancelled',updated_at=? WHERE id=? AND project_id=? AND state NOT IN ('completed','partial_failure','failed')").run(Date.now(), operationId, projectId);
-  await callHost(parentId, 'tasks.v7', { action: 'cancel', operationId }).catch(() => undefined);
+  await callHost(parentId, 'tasks', { action: 'cancel', operationId }).catch(() => undefined);
   return operationSnapshot(db, projectId, operationId);
 };
 
@@ -500,7 +500,7 @@ const handlers = {
   'transcript.operation.list.v1': async parentId => { const { db, projectId } = await storageFor(parentId); return { operations: db.prepare('SELECT id FROM transcript_operations WHERE project_id=? ORDER BY created_at DESC LIMIT 100').all(projectId).map(row => operationSnapshot(db, projectId, row.id, false)) }; },
   'transcript.operation.get.v1': async (parentId, payload) => { const { db, projectId } = await storageFor(parentId); const operation = operationSnapshot(db, projectId, String(payload.operationId || '')); if (!operation) throw new Error('找不到识别任务'); return { operation }; },
   'transcript.operation.cancel.v1': cancelOperation,
-  'transcript.operation.resume.v1': async (parentId, payload) => { const { db, projectId } = await storageFor(parentId); const operationId = String(payload.operationId || ''); if (!db.prepare('SELECT 1 FROM transcript_operations WHERE id=? AND project_id=?').get(operationId, projectId)) throw new Error('找不到识别任务'); db.prepare("UPDATE transcript_operations SET state='queued',updated_at=? WHERE id=? AND project_id=? AND state IN ('cancelled','failed','partial_failure')").run(Date.now(), operationId, projectId); await callHost(parentId, 'tasks.v7', { action: 'resume', operationId, title: '视频转文字', message: '准备恢复转写', checkpoint: { resumed: true } }); return { accepted: true, operationId }; },
+  'transcript.operation.resume.v1': async (parentId, payload) => { const { db, projectId } = await storageFor(parentId); const operationId = String(payload.operationId || ''); if (!db.prepare('SELECT 1 FROM transcript_operations WHERE id=? AND project_id=?').get(operationId, projectId)) throw new Error('找不到识别任务'); db.prepare("UPDATE transcript_operations SET state='queued',updated_at=? WHERE id=? AND project_id=? AND state IN ('cancelled','failed','partial_failure')").run(Date.now(), operationId, projectId); await callHost(parentId, 'tasks', { action: 'resume', operationId, title: '视频转文字', message: '准备恢复转写', checkpoint: { resumed: true } }); return { accepted: true, operationId }; },
   'transcript.search.v1': search,
   'transcript.file.get.v1': getFile,
   'transcript.operation.transcript.page.v1': getOperationTranscriptPage,

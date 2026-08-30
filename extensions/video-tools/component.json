@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "video-tools",
-  "version": "26.8.29.1",
+  "version": "26.8.29.2",
   "displayName": "视频处理",
   "description": "视频转码与无损切割工具",
   "icon": "ui/icon.svg",
@@ -24,7 +24,7 @@
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
       "rpcMethods": ["video-tools.sources.choose.v1", "video-tools.sources.preview.v1", "video-tools.settings.get.v1", "video-tools.settings.update.v1", "video-tools.inspect.v1", "video-tools.transcode.v1", "video-tools.split.v1", "video-tools.operation.current.v1", "video-tools.operation.control.v1"],
-      "capabilities": ["component.settings.v7", "project.media.process.v7", "dialogs.v7", "component.events.v7"],
+      "capabilities": ["component.settings", "project.media.process", "dialogs", "component.events"],
       "permissions": ["component.settings", "project.media.process", "dialogs", "events"],
       "events": ["video-tools.operation.progress.v1"],
       "runtimeActions": []

@@ -1,4 +1,4 @@
-const { runSlicedMaintenance } = require('../services/sliced-maintenance-runner.cjs');
+const { createBatchedSliceMetricsReporter, runSlicedMaintenance } = require('../services/sliced-maintenance-runner.cjs');
 
 const registerMediaIpc = context => {
   const { Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog } = context;
@@ -203,6 +203,10 @@ const registerMediaIpc = context => {
           onBlocked: reportBlocked(0, deadlineAt),
         });
       } else {
+        const reportSliceMetrics = createBatchedSliceMetricsReporter({
+          writeLog,
+          context: { origin: 'daily-auto' },
+        });
         const run = await runSlicedMaintenance({
           task,
           initialState: { recoveryCursor: {}, detachPending: true, prunePending: true },
@@ -247,7 +251,7 @@ const registerMediaIpc = context => {
             `缓存维护：${phase}，已处理 ${processedCount} 条`,
             { maintenancePhase: phase, processedCount, deadlineAt },
           ),
-          reportSliceMetrics: metrics => writeLog('info', 'Thumbnail maintenance slice', metrics),
+          reportSliceMetrics,
         });
         result = { ...run.metrics, maintenanceComplete: true };
       }

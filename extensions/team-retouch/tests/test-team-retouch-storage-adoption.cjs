@@ -10,12 +10,12 @@ const storage = state => state === 'pending'
   ? { apiVersion: 7, projectId: 'project-1', ownership: 'component-private', adoption: { schemaVersion: 1, kind: 'component-storage-adoption', state: 'pending', componentId: 'team-retouch', fromHostApiVersion: 1, toHostApiVersion: 2, startedAt: 1 } }
   : { apiVersion: 7, dataPath: root, databasePath: path.join(root, 'storage.sqlite3'), projectId: 'project-1', ownership: 'component-private' };
 const create = state => createHostSimulator({ service: path.join(__dirname, '..', 'service.cjs'), context, capabilities: {
-  'component.storage.v7': () => storage(state),
-  'component.settings.v7': () => ({ apiVersion: 7, revision: 0, settings: {} }),
-  'project.media.page.v7': () => ({ apiVersion: 7, items: [], page: { hasMore: false, cursor: null, pageSize: 100 } }),
-  'project.progress.v7': () => ({ apiVersion: 7, progress: [], edges: [] }),
-  'tasks.v7': () => ({ apiVersion: 7, cancelled: false }),
-  'component.events.v7': () => ({ apiVersion: 7, emitted: true })
+  'component.storage': () => storage(state),
+  'component.settings': () => ({ apiVersion: 7, revision: 0, settings: {} }),
+  'project.media.page': () => ({ apiVersion: 7, items: [], page: { hasMore: false, cursor: null, pageSize: 100 } }),
+  'project.progress': () => ({ apiVersion: 7, progress: [], edges: [] }),
+  'tasks': () => ({ apiVersion: 7, cancelled: false }),
+  'component.events': () => ({ apiVersion: 7, emitted: true })
 } });
 (async () => {
   const pending = create('pending');

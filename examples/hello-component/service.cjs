@@ -20,7 +20,7 @@ readline.createInterface({ input: process.stdin, crlfDelay: Infinity }).on('line
   if (frame.type !== 'request') return;
   let operation;
   if (frame.method === 'sample.context.v1') operation = { context: frame.context };
-  else if (frame.method === 'sample.media-page.v1') operation = capability(frame.id, 'project.media.page.v7', { pageSize: 20, kinds: ['image', 'raw'] });
+  else if (frame.method === 'sample.media-page.v1') operation = capability(frame.id, 'project.media.page', { pageSize: 20, kinds: ['image', 'raw'] });
   else {
     send({ type: 'response', id: frame.id, ok: false, error: 'Unknown component RPC method', errorCode: 'COMPONENT_RPC_UNKNOWN' });
     return;

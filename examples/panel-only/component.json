@@ -1,6 +1,6 @@
 {
   "apiVersion": 1,
-  "id": "panel-only-v7-example",
+  "id": "panel-only-example",
   "version": "0.1.0",
   "componentHost": {
     "contractVersion": 2,

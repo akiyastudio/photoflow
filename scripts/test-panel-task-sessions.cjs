@@ -34,6 +34,7 @@ new Function('module', 'exports', 'require', compiledToastModel)(toastModelModul
 const {
   isActiveProjectFileTask,
   isPointerInsideTaskIndicator,
+  compareTaskCenterPublishedAt,
   mergeBackgroundTaskSnapshots,
   pruneFinishedTaskToastIds,
   selectProjectFileTaskToasts,
@@ -73,6 +74,19 @@ assert.equal(nextPanelTaskStartedAt(undefined, 'running', 100), 100, 'the first 
 assert.equal(nextPanelTaskStartedAt({ state: 'running', startedAt: 100 }, 'running', 200), 100, 'progress reports must preserve the first start time');
 assert.equal(nextPanelTaskStartedAt({ state: 'running', startedAt: 100 }, 'completed', 200), 100, 'completion must retain the original start time');
 assert.equal(nextPanelTaskStartedAt({ state: 'completed', startedAt: 100 }, 'running', 300), 300, 'a new run using the same panel must receive a new start time');
+
+const publishedEarlierButUpdatedLater = { startedAt: 100, updatedAt: 900 };
+const publishedLaterButUpdatedEarlier = { startedAt: 200, updatedAt: 300 };
+assert.deepStrictEqual(
+  [publishedEarlierButUpdatedLater, publishedLaterButUpdatedEarlier].sort(compareTaskCenterPublishedAt),
+  [publishedLaterButUpdatedEarlier, publishedEarlierButUpdatedLater],
+  'task-center progress updates must not move an older publication ahead of a newer one',
+);
+assert.deepStrictEqual(
+  [{ startedAt: 0, createdAt: 100 }, { startedAt: 200, createdAt: 50 }].sort(compareTaskCenterPublishedAt),
+  [{ startedAt: 200, createdAt: 50 }, { startedAt: 0, createdAt: 100 }],
+  'queued tasks without a start time must fall back to their creation time',
+);
 
 const presentedPythonTask = (state, ownerPageId = 'page-a', panelKind = 'research') => ({
   state,
@@ -214,6 +228,7 @@ assert(trackingConfirmation.includes('useHostSurfaceSuspension(active)') && work
 assert(versionManager.includes('onSaveNote={note => updateVersion') && versionManager.includes('保存说明') && !versionManager.includes('编辑版本说明') && workspace.includes('<VersionManager active={active && activeView === \'version\'}'), 'version notes must be directly editable without a modal editor and the version view must still receive active-tab state');
 assert(projectToolModal.includes('createPortal(') && projectToolModal.includes('useEscapeLayer(open, onClose, true, true)') && workspace.includes('useEscapeLayer(Boolean(gatherPickerPaths)'), 'body-portal project tools remain globally visible and continue suspending host surfaces across tab switches');
 assert(indicator.includes('visiblePanelTasks') && indicator.includes('恢复面板') && workspace.includes('photoflow:restore-panel-task'), 'minimized component tasks must restore through the single global task center');
+assert(indicator.includes('visibleTaskItems.map(item =>') && indicator.includes('compareTaskCenterPublishedAt(left.task, right.task)') && !indicator.includes('right.updatedAt - left.updatedAt'), 'panel and main-process tasks must share publication-time ordering that is unaffected by progress updates');
 assert(taskCenter.includes('const startedAt = nextPanelTaskStartedAt(previous, report.state, updatedAt)') && taskCenter.includes('progress, startedAt, updatedAt') && (indicator.match(/formatBackgroundTaskStartedAt\(task\.startedAt\)/g) || []).length >= 2, 'both panel tasks and main-process background tasks must display their captured start time');
 assert(taskCenter.includes('minimizedToastTaskIds') && taskCenter.includes('minimizeTaskToast') && taskCenter.includes('restoreTaskToast') && taskCenter.includes('isTaskToastMinimized') && !taskCenter.includes('localStorage'), 'file-transfer toast minimization must be session-only shared task-center state');
 assert(taskCenter.includes('pruneFinishedTaskToastIds(current, backgroundTasks)'), 'terminal background tasks must be removed from the minimized-toast set');

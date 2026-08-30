@@ -8,6 +8,7 @@ const player = read('src/components/AdvancedVideoPlayer.tsx');
 const workspace = read('src/features/workspace/ProjectWorkspace.tsx');
 const versions = read('src/components/VersionManager.tsx');
 const settings = read('src/features/settings/SettingsFeature.tsx');
+const app = read('src/App.tsx');
 const nativeService = read('electron/services/video-playback-process-service.cjs');
 const broker = read('electron/services/video-playback-broker.cjs');
 const main = read('electron/main.cjs');
@@ -26,6 +27,8 @@ assert(main.includes("appendSwitch('disable-features', 'DirectCompositionVideoOv
 assert(rendererSession.includes('languageMatches'), 'subtitle default selection policy must live in the application session');
 assert(nativeService.includes('mediaInputSessionService') && nativeService.includes('captureService') && nativeService.includes('nativeSurfaceService') && nativeService.includes('subtitleInputService.discover'), 'the native adapter must use generic host security and host-authorized subtitle capabilities');
 assert(workspace.includes('<VideoPlayer filePath={entry.path}') && workspace.includes('keyboardSettings={keyboardSettings}') && workspace.includes('onToggleFullscreen={() => setFullscreen(current => !current)}'), 'ProjectWorkspace must render the shared player and route workspace settings/fullscreen controls into it');
+assert(app.includes("componentRuntimeIsAvailable(components, 'video-playback-mpv')") && app.includes('advancedVideoPlaybackAvailable={advancedVideoPlaybackAvailable}'), 'the application must derive and pass the advanced playback component runtime availability');
+assert(workspace.includes('videoTrimAvailable={videoToolsAvailable && advancedVideoPlaybackAvailable}') && workspace.includes("(entry.kind !== 'video' || videoTrimAvailable) && <button"), 'the video trim button must only render when both required components are available');
 assert(versions.includes('<VideoPlayer filePath={version.filePath}') && versions.includes('keyboardSettings={videoPlaybackSettings}'), 'VersionManager must render the shared player with the application playback settings');
 assert(player.includes("controlPanel === 'display'") && player.includes("action: 'transform'") && player.includes("action:'hdr-mode'") && player.includes("action:'tone-mapping'") && player.includes("action:'audio-select'"), 'rendered display, HDR/tone-map, transform, and audio controls must issue PlaybackSession commands');
 assert(player.includes("const chromiumMode = activeBackendId === 'core.chromium'") && player.includes('capabilityPresentation.hdrControlsAvailable') && player.includes('!chromiumMode&&audioTracks.length>0'), 'Chromium mode must hide HDR/tone-map and audio-track controls');

@@ -1,5 +1,5 @@
 const NOTIFICATION_API_VERSION = 7;
-const NOTIFICATION_CAPABILITY = 'notifications.v7';
+const NOTIFICATION_CAPABILITY = 'notifications';
 const NOTIFICATION_PERMISSION = 'notifications';
 const NOTIFICATION_TONES = new Set(['info', 'success', 'warning', 'error']);
 const MESSAGE_MAX_LENGTH = 360;
@@ -44,7 +44,7 @@ class ComponentNotificationService {
   deliver(event) {
     const target = this.mainWindow;
     if (!target || target.isDestroyed?.() || !target.webContents || target.webContents.isDestroyed?.()) return false;
-    try { target.webContents.send('component-host:notification.v7', event); return true; } catch { return false; }
+    try { target.webContents.send('component-host:notification', event); return true; } catch { return false; }
   }
 
   setRendererReady(update) {
@@ -72,7 +72,7 @@ class ComponentNotificationService {
   }
 
   publish(descriptor, payload, context = {}) {
-    if (descriptor?.hostApiVersion !== 7) return failure('NOTIFICATION_HOST_API_REQUIRED', 'Notifications require Host API 7');
+    if (descriptor?.hostApiVersion !== 7) return failure('NOTIFICATION_HOST_API_REQUIRED', 'Notifications require Host API');
     if (!descriptor?.service?.capabilities?.includes(NOTIFICATION_CAPABILITY)) return failure('NOTIFICATION_CAPABILITY_NOT_GRANTED', 'Notification capability is not granted');
     if (!descriptor?.service?.permissions?.includes(NOTIFICATION_PERMISSION)) return failure('NOTIFICATION_PERMISSION_DENIED', 'Notification permission is not granted');
     if (!['project', 'application.settings', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(context.surface)) return failure('NOTIFICATION_CONTEXT_INVALID', 'Notification surface is not bound');

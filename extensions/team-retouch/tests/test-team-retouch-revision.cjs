@@ -18,7 +18,7 @@ db.close();
 const simulator = projectId => createHostSimulator({
   service: path.join(__dirname, '..', 'service.cjs'),
   context: { componentId: 'team-retouch', componentVersion: 'test', surface: 'project', projectId, projectName: projectId, projectStatus: 'active' },
-  capabilities: { 'component.storage.v7': () => ({ apiVersion: 7, dataPath, databasePath, projectId, ownership: 'component-private' }) },
+  capabilities: { 'component.storage': () => ({ apiVersion: 7, dataPath, databasePath, projectId, ownership: 'component-private' }) },
 });
 
 (async () => {

@@ -1290,7 +1290,7 @@ const watchWorkspace = (root) => {
 
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif']);
 const IMAGE_PREVIEW_CONVERSION_EXTENSIONS = new Set(['.tif', '.tiff', '.heic', '.heif', '.hif']);
-const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.crm']);
+const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm']);
 const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
 const mediaRatingService = createMediaRatingService({
   exiftool, fs, path, imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS,

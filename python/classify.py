@@ -12,6 +12,8 @@ import hashlib
 import math
 import ctypes
 import uuid
+import queue
+import threading
 from contextlib import contextmanager
 from pathlib import Path
 import gc
@@ -26,6 +28,12 @@ CAPTURE_TIME_MEMORY_CACHE_LIMIT = 100000
 CANCEL_FILE = ''
 RESOURCE_PROTOCOL_ENABLED = False
 VIDEO_TOOL_REQUEST_SEQUENCE = 0
+HOST_CONTROL_POLL_SECONDS = 0.2
+HOST_RESOURCE_RESPONSE_TIMEOUT_SECONDS = 30.0
+HOST_VIDEO_TOOL_IDLE_TIMEOUT_SECONDS = 30.0
+_HOST_CONTROL_EOF = object()
+_HOST_CONTROL_STATE = None
+_HOST_CONTROL_STATE_LOCK = threading.Lock()
 VIDEO_PREVIEW_QUALITY_PROFILES = {
     'low': {'label': '低', 'preset': 'fast'},
     'medium': {'label': '中', 'preset': 'medium'},
@@ -35,6 +43,57 @@ VIDEO_PREVIEW_QUALITY_PROFILES = {
 
 class FFmpegTranscodeError(RuntimeError):
     pass
+
+
+def _read_host_control_stream(stream, messages):
+    try:
+        while True:
+            line = stream.readline()
+            if not line:
+                messages.put((_HOST_CONTROL_EOF, None))
+                return
+            try:
+                messages.put(('message', json.loads(line)))
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+    except BaseException as error:
+        messages.put(('error', error))
+
+
+def _host_control_messages():
+    global _HOST_CONTROL_STATE
+    stream = sys.stdin
+    with _HOST_CONTROL_STATE_LOCK:
+        state = _HOST_CONTROL_STATE
+        if state is not None and state['stream'] is stream and state['thread'].is_alive():
+            return state['messages']
+        messages = queue.Queue()
+        thread = threading.Thread(
+            target=_read_host_control_stream,
+            args=(stream, messages),
+            name='photoflow-host-control',
+            daemon=True,
+        )
+        _HOST_CONTROL_STATE = {'stream': stream, 'messages': messages, 'thread': thread}
+        thread.start()
+        return messages
+
+
+def _next_host_control_message(messages, deadline, timeout_message, disconnected_message):
+    while True:
+        ensure_not_cancelled()
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            raise TimeoutError(timeout_message)
+        try:
+            kind, payload = messages.get(timeout=min(HOST_CONTROL_POLL_SECONDS, remaining))
+        except queue.Empty:
+            continue
+        if kind is _HOST_CONTROL_EOF:
+            raise ConnectionError(disconnected_message)
+        if kind == 'error':
+            raise ConnectionError(disconnected_message) from payload
+        return payload
 
 
 def normalize_video_preview_quality(value):
@@ -48,17 +107,22 @@ def request_video_tool(action, payload):
     VIDEO_TOOL_REQUEST_SEQUENCE += 1
     request_id = f'video-{VIDEO_TOOL_REQUEST_SEQUENCE}'
     emit('video_tool_request', action, data={'requestId': request_id, 'action': action, 'payload': payload})
+    messages = _host_control_messages()
+    deadline = time.monotonic() + HOST_VIDEO_TOOL_IDLE_TIMEOUT_SECONDS
     while True:
-        response_line = sys.stdin.readline()
-        if not response_line:
-            raise FFmpegTranscodeError('视频处理插件已断开')
         try:
-            response = json.loads(response_line)
-        except json.JSONDecodeError:
-            continue
+            response = _next_host_control_message(
+                messages,
+                deadline,
+                '视频处理插件长时间未响应',
+                '视频处理插件已断开',
+            )
+        except (TimeoutError, ConnectionError) as error:
+            raise FFmpegTranscodeError(str(error)) from error
         if response.get('requestId') != request_id:
             continue
         if response.get('type') == 'video_tool_progress':
+            deadline = time.monotonic() + HOST_VIDEO_TOOL_IDLE_TIMEOUT_SECONDS
             message = str(response.get('message') or '').strip()
             if message:
                 log_info(message)
@@ -148,16 +212,23 @@ def task_resource_lease(profile, phase):
         return
     lease_id = f'lease-{uuid.uuid4()}'
     emit('resource_request', phase, data={'leaseId': lease_id, 'profile': profile, 'phase': phase})
+    messages = _host_control_messages()
+    deadline = time.monotonic() + HOST_RESOURCE_RESPONSE_TIMEOUT_SECONDS
     granted = False
     while True:
-        response_line = sys.stdin.readline()
-        if not response_line:
-            raise ResourceLeaseDenied('主程序已断开资源调度协议')
         try:
-            response = json.loads(response_line)
-        except (TypeError, ValueError, json.JSONDecodeError):
-            continue
+            response = _next_host_control_message(
+                messages,
+                deadline,
+                '等待主程序分配视频处理资源超时',
+                '主程序已断开资源调度协议',
+            )
+        except (TimeoutError, ConnectionError) as error:
+            raise ResourceLeaseDenied(str(error)) from error
         if str(response.get('leaseId') or '') != lease_id:
+            continue
+        if response.get('type') == 'resource_waiting':
+            deadline = time.monotonic() + HOST_RESOURCE_RESPONSE_TIMEOUT_SECONDS
             continue
         if response.get('type') == 'resource_granted':
             granted = True
@@ -283,11 +354,11 @@ def promote_staged_file(source, destination, on_progress=None, allow_atomic_move
     _move_file_no_replace(temporary, destination)
     return False
 
-VALID_MEDIA_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.mp4', '.mov', '.avi', '.crm', '.rwl', '.raf', '.3fr', '.fff')
+VALID_MEDIA_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif', '.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.mp4', '.mov', '.avi', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm', '.rwl', '.raf', '.3fr', '.fff')
 IMPORT_DATE_FILTERS = ('all', 'today', 'today_yesterday')
 RAW_EXTENSIONS = ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.rwl', '.raf', '.3fr', '.fff')
 JPG_EXTENSIONS = ('.jpg', '.jpeg')
-VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.crm')
+VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm')
 FOUR_GB = 4 * 1024 * 1024 * 1024
 SPLIT_TARGET_BYTES = int(3.95 * 1024 * 1024 * 1024)
 
@@ -1408,7 +1479,7 @@ def unique_broll_destination(directory, file_name, will_split=False):
 CLASSIFY_EXTENSION_MAP = {
     'jpg': ('.jpg', '.jpeg', '.png', '.webp', '.tif', '.tiff', '.avif', '.heic', '.heif', '.hif'),
     'raw': ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.rwl', '.raf', '.3fr', '.fff'),
-    'mov': ('.mp4', '.mov', '.avi', '.crm'),
+    'mov': ('.mp4', '.mov', '.avi', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm'),
 }
 
 
@@ -1571,7 +1642,7 @@ def generate_video_previews(target_folder, quality='medium', on_generated=None, 
     if not os.path.isdir(source_dir):
         return 0, 0
 
-    video_extensions = ('.mp4', '.mov', '.avi', '.crm')
+    video_extensions = ('.mp4', '.mov', '.avi', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm')
     if source_paths is None:
         video_files = [
             name for name in os.listdir(source_dir)
@@ -1676,14 +1747,14 @@ def video_transcode_settings_kwargs(settings):
     }
 
 
-def transcode_imported_videos(target_folder, settings, on_transcoded=None, source_paths=None):
-    """Apply the shared video-transcode panel settings to this import batch."""
-    source_dir = os.path.join(target_folder, 'mov')
-    output_dir = os.path.join(target_folder, 'mov_转码')
+def transcode_imported_video_folder(source_dir, settings, on_transcoded=None, source_paths=None):
+    """Transcode every imported video in one media folder into its sibling ``*_转码`` folder."""
+    source_dir = os.path.abspath(source_dir)
+    output_dir = f'{source_dir}_转码'
     candidates = [
         os.path.abspath(file_path) for file_path in (source_paths or [])
         if os.path.isfile(file_path)
-        and os.path.dirname(os.path.abspath(file_path)) == os.path.abspath(source_dir)
+        and os.path.commonpath((source_dir, os.path.abspath(file_path))) == source_dir
         and os.path.splitext(file_path)[1].lower() in VIDEO_EXTENSIONS
     ]
     succeeded = 0
@@ -1707,6 +1778,16 @@ def transcode_imported_videos(target_folder, settings, on_transcoded=None, sourc
         except (FFmpegTranscodeError, OSError, ValueError) as error:
             emit('warning', f'视频转码失败，已保留原文件 {os.path.basename(input_path)}：{error}')
     return succeeded, len(candidates), outputs
+
+
+def transcode_imported_videos(target_folder, settings, on_transcoded=None, source_paths=None):
+    """Apply the shared video-transcode panel settings to this work-import batch."""
+    return transcode_imported_video_folder(
+        os.path.join(target_folder, 'mov'),
+        settings,
+        on_transcoded=on_transcoded,
+        source_paths=source_paths,
+    )
 # --- 3. 核心导入流程 ---
 def split_broll_video(input_path, keep_original=False):
     """Losslessly split one imported B-roll video and return its new segments."""
@@ -2072,6 +2153,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
     created_broll_folders = []
     moved_staged_files = {}
     split_originals = []
+    imported_video_paths_by_folder = {}
     source_cleanup_started = False
     deleted_source_count = 0
 
@@ -2165,23 +2247,29 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                     split_originals.append(destination)
                     post_process_video_paths = segments
             if transcode_import_videos:
-                for video_path in post_process_video_paths:
-                    if os.path.splitext(video_path)[1].lower() not in VIDEO_EXTENSIONS:
-                        continue
-                    try:
-                        with task_resource_lease('video-transcode', f'正在转码花絮视频：{os.path.basename(video_path)}'):
-                            output_path = transcode_video(
-                                video_path,
-                                **video_transcode_settings_kwargs(transcode_settings),
-                                output_mode='new',
-                                on_log=log_info,
-                                cancel_check=ensure_not_cancelled,
-                            )
-                        created_files.append(output_path)
-                    except (FFmpegTranscodeError, OSError, ValueError) as error:
-                        emit('warning', f'花絮视频转码失败，已保留原文件 {os.path.basename(video_path)}：{error}')
+                imported_video_paths_by_folder.setdefault(broll_folder, []).extend(post_process_video_paths)
             completed_bytes += source_size
             publish_broll_progress(0, True)
+
+        transcode_count = 0
+        transcode_candidate_count = 0
+        for broll_folder, imported_video_paths in imported_video_paths_by_folder.items():
+            output_folder = f'{os.path.abspath(broll_folder)}_转码'
+            output_folder_existed = os.path.isdir(output_folder)
+            try:
+                succeeded, candidate_count, _outputs = transcode_imported_video_folder(
+                    broll_folder,
+                    transcode_settings or {},
+                    on_transcoded=created_files.append,
+                    source_paths=imported_video_paths,
+                )
+            finally:
+                if not output_folder_existed and os.path.isdir(output_folder):
+                    created_broll_folders.append(output_folder)
+            transcode_count += succeeded
+            transcode_candidate_count += candidate_count
+        if transcode_candidate_count:
+            log_info(f'花絮视频转码完成：{transcode_count}/{transcode_candidate_count} 个文件已保存到 花絮_转码')
 
         # All segments are complete before their full-size inputs are removed.
         # From this point onward target files are the durable local copies.
@@ -2235,6 +2323,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
             "destination": dest_path,
             "brollFolders": sorted({os.path.dirname(file_path) for file_path in created_files}),
             "sourceFilesDeleted": should_delete_sources,
+            "transcodeCount": transcode_count,
             "importedPaths": sorted(created_files),
             "importedPathsByProject": imported_paths_by_project,
         })

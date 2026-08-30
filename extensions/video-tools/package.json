@@ -1,6 +1,6 @@
 {
   "name": "@photoflow/video-tools",
-  "version": "26.8.29.1",
+  "version": "26.8.29.2",
   "private": true,
   "scripts": { "setup": "node scripts/setup-python.cjs", "prepare:dev": "node scripts/setup-python.cjs && node scripts/verify-layout.cjs", "prepare:runtime": "node scripts/prepare-ffmpeg.cjs", "build:runtime": "bash scripts/media-runtime/build-ffmpeg-windows.sh", "verify:runtime": "node scripts/media-runtime/verify-runtime.cjs ffmpeg", "test:runtime-policy": "node scripts/media-runtime/test-runtime-policy.cjs", "build": "node scripts/verify-layout.cjs", "test:split": ".venv\\Scripts\\python.exe tests\\test-cut-video.py", "test:encoder": ".venv\\Scripts\\python.exe tests\\test-media-encoder.py", "test:trim": ".venv\\Scripts\\python.exe tests\\test-video-trim-real.py", "test:python": "node scripts/test-python.cjs", "test": "node tests/test-service.cjs && node tests/test-runtime-boundary.cjs && npm run test:runtime-policy && npm run test:python", "package": "node scripts/package-component.cjs", "package:host": "node scripts/package-component.cjs" },
   "photoflowComponent": {

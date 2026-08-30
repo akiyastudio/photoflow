@@ -196,7 +196,7 @@ const registerComponentProjectCapabilities = ({
   const grantInput = (filePath, descriptor, context, boundary = null) => {
     pruneExpiringMaps(Date.now());
     if (inputGrants.size >= MAX_INPUT_TOKENS) throw hostError(CODES.LIMIT_EXCEEDED, 'Too many active component input grants');
-    const token = `component-input:v7:${crypto.randomUUID()}`;
+    const token = `component-input:${crypto.randomUUID()}`;
     const expiresAt = Date.now() + INPUT_TOKEN_TTL_MS;
     const stat = fs.lstatSync(filePath);
     inputGrants.set(token, { filePath, scope: scopeKey(descriptor, context), expiresAt, usesRemaining: 1, boundary,
@@ -214,7 +214,7 @@ const registerComponentProjectCapabilities = ({
   };
   const consumeInput = (token, descriptor, context, consume = true) => takeInputGrant(token, descriptor, context, consume).filePath;
 
-  broker.register('project.media.page.v7', async (payload, context, descriptor) => {
+  broker.register('project.media.page', async (payload, context, descriptor) => {
     const scope = bound(context, descriptor);
     pruneExpiringMaps(Date.now());
     const pageSize = Math.min(MAX_MEDIA_PAGE_SIZE, Math.max(1, Number(payload.pageSize) || 100));
@@ -272,7 +272,7 @@ const registerComponentProjectCapabilities = ({
     return { apiVersion: 7, items, page: { hasMore, cursor: hasMore ? session.cursor : null, pageSize } };
   });
 
-  broker.register('project.media.variants.v7', async (payload, context, descriptor) => {
+  broker.register('project.media.variants', async (payload, context, descriptor) => {
     const media = await resolveSafeMedia(payload, context, descriptor);
     const stat = await fs.promises.lstat(media.filePath).catch(() => null);
     if (!stat?.isFile() || stat.isSymbolicLink()) throw hostError(CODES.NOT_FOUND, 'Media file is missing or unsafe');
@@ -305,7 +305,7 @@ const registerComponentProjectCapabilities = ({
     };
   });
 
-  broker.register('project.input.tokens.v7', async (payload, context, descriptor) => {
+  broker.register('project.input.tokens', async (payload, context, descriptor) => {
     if (payload.action !== 'materialize') throw hostError(CODES.INVALID_REQUEST, 'Unknown input token action');
     const grant = takeInputGrant(payload.token, descriptor, context); const source = grant.filePath;
     const sourceStat = await fs.promises.lstat(source).catch(() => null); const realSource = await fs.promises.realpath(source).catch(() => '');
@@ -331,7 +331,7 @@ const registerComponentProjectCapabilities = ({
     return { apiVersion: 7, inputId: path.basename(directory), privatePath: destination, byteLength: (await fs.promises.stat(destination)).size };
   });
 
-  broker.register('component.storage.v7', async (payload, context, descriptor) => {
+  broker.register('component.storage', async (payload, context, descriptor) => {
     const scope = bound(context, descriptor);
     let adoption = null;
     if (descriptor.adoptionGrants?.includes('component.storage.previous.v1')) {
@@ -353,7 +353,7 @@ const registerComponentProjectCapabilities = ({
     return { apiVersion: 7, dataPath: scope.componentRoot, databasePath: path.join(scope.componentRoot, 'storage.sqlite3'), projectId: String(scope.project.id), ownership: 'component-private', ...(adoption ? { adoption: { schemaVersion: adoption.schemaVersion, kind: adoption.kind, state: adoption.state, componentId: adoption.componentId, fromHostApiVersion: adoption.fromHostApiVersion, toHostApiVersion: adoption.toHostApiVersion, adoptedDataRoot: adoption.adoptedDataRoot === true, adoptedDatabase: adoption.adoptedDatabase === true, legacyDataRoot: adoption.legacyDataRoot || '', legacyDatabasePath: adoption.legacyDatabasePath || '', databaseSha256: adoption.databaseSha256 || '', copiedFileCount: Number(adoption.copiedFileCount) || 0, copiedByteCount: Number(adoption.copiedByteCount) || 0 } } : {}) };
   });
 
-  broker.register('component.settings.v7', async (payload, _context, descriptor) => {
+  broker.register('component.settings', async (payload, _context, descriptor) => {
     const componentId = String(descriptor.componentId || '');
     if (payload.action === 'get') {
       const config = readConfig ? await readConfig() : readSavedConfig() || {};
@@ -603,7 +603,7 @@ const registerComponentProjectCapabilities = ({
     operations.set(key, operation);
     return operation;
   };
-  broker.register('project.output.v7', async (payload, context, descriptor) => {
+  broker.register('project.output', async (payload, context, descriptor) => {
     const scope = { ...bound(context, descriptor), componentId: descriptor.componentId };
     if (payload.action === 'adopt') {
       if (!descriptor.adoptionGrants?.includes('project.output.existing.v1')) throw hostError(CODES.PERMISSION_DENIED, 'Output adoption is not granted to this component');
@@ -739,21 +739,21 @@ const registerComponentProjectCapabilities = ({
     void ensureTrackedVersionThumbnail?.({ workspaceRoot: scope.workspaceRoot, photoId: payload.photoId, versionId, filePath });
     return response;
   };
-  broker.register('version.create.v7', async (payload, context, descriptor) => {
+  broker.register('version.create', async (payload, context, descriptor) => {
     const scope = { ...bound(context, descriptor), componentId: descriptor.componentId };
     const idempotencyKey = String(payload.idempotencyKey || '');
     if (!ID.test(idempotencyKey)) throw hostError(CODES.INVALID_REQUEST, 'A stable idempotencyKey is required');
     return withOperation(versionOperations, `${scope.key}\0${idempotencyKey}`, () => createVersion(payload, scope));
   });
 
-  broker.register('component.media.v7', async (payload, context, descriptor) => {
+  broker.register('component.media', async (payload, context, descriptor) => {
     const scope = { ...bound(context, descriptor), componentId: descriptor.componentId };
     const relativePath = assertRelativePath(path, payload.relativePath, 'component media relativePath');
     const filePath = path.resolve(scope.componentRoot, relativePath);
     if (!inside(path, scope.componentRoot, filePath)) throw hostError(CODES.PERMISSION_DENIED, 'Component media escapes private storage');
     const stat = await fs.promises.lstat(filePath).catch(() => null);
     if (!stat?.isFile() || stat.isSymbolicLink() || !inside(path, await fs.promises.realpath(scope.componentRoot), await fs.promises.realpath(filePath))) throw hostError(CODES.NOT_FOUND, 'Component private media is missing or unsafe');
-    const opaqueRef = `component-media:v7:${stableUuid(crypto, `${scope.key}\0${relativePath}`)}`;
+    const opaqueRef = `component-media:${stableUuid(crypto, `${scope.key}\0${relativePath}`)}`;
     if (['open', 'reveal'].includes(payload.action)) {
       const error = payload.action === 'reveal' && typeof shell.showItemInFolder === 'function' ? (shell.showItemInFolder(filePath), '') : await shell.openPath(payload.action === 'reveal' ? path.dirname(filePath) : filePath);
       if (error) throw hostError(CODES.INTERNAL, String(error));
@@ -798,7 +798,7 @@ const registerComponentProjectCapabilities = ({
     }
     return { ...normalized, componentId };
   };
-  broker.register('project.progress.v7', async (payload, context, descriptor) => {
+  broker.register('project.progress', async (payload, context, descriptor) => {
     const scope = bound(context, descriptor);
     if (payload.action === 'list') {
       const listed = await versionService.listProgress(scope.workspaceRoot, context.projectName, payload.includeMissing === true);
@@ -835,7 +835,7 @@ const registerComponentProjectCapabilities = ({
     return { apiVersion: 7, progress: publicProgress(scope, registered.progressFolder), edges: (registered.edges || []).map(stripProgressPaths) };
   });
 
-  broker.register('tasks.v7', async (payload, context, descriptor) => {
+  broker.register('tasks', async (payload, context, descriptor) => {
     const operationId = String(payload.operationId || '');
     if (!ID.test(operationId)) throw hostError(CODES.INVALID_REQUEST, 'Invalid component task operationId');
     const key = `${scopeKey(descriptor, context)}\0${operationId}`;
@@ -868,7 +868,7 @@ const registerComponentProjectCapabilities = ({
     return { apiVersion: 7, task, cancelled: Boolean(handle?.context.signal.aborted), checkpoint: task?.checkpoint };
   });
 
-  broker.register('dialogs.v7', async (payload, context, descriptor) => {
+  broker.register('dialogs', async (payload, context, descriptor) => {
     if (context?.surface === 'application.settings' && payload.kind !== 'confirm') throw hostError(CODES.PERMISSION_DENIED, 'Only confirmation dialogs are available on the application settings surface');
     if (['openOutput', 'revealOutput'].includes(payload.kind)) {
       const scope = { ...bound(context, descriptor), componentId: descriptor.componentId };
@@ -961,7 +961,7 @@ const registerComponentProjectCapabilities = ({
     return { apiVersion: 7, cancelled: false, inputs, ...(selectingDirectory ? { truncated } : {}) };
   });
 
-  broker.register('component.events.v7', async (payload, context, descriptor) => {
+  broker.register('component.events', async (payload, context, descriptor) => {
     const topic = String(payload.topic || '');
     if (!EVENT_TOPIC.test(topic) || !descriptor.service?.events?.includes(topic)) throw hostError(CODES.PERMISSION_DENIED, 'Component event topic is not declared');
     const event = boundedObject(payload.event || {}, MAX_SETTINGS_BYTES, 'Component event');

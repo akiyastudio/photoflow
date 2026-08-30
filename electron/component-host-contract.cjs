@@ -17,16 +17,16 @@ const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPa
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const VERSIONED_METHOD = /^[a-z][a-z0-9.-]{0,119}\.v[1-9][0-9]*$/;
 const HOST_CAPABILITIES = new Set([
-  'project.media.page.v7', 'project.media.variants.v7', 'project.input.tokens.v7',
-  'project.output.v7', 'version.create.v7', 'tasks.v7', 'dialogs.v7',
-  'component.storage.v7', 'component.settings.v7', 'component.events.v7',
-  'component.lifecycle.v7', 'component.media.v7', 'project.progress.v7',
-  'notifications.v7',
-  'project.files.page.v7', 'project.files.search.v7', 'project.media.metadata.v7',
-  'project.versions.page.v7', 'project.version.graph.v7', 'project.media.ratings.v7',
-  'project.media.ratings.write.v7', 'project.version.update.v7', 'project.version.delete.v7',
-  'project.progress.manage.v7', 'project.import.v7', 'project.files.mutate.v7', 'project.media.process.v7',
-  'component.secrets.v7', 'network.fetch.v7',
+  'project.media.page', 'project.media.variants', 'project.input.tokens',
+  'project.output', 'version.create', 'tasks', 'dialogs',
+  'component.storage', 'component.settings', 'component.events',
+  'component.lifecycle', 'component.media', 'project.progress',
+  'notifications',
+  'project.files.page', 'project.files.search', 'project.media.metadata',
+  'project.versions.page', 'project.version.graph', 'project.media.ratings',
+  'project.media.ratings.write', 'project.version.update', 'project.version.delete',
+  'project.progress.manage', 'project.import', 'project.files.mutate', 'project.media.process',
+  'component.secrets', 'network.fetch',
 ]);
 const HOST_PERMISSIONS = new Set([
   'project.media.read', 'project.input.read', 'project.output.write',
@@ -40,35 +40,35 @@ const HOST_PERMISSIONS = new Set([
   'component.secrets', 'network.fetch',
 ]);
 const CAPABILITY_PERMISSIONS = Object.freeze({
-  'project.media.page.v7': 'project.media.read',
-  'project.media.variants.v7': 'project.media.read',
-  'project.input.tokens.v7': 'project.input.read',
-  'project.output.v7': 'project.output.write',
-  'version.create.v7': 'project.version.create',
-  'tasks.v7': 'tasks',
-  'dialogs.v7': 'dialogs',
-  'component.storage.v7': 'component.storage',
-  'component.settings.v7': 'component.settings',
-  'component.events.v7': 'events',
-  'component.lifecycle.v7': 'component.lifecycle.read',
-  'component.media.v7': 'component.media',
-  'project.progress.v7': 'project.progress',
-  'notifications.v7': 'notifications',
-  'project.files.page.v7': 'project.files.read',
-  'project.files.search.v7': 'project.files.read',
-  'project.media.metadata.v7': 'project.media.read',
-  'project.versions.page.v7': 'project.versions.read',
-  'project.version.graph.v7': 'project.versions.read',
-  'project.media.ratings.v7': 'project.media.ratings.read',
-  'project.media.ratings.write.v7': 'project.media.ratings.write',
-  'project.version.update.v7': 'project.version.write',
-  'project.version.delete.v7': 'project.version.delete',
-  'project.progress.manage.v7': 'project.progress.manage',
-  'project.import.v7': 'project.import',
-  'project.files.mutate.v7': 'project.files.write',
-  'project.media.process.v7': 'project.media.process',
-  'component.secrets.v7': 'component.secrets',
-  'network.fetch.v7': 'network.fetch',
+  'project.media.page': 'project.media.read',
+  'project.media.variants': 'project.media.read',
+  'project.input.tokens': 'project.input.read',
+  'project.output': 'project.output.write',
+  'version.create': 'project.version.create',
+  'tasks': 'tasks',
+  'dialogs': 'dialogs',
+  'component.storage': 'component.storage',
+  'component.settings': 'component.settings',
+  'component.events': 'events',
+  'component.lifecycle': 'component.lifecycle.read',
+  'component.media': 'component.media',
+  'project.progress': 'project.progress',
+  'notifications': 'notifications',
+  'project.files.page': 'project.files.read',
+  'project.files.search': 'project.files.read',
+  'project.media.metadata': 'project.media.read',
+  'project.versions.page': 'project.versions.read',
+  'project.version.graph': 'project.versions.read',
+  'project.media.ratings': 'project.media.ratings.read',
+  'project.media.ratings.write': 'project.media.ratings.write',
+  'project.version.update': 'project.version.write',
+  'project.version.delete': 'project.version.delete',
+  'project.progress.manage': 'project.progress.manage',
+  'project.import': 'project.import',
+  'project.files.mutate': 'project.files.write',
+  'project.media.process': 'project.media.process',
+  'component.secrets': 'component.secrets',
+  'network.fetch': 'network.fetch',
 });
 const COMPONENT_ICON_MIME_TYPES = new Map([['.png', 'image/png'], ['.svg', 'image/svg+xml']]);
 const MAX_COMPONENT_ICON_BYTES = 512 * 1024;
@@ -208,7 +208,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   const actions = [];
   const settingsPages = [];
   const settingsForms = [];
-  const api7Contributions = [];
+  const hostContributions = [];
   for (const raw of host.contributions) {
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component host contribution');
     if (!CONTRIBUTION_TYPES.has(raw.type)) throw new Error(`Unknown component host contribution type: ${raw.type || 'missing'}`);
@@ -258,15 +258,15 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       if (!Array.isArray(raw.rpcMethods) || raw.rpcMethods.length < 1 || raw.rpcMethods.length > 16) throw new Error(`${raw.type} RPC methods must be a bounded allowlist`);
       const rpcMethods = raw.rpcMethods.map(method => requiredExactStringText(method, `${raw.type} RPC method`, 128));
       if (new Set(rpcMethods).size !== rpcMethods.length || rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error(`${raw.type} RPC methods must be unique versioned methods`);
-      api7Contributions.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, `${raw.type} title`, 160), ...(description ? { description } : {}), pageId, rpcMethods: Object.freeze(rpcMethods), ...(placement ? { placement } : {}) }));
+      hostContributions.push(Object.freeze({ type: raw.type, id, label, title: raw.title === undefined ? label : requiredExactStringText(raw.title, `${raw.type} title`, 160), ...(description ? { description } : {}), pageId, rpcMethods: Object.freeze(rpcMethods), ...(placement ? { placement } : {}) }));
     }
   }
   if (settingsPages.length + settingsForms.length > 16) throw new Error('Component settings contributions must be bounded');
   if (pages.size < 1 || pages.size > 16 || actions.length > 1) throw new Error('Component Host requires 1-16 full pages and at most one toolbar action');
-  if (!actions.length && !api7Contributions.some(contribution => contribution.type === 'component.sidePanel')) throw new Error('Component Host requires a toolbar action or side panel contribution');
+  if (!actions.length && !hostContributions.some(contribution => contribution.type === 'component.sidePanel')) throw new Error('Component Host requires a toolbar action or side panel contribution');
   if (actions[0] && !pages.has(actions[0].pageId)) throw new Error(`Component toolbar action references an unknown page: ${actions[0].pageId}`);
   const page = actions[0] ? pages.get(actions[0].pageId) : null;
-  for (const contribution of api7Contributions) if (!pages.has(contribution.pageId)) throw new Error(`${contribution.type} references an unknown page: ${contribution.pageId}`);
+  for (const contribution of hostContributions) if (!pages.has(contribution.pageId)) throw new Error(`${contribution.type} references an unknown page: ${contribution.pageId}`);
   let service = null;
   if (host.service === undefined) throw new Error('Component Host V2 requires a service declaration');
   if (host.service !== undefined) {
@@ -283,10 +283,10 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     if (!Array.isArray(raw.rpcMethods) || raw.rpcMethods.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.rpcMethods).size !== raw.rpcMethods.length) throw new Error('Component service RPC methods must be exact and unique');
     const rpcMethods = raw.rpcMethods.map(value => requiredText(value, 'service RPC method', 128));
     if (!rpcMethods.length || rpcMethods.length > 128 || rpcMethods.some(method => !VERSIONED_METHOD.test(method))) throw new Error('Component service RPC methods must be a bounded versioned allowlist');
-    if (!Array.isArray(raw.capabilities) || raw.capabilities.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.capabilities).size !== raw.capabilities.length) throw new Error('Host API 7 capabilities must be exact and unique');
+    if (!Array.isArray(raw.capabilities) || raw.capabilities.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.capabilities).size !== raw.capabilities.length) throw new Error('Host API capabilities must be exact and unique');
     const capabilities = raw.capabilities.map(value => requiredText(value, 'service capability', 128));
     if (capabilities.length > 32 || capabilities.some(capability => !HOST_CAPABILITIES.has(capability))) throw new Error('Component service requests an unknown host capability');
-    if (!Array.isArray(raw.permissions) || raw.permissions.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.permissions).size !== raw.permissions.length) throw new Error('Host API 7 permissions must be exact and unique');
+    if (!Array.isArray(raw.permissions) || raw.permissions.some(value => typeof value !== 'string' || value !== value.trim()) || new Set(raw.permissions).size !== raw.permissions.length) throw new Error('Host API permissions must be exact and unique');
     const permissions = raw.permissions.map(value => requiredText(value, 'service permission', 128));
     if (permissions.length > 32 || permissions.some(permission => !HOST_PERMISSIONS.has(permission))) throw new Error('Component service requests an unknown host permission');
     if (contractVersion === 2 && !Array.isArray(raw.permissions)) throw new Error('Component Host V2 service must declare a permissions allowlist');
@@ -301,7 +301,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     if (raw.secretBindings !== undefined && (!raw.secretBindings || typeof raw.secretBindings !== 'object' || Array.isArray(raw.secretBindings))) throw new Error('Component secretBindings must be an object');
     for (const [bindingId, binding] of Object.entries(raw.secretBindings || {})) { const id = requiredExactId(bindingId, 'secret binding id'); if (!binding || typeof binding !== 'object' || Array.isArray(binding)) throw new Error('Invalid component secret binding'); rejectUnknownFields(binding, ['origin', 'header', 'prefix'], 'component secret binding'); const origin = requiredExactStringText(binding.origin, 'secret binding origin', 512); const header = requiredExactStringText(binding.header, 'secret binding header', 64); const prefix = binding.prefix === undefined ? '' : binding.prefix; if (typeof prefix !== 'string' || prefix.length > 128 || !networkOrigins.includes(origin) || header !== header.toLowerCase() || !/^[a-z0-9-]+$/.test(header) || dangerousSecretHeaders.test(header) || /[\r\n]/.test(prefix)) throw new Error('Invalid component secret binding policy'); secretBindings[id] = Object.freeze({ origin, header, prefix }); }
     if (Object.keys(secretBindings).length > 16) throw new Error('Component secret bindings must be bounded');
-    if (capabilities.includes('network.fetch.v7') && !networkOrigins.length) throw new Error('network.fetch.v7 requires declared networkOrigins');
+    if (capabilities.includes('network.fetch') && !networkOrigins.length) throw new Error('network.fetch requires declared networkOrigins');
     const events = [...new Set((raw.events || []).map(value => requiredText(value, 'service event', 128)))];
     if (events.length > 32 || events.some(event => !VERSIONED_METHOD.test(event))) throw new Error('Component service events must be a bounded versioned allowlist');
     const runtimeActions = [...new Set((raw.runtimeActions || []).map(value => requiredId(value, 'runtime action')))];
@@ -399,13 +399,13 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       if (unknownMethod) throw new Error(`Component settings page RPC method is not declared by the service: ${unknownMethod}`);
       if (settingsPage.rpcMethods.some(method => hostOnlyRpcMethods.includes(method))) throw new Error('Component settings page cannot expose a host-only RPC method');
     }
-    if (settingsForms.length && (!capabilities.includes('component.settings.v7') || !permissions.includes('component.settings'))) throw new Error('Declarative settings forms require component.settings.v7 and component.settings permission');
+    if (settingsForms.length && (!capabilities.includes('component.settings') || !permissions.includes('component.settings'))) throw new Error('Declarative settings forms require component.settings and component.settings permission');
     for (const settingsForm of settingsForms) {
       const unknownMethod = settingsForm.customPage?.rpcMethods.find(method => !rpcMethods.includes(method));
       if (unknownMethod) throw new Error(`Declarative settings custom page RPC method is not declared by the service: ${unknownMethod}`);
       if (settingsForm.customPage?.rpcMethods.some(method => hostOnlyRpcMethods.includes(method))) throw new Error('Declarative settings custom page cannot expose a host-only RPC method');
     }
-    for (const contribution of api7Contributions) { const unknownMethod = contribution.rpcMethods.find(method => !rpcMethods.includes(method)); if (unknownMethod) throw new Error(`${contribution.type} RPC method is not declared by the service: ${unknownMethod}`); if (contribution.rpcMethods.some(method => hostOnlyRpcMethods.includes(method))) throw new Error(`${contribution.type} cannot expose a host-only RPC method`); }
+    for (const contribution of hostContributions) { const unknownMethod = contribution.rpcMethods.find(method => !rpcMethods.includes(method)); if (unknownMethod) throw new Error(`${contribution.type} RPC method is not declared by the service: ${unknownMethod}`); if (contribution.rpcMethods.some(method => hostOnlyRpcMethods.includes(method))) throw new Error(`${contribution.type} cannot expose a host-only RPC method`); }
   }
   let advancedRuntime = null;
   if (manifest.advancedRuntime !== undefined) {
@@ -432,7 +432,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     pages: Object.freeze([...pages.values()].map(value => Object.freeze(value))),
     settingsPages: Object.freeze(settingsPages),
     settingsForms: Object.freeze(settingsForms),
-    contributions: Object.freeze(api7Contributions),
+    contributions: Object.freeze(hostContributions),
     icon,
     service,
     advancedRuntime,

@@ -21,7 +21,7 @@ else:
 
 IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif')
 HEIF_EXTENSIONS = ('.heic', '.heif', '.hif', '.avif')
-VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.crm')
+VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm')
 RAW_EXTENSIONS = ('.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw')
 FFMPEG_IMAGE_EXTENSIONS = RAW_EXTENSIONS
 JPG_PROXY_EXTENSIONS = ('.jpg', '.jpeg')

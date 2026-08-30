@@ -15,6 +15,15 @@
 .settings { gap: 12px; margin-top: 12px; }
 .choices, .split-summary { gap: 10px; }
 
+.preset-bar {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto auto;
+  align-items: end;
+  gap: 12px;
+}
+
+.preset-action { min-width: 72px; }
+
 .section h3,
 .source-title {
   margin: 0;
@@ -238,7 +247,8 @@ th { color: var(--pf-muted); }
 .metric strong { margin-top: 5px; font-size: 13px; }
 
 @media (max-width: 700px) {
-  .grid, .settings, .choices, .split-summary { grid-template-columns: 1fr; }
+  .grid, .settings, .choices, .split-summary, .preset-bar { grid-template-columns: 1fr; }
+  .preset-action { width: 100%; }
   .source-picker-head { align-items: flex-start; }
   .source-actions { width: 100%; }
   .source-actions button { flex: 1; }

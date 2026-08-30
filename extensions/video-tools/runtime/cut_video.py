@@ -18,7 +18,7 @@ from ffmpeg_utils import get_ffmpeg_exe
 TARGET_SIZE = int(3.95 * 1024 * 1024 * 1024)
 MAXIMUM_SIZE = TARGET_SIZE
 MAX_SPLIT_ATTEMPTS = 6
-VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".crm", ".mts", ".m2ts", ".ts"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".crm", ".mpeg", ".mpg", ".mts", ".m2ts", ".ts"}
 
 
 class SplitCancelled(RuntimeError):

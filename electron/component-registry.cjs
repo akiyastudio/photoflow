@@ -130,8 +130,8 @@ const manifestCompatibilityError = (manifest, platform, arch) => {
     const settingsPageCount = contributions.filter(item => item?.type === 'application.settingsPage').length;
     const settingsFormCount = contributions.filter(item => item?.type === 'application.settingsForm').length;
     const sidePanelCount = contributions.filter(item => item?.type === 'component.sidePanel').length;
-    const api7Count = contributions.filter(item => ['component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(item?.type)).length;
-    if (toolbarCount > 1 || toolbarCount + sidePanelCount < 1 || pageCount < 1 || pageCount > 16 || settingsPageCount + settingsFormCount > 16 || contributions.length !== toolbarCount + pageCount + settingsPageCount + settingsFormCount + api7Count) return '页面组件必须贡献 toolbarAction 或 sidePanel、1-16 个 fullPage，并可选贡献设置页、声明式设置表单或其他 Host API 7 入口';
+    const hostContributionCount = contributions.filter(item => ['component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(item?.type)).length;
+    if (toolbarCount > 1 || toolbarCount + sidePanelCount < 1 || pageCount < 1 || pageCount > 16 || settingsPageCount + settingsFormCount > 16 || contributions.length !== toolbarCount + pageCount + settingsPageCount + settingsFormCount + hostContributionCount) return '页面组件必须贡献 toolbarAction 或 sidePanel、1-16 个 fullPage，并可选贡献设置页、声明式设置表单或其他 Host API 入口';
   }
   const entrypoints = manifest.entrypoints || {};
   const relativeEntry = entrypoints[`${platform}-${arch}`] || entrypoints[platform] || entrypoints.default;

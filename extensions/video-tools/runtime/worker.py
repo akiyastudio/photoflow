@@ -59,7 +59,7 @@ def bridge(encoded):
         import subprocess
         ffmpeg_exe = __import__('ffmpeg_utils').get_ffmpeg_exe()
         command = [ffmpeg_exe, '-hide_banner', '-loglevel', 'error']
-        if os.path.splitext(payload['inputPath'])[1].lower() in {'.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.crm'}:
+        if os.path.splitext(payload['inputPath'])[1].lower() in {'.mp4', '.mov', '.avi', '.m4v', '.mkv', '.webm', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm'}:
             command.extend(['-ss', '0.2'])
         command.extend(['-i', payload['inputPath'], '-frames:v', '1', '-vf', 'scale=640:-2', '-y', payload['outputPath']])
         completed = subprocess.run(command, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE, check=False)

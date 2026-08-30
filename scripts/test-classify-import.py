@@ -7,6 +7,7 @@ import os
 import shutil
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from pathlib import Path
@@ -42,6 +43,47 @@ class ClassifyImportTests(unittest.TestCase):
             classify.RESOURCE_PROTOCOL_ENABLED = previous_protocol
             classify.VIDEO_TOOL_REQUEST_SEQUENCE = previous_sequence
 
+    def test_video_tool_request_times_out_when_host_stops_responding(self):
+        release = threading.Event()
+
+        class BlockingControlStream:
+            def readline(self):
+                release.wait(1)
+                return ''
+
+        classify.RESOURCE_PROTOCOL_ENABLED = True
+        with mock.patch.object(classify.sys, 'stdin', BlockingControlStream()), \
+                mock.patch.object(classify, 'HOST_VIDEO_TOOL_IDLE_TIMEOUT_SECONDS', 0.02), \
+                mock.patch.object(classify, 'HOST_CONTROL_POLL_SECONDS', 0.005), \
+                mock.patch.object(classify, 'emit'):
+            try:
+                with self.assertRaisesRegex(classify.FFmpegTranscodeError, '长时间未响应'):
+                    classify.request_video_tool('transcode', {'inputPath': 'clip.mov'})
+            finally:
+                release.set()
+
+    def test_resource_wait_observes_import_cancellation(self):
+        release = threading.Event()
+
+        class BlockingControlStream:
+            def readline(self):
+                release.wait(1)
+                return ''
+
+        with tempfile.TemporaryDirectory() as temporary:
+            cancel_file = Path(temporary) / 'cancel.flag'
+            cancel_file.write_text('cancel', encoding='utf-8')
+            classify.CANCEL_FILE = str(cancel_file)
+            classify.RESOURCE_PROTOCOL_ENABLED = True
+            with mock.patch.object(classify.sys, 'stdin', BlockingControlStream()), \
+                    mock.patch.object(classify, 'emit'):
+                try:
+                    with self.assertRaisesRegex(classify.ImportCancelled, '导入已取消'):
+                        with classify.task_resource_lease('video-transcode', '正在转码视频'):
+                            self.fail('取消后不得进入视频处理阶段')
+                finally:
+                    release.set()
+
     def tearDown(self):
         classify.CANCEL_FILE = ''
         classify.EXIFTOOL_PATH = ''
@@ -64,6 +106,20 @@ class ClassifyImportTests(unittest.TestCase):
         self.assertEqual([event[0] for event in events], ['resource_request', 'worker', 'resource_release'])
         self.assertEqual(events[0][2], {'leaseId': lease_id, 'profile': 'video-split', 'phase': '正在分割视频'})
         self.assertEqual(events[-1][2]['leaseId'], lease_id)
+
+    def test_phase_resource_wait_heartbeat_prevents_false_timeout(self):
+        lease_uuid = '00000000-0000-0000-0000-000000000003'
+        lease_id = f'lease-{lease_uuid}'
+        control = io.StringIO(
+            json.dumps({'type': 'resource_waiting', 'leaseId': lease_id}) + '\n'
+            + json.dumps({'type': 'resource_granted', 'leaseId': lease_id}) + '\n'
+        )
+        classify.RESOURCE_PROTOCOL_ENABLED = True
+        with mock.patch.object(classify.uuid, 'uuid4', return_value=lease_uuid), \
+                mock.patch.object(classify.sys, 'stdin', control), \
+                mock.patch.object(classify, 'emit'):
+            with classify.task_resource_lease('video-transcode', '等待视频资源'):
+                pass
 
     def test_phase_resource_lease_never_runs_after_host_denial(self):
         lease_uuid = '00000000-0000-0000-0000-000000000002'
@@ -638,6 +694,46 @@ class ClassifyImportTests(unittest.TestCase):
             self.assertFalse(any(path.is_dir() for path in broll.iterdir()))
             self.assertTrue(source.is_file())
             splitter.assert_called_once()
+
+    def test_sd_broll_transcodes_entire_imported_folder_into_sibling_folder(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            dcim = root / 'card' / 'DCIM'
+            project = root / 'project'
+            dcim.mkdir(parents=True)
+            project.mkdir()
+            for name in ('one.mov', 'two.mp4'):
+                (dcim / name).write_bytes(name.encode())
+            (dcim / 'photo.jpg').write_bytes(b'image')
+            calls = []
+
+            def fake_transcode(input_path, **kwargs):
+                calls.append(Path(input_path).name)
+                destination = Path(kwargs['destination_directory']) / f'{Path(input_path).stem}.mp4'
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                destination.write_bytes(b'transcoded')
+                return str(destination)
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), mock.patch.object(
+                classify, 'transcode_video', side_effect=fake_transcode,
+            ):
+                classify.stage_import_broll(
+                    str(root / 'card'), str(project),
+                    transcode_import_videos=True,
+                )
+
+            self.assertEqual(sorted(calls), ['one.mov', 'two.mp4'])
+            self.assertEqual(
+                sorted(path.name for path in (project / '花絮_转码').glob('*.mp4')),
+                ['one.mp4', 'two.mp4'],
+            )
+            self.assertTrue((project / '花絮' / 'one.mov').is_file())
+            self.assertTrue((project / '花絮' / 'two.mp4').is_file())
+            events = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith('{')]
+            success = next(event for event in events if event.get('type') == 'success')
+            self.assertEqual(success['data']['transcodeCount'], 2)
+            self.assertIn(str(project / '花絮_转码' / 'one.mp4'), success['data']['importedPaths'])
 
     def test_split_broll_name_avoids_existing_segment_series(self):
         with tempfile.TemporaryDirectory() as temporary:

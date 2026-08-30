@@ -11,8 +11,13 @@ const projectFileTaskSource = fs.readFileSync(path.join(__dirname, '..', 'electr
 const versionsIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'versions-ipc.cjs'), 'utf8');
 const mediaScanSchedulerSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'media-tracking-scan-scheduler.cjs'), 'utf8');
 const brollImportSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'broll-import.cjs'), 'utf8');
+const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
+const pluginServiceSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'plugin-service.cjs'), 'utf8');
 assert(projectFileTaskSource.includes("scanning: '正在统计'") && projectFileTaskSource.includes('concurrencyLimit = 3') && projectFileTaskSource.includes('concurrencyWriteLimit = 2'), 'file tasks must allow three total disk tasks while retaining the two-writer limit');
 assert(brollImportSource.includes("concurrencyGroup: 'disk-io'") && brollImportSource.includes("task.withResources({\n              capacities: [{ key: 'heavy-media'"), 'b-roll imports must reserve heavy media capacity only around their actual split/transcode phases');
+assert(systemIpcSource.includes('const pendingWorkerVideoTools = new Map()') && systemIpcSource.includes('const heartbeat = setInterval(sendHeartbeat, 5000)') && systemIpcSource.includes('abortAllWorkerVideoTools'), 'import video-tool requests must stay alive with heartbeats and be aborted with their Python owner');
+assert(systemIpcSource.includes('const pendingWorkerResourceLeases = new Map()') && systemIpcSource.includes("type: 'resource_waiting'") && systemIpcSource.includes('clearAllWorkerResourceWaits'), 'queued import media phases must receive resource heartbeats without leaking wait timers');
+assert(systemIpcSource.includes('}, controller.signal)') && pluginServiceSource.includes('onMessage, signal, requestedDeadlineAt'), 'video-tool cancellation must reach the supervised plugin process');
 const deferredMediaScanStart = mediaScanSchedulerSource.indexOf("type: 'version-media-rescan'");
 const deferredMediaScanBlock = mediaScanSchedulerSource.slice(deferredMediaScanStart, mediaScanSchedulerSource.indexOf('runner = createDirtyCoalescingRunner', deferredMediaScanStart));
 assert(deferredMediaScanBlock.includes("{ path: projectPath, access: 'read' }") && deferredMediaScanBlock.includes('photoflow-workspace-database/'), 'deferred media maintenance must read project files while reserving the shared workspace database writer');

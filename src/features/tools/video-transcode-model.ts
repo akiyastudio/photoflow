@@ -54,21 +54,27 @@ export const DEFAULT_VIDEO_TRANSCODE_SETTINGS: VideoTranscodeSettings = {
   encoderPreset: 'balanced', retryCount: 1,
 };
 
-export const normalizeVideoTranscodeSettings = (value?: Partial<VideoTranscodeSettings> | null): VideoTranscodeSettings => ({
-  ...DEFAULT_VIDEO_TRANSCODE_SETTINGS,
-  ...(value || {}),
-  videoBitrateMbps: Number(value?.videoBitrateMbps) > 0 ? Number(value?.videoBitrateMbps) : null,
-  retryCount: 1,
-});
+export const normalizeVideoTranscodeSettings = (value?: Partial<VideoTranscodeSettings> | null): VideoTranscodeSettings => {
+  const migratedColorMode = value?.colorMode === 'hdr-to-sdr' ? 'sdr' : value?.colorMode;
+  const videoMode = value?.videoMode || DEFAULT_VIDEO_TRANSCODE_SETTINGS.videoMode;
+  return {
+    ...DEFAULT_VIDEO_TRANSCODE_SETTINGS,
+    ...(value || {}),
+    ...(migratedColorMode ? { colorMode: migratedColorMode } : {}),
+    ...(['hdr10', 'hlg'].includes(String(migratedColorMode)) ? { bitDepth: '10' as const } : {}),
+    videoBitrateMbps: videoMode === 'prores' || videoMode === 'copy' ? null : Number(value?.videoBitrateMbps) > 0 ? Number(value?.videoBitrateMbps) : null,
+    retryCount: 1,
+  };
+};
 
 const preset = (id: string, name: string, settings: Partial<VideoTranscodeSettings>): VideoTranscodePreset => ({
   id, name, builtIn: true, settings: normalizeVideoTranscodeSettings(settings),
 });
 
 export const BUILTIN_VIDEO_TRANSCODE_PRESETS: VideoTranscodePreset[] = [
-  preset('h264-compatible', 'H.264 通用兼容', { videoMode: 'h264', colorMode: 'auto', bitDepth: '8', container: 'mp4' }),
-  preset('hevc-main10', 'HEVC Main10 / HDR', { videoMode: 'h265', colorMode: 'auto', bitDepth: '10', container: 'mp4', quality: 'high' }),
-  preset('hdr-to-sdr', 'HDR 转 SDR', { videoMode: 'h265', colorMode: 'hdr-to-sdr', bitDepth: '8', container: 'mp4' }),
+  preset('h264-compatible', 'H.264 通用兼容', { videoMode: 'h264', colorMode: 'sdr', bitDepth: '8', container: 'mp4' }),
+  preset('hevc-main10', 'HEVC Main10 · 跟随来源', { videoMode: 'h265', colorMode: 'auto', bitDepth: '10', container: 'mp4', quality: 'high' }),
+  preset('hdr-to-sdr', 'Rec.709 SDR 输出', { videoMode: 'h265', colorMode: 'sdr', bitDepth: '8', container: 'mp4' }),
   preset('av1-hardware', 'AV1 硬件高效', { videoMode: 'av1', colorMode: 'auto', bitDepth: '10', container: 'mp4' }),
   preset('prores-master', 'ProRes 422 HQ 母版', { videoMode: 'prores', colorMode: 'auto', bitDepth: '10', container: 'mov', quality: 'high', audioMode: 'copy' }),
 ];
@@ -99,15 +105,26 @@ export const formatMediaBytes = (bytes: number) => {
   return `${value.toFixed(value >= 100 ? 0 : value >= 10 ? 1 : 2)} ${units[unit]}`;
 };
 
-export const videoTranscodeWarnings = (settings: VideoTranscodeSettings, capabilities?: VideoTranscodeCapabilities | null) => {
-  const warnings: string[] = [];
-  if (settings.videoMode === 'h264' && ['hdr10', 'hlg'].includes(settings.colorMode)) warnings.push('H.264 不支持此 HDR 输出设置；请选择 HEVC、AV1 或 ProRes。');
-  if (settings.videoMode === 'h264' && settings.bitDepth === '10') warnings.push('H.264 10-bit 兼容性过低；请选择 HEVC、AV1 或 ProRes。');
-  if (settings.videoMode === 'av1' && capabilities && !capabilities.av1Hardware) warnings.push('当前设备未检测到 AV1 硬件编码器。');
-  if ((settings.bitDepth === '10' || ['hdr10', 'hlg'].includes(settings.colorMode)) && capabilities && !capabilities.hevc10Bit && settings.videoMode === 'h265') warnings.push('当前运行库/设备没有可用的 HEVC 10-bit 编码器。');
-  if (settings.colorMode === 'hdr-to-sdr' && capabilities && !capabilities.hdrToneMap) warnings.push('当前运行库缺少 HDR 色调映射滤镜。');
-  if (settings.subtitleMode === 'burn' && capabilities && !capabilities.subtitleBurn) warnings.push('当前运行库缺少字幕烧录滤镜。');
+export const videoTranscodeBlockingErrors = (
+  settings: VideoTranscodeSettings,
+  capabilities?: VideoTranscodeCapabilities | null,
+  mediaInfo: VideoTranscodeMediaInfo[] = [],
+) => {
+  const errors: string[] = [];
+  const hasHdrSource = mediaInfo.some(item => item.hdr);
+  if (settings.videoMode === 'h264' && ['hdr10', 'hlg'].includes(settings.colorMode)) errors.push('H.264 不支持此 HDR 输出设置；请选择 HEVC、AV1 或 ProRes。');
+  if (settings.videoMode === 'h264' && settings.bitDepth === '10') errors.push('H.264 10-bit 兼容性过低；请选择 HEVC、AV1 或 ProRes。');
+  if (settings.videoMode === 'h264' && settings.colorMode === 'auto' && hasHdrSource) errors.push('H.264 无法保留队列中的 HDR；请选择 HEVC、AV1、ProRes，或将色彩输出设为 Rec.709 SDR。');
+  if (settings.videoMode === 'av1' && capabilities && !capabilities.av1Hardware) errors.push('当前设备未检测到 AV1 硬件编码器。');
+  if ((settings.bitDepth === '10' || ['hdr10', 'hlg'].includes(settings.colorMode)) && capabilities && !capabilities.hevc10Bit && settings.videoMode === 'h265') errors.push('当前运行库/设备没有可用的 HEVC 10-bit 编码器。');
+  if (settings.colorMode === 'sdr' && hasHdrSource && capabilities && !capabilities.hdrToneMap) errors.push('当前运行库缺少 HDR→SDR 色调映射滤镜。');
+  if (settings.subtitleMode === 'burn' && capabilities && !capabilities.subtitleBurn) errors.push('当前运行库缺少字幕烧录滤镜。');
+  return errors;
+};
+
+export const videoTranscodeWarnings = (settings: VideoTranscodeSettings, capabilities?: VideoTranscodeCapabilities | null, mediaInfo: VideoTranscodeMediaInfo[] = []) => {
+  const warnings = videoTranscodeBlockingErrors(settings, capabilities, mediaInfo);
   if (settings.subtitleMode === 'copy' && settings.container === 'mp4') warnings.push('MP4 不能封装部分图形字幕；遇到不兼容字幕时请改用 MKV、烧录或移除。');
-  if (settings.videoMode === 'copy' && settings.audioMode === 'copy' && settings.subtitleMode === 'copy') warnings.push('仅换封装不会改变画质或体积，且目标封装必须支持原始音视频与字幕编码。');
+  if (settings.videoMode === 'copy' && settings.audioMode === 'copy' && settings.subtitleMode === 'copy') warnings.push('复制视频流不会改变画质或体积，且目标封装必须支持原始音视频与字幕编码。');
   return warnings;
 };

@@ -13,7 +13,7 @@ from PIL import Image
 from send2trash import send2trash
 
 
-VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".m4v", ".webm"}
+VIDEO_EXTENSIONS = {".mp4", ".avi", ".mov", ".mkv", ".wmv", ".m4v", ".webm", ".mpeg", ".mpg", ".mts", ".m2ts"}
 IMAGE_EXTENSIONS = {".jpg", ".jpeg", ".png"}
 PREVIEW_WIDTH = 384
 QUALITY_WIDTH = 640

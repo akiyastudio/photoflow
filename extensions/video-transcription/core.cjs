@@ -28,7 +28,7 @@ const normalizeDialogInputs = inputs => {
   return (Array.isArray(inputs) ? inputs : []).flatMap(item => {
     const token = String(item?.token || '');
     const relativeName = cleanRelativeName(item?.relativeName || item?.name);
-    if (!token.startsWith('component-input:v7:') && !token.startsWith('test-input:')) return [];
+    if (!token.startsWith('component-input:') && !token.startsWith('test-input:')) return [];
     if (!isSupportedMediaName(relativeName)) return [];
     const key = `${token}\0${relativeName.toLowerCase()}`;
     if (seen.has(key)) return [];

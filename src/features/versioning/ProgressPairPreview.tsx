@@ -20,7 +20,7 @@ type ProgressPairPreviewProps = {
 
 const previewKind = (filePath: string): 'image' | 'raw' | 'video' => {
   const extension = filePath.slice(filePath.lastIndexOf('.')).toLocaleLowerCase();
-  if (new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.crm']).has(extension)) return 'video';
+  if (new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm']).has(extension)) return 'video';
   if (new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']).has(extension)) return 'raw';
   return 'image';
 };

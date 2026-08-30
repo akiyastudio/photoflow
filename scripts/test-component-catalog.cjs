@@ -89,7 +89,7 @@ try {
   const declarativeSettingsManifest = structuredClone(settingsManifest);
   declarativeSettingsManifest.id = 'settings-form-fixture';
   declarativeSettingsManifest.componentHost.contributions = declarativeSettingsManifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { type: 'application.settingsForm', id: 'settings', label: 'Fixture', form: { schemaVersion: 1, groups: [{ id: 'general', title: 'General', fields: [{ id: 'enabled', type: 'toggle', label: 'Enabled', default: true }] }] } } : item);
-  declarativeSettingsManifest.componentHost.service.capabilities = ['component.settings.v7'];
+  declarativeSettingsManifest.componentHost.service.capabilities = ['component.settings'];
   declarativeSettingsManifest.componentHost.service.permissions = ['component.settings'];
   const declarativeSettingsArchive = path.join(componentRoot, 'settings-form.zip');
   writeZip(declarativeSettingsArchive, { 'component.json': JSON.stringify(declarativeSettingsManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>' });
@@ -108,7 +108,7 @@ try {
   const legacyHostArchive = path.join(componentRoot, 'legacy-host-api.zip');
   const legacyHostManifest = { ...settingsManifest, id: 'legacy-host-fixture', componentHost: { ...settingsManifest.componentHost, compatibility: { minHostApiVersion: 6, maxHostApiVersion: 6 } } };
   writeZip(legacyHostArchive, { 'component.json': JSON.stringify(legacyHostManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>', 'ui/settings.html': '<!doctype html>' });
-  assert.match(registry.list().find(item => item.id === 'legacy-host-fixture').error, /仅支持 API 7/, 'catalog preflight rejects legacy Host API manifests before installation');
+  assert.match(registry.list().find(item => item.id === 'legacy-host-fixture').error, /仅支持 API/, 'catalog preflight rejects legacy Host API manifests before installation');
   fs.unlinkSync(legacyHostArchive);
 
   const incompatible = path.join(componentRoot, 'incompatible.zip');
@@ -119,7 +119,7 @@ try {
 
   const hostIncompatible = path.join(componentRoot, 'host-incompatible.zip');
   writeZip(hostIncompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), componentHost: { contractVersion: 2, compatibility: { minHostApiVersion: 8, maxHostApiVersion: 9 }, contributions: [{ type: 'workspace.toolbarAction' }, { type: 'component.fullPage' }] } }), 'tool.exe': 'binary' });
-  assert.match(registry.list().find(item => item.id === 'third-party-tool').error, /仅支持 API 7/);
+  assert.match(registry.list().find(item => item.id === 'third-party-tool').error, /仅支持 API/);
   fs.unlinkSync(hostIncompatible);
 
   const unsafe = path.join(componentRoot, 'unsafe.zip');

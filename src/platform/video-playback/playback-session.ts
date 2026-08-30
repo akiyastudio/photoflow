@@ -403,7 +403,8 @@ export class BrokeredPlaybackBackend implements VideoPlaybackBackend {
 
 const MIME_HINTS: Record<string, string> = {
   '.avi': 'video/x-msvideo', '.m4v': 'video/mp4', '.mkv': 'video/x-matroska',
-  '.mov': 'video/quicktime', '.mp4': 'video/mp4', '.ogv': 'video/ogg',
+  '.mov': 'video/quicktime', '.mp4': 'video/mp4', '.mpeg': 'video/mpeg', '.mpg': 'video/mpeg',
+  '.mts': 'video/mp2t', '.m2ts': 'video/mp2t', '.ogv': 'video/ogg',
   '.ogg': 'video/ogg', '.webm': 'video/webm',
 };
 

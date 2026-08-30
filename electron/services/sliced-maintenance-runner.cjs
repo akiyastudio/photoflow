@@ -8,6 +8,66 @@ const mergeNumericMetrics = (current, delta) => {
   return merged;
 };
 
+const createBatchedSliceMetricsReporter = ({
+  writeLog,
+  message = 'Thumbnail maintenance summary',
+  context = {},
+  intervalMs = 30 * 1000,
+  now = () => Date.now(),
+}) => {
+  let windowStartedAt = now();
+  let aggregate = null;
+
+  const reset = timestamp => {
+    windowStartedAt = timestamp;
+    aggregate = null;
+  };
+  const emit = (outcome, timestamp = now()) => {
+    if (!aggregate) return;
+    writeLog('info', message, {
+      ...context,
+      windowMs: Math.max(0, timestamp - windowStartedAt),
+      sliceCount: aggregate.sliceCount,
+      inspectedCount: aggregate.inspectedCount,
+      deletedCount: aggregate.deletedCount,
+      cursorAdvancedCount: aggregate.cursorAdvancedCount,
+      pendingPhase: aggregate.pendingPhase,
+      foregroundWaitMs: aggregate.foregroundWaitMs,
+      maxSliceMs: aggregate.maxSliceMs,
+      outcome,
+    });
+    reset(timestamp);
+  };
+  const report = metrics => {
+    const timestamp = now();
+    if (!aggregate) {
+      aggregate = {
+        sliceCount: 0,
+        inspectedCount: 0,
+        deletedCount: 0,
+        cursorAdvancedCount: 0,
+        pendingPhase: 'pending',
+        foregroundWaitMs: 0,
+        maxSliceMs: 0,
+      };
+    }
+    aggregate.sliceCount += 1;
+    aggregate.inspectedCount += Math.max(0, Number(metrics?.inspectedCount) || 0);
+    aggregate.deletedCount += Math.max(0, Number(metrics?.deletedCount) || 0);
+    aggregate.cursorAdvancedCount += metrics?.cursorAdvanced ? 1 : 0;
+    aggregate.pendingPhase = metrics?.pendingPhase || aggregate.pendingPhase;
+    aggregate.foregroundWaitMs += Math.max(0, Number(metrics?.foregroundWaitMs) || 0);
+    aggregate.maxSliceMs = Math.max(aggregate.maxSliceMs, Math.max(0, Number(metrics?.maintenanceSliceMs) || 0));
+
+    const complete = metrics?.pendingPhase === 'complete';
+    if (complete || timestamp - windowStartedAt >= Math.max(1, Number(intervalMs) || 1)) {
+      emit(complete ? 'complete' : 'progress', timestamp);
+    }
+  };
+  report.flush = outcome => emit(outcome || 'stopped');
+  return report;
+};
+
 const runSlicedMaintenance = async ({
   task,
   initialState,
@@ -80,6 +140,7 @@ const runSlicedMaintenance = async ({
     }
     return { complete, state, metrics, processedCount, sliceCount, progress };
   } catch (error) {
+    reportSliceMetrics.flush?.('failed');
     if (error && typeof error === 'object') {
       error.lastCommittedState = state;
       error.metrics = metrics;
@@ -90,4 +151,4 @@ const runSlicedMaintenance = async ({
   }
 };
 
-module.exports = { runSlicedMaintenance, mergeNumericMetrics };
+module.exports = { runSlicedMaintenance, mergeNumericMetrics, createBatchedSliceMetricsReporter };

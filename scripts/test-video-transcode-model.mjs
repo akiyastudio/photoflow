@@ -1,15 +1,22 @@
 import assert from 'node:assert/strict';
 import {
   BUILTIN_VIDEO_TRANSCODE_PRESETS, formatMediaBytes, normalizeVideoTranscodeSettings,
-  readCustomVideoTranscodePresets, videoTranscodeWarnings, writeCustomVideoTranscodePresets,
+  readCustomVideoTranscodePresets, videoTranscodeBlockingErrors, videoTranscodeWarnings, writeCustomVideoTranscodePresets,
 } from '../src/features/tools/video-transcode-model.ts';
 
 const legacy = normalizeVideoTranscodeSettings({ videoMode: 'h265', audioMode: 'copy' });
 assert.equal(legacy.colorMode, 'auto');
 assert.equal(legacy.retryCount, 1);
+assert.equal(normalizeVideoTranscodeSettings({ colorMode: 'hdr-to-sdr' }).colorMode, 'sdr');
+assert.equal(normalizeVideoTranscodeSettings({ colorMode: 'hdr10', bitDepth: '8' }).bitDepth, '10');
 assert.equal(BUILTIN_VIDEO_TRANSCODE_PRESETS.length, 5);
 assert.equal(formatMediaBytes(1024 ** 3), '1.00 GiB');
 assert(videoTranscodeWarnings({ ...legacy, videoMode: 'av1' }, { av1Hardware: false, hevc10Bit: false, hdrToneMap: true, subtitleBurn: true, encoders: [], pixelFormats: {}, filters: [] }).some(value => value.includes('AV1')));
+assert(videoTranscodeBlockingErrors(
+  { ...legacy, videoMode: 'h264', colorMode: 'auto' },
+  null,
+  [{ hdr: true }],
+).some(value => value.includes('无法保留')));
 
 const values = new Map();
 const storage = { getItem: key => values.get(key) || null, setItem: (key, value) => values.set(key, value) };

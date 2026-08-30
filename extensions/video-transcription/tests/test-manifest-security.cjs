@@ -19,7 +19,7 @@ assert(!manifest.componentHost.service.rpcMethods.includes('transcript.inputs.st
 assert.deepEqual(new Set(manifest.componentHost.service.permissions), new Set(['project.media.read', 'project.input.read', 'project.output.write', 'tasks', 'dialogs', 'component.storage', 'component.settings', 'events']));
 assert(!manifest.componentHost.service.permissions.includes('network.fetch')); assert(!manifest.componentHost.service.permissions.includes('project.files.read'));
 for (const name of ['index.html', 'settings.html', 'app.js', 'settings.js']) { const source = fs.readFileSync(path.join(root, 'ui', name), 'utf8'); assert(!/[A-Za-z]:\\|\\\\[^\s]+|file:\/\//.test(source), `${name} leaks an absolute path`); }
-const schema = fs.readFileSync(path.join(repo, 'electron', 'contracts', 'schemas', 'component-host-api-v7.schema.json'), 'utf8'); assert(schema.includes('"openDirectory"'));
+const schema = fs.readFileSync(path.join(repo, 'electron', 'contracts', 'schemas', 'component-host-api.schema.json'), 'utf8'); assert(schema.includes('"openDirectory"'));
 const development = packageJson.photoflowComponent.development;
 const runtimeCommand = typeof development.runtime.command === 'string'
   ? development.runtime.command

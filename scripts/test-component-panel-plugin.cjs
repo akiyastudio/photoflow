@@ -23,7 +23,7 @@ const manifest = {
       { type: 'component.fullPage', id: 'panel-ui', title: 'Fixture panel', entry: 'ui/panel.html' },
       { type: 'component.sidePanel', id: 'panel', label: 'Fixture', title: 'Fixture panel', description: 'Fixture panel description.', pageId: 'panel-ui', rpcMethods: ['fixture.run.v1'] },
     ],
-    service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1'], capabilities: ['dialogs.v7'], permissions: ['dialogs'], events: [] },
+    service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1'], capabilities: ['dialogs'], permissions: ['dialogs'], events: [] },
   },
 };
 
@@ -61,7 +61,7 @@ class View {
     const validate = new Ajv({ allErrors: true }).compile(schema);
     assert.equal(validate(manifest), true, JSON.stringify(validate.errors));
     assert.equal(validate(entryOnlyManifest), false, 'the public schema must require a toolbar action or side panel');
-    const exampleRoot = path.join(__dirname, '..', 'examples', 'panel-only-v7');
+    const exampleRoot = path.join(__dirname, '..', 'examples', 'panel-only');
     const exampleDescriptor = parseComponentHostManifest(JSON.parse(fs.readFileSync(path.join(exampleRoot, 'component.json'), 'utf8')), exampleRoot);
     assert.equal(exampleDescriptor.toolbarAction, null);
     assert.equal(exampleDescriptor.contributions[0].type, 'component.sidePanel');

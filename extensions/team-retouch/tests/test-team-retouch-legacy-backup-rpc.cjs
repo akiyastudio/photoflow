@@ -40,7 +40,7 @@ const runMode = async mode => {
   const simulator = createHostSimulator({
     service: path.join(__dirname, '..', 'service.cjs'),
     context: { componentId: 'team-retouch', componentVersion: 'test', surface: 'backup.restore', componentBackupRestore: true, projectId: 'legacy-project', projectName: 'Legacy' },
-    capabilities: { 'component.storage.v7': () => { storageCalls += 1; return { apiVersion: 7, dataPath, databasePath, projectId: 'legacy-project', ownership: 'component-private' }; } },
+    capabilities: { 'component.storage': () => { storageCalls += 1; return { apiVersion: 7, dataPath, databasePath, projectId: 'legacy-project', ownership: 'component-private' }; } },
   });
   try {
     const method = mode === 'workspace' ? 'team.backup-restore.workspace.v1' : 'team.backup-restore.project.v1';

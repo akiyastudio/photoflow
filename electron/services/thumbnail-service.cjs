@@ -1,6 +1,6 @@
 const crypto = require('crypto');
 const path = require('path');
-const { runSlicedMaintenance } = require('./sliced-maintenance-runner.cjs');
+const { createBatchedSliceMetricsReporter, runSlicedMaintenance } = require('./sliced-maintenance-runner.cjs');
 
 const RECOVERY_TYPE = 'thumbnail-cache-recovery';
 const MIGRATION_VERSION = 'thumbnail-cache-migration-v2';
@@ -93,6 +93,11 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
         : { generation: startupGeneration, generationMaxRowId: 0, afterRowId: 0, lastCompletedAt: 0, directory: {} };
       await pipeline.saveMaintenanceState(descriptor.maintenanceKey, recoveryCursor);
       const orphanBeforeMs = now() - RECOVERY_ORPHAN_RETENTION_MS;
+      const reportSliceMetrics = createBatchedSliceMetricsReporter({
+        writeLog,
+        context: { origin: 'startup-recovery' },
+        now,
+      });
       const run = await runSlicedMaintenance({
         task,
         initialState: { recoveryCursor, prunePending: true },
@@ -149,7 +154,7 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
           `缓存修复：${phase}，已处理 ${processedCount} 条`,
           { maintenancePhase: phase, processedCount, deadlineAt },
         ),
-        reportSliceMetrics: metrics => writeLog('info', 'Thumbnail maintenance slice', metrics),
+        reportSliceMetrics,
       });
       recoveryCursor = run.state.recoveryCursor;
       const aggregate = { success: true, ...run.metrics, recoveryCursor, maintenanceComplete: true };

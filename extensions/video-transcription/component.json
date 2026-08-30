@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "video-transcription",
-  "version": "26.8.29.9",
+  "version": "26.8.29.10",
   "displayName": "视频转文字",
   "description": "本地批量语音识别、字幕搜索与受控 SRT 发布",
   "icon": "ui/icon.svg",
@@ -75,15 +75,15 @@
         "transcript.runtime.status.v1"
       ],
       "capabilities": [
-        "project.media.page.v7",
-        "project.media.variants.v7",
-        "project.input.tokens.v7",
-        "project.output.v7",
-        "tasks.v7",
-        "dialogs.v7",
-        "component.storage.v7",
-        "component.settings.v7",
-        "component.events.v7"
+        "project.media.page",
+        "project.media.variants",
+        "project.input.tokens",
+        "project.output",
+        "tasks",
+        "dialogs",
+        "component.storage",
+        "component.settings",
+        "component.events"
       ],
       "permissions": [
         "project.media.read",

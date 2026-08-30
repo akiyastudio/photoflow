@@ -14,7 +14,7 @@ const steps = [
   ['domain contracts', ['run', 'test:domain-contracts']],
   ['operations storage', ['run', 'test:operations-storage']],
   ['component service and migrations', ['run', 'test:component-service']],
-  ['component host contracts and leases', ['run', 'test:component-host-v7']],
+  ['component host contracts and leases', ['run', 'test:component-host-api']],
   ['component host views', ['run', 'test:component-host']],
   ['component package catalog', ['run', 'test:component-catalog']],
   ['component package layout', ['run', 'test:component-package-layout']],

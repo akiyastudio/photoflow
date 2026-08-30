@@ -166,10 +166,10 @@ const registerComponentProjectReadCapabilities = ({
     const nextCursor = payload.cursor ? (nextOffset < cursor.items.length ? String(payload.cursor) : null) : issueCursor(scope, search ? 'files-search' : 'files-page', cursor.items, nextOffset, { truncated, query: cursor.query, pageSize });
     return { apiVersion: 7, items, page: { cursor: nextCursor, hasMore: Boolean(nextCursor), pageSize, truncated } };
   };
-  broker.register('project.files.page.v7', (payload, context, descriptor) => filePage(payload, context, descriptor, false));
-  broker.register('project.files.search.v7', (payload, context, descriptor) => filePage(payload, context, descriptor, true));
+  broker.register('project.files.page', (payload, context, descriptor) => filePage(payload, context, descriptor, false));
+  broker.register('project.files.search', (payload, context, descriptor) => filePage(payload, context, descriptor, true));
 
-  broker.register('project.media.metadata.v7', async (payload, context, descriptor) => {
+  broker.register('project.media.metadata', async (payload, context, descriptor) => {
     assertObjectFields(payload, ['relativePath'], ['relativePath']);
     const scope = await bound(context, descriptor); const media = await resolveFile(scope, payload.relativePath, { mediaOnly: true });
     const args = ['-G1', '-n', '-ImageWidth', '-ImageHeight', '-ColorSpace', '-ColorProfileDescription', '-Make', '-Model', '-LensModel', '-LensID', '-FNumber', '-ExposureTime', '-ISO', '-FocalLength', '-DateTimeOriginal', '-Duration', '-VideoFrameRate', '-VideoCodec', '-CompressorName', '-AudioCodec', '-Rotation', '-api', 'largefilesupport=1'];
@@ -200,7 +200,7 @@ const registerComponentProjectReadCapabilities = ({
     items.sort((a, b) => b.createdAt - a.createdAt || a.id.localeCompare(b.id));
     return { items, truncated: result.truncated === true };
   };
-  broker.register('project.versions.page.v7', async (payload, context, descriptor) => {
+  broker.register('project.versions.page', async (payload, context, descriptor) => {
     assertObjectFields(payload, ['pageSize', 'cursor']);
     const scope = await bound(context, descriptor); const pageSize = pageSizeFor(payload);
     let cursor = pageCursor(payload, scope, 'versions-page'); let truncated = false;
@@ -212,7 +212,7 @@ const registerComponentProjectReadCapabilities = ({
     const nextCursor = payload.cursor ? (nextOffset < cursor.items.length ? String(payload.cursor) : null) : issueCursor(scope, 'versions-page', cursor.items, nextOffset, { truncated, pageSize });
     return { apiVersion: 7, items, page: { cursor: nextCursor, hasMore: Boolean(nextCursor), pageSize, truncated } };
   });
-  broker.register('project.version.graph.v7', async (payload, context, descriptor) => {
+  broker.register('project.version.graph', async (payload, context, descriptor) => {
     assertObjectFields(payload, ['includeMissing']); if (payload.includeMissing !== undefined && typeof payload.includeMissing !== 'boolean') throw hostError(CODES.INVALID_REQUEST, 'includeMissing must be boolean');
     const scope = await bound(context, descriptor); const versions = await versionSnapshot(scope);
     const listed = await versionService.snapshotProgress(scope.workspaceRoot, scope.project.name, payload.includeMissing === true);
@@ -255,7 +255,7 @@ const registerComponentProjectReadCapabilities = ({
     return { apiVersion: 7, progress, versions: versions.items, edges: [...progressEdges, ...versionEdges], truncated: versions.truncated || allProgress.length > MAX_PROGRESS_SCAN || progressOverflow || edgeOverflow };
   });
 
-  broker.register('project.media.ratings.v7', async (payload, context, descriptor) => {
+  broker.register('project.media.ratings', async (payload, context, descriptor) => {
     assertObjectFields(payload, ['mediaRefs'], ['mediaRefs']);
     const scope = await bound(context, descriptor);
     if (!Array.isArray(payload.mediaRefs) || !payload.mediaRefs.length || payload.mediaRefs.length > 100) throw hostError(CODES.INVALID_REQUEST, 'mediaRefs must contain 1 to 100 items');

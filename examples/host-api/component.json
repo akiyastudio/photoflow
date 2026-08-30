@@ -1,6 +1,6 @@
 {
   "apiVersion": 1,
-  "id": "host-api-v7-example",
+  "id": "host-api-example",
   "version": "0.1.0",
   "componentHost": {
     "contractVersion": 2,

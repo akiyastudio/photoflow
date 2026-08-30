@@ -39,7 +39,7 @@
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
       "rpcMethods": ["example.ping.v1"],
-      "capabilities": ["component.settings.v7"],
+      "capabilities": ["component.settings"],
       "permissions": ["component.settings"],
       "events": []
     }

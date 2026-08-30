@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "team-retouch",
-  "version": "26.8.25.3",
+  "version": "26.8.29.1",
   "displayName": "团片协作",
   "description": "人物检测、身份确认、工作流、返图与合并",
   "icon": "ui/team-retouch.svg",
@@ -76,10 +76,10 @@
         "team.advanced.status.v1", "team.advanced.preflight.v1", "team.advanced.install.v1", "team.advanced.uninstall.v1"
       ],
       "capabilities": [
-        "project.media.page.v7", "project.media.variants.v7", "project.input.tokens.v7",
-        "project.output.v7", "version.create.v7", "project.progress.v7",
-        "tasks.v7", "dialogs.v7", "component.storage.v7", "component.settings.v7",
-        "component.events.v7", "component.lifecycle.v7", "component.media.v7", "notifications.v7"
+        "project.media.page", "project.media.variants", "project.input.tokens",
+        "project.output", "version.create", "project.progress",
+        "tasks", "dialogs", "component.storage", "component.settings",
+        "component.events", "component.lifecycle", "component.media", "notifications"
       ],
       "permissions": [
         "project.media.read", "project.input.read", "project.output.write", "project.version.create", "project.progress",

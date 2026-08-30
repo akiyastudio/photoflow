@@ -81,7 +81,7 @@ const opaque = (relativePath, filePath) => ({
     const simulator = createHostSimulator({
       service: path.join(__dirname, '..', 'service.cjs'),
       context: { componentId: 'team-retouch', componentVersion: 'test', surface: 'project', projectId: targetId, projectName: targetName, projectStatus: targetStatus },
-      capabilities: { 'component.storage.v7': () => ({ apiVersion: 7, dataPath: targetDataPath, databasePath: targetDatabase, projectId: targetId, ownership: 'component-private' }) },
+      capabilities: { 'component.storage': () => ({ apiVersion: 7, dataPath: targetDataPath, databasePath: targetDatabase, projectId: targetId, ownership: 'component-private' }) },
     });
     try {
       const project = await simulator.request('team.project.get.v1');

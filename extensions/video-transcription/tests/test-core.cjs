@@ -3,7 +3,7 @@ const fs = require('node:fs'); const os = require('node:os'); const path = requi
 const { DatabaseSync } = require('node:sqlite');
 const { normalizeDialogInputs, isSupportedMediaName, srtNameFor, normalizeSettings, redactError, openDatabase, publicFile, operationSnapshot, LEGACY_UNSCOPED_PROJECT } = require('../core.cjs');
 assert.equal(isSupportedMediaName('A.MP4'), true); assert.equal(isSupportedMediaName('note.txt'), false);
-assert.deepEqual(normalizeDialogInputs([{ name: 'a.MP4', token: 'component-input:v7:one' }, { name: 'skip.exe', token: 'component-input:v7:two' }, { name: 'x.wav', relativeName: '../nested/x.wav', token: 'component-input:v7:three' }]).map(item => item.relativeName), ['a.MP4', 'nested/x.wav']);
+assert.deepEqual(normalizeDialogInputs([{ name: 'a.MP4', token: 'component-input:one' }, { name: 'skip.exe', token: 'component-input:two' }, { name: 'x.wav', relativeName: '../nested/x.wav', token: 'component-input:three' }]).map(item => item.relativeName), ['a.MP4', 'nested/x.wav']);
 assert.equal(srtNameFor('folder/movie.mkv'), 'folder/movie.srt');
 assert.deepEqual(normalizeSettings({ language: 'auto', model: '../../bad model', device: 'cpu', computeType: 'wat', beamSize: 99 }).language, null);
 assert.equal(normalizeSettings({ model: '../../bad model' }).model, 'large-v3', 'model normalization is an allowlist, never a path sanitizer');

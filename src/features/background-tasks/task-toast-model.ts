@@ -22,6 +22,23 @@ export const formatBackgroundTaskStartedAt = (value: number, now = Date.now()) =
   return sameYear ? `${date} ${time}` : `${startedAt.getFullYear()}/${date} ${time}`;
 };
 
+type TaskCenterPublishedTask = {
+  startedAt?: number;
+  createdAt?: number;
+  updatedAt?: number;
+};
+
+export const taskCenterPublishedAt = (task: TaskCenterPublishedTask) => {
+  for (const candidate of [task.startedAt, task.createdAt, task.updatedAt]) {
+    const timestamp = Number(candidate);
+    if (Number.isFinite(timestamp) && timestamp > 0) return timestamp;
+  }
+  return 0;
+};
+
+export const compareTaskCenterPublishedAt = (left: TaskCenterPublishedTask, right: TaskCenterPublishedTask) =>
+  taskCenterPublishedAt(right) - taskCenterPublishedAt(left);
+
 export const normalizeBackgroundTaskSnapshots = (tasks: BackgroundTask[], limit = 200) => {
   const retained = tasks.filter(task => task.historyPolicy !== 'ephemeral' && !TERMINAL_TASK_STATES.has(task.state));
   const history = tasks

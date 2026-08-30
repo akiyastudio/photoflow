@@ -10,6 +10,7 @@ import { INSPIRATION_FILE_BROWSER_CONTEXT } from '../file-browser/browser-contex
 import type { AppConfig, ComponentStatus, WorkspaceProject } from '../../types';
 import { useUserFacingToast } from '../app/useUserFacingToast';
 import { mayCommitAsyncOperationResult } from '../file-operation-identity-model';
+import { componentRuntimeIsAvailable } from '../components/component-availability-model';
 
 export const INSPIRATION_PROJECT_NAME = '.__photoflow_inspiration__';
 const inspirationCollapsedPathsStorageKey = (rootPath: string) => {
@@ -499,7 +500,8 @@ export const InspirationLibraryPage = ({
     updatedAt: Date.now(),
   };
   const installedComponentIds = new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id));
-  const videoToolsAvailable = components.some(component => component.id === 'video-tools' && component.installed && component.enabled !== false && component.compatible);
+  const videoToolsAvailable = componentRuntimeIsAvailable(components, 'video-tools');
+  const advancedVideoPlaybackAvailable = componentRuntimeIsAvailable(components, 'video-playback-mpv');
   return <FileBrowserWorkspace
     pageId={pageId}
     active={active}
@@ -514,6 +516,7 @@ export const InspirationLibraryPage = ({
     inspirationTargetWorkspacePath={config.workspacePath}
     installedComponentIds={installedComponentIds}
     videoToolsAvailable={videoToolsAvailable}
+    advancedVideoPlaybackAvailable={advancedVideoPlaybackAvailable}
     videoPlaybackSettings={config.videoPlayback}
     initialPanel={null}
     importConfig={config.smartImport}

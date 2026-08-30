@@ -129,13 +129,13 @@ const replaceJsonAtomic = async (filePath, value) => {
   }
 };
 
-const callHostV7 = (parentId, method, payload = {}) => new Promise((resolve, reject) => {
+const callHost = (parentId, method, payload = {}) => new Promise((resolve, reject) => {
   const id = `cap-${nextCapabilityId++}`;
   pendingCapabilities.set(id, { parentId: String(parentId), resolve, reject });
   writeFrame({ type: 'capability', id, parentId, method, payload });
 });
 
-const materializeInput = async (parentId, token) => callHostV7(parentId, 'project.input.tokens.v7', { action: 'materialize', token });
+const materializeInput = async (parentId, token) => callHost(parentId, 'project.input.tokens', { action: 'materialize', token });
 const readHostMedia = async (parentId, payload) => {
   const refs = Array.isArray(payload.mediaRefs) ? payload.mediaRefs
     : [...(payload.photoIds || []).map(photoId => ({ photoId })), ...(payload.relativePaths || []).map(relativePath => ({ relativePath }))];
@@ -144,7 +144,7 @@ const readHostMedia = async (parentId, payload) => {
   const workers = Array.from({ length: Math.min(16, selected.length) }, async () => { while (cursor < selected.length) {
     const ref = selected[cursor++];
     try {
-      const variant = await callHostV7(parentId, 'project.media.variants.v7', { ...ref, variants: [] });
+      const variant = await callHost(parentId, 'project.media.variants', { ...ref, variants: [] });
       const metadata = variant.metadata || {};
       const photoId = String(metadata.photoId || variant.mediaRef?.photoId || ref.photoId || '');
       const versionId = String(metadata.versionId || variant.mediaRef?.versionId || ref.versionId || '');
@@ -169,7 +169,7 @@ const materializeMediaForOperation = async (parentId, refs) => {
   const items = []; const directories = new Set();
   try {
     for (const ref of unique.values()) {
-      const variant = await callHostV7(parentId, 'project.media.variants.v7', { ...ref, variants: ['original'] });
+      const variant = await callHost(parentId, 'project.media.variants', { ...ref, variants: ['original'] });
       if (!variant.input?.token) throw new Error('Host did not grant materialization for requested media');
       const input = await materializeInput(parentId, variant.input.token); directories.add(path.dirname(input.privatePath));
       const metadata = variant.metadata || {}; const photoId = String(metadata.photoId || variant.mediaRef?.photoId || ref.photoId || ''); const versionId = String(metadata.versionId || variant.mediaRef?.versionId || ref.versionId || '');
@@ -187,7 +187,7 @@ const artifactGrantForHost = async (parentId, payload) => artifactGrantForStorag
 const inputStages = new Map();
 const storageMigrationOperations = new Map();
 const loadRawHostStorage = async parentId => {
-  const value = await callHostV7(parentId, 'component.storage.v7', {}); const storage = { ...value, ...(value.dataPath ? { dataRoot: value.dataPath } : {}) };
+  const value = await callHost(parentId, 'component.storage', {}); const storage = { ...value, ...(value.dataPath ? { dataRoot: value.dataPath } : {}) };
   if (value.adoption?.legacyDataRoot) {
     let operation = storageMigrationOperations.get(value.databasePath);
     if (!operation) { operation = migrateAdoptedPrivatePaths(storage).finally(() => storageMigrationOperations.delete(value.databasePath)); storageMigrationOperations.set(value.databasePath, operation); }
@@ -207,8 +207,8 @@ const hostStorage = async parentId => {
 };
 const readMedia = (parentId, payload) => readHostMedia(parentId, payload);
 const artifactsScope = (parentId, payload) => artifactGrantForHost(parentId, payload);
-const hostSettings = (parentId, settings) => callHostV7(parentId, 'component.settings.v7', settings === undefined ? { action: 'get' } : { action: 'merge', settings });
-const selectInputFiles = (parentId, { title = '选择图片', multiple = true } = {}) => callHostV7(parentId, 'dialogs.v7', { kind: 'openFiles', title, extensions: [...RETURN_IMAGE_EXTENSIONS].map(value => value.slice(1)), multiple });
+const hostSettings = (parentId, settings) => callHost(parentId, 'component.settings', settings === undefined ? { action: 'get' } : { action: 'merge', settings });
+const selectInputFiles = (parentId, { title = '选择图片', multiple = true } = {}) => callHost(parentId, 'dialogs', { kind: 'openFiles', title, extensions: [...RETURN_IMAGE_EXTENSIONS].map(value => value.slice(1)), multiple });
 const materializeInputStage = async (parentId, tokens) => {
   const stageId = crypto.randomUUID(); const items = [];
   for (const [index, token] of (tokens || []).entries()) { const input = await materializeInput(parentId, token); items.push({ id: input.inputId, name: path.basename(input.privatePath), path: input.privatePath, index }); }
@@ -227,41 +227,41 @@ const PROGRESS_EVENTS = Object.freeze({
 const emitProgress = (parentId, topic, event) => {
   const declaredTopic = PROGRESS_EVENTS[String(topic || '')];
   if (!declaredTopic) return Promise.reject(new Error(`Unknown component progress topic: ${topic}`));
-  return callHostV7(parentId, 'component.events.v7', { topic: declaredTopic, event });
+  return callHost(parentId, 'component.events', { topic: declaredTopic, event });
 };
 const hostTask = async (parentId, operationId, action, update = {}, topic = '') => {
   const mapped = action === 'failed' ? 'fail' : action;
   if (mapped === 'latest') return { task: null, cancelled: false };
-  const result = await callHostV7(parentId, 'tasks.v7', { action: mapped, operationId: String(operationId || 'team-operation'), title: update.title, message: update.message, progress: update.progress, phase: update.phase, checkpoint: update.checkpoint, error: update.error });
+  const result = await callHost(parentId, 'tasks', { action: mapped, operationId: String(operationId || 'team-operation'), title: update.title, message: update.message, progress: update.progress, phase: update.phase, checkpoint: update.checkpoint, error: update.error });
   if (topic) await emitProgress(parentId, topic, update).catch(() => undefined);
   return result;
 };
-const lifecycleAction = (parentId, action) => callHostV7(parentId, 'component.lifecycle.v7', { action });
+const lifecycleAction = (parentId, action) => callHost(parentId, 'component.lifecycle', { action });
 
 const publishProjectFile = async (parentId, sourcePath, outputRelativePath, idempotencyKey, replacement = null) => {
-  const stage = await callHostV7(parentId, 'project.output.v7', { action: 'stage' });
+  const stage = await callHost(parentId, 'project.output', { action: 'stage' });
   const name = path.basename(sourcePath);
   const sourceName = `${crypto.randomUUID()}-${name}`;
   const stagedPath = path.join(stage.privatePath, sourceName);
   try {
     await fs.promises.copyFile(sourcePath, stagedPath, fs.constants.COPYFILE_EXCL);
-    await callHostV7(parentId, 'project.output.v7', { action: 'write', stageId: stage.stageId, name, sourceName, outputRelativePath, ...(replacement ? { replace: true, previousCommitId: replacement.commitId, previousArtifactId: replacement.artifactId, expectedDigest: replacement.sha256 } : {}) });
-    await callHostV7(parentId, 'project.output.v7', { action: 'validate', stageId: stage.stageId });
-    return await callHostV7(parentId, 'project.output.v7', { action: 'commit', stageId: stage.stageId, idempotencyKey });
-  } finally { await callHostV7(parentId, 'project.output.v7', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); }
+    await callHost(parentId, 'project.output', { action: 'write', stageId: stage.stageId, name, sourceName, outputRelativePath, ...(replacement ? { replace: true, previousCommitId: replacement.commitId, previousArtifactId: replacement.artifactId, expectedDigest: replacement.sha256 } : {}) });
+    await callHost(parentId, 'project.output', { action: 'validate', stageId: stage.stageId });
+    return await callHost(parentId, 'project.output', { action: 'commit', stageId: stage.stageId, idempotencyKey });
+  } finally { await callHost(parentId, 'project.output', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); }
 };
 const publishProjectFiles = async (parentId, files, idempotencyKey, replacements = new Map()) => {
-  const stage = await callHostV7(parentId, 'project.output.v7', { action: 'stage' });
+  const stage = await callHost(parentId, 'project.output', { action: 'stage' });
   try {
     for (const [index, file] of files.entries()) {
       const name = path.basename(file.sourcePath); const sourceName = `${String(index + 1).padStart(4, '0')}-${name}`;
       await fs.promises.copyFile(file.sourcePath, path.join(stage.privatePath, sourceName), fs.constants.COPYFILE_EXCL);
       const previous = replacements.get(file.outputRelativePath);
-      await callHostV7(parentId, 'project.output.v7', { action: 'write', stageId: stage.stageId, name, sourceName, outputRelativePath: file.outputRelativePath, ...(previous ? { replace: true, previousCommitId: previous.commitId, previousArtifactId: previous.artifactId, expectedDigest: previous.sha256 } : {}) });
+      await callHost(parentId, 'project.output', { action: 'write', stageId: stage.stageId, name, sourceName, outputRelativePath: file.outputRelativePath, ...(previous ? { replace: true, previousCommitId: previous.commitId, previousArtifactId: previous.artifactId, expectedDigest: previous.sha256 } : {}) });
     }
-    await callHostV7(parentId, 'project.output.v7', { action: 'validate', stageId: stage.stageId });
-    return await callHostV7(parentId, 'project.output.v7', { action: 'commit', stageId: stage.stageId, idempotencyKey });
-  } finally { await callHostV7(parentId, 'project.output.v7', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); }
+    await callHost(parentId, 'project.output', { action: 'validate', stageId: stage.stageId });
+    return await callHost(parentId, 'project.output', { action: 'commit', stageId: stage.stageId, idempotencyKey });
+  } finally { await callHost(parentId, 'project.output', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined); }
 };
 const publishWorkingImage = async (parentId, storage, sourcePath, baseRelativePath, operationKey) => {
   const normalizedBase = String(baseRelativePath || '').replace(/\\/g, '/'); const parsed = path.posix.parse(normalizedBase);
@@ -269,10 +269,10 @@ const publishWorkingImage = async (parentId, storage, sourcePath, baseRelativePa
   const ledgerPath = path.join(storage.dataPath, 'output-ownership', sha256(String(storage.projectId)), 'working-images.json'); const ledger = await readJson(ledgerPath, {});
   let previous = ledger[outputRelativePath] || null;
   if (!previous) {
-    try { const adopted = await callHostV7(parentId, 'project.output.v7', { action: 'adopt', migrationId: `working-${sha256(outputRelativePath).slice(0, 24)}`, outputs: [{ relativePath: outputRelativePath }] }); const output = adopted.outputs?.[0]; if (output) previous = { commitId: adopted.commitId, artifactId: output.artifactId, sha256: output.sha256 }; } catch { /* A new working image has no legacy target to adopt. */ }
+    try { const adopted = await callHost(parentId, 'project.output', { action: 'adopt', migrationId: `working-${sha256(outputRelativePath).slice(0, 24)}`, outputs: [{ relativePath: outputRelativePath }] }); const output = adopted.outputs?.[0]; if (output) previous = { commitId: adopted.commitId, artifactId: output.artifactId, sha256: output.sha256 }; } catch { /* A new working image has no legacy target to adopt. */ }
   }
   const committed = await publishProjectFile(parentId, sourcePath, outputRelativePath, `working-${sha256(operationKey).slice(0, 24)}`, previous);
-  const output = committed.outputs[0]; const imported = await callHostV7(parentId, 'project.output.v7', { action: 'materializeOwned', commitId: committed.commitId, artifactId: output.artifactId });
+  const output = committed.outputs[0]; const imported = await callHost(parentId, 'project.output', { action: 'materializeOwned', commitId: committed.commitId, artifactId: output.artifactId });
   ledger[outputRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256 };
   await replaceJsonAtomic(ledgerPath, ledger);
   return { privatePath: imported.privatePath, outputRelativePath, ownership: ledger[outputRelativePath] };
@@ -1059,7 +1059,7 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   const tasks = listTasks(db, payload.photoId, payload.baseVersionId).filter(task => task.editedPatchPath && fs.existsSync(task.editedPatchPath));
   if (!tasks.length) throw new Error('请至少上传一张工作图的修图结果');
   await assertAuthorizedArtifacts(parentId, taskRows(db, payload.photoId, payload.baseVersionId));
-  const progress = await callHostV7(parentId, 'project.progress.v7', { action: 'list' });
+  const progress = await callHost(parentId, 'project.progress', { action: 'list' });
   const outputProgress = (progress.progress || []).find(item => String(item.id) === String(payload.outputProgressId));
   const relativeDirectory = String(outputProgress?.contentRef?.relativeDirectory || '');
   if (!outputProgress || outputProgress.mediaKind !== 'image' || !relativeDirectory) throw new Error('合成结果的目标图片进度不存在或不在项目内容边界内');
@@ -1082,7 +1082,7 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
     const needsReview = Boolean(merged.needsReview) || Number(merged.conflictPixels || 0) > threshold;
     const committed = await publishProjectFile(parentId, privateOutputPath, outputRelativePath, `merge-${mergeFingerprint.slice(0, 40)}`);
     const artifact = committed.outputs[0];
-    const registered = await callHostV7(parentId, 'version.create.v7', { commitId: committed.commitId, artifactId: artifact.artifactId, photoId: payload.photoId, parentVersionId: base.id, idempotencyKey: `merge-version-${mergeFingerprint.slice(0, 40)}`, name: String(payload.versionName || '').trim().slice(0, 80) || '团片协作合成', type: 'team-retouch', note: `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(threshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`, status: needsReview ? 'needs-review' : 'draft', isFinal: false });
+    const registered = await callHost(parentId, 'version.create', { commitId: committed.commitId, artifactId: artifact.artifactId, photoId: payload.photoId, parentVersionId: base.id, idempotencyKey: `merge-version-${mergeFingerprint.slice(0, 40)}`, name: String(payload.versionName || '').trim().slice(0, 80) || '团片协作合成', type: 'team-retouch', note: `由 ${merged.mergedCount} 张人物工作图自动合回原尺寸；重叠冲突像素 ${merged.conflictPixels}（复核阈值 ${Math.round(threshold)}）；边界评分 ${Number(merged.seamScore || 0).toFixed(2)}`, status: needsReview ? 'needs-review' : 'draft', isFinal: false });
     const versionId = registered.versionId;
     db.exec('BEGIN IMMEDIATE');
     try {
@@ -1119,7 +1119,7 @@ async function migrateAdoptedPrivatePaths(storage) {
     for (const [table, key, fields] of specs) for (const row of db.prepare(`SELECT ${key} AS migration_key,${fields.join(',')} FROM ${table}`).all()) for (const field of fields) {
       const current = String(row[field] || ''); if (!current || !path.isAbsolute(current) || !isInside(legacyRoot, current)) continue;
       const relative = path.relative(legacyRoot, current); const target = path.resolve(targetRoot, relative);
-      if (!isInside(targetRoot, target)) throw new Error('旧组件私有路径迁移超出 Host V7 storage');
+      if (!isInside(targetRoot, target)) throw new Error('旧组件私有路径迁移超出 Host storage');
       await assertOrdinaryParentSegments(targetRoot, relative, verifiedDirectories);
       const targetStat = await fs.promises.lstat(target).catch(() => null);
       if (!targetStat?.isFile() || targetStat.isSymbolicLink()) throw new Error(`旧组件私有文件副本缺失：${path.basename(current)}`);
@@ -1492,17 +1492,17 @@ const saveWorkflowSettings = async (parentId, payload, context) => {
 };
 
 const componentSettings = async (parentId, payload) => payload.action === 'get' ? hostSettings(parentId) : hostSettings(parentId, payload.settings || {});
-const listProjectProgress = async parentId => { const value = await callHostV7(parentId, 'project.progress.v7', { action: 'list' }); const graphEdges = Array.isArray(value.graphEdges) ? value.graphEdges : Array.isArray(value.edges) ? value.edges : []; return { success: true, progressFolders: Array.isArray(value.progressFolders) ? value.progressFolders : Array.isArray(value.progress) ? value.progress : [], graphEdges, edges: graphEdges }; };
+const listProjectProgress = async parentId => { const value = await callHost(parentId, 'project.progress', { action: 'list' }); const graphEdges = Array.isArray(value.graphEdges) ? value.graphEdges : Array.isArray(value.edges) ? value.edges : []; return { success: true, progressFolders: Array.isArray(value.progressFolders) ? value.progressFolders : Array.isArray(value.progress) ? value.progress : [], graphEdges, edges: graphEdges }; };
 const createProjectProgress = async (parentId, payload) => {
-  const listed = await callHostV7(parentId, 'project.progress.v7', { action: 'list' });
+  const listed = await callHost(parentId, 'project.progress', { action: 'list' });
   const raw = payload.progress || payload; const parentProgressId = String(raw.parentProgressId || payload.workflowInputProgressIds?.[0] || (listed.progress || []).find(item => item.nodeRole === 'original')?.id || '');
   if (!parentProgressId) throw new Error('创建输出进度需要一个来源进度');
   const displayName = String(raw.displayName || '团片协作输出').slice(0, 120);
   const relativePath = String(raw.relativePath || safeSegment(displayName, '团片协作输出')).replace(/\\/g, '/');
-  const result = await callHostV7(parentId, 'project.progress.v7', { action: 'create', relativePath, mediaKind: raw.mediaKind === 'video' ? 'video' : 'image', versionKey: String(raw.versionKey || Date.now()), parentProgressId, displayName, trackingEnabled: raw.trackingEnabled === true, sourceProgressIds: payload.workflowInputProgressIds || [] });
+  const result = await callHost(parentId, 'project.progress', { action: 'create', relativePath, mediaKind: raw.mediaKind === 'video' ? 'video' : 'image', versionKey: String(raw.versionKey || Date.now()), parentProgressId, displayName, trackingEnabled: raw.trackingEnabled === true, sourceProgressIds: payload.workflowInputProgressIds || [] });
   return { success: true, progressFolder: result.progress, edges: result.edges || [] };
 };
-const listProjectMediaPage = async (parentId, payload) => { const value = await callHostV7(parentId, 'project.media.page.v7', { pageSize: Math.min(200, Math.max(1, Number(payload.pageSize) || 200)), ...(payload.cursor ? { cursor: payload.cursor } : {}), kinds: ['image', 'raw'] }); return { success: true, items: value.items || [], hasMore: Boolean(value.page?.hasMore), cursor: value.page?.cursor || null }; };
+const listProjectMediaPage = async (parentId, payload) => { const value = await callHost(parentId, 'project.media.page', { pageSize: Math.min(200, Math.max(1, Number(payload.pageSize) || 200)), ...(payload.cursor ? { cursor: payload.cursor } : {}), kinds: ['image', 'raw'] }); return { success: true, items: value.items || [], hasMore: Boolean(value.page?.hasMore), cursor: value.page?.cursor || null }; };
 
 const archiveReturnedFile = async (source, destination, storageRoot) => {
   if (storageRoot && isInside(storageRoot, source)) {
@@ -1580,7 +1580,7 @@ const componentMedia = async (parentId, payload, action = 'variants') => {
   if (payload.kind === 'original') {
     if (action !== 'variants') return { success: false, error: '原图由项目媒体查看器打开' };
     let media;
-    try { media = await callHostV7(parentId, 'project.media.variants.v7', { photoId: payload.photoId, versionId: payload.baseVersionId, variants: [variant] }); }
+    try { media = await callHost(parentId, 'project.media.variants', { photoId: payload.photoId, versionId: payload.baseVersionId, variants: [variant] }); }
     catch (error) { const expected = expectedMediaError(error, variant); if (expected) return expected; throw error; }
     const url = media.variants?.[variant]?.url;
     if (!url) return unavailableMedia(variant, 'variant-unavailable');
@@ -1610,9 +1610,9 @@ const componentMedia = async (parentId, payload, action = 'variants') => {
   if (!candidate) return unavailableMedia(variant, 'history-reference-missing');
   if (!isInside(storage.dataPath, candidate)) throw new Error('组件媒体 outside the bound component storage');
   const relativePath = path.relative(storage.dataPath, candidate).replace(/\\/g, '/');
-  if (action === 'open') return callHostV7(parentId, 'component.media.v7', { action: 'open', relativePath });
+  if (action === 'open') return callHost(parentId, 'component.media', { action: 'open', relativePath });
   let media;
-  try { media = await callHostV7(parentId, 'component.media.v7', { action: 'variants', relativePath, variants: [variant] }); }
+  try { media = await callHost(parentId, 'component.media', { action: 'variants', relativePath, variants: [variant] }); }
   catch (error) { const expected = expectedMediaError(error, variant); if (expected) return expected; throw error; }
   const url = media.variants?.[variant]?.url;
   if (!url) return unavailableMedia(variant, 'variant-unavailable');
@@ -1887,7 +1887,7 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
       if (!replacements.size && previousManifest?.groups?.length) {
         const legacyOutputs = previousManifest.groups.flatMap(group => (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ relativePath: `团片协作/${String(item.relativePath).replace(/\\/g, '/')}` })));
         if (legacyOutputs.length) {
-          const adopted = await callHostV7(parentId, 'project.output.v7', { action: 'adopt', migrationId: `workflow-${sha256(String(context.projectId)).slice(0, 24)}`, outputs: legacyOutputs });
+          const adopted = await callHost(parentId, 'project.output', { action: 'adopt', migrationId: `workflow-${sha256(String(context.projectId)).slice(0, 24)}`, outputs: legacyOutputs });
           for (const item of adopted.outputs || []) replacements.set(item.relativePath, { commitId: adopted.commitId, artifactId: item.artifactId, sha256: item.sha256 });
         }
       }
@@ -1981,8 +1981,8 @@ const exportWorkflow = async (parentId, payload, context, open = false) => {
   if (open) {
     const first = (group.items || []).find(item => item.available && item.relativePath);
     const owned = first ? manifest.outputOwnership?.[`团片协作/${String(first.relativePath).replace(/\\/g, '/')}`] : null;
-    if (!owned) throw new Error('任务输出尚未进入 Host V7 ownership，请重新生成工作流程');
-    await callHostV7(parentId, 'dialogs.v7', { kind: 'revealOutput', commitId: owned.commitId, artifactId: owned.artifactId });
+    if (!owned) throw new Error('任务输出尚未进入 Host ownership，请重新生成工作流程');
+    await callHost(parentId, 'dialogs', { kind: 'revealOutput', commitId: owned.commitId, artifactId: owned.artifactId });
   }
   return { success: true, count };
 };
@@ -2207,7 +2207,7 @@ const reconcileWorkflowTaskChainUnlocked = async (parentId, context, taskId, exi
     const ownership = { ...(scope.manifest.outputOwnership || {}) };
     for (const previous of priorOutputs) if (!previous.ownership) {
       try {
-        const adopted = await callHostV7(parentId, 'project.output.v7', { action: 'adopt', migrationId: `relay-${sha256(`${task.id}\0${previous.relativePath}`).slice(0, 24)}`, outputs: [{ relativePath: previous.relativePath }] });
+        const adopted = await callHost(parentId, 'project.output', { action: 'adopt', migrationId: `relay-${sha256(`${task.id}\0${previous.relativePath}`).slice(0, 24)}`, outputs: [{ relativePath: previous.relativePath }] });
         const output = adopted.outputs?.[0]; if (output) previous.ownership = { commitId: adopted.commitId, artifactId: output.artifactId, sha256: output.sha256 };
       } catch { /* A missing historical relay file is reconstructed below when active. */ }
     }
@@ -2218,7 +2218,7 @@ const reconcileWorkflowTaskChainUnlocked = async (parentId, context, taskId, exi
       const output = committed.outputs[0]; ownership[activeRelativePath] = { commitId: committed.commitId, artifactId: output.artifactId, sha256: output.sha256 };
     }
     for (const previous of priorOutputs) if (previous.relativePath !== activeRelativePath && previous.ownership) {
-      await callHostV7(parentId, 'project.output.v7', { action: 'delete', previousCommitId: previous.ownership.commitId, previousArtifactId: previous.ownership.artifactId, expectedDigest: previous.ownership.sha256, idempotencyKey: `relay-delete-${sha256(`${task.id}\0${previous.relativePath}`).slice(0, 20)}` }).catch(() => undefined);
+      await callHost(parentId, 'project.output', { action: 'delete', previousCommitId: previous.ownership.commitId, previousArtifactId: previous.ownership.artifactId, expectedDigest: previous.ownership.sha256, idempotencyKey: `relay-delete-${sha256(`${task.id}\0${previous.relativePath}`).slice(0, 20)}` }).catch(() => undefined);
       delete ownership[previous.relativePath];
     }
     scope.manifest.outputOwnership = ownership;
@@ -2497,9 +2497,9 @@ const migrateLegacyProjectArtifacts = async (parentId, context, control = {}) =>
       const item = pending[0]; const { row, field, current } = item;
       try {
         const migrationId = `artifact-${sha256(`${row.id}\0${field}\0${current}`).slice(0, 24)}`;
-        const adopted = await callHostV7(parentId, 'project.output.v7', { action: 'adopt', migrationId, outputs: [{ sourcePath: current }] });
+        const adopted = await callHost(parentId, 'project.output', { action: 'adopt', migrationId, outputs: [{ sourcePath: current }] });
         const output = adopted.outputs?.[0]; if (!output) throw new Error('旧项目输出文件暂时缺失');
-        const imported = await callHostV7(parentId, 'project.output.v7', { action: 'materializeOwned', commitId: adopted.commitId, artifactId: output.artifactId });
+        const imported = await callHost(parentId, 'project.output', { action: 'materializeOwned', commitId: adopted.commitId, artifactId: output.artifactId });
         if (control.signal?.aborted) return migrationStateFromDb(db, projectId);
         const targetStat = await fs.promises.lstat(imported.privatePath).catch(() => null);
         if (!targetStat?.isFile() || targetStat.isSymbolicLink() || !isInside(storage.dataPath, imported.privatePath)) throw new Error('Host 返回的旧项目输出副本无效');

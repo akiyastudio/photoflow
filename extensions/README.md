@@ -63,7 +63,7 @@ Entrypoints that escape the component directory are rejected.
 Standard preferences should use the Host-rendered `application.settingsForm`
 contribution (schema version 1). It supports toggle, select, text, number, and
 range fields; PhotoFlow validates defaults and updates, renders the native
-settings layout, and persists values through `component.settings.v7`. Declare
+settings layout, and persists values through `component.settings`. Declare
 that capability and the matching `component.settings` permission. See
 `examples/declarative-settings-v1` for a complete component.
 

@@ -63,7 +63,7 @@ GENERAL_TRANSCODE_ASPECT_MODES = {"preserve", "square-pixels"}
 GENERAL_TRANSCODE_AUDIO_TRACKS = {"all", "first"}
 GENERAL_TRANSCODE_INPUT_EXTENSIONS = {
     ".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm", ".wmv",
-    ".crm", ".mts", ".m2ts", ".ts",
+    ".crm", ".mpeg", ".mpg", ".mts", ".m2ts", ".ts",
 }
 
 
@@ -157,15 +157,19 @@ def probe_media_info(input_path: str, timeout: float | None = 20) -> dict:
     sar_match = re.search(r"SAR\s+(\d+:\d+)", video)
     dar_match = re.search(r"DAR\s+(\d+:\d+)", video)
     rotation_match = re.search(r"rotation of\s+(-?[\d.]+)\s*degrees", text, re.I)
-    color_values: list[str] = []
-    for group in re.findall(r"\(([^)]*)\)", video):
-        for value in re.split(r"[/,\s]+", group.lower()):
-            if value in {"bt2020", "bt2020nc", "bt2020ncl", "smpte2084", "arib-std-b67", "bt709", "smpte170m", "pc", "tv"}:
-                color_values.append(value)
-    transfer = next((value for value in color_values if value in {"smpte2084", "arib-std-b67", "bt709", "smpte170m"}), "unknown")
-    primaries = next((value for value in color_values if value in {"bt2020", "bt709"}), "unknown")
-    matrix = next((value for value in color_values if value in {"bt2020nc", "bt2020ncl", "bt709", "smpte170m"}), "unknown")
-    color_range = next((value for value in color_values if value in {"pc", "tv"}), "unknown")
+    color_triplet = re.search(r"\((pc|tv|unknown),\s*([^/,\s]+)/([^/,\s]+)/([^,\s)]+)", video, re.I)
+    if color_triplet:
+        color_range, matrix, primaries, transfer = (value.lower() for value in color_triplet.groups())
+    else:
+        color_values: list[str] = []
+        for group in re.findall(r"\(([^)]*)\)", video):
+            for value in re.split(r"[/,\s]+", group.lower()):
+                if value in {"bt2020", "bt2020nc", "bt2020ncl", "smpte2084", "arib-std-b67", "bt709", "smpte170m", "pc", "tv"}:
+                    color_values.append(value)
+        transfer = next((value for value in color_values if value in {"smpte2084", "arib-std-b67", "bt709", "smpte170m"}), "unknown")
+        primaries = next((value for value in color_values if value in {"bt2020", "bt709"}), "unknown")
+        matrix = next((value for value in color_values if value in {"bt2020nc", "bt2020ncl", "bt709", "smpte170m"}), "unknown")
+        color_range = next((value for value in color_values if value in {"pc", "tv"}), "unknown")
     hdr_kind = "HDR10" if transfer == "smpte2084" else "HLG" if transfer == "arib-std-b67" else "SDR"
     dynamic_hdr = "Dolby Vision" if re.search(r"(?:DOVI|Dolby Vision|dvhe\.|dvh1\.)", text, re.I) else "HDR10+" if re.search(r"(?:HDR10\+|SMPTE\s*2094-40|dynamic HDR plus)", text, re.I) else ""
     mastering_match = re.search(r"Mastering Display Metadata[^\n]*(?:\n\s*[^\n]+)?", text, re.I)
@@ -516,6 +520,8 @@ def validate_general_transcode_options(
         raise ValueError("H.264 10-bit 兼容性过低，请选择 H.265、AV1 或 ProRes")
     if video_mode == "prores" and container != "mov":
         raise ValueError("ProRes 输出必须使用 MOV 封装")
+    if video_mode == "prores" and video_bitrate_mbps is not None:
+        raise ValueError("ProRes 请通过规格选择控制输出，不支持目标码率")
     if video_mode == "av1" and container == "mov":
         raise ValueError("AV1 输出请使用 MP4 或 MKV 封装")
 
@@ -546,6 +552,10 @@ def build_general_transcode_command(
     video_bitrate_mbps: float | None = None,
     audio_bitrate_kbps: int = 192,
     encoder_preset: str = "balanced",
+    source_hdr: bool = False,
+    source_transfer: str = "unknown",
+    source_primaries: str = "unknown",
+    source_matrix: str = "unknown",
 ) -> list[str]:
     """Build a validated general-purpose video transcode command."""
     validate_general_transcode_options(
@@ -586,7 +596,7 @@ def build_general_transcode_command(
         else:
             filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
         target_frame_rate = GENERAL_TRANSCODE_FRAME_RATES[frame_rate]
-        if target_frame_rate and frame_rate_mode in {"preserve", "cfr"}:
+        if target_frame_rate and frame_rate_mode == "cfr":
             filters.append(f"fps={target_frame_rate}")
         if rotation == "90":
             filters.append("transpose=clock")
@@ -596,14 +606,34 @@ def build_general_transcode_command(
             filters.append("transpose=cclock")
         if subtitle_mode == "burn":
             filters.append(f"subtitles='{_escape_subtitle_filter_path(input_path)}':si=0")
-        output_bit_depth = "10" if color_mode in {"hdr10", "hlg"} or video_mode == "prores" else bit_depth
-        if color_mode == "hdr-to-sdr":
+        # ``hdr-to-sdr`` remains accepted for saved presets from older builds.
+        # Rec.709 is now an output target and tone-maps only when the source is HDR.
+        output_color_mode = "sdr" if color_mode == "hdr-to-sdr" else color_mode
+        tone_map_to_sdr = output_color_mode == "sdr" and (source_hdr or color_mode == "hdr-to-sdr")
+        output_bit_depth = "10" if output_color_mode in {"hdr10", "hlg"} or video_mode == "prores" else bit_depth
+        if tone_map_to_sdr:
             filters.extend([
                 "zscale=t=linear:npl=100", "format=gbrpf32le",
                 "zscale=p=bt709", "tonemap=tonemap=hable:desat=2",
-                "zscale=t=bt709:m=bt709:r=tv", "format=yuv420p",
+                "zscale=t=bt709:m=bt709:r=tv",
             ])
-            output_bit_depth = "8"
+        elif output_color_mode in {"hdr10", "hlg"}:
+            target_transfer = "smpte2084" if output_color_mode == "hdr10" else "arib-std-b67"
+            if source_transfer != target_transfer:
+                source_defaults = []
+                if source_transfer not in {"bt709", "smpte170m", "smpte2084", "arib-std-b67"}:
+                    source_defaults.append("tin=bt709")
+                if source_primaries not in {"bt709", "bt2020"}:
+                    source_defaults.append("pin=bt709")
+                if source_matrix not in {"bt709", "bt2020nc", "bt2020ncl", "smpte170m"}:
+                    source_defaults.append("min=bt709")
+                linearize = "zscale=t=linear:npl=100"
+                if source_defaults:
+                    linearize += ":" + ":".join(source_defaults)
+                filters.extend([
+                    linearize, "format=gbrpf32le", "zscale=p=bt2020",
+                    f"zscale=t={target_transfer}:m=bt2020nc:r=tv",
+                ])
         if video_mode == "h265":
             allowed_encoders = (*H265_GPU_VIDEO_ENCODERS, SOFTWARE_H265_VIDEO_ENCODER)
             selected_encoder = encoder if encoder in allowed_encoders else SOFTWARE_H265_VIDEO_ENCODER
@@ -621,59 +651,78 @@ def build_general_transcode_command(
             quality_value = GENERAL_TRANSCODE_QUALITY[quality]
         software_preset = {"fast": "fast", "balanced": "medium", "quality": "slow"}.get(encoder_preset, "medium")
         nvenc_preset = {"fast": "p2", "balanced": "p4", "quality": "p6"}.get(encoder_preset, "p4")
+        amf_quality = {"fast": "speed", "balanced": "balanced", "quality": "quality"}.get(encoder_preset, "balanced")
+        explicit_bitrate = video_bitrate_mbps is not None
+        if output_color_mode == "sdr":
+            encoded_primaries, encoded_transfer, encoded_matrix = "bt709", "bt709", "bt709"
+        elif output_color_mode == "hdr10":
+            encoded_primaries, encoded_transfer, encoded_matrix = "bt2020", "smpte2084", "bt2020nc"
+        elif output_color_mode == "hlg":
+            encoded_primaries, encoded_transfer, encoded_matrix = "bt2020", "arib-std-b67", "bt2020nc"
+        else:
+            encoded_primaries, encoded_transfer, encoded_matrix = source_primaries, source_transfer, source_matrix
+        matrix_parameter = "bt2020nc" if encoded_matrix == "bt2020ncl" else encoded_matrix
+        codec_color_parameters = [
+            *( [f"colorprim={encoded_primaries}"] if encoded_primaries in {"bt709", "bt2020"} else [] ),
+            *( [f"transfer={encoded_transfer}"] if encoded_transfer in {"bt709", "smpte170m", "smpte2084", "arib-std-b67"} else [] ),
+            *( [f"colormatrix={matrix_parameter}"] if matrix_parameter in {"bt709", "smpte170m", "bt2020nc"} else [] ),
+        ]
+        x265_parameters = [*( ["hdr10-opt=1"] if output_color_mode == "hdr10" else [] ), "repeat-headers=1", *codec_color_parameters]
         encoder_options = {
             "h264_nvenc": [
                 "-c:v", "h264_nvenc", "-preset", nvenc_preset, "-tune", "hq",
-                "-rc", "vbr", "-cq", str(quality_value), "-b:v", "0",
+                "-rc", "vbr", *([] if explicit_bitrate else ["-cq", str(quality_value), "-b:v", "0"]),
             ],
             "h264_qsv": [
-                "-c:v", "h264_qsv", "-preset", "medium",
-                "-global_quality", str(quality_value),
+                "-c:v", "h264_qsv", "-preset", software_preset,
+                *([] if explicit_bitrate else ["-global_quality", str(quality_value)]),
             ],
             "h264_amf": [
-                "-c:v", "h264_amf", "-quality", "balanced", "-rc", "cqp",
-                "-qp_i", str(quality_value), "-qp_p", str(quality_value),
-                "-qp_b", str(min(51, quality_value + 2)),
+                "-c:v", "h264_amf", "-quality", amf_quality,
+                "-rc", "vbr_peak" if explicit_bitrate else "cqp",
+                *([] if explicit_bitrate else ["-qp_i", str(quality_value), "-qp_p", str(quality_value), "-qp_b", str(min(51, quality_value + 2))]),
             ],
             "h264_mf": [
-                "-c:v", "h264_mf", "-rate_control", "quality",
-                "-quality", str({"high": 82, "balanced": 72, "small": 62}[quality]),
+                "-c:v", "h264_mf", "-rate_control", "pc_vbr" if explicit_bitrate else "quality",
+                *([] if explicit_bitrate else ["-quality", str({"high": 82, "balanced": 72, "small": 62}[quality])]),
             ],
             SOFTWARE_VIDEO_ENCODER: [
                 "-c:v", SOFTWARE_VIDEO_ENCODER, "-preset", software_preset,
-                "-crf", str(quality_value),
+                *([] if explicit_bitrate else ["-crf", str(quality_value)]),
+                *(["-x264-params", ":".join(codec_color_parameters)] if codec_color_parameters else []),
             ],
             "hevc_nvenc": [
                 "-c:v", "hevc_nvenc", "-preset", nvenc_preset, "-tune", "hq",
-                "-rc", "vbr", "-cq", str(quality_value), "-b:v", "0",
+                "-rc", "vbr", *([] if explicit_bitrate else ["-cq", str(quality_value), "-b:v", "0"]),
             ],
             "hevc_qsv": [
-                "-c:v", "hevc_qsv", "-preset", "medium",
-                "-global_quality", str(quality_value),
+                "-c:v", "hevc_qsv", "-preset", software_preset,
+                *([] if explicit_bitrate else ["-global_quality", str(quality_value)]),
             ],
             "hevc_amf": [
-                "-c:v", "hevc_amf", "-quality", "balanced", "-rc", "cqp",
-                "-qp_i", str(quality_value), "-qp_p", str(quality_value),
+                "-c:v", "hevc_amf", "-quality", amf_quality,
+                "-rc", "vbr_peak" if explicit_bitrate else "cqp",
+                *([] if explicit_bitrate else ["-qp_i", str(quality_value), "-qp_p", str(quality_value)]),
             ],
             "hevc_mf": [
-                "-c:v", "hevc_mf", "-rate_control", "quality",
-                "-quality", str({"high": 82, "balanced": 72, "small": 62}[quality]),
+                "-c:v", "hevc_mf", "-rate_control", "pc_vbr" if explicit_bitrate else "quality",
+                *([] if explicit_bitrate else ["-quality", str({"high": 82, "balanced": 72, "small": 62}[quality])]),
             ],
             SOFTWARE_H265_VIDEO_ENCODER: [
                 "-c:v", SOFTWARE_H265_VIDEO_ENCODER, "-preset", software_preset,
-                "-crf", str(quality_value),
-                *(["-x265-params", "hdr10-opt=1:repeat-headers=1"] if color_mode == "hdr10" else []),
+                *([] if explicit_bitrate else ["-crf", str(quality_value)]),
+                "-x265-params", ":".join(x265_parameters),
             ],
             "av1_nvenc": [
                 "-c:v", "av1_nvenc", "-preset", nvenc_preset, "-tune", "hq",
-                "-rc", "vbr", "-cq", str(quality_value), "-b:v", "0",
+                "-rc", "vbr", *([] if explicit_bitrate else ["-cq", str(quality_value), "-b:v", "0"]),
             ],
-            "av1_qsv": ["-c:v", "av1_qsv", "-global_quality", str(quality_value)],
-            "av1_amf": ["-c:v", "av1_amf", "-quality", "quality", "-qp_i", str(quality_value)],
+            "av1_qsv": ["-c:v", "av1_qsv", "-preset", software_preset, *([] if explicit_bitrate else ["-global_quality", str(quality_value)])],
+            "av1_amf": ["-c:v", "av1_amf", "-quality", amf_quality, *([] if explicit_bitrate else ["-qp_i", str(quality_value)])],
             PRORES_VIDEO_ENCODER: [
                 "-c:v", PRORES_VIDEO_ENCODER,
-                "-profile:v", str({"high": 4, "balanced": 3, "small": 2}[quality]),
-                "-vendor", "apl0", "-bits_per_mb", "8000",
+                "-profile:v", str({"high": 3, "balanced": 2, "small": 1}[quality]),
+                "-vendor", "apl0",
             ],
         }[selected_encoder]
         pixel_format = "yuv422p10le" if video_mode == "prores" else "p010le" if output_bit_depth == "10" and selected_encoder in ALL_GPU_VIDEO_ENCODERS else "yuv420p10le" if output_bit_depth == "10" else "yuv420p"
@@ -686,11 +735,11 @@ def build_general_transcode_command(
         if video_bitrate_mbps is not None:
             bitrate = f"{video_bitrate_mbps:g}M"
             command.extend(["-b:v", bitrate, "-maxrate", bitrate, "-bufsize", f"{video_bitrate_mbps * 2:g}M"])
-        if color_mode == "hdr10":
+        if output_color_mode == "hdr10":
             command.extend(["-color_primaries", "bt2020", "-color_trc", "smpte2084", "-colorspace", "bt2020nc", "-color_range", "tv"])
-        elif color_mode == "hlg":
+        elif output_color_mode == "hlg":
             command.extend(["-color_primaries", "bt2020", "-color_trc", "arib-std-b67", "-colorspace", "bt2020nc", "-color_range", "tv"])
-        else:
+        elif output_color_mode == "sdr":
             command.extend(["-color_primaries", "bt709", "-color_trc", "bt709", "-colorspace", "bt709", "-color_range", "tv"])
     if audio_mode == "remove":
         command.append("-an")
@@ -835,28 +884,18 @@ def transcode_video(
         source_info = probe_media_info(input_path)
     except Exception:
         source_info = {"hdr": False, "hdrKind": "SDR", "bitDepth": 8}
-    resolved_color_mode = color_mode
+    resolved_color_mode = "sdr" if color_mode == "hdr-to-sdr" else color_mode
     if color_mode == "auto":
         if source_info.get("dynamicHdr") and video_mode != "copy":
-            raise FFmpegTranscodeError(f"暂不安全转码 {source_info['dynamicHdr']} 动态元数据；请选择仅更换封装，或明确转为 HDR10/SDR")
+            raise FFmpegTranscodeError(f"暂不安全转码 {source_info['dynamicHdr']} 动态元数据；请选择复制视频流，或明确指定 SDR/HDR10/HLG 输出")
         if source_info.get("hdr"):
-            resolved_color_mode = (
-                str(source_info.get("hdrKind", "")).lower()
-                if video_mode in {"h265", "av1", "prores", "copy"}
-                else "hdr-to-sdr"
-            )
+            if video_mode not in {"h265", "av1", "prores", "copy"}:
+                raise FFmpegTranscodeError("当前视频编码不能保留 HDR；请选择 H.265、AV1、ProRes，或将色彩输出设为 Rec.709 SDR")
+            resolved_color_mode = str(source_info.get("hdrKind", "")).lower()
         else:
-            resolved_color_mode = "sdr"
+            resolved_color_mode = "auto"
     if video_mode == "copy":
         resolved_color_mode = "auto"
-    elif resolved_color_mode == "hdr-to-sdr" and not source_info.get("hdr"):
-        raise FFmpegTranscodeError("来源不是 HDR 视频，不需要执行 HDR→SDR 色调映射")
-    if source_info.get("hdr") and resolved_color_mode == "sdr":
-        raise FFmpegTranscodeError("HDR 来源不能仅改写为 SDR 标记；请选择“HDR 转 SDR”执行色调映射")
-    if resolved_color_mode == "hdr10" and source_info.get("transfer") != "smpte2084":
-        raise FFmpegTranscodeError("来源不是 HDR10/PQ，不能只改写为 HDR10；请选择自动保留或 HDR 转 SDR")
-    if resolved_color_mode == "hlg" and source_info.get("transfer") != "arib-std-b67":
-        raise FFmpegTranscodeError("来源不是 HLG，不能只改写为 HLG；请选择自动保留或 HDR 转 SDR")
     resolved_bit_depth = bit_depth
     if bit_depth == "auto":
         resolved_bit_depth = "10" if int(source_info.get("bitDepth", 8) or 8) > 8 and video_mode in {"h265", "av1", "prores"} else "8"
@@ -875,8 +914,11 @@ def transcode_video(
     )
     ffmpeg_exe = get_ffmpeg_exe()
     capabilities = available_transcode_capabilities(ffmpeg_exe)
-    if resolved_color_mode == "hdr-to-sdr" and not capabilities["hdrToneMap"]:
+    if resolved_color_mode == "sdr" and source_info.get("hdr") and not capabilities["hdrToneMap"]:
         raise FFmpegTranscodeError("当前媒体运行库缺少 HDR→SDR 色调映射滤镜，请重新安装或更新运行库")
+    target_transfer = {"hdr10": "smpte2084", "hlg": "arib-std-b67"}.get(resolved_color_mode)
+    if target_transfer and source_info.get("transfer") != target_transfer and "zscale" not in capabilities["filters"]:
+        raise FFmpegTranscodeError("当前媒体运行库缺少色彩空间转换滤镜，请重新安装或更新运行库")
     if subtitle_mode == "burn" and not capabilities["subtitleBurn"]:
         raise FFmpegTranscodeError("当前媒体运行库缺少字幕烧录滤镜，请重新安装或更新运行库")
     encoder_candidates = general_transcode_encoder_candidates(ffmpeg_exe, video_mode, resolved_bit_depth)
@@ -909,6 +951,10 @@ def transcode_video(
                 aspect_mode=aspect_mode, audio_track=audio_track,
                 video_bitrate_mbps=video_bitrate_mbps,
                 audio_bitrate_kbps=audio_bitrate_kbps, encoder_preset=encoder_preset,
+                source_hdr=bool(source_info.get("hdr")),
+                source_transfer=str(source_info.get("transfer", "unknown")),
+                source_primaries=str(source_info.get("primaries", "unknown")),
+                source_matrix=str(source_info.get("matrix", "unknown")),
             )
             attempt_arguments = (command, duration, on_progress, cancel_check)
             code, stderr = _run_general_transcode_attempt(
@@ -932,7 +978,7 @@ def transcode_video(
                         raise FFmpegTranscodeError("转码结果时长校验失败")
                     if resolved_bit_depth == "10" and int(output_info.get("bitDepth", 0)) < 10:
                         raise FFmpegTranscodeError("转码结果位深校验失败：预期 10-bit")
-                    expected_transfer = {"hdr10": "smpte2084", "hlg": "arib-std-b67"}.get(resolved_color_mode)
+                    expected_transfer = {"sdr": "bt709", "hdr10": "smpte2084", "hlg": "arib-std-b67"}.get(resolved_color_mode)
                     if expected_transfer and output_info.get("transfer") != expected_transfer:
                         raise FFmpegTranscodeError("转码结果 HDR 色彩标记校验失败")
                     if resolved_color_mode == "hdr10" and source_info.get("masteringDisplay") and not output_info.get("masteringDisplay"):

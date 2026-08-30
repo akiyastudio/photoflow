@@ -13,7 +13,7 @@ from event_protocol import emit, log_error, log_info, log_progress, log_success
 
 IMAGE_EXTENSIONS = {'.jpg', '.jpeg', '.png', '.bmp', '.gif', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif', '.webp',
                     '.cr2', '.cr3', '.arw', '.nef', '.orf', '.rwl', '.dng', '.raf', '.3fr', '.fff'}
-VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.m4v', '.mkv', '.mts', '.m2ts'}
+VIDEO_EXTENSIONS = {'.mp4', '.mov', '.avi', '.m4v', '.mkv', '.mpeg', '.mpg', '.mts', '.m2ts'}
 COPY_CHUNK_SIZE = 8 * 1024 * 1024
 
 

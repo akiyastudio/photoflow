@@ -53,7 +53,9 @@ const createPluginService = ({ app, registry, runJsonCommand }) => {
     setComponentEnabled: (pluginId, enabled) => registry.setComponentEnabled(pluginId, enabled),
     clearComponentEnabledState: pluginId => registry.clearComponentEnabledState(pluginId),
     requireCapability,
-    runJson: (pluginId, args, timeoutMs, onMessage) => runJsonCommand(resolveRunConfig(pluginId, args), `Plugin ${pluginId}`, timeoutMs, onMessage),
+    runJson: (pluginId, args, timeoutMs, onMessage, signal, requestedDeadlineAt) => runJsonCommand(
+      resolveRunConfig(pluginId, args), `Plugin ${pluginId}`, timeoutMs, onMessage, signal, requestedDeadlineAt,
+    ),
     installRoot: registry.installRoot,
     ensureInstallRoot: () => registry.ensureInstallRoot(),
   };

@@ -1160,7 +1160,7 @@ class ThumbnailPipeline {
 
   async runChangedPathSync(projectRoot, filePaths, cacheConfig) {
     const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif']);
-    const videoExtensions = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv']);
+    const videoExtensions = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.mpeg', '.mpg', '.mts', '.m2ts']);
     const rawExtensions = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
     const mediaExtensions = new Set([...imageExtensions, ...videoExtensions, ...rawExtensions]);
     const visibleFilePaths = filePaths.filter(filePath => !isInternalWorkspacePath(filePath));

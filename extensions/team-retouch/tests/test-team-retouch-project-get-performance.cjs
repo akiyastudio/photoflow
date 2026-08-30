@@ -28,8 +28,8 @@ const simulator = createHostSimulator({
   service: path.join(__dirname, '..', 'service.cjs'),
   context: { componentId: 'team-retouch', componentVersion: 'test', surface: 'project', projectId: 'project-performance', projectName: 'Performance', projectStatus: 'active' },
   capabilities: {
-    'component.storage.v7': () => ({ apiVersion: 7, dataPath, databasePath, projectId: 'project-performance', ownership: 'component-private' }),
-    'project.media.variants.v7': () => { metadataIpcCount += 1; throw new Error('project.get must not issue per-photo metadata IPC'); },
+    'component.storage': () => ({ apiVersion: 7, dataPath, databasePath, projectId: 'project-performance', ownership: 'component-private' }),
+    'project.media.variants': () => { metadataIpcCount += 1; throw new Error('project.get must not issue per-photo metadata IPC'); },
   },
 });
 

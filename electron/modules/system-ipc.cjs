@@ -377,7 +377,7 @@ const registerSystemIpc = context => {
     invalidateComponentStatus, writeLog,
   });
   registerHostCapabilities(componentCapabilityBroker, [
-    ['component.lifecycle.v7', componentLifecycleService.invokeV7],
+    ['component.lifecycle', componentLifecycleService.invoke],
   ]);
 
   backgroundTasks?.registerTypeRestartFactory?.('component-status-refresh', task => {
@@ -1079,9 +1079,9 @@ const registerSystemIpc = context => {
       let toolCancelled = false;
       let toolProgress = 0;
       let workerClosed = false;
-      const pendingWorkerResourceLeases = new Set();
+      const pendingWorkerResourceLeases = new Map();
       const activeWorkerResourceLeases = new Map();
-      const pendingWorkerVideoTools = new Set();
+      const pendingWorkerVideoTools = new Map();
       const sendWorkerControl = payload => {
         if (workerClosed || !pyProcess.stdin?.writable) return false;
         pyProcess.stdin.write(`${JSON.stringify(payload)}\n`, error => {
@@ -1099,6 +1099,17 @@ const registerSystemIpc = context => {
       const releaseAllWorkerResourceLeases = () => {
         for (const leaseId of [...activeWorkerResourceLeases.keys()]) releaseWorkerResourceLease(leaseId);
       };
+      const clearAllWorkerResourceWaits = () => {
+        for (const heartbeat of pendingWorkerResourceLeases.values()) clearInterval(heartbeat);
+        pendingWorkerResourceLeases.clear();
+      };
+      const abortAllWorkerVideoTools = reason => {
+        for (const pending of pendingWorkerVideoTools.values()) {
+          clearInterval(pending.heartbeat);
+          if (!pending.controller.signal.aborted) pending.controller.abort(reason);
+        }
+        pendingWorkerVideoTools.clear();
+      };
       const requestWorkerResourceLease = payload => {
         let request;
         try { request = resolvePythonWorkerResourceLease(scriptName, payload); }
@@ -1114,11 +1125,15 @@ const registerSystemIpc = context => {
           sendWorkerControl({ type: 'resource_denied', leaseId: request.leaseId, error: 'Too many worker resource leases' });
           return;
         }
-        pendingWorkerResourceLeases.add(request.leaseId);
+        const sendWaiting = () => sendWorkerControl({ type: 'resource_waiting', leaseId: request.leaseId, profile: request.profile });
+        sendWaiting();
+        const waitingHeartbeat = setInterval(sendWaiting, 5000);
+        pendingWorkerResourceLeases.set(request.leaseId, waitingHeartbeat);
         const acquire = importTask?.context?.acquireResourceLease
           ? importTask.context.acquireResourceLease(request.definition)
           : Promise.resolve({ id: '', release: () => false });
         void acquire.then(lease => {
+          clearInterval(waitingHeartbeat);
           pendingWorkerResourceLeases.delete(request.leaseId);
           if (workerClosed) {
             lease.release();
@@ -1129,6 +1144,7 @@ const registerSystemIpc = context => {
             releaseWorkerResourceLease(request.leaseId);
           }
         }).catch(error => {
+          clearInterval(waitingHeartbeat);
           pendingWorkerResourceLeases.delete(request.leaseId);
           sendWorkerControl({ type: 'resource_denied', leaseId: request.leaseId, error: error.message || String(error) });
         });
@@ -1140,16 +1156,26 @@ const registerSystemIpc = context => {
           sendWorkerControl({ type: 'video_tool_result', requestId, ok: false, error: 'Invalid video tool request' });
           return;
         }
-        pendingWorkerVideoTools.add(requestId);
+        const controller = new AbortController();
+        const sendHeartbeat = () => sendWorkerControl({
+          type: 'video_tool_progress', requestId, message: action === 'transcode' ? '正在转码视频' : '正在处理视频', progress: 0,
+        });
+        sendHeartbeat();
+        const heartbeat = setInterval(sendHeartbeat, 5000);
+        const pending = { controller, heartbeat };
+        pendingWorkerVideoTools.set(requestId, pending);
         const encoded = Buffer.from(JSON.stringify({ ...payload.payload, action }), 'utf8').toString('base64url');
         Promise.resolve().then(() => pluginService.runJson('video-tools', ['bridge', encoded], 4 * 60 * 60 * 1000, message => {
           const text = String(message?.message || '').slice(0, 500);
           if (text) sendWorkerControl({ type: 'video_tool_progress', requestId, message: text, progress: Math.max(0, Math.min(100, Number(message?.progress) || 0)) });
-        })).then(result => {
+        }, controller.signal)).then(result => {
           sendWorkerControl({ type: 'video_tool_result', requestId, ok: true, result: result?.result || {} });
         }).catch(error => {
-          sendWorkerControl({ type: 'video_tool_result', requestId, ok: false, error: error.message || String(error) });
-        }).finally(() => pendingWorkerVideoTools.delete(requestId));
+          if (!workerClosed) sendWorkerControl({ type: 'video_tool_result', requestId, ok: false, error: error.message || String(error) });
+        }).finally(() => {
+          clearInterval(heartbeat);
+          if (pendingWorkerVideoTools.get(requestId) === pending) pendingWorkerVideoTools.delete(requestId);
+        });
       };
       const handlePythonOutputLine = line => {
         const trimmed = line.trim();
@@ -1245,6 +1271,8 @@ const registerSystemIpc = context => {
   
       pyProcess.on('close', (code) => {
         workerClosed = true;
+        abortAllWorkerVideoTools(Object.assign(new Error('导入进程已结束'), { code: 'TASK_CANCELLED' }));
+        clearAllWorkerResourceWaits();
         releaseAllWorkerResourceLeases();
         releaseOperationLeases();
         if (stdoutBuffer.trim()) handlePythonOutputLine(stdoutBuffer);
@@ -1299,6 +1327,8 @@ const registerSystemIpc = context => {
       // 监听启动错误（比如 exe 不存在）
       pyProcess.on('error', (err) => {
          workerClosed = true;
+         abortAllWorkerVideoTools(err);
+         clearAllWorkerResourceWaits();
          releaseAllWorkerResourceLeases();
          releaseOperationLeases();
          importTask?.fail(err);

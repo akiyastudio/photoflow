@@ -18,10 +18,10 @@ child.once('exit', code => {
   const line = stdout.split(/\r?\n/).find(value => value.startsWith('PHOTOFLOW_COMPONENT_SMOKE_RESULT='));
   assert(line, `missing component smoke evidence\n${stdout}\n${stderr}`);
   const evidence = JSON.parse(line.slice('PHOTOFLOW_COMPONENT_SMOKE_RESULT='.length));
-  assert.deepEqual(evidence.v7Mounted, { api: true, notify: true, dialog: true, bridgeContract: 1, root: 'v7-mounted' });
-  assert.deepEqual(evidence.v7Event, { value: 'delivered-v7' });
+  assert.deepEqual(evidence.hostMounted, { api: true, notify: true, dialog: true, bridgeContract: 1, root: 'host-mounted' });
+  assert.deepEqual(evidence.hostEvent, { value: 'delivered-host' });
   assert.equal(evidence.legacyRejected, true);
   assert.deepEqual(evidence.failures, []);
-  console.log('Component Electron smoke passed: sandbox=true Host API V7 root/event and legacy contract default-deny verified.');
+  console.log('Component Electron smoke passed: sandbox=true Host API root/event and legacy contract default-deny verified.');
 });
 child.once('error', error => { clearTimeout(timer); throw error; });

@@ -78,20 +78,20 @@ const ready = new Promise((resolve, reject) => {
       let result;
       let error;
       try {
-        if (frame.method === 'component.storage.v7') result = { apiVersion: 7, dataPath: dataRoot, databasePath, projectId: 'project-1', ownership: 'component-private' };
-        else if (frame.method === 'component.settings.v7') result = { apiVersion: 7, revision: 1, settings: { useGpu: false, oversizeCropMode: 'expand' } };
-        else if (frame.method === 'component.events.v7') { emittedTopics.add(frame.payload.topic); emittedEvents.push(frame.payload); result = { apiVersion: 7, emitted: true }; }
-        else if (frame.method === 'tasks.v7') result = { apiVersion: 7, task: null, cancelled: false };
-        else if (frame.method === 'dialogs.v7') result = { apiVersion: 7, cancelled: false, inputs: [{ name: path.basename(returnedInputPath), token: `test-input:${returnedInputPath}`, expiresAt: Date.now() + 1000 }] };
-        else if (frame.method === 'project.input.tokens.v7') { materializeCount += 1; const source = frame.payload.token.slice('test-input:'.length); const inputId = crypto.randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 7, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
-        else if (frame.method === 'project.media.variants.v7') {
+        if (frame.method === 'component.storage') result = { apiVersion: 7, dataPath: dataRoot, databasePath, projectId: 'project-1', ownership: 'component-private' };
+        else if (frame.method === 'component.settings') result = { apiVersion: 7, revision: 1, settings: { useGpu: false, oversizeCropMode: 'expand' } };
+        else if (frame.method === 'component.events') { emittedTopics.add(frame.payload.topic); emittedEvents.push(frame.payload); result = { apiVersion: 7, emitted: true }; }
+        else if (frame.method === 'tasks') result = { apiVersion: 7, task: null, cancelled: false };
+        else if (frame.method === 'dialogs') result = { apiVersion: 7, cancelled: false, inputs: [{ name: path.basename(returnedInputPath), token: `test-input:${returnedInputPath}`, expiresAt: Date.now() + 1000 }] };
+        else if (frame.method === 'project.input.tokens') { materializeCount += 1; const source = frame.payload.token.slice('test-input:'.length); const inputId = crypto.randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 7, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
+        else if (frame.method === 'project.media.variants') {
           const requested = frame.payload.relativePath;
           let photoId = frame.payload.photoId || (requested === 'two.jpg' ? 'photo-2' : 'photo-1');
           if (!['photo-1', 'photo-2'].includes(photoId)) throw new Error('outside the bound project');
           const versionId = frame.payload.versionId || (photoId === 'photo-2' ? 'version-2' : 'version-1');
           const filePath = requested ? (requested === 'two.jpg' ? secondBasePath : basePath) : currentBasePath;
           result = { apiVersion: 7, mediaRef: { photoId, versionId, relativePath: requested || 'one.jpg' }, metadata: { photoId, versionId, currentVersionId: versionId, displayName: photoId === 'photo-2' ? 'Second' : 'Base', originalName: path.basename(filePath), relativePath: requested || 'one.jpg', isCurrent: true, fileMissing: false }, variants: { original: { url: 'test', byteLength: 4, derived: false } }, input: { token: `test-input:${filePath}`, expiresAt: Date.now() + 1000 } };
-        } else if (frame.method === 'project.output.v7') {
+        } else if (frame.method === 'project.output') {
           if (frame.payload.action === 'stage') { const stageId = crypto.randomUUID(); const privatePath = path.join(dataRoot, 'stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); result = { apiVersion: 7, stageId, privatePath, expiresAt: Date.now() + 60000 }; }
           else if (frame.payload.action === 'adopt') throw new Error('legacy output missing');
           else if (frame.payload.action === 'write') { if (frame.payload.replace) controlledReplacementWrites += 1; const stage = outputStages.get(frame.payload.stageId); stage.files.push(frame.payload); result = { apiVersion: 7, stageId: frame.payload.stageId, artifactId: crypto.randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, frame.payload.sourceName)).size }; }
@@ -100,8 +100,8 @@ const ready = new Promise((resolve, reject) => {
           else if (frame.payload.action === 'materializeOwned') { const output = outputReceipts.get(frame.payload.commitId).outputs.find(item => item.artifactId === frame.payload.artifactId); const importId = crypto.randomUUID(); const directory = path.join(dataRoot, 'imported-outputs', importId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(output.filePath)); fs.copyFileSync(output.filePath, privatePath); result = { apiVersion: 7, importId, privatePath, byteLength: fs.statSync(privatePath).size, sha256: output.sha256, outputRef: { commitId: frame.payload.commitId, artifactId: frame.payload.artifactId } }; }
           else if (frame.payload.action === 'rollback') { const stage = outputStages.get(frame.payload.stageId); if (stage) fs.rmSync(stage.privatePath, { recursive: true, force: true }); outputStages.delete(frame.payload.stageId); result = { apiVersion: 7, stageId: frame.payload.stageId, rolledBack: true }; }
           else throw new Error(`unexpected output action ${frame.payload.action}`);
-        } else if (frame.method === 'project.progress.v7') result = { apiVersion: 7, progress: [{ id: 'progress-2', mediaKind: 'image', contentRef: { relativeDirectory: 'merged' } }], edges: [] };
-        else if (frame.method === 'version.create.v7') { result = versionsByIdempotencyKey.get(frame.payload.idempotencyKey); if (!result) { result = { apiVersion: 7, versionId: crypto.randomUUID(), result: { success: true, photo: { id: frame.payload.photoId }, versions: [] } }; versionsByIdempotencyKey.set(frame.payload.idempotencyKey, result); } }
+        } else if (frame.method === 'project.progress') result = { apiVersion: 7, progress: [{ id: 'progress-2', mediaKind: 'image', contentRef: { relativeDirectory: 'merged' } }], edges: [] };
+        else if (frame.method === 'version.create') { result = versionsByIdempotencyKey.get(frame.payload.idempotencyKey); if (!result) { result = { apiVersion: 7, versionId: crypto.randomUUID(), result: { success: true, photo: { id: frame.payload.photoId }, versions: [] } }; versionsByIdempotencyKey.set(frame.payload.idempotencyKey, result); } }
         else throw new Error(`unexpected capability ${frame.method}`);
       } catch (value) { error = value; }
       child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: !error, result, error: error?.message })}\n`);
@@ -138,7 +138,7 @@ const ready = new Promise((resolve, reject) => {
     assert.equal(fs.readFileSync(batchCountPath, 'utf8'), '1', 'the service invokes one detect-batch process/model session for the whole batch');
     const replacementsBeforeRepeat = controlledReplacementWrites;
     await invoke('team.patch.detect-batch.v1', { relativePaths: ['one.jpg', 'two.jpg'] });
-    assert.equal(controlledReplacementWrites - replacementsBeforeRepeat, 2, 'regenerated working images use Host Host V7 controlled replacement ownership');
+    assert.equal(controlledReplacementWrites - replacementsBeforeRepeat, 2, 'regenerated working images use Host Host controlled replacement ownership');
     const beforeIdentityMaterialize = materializeCount;
     const suggested = await invoke('team.identity.suggest.v1');
     assert.equal(suggested.success, true);
@@ -146,7 +146,7 @@ const ready = new Promise((resolve, reject) => {
     assert.equal(fs.readdirSync(path.join(dataRoot, 'inputs')).length, 0, 'identity batch inputs are removed after the operation');
     const selectedReturns = await invoke('team.patch.select-returns.v1');
     const returned = await invoke('team.patch.return-batch.v1', { operationId: 'return-progress-test', returnedFiles: selectedReturns.files, relativePaths: ['one.jpg'] });
-    assert.equal(returned.acceptedCount, 1, `return matching consumes Host V7 selector tokens and archives into component-private storage: ${JSON.stringify(returned)}`);
+    assert.equal(returned.acceptedCount, 1, `return matching consumes Host selector tokens and archives into component-private storage: ${JSON.stringify(returned)}`);
     assert(emittedTopics.has('team.return.progress.v1'), 'return progress reaches the declared plugin event topic');
     const returnProgress = emittedEvents.filter(item => item.topic === 'team.return.progress.v1').map(item => item.event);
     assert(returnProgress.length >= 8, `return processing must report real multi-phase progress: ${JSON.stringify(returnProgress)}`);

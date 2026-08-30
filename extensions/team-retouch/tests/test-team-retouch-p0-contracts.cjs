@@ -31,8 +31,8 @@ const { createHostSimulator } = require('./host-simulator.cjs');
     service: path.join(__dirname, '..', 'service.cjs'),
     context: { componentId: 'team-retouch', componentVersion: 'test', surface: 'project', projectId: 'durable-project', projectName: 'Durable', projectStatus: 'active' },
     capabilities: {
-      'component.storage.v7': () => ({ apiVersion: 7, dataPath, databasePath, projectId: 'durable-project', ownership: 'component-private' }),
-      'tasks.v7': () => { taskCapabilityCalls += 1; return { apiVersion: 7, task: null, cancelled: false }; },
+      'component.storage': () => ({ apiVersion: 7, dataPath, databasePath, projectId: 'durable-project', ownership: 'component-private' }),
+      'tasks': () => { taskCapabilityCalls += 1; return { apiVersion: 7, task: null, cancelled: false }; },
     },
   });
   try {

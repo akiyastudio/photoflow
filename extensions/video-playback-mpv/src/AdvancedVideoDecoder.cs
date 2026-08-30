@@ -108,7 +108,7 @@ namespace PhotoFlow.AdvancedVideoDecoder
             context = create();
             if (context == IntPtr.Zero) throw new InvalidOperationException("libmpv 初始化内存失败");
             if (videoWindow != IntPtr.Zero) SetOption("wid", videoWindow.ToInt64().ToString(CultureInfo.InvariantCulture));
-            SetOption("vo", probeOnly ? "null" : "gpu");
+            SetOption("vo", probeOnly ? "null" : "gpu-next,gpu");
             if (probeOnly) SetOption("audio", "no");
             else
             {
@@ -121,7 +121,6 @@ namespace PhotoFlow.AdvancedVideoDecoder
             SetOption("cache", "yes");
             SetOption("demuxer-readahead-secs", "5");
             SetOption("demuxer-max-bytes", "256MiB");
-            SetOptionalOption("demuxer-lavf-o", "fflags=+genpts+igndts");
             SetOption("keep-open", "yes");
             SetOption("idle", "yes");
             // Discovery is explicit so camera telemetry and sidecars never become visible automatically.

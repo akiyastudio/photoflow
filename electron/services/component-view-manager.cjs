@@ -105,7 +105,7 @@ class ComponentViewManager {
       const instance = this.senderBindings.get(event.sender.id);
       if (!instance || instance.view.webContents !== event.sender) throw new Error('Unauthorized component sender');
       if (!this.capabilityBroker) throw new Error('Component dialog service is unavailable');
-      return this.capabilityBroker.invoke(instance.descriptor, 'dialogs.v7', payload, instance.context);
+      return this.capabilityBroker.invoke(instance.descriptor, 'dialogs', payload, instance.context);
     });
     this.ipcMain.handle('component-sdk:authorize-files', (event, filePaths) => {
       const instance = this.senderBindings.get(event.sender.id);
@@ -177,7 +177,7 @@ class ComponentViewManager {
   async readSettingsForm(request) {
     if (!this.capabilityBroker) throw new Error('Declarative component settings are unavailable');
     const { descriptor, contribution } = this.settingsForm(request);
-    const result = await this.capabilityBroker.invoke(descriptor, 'component.settings.v7', { action: 'get' }, this.declarativeSettingsContext(descriptor));
+    const result = await this.capabilityBroker.invoke(descriptor, 'component.settings', { action: 'get' }, this.declarativeSettingsContext(descriptor));
     return { apiVersion: 1, revision: Number(result.revision) || 0, values: normalizeComponentSettingsFormValues(contribution.form, result.settings) };
   }
 
@@ -185,7 +185,7 @@ class ComponentViewManager {
     if (!this.capabilityBroker) throw new Error('Declarative component settings are unavailable');
     const { descriptor, contribution } = this.settingsForm(request);
     const patch = validateComponentSettingsFormPatch(contribution.form, request?.patch);
-    const result = await this.capabilityBroker.invoke(descriptor, 'component.settings.v7', { action: 'merge', settings: patch }, this.declarativeSettingsContext(descriptor));
+    const result = await this.capabilityBroker.invoke(descriptor, 'component.settings', { action: 'merge', settings: patch }, this.declarativeSettingsContext(descriptor));
     return { apiVersion: 1, revision: Number(result.revision) || 0, values: normalizeComponentSettingsFormValues(contribution.form, result.settings) };
   }
   listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, hostApiVersion: item.hostApiVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, ...(contribution.description ? { description: contribution.description } : {}), pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(contribution.placement ? { placement: contribution.placement } : {}), ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
