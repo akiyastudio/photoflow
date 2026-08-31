@@ -13,7 +13,15 @@ export interface TopToastNotice {
 }
 
 export const enqueueTopToastNoticeWithEvictions = (current: TopToastNotice[], incoming: TopToastNotice) => {
-  let next = [...current, incoming];
+  const repeatedPersistent = incoming.persistent && !incoming.dedupeKey
+    ? current.find(notice => notice.persistent
+      && !notice.dedupeKey
+      && notice.message === incoming.message
+      && notice.sourceComponentId === incoming.sourceComponentId)
+    : undefined;
+  let next = repeatedPersistent
+    ? [...current.filter(notice => notice.id !== repeatedPersistent.id), { ...repeatedPersistent, count: repeatedPersistent.count + 1 }]
+    : [...current, incoming];
   if (incoming.persistent) {
     let overflow = next.filter(notice => notice.persistent).length - MAX_PERSISTENT_NOTICES;
     next = next.filter(notice => {

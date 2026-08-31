@@ -40,8 +40,15 @@ let keyed = model.upsertTopToastNotice([], { id: 30, message: 'first', persisten
 keyed = model.upsertTopToastNotice(keyed, { id: 31, message: 'replacement', persistent: true, count: 1, tone: 'error', dedupeKey: 'same' }).notices;
 assert.deepEqual(keyed.map(item => ({ id: item.id, message: item.message, tone: item.tone, persistent: item.persistent })), [{ id: 30, message: 'replacement', tone: 'error', persistent: true }], 'same dedupeKey replaces the existing card while preserving identity');
 const distinctPersistent = model.enqueueTopToastNoticeWithEvictions([], { id: 40, message: 'same failure', persistent: true, count: 1, tone: 'error', dedupeKey: 'alpha', sourceComponentId: 'component-a' });
-const distinctPersistentNext = model.enqueueTopToastNoticeWithEvictions(distinctPersistent.notices, { id: 41, message: 'same failure', persistent: true, count: 1, tone: 'error', dedupeKey: 'beta', sourceComponentId: 'component-b' });
-assert.deepEqual(distinctPersistentNext.notices.map(item => item.id), [40, 41], 'persistent notices with distinct keys and sources retain independent live handles');
+const distinctPersistentNext = model.enqueueTopToastNoticeWithEvictions(distinctPersistent.notices, { id: 41, message: 'same failure', persistent: true, count: 1, tone: 'error', dedupeKey: 'beta', sourceComponentId: 'component-a' });
+assert.deepEqual(distinctPersistentNext.notices.map(item => item.id), [40, 41], 'persistent notices with distinct keys retain independent live handles even within one source');
+let unkeyedPersistent = model.enqueueTopToastNoticeWithEvictions([], { id: 50, message: 'host failure', persistent: true, count: 1, tone: 'error' });
+unkeyedPersistent = model.enqueueTopToastNoticeWithEvictions(unkeyedPersistent.notices, { id: 51, message: 'host failure', persistent: true, count: 1, tone: 'error' });
+assert.deepEqual(unkeyedPersistent.notices.map(item => ({ id: item.id, count: item.count })), [{ id: 50, count: 2 }], 'unkeyed host errors merge by message while preserving identity and count');
+let sourcedPersistent = model.enqueueTopToastNoticeWithEvictions([], { id: 60, message: 'component failure', persistent: true, count: 1, tone: 'error', sourceComponentId: 'component-a' });
+sourcedPersistent = model.enqueueTopToastNoticeWithEvictions(sourcedPersistent.notices, { id: 61, message: 'component failure', persistent: true, count: 1, tone: 'error', sourceComponentId: 'component-a' });
+sourcedPersistent = model.enqueueTopToastNoticeWithEvictions(sourcedPersistent.notices, { id: 62, message: 'component failure', persistent: true, count: 1, tone: 'error', sourceComponentId: 'component-b' });
+assert.deepEqual(sourcedPersistent.notices.map(item => ({ id: item.id, count: item.count, source: item.sourceComponentId })), [{ id: 60, count: 2, source: 'component-a' }, { id: 62, count: 1, source: 'component-b' }], 'unkeyed component errors merge only within the same source');
 const taskToast = fs.readFileSync(path.join(root, 'src/features/background-tasks/FileTransferToast.tsx'), 'utf8');
 const toastReflow = fs.readFileSync(path.join(root, 'src/components/toast-stack-reflow.ts'), 'utf8');
 assert(taskToast.includes('useToastStackReflow(stackRef, reflowKey)') && toastReflow.includes('[layoutKey, stackRef]') && toastReflow.includes("matchMedia('(prefers-reduced-motion: reduce)').matches") && toastReflow.indexOf('matchMedia') < toastReflow.indexOf('element.animate'), 'shared Toast reordering runs only for structural changes and skips Web Animations when reduced motion is requested');
