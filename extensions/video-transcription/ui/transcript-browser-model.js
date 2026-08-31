@@ -11,6 +11,7 @@
   const operationProgress = operation => {
     const files = Array.isArray(operation?.files) ? operation.files : [];
     const total = Math.max(0, Number(operation?.total) || files.length);
+    if (['completed', 'partial_failure', 'failed'].includes(operation?.state)) return 100;
     if (!total) return operation?.terminal ? 100 : 0;
     const completedProgress = files.reduce((sum, file) => {
       if (file.state === 'completed' || file.state === 'failed') return sum + 100;

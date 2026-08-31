@@ -17,6 +17,7 @@ const running = { id: 'op', state: 'running', sourceKind: 'project-media', total
 assert.equal(model.operationProgress(running), 81, 'aggregate progress includes completed, failed, and current-file progress');
 assert.deepEqual(model.taskNoticeView(running), { tone: 'primary', title: '正在识别', detail: '已处理 2/3 · 当前：Folder/Nested/b.mp4 · 42%', progress: 81, terminal: false });
 assert.deepEqual(model.taskNoticeView({ ...running, state: 'completed', succeeded: 3, terminal: true, files: files.map(file => ({ ...file, state: 'completed', progress: 100 })) }), { tone: 'success', title: '识别完成', detail: '全部 3 个文件识别完成，SRT 已写入视频同目录', progress: 100, terminal: true });
+assert.equal(model.operationProgress({ state: 'completed', terminal: true, total: 23, files: Array.from({ length: 22 }, () => ({ state: 'completed', progress: 100 })) }), 100, 'a terminal event cannot remain visually stuck at rounded 96%');
 assert.equal(model.taskNoticeView({ id: 'srt-library', sourceKind: 'srt-library' }), null, 'the synthetic SRT library does not produce task status notifications');
 assert.equal(model.segmentKey('a', 9), 'a:9', 'search targets use a stable exact segment key');
 assert.equal(model.boundedPage(Array.from({ length: 500 }, (_, index) => index), 120).length, 120, 'all-transcript rendering is bounded to one page');

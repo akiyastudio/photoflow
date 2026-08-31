@@ -86,15 +86,30 @@ const spawnRuntime = (runtime, extraArgs = []) => {
   if (/\.(?:cmd|bat)$/i.test(runtime.command)) throw new Error('转录运行时必须是可直接启动的可执行文件');
   return spawn(runtime.command, [...runtime.argsPrefix, ...extraArgs], { cwd: __dirname, windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'], shell: false, env: { ...process.env, PYTHONUTF8: '1', PYTHONUNBUFFERED: '1' } });
 };
-const runtimeStatus = () => new Promise(resolve => {
+const RUNTIME_DIAGNOSTIC_TIMEOUT_MS = 20_000;
+let runtimeStatusCache = null;
+let runtimeStatusExpiresAt = 0;
+let runtimeStatusPending = null;
+const probeRuntimeStatus = () => new Promise(resolve => {
   const runtime = resolveRuntime(); let settled = false; let stdout = ''; let stderr = ''; let child;
   try { child = spawnRuntime(runtime, ['--diagnose']); } catch (error) { resolve({ ready: false, source: runtime.source, message: redactError(error) }); return; }
   const finish = result => { if (settled) return; settled = true; clearTimeout(timer); resolve(result); };
-  const timer = setTimeout(() => { child.kill(); finish({ ready: false, source: runtime.source, message: '算法运行时诊断超时' }); }, 8000);
+  const timer = setTimeout(() => { child.kill(); finish({ ready: false, source: runtime.source, message: '算法运行时诊断超时' }); }, RUNTIME_DIAGNOSTIC_TIMEOUT_MS);
   child.stdout.on('data', chunk => { stdout += chunk.toString('utf8'); }); child.stderr.on('data', chunk => { stderr += chunk.toString('utf8'); });
   child.on('error', error => finish({ ready: false, source: runtime.source, message: `无法启动算法运行时：${redactError(error)}` }));
   child.on('exit', code => { const frames = stdout.split(/\r?\n/).flatMap(line => { try { return [JSON.parse(line)]; } catch { return []; } }); const result = frames.find(frame => frame.type === 'diagnostic-result'); finish(result ? { ready: result.ready === true, source: runtime.source, missing: result.missing || [], packaged: result.packaged === true, message: result.ready ? '算法运行时可用' : `缺少依赖：${(result.missing || []).join(', ')}` } : { ready: false, source: runtime.source, message: redactError(stderr || `算法运行时退出码 ${code}`) }); });
 });
+const runtimeStatus = () => {
+  if (runtimeStatusCache && Date.now() < runtimeStatusExpiresAt) return Promise.resolve({ ...runtimeStatusCache });
+  if (runtimeStatusPending) return runtimeStatusPending;
+  const pending = probeRuntimeStatus().then(result => {
+    runtimeStatusCache = { ...result };
+    runtimeStatusExpiresAt = Date.now() + (result.ready ? 30_000 : 1_000);
+    return { ...result };
+  }).finally(() => { if (runtimeStatusPending === pending) runtimeStatusPending = null; });
+  runtimeStatusPending = pending;
+  return pending;
+};
 
 const normalizeProjectRelativePath = value => {
   const raw = String(value || '').replace(/\\/g, '/').trim().replace(/\/+$/, '');
@@ -215,6 +230,20 @@ const startCancellationWatcher = (parentId, operationId, control) => {
   timer = setTimeout(poll, 0); return () => { stopped = true; if (timer) clearTimeout(timer); };
 };
 const emitProgress = (parentId, operation, file) => callHost(parentId, 'component.events', { topic: 'transcript.operation.progress.v1', event: { operationId: operation.id, state: operation.state, total: operation.files.length, succeeded: operation.files.filter(value => value.state === 'completed').length, failed: operation.files.filter(value => value.state === 'failed').length, file: file ? { id: file.id, displayName: file.displayName, state: file.state, progress: file.progress } : null } }).catch(() => undefined);
+const reconcilePublishedOperation = async (parentId, operation) => {
+  if (!operation || TERMINAL_STATES.has(operation.state)) return operation;
+  const unresolved = operation.files.filter(file => !['completed', 'failed'].includes(file.state));
+  if (unresolved.length !== 1 || Date.now() - operation.updatedAt < 1500) return operation;
+  const item = (await listProjectSrtFiles(parentId)).find(value => value.relativePath.toLocaleLowerCase('en-US') === srtNameFor(unresolved[0].relativeName).toLocaleLowerCase('en-US'));
+  if (!item || item.updatedAt + 1000 < operation.createdAt) return operation;
+  const file = unresolved[0]; file.state = 'completed'; file.progress = 100; file.error = ''; file.updatedAt = item.updatedAt; file.output = { ...file.output, relativePath: item.relativePath, size: item.size };
+  operation.updatedAt = Date.now();
+  if (operation.files.every(value => value.state === 'completed')) {
+    operation.state = 'completed'; const message = `全部 ${operation.files.length} 个文件识别完成，SRT 已写入视频同目录`;
+    await callHost(parentId, 'tasks', { action: 'complete', operationId: operation.id, message }).catch(() => undefined);
+  }
+  await emitProgress(parentId, operation, file); return operation;
+};
 
 const runOperation = async (parentId, payload, context) => {
   const operationId = String(payload.operationId || ''); if (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$/.test(operationId) || operationId === LIBRARY_OPERATION_ID) throw new Error('无效的 operationId');
@@ -227,11 +256,12 @@ const runOperation = async (parentId, payload, context) => {
     for (const file of rows) {
       if (control.signal.aborted) break; let stage = null; let privatePath = '';
       try {
-        privatePath = await materializeProjectFile(parentId, file); file.privatePath = privatePath; stage = await callHost(parentId, 'project.output', { action: 'stage' }); const sourceName = `${file.id}.srt`; const outputPath = path.join(stage.privatePath, sourceName); file.state = 'running'; file.progress = 0; file.error = '';
+        file.state = 'running'; file.progress = 0; file.error = ''; operation.updatedAt = Date.now(); await emitProgress(parentId, operation, file); const prepared = operation.files.filter(value => ['completed', 'failed'].includes(value.state)).length; const preparation = await callHost(parentId, 'tasks', { action: 'report', operationId, progress: prepared * 100 / Math.max(1, operation.files.length), phase: 'preparing', message: `正在准备 ${file.displayName}`, checkpoint: { nextOrdinal: file.ordinal, currentFileId: file.id, total: operation.files.length } }); if (preparation.cancelled) control.abort();
+        if (control.signal.aborted) throw Object.assign(new Error('识别已取消'), { code: 'CANCELLED' }); privatePath = await materializeProjectFile(parentId, file); file.privatePath = privatePath; stage = await callHost(parentId, 'project.output', { action: 'stage' }); const sourceName = `${file.id}.srt`; const outputPath = path.join(stage.privatePath, sourceName);
         engine ||= createEngineSession({ operationId: runKey, signal: control.signal });
         const result = await engine.transcribe(file, operation.settings, outputPath, async (progress, message = '') => { if (progress !== null) file.progress = progress; operation.updatedAt = Date.now(); const completed = operation.files.filter(value => ['completed', 'failed'].includes(value.state)).length; const report = await callHost(parentId, 'tasks', { action: 'report', operationId, progress: ((completed + (Number(progress) || 0) / 100) / Math.max(1, operation.files.length)) * 100, phase: 'transcribing', message: message || `正在识别 ${file.displayName}`, checkpoint: { nextOrdinal: file.ordinal, currentFileId: file.id, total: operation.files.length } }); await emitProgress(parentId, operation, file); if (report.cancelled) control.abort(); });
         if (control.signal.aborted) throw Object.assign(new Error('识别已取消'), { code: 'CANCELLED' });
-        file.output = await publishStagedSrt(parentId, operation, file, stage, sourceName); stage = null; file.state = 'completed'; file.progress = 100; file.language = String(result.language || ''); file.segmentCount = result.segments.length;
+        file.output = await publishStagedSrt(parentId, operation, file, stage, sourceName); stage = null; file.state = 'completed'; file.progress = 100; file.language = String(result.language || ''); file.segmentCount = result.segments.length; operation.updatedAt = Date.now(); await emitProgress(parentId, operation, file);
       } catch (error) {
         if (stage) await callHost(parentId, 'project.output', { action: 'rollback', stageId: stage.stageId }).catch(() => undefined);
         if (control.signal.aborted || error.code === 'CANCELLED') { file.state = 'pending'; file.progress = 0; break; }
@@ -272,7 +302,7 @@ const handlers = {
   'transcript.project.start.v1': startProjectOperation,
   'transcript.operation.run.v1': runOperation,
   'transcript.operation.list.v1': async (parentId, _payload, context) => { const projectId = projectIdFor(context); const current = [...operations.values()].filter(value => value.projectId === projectId).sort((a, b) => b.createdAt - a.createdAt).map(value => operationSnapshot(value, false)); const library = await libraryOperation(parentId); return { operations: [operationSnapshot(library, false), ...current] }; },
-  'transcript.operation.get.v1': async (parentId, payload, context) => { if (String(payload.operationId) === LIBRARY_OPERATION_ID) return { operation: operationSnapshot(await libraryOperation(parentId)) }; const operation = getOperation(context, payload.operationId); if (!operation) throw new Error('找不到识别任务'); return { operation: operationSnapshot(operation) }; },
+  'transcript.operation.get.v1': async (parentId, payload, context) => { if (String(payload.operationId) === LIBRARY_OPERATION_ID) return { operation: operationSnapshot(await libraryOperation(parentId)) }; const operation = getOperation(context, payload.operationId); if (!operation) throw new Error('找不到识别任务'); await reconcilePublishedOperation(parentId, operation); return { operation: operationSnapshot(operation) }; },
   'transcript.operation.cancel.v1': cancelOperation,
   'transcript.operation.resume.v1': async (parentId, payload, context) => { const operation = getOperation(context, payload.operationId); if (!operation) throw new Error('找不到识别任务'); operation.state = 'queued'; operation.error = ''; operation.updatedAt = Date.now(); for (const file of operation.files) if (file.state !== 'completed') { file.state = 'pending'; file.progress = 0; } await callHost(parentId, 'tasks', { action: 'resume', operationId: operation.id, title: '视频转文字', message: '准备恢复转写', checkpoint: { resumed: true } }); return { accepted: true, operationId: operation.id }; },
   'transcript.search.v1': search,

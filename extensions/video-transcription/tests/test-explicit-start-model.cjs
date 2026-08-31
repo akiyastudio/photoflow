@@ -2,11 +2,12 @@ const assert = require('node:assert/strict');
 const { createExplicitStartController } = require('../ui/explicit-start-model.js');
 
 const context = { surface: 'project.contextAction', projectId: 'project-1', scopeRelativePath: 'video', selectedRelativePaths: ['video/a.mp4'] };
-const starts = []; const runs = []; const views = [];
+const starts = []; const runs = []; const completedRuns = []; const views = [];
 let releaseStart;
 const controller = createExplicitStartController({
   startProject: payload => { starts.push(payload); return new Promise(resolve => { releaseStart = resolve; }); },
-  runOperation: payload => { runs.push(payload); return Promise.resolve(); },
+  runOperation: payload => { runs.push(payload); return Promise.resolve({ id: payload.operationId, state: 'completed' }); },
+  onRunComplete: result => completedRuns.push(result),
   onChange: view => views.push(view),
 });
 
@@ -30,6 +31,7 @@ const controller = createExplicitStartController({
   releaseStart({ operationId: 'operation-1' });
   assert.equal((await first).accepted, true);
   assert.deepEqual(runs, [{ operationId: 'operation-1' }], 'the accepted task is run exactly once');
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(completedRuns, [{ id: 'operation-1', state: 'completed' }], 'the terminal run result is delivered to the page immediately');
   assert.deepEqual(controller.view(), { count: 2, disabled: false, label: '重新识别当前选择' });
 
   const second = controller.start();
@@ -37,6 +39,7 @@ const controller = createExplicitStartController({
   releaseStart({ operationId: 'operation-2' });
   await second;
   assert.deepEqual(runs, [{ operationId: 'operation-1' }, { operationId: 'operation-2' }]);
+  await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(completedRuns.at(-1), { id: 'operation-2', state: 'completed' });
 
   controller.setContext({ ...context, selectedRelativePaths: [] });
   assert.deepEqual(controller.view(), { count: 0, disabled: true, label: '请在文件页选择视频或文件夹' });

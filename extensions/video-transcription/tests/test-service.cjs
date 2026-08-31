@@ -19,11 +19,13 @@ const sources = {
   good: path.join(projectRoot, 'Library', 'clip.mp4'),
   slow: path.join(projectRoot, 'Library', 'slow.mp4'),
   slowPanel: path.join(projectRoot, 'Library', 'slow-panel.mp4'),
+  reconcile: path.join(projectRoot, 'Library', 'reconcile.mp4'),
 };
 fs.mkdirSync(path.dirname(sources.good), { recursive: true });
 fs.writeFileSync(sources.good, '第一条字幕\n可搜索字幕');
 fs.writeFileSync(sources.slow, 'SLOW_TRANSCRIPTION\n不应完成');
 fs.writeFileSync(sources.slowPanel, 'SLOW_TRANSCRIPTION\n后台取消');
+fs.writeFileSync(sources.reconcile, '完成状态恢复');
 fs.writeFileSync(path.join(projectRoot, 'manual.srt'), '\uFEFF1\n00:00:03,000 --> 00:00:04,000\n手工字幕\n');
 
 const child = spawn(process.execPath, [path.join(extensionRoot, 'service.cjs')], {
@@ -60,7 +62,7 @@ const capability = async frame => {
     if (payload.action === 'materializeOwned') { const receipt = receipts.get(payload.commitId); const output = receipt?.outputs.find(item => item.artifactId === payload.artifactId); if (!output) throw new Error('unknown output'); const directory = path.join(privateRoot, 'reads', crypto.randomUUID()); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(output.relativePath)); fs.copyFileSync(path.join(projectRoot, output.relativePath), privatePath); return { apiVersion: 7, privatePath, byteLength: fs.statSync(privatePath).size, sha256: output.sha256, outputRef: { commitId: payload.commitId, artifactId: payload.artifactId } }; }
     if (payload.action === 'write') { const stage = stages.get(payload.stageId); const bytes = fs.readFileSync(path.join(stage.privatePath, payload.sourceName)); const target = path.join(projectRoot, payload.outputRelativePath); if (fs.existsSync(target)) { assert.equal(payload.replace, true, 'existing SRT requires a controlled replacement'); const old = receipts.get(payload.previousCommitId)?.outputs.find(item => item.artifactId === payload.previousArtifactId); assert(old && old.sha256 === payload.expectedDigest && old.sha256 === digest(fs.readFileSync(target)), 'replacement digest must own the current SRT'); } else assert.equal(payload.replace, undefined); stage.output = { artifactId: crypto.randomUUID(), relativePath: payload.outputRelativePath, size: bytes.length, sha256: digest(bytes), bytes }; return { apiVersion: 7, stageId: payload.stageId, artifactId: stage.output.artifactId, byteLength: bytes.length }; }
     if (payload.action === 'validate') return { apiVersion: 7, stageId: payload.stageId, valid: true, fileCount: 1, totalBytes: stages.get(payload.stageId).output.size };
-    if (payload.action === 'commit') { if (idempotency.has(payload.idempotencyKey)) return idempotency.get(payload.idempotencyKey); const stage = stages.get(payload.stageId); const target = path.join(projectRoot, stage.output.relativePath); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, stage.output.bytes); const commitId = crypto.randomUUID(); const receipt = receiptFor(commitId, { ...stage.output, bytes: undefined }); receipts.set(commitId, receipt); idempotency.set(payload.idempotencyKey, receipt); fs.rmSync(stage.privatePath, { recursive: true, force: true }); stages.delete(payload.stageId); return receipt; }
+    if (payload.action === 'commit') { if (idempotency.has(payload.idempotencyKey)) return idempotency.get(payload.idempotencyKey); const stage = stages.get(payload.stageId); const target = path.join(projectRoot, stage.output.relativePath); fs.mkdirSync(path.dirname(target), { recursive: true }); fs.writeFileSync(target, stage.output.bytes); const commitId = crypto.randomUUID(); const receipt = receiptFor(commitId, { ...stage.output, bytes: undefined }); receipts.set(commitId, receipt); idempotency.set(payload.idempotencyKey, receipt); fs.rmSync(stage.privatePath, { recursive: true, force: true }); stages.delete(payload.stageId); if (stage.output.relativePath === 'Library/reconcile.srt') await new Promise(resolve => setTimeout(resolve, 2200)); return receipt; }
     if (payload.action === 'rollback') { const stage = stages.get(payload.stageId); if (stage) fs.rmSync(stage.privatePath, { recursive: true, force: true }); stages.delete(payload.stageId); return { apiVersion: 7, stageId: payload.stageId, rolledBack: true }; }
   }
   if (frame.method === 'dialogs') return { apiVersion: 7, opened: true, outputRef: { commitId: payload.commitId, artifactId: payload.artifactId } };
@@ -78,10 +80,11 @@ const assertPublic = value => { const serialized = JSON.stringify(value); assert
 (async () => {
   try {
     await ready;
-    const preview = await request('transcript.selection.preview.v1', { relativePaths: ['Library'] }); assert.deepEqual(preview.files.map(file => file.relativeName).sort(), ['Library/clip.mp4', 'Library/slow-panel.mp4', 'Library/slow.mp4']);
+    const preview = await request('transcript.selection.preview.v1', { relativePaths: ['Library'] }); assert.deepEqual(preview.files.map(file => file.relativeName).sort(), ['Library/clip.mp4', 'Library/reconcile.mp4', 'Library/slow-panel.mp4', 'Library/slow.mp4']);
     const started = await request('transcript.project.start.v1', { relativePaths: ['Library/clip.mp4'] }); assertPublic(started);
     const completed = await request('transcript.operation.run.v1', { operationId: started.operationId }); assert.equal(completed.state, 'completed'); assert.equal(completed.succeeded, 1); assertPublic(completed);
     const progressEvents = capabilityCalls.filter(call => call.method === 'component.events' && call.payload.event?.operationId === started.operationId).map(call => call.payload.event); assert(progressEvents.some(event => event.state === 'running' && event.file?.progress > 0), 'algorithm progress emits a live component event'); assert.equal(progressEvents.at(-1)?.state, 'completed', 'the final component event announces completion');
+    assert(progressEvents.some(event => event.state === 'running' && event.file?.state === 'running' && event.file.progress === 0), 'the current file is visible while its input is being prepared');
     const outputPath = path.join(projectRoot, 'Library', 'clip.srt'); assert(fs.existsSync(outputPath), 'SRT is committed directly beside its video'); assert.match(fs.readFileSync(outputPath, 'utf8'), /可搜索字幕/);
     assert(!fs.existsSync(path.join(privateRoot, 'storage.sqlite3')), 'the component creates no user database'); assert.equal(capabilityCalls.some(call => call.method === 'component.storage'), false, 'the component never requests database storage');
 
@@ -93,6 +96,8 @@ const assertPublic = value => { const serialized = JSON.stringify(value); assert
 
     fs.writeFileSync(sources.good, '替换后的字幕');
     const replaceStart = await request('transcript.project.start.v1', { relativePaths: ['Library/clip.mp4'] }); const replaced = await request('transcript.operation.run.v1', { operationId: replaceStart.operationId }); assert.equal(replaced.state, 'completed'); assert.match(fs.readFileSync(outputPath, 'utf8'), /替换后的字幕/); assert(capabilityCalls.some(call => call.method === 'project.output' && call.payload.action === 'write' && call.payload.replace === true), 'repeat transcription safely replaces the existing SRT');
+
+    const reconcileStart = await request('transcript.project.start.v1', { relativePaths: ['Library/reconcile.mp4'] }); const reconcileRun = request('transcript.operation.run.v1', { operationId: reconcileStart.operationId }); const reconcileOutput = path.join(projectRoot, 'Library', 'reconcile.srt'); for (let attempt = 0; attempt < 50 && !fs.existsSync(reconcileOutput); attempt += 1) await new Promise(resolve => setTimeout(resolve, 20)); assert(fs.existsSync(reconcileOutput), 'the SRT becomes visible before the delayed commit response'); await new Promise(resolve => setTimeout(resolve, 1600)); const reconciled = await request('transcript.operation.get.v1', { operationId: reconcileStart.operationId }); assert.equal(reconciled.operation.state, 'completed', 'a freshly published SRT recovers a stale final in-memory state'); assert.equal(reconciled.operation.files[0].state, 'completed'); await reconcileRun;
 
     const cancelStart = await request('transcript.project.start.v1', { relativePaths: ['Library/slow.mp4'] }); const cancelRun = request('transcript.operation.run.v1', { operationId: cancelStart.operationId }); await new Promise(resolve => setTimeout(resolve, 180)); const cancelAt = Date.now(); await request('transcript.operation.cancel.v1', { operationId: cancelStart.operationId }); const cancelled = await cancelRun; assert.equal(cancelled.state, 'cancelled'); assert(Date.now() - cancelAt < 1200, 'page cancellation terminates the active algorithm process promptly'); assert(!fs.existsSync(path.join(projectRoot, 'Library', 'slow.srt')), 'cancel rolls back the unfinished SRT');
 

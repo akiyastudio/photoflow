@@ -14,7 +14,7 @@
     selectedPaths(context),
   ]);
 
-  const createExplicitStartController = ({ startProject, runOperation, onAccepted, onRunError, onChange } = {}) => {
+  const createExplicitStartController = ({ startProject, runOperation, onAccepted, onRunComplete, onRunError, onChange } = {}) => {
     let context = null;
     let pending = false;
     let started = false;
@@ -55,9 +55,9 @@
           const result = await startProject(payload);
           if (!result?.cancelled) {
             if (revision === activeRevision) onAccepted?.(result);
-            Promise.resolve(runOperation({ operationId: result.operationId })).catch(error => {
-              if (revision === activeRevision) onRunError?.(error);
-            });
+            Promise.resolve(runOperation({ operationId: result.operationId })).then(runResult => {
+              if (revision === activeRevision) onRunComplete?.(runResult);
+            }).catch(error => { if (revision === activeRevision) onRunError?.(error); });
           }
           if (revision === activeRevision) {
             pending = false;

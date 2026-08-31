@@ -21,6 +21,22 @@
     copy.append(title, detail); heading.append(copy, percent); node.append(heading, progress);
   };
   const shortTime = seconds => { const value = Math.max(0, Number(seconds) || 0); return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(Math.floor(value % 60)).padStart(2, '0')}`; };
+  let runtimeStatusToken = 0;
+  const refreshRuntimeStatus = async () => {
+    const token = ++runtimeStatusToken; const node = $('#runtime-status'); node.textContent = '正在检查本地识别…'; node.title = ''; delete node.dataset.tone;
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      try {
+        const result = await rpc('transcript.runtime.status.v1'); if (token !== runtimeStatusToken) return;
+        if (result.ready) { node.textContent = '本地识别可用'; node.title = ''; node.dataset.tone = 'success'; return; }
+        if (attempt === 0) { await new Promise(resolve => setTimeout(resolve, 1200)); continue; }
+        node.textContent = '本地识别不可用'; node.title = result.message || '算法运行时诊断失败'; node.dataset.tone = 'danger'; return;
+      } catch (error) {
+        if (token !== runtimeStatusToken) return;
+        if (attempt === 0) { await new Promise(resolve => setTimeout(resolve, 1200)); continue; }
+        node.textContent = '本地识别不可用'; node.title = error.message || '无法检查算法运行时'; node.dataset.tone = 'danger'; return;
+      }
+    }
+  };
   const stateLabel = value => ({ queued: '等待中', running: '识别中', completed: '已完成', partial_failure: '部分失败', failed: '失败', cancelled: '已取消', pending: '等待中' }[value] || value);
   const button = (label, action, value, className = 'pf-button') => { const node = document.createElement('button'); node.type = 'button'; node.className = className; node.textContent = label; node.dataset[action] = value; return node; };
   const renderSegments = (segments, { highlightSeq = 0, includeFile = false } = {}) => {
@@ -43,6 +59,7 @@
     startProject: payload => rpc('transcript.project.start.v1', payload),
     runOperation: payload => rpc('transcript.operation.run.v1', payload),
     onAccepted: result => { state.sourceMode = 'operation'; state.operationId = result.operationId; state.operationsSignature = ''; notice(result.warning || '任务已开始；关闭页面后仍会保留处理进度。', result.warning ? 'warning' : 'success'); coordinator.request({ immediate: true }); },
+    onRunComplete: result => applyRunResult(result),
     onRunError: error => notice(error.message, 'error'), onChange: renderStart,
   });
   const startCurrentSelection = async () => {
@@ -182,7 +199,13 @@
     } catch (error) { notice(error.message, 'error'); }
   }
   const coordinator = window.VideoTranscriptionRefreshCoordinator.createRefreshCoordinator({ refresh, debounceMs: 400, pollMs: 3000 });
-  const runAccepted = result => { if (result.cancelled) return; state.sourceMode = 'operation'; state.operationId = result.operationId; notice(result.warning || '任务已恢复。', result.warning ? 'warning' : 'success'); void rpc('transcript.operation.run.v1', { operationId: result.operationId }).catch(error => notice(error.message, 'error')); coordinator.request({ immediate: true }); };
+  function applyRunResult(result) {
+    if (!result) { coordinator.request({ immediate: true }); return; }
+    const operationId = String(result.id || result.operationId || '');
+    if (operationId && state.sourceMode === 'operation' && state.operationId === operationId && result.state && Array.isArray(result.files)) { state.operationSignature = ''; renderOperation(result); }
+    coordinator.request({ immediate: true });
+  }
+  const runAccepted = result => { if (result.cancelled) return; state.sourceMode = 'operation'; state.operationId = result.operationId; notice(result.warning || '任务已恢复。', result.warning ? 'warning' : 'success'); void rpc('transcript.operation.run.v1', { operationId: result.operationId }).then(applyRunResult).catch(error => notice(error.message, 'error')); coordinator.request({ immediate: true }); };
   const viewSearchFile = async item => { const navigationToken = ++state.navigationToken; try {
     let detail = null; if (state.operationId !== item.operationId) detail = await rpc('transcript.operation.get.v1', { operationId: item.operationId }); if (navigationToken !== state.navigationToken) return;
     state.viewMode = 'single'; state.sourceMode = 'operation'; if (detail) { state.operationId = item.operationId; state.operationSignature = ''; state.fileId = item.fileId; renderOperation(detail.operation, { skipTranscript: true }); }
@@ -190,14 +213,14 @@
   } catch (error) { if (navigationToken === state.navigationToken) notice(error.message, 'error'); } };
   document.addEventListener('click', event => { const target = event.target.closest('button'); if (!target) return; if (target.dataset.selectionAction !== undefined) void startCurrentSelection(); else if (target.dataset.selectFile) { ++state.navigationToken; selectFile(target.dataset.selectFile); } else if (target.dataset.cancel) void rpc('transcript.operation.cancel.v1', { operationId: target.dataset.cancel }).then(() => coordinator.request({ immediate: true })).catch(error => notice(error.message, 'error')); else if (target.dataset.resume) void rpc('transcript.operation.resume.v1', { operationId: target.dataset.resume }).then(runAccepted).catch(error => notice(error.message, 'error')); else if (target.dataset.openOutput) void rpc('transcript.output.open.v1', { fileId: target.dataset.openOutput }).catch(error => notice(error.message, 'error')); });
   $('#operation-select').addEventListener('change', event => { ++state.navigationToken; state.fileId = ''; state.viewMode = 'single'; if (event.target.value === '__current_selection__') { state.sourceMode = 'selection'; state.operationId = ''; state.operation = null; state.operationSignature = ''; state.operationsSignature = ''; renderOperations(state.operations); renderSelectionPreview(); void renderTranscript(null); return; } state.sourceMode = 'operation'; state.operationId = event.target.value; state.operationSignature = ''; state.operationsSignature = ''; coordinator.request({ immediate: true }); });
-  $('#refresh').addEventListener('click', () => coordinator.request({ immediate: true })); $('#reprocess').addEventListener('click', () => void startCurrentSelection());
+  $('#refresh').addEventListener('click', () => { coordinator.request({ immediate: true }); void refreshRuntimeStatus(); }); $('#reprocess').addEventListener('click', () => void startCurrentSelection());
   $('#browse-all').addEventListener('click', () => { ++state.navigationToken; state.viewMode === 'all' ? void selectFile(state.fileId) : void renderAllTranscript(); });
   const loadSearch = async ({ query, cursor = '', append = false }) => { const searchToken = ++state.searchToken; const root = $('#search-results'); const more = $('#search-more'); more.disabled = true; if (!append) root.textContent = '搜索中…'; try { const result = await rpc('transcript.search.v1', { query, cursor, limit: 50 }); if (searchToken !== state.searchToken) return; if (!append) root.replaceChildren(); result.results.forEach(item => { const row = button('', 'searchFile', item.fileId); row.addEventListener('click', () => void viewSearchFile(item)); const title = document.createElement('strong'); title.textContent = `${item.relativeName} · ${shortTime(item.start)}`; const text = document.createElement('span'); text.textContent = item.text; row.append(title, text); root.append(row); }); if (!append && !result.results.length) root.textContent = '没有匹配字幕'; state.searchQuery = result.query; state.searchCursor = result.page?.nextCursor || ''; more.hidden = !state.searchCursor; } catch (error) { if (searchToken === state.searchToken) { if (!append) root.textContent = error.message; else notice(error.message, 'error'); } } finally { if (searchToken === state.searchToken) more.disabled = false; } };
   $('#search-form').addEventListener('submit', event => { event.preventDefault(); state.searchCursor = ''; void loadSearch({ query: $('#search-input').value, append: false }); });
   $('#search-more').addEventListener('click', () => { if (state.searchCursor) void loadSearch({ query: state.searchQuery, cursor: state.searchCursor, append: true }); });
   const setContext = context => { const selectionKey = JSON.stringify(selectionPreview.payloadFor(context)); const changed = selectionKey !== state.selectionContextKey; state.selectionContextKey = selectionKey; state.context = context; applyTheme(context.resolvedTheme); startController.setContext(context); if (changed && selectedPaths(context).length) { state.sourceMode = 'selection'; state.operationId = ''; state.operation = null; state.operationSignature = ''; state.operationsSignature = ''; } previewController.setContext(context); const count = selectedPaths(context).length; $('#selection-summary').textContent = `当前选择 ${count} 个条目`; $('#empty-selection').hidden = count > 0; if (state.sourceMode === 'selection') { renderOperations(state.operations); renderSelectionPreview(); void renderTranscript(null); } };
   api.getContext().then(context => setContext(context)).catch(error => notice(error.message, 'error')); api.onContextChange(context => setContext(context));
-  api.onThemeChange(value => applyTheme(value.resolvedTheme)); api.onEvent('transcript.operation.progress.v1', () => coordinator.event());
-  rpc('transcript.runtime.status.v1').then(result => { const node = $('#runtime-status'); node.textContent = result.ready ? '本地识别可用' : '本地识别不可用'; node.title = result.ready ? '' : result.message; node.dataset.tone = result.ready ? 'success' : 'danger'; }).catch(() => { $('#runtime-status').textContent = '本地识别不可用'; });
+  api.onThemeChange(value => applyTheme(value.resolvedTheme)); api.onEvent('transcript.operation.progress.v1', event => { if (event?.operationId === state.operationId && ['completed', 'partial_failure', 'failed', 'cancelled'].includes(event.state)) renderTaskNotice({ ...(state.operation || {}), ...event, terminal: true }); coordinator.event(); });
+  void refreshRuntimeStatus();
   api.onDeactivate(() => coordinator.deactivate()); api.onActivate(() => coordinator.activate()); coordinator.activate();
 })();
