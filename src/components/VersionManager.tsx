@@ -775,14 +775,14 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
       return;
     }
     publishCommittedMutation();
-    if (!result.warning) publishCommittedMutationNotice(trashFile ? '版本已删除，文件已移入回收站；其他版本编号保持不变' : '版本记录已删除；其他版本编号保持不变');
-    if (!current) return;
+    if (result.warning) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+    else publishCommittedMutationNotice(trashFile ? '版本已删除，文件已移入回收站；其他版本编号保持不变' : '版本记录已删除；其他版本编号保持不变');
+    if (!pageGenerationIsCurrent(pageGeneration)) return;
     const branchLoaded = result.photo ? await loadBranchPhoto(result.photo.id, result.photo, branchPhotos, pageGeneration) : false;
     if (!pageGenerationIsCurrent(pageGeneration)) return;
     if (!result.photo || !branchLoaded) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
     setSelectedId(result.versions.find(item => item.isCurrent)?.id || result.versions[0]?.id || '');
     setCompareIds(ids => ids.filter(id => id !== version.id));
-    if (result.warning) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
   };
   const relocateVersion = async (version: MediaVersion) => {
     if (!bundle.photo || busyRef.current) return;

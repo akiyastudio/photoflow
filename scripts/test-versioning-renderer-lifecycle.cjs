@@ -155,11 +155,14 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
 
   const updateResolvers = [];
   const updateRequests = [];
+  const deleteResolvers = [];
+  const deleteRequests = [];
   const recycleAlerts = [];
   const version = (id, name) => ({ id, photoId: `photo-${id}`, versionNumber: 1, versionName: name, versionType: 'custom', filePath: `C:/project/${id}.jpg`, fileSize: 100, note: '', status: 'ready', isCurrent: false, isFinal: false, fileMissing: false, contentChanged: false, createdAt: 1, updatedAt: 1 });
   const bundles = {
     'a.jpg': { success: true, photo: { id: 'photo-a', projectId: 'project', mediaType: 'image', originalName: 'a.jpg', displayName: 'A photo', currentVersionId: 'a', originalFilePath: 'C:/project/a.jpg', createdAt: 1, updatedAt: 1 }, versions: [version('a', 'A original')] },
     'b.jpg': { success: true, photo: { id: 'photo-b', projectId: 'project', mediaType: 'image', originalName: 'b.jpg', displayName: 'B photo', currentVersionId: 'b', originalFilePath: 'C:/project/b.jpg', createdAt: 1, updatedAt: 1 }, versions: [version('b', 'B current')] },
+    'c.jpg': { success: true, photo: { id: 'photo-c', projectId: 'project', mediaType: 'image', originalName: 'c.jpg', displayName: 'C photo', currentVersionId: 'c', originalFilePath: 'C:/project/c.jpg', createdAt: 1, updatedAt: 1 }, versions: [version('c', 'C current')] },
   };
   testWindow.electronAPI = {
     async getMediaVersions(_workspace, _status, _project, relativePath) { return bundles[relativePath]; },
@@ -168,7 +171,7 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
     async getMediaOriginal(filePath) { return { success: true, mediaUrl: `original:${filePath}` }; },
     updateMediaVersion(_workspace, request) { updateRequests.push(request); return new Promise(resolve => updateResolvers.push(resolve)); },
     async getMediaVersionDeleteScope() { return { success: true, selectedChildCount: 0, childCount: 0, allMissing: false, versionCount: 1, versionNumber: 1 }; },
-    async deleteMediaVersion() { return { ...bundles['b.jpg'], warning: 'simulated recycle failure' }; },
+    deleteMediaVersion(_workspace, request) { deleteRequests.push(request); return new Promise(resolve => deleteResolvers.push(resolve)); },
     async saveMediaComparisonPreference() { return { success: true }; },
     async openMediaVersion() { return { success: true }; },
     reportRendererError() {},
@@ -202,6 +205,7 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
   });
   const entryA = { kind: 'image', name: 'a.jpg', relativePath: 'a.jpg', path: 'C:/project/a.jpg', extension: '.jpg', size: 100, createdAt: 1, updatedAt: 1 };
   const entryB = { ...entryA, name: 'b.jpg', relativePath: 'b.jpg', path: 'C:/project/b.jpg', updatedAt: 2 };
+  const entryC = { ...entryA, name: 'c.jpg', relativePath: 'c.jpg', path: 'C:/project/c.jpg', updatedAt: 3 };
   await React.act(async () => managerRoot.render(React.createElement(versionManagerModule.VersionManager, managerProps(entryA))));
   await flush();
   const actionsButton = allNodes(managerContainer).find(node => node.attributes.get('aria-label') === '版本操作');
@@ -250,9 +254,15 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
   await React.act(async () => dispatch(deleteActionsButton, 'click'));
   const deleteButton = allNodes(managerContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('删除版本记录'));
   await React.act(async () => { dispatch(deleteButton, 'click'); await Promise.resolve(); await Promise.resolve(); });
-  assert.strictEqual(invalidations, 4, 'a delete committed with a recycle warning still invalidates outer version state');
-  assert.strictEqual(recycleAlerts.length, 1, 'a recycle warning retains the established failure dialog');
+  assert.strictEqual(deleteRequests.length, 1, 'the mounted old page begins its delete IPC');
+  await React.act(async () => managerRoot.render(React.createElement(versionManagerModule.VersionManager, managerProps(entryC))));
+  await flush();
+  assert(managerContainer.textContent.includes('C current'), 'the new identity is visible while the old delete remains in flight');
+  await React.act(async () => { deleteResolvers[0]({ ...bundles['b.jpg'], warning: 'simulated recycle failure' }); await Promise.resolve(); await Promise.resolve(); });
+  assert.strictEqual(invalidations, 4, 'a stale-identity delete committed with a recycle warning still invalidates outer version state exactly once');
+  assert.strictEqual(recycleAlerts.length, 1, 'a stale-identity recycle warning publishes the established failure dialog exactly once');
   assert(!notices.some(message => message.includes('文件已移入回收站')), 'a recycle warning must never claim that the file reached the recycle bin');
+  assert(managerContainer.textContent.includes('C current') && !managerContainer.textContent.includes('B current'), 'the stale warning result cannot overwrite the new page');
   await React.act(async () => managerRoot.unmount());
 
   const managerSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/components/VersionManager.tsx'), 'utf8');
@@ -264,6 +274,10 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
     assert(publishIndex >= 0, `${operation} must publish committed writes`);
     assert(body.indexOf('pageGenerationIsCurrent(pageGeneration)', publishIndex) > publishIndex, `${operation} must gate local reconciliation after publishing success`);
   }
+  const deleteMutationSource = managerSource.slice(managerSource.indexOf('const deleteVersion = async'), managerSource.indexOf('const relocateVersion = async'));
+  const warningPublishIndex = deleteMutationSource.indexOf('if (result.warning) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG)');
+  assert(warningPublishIndex > deleteMutationSource.lastIndexOf('publishCommittedMutation()', warningPublishIndex), 'recycle failure must be published after outer invalidation');
+  assert(deleteMutationSource.indexOf('pageGenerationIsCurrent(pageGeneration)', warningPublishIndex) > warningPublishIndex, 'recycle failure must be published before stale-page reconciliation gating');
   assert(!fs.readFileSync(path.resolve(__dirname, '..', 'src/features/versioning/ProgressPairPreview.tsx'), 'utf8').includes('cancelMediaThumbnail'), 'the preview must not issue consumer-unsafe global cancellation');
   console.log('versioning renderer lifecycle real mount tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });
