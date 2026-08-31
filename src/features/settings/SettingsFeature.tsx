@@ -11,7 +11,7 @@ import { normalizeConfiguredSdDeviceRecords, removeConfiguredSdDevice, syncLegac
 import { MAX_SUBTITLE_FONT_SIZE, MIN_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../app/video-player-settings';
 import { componentSettingsSectionKey, type ComponentSettingsSection } from './component-settings-page-model';
 import { componentRuntimeIsAvailable, componentUnavailableMessage } from '../components/component-availability-model';
-import { createSettingsSaveCoordinator, restoredWorkspaceConfig } from './restored-workspace-config';
+import { createSettingsSaveCoordinator, patchSettingsDraft, restoredWorkspaceConfig } from './restored-workspace-config';
 import { useUserFacingToast } from '../app/useUserFacingToast';
 import { defaultVideoShortcutBindings, exportVideoShortcuts, formatVideoShortcutChord, importVideoShortcuts, isModifierOnlyVideoShortcutInput, isReservedVideoShortcut, normalizeVideoShortcutBindings, shortcutChord, shortcutInputFromKeyboardEvent, VIDEO_ACTIONS, videoShortcutConflicts } from '../../contracts/video-shortcuts';
 import type { VideoActionId } from '../../contracts/video-shortcuts';
@@ -631,7 +631,8 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const commitSettings = (next: AppConfig) => {
     void saveCoordinatorRef.current?.enqueue(next).then(saved => { if (saved) onNoticeRef.current('已更改设置'); });
   };
-  const update = <K extends keyof AppConfig,>(key: K, value: AppConfig[K]) => commitSettings({ ...draftRef.current, [key]: value });
+  const patchSettings = (patch: (current: AppConfig) => Partial<AppConfig>) => commitSettings(patchSettingsDraft(draftRef.current, patch));
+  const update = <K extends keyof AppConfig,>(key: K, value: AppConfig[K]) => patchSettings(() => ({ [key]: value }));
   const projectCategories = normalizeProjectCategoryOrder(draft.projectCategoryOrder, draft.customProjectCategories);
   const addProjectCategory = () => {
     const name = newProjectCategory.trim().replace(/\s+/g, ' ');
@@ -644,8 +645,10 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       return;
     }
     if (draft.customProjectCategories.length >= 50) { setProjectCategoryError('最多可以创建 50 个自定义分类'); return; }
-    const customProjectCategories = [...draft.customProjectCategories, name];
-    commitSettings({ ...draft, customProjectCategories, projectCategoryOrder: [...projectCategories, name] });
+    patchSettings(current => {
+      const currentOrder = normalizeProjectCategoryOrder(current.projectCategoryOrder, current.customProjectCategories);
+      return { customProjectCategories: [...current.customProjectCategories, name], projectCategoryOrder: [...currentOrder, name] };
+    });
     setNewProjectCategory('');
     setProjectCategoryError('');
     setAddingProjectCategory(false);
@@ -662,11 +665,10 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       if (categoryGroups.length) { onNotice(`“${name}”仍被离线项目记录使用，请恢复或清理这些项目后再删除`, 5000); return; }
     }
     if (!await appDialog.confirm({ title: `删除“${name}”分类吗？`, message: '只会删除这个自定义分类，不会删除任何项目文件。', confirmLabel: '删除分类', tone: 'danger' })) return;
-    commitSettings({
-      ...draft,
-      customProjectCategories: draft.customProjectCategories.filter(item => item !== name),
-      projectCategoryOrder: projectCategories.filter(item => item !== name),
-    });
+    patchSettings(current => ({
+      customProjectCategories: current.customProjectCategories.filter(item => item !== name),
+      projectCategoryOrder: normalizeProjectCategoryOrder(current.projectCategoryOrder, current.customProjectCategories).filter(item => item !== name),
+    }));
   };
   const reorderProjectCategory = (source: string, target: string) => {
     if (!source || source === target) return;
@@ -767,8 +769,8 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     } catch (error) { onNotice(`选择备份位置失败：${error instanceof Error ? error.message : String(error)}`, 5000); return false; }
   };
   const enableBackup = async () => {
-    if (draft.backup.targetPath) {
-      update('backup', { ...draft.backup, enabled: true });
+    if (draftRef.current.backup.targetPath) {
+      patchSettings(current => ({ backup: { ...current.backup, enabled: true } }));
       return;
     }
     const targetType = await appDialog.choice({
@@ -778,18 +780,18 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
         { value: 'local', label: '本地磁盘或外接硬盘' },
         { value: 'nas', label: 'NAS 网络存储' },
       ],
-      defaultValue: draft.backup.targetType || 'local',
+      defaultValue: draftRef.current.backup.targetType || 'local',
     });
     if (targetType === 'local') await chooseBackupTarget('');
     else if (targetType === 'nas') {
-      commitSettings({ ...draft, backup: { ...draft.backup, enabled: false, targetType: 'nas', targetPath: '' } });
+      patchSettings(current => ({ backup: { ...current.backup, enabled: false, targetType: 'nas', targetPath: '' } }));
       setBackupTargetSetup('nas');
       setNasPath('');
     }
   };
   const switchBackupTargetType = async (targetType: AppConfig['backup']['targetType']) => {
     if (targetType === activeBackupTargetType) return;
-    if (draft.backup.targetPath && !await appDialog.confirm({
+    if (draftRef.current.backup.targetPath && !await appDialog.confirm({
       title: '更换备份方式？',
       message: '当前备份目标将停止使用，但原位置中的备份不会被删除。完成新目标配置后，备份功能会重新开启。',
       confirmLabel: '更换备份方式',
@@ -798,8 +800,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       await chooseBackupTarget('');
       return;
     }
-    const next = { ...draft, backup: { ...draft.backup, enabled: false, targetType: 'nas' as const, targetPath: '' } };
-    commitSettings(next);
+    patchSettings(current => ({ backup: { ...current.backup, enabled: false, targetType: 'nas' as const, targetPath: '' } }));
     setBackupTargetSetup('nas');
     setNasPath('');
   };
@@ -918,7 +919,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   };
   const videoPlaybackSettings = draft.videoPlayback;
   const inspirationLibrarySettings = draft.inspirationLibrary;
-  const updateVideoPlaybackSettings = (next: AppConfig['videoPlayback']) => commitSettings({ ...draft, videoPlayback: next });
+  const updateVideoPlaybackSettings = (next: AppConfig['videoPlayback']) => update('videoPlayback', next);
   const shortcutBindings = normalizeVideoShortcutBindings(videoPlaybackSettings.shortcuts);
   const shortcutConflicts = videoShortcutConflicts(shortcutBindings);
   const captureShortcut = (actionId: VideoActionId, event: React.KeyboardEvent<HTMLButtonElement>) => {
@@ -935,8 +936,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     updateVideoPlaybackSettings({ ...videoPlaybackSettings, shortcuts: next });
     setRecordingShortcutAction('');
   };
-  const updateInspirationLibrarySettings = (next: AppConfig['inspirationLibrary']) => commitSettings({ ...draft, inspirationLibrary: next });
-  const updateInspirationLibraryRoot = (rootPath: string) => updateInspirationLibrarySettings({ ...inspirationLibrarySettings, rootPath });
+  const updateInspirationLibraryRoot = (rootPath: string) => patchSettings(current => ({ inspirationLibrary: { ...current.inspirationLibrary, rootPath } }));
   const visibleBackupSnapshots = backupProjectFocus ? backupStatus.snapshots.filter(snapshot => snapshot.projectItems?.some(project => project.name === backupProjectFocus.name)) : backupStatus.snapshots;
   const restoreDefaults = async () => {
     if (!await appDialog.confirm({
@@ -945,7 +945,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       confirmLabel: '恢复默认设置',
     })) return;
     const defaults = await getDefaultSettings();
-    commitSettings({ ...defaults, workspacePath: draft.workspacePath.trim() || defaults.workspacePath, workspacePaths: normalizeWorkspacePaths(draft.workspacePath, draft.workspacePaths), componentSettings: draft.componentSettings, componentSettingsRevisions: draft.componentSettingsRevisions });
+    patchSettings(current => ({ ...defaults, workspacePath: current.workspacePath.trim() || defaults.workspacePath, workspacePaths: normalizeWorkspacePaths(current.workspacePath, current.workspacePaths), componentSettings: current.componentSettings, componentSettingsRevisions: current.componentSettingsRevisions }));
   };
   return <section className="min-h-full w-full bg-slate-50"><div className="mx-auto w-full max-w-6xl space-y-10 px-8 py-10 lg:px-12">
     <h2 className="text-2xl font-bold text-slate-900">{SETTINGS_SECTION_LABELS[activeSection]}</h2>
@@ -996,7 +996,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
         <StorageVolumeOverview sourceSignature={[...normalizeWorkspacePaths(draft.workspacePath, draft.workspacePaths), inspirationLibrarySettings.rootPath, draft.archive.targetPath, draft.backup.targetPath, draft.mediaCache.directory].join('\u0000')}/>
       </SettingsPageGroup>
       <SettingsPageGroup title="工作目录">
-      <SettingsRow title="项目工作目录" description="可读取多个磁盘。默认目录用于新建和导入项目；已有项目使用其所在磁盘。" align="start"><WorkspaceFoldersPicker primary={draft.workspacePath} values={draft.workspacePaths} onChange={(workspacePath, workspacePaths) => commitSettings({ ...draft, workspacePath, workspacePaths })}/></SettingsRow>
+      <SettingsRow title="项目工作目录" description="可读取多个磁盘。默认目录用于新建和导入项目；已有项目使用其所在磁盘。" align="start"><WorkspaceFoldersPicker primary={draft.workspacePath} values={draft.workspacePaths} onChange={(workspacePath, workspacePaths) => patchSettings(() => ({ workspacePath, workspacePaths }))}/></SettingsRow>
       <SettingsRow title="灵感库目录" description="选择后立即保存，并纳入磁盘占用统计。"><WorkspaceFolderPicker value={inspirationLibrarySettings.rootPath} onChange={rootPath => void updateInspirationLibraryRoot(rootPath)}/></SettingsRow>
       <SettingsRow title="使用独立项目归档盘" description={draft.archive.enabled ? (archiveStatus.state === 'connected' ? '归档盘已连接。' : archiveStatus.state === 'offline' ? '归档盘当前离线。' : '请选择归档盘。') : '将“已归档”项目迁移到其他存储盘。'}><SettingsToggle label="使用独立项目归档盘" checked={draft.archive.enabled} onChange={checked => { if (checked && !draft.archive.targetPath) void chooseArchiveTarget(); else update('archive', { ...draft.archive, enabled: checked }); }}/></SettingsRow>
       <SettingsRow title="项目归档盘位置" description={archiveStatus.freeBytes !== undefined ? `剩余 ${formatStorageSize(archiveStatus.freeBytes)} / ${formatStorageSize(archiveStatus.totalBytes)}` : '选择用于保存已归档项目的位置。'}><fieldset disabled={!draft.archive.enabled} className="flex min-w-0 gap-2 disabled:opacity-50"><input readOnly value={draft.archive.targetPath} placeholder="尚未选择归档盘" className="form-input min-w-0 flex-1"/><button type="button" onClick={() => void chooseArchiveTarget()} className="dialog-secondary shrink-0">选择</button><button type="button" onClick={() => void window.electronAPI.openArchiveTarget()} disabled={!draft.archive.targetPath} className="dialog-secondary shrink-0 disabled:opacity-45">打开</button></fieldset></SettingsRow>
@@ -1031,9 +1031,11 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       </SettingsPageGroup>
     </>}
     {activeSection === 'components' && <ComponentSettings components={components} installPath={componentInstallPath} loading={componentsLoading} onRefresh={onRefreshComponents} onComponentsChanged={onComponentsChanged} onComponentDataCleared={componentId => {
-      const componentSettings = { ...draft.componentSettings };
-      delete componentSettings[componentId];
-      commitSettings({ ...draft, componentSettings });
+      patchSettings(current => {
+        const componentSettings = { ...current.componentSettings };
+        delete componentSettings[componentId];
+        return { componentSettings };
+      });
     }} onNotice={onNotice}/>}
     {activeSection === 'video' && <>
     <SettingsPageGroup title="视频浏览">
@@ -1070,7 +1072,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="已记录的 SD 卡设备" description="为每张卡分别设置导入类型和视频处理行为；例如 G 盘可以转码，其他卡可以不处理。" align="start"><SdDriveHistorySettings value={draft.smartImport} videoToolsAvailable={videoToolsAvailable} videoToolsUnavailableMessage={videoToolsUnavailableMessage} onChange={smartImport => update('smartImport', smartImport)} onOpenVideoPanel={setImportVideoPanel}/></SettingsRow>
     </SettingsPageGroup>
     {videoToolsAvailable && importVideoPanel === 'split' && <SettingsPanel title="视频切割设置" onClose={() => setImportVideoPanel(null)}><VideoSplitView embedded settingsOnly/></SettingsPanel>}
-    {videoToolsAvailable && importVideoPanel === 'transcode' && <SettingsPanel title="视频转码设置" onClose={() => setImportVideoPanel(null)}><VideoTranscodeView embedded settingsOnly initialSettings={draft.videoTools.transcode} onSettingsChange={transcode => update('videoTools', { ...draft.videoTools, transcode })}/></SettingsPanel>}
+    {videoToolsAvailable && importVideoPanel === 'transcode' && <SettingsPanel title="视频转码设置" onClose={() => setImportVideoPanel(null)}><VideoTranscodeView embedded settingsOnly initialSettings={draft.videoTools.transcode} onSettingsChange={transcode => patchSettings(current => ({ videoTools: { ...current.videoTools, transcode } }))}/></SettingsPanel>}
     </>}
     {activeSection === 'about' && <AboutSettings/>}
     {activeSection === 'feedback' && <FeedbackSettings onNotice={onNotice}/>}

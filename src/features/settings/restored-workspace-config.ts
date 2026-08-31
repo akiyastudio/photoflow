@@ -8,6 +8,8 @@ type SettingsSaveCoordinatorOptions<T> = {
   onFailure: (value: T, error: Error) => void;
 };
 
+export const patchSettingsDraft = <T extends object>(current: T, patch: (current: T) => Partial<T>): T => ({ ...current, ...patch(current) });
+
 export const createSettingsSaveCoordinator = <T,>({ initial, normalize, applyDraft, save, onFailure }: SettingsSaveCoordinatorOptions<T>) => {
   let tail = Promise.resolve();
   let persisted = initial;

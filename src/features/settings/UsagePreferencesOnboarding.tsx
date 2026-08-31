@@ -1,4 +1,4 @@
-import { useState, type ReactNode } from 'react';
+import { useRef, useState, type ReactNode } from 'react';
 import { ArrowRight, Check, Heart, MemoryStick, MousePointerClick, Star } from 'lucide-react';
 import type { AppConfig } from '../../types';
 
@@ -43,6 +43,7 @@ export const UsagePreferencesOnboarding = ({ config, onSave }: { config: AppConf
   const [limitedDateFilter, setLimitedDateFilter] = useState<LimitedDateFilter | null>(null);
   const [ratingHabit, setRatingHabit] = useState<RatingHabit | null>(null);
   const [saving, setSaving] = useState(false);
+  const savingRef = useRef(false);
   const [error, setError] = useState('');
   const openModeComplete = Boolean(openMode);
   const sdHabitComplete = Boolean(sdHabit && (sdHabit === 'clear-after-shoot' || limitedDateFilter));
@@ -51,7 +52,8 @@ export const UsagePreferencesOnboarding = ({ config, onSave }: { config: AppConf
   const complete = Boolean(openMode && sdHabit && ratingHabit && (sdHabit === 'clear-after-shoot' || limitedDateFilter));
 
   const save = async () => {
-    if (!complete || !openMode || !sdHabit || !ratingHabit) return;
+    if (!complete || !openMode || !sdHabit || !ratingHabit || savingRef.current) return;
+    savingRef.current = true;
     setSaving(true);
     setError('');
     const keepMany = sdHabit === 'keep-many';
@@ -72,6 +74,7 @@ export const UsagePreferencesOnboarding = ({ config, onSave }: { config: AppConf
     } catch (reason) {
       setError(`设置没有保存成功，请重试。${reason instanceof Error && reason.message ? `（${reason.message}）` : ''}`);
     } finally {
+      savingRef.current = false;
       setSaving(false);
     }
   };

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { createSettingsSaveCoordinator, restoredWorkspaceConfig } from '../src/features/settings/restored-workspace-config.ts';
+import { createSettingsSaveCoordinator, patchSettingsDraft, restoredWorkspaceConfig } from '../src/features/settings/restored-workspace-config.ts';
 
 const snapshot = { theme: 'light', defaultFolderSort: 'name', workspacePath: 'C:/old', workspacePaths: ['C:/old'], backup: { enabled: true, targetType: 'local', targetPath: 'E:/backup' }, componentSettings: { fixture: { enabled: true } }, componentSettingsRevisions: { fixture: 4 } };
 const restored = restoredWorkspaceConfig(snapshot, 'D:/restored');
@@ -57,5 +57,19 @@ assert.equal(drafts.at(-1), 7, 'a rejected save cannot discard or overwrite its 
 assert.equal(await coordinator.enqueue({ value: 8 }), false);
 assert.equal(drafts.at(-1), 7, 'a latest failed draft rolls back to the last persisted configuration');
 assert.equal(saveCalls.at(-1), 7, 'rollback also reconciles an optimistic parent configuration');
+
+let delayedDraft = { theme: 'light', customProjectCategories: ['client'], projectCategoryOrder: ['client'] };
+const delayedCompletion = deferred();
+const removeAfterDelay = (async () => {
+  await delayedCompletion.promise;
+  delayedDraft = patchSettingsDraft(delayedDraft, current => ({
+    customProjectCategories: current.customProjectCategories.filter(name => name !== 'client'),
+    projectCategoryOrder: current.projectCategoryOrder.filter(name => name !== 'client'),
+  }));
+})();
+delayedDraft = patchSettingsDraft(delayedDraft, () => ({ theme: 'dark' }));
+delayedCompletion.resolve(); await removeAfterDelay;
+assert.equal(delayedDraft.theme, 'dark', 'a delayed field patch preserves another setting changed while it was waiting');
+assert.deepEqual(delayedDraft.customProjectCategories, []);
 console.log('Settings restore canonical model tests passed');
 
