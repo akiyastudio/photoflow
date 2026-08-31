@@ -65,6 +65,11 @@ const compareEdges = (left: VersionTreeLayoutEdge, right: VersionTreeLayoutEdge)
   || left.parentId.localeCompare(right.parentId)
   || left.childId.localeCompare(right.childId)
   || String(left.id || '').localeCompare(String(right.id || ''));
+const appendIndex = <T,>(index: Map<string, T[]>, key: string, value: T) => {
+  const values = index.get(key);
+  if (values) values.push(value);
+  else index.set(key, [value]);
+};
 
 const layoutVersionTreeDag = (input: VersionTreeLayoutInput): VersionTreeLayoutResult => {
   const nodeWidth = Math.max(1, input.nodeWidth);
@@ -97,17 +102,15 @@ const layoutVersionTreeDag = (input: VersionTreeLayoutInput): VersionTreeLayoutR
     if (edgeKeys.has(key) || reaches(edge.childId, edge.parentId)) continue;
     edgeKeys.add(key);
     acceptedEdges.push(edge);
-    const children = adjacency.get(edge.parentId) || [];
-    children.push(edge.childId);
-    adjacency.set(edge.parentId, children);
+    appendIndex(adjacency, edge.parentId, edge.childId);
   }
 
   const incoming = new Map<string, VersionTreeLayoutEdge[]>();
   const outgoing = new Map<string, VersionTreeLayoutEdge[]>();
   const indegree = new Map(stableNodes.map(node => [node.id, 0]));
   for (const edge of acceptedEdges) {
-    incoming.set(edge.childId, [...(incoming.get(edge.childId) || []), edge]);
-    outgoing.set(edge.parentId, [...(outgoing.get(edge.parentId) || []), edge]);
+    appendIndex(incoming, edge.childId, edge);
+    appendIndex(outgoing, edge.parentId, edge);
     indegree.set(edge.childId, (indegree.get(edge.childId) || 0) + 1);
   }
   for (const edges of incoming.values()) edges.sort(compareEdges);
@@ -143,8 +146,8 @@ const layoutVersionTreeDag = (input: VersionTreeLayoutInput): VersionTreeLayoutR
   // edge between them.
   const undirected = new Map<string, string[]>();
   for (const edge of acceptedEdges) {
-    undirected.set(edge.parentId, [...(undirected.get(edge.parentId) || []), edge.childId]);
-    undirected.set(edge.childId, [...(undirected.get(edge.childId) || []), edge.parentId]);
+    appendIndex(undirected, edge.parentId, edge.childId);
+    appendIndex(undirected, edge.childId, edge.parentId);
   }
   const componentById = new Map<string, number>();
   const componentIds: string[][] = [];

@@ -1,5 +1,14 @@
 import type { BackgroundTask, ProgressFolder, VersionGraphEdge } from '../../types';
 
+const VERSIONING_VIDEO_EXTENSIONS = new Set(['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv', 'mpeg', 'mpg', 'mts', 'm2ts', 'crm']);
+const VERSIONING_RAW_EXTENSIONS = new Set(['cr2', 'cr3', 'nef', 'arw', 'raf', 'orf', 'rw2', 'dng', 'rwl', '3fr', 'fff', 'iiq', 'pef', 'srw']);
+export const versioningMediaKind = (filePath: string): 'image' | 'raw' | 'video' => {
+  const extension = filePath.split('.').pop()?.toLocaleLowerCase() || '';
+  if (VERSIONING_VIDEO_EXTENSIONS.has(extension)) return 'video';
+  if (VERSIONING_RAW_EXTENSIONS.has(extension)) return 'raw';
+  return 'image';
+};
+
 export type VersionPanelKind = 'create' | 'create-next' | 'import' | 'modify' | 'confirm';
 export type VersionPanelState = 'ready' | 'move_confirm' | 'processing' | 'waiting_confirmation' | 'loading' | 'committing' | 'result' | 'failure';
 export type VersionRelationKind = 'main' | 'auxiliary';

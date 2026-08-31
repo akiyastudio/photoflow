@@ -23,8 +23,11 @@ export const LegacySelectionRepairNotice = ({ repairs, folders, busyProgressIds 
       const suggestedSourceIds = [...new Set(repair.candidateIds.flatMap(id => {
         const candidate = folderById.get(id);
         return candidate?.nodeRole === 'selection' && candidate.parentProgressId ? [candidate.parentProgressId] : [];
-      }))];
-      const sourceProgressId = selectedSources[repair.progressId] || (suggestedSourceIds.length === 1 ? suggestedSourceIds[0] : '');
+      }))].filter(id => sourceCandidates.some(folder => folder.id === id));
+      const legalSourceIds = new Set(sourceCandidates.map(folder => folder.id));
+      const selectedSourceId = selectedSources[repair.progressId];
+      const suggestedSourceId = suggestedSourceIds.length === 1 ? suggestedSourceIds[0] : '';
+      const sourceProgressId = selectedSourceId && legalSourceIds.has(selectedSourceId) ? selectedSourceId : suggestedSourceId;
       const busy = busyIds.has(repair.progressId);
       const reason = repair.reason === 'selection_already_exists'
         ? `已经存在现代选片节点，同时还发现旧“${repair.legacyName}”；不能静默覆盖或删除。`

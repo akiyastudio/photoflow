@@ -1,6 +1,7 @@
 import type { ProgressTrackingItem, ProgressTrackingSession } from '../../types';
 
 export type TrackingConfirmationCategory = 'recognized' | 'accepted' | 'pending' | 'missing';
+export const TRACKING_CONFIRMATION_PAGE_SIZE = 200;
 
 export const trackingConfirmationCategory = (item: ProgressTrackingItem): TrackingConfirmationCategory => {
   if (item.status === 'accepted' || item.status === 'rejected') return 'accepted';
@@ -94,7 +95,7 @@ export const applyTrackingItemDecision = (
 export const canCommitTrackingSession = (items: readonly ProgressTrackingItem[]) =>
   !items.some(item => unresolvedTrackingStatus(item.status));
 
-const joinTrackingPath = (folderPath: string, name?: string) => name
+const joinTrackingPath = (folderPath: string, name?: string) => folderPath && name
   ? `${folderPath.replace(/[\\/]+$/, '')}${folderPath.includes('\\') ? '\\' : '/'}${name}`
   : '';
 

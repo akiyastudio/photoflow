@@ -53,12 +53,17 @@ export const ImageComparisonView = ({ left, right, mode, onModeChange, swapped =
     setZoom(1);
     setRotation(0);
     setPan({ x: 0, y: 0 });
-    if (!onSwappedChange) setInternalSwapped(false);
+    if (onSwappedChange) onSwappedChange(false);
+    else setInternalSwapped(false);
   };
 
   useEffect(() => {
     resetView();
   }, [comparisonKey]);
+
+  useEffect(() => {
+    if (zoom === 1) setPan(current => current.x || current.y ? { x: 0, y: 0 } : current);
+  }, [zoom]);
 
   useEffect(() => {
     setBlinkRight(false);
@@ -108,9 +113,9 @@ export const ImageComparisonView = ({ left, right, mode, onModeChange, swapped =
       </div> : <>
         <div className="absolute inset-0 overflow-hidden bg-black">{renderContent(ordered[0])}{renderLabel(ordered[0], 'A')}</div>
         {mode === 'split' && !unavailable && <div className="absolute inset-0 overflow-hidden" style={{ clipPath: `inset(0 0 0 ${split}%)` }}>{renderContent(ordered[1])}{renderLabel(ordered[1], 'B')}</div>}
-        {mode === 'overlay' && !unavailable && <div className="absolute inset-0 overflow-hidden" style={{ opacity: opacity / 100 }}>{renderContent(ordered[1])}{renderLabel(ordered[1], 'B')}</div>}
+        {mode === 'overlay' && !unavailable && <><div className="absolute inset-0 overflow-hidden" style={{ opacity: opacity / 100 }}>{renderContent(ordered[1])}</div>{renderLabel(ordered[1], 'B')}</>}
         {mode === 'blink' && !unavailable && <div className="absolute inset-0 overflow-hidden transition-none" style={{ visibility: blinkRight ? 'visible' : 'hidden' }}>{renderContent(ordered[1])}{renderLabel(ordered[1], 'B')}</div>}
-        {mode === 'difference' && !unavailable && <div className="absolute inset-0 overflow-hidden mix-blend-difference">{renderContent(ordered[1])}{renderLabel(ordered[1], 'B')}</div>}
+        {mode === 'difference' && !unavailable && <><div className="absolute inset-0 overflow-hidden mix-blend-difference">{renderContent(ordered[1])}</div>{renderLabel(ordered[1], 'B')}</>}
         {mode === 'split' && !unavailable && <button
           type="button"
           role="slider"

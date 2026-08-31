@@ -4,8 +4,35 @@ const { getProtectedProjectFolderRegistry } = require('../services/protected-pro
 const registerVersionIpc = context => {
   const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
   const protectedProjectFolders = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
+  const pendingRelocateDecisions = new Map();
+  const RELOCATE_DECISION_TTL_MS = 5 * 60 * 1000;
+  const RELOCATE_DECISION_LIMIT = 256;
   const listRatedProjectMedia = (projectPath, workspaceRoot, projectName) => mediaRatingService.listProject(projectPath, { workspaceRoot, projectName });
   const validProgressFolderName = value => Boolean(value && path.basename(value) === value && !/[<>:"/\\|?*\x00-\x1f]/.test(value) && !/[. ]$/.test(value));
+  const validOpaqueId = value => Boolean(value && value.length <= 128 && !/[\x00-\x1f]/.test(value));
+  const compatibleBoolean = (value, fieldName) => {
+    if (value == null || value === false || value === 0) return false;
+    if (value === true || value === 1) return true;
+    throw new Error(`${fieldName} 必须是布尔值`);
+  };
+  const normalizeProjectRelativePath = value => {
+    const normalized = String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+    if (!normalized || normalized.length > 1024 || path.isAbsolute(normalized)
+      || normalized.split('/').some(part => !part || part === '.' || part === '..')) {
+      throw new Error('项目相对路径无效');
+    }
+    return normalized;
+  };
+  const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value);
+  const relocateDecisionKey = (workspaceRoot, versionId) => `${pathKey(workspaceRoot)}\0${String(versionId).toLowerCase()}`;
+  const pruneRelocateDecisions = now => {
+    for (const [key, decision] of pendingRelocateDecisions) {
+      if (decision.expiresAt <= now) pendingRelocateDecisions.delete(key);
+    }
+    while (pendingRelocateDecisions.size >= RELOCATE_DECISION_LIMIT) {
+      pendingRelocateDecisions.delete(pendingRelocateDecisions.keys().next().value);
+    }
+  };
   const isValidProgressParent = (folder, mediaKind) => Boolean(folder && !folder.folderMissing
     && folder.mediaKind === mediaKind
     && (folder.nodeRole === 'original' && !folder.artifactKind
@@ -123,6 +150,8 @@ const registerVersionIpc = context => {
 
   ipcMain.handle('workspace-final-version-export', async (_event, workspacePath, status, projectName, request = {}) => {
     let folderPath = '';
+    let createdDirectory = false;
+    let registrationCommitted = false;
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
@@ -145,25 +174,55 @@ const registerVersionIpc = context => {
       if (!folderPath.startsWith(projectPath + path.sep)) throw new Error('喜爱图片进度文件夹路径无效');
       if (fs.existsSync(folderPath)) throw new Error(`文件夹“${displayName}”已经存在`);
 
-      await fs.promises.mkdir(folderPath);
-      const reserved = new Set();
-      const copiedFiles = [];
-      for (const entry of ratedEntries) {
-        const sourcePath = await mediaService.authorizeInput(entry.path);
-        const destinationPath = uniqueDestination(folderPath, path.basename(sourcePath), reserved);
-        await copyFileAtomic(sourcePath, destinationPath);
-        copiedFiles.push(destinationPath);
-      }
-      const registered = await versionService.registerProgress(workspaceRoot, {
-        projectName,
-        mediaKind: 'image',
-        versionKey,
-        parentProgressId: explicitParent.id,
-        displayName,
-        folderPath,
-        trackingEnabled: false,
-        sourceMetadata: { category: 'favorite-export', role: 'output', displayName },
-      });
+      const executeExport = async () => {
+        try {
+          await fs.promises.mkdir(folderPath);
+          createdDirectory = true;
+          const reserved = new Set();
+          const copiedFiles = [];
+          for (const entry of ratedEntries) {
+            const sourcePath = await mediaService.authorizeInput(entry.path);
+            const destinationPath = uniqueDestination(folderPath, path.basename(sourcePath), reserved);
+            await copyFileAtomic(sourcePath, destinationPath);
+            copiedFiles.push(destinationPath);
+          }
+          const registered = await versionService.registerProgress(workspaceRoot, {
+            projectName,
+            mediaKind: 'image',
+            versionKey,
+            parentProgressId: explicitParent.id,
+            displayName,
+            folderPath,
+            trackingEnabled: false,
+            sourceMetadata: { category: 'favorite-export', role: 'output', displayName },
+          });
+          if (registered?.success) registrationCommitted = true;
+          if (!registered?.success || !registered.progressFolder) throw new Error(registered?.error || '无法登记喜爱图片进度');
+          return { copiedFiles, registered };
+        } catch (error) {
+          if (createdDirectory && !registrationCommitted && fs.existsSync(folderPath)) {
+            await fs.promises.rm(folderPath, { recursive: true, force: true }).catch(() => undefined);
+            createdDirectory = false;
+          }
+          throw error;
+        }
+      };
+      const exportResult = backgroundTasks?.run
+        ? await backgroundTasks.run({
+          type: 'final-version-export',
+          title: '导出喜爱图片',
+          notificationPolicy: 'progress-toast',
+          cancellable: false,
+          resources: [{ path: folderPath, access: 'write' }, { path: `photoflow-workspace-database/${workspaceRoot}`, access: 'write' }],
+          concurrencyGroup: 'disk-io',
+          concurrencyLimit: 3,
+          concurrencyWriteLimit: 2,
+          resourceAccess: 'write',
+          metadata: { workspaceRoot, projectName, folderPath },
+        }, executeExport)
+        : { result: await executeExport() };
+      const { copiedFiles, registered } = exportResult.result || {};
+      if (!copiedFiles || !registered) throw new Error('喜爱图片导出没有返回结果');
       writeLog('info', 'Final versions exported to progress folder', { projectName, displayName, count: copiedFiles.length });
       return {
         success: true,
@@ -179,7 +238,7 @@ const registerVersionIpc = context => {
         },
       };
     } catch (error) {
-      if (folderPath && fs.existsSync(folderPath)) await fs.promises.rm(folderPath, { recursive: true, force: true }).catch(() => undefined);
+      if (createdDirectory && !registrationCommitted && folderPath && fs.existsSync(folderPath)) await fs.promises.rm(folderPath, { recursive: true, force: true }).catch(() => undefined);
       writeLog('error', 'Unable to export final versions', { projectName, error: error.message || String(error) });
       return { success: false, count: 0, error: error.message || String(error) };
     }
@@ -474,7 +533,7 @@ const registerVersionIpc = context => {
     const sourceProgressId = String(request?.sourceProgressId || '');
     const targetProgressId = String(request?.targetProgressId || '');
     const edgeKind = String(request?.edgeKind || '');
-    if (!projectId || !sourceProgressId || !targetProgressId
+    if (!validOpaqueId(projectId) || !validOpaqueId(sourceProgressId) || !validOpaqueId(targetProgressId)
       || !['media_companion', 'derived_preview', 'derived_transcode', 'workflow_input'].includes(edgeKind)) {
       throw new Error('version_graph_edge_payload_invalid: 项目、节点或关系类型无效');
     }
@@ -500,7 +559,7 @@ const registerVersionIpc = context => {
   ipcMain.handle('workspace-version-graph-edge-replace-source', async (_event, workspacePath, request = {}) => {
     try {
       const newSourceProgressId = String(request?.newSourceProgressId || '');
-      if (!newSourceProgressId) throw new Error('version_graph_edge_payload_invalid: 新来源节点无效');
+      if (!validOpaqueId(newSourceProgressId)) throw new Error('version_graph_edge_payload_invalid: 新来源节点无效');
       return await mutateVersionGraphEdge(workspacePath, request, (root, payload) => versionService.replaceVersionGraphEdgeSource(root, {
         ...payload,
         newSourceProgressId,
@@ -573,7 +632,9 @@ const registerVersionIpc = context => {
       const listed = await versionService.listProgress(workspaceRoot, projectName, true);
       const progressId = String(request.progressId || '');
       const sourceProgressId = String(request.sourceProgressId || '');
-      const action = request.action === 'keep-independent' ? 'keep-independent' : 'connect';
+      const requestedAction = request.action == null || request.action === '' ? 'connect' : String(request.action);
+      if (!['connect', 'keep-independent'].includes(requestedAction)) throw new Error('legacy_selection_repair_action_invalid: 修复操作无效');
+      const action = requestedAction;
       const projectNodeIds = new Set((listed.progressFolders || []).map(folder => folder.id));
       const repairIds = new Set((listed.legacySelectionRelationRepairs || []).map(repair => repair.progressId));
       if (!repairIds.has(progressId) || !projectNodeIds.has(progressId) || action === 'connect' && !projectNodeIds.has(sourceProgressId)) {
@@ -664,20 +725,24 @@ const registerVersionIpc = context => {
     let oldPath = '';
     let newPath = '';
     try {
+      if (!request || typeof request !== 'object'
+        || Object.keys(request).some(key => !['progressId', 'expectedFolderId', 'expectedRelativePath', 'newName'].includes(key))) {
+        throw new Error('progress_folder_rename_payload_invalid: 请求字段无效');
+      }
       workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       const listed = await versionService.listProgress(workspaceRoot, projectName, true);
       const current = (listed.progressFolders || []).find(progress => progress.id === String(request.progressId || ''));
       if (!current || current.nodeRole !== 'progress') throw new Error('progress_folder_rename_role_invalid: 只能重命名已登记的 progress 目录');
-      const expectedRelativePath = String(request.expectedRelativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+      const expectedRelativePath = normalizeProjectRelativePath(request.expectedRelativePath);
       const externalRoute = String(current.externalLinkRelativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
       const currentRelativePath = externalRoute || path.relative(projectPath, path.resolve(current.folderPath)).replace(/\\/g, '/');
       if (!request.expectedFolderId || request.expectedFolderId !== current.folderId) {
         throw new Error('progress_folder_identity_mismatch: 当前目录已变化，请刷新后重试');
       }
       if (expectedRelativePath !== currentRelativePath && externalRoute) {
-        let repeatedFileName = String(request.newName || '').trim();
+        let repeatedFileName = String(request.newName || '');
         if (path.extname(repeatedFileName).toLocaleLowerCase() !== '.lnk') repeatedFileName += '.lnk';
         const expectedParent = path.posix.dirname(expectedRelativePath);
         const repeatedRoute = [expectedParent === '.' ? '' : expectedParent, repeatedFileName].filter(Boolean).join('/');
@@ -694,7 +759,7 @@ const registerVersionIpc = context => {
         if (!externalRoute.toLocaleLowerCase().endsWith('.lnk')) throw new Error('external_progress_rename_unsupported: 只能重命名项目内的外链入口');
         const resolution = projectVirtualPaths.resolve(projectPath, externalRoute, { externalRootMode: 'link' });
         if (!resolution.isExternalLinkRoot || !resolution.shortcutPath) throw new Error('external_progress_rename_invalid: 外链入口当前不可用');
-        let fileName = String(request.newName || '').trim();
+        let fileName = String(request.newName || '');
         if (path.extname(fileName).toLocaleLowerCase() !== '.lnk') fileName += '.lnk';
         if (!fileName || path.basename(fileName) !== fileName || /[<>:"/\\|?*\x00-\x1f]/.test(fileName) || /[. ]$/.test(fileName)) throw new Error('external_progress_name_invalid: 外链名称无效');
         const oldRoute = externalRoute;
@@ -722,7 +787,10 @@ const registerVersionIpc = context => {
         return { ...result, ...(warnings.length ? { warnings } : {}), folder: { name: fileName, path: newPath, relativePath: newRoute, updatedAt: Date.now() } };
       }
       oldPath = path.resolve(current.folderPath);
-      newPath = path.resolve(path.dirname(oldPath), String(request.newName || ''));
+      const newName = String(request.newName || '');
+      if (!validProgressFolderName(newName)) throw new Error('progress_folder_name_invalid: 进度名称无效');
+      newPath = path.resolve(path.dirname(oldPath), newName);
+      if (path.dirname(newPath) !== path.dirname(oldPath)) throw new Error('progress_folder_name_invalid: 进度名称无效');
       if (protectedProjectFolders.isProtectedProjectFolderName(request.newName)) throw new Error('progress_folder_name_reserved: 该名称保留给固定工作流使用');
       suppressWorkspaceWatchPath(oldPath);
       suppressWorkspaceWatchPath(newPath);
@@ -733,7 +801,7 @@ const registerVersionIpc = context => {
         progressId: current.id,
         expectedFolderId: request.expectedFolderId,
         expectedRelativePath,
-        newName: request.newName,
+        newName,
         reservedProjectFolderNames: protectedProjectFolders.progressRelocationReservedNames(),
         mutationToken,
       });
@@ -803,21 +871,34 @@ const registerVersionIpc = context => {
   ipcMain.handle('workspace-version-batch-commit', async (_event, workspacePath, status, projectName, request = {}) => {
     const copiedMissingPaths = [];
     try {
+      if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('版本批次请求无效');
+      const renameSources = compatibleBoolean(request.renameSources, '版本批次字段 renameSources');
+      const reconcileExisting = compatibleBoolean(request.reconcileExisting, '版本批次字段 reconcileExisting');
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
+      const realProjectPath = fs.realpathSync(projectPath);
       const resolveBatchFolder = value => {
         const folderPath = path.resolve(String(value || ''));
         const relative = path.relative(projectPath, folderPath);
         if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('批次必须选择项目内的两个不同子文件夹');
         if (!fs.existsSync(folderPath) || !fs.statSync(folderPath).isDirectory()) throw new Error('批次文件夹不存在');
-        return folderPath;
+        const realFolderPath = fs.realpathSync(folderPath);
+        const realRelative = path.relative(realProjectPath, realFolderPath);
+        if (!realRelative || realRelative.startsWith('..') || path.isAbsolute(realRelative)) throw new Error('批次文件夹的真实路径超出项目范围');
+        return { folderPath, realFolderPath };
       };
-      const folderA = resolveBatchFolder(request.folderA);
-      const folderB = resolveBatchFolder(request.folderB);
+      const resolvedFolderA = resolveBatchFolder(request.folderA);
+      const resolvedFolderB = resolveBatchFolder(request.folderB);
+      const folderA = resolvedFolderA.folderPath;
+      const folderB = resolvedFolderB.folderPath;
       if (folderA.toLocaleLowerCase() === folderB.toLocaleLowerCase()) throw new Error('对照批次的来源和目标不能是同一个文件夹');
+      if (pathKey(resolvedFolderA.realFolderPath) === pathKey(resolvedFolderB.realFolderPath)) throw new Error('对照批次的来源和目标不能指向同一个物理文件夹');
       const importKey = await buildVersionBatchImportKey(folderA, folderB);
-      const matches = (Array.isArray(request.matches) ? request.matches : []).slice(0, 20000).map(match => {
+      if (request.matches !== undefined && !Array.isArray(request.matches)) throw new Error('匹配结果必须是数组');
+      if ((request.matches || []).length > 20000) throw new Error('匹配结果数量过多');
+      const matches = (request.matches || []).map(match => {
+        if (!match || typeof match !== 'object' || Array.isArray(match)) throw new Error('匹配结果格式无效');
         const reference = String(match.reference || '');
         const source = String(match.source || '');
         const target = String(match.target || source);
@@ -832,7 +913,9 @@ const registerVersionIpc = context => {
       });
       const copyMissingErrors = [];
       const reservedDestinations = new Set();
-      const missingReferences = [...new Set((Array.isArray(request.copyMissingReferences) ? request.copyMissingReferences : []).slice(0, 20000).map(value => String(value || '')))];
+      if (request.copyMissingReferences !== undefined && !Array.isArray(request.copyMissingReferences)) throw new Error('补齐文件列表必须是数组');
+      if ((request.copyMissingReferences || []).length > 20000) throw new Error('补齐文件数量过多');
+      const missingReferences = [...new Set((request.copyMissingReferences || []).map(value => String(value || '')))];
       for (const reference of missingReferences) {
         try {
           if (!reference || path.basename(reference) !== reference) throw new Error('无效文件名');
@@ -848,18 +931,31 @@ const registerVersionIpc = context => {
           copyMissingErrors.push({ name: reference, error: error.message || String(error) });
         }
       }
+      if (request.incrementalSources !== undefined && !Array.isArray(request.incrementalSources)) throw new Error('增量文件列表必须是数组');
+      if ((request.incrementalSources || []).length > 20000) throw new Error('增量文件数量过多');
+      const incrementalSources = (request.incrementalSources || []).map(value => {
+        const name = String(value || '');
+        if (!name || path.basename(name) !== name) throw new Error('增量文件列表包含无效文件名');
+        return name;
+      });
       const result = await versionService.commitBatchCompare(workspaceRoot, {
         projectName,
         folderA,
         folderB,
         importKey,
         displayName: cleanVersionName(request.displayName || path.basename(folderB)) || path.basename(folderB),
-        renameSources: Boolean(request.renameSources),
-        reconcileExisting: Boolean(request.reconcileExisting),
-        incrementalSources: Array.isArray(request.incrementalSources) ? request.incrementalSources : [],
+        renameSources,
+        reconcileExisting,
+        incrementalSources,
         matches,
       });
-      writeLog('info', 'Version batch committed', { projectName, folderA, folderB, matchCount: matches.length, copiedMissingCount: copiedMissingPaths.length, copyMissingErrorCount: copyMissingErrors.length, batch: result.batch?.sequence });
+      if (!result) throw new Error('版本批次提交没有返回结果');
+      if (!result.success && !result.repairRequired) throw new Error(result.error || '版本批次提交失败');
+      writeLog(result.repairRequired ? 'warn' : 'info', result.repairRequired ? 'Version batch requires repair' : 'Version batch committed', {
+        projectName, folderA, folderB, matchCount: matches.length,
+        copiedMissingCount: copiedMissingPaths.length, copyMissingErrorCount: copyMissingErrors.length,
+        batch: result.batch?.sequence,
+      });
       return { ...result, copiedMissingCount: copiedMissingPaths.length, copyMissingErrors };
     } catch (error) {
       await Promise.all(copiedMissingPaths.map(filePath => fs.promises.rm(filePath, { force: true }).catch(() => undefined)));
@@ -885,6 +981,8 @@ const registerVersionIpc = context => {
       const normalizedBatchId = String(batchId || '');
       if (!/^[0-9a-f-]{36}$/i.test(normalizedBatchId)) throw new Error('版本批次标识无效');
       const result = await versionService.retryBatchOperations(workspaceRoot, normalizedBatchId);
+      if (!result) return { success: false, error: '版本批次修复没有返回结果' };
+      if (!result.success) return result;
       writeLog(result.success ? 'info' : 'warn', 'Version batch repair attempted', {
         batchId: normalizedBatchId,
         remainingErrors: result.renameErrors?.length || 0,
@@ -913,6 +1011,29 @@ const registerVersionIpc = context => {
   ipcMain.handle('workspace-version-relocate', async (_event, workspacePath, status, projectName, request = {}) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      if (!request || typeof request !== 'object' || Array.isArray(request)
+        || Object.keys(request).some(key => !['photoId', 'versionId', 'filePath', 'force'].includes(key))) throw new Error('重新定位请求无效');
+      const photoId = String(request.photoId || '');
+      const versionId = String(request.versionId || '');
+      if (!validOpaqueId(photoId) || !validOpaqueId(versionId)) throw new Error('重新定位的版本标识无效');
+      if (![undefined, null, false, true, 0, 1].some(value => Object.is(value, request.force))) throw new Error('重新定位确认字段必须是布尔值');
+      const force = request.force === true;
+      const resolvedProjectPath = getProjectPath(workspacePath, status, projectName);
+      if (typeof resolvedProjectPath !== 'string' || !resolvedProjectPath) throw new Error('当前项目路径无效');
+      path.resolve(resolvedProjectPath);
+      const bundle = await versionService.getPhoto(workspaceRoot, photoId);
+      if (!bundle?.success || !bundle.photo || !(bundle.versions || []).some(version => version.id === versionId)) throw new Error(bundle?.error || '重新定位的版本不存在');
+      const catalog = workspaceCatalogs.get(workspaceRoot);
+      const catalogProject = catalog?.byName?.get(String(projectName).toLocaleLowerCase())
+        || catalog?.projects?.find(project => project.name === projectName);
+      if (!catalogProject?.id || !bundle.photo.projectId || catalogProject.id !== bundle.photo.projectId) throw new Error('重新定位的版本不属于当前项目');
+      const now = Date.now();
+      pruneRelocateDecisions(now);
+      const decisionKey = relocateDecisionKey(workspaceRoot, versionId);
+      const pendingDecision = force ? pendingRelocateDecisions.get(decisionKey) : null;
+      pendingRelocateDecisions.delete(decisionKey);
+      if (force && (!pendingDecision || pendingDecision.expiresAt <= now)) throw new Error('重新定位确认已失效，请重新选择文件');
       let filePath = request.filePath ? path.resolve(request.filePath) : '';
       if (!filePath) {
         const choice = await dialog.showOpenDialog(mainWindow, {
@@ -923,13 +1044,38 @@ const registerVersionIpc = context => {
         if (choice.canceled || !choice.filePaths.length) return { success: true, cancelled: true, versions: [] };
         filePath = path.resolve(choice.filePaths[0]);
       }
-      if (!fs.existsSync(filePath) || !fs.statSync(filePath).isFile()) throw new Error('重新定位的文件不存在');
-      const result = await versionService.relocateVersion(workspaceRoot, {
-        versionId: request.versionId,
-        filePath,
-        force: request.force === true,
-      });
+      filePath = path.resolve(await mediaService.authorizeInput(filePath));
+      if (!fs.existsSync(filePath)) throw new Error('重新定位的文件不存在');
+      const fileStat = fs.statSync(filePath);
+      if (!fileStat.isFile()) throw new Error('重新定位的文件不存在');
+      if (!supportedVersionFileKind(filePath)) throw new Error('重新定位的文件不是支持的图片、RAW 或视频');
+      if (force && (pathKey(pendingDecision.filePath) !== pathKey(filePath)
+        || pendingDecision.photoId !== photoId
+        || pendingDecision.projectId !== bundle.photo.projectId
+        || pendingDecision.size !== Number(fileStat.size)
+        || pendingDecision.mtimeMs !== Number(fileStat.mtimeMs))) {
+        throw new Error('重新定位确认已失效，请重新选择文件');
+      }
+      let result;
+      try {
+        result = await versionService.relocateVersion(workspaceRoot, { versionId, filePath, force });
+      } catch (error) {
+        pendingRelocateDecisions.delete(decisionKey);
+        throw error;
+      }
+      if (!result) {
+        pendingRelocateDecisions.delete(decisionKey);
+        throw new Error('重新定位版本没有返回结果');
+      }
       if (result.fingerprintMismatch) {
+        pendingRelocateDecisions.set(decisionKey, {
+          filePath,
+          photoId,
+          projectId: bundle.photo.projectId,
+          size: Number(fileStat.size),
+          mtimeMs: Number(fileStat.mtimeMs),
+          expiresAt: Date.now() + RELOCATE_DECISION_TTL_MS,
+        });
         return {
           success: true,
           versions: [],
@@ -941,10 +1087,10 @@ const registerVersionIpc = context => {
           },
         };
       }
+      pendingRelocateDecisions.delete(decisionKey);
       if (!result.success) return result;
-      const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
-      void ensureTrackedVersionThumbnail({ workspaceRoot, photoId: request.photoId, versionId: request.versionId, filePath });
-      writeLog('info', 'Media version relocated', { projectName, photoId: request.photoId, versionId: request.versionId, filePath });
+      void ensureTrackedVersionThumbnail({ workspaceRoot, photoId, versionId, filePath });
+      writeLog('info', 'Media version relocated', { projectName, photoId, versionId, filePath });
       return result;
     } catch (error) {
       return { success: false, error: error.message || String(error), versions: [] };
@@ -991,7 +1137,19 @@ const registerVersionIpc = context => {
   
   ipcMain.handle('workspace-version-compare-record', async (_event, workspacePath, request = {}) => {
     try {
-      return await versionService.recordCompare(ensureWorkspace(workspacePath), request);
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!request || typeof request !== 'object' || Array.isArray(request)
+        || Object.keys(request).some(key => !['photoId', 'leftVersionId', 'rightVersionId', 'compareMode'].includes(key))) throw new Error('版本对比记录请求无效');
+      const photoId = String(request.photoId || '');
+      const leftVersionId = String(request.leftVersionId || '');
+      const rightVersionId = String(request.rightVersionId || '');
+      const compareMode = String(request.compareMode || 'side-by-side');
+      if (!validOpaqueId(photoId) || !validOpaqueId(leftVersionId) || !validOpaqueId(rightVersionId) || leftVersionId === rightVersionId
+        || !['side-by-side', 'split', 'overlay', 'blink', 'difference'].includes(compareMode)) throw new Error('版本对比记录参数无效');
+      const bundle = await versionService.getPhoto(workspaceRoot, photoId);
+      const versionIds = new Set((bundle?.versions || []).map(version => version.id));
+      if (!bundle?.success || !versionIds.has(leftVersionId) || !versionIds.has(rightVersionId)) throw new Error(bundle?.error || '版本对比节点不属于同一素材');
+      return await versionService.recordCompare(workspaceRoot, { photoId, leftVersionId, rightVersionId, compareMode });
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }

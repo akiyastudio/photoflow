@@ -25,7 +25,7 @@ import { useEscapeLayer } from './LayerProvider';
 import { RECYCLE_BIN_FAILURE_DIALOG } from '../utils/recycleBinFailure';
 import { VideoPlayer } from './AdvancedVideoPlayer';
 import { metadataFieldLabel, metadataGroupLabel } from '../features/metadata/metadata-labels';
-import { mainBranchPhotoSummaries, mainBranchVersionsForPhoto, paginateMainBranchPhotos, type MainBranchPhotoSummary } from '../features/versioning/public';
+import { MAIN_BRANCH_PHOTO_PAGE_SIZE, mainBranchPhotoSummaries, mainBranchVersionsForPhoto, paginateMainBranchPhotos, versioningMediaKind, type MainBranchPhotoSummary } from '../features/versioning/public';
 import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
 
 type VersionManagerProps = {
@@ -53,9 +53,12 @@ const ResizeHandle = ({ orientation, label, value, min, max, onDrag, onReset }: 
   onDrag: (delta: number) => void;
   onReset: () => void;
 }) => {
+  const cleanupDragRef = useRef<(() => void) | null>(null);
+  useEffect(() => () => cleanupDragRef.current?.(), []);
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     event.preventDefault();
+    cleanupDragRef.current?.();
     let previousPosition = orientation === 'vertical' ? event.clientX : event.clientY;
     const previousCursor = document.body.style.cursor;
     const previousUserSelect = document.body.style.userSelect;
@@ -72,7 +75,9 @@ const ResizeHandle = ({ orientation, label, value, min, max, onDrag, onReset }: 
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', finish);
       window.removeEventListener('pointercancel', finish);
+      cleanupDragRef.current = null;
     };
+    cleanupDragRef.current = finish;
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', finish);
     window.addEventListener('pointercancel', finish);
@@ -120,12 +125,7 @@ const normalizeVisibleVersionBundle = (bundle: MediaVersionBundle, entryPath = '
   })),
 });
 
-const mediaKind = (filePath: string): 'image' | 'raw' | 'video' => {
-  const extension = filePath.split('.').pop()?.toLocaleLowerCase() || '';
-  if (['mp4', 'mov', 'm4v', 'webm', 'avi', 'mkv'].includes(extension)) return 'video';
-  if (['cr2', 'cr3', 'nef', 'arw', 'raf', 'orf', 'rw2', 'dng', 'rwl', '3fr', 'fff', 'iiq', 'pef', 'srw'].includes(extension)) return 'raw';
-  return 'image';
-};
+const mediaKind = versioningMediaKind;
 
 type VersionResourceData = {
   url?: string;
@@ -134,28 +134,31 @@ type VersionResourceData = {
 };
 const versionResourceCache = new Map<string, VersionResourceData>();
 const versionResourceRequests = new Map<string, Promise<VersionResourceData>>();
-const versionResourceCacheKey = (version: MediaVersion) => `${version.filePath.replace(/\\/g, '/').toLocaleLowerCase()}|${version.fileModifiedAt || 0}|${version.fileSize}`;
-const loadVersionResource = (version: MediaVersion, cacheConfig: AppConfig['mediaCache']) => {
-  const key = versionResourceCacheKey(version);
+type VersionResourceQuality = 'thumbnail' | 'full';
+const versionResourceCacheKey = (version: MediaVersion, quality: VersionResourceQuality) => `${version.filePath.replace(/\\/g, '/').toLocaleLowerCase()}|${version.fileModifiedAt || 0}|${version.fileSize}|${quality}`;
+const loadVersionResource = (version: MediaVersion, cacheConfig: AppConfig['mediaCache'], quality: VersionResourceQuality) => {
+  const key = versionResourceCacheKey(version, quality);
   const cached = versionResourceCache.get(key);
   if (cached) return Promise.resolve(cached);
   const pending = versionResourceRequests.get(key);
   if (pending) return pending;
   const kind = mediaKind(version.filePath);
-  const request = (kind === 'raw'
-    ? window.electronAPI.getMediaOriginal(version.filePath, kind, cacheConfig).then(result => ({
-      success: result.success,
-      previewUrl: result.mediaUrl,
-      orientation: result.orientation,
-      error: result.error,
-    }))
-    : window.electronAPI.getMediaThumbnail(version.filePath, kind, cacheConfig, 1600, 0, -1)
+  const request = (quality === 'thumbnail'
+    ? window.electronAPI.getMediaThumbnail(version.filePath, kind, cacheConfig, 1600, 0, -1)
+    : kind === 'raw'
+      ? window.electronAPI.getMediaOriginal(version.filePath, kind, cacheConfig).then(result => ({
+        success: result.success,
+        previewUrl: result.mediaUrl,
+        orientation: result.orientation,
+        error: result.error,
+      }))
+      : window.electronAPI.getMediaThumbnail(version.filePath, kind, cacheConfig, 1600, 0, -1)
   ).then(async result => {
     if (!result.success) return {};
     let url = result.previewUrl;
     let orientationMatrix = 'orientation' in result ? result.orientation?.matrix : undefined;
     let orientationSwapsAxes = 'orientation' in result ? result.orientation?.swapsAxes : undefined;
-    if (kind === 'image') {
+    if (kind === 'image' && quality === 'full') {
       const original = await window.electronAPI.getMediaOriginal(version.filePath, kind, cacheConfig);
       if (original.success && original.mediaUrl) {
         url = original.mediaUrl;
@@ -241,8 +244,9 @@ const OrientedVersionImage = ({ src, alt, orientationMatrix, contentStyle }: {
   </div>;
 };
 
-const VersionResource = ({ version, cacheConfig, videoPlaybackSettings, className = '', contentStyle, videoPlayback = true }: { version: MediaVersion; cacheConfig: AppConfig['mediaCache']; videoPlaybackSettings?: AppConfig['videoPlayback']; className?: string; contentStyle?: React.CSSProperties; videoPlayback?: boolean }) => {
-  const resourceKey = versionResourceCacheKey(version);
+const VersionResource = ({ version, cacheConfig, videoPlaybackSettings, className = '', contentStyle, videoPlayback = true, quality }: { version: MediaVersion; cacheConfig: AppConfig['mediaCache']; videoPlaybackSettings?: AppConfig['videoPlayback']; className?: string; contentStyle?: React.CSSProperties; videoPlayback?: boolean; quality?: VersionResourceQuality }) => {
+  const resourceQuality = quality || (videoPlayback ? 'full' : 'thumbnail');
+  const resourceKey = versionResourceCacheKey(version, resourceQuality);
   const [resource, setResource] = useState<VersionResourceData>(() => versionResourceCache.get(resourceKey) || {});
   const [loading, setLoading] = useState(false);
   const [videoPlaybackFailed, setVideoPlaybackFailed] = useState(false);
@@ -258,9 +262,9 @@ const VersionResource = ({ version, cacheConfig, videoPlaybackSettings, classNam
       return () => { active = false; };
     }
     setLoading(true);
-    loadVersionResource(version, cacheConfig).then(result => { if (active) setResource(result); }).finally(() => { if (active) setLoading(false); });
+    loadVersionResource(version, cacheConfig, resourceQuality).then(result => { if (active) setResource(result); }).finally(() => { if (active) setLoading(false); });
     return () => { active = false; };
-  }, [resourceKey, version.fileMissing, cacheConfig.directory, cacheConfig.maxSizeGB]);
+  }, [resourceKey, version.fileMissing, cacheConfig.directory, cacheConfig.maxSizeGB, resourceQuality]);
   useEffect(() => { setVideoPlaybackFailed(false); setVideoPlayerError(''); }, [resourceKey]);
 
   if (version.fileMissing) return <div className={`flex items-center justify-center bg-slate-100 text-slate-400 ${className}`}><AlertTriangle size={26}/></div>;
@@ -293,8 +297,9 @@ const CompareView = ({ active, left, right, cacheConfig, videoPlaybackSettings, 
     if (videoComparison && mode !== 'side-by-side') setMode('side-by-side');
   }, [mode, videoComparison]);
   useEffect(() => {
-    void window.electronAPI.recordMediaVersionCompare(workspacePath, { photoId, leftVersionId: left.id, rightVersionId: right.id, compareMode: mode });
-  }, [mode, left.id, right.id, photoId, workspacePath]);
+    void window.electronAPI.recordMediaVersionCompare(workspacePath, { photoId, leftVersionId: left.id, rightVersionId: right.id, compareMode: videoComparison ? 'side-by-side' : mode })
+      .catch(() => undefined);
+  }, [mode, videoComparison, left.id, right.id, photoId, workspacePath]);
   return <ImageComparisonView
     left={{ label: `${visibleVersionLabel(left)} ${visibleVersionName(left)}`, interactive: active && mediaKind(left.filePath) === 'video', content: <VersionResource version={left} cacheConfig={cacheConfig} videoPlaybackSettings={videoPlaybackSettings} videoPlayback={active} className="absolute inset-0 h-full w-full"/> }}
     right={{ label: `${visibleVersionLabel(right)} ${visibleVersionName(right)}`, interactive: active && mediaKind(right.filePath) === 'video', content: <VersionResource version={right} cacheConfig={cacheConfig} videoPlaybackSettings={videoPlaybackSettings} videoPlayback={active} className="absolute inset-0 h-full w-full"/> }}
@@ -346,17 +351,25 @@ const SingleVersionView = ({ active, version, cacheConfig, videoPlaybackSettings
     setMetadataError('');
     setZoom(1);
     setPan({ x: 0, y: 0 });
-    if (version.fileMissing) return () => { active = false; };
+    if (version.fileMissing) {
+      setMetadataLoading(false);
+      return () => { active = false; };
+    }
     setMetadataLoading(true);
     window.electronAPI.getMediaMetadata(version.filePath).then(result => {
       if (!active) return;
       if (!result.success) setMetadataError(result.error || '无法读取完整详细信息');
       else setMetadataFields(result.fields);
+    }).catch(error => {
+      if (active) setMetadataError(error instanceof Error ? error.message : String(error));
     }).finally(() => { if (active) setMetadataLoading(false); });
     return () => { active = false; };
   }, [version.id, version.filePath, version.fileModifiedAt, version.fileMissing]);
   useEffect(() => window.localStorage.setItem('photoflow:version-metadata-width', String(Math.round(metadataWidth))), [metadataWidth]);
   useEffect(() => setNoteDraft(version.note), [version.id, version.note]);
+  useEffect(() => {
+    if (zoom === 1) setPan(current => current.x || current.y ? { x: 0, y: 0 } : current);
+  }, [zoom]);
   const clampMetadataWidth = useCallback((width: number) => {
     const available = layoutRef.current?.getBoundingClientRect().width || window.innerWidth;
     return Math.max(260, Math.min(560, Math.max(260, available - 320), width));
@@ -391,7 +404,7 @@ const SingleVersionView = ({ active, version, cacheConfig, videoPlaybackSettings
       <div className="min-w-0"><p className="text-xs font-bold uppercase tracking-wider text-slate-400">预览</p><p className="truncate text-sm font-semibold text-slate-700">{fileName}</p></div>
       <div className="flex items-center gap-1">
         {!fullscreen && <button type="button" onClick={() => setFullscreen(true)} title="全屏查看预览图" aria-label="全屏查看预览图" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Maximize2 size={16}/></button>}
-        <button type="button" disabled={version.fileMissing} onClick={async () => { const result = await window.electronAPI.openMediaVersion(version.filePath); if (!result.success) onNotice(`打开版本失败：${result.error || '未知错误'}`); }} title="使用系统默认应用打开" aria-label="使用系统默认应用打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40"><ExternalLink size={16}/></button>
+        <button type="button" disabled={version.fileMissing} onClick={async () => { const result = await window.electronAPI.openMediaVersion(version.filePath).catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) })); if (!result.success) onNotice(`打开版本失败：${result.error || '未知错误'}`); }} title="使用系统默认应用打开" aria-label="使用系统默认应用打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40"><ExternalLink size={16}/></button>
         {fullscreen ? <button type="button" onClick={() => setFullscreen(false)} title="缩小预览（Esc）" aria-label="缩小预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Minimize2 size={16}/></button> : <button type="button" onClick={onClose} title="关闭版本管理" aria-label="关闭版本管理" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={16}/></button>}
       </div>
     </header>
@@ -501,7 +514,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     return {
       id: photoId,
       projectId: project.id,
-      mediaType: /\.(?:mp4|mov|mkv|avi|webm|m4v)$/i.test(current?.filePath || first?.filePath || '') ? 'video' : 'image',
+      mediaType: mediaKind(current?.filePath || first?.filePath || '') === 'video' ? 'video' : 'image',
       originalName: summary?.originalName || photoId,
       displayName: summary?.originalName || photoId,
       currentVersionId: current?.id || '',
@@ -524,7 +537,8 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     const requestId = ++branchPhotoRequestRef.current;
     setCompareIds([]);
     setBranchPhotoLoading(true);
-    const result = await window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId, photoId });
+    const result = await window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId, photoId })
+      .catch(error => ({ success: false as const, entries: [], error: error instanceof Error ? error.message : String(error) }));
     if (requestId !== branchPhotoRequestRef.current || !pageGenerationIsCurrent(pageGeneration)) return false;
     setBranchPhotoLoading(false);
     if (!result.success) { onNotice(`读取主分支版本失败：${result.error || '未知错误'}`); return false; }
@@ -546,7 +560,8 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     branchPhotoRequestRef.current += 1;
     setBranchPhotoLoading(false);
     setLoading(true);
-    const result = await window.electronAPI.getMediaVersions(workspacePath, project.status, project.name, entry.relativePath);
+    const result = await window.electronAPI.getMediaVersions(workspacePath, project.status, project.name, entry.relativePath)
+      .catch(error => ({ success: false as const, versions: [], error: error instanceof Error ? error.message : String(error) }));
     if (requestId !== loadRequestRef.current || !pageGenerationIsCurrent(pageGeneration)) return;
     if (!result.success) {
       setLoading(false);
@@ -562,14 +577,16 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     let summaries: MainBranchPhotoSummary[] = [];
     if (progressId && result.photo?.id) {
       const [photoBranch, fullBranch] = await Promise.all([
-        window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId, photoId: result.photo.id }),
-        window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId }),
+        window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId, photoId: result.photo.id })
+          .catch(error => ({ success: false as const, entries: [], error: error instanceof Error ? error.message : String(error) })),
+        window.electronAPI.getProgressMainBranchMedia(workspacePath, { progressId })
+          .catch(error => ({ success: false as const, entries: [], error: error instanceof Error ? error.message : String(error) })),
       ]);
       if (requestId !== loadRequestRef.current || !pageGenerationIsCurrent(pageGeneration)) return;
       if (fullBranch.success) {
         summaries = mainBranchPhotoSummaries(fullBranch.entries);
         setBranchPhotos(summaries);
-        setBranchPhotoPage(Math.max(0, Math.floor(Math.max(0, summaries.findIndex(item => item.photoId === result.photo!.id)) / 48)));
+        setBranchPhotoPage(Math.max(0, Math.floor(Math.max(0, summaries.findIndex(item => item.photoId === result.photo!.id)) / MAIN_BRANCH_PHOTO_PAGE_SIZE)));
       } else {
         setBranchPhotos([]);
       }
@@ -588,21 +605,22 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     else setBundle({ ...result, versions: visibleVersions });
     const current = visibleVersions.find(version => version.isCurrent) || visibleVersions[visibleVersions.length - 1];
     setSelectedId(value => visibleVersions.some(version => version.id === value) ? value : current?.id || '');
-    const compareKey = initialCompareKey;
-    if (compareKey && initialCompareAppliedRef.current !== compareKey) {
-      const availableIds = initialCompareIds.filter(id => visibleVersions.some(version => version.id === id && !version.fileMissing)).slice(0, 2);
+    const compareKey = `${result.photo?.id || entry.path}|${initialCompareKey}`;
+    if (initialCompareKey && initialCompareAppliedRef.current !== compareKey) {
+      const availableIds = [...new Set(initialCompareIds)].filter(id => visibleVersions.some(version => version.id === id && !version.fileMissing)).slice(0, 2);
       if (availableIds.length === 2) setCompareIds(availableIds);
       initialCompareAppliedRef.current = compareKey;
     }
   };
   useEffect(() => {
     const pageGeneration = ++pageGenerationRef.current;
+    if (!initialCompareKey) initialCompareAppliedRef.current = '';
     setBusy(false);
     void load(pageGeneration);
     return () => {
+      pageGenerationRef.current += 1;
       loadRequestRef.current += 1;
       branchPhotoRequestRef.current += 1;
-      if (pageGenerationRef.current === pageGeneration) pageGenerationRef.current += 1;
     };
   }, [entry.path, entry.updatedAt, workspacePath, project.status, project.name, initialCompareKey, progressId, progressVersionKey]);
 
@@ -634,7 +652,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
       let depth = 0;
       let parent = version.parentVersionId ? byId.get(version.parentVersionId) : undefined;
       const visited = new Set<string>();
-      while (parent && depth < 6 && !visited.has(parent.id)) { visited.add(parent.id); depth += 1; parent = parent.parentVersionId ? byId.get(parent.parentVersionId) : undefined; }
+      while (parent && !visited.has(parent.id)) { visited.add(parent.id); depth += 1; parent = parent.parentVersionId ? byId.get(parent.parentVersionId) : undefined; }
       return [version.id, depth];
     }));
   }, [bundle.versions]);
@@ -643,7 +661,8 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     const pageGeneration = pageGenerationRef.current;
     if (!pageGenerationIsCurrent(pageGeneration)) return;
     setBusy(true);
-    const result = await window.electronAPI.updateMediaVersion(workspacePath, request);
+    const result = await window.electronAPI.updateMediaVersion(workspacePath, request)
+      .catch(error => ({ success: false as const, versions: [], error: error instanceof Error ? error.message : String(error) }));
     if (!pageGenerationIsCurrent(pageGeneration)) return;
     setBusy(false);
     if (!result.success) { onNotice(`更新版本失败：${result.error || '未知错误'}`); return; }
@@ -657,8 +676,10 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     if (!bundle.photo) return;
     const pageGeneration = pageGenerationRef.current;
     const photoId = bundle.photo.id;
-    const scope = await window.electronAPI.getMediaVersionDeleteScope(workspacePath, version.id);
+    const scope = await window.electronAPI.getMediaVersionDeleteScope(workspacePath, version.id)
+      .catch(error => ({ success: false as const, error: error instanceof Error ? error.message : String(error) }));
     if (!pageGenerationIsCurrent(pageGeneration)) return;
+    if (!scope.success) { onNotice(`读取删除范围失败：${scope.error || '未知错误'}`); return; }
     const selectedReparentText = scope.success && scope.selectedChildCount
       ? `\n\n该版本有 ${scope.selectedChildCount} 条直接子版本；删除后会自动改接到它的上一级版本，编号不会变化。`
       : '';
@@ -682,7 +703,8 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
         if (!pageGenerationIsCurrent(pageGeneration)) return;
         if (deleteAll) {
           setBusy(true);
-          const bulkResult = await window.electronAPI.deleteProjectMissingMediaVersion(workspacePath, version.id);
+          const bulkResult = await window.electronAPI.deleteProjectMissingMediaVersion(workspacePath, version.id)
+            .catch(error => ({ success: false as const, deletedCount: 0, reparentedCount: 0, versionNumber: version.versionNumber, error: error instanceof Error ? error.message : String(error) }));
           if (!pageGenerationIsCurrent(pageGeneration)) return;
           setBusy(false);
           if (!bulkResult.success) { onNotice(`批量删除失效版本失败：${bulkResult.error || '未知错误'}`); return; }
@@ -704,7 +726,8 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     });
     if (!pageGenerationIsCurrent(pageGeneration)) return;
     setBusy(true);
-    const result = await window.electronAPI.deleteMediaVersion(workspacePath, { photoId, versionId: version.id, trashFile });
+    const result = await window.electronAPI.deleteMediaVersion(workspacePath, { photoId, versionId: version.id, trashFile })
+      .catch(error => ({ success: false as const, versions: [], error: error instanceof Error ? error.message : String(error) }));
     if (!pageGenerationIsCurrent(pageGeneration)) return;
     setBusy(false);
     if (!result.success) { onNotice(`删除版本失败：${result.error || '未知错误'}`); return; }
@@ -725,7 +748,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     let result = await window.electronAPI.relocateMediaVersion(workspacePath, project.status, project.name, {
       photoId,
       versionId: version.id,
-    });
+    }).catch(error => ({ success: false as const, versions: [], requiresDecision: undefined, cancelled: false, error: error instanceof Error ? error.message : String(error) }));
     if (!pageGenerationIsCurrent(pageGeneration)) return;
     setBusy(false);
     if (result.requiresDecision?.kind === 'version-fingerprint-mismatch') {
@@ -745,7 +768,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
         versionId: version.id,
         filePath: decision.filePath,
         force: true,
-      });
+      }).catch(error => ({ success: false as const, versions: [], requiresDecision: undefined, cancelled: false, error: error instanceof Error ? error.message : String(error) }));
       if (!pageGenerationIsCurrent(pageGeneration)) return;
       setBusy(false);
     }
@@ -754,6 +777,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     const branchLoaded = result.photo ? await loadBranchPhoto(result.photo.id, result.photo, branchPhotos, pageGeneration) : false;
     if (!pageGenerationIsCurrent(pageGeneration)) return;
     if (!result.photo || !branchLoaded) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
+    onVersionStateChanged?.();
     onNotice(result.versions.find(item => item.id === version.id)?.contentChanged ? '已重新定位，但文件内容与原记录不同。' : '版本文件已重新定位');
   };
   const toggleCompare = (id: string) => setCompareIds(current => current.includes(id) ? current.filter(value => value !== id) : [...(current.length >= 2 ? current.slice(1) : current), id]);
@@ -769,8 +793,8 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
         {missingVersionCount > 0 && <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] font-medium leading-5 text-amber-800"><AlertTriangle size={14} className="mt-0.5 shrink-0"/><span>{missingVersionCount} 个版本文件不可用，请重新定位或删除记录。</span></div>}
         {branchPhotos.length > 1 && <><section style={{ height: branchPhotoHeight }} className="flex min-h-0 shrink-0 flex-col bg-slate-50/70 p-3"><div className="mb-2 flex shrink-0 items-center justify-between"><span className="text-xs font-bold text-slate-600">主分支图片</span><span className="text-[10px] text-slate-400">{branchPhotoPagination.total} 张</span></div><div className="min-h-0 flex-1 space-y-1 overflow-y-auto">{branchPhotoPagination.items.map(photo => <button key={photo.photoId} type="button" aria-pressed={activePhotoId === photo.photoId} onClick={() => void selectBranchPhoto(photo.photoId)} className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${activePhotoId === photo.photoId ? 'bg-blue-100 font-bold text-blue-700' : 'text-slate-600 hover:bg-white'}`}><span className={`h-2 w-2 shrink-0 rounded-full ${photo.missing ? 'bg-red-400' : 'bg-emerald-400'}`}/><span className="min-w-0 flex-1 truncate" title={photo.originalName}>{photo.originalName}</span><span className="shrink-0 text-[10px] text-slate-400">{photo.versionCount} 版</span></button>)}</div>{branchPhotoPagination.pageCount > 1 && <div className="mt-2 flex shrink-0 items-center justify-between"><button type="button" disabled={branchPhotoPagination.currentPage === 0 || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => Math.max(0, page - 1))} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">上一页</button><span className="text-[10px] text-slate-400">{branchPhotoPagination.currentPage + 1} / {branchPhotoPagination.pageCount}</span><button type="button" disabled={branchPhotoPagination.currentPage + 1 >= branchPhotoPagination.pageCount || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => page + 1)} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">下一页</button></div>}</section><ResizeHandle orientation="horizontal" label="调整主分支图片列表高度" value={branchPhotoHeight} min={140} max={720} onReset={() => setBranchPhotoHeight(276)} onDrag={delta => setBranchPhotoHeight(height => clampBranchPhotoHeight(height + delta))}/></>}
         <div className="min-h-0 flex-1 overflow-y-auto p-3"><div className="mb-2 flex items-center justify-between px-2"><span className="text-xs font-bold uppercase tracking-wider text-slate-400">版本树</span><span className="text-xs text-slate-400">{bundle.versions.length} 个版本</span></div>
-        <div className="space-y-2">{bundle.versions.map(version => <div key={version.id} className={`relative w-full rounded-xl border p-3 text-left transition ${selectedId === version.id ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'}`} style={{ paddingLeft: 12 + (depths.get(version.id) || 0) * 14 }}><button type="button" aria-label={`预览 ${visibleVersionLabel(version)} ${visibleVersionName(version)}`} onClick={() => previewVersion(version.id)} className="absolute inset-0 z-0 cursor-pointer rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"/>
-          {(depths.get(version.id) || 0) > 0 && <span className="absolute bottom-1/2 top-0 w-px bg-slate-200" style={{ left: 8 + (depths.get(version.id) || 0) * 14 }}/>} 
+        <div className="space-y-2">{bundle.versions.map(version => <div key={version.id} className={`relative w-full rounded-xl border p-3 text-left transition ${selectedId === version.id ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'}`} style={{ paddingLeft: 12 + Math.min(depths.get(version.id) || 0, 6) * 14 }}><button type="button" aria-label={`预览 ${visibleVersionLabel(version)} ${visibleVersionName(version)}`} onClick={() => previewVersion(version.id)} className="absolute inset-0 z-0 cursor-pointer rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"/>
+          {(depths.get(version.id) || 0) > 0 && <span className="absolute bottom-1/2 top-0 w-px bg-slate-200" style={{ left: 8 + Math.min(depths.get(version.id) || 0, 6) * 14 }}/>} {/* Visual indentation is capped without truncating logical depth. */}
           <div className="pointer-events-none relative z-10 flex items-start gap-3"><VersionResource version={version} cacheConfig={cacheConfig} videoPlayback={false} className="h-16 w-20 shrink-0 rounded-md"/><div className="min-w-0 flex-1"><div className="flex items-center gap-1.5"><span className="font-mono text-xs font-bold text-blue-600">{visibleVersionLabel(version)}</span><span className="truncate text-sm font-bold text-slate-800">{visibleVersionName(version)}</span>{version.isCurrent && <span title="当前版本" className="rounded-full bg-blue-600 p-0.5 text-white"><Check size={10}/></span>}</div><p className="mt-1 flex items-center gap-1 text-[11px] text-slate-400"><Clock3 size={11}/>{new Date(version.createdAt).toLocaleString()}</p>{version.note && <p title={version.note} className="mt-1 line-clamp-2 break-words text-[11px] leading-4 text-slate-500">{version.note}</p>}{version.fileMissing && <div className="mt-1 flex flex-wrap items-center gap-2"><span className="text-[11px] font-bold text-red-500">文件丢失</span>{version.versionNumber > 0 && <button type="button" disabled={busy} onClick={event => { event.stopPropagation(); void deleteVersion(version); }} className="pointer-events-auto inline-flex items-center gap-1 rounded border border-red-200 bg-white px-2 py-0.5 text-[10px] font-bold text-red-600 hover:bg-red-50 disabled:opacity-40"><Trash2 size={11}/>删除版本</button>}</div>}{version.contentChanged && <p className="mt-1 text-[11px] font-bold text-amber-600">文件曾被外部修改</p>}</div><input disabled={version.fileMissing} title={version.fileMissing ? '请先重新定位文件' : '选择进行对比'} aria-label={`选择 ${visibleVersionLabel(version)} 进行对比`} type="checkbox" checked={compareIds.includes(version.id)} onClick={event => event.stopPropagation()} onChange={() => toggleCompare(version.id)} className="pointer-events-auto mt-1 accent-blue-600 disabled:opacity-40"/></div>
         </div>)}</div></div>
       </aside>

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { MutableRefObject, PointerEvent as ReactPointerEvent } from 'react';
 import { reconcileVersionTreeCanvasPositions, translateVersionTreeCanvasSelection, type VersionTreeCanvasPosition } from './version-tree-canvas-model';
 
@@ -34,6 +34,7 @@ type NodeDrag = {
   startClientX: number;
   startClientY: number;
   startPositions: Map<string, VersionTreeCanvasPosition>;
+  beforeMutationMarkers: Map<string, number | undefined>;
   before: Map<string, VersionTreeCanvasPosition>;
   dragged: boolean;
 };
@@ -74,11 +75,16 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
   const saveEpochRef = useRef(0);
   const historyEpochRef = useRef(0);
   const generationRef = useRef(0);
+  const layoutReadyRef = useRef(false);
+  const loadPromiseRef = useRef<Promise<void>>(Promise.resolve());
+  const localMutationSequenceRef = useRef(0);
+  const localMutationByNodeRef = useRef(new Map<string, number>());
   const disposedRef = useRef(false);
   const nodeDragRef = useRef<NodeDrag | null>(null);
   const canvasPanRef = useRef<CanvasPan | null>(null);
   const suppressClickRef = useRef('');
   const viewportRef = useRef<HTMLDivElement>(null);
+  const viewportOwnsInteractionRef = useRef(false);
   const spacePressedRef = useRef(false);
   const undoStackRef = useRef<LayoutHistoryEntry[]>([]);
   const redoStackRef = useRef<LayoutHistoryEntry[]>([]);
@@ -92,9 +98,29 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
     setPositions(next);
   }, []);
 
+  const cancelCanvasInteraction = useCallback((restoreNode = true) => {
+    const drag = nodeDragRef.current;
+    if (drag?.element.hasPointerCapture(drag.pointerId)) drag.element.releasePointerCapture(drag.pointerId);
+    if (drag && restoreNode) {
+      drag.beforeMutationMarkers.forEach((mutation, id) => {
+        if (mutation === undefined) localMutationByNodeRef.current.delete(id);
+        else localMutationByNodeRef.current.set(id, mutation);
+      });
+      if (drag.dragged) applyPositions(drag.before);
+    }
+    const pan = canvasPanRef.current;
+    if (pan?.element.hasPointerCapture(pan.pointerId)) pan.element.releasePointerCapture(pan.pointerId);
+    nodeDragRef.current = null;
+    canvasPanRef.current = null;
+    suppressClickRef.current = '';
+    spacePressedRef.current = false;
+    if (dragStateRef.current?.type === 'node' || dragStateRef.current?.type === 'pan') onDragStateChange(null);
+  }, [applyPositions, dragStateRef, onDragStateChange]);
+
   const loadServerLayout = useCallback(async (generation = generationRef.current) => {
     if (disposedRef.current || generation !== generationRef.current) return;
     const sequence = ++loadSequenceRef.current;
+    const localMutationAtStart = localMutationSequenceRef.current;
     const result = await window.electronAPI.getVersionTreeLayout(workspacePath, projectName, scopeKey).catch(error => ({
       success: false,
       revision: 0,
@@ -103,16 +129,13 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
     }));
     if (disposedRef.current || generation !== generationRef.current || sequence !== loadSequenceRef.current) return;
     if (!result.success) {
+      layoutReadyRef.current = true;
       onNoticeRef.current(`读取版本树布局失败：${result.error || '未知错误'}`, 5000);
       return;
     }
     revisionRef.current = result.revision;
     serverPositionsRef.current = new Map(result.positions.map(position => [position.nodeKey, { x: position.x, y: position.y, manual: true }]));
     appliedServerNodeKeysRef.current = new Set();
-    undoStackRef.current = [];
-    redoStackRef.current = [];
-    historyEpochRef.current += 1;
-    setHistoryRevision(value => value + 1);
     const currentNodes = nodesRef.current;
     const idByNodeKey = new Map(currentNodes.flatMap(node => [node.nodeKey, ...(node.fallbackNodeKeys || [])].map(nodeKey => [nodeKey, node.id] as const)));
     const saved = new Map<string, VersionTreeCanvasPosition>();
@@ -124,7 +147,33 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       }
     });
     const dimensions = dimensionsRef.current;
-    applyPositions(reconcileVersionTreeCanvasPositions({ nodes: currentNodes, previous: saved, nodeWidth: dimensions.nodeWidth, nodeHeight: dimensions.nodeHeight, horizontalGap: dimensions.collisionHorizontalGap }));
+    const reconciled = reconcileVersionTreeCanvasPositions({ nodes: currentNodes, previous: saved, nodeWidth: dimensions.nodeWidth, nodeHeight: dimensions.nodeHeight, horizontalGap: dimensions.collisionHorizontalGap });
+    const drag = nodeDragRef.current;
+    const draggedIds = new Set(drag?.ids || []);
+    // A pointer move can happen while the initial IPC read is in flight. Such
+    // local coordinates belong to this identity and must win over the late
+    // server snapshot, while untouched nodes still receive persisted values.
+    localMutationByNodeRef.current.forEach((mutation, id) => {
+      if (mutation <= localMutationAtStart) return;
+      if (drag && draggedIds.has(id)) {
+        const beforeMutation = drag.beforeMutationMarkers.get(id);
+        const beforePosition = drag.before.get(id);
+        if (beforeMutation !== undefined && beforeMutation > localMutationAtStart && beforePosition) reconciled.set(id, beforePosition);
+        return;
+      }
+      const current = positionsRef.current.get(id);
+      if (current) reconciled.set(id, current);
+    });
+    const displayed = new Map(reconciled);
+    if (drag) {
+      drag.ids.forEach(id => {
+        const current = positionsRef.current.get(id);
+        if (current) displayed.set(id, current);
+      });
+      drag.before = new Map(reconciled);
+    }
+    layoutReadyRef.current = true;
+    applyPositions(displayed);
     // Loading persisted positions is asynchronous. The user may already have
     // panned or scrolled while the request was in flight, so keep the current
     // viewport instead of snapping it back to the canvas origin.
@@ -136,24 +185,34 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       disposedRef.current = true;
       generationRef.current += 1;
       loadSequenceRef.current += 1;
-      const drag = nodeDragRef.current;
-      if (drag?.element.hasPointerCapture(drag.pointerId)) drag.element.releasePointerCapture(drag.pointerId);
-      const pan = canvasPanRef.current;
-      if (pan?.element.hasPointerCapture(pan.pointerId)) pan.element.releasePointerCapture(pan.pointerId);
-      nodeDragRef.current = null;
-      canvasPanRef.current = null;
-      suppressClickRef.current = '';
-      spacePressedRef.current = false;
+      cancelCanvasInteraction(false);
       dragStateRef.current = null;
       saveEpochRef.current += 1;
       saveQueueRef.current = Promise.resolve();
+      layoutReadyRef.current = false;
     };
-  }, [dragStateRef]);
+  }, [cancelCanvasInteraction, dragStateRef]);
 
   useEffect(() => {
+    if (!active) cancelCanvasInteraction();
+  }, [active, cancelCanvasInteraction]);
+
+  useLayoutEffect(() => {
+    cancelCanvasInteraction();
     const generation = ++generationRef.current;
+    revisionRef.current = 0;
+    loadSequenceRef.current += 1;
+    saveEpochRef.current += 1;
+    saveQueueRef.current = Promise.resolve();
+    layoutReadyRef.current = false;
+    localMutationSequenceRef.current = 0;
+    localMutationByNodeRef.current = new Map();
     serverPositionsRef.current = new Map();
     appliedServerNodeKeysRef.current = new Set();
+    undoStackRef.current = [];
+    redoStackRef.current = [];
+    historyEpochRef.current += 1;
+    setHistoryRevision(value => value + 1);
     applyPositions(defaultPositions());
     // A genuinely different project/scope starts at its origin. Do this before
     // the asynchronous read begins so a late response cannot override any
@@ -162,9 +221,19 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       viewportRef.current.scrollLeft = 0;
       viewportRef.current.scrollTop = 0;
     }
-    void loadServerLayout(generation);
-    return () => { loadSequenceRef.current += 1; generationRef.current += 1; saveEpochRef.current += 1; saveQueueRef.current = Promise.resolve(); };
-  }, [applyPositions, defaultPositions, loadServerLayout]);
+    loadPromiseRef.current = loadServerLayout(generation);
+    return () => {
+      loadSequenceRef.current += 1;
+      generationRef.current += 1;
+      saveEpochRef.current += 1;
+      saveQueueRef.current = Promise.resolve();
+      layoutReadyRef.current = false;
+      revisionRef.current = 0;
+      undoStackRef.current = [];
+      redoStackRef.current = [];
+      historyEpochRef.current += 1;
+    };
+  }, [applyPositions, cancelCanvasInteraction, defaultPositions, loadServerLayout]);
 
   useEffect(() => {
     // Automatic positions must follow a changed graph layout (for example,
@@ -191,12 +260,33 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       canvasPanRef.current = null;
       if (dragStateRef.current?.type === 'pan' && dragStateRef.current.pointerId === pan.pointerId) onDragStateChange(null);
     };
-    const onKeyDown = (event: KeyboardEvent) => { if (event.code === 'Space' && !(event.target as Element | null)?.closest?.('input,select,textarea')) { spacePressedRef.current = true; event.preventDefault(); } };
+    const belongsToViewport = (target: EventTarget | null) => {
+      const viewport = viewportRef.current;
+      const contains = (candidate: EventTarget | null) => {
+        let current = candidate as Node | null;
+        while (current) {
+          if (current === viewport) return true;
+          current = current.parentNode;
+        }
+        return false;
+      };
+      return Boolean(viewport && (contains(target) || contains(document.activeElement)));
+    };
+    const updateOwnership = (event: Event) => { viewportOwnsInteractionRef.current = belongsToViewport(event.target); };
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.defaultPrevented) return;
+      if (event.code === 'Space' && (viewportOwnsInteractionRef.current || belongsToViewport(event.target))
+        && !(event.target as Element | null)?.closest?.('input,select,textarea,[contenteditable]:not([contenteditable="false"]),[role="textbox"]')) {
+        spacePressedRef.current = true;
+        event.preventDefault();
+      }
+    };
     const onKeyUp = (event: KeyboardEvent) => {
       if (event.code !== 'Space') return;
       const wasPressed = spacePressedRef.current;
       spacePressedRef.current = false;
       finishCanvasPan(true);
+      if (event.defaultPrevented) return;
       if (wasPressed) event.preventDefault();
     };
     const onBlur = () => {
@@ -204,6 +294,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       finishCanvasPan(false);
     };
     if (!active) {
+      viewportOwnsInteractionRef.current = false;
       spacePressedRef.current = false;
       finishCanvasPan(false);
       return;
@@ -211,15 +302,26 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
     window.addEventListener('keydown', onKeyDown, true);
     window.addEventListener('keyup', onKeyUp, true);
     window.addEventListener('blur', onBlur);
-    return () => { window.removeEventListener('keydown', onKeyDown, true); window.removeEventListener('keyup', onKeyUp, true); window.removeEventListener('blur', onBlur); };
+    window.addEventListener('pointerdown', updateOwnership, true);
+    window.addEventListener('focusin', updateOwnership, true);
+    return () => {
+      window.removeEventListener('keydown', onKeyDown, true);
+      window.removeEventListener('keyup', onKeyUp, true);
+      window.removeEventListener('blur', onBlur);
+      window.removeEventListener('pointerdown', updateOwnership, true);
+      window.removeEventListener('focusin', updateOwnership, true);
+    };
   }, [active, dragStateRef, onDragStateChange]);
 
   const enqueueSave = useCallback((mode: 'patch' | 'replace', savedPositions: Map<string, VersionTreeCanvasPosition>, before: Map<string, VersionTreeCanvasPosition>, applyOnSuccess?: Map<string, VersionTreeCanvasPosition>, requiredHistoryEpoch?: number) => {
     if (disposedRef.current) return Promise.resolve(false);
     const generation = generationRef.current;
     const saveEpoch = saveEpochRef.current;
+    const localMutationAtEnqueue = localMutationSequenceRef.current;
     const operation = saveQueueRef.current.then(async () => {
+      await loadPromiseRef.current;
       if (disposedRef.current || generation !== generationRef.current || saveEpoch !== saveEpochRef.current || requiredHistoryEpoch !== undefined && requiredHistoryEpoch !== historyEpochRef.current) return false;
+      if (!layoutReadyRef.current) return false;
       const buildPayload = () => {
         const nodeById = new Map(nodesRef.current.map(node => [node.id, node]));
         return [...savedPositions].flatMap(([id, position]) => {
@@ -228,7 +330,6 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         });
       };
       let payload = buildPayload();
-      let mergedAfterConflict: Map<string, VersionTreeCanvasPosition> | null = null;
       let result = await window.electronAPI.saveVersionTreeLayout(workspacePath, projectName, {
         scopeKey,
         expectedRevision: revisionRef.current,
@@ -249,13 +350,25 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
           const currentNodes = nodesRef.current;
           const idByNodeKey = new Map(currentNodes.flatMap(node => [node.nodeKey, ...(node.fallbackNodeKeys || [])].map(nodeKey => [nodeKey, node.id] as const)));
           const latestServerPositions = new Map(latest.positions.map(position => [position.nodeKey, { x: position.x, y: position.y, manual: true }]));
-          const merged = new Map(positionsRef.current);
+          const latestPositionsById = new Map<string, VersionTreeCanvasPosition>();
           latest.positions.forEach(position => {
             const id = idByNodeKey.get(position.nodeKey);
-            if (id) merged.set(id, { x: position.x, y: position.y, manual: true });
+            if (id) latestPositionsById.set(id, { x: position.x, y: position.y, manual: true });
           });
-          savedPositions.forEach((position, id) => merged.set(id, position));
-          mergedAfterConflict = merged;
+          const dimensions = dimensionsRef.current;
+          const currentNodeIds = new Set(currentNodes.map(node => node.id));
+          const merged = reconcileVersionTreeCanvasPositions({
+            nodes: currentNodes,
+            previous: latestPositionsById,
+            nodeWidth: dimensions.nodeWidth,
+            nodeHeight: dimensions.nodeHeight,
+            horizontalGap: dimensions.collisionHorizontalGap,
+          });
+          savedPositions.forEach((position, id) => { if (currentNodeIds.has(id)) merged.set(id, position); });
+          localMutationByNodeRef.current.forEach((mutation, id) => {
+            const current = positionsRef.current.get(id);
+            if (currentNodeIds.has(id) && mutation > localMutationAtEnqueue && current) merged.set(id, current);
+          });
           serverPositionsRef.current = latestServerPositions;
           appliedServerNodeKeysRef.current = new Set(latest.positions.map(position => position.nodeKey));
           // Existing history contains full maps based on the losing revision.
@@ -281,13 +394,11 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       if (result.success) {
         revisionRef.current = 'revision' in result && result.revision !== undefined ? result.revision : revisionRef.current + 1;
         payload.forEach(position => serverPositionsRef.current.set(position.nodeKey, { x: position.x, y: position.y, manual: true }));
-        if (applyOnSuccess || mergedAfterConflict) {
-          applyPositions(applyOnSuccess || mergedAfterConflict!);
+        if (applyOnSuccess) {
+          applyPositions(applyOnSuccess);
           if (viewportRef.current) {
-            if (applyOnSuccess) {
-              viewportRef.current.scrollLeft = 0;
-              viewportRef.current.scrollTop = 0;
-            }
+            viewportRef.current.scrollLeft = 0;
+            viewportRef.current.scrollTop = 0;
           }
         }
         return true;
@@ -302,13 +413,14 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       if (!applyOnSuccess || staleLayout) await loadServerLayout(generation);
       return false;
     });
-    saveQueueRef.current = operation.then(() => undefined);
+    saveQueueRef.current = operation.then(() => undefined, () => undefined);
     return operation;
   }, [applyPositions, loadServerLayout, projectName, scopeKey, workspacePath]);
 
   const nodePointerHandlers = useCallback((id: string) => ({
     onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {
-      if (disposedRef.current || dragStateRef.current || event.button !== 0 || (event.target as Element).closest('button,input,select,textarea,[data-version-tree-port]')) return;
+      viewportOwnsInteractionRef.current = active;
+      if (!active || disposedRef.current || dragStateRef.current || event.button !== 0 || (event.target as Element).closest('button,input,select,textarea,[data-version-tree-port]')) return;
       const startPosition = positionsRef.current.get(id);
       if (!startPosition) return;
       const currentSelectedNodeIds = selectedNodeIdsRef.current;
@@ -319,8 +431,9 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         const position = positionsRef.current.get(candidate);
         return position ? [[candidate, position] as const] : [];
       }));
+      const beforeMutationMarkers = new Map(ids.map(nodeId => [nodeId, localMutationByNodeRef.current.get(nodeId)] as const));
       onDragStateChange({ type: 'node', nodeKey: id, pointerId: event.pointerId });
-      nodeDragRef.current = { element: event.currentTarget, pointerId: event.pointerId, anchorId: id, ids, startClientX: event.clientX, startClientY: event.clientY, startPositions, before: new Map(positionsRef.current), dragged: false };
+      nodeDragRef.current = { element: event.currentTarget, pointerId: event.pointerId, anchorId: id, ids, startClientX: event.clientX, startClientY: event.clientY, startPositions, beforeMutationMarkers, before: new Map(positionsRef.current), dragged: false };
     },
     onPointerMove: (event: ReactPointerEvent<HTMLDivElement>) => {
       const drag = nodeDragRef.current;
@@ -338,7 +451,11 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       event.preventDefault();
       const moved = translateVersionTreeCanvasSelection(drag.startPositions, deltaX, deltaY);
       const next = new Map(positionsRef.current);
-      moved.forEach((position, nodeId) => next.set(nodeId, position));
+      const mutation = ++localMutationSequenceRef.current;
+      moved.forEach((position, nodeId) => {
+        next.set(nodeId, position);
+        localMutationByNodeRef.current.set(nodeId, mutation);
+      });
       applyPositions(next);
     },
     onPointerUp: (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -347,7 +464,10 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       if (drag.element.hasPointerCapture(drag.pointerId)) drag.element.releasePointerCapture(drag.pointerId);
       nodeDragRef.current = null;
       onDragStateChange(null);
-      if (!drag.dragged) return;
+      if (!drag.dragged) {
+        applyPositions(drag.before);
+        return;
+      }
       event.preventDefault();
       event.stopPropagation();
       suppressClickRef.current = id;
@@ -369,6 +489,10 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       if (drag.element.hasPointerCapture(drag.pointerId)) drag.element.releasePointerCapture(drag.pointerId);
       nodeDragRef.current = null;
       onDragStateChange(null);
+      drag.beforeMutationMarkers.forEach((mutation, nodeId) => {
+        if (mutation === undefined) localMutationByNodeRef.current.delete(nodeId);
+        else localMutationByNodeRef.current.set(nodeId, mutation);
+      });
       applyPositions(drag.before);
     },
     onPointerLeave: (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -376,6 +500,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       if (!drag || drag.dragged || drag.anchorId !== id || drag.pointerId !== event.pointerId) return;
       nodeDragRef.current = null;
       onDragStateChange(null);
+      applyPositions(drag.before);
     },
     onClickCapture: (event: React.MouseEvent<HTMLDivElement>) => {
       if (suppressClickRef.current !== id) return;
@@ -383,12 +508,13 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       event.preventDefault();
       event.stopPropagation();
     },
-  }), [applyPositions, coordinateScale, dragStateRef, enqueueSave, onDragStateChange]);
+  }), [active, applyPositions, coordinateScale, dragStateRef, enqueueSave, onDragStateChange]);
 
   const canvasPointerHandlers = {
     onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {
+      viewportOwnsInteractionRef.current = active;
       const shouldPan = event.button === 1 || event.button === 0 && spacePressedRef.current;
-      if (disposedRef.current || dragStateRef.current || !shouldPan || (event.target as Element).closest('[data-version-tree-node]')) return;
+      if (!active || disposedRef.current || dragStateRef.current || !shouldPan || (event.target as Element).closest('[data-version-tree-node]')) return;
       const viewport = viewportRef.current;
       if (!viewport) return;
       event.preventDefault();

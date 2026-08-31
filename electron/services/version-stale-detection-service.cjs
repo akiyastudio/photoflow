@@ -4,17 +4,19 @@ const { createDirtyCoalescingRunner } = require('./dirty-coalescing-runner.cjs')
 const mergeDetectionBatch = (current, delta) => {
   const left = current || {};
   const right = delta || {};
+  const fullScan = Boolean(left.fullScan || right.fullScan);
   return {
     root: right.root || left.root,
     projectName: right.projectName || left.projectName,
-    changedPaths: new Set([...(left.changedPaths || []), ...(right.changedPaths || [])]),
-    fullScan: Boolean(left.fullScan || right.fullScan),
+    changedPaths: fullScan ? new Set() : new Set([...(left.changedPaths || []), ...(right.changedPaths || [])]),
+    fullScan,
     restartTask: right.restartTask || left.restartTask || null,
   };
 };
 
 const createVersionStaleDetectionService = ({ versionService, backgroundTasks = null, delayMs = 1500, runnerRetryDelays = undefined, writeLog = () => undefined }) => {
-  const keyFor = (root, projectName) => `${path.resolve(root).toLocaleLowerCase()}\0${String(projectName || '').toLocaleLowerCase()}`;
+  const keyPart = value => process.platform === 'win32' ? String(value).toLocaleLowerCase() : String(value);
+  const keyFor = (root, projectName) => `${keyPart(path.resolve(root))}\0${keyPart(projectName || '')}`;
   let runner;
 
   const enqueueRetry = (key, batch, restartTask = null) => {
@@ -35,7 +37,7 @@ const createVersionStaleDetectionService = ({ versionService, backgroundTasks = 
       resources: [{ path: `photoflow-workspace-database/${batch.root}`, access: 'write' }],
       metadata: {
         workspaceRoot: batch.root, projectName: batch.projectName,
-        changedPaths: [...batch.changedPaths], fullScan: batch.fullScan,
+        changedPaths: batch.fullScan ? [] : [...batch.changedPaths], fullScan: batch.fullScan,
       },
     }, executeDatabaseWork, () => enqueueRetry(key, batch));
     backgroundTasks.dismiss(execution.task.id);
@@ -70,7 +72,7 @@ const createVersionStaleDetectionService = ({ versionService, backgroundTasks = 
     if (!projectName) return null;
     return runner.enqueue(keyFor(root, projectName), {
       root: path.resolve(root), projectName: String(projectName),
-      changedPaths: changedPaths.map(value => path.resolve(value)), fullScan,
+      changedPaths: fullScan ? [] : changedPaths.map(value => path.resolve(value)), fullScan,
     });
   };
 

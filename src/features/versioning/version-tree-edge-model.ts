@@ -27,6 +27,9 @@ const VERSION_TREE_RELATION_LABELS: Record<VersionTreeEdgeKind, string> = {
 
 export const versionTreeRelationLabel = (kind: VersionTreeEdgeKind) => VERSION_TREE_RELATION_LABELS[kind];
 
+export const isSupplementalVersionTreeEdgeKind = (kind: VersionTreeEdgeKind): kind is VersionTreeSupplementalEdgeKind =>
+  kind === 'media_companion' || kind === 'derived_preview' || kind === 'derived_transcode' || kind === 'workflow_input';
+
 export const allowedVersionTreeRelationKinds = (source: VersionTreeRelationNode, target: VersionTreeRelationNode): VersionTreeEdgeKind[] => {
   if (source.folderMissing || target.folderMissing || source.id === target.id || source.projectId !== target.projectId || source.mediaKind !== target.mediaKind) return [];
   const result: VersionTreeEdgeKind[] = [];

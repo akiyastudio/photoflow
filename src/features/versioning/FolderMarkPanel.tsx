@@ -1,3 +1,4 @@
+import { useRef } from 'react';
 import { Aperture, GitBranch, Loader2, Video } from 'lucide-react';
 import type { ProgressFolder } from '../../types';
 import { VersionProgressPanel } from './VersionProgressPanel';
@@ -55,6 +56,11 @@ const SimplePanelFooter = ({ busy, submitLabel, onSubmit, onClose }: {
 
 export const FolderMarkPanel = ({ draft, folders, state = 'ready', taskProgress, message, error, namePresets, onChange, onSubmit, onClose }: FolderMarkPanelProps) => {
   const busy = state === 'processing';
+  const lastMediaKindRef = useRef<FolderMarkMediaKind>(draft.purpose === 'original'
+    ? draft.mediaKind
+    : draft.purpose === 'progress' ? draft.progress.mediaKind : 'image');
+  if (draft.purpose === 'original') lastMediaKindRef.current = draft.mediaKind;
+  else if (draft.purpose === 'progress') lastMediaKindRef.current = draft.progress.mediaKind;
   const purposes: Array<{ purpose: FolderMarkPurpose; label: string; icon: React.ReactNode }> = [
     { purpose: 'original', label: '原始素材', icon: <Aperture size={16}/> },
     { purpose: 'progress', label: '进度', icon: <GitBranch size={16}/> },
@@ -62,8 +68,14 @@ export const FolderMarkPanel = ({ draft, folders, state = 'ready', taskProgress,
   ];
   const changePurpose = (purpose: FolderMarkPurpose) => {
     if (purpose === draft.purpose) return;
-    onChange(switchFolderMarkPurpose(draft, purpose, folders));
+    onChange(switchFolderMarkPurpose(draft, purpose, folders, lastMediaKindRef.current));
   };
+
+  if (draft.purpose !== 'progress' && state !== 'ready') {
+    const title = state === 'processing' ? '正在更新文件夹标记' : state === 'result' ? '文件夹标记已更新' : '文件夹标记失败';
+    const tone = state === 'failure' ? 'border-red-200 bg-red-50 text-red-800' : state === 'result' ? 'border-emerald-200 bg-emerald-50 text-emerald-800' : 'border-blue-200 bg-blue-50 text-blue-800';
+    return <div className="space-y-4"><FolderSummary draft={draft}/><section role={state === 'failure' ? 'alert' : 'status'} className={`rounded-xl border px-4 py-3 ${tone}`}><b className="text-sm">{title}</b><p className="mt-1 text-xs leading-5 opacity-80">{error || message || (busy ? taskProgress?.currentName || '正在处理，请稍候…' : '操作已经完成。')}</p>{busy && typeof taskProgress?.percentage === 'number' && <div className="mt-3 h-2 overflow-hidden rounded-full bg-white/60"><div className="h-full rounded-full bg-blue-500" style={{ width: `${Math.max(0, Math.min(100, taskProgress.percentage))}%` }}/></div>}</section><div className="flex justify-end"><button type="button" disabled={busy} onClick={onClose} className="dialog-primary">关闭</button></div></div>;
+  }
 
   const originalPanel = draft.purpose === 'original' ? <div className="space-y-4">
     <FolderSummary draft={draft}/>

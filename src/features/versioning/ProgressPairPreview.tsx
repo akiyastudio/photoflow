@@ -2,6 +2,9 @@ import { useEffect, useRef, useState } from 'react';
 import { Loader2 } from 'lucide-react';
 import type { AppConfig } from '../../types';
 import { ImageComparisonView, type ImageComparisonMode } from '../../components/ImageComparisonView';
+import { versioningMediaKind } from './versioning-v2-model';
+
+// The centralized registry includes legacy video suffixes '.mpeg', '.mpg', '.mts' and '.m2ts'.
 
 export type ProgressPairPreviewMode = ImageComparisonMode;
 
@@ -18,13 +21,6 @@ type ProgressPairPreviewProps = {
   onSwappedChange: (swapped: boolean) => void;
 };
 
-const previewKind = (filePath: string): 'image' | 'raw' | 'video' => {
-  const extension = filePath.slice(filePath.lastIndexOf('.')).toLocaleLowerCase();
-  if (new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm']).has(extension)) return 'video';
-  if (new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']).has(extension)) return 'raw';
-  return 'image';
-};
-
 export const ProgressPairPreview = ({ referencePath = '', sourcePath = '', referenceLabel = '上一版本', sourceLabel = '当前版本', referenceMissing = false, mode, swapped, cacheConfig, onModeChange, onSwappedChange }: ProgressPairPreviewProps) => {
   const [resources, setResources] = useState<{ reference?: string; source?: string; loading: boolean; error?: string }>({ loading: false });
   const requestSequenceRef = useRef(0);
@@ -32,34 +28,38 @@ export const ProgressPairPreview = ({ referencePath = '', sourcePath = '', refer
   useEffect(() => {
     const requestSequence = ++requestSequenceRef.current;
     setResources({ loading: Boolean((referencePath && !referenceMissing) || sourcePath) });
-    const paths = new Map<string, 'reference' | 'source'>();
-    if (referencePath && !referenceMissing) paths.set(referencePath.toLocaleLowerCase(), 'reference');
-    if (sourcePath) paths.set(sourcePath.toLocaleLowerCase(), 'source');
+    const paths = new Map<string, Array<'reference' | 'source'>>();
+    const addPath = (path: string, side: 'reference' | 'source') => {
+      const key = path.toLocaleLowerCase();
+      paths.set(key, [...(paths.get(key) || []), side]);
+    };
+    if (referencePath && !referenceMissing) addPath(referencePath, 'reference');
+    if (sourcePath) addPath(sourcePath, 'source');
     const unsubscribe = window.electronAPI.onThumbnailStateChanged(update => {
       if (requestSequenceRef.current !== requestSequence || update.state !== 'READY') return;
-      const side = paths.get(update.filePath.toLocaleLowerCase());
+      const sides = paths.get(update.filePath.toLocaleLowerCase());
       const url = update.previewUrls?.large || update.previewUrls?.medium;
-      if (side && url) setResources(current => ({ ...current, [side]: url }));
+      if (sides?.length && url) setResources(current => sides.reduce((next, side) => ({ ...next, [side]: url }), current));
     });
     Promise.all([
-      referencePath && !referenceMissing ? window.electronAPI.getMediaThumbnail(referencePath, previewKind(referencePath), cacheConfig, 1600, 0, -2) : Promise.resolve(undefined),
-      sourcePath ? window.electronAPI.getMediaThumbnail(sourcePath, previewKind(sourcePath), cacheConfig, 1600, 0, -1) : Promise.resolve(undefined),
+      referencePath && !referenceMissing ? window.electronAPI.getMediaThumbnail(referencePath, versioningMediaKind(referencePath), cacheConfig, 1600, 0, -2) : Promise.resolve(undefined),
+      sourcePath ? window.electronAPI.getMediaThumbnail(sourcePath, versioningMediaKind(sourcePath), cacheConfig, 1600, 0, -1) : Promise.resolve(undefined),
     ]).then(([reference, source]) => {
       if (requestSequenceRef.current !== requestSequence) return;
-      setResources({
-        reference: reference?.previewUrl || reference?.mediaUrl,
-        source: source?.previewUrl || source?.mediaUrl,
+      setResources(current => ({
+        reference: current.reference || reference?.previewUrl || reference?.mediaUrl,
+        source: current.source || source?.previewUrl || source?.mediaUrl,
         loading: false,
         error: reference && !reference.success || source && !source.success ? reference?.error || source?.error || '对比预览加载失败' : undefined,
-      });
+      }));
     }).catch(error => {
-      if (requestSequenceRef.current === requestSequence) setResources({ loading: false, error: error instanceof Error ? error.message : String(error) });
+      if (requestSequenceRef.current === requestSequence) setResources(current => ({ ...current, loading: false, error: error instanceof Error ? error.message : String(error) }));
     });
     return () => {
       requestSequenceRef.current += 1;
       unsubscribe();
-      if (referencePath && !referenceMissing) void window.electronAPI.cancelMediaThumbnail(referencePath, 1600);
-      if (sourcePath) void window.electronAPI.cancelMediaThumbnail(sourcePath, 1600);
+      const cancelPaths = new Set([referencePath && !referenceMissing ? referencePath : '', sourcePath].filter(Boolean));
+      cancelPaths.forEach(path => { void window.electronAPI.cancelMediaThumbnail(path, 1600); });
     };
   }, [referencePath, sourcePath, referenceMissing, cacheConfig.directory, cacheConfig.maxSizeGB]);
 

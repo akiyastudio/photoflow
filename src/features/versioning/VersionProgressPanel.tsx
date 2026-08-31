@@ -164,7 +164,7 @@ export const VersionProgressPanel = ({ draft, folders, state = 'ready', progress
         selectionDescription="可直接拖入多个文件或文件夹"
         selectedPaths={draft.sourcePaths || []}
         onSelectedPathsChange={paths => update({ sourcePaths: paths })}
-        onChooseFiles={onChooseFiles || onSubmit}
+        onChooseFiles={onChooseFiles || (() => undefined)}
         onChooseFolder={onChooseFolder}
         importKind="progress"
         onImportKindChange={kind => onImportKindChange?.(kind, draft.sourcePaths || [])}
