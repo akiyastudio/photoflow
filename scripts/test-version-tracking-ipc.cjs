@@ -300,6 +300,12 @@ async function main() {
     status: 'accepted',
   });
   await Promise.resolve();
+  const secondDecision = await decide({}, workspaceRoot, {
+    sessionId: decisionSessionId,
+    itemId: 'dddddddd-dddd-4ddd-8ddd-dddddddddddd',
+    status: 'rejected',
+  });
+  assert.strictEqual(secondDecision.success, false, 'a second decision must not acquire or release the first decision lease');
   const commitDuringDecision = await commit({}, workspaceRoot, { sessionId: decisionSessionId });
   const releaseDuringDecision = await release({}, workspaceRoot, { sessionId: decisionSessionId });
   assert.strictEqual(commitDuringDecision.success, false, 'commit must not bypass an in-flight decision');
@@ -307,6 +313,8 @@ async function main() {
   assert.strictEqual(releaseDuringDecision.success, false, 'release must not delete a session with an in-flight decision');
   releaseDecision();
   assert.strictEqual((await decisionPromise).success, true);
+  const releaseAfterDecision = await release({}, workspaceRoot, { sessionId: decisionSessionId });
+  assert.strictEqual(releaseAfterDecision.success, true, 'the decision lease must be released by its owner after completion');
   versionService.decideTrackingItem = originalDecideTrackingItem;
 
   const originalReleaseTrackingSession = versionService.releaseTrackingSession;
@@ -401,6 +409,27 @@ async function main() {
   writeLogImplementation = () => undefined;
   assert.strictEqual(batchCommittedDespiteLogFailure.success, true, 'post-persistence logging must not turn a committed batch into failure');
   assert.strictEqual(fs.readFileSync(copiedDestinationPath, 'utf8'), 'persisted-version-file', 'post-persistence logging must not delete committed copies');
+
+  const originalCommitBatchCompare = versionService.commitBatchCompare;
+  const guardedReferencePath = path.join(trustedParent, 'post-persist-guard.jpg');
+  const guardedDestinationPath = path.join(trustedProgress, 'post-persist-guard.jpg');
+  fs.writeFileSync(guardedReferencePath, 'guarded-persisted-file');
+  versionService.commitBatchCompare = async () => new Proxy({ success: true }, {
+    get: (target, property) => {
+      if (property === 'batch') throw new Error('injected post-persist metadata failure');
+      return Reflect.get(target, property);
+    },
+  });
+  const failedAfterPersistence = await batchCommit({}, workspaceRoot, 'active', 'Project', {
+    folderA: trustedParent,
+    folderB: trustedProgress,
+    copyMissingReferences: ['post-persist-guard.jpg'],
+    matches: [],
+  });
+  versionService.commitBatchCompare = originalCommitBatchCompare;
+  assert.strictEqual(failedAfterPersistence.success, false, 'a post-persistence metadata failure must be reported');
+  assert.match(failedAfterPersistence.error, /post-persist metadata failure/);
+  assert.strictEqual(fs.readFileSync(guardedDestinationPath, 'utf8'), 'guarded-persisted-file', 'post-persistence catch must not roll back committed copies');
 
   const originalGetTrackingCommitPlan = versionService.getTrackingCommitPlan;
   let releaseCommitPlan;

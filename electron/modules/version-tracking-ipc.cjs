@@ -10,8 +10,18 @@ const registerVersionTrackingIpc = context => {
   };
   const trackingCommitJobs = new Map();
   const trackingLaunchJobs = new Map();
-  const trackingCompareSessions = new Set();
+  const trackingCompareSessions = new Map();
   const trackingSessionOperations = new Map();
+  const acquireTrackingSessionOperation = (key, type) => {
+    const token = Symbol(type);
+    trackingSessionOperations.set(key, { type, token });
+    return token;
+  };
+  const releaseTrackingSessionOperation = (key, token) => {
+    if (trackingSessionOperations.get(key)?.token !== token) return false;
+    trackingSessionOperations.delete(key);
+    return true;
+  };
   const platformKey = value => process.platform === 'win32' ? String(value).toLowerCase() : String(value);
   const trackingSessionKey = (workspaceRoot, sessionId) => `${platformKey(path.resolve(workspaceRoot))}\0${String(sessionId).toLowerCase()}`;
   const trackingLaunchKey = (workspaceRoot, projectName, progressId, mode, restartTask = null) => {
@@ -39,11 +49,11 @@ const registerVersionTrackingIpc = context => {
     if (trackingCommitJobs.has(key) || trackingCompareSessions.has(key) || trackingSessionOperations.has(key)) {
       throw new Error('跟踪结果正在提交、确认或比较，暂时不能放弃会话');
     }
-    trackingSessionOperations.set(key, 'release');
+    const operationToken = acquireTrackingSessionOperation(key, 'release');
     try {
       return await versionService.releaseTrackingSession(workspaceRoot, sessionId);
     } finally {
-      if (trackingSessionOperations.get(key) === 'release') trackingSessionOperations.delete(key);
+      releaseTrackingSessionOperation(key, operationToken);
     }
   };
   const trackingPreviewItems = (prepared, preview = {}) => {
@@ -198,7 +208,7 @@ const registerVersionTrackingIpc = context => {
           && task.metadata?.sessionId === created.sessionId
           && (task.state === 'queued' || task.state === 'running'));
         const sessionOperation = trackingSessionOperations.get(sessionKey);
-        if (trackingCommitJobs.has(sessionKey) || sessionOperation && sessionOperation !== 'compare') {
+        if (trackingCommitJobs.has(sessionKey) || sessionOperation && sessionOperation.type !== 'compare') {
           throw new Error('版本跟踪会话正在执行其他操作，暂时不能恢复');
         }
         if (activeTask) return {
@@ -269,8 +279,8 @@ const registerVersionTrackingIpc = context => {
         };
       }
       const compareSessionKey = trackingSessionKey(workspaceRoot, created.sessionId);
-      trackingCompareSessions.add(compareSessionKey);
-      trackingSessionOperations.set(compareSessionKey, 'compare');
+      const compareOperationToken = acquireTrackingSessionOperation(compareSessionKey, 'compare');
+      trackingCompareSessions.set(compareSessionKey, compareOperationToken);
       setTimeout(() => void (async () => {
         try {
           await handle.waitForStart();
@@ -292,8 +302,8 @@ const registerVersionTrackingIpc = context => {
             handle.fail(error);
           }
         } finally {
-          trackingCompareSessions.delete(compareSessionKey);
-          if (trackingSessionOperations.get(compareSessionKey) === 'compare') trackingSessionOperations.delete(compareSessionKey);
+          if (trackingCompareSessions.get(compareSessionKey) === compareOperationToken) trackingCompareSessions.delete(compareSessionKey);
+          releaseTrackingSessionOperation(compareSessionKey, compareOperationToken);
         }
       })(), 0);
       return {
@@ -361,6 +371,7 @@ const registerVersionTrackingIpc = context => {
 
   ipcMain.handle('workspace-progress-tracking-decide', async (_event, workspacePath, request = {}) => {
     let operationKey;
+    let operationToken;
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       const sessionId = String(request.sessionId || '');
@@ -375,7 +386,7 @@ const registerVersionTrackingIpc = context => {
       if (trackingCommitJobs.has(operationKey) || trackingCompareSessions.has(operationKey) || trackingSessionOperations.has(operationKey)) {
         throw new Error('版本跟踪会话正在执行其他操作，暂时不能确认');
       }
-      trackingSessionOperations.set(operationKey, 'decide');
+      operationToken = acquireTrackingSessionOperation(operationKey, 'decide');
       return await versionService.decideTrackingItem(workspaceRoot, {
         sessionId, itemId,
         status: request.status,
@@ -384,7 +395,7 @@ const registerVersionTrackingIpc = context => {
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     } finally {
-      if (operationKey && trackingSessionOperations.get(operationKey) === 'decide') trackingSessionOperations.delete(operationKey);
+      if (operationKey && operationToken) releaseTrackingSessionOperation(operationKey, operationToken);
     }
   });
 
@@ -462,7 +473,7 @@ const registerVersionTrackingIpc = context => {
       if (trackingCompareSessions.has(key) || trackingSessionOperations.has(key)) {
         return { success: false, sessionId, retryable: true, items: [], error: '版本跟踪会话正在执行其他操作，暂时不能提交' };
       }
-      trackingSessionOperations.set(key, 'commit');
+      const operationToken = acquireTrackingSessionOperation(key, 'commit');
       const job = Promise.resolve().then(async () => {
         const resources = versionService.getTrackingCommitResources
           ? requireStageSuccess(await versionService.getTrackingCommitResources(workspaceRoot, sessionId), '无法读取版本跟踪资源')
@@ -502,7 +513,7 @@ const registerVersionTrackingIpc = context => {
         return await job;
       } finally {
         if (trackingCommitJobs.get(key) === job) trackingCommitJobs.delete(key);
-        if (trackingSessionOperations.get(key) === 'commit') trackingSessionOperations.delete(key);
+        releaseTrackingSessionOperation(key, operationToken);
       }
     } catch (error) {
       return error.trackingResult || { success: false, sessionId: String(request.sessionId || ''), retryable: true, items: [], error: error.message || String(error) };
