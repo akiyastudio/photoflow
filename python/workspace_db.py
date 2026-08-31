@@ -10681,9 +10681,10 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
         db.close()
         return result
     elif action == "media_get":
-        result = media_get(root, db, payload)
-        db.close()
-        return result
+        try:
+            return media_get(root, db, payload)
+        finally:
+            db.close()
     elif action == "media_versions_snapshot":
         result = media_versions_snapshot(db, payload)
         db.close()

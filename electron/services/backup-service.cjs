@@ -400,8 +400,18 @@ const createBackupService = context => {
     const descriptor = path.join(storeRoot(target), 'store.json');
     let stored;
     try { stored = JSON.parse(await fs.promises.readFile(descriptor, 'utf8')); }
-    catch { throw inventoryUnsafe('备份存储描述文件不可读或已损坏'); }
+    catch (error) {
+      if (error?.code !== 'ENOENT') throw inventoryUnsafe('备份存储描述文件不可读或已损坏');
+      const entries = await fs.promises.readdir(storeRoot(target), { withFileTypes: true });
+      const allowedLegacyEntries = new Set(['objects', 'snapshots', 'temporary']);
+      const byName = new Map(entries.map(entry => [entry.name, entry]));
+      const legacyLayoutValid = ['objects', 'snapshots'].every(name => byName.get(name)?.isDirectory() && !byName.get(name)?.isSymbolicLink())
+        && entries.every(entry => allowedLegacyEntries.has(entry.name) && entry.isDirectory() && !entry.isSymbolicLink());
+      if (!legacyLayoutValid) throw inventoryUnsafe('备份存储缺少版本描述文件且旧版目录布局无法验证');
+      return { formatVersion: STORE_FORMAT_VERSION, legacy: true };
+    }
     if (stored?.formatVersion !== STORE_FORMAT_VERSION) throw inventoryUnsafe(`不支持的备份存储版本：${stored?.formatVersion ?? 'unknown'}`);
+    return stored;
   };
   const assertStoreLayoutPhysical = async target => {
     await assertNoReparseAncestorsBeforeCreate(target);
