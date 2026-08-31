@@ -155,17 +155,26 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
 
   const trackingModel = loadCommonJs(compile('src/features/versioning/tracking-confirmation-model.ts'));
   const trackingCalls = { decide: [], commit: [], release: [] };
+  const trackingCallbacks = { close: 0, committed: 0, released: 0, notices: [] };
+  const trackingEvents = [];
+  let failNextSessionCCommit = true;
   let resolveSessionB;
   const trackingSession = id => ({ id, progressId: `progress-${id}`, parentProgressId: `parent-${id}`, mode: 'refresh', status: 'pending_confirm', renameFromParent: false, copyMissingFromParent: false, error: '', total: 1, unresolvedCount: 1 });
   const trackingItem = { id: 'item-a', kind: 'new', sourceName: 'current.jpg', referenceName: 'reference.jpg', targetName: 'current.jpg', status: 'pending_confirmation' };
   testWindow.electronAPI = {
     async getProgressTrackingSession(_workspacePath, request) {
       if (request.sessionId === 'A') return { success: true, session: trackingSession('A'), items: [trackingItem], nextCursor: null };
+      if (request.sessionId === 'C') return { success: true, session: { ...trackingSession('C'), unresolvedCount: 0 }, items: [{ ...trackingItem, id: 'item-c', status: 'accepted' }], nextCursor: null };
       return new Promise(resolve => { resolveSessionB = resolve; });
     },
     async decideProgressTrackingItem(_workspacePath, request) { trackingCalls.decide.push(request); return { success: true }; },
-    async commitProgressTracking(_workspacePath, request) { trackingCalls.commit.push(request); return { success: true }; },
-    async releaseProgressTrackingSession(_workspacePath, request) { trackingCalls.release.push(request); return { success: true, released: true }; },
+    async commitProgressTracking(_workspacePath, request) {
+      trackingCalls.commit.push(request);
+      trackingEvents.push(`commit:${request.sessionId}`);
+      if (request.sessionId === 'C' && failNextSessionCCommit) { failNextSessionCCommit = false; return { success: false, error: 'simulated commit failure' }; }
+      return { success: true };
+    },
+    async releaseProgressTrackingSession(_workspacePath, request) { trackingCalls.release.push(request); trackingEvents.push(`release:${request.sessionId}`); return { success: true, released: true }; },
   };
   const trackingPanelModule = loadCommonJs(compile('src/features/versioning/TrackingConfirmationPanel.tsx'), request => {
     if (request === 'lucide-react') return iconModule;
@@ -182,7 +191,11 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
       { id: `parent-${sessionId}`, displayName: `Parent ${sessionId}`, folderPath: `C:/parent-${sessionId}` },
       { id: `progress-${sessionId}`, displayName: `Progress ${sessionId}`, folderPath: `C:/progress-${sessionId}` },
     ],
-    cacheConfig: { directory: '', maxSizeGB: 1 }, onClose() {}, onCommitted() {}, onReleased() {}, onNotice() {},
+    cacheConfig: { directory: '', maxSizeGB: 1 },
+    onClose() { trackingCallbacks.close += 1; trackingEvents.push('close'); },
+    onCommitted() { trackingCallbacks.committed += 1; trackingEvents.push('committed'); },
+    onReleased() { trackingCallbacks.released += 1; trackingEvents.push('released'); },
+    onNotice(message) { trackingCallbacks.notices.push(message); trackingEvents.push('notice'); },
   });
   await React.act(async () => { trackingRoot.render(React.createElement(trackingPanelModule.TrackingConfirmationPanel, trackingProps('A'))); await Promise.resolve(); await Promise.resolve(); });
   const oldDecisionButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent === '确认同一张');
@@ -198,8 +211,31 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
   assert.deepStrictEqual(trackingCalls, {
     decide: [{ sessionId: 'A', itemId: 'item-a', status: 'accepted' }], commit: [], release: [],
   }, 'old session A decision/commit controls and transitional release cannot be combined with the new session B prop for IPC');
-  resolveSessionB({ success: true, session: trackingSession('B'), items: [], nextCursor: null });
+  resolveSessionB({ success: true, session: { ...trackingSession('B'), unresolvedCount: 0 }, items: [{ ...trackingItem, id: 'item-b', status: 'accepted' }], nextCursor: null });
   await React.act(async () => { await Promise.resolve(); });
+
+  const sessionBCommitButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('提交结果'));
+  await React.act(async () => { dispatch(sessionBCommitButton, 'click'); await Promise.resolve(); await Promise.resolve(); });
+  assert.deepStrictEqual(trackingCalls.commit, [{ sessionId: 'B' }], 'a normal commit targets the loaded session B');
+  assert.deepStrictEqual(trackingCalls.release, [{ sessionId: 'B' }], 'a successful commit releases the same session before callbacks');
+  assert.deepStrictEqual(trackingCallbacks, { close: 1, committed: 1, released: 0, notices: [] }, 'commit and release success close and report committed exactly once');
+  assert.deepStrictEqual(trackingEvents, ['commit:B', 'release:B', 'close', 'committed'], 'successful commit waits for release before closing and reporting completion');
+
+  await React.act(async () => { trackingRoot.render(React.createElement(trackingPanelModule.TrackingConfirmationPanel, trackingProps('C'))); await Promise.resolve(); await Promise.resolve(); });
+  const firstSessionCCommitButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('提交结果'));
+  await React.act(async () => { dispatch(firstSessionCCommitButton, 'click'); await Promise.resolve(); await Promise.resolve(); });
+  assert.deepStrictEqual(trackingCalls.commit, [{ sessionId: 'B' }, { sessionId: 'C' }], 'session C performs its first commit attempt');
+  assert.deepStrictEqual(trackingCalls.release, [{ sessionId: 'B' }], 'a failed commit must not release its session');
+  assert.strictEqual(trackingCallbacks.close, 1, 'a failed commit must not close the panel');
+  assert.strictEqual(trackingCallbacks.committed, 1, 'a failed commit must not report completion');
+  assert(trackingCallbacks.notices.some(message => message.includes('simulated commit failure')), 'commit failure remains visible to the user');
+  const retrySessionCCommitButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('提交结果'));
+  assert(retrySessionCCommitButton && !retrySessionCCommitButton.attributes.has('disabled'), 'commit failure clears the in-flight gate so the user can retry');
+  await React.act(async () => { dispatch(retrySessionCCommitButton, 'click'); await Promise.resolve(); await Promise.resolve(); });
+  assert.deepStrictEqual(trackingCalls.commit, [{ sessionId: 'B' }, { sessionId: 'C' }, { sessionId: 'C' }], 'the recovered retry targets session C again');
+  assert.deepStrictEqual(trackingCalls.release, [{ sessionId: 'B' }, { sessionId: 'C' }], 'the successful retry releases session C');
+  assert.strictEqual(trackingCallbacks.close, 2, 'the successful retry closes exactly once');
+  assert.strictEqual(trackingCallbacks.committed, 2, 'the successful retry reports committed exactly once');
   await React.act(async () => trackingRoot.unmount());
 
   const updateResolvers = [];
