@@ -76,6 +76,11 @@ MIGRATION_BACKUP_LIMIT = 5
 AUTOMATIC_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
 AUTOMATIC_BACKUP_LIMIT = 7
 MIGRATION_JOURNAL_SUFFIX = ".migration-journal-v1.json"
+_CONNECT_ATTEMPTS = []
+
+
+class DatabaseWriteRequired(RuntimeError):
+    code = "DATABASE_WRITE_REQUIRED"
 
 
 def __getattr__(name):
@@ -2144,15 +2149,18 @@ def _check_integrity(db, force: bool = False):
     db.commit()
 
 
-def connect(root: str, database: str, include_domains=None, include_compatibility: bool = False, _staging_init: bool = False):
+def _connect_impl(root: str, database: str, include_domains=None, include_compatibility: bool = False, _staging_init: bool = False):
     root = os.path.abspath(root)
     database = os.path.abspath(database)
     os.makedirs(os.path.dirname(database), exist_ok=True)
     _recover_interrupted_migration(database)
+    _resume_media_operation_files(database)
     if not _staging_init and _database_needs_initialization(database):
         _initialize_database_staged(root, database)
         return connect(root, database, include_domains=include_domains, include_compatibility=include_compatibility, _staging_init=True)
     db = sqlite3.connect(database, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
+    for attempt in _CONNECT_ATTEMPTS:
+        attempt.append(db)
     db.row_factory = sqlite3.Row
     # The catalog and media workers intentionally share this database. Give a
     # short-lived writer time to finish instead of surfacing SQLITE_BUSY to the
@@ -2560,22 +2568,57 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
     return db
 
 
+def connect(root: str, database: str, include_domains=None, include_compatibility: bool = False, _staging_init: bool = False):
+    attempt = []
+    _CONNECT_ATTEMPTS.append(attempt)
+    try:
+        return _connect_impl(root, database, include_domains, include_compatibility, _staging_init)
+    except Exception:
+        for connection in reversed(attempt):
+            try: connection.close()
+            except sqlite3.Error: pass
+        raise
+    finally:
+        _CONNECT_ATTEMPTS.pop()
+
+
 def connect_read_only(database: str, domains=()):
     """Open the catalog without schema writes so WAL readers never need the writer slot."""
     database = os.path.abspath(database)
-    _recover_interrupted_migration(database)
+    if os.path.isfile(_migration_journal_path(database)) or not os.path.isfile(database):
+        raise DatabaseWriteRequired("目录数据库需要迁移恢复或初始化")
     uri = f"{Path(database).resolve().as_uri()}?mode=ro"
     db = sqlite3.connect(uri, uri=True, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
-    db.row_factory = sqlite3.Row
-    db.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
-    for domain in tuple(dict.fromkeys(domains or ())):
-        domain_path = database_path_for_workspace_database(database, domain)
-        if not os.path.isfile(domain_path):
-            raise RuntimeError(f"只读业务域尚未初始化：{domain}")
-        domain_uri = f"{Path(domain_path).resolve().as_uri()}?mode=ro"
-        db.execute(f'ATTACH DATABASE ? AS "{domain}"', (domain_uri,))
-    db.execute("PRAGMA query_only=ON")
-    return db
+    try:
+        db.row_factory = sqlite3.Row
+        db.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+        core_tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if not {"meta", "projects"} <= core_tables:
+            raise DatabaseWriteRequired("目录数据库 schema 尚未初始化")
+        schema = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if not schema or int(schema[0]) != TARGET_SCHEMA_VERSION:
+            raise DatabaseWriteRequired("目录数据库 schema 需要迁移")
+        if _meta_value(db, "purge_journal_v1") or _meta_value(db, "media_operation_journal_v1"):
+            raise DatabaseWriteRequired("目录数据库存在待重放 operation journal")
+        for domain in tuple(dict.fromkeys(domains or ())):
+            domain_path = database_path_for_workspace_database(database, domain)
+            if not os.path.isfile(domain_path):
+                raise DatabaseWriteRequired(f"只读业务域尚未初始化：{domain}")
+            domain_uri = f"{Path(domain_path).resolve().as_uri()}?mode=ro"
+            db.execute(f'ATTACH DATABASE ? AS "{domain}"', (domain_uri,))
+            tables = {row[0] for row in db.execute(f'SELECT name FROM "{domain}".sqlite_master WHERE type=\'table\'').fetchall()}
+            required = {"meta", *(DOMAIN_TABLES.get(domain) or ())}
+            if not required <= tables:
+                raise DatabaseWriteRequired(f"只读业务域 schema 不完整：{domain}")
+            domain_schema = db.execute(f'SELECT value FROM "{domain}".meta WHERE key=\'schema_version\'').fetchone()
+            identity = db.execute(f'SELECT value FROM "{domain}".meta WHERE key=\'domain_identity\'').fetchone()
+            if not domain_schema or int(domain_schema[0]) != 1 or not identity or identity[0] != domain:
+                raise DatabaseWriteRequired(f"只读业务域需要迁移：{domain}")
+        db.execute("PRAGMA query_only=ON")
+        return db
+    except Exception:
+        db.close()
+        raise
 
 
 def database_needs_initialization(database: str) -> bool:
@@ -3776,23 +3819,33 @@ def media_sync_project(root: str, db, payload: dict):
         return prepared
     count = 0
     batch_size = 64
+    database = db.execute("PRAGMA database_list").fetchone()[2]
+    monolithic = db.execute("SELECT 1 FROM main.sqlite_master WHERE type='table' AND name='versions'").fetchone() is not None
     for offset in range(0, len(prepared["files"]), batch_size):
         batch_index = offset // batch_size
-        applied = media_sync_apply_batch(root, db, {
+        batch_payload = {
             "projectName": payload["projectName"],
             "snapshotId": prepared["snapshotId"],
             "batchIndex": batch_index,
             "authorizedRoots": prepared["authorizedRoots"],
             "files": prepared["files"][offset:offset + batch_size],
-        })
+        }
+        applied = media_sync_apply_batch(root, db, batch_payload) if monolithic else mutate(
+            root, database, "media_sync_apply_batch", batch_payload,
+            f"direct-media-sync:{prepared['snapshotId']}:batch:{batch_index}",
+        )
         count += int(applied.get("count") or 0)
-    finalized = media_sync_finalize(root, db, {
+    finalize_payload = {
         "projectName": payload["projectName"],
         "snapshotId": prepared["snapshotId"],
         "authorizedRoots": prepared["authorizedRoots"],
         "files": prepared["files"],
         "baselineVersions": prepared["baselineVersions"],
-    })
+    }
+    finalized = media_sync_finalize(root, db, finalize_payload) if monolithic else mutate(
+        root, database, "media_sync_finalize", finalize_payload,
+        f"direct-media-sync:{prepared['snapshotId']}:finalize",
+    )
     finalized["count"] = count
     return finalized
 
@@ -9573,16 +9626,17 @@ def load(root: str, database: str):
     # single WAL writer slot.
     requires_initialization = database_needs_initialization(database)
     requires_wal = False
-    pending_purge = False
     if not requires_initialization:
-        probe = connect_read_only(database)
         try:
-            requires_wal = str(probe.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal"
-            pending_purge = bool(_meta_value(probe, "purge_journal_v1"))
-        finally:
-            probe.close()
-    if requires_initialization or requires_wal or pending_purge:
-        initialized = connect(root, database, include_domains=True if pending_purge else False, include_compatibility=pending_purge)
+            probe = connect_read_only(database)
+            try:
+                requires_wal = str(probe.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal"
+            finally:
+                probe.close()
+        except DatabaseWriteRequired:
+            requires_initialization = True
+    if requires_initialization or requires_wal:
+        initialized = connect(root, database, include_domains=False)
         try:
             # Preserve eager creation/migration for a healthy installation, but
             # never make catalog startup depend on an optional compatibility domain.
@@ -10127,7 +10181,187 @@ def reconcile_cross_domain_references(db) -> dict:
     }
 
 
-def mutate(root: str, database: str, action: str, payload: dict):
+MEDIA_DURABLE_ACTIONS = frozenset((
+    "media_sync_apply_batch", "media_sync_finalize",
+    "media_sync_paths_apply_batch", "media_sync_paths_finalize", "media_get",
+))
+
+
+def _media_operation_digest(action: str, payload: dict) -> str:
+    encoded = json.dumps({"action": action, "payload": payload}, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _sqlite_backup_schema(source, schema: str, destination: str) -> None:
+    os.makedirs(os.path.dirname(destination), exist_ok=True)
+    target = sqlite3.connect(destination, timeout=30)
+    try:
+        target.execute("PRAGMA synchronous=FULL")
+        source.backup(target, name=schema)
+        target.commit()
+        if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RuntimeError(f"media operation staging backup failed: {schema}")
+    finally:
+        target.close()
+
+
+def _publish_sqlite_stage(source_path: str, destination: str) -> None:
+    if not os.path.isfile(source_path):
+        raise RuntimeError(f"media operation staging database is missing: {source_path}")
+    source = sqlite3.connect(f"{Path(source_path).resolve().as_uri()}?mode=ro", uri=True, timeout=30)
+    target = sqlite3.connect(destination, timeout=30)
+    try:
+        target.execute("PRAGMA busy_timeout=30000")
+        target.execute("PRAGMA synchronous=FULL")
+        if source.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RuntimeError("media operation staging database is corrupt")
+        source.backup(target)
+        target.commit()
+        if target.execute("PRAGMA quick_check").fetchone()[0] != "ok" or target.execute("PRAGMA foreign_key_check").fetchall():
+            raise RuntimeError("media operation publication verification failed")
+    finally:
+        target.close()
+        source.close()
+
+
+def _read_media_operation_journal(database: str):
+    if not os.path.isfile(database): return None
+    db = sqlite3.connect(database, timeout=30)
+    try:
+        if db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() is None:
+            return None
+        row = db.execute("SELECT value FROM meta WHERE key='media_operation_journal_v1'").fetchone()
+        if row is None: return None
+        journal = json.loads(row[0])
+        if int(journal.get("version") or 0) != 1 or not journal.get("operationId") or not journal.get("stageRoot"):
+            raise RuntimeError("media operation journal is incompatible")
+        stage_root = os.path.abspath(str(journal["stageRoot"]))
+        expected_prefix = os.path.abspath(database) + ".media-operation-"
+        expected_core = os.path.join(stage_root, "workspace.sqlite3")
+        if not stage_root.startswith(expected_prefix) or os.path.abspath(str(journal.get("stageCore") or "")) != expected_core \
+                or os.path.abspath(str(journal.get("stageMedia") or "")) != database_path_for_workspace_database(expected_core, "media") \
+                or os.path.abspath(str(journal.get("stageVersioning") or "")) != database_path_for_workspace_database(expected_core, "versioning"):
+            raise RuntimeError("media operation journal contains unsafe staging paths")
+        return journal
+    finally:
+        db.close()
+
+
+def _set_media_operation_stage(database: str, journal: dict, state: str):
+    updated = {**journal, "state": state, "updatedAt": int(time.time() * 1000)}
+    db = sqlite3.connect(database, timeout=30)
+    try:
+        db.execute("PRAGMA synchronous=FULL")
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES('media_operation_journal_v1',?)",
+            (json.dumps(updated, ensure_ascii=False, sort_keys=True),),
+        )
+        db.commit()
+    except Exception:
+        db.rollback(); raise
+    finally:
+        db.close()
+    return updated
+
+
+def _clear_preparing_media_operation(database: str, journal: dict) -> None:
+    db = sqlite3.connect(database, timeout=30)
+    try:
+        db.execute("PRAGMA synchronous=FULL")
+        db.execute("DELETE FROM meta WHERE key='media_operation_journal_v1'")
+        db.commit()
+    finally:
+        db.close()
+    shutil.rmtree(str(journal["stageRoot"]), ignore_errors=False)
+
+
+def _resume_media_operation_files(database: str):
+    journal = _read_media_operation_journal(database)
+    if not journal: return None
+    state = str(journal.get("state") or "preparing")
+    if state == "preparing":
+        _clear_preparing_media_operation(database, journal)
+        return None
+    if state not in ("ready", "media", "versioning"):
+        raise RuntimeError(f"unknown media operation state: {state}")
+    stage_core = str(journal["stageCore"])
+    stage_media = str(journal["stageMedia"])
+    stage_versioning = str(journal["stageVersioning"])
+    if state == "ready":
+        _publish_sqlite_stage(stage_media, database_path_for_workspace_database(database, "media"))
+        journal = _set_media_operation_stage(database, journal, "media"); state = "media"
+    if state == "media":
+        _publish_sqlite_stage(stage_versioning, database_path_for_workspace_database(database, "versioning"))
+        journal = _set_media_operation_stage(database, journal, "versioning"); state = "versioning"
+    if state == "versioning":
+        _publish_sqlite_stage(stage_core, database)
+        shutil.rmtree(str(journal["stageRoot"]), ignore_errors=False)
+        return journal.get("result")
+    return None
+
+
+def _run_durable_media_operation(root: str, database: str, action: str, payload: dict, operation_id: str | None):
+    database = os.path.abspath(database)
+    digest = _media_operation_digest(action, payload)
+    operation_id = str(operation_id or f"{action}:{digest}")
+    if not operation_id or len(operation_id) > 160:
+        raise ValueError("media operationId is invalid")
+    live = connect(root, database, include_domains=True)
+    try:
+        receipt_key = f"media_operation_receipt:{operation_id}"
+        receipt = _meta_value(live, receipt_key)
+        if receipt:
+            decoded = json.loads(receipt)
+            if decoded.get("payloadDigest") != digest:
+                raise ValueError("media operationId payload digest mismatch")
+            return decoded.get("result") or {"success": True}
+        stage_token = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:32]
+        stage_root = f"{database}.media-operation-{stage_token}"
+        stage_core = os.path.join(stage_root, "workspace.sqlite3")
+        stage_media = database_path_for_workspace_database(stage_core, "media")
+        stage_versioning = database_path_for_workspace_database(stage_core, "versioning")
+        if os.path.exists(stage_root):
+            shutil.rmtree(stage_root)
+        os.makedirs(stage_root, exist_ok=False)
+        journal = {
+            "version": 1, "operationId": operation_id, "action": action, "payloadDigest": digest,
+            "state": "preparing", "stageRoot": stage_root, "stageCore": stage_core,
+            "stageMedia": stage_media, "stageVersioning": stage_versioning,
+            "createdAt": int(time.time() * 1000), "updatedAt": int(time.time() * 1000),
+        }
+        live.execute("PRAGMA main.synchronous=FULL")
+        _set_meta(live, "media_operation_journal_v1", json.dumps(journal, ensure_ascii=False, sort_keys=True))
+        live.commit()
+        _sqlite_backup_schema(live, "main", stage_core)
+        _sqlite_backup_schema(live, "media", stage_media)
+        _sqlite_backup_schema(live, "versioning", stage_versioning)
+    finally:
+        live.close()
+    staged_owner = sqlite3.connect(stage_core, timeout=30)
+    try:
+        staged_owner.execute("DELETE FROM meta WHERE key='media_operation_journal_v1'")
+        staged_owner.commit()
+    finally:
+        staged_owner.close()
+    result = _mutate_impl(root, stage_core, action, payload)
+    staged_owner = sqlite3.connect(stage_core, timeout=30)
+    try:
+        staged_owner.execute("PRAGMA synchronous=FULL")
+        staged_owner.execute(
+            "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+            (f"media_operation_receipt:{operation_id}", json.dumps({"payloadDigest": digest, "result": result}, ensure_ascii=False, sort_keys=True)),
+        )
+        staged_owner.execute("DELETE FROM meta WHERE key='media_operation_journal_v1'")
+        staged_owner.commit()
+    finally:
+        staged_owner.close()
+    journal = {**journal, "result": result}
+    _set_media_operation_stage(database, journal, "ready")
+    return _resume_media_operation_files(database) or result
+
+
+def _mutate_impl(root: str, database: str, action: str, payload: dict):
     # Interactive version-tree and confirmation reads must never compete for
     # SQLite's writer slot with media scans or tracking commits.
     run_compatibility_hooks("bind_core", globals())
@@ -10148,7 +10382,7 @@ def mutate(root: str, database: str, action: str, payload: dict):
                 candidate.close()
             else:
                 db = candidate
-        except (OSError, sqlite3.Error, RuntimeError):
+        except DatabaseWriteRequired:
             db = None
     if db is None:
         db = connect(root, database, include_domains=needs_domains, include_compatibility=needs_compatibility)
@@ -10603,6 +10837,12 @@ def mutate(root: str, database: str, action: str, payload: dict):
     return {"success": True}
 
 
+def mutate(root: str, database: str, action: str, payload: dict, operation_id: str | None = None):
+    if action in MEDIA_DURABLE_ACTIONS:
+        return _run_durable_media_operation(root, database, action, payload, operation_id)
+    return _mutate_impl(root, database, action, payload)
+
+
 def run(args_list=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("action", nargs="?", choices=ALL_ACTIONS)
@@ -10632,7 +10872,7 @@ def run_server():
             root = request["root"]
             database = request["database"]
             payload = request.get("payload") or {}
-            result = load(root, database) if action == "init" else mutate(root, database, action, payload)
+            result = load(root, database) if action == "init" else mutate(root, database, action, payload, request.get("operationId"))
             response = {"id": request_id, "success": True, "result": result}
         except Exception as error:
             response = error_response(request_id, error)

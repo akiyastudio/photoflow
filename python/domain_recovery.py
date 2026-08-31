@@ -148,7 +148,7 @@ def snapshot(source: str, destination: str, domain: str | None = None) -> dict:
 
 
 def _normalize_replacements(replacements):
-    normalized = []
+    by_old = {}
     for old_root, new_root in replacements or ():
         if not old_root and not new_root:
             continue
@@ -156,7 +156,13 @@ def _normalize_replacements(replacements):
             raise ValueError("path replacement roots must be provided as a pair")
         if not os.path.isabs(old_root) or not os.path.isabs(new_root):
             raise ValueError("path replacement roots must be absolute")
-        normalized.append((os.path.normpath(old_root), os.path.normpath(new_root)))
+        pair = (os.path.normpath(old_root), os.path.normpath(new_root))
+        old_key = os.path.normcase(pair[0])
+        previous = by_old.get(old_key)
+        if previous is not None and os.path.normcase(previous[1]) != os.path.normcase(pair[1]):
+            raise ValueError(f"conflicting path replacement for {old_root}")
+        by_old[old_key] = pair
+    normalized = list(by_old.values())
     normalized.sort(key=lambda pair: len(os.path.normcase(pair[0])), reverse=True)
     return normalized
 

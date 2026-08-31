@@ -36,7 +36,6 @@ class CoordinatedDatabaseClient {
     const database = this.getDatabasePath(root);
     const policy = this.operationPolicy.classify({ root, database, action, payload, scriptName: this.scriptName });
     const run = () => this.callSingleFlight(root, action, payload, options, { database, policy });
-    if (policy.mode === 'read') return run();
     const result = this.singleFlight.then(run, run);
     this.singleFlight = result.catch(() => undefined);
     return result;

@@ -190,7 +190,7 @@ def snapshot(source: str, destination: str, media: str = "") -> dict:
 
 
 def normalize_replacements(replacements):
-    normalized = []
+    by_old = {}
     for old_root, new_root in replacements or ():
         if not old_root and not new_root:
             continue
@@ -198,7 +198,13 @@ def normalize_replacements(replacements):
             raise ValueError("路径重定位 old/new root 必须成对提供")
         if not os.path.isabs(old_root) or not os.path.isabs(new_root):
             raise ValueError("路径重定位 root 必须是绝对路径")
-        normalized.append((os.path.normpath(old_root), os.path.normpath(new_root)))
+        pair = (os.path.normpath(old_root), os.path.normpath(new_root))
+        old_key = os.path.normcase(pair[0])
+        previous = by_old.get(old_key)
+        if previous is not None and os.path.normcase(previous[1]) != os.path.normcase(pair[1]):
+            raise ValueError(f"同一路径存在冲突的重定位目标：{old_root}")
+        by_old[old_key] = pair
+    normalized = list(by_old.values())
     normalized.sort(key=lambda pair: len(os.path.normcase(pair[0])), reverse=True)
     return normalized
 
