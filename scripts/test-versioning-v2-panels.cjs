@@ -50,6 +50,17 @@ class TestNode extends TestEventTarget {
 }
 const layoutRequests = { loads: 0, saves: [], failLoadBudget: 0, failNextSave: false, staleNextSave: false, staleMutation: null, revision: 0, positions: [], holdSaves: false, saveReleases: [] };
 const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode, HTMLIFrameElement: class {}, Node: TestNode, getSelection: () => null, electronAPI: {
+  async inspectSourcePaths(paths) {
+    return {
+      success: true,
+      sources: paths.map(sourcePath => ({
+        path: sourcePath,
+        kind: 'folder',
+        preview: { count: 0, files: [], truncated: false },
+      })),
+      missingPaths: [],
+    };
+  },
   async getVersionTreeLayout() {
     layoutRequests.loads += 1;
     if (layoutRequests.failLoadBudget > 0) {
@@ -116,7 +127,7 @@ const canvasModel = loadCommonJs(compile('src/features/versioning/version-tree-c
 const edgeModel = loadCommonJs(compile('src/features/versioning/version-tree-edge-model.ts'));
 const layoutModel = loadCommonJs(compile('src/features/versioning/version-tree-layout-model.ts'), request => request === './version-tree-edge-model.ts' ? edgeModel : require(request));
 const canvasHook = loadCommonJs(compile('src/features/versioning/use-version-tree-canvas.ts'), request => request === './version-tree-canvas-model' ? canvasModel : require(request));
-const canvasHookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/versioning/use-version-tree-canvas.ts'), 'utf8');
+const canvasHookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/versioning/use-version-tree-canvas.ts'), 'utf8').replace(/\r\n?/g, '\n');
 const projectWorkspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/workspace/ProjectWorkspace.tsx'), 'utf8');
 assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next)'), 'version-tree layout reconciliation must skip identical maps to prevent effect update loops');
 const initialLayoutLoadSource = canvasHookSource.slice(canvasHookSource.indexOf('const loadServerLayout'), canvasHookSource.indexOf('useEffect(() => {\n    disposedRef.current = false'));
