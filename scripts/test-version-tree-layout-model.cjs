@@ -60,6 +60,17 @@ const { pathToFileURL } = require('url');
   const withNewNode = canvas.reconcileVersionTreeCanvasPositions({ nodes: [...branch.nodes, { id: 'new', x: 0, y: 0 }], previous: preserved, nodeWidth: base.nodeWidth, nodeHeight: base.nodeHeight });
   for (const id of preserved.keys()) assert.strictEqual(withNewNode.get(id), preserved.get(id), 'adding a node must not rearrange existing nodes');
   assert(withNewNode.has('new'));
+  const alignedHistory = canvas.alignVersionTreeHistoryPositions({
+    nodes: [...branch.nodes.filter(item => item.id !== 'RAW_selection'), { id: 'new', x: 900, y: 700 }],
+    current: new Map([...preserved, ['new', { x: 940, y: 740, manual: true }]]),
+    snapshot: new Map([...defaultPositions, ['deleted', { x: 10, y: 20, manual: true }]]),
+    nodeWidth: base.nodeWidth,
+    nodeHeight: base.nodeHeight,
+  });
+  assert.deepStrictEqual(alignedHistory.get('new'), { x: 940, y: 740, manual: true }, 'applying old history must preserve a node added after the snapshot');
+  assert(!alignedHistory.has('deleted'), 'applying old history must not revive a node removed from the current graph');
+  assert(!alignedHistory.has('RAW_selection'), 'history alignment must remove nodes that no longer exist');
+  assert.deepStrictEqual(alignedHistory.get('RAW'), defaultPositions.get('RAW'), 'history alignment must still restore snapshot coordinates for surviving nodes');
   const clampedLegacy = canvas.reconcileVersionTreeCanvasPositions({ nodes: branch.nodes, previous: new Map([['RAW', { x: -220, y: -80, manual: true }]]), nodeWidth: base.nodeWidth, nodeHeight: base.nodeHeight });
   assert.deepStrictEqual(clampedLegacy.get('RAW'), { x: 0, y: 0, manual: true }, 'legacy negative saved coordinates must not clip nodes above or left of the viewport');
   const refreshed = canvas.reconcileVersionTreeCanvasPositions({ nodes: branch.nodes, previous: manual, nodeWidth: base.nodeWidth, nodeHeight: base.nodeHeight, refreshAll: true });

@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { MutableRefObject, PointerEvent as ReactPointerEvent } from 'react';
-import { reconcileVersionTreeCanvasPositions, translateVersionTreeCanvasSelection, type VersionTreeCanvasPosition } from './version-tree-canvas-model';
+import { alignVersionTreeHistoryPositions, reconcileVersionTreeCanvasPositions, translateVersionTreeCanvasSelection, type VersionTreeCanvasPosition } from './version-tree-canvas-model';
 
 export type VersionTreeCanvasItem = { id: string; nodeKey: string; fallbackNodeKeys?: readonly string[]; x: number; y: number };
 export type VersionTreeDragState =
@@ -74,6 +74,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
   const saveQueueRef = useRef(Promise.resolve());
   const saveEpochRef = useRef(0);
   const historyEpochRef = useRef(0);
+  const commandSequenceRef = useRef(0);
   const generationRef = useRef(0);
   const layoutReadyRef = useRef(false);
   const loadPromiseRef = useRef<Promise<void>>(Promise.resolve());
@@ -96,6 +97,18 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
     if (sameCanvasPositions(positionsRef.current, next)) return;
     positionsRef.current = next;
     setPositions(next);
+  }, []);
+
+  const alignHistoryPositions = useCallback((snapshot: ReadonlyMap<string, VersionTreeCanvasPosition>) => {
+    const dimensions = dimensionsRef.current;
+    return alignVersionTreeHistoryPositions({
+      nodes: nodesRef.current,
+      current: positionsRef.current,
+      snapshot,
+      nodeWidth: dimensions.nodeWidth,
+      nodeHeight: dimensions.nodeHeight,
+      horizontalGap: dimensions.collisionHorizontalGap,
+    });
   }, []);
 
   const cancelCanvasInteraction = useCallback((restoreNode = true) => {
@@ -188,6 +201,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       cancelCanvasInteraction(false);
       dragStateRef.current = null;
       saveEpochRef.current += 1;
+      commandSequenceRef.current += 1;
       saveQueueRef.current = Promise.resolve();
       layoutReadyRef.current = false;
     };
@@ -203,6 +217,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
     revisionRef.current = 0;
     loadSequenceRef.current += 1;
     saveEpochRef.current += 1;
+    commandSequenceRef.current += 1;
     saveQueueRef.current = Promise.resolve();
     layoutReadyRef.current = false;
     localMutationSequenceRef.current = 0;
@@ -313,11 +328,13 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
     };
   }, [active, dragStateRef, onDragStateChange]);
 
-  const enqueueSave = useCallback((mode: 'patch' | 'replace', savedPositions: Map<string, VersionTreeCanvasPosition>, before: Map<string, VersionTreeCanvasPosition>, applyOnSuccess?: Map<string, VersionTreeCanvasPosition>, requiredHistoryEpoch?: number) => {
+  const enqueueSave = useCallback((mode: 'patch' | 'replace', savedPositions: Map<string, VersionTreeCanvasPosition>, before: Map<string, VersionTreeCanvasPosition>, requiredHistoryEpoch?: number) => {
     if (disposedRef.current) return Promise.resolve(false);
     const generation = generationRef.current;
     const saveEpoch = saveEpochRef.current;
-    const localMutationAtEnqueue = localMutationSequenceRef.current;
+    const commandSequence = ++commandSequenceRef.current;
+    const localMutationAtEnqueue = ++localMutationSequenceRef.current;
+    savedPositions.forEach((_position, id) => localMutationByNodeRef.current.set(id, localMutationAtEnqueue));
     const operation = saveQueueRef.current.then(async () => {
       await loadPromiseRef.current;
       if (disposedRef.current || generation !== generationRef.current || saveEpoch !== saveEpochRef.current || requiredHistoryEpoch !== undefined && requiredHistoryEpoch !== historyEpochRef.current) return false;
@@ -371,14 +388,10 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
           });
           serverPositionsRef.current = latestServerPositions;
           appliedServerNodeKeysRef.current = new Set(latest.positions.map(position => position.nodeKey));
-          // Existing history contains full maps based on the losing revision.
-          // Keeping it would let a later replace-style undo erase coordinates
-          // committed by the other window, so conflict recovery starts a new
-          // local history epoch.
-          undoStackRef.current = [];
-          redoStackRef.current = [];
-          historyEpochRef.current += 1;
-          setHistoryRevision(value => value + 1);
+          // History entries are node-local patches. They remain valid across a
+          // stale-layout merge and cannot overwrite untouched remote nodes.
+          // Overlaying mutations enqueued after this command makes this safe
+          // even when a later undo/redo/refresh is already visible locally.
           applyPositions(merged);
           payload = buildPayload();
           if (!payload.length && savedPositions.size) return true;
@@ -394,28 +407,29 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       if (result.success) {
         revisionRef.current = 'revision' in result && result.revision !== undefined ? result.revision : revisionRef.current + 1;
         payload.forEach(position => serverPositionsRef.current.set(position.nodeKey, { x: position.x, y: position.y, manual: true }));
-        if (applyOnSuccess) {
-          applyPositions(applyOnSuccess);
-          if (viewportRef.current) {
-            viewportRef.current.scrollLeft = 0;
-            viewportRef.current.scrollTop = 0;
-          }
-        }
         return true;
       }
-      saveEpochRef.current += 1;
-      undoStackRef.current = [];
-      redoStackRef.current = [];
-      historyEpochRef.current += 1;
-      setHistoryRevision(value => value + 1);
-      if (!applyOnSuccess) applyPositions(before);
+      const rollback = new Map(positionsRef.current);
+      savedPositions.forEach((_position, id) => {
+        if (localMutationByNodeRef.current.get(id) !== localMutationAtEnqueue) return;
+        const previous = before.get(id);
+        if (previous) rollback.set(id, previous);
+      });
+      applyPositions(alignVersionTreeHistoryPositions({
+        nodes: nodesRef.current,
+        current: rollback,
+        snapshot: new Map(),
+        nodeWidth: dimensionsRef.current.nodeWidth,
+        nodeHeight: dimensionsRef.current.nodeHeight,
+        horizontalGap: dimensionsRef.current.collisionHorizontalGap,
+      }));
       onNoticeRef.current(`保存版本树布局失败：${result.error || '未知错误'}`, 5000);
-      if (!applyOnSuccess || staleLayout) await loadServerLayout(generation);
+      if ((mode === 'patch' || staleLayout) && commandSequence === commandSequenceRef.current) await loadServerLayout(generation);
       return false;
     });
     saveQueueRef.current = operation.then(() => undefined, () => undefined);
     return operation;
-  }, [applyPositions, loadServerLayout, projectName, scopeKey, workspacePath]);
+  }, [alignHistoryPositions, applyPositions, loadServerLayout, projectName, scopeKey, workspacePath]);
 
   const nodePointerHandlers = useCallback((id: string) => ({
     onPointerDown: (event: ReactPointerEvent<HTMLDivElement>) => {
@@ -476,7 +490,11 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         return position ? [[nodeId, position] as const] : [];
       }));
       if (moved.size) {
-        undoStackRef.current.push({ before: drag.before, after: new Map(positionsRef.current) });
+        const beforeMoved = new Map(drag.ids.flatMap(nodeId => {
+          const position = drag.before.get(nodeId);
+          return position ? [[nodeId, position] as const] : [];
+        }));
+        undoStackRef.current.push({ before: beforeMoved, after: moved });
         if (undoStackRef.current.length > 80) undoStackRef.current.shift();
         redoStackRef.current = [];
         setHistoryRevision(value => value + 1);
@@ -553,40 +571,53 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
   const refreshLayout = useCallback(async () => {
     const before = new Map(positionsRef.current);
     const next = defaultPositions();
-    const success = await enqueueSave('replace', next, before, next);
+    applyPositions(next);
+    undoStackRef.current.push({ before, after: next });
+    redoStackRef.current = [];
+    setHistoryRevision(value => value + 1);
+    const success = await enqueueSave('replace', next, before);
     if (success) {
-      undoStackRef.current.push({ before, after: next });
-      redoStackRef.current = [];
+      if (viewportRef.current) {
+        viewportRef.current.scrollLeft = 0;
+        viewportRef.current.scrollTop = 0;
+      }
+    } else {
+      const index = undoStackRef.current.findIndex(entry => entry.before === before && entry.after === next);
+      if (index >= 0) undoStackRef.current.splice(index, 1);
       setHistoryRevision(value => value + 1);
     }
     return success;
-  }, [defaultPositions, enqueueSave]);
+  }, [applyPositions, defaultPositions, enqueueSave]);
 
   const undoLayout = useCallback(async () => {
     const entry = undoStackRef.current.pop();
     if (!entry) return false;
     const historyEpoch = historyEpochRef.current;
     const current = new Map(positionsRef.current);
-    applyPositions(new Map(entry.before));
-    const success = await enqueueSave('replace', entry.before, current, undefined, historyEpoch);
+    const target = alignHistoryPositions(entry.before);
+    const patch = new Map([...entry.before].filter(([id]) => target.has(id)));
+    applyPositions(target);
+    const success = await enqueueSave('patch', patch, current, historyEpoch);
     if (success) redoStackRef.current.push(entry);
     else if (historyEpoch === historyEpochRef.current) undoStackRef.current.push(entry);
     setHistoryRevision(value => value + 1);
     return success;
-  }, [applyPositions, enqueueSave]);
+  }, [alignHistoryPositions, applyPositions, enqueueSave]);
 
   const redoLayout = useCallback(async () => {
     const entry = redoStackRef.current.pop();
     if (!entry) return false;
     const historyEpoch = historyEpochRef.current;
     const current = new Map(positionsRef.current);
-    applyPositions(new Map(entry.after));
-    const success = await enqueueSave('replace', entry.after, current, undefined, historyEpoch);
+    const target = alignHistoryPositions(entry.after);
+    const patch = new Map([...entry.after].filter(([id]) => target.has(id)));
+    applyPositions(target);
+    const success = await enqueueSave('patch', patch, current, historyEpoch);
     if (success) undoStackRef.current.push(entry);
     else if (historyEpoch === historyEpochRef.current) redoStackRef.current.push(entry);
     setHistoryRevision(value => value + 1);
     return success;
-  }, [applyPositions, enqueueSave]);
+  }, [alignHistoryPositions, applyPositions, enqueueSave]);
 
   const resetViewport = useCallback(() => {
     if (!viewportRef.current) return;

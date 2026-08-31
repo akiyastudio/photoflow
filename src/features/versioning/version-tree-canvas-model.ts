@@ -47,6 +47,11 @@ type ReconcileVersionTreeCanvasInput = {
   refreshAll?: boolean;
 };
 
+type AlignVersionTreeHistoryInput = Omit<ReconcileVersionTreeCanvasInput, 'previous' | 'refreshAll'> & {
+  current: ReadonlyMap<string, VersionTreeCanvasPosition>;
+  snapshot: ReadonlyMap<string, VersionTreeCanvasPosition>;
+};
+
 const finitePosition = (position: VersionTreeCanvasPosition | undefined): position is VersionTreeCanvasPosition => Boolean(
   position && Number.isFinite(position.x) && Number.isFinite(position.y),
 );
@@ -98,6 +103,27 @@ export const reconcileVersionTreeCanvasPositions = ({
     occupied.push(position);
   }
   return result;
+};
+
+/**
+ * Applies an older history snapshot to the graph that exists now. History is
+ * intentionally not authoritative for graph membership: nodes created later
+ * retain their current coordinates and removed nodes cannot be resurrected.
+ */
+export const alignVersionTreeHistoryPositions = ({
+  nodes,
+  current,
+  snapshot,
+  nodeWidth,
+  nodeHeight,
+  horizontalGap,
+  rowGap,
+}: AlignVersionTreeHistoryInput) => {
+  const nodeIds = new Set(nodes.map(node => node.id));
+  const aligned = new Map<string, VersionTreeCanvasPosition>();
+  current.forEach((position, id) => { if (nodeIds.has(id)) aligned.set(id, position); });
+  snapshot.forEach((position, id) => { if (nodeIds.has(id)) aligned.set(id, position); });
+  return reconcileVersionTreeCanvasPositions({ nodes, previous: aligned, nodeWidth, nodeHeight, horizontalGap, rowGap });
 };
 
 export const versionTreeCanvasBounds = (
