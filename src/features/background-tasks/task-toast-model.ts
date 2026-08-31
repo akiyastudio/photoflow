@@ -78,18 +78,21 @@ const showsSuccessToast = (task: BackgroundTask) => task.notificationPolicy === 
   || task.notificationPolicy === 'progress-and-result';
 
 export const taskToastExpiresAt = (task: BackgroundTask, firstVisibleAt?: number) => task.state === 'failed'
-  ? (firstVisibleAt || task.updatedAt) + FAILURE_TOAST_MS
+  ? (firstVisibleAt ?? task.updatedAt) + FAILURE_TOAST_MS
   : task.state === 'completed' && showsSuccessToast(task)
-    ? task.updatedAt + RESULT_TOAST_MS
+    ? (firstVisibleAt ?? task.updatedAt) + RESULT_TOAST_MS
     : 0;
+
+export const taskToastInstanceKey = (task: Pick<BackgroundTask, 'id' | 'createdAt'>) => `${task.id.length}:${task.id}:${task.createdAt}`;
 
 export const taskToastLiveRole = (state: BackgroundTask['state']): 'alert' | 'status' | undefined => state === 'failed' ? 'alert' : state === 'completed' ? 'status' : undefined;
 
-export const isActiveProjectFileTask = (task: BackgroundTask, now = Date.now(), firstVisibleAt?: number) => {
+export const isActiveProjectFileTask = (task: BackgroundTask, now = Date.now(), firstVisibleAt?: number, pendingResult = true, awaitingVisibility = false) => {
   const active = task.state === 'queued' || task.state === 'running' || task.state === 'pausing' || task.state === 'paused' || task.state === 'resuming';
   if (active) return showsProgressToast(task);
-  if (task.state === 'failed') return task.notificationPolicy !== 'silent' && now < taskToastExpiresAt(task, firstVisibleAt);
-  return task.state === 'completed' && showsSuccessToast(task) && now < taskToastExpiresAt(task);
+  const anchor = firstVisibleAt ?? (awaitingVisibility ? undefined : task.updatedAt);
+  if (task.state === 'failed') return task.notificationPolicy !== 'silent' && pendingResult && (anchor === undefined || now < anchor + FAILURE_TOAST_MS);
+  return task.state === 'completed' && showsSuccessToast(task) && pendingResult && (anchor === undefined || now < anchor + RESULT_TOAST_MS);
 };
 
 export const compareProjectFileTasks = (left: BackgroundTask, right: BackgroundTask) => {
@@ -101,10 +104,14 @@ export const compareProjectFileTasks = (left: BackgroundTask, right: BackgroundT
   return left.createdAt - right.createdAt;
 };
 
-export const selectProjectFileTaskToasts = (tasks: BackgroundTask[], minimizedTaskIds: ReadonlySet<string>, limit = 4, now = Date.now(), queuedDelayMs = 700, firstVisibleAt: ReadonlyMap<string, number> = new Map()) => {
-  const eligible = collapseRetryPredecessors(tasks).filter(task => isActiveProjectFileTask(task, now, firstVisibleAt.get(task.id))
-    && !minimizedTaskIds.has(task.id)
-    && (task.state !== 'queued' || now - task.createdAt >= queuedDelayMs)).sort(compareProjectFileTasks);
+export const selectProjectFileTaskToasts = (tasks: BackgroundTask[], minimizedTaskIds: ReadonlySet<string>, limit = 4, now = Date.now(), queuedDelayMs = 700, firstVisibleAt: ReadonlyMap<string, number> = new Map(), pendingResultKeys?: ReadonlySet<string>) => {
+  const eligible = collapseRetryPredecessors(tasks).filter(task => {
+    const instanceKey = taskToastInstanceKey(task);
+    const pendingResult = pendingResultKeys ? pendingResultKeys.has(instanceKey) : true;
+    return isActiveProjectFileTask(task, now, firstVisibleAt.get(instanceKey), pendingResult, Boolean(pendingResultKeys))
+      && !minimizedTaskIds.has(instanceKey) && !minimizedTaskIds.has(task.id)
+      && (task.state !== 'queued' || now - task.createdAt >= queuedDelayMs);
+  }).sort(compareProjectFileTasks);
   return { visible: eligible.slice(0, limit), overflowCount: Math.max(0, eligible.length - limit) };
 };
 
@@ -117,7 +124,7 @@ export const setTaskToastMinimized = (current: Set<string>, id: string, minimize
 };
 
 export const pruneFinishedTaskToastIds = (current: Set<string>, tasks: BackgroundTask[]): Set<string> => {
-  const activeIds = new Set(tasks.filter(task => isActiveProjectFileTask(task)).map(task => task.id));
+  const activeIds = new Set(tasks.map(taskToastInstanceKey));
   const next = new Set([...current].filter(id => activeIds.has(id)));
   return next.size === current.size ? current : next;
 };

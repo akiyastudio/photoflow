@@ -1,5 +1,4 @@
 const path = require('path');
-const crypto = require('crypto');
 
 const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain: electronIpcMain, getMainWindow, shell, writeLog }) => {
   const channels = [];
@@ -71,10 +70,8 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain: 
 
   ipcMain.handle('backup-cleanup', async (_event, workspacePath) => {
     try {
-      const taskId = crypto.randomUUID();
-      void backupService.cleanup(rootPath(workspacePath), { id: taskId }).catch(error => writeLog('error', 'Backup cleanup failed', error));
-      await Promise.resolve();
-      return { success: true, queued: true, accepted: true, taskId };
+      void backupService.cleanup(rootPath(workspacePath)).catch(error => writeLog('error', 'Backup cleanup failed', error));
+      return { success: true, queued: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -84,16 +81,8 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain: 
     try {
       const current = await backupService.status(workspacePath);
       if (!current.enabled) return { success: false, error: '请先启用备份并选择备份位置' };
-      const root = rootPath(workspacePath);
-      const taskId = crypto.randomUUID();
-      const completion = backupService.runBackup(root, reason, { id: taskId });
-      void completion.catch(error => writeLog('error', 'Workspace backup failed', error));
-      for (let attempt = 0; attempt < 50; attempt += 1) {
-        const status = await backupService.status(root);
-        if (status?.task?.id === taskId) return { success: true, queued: true, accepted: true, taskId };
-        await new Promise(resolve => setTimeout(resolve, 10));
-      }
-      return { success: false, error: '备份任务未能登记' };
+      void backupService.runBackup(rootPath(workspacePath), reason).catch(error => writeLog('error', 'Workspace backup failed', error));
+      return { success: true, queued: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -111,10 +100,8 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain: 
 
   ipcMain.handle('backup-verify', async (_event, workspacePath, snapshotId) => {
     try {
-      const taskId = crypto.randomUUID();
-      void backupService.verify(rootPath(workspacePath), snapshotId, { id: taskId }).catch(error => writeLog('error', 'Backup verification failed', error));
-      await Promise.resolve();
-      return { success: true, queued: true, accepted: true, taskId };
+      void backupService.verify(rootPath(workspacePath), snapshotId).catch(error => writeLog('error', 'Backup verification failed', error));
+      return { success: true, queued: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }

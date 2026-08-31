@@ -1,5 +1,4 @@
 const path = require('path');
-const crypto = require('crypto');
 
 const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain: electronIpcMain, shell, writeLog }) => {
   const channels = [];
@@ -15,26 +14,20 @@ const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain: el
   ipcMain.handle('archive-status', async () => archiveService.status());
   ipcMain.handle('archive-project', async (_event, workspacePath, projectName) => {
     try {
-      const taskId = crypto.randomUUID();
-      const completion = archiveService.archiveProject(rootPath(workspacePath), cleanProjectName(projectName), { id: taskId });
-      void completion.then(() => {
+      void archiveService.archiveProject(rootPath(workspacePath), cleanProjectName(projectName)).then(() => {
         const window = getMainWindow();
         if (window && !window.isDestroyed()) window.webContents.send('workspace-projects-changed', { root: workspacePath, reason: 'project-archived' });
       }).catch(error => writeLog('error', 'Project archive failed', error));
-      await Promise.resolve();
-      return { success: true, queued: true, accepted: true, taskId };
+      return { success: true, queued: true };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });
   ipcMain.handle('archive-move-back', async (_event, workspacePath, projectName, statusAfter) => {
     try {
-      const taskId = crypto.randomUUID();
-      const completion = archiveService.moveBack(rootPath(workspacePath), cleanProjectName(projectName), statusAfter, { id: taskId });
-      void completion.then(() => {
+      void archiveService.moveBack(rootPath(workspacePath), cleanProjectName(projectName), statusAfter).then(() => {
         const window = getMainWindow();
         if (window && !window.isDestroyed()) window.webContents.send('workspace-projects-changed', { root: workspacePath, reason: 'project-unarchived' });
       }).catch(error => writeLog('error', 'Project move-back failed', error));
-      await Promise.resolve();
-      return { success: true, queued: true, accepted: true, taskId };
+      return { success: true, queued: true };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });
   ipcMain.handle('archive-open-target', async () => {

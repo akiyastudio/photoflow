@@ -2,7 +2,7 @@
 import React, { createContext, useCallback, useContext, useEffect, useMemo, useReducer, useState } from 'react';
 import type { BackgroundTask, LogEntry } from '../../types';
 import { nextPanelTaskStartedAt, panelTaskSessionKey, removePanelTasksByOwnerPageId } from './panel-task-session-model';
-import { pruneFinishedTaskToastIds, setTaskToastMinimized } from './task-toast-model';
+import { pruneFinishedTaskToastIds, setTaskToastMinimized, taskToastInstanceKey } from './task-toast-model';
 import { initialBackgroundTaskStreamState, receiveBackgroundTaskDelta, receiveBackgroundTaskSnapshot, type BackgroundTaskStreamState } from './background-task-stream-model';
 
 export type PanelTaskState = 'idle' | 'running' | 'completed' | 'failed';
@@ -133,12 +133,17 @@ export const TaskCenterProvider = ({ children }: { children: React.ReactNode }) 
   }, []);
 
   const minimizeTaskToast = useCallback((id: string) => {
-    setMinimizedToastTaskIds(current => setTaskToastMinimized(current, id, true));
-  }, []);
+    const task = backgroundTasks.find(candidate => candidate.id === id);
+    if (task) setMinimizedToastTaskIds(current => setTaskToastMinimized(current, taskToastInstanceKey(task), true));
+  }, [backgroundTasks]);
   const restoreTaskToast = useCallback((id: string) => {
-    setMinimizedToastTaskIds(current => setTaskToastMinimized(current, id, false));
-  }, []);
-  const isTaskToastMinimized = useCallback((id: string) => minimizedToastTaskIds.has(id), [minimizedToastTaskIds]);
+    const task = backgroundTasks.find(candidate => candidate.id === id);
+    if (task) setMinimizedToastTaskIds(current => setTaskToastMinimized(current, taskToastInstanceKey(task), false));
+  }, [backgroundTasks]);
+  const isTaskToastMinimized = useCallback((id: string) => {
+    const task = backgroundTasks.find(candidate => candidate.id === id);
+    return Boolean(task && minimizedToastTaskIds.has(taskToastInstanceKey(task)));
+  }, [backgroundTasks, minimizedToastTaskIds]);
 
   const value = useMemo<TaskCenterValue>(() => ({ backgroundTasks, backgroundTaskSyncing: backgroundTaskStream.syncing, backgroundTaskDegraded: backgroundTaskStream.degraded, panelTasks, reportPanelTask, dismissPanelTask, dismissPanelTasksByOwnerPageId, dismissBackgroundTask, retryBackgroundTask, minimizeTaskToast, restoreTaskToast, isTaskToastMinimized }), [backgroundTaskStream.degraded, backgroundTaskStream.syncing, backgroundTasks, dismissBackgroundTask, dismissPanelTask, dismissPanelTasksByOwnerPageId, isTaskToastMinimized, minimizeTaskToast, panelTasks, reportPanelTask, restoreTaskToast, retryBackgroundTask]);
   return <TaskCenterContext.Provider value={value}>{children}</TaskCenterContext.Provider>;

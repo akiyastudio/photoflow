@@ -3,7 +3,7 @@ const EXTERNAL_CHANNELS = new Set(['workspace-screenshot-main-image-progress', '
 const SCREENSHOT_PHASES = new Set(['scanning', 'moving', 'copying', 'splitting', 'finishing', 'trashing', 'running', 'complete', 'cancelled', 'failed']);
 const isPlainObject = value => Boolean(value) && typeof value === 'object' && !Array.isArray(value) && (Object.getPrototypeOf(value) === Object.prototype || Object.getPrototypeOf(value) === null);
 const serializeError = (error, fallback = '操作失败') => ({ code: typeof error?.code === 'string' ? error.code : 'BACKGROUND_TASK_FAILED', error: typeof error?.message === 'string' ? error.message : fallback });
-const normalizedId = value => typeof value === 'string' && /^[a-z0-9][a-z0-9:._-]{0,199}$/i.test(value) ? value : '';
+const normalizedExternalId = value => typeof value === 'string' && /^[a-z0-9][a-z0-9:._-]{0,199}$/i.test(value) ? value : '';
 
 const normalizeExternalProgress = (channel, value = {}) => {
   if (!EXTERNAL_CHANNELS.has(channel) || !isPlainObject(value)) return null;
@@ -11,11 +11,11 @@ const normalizeExternalProgress = (channel, value = {}) => {
   const progress = Number.isFinite(numericProgress) ? Math.max(0, Math.min(100, numericProgress)) : 0;
   const stateFor = phase => phase === 'failed' ? 'failed' : phase === 'cancelled' ? 'cancelled' : phase === 'complete' ? 'completed' : 'running';
   if (channel === 'workspace-screenshot-main-image-progress') {
-    const requestId = normalizedId(value.requestId);
+    const requestId = normalizedExternalId(value.requestId);
     if (!requestId || !SCREENSHOT_PHASES.has(value.phase)) return null;
     return { id: `external:screenshot-main-image:${requestId}`, type: 'screenshot-main-image', title: '提取截图主图', state: stateFor(value.phase), progress, message: typeof value.message === 'string' ? value.message : undefined, metadata: { phase: value.phase, requestId, processedCount: value.processedCount, totalCount: value.totalCount, currentName: value.currentName } };
   }
-  const operationId = normalizedId(value.operationId);
+  const operationId = normalizedExternalId(value.operationId);
   if (!operationId || !['copying', 'complete', 'cancelled', 'failed'].includes(value.phase)) return null;
   return { id: `external:selection:${operationId}`, type: 'selection-operation', title: '选片文件处理', state: stateFor(value.phase), progress, message: value.fileName || value.message || '正在处理选片文件', error: typeof value.error === 'string' ? value.error : undefined, cancellable: true, metadata: { phase: value.phase, operationId, bytesCopied: value.bytesCopied, totalBytes: value.totalBytes, filesCopied: value.fileIndex, totalFiles: value.totalFiles } };
 };
@@ -26,7 +26,7 @@ const registerBackgroundTasksIpc = ({ ipcMain, eventBus, backgroundTasks, getMai
     if (!trusted(event)) throw new Error('Unauthorized IPC sender');
     try { return await listener(...args); } catch (error) { return { success: false, ...serializeError(error) }; }
   });
-  const requireId = value => { const id = normalizedId(value); if (!id) throw new Error('无效的任务 ID'); return id; };
+  const requireId = value => { if (typeof value !== 'string' || !value || value.length > 1024 || value.includes('\0')) throw new Error('无效的任务 ID'); return value; };
   const sendTask = delta => { const window = getMainWindow(); if (window && !window.isDestroyed()) window.webContents.send('background-task-changed', delta); };
   const unsubscribe = eventBus.on('background-task:changed', sendTask);
   const externalProgressListener = (event, channel, value) => { if (!trusted(event) || typeof channel !== 'string') return; const task = normalizeExternalProgress(channel, value); if (task) backgroundTasks.upsertExternal(task); };

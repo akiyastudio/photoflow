@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { CheckCircle2, Clock3, Loader2, Minimize2, Pause, Play, X, XCircle } from 'lucide-react';
 import type { BackgroundTask } from '../../types';
 import { useTaskCenter } from './TaskCenter';
-import { selectProjectFileTaskToasts, taskToastExpiresAt, taskToastLiveRole } from './task-toast-model';
+import { selectProjectFileTaskToasts, taskToastExpiresAt, taskToastInstanceKey, taskToastLiveRole } from './task-toast-model';
 import { useToastStackReflow } from '../../components/toast-stack-reflow';
 import { formatTaskBytes, normalizeTaskProgress } from '../../components/useTaskPresentation';
 
@@ -60,24 +60,60 @@ export const FileTransferToastItem = ({ task, onMinimize, onDismiss, onPause, on
 };
 
 export const useFileTransferToastPresentation = () => {
-  const { backgroundTasks, dismissBackgroundTask, isTaskToastMinimized, minimizeTaskToast } = useTaskCenter();
+  const { backgroundTasks, backgroundTaskSyncing, dismissBackgroundTask, isTaskToastMinimized, minimizeTaskToast } = useTaskCenter();
   const [clock, setClock] = useState(() => Date.now());
   const firstVisibleAtRef = useRef(new Map<string, number>());
-  const minimizedTaskIds = useMemo(() => new Set(backgroundTasks.filter(task => isTaskToastMinimized(task.id)).map(task => task.id)), [backgroundTasks, isTaskToastMinimized]);
-  for (const task of backgroundTasks) if (task.state === 'failed' && !firstVisibleAtRef.current.has(task.id)) firstVisibleAtRef.current.set(task.id, clock);
-  const { visible: visibleTasks, overflowCount } = useMemo(() => selectProjectFileTaskToasts(backgroundTasks, minimizedTaskIds, 4, clock, 700, firstVisibleAtRef.current), [backgroundTasks, clock, minimizedTaskIds]);
+  const initializedRef = useRef(false);
+  const seenStateRef = useRef(new Map<string, BackgroundTask['state']>());
+  const [pendingResultKeys, setPendingResultKeys] = useState<Set<string>>(() => new Set());
+  const minimizedTaskIds = useMemo(() => new Set(backgroundTasks.filter(task => isTaskToastMinimized(task.id)).map(taskToastInstanceKey)), [backgroundTasks, isTaskToastMinimized]);
+
+  useEffect(() => {
+    if (!initializedRef.current && backgroundTaskSyncing) return;
+    const currentKeys = new Set(backgroundTasks.map(taskToastInstanceKey));
+    if (!initializedRef.current) {
+      initializedRef.current = true;
+      seenStateRef.current = new Map(backgroundTasks.map(task => [taskToastInstanceKey(task), task.state]));
+      return;
+    }
+    setPendingResultKeys(current => {
+      const next = new Set([...current].filter(key => currentKeys.has(key)));
+      for (const task of backgroundTasks) {
+        const key = taskToastInstanceKey(task);
+        const previousState = seenStateRef.current.get(key);
+        const terminal = task.state === 'failed' || task.state === 'completed';
+        const previouslyTerminal = previousState === 'failed' || previousState === 'completed';
+        if (terminal && !previouslyTerminal) next.add(key);
+      }
+      return next;
+    });
+    seenStateRef.current = new Map(backgroundTasks.map(task => [taskToastInstanceKey(task), task.state]));
+  }, [backgroundTaskSyncing, backgroundTasks]);
+
+  const { visible: visibleTasks, overflowCount } = useMemo(() => selectProjectFileTaskToasts(backgroundTasks, minimizedTaskIds, 4, clock, 700, firstVisibleAtRef.current, pendingResultKeys), [backgroundTasks, clock, minimizedTaskIds, pendingResultKeys]);
+
+  useEffect(() => {
+    const now = Date.now();
+    let anchored = false;
+    for (const task of visibleTasks) {
+      if (task.state !== 'failed' && task.state !== 'completed') continue;
+      const key = taskToastInstanceKey(task);
+      if (!firstVisibleAtRef.current.has(key)) { firstVisibleAtRef.current.set(key, now); anchored = true; }
+    }
+    if (anchored) setClock(now);
+  }, [visibleTasks]);
 
   useEffect(() => {
     const currentTime = Date.now();
     const nextDue = backgroundTasks
       .filter(task => !isTaskToastMinimized(task.id))
-      .map(task => task.state === 'queued' ? task.createdAt + 700 : taskToastExpiresAt(task, firstVisibleAtRef.current.get(task.id)))
+      .map(task => task.state === 'queued' ? task.createdAt + 700 : taskToastExpiresAt(task, firstVisibleAtRef.current.get(taskToastInstanceKey(task))))
       .filter(due => due > currentTime)
       .sort((left, right) => left - right)[0];
     if (!nextDue) return;
     const timer = window.setTimeout(() => setClock(Date.now()), nextDue - currentTime + 10);
     return () => window.clearTimeout(timer);
-  }, [backgroundTasks, isTaskToastMinimized]);
+  }, [backgroundTasks, clock, isTaskToastMinimized]);
 
   useEffect(() => { setClock(Date.now()); }, [backgroundTasks]);
 
@@ -87,19 +123,22 @@ export const useFileTransferToastPresentation = () => {
 export const FileTransferToast = ({ stackRef, presentation, reflowKey }: { stackRef: React.RefObject<HTMLDivElement | null>; presentation: ReturnType<typeof useFileTransferToastPresentation>; reflowKey: string }) => {
   const { visibleTasks, overflowCount, minimizeTaskToast } = presentation;
   const [pendingAction, setPendingAction] = useState('');
+  const pendingActionRef = useRef('');
   const [actionError, setActionError] = useState('');
   const runAction = async (key: string, action: () => Promise<unknown>) => {
-    if (pendingAction) return;
+    if (pendingActionRef.current) return;
+    pendingActionRef.current = key;
     setPendingAction(key); setActionError('');
     try { const result = await action() as { success?: boolean; error?: string } | undefined; if (result?.success === false) throw new Error(result.error || '操作未成功'); }
     catch (error) { setActionError(error instanceof Error ? error.message : '操作未成功'); }
-    finally { setPendingAction(''); }
+    finally { pendingActionRef.current = ''; setPendingAction(''); }
   };
   useToastStackReflow(stackRef, reflowKey);
 
   if (!visibleTasks.length) return null;
 
   return <>
+    {pendingAction && <span className="sr-only" role="status">正在执行任务操作</span>}
     {visibleTasks.map(task => <FileTransferToastItem key={task.id} task={task} onMinimize={minimizeTaskToast} onDismiss={minimizeTaskToast} onPause={id => void runAction(`pause:${id}`, () => window.electronAPI.pauseBackgroundTask(id))} onContinue={id => void runAction(`continue:${id}`, () => window.electronAPI.continueBackgroundTask(id))} onCancel={task => void runAction(`cancel:${task.id}`, () => task.type === 'selection-operation' ? window.electronAPI.cancelSelectionOperation(String(task.metadata?.operationId || '')) : window.electronAPI.cancelBackgroundTask(task.id))}/>) }
     {actionError && <div role="alert" className="file-transfer-toast border-red-200 bg-red-50 text-xs text-red-700">{actionError}</div>}
     {overflowCount > 0 && <div data-top-toast-id="task-overflow" className="file-transfer-toast-overflow">还有 {overflowCount} 个任务</div>}
