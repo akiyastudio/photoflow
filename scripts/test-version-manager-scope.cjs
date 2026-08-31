@@ -11,12 +11,16 @@ const { pathToFileURL } = require('url');
   assert(source.includes('aria-expanded={open}') && source.includes('openMetadataGroups'), 'version metadata groups must use explicit controlled buttons');
   assert(source.includes('const branchPhotoRequestRef = useRef(0)') && !source.includes('disabled={branchPhotoLoading} aria-pressed={activePhotoId'), 'branch photos must remain clickable while another photo request is pending');
   assert(source.includes('const loadRequestRef = useRef(0)') && source.includes('requestId !== loadRequestRef.current'), 'stale version-load responses must not overwrite a newer entry');
-  assert(source.includes('const pageGenerationRef = useRef(0)') && (source.match(/pageGenerationIsCurrent\(pageGeneration\)/g) || []).length >= 12, 'every version mutation stage must ignore responses from an older entry generation');
+  assert(source.includes('const pageGenerationRef = useRef(0)') && (source.match(/runMutation\(pageGeneration/g) || []).length >= 5, 'every committed version write must use the shared finally-backed busy lifecycle');
+  const busyLifecycleSource = source.slice(source.indexOf('const runMutation = async'), source.indexOf('const publishCommittedMutation ='));
+  assert(busyLifecycleSource.includes('try {') && busyLifecycleSource.includes('finally {') && busyLifecycleSource.includes('settleMutationBusy(pageGeneration)'), 'the shared mutation lifecycle must settle both busy representations in finally');
   assert(source.includes('const selectBranchPhoto = async') && source.includes('const pageGeneration = ++pageGenerationRef.current') && source.includes('selectBranchPhoto(photo.photoId)'), 'switching the active main-branch photo must start a new page generation');
-  for (const marker of ['updateMediaVersion(workspacePath, request)', 'getMediaVersionDeleteScope(workspacePath, version.id)', 'deleteProjectMissingMediaVersion(workspacePath, version.id)', 'deleteMediaVersion(workspacePath', 'relocateMediaVersion(workspacePath']) {
+  for (const marker of ['updateMediaVersion(workspacePath, request)', 'deleteProjectMissingMediaVersion(workspacePath, version.id)', 'deleteMediaVersion(workspacePath', 'relocateMediaVersion(workspacePath']) {
     const index = source.indexOf(marker);
-    assert(index >= 0 && source.slice(index, index + 500).includes('pageGenerationIsCurrent(pageGeneration)'), `${marker} must check page generation after awaiting IPC`);
+    assert(index >= 0 && source.slice(Math.max(0, index - 100), index + 700).includes('runMutation(pageGeneration'), `${marker} must use the finally-backed busy lifecycle`);
   }
+  const deleteScopeIndex = source.indexOf('getMediaVersionDeleteScope(workspacePath, version.id)');
+  assert(deleteScopeIndex >= 0 && source.slice(deleteScopeIndex, deleteScopeIndex + 500).includes('pageGenerationIsCurrent(pageGeneration)'), 'delete-scope preflight must ignore an older page generation');
   assert(source.includes("setBundle({ ...result, versions: [] })") && source.includes("setSelectedId('')") && source.includes("setCompareIds([])"), 'a failed version load must clear the prior entry instead of leaving stale media visible');
   assert(source.includes('orientation="horizontal" label="调整主分支图片列表高度"') && source.includes("document.body.style.cursor = orientation === 'vertical' ? 'col-resize' : 'row-resize'") && source.includes("window.addEventListener('pointermove', move)"), 'version-manager splitters must support robust horizontal and vertical window-level dragging');
   assert(source.includes('onSaveNote={note => updateVersion') && source.includes('保存说明') && !source.includes('编辑版本说明'), 'the selected version note must be editable directly in the details pane');

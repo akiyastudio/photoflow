@@ -405,7 +405,7 @@ const SingleVersionView = ({ active, version, cacheConfig, videoPlaybackSettings
       <div className="flex items-center gap-1">
         {!fullscreen && <button type="button" onClick={() => setFullscreen(true)} title="全屏查看预览图" aria-label="全屏查看预览图" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Maximize2 size={16}/></button>}
         <button type="button" disabled={version.fileMissing} onClick={async () => { const result = await window.electronAPI.openMediaVersion(version.filePath).catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) })); if (!result.success) onNotice(`打开版本失败：${result.error || '未知错误'}`); }} title="使用系统默认应用打开" aria-label="使用系统默认应用打开" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:opacity-40"><ExternalLink size={16}/></button>
-        {fullscreen ? <button type="button" onClick={() => setFullscreen(false)} title="缩小预览（Esc）" aria-label="缩小预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Minimize2 size={16}/></button> : <button type="button" onClick={onClose} title="关闭版本管理" aria-label="关闭版本管理" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><X size={16}/></button>}
+        {fullscreen ? <button type="button" onClick={() => setFullscreen(false)} title="缩小预览（Esc）" aria-label="缩小预览" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800"><Minimize2 size={16}/></button> : <button type="button" disabled={busy} onClick={onClose} title="关闭版本管理" aria-label="关闭版本管理" className="rounded-md p-2 text-slate-500 hover:bg-slate-100 hover:text-slate-800 disabled:cursor-not-allowed disabled:opacity-40"><X size={16}/></button>}
       </div>
     </header>
     <div
@@ -459,6 +459,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
   const branchPhotoRequestRef = useRef(0);
   const loadRequestRef = useRef(0);
   const pageGenerationRef = useRef(0);
+  const busyRef = useRef(false);
   const pageIdentityKey = `${workspacePath}\0${project.status}\0${project.name}\0${entry.path}\0${entry.updatedAt}\0${progressId}\0${progressVersionKey}\0${initialCompareKey}`;
   const pageIdentityRef = useRef(pageIdentityKey);
   if (pageIdentityRef.current !== pageIdentityKey) {
@@ -468,6 +469,26 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     branchPhotoRequestRef.current += 1;
   }
   const pageGenerationIsCurrent = (generation: number) => generation === pageGenerationRef.current;
+  const setMutationBusy = (value: boolean) => {
+    busyRef.current = value;
+    setBusy(value);
+  };
+  const settleMutationBusy = (pageGeneration: number) => {
+    busyRef.current = false;
+    const current = pageGenerationIsCurrent(pageGeneration);
+    if (current) setBusy(false);
+    return current;
+  };
+  const runMutation = async <T,>(pageGeneration: number, operation: () => Promise<T>) => {
+    setMutationBusy(true);
+    try {
+      return await operation();
+    } finally {
+      settleMutationBusy(pageGeneration);
+    }
+  };
+  const publishCommittedMutation = () => onVersionStateChanged?.();
+  const publishCommittedMutationNotice = (message: string) => onNotice(message);
   const initialCompareAppliedRef = useRef('');
   const [treeWidth, setTreeWidth] = useState(() => {
     const stored = Number(window.localStorage.getItem('photoflow:version-manager-tree-width-v2'));
@@ -548,9 +569,10 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     return true;
   };
   const selectBranchPhoto = async (photoId: string) => {
+    if (busyRef.current) return false;
     const pageGeneration = ++pageGenerationRef.current;
     loadRequestRef.current += 1;
-    setBusy(false);
+    setMutationBusy(false);
     return loadBranchPhoto(photoId, undefined, branchPhotos, pageGeneration);
   };
 
@@ -615,7 +637,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
   useEffect(() => {
     const pageGeneration = ++pageGenerationRef.current;
     if (!initialCompareKey) initialCompareAppliedRef.current = '';
-    setBusy(false);
+    setMutationBusy(false);
     void load(pageGeneration);
     return () => {
       pageGenerationRef.current += 1;
@@ -658,19 +680,23 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
   }, [bundle.versions]);
 
   const updateVersion = async (request: { versionId: string; versionName?: string; note?: string; makeCurrent?: boolean }, notice: string) => {
+    if (busyRef.current) return;
     const pageGeneration = pageGenerationRef.current;
     if (!pageGenerationIsCurrent(pageGeneration)) return;
-    setBusy(true);
-    const result = await window.electronAPI.updateMediaVersion(workspacePath, request)
-      .catch(error => ({ success: false as const, versions: [], error: error instanceof Error ? error.message : String(error) }));
-    if (!pageGenerationIsCurrent(pageGeneration)) return;
-    setBusy(false);
-    if (!result.success) { onNotice(`更新版本失败：${result.error || '未知错误'}`); return; }
+    const result = await runMutation(pageGeneration, () => window.electronAPI.updateMediaVersion(workspacePath, request)
+      .catch(error => ({ success: false as const, versions: [], error: error instanceof Error ? error.message : String(error) })));
+    const current = pageGenerationIsCurrent(pageGeneration);
+    if (!result.success) {
+      if (!current) return;
+      onNotice(`更新版本失败：${result.error || '未知错误'}`);
+      return;
+    }
+    publishCommittedMutation();
+    publishCommittedMutationNotice(notice);
+    if (!current) return;
     const branchLoaded = result.photo ? await loadBranchPhoto(result.photo.id, result.photo, branchPhotos, pageGeneration) : false;
     if (!pageGenerationIsCurrent(pageGeneration)) return;
     if (!result.photo || !branchLoaded) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
-    onVersionStateChanged?.();
-    onNotice(notice);
   };
   const deleteVersion = async (version: MediaVersion) => {
     if (!bundle.photo) return;
@@ -702,17 +728,21 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
         });
         if (!pageGenerationIsCurrent(pageGeneration)) return;
         if (deleteAll) {
-          setBusy(true);
-          const bulkResult = await window.electronAPI.deleteProjectMissingMediaVersion(workspacePath, version.id)
-            .catch(error => ({ success: false as const, deletedCount: 0, reparentedCount: 0, versionNumber: version.versionNumber, error: error instanceof Error ? error.message : String(error) }));
-          if (!pageGenerationIsCurrent(pageGeneration)) return;
-          setBusy(false);
-          if (!bulkResult.success) { onNotice(`批量删除失效版本失败：${bulkResult.error || '未知错误'}`); return; }
+          if (busyRef.current) return;
+          const bulkResult = await runMutation(pageGeneration, () => window.electronAPI.deleteProjectMissingMediaVersion(workspacePath, version.id)
+            .catch(error => ({ success: false as const, deletedCount: 0, reparentedCount: 0, versionNumber: version.versionNumber, error: error instanceof Error ? error.message : String(error) })));
+          const current = pageGenerationIsCurrent(pageGeneration);
+          if (!bulkResult.success) {
+            if (!current) return;
+            onNotice(`批量删除失效版本失败：${bulkResult.error || '未知错误'}`);
+            return;
+          }
+          publishCommittedMutation();
+          publishCommittedMutationNotice(`已删除当前项目 ${bulkResult.deletedCount} 张图片的 V${bulkResult.versionNumber} 失效版本${bulkResult.reparentedCount ? `，并改接 ${bulkResult.reparentedCount} 条后续版本` : ''}；其他版本编号保持不变`);
+          if (!current) return;
           setCompareIds([]);
           await load(pageGeneration);
           if (!pageGenerationIsCurrent(pageGeneration)) return;
-          onVersionStateChanged?.();
-          onNotice(`已删除当前项目 ${bulkResult.deletedCount} 张图片的 V${bulkResult.versionNumber} 失效版本${bulkResult.reparentedCount ? `，并改接 ${bulkResult.reparentedCount} 条后续版本` : ''}；其他版本编号保持不变`);
           return;
         }
       }
@@ -725,32 +755,35 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
       tone: 'danger',
     });
     if (!pageGenerationIsCurrent(pageGeneration)) return;
-    setBusy(true);
-    const result = await window.electronAPI.deleteMediaVersion(workspacePath, { photoId, versionId: version.id, trashFile })
-      .catch(error => ({ success: false as const, versions: [], error: error instanceof Error ? error.message : String(error) }));
-    if (!pageGenerationIsCurrent(pageGeneration)) return;
-    setBusy(false);
-    if (!result.success) { onNotice(`删除版本失败：${result.error || '未知错误'}`); return; }
+    if (busyRef.current) return;
+    const result = await runMutation(pageGeneration, () => window.electronAPI.deleteMediaVersion(workspacePath, { photoId, versionId: version.id, trashFile })
+      .catch(error => ({ success: false as const, versions: [], error: error instanceof Error ? error.message : String(error) })));
+    const current = pageGenerationIsCurrent(pageGeneration);
+    if (!result.success) {
+      if (!current) return;
+      onNotice(`删除版本失败：${result.error || '未知错误'}`);
+      return;
+    }
+    publishCommittedMutation();
+    if (!result.warning) publishCommittedMutationNotice(trashFile ? '版本已删除，文件已移入回收站；其他版本编号保持不变' : '版本记录已删除；其他版本编号保持不变');
+    if (!current) return;
     const branchLoaded = result.photo ? await loadBranchPhoto(result.photo.id, result.photo, branchPhotos, pageGeneration) : false;
     if (!pageGenerationIsCurrent(pageGeneration)) return;
     if (!result.photo || !branchLoaded) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
     setSelectedId(result.versions.find(item => item.isCurrent)?.id || result.versions[0]?.id || '');
     setCompareIds(ids => ids.filter(id => id !== version.id));
-    onVersionStateChanged?.();
     if (result.warning) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
-    else onNotice(trashFile ? '版本已删除，文件已移入回收站；其他版本编号保持不变' : '版本记录已删除；其他版本编号保持不变');
   };
   const relocateVersion = async (version: MediaVersion) => {
-    if (!bundle.photo) return;
+    if (!bundle.photo || busyRef.current) return;
     const pageGeneration = pageGenerationRef.current;
     const photoId = bundle.photo.id;
-    setBusy(true);
-    let result = await window.electronAPI.relocateMediaVersion(workspacePath, project.status, project.name, {
+    let result = await runMutation(pageGeneration, () => window.electronAPI.relocateMediaVersion(workspacePath, project.status, project.name, {
       photoId,
       versionId: version.id,
-    }).catch(error => ({ success: false as const, versions: [], requiresDecision: undefined, cancelled: false, error: error instanceof Error ? error.message : String(error) }));
-    if (!pageGenerationIsCurrent(pageGeneration)) return;
-    setBusy(false);
+    }).catch(error => ({ success: false as const, versions: [], requiresDecision: undefined, cancelled: false, error: error instanceof Error ? error.message : String(error) })));
+    let current = pageGenerationIsCurrent(pageGeneration);
+    if (!current && !result.success) return;
     if (result.requiresDecision?.kind === 'version-fingerprint-mismatch') {
       const decision = result.requiresDecision;
       const action = await appDialog.choice({
@@ -762,23 +795,24 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
       });
       if (!pageGenerationIsCurrent(pageGeneration)) return;
       if (action !== 'relocate') return;
-      setBusy(true);
-      result = await window.electronAPI.relocateMediaVersion(workspacePath, project.status, project.name, {
+      if (busyRef.current) return;
+      result = await runMutation(pageGeneration, () => window.electronAPI.relocateMediaVersion(workspacePath, project.status, project.name, {
         photoId,
         versionId: version.id,
         filePath: decision.filePath,
         force: true,
-      }).catch(error => ({ success: false as const, versions: [], requiresDecision: undefined, cancelled: false, error: error instanceof Error ? error.message : String(error) }));
-      if (!pageGenerationIsCurrent(pageGeneration)) return;
-      setBusy(false);
+      }).catch(error => ({ success: false as const, versions: [], requiresDecision: undefined, cancelled: false, error: error instanceof Error ? error.message : String(error) })));
+      current = pageGenerationIsCurrent(pageGeneration);
+      if (!current && !result.success) return;
     }
     if (result.cancelled) return;
     if (!result.success) { onNotice(`重新定位失败：${result.error || '未知错误'}`); return; }
+    publishCommittedMutation();
+    publishCommittedMutationNotice(result.versions.find(item => item.id === version.id)?.contentChanged ? '已重新定位，但文件内容与原记录不同。' : '版本文件已重新定位');
+    if (!current) return;
     const branchLoaded = result.photo ? await loadBranchPhoto(result.photo.id, result.photo, branchPhotos, pageGeneration) : false;
     if (!pageGenerationIsCurrent(pageGeneration)) return;
     if (!result.photo || !branchLoaded) setBundle(normalizeVisibleVersionBundle(result, entry.path, progressVersionKey));
-    onVersionStateChanged?.();
-    onNotice(result.versions.find(item => item.id === version.id)?.contentChanged ? '已重新定位，但文件内容与原记录不同。' : '版本文件已重新定位');
   };
   const toggleCompare = (id: string) => setCompareIds(current => current.includes(id) ? current.filter(value => value !== id) : [...(current.length >= 2 ? current.slice(1) : current), id]);
   const previewVersion = (id: string) => {
@@ -789,9 +823,9 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
   return <div className="version-manager-surface fixed inset-x-0 bottom-0 top-10 z-[300] flex flex-col bg-slate-50">
     {loading ? <div className="flex flex-1 items-center justify-center gap-3 text-slate-500"><Loader2 size={20} className="animate-spin"/>正在扫描文件身份并建立版本记录…</div> : <div ref={layoutRef} className="relative flex min-h-0 flex-1">
       <aside ref={treePaneRef} style={{ width: treeWidth }} className="flex min-h-0 shrink-0 flex-col overflow-hidden bg-white">
-        <header className="z-10 shrink-0 border-b border-slate-200 bg-white px-4 py-3"><div className="flex items-start gap-2"><GitBranch size={18} className="mt-0.5 shrink-0 text-blue-600"/><div className="min-w-0 flex-1"><h2 className="truncate text-sm font-bold text-slate-800">版本对比 · {bundle.photo?.displayName || entry.name}</h2><p className="mt-1 truncate text-[11px] text-slate-500" title={bundle.photo?.id}>Photo ID：<span className="font-mono">{bundle.photo?.id || '正在建立追踪…'}</span></p></div><button onClick={onClose} title="关闭版本对比" aria-label="关闭版本对比" className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100"><X size={17}/></button></div></header>
+        <header className="z-10 shrink-0 border-b border-slate-200 bg-white px-4 py-3"><div className="flex items-start gap-2"><GitBranch size={18} className="mt-0.5 shrink-0 text-blue-600"/><div className="min-w-0 flex-1"><h2 className="truncate text-sm font-bold text-slate-800">版本对比 · {bundle.photo?.displayName || entry.name}</h2><p className="mt-1 truncate text-[11px] text-slate-500" title={bundle.photo?.id}>Photo ID：<span className="font-mono">{bundle.photo?.id || '正在建立追踪…'}</span></p></div><button disabled={busy} onClick={onClose} title="关闭版本对比" aria-label="关闭版本对比" className="rounded-md p-1.5 text-slate-500 hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40"><X size={17}/></button></div></header>
         {missingVersionCount > 0 && <div className="flex items-start gap-2 border-b border-amber-200 bg-amber-50 px-4 py-2 text-[11px] font-medium leading-5 text-amber-800"><AlertTriangle size={14} className="mt-0.5 shrink-0"/><span>{missingVersionCount} 个版本文件不可用，请重新定位或删除记录。</span></div>}
-        {branchPhotos.length > 1 && <><section style={{ height: branchPhotoHeight }} className="flex min-h-0 shrink-0 flex-col bg-slate-50/70 p-3"><div className="mb-2 flex shrink-0 items-center justify-between"><span className="text-xs font-bold text-slate-600">主分支图片</span><span className="text-[10px] text-slate-400">{branchPhotoPagination.total} 张</span></div><div className="min-h-0 flex-1 space-y-1 overflow-y-auto">{branchPhotoPagination.items.map(photo => <button key={photo.photoId} type="button" aria-pressed={activePhotoId === photo.photoId} onClick={() => void selectBranchPhoto(photo.photoId)} className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs ${activePhotoId === photo.photoId ? 'bg-blue-100 font-bold text-blue-700' : 'text-slate-600 hover:bg-white'}`}><span className={`h-2 w-2 shrink-0 rounded-full ${photo.missing ? 'bg-red-400' : 'bg-emerald-400'}`}/><span className="min-w-0 flex-1 truncate" title={photo.originalName}>{photo.originalName}</span><span className="shrink-0 text-[10px] text-slate-400">{photo.versionCount} 版</span></button>)}</div>{branchPhotoPagination.pageCount > 1 && <div className="mt-2 flex shrink-0 items-center justify-between"><button type="button" disabled={branchPhotoPagination.currentPage === 0 || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => Math.max(0, page - 1))} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">上一页</button><span className="text-[10px] text-slate-400">{branchPhotoPagination.currentPage + 1} / {branchPhotoPagination.pageCount}</span><button type="button" disabled={branchPhotoPagination.currentPage + 1 >= branchPhotoPagination.pageCount || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => page + 1)} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">下一页</button></div>}</section><ResizeHandle orientation="horizontal" label="调整主分支图片列表高度" value={branchPhotoHeight} min={140} max={720} onReset={() => setBranchPhotoHeight(276)} onDrag={delta => setBranchPhotoHeight(height => clampBranchPhotoHeight(height + delta))}/></>}
+        {branchPhotos.length > 1 && <><section style={{ height: branchPhotoHeight }} className="flex min-h-0 shrink-0 flex-col bg-slate-50/70 p-3"><div className="mb-2 flex shrink-0 items-center justify-between"><span className="text-xs font-bold text-slate-600">主分支图片</span><span className="text-[10px] text-slate-400">{branchPhotoPagination.total} 张</span></div><div className="min-h-0 flex-1 space-y-1 overflow-y-auto">{branchPhotoPagination.items.map(photo => <button key={photo.photoId} type="button" disabled={busy} aria-pressed={activePhotoId === photo.photoId} onClick={() => void selectBranchPhoto(photo.photoId)} className={`flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left text-xs disabled:cursor-not-allowed disabled:opacity-40 ${activePhotoId === photo.photoId ? 'bg-blue-100 font-bold text-blue-700' : 'text-slate-600 hover:bg-white'}`}><span className={`h-2 w-2 shrink-0 rounded-full ${photo.missing ? 'bg-red-400' : 'bg-emerald-400'}`}/><span className="min-w-0 flex-1 truncate" title={photo.originalName}>{photo.originalName}</span><span className="shrink-0 text-[10px] text-slate-400">{photo.versionCount} 版</span></button>)}</div>{branchPhotoPagination.pageCount > 1 && <div className="mt-2 flex shrink-0 items-center justify-between"><button type="button" disabled={busy || branchPhotoPagination.currentPage === 0 || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => Math.max(0, page - 1))} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">上一页</button><span className="text-[10px] text-slate-400">{branchPhotoPagination.currentPage + 1} / {branchPhotoPagination.pageCount}</span><button type="button" disabled={busy || branchPhotoPagination.currentPage + 1 >= branchPhotoPagination.pageCount || branchPhotoLoading} onClick={() => setBranchPhotoPage(page => page + 1)} className="rounded border border-slate-200 bg-white px-2 py-1 text-[10px] font-bold text-slate-600 disabled:opacity-40">下一页</button></div>}</section><ResizeHandle orientation="horizontal" label="调整主分支图片列表高度" value={branchPhotoHeight} min={140} max={720} onReset={() => setBranchPhotoHeight(276)} onDrag={delta => setBranchPhotoHeight(height => clampBranchPhotoHeight(height + delta))}/></>}
         <div className="min-h-0 flex-1 overflow-y-auto p-3"><div className="mb-2 flex items-center justify-between px-2"><span className="text-xs font-bold uppercase tracking-wider text-slate-400">版本树</span><span className="text-xs text-slate-400">{bundle.versions.length} 个版本</span></div>
         <div className="space-y-2">{bundle.versions.map(version => <div key={version.id} className={`relative w-full rounded-xl border p-3 text-left transition ${selectedId === version.id ? 'border-blue-400 bg-blue-50 shadow-sm' : 'border-slate-200 bg-white hover:bg-slate-50'}`} style={{ paddingLeft: 12 + Math.min(depths.get(version.id) || 0, 6) * 14 }}><button type="button" aria-label={`预览 ${visibleVersionLabel(version)} ${visibleVersionName(version)}`} onClick={() => previewVersion(version.id)} className="absolute inset-0 z-0 cursor-pointer rounded-xl focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-400"/>
           {(depths.get(version.id) || 0) > 0 && <span className="absolute bottom-1/2 top-0 w-px bg-slate-200" style={{ left: 8 + Math.min(depths.get(version.id) || 0, 6) * 14 }}/>} {/* Visual indentation is capped without truncating logical depth. */}

@@ -58,8 +58,6 @@ export const ProgressPairPreview = ({ referencePath = '', sourcePath = '', refer
     return () => {
       requestSequenceRef.current += 1;
       unsubscribe();
-      const cancelPaths = new Set([referencePath && !referenceMissing ? referencePath : '', sourcePath].filter(Boolean));
-      cancelPaths.forEach(path => { void window.electronAPI.cancelMediaThumbnail(path, 1600); });
     };
   }, [referencePath, sourcePath, referenceMissing, cacheConfig.directory, cacheConfig.maxSizeGB]);
 
