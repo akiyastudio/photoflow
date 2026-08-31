@@ -66,8 +66,11 @@ export const requestCaptureDateTime = (entry: ProjectFileEntry) => {
   const cached = captureDateTimeRequestCache.get(cacheKey);
   if (cached) return cached;
   const request = projectWorkspaceClient.getMediaMetadata(entry.path).then(result => {
-    if (!result.success) return undefined;
+    if (!result.success) { captureDateTimeRequestCache.delete(cacheKey); return undefined; }
     return pickCaptureDate(result.fields, 'DateTimeOriginal', 'CreateDate', 'MediaCreateDate', 'TrackCreateDate', 'CreationDate', 'FileModifyDate');
+  }).catch(error => {
+    captureDateTimeRequestCache.delete(cacheKey);
+    throw error;
   });
   if (captureDateTimeRequestCache.size >= 256) captureDateTimeRequestCache.delete(captureDateTimeRequestCache.keys().next().value as string);
   captureDateTimeRequestCache.set(cacheKey, request);

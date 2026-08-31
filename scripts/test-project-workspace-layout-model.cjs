@@ -5,9 +5,11 @@ const ts = require('typescript');
 
 const sourcePath = path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'project-workspace-layout-model.ts');
 const workspacePath = path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx');
+const workspaceLayoutPath = path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspaceLayout.tsx');
 const versionTreePath = path.resolve(__dirname, '..', 'src', 'components', 'ProjectVersionTree.tsx');
 const source = fs.readFileSync(sourcePath, 'utf8');
 const workspace = fs.readFileSync(workspacePath, 'utf8');
+const workspaceLayout = fs.readFileSync(workspaceLayoutPath, 'utf8');
 const versionTree = fs.readFileSync(versionTreePath, 'utf8');
 const compiled = ts.transpileModule(source, {
   compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
@@ -19,10 +21,42 @@ const {
   DEFAULT_FILE_LIST_COLUMN_WIDTHS,
   MIN_FILE_LIST_COLUMN_WIDTHS,
   fitFileListColumnWidths,
+  createDelayedCloseController,
   groupedResultsAreInitiallyLoading,
+  positionViewportSubmenu,
+  cleanViewportSubmenuClassName,
   resizeFileListColumnBoundary,
   shouldRetainGroupedResultsDuringRefresh,
 } = moduleUnderTest.exports;
+
+let fakeNow = 0; let nextTimerId = 1; const fakeTimers = new Map();
+const fakeSetTimeout = (callback, delay) => { const id = nextTimerId++; fakeTimers.set(id, { at: fakeNow + delay, callback }); return id; };
+const fakeClearTimeout = id => fakeTimers.delete(id);
+const advanceFakeTimers = milliseconds => {
+  fakeNow += milliseconds;
+  for (const [id, timer] of [...fakeTimers].sort((left, right) => left[1].at - right[1].at)) if (timer.at <= fakeNow) { fakeTimers.delete(id); timer.callback(); }
+};
+let delayedCloseCalls = 0;
+const delayedClose = createDelayedCloseController(() => { delayedCloseCalls += 1; }, 100, fakeSetTimeout, fakeClearTimeout);
+delayedClose.scheduleClose(); advanceFakeTimers(60); delayedClose.cancelClose(); advanceFakeTimers(100);
+assert.strictEqual(delayedCloseCalls, 0, 'entering the submenu during the pointer gap cancels delayed close and keeps it open');
+delayedClose.scheduleClose(); advanceFakeTimers(99); assert.strictEqual(delayedCloseCalls, 0, 'slow pointer transit remains open for the full grace period'); advanceFakeTimers(1);
+assert.strictEqual(delayedCloseCalls, 1, 'a genuine leave closes after the grace period');
+delayedClose.scheduleClose(); delayedClose.dispose(); advanceFakeTimers(100); assert.strictEqual(delayedCloseCalls, 1, 'unmount disposal clears pending close timers');
+
+assert.strictEqual(cleanViewportSubmenuClassName('invisible absolute left-full top-0 opacity-0 group-hover/submenu:visible group-hover/submenu:opacity-100 w-52 bg-white shadow-xl overflow-y-auto'), 'w-52 bg-white shadow-xl overflow-y-auto', 'submenu cleanup removes only legacy visibility and positioning state while preserving static presentation');
+
+const clampedRootTrigger = { left: 984, right: 1192, top: 40 };
+assert.deepStrictEqual(
+  positionViewportSubmenu(clampedRootTrigger, { width: 208, height: 300 }, { width: 1200, height: 800 }),
+  { openLeft: true, left: 772, top: 40 },
+  'submenu positioning uses the trigger rect after the root menu has been clamped at the right viewport edge',
+);
+assert.deepStrictEqual(
+  positionViewportSubmenu({ left: 400, right: 608, top: 760 }, { width: 208, height: 300 }, { width: 1200, height: 800 }),
+  { openLeft: false, left: 612, top: 492 },
+  'submenu positioning clamps upward from the real trigger near the bottom edge',
+);
 
 assert.strictEqual(shouldRetainGroupedResultsDuringRefresh('same', 'same', 12), true, 'a background refresh of the same grouped request must retain visible files');
 assert.strictEqual(shouldRetainGroupedResultsDuringRefresh('old', 'new', 12), false, 'a new search or scope must not retain unrelated results');
@@ -69,5 +103,9 @@ assert(workspace.includes('onWheelCapture={handleFilesColumnWheelCapture}') && w
 assert(versionTree.includes('if (nextScrollTop > 1) onViewportScrollChange?.(true)') && versionTree.includes('else if (nextScrollTop < previousScrollTop) onViewportScrollChange?.(false)'), 'vertical version-tree scrolling must not immediately undo a wheel-triggered collapse while still at the top');
 assert(versionTree.includes('if (event.deltaY > 0) onViewportScrollChange?.(true)') && versionTree.includes('event.deltaY < 0 && viewport.scrollTop <= 1'), 'version-tree wheel intent must collapse the overview even before the canvas itself can scroll and reveal it again at the top');
 assert(workspace.includes("versionTreeOpen ? 'gap-0 overflow-hidden pb-0' : 'gap-3 overflow-auto pb-6'"), 'version-tree mode must not add the normal content gap below its breadcrumb');
+assert(workspace.includes('const safeStorageGet =') && workspace.includes('const safeStorageSet =') && workspace.includes('const safeStorageRemove ='), 'tracking session storage access must be guarded when localStorage is unavailable');
+assert(!workspace.includes('window.localStorage.getItem(sessionKey)') && !workspace.includes('window.localStorage.removeItem(sessionKey)'), 'tracking session recovery must use the safe storage wrappers');
+assert(workspace.includes('!relativePaths?.length && !completion.partial') && workspace.includes('completion.warning ||'), 'materialize partial/warning responses must retain the external-link affordance and show a non-destructive notice');
+assert(workspaceLayout.includes('onMouseLeave={() => closeControllerRef.current?.scheduleClose()}') && workspaceLayout.includes('onMouseEnter: openNow') && workspaceLayout.includes('closeControllerRef.current?.dispose()'), 'ViewportSubmenu must cancel delayed close on wrapper/submenu entry and clear the timer on unmount');
 
 console.log('Project workspace layout model tests passed.');

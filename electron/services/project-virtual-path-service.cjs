@@ -1,9 +1,13 @@
 const fs = require('fs');
 const path = require('path');
+const { spawnSync } = require('child_process');
+const { physicalPathKey, identityFromStat, identitiesMatch } = require('./file-identity-service.cjs');
 
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
 const MANAGED_EXTERNAL_ID_MARKER = ' | PhotoFlow-ID:';
+const REGISTRY_PROTOCOL = 'photoflow-external-links-registry-v1';
+const HARDLINK_FALLBACK_CODES = new Set(['EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'EINVAL', 'UNKNOWN']);
 
 const normalizeVirtualPath = value => {
   const normalized = String(value || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
@@ -19,39 +23,186 @@ const isInsideOrEqual = (parent, candidate) => {
   return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
 };
 
-const createProjectVirtualPathService = ({ shell, registryPath = '', crypto = require('crypto') }) => {
+const createProjectVirtualPathService = ({ shell, registryPath = '', crypto = require('crypto'), platform = process.platform, runtimeDirectory = __dirname, resourcesPath = process.resourcesPath, isPackaged = null, nativeRegistryPublisher = null, registryFaultInjector = () => undefined, executableExists = fs.existsSync, spawnSyncImpl = spawnSync }) => {
   if (!shell?.readShortcutLink) throw new Error('外链路径服务缺少快捷方式读取能力');
   const registryFile = registryPath ? path.resolve(registryPath) : '';
   let registryCache = null;
-  let registryMtimeMs = 0;
-  const loadRegistry = () => {
-    const currentMtimeMs = registryFile ? fs.statSync(registryFile, { throwIfNoEntry: false })?.mtimeMs || 0 : 0;
-    if (registryCache && currentMtimeMs === registryMtimeMs) return registryCache;
-    if (!registryFile) return (registryCache = { version: 1, links: {} });
+  let registryIdentity = null;
+  const digestSync = filePath => crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+  const writeSyncedFileSync = (filePath, contents) => {
+    const handle = fs.openSync(filePath, 'wx', 0o600);
+    try { fs.writeFileSync(handle, contents, 'utf8'); fs.fsyncSync(handle); } finally { fs.closeSync(handle); }
+  };
+  const nativeMoveNoReplaceSync = (source, destination) => {
+    if (nativeRegistryPublisher) return nativeRegistryPublisher(source, destination);
+    const binaryName = platform === 'win32' ? 'file-publication-service.exe' : 'file-publication-service';
+    const normalizedRuntime = path.resolve(runtimeDirectory).replace(/\\/g, '/').toLowerCase();
+    const packagedRuntime = /(?:^|\/)app\.asar(?:\.unpacked)?(?:\/|$)/.test(normalizedRuntime);
+    const packagedMode = typeof isPackaged === 'boolean' ? isPackaged : packagedRuntime;
+    const developmentExecutable = path.resolve(runtimeDirectory, '..', 'bin', binaryName);
+    const resourceCandidates = resourcesPath ? [path.join(resourcesPath, binaryName), path.join(resourcesPath, 'app.asar.unpacked', 'electron', 'bin', binaryName)] : [];
+    const candidates = packagedMode ? resourceCandidates : [developmentExecutable, ...resourceCandidates];
+    const executable = candidates.find(candidate => candidate && executableExists(candidate));
+    if (!executable) throw Object.assign(new Error('registry native publication service unavailable'), { code: 'FILE_PUBLICATION_SERVICE_MISSING' });
+    const result = spawnSyncImpl(executable, ['move-no-replace', '--source', path.resolve(source), '--target', path.resolve(destination)], { encoding: 'utf8', windowsHide: true });
+    const line = String(result.stdout || '').replace(/^\uFEFF/, '').split(/\r?\n/).map(value => value.trim()).filter(Boolean).pop();
+    let payload; try { payload = line ? JSON.parse(line) : null; } catch { payload = null; }
+    if (!payload?.success) {
+      let reconciled = false;
+      if (payload?.published === true && payload?.outcomeUnknown !== true && payload?.identity && !fs.existsSync(source) && fs.existsSync(destination)) {
+        const inspectedResult = spawnSyncImpl(executable, ['inspect-path', '--path', path.resolve(destination)], { encoding: 'utf8', windowsHide: true });
+        const inspectedLine = String(inspectedResult.stdout || '').replace(/^\uFEFF/, '').split(/\r?\n/).map(value => value.trim()).filter(Boolean).pop();
+        let inspected; try { inspected = inspectedLine ? JSON.parse(inspectedLine) : null; } catch { inspected = null; }
+        reconciled = inspected?.success === true && inspected.identity === payload.identity;
+      }
+      if (reconciled) return { ...payload, success: true, strategy: 'native-write-through-reconciled' };
+      throw Object.assign(new Error(payload?.error || String(result.stderr || 'registry native publication failed')), { code: payload?.code || 'FILE_PUBLICATION_FAILED', published: payload?.published, outcomeUnknown: payload?.outcomeUnknown, identity: payload?.identity });
+    }
+    return payload;
+  };
+  const publishFileNoClobberSync = (source, destination, options = {}) => {
+    if (options.registryCanonical) {
+      const native = nativeMoveNoReplaceSync(source, destination);
+      return { strategy: native.strategy || 'native-write-through-no-clobber', identity: identityFromStat(destination, fs.statSync(destination, { bigint: true })), nativeIdentity: native.identity, cleanupWarning: '' };
+    }
+    let strategy = 'hardlink-no-clobber';
+    try { fs.linkSync(source, destination); }
+    catch (error) {
+      if (!HARDLINK_FALLBACK_CODES.has(error?.code)) throw error;
+      strategy = 'copyfile-excl-fallback';
+      try {
+        fs.copyFileSync(source, destination, fs.constants.COPYFILE_EXCL);
+        const sourceMode = fs.statSync(source).mode;
+        fs.chmodSync(destination, sourceMode | 0o200);
+        const handle = fs.openSync(destination, 'r+');
+        try { fs.fsyncSync(handle); } finally { fs.closeSync(handle); }
+        if (fs.statSync(source).size !== fs.statSync(destination).size || digestSync(source) !== digestSync(destination)) throw Object.assign(new Error('no-clobber fallback verification failed'), { code: 'PUBLISH_VERIFY_FAILED' });
+        try { fs.chmodSync(destination, sourceMode); } catch { /* identity remains verified */ }
+      } catch (copyError) {
+        if (fs.existsSync(destination)) {
+          const recovery = `${destination}.recovery-${crypto.randomUUID()}`;
+          try { fs.renameSync(destination, recovery); copyError.recoveryPath = recovery; } catch { /* preserve ambiguous destination */ }
+        }
+        throw copyError;
+      }
+    }
+    const identity = identityFromStat(destination, fs.statSync(destination, { bigint: true }));
+    let cleanupWarning = '';
+    try { fs.unlinkSync(source); } catch (error) { cleanupWarning = error?.message || String(error); }
+    return { strategy, identity, cleanupWarning };
+  };
+  const parseRegistryCandidate = filePath => {
     try {
-      const parsed = JSON.parse(fs.readFileSync(registryFile, 'utf8'));
-      registryCache = parsed?.version === 1 && parsed.links && typeof parsed.links === 'object' ? parsed : { version: 1, links: {} };
-    } catch { registryCache = { version: 1, links: {} }; }
-    registryMtimeMs = currentMtimeMs;
+      const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      if (value?.version !== 1 || !value.links || typeof value.links !== 'object' || Array.isArray(value.links)) return null;
+      const meta = value._registryWrite;
+      if (meta !== undefined && (meta?.protocol !== REGISTRY_PROTOCOL || !Number.isSafeInteger(meta.generation) || meta.generation < 1 || typeof meta.operationId !== 'string')) return null;
+      return { filePath, value, generation: Number(meta?.generation || 0) };
+    } catch { return null; }
+  };
+  const selectRegistryRecovery = () => {
+    const directory = path.dirname(registryFile); const basename = path.basename(registryFile);
+    if (!fs.existsSync(directory)) return null;
+    const names = fs.readdirSync(directory, { withFileTypes: true });
+    const artifactPaths = names.filter(entry => entry.isFile() && (entry.name.startsWith(`${basename}.tmp-`) || entry.name.startsWith(`${basename}.backup-`))).map(entry => path.join(directory, entry.name));
+    if (!artifactPaths.length) return null;
+    const candidates = artifactPaths.map(parseRegistryCandidate);
+    if (candidates.some(candidate => !candidate)) throw Object.assign(new Error('外链注册表恢复候选损坏'), { code: 'EXTERNAL_LINK_REGISTRY_RECOVERY_AMBIGUOUS' });
+    const temporary = candidates.filter(candidate => path.basename(candidate.filePath).startsWith(`${basename}.tmp-`));
+    const backups = candidates.filter(candidate => path.basename(candidate.filePath).startsWith(`${basename}.backup-`));
+    let winner = null;
+    if (temporary.length === 1 && backups.length <= 1 && (backups.length ? temporary[0].generation === backups[0].generation + 1 : temporary[0].generation === 1)) winner = temporary[0];
+    else if (!temporary.length && backups.length === 1) winner = backups[0];
+    if (!winner) throw Object.assign(new Error('外链注册表恢复候选不唯一或代际冲突'), { code: 'EXTERNAL_LINK_REGISTRY_RECOVERY_AMBIGUOUS' });
+    return { candidates, winner };
+  };
+  const recoverMissingRegistry = () => {
+    if (!registryFile || fs.existsSync(registryFile)) return;
+    const recovery = selectRegistryRecovery();
+    if (!recovery) return;
+    const { candidates, winner } = recovery;
+    publishFileNoClobberSync(winner.filePath, registryFile, { registryCanonical: true });
+    for (const candidate of candidates) if (candidate !== winner) try { fs.rmSync(candidate.filePath, { force: true }); } catch { /* canonical is already authoritative */ }
+  };
+  const recoverInvalidRegistry = () => {
+    const recovery = selectRegistryRecovery();
+    if (!recovery) throw Object.assign(new Error('外链注册表已损坏且没有恢复候选'), { code: 'EXTERNAL_LINK_REGISTRY_CORRUPT' });
+    const corruptRecovery = `${registryFile}.recovery-corrupt-${crypto.randomUUID()}`;
+    publishFileNoClobberSync(registryFile, corruptRecovery, { registryCanonical: true });
+    try { publishFileNoClobberSync(recovery.winner.filePath, registryFile, { registryCanonical: true }); }
+    catch (error) { if (!fs.existsSync(registryFile) && fs.existsSync(corruptRecovery)) try { publishFileNoClobberSync(corruptRecovery, registryFile, { registryCanonical: true }); } catch { error.recoveryPath = corruptRecovery; } throw error; }
+    for (const candidate of recovery.candidates) if (candidate !== recovery.winner) try { fs.rmSync(candidate.filePath, { force: true }); } catch { /* recovered canonical is authoritative */ }
+    try { fs.rmSync(corruptRecovery, { force: true }); } catch { /* non-authoritative damaged recovery */ }
+  };
+  const rollbackCommittedShortcut = item => {
+    let current;
+    try { current = identityFromStat(item.shortcutPath, fs.statSync(item.shortcutPath, { bigint: true })); }
+    catch { return { success: false }; }
+    if (!identitiesMatch(current, item.publishedIdentity, { destructive: true }) || digestSync(item.shortcutPath) !== item.publishedIdentity.sha256) return { success: false };
+    const quarantine = `${item.shortcutPath}.recovery-${crypto.randomUUID()}`;
+    let publication;
+    try { publication = publishFileNoClobberSync(item.shortcutPath, quarantine); }
+    catch (error) { return { success: false, recoveryPath: error?.recoveryPath }; }
+    const valid = fs.statSync(quarantine).size.toString() === item.publishedIdentity.size && digestSync(quarantine) === item.publishedIdentity.sha256;
+    if (!valid) {
+      if (!fs.existsSync(item.shortcutPath)) try { publishFileNoClobberSync(quarantine, item.shortcutPath); return { success: false }; } catch { /* preserve quarantine */ }
+      return { success: false, recoveryPath: quarantine };
+    }
+    try { fs.unlinkSync(quarantine); return { success: true, strategy: publication.strategy }; }
+    catch { return { success: false, recoveryPath: quarantine }; }
+  };
+  const loadRegistry = () => {
+    if (registryFile && !fs.existsSync(registryFile)) recoverMissingRegistry();
+    const currentStat = registryFile ? fs.statSync(registryFile, { bigint: true, throwIfNoEntry: false }) : null;
+    const currentIdentity = currentStat ? identityFromStat(registryFile, currentStat) : null;
+    if (registryCache && Boolean(currentIdentity) === Boolean(registryIdentity) && (!currentIdentity || identitiesMatch(currentIdentity, registryIdentity))) return registryCache;
+    if (!registryFile || !currentStat) {
+      registryIdentity = null;
+      return (registryCache = { version: 1, links: {} });
+    }
+    try {
+      const candidate = parseRegistryCandidate(registryFile);
+      if (!candidate) { recoverInvalidRegistry(); return loadRegistry(); }
+      registryCache = candidate.value;
+    } catch (cause) {
+      throw Object.assign(new Error('外链注册表已损坏，拒绝覆盖'), { code: 'EXTERNAL_LINK_REGISTRY_CORRUPT', cause });
+    }
+    registryIdentity = identityFromStat(registryFile, currentStat);
     return registryCache;
   };
   const saveRegistry = () => {
     if (!registryFile) return;
     fs.mkdirSync(path.dirname(registryFile), { recursive: true });
-    const temporary = `${registryFile}.tmp-${process.pid}-${crypto.randomUUID()}`;
-    const backup = `${registryFile}.backup-${process.pid}-${crypto.randomUUID()}`;
-    fs.writeFileSync(temporary, JSON.stringify(loadRegistry()), { encoding: 'utf8', flag: 'wx' });
+    const currentStat = fs.statSync(registryFile, { bigint: true, throwIfNoEntry: false });
+    const currentIdentity = currentStat ? identityFromStat(registryFile, currentStat) : null;
+    if (Boolean(currentIdentity) !== Boolean(registryIdentity) || currentIdentity && !identitiesMatch(currentIdentity, registryIdentity)) {
+      throw Object.assign(new Error('外链注册表已被其他操作修改'), { code: 'EXTERNAL_LINK_REGISTRY_CHANGED' });
+    }
+    const operationId = crypto.randomUUID();
+    const generation = Number(loadRegistry()._registryWrite?.generation || 0) + 1;
+    const temporary = `${registryFile}.tmp-${process.pid}-${operationId}`;
+    const backup = `${registryFile}.backup-${process.pid}-${operationId}`;
+    const snapshot = { ...loadRegistry(), _registryWrite: { protocol: REGISTRY_PROTOCOL, operationId, generation } };
+    writeSyncedFileSync(temporary, JSON.stringify(snapshot));
+    registryFaultInjector('after-temp-sync', { registryFile, temporary, backup, snapshot });
+    let published = false; let simulatedCrash = false;
     try {
-      if (fs.existsSync(registryFile)) fs.renameSync(registryFile, backup);
-      fs.renameSync(temporary, registryFile);
-      registryMtimeMs = fs.statSync(registryFile).mtimeMs;
-      fs.rmSync(backup, { force: true });
+      if (fs.existsSync(registryFile)) publishFileNoClobberSync(registryFile, backup, { registryCanonical: true });
+      registryFaultInjector('after-backup-before-canonical', { registryFile, temporary, backup, snapshot });
+      publishFileNoClobberSync(temporary, registryFile, { registryCanonical: true });
+      published = true;
+      registryFaultInjector('after-canonical', { registryFile, temporary, backup, snapshot });
+      const publishedStat = fs.statSync(registryFile, { bigint: true });
+      registryIdentity = identityFromStat(registryFile, publishedStat);
+      registryCache = snapshot;
+      try { fs.rmSync(backup, { force: true }); } catch { /* cleanup cannot invalidate a committed registry */ }
     } catch (error) {
-      if (!fs.existsSync(registryFile) && fs.existsSync(backup)) fs.renameSync(backup, registryFile);
+      simulatedCrash = error?.simulateCrash === true;
+      if (!simulatedCrash && !published && !fs.existsSync(registryFile) && fs.existsSync(backup)) try { publishFileNoClobberSync(backup, registryFile, { registryCanonical: true }); } catch { error.recoveryPath = backup; }
       throw error;
-    } finally { fs.rmSync(temporary, { force: true }); fs.rmSync(backup, { force: true }); }
+    } finally { if (!simulatedCrash && (published || fs.existsSync(registryFile))) try { fs.rmSync(temporary, { force: true }); } catch { /* recovery scanner validates leftovers */ } }
   };
-  const targetKey = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
+  const targetKey = physicalPathKey;
 
   const readManagedExternalLink = shortcutPath => {
   if (path.extname(shortcutPath).toLowerCase() !== '.lnk') return null;
@@ -108,8 +259,9 @@ const createProjectVirtualPathService = ({ shell, registryPath = '', crypto = re
         })) throw new Error(`无法创建外链：${path.basename(item.target)}`);
       }
       for (const item of planned) {
-        fs.renameSync(item.temporary, item.shortcutPath);
-        committed.push(item);
+        const publication = publishFileNoClobberSync(item.temporary, item.shortcutPath);
+        const publishedIdentity = { ...publication.identity, sha256: digestSync(item.shortcutPath) };
+        committed.push({ ...item, publishedIdentity });
         registry.links[item.linkId] = { target: item.target, kind: item.kind, createdAt: Date.now() };
       }
       saveRegistry();
@@ -117,8 +269,10 @@ const createProjectVirtualPathService = ({ shell, registryPath = '', crypto = re
     } catch (error) {
       for (const item of planned) {
         fs.rmSync(item.temporary, { force: true });
-        fs.rmSync(item.shortcutPath, { force: true });
         delete registry.links[item.linkId];
+      }
+      for (const item of committed.reverse()) {
+        rollbackCommittedShortcut(item);
       }
       throw error;
     }
@@ -271,22 +425,42 @@ const createProjectVirtualPathService = ({ shell, registryPath = '', crypto = re
     return path.relative(root, physical).replace(/\\/g, '/');
   };
 
-  const listManagedExternalLinks = projectRoot => {
+  const listManagedExternalLinks = (projectRoot, options = {}) => {
     const root = path.resolve(projectRoot);
     if (!fs.existsSync(root)) return [];
+    const numericLimit = (value, fallback) => Number.isFinite(Number(value)) ? Number(value) : fallback;
+    const maxDepth = Math.max(0, Math.min(128, numericLimit(options.maxDepth, 32)));
+    const maxDirectories = Math.max(1, Math.min(100000, numericLimit(options.maxDirectories, 10000)));
+    const maxEntries = Math.max(1, Math.min(500000, numericLimit(options.maxEntries, 50000)));
+    const cancelled = typeof options.cancel === 'function' ? options.cancel : () => false;
     const links = [];
-    const pending = [{ directory: root, virtualDirectory: '' }];
-    while (pending.length) {
+    const pending = [{ directory: root, virtualDirectory: '', depth: 0 }];
+    const visited = new Set();
+    let directoriesScanned = 0; let entriesScanned = 0; let skipped = 0; let truncated = false; let wasCancelled = false;
+    while (pending.length && !truncated) {
+      if (cancelled()) { truncated = true; wasCancelled = true; break; }
       const current = pending.pop();
+      let realDirectory; let directoryStat;
+      try { realDirectory = fs.realpathSync.native(current.directory); directoryStat = fs.statSync(realDirectory, { bigint: true }); }
+      catch { skipped += 1; continue; }
+      const visitKey = directoryStat.dev !== 0n && directoryStat.ino !== 0n ? `${directoryStat.dev}:${directoryStat.ino}` : physicalPathKey(realDirectory);
+      if (visited.has(visitKey)) { skipped += 1; continue; }
+      visited.add(visitKey);
+      directoriesScanned += 1;
+      if (directoriesScanned > maxDirectories) { truncated = true; break; }
       let entries = [];
       try { entries = fs.readdirSync(current.directory, { withFileTypes: true }); }
       catch { continue; }
       for (const entry of entries) {
-        if (entry.isSymbolicLink()) continue;
+        if (cancelled()) { truncated = true; wasCancelled = true; break; }
+        entriesScanned += 1;
+        if (entriesScanned > maxEntries) { truncated = true; break; }
+        if (entry.isSymbolicLink()) { skipped += 1; continue; }
         const entryPath = path.join(current.directory, entry.name);
         const virtualPath = [current.virtualDirectory, entry.name].filter(Boolean).join('/');
         if (entry.isDirectory()) {
-          pending.push({ directory: entryPath, virtualDirectory: virtualPath });
+          if (current.depth >= maxDepth) { skipped += 1; truncated = true; continue; }
+          pending.push({ directory: entryPath, virtualDirectory: virtualPath, depth: current.depth + 1 });
           continue;
         }
         if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.lnk') continue;
@@ -306,6 +480,13 @@ const createProjectVirtualPathService = ({ shell, registryPath = '', crypto = re
         });
       }
     }
+    Object.defineProperties(links, {
+      truncated: { value: truncated, enumerable: false },
+      cancelled: { value: wasCancelled, enumerable: false },
+      skipped: { value: skipped, enumerable: false },
+      directoriesScanned: { value: directoriesScanned, enumerable: false },
+      entriesScanned: { value: entriesScanned, enumerable: false },
+    });
     return links;
   };
 

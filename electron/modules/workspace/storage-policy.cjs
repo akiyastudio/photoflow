@@ -1,7 +1,8 @@
 const createWorkspaceStoragePolicy = ({ fs, path, ensureWorkspace }) => {
+  const pathKey = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
   const workspaceCandidates = (primary, requested = []) => [primary, ...(Array.isArray(requested) ? requested : [])]
     .map(value => String(value || '').trim()).filter((value, index, values) => value
-      && values.findIndex(candidate => path.resolve(candidate).toLocaleLowerCase() === path.resolve(value).toLocaleLowerCase()) === index);
+      && values.findIndex(candidate => pathKey(candidate) === pathKey(value)) === index);
 
   const selectWorkspaceForWrite = async (primary, requested, requiredBytes = 0) => {
     const candidates = workspaceCandidates(primary, requested);
@@ -12,7 +13,7 @@ const createWorkspaceStoragePolicy = ({ fs, path, ensureWorkspace }) => {
         const available = stat ? Number(stat.bavail) * Number(stat.bsize) : Number.POSITIVE_INFINITY;
         const reserve = Math.max(256 * 1024 * 1024, Math.ceil(Math.max(0, requiredBytes) * 0.02));
         if (!Number.isFinite(available) || available >= Math.max(0, requiredBytes) + reserve) {
-          return { root, switched: path.resolve(root).toLocaleLowerCase() !== path.resolve(primary).toLocaleLowerCase() };
+          return { root, switched: pathKey(root) !== pathKey(primary) };
         }
       } catch { /* try the next configured workspace */ }
     }

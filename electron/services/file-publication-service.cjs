@@ -13,25 +13,29 @@ const runPublicationJson = (command, args, timeoutMs, processSupervisor, options
   const finish = (error, value) => { if (settled) return; settled = true; clearTimeout(timer); error ? reject(error) : resolve(value); };
   child.stdout.setEncoding('utf8'); child.stderr.setEncoding('utf8');
   child.stdout.on('data', data => { stdout = (stdout + data).slice(-1024 * 1024); }); child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
-  child.on('error', error => { if (!terminating) finish(error); }); child.on('close', code => { if (terminating) return; const line = stdout.replace(/^\uFEFF/, '').split(/\r?\n/).map(value => value.trim()).filter(Boolean).pop(); let payload; try { payload = line ? JSON.parse(line) : null; } catch {} if (!payload) return finish(new Error(stderr.trim() || `文件发布服务未返回有效 JSON（代码 ${code}）`)); if (!payload.success) return finish(Object.assign(new Error(payload.error || '文件发布服务失败'), { code: payload.code || 'FILE_PUBLICATION_FAILED', nativeError: payload.nativeError, recoveryPath: payload.recoveryPath, recoveryPathBase64: payload.recoveryPathBase64 })); finish(null, payload); });
-  const timer = setTimeout(() => { if (settled || terminating) return; terminating = true; const timeoutError = Object.assign(new Error('文件发布服务响应超时'), { code: 'FILE_PUBLICATION_TIMEOUT' }); void terminateAndWait(child, Date.now() + (options.terminationTimeoutMs || 5000)).then(() => finish(timeoutError), finish); }, timeoutMs);
+  child.on('error', error => { if (!terminating) finish(error); }); child.on('close', code => { if (terminating) return; const line = stdout.replace(/^\uFEFF/, '').split(/\r?\n/).map(value => value.trim()).filter(Boolean).pop(); let payload; try { payload = line ? JSON.parse(line) : null; } catch {} if (!payload) return finish(new Error(stderr.trim() || `文件发布服务未返回有效 JSON（代码 ${code}）`)); if (!payload.success) return finish(Object.assign(new Error(payload.error || '文件发布服务失败'), { code: payload.code || 'FILE_PUBLICATION_FAILED', nativeError: payload.nativeError, phase: payload.phase, recoveryPath: payload.recoveryPath, recoveryPathBase64: payload.recoveryPathBase64, originalMissing: payload.originalMissing, deleted: payload.deleted, cleanupWarning: payload.cleanupWarning, publishedPath: payload.publishedPath, published: payload.published, publishedConfirmed: payload.publishedConfirmed, publicationState: payload.publicationState, outcomeUnknown: payload.outcomeUnknown, identity: payload.identity })); finish(null, payload); });
+  const timer = setTimeout(() => { if (settled || terminating) return; terminating = true; const timeoutError = Object.assign(new Error('文件发布服务响应超时，操作结果未知'), { code: 'FILE_PUBLICATION_TIMEOUT', outcomeUnknown: true }); void terminateAndWait(child, Date.now() + (options.terminationTimeoutMs || 5000)).then(() => finish(timeoutError), terminationError => finish(Object.assign(timeoutError, { terminationError, pid: child.pid || null }))); }, timeoutMs);
 });
 const digest = async filePath => { const hash = crypto.createHash('sha256'); const stream = fs.createReadStream(filePath); for await (const chunk of stream) hash.update(chunk); return hash.digest('hex'); };
-const createFilePublicationService = ({ app, projectRoot, processSupervisor = null, platform = process.platform, invokeOverride = null, spawnImpl = null, batchTimeoutMs = publicationBatchTimeoutMs }) => {
+const createFilePublicationService = ({ app, projectRoot, processSupervisor = null, platform = process.platform, invokeOverride = null, spawnImpl = null, batchTimeoutMs = publicationBatchTimeoutMs, portableFaultInjector = async () => undefined }) => {
   const MAX_BATCH_ITEMS = 2048;
   const MAX_BATCH_MANIFEST_BYTES = 512 * 1024;
   const binaryName = platform === 'win32' ? 'file-publication-service.exe' : 'file-publication-service';
   const executable = () => app.isPackaged ? path.join(process.resourcesPath, binaryName) : path.join(projectRoot, 'electron', 'bin', binaryName);
   const ensure = () => { if (!fs.existsSync(executable())) { const error = new Error(`${platform === 'win32' ? 'Windows' : 'POSIX'} 原子文件发布服务不可用`); error.code = 'FILE_PUBLICATION_SERVICE_MISSING'; throw error; } };
-  const decodeSingleRecoveryPath = (encoded, original) => {
+  const decodeRecoveryPath = (encoded, original, suffix = 'photoflow-recovery-') => {
     if (typeof encoded !== 'string' || !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(encoded)) throw Object.assign(new Error('文件发布服务返回了无效的恢复路径编码'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
     const bytes = Buffer.from(encoded, 'base64');
     if (bytes.toString('base64') !== encoded || bytes.includes(0)) throw Object.assign(new Error('文件发布服务返回了无效的恢复路径编码'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
     const decoded = bytes.toString('utf8');
     if (!Buffer.from(decoded, 'utf8').equals(bytes)) throw Object.assign(new Error('文件发布服务返回了无效的恢复路径编码'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
+    if (!path.isAbsolute(decoded) || path.normalize(decoded) !== decoded) throw Object.assign(new Error('文件发布服务返回了非规范恢复路径'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
     const recoveryPath = path.resolve(decoded);
     const expected = path.resolve(original);
-    if (path.dirname(recoveryPath) !== path.dirname(expected) || !path.basename(recoveryPath).startsWith(`${path.basename(expected)}.photoflow-recovery-`)) throw Object.assign(new Error('文件发布服务返回了越界恢复路径'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
+    const recoveryDirectory = path.dirname(recoveryPath);
+    const privateQuarantine = path.dirname(recoveryDirectory) === path.dirname(expected) && path.basename(recoveryDirectory).startsWith('.photoflow-quarantine-') && path.basename(recoveryPath) === path.basename(expected);
+    const legacyRecovery = recoveryDirectory === path.dirname(expected) && path.basename(recoveryPath).startsWith(`${path.basename(expected)}.${suffix}`);
+    if (!privateQuarantine && !legacyRecovery) throw Object.assign(new Error('文件发布服务返回了越界恢复路径'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
     return recoveryPath;
   };
   const invoke = async (operation, values, timeout = 120000) => {
@@ -45,7 +49,7 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
       if (error.recoveryPathBase64) {
         const original = operation === 'compare-delete-file' ? values.target : operation === 'commit-cross-volume-file' ? values.source : null;
         if (!original) throw Object.assign(new Error('文件发布服务在不支持的操作中返回了恢复路径'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR', operation });
-        error.recoveryPath = decodeSingleRecoveryPath(error.recoveryPathBase64, original);
+        error.recoveryPath = decodeRecoveryPath(error.recoveryPathBase64, original);
       }
       throw error;
     }
@@ -75,7 +79,10 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
       for (const item of results) {
         const index = Number(item?.index);
         if (!Number.isInteger(index) || index < 0 || index >= requests.length || index !== completed.length) throw Object.assign(new Error('批量文件发布服务返回了无效的结果索引'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR', completed });
-        if (!item.success) throw Object.assign(new Error(item.error || '批量文件发布失败'), { code: item.code || 'FILE_PUBLICATION_FAILED', nativeError: item.nativeError, failedIndex: index, completed });
+        if (!item.success) {
+          const recoveryPath = item.recoveryPathBase64 ? decodeRecoveryPath(item.recoveryPathBase64, requests[index].source) : item.recoveryPath;
+          throw Object.assign(new Error(item.error || '批量文件发布失败'), { code: item.code || 'FILE_PUBLICATION_FAILED', nativeError: item.nativeError, phase: item.phase, failedIndex: index, completed, recoveryPath, recoveryPathBase64: item.recoveryPathBase64, originalMissing: item.originalMissing, deleted: item.deleted, cleanupWarning: item.cleanupWarning, publishedPath: item.publishedPath, published: item.published, publishedConfirmed: item.publishedConfirmed, publicationState: item.publicationState, outcomeUnknown: item.outcomeUnknown, identity: item.identity });
+        }
         if (typeof item.identity !== 'string' || !item.identity) throw Object.assign(new Error('批量文件发布服务未返回已发布对象身份'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR', completed });
         completed.push({ index, strategy: item.strategy || 'native-batch-move-no-replace', identity: item.identity });
       }
@@ -123,10 +130,8 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
       for (let index = 0; index < results.length; index += 1) {
         const encoded = results[index]?.recoveryPathBase64;
         if (!encoded) continue;
-        const recoveryPath = path.resolve(Buffer.from(encoded, 'base64').toString('utf8'));
         const original = path.resolve(requests[index].path);
-        const expectedPrefix = `${path.basename(original)}.photoflow-quarantine-`;
-        if (path.dirname(recoveryPath) !== path.dirname(original) || !path.basename(recoveryPath).startsWith(expectedPrefix)) throw Object.assign(new Error('批量安全清理服务返回了越界恢复路径'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
+        const recoveryPath = decodeRecoveryPath(encoded, original, 'photoflow-quarantine-');
         results[index].recoveryPath = recoveryPath;
       }
       return results;
@@ -135,13 +140,27 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
       await fs.promises.rm(manifest, { force: true }).catch(() => undefined);
     }
   };
-  const quarantine = candidate => path.join(path.dirname(candidate), `.${path.basename(candidate)}.photoflow-recovery-${crypto.randomUUID()}`);
+  const createPortableQuarantine = async candidate => {
+    for (let attempt = 0; attempt < 16; attempt += 1) {
+      const directory = path.join(path.dirname(candidate), `.photoflow-quarantine-${crypto.randomUUID()}`);
+      try { await fs.promises.mkdir(directory, { mode: 0o700 }); const directoryHandle = process.platform === 'win32' ? null : await fs.promises.open(directory, 'r'); const directoryStat = directoryHandle ? await directoryHandle.stat() : await fs.promises.lstat(directory); return { directory, recovery: path.join(directory, path.basename(candidate)), directoryHandle, directoryIdentity: `${directoryStat.dev}:${directoryStat.ino}` }; }
+      catch (error) { if (error.code !== 'EEXIST') throw error; }
+    }
+    throw Object.assign(new Error('无法创建私有恢复目录'), { code: 'EEXIST' });
+  };
   const inspectPortable = async targetPath => { const stat = await fs.promises.lstat(targetPath); return { success: true, identity: `${stat.dev}:${stat.ino}`, directory: stat.isDirectory() }; };
-  const restoreQuarantine = async (recovery, original) => { if (fs.existsSync(recovery) && !fs.existsSync(original)) await moveNoReplace(recovery, original); };
+  const closeQuarantineDirectory = async quarantine => { if (quarantine.directoryHandle) { await quarantine.directoryHandle.close().catch(() => undefined); quarantine.directoryHandle = null; } };
+  const assertPrivateDirectory = async quarantine => { const linked = await fs.promises.lstat(quarantine.directory); const held = quarantine.directoryHandle ? await quarantine.directoryHandle.stat() : linked; if (`${held.dev}:${held.ino}` !== quarantine.directoryIdentity || `${linked.dev}:${linked.ino}` !== quarantine.directoryIdentity) throw Object.assign(new Error('私有恢复目录身份已变化'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); };
+  const moveToQuarantine = async (original, quarantine) => { try { return await moveNoReplace(original, quarantine.recovery); } catch (error) { if (fs.existsSync(quarantine.recovery)) { error.recoveryPath = quarantine.recovery; error.originalMissing = !fs.existsSync(original); } else { await closeQuarantineDirectory(quarantine); await fs.promises.rmdir(quarantine.directory).catch(() => undefined); } await closeQuarantineDirectory(quarantine); throw error; } };
+  const digestHandle = async handle => { const hash = crypto.createHash('sha256'); const stream = handle.createReadStream({ autoClose: false, start: 0 }); for await (const chunk of stream) hash.update(chunk); return hash.digest('hex'); };
+  const assertRecoveryIdentity = async (handle, recovery, identity, label) => { const [held, linked] = await Promise.all([handle.stat(), fs.promises.lstat(recovery)]); assertPortableIdentity(held, identity, label); if (`${linked.dev}:${linked.ino}` !== `${held.dev}:${held.ino}`) throw Object.assign(new Error(`${label}私有恢复路径身份已变化`), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); return held; };
   const assertPortableIdentity = (stat, identity, label) => { if (!identity || `${stat.dev}:${stat.ino}` !== identity) throw Object.assign(new Error(`${label}身份已变化`), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); };
-  const portableCompareDelete = async ({ target, sha256, size, identity }) => { const resolved = path.resolve(target); const recovery = quarantine(resolved); await moveNoReplace(resolved, recovery); try { const stat = await fs.promises.stat(recovery); assertPortableIdentity(stat, identity, '补偿目标'); if (!stat.isFile() || stat.size !== Number(size) || await digest(recovery) !== sha256) throw Object.assign(new Error('补偿目标身份或摘要不匹配'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); await fs.promises.unlink(recovery); return { success: true, deleted: true }; } catch (error) { await restoreQuarantine(recovery, resolved).catch(() => undefined); error.recoveryPath = fs.existsSync(recovery) ? recovery : undefined; throw error; } };
-  const portableCommitTreeFile = async ({ source, target, sha256, size, identity }) => { const resolved = path.resolve(source); const recovery = quarantine(resolved); await moveNoReplace(resolved, recovery); try { const [sourceStat, targetStat, sourceHash, targetHash] = await Promise.all([fs.promises.stat(recovery), fs.promises.stat(target), digest(recovery), digest(target)]); if (`${sourceStat.dev}:${sourceStat.ino}` !== identity || sourceStat.size !== Number(size) || targetStat.size !== Number(size) || sourceHash !== sha256 || targetHash !== sha256) throw Object.assign(new Error('跨卷文件身份或摘要不匹配'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); await fs.promises.unlink(recovery); return { success: true, deleted: true }; } catch (error) { await restoreQuarantine(recovery, resolved).catch(() => undefined); error.recoveryPath = fs.existsSync(recovery) ? recovery : undefined; throw error; } };
-  const portableDeleteDirectory = async ({ source, identity }) => { const resolved = path.resolve(source); const recovery = quarantine(resolved); await moveNoReplace(resolved, recovery); try { const stat = await fs.promises.lstat(recovery); if (`${stat.dev}:${stat.ino}` !== identity || !stat.isDirectory() || (await fs.promises.readdir(recovery)).length) throw Object.assign(new Error('源目录身份变化或不为空'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); await fs.promises.rmdir(recovery); return { success: true, deleted: true }; } catch (error) { await restoreQuarantine(recovery, resolved).catch(() => undefined); error.recoveryPath = fs.existsSync(recovery) ? recovery : undefined; throw error; } };
+  const syncPortableDirectory = async directory => { if (process.platform === 'win32') return; const handle = await fs.promises.open(directory, 'r'); try { await handle.sync(); } finally { await handle.close(); } };
+  const finalizePortableDeletion = async (quarantine, original) => { await portableFaultInjector('after-unlink-before-private-rmdir', { quarantine, original }); if (quarantine.directoryHandle) await quarantine.directoryHandle.sync(); await closeQuarantineDirectory(quarantine); await fs.promises.rmdir(quarantine.directory); await portableFaultInjector('after-private-rmdir-before-parent-fsync', { quarantine, original }); await syncPortableDirectory(path.dirname(original)); };
+  const annotatePortableCleanupFailure = (error, deleted, quarantine, original) => { if (deleted) { error.deleted = true; error.outcomeUnknown = true; error.cleanupWarning = true; error.phase = 'post-unlink-cleanup'; error.recoveryPath = undefined; } else error.recoveryPath = fs.existsSync(quarantine.recovery) ? quarantine.recovery : undefined; error.originalMissing = !fs.existsSync(original); return error; };
+  const portableCompareDelete = async ({ target, sha256, size, identity }) => { const resolved = path.resolve(target); const quarantine = await createPortableQuarantine(resolved); let handle; let deleted = false; await moveToQuarantine(resolved, quarantine); try { handle = await fs.promises.open(quarantine.recovery, 'r'); const stat = await assertRecoveryIdentity(handle, quarantine.recovery, identity, '补偿目标'); if (!stat.isFile() || stat.size !== Number(size) || await digestHandle(handle) !== sha256) throw Object.assign(new Error('补偿目标身份或摘要不匹配'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); await assertPrivateDirectory(quarantine); await assertRecoveryIdentity(handle, quarantine.recovery, identity, '补偿目标'); await fs.promises.unlink(quarantine.recovery); deleted = true; await handle.close(); handle = null; await finalizePortableDeletion(quarantine, resolved); return { success: true, deleted: true }; } catch (error) { if (handle) await handle.close().catch(() => undefined); await closeQuarantineDirectory(quarantine); throw annotatePortableCleanupFailure(error, deleted, quarantine, resolved); } };
+  const portableCommitTreeFile = async ({ source, target, sha256, size, identity }) => { const resolved = path.resolve(source); const quarantine = await createPortableQuarantine(resolved); let handle; let deleted = false; await moveToQuarantine(resolved, quarantine); try { handle = await fs.promises.open(quarantine.recovery, 'r'); const sourceStat = await assertRecoveryIdentity(handle, quarantine.recovery, identity, '跨卷源文件'); const [targetStat, sourceHash, targetHash] = await Promise.all([fs.promises.stat(target), digestHandle(handle), digest(target)]); if (sourceStat.size !== Number(size) || targetStat.size !== Number(size) || sourceHash !== sha256 || targetHash !== sha256) throw Object.assign(new Error('跨卷文件身份或摘要不匹配'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); await assertPrivateDirectory(quarantine); await assertRecoveryIdentity(handle, quarantine.recovery, identity, '跨卷源文件'); await fs.promises.unlink(quarantine.recovery); deleted = true; await handle.close(); handle = null; await finalizePortableDeletion(quarantine, resolved); return { success: true, deleted: true }; } catch (error) { if (handle) await handle.close().catch(() => undefined); await closeQuarantineDirectory(quarantine); throw annotatePortableCleanupFailure(error, deleted, quarantine, resolved); } };
+  const portableDeleteDirectory = async ({ source, identity }) => { const resolved = path.resolve(source); const quarantine = await createPortableQuarantine(resolved); let handle; let deleted = false; await moveToQuarantine(resolved, quarantine); try { handle = await fs.promises.open(quarantine.recovery, 'r'); const stat = await assertRecoveryIdentity(handle, quarantine.recovery, identity, '源目录'); if (!stat.isDirectory() || (await fs.promises.readdir(quarantine.recovery)).length) throw Object.assign(new Error('源目录身份变化或不为空'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' }); await assertPrivateDirectory(quarantine); await assertRecoveryIdentity(handle, quarantine.recovery, identity, '源目录'); await fs.promises.rmdir(quarantine.recovery); deleted = true; await handle.close(); handle = null; await finalizePortableDeletion(quarantine, resolved); return { success: true, deleted: true }; } catch (error) { if (handle) await handle.close().catch(() => undefined); await closeQuarantineDirectory(quarantine); throw annotatePortableCleanupFailure(error, deleted, quarantine, resolved); } };
   return {
     moveNoReplace,
     moveNoReplaceBatch,

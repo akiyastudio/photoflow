@@ -7,6 +7,11 @@ using System.Web.Script.Serialization;
 
 internal static class RecycleBinService
 {
+    private sealed class RecoveryFailureException : IOException
+    {
+        internal readonly string CodeValue; internal readonly string RecoveryPathValue; internal readonly string PhaseValue; internal readonly bool OriginalMissingValue; internal readonly bool PublishedValue; internal readonly bool OutcomeUnknownValue;
+        internal RecoveryFailureException(string message, string code, string recoveryPath, bool originalMissing, bool published, bool outcomeUnknown, Exception inner, string phase = null) : base(message, inner) { CodeValue = code; RecoveryPathValue = recoveryPath; PhaseValue = phase; OriginalMissingValue = originalMissing; PublishedValue = published; OutcomeUnknownValue = outcomeUnknown; }
+    }
     private const uint FOF_SILENT = 0x0004;
     private const uint FOF_NOCONFIRMATION = 0x0010;
     private const uint FOF_ALLOWUNDO = 0x0040;
@@ -15,6 +20,9 @@ internal static class RecycleBinService
     private const uint FOFX_RECYCLEONDELETE = 0x00080000;
     private const uint FOFX_ADDUNDORECORD = 0x20000000;
     private const uint SIGDN_NORMALDISPLAY = 0;
+    private const uint SICHINT_CANONICAL = 0x10000000;
+    private const uint MOVEFILE_WRITE_THROUGH = 0x00000008;
+    private static Guid RecycleBinFolderId = new Guid("B7534046-3ECB-4C18-BE4E-64CD4CB7D6AC");
 
     [STAThread]
     private static int Main(string[] args)
@@ -32,7 +40,7 @@ internal static class RecycleBinService
             object result;
             if (args[0] == "trash") result = Trash(Required(options, "path"));
             else if (args[0] == "trash-many") result = TrashMany(ReadPaths());
-            else if (args[0] == "restore") result = Restore(Required(options, "pidl"), Required(options, "target"));
+            else if (args[0] == "restore") result = Restore(Required(options, "pidl"), Required(options, "target"), Optional(options, "staging"));
             else if (args[0] == "probe") result = Probe(Required(options, "pidl"));
             else if (args[0] == "probe-many") result = ProbeMany(ReadValues(5000));
             else if (args[0] == "check") result = Check(Required(options, "directory"));
@@ -42,11 +50,14 @@ internal static class RecycleBinService
         }
         catch (Exception error)
         {
-            WriteJson(new Dictionary<string, object> {
+            var failure = new Dictionary<string, object> {
                 { "success", false },
                 { "error", error.Message },
                 { "hresult", error.HResult }
-            });
+            };
+            var recovery = error as RecoveryFailureException;
+            if (recovery != null) { var recoveryExists = File.Exists(recovery.RecoveryPathValue) || Directory.Exists(recovery.RecoveryPathValue); failure["code"] = recovery.CodeValue; if (!String.IsNullOrEmpty(recovery.PhaseValue)) failure["phase"] = recovery.PhaseValue; if (recoveryExists) failure["recoveryPath"] = recovery.RecoveryPathValue; else failure["attemptedStagingPath"] = recovery.RecoveryPathValue; failure["recoveryAvailable"] = recoveryExists; failure["staged"] = recoveryExists; failure["originalMissing"] = recovery.OriginalMissingValue; failure["published"] = recovery.PublishedValue; failure["publishedConfirmed"] = true; failure["publicationState"] = recovery.PublishedValue ? "published" : "not-published"; failure["outcomeUnknown"] = recovery.OutcomeUnknownValue; }
+            WriteJson(failure);
             return 1;
         }
     }
@@ -66,10 +77,14 @@ internal static class RecycleBinService
                 return new Dictionary<string, object> { { "success", true }, { "supported", false }, { "reason", error.Message } };
             }
             var pidl = Convert.ToString(recycled["recyclePidl"]);
-            try { Restore(pidl, canary); }
+            try {
+                var restored = Restore(pidl, canary) as Dictionary<string, object>;
+                if (restored == null || !restored.ContainsKey("success") || !Convert.ToBoolean(restored["success"])) { var restoreError = restored != null && restored.ContainsKey("error") ? restored["error"] : "回收站项目无法还原"; return new Dictionary<string, object> { { "success", true }, { "supported", false }, { "code", restored != null && restored.ContainsKey("code") ? restored["code"] : "RECYCLE_RESTORE_FAILED" }, { "error", restoreError }, { "reason", restoreError } }; }
+            }
             catch (Exception error)
             {
-                return new Dictionary<string, object> { { "success", true }, { "supported", false }, { "reason", "回收站项目无法还原：" + error.Message } };
+                var recovery = error as RecoveryFailureException;
+                return new Dictionary<string, object> { { "success", true }, { "supported", false }, { "code", recovery == null ? "RECYCLE_RESTORE_FAILED" : recovery.CodeValue }, { "error", error.Message }, { "reason", "回收站项目无法还原：" + error.Message } };
             }
             return new Dictionary<string, object> { { "success", true }, { "supported", true } };
         }
@@ -88,15 +103,13 @@ internal static class RecycleBinService
         ThrowIfFailed(SHCreateItemFromParsingName(sourcePath, IntPtr.Zero, typeof(IShellItem).GUID, out source));
         var operation = (IFileOperation)new FileOperation();
         var sink = new ProgressSink();
-        uint cookie;
-        ThrowIfFailed(operation.Advise(sink, out cookie));
         try
         {
             // Skip the routine second confirmation after PhotoFlow's own dialog,
             // but let Windows show its standard warning when recycling is not
             // possible and the item would be deleted permanently.
             ThrowIfFailed(operation.SetOperationFlags(FOF_NOCONFIRMATION | FOF_ALLOWUNDO | FOF_WANTNUKEWARNING | FOFX_RECYCLEONDELETE | FOFX_ADDUNDORECORD));
-            ThrowIfFailed(operation.DeleteItem(source, null));
+            ThrowIfFailed(operation.DeleteItem(source, sink));
             ThrowIfFailed(operation.PerformOperations());
             bool aborted;
             ThrowIfFailed(operation.GetAnyOperationsAborted(out aborted));
@@ -115,7 +128,6 @@ internal static class RecycleBinService
         }
         finally
         {
-            operation.Unadvise(cookie);
             Release(source);
             Release(operation);
         }
@@ -222,61 +234,111 @@ internal static class RecycleBinService
         return "Windows 回收站操作失败";
     }
 
-    private static object Restore(string encodedPidl, string requestedTarget)
+    private static object Restore(string encodedPidl, string requestedTarget, string requestedStaging = null)
     {
         var targetPath = Path.GetFullPath(requestedTarget);
+        var temporaryPath = ApprovedStaging(targetPath, requestedStaging);
         if (File.Exists(targetPath) || Directory.Exists(targetPath))
-            return new Dictionary<string, object> { { "success", false }, { "code", "DESTINATION_EXISTS" }, { "error", "原位置已有同名文件或文件夹" } };
+            return new Dictionary<string, object> { { "success", false }, { "code", "DESTINATION_EXISTS" }, { "error", "原位置已有同名文件或文件夹" }, { "phase", "preflight" }, { "attemptedStagingPath", temporaryPath }, { "recoveryAvailable", false }, { "staged", false }, { "originalMissing", false }, { "published", false }, { "publishedConfirmed", true }, { "publicationState", "not-published" }, { "outcomeUnknown", false } };
         var parentPath = Path.GetDirectoryName(targetPath);
         if (String.IsNullOrEmpty(parentPath)) throw new InvalidOperationException("无法确定恢复目录");
         Directory.CreateDirectory(parentPath);
 
-        var pidl = DecodePidl(encodedPidl);
+        IntPtr pidl = IntPtr.Zero;
         IShellItem recycled = null;
         IShellItem destination = null;
+        IShellItem restoredItem = null;
+        var phase = "resolve-recycle-item";
         try
         {
+            pidl = DecodePidl(encodedPidl);
             ThrowIfFailed(SHCreateItemFromIDList(pidl, typeof(IShellItem).GUID, out recycled));
+            EnsureRecycleItem(recycled);
             ThrowIfFailed(SHCreateItemFromParsingName(parentPath, IntPtr.Zero, typeof(IShellItem).GUID, out destination));
             var operation = (IFileOperation)new FileOperation();
+            var sink = new ProgressSink();
             try
             {
+                phase = "move-to-staging";
                 ThrowIfFailed(operation.SetOperationFlags(FOF_SILENT | FOF_NOCONFIRMATION | FOF_NOERRORUI | FOFX_ADDUNDORECORD));
-                ThrowIfFailed(operation.MoveItem(recycled, destination, Path.GetFileName(targetPath), null));
+                ThrowIfFailed(operation.MoveItem(recycled, destination, Path.GetFileName(temporaryPath), sink));
                 ThrowIfFailed(operation.PerformOperations());
                 bool aborted;
                 ThrowIfFailed(operation.GetAnyOperationsAborted(out aborted));
                 if (aborted) throw new OperationCanceledException("系统取消了还原操作");
+                if (!sink.MoveCompleted) throw new IOException("Windows 未报告还原项目结果");
+                if (sink.MoveResult < 0) Marshal.ThrowExceptionForHR(sink.MoveResult);
+                if (sink.MovedItem == null) throw new IOException("Windows 未返回已恢复对象身份");
+                phase = "verify-staging";
+                ThrowIfFailed(SHCreateItemFromParsingName(temporaryPath, IntPtr.Zero, typeof(IShellItem).GUID, out restoredItem));
+                int order;
+                ThrowIfFailed(sink.MovedItem.Compare(restoredItem, SICHINT_CANONICAL, out order));
+                if (order != 0) throw new IOException("恢复对象身份与目标临时路径不匹配");
             }
-            finally { Release(operation); }
+            catch (Exception error)
+            {
+                if (File.Exists(temporaryPath) || Directory.Exists(temporaryPath))
+                    throw new RecoveryFailureException(error.Message, "RECYCLE_RESTORE_VERIFY_FAILED", temporaryPath, true, false, false, error, phase);
+                throw;
+            }
+            finally { sink.ReleaseMovedItem(); Release(operation); }
+
+            try
+            {
+                phase = "commit-target";
+                if (!MoveFileEx(temporaryPath, targetPath, MOVEFILE_WRITE_THROUGH))
+                {
+                    var nativeError = Marshal.GetLastWin32Error();
+                    return new Dictionary<string, object> {
+                        { "success", false }, { "code", File.Exists(targetPath) || Directory.Exists(targetPath) ? "DESTINATION_EXISTS" : "RECYCLE_RESTORE_COMMIT_FAILED" },
+                        { "error", "恢复对象已安全保留在临时路径，无法无覆盖提交到原位置" }, { "nativeError", nativeError }, { "phase", "commit-target" },
+                        { "recoveryPath", temporaryPath }, { "recoveryAvailable", true }, { "staged", true }, { "originalMissing", !File.Exists(targetPath) && !Directory.Exists(targetPath) }, { "published", false }, { "publishedConfirmed", true }, { "publicationState", "not-published" }, { "outcomeUnknown", false }, { "identityVerified", true }
+                    };
+                }
+            }
+            catch (Exception error) { throw new RecoveryFailureException(error.Message, "RECYCLE_RESTORE_COMMIT_FAILED", temporaryPath, !File.Exists(targetPath) && !Directory.Exists(targetPath), false, false, error, phase); }
+        }
+        catch (RecoveryFailureException) { throw; }
+        catch (Exception error)
+        {
+            throw new RecoveryFailureException(error.Message, "RECYCLE_RESTORE_FAILED", temporaryPath, !File.Exists(targetPath) && !Directory.Exists(targetPath), false, true, error, phase);
         }
         finally
         {
-            Marshal.FreeCoTaskMem(pidl);
+            if (pidl != IntPtr.Zero) Marshal.FreeCoTaskMem(pidl);
             Release(recycled);
             Release(destination);
+            Release(restoredItem);
         }
         if (!File.Exists(targetPath) && !Directory.Exists(targetPath)) throw new IOException("Windows 未能把项目恢复到原位置");
-        return new Dictionary<string, object> { { "success", true }, { "restoredPath", targetPath } };
+        return new Dictionary<string, object> { { "success", true }, { "restoredPath", targetPath }, { "identityVerified", true } };
     }
 
     private static object Probe(string encodedPidl)
     {
-        var pidl = DecodePidl(encodedPidl);
+        IntPtr pidl;
+        try { pidl = DecodePidl(encodedPidl); }
+        catch (FormatException error) { return new Dictionary<string, object> { { "success", true }, { "exists", false }, { "invalidPidl", true }, { "error", error.Message } }; }
+        catch (ArgumentException error) { return new Dictionary<string, object> { { "success", true }, { "exists", false }, { "invalidPidl", true }, { "error", error.Message } }; }
         IShellItem item = null;
         try
         {
             var hr = SHCreateItemFromIDList(pidl, typeof(IShellItem).GUID, out item);
-            if (hr < 0 || item == null) return new Dictionary<string, object> { { "success", true }, { "exists", false } };
+            if (hr < 0 || item == null) return IsNotFound(hr)
+                ? new Dictionary<string, object> { { "success", true }, { "exists", false } }
+                : ProbeFailure(hr, "Windows 无法探测回收站项目");
+            try { EnsureRecycleItem(item); }
+            catch (ArgumentException error) { return new Dictionary<string, object> { { "success", true }, { "exists", false }, { "invalidPidl", true }, { "error", error.Message } }; }
             IntPtr displayName;
             hr = item.GetDisplayName(SIGDN_NORMALDISPLAY, out displayName);
+            if (hr < 0) { if (displayName != IntPtr.Zero) Marshal.FreeCoTaskMem(displayName); return IsNotFound(hr) ? new Dictionary<string, object> { { "success", true }, { "exists", false } } : ProbeFailure(hr, "Windows 无法读取回收站项目"); }
             var name = hr >= 0 && displayName != IntPtr.Zero ? Marshal.PtrToStringUni(displayName) : "";
             if (displayName != IntPtr.Zero) Marshal.FreeCoTaskMem(displayName);
             return new Dictionary<string, object> { { "success", true }, { "exists", true }, { "name", name ?? "" } };
         }
-        catch
+        catch (COMException error)
         {
-            return new Dictionary<string, object> { { "success", true }, { "exists", false } };
+            return IsNotFound(error.HResult) ? new Dictionary<string, object> { { "success", true }, { "exists", false } } : ProbeFailure(error.HResult, error.Message);
         }
         finally
         {
@@ -311,9 +373,57 @@ internal static class RecycleBinService
     {
         var bytes = Convert.FromBase64String(encoded);
         if (bytes.Length < 2 || bytes.Length > 1024 * 1024) throw new ArgumentException("无效的回收站项目标识");
+        var offset = 0;
+        var terminated = false;
+        while (offset + 2 <= bytes.Length)
+        {
+            var itemSize = bytes[offset] | (bytes[offset + 1] << 8);
+            if (itemSize == 0) { terminated = offset + 2 == bytes.Length; break; }
+            if (itemSize < 2 || itemSize > bytes.Length - offset) throw new ArgumentException("回收站 ITEMIDLIST 边界无效");
+            offset += itemSize;
+        }
+        if (!terminated) throw new ArgumentException("回收站 ITEMIDLIST 未正确终止");
         var pointer = Marshal.AllocCoTaskMem(bytes.Length);
         Marshal.Copy(bytes, 0, pointer, bytes.Length);
         return pointer;
+    }
+
+    private static string ApprovedStaging(string targetPath, string requested)
+    {
+        var targetParent = Path.GetDirectoryName(targetPath); var targetName = Path.GetFileName(targetPath);
+        var staging = String.IsNullOrWhiteSpace(requested) ? Path.Combine(targetParent, ".photoflow-restore-" + Guid.NewGuid().ToString("N") + "-" + targetName) : Path.GetFullPath(requested);
+        var stagingName = Path.GetFileName(staging); const string prefix = ".photoflow-restore-"; var suffix = "-" + targetName; Guid stagingId;
+        var tokenLength = stagingName.Length - prefix.Length - suffix.Length;
+        var token = tokenLength > 0 ? stagingName.Substring(prefix.Length, tokenLength) : "";
+        if (!String.Equals(Path.GetDirectoryName(staging), targetParent, StringComparison.OrdinalIgnoreCase) || !stagingName.StartsWith(prefix, StringComparison.Ordinal) || !stagingName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase) || !Guid.TryParse(token, out stagingId) || String.Equals(staging, targetPath, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("恢复暂存路径未获批准");
+        if (File.Exists(staging) || Directory.Exists(staging)) throw new IOException("恢复暂存路径已被占用");
+        return staging;
+    }
+
+    private static Dictionary<string, object> ProbeFailure(int hr, string message) { return new Dictionary<string, object> { { "success", false }, { "exists", false }, { "code", "RECYCLE_PROBE_FAILED" }, { "error", message }, { "hresult", hr }, { "transient", true } }; }
+    private static bool IsNotFound(int hr) { return hr == unchecked((int)0x80070002) || hr == unchecked((int)0x80070003) || hr == unchecked((int)0x800401E5); }
+
+    private static void EnsureRecycleItem(IShellItem item)
+    {
+        IShellItem recycleRoot = null;
+        IShellItem current = null;
+        try
+        {
+            var iid = typeof(IShellItem).GUID;
+            ThrowIfFailed(SHGetKnownFolderItem(ref RecycleBinFolderId, 0, IntPtr.Zero, ref iid, out recycleRoot));
+            ThrowIfFailed(item.GetParent(out current));
+            for (var depth = 0; current != null && depth < 32; depth++)
+            {
+                int order;
+                if (current.Compare(recycleRoot, SICHINT_CANONICAL, out order) >= 0 && order == 0) return;
+                IShellItem parent;
+                if (current.GetParent(out parent) < 0 || parent == null) break;
+                Release(current);
+                current = parent;
+            }
+            throw new ArgumentException("项目标识不属于 Windows 回收站");
+        }
+        finally { Release(current); Release(recycleRoot); }
     }
 
     private static Dictionary<string, string> ParseOptions(string[] args)
@@ -360,6 +470,12 @@ internal static class RecycleBinService
 
     [DllImport("shell32.dll", PreserveSig = true)]
     private static extern uint ILGetSize(IntPtr pidl);
+
+    [DllImport("shell32.dll", PreserveSig = true)]
+    private static extern int SHGetKnownFolderItem(ref Guid folderId, uint flags, IntPtr token, [MarshalAs(UnmanagedType.LPStruct)] ref Guid riid, [MarshalAs(UnmanagedType.Interface)] out IShellItem item);
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern bool MoveFileEx(string existingName, string newName, uint flags);
 
     [ComImport, Guid("3AD05575-8857-4850-9277-11B85BDB8E09")]
     private class FileOperation { }
@@ -426,12 +542,15 @@ internal static class RecycleBinService
         internal byte[] RecycledPidl;
         internal int DeleteResult;
         internal bool DeleteCompleted;
+        internal IShellItem MovedItem;
+        internal int MoveResult;
+        internal bool MoveCompleted;
         public int StartOperations() { return 0; }
         public int FinishOperations(int result) { return 0; }
         public int PreRenameItem(uint flags, IShellItem item, string newName) { return 0; }
         public int PostRenameItem(uint flags, IShellItem item, string newName, int result, IShellItem newItem) { return 0; }
         public int PreMoveItem(uint flags, IShellItem item, IShellItem destination, string newName) { return 0; }
-        public int PostMoveItem(uint flags, IShellItem item, IShellItem destination, string newName, int result, IShellItem newItem) { return 0; }
+        public int PostMoveItem(uint flags, IShellItem item, IShellItem destination, string newName, int result, IShellItem newItem) { MoveCompleted = true; MoveResult = result; if (result >= 0 && newItem != null) MovedItem = newItem; return 0; }
         public int PreCopyItem(uint flags, IShellItem item, IShellItem destination, string newName) { return 0; }
         public int PostCopyItem(uint flags, IShellItem item, IShellItem destination, string newName, int result, IShellItem newItem) { return 0; }
         public int PreDeleteItem(uint flags, IShellItem item) { return 0; }
@@ -464,5 +583,8 @@ internal static class RecycleBinService
         public int ResetTimer() { return 0; }
         public int PauseTimer() { return 0; }
         public int ResumeTimer() { return 0; }
+        internal void ReleaseMovedItem() { MovedItem = null; }
     }
+
+    private static string Optional(Dictionary<string, string> options, string name) { string value; return options.TryGetValue(name, out value) ? value : null; }
 }

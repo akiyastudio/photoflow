@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+
 const createDeletedProjectCleanup = ({
   backgroundTasks, fs, getWorkspaceDataRoot, path, pathExists, recycleBinService,
   renameHistory, setTimeout, thumbnailService, workspaceRepository, writeLog,
@@ -26,6 +28,7 @@ const createDeletedProjectCleanup = ({
 
   const removeInternalProjectArtifacts = async (root, purgeResult) => {
     const dataRoot = path.resolve(getWorkspaceDataRoot(root));
+    const dataRootReal = await fs.promises.realpath(dataRoot).catch(() => dataRoot);
     const candidates = [
       ...(purgeResult.artifactPaths || []),
       ...(purgeResult.photoIds || []).map(photoId => path.join(dataRoot, 'thumbnails', photoId)),
@@ -36,27 +39,75 @@ const createDeletedProjectCleanup = ({
       const relative = path.relative(dataRoot, resolved);
       return !relative || relative.startsWith('..') || path.isAbsolute(relative) ? [] : [resolved];
     });
+    const verifyArtifactPath = async resolved => {
+      const relative = path.relative(dataRoot, resolved);
+      let current = dataRoot;
+      for (const segment of relative.split(path.sep).filter(Boolean)) {
+        current = path.join(current, segment);
+        const stat = await fs.promises.lstat(current);
+        if (stat.isSymbolicLink()) throw new Error('清理路径包含符号链接');
+      }
+      const candidateReal = await fs.promises.realpath(resolved);
+      const realRelative = path.relative(dataRootReal, candidateReal);
+      if (!realRelative || realRelative.startsWith('..') || path.isAbsolute(realRelative)) throw new Error('清理路径越过工作区数据目录');
+      const stat = await fs.promises.lstat(resolved, { bigint: true });
+      return { device: stat.dev.toString(), inode: stat.ino.toString(), directory: stat.isDirectory() };
+    };
     let removedCount = 0;
+    const failedArtifacts = [];
     for (let offset = 0; offset < safeCandidates.length; offset += 8) {
       const results = await Promise.all(safeCandidates.slice(offset, offset + 8).map(async resolved => {
+        let quarantine = '';
+        let quarantinedPath = '';
         try {
-          await fs.promises.rm(resolved, { recursive: true, force: true });
+          if (!await pathExists(resolved)) return true;
+          const identity = await verifyArtifactPath(resolved);
+          const current = await fs.promises.lstat(resolved, { bigint: true });
+          if (current.dev.toString() !== identity.device || current.ino.toString() !== identity.inode || current.isDirectory() !== identity.directory) throw new Error('清理目标在删除前已被替换');
+          quarantine = path.join(path.dirname(resolved), `.photoflow-deleted-project-cleanup-${crypto.randomUUID()}`);
+          quarantinedPath = path.join(quarantine, 'payload');
+          await fs.promises.mkdir(quarantine, { recursive: false });
+          await fs.promises.rename(resolved, quarantinedPath);
+          const quarantined = await fs.promises.lstat(quarantinedPath, { bigint: true });
+          if (quarantined.dev.toString() !== identity.device || quarantined.ino.toString() !== identity.inode || quarantined.isDirectory() !== identity.directory) {
+            throw Object.assign(new Error('清理目标在隔离时已被替换，内容已保留'), { recoveryPath: quarantinedPath });
+          }
+          await fs.promises.rm(quarantinedPath, { recursive: true, force: true });
+          await fs.promises.rmdir(quarantine).catch(() => undefined);
           return true;
         } catch (error) {
-          writeLog('warn', 'Unable to remove deleted project artifact', { path: resolved, error: error.message || String(error) });
+          let recoveryPath = error.recoveryPath || '';
+          if (quarantinedPath && await pathExists(quarantinedPath) && !await pathExists(resolved)) {
+            try {
+              await fs.promises.rename(quarantinedPath, resolved);
+              recoveryPath = '';
+              if (quarantine) await fs.promises.rmdir(quarantine).catch(() => undefined);
+            } catch (restoreError) {
+              recoveryPath = quarantinedPath;
+              error.restoreError = restoreError.message || String(restoreError);
+            }
+          }
+          writeLog('warn', 'Unable to remove deleted project artifact', { path: resolved, recoveryPath, error: error.message || String(error) });
+          failedArtifacts.push({ path: resolved, recoveryPath: recoveryPath || undefined, error: error.message || String(error), restoreError: error.restoreError });
           return false;
         }
       }));
       removedCount += results.filter(Boolean).length;
     }
-    return removedCount;
+    return { removedCount, failedArtifacts };
   };
 
   const purgeDeletedProjectData = async (root, project, task) => {
     task?.report(15, `正在准备清理“${project.name}”的数据`);
     const cleanupPlan = await workspaceRepository.getDeletedProjectCleanupPlan(root, project.id);
     task?.report(35, `正在清理“${project.name}”的缩略图和内部文件`);
-    const removedArtifactCount = await removeInternalProjectArtifacts(root, cleanupPlan);
+    const artifactCleanup = await removeInternalProjectArtifacts(root, cleanupPlan);
+    if (artifactCleanup.failedArtifacts.length) {
+      throw Object.assign(new Error(`仍有 ${artifactCleanup.failedArtifacts.length} 个项目内部文件等待安全清理`), {
+        code: 'DELETED_PROJECT_CLEANUP_PENDING', recoveryRequired: true, failedArtifacts: artifactCleanup.failedArtifacts,
+      });
+    }
+    const removedArtifactCount = artifactCleanup.removedCount;
     await thumbnailService.evictCache({ sourcePaths: cleanupPlan.sourcePaths || [] }).catch(error => {
       writeLog('warn', 'Unable to clear deleted project thumbnail cache', { project: project.name, error: error.message || String(error) });
     });
@@ -64,8 +115,13 @@ const createDeletedProjectCleanup = ({
     const purgeResult = await workspaceRepository.purgeDeletedProject(root, project.id);
     for (let index = renameHistory.length - 1; index >= 0; index -= 1) {
       const operation = renameHistory[index];
-      if (operation.projectCatalog?.name?.toLocaleLowerCase() === project.name.toLocaleLowerCase()
-        || (purgeResult.removedUndoIds || []).includes(operation.persistentId)) renameHistory.splice(index, 1);
+      const sameWorkspace = operation.workspaceRoot && (process.platform === 'win32'
+        ? path.resolve(operation.workspaceRoot).toLocaleLowerCase() === path.resolve(root).toLocaleLowerCase()
+        : path.resolve(operation.workspaceRoot) === path.resolve(root));
+      const sameProject = operation.projectCatalog?.id
+        ? operation.projectCatalog.id === project.id
+        : operation.projectCatalog?.name?.toLocaleLowerCase() === project.name.toLocaleLowerCase();
+      if (sameWorkspace && (sameProject || (purgeResult.removedUndoIds || []).includes(operation.persistentId))) renameHistory.splice(index, 1);
     }
     writeLog('info', 'Purged unavailable deleted project data', { root, project: project.name, photoCount: purgeResult.photoIds?.length || 0, removedArtifactCount });
     return { removedArtifactCount, purgeResult };
@@ -79,13 +135,12 @@ const createDeletedProjectCleanup = ({
   };
 
   const purgeStaleMissingProject = async (root, project) => {
-    const purgeResult = await workspaceRepository.purgeMissingProject(root, project.name);
-    const removedArtifactCount = await removeInternalProjectArtifacts(root, purgeResult);
-    await thumbnailService.evictCache({ sourcePaths: purgeResult.sourcePaths || [] }).catch(error => {
-      writeLog('warn', 'Unable to clear stale offline project thumbnails', { projectName: project.name, error: error.message || String(error) });
-    });
-    writeLog('info', 'Purged stale offline project data', { root, projectName: project.name, removedArtifactCount });
-    return { cleaned: true, status: 'missing', removedArtifactCount };
+    // Automatic purge must remain disabled until the Python protocol exposes a
+    // read-only missing-project cleanup plan and a durable purge outbox. Calling
+    // purgeMissingProject first makes artifact failures impossible to enumerate
+    // or retry because the owning database row has already been removed.
+    writeLog('warn', 'Deferred stale missing project cleanup because no read-only cleanup plan is available', { root, projectId: project.id, projectName: project.name });
+    return { cleaned: false, status: 'deferred', reason: 'cleanup-plan-unavailable' };
   };
 
   const runPermanentProjectCleanup = (root, projectName, restartTask = null) => backgroundTasks.run({

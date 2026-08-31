@@ -3,6 +3,13 @@ const path = require('path');
 const crypto = require('crypto');
 const { pipeline } = require('stream/promises');
 const { createFilePublicationService } = require('./file-publication-service.cjs');
+const {
+  physicalPathKey,
+  identityFromStat,
+  capturePathIdentity,
+  samePathIdentity,
+  identitiesMatch,
+} = require('./file-identity-service.cjs');
 
 const CANCELLED_CODE = 'EOPCANCELLED';
 const SOURCE_CLEANUP_INCOMPLETE_CODE = 'ESOURCECLEANUP';
@@ -11,7 +18,15 @@ const DEFAULT_SMALL_FILE_THRESHOLD = 2 * 1024 * 1024;
 const DEFAULT_SMALL_FILE_CONCURRENCY = 8;
 const LINK_COPY_FALLBACK_ERRORS = new Set(['EXDEV']);
 const MAX_BATCH_MANIFEST_BYTES = 480 * 1024;
+const CLEANUP_OWNERSHIP_TTL_MS = 6 * 60 * 60 * 1000;
+const IMPLICIT_CLEANUP_OWNERSHIP_TTL_MS = 250;
+const MAX_CLEANUP_OWNERSHIP_OPERATIONS = 2048;
 let configuredNativePublicationService = null;
+// The primary key is always the operation token. Paths exist only inside an
+// operation snapshot, so overlapping operations can never overwrite owners.
+const cleanupOwnershipLedger = new Map();
+const cleanupOwnershipPathIndex = new Map();
+const cleanupOwnershipQueue = [];
 const configureNativePublicationService = service => { configuredNativePublicationService = service || null; };
 const bundledNativePublicationService = createFilePublicationService({ app: { isPackaged: false }, projectRoot: path.resolve(__dirname, '..', '..') });
 const takeBoundedBatch = (items, start, maxItems, measure) => {
@@ -73,7 +88,7 @@ const assertExistingInside = (root, candidate, label = '路径', allowRoot = fal
 
 const assertRegularFile = async filePath => {
   const resolved = path.resolve(filePath);
-  const stat = await fs.promises.stat(resolved);
+  const stat = await fs.promises.lstat(resolved);
   if (!stat.isFile()) throw new Error(`不是可导入的普通文件：${path.basename(resolved)}`);
   return { path: resolved, stat };
 };
@@ -107,35 +122,153 @@ const assertDiskSpace = async (directory, requiredBytes) => {
   }
 };
 
-const publishedIdentityFromStat = (filePath, stat) => ({
-  path: path.resolve(filePath),
-  device: stat.dev.toString(),
-  inode: stat.ino.toString(),
-  size: stat.size.toString(),
-  modifiedNs: typeof stat.mtimeNs === 'bigint' ? stat.mtimeNs.toString() : String(Math.trunc(stat.mtimeMs * 1e6)),
-  directory: stat.isDirectory(),
-});
+const publishedIdentityFromStat = identityFromStat;
 
-const capturePublishedIdentity = async filePath => publishedIdentityFromStat(filePath, await fs.promises.stat(filePath, { bigint: true }));
+const capturePublishedIdentity = async filePath => publishedIdentityFromStat(filePath, await fs.promises.lstat(filePath, { bigint: true }));
 const fileDigest = async filePath => {
   const hash = crypto.createHash('sha256');
   const reader = fs.createReadStream(filePath);
   for await (const chunk of reader) hash.update(chunk);
   return hash.digest('hex');
 };
+const existingRecoveryPaths = candidates => [...new Set((candidates || []).filter(candidate => typeof candidate === 'string' && fs.existsSync(candidate)).map(candidate => path.resolve(candidate)))];
+const samePhysicalIdentity = (left, right) => left && right && left.device === right.device && left.inode === right.inode && left.size === right.size && left.modifiedNs === right.modifiedNs && left.directory === right.directory;
+const verifyNativeOwnedPath = async (nativeService, candidate, expectedIdentity) => {
+  if (!candidate || !expectedIdentity || typeof nativeService?.inspectPath !== 'function' || !fs.existsSync(candidate)) return null;
+  try { const before = await capturePublishedIdentity(candidate); const native = await nativeService.inspectPath(candidate); const after = await capturePublishedIdentity(candidate); return native?.success !== false && native?.identity === expectedIdentity && samePhysicalIdentity(before, after) ? { path: path.resolve(candidate), physicalIdentity: after, nativeIdentity: native.identity } : null; }
+  catch { return null; }
+};
 
-const partialPublishError = ({ source, target, identity, cleanupError, rollbackError, strategy }) => {
-  const error = new Error(`内容已发布到“${path.basename(target)}”，但源文件清理失败且无法安全回滚；已保留可恢复副本`);
+const sourceChangedError = source => Object.assign(new Error(`文件在复制期间发生变化：${path.basename(source)}`), {
+  code: 'SOURCE_CHANGED_DURING_COPY',
+  sourcePath: source,
+  transferStage: 'verify-source',
+});
+
+const verifyStableCopiedFile = async (source, temporary, expectedIdentity, copiedSha256 = '') => {
+  const beforeDigest = await capturePathIdentity(source);
+  if (!identitiesMatch(beforeDigest, expectedIdentity)) throw sourceChangedError(source);
+  const [sourceSha256, temporarySha256] = await Promise.all([fileDigest(source), copiedSha256 || fileDigest(temporary)]);
+  const afterDigest = await capturePathIdentity(source);
+  if (!identitiesMatch(afterDigest, expectedIdentity) || sourceSha256 !== temporarySha256) throw sourceChangedError(source);
+  return temporarySha256;
+};
+
+const releaseCleanupOwnership = ownershipToken => {
+  const token = String(ownershipToken || '');
+  const snapshot = cleanupOwnershipLedger.get(token);
+  if (snapshot) for (const key of snapshot.paths.keys()) {
+    const owners = cleanupOwnershipPathIndex.get(key); owners?.delete(token);
+    if (!owners?.size) cleanupOwnershipPathIndex.delete(key);
+  }
+  cleanupOwnershipLedger.delete(token);
+  return snapshot?.paths.size || 0;
+};
+
+const pruneCleanupOwnership = () => {
+  const cutoff = Date.now() - CLEANUP_OWNERSHIP_TTL_MS;
+  let inspected = 0;
+  while (cleanupOwnershipQueue.length && inspected < 32) {
+    const oldest = cleanupOwnershipQueue[0]; const snapshot = cleanupOwnershipLedger.get(oldest.token);
+    if (!snapshot || snapshot.createdAt !== oldest.createdAt) { cleanupOwnershipQueue.shift(); inspected += 1; continue; }
+    if (snapshot.createdAt >= cutoff && cleanupOwnershipLedger.size < MAX_CLEANUP_OWNERSHIP_OPERATIONS) break;
+    cleanupOwnershipQueue.shift(); releaseCleanupOwnership(oldest.token); inspected += 1;
+  }
+  while (cleanupOwnershipLedger.size >= MAX_CLEANUP_OWNERSHIP_OPERATIONS && cleanupOwnershipQueue.length) releaseCleanupOwnership(cleanupOwnershipQueue.shift().token);
+};
+
+const ownershipTokenForOptions = options => options?.ownershipToken ? String(options.ownershipToken) : `implicit-${crypto.randomUUID()}`;
+const finalizeImplicitOwnership = ownershipToken => {
+  const token = String(ownershipToken || '');
+  if (!token.startsWith('implicit-') || !cleanupOwnershipLedger.has(token)) return;
+  const timer = setTimeout(() => releaseCleanupOwnership(token), IMPLICIT_CLEANUP_OWNERSHIP_TTL_MS);
+  timer.unref?.();
+};
+
+const currentOwnershipMatchesSync = item => {
+  try {
+    const current = identityFromStat(item.path, fs.lstatSync(item.path, { bigint: true }));
+    if (item.identity.kind === 'directory') return directoryOwnershipMatches(current, item.identity);
+    if (item.identity.sha256 && current.kind === 'file') current.sha256 = crypto.createHash('sha256').update(fs.readFileSync(item.path)).digest('hex');
+    if (!identitiesMatch(current, item.identity, { destructive: true })) return false;
+    return true;
+  } catch { return false; }
+};
+
+const rememberCleanupOwnership = (target, publishedIdentity, ownershipToken) => {
+  if (!publishedIdentity) return;
+  pruneCleanupOwnership();
+  const token = String(ownershipToken || crypto.randomUUID());
+  const key = physicalPathKey(target);
+  for (const existingToken of [...(cleanupOwnershipPathIndex.get(key) || [])]) {
+    const snapshot = cleanupOwnershipLedger.get(existingToken);
+    if (!snapshot) continue;
+    const existing = snapshot.paths.get(key);
+    if (existing && !currentOwnershipMatchesSync(existing)) {
+      snapshot.paths.delete(key);
+      if (!snapshot.paths.size) releaseCleanupOwnership(existingToken);
+    }
+  }
+  if (!cleanupOwnershipLedger.has(token)) {
+    const createdAt = Date.now(); cleanupOwnershipLedger.set(token, { createdAt, paths: new Map() }); cleanupOwnershipQueue.push({ token, createdAt });
+  }
+  cleanupOwnershipLedger.get(token).paths.set(key, { path: path.resolve(target), identity: publishedIdentity, ownershipToken: token });
+  if (!cleanupOwnershipPathIndex.has(key)) cleanupOwnershipPathIndex.set(key, new Set());
+  cleanupOwnershipPathIndex.get(key).add(token);
+  return token;
+};
+
+const forgetCleanupOwnership = (target, ownershipToken) => {
+  const token = String(ownershipToken || ''); const snapshot = cleanupOwnershipLedger.get(token);
+  snapshot?.paths.delete(physicalPathKey(target));
+  const owners = cleanupOwnershipPathIndex.get(physicalPathKey(target)); owners?.delete(token); if (!owners?.size) cleanupOwnershipPathIndex.delete(physicalPathKey(target));
+  if (!snapshot?.paths.size) cleanupOwnershipLedger.delete(token);
+};
+
+const getCleanupOwnershipStats = () => ({ operations: cleanupOwnershipLedger.size, paths: [...cleanupOwnershipLedger.values()].reduce((sum, snapshot) => sum + snapshot.paths.size, 0) });
+const ownershipSnapshotForToken = ownershipToken => [...(cleanupOwnershipLedger.get(String(ownershipToken || ''))?.paths.values() || [])].map(item => ({ path: item.path, identity: item.identity, ownershipToken: item.ownershipToken }));
+const mergedCurrentOwnershipSnapshot = (error, ownershipToken) => {
+  const token = String(ownershipToken || error?.ownershipToken || '');
+  const candidates = [...(Array.isArray(error?.ownershipSnapshot) ? error.ownershipSnapshot : []), ...ownershipSnapshotForToken(token)];
+  if (error?.publishedIdentity && error?.destinationPath) candidates.push({ path: error.destinationPath, identity: error.publishedIdentity, ownershipToken: error.ownershipToken || token });
+  const byPath = new Map();
+  for (const candidate of candidates) {
+    if (!candidate?.path || !candidate?.identity || String(candidate.ownershipToken || token) !== token) continue;
+    const item = { path: path.resolve(candidate.path), identity: candidate.identity, ownershipToken: token };
+    if (currentOwnershipMatchesSync(item)) byPath.set(physicalPathKey(item.path), item);
+  }
+  return [...byPath.values()];
+};
+const attachOwnershipToError = (error, ownershipToken) => {
+  if (!error || typeof error !== 'object') return error;
+  error.ownershipToken ||= ownershipToken;
+  error.ownershipSnapshot = mergedCurrentOwnershipSnapshot(error, ownershipToken);
+  finalizeImplicitOwnership(ownershipToken);
+  return error;
+};
+
+const partialPublishError = ({ source, target, identity, cleanupError, rollbackError, strategy, verifiedRecoveryPaths = null, verifiedSourceRetained = null, uncertainPaths = [] }) => {
+  const targetVerified = Boolean(identity);
+  const error = new Error(targetVerified
+    ? `内容已发布到“${path.basename(target)}”，但源文件清理失败且无法安全回滚；已保留可恢复副本`
+    : `“${path.basename(target)}”的发布结果待确认，源文件清理也未能安全完成；已保留可恢复副本`);
   error.code = PUBLISH_PARTIAL_CODE;
   error.transferStage = 'cleanup-published-source';
   error.sourcePath = source;
   error.destinationPath = target;
-  error.publishedIdentity = identity;
+  if (targetVerified) error.publishedIdentity = identity;
   error.publishStrategy = strategy;
-  error.published = true;
-  error.recoveryRequired = true;
-  error.recoveryPath = cleanupError?.recoveryPath || target;
-  error.sourceRetained = true;
+  if (targetVerified) { error.published = true; error.publishedConfirmed = true; error.publicationState = 'published'; }
+  else { error.publishedConfirmed = false; error.publicationState = 'unknown'; error.outcomeUnknown = true; }
+  const payloadDeleted = cleanupError?.deleted === true;
+  const recoveryPaths = payloadDeleted ? [] : verifiedRecoveryPaths === null ? existingRecoveryPaths([cleanupError?.recoveryPath, source]) : existingRecoveryPaths(verifiedRecoveryPaths);
+  error.recoveryRequired = recoveryPaths.length > 0;
+  if (recoveryPaths.length) error.recoveryPath = recoveryPaths[0];
+  error.recoveryPaths = recoveryPaths;
+  error.sourceRetained = payloadDeleted ? false : verifiedSourceRetained === null ? fs.existsSync(source) : verifiedSourceRetained === true;
+  error.uncertainPaths = existingRecoveryPaths(uncertainPaths);
+  if (payloadDeleted) { error.deleted = true; error.cleanupWarning = true; error.outcomeUnknown = cleanupError?.outcomeUnknown !== false; }
+  if (cleanupError?.phase) error.cleanupPhase = cleanupError.phase;
   error.cleanupError = cleanupError?.message || String(cleanupError);
   error.cleanupCode = cleanupError?.code;
   error.cause = cleanupError;
@@ -160,6 +293,45 @@ const stagingRecoveryError = ({ source, destination, staging, cause, strategy })
 };
 const publicationServiceMissingError = source => Object.assign(new Error('平台原子文件发布服务不可用，未发布任何目标，源内容已保留'), { code: 'FILE_PUBLICATION_SERVICE_MISSING', sourcePath: source, sourceRetained: true, published: false, recoveryRequired: false });
 
+const normalizeNativePublicationError = async (error, source, target, strategy = 'native-move-no-replace', nativeService = null, reconciliationHook = null, ownershipToken = '') => {
+  if (!error?.published && !error?.outcomeUnknown) return error;
+  const resolvedTarget = path.resolve(target);
+  const reportedPath = error.publishedPath ? path.resolve(error.publishedPath) : resolvedTarget;
+  const sourceMissing = !await fs.promises.lstat(source).catch(() => null);
+  const targetExists = Boolean(await fs.promises.lstat(resolvedTarget).catch(() => null));
+  let publishedIdentity;
+  if (error.published === true && error.outcomeUnknown !== true && sourceMissing && targetExists && reportedPath === resolvedTarget && error.identity && nativeService && typeof nativeService.inspectPath === 'function') {
+    const firstNative = await nativeService.inspectPath(resolvedTarget).catch(() => null);
+    await reconciliationHook?.({ stage: 'after-first-native-inspect', target: resolvedTarget, expectedNativeIdentity: error.identity });
+    const firstPhysical = await capturePublishedIdentity(resolvedTarget).catch(() => null);
+    const secondNative = await nativeService.inspectPath(resolvedTarget).catch(() => null);
+    const secondPhysical = await capturePublishedIdentity(resolvedTarget).catch(() => null);
+    const thirdNative = await nativeService.inspectPath(resolvedTarget).catch(() => null);
+    const nativeConsistent = [firstNative, secondNative, thirdNative].every(item => item?.success !== false && item?.identity === error.identity);
+    const physicalConsistent = firstPhysical && secondPhysical && identitiesMatch(firstPhysical, secondPhysical, { destructive: true });
+    if (nativeConsistent && physicalConsistent) publishedIdentity = { ...secondPhysical, nativeIdentity: error.identity };
+  }
+  const strictlyPublished = Boolean(publishedIdentity);
+  return Object.assign(new Error(error.message || `“${path.basename(resolvedTarget)}”的原子发布结果需要恢复确认`), {
+    code: PUBLISH_PARTIAL_CODE,
+    transferStage: 'commit-target-outcome',
+    sourcePath: path.resolve(source),
+    destinationPath: resolvedTarget,
+    published: strictlyPublished,
+    outcomeUnknown: error.outcomeUnknown === true || !strictlyPublished,
+    publishedIdentity,
+    ownershipToken: ownershipToken || undefined,
+    ownershipSnapshot: strictlyPublished ? [{ path: resolvedTarget, identity: publishedIdentity, ownershipToken: ownershipToken || undefined }] : [],
+    uncertainPaths: strictlyPublished ? undefined : [path.resolve(source), resolvedTarget],
+    publishStrategy: strategy,
+    recoveryRequired: true,
+    recoveryPath: error.recoveryPath || (strictlyPublished ? resolvedTarget : path.resolve(source)),
+    sourceRetained: fs.existsSync(source),
+    nativeCode: error.code,
+    cause: error,
+  });
+};
+
 const publishPathNoClobber = async (source, destination, options = {}) => {
   const resolvedSource = path.resolve(source);
   const target = path.resolve(destination);
@@ -167,12 +339,18 @@ const publishPathNoClobber = async (source, destination, options = {}) => {
   const existing = await fs.promises.lstat(target).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
   if (existing) throw Object.assign(new Error(`目标已存在：${path.basename(target)}`), { code: 'EEXIST' });
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
-  if (!sourceStat.isFile() && !sourceStat.isDirectory()) throw new Error(`不支持发布此文件类型：${path.basename(resolvedSource)}`);
+  if (!sourceStat.isFile() && !sourceStat.isDirectory() && !sourceStat.isSymbolicLink()) throw new Error(`不支持发布此文件类型：${path.basename(resolvedSource)}`);
+  // Symlinks and Windows junctions are always moved as link objects by the
+  // native no-replace helper. Never stat or copy their targets here.
+  if (sourceStat.isSymbolicLink()) await fs.promises.readlink(resolvedSource);
   const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
   if (!nativeService?.nativeAvailable?.()) {
     throw publicationServiceMissingError(resolvedSource);
   }
-  const result = await nativeService.moveNoReplace(resolvedSource, target);
+  let result;
+  try { result = await nativeService.moveNoReplace(resolvedSource, target); }
+  catch (error) { throw await normalizeNativePublicationError(error, resolvedSource, target, 'native-move-no-replace', nativeService, options.nativeReconcileHook, options.ownershipToken); }
+  if (result?.outcomeUnknown || result?.success === false && result?.published) throw await normalizeNativePublicationError(result, resolvedSource, target, 'native-move-no-replace', nativeService, options.nativeReconcileHook, options.ownershipToken);
   return { strategy: result.strategy || 'win32-move-no-replace', identity: await capturePublishedIdentity(target), nativeIdentity: result.identity, sourceRemoved: true, recoveryRequired: false };
 };
 
@@ -182,15 +360,18 @@ const commitTemporaryFile = async (temporary, target, options = {}) => {
 
 const copyFileAtomic = async (source, destination, options = {}) => {
   const { onProgress = () => undefined, isCancelled = () => false, waitIfPaused = async () => undefined, durable = false } = options;
+  const ownershipToken = ownershipTokenForOptions(options);
   const sourceInfo = await assertRegularFile(source).catch(error => { throw attachTransferContext(error, 'inspect-source', source, destination); });
   const target = path.resolve(destination);
   const targetDirectory = path.dirname(target);
   await fs.promises.mkdir(targetDirectory, { recursive: true }).catch(error => { throw attachTransferContext(error, 'prepare-target', sourceInfo.path, target); });
   if (fs.existsSync(target)) throw Object.assign(new Error(`目标文件已存在：${path.basename(target)}`), { code: 'EEXIST' });
   await assertDiskSpace(targetDirectory, sourceInfo.stat.size);
+  const sourceIdentity = await capturePathIdentity(sourceInfo.path);
 
   const temporary = path.join(targetDirectory, `.${path.basename(target)}.${crypto.randomUUID()}.photoflow-part`);
   let copied = 0;
+  const copiedHash = crypto.createHash('sha256');
   const reader = fs.createReadStream(sourceInfo.path, { highWaterMark: 4 * 1024 * 1024 });
   // Do not copy a Windows read-only bit onto the temporary file before the
   // atomic rename. A read-only temporary can make the final rename fail with
@@ -205,6 +386,7 @@ const copyFileAtomic = async (source, destination, options = {}) => {
   const observeChunk = chunk => {
     reader.pause();
     copied += chunk.length;
+    copiedHash.update(chunk);
     onProgress({ bytesCopied: copied, totalBytes: sourceInfo.stat.size });
     checkCancelled();
     void Promise.resolve(waitIfPaused()).then(() => {
@@ -224,13 +406,23 @@ const copyFileAtomic = async (source, destination, options = {}) => {
     checkCancelled();
     const written = await fs.promises.stat(temporary);
     if (written.size !== sourceInfo.stat.size) throw new Error(`文件复制不完整：${path.basename(sourceInfo.path)}`);
+    const copiedSha256 = await verifyStableCopiedFile(sourceInfo.path, temporary, sourceIdentity, copiedHash.digest('hex'));
     await fs.promises.utimes(temporary, sourceInfo.stat.atime, sourceInfo.stat.mtime).catch(() => undefined);
     if (durable) await syncTemporaryFile(temporary, sourceInfo.path, target);
     checkCancelled();
+    if (!await samePathIdentity(sourceInfo.path, sourceIdentity)) throw sourceChangedError(sourceInfo.path);
     const commit = await commitTemporaryFile(temporary, target, options).catch(error => { throw attachTransferContext(error, 'commit-target', sourceInfo.path, target); });
     await fs.promises.chmod(target, sourceInfo.stat.mode).catch(() => undefined);
+    const publishedIdentity = { ...await capturePublishedIdentity(target), sha256: copiedSha256, ...(commit.nativeIdentity ? { nativeIdentity: commit.nativeIdentity } : {}) };
+    rememberCleanupOwnership(target, publishedIdentity, ownershipToken);
+    if (!await samePathIdentity(sourceInfo.path, sourceIdentity)) {
+      const cleanup = await quarantineOwnedPath({ path: target, identity: publishedIdentity, ownershipToken });
+      if (cleanup.success) forgetCleanupOwnership(target, ownershipToken);
+      throw Object.assign(sourceChangedError(sourceInfo.path), cleanup.recoveryPath ? { recoveryRequired: true, recoveryPath: cleanup.recoveryPath } : {});
+    }
     onProgress({ bytesCopied: sourceInfo.stat.size, totalBytes: sourceInfo.stat.size });
-    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: true, commitStrategy: commit.strategy, publishedIdentity: commit.identity, nativePublishedIdentity: commit.nativeIdentity };
+    finalizeImplicitOwnership(ownershipToken);
+    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: true, commitStrategy: commit.strategy, publishedIdentity, nativePublishedIdentity: commit.nativeIdentity, ownershipToken, ownershipSnapshot: [{ path: target, identity: publishedIdentity, ownershipToken }] };
   } catch (error) {
     reader.destroy();
     writer.destroy();
@@ -241,11 +433,12 @@ const copyFileAtomic = async (source, destination, options = {}) => {
 
 const collectCopyPlan = async (source, destination, plan, options = {}) => {
   const { isCancelled = () => false, onDiscovered = () => undefined } = options;
-  const identityFromStat = stat => ({
-    device: stat.dev.toString(),
-    inode: stat.ino.toString(),
-    size: stat.size.toString(),
-    modifiedMs: stat.mtimeMs,
+  const planIdentity = (filePath, stat) => identityFromStat(filePath, stat);
+  const planFileMetadata = stat => ({
+    size: Number(stat.size),
+    mode: Number(stat.mode),
+    atime: new Date(Number((stat.atimeNs + 500000n) / 1000000n)),
+    mtime: new Date(Number((stat.mtimeNs + 500000n) / 1000000n)),
   });
   const visitDirectory = async (directorySource, directoryDestination, directoryEntry) => {
     throwIfCancelled(isCancelled);
@@ -256,31 +449,31 @@ const collectCopyPlan = async (source, destination, plan, options = {}) => {
       const entrySource = path.join(directorySource, entry.name);
       const entryDestination = path.join(directoryDestination, entry.name);
       if (entry.isDirectory()) {
-        const stat = await fs.promises.lstat(entrySource).catch(error => { throw attachTransferContext(error, 'inspect-source', entrySource, entryDestination); });
-        const childDirectory = { kind: 'directory', source: entrySource, destination: entryDestination, size: 0, sourceIdentity: identityFromStat(stat), children: [] };
+        const stat = await fs.promises.lstat(entrySource, { bigint: true }).catch(error => { throw attachTransferContext(error, 'inspect-source', entrySource, entryDestination); });
+        const childDirectory = { kind: 'directory', source: entrySource, destination: entryDestination, size: 0, sourceIdentity: planIdentity(entrySource, stat), children: [] };
         plan.push(childDirectory);
         onDiscovered(childDirectory, plan.length);
         await visitDirectory(entrySource, entryDestination, childDirectory);
         continue;
       }
       if (!entry.isFile()) throw new Error(`不支持复制此文件类型：${entry.name}`);
-      const stat = await fs.promises.lstat(entrySource).catch(error => { throw attachTransferContext(error, 'inspect-source', entrySource, entryDestination); });
-      plan.push({ kind: 'file', source: entrySource, destination: entryDestination, size: stat.size, mode: stat.mode, atime: stat.atime, mtime: stat.mtime, sourceIdentity: identityFromStat(stat) });
+      const stat = await fs.promises.lstat(entrySource, { bigint: true }).catch(error => { throw attachTransferContext(error, 'inspect-source', entrySource, entryDestination); });
+      plan.push({ kind: 'file', source: entrySource, destination: entryDestination, ...planFileMetadata(stat), sourceIdentity: planIdentity(entrySource, stat) });
       onDiscovered(plan[plan.length - 1], plan.length);
     }
   };
 
   throwIfCancelled(isCancelled);
-  const stat = await fs.promises.lstat(source).catch(error => { throw attachTransferContext(error, 'inspect-source', source, destination); });
+  const stat = await fs.promises.lstat(source, { bigint: true }).catch(error => { throw attachTransferContext(error, 'inspect-source', source, destination); });
   if (stat.isDirectory()) {
-    const rootDirectory = { kind: 'directory', source, destination, size: 0, sourceIdentity: identityFromStat(stat), children: [] };
+    const rootDirectory = { kind: 'directory', source, destination, size: 0, sourceIdentity: planIdentity(source, stat), children: [] };
     plan.push(rootDirectory);
     onDiscovered(rootDirectory, plan.length);
     await visitDirectory(source, destination, rootDirectory);
     return plan;
   }
   if (!stat.isFile()) throw new Error(`不支持复制此文件类型：${path.basename(source)}`);
-  plan.push({ kind: 'file', source, destination, size: stat.size, mode: stat.mode, atime: stat.atime, mtime: stat.mtime, sourceIdentity: identityFromStat(stat) });
+  plan.push({ kind: 'file', source, destination, ...planFileMetadata(stat), sourceIdentity: planIdentity(source, stat) });
   onDiscovered(plan[plan.length - 1], plan.length);
   return plan;
 };
@@ -288,15 +481,14 @@ const collectCopyPlan = async (source, destination, plan, options = {}) => {
 const assertCopyPlanSourcesUnchanged = async plan => {
   for (const entry of plan) {
     let stat;
-    try { stat = await fs.promises.lstat(entry.source); }
+    try { stat = await fs.promises.lstat(entry.source, { bigint: true }); }
     catch { throw new Error(`剪切源已不存在：${path.basename(entry.source)}`); }
     const expected = entry.sourceIdentity;
-    const currentDevice = stat.dev.toString();
-    const currentInode = stat.ino.toString();
-    const stableIdentity = expected?.device !== '0' && expected?.inode !== '0' && currentDevice !== '0' && currentInode !== '0';
-    if (stableIdentity && (currentDevice !== expected.device || currentInode !== expected.inode)) throw new Error(`剪切源已被替换：${path.basename(entry.source)}`);
+    const current = identityFromStat(entry.source, stat);
+    if (expected?.sha256 && current.kind === 'file') current.sha256 = await fileDigest(entry.source);
+    if (!identitiesMatch(current, expected)) throw new Error(`剪切源在复制期间发生变化：${path.basename(entry.source)}`);
     if (entry.kind === 'file') {
-      if (!stat.isFile() || stat.size.toString() !== expected?.size || stat.mtimeMs !== expected?.modifiedMs) throw new Error(`剪切源在复制期间发生变化：${path.basename(entry.source)}`);
+      if (!stat.isFile()) throw new Error(`剪切源在复制期间发生变化：${path.basename(entry.source)}`);
       continue;
     }
     if (!stat.isDirectory()) throw new Error(`剪切源类型发生变化：${path.basename(entry.source)}`);
@@ -306,19 +498,37 @@ const assertCopyPlanSourcesUnchanged = async plan => {
 };
 
 const removeCopiedSources = async (plan, options = {}) => {
-  const removeFile = options.removeFile || fs.promises.rm.bind(fs.promises);
   await assertCopyPlanSourcesUnchanged(plan);
   const files = plan.filter(entry => entry.kind === 'file');
   const directories = plan.filter(entry => entry.kind === 'directory').sort((left, right) => right.source.length - left.source.length);
+  const outcomes = [];
   for (const entry of files) {
     await assertCopyPlanSourcesUnchanged([entry]);
-    await removeFile(entry.source, { force: false });
+    const identity = { ...entry.sourceIdentity, kind: 'file' };
+    if (!identity.sha256) identity.sha256 = await fileDigest(entry.source);
+    const outcome = await quarantineOwnedPath({ path: entry.source, identity, ownershipToken: String(options.ownershipToken || crypto.randomUUID()) }, options);
+    outcomes.push(outcome);
+    if (!outcome.success) throw Object.assign(new Error(`剪切源无法安全清理：${path.basename(entry.source)}`), outcome);
   }
   for (const entry of directories) {
+    const current = await capturePathIdentity(entry.source).catch(() => null);
+    if (!current || current.kind !== 'directory' || current.device === '0' || current.inode === '0'
+      || current.device !== entry.sourceIdentity.device || current.inode !== entry.sourceIdentity.inode) throw new Error(`剪切源文件夹已被替换：${path.basename(entry.source)}`);
     const children = await fs.promises.readdir(entry.source);
     if (children.length) throw new Error(`剪切源文件夹出现了未复制的新内容：${path.basename(entry.source)}`);
-    await fs.promises.rmdir(entry.source);
+    const outcome = await quarantineOwnedPath({ path: entry.source, identity: { ...entry.sourceIdentity, kind: 'directory' }, ownershipToken: String(options.ownershipToken || crypto.randomUUID()) }, options);
+    outcomes.push(outcome);
+    if (!outcome.success) throw Object.assign(new Error(`剪切源文件夹无法安全清理：${path.basename(entry.source)}`), outcome);
   }
+  const warnings = outcomes.filter(outcome => outcome.cleanupWarning || outcome.outcomeUnknown);
+  return {
+    success: true,
+    outcomes,
+    recoveryPaths: [],
+    cleanupWarning: warnings.map(outcome => outcome.cleanupWarning).filter(Boolean).join('；') || undefined,
+    outcomeUnknown: warnings.some(outcome => outcome.outcomeUnknown === true) || undefined,
+    phase: warnings.find(outcome => outcome.phase)?.phase,
+  };
 };
 
 const stageSmallFileAtomic = async (entry, options = {}) => {
@@ -331,10 +541,14 @@ const stageSmallFileAtomic = async (entry, options = {}) => {
 
   const temporary = path.join(targetDirectory, `.${path.basename(target)}.${crypto.randomUUID()}.photoflow-part`);
   try {
+    const sourceIdentity = entry.sourceIdentity || await capturePathIdentity(entry.source);
+    if (!await samePathIdentity(entry.source, sourceIdentity)) throw sourceChangedError(entry.source);
     await fs.promises.copyFile(entry.source, temporary, fs.constants.COPYFILE_EXCL).catch(error => { throw attachTransferContext(error, 'copy-data', entry.source, target); });
     throwIfCancelled(isCancelled);
     const written = await fs.promises.stat(temporary);
     if (written.size !== entry.size) throw new Error(`文件复制不完整：${path.basename(entry.source)}`);
+    const sha256 = await verifyStableCopiedFile(entry.source, temporary, sourceIdentity);
+    sourceIdentity.sha256 = sha256;
     const originalMode = Number.isInteger(entry.mode) ? entry.mode : written.mode;
     // copyFile preserves the Windows read-only attribute. Keep the staging
     // file writable for durable sync and atomic commit, then restore the
@@ -345,7 +559,7 @@ const stageSmallFileAtomic = async (entry, options = {}) => {
     await fs.promises.utimes(temporary, entry.atime, entry.mtime).catch(() => undefined);
     if (durable) await syncTemporaryFile(temporary, entry.source, target);
     throwIfCancelled(isCancelled);
-    return { entry, temporary, target, originalMode };
+    return { entry, temporary, target, originalMode, sourceIdentity, sha256 };
   } catch (error) {
     if (error?.code !== PUBLISH_PARTIAL_CODE) await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
     throw error;
@@ -353,18 +567,28 @@ const stageSmallFileAtomic = async (entry, options = {}) => {
 };
 
 const copySmallFileAtomic = async (entry, options = {}) => {
+  const ownershipToken = ownershipTokenForOptions(options);
   const staged = await stageSmallFileAtomic(entry, options);
   try {
     const commit = await commitTemporaryFile(staged.temporary, staged.target, options).catch(error => { throw attachTransferContext(error, 'commit-target', entry.source, staged.target); });
     await fs.promises.chmod(staged.target, staged.originalMode).catch(() => undefined);
-    return { source: entry.source, destination: staged.target, bytes: entry.size, copied: true, commitStrategy: commit.strategy, publishedIdentity: commit.identity };
+    const publishedIdentity = { ...await capturePublishedIdentity(staged.target), sha256: staged.sha256, ...(commit.nativeIdentity ? { nativeIdentity: commit.nativeIdentity } : {}) };
+    rememberCleanupOwnership(staged.target, publishedIdentity, ownershipToken);
+    if (!await samePathIdentity(entry.source, staged.sourceIdentity)) {
+      const cleanup = await quarantineOwnedPath({ path: staged.target, identity: publishedIdentity, ownershipToken });
+      if (cleanup.success) forgetCleanupOwnership(staged.target, ownershipToken);
+      throw Object.assign(sourceChangedError(entry.source), cleanup.recoveryPath ? { recoveryRequired: true, recoveryPath: cleanup.recoveryPath } : {});
+    }
+    finalizeImplicitOwnership(ownershipToken);
+    return { source: entry.source, destination: staged.target, bytes: entry.size, copied: true, commitStrategy: commit.strategy, publishedIdentity, ownershipToken, ownershipSnapshot: [{ path: staged.target, identity: publishedIdentity, ownershipToken }] };
   } catch (error) {
     if (error?.code !== PUBLISH_PARTIAL_CODE) await fs.promises.rm(staged.temporary, { force: true }).catch(() => undefined);
-    throw error;
+    throw attachOwnershipToError(error, ownershipToken);
   }
 };
 
 const copyPlannedFiles = async (plan, options = {}) => {
+  const ownershipToken = ownershipTokenForOptions(options);
   const {
     destinationRoot,
     diskSpaceChecked = false,
@@ -385,13 +609,33 @@ const copyPlannedFiles = async (plan, options = {}) => {
   const smallFiles = files.filter(entry => entry.size <= smallFileThreshold);
   const largeFiles = files.filter(entry => entry.size > smallFileThreshold);
   const totalBytes = files.reduce((sum, entry) => sum + entry.size, 0);
+  const rememberCompletedEntry = async entry => {
+    const identity = await capturePathIdentity(entry.destination, { digest: entry.kind === 'file' });
+    rememberCleanupOwnership(entry.destination, identity, ownershipToken);
+  };
   if (destinationRoot && !diskSpaceChecked) await assertDiskSpace(destinationRoot, totalBytes);
+  if (destinationRoot) {
+    const plannedKeys = new Set(plan.map(entry => physicalPathKey(entry.destination)));
+    const claimedParents = new Set();
+    for (const entry of plan) {
+      let parent = path.dirname(entry.destination);
+      while (isInside(destinationRoot, parent) && !plannedKeys.has(physicalPathKey(parent))) {
+        const key = physicalPathKey(parent);
+        if (!claimedParents.has(key) && fs.existsSync(parent)) {
+          rememberCleanupOwnership(parent, await capturePathIdentity(parent), ownershipToken);
+          claimedParents.add(key);
+        }
+        parent = path.dirname(parent);
+      }
+    }
+  }
 
   for (const entry of directories) {
     throwIfCancelled(isCancelled);
     await waitIfPaused();
-    if (await isEntryComplete(entry)) continue;
+    if (await isEntryComplete(entry)) { await rememberCompletedEntry(entry); continue; }
     await fs.promises.mkdir(entry.destination, { recursive: false }).catch(error => { throw attachTransferContext(error, 'prepare-target', entry.source, entry.destination); });
+    rememberCleanupOwnership(entry.destination, await capturePathIdentity(entry.destination), ownershipToken);
     onCreated(entry.destination);
     await onEntryComplete(entry, { copied: true, bytes: 0 });
   }
@@ -421,6 +665,7 @@ const copyPlannedFiles = async (plan, options = {}) => {
         const entry = entries[index];
         try {
           if (await isEntryComplete(entry)) {
+            await rememberCompletedEntry(entry);
             resumedFiles += 1;
             onProgress({ entry, bytesDelta: entry.size, fileCompleted: true, resumed: true });
             continue;
@@ -450,7 +695,7 @@ const copyPlannedFiles = async (plan, options = {}) => {
         peakSmallConcurrency = Math.max(peakSmallConcurrency, activeSmallCopies);
         try {
           await waitIfPaused();
-          return await copySmallFileAtomic(entry, { durable, isCancelled: shouldCancel, nativePublicationService: nativeService });
+          return await copySmallFileAtomic(entry, { durable, isCancelled: shouldCancel, nativePublicationService: nativeService, ownershipToken });
         } finally {
           activeSmallCopies -= 1;
         }
@@ -468,6 +713,7 @@ const copyPlannedFiles = async (plan, options = {}) => {
         const entry = smallFiles[index];
         try {
           if (await isEntryComplete(entry)) {
+            await rememberCompletedEntry(entry);
             resumedFiles += 1;
             onProgress({ entry, bytesDelta: entry.size, fileCompleted: true, resumed: true });
             continue;
@@ -493,6 +739,11 @@ const copyPlannedFiles = async (plan, options = {}) => {
       if (!control.error) rememberError(cancelledError());
     }
     if (!prepared.length) return;
+
+    for (const item of prepared) if (!await samePathIdentity(item.entry.source, item.sourceIdentity)) {
+      rememberError(sourceChangedError(item.entry.source));
+      break;
+    }
 
     const batchSize = 2048;
     const preservedUnknown = new Set();
@@ -551,7 +802,14 @@ const copyPlannedFiles = async (plan, options = {}) => {
         await fs.promises.chmod(item.target, item.originalMode).catch(() => undefined);
         const localIndex = chunk.indexOf(item); const nativeResult = completed.find(result => result.index === localIndex);
         const targetStat = await fs.promises.stat(item.target, { bigint: true });
-        const publishedIdentity = { ...publishedIdentityFromStat(item.target, targetStat), nativeIdentity: nativeResult.identity };
+        const publishedIdentity = { ...publishedIdentityFromStat(item.target, targetStat), nativeIdentity: nativeResult.identity, sha256: item.sha256 };
+        rememberCleanupOwnership(item.target, publishedIdentity, ownershipToken);
+        if (!await samePathIdentity(item.entry.source, item.sourceIdentity)) {
+          const cleanup = await quarantineOwnedPath({ path: item.target, identity: publishedIdentity, ownershipToken });
+          if (cleanup.success) forgetCleanupOwnership(item.target, ownershipToken);
+          rememberError(Object.assign(sourceChangedError(item.entry.source), cleanup.recoveryPath ? { recoveryRequired: true, recoveryPath: cleanup.recoveryPath } : {}));
+          continue;
+        }
         owned.push({ item, publishedIdentity, strategy: nativeResult.strategy || 'native-batch-move-no-replace' });
         onCreated(item.target);
       }
@@ -563,7 +821,8 @@ const copyPlannedFiles = async (plan, options = {}) => {
       }
       if (publicationError && !control.error) {
         const failed = chunk[publicationError.failedIndex];
-        rememberError(attachTransferContext(publicationError, 'commit-target', failed?.entry.source, failed?.target));
+        const normalized = failed ? await normalizeNativePublicationError(publicationError, failed.entry.source, failed.target, 'native-batch-move-no-replace', nativeService, options.nativeReconcileHook, ownershipToken) : publicationError;
+        rememberError(attachTransferContext(normalized, 'commit-target', failed?.entry.source, failed?.target));
       }
       offset += chunk.length;
     }
@@ -574,10 +833,12 @@ const copyPlannedFiles = async (plan, options = {}) => {
         const cleanupChunk = takeBoundedBatch(unprocessed, offset, batchSize, item => Math.ceil(Buffer.byteLength(item.temporary) / 3) * 4 + Math.ceil(Buffer.byteLength(item.nativeIdentity) / 3) * 4);
         try {
           const results = await nativeService.deletePathsBatch(cleanupChunk.map(item => ({ path: item.temporary, identity: item.nativeIdentity })));
-          const retained = results.map((result, index) => result.success ? null : (result.recoveryPath || cleanupChunk[index].temporary)).filter(Boolean);
+          const retained = existingRecoveryPaths(results.flatMap((result, index) => result.success || result.deleted === true ? [] : [result.recoveryPath, cleanupChunk[index].temporary]));
+          const warnings = results.filter(result => result.deleted === true && (result.cleanupWarning === true || result.outcomeUnknown === true));
+          if (warnings.length && control.error) { control.error.cleanupWarning = true; control.error.outcomeUnknown = true; control.error.deletedCleanupCount = Number(control.error.deletedCleanupCount || 0) + warnings.length; control.error.cleanupPhase = warnings.find(item => item.phase)?.phase || control.error.cleanupPhase; }
           if (retained.length && control.error) { control.error.recoveryRequired = true; control.error.recoveryPaths = [...new Set([...(control.error.recoveryPaths || []), ...retained])]; }
         } catch (cleanupError) {
-          if (control.error) { control.error.recoveryRequired = true; control.error.recoveryPaths = [...new Set([...(control.error.recoveryPaths || []), ...cleanupChunk.map(item => item.temporary)])]; control.error.cleanupError = cleanupError; }
+          if (control.error) { const retained = cleanupError?.deleted === true ? [] : existingRecoveryPaths([cleanupError?.recoveryPath, ...cleanupChunk.map(item => item.temporary)]); if (retained.length) { control.error.recoveryRequired = true; control.error.recoveryPaths = [...new Set([...(control.error.recoveryPaths || []), ...retained])]; } if (cleanupError?.deleted === true) { control.error.cleanupWarning = true; control.error.outcomeUnknown = cleanupError.outcomeUnknown !== false; control.error.cleanupPhase = cleanupError.phase || control.error.cleanupPhase; } control.error.cleanupError = cleanupError; }
         }
         offset += cleanupChunk.length;
       }
@@ -594,27 +855,198 @@ const copyPlannedFiles = async (plan, options = {}) => {
         reportedBytes = progress.bytesCopied;
         if (bytesDelta) onProgress({ entry, bytesDelta, fileCompleted: false });
       },
+      ownershipToken,
     });
+    if (result?.publishedIdentity?.sha256) entry.sourceIdentity.sha256 = result.publishedIdentity.sha256;
     return { progressReported: true, commitStrategy: result.commitStrategy };
   });
 
   await Promise.all([smallPool, largePool]);
-  if (control.error) throw control.error;
+  if (control.error) throw attachOwnershipToError(control.error, ownershipToken);
   throwIfCancelled(isCancelled);
+  finalizeImplicitOwnership(ownershipToken);
   return {
     smallFilesCopied,
     largeFilesCopied,
     resumedFiles,
     peakSmallConcurrency,
     fallbackCommits,
+    ownershipToken,
+    ownershipSnapshot: ownershipSnapshotForToken(ownershipToken),
   };
 };
 
-const removeCreatedPasteTargets = async targets => {
-  for (const target of targets.slice().reverse()) await fs.promises.rm(target, { recursive: true, force: true }).catch(() => undefined);
+const directoryOwnershipMatches = (current, expected) => Boolean(current && expected && current.kind === 'directory'
+  && current.device !== '0' && current.inode !== '0' && current.device === expected.device && current.inode === expected.inode);
+
+const quarantinedFileMatches = async (quarantine, expected) => {
+  const current = await capturePathIdentity(quarantine, { digest: Boolean(expected.sha256) }).catch(() => null);
+  return Boolean(current && current.kind === 'file' && current.device === expected.device && current.inode === expected.inode
+    && current.size === expected.size && current.mtimeNs === expected.mtimeNs && (!expected.sha256 || current.sha256 === expected.sha256));
+};
+
+const pathExistsObject = async candidate => Boolean(await fs.promises.lstat(candidate).catch(() => null));
+
+const restoreQuarantine = async (quarantine, original, options = {}) => {
+  if (!await pathExistsObject(quarantine) || await pathExistsObject(original)) return false;
+  const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+  try {
+    if (nativeService?.nativeAvailable?.()) await publishPathNoClobber(quarantine, original, { ...options, nativePublicationService: nativeService });
+    else await fs.promises.rename(quarantine, original);
+    return true;
+  }
+  catch { return false; }
+};
+
+const removePrivateQuarantineRoot = async (privateRoot, privateIdentity) => {
+  if (!await pathExistsObject(privateRoot)) return true;
+  if ((await fs.promises.readdir(privateRoot).catch(() => ['unknown'])).length) return false;
+  const current = await capturePathIdentity(privateRoot).catch(() => null);
+  if (!directoryOwnershipMatches(current, privateIdentity)) return false;
+  const final = await capturePathIdentity(privateRoot).catch(() => null);
+  if (!directoryOwnershipMatches(final, privateIdentity) || (await fs.promises.readdir(privateRoot).catch(() => ['unknown'])).length) return false;
+  await fs.promises.rmdir(privateRoot);
+  return true;
+};
+
+const nativeDeleteQuarantine = async (quarantine, item, publication, nativeService) => {
+  let nativeIdentity = publication.nativeIdentity;
+  if (!nativeIdentity && typeof nativeService.inspectPath === 'function') nativeIdentity = (await nativeService.inspectPath(quarantine)).identity;
+  if (!nativeIdentity) throw Object.assign(new Error('quarantine native identity unavailable'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' });
+  if (item.identity.kind === 'directory') {
+    if (typeof nativeService.deleteEmptyDirectory !== 'function') throw Object.assign(new Error('native empty-directory delete unavailable'), { code: 'FILE_PUBLICATION_SERVICE_MISSING' });
+    return nativeService.deleteEmptyDirectory({ source: quarantine, identity: nativeIdentity });
+  }
+  const sha256 = item.identity.sha256 || await fileDigest(quarantine);
+  if (typeof nativeService.compareDeleteFile === 'function') return nativeService.compareDeleteFile({ target: quarantine, sha256, size: Number(item.identity.size), identity: nativeIdentity });
+  if (typeof nativeService.deletePathsBatch === 'function') {
+    const [result] = await nativeService.deletePathsBatch([{ path: quarantine, identity: nativeIdentity }]);
+    if (!result?.success) throw Object.assign(new Error(result?.error || 'native quarantine delete failed'), result || {}, { code: result?.code || 'PUBLISH_OWNERSHIP_CONFLICT' });
+    return result;
+  }
+  throw Object.assign(new Error('native identity-bound delete unavailable'), { code: 'FILE_PUBLICATION_SERVICE_MISSING' });
+};
+
+const quarantineOwnedPath = async (item, options = {}) => {
+  const current = await capturePathIdentity(item.path, { digest: item.identity.kind === 'file' && Boolean(item.identity.sha256) }).catch(() => null);
+  const initiallyOwned = item.identity.kind === 'directory'
+    ? directoryOwnershipMatches(current, item.identity)
+    : identitiesMatch(current, item.identity, { destructive: true });
+  if (!initiallyOwned) return { success: false, path: item.path, code: 'CLEANUP_OWNERSHIP_CONFLICT' };
+  await options.beforeQuarantineMove?.(item);
+  const privateRoot = path.join(path.dirname(item.path), `.photoflow-cleanup-${crypto.randomUUID()}`);
+  try { await fs.promises.mkdir(privateRoot, { recursive: false, mode: 0o700 }); await fs.promises.chmod(privateRoot, 0o700).catch(() => undefined); }
+  catch (error) { return { success: false, path: item.path, code: error?.code || 'CLEANUP_QUARANTINE_FAILED' }; }
+  const privateIdentity = await capturePathIdentity(privateRoot);
+  const quarantine = path.join(privateRoot, `item-${crypto.randomUUID()}`);
+  const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+  let publication;
+  try {
+    if (nativeService?.nativeAvailable?.()) publication = await publishPathNoClobber(item.path, quarantine, { ...options, nativePublicationService: nativeService });
+    else {
+      if (await pathExistsObject(quarantine)) throw Object.assign(new Error('private quarantine collision'), { code: 'EEXIST' });
+      await fs.promises.rename(item.path, quarantine);
+      publication = { strategy: 'private-0700-portable-rename', identity: await capturePublishedIdentity(quarantine) };
+    }
+  }
+  catch (error) {
+    await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => undefined);
+    return { success: false, path: item.path, code: error?.code || 'CLEANUP_QUARANTINE_FAILED', recoveryPath: error?.recoveryPath || (await pathExistsObject(privateRoot) ? privateRoot : undefined) };
+  }
+  await options.afterQuarantineMove?.({ ...item, quarantine });
+  const valid = item.identity.kind === 'directory'
+    ? directoryOwnershipMatches(await capturePathIdentity(quarantine).catch(() => null), item.identity) && (await fs.promises.readdir(quarantine).catch(() => ['unknown'])).length === 0
+    : await quarantinedFileMatches(quarantine, item.identity);
+  if (!valid) {
+    const restored = await restoreQuarantine(quarantine, item.path, options);
+    if (restored) await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => undefined);
+    return { success: false, path: item.path, code: 'CLEANUP_OWNERSHIP_CONFLICT', recoveryPath: restored ? undefined : privateRoot };
+  }
+  try {
+    if (nativeService?.nativeAvailable?.()) await nativeDeleteQuarantine(quarantine, item, publication, nativeService);
+    else {
+      await options.beforePortableDelete?.({ ...item, quarantine });
+      const portableValid = item.identity.kind === 'directory'
+        ? directoryOwnershipMatches(await capturePathIdentity(quarantine).catch(() => null), item.identity) && (await fs.promises.readdir(quarantine).catch(() => ['unknown'])).length === 0
+        : await quarantinedFileMatches(quarantine, item.identity);
+      if (!portableValid) return { success: false, path: item.path, code: 'CLEANUP_OWNERSHIP_CONFLICT', recoveryPath: privateRoot };
+      if (item.identity.kind === 'directory') await fs.promises.rmdir(quarantine);
+      else await fs.promises.unlink(quarantine);
+    }
+    const rootRemoved = await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => false);
+    return { success: true, path: item.path, quarantined: true, ...(!rootRemoved ? { cleanupWarning: '隔离目录清理未完成' } : {}) };
+  } catch (error) {
+    if (error?.deleted === true) {
+      const rootRemoved = await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => false);
+      const cleanupWarning = [error.cleanupWarning === true ? '原生删除已完成，但持久化确认失败' : error.cleanupWarning, !rootRemoved ? '隔离目录清理未完成' : ''].filter(Boolean).join('；') || undefined;
+      return {
+        success: true,
+        path: item.path,
+        quarantined: true,
+        deleted: true,
+        cleanupWarning,
+        outcomeUnknown: error.outcomeUnknown,
+        phase: error.phase,
+        originalMissing: error.originalMissing,
+        recoveryPaths: [],
+      };
+    }
+    return { success: false, path: item.path, code: error?.code || 'CLEANUP_DELETE_FAILED', recoveryPath: error?.recoveryPath || privateRoot };
+  }
+};
+
+const removeCreatedPasteTargets = async (targets, options = {}) => {
+  const requestedToken = String(options.ownershipToken || '');
+  const roots = targets.map(target => ({ path: path.resolve(typeof target === 'string' ? target : target.path), ownershipToken: String(typeof target === 'object' ? target.ownershipToken || requestedToken : requestedToken), identity: typeof target === 'object' ? target.identity : undefined }));
+  const owned = [];
+  const ambiguous = [];
+  const shared = [];
+  const missing = [];
+  const matchesByPath = new Map();
+  for (const snapshot of cleanupOwnershipLedger.values()) for (const item of snapshot.paths.values()) {
+    const root = roots.find(candidate => physicalPathKey(candidate.path) === physicalPathKey(item.path) || isInside(candidate.path, item.path));
+    if (!root) continue;
+    const key = physicalPathKey(item.path);
+    if (!matchesByPath.has(key)) matchesByPath.set(key, []);
+    matchesByPath.get(key).push(item);
+  }
+  for (const matches of matchesByPath.values()) {
+    const root = roots.find(candidate => physicalPathKey(candidate.path) === physicalPathKey(matches[0].path) || isInside(candidate.path, matches[0].path));
+    if (root.ownershipToken) {
+      const item = matches.find(candidate => candidate.ownershipToken === root.ownershipToken);
+      if (item && matches.length === 1) owned.push(item);
+      else if (item) shared.push(item.path);
+      else missing.push(matches[0].path);
+    } else if (matches.length === 1) owned.push(matches[0]);
+    else ambiguous.push(matches[0].path);
+  }
+  for (const root of roots.filter(candidate => candidate.identity)) {
+    if (!owned.some(item => physicalPathKey(item.path) === physicalPathKey(root.path) && item.ownershipToken === root.ownershipToken)) owned.push({ path: root.path, identity: root.identity, ownershipToken: root.ownershipToken || `snapshot-${crypto.randomUUID()}` });
+  }
+  owned.sort((left, right) => right.path.length - left.path.length);
+  const outcomes = [];
+  for (const item of owned.filter(entry => entry.identity.kind !== 'directory')) {
+    const outcome = await quarantineOwnedPath(item, options); outcomes.push(outcome);
+    if (outcome.success) forgetCleanupOwnership(item.path, item.ownershipToken);
+  }
+  for (const item of owned.filter(entry => entry.identity.kind === 'directory')) {
+    const outcome = await quarantineOwnedPath(item, options); outcomes.push(outcome);
+    if (outcome.success) forgetCleanupOwnership(item.path, item.ownershipToken);
+  }
+  const hasOwnerForPath = candidate => [...cleanupOwnershipLedger.values()].some(snapshot => snapshot.paths.has(physicalPathKey(candidate)));
+  for (const root of roots) if (!owned.some(item => physicalPathKey(item.path) === physicalPathKey(root.path)) && !hasOwnerForPath(root.path)) outcomes.push({ success: false, path: root.path, code: 'CLEANUP_UNOWNED_PATH' });
+  for (const retained of ambiguous) outcomes.push({ success: false, path: retained, code: 'CLEANUP_OWNER_AMBIGUOUS' });
+  for (const retained of shared) outcomes.push({ success: false, path: retained, code: 'CLEANUP_SHARED_OWNER' });
+  for (const retained of missing) outcomes.push({ success: false, path: retained, code: 'CLEANUP_OWNER_NOT_FOUND' });
+  const recoveryPaths = outcomes.map(item => item.recoveryPath).filter(Boolean);
+  const terminalTokens = new Set(owned.map(item => item.ownershipToken).filter(Boolean));
+  if (requestedToken) terminalTokens.add(requestedToken);
+  for (const token of terminalTokens) releaseCleanupOwnership(token);
+  return { success: outcomes.every(item => item.success), outcomes, recoveryPaths, ownershipToken: requestedToken || undefined };
 };
 
 const moveFileAtomic = async (source, destination, options = {}) => {
+  const ownershipToken = ownershipTokenForOptions(options);
   const sourceInfo = await assertRegularFile(source);
   const target = path.resolve(destination);
   if (options.isCancelled?.()) throw cancelledError();
@@ -622,8 +1054,11 @@ const moveFileAtomic = async (source, destination, options = {}) => {
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
   try {
     const publish = await publishPathNoClobber(sourceInfo.path, target, options);
+    const publishedIdentity = { ...publish.identity, sha256: await fileDigest(target), ...(publish.nativeIdentity ? { nativeIdentity: publish.nativeIdentity } : {}) };
+    rememberCleanupOwnership(target, publishedIdentity, ownershipToken);
     options.onProgress?.({ bytesCopied: sourceInfo.stat.size, totalBytes: sourceInfo.stat.size });
-    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: false, commitStrategy: publish.strategy };
+    finalizeImplicitOwnership(ownershipToken);
+    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: false, commitStrategy: publish.strategy, publishedIdentity, ownershipToken, ownershipSnapshot: [{ path: target, identity: publishedIdentity, ownershipToken }] };
   } catch (error) {
     if (!LINK_COPY_FALLBACK_ERRORS.has(error?.code)) throw error;
   }
@@ -635,38 +1070,70 @@ const moveFileAtomic = async (source, destination, options = {}) => {
   const sourceIdentity = (await nativeService.inspectPath(sourceInfo.path)).identity;
   const staged = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.photoflow-cross-volume`);
   try {
-    const stagedCopy = await copyFileAtomic(sourceInfo.path, staged, { ...options, isCancelled: options.isCancelled });
+    const stagedCopy = await copyFileAtomic(sourceInfo.path, staged, { ...options, isCancelled: options.isCancelled, ownershipToken });
     const [stagedStat, sha256] = await Promise.all([fs.promises.stat(staged), fileDigest(staged)]);
     if (options.isCancelled?.()) {
-      await nativeService.compareDeleteFile({ target: staged, sha256, size: stagedStat.size, identity: stagedCopy.nativePublishedIdentity });
+      try { await nativeService.compareDeleteFile({ target: staged, sha256, size: stagedStat.size, identity: stagedCopy.nativePublishedIdentity }); }
+      catch (error) { if (error?.deleted !== true) throw error; }
       throw cancelledError();
     }
     const committed = await nativeService.commitCrossVolumeFile({ source: sourceInfo.path, staged, target, sha256, size: stagedStat.size, sourceIdentity });
+    releaseCleanupOwnership(ownershipToken);
+    const publishedIdentity = { ...await capturePublishedIdentity(target), sha256 };
+    rememberCleanupOwnership(target, publishedIdentity, ownershipToken);
     options.onProgress?.({ bytesCopied: sourceInfo.stat.size, totalBytes: sourceInfo.stat.size });
-    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: true, commitStrategy: committed.strategy };
+    finalizeImplicitOwnership(ownershipToken);
+    return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: true, commitStrategy: committed.strategy, publishedIdentity, ownershipToken, ownershipSnapshot: [{ path: target, identity: publishedIdentity, ownershipToken }] };
   } catch (error) {
-    if (error?.code === CANCELLED_CODE || error?.code === 'EEXIST') throw error;
+    if (error?.code === CANCELLED_CODE || error?.code === 'EEXIST') throw attachOwnershipToError(error, ownershipToken);
     const targetExists = fs.existsSync(target);
     const stagedExists = fs.existsSync(staged);
-    if (stagedExists) error.recoveryPath = staged;
-    if (targetExists) throw partialPublishError({ source: sourceInfo.path, target, cleanupError: error, strategy: 'win32-cross-volume-locked-commit' });
-    if (stagedExists) throw stagingRecoveryError({ source: sourceInfo.path, destination: target, staging: staged, cause: error, strategy: 'cross-volume-staging-recovery' });
-    throw error;
+    if (error?.deleted === true) { delete error.recoveryPath; error.recoveryRequired = false; error.sourceRetained = false; error.cleanupWarning = true; error.outcomeUnknown = error.outcomeUnknown !== false; }
+    else if (stagedExists) error.recoveryPath = staged;
+    if (targetExists && error?.deleted === true) {
+      const verifiedTarget = await verifyNativeOwnedPath(nativeService, target, error.identity);
+      if (verifiedTarget) {
+        const publishedIdentity = { ...verifiedTarget.physicalIdentity, nativeIdentity: verifiedTarget.nativeIdentity };
+        rememberCleanupOwnership(target, publishedIdentity, ownershipToken);
+        options.onProgress?.({ bytesCopied: sourceInfo.stat.size, totalBytes: sourceInfo.stat.size });
+        finalizeImplicitOwnership(ownershipToken);
+        return { source: sourceInfo.path, destination: target, bytes: sourceInfo.stat.size, copied: true, commitStrategy: 'cross-volume-commit-cleanup-warning', publishedIdentity, sourceRetained: false, deleted: true, cleanupWarning: true, cleanupPhase: error.phase, outcomeUnknown: error.outcomeUnknown, ownershipToken, ownershipSnapshot: [{ path: target, identity: publishedIdentity, ownershipToken }] };
+      }
+      delete error.published; delete error.publishedIdentity; error.publishedConfirmed = false; error.publicationState = 'unknown'; error.uncertainPaths = existingRecoveryPaths([target]); error.recoveryPaths = []; error.recoveryRequired = false;
+      throw attachOwnershipToError(error, ownershipToken);
+    }
+    if (targetExists) {
+      const [verifiedRecovery, verifiedSource, verifiedTarget] = await Promise.all([verifyNativeOwnedPath(nativeService, error?.recoveryPath, sourceIdentity), verifyNativeOwnedPath(nativeService, sourceInfo.path, sourceIdentity), verifyNativeOwnedPath(nativeService, target, error?.identity)]);
+      const uncertainPaths = [error?.recoveryPath && !verifiedRecovery ? error.recoveryPath : null, fs.existsSync(sourceInfo.path) && !verifiedSource ? sourceInfo.path : null, error?.identity && !verifiedTarget ? target : null];
+      throw attachOwnershipToError(partialPublishError({ source: sourceInfo.path, target, identity: verifiedTarget ? { ...verifiedTarget.physicalIdentity, nativeIdentity: verifiedTarget.nativeIdentity } : undefined, cleanupError: error, strategy: 'win32-cross-volume-locked-commit', verifiedRecoveryPaths: [verifiedRecovery?.path, verifiedSource?.path].filter(Boolean), verifiedSourceRetained: Boolean(verifiedSource), uncertainPaths }), ownershipToken);
+    }
+    if (stagedExists) throw attachOwnershipToError(stagingRecoveryError({ source: sourceInfo.path, destination: target, staging: staged, cause: error, strategy: 'cross-volume-staging-recovery' }), ownershipToken);
+    throw attachOwnershipToError(error, ownershipToken);
   }
 };
 
 const movePathAtomic = async (source, destination, options = {}) => {
+  const ownershipToken = ownershipTokenForOptions(options);
   const resolvedSource = path.resolve(source);
   const target = path.resolve(destination);
-  const sourceStat = await fs.promises.stat(resolvedSource);
-  if (sourceStat.isFile()) return moveFileAtomic(resolvedSource, target, options);
+  const sourceStat = await fs.promises.lstat(resolvedSource);
+  if (sourceStat.isSymbolicLink()) {
+    const publish = await publishPathNoClobber(resolvedSource, target, options);
+    const publishedIdentity = { ...publish.identity, ...(publish.nativeIdentity ? { nativeIdentity: publish.nativeIdentity } : {}) };
+    rememberCleanupOwnership(target, publishedIdentity, ownershipToken);
+    finalizeImplicitOwnership(ownershipToken);
+    return { source: resolvedSource, destination: target, copied: false, commitStrategy: publish.strategy, publishedIdentity, nativePublishedIdentity: publish.nativeIdentity, ownershipToken, ownershipSnapshot: [{ path: target, identity: publishedIdentity, ownershipToken }] };
+  }
+  if (sourceStat.isFile()) return moveFileAtomic(resolvedSource, target, { ...options, ownershipToken });
   if (!sourceStat.isDirectory()) throw new Error(`不是可移动的文件或文件夹：${path.basename(resolvedSource)}`);
   if (fs.existsSync(target)) throw Object.assign(new Error(`目标已存在：${path.basename(target)}`), { code: 'EEXIST' });
 
   await fs.promises.mkdir(path.dirname(target), { recursive: true });
   try {
-    await publishPathNoClobber(resolvedSource, target, options);
-    return { source: resolvedSource, destination: target, copied: false };
+    const publish = await publishPathNoClobber(resolvedSource, target, options);
+    rememberCleanupOwnership(target, publish.identity, ownershipToken);
+    finalizeImplicitOwnership(ownershipToken);
+    return { source: resolvedSource, destination: target, copied: false, publishedIdentity: publish.identity, ownershipToken, ownershipSnapshot: [{ path: target, identity: publish.identity, ownershipToken }] };
   } catch (error) {
     if (error?.code !== 'EXDEV') throw error;
   }
@@ -675,6 +1142,9 @@ const movePathAtomic = async (source, destination, options = {}) => {
   const temporary = path.join(path.dirname(target), `.${path.basename(target)}.${crypto.randomUUID()}.photoflow-part`);
   const plan = [];
   let targetCommitted = false;
+  let cleanupWarning = false;
+  let cleanupOutcomeUnknown = false;
+  let cleanupPhase;
   try {
     await collectCopyPlan(resolvedSource, temporary, plan, {
       isCancelled: options.isCancelled,
@@ -693,6 +1163,7 @@ const movePathAtomic = async (source, destination, options = {}) => {
       isCancelled: options.isCancelled,
       onFileStart: options.onFileStart,
       onProgress: options.onProgress,
+      ownershipToken,
     });
     throwIfCancelled(options.isCancelled || (() => false));
     await assertCopyPlanSourcesUnchanged(plan);
@@ -707,12 +1178,14 @@ const movePathAtomic = async (source, destination, options = {}) => {
           const relative = path.relative(temporary, entry.destination);
           const targetFile = path.join(target, relative);
           const sha256 = await fileDigest(targetFile);
-          await nativeService.commitTreeFile({ source: entry.source, target: targetFile, sha256, size: entry.size, identity: entry.nativeSourceIdentity });
+          try { await nativeService.commitTreeFile({ source: entry.source, target: targetFile, sha256, size: entry.size, identity: entry.nativeSourceIdentity }); }
+          catch (error) { if (error?.deleted !== true) throw error; cleanupWarning = true; cleanupOutcomeUnknown = error.outcomeUnknown !== false; cleanupPhase = error.phase || cleanupPhase; }
           completedSources.push(entry.source);
         }
         for (const entry of plan.filter(item => item.kind === 'directory').sort((left, right) => right.source.length - left.source.length)) {
           throwIfCancelled(options.isCancelled || (() => false));
-          await nativeService.deleteEmptyDirectory({ source: entry.source, identity: entry.nativeSourceIdentity });
+          try { await nativeService.deleteEmptyDirectory({ source: entry.source, identity: entry.nativeSourceIdentity }); }
+          catch (error) { if (error?.deleted !== true) throw error; cleanupWarning = true; cleanupOutcomeUnknown = error.outcomeUnknown !== false; cleanupPhase = error.phase || cleanupPhase; }
           completedSources.push(entry.source);
         }
       } catch (cleanupError) {
@@ -734,9 +1207,24 @@ const movePathAtomic = async (source, destination, options = {}) => {
       cleanupError.destinationPath = target;
       throw cleanupError;
     }
-    throw error;
+    error.ownershipToken = ownershipToken;
+    throw attachOwnershipToError(error, ownershipToken);
   }
-  return { source: resolvedSource, destination: target, copied: true };
+  releaseCleanupOwnership(ownershipToken);
+  const publishedIdentity = await capturePublishedIdentity(target);
+  rememberCleanupOwnership(target, publishedIdentity, ownershipToken);
+  finalizeImplicitOwnership(ownershipToken);
+  return {
+    source: resolvedSource,
+    destination: target,
+    copied: true,
+    cleanupWarning,
+    cleanupPhase,
+    outcomeUnknown: cleanupOutcomeUnknown,
+    publishedIdentity,
+    ownershipToken,
+    ownershipSnapshot: [{ path: target, identity: publishedIdentity, ownershipToken }],
+  };
 };
 
 module.exports = {
@@ -760,6 +1248,8 @@ module.exports = {
   moveFileAtomic,
   movePathAtomic,
   publishPathNoClobber,
+  releaseCleanupOwnership,
+  getCleanupOwnershipStats,
   removeCopiedSources,
   removeCreatedPasteTargets,
   throwIfCancelled,

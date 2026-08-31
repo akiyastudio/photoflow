@@ -14,10 +14,28 @@ internal static class FileClipboardService
 {
     private const string DropEffectFormat = "Preferred DropEffect";
     private const int RetryCount = 8;
+    private const uint CF_HDROP = 15;
+    private const uint FileCountIndex = 0xffffffff;
     private static readonly JavaScriptSerializer Json = new JavaScriptSerializer();
 
     [DllImport("user32.dll")]
     private static extern uint GetClipboardSequenceNumber();
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool OpenClipboard(IntPtr owner);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool CloseClipboard();
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EmptyClipboard();
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern IntPtr GetClipboardData(uint format);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern uint RegisterClipboardFormat(string format);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern IntPtr GlobalLock(IntPtr memory);
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern bool GlobalUnlock(IntPtr memory);
+    [DllImport("shell32.dll", CharSet = CharSet.Unicode)]
+    private static extern uint DragQueryFile(IntPtr drop, uint index, StringBuilder path, uint pathLength);
 
     [STAThread]
     private static int Main(string[] args)
@@ -107,18 +125,42 @@ internal static class FileClipboardService
 
     private static object Read()
     {
-        return Retry<object>(() =>
+        Exception last = null;
+        for (var attempt = 0; attempt < RetryCount; attempt++)
         {
-            var data = Clipboard.GetDataObject();
-            var files = Clipboard.ContainsFileDropList() ? Clipboard.GetFileDropList().Cast<string>().Select(Path.GetFullPath).ToArray() : new string[0];
-            var operation = "copy";
-            if (data != null && data.GetDataPresent(DropEffectFormat))
+            try
             {
-                var effect = ReadEffect(data.GetData(DropEffectFormat));
+                var before = GetClipboardSequenceNumber();
+                var snapshot = ReadDataObject(Clipboard.GetDataObject());
+                var after = GetClipboardSequenceNumber();
+                if (before == after)
+                    return new Dictionary<string, object> { { "success", true }, { "sources", snapshot.Item1 }, { "operation", snapshot.Item2 }, { "sequence", after } };
+                last = new ExternalException("读取期间剪贴板内容发生变化");
+            }
+            catch (ExternalException error) { last = error; }
+            if (attempt + 1 < RetryCount) Thread.Sleep(35 + attempt * 20);
+        }
+        throw new InvalidOperationException("无法取得一致的 Windows 剪贴板快照", last);
+    }
+
+    private static Tuple<string[], string> ReadDataObject(IDataObject data)
+    {
+        var files = new string[0];
+        var operation = "copy";
+        if (data != null)
+        {
+            if (data.GetDataPresent(DataFormats.FileDrop, false))
+            {
+                var dropped = data.GetData(DataFormats.FileDrop, false) as string[];
+                if (dropped != null) files = dropped.Select(Path.GetFullPath).ToArray();
+            }
+            if (data.GetDataPresent(DropEffectFormat, false))
+            {
+                var effect = ReadEffect(data.GetData(DropEffectFormat, false));
                 if ((effect & 2) == 2) operation = "cut";
             }
-            return new Dictionary<string, object> { { "success", true }, { "sources", files }, { "operation", operation }, { "sequence", GetClipboardSequenceNumber() } };
-        });
+        }
+        return Tuple.Create(files, operation);
     }
 
     private static int ReadEffect(object value)
@@ -141,13 +183,53 @@ internal static class FileClipboardService
         var expectedSources = Sources(request);
         return Retry<object>(() =>
         {
-            var current = (Dictionary<string, object>)Read();
-            var matches = Convert.ToUInt32(current["sequence"]) == expectedSequence
-                && Convert.ToString(current["operation"]) == "cut"
-                && SameSources(expectedSources, (string[])current["sources"]);
-            if (matches) Clipboard.Clear();
-            return new { success = true, cleared = matches, sequence = GetClipboardSequenceNumber(), sources = matches ? new string[0] : (string[])current["sources"], operation = matches ? "copy" : Convert.ToString(current["operation"]) };
+            if (!OpenClipboard(IntPtr.Zero)) throw new ExternalException("无法锁定 Windows 剪贴板", Marshal.GetLastWin32Error());
+            try
+            {
+                var sequence = GetClipboardSequenceNumber();
+                var snapshot = ReadOpenClipboard();
+                var matches = sequence == GetClipboardSequenceNumber() && snapshot.Item2 == "cut" && SameSources(expectedSources, snapshot.Item1);
+                matches = matches && sequence == expectedSequence;
+                if (matches && !EmptyClipboard()) throw new ExternalException("无法清空 Windows 剪贴板", Marshal.GetLastWin32Error());
+                return new { success = true, cleared = matches, sequence = GetClipboardSequenceNumber(), sources = matches ? new string[0] : snapshot.Item1, operation = matches ? "copy" : snapshot.Item2 };
+            }
+            finally { CloseClipboard(); }
         });
+    }
+
+    private static Tuple<string[], string> ReadOpenClipboard()
+    {
+        var files = new List<string>();
+        var dropHandle = GetClipboardData(CF_HDROP);
+        if (dropHandle != IntPtr.Zero)
+        {
+            var dropPointer = GlobalLock(dropHandle);
+            if (dropPointer == IntPtr.Zero) throw new ExternalException("无法锁定剪贴板文件列表", Marshal.GetLastWin32Error());
+            try
+            {
+                var count = DragQueryFile(dropHandle, FileCountIndex, null, 0);
+                for (uint index = 0; index < count; index++)
+                {
+                    var length = DragQueryFile(dropHandle, index, null, 0);
+                    var value = new StringBuilder(checked((int)length + 1));
+                    if (DragQueryFile(dropHandle, index, value, (uint)value.Capacity) == 0) throw new ExternalException("无法读取剪贴板文件路径");
+                    files.Add(Path.GetFullPath(value.ToString()));
+                }
+            }
+            finally { GlobalUnlock(dropHandle); }
+        }
+        var operation = "copy";
+        var effectFormat = RegisterClipboardFormat(DropEffectFormat);
+        if (effectFormat == 0) throw new ExternalException("无法注册剪贴板拖放格式", Marshal.GetLastWin32Error());
+        var effectHandle = GetClipboardData(effectFormat);
+        if (effectHandle != IntPtr.Zero)
+        {
+            var effectPointer = GlobalLock(effectHandle);
+            if (effectPointer == IntPtr.Zero) throw new ExternalException("无法锁定剪贴板拖放效果", Marshal.GetLastWin32Error());
+            try { if ((Marshal.ReadInt32(effectPointer) & 2) == 2) operation = "cut"; }
+            finally { GlobalUnlock(effectHandle); }
+        }
+        return Tuple.Create(files.ToArray(), operation);
     }
 
     private static bool SameSources(IEnumerable<string> left, IEnumerable<string> right)

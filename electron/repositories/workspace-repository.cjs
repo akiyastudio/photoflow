@@ -1,4 +1,20 @@
-const createWorkspaceRepository = (client, operationsRepository = null) => ({
+const createWorkspaceRepository = (client, operationsRepository = null) => {
+  const pendingUndoPurges = new Map();
+  const pathKey = value => process.platform === 'win32' ? String(value).toLocaleLowerCase() : String(value);
+  const removeUndoRecordsRetryably = async (root, key, ids) => {
+    if (!operationsRepository || !ids.length) return { undoCleanupPending: false };
+    const pendingKey = `${pathKey(root)}\0${key}`;
+    const allIds = [...new Set([...(pendingUndoPurges.get(pendingKey) || []), ...ids])];
+    try {
+      await operationsRepository.removeUndoRecords(root, allIds);
+      pendingUndoPurges.delete(pendingKey);
+      return { undoCleanupPending: false };
+    } catch {
+      pendingUndoPurges.set(pendingKey, allIds);
+      return { undoCleanupPending: true, pendingUndoIds: allIds };
+    }
+  };
+  return ({
   load: async root => {
     const catalog = await client.call(root, 'init');
     return catalog;
@@ -20,20 +36,20 @@ const createWorkspaceRepository = (client, operationsRepository = null) => ({
     ...(operationsRepository ? { undoRecords: (await operationsRepository.listUndoRecords(root)).records } : {}),
   }),
   purgeDeletedProject: async (root, projectId) => {
-    const result = await client.call(root, 'purge_deleted_project', {
-      projectId,
-      ...(operationsRepository ? { undoRecords: (await operationsRepository.listUndoRecords(root)).records } : {}),
-    });
-    if (operationsRepository && result.removedUndoIds?.length) await operationsRepository.removeUndoRecords(root, result.removedUndoIds);
-    return result;
+    const undoRecords = operationsRepository ? (await operationsRepository.listUndoRecords(root)).records : undefined;
+    if (operationsRepository) {
+      const plan = await client.call(root, 'deleted_project_cleanup_plan', { projectId, undoRecords });
+      if (plan.removedUndoIds?.length) await operationsRepository.removeUndoRecords(root, plan.removedUndoIds);
+    }
+    return client.call(root, 'purge_deleted_project', { projectId, ...(undoRecords ? { undoRecords } : {}) });
   },
   purgeMissingProject: async (root, name) => {
     const result = await client.call(root, 'purge_missing_project', {
       name,
       ...(operationsRepository ? { undoRecords: (await operationsRepository.listUndoRecords(root)).records } : {}),
     });
-    if (operationsRepository && result.removedUndoIds?.length) await operationsRepository.removeUndoRecords(root, result.removedUndoIds);
-    return result;
+    const compensation = await removeUndoRecordsRetryably(root, `missing:${name}`, result.removedUndoIds || []);
+    return { ...result, ...compensation };
   },
   listMissingProjects: (root, missingBefore) => client.call(root, 'missing_projects_list', { missingBefore }),
   addUndoRecord: (root, payload) => operationsRepository
@@ -49,6 +65,7 @@ const createWorkspaceRepository = (client, operationsRepository = null) => ({
     ? operationsRepository.markUndoRecordUnavailable(root, id)
     : client.call(root, 'undo_record_mark_unavailable', { id }),
   stop: () => client.stop(),
-});
+  });
+};
 
 module.exports = { createWorkspaceRepository };

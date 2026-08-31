@@ -23,7 +23,13 @@ const keyFor = (workspacePath: string) => workspacePath.trim().replace(/\\/g, '/
 
 const validResponse = (value: unknown): value is WorkspaceCatalogResponse => {
   const response = value as WorkspaceCatalogResponse | null;
-  return Boolean(response && typeof response.success === 'boolean' && Array.isArray(response.statuses));
+  return Boolean(response && typeof response.success === 'boolean'
+    && (response.root === undefined || typeof response.root === 'string')
+    && (response.error === undefined || typeof response.error === 'string')
+    && Array.isArray(response.statuses)
+    && response.statuses.every(group => group && typeof group.status === 'string'
+      && Array.isArray(group.projects)
+      && group.projects.every(project => project && typeof project.name === 'string' && typeof project.path === 'string')));
 };
 
 const loadStoredSnapshots = () => {
@@ -36,7 +42,7 @@ const loadStoredSnapshots = () => {
       memorySnapshots.set(keyFor(snapshot.requestedPath), snapshot);
     }
   } catch {
-    window.localStorage.removeItem(STORAGE_KEY);
+    try { window.localStorage.removeItem(STORAGE_KEY); } catch { /* unavailable storage */ }
   }
 };
 
@@ -46,6 +52,8 @@ const persistSnapshots = () => {
       .filter(snapshot => snapshot.response.success)
       .sort((left, right) => right.capturedAt - left.capturedAt)
       .slice(0, MAX_STORED_SNAPSHOTS);
+    const retained = new Set(snapshots);
+    for (const [key, snapshot] of memorySnapshots) if (!retained.has(snapshot)) memorySnapshots.delete(key);
     window.localStorage.setItem(STORAGE_KEY, JSON.stringify(snapshots));
   } catch {
     // A catalog snapshot is only a startup optimization.

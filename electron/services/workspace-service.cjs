@@ -38,6 +38,17 @@ const createWorkspaceService = ({ repository, reconcileRepository = repository, 
     return refreshCatalog(root);
   };
 
+  const comparablePath = value => process.platform === 'win32' ? value.toLocaleLowerCase() : value;
+
+  const resolveNewProjectPath = (workspacePath, projectName) => {
+    const root = ensureRoot(workspacePath);
+    const name = cleanProjectName(projectName);
+    if (!name || name !== String(projectName || '').trim()) throw new Error('无效的项目名称');
+    const projectPath = path.resolve(root, name);
+    assertInside(root, projectPath, '项目路径');
+    return projectPath;
+  };
+
   const getProjectPath = (workspacePath, status, projectName) => {
     const validStatus = typeof status === 'string' && status === status.trim() && status.length > 0 && status.length <= 24 && ![...status].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
     if (!validStatus) throw new Error('无效的项目状态');
@@ -46,28 +57,35 @@ const createWorkspaceService = ({ repository, reconcileRepository = repository, 
       const configuredValue = String(getConfiguredInspirationRoot() || '').trim();
       if (!configuredValue) throw new Error('尚未配置灵感库文件夹');
       const configuredRoot = path.resolve(configuredValue);
-      const comparable = value => process.platform === 'win32' ? value.toLocaleLowerCase() : value;
-      if (comparable(inspirationRoot) !== comparable(configuredRoot)) throw new Error('灵感库路径未获用户配置授权');
+      if (comparablePath(inspirationRoot) !== comparablePath(configuredRoot)) throw new Error('灵感库路径未获用户配置授权');
       if (!fs.existsSync(inspirationRoot)) throw new Error('灵感库文件夹不存在');
       assertExistingInside(path.dirname(inspirationRoot), inspirationRoot, '灵感库路径', true);
-      if (comparable(fs.realpathSync(inspirationRoot)) !== comparable(fs.realpathSync(configuredRoot))) throw new Error('灵感库路径未获用户配置授权');
+      if (comparablePath(fs.realpathSync(inspirationRoot)) !== comparablePath(fs.realpathSync(configuredRoot))) throw new Error('灵感库路径未获用户配置授权');
       return inspirationRoot;
     }
     const root = ensureRoot(workspacePath);
     const row = catalogs.get(root)?.byName.get(String(projectName).toLocaleLowerCase());
+    if (!row) throw new Error('项目未在当前工作区注册');
+    if (String(row.status || '') !== status) throw new Error('项目状态与目录记录不一致');
     if (row?.availability === 'missing') throw new Error('项目文件夹当前不可用，请恢复文件夹或重新连接工作区');
     const relativePath = row?.relative_path || projectName;
     const projectPath = path.resolve(root, relativePath);
     assertInside(root, projectPath, '项目路径');
     let archivePath = '';
     try { archivePath = JSON.parse(row?.extra_json || '{}')?.archive?.path || ''; } catch { /* malformed optional metadata is ignored */ }
-    if (fs.existsSync(projectPath) && !archivePath) assertExistingInside(root, projectPath, '项目路径');
+    if (fs.existsSync(projectPath) && archivePath) {
+      const actualTarget = fs.realpathSync(projectPath);
+      const recordedTarget = fs.realpathSync(path.resolve(archivePath));
+      if (comparablePath(actualTarget) !== comparablePath(recordedTarget)) throw new Error('归档项目链接目标与目录记录不一致');
+    } else if (fs.existsSync(projectPath)) {
+      assertExistingInside(root, projectPath, '项目路径');
+    }
     return projectPath;
   };
 
   const cleanProjectName = value => String(value || '').trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '_');
 
-  return { resolveRoot, ensureRoot, refreshCatalog, reconcileCatalog, mutateCatalog, getProjectPath, cleanProjectName };
+  return { resolveRoot, ensureRoot, refreshCatalog, reconcileCatalog, mutateCatalog, getProjectPath, resolveNewProjectPath, cleanProjectName };
 };
 
 module.exports = { createWorkspaceService };

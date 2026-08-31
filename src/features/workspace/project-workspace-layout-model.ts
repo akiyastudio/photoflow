@@ -43,6 +43,42 @@ export const shouldRetainGroupedResultsDuringRefresh = (previousIdentity: string
 export const groupedResultsAreInitiallyLoading = (loading: boolean, visibleGroupCount: number) =>
   loading && visibleGroupCount === 0;
 
+export const createDelayedCloseController = (
+  close: () => void,
+  delayMs = 100,
+  schedule: (callback: () => void, delay: number) => ReturnType<typeof setTimeout> = setTimeout,
+  cancelScheduled: (handle: ReturnType<typeof setTimeout>) => void = clearTimeout,
+) => {
+  let handle: ReturnType<typeof setTimeout> | null = null;
+  const cancelClose = () => {
+    if (handle === null) return;
+    cancelScheduled(handle);
+    handle = null;
+  };
+  const scheduleClose = () => {
+    cancelClose();
+    handle = schedule(() => { handle = null; close(); }, delayMs);
+  };
+  return { scheduleClose, cancelClose, dispose: cancelClose };
+};
+
+export const positionViewportSubmenu = (
+  trigger: { left: number; right: number; top: number },
+  submenu: { width: number; height: number },
+  viewport: { width: number; height: number; margin?: number },
+) => {
+  const margin = viewport.margin ?? 8;
+  const openLeft = trigger.right + submenu.width + 4 > viewport.width - margin;
+  return {
+    openLeft,
+    left: Math.max(margin, openLeft ? trigger.left - submenu.width - 4 : trigger.right + 4),
+    top: Math.max(margin, Math.min(trigger.top, viewport.height - submenu.height - margin)),
+  };
+};
+
+const LEGACY_SUBMENU_STATE_CLASSES = new Set(['invisible', 'absolute', 'left-full', 'right-full', 'top-0', 'opacity-0', 'opacity-100', 'group-hover/submenu:visible', 'group-hover/submenu:opacity-100']);
+export const cleanViewportSubmenuClassName = (className = '') => className.split(/\s+/).filter(token => token && !LEGACY_SUBMENU_STATE_CLASSES.has(token)).join(' ');
+
 export const fitFileListColumnWidths = (preferred: FileListColumnWidths, availableWidth: number): FileListColumnWidths => {
   const normalized = Object.fromEntries(FILE_LIST_COLUMN_KEYS.map(key => {
     const value = Number(preferred[key]);

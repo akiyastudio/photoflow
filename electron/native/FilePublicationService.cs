@@ -12,27 +12,36 @@ using System.Linq;
 internal static class FilePublicationService
 {
     private sealed class OwnershipConflictException : IOException { public OwnershipConflictException(string message) : base(message) {} }
+    private sealed class PostCommitException : IOException {
+        internal readonly string PublishedPath;
+        internal readonly string IdentityValue;
+        public PostCommitException(string message, string publishedPath, string identity, Exception inner) : base(message, inner) { PublishedPath = publishedPath; IdentityValue = identity; }
+    }
     private const uint MOVEFILE_WRITE_THROUGH = 0x8;
     private const uint GENERIC_READ = 0x80000000;
     private const uint DELETE = 0x00010000;
+    private const uint FILE_WRITE_ATTRIBUTES = 0x00000100;
     private const uint FILE_SHARE_READ = 0x1;
     private const uint FILE_SHARE_WRITE = 0x2;
     private const uint FILE_SHARE_DELETE = 0x4;
     private const uint OPEN_EXISTING = 3;
     private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     private const int FileDispositionInfo = 4;
+    private const int FileBasicInfo = 0;
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
     private const uint FILE_ATTRIBUTE_READONLY = 0x1;
     private const uint INVALID_FILE_ATTRIBUTES = 0xffffffff;
 
     [StructLayout(LayoutKind.Sequential)] private struct FILE_DISPOSITION_INFO { [MarshalAs(UnmanagedType.Bool)] public bool DeleteFile; }
+    [StructLayout(LayoutKind.Sequential)] private struct FILE_BASIC_INFO { public long CreationTime; public long LastAccessTime; public long LastWriteTime; public long ChangeTime; public uint FileAttributes; }
     [StructLayout(LayoutKind.Sequential)] private struct BY_HANDLE_FILE_INFORMATION { public uint FileAttributes; public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime; public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime; public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime; public uint VolumeSerialNumber; public uint FileSizeHigh; public uint FileSizeLow; public uint NumberOfLinks; public uint FileIndexHigh; public uint FileIndexLow; }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool MoveFileEx(string existingName, string newName, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int infoClass, ref FILE_DISPOSITION_INFO info, uint size);
+    [DllImport("kernel32.dll", EntryPoint = "SetFileInformationByHandle", SetLastError = true)] private static extern bool SetBasicInformationByHandle(SafeFileHandle handle, int infoClass, ref FILE_BASIC_INFO info, uint size);
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int infoClass, out FILE_BASIC_INFO info, uint size);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out BY_HANDLE_FILE_INFORMATION info);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern uint GetFileAttributes(string name);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool SetFileAttributes(string name, uint attributes);
 
     private static int Main(string[] args)
     {
@@ -55,7 +64,10 @@ internal static class FilePublicationService
         } catch (Exception error) {
             var native = error as Win32Exception;
             var code = error is OwnershipConflictException ? "PUBLISH_OWNERSHIP_CONFLICT" : error is PathTooLongException ? "ENAMETOOLONG" : error is ArgumentException ? "EINVAL" : native == null ? "FILE_PUBLICATION_FAILED" : NativeCode(native.NativeErrorCode);
-            Write(new Dictionary<string, object> { { "success", false }, { "error", error.Message }, { "code", code }, { "nativeError", native == null ? 0 : native.NativeErrorCode } });
+            var failure = new Dictionary<string, object> { { "success", false }, { "error", error.Message }, { "code", code }, { "nativeError", native == null ? 0 : native.NativeErrorCode } };
+            var committed = error as PostCommitException;
+            if (committed != null) { failure["published"] = true; failure["outcomeUnknown"] = true; failure["publishedPath"] = committed.PublishedPath; failure["identity"] = committed.IdentityValue; }
+            Write(failure);
             return 1;
         }
     }
@@ -65,8 +77,13 @@ internal static class FilePublicationService
         var source = Full(sourceValue); var target = Full(targetValue); EnsureDistinct(source, target);
         var sourceAttributes = GetFileAttributes(source); if (sourceAttributes == INVALID_FILE_ATTRIBUTES) throw new Win32Exception(Marshal.GetLastWin32Error());
         if ((sourceAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
-            MoveNoReplaceCore(source, target);
-            using (var directoryHandle = OpenLocked(target, GENERIC_READ, true)) return new Dictionary<string, object> { { "success", true }, { "strategy", "win32-move-no-replace" }, { "identity", Identity(directoryHandle) } };
+            using (var directoryHandle = OpenLocked(source, GENERIC_READ, true, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)) {
+                var identity = Identity(directoryHandle);
+                MoveNoReplaceCore(source, target);
+                try { using (var targetHandle = OpenLocked(target, GENERIC_READ, true)) VerifyIdentity(targetHandle, identity, "已发布目录"); }
+                catch (Exception error) { throw new PostCommitException("目录已发布，但无法完成目标身份复核", target, identity, error); }
+                return new Dictionary<string, object> { { "success", true }, { "strategy", "win32-move-no-replace" }, { "identity", identity } };
+            }
         }
         using (var handle = OpenLocked(source, GENERIC_READ, false, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)) {
             var identity = Identity(handle);
@@ -93,13 +110,17 @@ internal static class FilePublicationService
                     var identity = Identity(handle);
                     VerifyIdentity(handle, expectedIdentity, "批量发布源");
                     MoveNoReplaceCore(source, target);
-                    using (var targetHandle = OpenLocked(target, GENERIC_READ)) VerifyIdentity(targetHandle, expectedIdentity, "批量发布目标");
+                    try { using (var targetHandle = OpenLocked(target, GENERIC_READ, Directory.Exists(target))) VerifyIdentity(targetHandle, expectedIdentity, "批量发布目标"); }
+                    catch (Exception error) { throw new PostCommitException("项目已发布，但无法完成目标身份复核", target, identity, error); }
                     results.Add(new Dictionary<string, object> { { "index", index }, { "success", true }, { "strategy", "win32-batch-move-no-replace" }, { "identity", identity } });
                 }
             } catch (Exception error) {
                 var native = error as Win32Exception;
                 var code = error is OwnershipConflictException ? "PUBLISH_OWNERSHIP_CONFLICT" : error is PathTooLongException ? "ENAMETOOLONG" : error is ArgumentException ? "EINVAL" : native == null ? "FILE_PUBLICATION_FAILED" : NativeCode(native.NativeErrorCode);
-                results.Add(new Dictionary<string, object> { { "index", index }, { "success", false }, { "error", error.Message }, { "code", code }, { "nativeError", native == null ? 0 : native.NativeErrorCode } });
+                var failed = new Dictionary<string, object> { { "index", index }, { "success", false }, { "error", error.Message }, { "code", code }, { "nativeError", native == null ? 0 : native.NativeErrorCode } };
+                var committed = error as PostCommitException;
+                if (committed != null) { failed["published"] = true; failed["outcomeUnknown"] = true; failed["publishedPath"] = committed.PublishedPath; failed["identity"] = committed.IdentityValue; }
+                results.Add(failed);
                 break;
             }
         }
@@ -131,7 +152,8 @@ internal static class FilePublicationService
             string value; string identity; try { value = utf8.GetString(Convert.FromBase64String(parts[1])); identity = utf8.GetString(Convert.FromBase64String(parts[2])); } catch (Exception error) { throw new ArgumentException("批量清理路径编码无效", error); }
             try {
                 var requested = Full(value); var attributes = GetFileAttributes(requested); if (attributes == INVALID_FILE_ATTRIBUTES) throw new Win32Exception(Marshal.GetLastWin32Error()); var directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-                using (var handle = OpenLocked(requested, GENERIC_READ | DELETE, directory)) { VerifyIdentity(handle, identity, "批量清理目标"); if (!directory) ClearReadOnly(requested); MarkDelete(handle); }
+                FILE_BASIC_INFO original; bool changed;
+                using (var handle = OpenIdentityDelete(requested, identity, directory, "批量清理目标", out original, out changed)) { try { MarkDelete(handle); } catch { RestoreAttributes(handle, original, changed); throw; } }
                 results.Add(new Dictionary<string, object> { { "index", index }, { "success", true }, { "deleted", true } });
             } catch (Exception error) {
                 var native = error as Win32Exception; var code = error is OwnershipConflictException ? "PUBLISH_OWNERSHIP_CONFLICT" : error is PathTooLongException ? "ENAMETOOLONG" : error is ArgumentException ? "EINVAL" : native == null ? "FILE_PUBLICATION_FAILED" : NativeCode(native.NativeErrorCode);
@@ -149,16 +171,16 @@ internal static class FilePublicationService
     {
         var source = Full(sourceValue); var staged = Full(stagedValue); var target = Full(targetValue);
         EnsureDistinct(source, target); EnsureDistinct(staged, target);
-        using (var sourceHandle = OpenVerifiedDelete(source, expectedSourceIdentity, expectedHash, expectedSize, "源文件")) {
+        FILE_BASIC_INFO sourceAttributes; bool sourceAttributesChanged;
+        using (var sourceHandle = OpenVerifiedDelete(source, expectedSourceIdentity, expectedHash, expectedSize, "源文件", out sourceAttributes, out sourceAttributesChanged)) {
             using (var stagedHandle = OpenLocked(staged, GENERIC_READ, false, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)) {
                 var stagedIdentity = Identity(stagedHandle);
                 Verify(stagedHandle, expectedHash, expectedSize, "暂存文件");
                 MoveNoReplaceCore(staged, target);
-                using (var targetHandle = OpenLocked(target, GENERIC_READ)) {
-                    VerifyIdentity(targetHandle, stagedIdentity, "目标文件");
-                    Verify(targetHandle, expectedHash, expectedSize, "目标");
-                }
-                MarkDelete(sourceHandle);
+                try {
+                    using (var targetHandle = OpenLocked(target, GENERIC_READ)) { VerifyIdentity(targetHandle, stagedIdentity, "目标文件"); Verify(targetHandle, expectedHash, expectedSize, "目标"); }
+                    try { MarkDelete(sourceHandle); } catch { RestoreAttributes(sourceHandle, sourceAttributes, sourceAttributesChanged); throw; }
+                } catch (Exception error) { throw new PostCommitException("目标已发布，但提交后的验证或源清理失败", target, stagedIdentity, error); }
             }
         }
         return new Dictionary<string, object> { { "success", true }, { "strategy", "win32-cross-volume-locked-commit" } };
@@ -167,7 +189,8 @@ internal static class FilePublicationService
     private static object CompareDelete(string targetValue, string expectedHash, long expectedSize, string expectedIdentity)
     {
         var target = Full(targetValue);
-        using (var handle = OpenVerifiedDelete(target, expectedIdentity, expectedHash, expectedSize, "补偿目标")) MarkDelete(handle);
+        FILE_BASIC_INFO attributes; bool changed;
+        using (var handle = OpenVerifiedDelete(target, expectedIdentity, expectedHash, expectedSize, "补偿目标", out attributes, out changed)) { try { MarkDelete(handle); } catch { RestoreAttributes(handle, attributes, changed); throw; } }
         return new Dictionary<string, object> { { "success", true }, { "deleted", true } };
     }
     private static object Inspect(string value)
@@ -180,10 +203,8 @@ internal static class FilePublicationService
         var source = Full(sourceValue); var target = Full(targetValue);
         using (var targetHandle = OpenLocked(target, GENERIC_READ)) {
             Verify(targetHandle, hash, size, "目标文件");
-            using (var sourceHandle = OpenLocked(source, GENERIC_READ | DELETE)) {
-                VerifyIdentity(sourceHandle, identity, "源文件");
-                Verify(sourceHandle, hash, size, "源文件"); ClearReadOnly(source); MarkDelete(sourceHandle);
-            }
+            FILE_BASIC_INFO original; bool changed;
+            using (var sourceHandle = OpenVerifiedDelete(source, identity, hash, size, "源文件", out original, out changed)) { try { MarkDelete(sourceHandle); } catch { RestoreAttributes(sourceHandle, original, changed); throw; } }
         }
         return new Dictionary<string, object> { { "success", true }, { "deleted", true } };
     }
@@ -203,16 +224,22 @@ internal static class FilePublicationService
         if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
         return handle;
     }
-    private static SafeFileHandle OpenVerifiedDelete(string filePath, string expectedIdentity, string expectedHash, long expectedSize, string label)
+    private static SafeFileHandle OpenVerifiedDelete(string filePath, string expectedIdentity, string expectedHash, long expectedSize, string label, out FILE_BASIC_INFO originalAttributes, out bool attributesChanged)
     {
-        using (var guard = OpenLocked(filePath, GENERIC_READ)) {
-            VerifyIdentity(guard, expectedIdentity, label);
-            Verify(guard, expectedHash, expectedSize, label);
-            ClearReadOnly(filePath);
-        }
+        originalAttributes = new FILE_BASIC_INFO(); attributesChanged = false;
         var deletable = OpenLocked(filePath, GENERIC_READ | DELETE);
-        try { VerifyIdentity(deletable, expectedIdentity, label); Verify(deletable, expectedHash, expectedSize, label); return deletable; }
-        catch { deletable.Dispose(); throw; }
+        try {
+            VerifyIdentity(deletable, expectedIdentity, label); Verify(deletable, expectedHash, expectedSize, label); ReadBasicInformation(deletable, out originalAttributes);
+            if ((originalAttributes.FileAttributes & FILE_ATTRIBUTE_READONLY) == 0) return deletable;
+            deletable.Dispose(); deletable = OpenLocked(filePath, GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES);
+            VerifyIdentity(deletable, expectedIdentity, label); Verify(deletable, expectedHash, expectedSize, label); attributesChanged = ClearReadOnly(deletable, out originalAttributes); return deletable;
+        } catch { RestoreAttributes(deletable, originalAttributes, attributesChanged); deletable.Dispose(); throw; }
+    }
+    private static SafeFileHandle OpenIdentityDelete(string filePath, string expectedIdentity, bool directory, string label, out FILE_BASIC_INFO originalAttributes, out bool attributesChanged)
+    {
+        originalAttributes = new FILE_BASIC_INFO(); attributesChanged = false; var handle = OpenLocked(filePath, GENERIC_READ | DELETE, directory);
+        try { VerifyIdentity(handle, expectedIdentity, label); if (directory) return handle; ReadBasicInformation(handle, out originalAttributes); if ((originalAttributes.FileAttributes & FILE_ATTRIBUTE_READONLY) == 0) return handle; handle.Dispose(); handle = OpenLocked(filePath, GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES, false); VerifyIdentity(handle, expectedIdentity, label); attributesChanged = ClearReadOnly(handle, out originalAttributes); return handle; }
+        catch { RestoreAttributes(handle, originalAttributes, attributesChanged); handle.Dispose(); throw; }
     }
     private static string Identity(SafeFileHandle handle) { BY_HANDLE_FILE_INFORMATION info; if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error()); return info.VolumeSerialNumber.ToString("x8") + ":" + info.FileIndexHigh.ToString("x8") + ":" + info.FileIndexLow.ToString("x8"); }
     private static void VerifyIdentity(SafeFileHandle handle, string expectedIdentity, string label) { if (!String.Equals(Identity(handle), expectedIdentity, StringComparison.OrdinalIgnoreCase)) throw new OwnershipConflictException(label + "身份已变化"); }
@@ -231,7 +258,9 @@ internal static class FilePublicationService
         var info = new FILE_DISPOSITION_INFO { DeleteFile = true };
         if (!SetFileInformationByHandle(handle, FileDispositionInfo, ref info, (uint)Marshal.SizeOf(typeof(FILE_DISPOSITION_INFO)))) throw new Win32Exception(Marshal.GetLastWin32Error());
     }
-    private static void ClearReadOnly(string filePath) { var attributes = GetFileAttributes(filePath); if (attributes == INVALID_FILE_ATTRIBUTES) throw new Win32Exception(Marshal.GetLastWin32Error()); if ((attributes & FILE_ATTRIBUTE_READONLY) != 0 && !SetFileAttributes(filePath, attributes & ~FILE_ATTRIBUTE_READONLY)) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+    private static void ReadBasicInformation(SafeFileHandle handle, out FILE_BASIC_INFO information) { if (!GetFileInformationByHandleEx(handle, FileBasicInfo, out information, (uint)Marshal.SizeOf(typeof(FILE_BASIC_INFO)))) throw new Win32Exception(Marshal.GetLastWin32Error()); }
+    private static bool ClearReadOnly(SafeFileHandle handle, out FILE_BASIC_INFO original) { ReadBasicInformation(handle, out original); if ((original.FileAttributes & FILE_ATTRIBUTE_READONLY) == 0) return false; var writable = original; writable.FileAttributes &= ~FILE_ATTRIBUTE_READONLY; if (!SetBasicInformationByHandle(handle, FileBasicInfo, ref writable, (uint)Marshal.SizeOf(typeof(FILE_BASIC_INFO)))) throw new Win32Exception(Marshal.GetLastWin32Error()); return true; }
+    private static void RestoreAttributes(SafeFileHandle handle, FILE_BASIC_INFO original, bool changed) { if (changed && handle != null && !handle.IsInvalid && !handle.IsClosed && !SetBasicInformationByHandle(handle, FileBasicInfo, ref original, (uint)Marshal.SizeOf(typeof(FILE_BASIC_INFO)))) throw new Win32Exception(Marshal.GetLastWin32Error()); }
     private static string Full(string value)
     {
         if (String.IsNullOrWhiteSpace(value)) throw new ArgumentException("路径为空");

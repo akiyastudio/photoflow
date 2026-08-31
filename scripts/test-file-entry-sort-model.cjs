@@ -52,4 +52,21 @@ assert.deepStrictEqual(
   'folders should remain grouped first while ordinary numbers use natural ordering',
 );
 
+const mixedTriple = ['2.jpg', '10.jpg', '2343803efe56e4e53174deb10bae25bd.jpg'];
+const permutations = values => values.length < 2 ? [values] : values.flatMap((value, index) =>
+  permutations(values.filter((_, candidateIndex) => candidateIndex !== index)).map(rest => [value, ...rest]));
+const expectedMixedOrder = sortProjectFileEntries(mixedTriple.map(entry), 'name', 'asc').map(item => item.name);
+for (const permutation of permutations(mixedTriple)) {
+  assert.deepStrictEqual(
+    sortProjectFileEntries(permutation.map(entry), 'name', 'asc').map(item => item.name),
+    expectedMixedOrder,
+    `mixed hash/natural ordering must be independent of input permutation: ${permutation.join(', ')}`,
+  );
+}
+for (const left of mixedTriple) for (const middle of mixedTriple) for (const right of mixedTriple) {
+  if (compareProjectFileNames(left, middle) <= 0 && compareProjectFileNames(middle, right) <= 0) {
+    assert(compareProjectFileNames(left, right) <= 0, `comparator must be transitive for ${left}, ${middle}, ${right}`);
+  }
+}
+
 console.log('File entry sort model tests passed.');

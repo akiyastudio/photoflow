@@ -4,8 +4,9 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 
 (async () => {
-  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, fileEntryDragPaths, fileEntryPointerModifiers, fileEntrySelectionAfterDragStart, mergeRefreshedEntryMetadata, mergeRefreshedRecursiveDirectoryEntries, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath, retainStableGroupOrder } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
+  const { directoryEntryToRevealOnReturn, fileEntryClickIntent, fileEntryDragPaths, fileEntryPointerModifiers, fileEntrySelectionAfterDragStart, mergeRefreshedEntryMetadata, mergeRefreshedRecursiveDirectoryEntries, mutatedEntryCanBeRevealed, mutatedEntryFiltersNeedReset, ratingMutationPreviewIsCurrent, remapEntryAfterProgressFolderMove, renamedEntryDestinationPath, retainStableGroupOrder } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
   const { mergeMarqueeSelection } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'marquee-selection-model.ts')).href);
+  const { mediaRatingCacheKey } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-entry-interaction-model.ts')).href);
   const { directoryPreviewCacheKey, directoryPreviewCacheKeyWithin, folderCoverEntryAfterLoad, pendingDirectoryPreviewSourceCacheKey, remapDirectoryPreviewCacheKey, remapPendingDirectoryPreviewEntries, settlePendingDirectoryPreviewRenameCaches, shouldCacheDirectoryPreviewResult } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'directory-preview-cache-model.ts')).href);
   const { FOLDER_COVER_MAX_CONSECUTIVE_LOAD_FAILURES, createFolderCoverMediaState, folderCoverRequestKey, reduceFolderCoverMediaState } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'folder-cover-media-model.ts')).href);
   const { presentOfficeExtractionResult } = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'office-extraction-result-model.ts')).href);
@@ -18,6 +19,9 @@ const { pathToFileURL } = require('url');
     additive: false,
     ...overrides,
   });
+  assert.equal(ratingMutationPreviewIsCurrent(3, 3, 'A|1', 'A|1'), true, 'the current rating mutation may update its own preview');
+  assert.equal(ratingMutationPreviewIsCurrent(3, 4, 'A|1', 'B|1'), false, 'a late A result cannot update B preview even though A entity caches still commit');
+  assert.equal(mediaRatingCacheKey('C:\\Photos/MIXED\\A.JPG', 9), mediaRatingCacheKey('c:/photos/mixed/a.jpg', 9), 'Windows rating keys normalize mixed slashes and case consistently');
 
   assert.strictEqual(intent({ openMode: 'single' }), 'open', 'single-click mode opens when selection mode is inactive');
   assert.strictEqual(intent({ openMode: 'double' }), 'select', 'double-click mode selects on its first click');

@@ -170,6 +170,20 @@ export const retainStableGroupOrder = (previousOrder: readonly string[], availab
   return [...previousOrder, ...availableOrder.filter(key => !known.has(key))];
 };
 
+export const ratingMutationPreviewIsCurrent = (
+  mutationSequence: number,
+  currentSequence: number,
+  targetIdentity: string,
+  currentIdentity: string,
+) => mutationSequence === currentSequence && targetIdentity === currentIdentity;
+
+export const mediaRatingCacheKey = (filePath: string, updatedAt: number) => {
+  const source = filePath.replace(/\\/g, '/');
+  const slashed = source.replace(/\/{2,}/g, '/').replace(/\/$/, '');
+  const normalized = /^(?:[a-z]:\/|\/\/)/i.test(source) ? slashed.toLocaleLowerCase() : slashed;
+  return `${normalized}|${updatedAt || 0}`;
+};
+
 export const renamedEntryDestinationPath = (
   sourceRelativePath: string,
   nextName: string,

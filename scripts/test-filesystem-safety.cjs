@@ -3,7 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
-const { capturePathIdentity, samePathIdentity } = require('../electron/services/file-identity-service.cjs');
+const { capturePathIdentity, samePathIdentity, assertUndoIdentity } = require('../electron/services/file-identity-service.cjs');
 const { createMediaAccessService } = require('../electron/services/media-access-service.cjs');
 const fileTransferSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'file-transfer-service.cjs'), 'utf8');
 assert(fileTransferSource.includes('await collectCopyPlan(resolvedSource, temporary, plan') && fileTransferSource.includes('nativeService.inspectPath(entry.source)') && fileTransferSource.includes('nativeService.commitTreeFile') && fileTransferSource.includes('nativeService.deleteEmptyDirectory'), 'cross-volume directory moves must use planned identities and locked native per-entry cleanup');
@@ -45,6 +45,20 @@ const syncMediaProject = (python, script, workspace, database, projectName) => {
     fs.renameSync(original, path.join(workspace, 'moved.txt'));
     fs.writeFileSync(original, 'replacement');
     assert.strictEqual(await samePathIdentity(original, identity), false, 'a same-path replacement must not pass undo identity validation');
+    const inPlace = path.join(workspace, 'identity-in-place.txt');
+    fs.writeFileSync(inPlace, 'before!!');
+    const inPlaceIdentity = await capturePathIdentity(inPlace);
+    const inPlaceHandle = fs.openSync(inPlace, 'r+');
+    try { fs.writeSync(inPlaceHandle, Buffer.from('after!!!'), 0, 8, 0); fs.fsyncSync(inPlaceHandle); }
+    finally { fs.closeSync(inPlaceHandle); }
+    fs.utimesSync(inPlace, new Date(), new Date(Date.now() + 2000));
+    const rewrittenIdentity = await capturePathIdentity(inPlace);
+    if (process.platform !== 'win32') assert.strictEqual(rewrittenIdentity.inode, inPlaceIdentity.inode, 'the regression fixture must retain the same inode');
+    const sameNativeIdentityFixture = { ...inPlaceIdentity, device: rewrittenIdentity.device, inode: rewrittenIdentity.inode };
+    assert.strictEqual(await samePathIdentity(inPlace, sameNativeIdentityFixture), false, 'same-inode in-place rewrites must fail identity validation');
+    const legacyIdentity = { device: inPlaceIdentity.device, inode: inPlaceIdentity.inode, size: inPlaceIdentity.size, modifiedNs: inPlaceIdentity.modifiedNs, directory: false };
+    assert.strictEqual(await samePathIdentity(inPlace, legacyIdentity, { destructive: true }), false, 'legacy identities without kind/ctime must be rejected for destructive cleanup');
+    await assert.rejects(assertUndoIdentity({ identities: { [path.resolve(inPlace)]: legacyIdentity } }, inPlace), error => error?.code === 'LEGACY_UNDO_UNSAFE', 'legacy destructive undo rejection must expose an explicit compatibility error');
 
     const broker = createMediaAccessService({ getWorkspaceRoots: () => [workspace] });
     assert.strictEqual(await broker.authorizeInput(original), fs.realpathSync(original));

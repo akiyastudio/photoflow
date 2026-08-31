@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { pathToFileURL } = require('url');
 const { SELECTION_LIMITS, createSelectionService, parseSelectionKeywords } = require('../electron/services/selection-service.cjs');
+const { copyFileAtomic: realCopyFileAtomic, getCleanupOwnershipStats } = require('../electron/services/file-transfer-service.cjs');
 const { registerSelectionIpc } = require('../electron/modules/selection-ipc.cjs');
 
 const mkdir = value => fs.mkdirSync(value, { recursive: true });
@@ -349,6 +350,24 @@ const run = async () => {
     assert.strictEqual(retried.success, true);
     assert.strictEqual(retried.selectionProgressId, failedSelection.id, '重试必须复用中断前的 selection 节点');
 
+    put(projectRoot, 'Replace/R_9301.JPG');
+    put(projectRoot, 'Replace/R_9302.JPG');
+    const replacePreview = await service.preflightFilename({ ...request('Replace'), keywords: '9301 9302' });
+    let replacementDestination = '';
+    let replacementCopies = 0;
+    const replacementService = createSelectionService({ ...options, copyFileAtomic: async (source, destination) => {
+      replacementCopies += 1;
+      if (replacementCopies === 2) {
+        fs.unlinkSync(replacementDestination);
+        fs.writeFileSync(replacementDestination, 'later replacement');
+        throw new Error('injected replacement rollback failure');
+      }
+      replacementDestination = destination;
+      await copyExclusive(source, destination);
+    } });
+    await expectReject(replacementService.executeFilename({ ...request('Replace'), keywords: '9301 9302', expectedSignature: replacePreview.signature, operationId: 'replacement-rollback' }), /replacement rollback failure/);
+    assert.strictEqual(fs.readFileSync(replacementDestination, 'utf8'), 'later replacement', 'selection rollback must retain a destination replaced after copy');
+
     put(projectRoot, 'Cancel/C_9101.JPG');
     put(projectRoot, 'Cancel/C_9102.JPG');
     const cancelPreview = await service.preflightFilename({ ...request('Cancel'), keywords: '9101 9102' });
@@ -420,6 +439,16 @@ const run = async () => {
     const undelivered = await handlers.get('workspace-selection-manual-execute')({ sender: {} }, projectRoot, { operationId: 'manual-undelivered', outcome: 'failed' });
     assert.strictEqual(undelivered.success, false);
     assert.strictEqual(undelivered.taskNotificationOwned, undefined, '终态事件未实际发送时页面仍拥有失败反馈');
+
+    const selectionLedgerBefore = getCleanupOwnershipStats();
+    const ledgerService = createSelectionService({ ...options, copyFileAtomic: realCopyFileAtomic });
+    for (let index = 0; index < 3; index += 1) {
+      const folder = `Ledger${index}`; const keyword = String(9500 + index); put(projectRoot, `${folder}/L_${keyword}.JPG`);
+      const preview = await ledgerService.preflightFilename({ ...request(folder), keywords: keyword });
+      const result = await ledgerService.executeFilename({ ...request(folder), keywords: keyword, expectedSignature: preview.signature, operationId: `ledger-selection-${index}` });
+      assert.strictEqual(result.success, true);
+    }
+    assert.deepStrictEqual(getCleanupOwnershipStats(), selectionLedgerBefore, 'successful selection terminal states must release explicit ownership tokens');
 
     console.log('selection V2 behavior tests passed');
   } finally {

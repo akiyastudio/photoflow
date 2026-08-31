@@ -25,8 +25,92 @@ try {
     writeShortcutLink: (shortcutPath, details) => { fs.writeFileSync(shortcutPath, JSON.stringify(details)); return true; },
   };
   const service = createProjectVirtualPathService({ shell, registryPath: path.join(temporaryRoot, 'managed-links.json') });
+  const racedShortcut = path.join(projectRoot, 'raced.lnk');
+  const originalLinkSync = fs.linkSync;
+  fs.linkSync = (source, destination) => {
+    if (path.resolve(destination) === path.resolve(racedShortcut) && !fs.existsSync(destination)) fs.writeFileSync(destination, 'concurrent placeholder');
+    return originalLinkSync(source, destination);
+  };
+  try {
+    assert.throws(() => service.createManagedExternalLink(racedShortcut, { target: externalRoot, kind: 'folder', displayName: 'raced' }), error => error?.code === 'EEXIST');
+  } finally { fs.linkSync = originalLinkSync; }
+  assert.strictEqual(fs.readFileSync(racedShortcut, 'utf8'), 'concurrent placeholder', 'external-link rollback must retain a concurrent destination placeholder');
+  const corruptRegistry = path.join(temporaryRoot, 'corrupt-managed-links.json');
+  fs.writeFileSync(corruptRegistry, '{damaged');
+  const corruptService = createProjectVirtualPathService({ shell, registryPath: corruptRegistry });
+  assert.throws(() => corruptService.createManagedExternalLink(path.join(projectRoot, 'corrupt.lnk'), { target: externalRoot, kind: 'folder', displayName: 'corrupt' }), error => error?.code === 'EXTERNAL_LINK_REGISTRY_CORRUPT');
+  assert.strictEqual(fs.readFileSync(corruptRegistry, 'utf8'), '{damaged', 'a damaged registry must never be silently overwritten');
+  const fallbackRegistry = path.join(temporaryRoot, 'fallback-managed-links.json');
+  const fallbackShortcut = path.join(projectRoot, 'fallback-link.lnk');
+  const fallbackService = createProjectVirtualPathService({ shell, registryPath: fallbackRegistry });
+  const hardlinkImplementation = fs.linkSync;
+  fs.linkSync = () => { throw Object.assign(new Error('hard links unavailable'), { code: 'EPERM' }); };
+  try { fallbackService.createManagedExternalLink(fallbackShortcut, { target: externalRoot, kind: 'folder', displayName: 'fallback-link' }); }
+  finally { fs.linkSync = hardlinkImplementation; }
+  assert.strictEqual(fs.existsSync(fallbackShortcut), true, 'external links must fall back to verified COPYFILE_EXCL publication when hard links are unavailable');
+  assert.strictEqual(fs.existsSync(fallbackRegistry), true, 'registry publication must use the same no-clobber fallback');
+  const fakeResourcesRegistry = path.join(temporaryRoot, 'fake-resources-managed-links.json');
+  const fakeResourcesService = createProjectVirtualPathService({ shell, registryPath: fakeResourcesRegistry, resourcesPath: path.join(temporaryRoot, 'missing-resources'), isPackaged: false });
+  fakeResourcesService.createManagedExternalLink(path.join(projectRoot, 'fake-resources-link.lnk'), { target: externalRoot, kind: 'folder', displayName: 'fake-resources-link' });
+  assert.strictEqual(fs.existsSync(fakeResourcesRegistry), true, 'Electron dev must prefer the existing project helper over a bogus resourcesPath');
+  const publisherSpawn = calls => (executable, args) => { calls.push(executable); const operation = args[0]; if (operation === 'move-no-replace') { const source = args[args.indexOf('--source') + 1]; const destination = args[args.indexOf('--target') + 1]; fs.renameSync(source, destination); const stat = fs.statSync(destination); return { stdout: `${JSON.stringify({ success: true, strategy: 'test-native', identity: `${stat.dev}:${stat.ino}` })}\n`, stderr: '', status: 0 }; } const target = args[args.indexOf('--path') + 1]; const stat = fs.statSync(target); return { stdout: `${JSON.stringify({ success: true, identity: `${stat.dev}:${stat.ino}` })}\n`, stderr: '', status: 0 }; };
+  const packagedCalls = []; const packagedResources = path.join(temporaryRoot, 'packaged-resources'); const packagedRuntime = path.join(packagedResources, 'app.asar', 'electron', 'services'); const packagedRegistry = path.join(temporaryRoot, 'packaged-managed-links.json');
+  const packagedService = createProjectVirtualPathService({ shell, registryPath: packagedRegistry, runtimeDirectory: packagedRuntime, resourcesPath: packagedResources, isPackaged: null, executableExists: () => true, spawnSyncImpl: publisherSpawn(packagedCalls) });
+  packagedService.createManagedExternalLink(path.join(projectRoot, 'packaged-helper-link.lnk'), { target: externalRoot, kind: 'folder', displayName: 'packaged-helper-link' });
+  assert(packagedCalls.length > 0 && packagedCalls.every(candidate => path.resolve(candidate) === path.resolve(path.join(packagedResources, process.platform === 'win32' ? 'file-publication-service.exe' : 'file-publication-service'))), 'packaged runtime must ignore an apparently existing app.asar helper and execute only extraResources');
+  const devCalls = []; const devRuntime = path.join(temporaryRoot, 'dev-project', 'electron', 'services'); const devResources = path.join(temporaryRoot, 'dev-fake-resources'); const devRegistry = path.join(temporaryRoot, 'dev-resolver-managed-links.json');
+  const devResolverService = createProjectVirtualPathService({ shell, registryPath: devRegistry, runtimeDirectory: devRuntime, resourcesPath: devResources, isPackaged: null, executableExists: () => true, spawnSyncImpl: publisherSpawn(devCalls) });
+  devResolverService.createManagedExternalLink(path.join(projectRoot, 'dev-helper-link.lnk'), { target: externalRoot, kind: 'folder', displayName: 'dev-helper-link' });
+  assert(devCalls.length > 0 && devCalls.every(candidate => path.resolve(candidate) === path.resolve(path.join(devRuntime, '..', 'bin', process.platform === 'win32' ? 'file-publication-service.exe' : 'file-publication-service'))), 'development runtime must prefer the project electron/bin helper even when resourcesPath exists');
+
+  const originalRmSync = fs.rmSync;
+  fs.rmSync = (candidate, options) => { if (String(candidate).includes(`${path.basename(fallbackRegistry)}.backup-`)) throw Object.assign(new Error('backup cleanup locked'), { code: 'EBUSY' }); return originalRmSync(candidate, options); };
+  const backupCleanupShortcut = path.join(projectRoot, 'backup-cleanup-link.lnk');
+  try { fallbackService.createManagedExternalLink(backupCleanupShortcut, { target: externalRoot, kind: 'folder', displayName: 'backup-cleanup-link' }); }
+  finally { fs.rmSync = originalRmSync; }
+  assert.strictEqual(fallbackService.resolve(projectRoot, 'backup-cleanup-link.lnk', { externalRootMode: 'link' }).linkId.length > 0, true, 'backup cleanup failure must not roll back a shortcut after registry commit');
+
+  const crashRegistry = path.join(temporaryRoot, 'crash-managed-links.json');
+  const crashService = createProjectVirtualPathService({ shell, registryPath: crashRegistry });
+  crashService.createManagedExternalLink(path.join(projectRoot, 'crash-link.lnk'), { target: externalRoot, kind: 'folder', displayName: 'crash-link' });
+  const crashSnapshot = JSON.parse(fs.readFileSync(crashRegistry, 'utf8'));
+  const crashBackup = `${crashRegistry}.backup-crash`; const crashTemporary = `${crashRegistry}.tmp-crash`;
+  fs.copyFileSync(crashRegistry, crashBackup);
+  fs.writeFileSync(crashTemporary, JSON.stringify({ ...crashSnapshot, _registryWrite: { ...crashSnapshot._registryWrite, operationId: require('crypto').randomUUID(), generation: crashSnapshot._registryWrite.generation + 1 } }));
+  fs.unlinkSync(crashRegistry);
+  const recoveredCrashService = createProjectVirtualPathService({ shell, registryPath: crashRegistry });
+  assert.strictEqual(recoveredCrashService.listManagedExternalLinks(projectRoot).some(item => item.shortcutVirtualPath === 'crash-link.lnk'), true, 'canonical-to-backup crash must recover the unique legal successor');
+  assert.strictEqual(fs.existsSync(crashRegistry), true);
+
+  const partialRegistry = path.join(temporaryRoot, 'partial-managed-links.json'); const partialService = createProjectVirtualPathService({ shell, registryPath: partialRegistry });
+  partialService.createManagedExternalLink(path.join(projectRoot, 'partial-link.lnk'), { target: externalRoot, kind: 'folder', displayName: 'partial-link' });
+  fs.copyFileSync(partialRegistry, `${partialRegistry}.backup-valid`); fs.writeFileSync(partialRegistry, '{partial');
+  const recoveredPartialService = createProjectVirtualPathService({ shell, registryPath: partialRegistry });
+  assert.strictEqual(recoveredPartialService.listManagedExternalLinks(projectRoot).some(item => item.shortcutVirtualPath === 'partial-link.lnk'), true, 'an invalid partial canonical must recover from the unique valid backup');
+  const posixFaultRegistry = path.join(temporaryRoot, 'posix-fault-managed-links.json'); let injectPosixCrash = false;
+  const posixPublisher = (source, destination) => { if (fs.existsSync(destination)) throw Object.assign(new Error('exists'), { code: 'EEXIST' }); fs.renameSync(source, destination); const stat = fs.statSync(destination); return { success: true, strategy: 'simulated-posix-renameat2-fsync', identity: `${stat.dev}:${stat.ino}` }; };
+  const posixFaultService = createProjectVirtualPathService({ shell, registryPath: posixFaultRegistry, platform: 'linux', nativeRegistryPublisher: posixPublisher, registryFaultInjector: stage => { if (injectPosixCrash && stage === 'after-backup-before-canonical') throw Object.assign(new Error('simulated POSIX registry crash'), { simulateCrash: true }); } });
+  posixFaultService.createManagedExternalLink(path.join(projectRoot, 'posix-first.lnk'), { target: externalRoot, kind: 'folder', displayName: 'posix-first' }); injectPosixCrash = true;
+  assert.throws(() => posixFaultService.createManagedExternalLink(path.join(projectRoot, 'posix-second.lnk'), { target: externalRoot, kind: 'folder', displayName: 'posix-second' }), /POSIX registry crash/);
+  const recoveredPosixService = createProjectVirtualPathService({ shell, registryPath: posixFaultRegistry, platform: 'linux', nativeRegistryPublisher: posixPublisher });
+  assert.doesNotThrow(() => recoveredPosixService.listManagedExternalLinks(projectRoot)); assert.strictEqual(fs.existsSync(posixFaultRegistry), true, 'POSIX crash recovery must atomically promote the unique synced successor');
+
+  const ambiguousRegistry = path.join(temporaryRoot, 'ambiguous-managed-links.json'); const ambiguousValue = { version: 1, links: {} };
+  fs.writeFileSync(`${ambiguousRegistry}.backup-a`, JSON.stringify(ambiguousValue)); fs.writeFileSync(`${ambiguousRegistry}.backup-b`, JSON.stringify(ambiguousValue));
+  const ambiguousService = createProjectVirtualPathService({ shell, registryPath: ambiguousRegistry });
+  assert.throws(() => ambiguousService.listManagedExternalLinks(projectRoot), error => error?.code === 'EXTERNAL_LINK_REGISTRY_RECOVERY_AMBIGUOUS');
+  const invalidAmbiguousRegistry = path.join(temporaryRoot, 'invalid-ambiguous-managed-links.json'); fs.writeFileSync(invalidAmbiguousRegistry, '{invalid'); fs.writeFileSync(`${invalidAmbiguousRegistry}.backup-a`, JSON.stringify(ambiguousValue)); fs.writeFileSync(`${invalidAmbiguousRegistry}.backup-b`, JSON.stringify(ambiguousValue));
+  const invalidAmbiguousService = createProjectVirtualPathService({ shell, registryPath: invalidAmbiguousRegistry });
+  assert.throws(() => invalidAmbiguousService.listManagedExternalLinks(projectRoot), /损坏|恢复候选|歧义/, 'an invalid canonical with multiple valid candidates must fail closed');
   service.createManagedExternalLink(path.join(projectRoot, 'RAW.lnk'), { target: externalRoot, kind: 'folder', displayName: 'RAW' });
   service.createManagedExternalLink(path.join(projectRoot, 'linked-photo.jpg.lnk'), { target: externalFile, kind: 'file', displayName: 'linked-photo.jpg' });
+  const boundedRoot = path.join(projectRoot, 'bounded-scan'); fs.mkdirSync(path.join(boundedRoot, 'a', 'b'), { recursive: true });
+  fs.writeFileSync(path.join(boundedRoot, 'a', 'ordinary.txt'), 'ordinary');
+  const bounded = service.listManagedExternalLinks(projectRoot, { maxEntries: 1, maxDirectories: 2, maxDepth: 1 });
+  assert.strictEqual(Array.isArray(bounded), true);
+  assert.strictEqual(bounded.truncated, true, 'managed external-link enumeration must expose bounded truncation without changing its Array return type');
+  const cancelledScan = service.listManagedExternalLinks(projectRoot, { cancel: () => true });
+  assert.strictEqual(cancelledScan.cancelled, true);
   const rootAsLink = service.resolve(projectRoot, 'RAW.lnk', { externalRootMode: 'link' });
   assert.strictEqual(rootAsLink.physicalPath, path.join(projectRoot, 'RAW.lnk'));
   assert.strictEqual(rootAsLink.isExternalLinkRoot, true);

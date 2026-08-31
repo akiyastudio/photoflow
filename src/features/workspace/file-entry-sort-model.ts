@@ -10,10 +10,11 @@ export const isFolderLikeEntry = (entry: ProjectFileEntry) => entry.kind === 'fo
   || entry.externalLink === true && entry.externalLinkTargetKind !== 'file';
 
 export const compareProjectFileNames = (left: string, right: string) => {
-  const collator = contentHashPrefixPattern.test(left) && contentHashPrefixPattern.test(right)
-    ? lexicalFileNameCollator
-    : naturalFileNameCollator;
-  return collator.compare(left, right);
+  const leftHash = contentHashPrefixPattern.test(left);
+  const rightHash = contentHashPrefixPattern.test(right);
+  if (leftHash !== rightHash) return leftHash ? 1 : -1;
+  const result = (leftHash ? lexicalFileNameCollator : naturalFileNameCollator).compare(left, right);
+  return result || left.localeCompare(right);
 };
 
 export const sortProjectFileEntries = (

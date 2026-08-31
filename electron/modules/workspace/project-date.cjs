@@ -1,7 +1,11 @@
 const readProjectDate = project => {
   try {
     const value = JSON.parse(project?.extra_json || '{}')?.projectDate;
-    if (!value || !Number.isInteger(value.year) || !Number.isInteger(value.month)) return undefined;
+    if (!value || !Number.isInteger(value.year) || value.year < 2000 || value.year > 2099 || !Number.isInteger(value.month) || value.month < 1 || value.month > 12) return undefined;
+    if (value.day !== undefined) {
+      const checked = new Date(value.year, value.month - 1, value.day);
+      if (!Number.isInteger(value.day) || value.day < 1 || checked.getFullYear() !== value.year || checked.getMonth() !== value.month - 1 || checked.getDate() !== value.day) return undefined;
+    }
     return {
       year: value.year,
       month: value.month,
@@ -15,6 +19,7 @@ const readProjectDate = project => {
 
 const normalizeProjectDate = value => {
   if (!value) return null;
+  if (value.year === undefined || value.year === null || String(value.year).trim() === '') throw new Error('年份不能为空');
   let year = Number(value.year);
   const month = Number(value.month);
   const hasDay = value.day !== undefined && value.day !== null && String(value.day).trim() !== '';

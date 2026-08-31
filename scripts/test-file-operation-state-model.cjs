@@ -7,6 +7,8 @@ const { pathToFileURL } = require('node:url');
   const model = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'file-operation-state-model.ts')).href);
   const identity = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'file-operation-identity-model.ts')).href);
   const entry = (relativePath, kind = 'file') => ({ name: relativePath.split('/').pop(), path: `D:/project/${relativePath}`, relativePath, kind, extension: '', size: 1, createdAt: 1, updatedAt: 1 });
+  assert.equal(model.claimClipboardGeneration(7, false), 7, 'a rejected second paste must not invalidate the in-flight clipboard owner');
+  assert.equal(model.claimClipboardGeneration(7, true), 8, 'generation advances only after the paste acquires its pending lock');
   const renameSource = { ...entry('a.txt'), previewUrl: 'safe-preview://a' };
   const rename = { id: 'rename', kind: 'rename', label: '正在重命名', lockedPaths: ['a.txt', 'b.txt'], affectedDirectories: [''], tombstonePaths: ['a.txt'], optimisticEntries: [{ ...renameSource, name: 'b.txt', path: 'D:/project/b.txt', relativePath: 'b.txt', pendingSourceRelativePath: 'a.txt' }] };
   assert.equal(model.pendingPathConflicts([rename], ['a.txt']), true, 'the source path is locked');

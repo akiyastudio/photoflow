@@ -38,6 +38,27 @@ const run = async () => {
   const surface = { contains: element => element === folderElement };
   assert.strictEqual(nativeFileDragTargetFromElement({ element: folderElement, surface, currentRelativePath: '', rootLabel: 'project', normalize: value => value })?.relativePath, 'folder');
 
+  const managedExternalFolder = {
+    dataset: { entryKind: 'shortcut', entryPath: 'managed.lnk/subfolder', dropCapable: 'true' },
+    title: 'managed external folder',
+    closest: selector => selector.includes('[data-entry-path]') ? managedExternalFolder : null,
+  };
+  assert.strictEqual(
+    nativeFileDragTargetFromElement({ element: managedExternalFolder, surface, currentRelativePath: '', rootLabel: 'project', normalize: value => value })?.relativePath,
+    'managed.lnk/subfolder',
+    'explicit capability accepts a writable managed external folder even when its renderer kind is shortcut',
+  );
+  const readOnlyShortcut = {
+    dataset: { entryKind: 'folder', entryPath: 'readonly.lnk/subfolder', dropCapable: 'false' },
+    title: 'read-only shortcut',
+    closest: selector => selector.includes('[data-entry-path]') ? readOnlyShortcut : null,
+  };
+  assert.strictEqual(
+    nativeFileDragTargetFromElement({ element: readOnlyShortcut, surface, currentRelativePath: '', rootLabel: 'project', normalize: value => value }),
+    null,
+    'an explicit read-only capability wins over a folder-looking shortcut',
+  );
+
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-native-drag-simple-'));
   try {
     fs.mkdirSync(path.join(temporaryRoot, 'folder'));

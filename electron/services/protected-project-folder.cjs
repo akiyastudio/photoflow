@@ -30,7 +30,7 @@ const createProtectedProjectFolderRegistry = ({ descriptors = [], descriptorProv
   const isProtectedProjectFolderPath = ({ fs, path, projectRoot, candidate }) => {
     const root = path.resolve(projectRoot);
     const target = path.resolve(candidate);
-    if (path.dirname(target).toLocaleLowerCase() !== root.toLocaleLowerCase()) return false;
+    if (physicalPathKey(path.dirname(target)) !== physicalPathKey(root)) return false;
     try {
       if (!fs.statSync(target).isDirectory()) return false;
     } catch {
@@ -59,3 +59,4 @@ module.exports = {
   configureProtectedProjectFolderRegistry,
   getProtectedProjectFolderRegistry,
 };
+const { physicalPathKey } = require('./file-identity-service.cjs');

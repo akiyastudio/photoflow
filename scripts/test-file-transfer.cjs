@@ -10,7 +10,7 @@ const { registerBrollImportIpc } = require('../electron/modules/broll-import.cjs
 const { createProjectVirtualPathService } = require('../electron/services/project-virtual-path-service.cjs');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
 const { createWorkspaceService } = require('../electron/services/workspace-service.cjs');
-const { addUndoIdentities, assertUndoIdentity, capturePathIdentity, samePathIdentity } = require('../electron/services/file-identity-service.cjs');
+const { addUndoIdentities, assertUndoIdentity, capturePathIdentity, physicalPathKey, samePathIdentity } = require('../electron/services/file-identity-service.cjs');
 const {
   CANCELLED_CODE,
   PUBLISH_PARTIAL_CODE,
@@ -24,10 +24,13 @@ const {
   commitTemporaryFile,
   configureNativePublicationService,
   copyFileAtomic,
+  copySmallFileAtomic,
   copyPlannedFiles,
   moveFileAtomic,
   movePathAtomic,
   publishPathNoClobber,
+  releaseCleanupOwnership,
+  getCleanupOwnershipStats,
   removeCopiedSources,
   removeCreatedPasteTargets,
   throwIfCancelled,
@@ -42,12 +45,13 @@ const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.
 assert(mainSource.includes('createFileClipboardService') && !mainSource.includes('runWindowsClipboardScript'), 'file clipboard access must use the native service instead of inline PowerShell');
 assert(filesIpcSource.includes('const clearClipboardIfSnapshotCurrent') && filesIpcSource.includes('clearSystemFileClipboardIfCurrent(snapshot)'), 'cut clipboard clearing must delegate sequence and path validation to the native helper');
 assert.strictEqual((filesIpcSource.match(/await clearClipboardIfSnapshotCurrent\(clipboardSnapshot\)/g) || []).length, 2, 'both paste completion branches must verify clipboard ownership before clearing');
+assert(filesIpcSource.includes('sourceCleanupOutcome = await removeCopiedSources') && filesIpcSource.includes('cleanupWarning: sourceCleanupOutcome?.cleanupWarning'), 'cut IPC success responses must expose terminal native cleanup warnings without retaining the source');
 assert(filesIpcSource.includes('missingCutSources') && filesIpcSource.includes('剪切源已被其他粘贴任务移动或删除'), 'a later paste sharing an already-consumed cut snapshot must return a clear source error');
 assert(filesIpcSource.includes('if (moves.length === 1 && sources.length === 1)') && filesIpcSource.includes('await fs.promises.rename(moves[0].source, moves[0].destination)'), 'single rename must have a one-call direct fast path');
 assert(filesIpcSource.includes('if (!sameVolumeCut) {') && filesIpcSource.indexOf('await collectCopyPlan(target.source') > filesIpcSource.indexOf('if (!sameVolumeCut) {'), 'same-volume cut-paste must bypass recursive copy planning');
 const singleMoveFastPathStart = filesIpcSource.indexOf('const singleSameVolumeMove');
 const singleMoveFastPathSource = filesIpcSource.slice(singleMoveFastPathStart, filesIpcSource.indexOf("if (operation === 'copy' || operation === 'cut')", singleMoveFastPathStart));
-assert(singleMoveFastPathSource.includes('canUseSingleRenameMove(process.platform, movePlan, destinationStat)') && singleMoveFastPathSource.includes('await publishPathNoClobber(entry.source, entry.destination)'), 'single internal move fast path must require matching filesystem device identities and use no-clobber publication');
+assert(singleMoveFastPathSource.includes('canUseSingleRenameMove(process.platform, movePlan, destinationStat)') && singleMoveFastPathSource.includes('await publishPathNoClobber(entry.source, entry.destination, { ownershipToken: operationId })'), 'single internal move fast path must require matching filesystem device identities and use token-bound no-clobber publication');
 assert(singleMoveFastPathSource.includes('if (!singleSameVolumeMove) task.publish') && singleMoveFastPathSource.includes('await movePathAtomic(entry.source, entry.destination'), 'only the non-fast move path may scan or fall back to copy');
 const sameVolumeCutStart = filesIpcSource.indexOf('if (sameVolumeCut) {');
 const sameVolumeCutSource = filesIpcSource.slice(sameVolumeCutStart, filesIpcSource.indexOf('const totalBytes = plan.reduce', sameVolumeCutStart));
@@ -97,6 +101,131 @@ const run = async () => {
     await copyFileAtomic(source, copy, { onProgress: value => { lastProgress = value.bytesCopied; } });
     assert.strictEqual(lastProgress, fs.statSync(source).size);
     assert.deepStrictEqual(fs.readFileSync(copy), fs.readFileSync(source));
+
+    const changingSource = path.join(root, 'changing-small.bin');
+    const changingTarget = path.join(root, 'changing-small-copy.bin');
+    fs.writeFileSync(changingSource, 'AAAA');
+    const changingPlan = [];
+    await collectCopyPlan(changingSource, changingTarget, changingPlan);
+    const originalCopyFile = fs.promises.copyFile;
+    fs.promises.copyFile = async (...args) => {
+      const result = await originalCopyFile(...args);
+      if (path.resolve(args[0]) === path.resolve(changingSource)) fs.writeFileSync(changingSource, 'BBBB');
+      return result;
+    };
+    try {
+      await assert.rejects(copySmallFileAtomic(changingPlan[0]), error => error?.code === 'SOURCE_CHANGED_DURING_COPY');
+    } finally { fs.promises.copyFile = originalCopyFile; }
+    assert.strictEqual(fs.existsSync(changingTarget), false, 'a same-size source rewrite during copy must not publish a target');
+
+    const replacedCleanupSource = path.join(root, 'cleanup-owned-source.txt');
+    const replacedCleanupTarget = path.join(root, 'cleanup-owned-target.txt');
+    fs.writeFileSync(replacedCleanupSource, 'owned');
+    await copyFileAtomic(replacedCleanupSource, replacedCleanupTarget);
+    fs.unlinkSync(replacedCleanupTarget);
+    fs.writeFileSync(replacedCleanupTarget, 'later replacement');
+    await removeCreatedPasteTargets([replacedCleanupTarget]);
+    assert.strictEqual(fs.readFileSync(replacedCleanupTarget, 'utf8'), 'later replacement', 'rollback must retain a target replaced after publication');
+
+    const overlapSourceA = path.join(root, 'overlap-a.txt'); const overlapSourceB = path.join(root, 'overlap-b.txt'); const overlapTarget = path.join(root, 'overlap-target.txt');
+    fs.writeFileSync(overlapSourceA, 'owner-a'); fs.writeFileSync(overlapSourceB, 'owner-b');
+    const overlapA = await copyFileAtomic(overlapSourceA, overlapTarget, { ownershipToken: 'overlap-owner-a' });
+    const overlapPlan = []; await collectCopyPlan(overlapSourceB, overlapTarget, overlapPlan);
+    const overlapB = await copyPlannedFiles(overlapPlan, { ownershipToken: 'overlap-owner-b', isEntryComplete: async () => true });
+    const ambiguousCleanup = await removeCreatedPasteTargets([overlapTarget]);
+    assert.strictEqual(ambiguousCleanup.success, false, 'legacy cleanup without a token must reject overlapping owners');
+    assert.strictEqual(fs.readFileSync(overlapTarget, 'utf8'), 'owner-a');
+    const staleOwnerCleanup = await removeCreatedPasteTargets([overlapTarget], { ownershipToken: overlapA.ownershipToken });
+    assert.strictEqual(staleOwnerCleanup.success, false, 'one shared owner cannot clean an object still owned by another operation');
+    assert.strictEqual(fs.readFileSync(overlapTarget, 'utf8'), 'owner-a');
+    const currentOwnerCleanup = await removeCreatedPasteTargets([overlapTarget], { ownershipToken: overlapB.ownershipToken });
+    assert.strictEqual(currentOwnerCleanup.success, true, 'the matching overlapping operation can clean only its own identity');
+    assert.strictEqual(fs.existsSync(overlapTarget), false);
+    const overlapSourceC = path.join(root, 'overlap-c.txt'); fs.writeFileSync(overlapSourceC, 'owner-c');
+    await copyFileAtomic(overlapSourceC, overlapTarget, { ownershipToken: 'overlap-owner-c' });
+    const cleanupC = await removeCreatedPasteTargets([overlapTarget]);
+    assert.strictEqual(cleanupC.success, true, 'A/B terminal cleanup must not leave C permanently ambiguous');
+    const stalePath = path.join(root, 'stale-owner-target.txt'); const staleSourceA = path.join(root, 'stale-owner-a.txt'); const staleSourceB = path.join(root, 'stale-owner-b.txt'); fs.writeFileSync(staleSourceA, 'stale-a'); fs.writeFileSync(staleSourceB, 'stale-b');
+    const staleA = await copyFileAtomic(staleSourceA, stalePath, { ownershipToken: 'stale-owner-a' }); fs.unlinkSync(stalePath);
+    const staleB = await copyFileAtomic(staleSourceB, stalePath, { ownershipToken: 'stale-owner-b' });
+    const staleAttempt = await removeCreatedPasteTargets([stalePath], { ownershipToken: staleA.ownershipToken });
+    assert.strictEqual(staleAttempt.success, false); assert.strictEqual(fs.readFileSync(stalePath, 'utf8'), 'stale-b', 'registering B must prune stale A without letting A delete B'); releaseCleanupOwnership(staleB.ownershipToken); fs.unlinkSync(stalePath);
+    const ledgerBeforeReleaseLoop = getCleanupOwnershipStats();
+    for (let index = 0; index < 12; index += 1) {
+      const loopSource = path.join(root, `release-source-${index}.txt`); const loopTarget = path.join(root, `release-target-${index}.txt`); fs.writeFileSync(loopSource, `release-${index}`);
+      const loopCopy = await copyFileAtomic(loopSource, loopTarget); releaseCleanupOwnership(loopCopy.ownershipToken); fs.unlinkSync(loopTarget);
+    }
+    assert.deepStrictEqual(getCleanupOwnershipStats(), ledgerBeforeReleaseLoop, 'successful operation token release must keep long-running ledger size bounded');
+    const implicitTargets = [];
+    for (let index = 0; index < 80; index += 1) {
+      const implicitTarget = path.join(root, `implicit-complete-${index}.txt`); fs.writeFileSync(implicitTarget, `implicit-${index}`); implicitTargets.push(implicitTarget);
+      await copyPlannedFiles([{ kind: 'file', source: implicitTarget, destination: implicitTarget, size: fs.statSync(implicitTarget).size, sourceIdentity: await capturePathIdentity(implicitTarget), mode: fs.statSync(implicitTarget).mode, atime: fs.statSync(implicitTarget).atime, mtime: fs.statSync(implicitTarget).mtime }], { isEntryComplete: async () => true });
+    }
+    await new Promise(resolve => setTimeout(resolve, 350));
+    assert.deepStrictEqual(getCleanupOwnershipStats(), ledgerBeforeReleaseLoop, 'high-frequency implicit successful calls must auto-release instead of accumulating random tokens');
+    for (const implicitTarget of implicitTargets) fs.unlinkSync(implicitTarget);
+
+    const quarantineRaceSource = path.join(root, 'quarantine-race-source.txt'); const quarantineRaceTarget = path.join(root, 'quarantine-race-target.txt');
+    fs.writeFileSync(quarantineRaceSource, 'owned-race');
+    const quarantineRace = await copyFileAtomic(quarantineRaceSource, quarantineRaceTarget, { ownershipToken: 'quarantine-file-owner' });
+    const racedFileCleanup = await removeCreatedPasteTargets([quarantineRaceTarget], {
+      ownershipToken: quarantineRace.ownershipToken,
+      beforeQuarantineMove: async () => { fs.unlinkSync(quarantineRaceTarget); fs.writeFileSync(quarantineRaceTarget, 'replacement-after-check'); },
+    });
+    assert.strictEqual(racedFileCleanup.success, false);
+    assert.strictEqual(fs.readFileSync(quarantineRaceTarget, 'utf8'), 'replacement-after-check', 'file replacement after the initial check must be restored, not deleted');
+
+    const occupiedRaceSource = path.join(root, 'occupied-race-source.txt'); const occupiedRaceTarget = path.join(root, 'occupied-race-target.txt'); fs.writeFileSync(occupiedRaceSource, 'owned-occupied');
+    const occupiedRace = await copyFileAtomic(occupiedRaceSource, occupiedRaceTarget, { ownershipToken: 'occupied-file-owner' });
+    const occupiedCleanup = await removeCreatedPasteTargets([occupiedRaceTarget], { ownershipToken: occupiedRace.ownershipToken, afterQuarantineMove: async item => { fs.writeFileSync(occupiedRaceTarget, 'new occupant'); fs.writeFileSync(item.quarantine, 'tampered quarantine'); } });
+    assert.strictEqual(occupiedCleanup.success, false);
+    assert.strictEqual(fs.readFileSync(occupiedRaceTarget, 'utf8'), 'new occupant');
+    assert.strictEqual(fs.existsSync(occupiedCleanup.recoveryPaths[0]), true, 'an occupied original path must retain the mismatched quarantine as an explicit recoveryPath');
+
+    const nativeCleanupSource = path.join(root, 'native-cleanup-source.txt'); const nativeCleanupTarget = path.join(root, 'native-cleanup-target.txt'); fs.writeFileSync(nativeCleanupSource, 'native-cleanup'); let nativeCompareDeletes = 0;
+    const identityDeleteNative = { ...nativePublication, compareDeleteFile: async request => { nativeCompareDeletes += 1; return nativePublication.compareDeleteFile(request); } };
+    const nativeCleanupCopy = await copyFileAtomic(nativeCleanupSource, nativeCleanupTarget, { ownershipToken: 'native-cleanup-owner', nativePublicationService: identityDeleteNative });
+    const nativeCleanup = await removeCreatedPasteTargets([nativeCleanupTarget], { ownershipToken: nativeCleanupCopy.ownershipToken, nativePublicationService: identityDeleteNative });
+    assert.strictEqual(nativeCleanup.success, true); assert.strictEqual(nativeCompareDeletes, 1, 'available native cleanup must use identity-bound compareDeleteFile instead of JS pathname unlink');
+    const portableCleanupTarget = path.join(root, 'portable-cleanup-target.txt'); fs.writeFileSync(portableCleanupTarget, 'portable-owned'); const portableIdentity = await capturePathIdentity(portableCleanupTarget, { digest: true });
+    const portableCleanup = await removeCreatedPasteTargets([{ path: portableCleanupTarget, identity: portableIdentity, ownershipToken: 'portable-cleanup-owner' }], { ownershipToken: 'portable-cleanup-owner', nativePublicationService: { nativeAvailable: () => false }, beforePortableDelete: async item => { fs.writeFileSync(item.quarantine, 'portable-replacement'); } });
+    assert.strictEqual(portableCleanup.success, false); assert.strictEqual(fs.existsSync(portableCleanup.recoveryPaths[0]), true, 'portable cleanup must retain the private 0700 recovery when the quarantine changes before final delete');
+
+    const quarantineDirectory = path.join(root, 'quarantine-directory-race'); fs.mkdirSync(quarantineDirectory);
+    const quarantineDirectoryIdentity = await capturePathIdentity(quarantineDirectory);
+    const racedDirectoryCleanup = await removeCreatedPasteTargets([{ path: quarantineDirectory, identity: quarantineDirectoryIdentity, ownershipToken: 'quarantine-directory-owner' }], {
+      ownershipToken: 'quarantine-directory-owner',
+      beforeQuarantineMove: async () => { fs.rmdirSync(quarantineDirectory); fs.mkdirSync(quarantineDirectory); },
+    });
+    assert.strictEqual(racedDirectoryCleanup.success, false);
+    assert.strictEqual(fs.statSync(quarantineDirectory).isDirectory(), true, 'directory replacement after the initial check must be restored, not removed');
+
+    const nativePostCommitSource = path.join(root, 'native-post-commit-source.txt'); const nativePostCommitTarget = path.join(root, 'native-post-commit-target.txt');
+    fs.writeFileSync(nativePostCommitSource, 'native-post-commit');
+    await assert.rejects(publishPathNoClobber(nativePostCommitSource, nativePostCommitTarget, { nativePublicationService: { nativeAvailable: () => true, moveNoReplace: async (sourcePath, targetPath) => { fs.renameSync(sourcePath, targetPath); throw Object.assign(new Error('native reply lost after commit'), { published: true, publishedPath: targetPath, identity: 'native-post-id' }); }, inspectPath: async () => ({ success: true, identity: 'native-post-id' }) } }), error => error.code === PUBLISH_PARTIAL_CODE && error.published === true && error.publishedIdentity?.nativeIdentity === 'native-post-id');
+    assert.strictEqual(fs.readFileSync(nativePostCommitTarget, 'utf8'), 'native-post-commit');
+    const reconcileRaceSource = path.join(root, 'native-reconcile-race-source.txt'); const reconcileRaceTarget = path.join(root, 'native-reconcile-race-target.txt'); fs.writeFileSync(reconcileRaceSource, 'published-original'); let reconcileInspectCount = 0;
+    await assert.rejects(publishPathNoClobber(reconcileRaceSource, reconcileRaceTarget, { nativePublicationService: { nativeAvailable: () => true, moveNoReplace: async (sourcePath, targetPath) => { fs.renameSync(sourcePath, targetPath); throw Object.assign(new Error('post-commit race'), { published: true, publishedPath: targetPath, identity: 'original-native-id' }); }, inspectPath: async () => ({ success: true, identity: reconcileInspectCount++ === 0 ? 'original-native-id' : 'replacement-native-id' }) }, nativeReconcileHook: async () => { fs.unlinkSync(reconcileRaceTarget); fs.writeFileSync(reconcileRaceTarget, 'replacement-between-inspect-and-capture'); } }), error => error.code === PUBLISH_PARTIAL_CODE && error.published === false && error.outcomeUnknown === true && !error.publishedIdentity);
+    assert.strictEqual(fs.readFileSync(reconcileRaceTarget, 'utf8'), 'replacement-between-inspect-and-capture', 'replacement between native inspect and physical capture must never be claimed');
+    const nativeUnknownSource = path.join(root, 'native-unknown-source.txt'); const nativeUnknownTarget = path.join(root, 'native-unknown-target.txt'); fs.writeFileSync(nativeUnknownSource, 'unknown');
+    await assert.rejects(publishPathNoClobber(nativeUnknownSource, nativeUnknownTarget, { nativePublicationService: { nativeAvailable: () => true, moveNoReplace: async () => { throw Object.assign(new Error('native timeout'), { outcomeUnknown: true }); } } }), error => error.code === PUBLISH_PARTIAL_CODE && error.outcomeUnknown === true && error.recoveryRequired === true);
+    assert.strictEqual(fs.readFileSync(nativeUnknownSource, 'utf8'), 'unknown');
+    const unrelatedSource = path.join(root, 'native-unrelated-source.txt'); const unrelatedTarget = path.join(root, 'native-unrelated-target.txt'); fs.writeFileSync(unrelatedSource, 'source-still-here');
+    await assert.rejects(publishPathNoClobber(unrelatedSource, unrelatedTarget, { nativePublicationService: { nativeAvailable: () => true, moveNoReplace: async (_sourcePath, targetPath) => { fs.writeFileSync(targetPath, 'unrelated occupant'); throw Object.assign(new Error('false published claim'), { published: true, publishedPath: targetPath, identity: 'unrelated-id' }); }, inspectPath: async () => ({ success: true, identity: 'unrelated-id' }) } }), error => error.code === PUBLISH_PARTIAL_CODE && error.published === false && error.outcomeUnknown === true && !error.publishedIdentity);
+    assert.strictEqual(fs.readFileSync(unrelatedSource, 'utf8'), 'source-still-here'); assert.strictEqual(fs.readFileSync(unrelatedTarget, 'utf8'), 'unrelated occupant');
+
+    const linkTargetDirectory = path.join(root, 'link-publish-target'); const linkPublishSource = path.join(root, 'link-publish-source'); const linkPublishDestination = path.join(root, 'link-publish-destination'); fs.mkdirSync(linkTargetDirectory);
+    let linkFixtureCreated = false;
+    try { fs.symlinkSync(linkTargetDirectory, linkPublishSource, process.platform === 'win32' ? 'junction' : 'dir'); linkFixtureCreated = true; }
+    catch (error) { if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(error?.code)) throw error; }
+    if (linkFixtureCreated) {
+      const linkPublish = await publishPathNoClobber(linkPublishSource, linkPublishDestination);
+      assert.strictEqual(linkPublish.identity.kind, 'symlink');
+      assert.strictEqual(fs.existsSync(linkPublishSource), false);
+      assert.strictEqual(fs.lstatSync(linkPublishDestination).isSymbolicLink(), true);
+      assert.strictEqual(await samePathIdentity(linkPublishDestination, linkPublish.identity, { destructive: true }), true, 'published link identity must describe the link object rather than its target');
+      assert.strictEqual(fs.statSync(linkTargetDirectory).isDirectory(), true, 'publishing a junction/symlink must never move or delete its target');
+    }
 
     const fallbackTemporary = path.join(root, '.fallback.photoflow-part');
     const fallbackTarget = path.join(root, 'fallback.bin');
@@ -180,6 +309,26 @@ const run = async () => {
     assert.strictEqual(crossVolumeResult.copied, true);
     assert.strictEqual(fs.existsSync(crossVolumeSource), false);
     assert.strictEqual(fs.readFileSync(crossVolumeTarget, 'utf8'), 'cross-volume move');
+
+    const deletedWarningSource = path.join(root, 'cross-volume-deleted-warning-source.bin'); const deletedWarningTarget = path.join(root, 'cross-volume-deleted-warning-target.bin'); fs.writeFileSync(deletedWarningSource, 'deleted cleanup warning'); let deletedWarningCommits = 0;
+    const deletedWarningNative = { ...nativePublication, nativeAvailable: () => true, moveNoReplace: async (source, destination) => path.resolve(source) === path.resolve(deletedWarningSource) ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' })) : nativePublication.moveNoReplace(source, destination), commitCrossVolumeFile: async ({ source, staged, target }) => { deletedWarningCommits += 1; const published = await nativePublication.moveNoReplace(staged, target); fs.unlinkSync(source); throw Object.assign(new Error('post-unlink parent fsync failed'), { code: 'EIO', published: true, deleted: true, cleanupWarning: true, phase: 'post-unlink-cleanup', outcomeUnknown: true, identity: published.identity }); } };
+    const deletedWarningResult = await moveFileAtomic(deletedWarningSource, deletedWarningTarget, { nativePublicationService: deletedWarningNative }); assert.strictEqual(deletedWarningCommits, 1, 'post-unlink cleanup warning must not retry cross-volume commit'); assert.strictEqual(deletedWarningResult.cleanupWarning, true); assert.strictEqual(deletedWarningResult.cleanupPhase, 'post-unlink-cleanup'); assert.strictEqual(deletedWarningResult.outcomeUnknown, true); assert.strictEqual(deletedWarningResult.sourceRetained, false); assert.strictEqual(deletedWarningResult.recoveryPath, undefined); assert(!fs.existsSync(deletedWarningSource)); assert.strictEqual(fs.readFileSync(deletedWarningTarget, 'utf8'), 'deleted cleanup warning');
+
+    const replacedPublishedSource = path.join(root, 'cross-volume-replaced-published-source.bin'); const replacedPublishedTarget = path.join(root, 'cross-volume-replaced-published-target.bin'); const replacedPublishedOwned = `${replacedPublishedTarget}.owned`; fs.writeFileSync(replacedPublishedSource, 'owned published target'); let replacedPublishedCommits = 0;
+    const replacedPublishedNative = { ...nativePublication, nativeAvailable: () => true, moveNoReplace: async (source, destination) => path.resolve(source) === path.resolve(replacedPublishedSource) ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' })) : nativePublication.moveNoReplace(source, destination), commitCrossVolumeFile: async ({ source, staged, target }) => { replacedPublishedCommits += 1; const published = await nativePublication.moveNoReplace(staged, target); fs.unlinkSync(source); fs.renameSync(target, replacedPublishedOwned); fs.writeFileSync(target, 'replacement target'); throw Object.assign(new Error('cleanup warning after target replacement'), { code: 'EIO', published: true, deleted: true, cleanupWarning: true, phase: 'post-unlink-cleanup', outcomeUnknown: true, identity: published.identity }); } };
+    await assert.rejects(moveFileAtomic(replacedPublishedSource, replacedPublishedTarget, { nativePublicationService: replacedPublishedNative }), error => error.deleted === true && error.outcomeUnknown === true && error.published === undefined && error.publishedConfirmed === false && error.publicationState === 'unknown' && error.publishedIdentity === undefined && error.recoveryRequired === false && error.recoveryPaths.length === 0 && error.uncertainPaths.includes(replacedPublishedTarget)); assert.strictEqual(replacedPublishedCommits, 1, 'target replacement after commit must not trigger a blind retry'); assert(!fs.existsSync(replacedPublishedSource)); assert.strictEqual(fs.readFileSync(replacedPublishedTarget, 'utf8'), 'replacement target'); assert.strictEqual(fs.readFileSync(replacedPublishedOwned, 'utf8'), 'owned published target');
+
+    const retainedRecoverySource = path.join(root, 'cross-volume-retained-recovery-source.bin'); const retainedRecoveryTarget = path.join(root, 'cross-volume-retained-recovery-target.bin'); const retainedRecoveryPath = path.join(root, 'cross-volume-retained-native-recovery.bin'); fs.writeFileSync(retainedRecoverySource, 'owned retained source');
+    const retainedRecoveryNative = { ...nativePublication, nativeAvailable: () => true, moveNoReplace: async (source, destination) => path.resolve(source) === path.resolve(retainedRecoverySource) ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' })) : nativePublication.moveNoReplace(source, destination), commitCrossVolumeFile: async ({ source, staged, target }) => { const published = await nativePublication.moveNoReplace(staged, target); fs.renameSync(source, retainedRecoveryPath); fs.writeFileSync(source, 'new source occupant'); throw Object.assign(new Error('pre-unlink source recovery retained'), { code: 'EACCES', published: true, recoveryPath: retainedRecoveryPath, identity: published.identity }); } };
+    await assert.rejects(moveFileAtomic(retainedRecoverySource, retainedRecoveryTarget, { nativePublicationService: retainedRecoveryNative }), error => error.code === PUBLISH_PARTIAL_CODE && error.published === true && error.publishedConfirmed === true && error.publicationState === 'published' && error.publishedIdentity && error.recoveryRequired === true && error.recoveryPaths.length === 1 && error.recoveryPaths[0] === retainedRecoveryPath && error.recoveryPaths.every(candidate => fs.existsSync(candidate)) && error.sourceRetained === false && error.uncertainPaths.includes(retainedRecoverySource)); assert.strictEqual(fs.readFileSync(retainedRecoverySource, 'utf8'), 'new source occupant'); assert.strictEqual(fs.readFileSync(retainedRecoveryPath, 'utf8'), 'owned retained source'); assert.strictEqual(fs.readFileSync(retainedRecoveryTarget, 'utf8'), 'owned retained source');
+
+    const retainedSourceSource = path.join(root, 'cross-volume-retained-source.bin'); const retainedSourceTarget = path.join(root, 'cross-volume-retained-source-target.bin'); fs.writeFileSync(retainedSourceSource, 'verified source retained');
+    const retainedSourceNative = { ...nativePublication, nativeAvailable: () => true, moveNoReplace: async (source, destination) => path.resolve(source) === path.resolve(retainedSourceSource) ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' })) : nativePublication.moveNoReplace(source, destination), commitCrossVolumeFile: async ({ staged, target }) => { const published = await nativePublication.moveNoReplace(staged, target); throw Object.assign(new Error('pre-unlink cleanup denied'), { code: 'EACCES', published: true, identity: published.identity }); } };
+    await assert.rejects(moveFileAtomic(retainedSourceSource, retainedSourceTarget, { nativePublicationService: retainedSourceNative }), error => error.code === PUBLISH_PARTIAL_CODE && error.published === true && error.publishedConfirmed === true && error.sourceRetained === true && error.recoveryRequired === true && error.recoveryPaths.includes(retainedSourceSource) && error.recoveryPaths.every(candidate => fs.existsSync(candidate))); assert.strictEqual(fs.readFileSync(retainedSourceSource, 'utf8'), 'verified source retained'); assert.strictEqual(fs.readFileSync(retainedSourceTarget, 'utf8'), 'verified source retained');
+
+    const combinedSource = path.join(root, 'cross-volume-combined-source.bin'); const combinedTarget = path.join(root, 'cross-volume-combined-target.bin'); const combinedRecovery = path.join(root, 'cross-volume-combined-recovery.bin'); const combinedOwnedTarget = `${combinedTarget}.owned`; fs.writeFileSync(combinedSource, 'combined owned payload');
+    const combinedNative = { ...nativePublication, nativeAvailable: () => true, moveNoReplace: async (source, destination) => path.resolve(source) === path.resolve(combinedSource) ? Promise.reject(Object.assign(new Error('simulated cross-device move'), { code: 'EXDEV' })) : nativePublication.moveNoReplace(source, destination), commitCrossVolumeFile: async ({ source, staged, target }) => { const published = await nativePublication.moveNoReplace(staged, target); fs.renameSync(source, combinedRecovery); fs.writeFileSync(source, 'combined source replacement'); fs.renameSync(target, combinedOwnedTarget); fs.writeFileSync(target, 'combined target replacement'); throw Object.assign(new Error('retained recovery with target replacement'), { code: 'EACCES', published: true, recoveryPath: combinedRecovery, identity: published.identity }); } };
+    await assert.rejects(moveFileAtomic(combinedSource, combinedTarget, { nativePublicationService: combinedNative }), error => error.code === PUBLISH_PARTIAL_CODE && error.published !== true && error.publishedConfirmed === false && error.publicationState === 'unknown' && error.outcomeUnknown === true && error.publishedIdentity === undefined && error.recoveryPaths.length === 1 && error.recoveryPaths[0] === combinedRecovery && error.recoveryPaths.every(candidate => fs.existsSync(candidate)) && error.sourceRetained === false && error.uncertainPaths.includes(combinedSource) && error.uncertainPaths.includes(combinedTarget) && /结果待确认/.test(error.message) && !/内容已发布/.test(error.message)); assert.strictEqual(fs.readFileSync(combinedRecovery, 'utf8'), 'combined owned payload'); assert.strictEqual(fs.readFileSync(combinedSource, 'utf8'), 'combined source replacement'); assert.strictEqual(fs.readFileSync(combinedTarget, 'utf8'), 'combined target replacement'); assert.strictEqual(fs.readFileSync(combinedOwnedTarget, 'utf8'), 'combined owned payload');
 
     const stagedRaceSource = path.join(root, 'cross-volume-staging-race-source.bin');
     const stagedRaceTarget = path.join(root, 'cross-volume-staging-race-target.bin');
@@ -271,7 +420,7 @@ const run = async () => {
           await fs.promises.rm(sourcePath, removeOptions);
         },
       }),
-      error => error.code === PUBLISH_PARTIAL_CODE && error.recoveryRequired,
+      error => error.code === PUBLISH_PARTIAL_CODE && error.recoveryRequired && error.sourceRetained === true && error.recoveryPaths.length > 0 && error.recoveryPaths.every(candidate => fs.existsSync(candidate)),
     );
     assert.strictEqual(sourceDeleteAttempt, 2, 'the injected failure occurs at the second locked per-file commit');
     assert.strictEqual(fs.existsSync(path.join(cleanupFailureSource, cleanupFailureFiles[0])), false, 'the first source was deleted only after its target was locked and verified');
@@ -370,6 +519,12 @@ const run = async () => {
     assert.strictEqual(fs.readFileSync(path.join(sameDeviceDestination, 'same-device.txt'), 'utf8'), 'same-device', 'same-device direct move creates the destination');
     assert.strictEqual(directDevicePublishCalls, 1, 'same-device handler move uses the direct atomic no-clobber path');
     assert.strictEqual(fallbackDeviceMoveCalls, 0, 'same-device handler move does not invoke movePathAtomic');
+
+    const postCommitMoveSource = path.join(deviceMoveProject, 'post-commit-move.txt'); fs.writeFileSync(postCommitMoveSource, 'post-commit-move'); mockedDeviceByPath.set(path.resolve(postCommitMoveSource).toLowerCase(), 7101); const postCommitMoveHandlers = new Map(); let postCommitMoveUndo = null;
+    registerFileOperationsIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto, ipcMain: { handle: (name, handler) => postCommitMoveHandlers.set(name, handler), on: () => {} }, fs: deviceAwareFs, path, getProjectPath: () => deviceMoveProject, activeProjectFileOperations: new Map(), assertInside, publishPathNoClobber: (sourcePath, destinationPath, options) => publishPathNoClobber(sourcePath, destinationPath, { ...options, nativePublicationService: { nativeAvailable: () => true, moveNoReplace: async (source, target) => { fs.renameSync(source, target); throw Object.assign(new Error('parent fsync reply lost'), { published: true, publishedPath: target, identity: 'post-commit-move-native' }); }, inspectPath: async () => ({ success: true, identity: 'post-commit-move-native' }) } }), movePathAtomic, pushUndoOperation: async operation => { postCommitMoveUndo = operation; return { undoToken: 'post-commit-move-undo' }; }, throwIfCancelled, writeLog: () => undefined });
+    const postCommitMoveResult = await postCommitMoveHandlers.get('workspace-file-operation')({ sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'move', ['post-commit-move.txt'], 'same-device-target');
+    const postCommitMoveTarget = path.join(sameDeviceDestination, 'post-commit-move.txt');
+    assert.strictEqual(postCommitMoveResult.success, false); assert.strictEqual(postCommitMoveResult.published, true); assert.strictEqual(postCommitMoveResult.outcomeUnknown, false); assert.deepStrictEqual(postCommitMoveResult.recovery.publishedPaths, [postCommitMoveTarget]); assert.strictEqual(postCommitMoveUndo.kind, 'move', 'proven post-commit single move must record a safe move undo'); assert.strictEqual(fs.readFileSync(postCommitMoveTarget, 'utf8'), 'post-commit-move'); assert.strictEqual(fs.existsSync(postCommitMoveSource), false);
 
     directDevicePublishCalls = 0;
     const differentDeviceMoveResult = await deviceMoveHandler(
@@ -531,6 +686,37 @@ const run = async () => {
     await removeCreatedPasteTargets([cancelBatchTarget]);
     assert.strictEqual(fs.existsSync(cancelBatchTarget), false);
 
+    const partialBatchRoot = path.join(root, 'partial-batch-ownership'); fs.mkdirSync(partialBatchRoot); const partialBatchPlan = [];
+    for (let index = 0; index < 2; index += 1) { const sourcePath = path.join(partialBatchRoot, `source-${index}.txt`); fs.writeFileSync(sourcePath, `batch-${index}`); await collectCopyPlan(sourcePath, path.join(partialBatchRoot, `target-${index}.txt`), partialBatchPlan); }
+    let partialBatchInspectCalls = 0;
+    const partialBatchNative = { nativeAvailable: () => true, inspectPathsBatch: async paths => { partialBatchInspectCalls += 1; if (partialBatchInspectCalls === 1) return paths.map((candidate, index) => ({ success: true, identity: `batch-stage-${index}`, path: candidate })); return [{ success: false }, { success: true, identity: 'batch-stage-1' }, { success: true, identity: 'batch-stage-0' }, { success: false }]; }, moveNoReplaceBatch: async requests => { fs.renameSync(requests[0].source, requests[0].target); throw Object.assign(new Error('second batch result unknown'), { completed: [{ index: 0, identity: requests[0].identity, strategy: 'test-batch' }], failedIndex: 1, outcomeUnknown: true, published: false }); }, deletePathsBatch: async requests => requests.map((request, index) => { if (fs.existsSync(request.path)) fs.unlinkSync(request.path); return { index, success: true }; }) };
+    let partialBatchError;
+    await assert.rejects(copyPlannedFiles(partialBatchPlan, { ownershipToken: 'partial-batch-owner', nativePublicationService: partialBatchNative }), error => { partialBatchError = error; return error.code === PUBLISH_PARTIAL_CODE && error.outcomeUnknown === true; });
+    const provenBatchTarget = path.join(partialBatchRoot, 'target-0.txt'); const uncertainBatchTarget = path.join(partialBatchRoot, 'target-1.txt');
+    Object.assign(partialBatchError, { nativeCode: 'NATIVE_BATCH_UNKNOWN', rollbackError: 'rollback diagnostic', attemptedStagingPath: path.join(partialBatchRoot, '.attempted-stage'), stagingExists: false, targetExists: true });
+    assert.deepStrictEqual(partialBatchError.ownershipSnapshot.map(item => path.resolve(item.path)), [path.resolve(provenBatchTarget)], 'batch partial ownership must retain the proven first item and exclude the unknown second item'); assert.strictEqual(fs.existsSync(uncertainBatchTarget), false);
+    releaseCleanupOwnership(partialBatchError.ownershipToken);
+    assert.deepStrictEqual(partialBatchError.ownershipSnapshot.map(item => path.resolve(item.path)), [path.resolve(provenBatchTarget)], 'releasing the ledger must not erase the error recovery snapshot already returned to IPC');
+
+    const partialBatchIpcHandlers = new Map(); let partialBatchUndo = null; const partialBatchImportSource = path.join(root, 'partial-batch-import-source.txt'); fs.writeFileSync(partialBatchImportSource, 'import');
+    registerFileOperationsIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto, ipcMain: { handle: (name, handler) => partialBatchIpcHandlers.set(name, handler), on: () => {} }, fs, path, getProjectPath: () => partialBatchRoot, activeProjectFileOperations: new Map(), fileOperationState: { projectFileClipboard: null }, writeLog: () => {}, assertInside, assertDiskSpace, collectCopyPlan, capturePathIdentity, samePathIdentity, removeCreatedPasteTargets, throwIfCancelled, uniqueDestination, copyPlannedFiles: async () => { throw partialBatchError; }, backgroundTasks: { create: () => ({ deduplicated: false, context: { signal: new AbortController().signal, report: () => {}, acquireResourceLease: async () => ({ release: () => true }) }, waitForStart: async () => {}, complete: () => {}, fail: () => {}, cancelled: () => {}, isFinished: () => false }), cancel: () => false }, pushUndoOperation: async operation => { partialBatchUndo = operation; return { undoToken: 'partial-batch-undo' }; } });
+    const partialBatchIpcResult = await partialBatchIpcHandlers.get('workspace-file-operation')({ sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'import', [partialBatchImportSource], '');
+    assert.deepStrictEqual(partialBatchIpcResult.recovery.publishedPaths.map(item => path.resolve(item)), [path.resolve(provenBatchTarget)]); assert.deepStrictEqual(partialBatchUndo.paths.map(item => path.resolve(item)), [path.resolve(provenBatchTarget)], 'IPC must build recovery undo for the proven completed batch item after ledger release');
+    assert.deepStrictEqual(partialBatchIpcResult.recoveryPaths, partialBatchError.recoveryPaths); assert.strictEqual(partialBatchIpcResult.nativeCode, 'NATIVE_BATCH_UNKNOWN'); assert.strictEqual(partialBatchIpcResult.rollbackError, 'rollback diagnostic'); assert.strictEqual(partialBatchIpcResult.attemptedStagingPath, partialBatchError.attemptedStagingPath); assert.strictEqual(partialBatchIpcResult.stagingExists, false); assert.strictEqual(partialBatchIpcResult.targetExists, true);
+    const runExplicitUncertainOwnership = async uncertainPath => {
+      const operationId = `uncertain-owner-${crypto.randomUUID()}`; const handlers = new Map(); let undoCalls = 0;
+      const ownership = partialBatchError.ownershipSnapshot[0];
+      const uncertaintyError = Object.assign(new Error('explicit uncertain ownership'), { code: PUBLISH_PARTIAL_CODE, published: true, publishedIdentity: ownership.identity, destinationPath: provenBatchTarget, ownershipToken: operationId, ownershipSnapshot: [{ ...ownership, ownershipToken: operationId }], uncertainPaths: [uncertainPath] });
+      registerFileOperationsIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto: { ...crypto, randomUUID: () => operationId }, ipcMain: { handle: (name, handler) => handlers.set(name, handler), on: () => {} }, fs, path, getProjectPath: () => partialBatchRoot, activeProjectFileOperations: new Map(), fileOperationState: { projectFileClipboard: null }, writeLog: () => {}, assertInside, assertDiskSpace, collectCopyPlan, capturePathIdentity, samePathIdentity, removeCreatedPasteTargets, throwIfCancelled, uniqueDestination, copyPlannedFiles: async () => { throw uncertaintyError; }, backgroundTasks: { create: () => ({ deduplicated: false, context: { signal: new AbortController().signal, report: () => {}, acquireResourceLease: async () => ({ release: () => true }) }, waitForStart: async () => {}, complete: () => {}, fail: () => {}, cancelled: () => {}, isFinished: () => false }), cancel: () => false }, pushUndoOperation: async () => { undoCalls += 1; } });
+      const result = await handlers.get('workspace-file-operation')({ sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'import', [partialBatchImportSource], '');
+      assert.deepStrictEqual(result.recovery.publishedPaths, [], 'an explicitly uncertain path must never be upgraded by a matching ownership snapshot'); assert.strictEqual(undoCalls, 0, 'explicitly uncertain ownership must not create remove-created undo'); assert(result.uncertainPaths.some(candidate => physicalPathKey(candidate) === physicalPathKey(provenBatchTarget)), 'explicit uncertainty remains reported');
+    };
+    await runExplicitUncertainOwnership(provenBatchTarget);
+    if (process.platform === 'win32') await runExplicitUncertainOwnership(provenBatchTarget.toUpperCase());
+    fs.unlinkSync(provenBatchTarget); fs.writeFileSync(provenBatchTarget, 'replacement after ownership snapshot'); partialBatchUndo = null;
+    const replacedBatchIpcResult = await partialBatchIpcHandlers.get('workspace-file-operation')({ sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'import', [partialBatchImportSource], '');
+    assert.deepStrictEqual(replacedBatchIpcResult.recovery.publishedPaths, [], 'identity-changed ownership must be excluded from destructive recovery'); assert.strictEqual(partialBatchUndo, null, 'identity-changed ownership must not create an undo claim'); assert(replacedBatchIpcResult.uncertainPaths.map(candidate => path.resolve(candidate)).includes(path.resolve(provenBatchTarget)), 'identity-changed ownership is reported as uncertain'); assert.strictEqual(fs.readFileSync(provenBatchTarget, 'utf8'), 'replacement after ownership snapshot'); fs.unlinkSync(provenBatchTarget);
+
     assert.strictEqual(assertInside(root, path.join(root, 'child'), 'test'), path.join(root, 'child'));
     assert.throws(() => assertInside(root, path.join(root, '..', 'outside'), 'test'), /超出允许的目录/);
     const reserved = new Set();
@@ -560,6 +746,17 @@ const run = async () => {
     fs.writeFileSync(path.join(growingSource, 'new.txt'), 'new during copy');
     await assert.rejects(removeCopiedSources(growingPlan), /发生变化/);
     assert.strictEqual(fs.readFileSync(path.join(growingSource, 'new.txt'), 'utf8'), 'new during copy');
+
+    const cleanupRootsBeforePostUnlink = new Set(fs.readdirSync(root).filter(name => name.startsWith('.photoflow-cleanup-'))); const postUnlinkSource = path.join(root, 'post-unlink-cut-source.txt'); fs.writeFileSync(postUnlinkSource, 'post-unlink-cut'); const postUnlinkPlan = []; await collectCopyPlan(postUnlinkSource, path.join(root, 'post-unlink-cut-target.txt'), postUnlinkPlan); let postUnlinkDeletes = 0;
+    const postUnlinkNative = { ...nativePublication, compareDeleteFile: async ({ target }) => { postUnlinkDeletes += 1; fs.unlinkSync(target); throw Object.assign(new Error('post-unlink fsync failed'), { code: 'EIO', deleted: true, cleanupWarning: true, outcomeUnknown: true, phase: 'post-unlink-cleanup', originalMissing: true }); } };
+    const postUnlinkOutcome = await removeCopiedSources(postUnlinkPlan, { ownershipToken: 'post-unlink-cut', nativePublicationService: postUnlinkNative });
+    assert.strictEqual(postUnlinkOutcome.success, true); assert.strictEqual(postUnlinkOutcome.outcomeUnknown, true); assert.match(postUnlinkOutcome.cleanupWarning, /持久化确认失败/); assert.strictEqual(postUnlinkOutcome.phase, 'post-unlink-cleanup'); assert.deepStrictEqual(postUnlinkOutcome.recoveryPaths, []); assert.strictEqual(fs.existsSync(postUnlinkSource), false); assert.deepStrictEqual(new Set(fs.readdirSync(root).filter(name => name.startsWith('.photoflow-cleanup-'))), cleanupRootsBeforePostUnlink, 'empty owned outer quarantine is removed after terminal post-unlink success');
+    fs.writeFileSync(postUnlinkSource, 'replacement after terminal delete'); await assert.rejects(removeCopiedSources(postUnlinkPlan, { ownershipToken: 'post-unlink-cut-retry', nativePublicationService: postUnlinkNative }), /发生变化/); assert.strictEqual(postUnlinkDeletes, 1, 'retry must stop before deleting a replacement at the original source path'); assert.strictEqual(fs.readFileSync(postUnlinkSource, 'utf8'), 'replacement after terminal delete');
+
+    const batchDeletedSource = path.join(root, 'batch-deleted-cut-source.txt'); fs.writeFileSync(batchDeletedSource, 'batch-deleted-cut'); const batchDeletedPlan = []; await collectCopyPlan(batchDeletedSource, path.join(root, 'batch-deleted-cut-target.txt'), batchDeletedPlan);
+    const batchDeletedNative = { ...nativePublication, compareDeleteFile: undefined, deletePathsBatch: async requests => requests.map(({ path: target }) => { fs.unlinkSync(target); return { success: false, code: 'EIO', deleted: true, cleanupWarning: 'batch post-unlink warning', outcomeUnknown: true, phase: 'batch-post-unlink', originalMissing: true }; }) };
+    const batchDeletedOutcome = await removeCopiedSources(batchDeletedPlan, { ownershipToken: 'batch-deleted-cut', nativePublicationService: batchDeletedNative });
+    assert.strictEqual(batchDeletedOutcome.success, true); assert.match(batchDeletedOutcome.cleanupWarning, /batch post-unlink warning/); assert.strictEqual(batchDeletedOutcome.outcomeUnknown, true); assert.strictEqual(batchDeletedOutcome.phase, 'batch-post-unlink'); assert.deepStrictEqual(batchDeletedOutcome.recoveryPaths, []); assert.strictEqual(fs.existsSync(batchDeletedSource), false);
 
     const dragImportProject = path.join(root, 'drag-import-project');
     const dragImportSource = path.join(root, 'drag-import-source');
@@ -648,7 +845,12 @@ const run = async () => {
     );
     assert.strictEqual(cancelledDragResult.cancelled, true);
     assert.strictEqual(cancelledDragReported, true);
-    assert.strictEqual(fs.existsSync(path.join(cancelledDragProject, 'cancelled-drag-source')), false, 'cancelled drag import must roll back partial targets');
+    assert.strictEqual(fs.existsSync(path.join(cancelledDragProject, 'cancelled-drag-source')), true, 'rollback must retain targets created by an unowned injected writer');
+
+    const unknownImportProject = path.join(root, 'unknown-import-project'); const unknownImportSource = path.join(root, 'unknown-import-source.txt'); fs.mkdirSync(unknownImportProject); fs.writeFileSync(unknownImportSource, 'source'); const unknownImportHandlers = new Map(); let unknownImportUndo = null;
+    registerFileOperationsIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto, ipcMain: { handle: (name, handler) => unknownImportHandlers.set(name, handler), on: () => {} }, fs, path, getProjectPath: () => unknownImportProject, activeProjectFileOperations: new Map(), fileOperationState: { projectFileClipboard: null }, writeLog: () => {}, assertInside, assertDiskSpace, collectCopyPlan, removeCreatedPasteTargets, throwIfCancelled, uniqueDestination, copyPlannedFiles: async plan => { const destination = plan.find(entry => entry.kind === 'file').destination; fs.writeFileSync(destination, 'unrelated replacement'); throw Object.assign(new Error('unknown import publication'), { code: PUBLISH_PARTIAL_CODE, transferStage: 'commit-target-outcome', destinationPath: destination, outcomeUnknown: true, published: false, recoveryRequired: true, sourceRetained: true, ownershipToken: 'unknown-import-token', ownershipSnapshot: [] }); }, backgroundTasks: { create: () => ({ deduplicated: false, context: { signal: new AbortController().signal, report: () => {}, acquireResourceLease: async () => ({ release: () => true }) }, waitForStart: async () => {}, complete: () => {}, fail: () => {}, cancelled: () => {}, isFinished: () => false }), cancel: () => false }, pushUndoOperation: async operation => { unknownImportUndo = operation; } });
+    const unknownImportResult = await unknownImportHandlers.get('workspace-file-operation')({ sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'import', [unknownImportSource], '');
+    assert.strictEqual(unknownImportResult.success, false); assert.strictEqual(unknownImportResult.outcomeUnknown, true); assert.strictEqual(unknownImportResult.published, false); assert.deepStrictEqual(unknownImportResult.recovery.publishedPaths, []); assert.strictEqual(unknownImportUndo, null, 'unknown/preexisting import targets must never create destructive undo'); assert.strictEqual(fs.readFileSync(path.join(unknownImportProject, 'unknown-import-source.txt'), 'utf8'), 'unrelated replacement');
 
     const conflictProject = path.join(root, 'conflict-project');
     const conflictExternal = path.join(root, 'conflict-external');
@@ -918,6 +1120,11 @@ const run = async () => {
     assert.strictEqual(screenshotUndo.kind, 'remove-created');
     assert.strictEqual(screenshotUndo.label, '粘贴截图');
 
+    const unknownScreenshotProject = path.join(root, 'unknown-screenshot-project'); fs.mkdirSync(unknownScreenshotProject); const unknownScreenshotHandlers = new Map(); let unknownScreenshotUndo = null; let unknownScreenshotInspect = 0;
+    registerFileOperationsIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined, crypto, ipcMain: { handle: (name, handler) => unknownScreenshotHandlers.set(name, handler), on: () => {} }, fs, path, getProjectPath: () => unknownScreenshotProject, activeProjectFileOperations: new Map(), fileOperationState: { projectFileClipboard: null }, clipboard: { readImage: () => ({ isEmpty: () => false, toPNG: () => screenshotBytes }) }, readSystemFileClipboard: async () => null, writeLog: () => {}, assertInside, assertExistingInside, throwIfCancelled, uniqueDestination, publishPathNoClobber: (sourcePath, destinationPath, options) => publishPathNoClobber(sourcePath, destinationPath, { ...options, nativePublicationService: { nativeAvailable: () => true, moveNoReplace: async (source, target) => { fs.renameSync(source, target); throw Object.assign(new Error('screenshot post-rename reply lost'), { published: true, publishedPath: target, identity: 'screenshot-original-native' }); }, inspectPath: async target => { if (unknownScreenshotInspect++ === 0) { fs.unlinkSync(target); fs.writeFileSync(target, 'screenshot replacement'); return { success: true, identity: 'screenshot-original-native' }; } return { success: true, identity: 'screenshot-replacement-native' }; } } }), pushUndoOperation: async operation => { unknownScreenshotUndo = operation; } });
+    const unknownScreenshotResult = await unknownScreenshotHandlers.get('workspace-file-operation')({ sender: { isDestroyed: () => false, send: () => {} } }, 'workspace', '策划中', 'project', 'paste', [], '');
+    assert.strictEqual(unknownScreenshotResult.success, false); assert.strictEqual(unknownScreenshotResult.outcomeUnknown, true); assert.strictEqual(unknownScreenshotResult.published, false); assert.deepStrictEqual(unknownScreenshotResult.recovery.publishedPaths, []); assert.strictEqual(unknownScreenshotUndo, null, 'unknown screenshot replacement must not create destructive undo'); assert(Array.isArray(unknownScreenshotResult.uncertainPaths) && unknownScreenshotResult.uncertainPaths.length === 2); const unknownScreenshotTarget = fs.readdirSync(unknownScreenshotProject).map(name => path.join(unknownScreenshotProject, name)).find(candidate => !path.basename(candidate).startsWith('.photoflow-')); assert.strictEqual(fs.readFileSync(unknownScreenshotTarget, 'utf8'), 'screenshot replacement');
+
     const failureProject = path.join(root, 'replacement-failure-project');
     const failureExternal = path.join(root, 'replacement-failure-external');
     fs.mkdirSync(failureProject);
@@ -943,7 +1150,7 @@ const run = async () => {
     );
     assert.strictEqual(failureResult.success, false);
     assert.strictEqual(fs.readFileSync(failureTarget, 'utf8'), 'original content', 'a failed replacement must not touch the old target');
-    assert.strictEqual(fs.readdirSync(failureProject).some(name => name.startsWith('.photoflow-')), false);
+    assert.strictEqual(fs.readdirSync(failureProject).some(name => name.startsWith('.photoflow-')), true, 'an unowned injected staging root must be retained instead of path-deleted');
 
     const replacementRaceProject = path.join(root, 'replacement-race-project');
     const replacementRaceExternal = path.join(root, 'replacement-race-external');
@@ -2277,7 +2484,7 @@ const run = async () => {
 const testTimeout = setTimeout(() => {
   console.error('file transfer service tests timed out before completing');
   process.exit(1);
-}, 30000);
+}, 60000);
 run().then(() => clearTimeout(testTimeout)).catch(error => {
   clearTimeout(testTimeout);
   console.error(error);

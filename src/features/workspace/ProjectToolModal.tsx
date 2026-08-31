@@ -51,9 +51,34 @@ export const ToolModal = ({ title, ownerPageId, panelKind, open, busy = false, u
   const taskKey = panelTaskSessionKey(ownerPageId, panelKind);
   const task = panelTasks[taskKey];
   const manualBusyRef = useRef(false);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
   const backgroundTaskActive = backgroundTasks.some(candidate => isActivePresentedBackgroundTaskForPanel(candidate, ownerPageId, panelKind));
   const effectiveBusy = busy || task?.state === 'running' || useBackgroundTaskBusyFallback && backgroundTaskActive;
   useEscapeLayer(open, onClose, true, true);
+
+  useEffect(() => {
+    if (!open) return;
+    const previouslyFocused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const dialog = dialogRef.current;
+    const selector = 'button:not([disabled]),input:not([disabled]),select:not([disabled]),textarea:not([disabled]),a[href],[tabindex]:not([tabindex="-1"])';
+    const focusables = () => Array.from(dialog?.querySelectorAll<HTMLElement>(selector) || []).filter(node => !node.hidden);
+    focusables()[0]?.focus();
+    const trapKeyboard = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); onCloseRef.current(); return; }
+      if (event.key !== 'Tab') return;
+      const items = focusables();
+      if (!items.length) { event.preventDefault(); dialog?.focus(); return; }
+      const currentIndex = items.indexOf(document.activeElement as HTMLElement);
+      const nextIndex = event.shiftKey
+        ? currentIndex <= 0 ? items.length - 1 : currentIndex - 1
+        : currentIndex < 0 || currentIndex === items.length - 1 ? 0 : currentIndex + 1;
+      event.preventDefault();
+      items[nextIndex].focus();
+    };
+    window.addEventListener('keydown', trapKeyboard, true);
+    return () => { window.removeEventListener('keydown', trapKeyboard, true); previouslyFocused?.focus(); };
+  }, [open]);
 
   useEffect(() => {
     if (!open) return;
@@ -70,11 +95,11 @@ export const ToolModal = ({ title, ownerPageId, panelKind, open, busy = false, u
       if (higherDialog && higherDialog !== dialog) return;
       event.preventDefault();
       event.stopImmediatePropagation();
-      if (!effectiveBusy) onClose();
+      if (!effectiveBusy) onCloseRef.current();
     };
     window.addEventListener('pointerdown', interceptOutsidePointer, true);
     return () => window.removeEventListener('pointerdown', interceptOutsidePointer, true);
-  }, [effectiveBusy, onClose, open]);
+  }, [effectiveBusy, open]);
 
   const reportBusyAsPanelTask = !panelKind.startsWith('version-');
   useEffect(() => {

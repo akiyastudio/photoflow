@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const crypto = require('crypto');
 const { spawn } = require('child_process');
 
 const COMMON_LABELS = new Map([
@@ -87,6 +88,42 @@ const runPowerShellJson = script => new Promise((resolve, reject) => {
 
 const expandEnvironmentVariables = value => String(value || '').replace(/%([^%]+)%/g, (_match, name) => process.env[name] || process.env[Object.keys(process.env).find(key => key.toLocaleLowerCase() === name.toLocaleLowerCase())] || '');
 const safeBaseName = value => String(value || '').trim().replace(/[<>:"/\\|?*\x00-\x1F]/g, '_').replace(/[. ]+$/g, '') || '文件';
+const HARDLINK_FALLBACK_CODES = new Set(['EPERM', 'EACCES', 'ENOTSUP', 'EOPNOTSUPP', 'EXDEV', 'EINVAL', 'UNKNOWN']);
+
+const digestFile = async filePath => {
+  const hash = crypto.createHash('sha256');
+  for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
+  return hash.digest('hex');
+};
+
+const publishGeneratedFileNoClobber = async (destination, populate) => {
+  const temporary = path.join(path.dirname(destination), `.${path.basename(destination)}.${crypto.randomUUID()}.photoflow-new`);
+  try {
+    await populate(temporary);
+    try { await fs.promises.link(temporary, destination); }
+    catch (error) {
+      if (!HARDLINK_FALLBACK_CODES.has(error?.code)) throw error;
+      try {
+        await fs.promises.copyFile(temporary, destination, fs.constants.COPYFILE_EXCL);
+        const sourceMode = (await fs.promises.stat(temporary)).mode;
+        await fs.promises.chmod(destination, sourceMode | 0o200);
+        const handle = await fs.promises.open(destination, 'r+');
+        try { await handle.sync(); } finally { await handle.close(); }
+        const [sourceStat, targetStat, sourceHash, targetHash] = await Promise.all([fs.promises.stat(temporary), fs.promises.stat(destination), digestFile(temporary), digestFile(destination)]);
+        if (sourceStat.size !== targetStat.size || sourceHash !== targetHash) throw Object.assign(new Error('新建文件发布校验失败'), { code: 'PUBLISH_VERIFY_FAILED' });
+        await fs.promises.chmod(destination, sourceMode).catch(() => undefined);
+      } catch (copyError) {
+        if (fs.existsSync(destination)) {
+          const recovery = `${destination}.recovery-${crypto.randomUUID()}`;
+          try { await fs.promises.rename(destination, recovery); copyError.recoveryPath = recovery; } catch { /* preserve ambiguous destination */ }
+        }
+        throw copyError;
+      }
+    }
+  } finally {
+    await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
+  }
+};
 
 const createShellNewService = ({ app } = {}) => {
   let cachedTypes = null;
@@ -199,11 +236,11 @@ const createShellNewService = ({ app } = {}) => {
     const baseName = `新建 ${safeBaseName(descriptor.label)}`;
     const destination = uniqueDestination(directory, `${baseName}${descriptor.extension}`);
     if (descriptor.method === 'null') await fs.promises.writeFile(destination, Buffer.alloc(0), { flag: 'wx' });
-    else if (descriptor.method === 'data') await fs.promises.writeFile(destination, Buffer.from(descriptor.dataBase64, 'base64'), { flag: 'wx' });
+    else if (descriptor.method === 'data') await publishGeneratedFileNoClobber(destination, temporary => fs.promises.writeFile(temporary, Buffer.from(descriptor.dataBase64, 'base64'), { flag: 'wx' }));
     else if (descriptor.method === 'template') {
       const template = resolveTemplate(descriptor.templatePath);
       if (!template) throw new Error(`找不到“${descriptor.label}”的 Windows 模板文件`);
-      await fs.promises.copyFile(template, destination, fs.constants.COPYFILE_EXCL);
+      await publishGeneratedFileNoClobber(destination, temporary => fs.promises.copyFile(template, temporary, fs.constants.COPYFILE_EXCL));
     } else throw new Error('该文件类型需要外部程序创建，当前未开放执行');
     return { name: path.basename(destination), path: destination, extension: descriptor.extension };
   };

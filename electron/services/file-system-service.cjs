@@ -21,19 +21,37 @@ const validWriteMeta = value => { const meta = writeMeta(value); return meta?.pr
 const sameWriteOwner = (left, right) => validWriteMeta(left) && validWriteMeta(right) && left._journalWrite.operationId === right._journalWrite.operationId && left._journalWrite.requestKey === right._journalWrite.requestKey;
 const legalSuccessor = (base, candidate) => sameWriteOwner(base, candidate) && candidate._journalWrite.generation === base._journalWrite.generation + 1 && ({ prepared: 'executing', executing: 'applied', applied: null }[base.state] === candidate.state || base.state === candidate.state);
 
-const promoteCandidate = async (fs, journalPath, candidate, canonical) => {
+const syncFile = async (fs, filePath) => {
+  const handle = await fs.promises.open(filePath, 'r+');
+  try { await handle.sync(); } finally { await handle.close().catch(() => undefined); }
+};
+
+const syncParentDirectory = async (fs, directory) => {
+  const handle = await fs.promises.open(directory, 'r');
+  try { await handle.sync(); } finally { await handle.close().catch(() => undefined); }
+};
+
+const publishJournalNoClobber = (source, target, nativePublicationService) => transfer.publishPathNoClobber(source, target, { nativePublicationService });
+
+const syncPublishedJournal = async (fs, journalPath) => {
+  await syncFile(fs, journalPath);
+  if (process.platform !== 'win32') await syncParentDirectory(fs, path.dirname(journalPath));
+};
+
+const promoteCandidate = async (fs, journalPath, candidate, canonical, nativePublicationService) => {
   if (candidate.filePath === journalPath) return;
   let recoveryBackup = '';
   if (canonical) {
     recoveryBackup = `${journalPath}.backup-recovery-${crypto.randomUUID()}`;
-    await fs.promises.rename(journalPath, recoveryBackup);
+    await publishJournalNoClobber(journalPath, recoveryBackup, nativePublicationService);
   }
-  try { await fs.promises.rename(candidate.filePath, journalPath); }
-  catch (error) { if (recoveryBackup && !fs.existsSync(journalPath)) await fs.promises.rename(recoveryBackup, journalPath).catch(() => undefined); throw error; }
+  try { await publishJournalNoClobber(candidate.filePath, journalPath, nativePublicationService); }
+  catch (error) { if (recoveryBackup && !fs.existsSync(journalPath)) await publishJournalNoClobber(recoveryBackup, journalPath, nativePublicationService).catch(() => undefined); throw error; }
+  await syncPublishedJournal(fs, journalPath);
   if (recoveryBackup) await fs.promises.rm(recoveryBackup, { force: true }).catch(() => undefined);
 };
 
-const recoverJournalFile = async (fs, journalPath) => {
+const recoverJournalFile = async (fs, journalPath, nativePublicationService) => {
   const directory = path.dirname(journalPath); const basename = path.basename(journalPath);
   const names = await fs.promises.readdir(directory).catch(() => []);
   const temporaryNames = names.filter(name => name.startsWith(`${basename}.tmp-`));
@@ -46,26 +64,36 @@ const recoverJournalFile = async (fs, journalPath) => {
   let winner = canonical;
   if (base) winner = temporaryCandidates.filter(candidate => legalSuccessor(base.value, candidate.value)).sort((left, right) => right.value._journalWrite.generation - left.value._journalWrite.generation)[0] || base;
   else winner = temporaryCandidates.filter(candidate => validWriteMeta(candidate.value) && candidate.value._journalWrite.generation === 1).sort((left, right) => right.value._journalWrite.generation - left.value._journalWrite.generation)[0] || null;
-  if (winner) await promoteCandidate(fs, journalPath, winner, canonical);
+  if (winner) await promoteCandidate(fs, journalPath, winner, canonical, nativePublicationService);
   return winner?.value || null;
 };
 
-const writeJournal = async (fs, journalPath, value, faultInjector = () => undefined) => {
+const writeJournal = async (fs, journalPath, value, faultInjector = () => undefined, nativePublicationService = null) => {
   await fs.promises.mkdir(path.dirname(journalPath), { recursive: true });
-  const previous = await recoverJournalFile(fs, journalPath);
+  const previous = await recoverJournalFile(fs, journalPath, nativePublicationService);
   if (!UUID.test(String(value.operationId || ''))) throw new Error('file_operation_trash_journal_operation_invalid');
   const previousMeta = validWriteMeta(previous) && previous.operationId === value.operationId ? previous._journalWrite : null;
   value._journalWrite = { protocol: JOURNAL_PROTOCOL, operationId: value.operationId, requestKey: journalRequestKey(value), resultKey: journalResultKey(value), generation: Number(previousMeta?.generation || 0) + 1, state: value.state };
   const writeId = `${process.pid}-${Date.now()}-${journalWriteSequence += 1}`;
   const temporary = `${journalPath}.tmp-${writeId}`;
-  const backup = `${journalPath}.backup-${writeId}`; let backedUp = false; let simulatedCrash = false;
-  await fs.promises.writeFile(temporary, JSON.stringify(value, null, 2), { encoding: 'utf8', flag: 'wx' });
-  try { await faultInjector('after-temp-before-backup', { journalPath, temporary }); if (fs.existsSync(journalPath)) { await fs.promises.rename(journalPath, backup); backedUp = true; } await faultInjector('after-backup-before-replace', { journalPath, temporary, backup }); await fs.promises.rename(temporary, journalPath); await faultInjector('after-replace-before-cleanup', { journalPath, backup }); if (backedUp) await fs.promises.rm(backup, { force: true }); }
-  catch (error) { simulatedCrash = error?.simulateCrash === true; if (!simulatedCrash && backedUp && !fs.existsSync(journalPath)) await fs.promises.rename(backup, journalPath).catch(() => undefined); throw error; }
-  finally { if (!simulatedCrash) { await fs.promises.rm(temporary, { force: true }).catch(() => undefined); await fs.promises.rm(backup, { force: true }).catch(() => undefined); } }
+  const backup = `${journalPath}.backup-${writeId}`; let backedUp = false; let preserveRecovery = false;
+  const temporaryHandle = await fs.promises.open(temporary, 'wx');
+  try { await temporaryHandle.writeFile(JSON.stringify(value, null, 2), 'utf8'); await temporaryHandle.sync(); }
+  finally { await temporaryHandle.close().catch(() => undefined); }
+  try {
+    await faultInjector('after-temp-before-backup', { journalPath, temporary });
+    if (fs.existsSync(journalPath)) { await publishJournalNoClobber(journalPath, backup, nativePublicationService); backedUp = true; if (process.platform !== 'win32') await syncParentDirectory(fs, path.dirname(journalPath)); }
+    await faultInjector('after-backup-before-replace', { journalPath, temporary, backup });
+    await publishJournalNoClobber(temporary, journalPath, nativePublicationService);
+    await syncPublishedJournal(fs, journalPath);
+    await faultInjector('after-replace-before-cleanup', { journalPath, backup });
+    if (backedUp) { await fs.promises.rm(backup, { force: true }); if (process.platform !== 'win32') await syncParentDirectory(fs, path.dirname(journalPath)); }
+  }
+  catch (error) { preserveRecovery = error?.simulateCrash === true || error?.code === transfer.PUBLISH_PARTIAL_CODE || error?.code === 'FILE_PUBLICATION_SERVICE_MISSING' || error?.outcomeUnknown === true || error?.recoveryRequired === true; if (preserveRecovery) { error.recoveryRequired = true; error.recoveryPath ||= fs.existsSync(temporary) ? temporary : fs.existsSync(backup) ? backup : undefined; } if (!preserveRecovery && backedUp && !fs.existsSync(journalPath)) await publishJournalNoClobber(backup, journalPath, nativePublicationService).catch(() => undefined); throw error; }
+  finally { if (!preserveRecovery) { await fs.promises.rm(temporary, { force: true }).catch(() => undefined); await fs.promises.rm(backup, { force: true }).catch(() => undefined); } }
 };
 
-const createFileSystemService = ({ recycleBinService, fs = require('fs'), journalFaultInjector = () => undefined }) => ({
+const createFileSystemService = ({ recycleBinService, fs = require('fs'), journalFaultInjector = () => undefined, nativePublicationService = null }) => ({
   ...transfer,
   ...identity,
   move: (source, destination, options) => transfer.movePathAtomic(source, destination, options),
@@ -77,32 +105,39 @@ const createFileSystemService = ({ recycleBinService, fs = require('fs'), journa
   trashMany: targetPaths => recycleBinService.trashMany(targetPaths),
   trashManyJournaled: async ({ targetPaths, journalPath }) => {
     const canonicalExisted = fs.existsSync(journalPath); const journalBasename = path.basename(journalPath); const recoveryArtifacts = (await fs.promises.readdir(path.dirname(journalPath)).catch(() => [])).filter(name => name.startsWith(`${journalBasename}.tmp-`) || name.startsWith(`${journalBasename}.backup-`) || name.startsWith(`${journalBasename}.recovery-`));
-    let journal = await recoverJournalFile(fs, journalPath);
+    let journal = await recoverJournalFile(fs, journalPath, nativePublicationService);
     if (!journal && (canonicalExisted || recoveryArtifacts.length)) throw new Error('file_operation_trash_journal_corrupt_or_ambiguous');
-    const normalizedTargets = [...new Set(targetPaths.map(target => path.resolve(target)))];
-    if (normalizedTargets.length !== targetPaths.length) throw new Error('file_operation_trash_request_not_unique');
-    const validResult = result => result && typeof result === 'object' && typeof result.success === 'boolean' && Array.isArray(result.items) && result.items.length === normalizedTargets.length && result.items.every(item => item && typeof item === 'object' && typeof item.success === 'boolean' && typeof item.recyclePidl === 'string' && typeof item.preciseRestore === 'boolean' && (item.permanent === undefined || typeof item.permanent === 'boolean'));
-    if (journal && (journal.schemaVersion !== 1 || journal.kind !== 'file-operations-trash-v1' || !['prepared', 'executing', 'applied'].includes(journal.state) || JSON.stringify(journal.targets) !== JSON.stringify(normalizedTargets))) throw new Error('file_operation_trash_journal_conflict');
+    const normalizedTargets = targetPaths.map(target => path.resolve(target));
+    const targetKeys = normalizedTargets.map(identity.physicalPathKey);
+    if (new Set(targetKeys).size !== targetPaths.length) throw new Error('file_operation_trash_request_not_unique');
+    const validResultItem = item => {
+      if (!item || typeof item !== 'object' || typeof item.success !== 'boolean') return false;
+      if (item.success) return typeof item.recyclePidl === 'string' && typeof item.preciseRestore === 'boolean' && (item.permanent === undefined || typeof item.permanent === 'boolean');
+      return true;
+    };
+    const validResult = result => result && typeof result === 'object' && typeof result.success === 'boolean' && Array.isArray(result.items) && result.items.length === normalizedTargets.length && result.items.every(validResultItem);
+    const sameJournalTargets = journal && Array.isArray(journal.targets) && journal.targets.length === targetKeys.length && journal.targets.every((target, index) => identity.physicalPathKey(target) === targetKeys[index]);
+    if (journal && (journal.schemaVersion !== 1 || journal.kind !== 'file-operations-trash-v1' || !['prepared', 'executing', 'applied'].includes(journal.state) || !sameJournalTargets)) throw new Error('file_operation_trash_journal_conflict');
     if (journal?.state === 'applied' && !journal.operationId && !journal._journalWrite) {
       const allowed = new Set(['schemaVersion', 'kind', 'state', 'targets', 'createdAt', 'executingAt', 'appliedAt', 'result']); const directory = path.dirname(journalPath); const basename = path.basename(journalPath); const siblings = await fs.promises.readdir(directory).catch(() => []);
       if (Object.keys(journal).some(key => !allowed.has(key)) || siblings.some(name => name.startsWith(`${basename}.tmp-`) || name.startsWith(`${basename}.backup-`) || name.startsWith(`${basename}.recovery-`)) || !validResult(journal.result)) throw new Error('file_operation_trash_legacy_applied_ambiguous');
       const unknown = { success: false, outcomeUnknown: true, code: 'TRASH_OUTCOME_UNKNOWN', manualRecovery: true, undoAvailable: false, items: [] };
-      if (normalizedTargets.some(target => fs.existsSync(target)) || journal.result.success !== true || journal.result.items.some((item, index) => item.success !== true || path.resolve(String(item.originalPath || '')) !== normalizedTargets[index] || (item.preciseRestore === true ? !item.recyclePidl || item.permanent === true : Boolean(item.recyclePidl)))) return unknown;
+      if (normalizedTargets.some(target => fs.existsSync(target)) || journal.result.success !== true || journal.result.items.some((item, index) => item.success !== true || identity.physicalPathKey(String(item.originalPath || '')) !== targetKeys[index] || (item.preciseRestore === true ? !item.recyclePidl || item.permanent === true : Boolean(item.recyclePidl)))) return unknown;
       for (const item of journal.result.items) if (item.preciseRestore === true) {
         if (!item.recyclePidl) return unknown;
         const probed = await recycleBinService.probe(item.recyclePidl).catch(() => null);
         if (!probed || probed.success !== true || probed.exists !== true || probed.pidl !== undefined && String(probed.pidl) !== item.recyclePidl) return unknown;
       }
-      journal.result.undoAvailable = journal.result.items.every(item => item.preciseRestore === true && item.permanent !== true && Boolean(item.recyclePidl)); journal.operationId = crypto.randomUUID(); await writeJournal(fs, journalPath, journal, journalFaultInjector); return journal.result;
+      journal.result.undoAvailable = journal.result.items.every(item => item.preciseRestore === true && item.permanent !== true && Boolean(item.recyclePidl)); journal.operationId = crypto.randomUUID(); await writeJournal(fs, journalPath, journal, journalFaultInjector, nativePublicationService); return journal.result;
     }
     if (journal && (!UUID.test(String(journal.operationId || '')) || Boolean(journal._journalWrite) !== validWriteMeta(journal))) throw new Error('file_operation_trash_journal_protocol_invalid');
     if (journal?.state === 'applied') { if (!validWriteMeta(journal) || journal._journalWrite.operationId !== journal.operationId || !validResult(journal.result)) throw new Error('file_operation_trash_journal_applied_invalid'); return journal.result; }
-    if (!journal) { journal = { schemaVersion: 1, kind: 'file-operations-trash-v1', operationId: crypto.randomUUID(), state: 'prepared', targets: normalizedTargets, createdAt: Date.now() }; await writeJournal(fs, journalPath, journal, journalFaultInjector); }
+    if (!journal) { journal = { schemaVersion: 1, kind: 'file-operations-trash-v1', operationId: crypto.randomUUID(), state: 'prepared', targets: normalizedTargets, createdAt: Date.now() }; await writeJournal(fs, journalPath, journal, journalFaultInjector, nativePublicationService); }
     if (journal.state === 'executing') return { success: false, outcomeUnknown: true, code: 'TRASH_OUTCOME_UNKNOWN', items: [] };
-    journal.state = 'executing'; journal.executingAt = Date.now(); await writeJournal(fs, journalPath, journal, journalFaultInjector);
+    journal.state = 'executing'; journal.executingAt = Date.now(); await writeJournal(fs, journalPath, journal, journalFaultInjector, nativePublicationService);
     const result = await recycleBinService.trashMany(normalizedTargets);
     journal.state = 'applied'; journal.appliedAt = Date.now(); journal.result = result;
-    await writeJournal(fs, journalPath, journal, journalFaultInjector);
+    await writeJournal(fs, journalPath, journal, journalFaultInjector, nativePublicationService);
     return result;
   },
   restore: item => recycleBinService.restore(item),

@@ -91,6 +91,10 @@ export const operationRefreshDirectories = (
   result?: { affectedDirectories?: string[] },
 ) => Array.from(new Set([...(operation.affectedDirectories || []), ...(result?.affectedDirectories || [])].map(normalizePath)));
 
+export const claimClipboardGeneration = (currentGeneration: number, pendingAcquired: boolean) => pendingAcquired
+  ? currentGeneration + 1
+  : currentGeneration;
+
 export const pendingOperationForEntry = (entry: ProjectFileEntry): Pick<PendingProjectFileEntry, 'pendingOperationId'> => {
   const pending = entry as PendingProjectFileEntry;
   return {

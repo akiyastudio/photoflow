@@ -1,6 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn } = require('child_process');
+const { terminateAndWait } = require('../infrastructure/process-termination.cjs');
 let clipboardProcessSequence = 0;
 
 const runJson = (command, args, stdin = '', timeoutMs = 12000, processSupervisor = null) => new Promise((resolve, reject) => {
@@ -13,6 +14,7 @@ const runJson = (command, args, stdin = '', timeoutMs = 12000, processSupervisor
   let stdout = '';
   let stderr = '';
   let settled = false;
+  let terminating = false;
   const finish = (error, value) => {
     if (settled) return;
     settled = true;
@@ -26,8 +28,9 @@ const runJson = (command, args, stdin = '', timeoutMs = 12000, processSupervisor
   child.stdin.end(stdin);
   child.stdout.on('data', data => { stdout = (stdout + data).slice(-1024 * 1024); });
   child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
-  child.on('error', error => finish(error));
+  child.on('error', error => { if (!terminating) finish(error); });
   child.on('close', code => {
+    if (terminating) return;
     const line = stdout.replace(/^\uFEFF/, '').split(/\r?\n/).map(value => value.trim()).filter(Boolean).pop();
     let payload;
     try { payload = line ? JSON.parse(line) : null; } catch { /* handled below */ }
@@ -39,8 +42,13 @@ const runJson = (command, args, stdin = '', timeoutMs = 12000, processSupervisor
     finish(null, payload);
   });
   const timer = setTimeout(() => {
-    if (!child.killed) child.kill();
-    finish(Object.assign(new Error('文件剪贴板服务响应超时'), { code: 'FILE_CLIPBOARD_TIMEOUT' }));
+    if (settled || terminating) return;
+    terminating = true;
+    const timeoutError = Object.assign(new Error('文件剪贴板服务响应超时，操作结果未知'), { code: 'FILE_CLIPBOARD_TIMEOUT', outcomeUnknown: true });
+    void terminateAndWait(child, Date.now() + 5000).then(
+      () => finish(timeoutError),
+      terminationError => finish(Object.assign(timeoutError, { terminationError, pid: child.pid || null }))
+    );
   }, timeoutMs);
 });
 
@@ -77,4 +85,4 @@ const createFileClipboardService = ({ app, projectRoot, processSupervisor = null
   return { write, read, clearIfCurrent, executable, nativeAvailable: () => process.platform === 'win32' && fs.existsSync(executable()) };
 };
 
-module.exports = { createFileClipboardService };
+module.exports = { createFileClipboardService, runJson };

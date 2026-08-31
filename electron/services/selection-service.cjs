@@ -1,4 +1,6 @@
 const path = require('path');
+const { physicalPathKey, capturePathIdentity } = require('./file-identity-service.cjs');
+const { removeCreatedPasteTargets, releaseCleanupOwnership } = require('./file-transfer-service.cjs');
 
 const SELECTION_LIMITS = Object.freeze({
   sourceFolderPageSize: 500,
@@ -50,7 +52,7 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
     if (imageExtensions.has(extension) || rawExtensions.has(extension)) return 'image';
     return '';
   };
-  const comparable = value => path.resolve(value).toLocaleLowerCase();
+  const comparable = physicalPathKey;
   const inside = (parent, candidate, allowSame = false) => {
     const relative = path.relative(path.resolve(parent), path.resolve(candidate));
     return (allowSame && !relative) || Boolean(relative && !relative.startsWith('..') && !path.isAbsolute(relative));
@@ -437,12 +439,14 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
     const operationId = String(request.operationId || crypto.randomUUID());
     if (!/^[0-9a-z-]{8,128}$/i.test(operationId) || activeOperations.has(operationId)) throw new Error('选片 operationId 无效或重复');
     const job = { cancelled: false };
+    const ownershipToken = `selection-${operationId}-${crypto.randomUUID()}`;
     activeOperations.set(operationId, job);
     const createdFiles = [];
     const createdDirectories = [];
     let nodesReady = false;
     let plan;
     let ownsRecoveryMarker = false;
+    let recoveryMarkerIdentity = null;
     try {
       plan = await buildPlan(job);
       if (!request.expectedSignature || request.expectedSignature !== plan.signature) throw new Error('预检结果已经过期，请重新预检');
@@ -450,6 +454,7 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
       // video sources. A source with no matching media is only a search miss;
       // it must not materialize an empty selection folder or database node.
       if (!plan.candidates.length) {
+        releaseCleanupOwnership(ownershipToken);
         return {
           ...plan.summary,
           success: true,
@@ -466,10 +471,11 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
           }), { encoding: 'utf8', flag: 'wx' });
         }
         ownsRecoveryMarker = true;
+        recoveryMarkerIdentity = await capturePathIdentity(plan.target.recoveryMarkerPath);
       }
       if (!fs.existsSync(plan.target.targetPath)) {
         await fs.promises.mkdir(plan.target.targetPath, { recursive: false });
-        createdDirectories.push(plan.target.targetPath);
+        createdDirectories.push({ path: plan.target.targetPath, identity: await capturePathIdentity(plan.target.targetPath), ownershipToken });
       }
       // Persist the explicit source -> selection relationship before copying.
       // If the process stops mid-copy, the next run can resume against a valid
@@ -477,7 +483,8 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
       const nodes = await ensureNodes(request, plan);
       nodesReady = true;
       if (ownsRecoveryMarker) {
-        await fs.promises.rm(plan.target.recoveryMarkerPath, { force: true });
+        const markerCleanup = await removeCreatedPasteTargets([{ path: plan.target.recoveryMarkerPath, identity: recoveryMarkerIdentity, ownershipToken }], { ownershipToken });
+        if (!markerCleanup.success) throw new Error('选片恢复标记已被替换，无法安全继续');
         ownsRecoveryMarker = false;
       }
       const totalCopyBytes = plan.copyItems.reduce((sum, item) => sum + item.size, 0);
@@ -507,18 +514,20 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
         const destinationDirectory = path.dirname(item.destination);
         if (!fs.existsSync(destinationDirectory)) {
           await fs.promises.mkdir(destinationDirectory, { recursive: true });
-          createdDirectories.push(destinationDirectory);
+          createdDirectories.push({ path: destinationDirectory, identity: await capturePathIdentity(destinationDirectory), ownershipToken });
         }
         if (fs.existsSync(item.destination)) throw new Error(`目标文件已存在：${item.destinationRelativePath}`);
-        await copyFileAtomic(item.sourcePath, item.destination, {
+        const copied = await copyFileAtomic(item.sourcePath, item.destination, {
           isCancelled: () => job.cancelled,
           onProgress: copyProgress => reportCopyProgress(item, fileIndex, copyProgress.bytesCopied),
+          ownershipToken,
         });
-        createdFiles.push(item.destination);
+        createdFiles.push({ path: item.destination, identity: copied?.publishedIdentity || await capturePathIdentity(item.destination, { digest: true }), ownershipToken });
         reportCopyProgress(item, fileIndex, item.size, true);
         completedCopyBytes += item.size;
       }
       if (job.cancelled) throw Object.assign(new Error('选片任务已取消'), { code: 'TASK_CANCELLED' });
+      releaseCleanupOwnership(ownershipToken);
       return {
         ...plan.summary, success: true, operationId, copiedCount: createdFiles.length,
         items: plan.summary.items.map(item => item.status === 'planned' ? { ...item, status: 'copied' } : item),
@@ -526,11 +535,12 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
         selectionNode: nodes.selectionNode,
       };
     } catch (error) {
-      if (ownsRecoveryMarker && plan?.target?.recoveryMarkerPath) await fs.promises.rm(plan.target.recoveryMarkerPath, { force: true }).catch(() => undefined);
-      for (const filePath of createdFiles.reverse()) await fs.promises.rm(filePath, { force: true }).catch(() => undefined);
-      for (const directory of [...new Set(createdDirectories)].sort((left, right) => right.length - left.length)) {
-        if (nodesReady && path.resolve(directory) === path.resolve(plan?.target?.targetPath || '')) continue;
-        await fs.promises.rmdir(directory).catch(() => undefined);
+      if (ownsRecoveryMarker && plan?.target?.recoveryMarkerPath) await removeCreatedPasteTargets([{ path: plan.target.recoveryMarkerPath, identity: recoveryMarkerIdentity, ownershipToken }], { ownershipToken }).catch(() => undefined);
+      await removeCreatedPasteTargets(createdFiles.reverse(), { ownershipToken }).catch(() => undefined);
+      const directories = [...new Map(createdDirectories.map(item => [physicalPathKey(item.path), item])).values()].sort((left, right) => right.path.length - left.path.length);
+      for (const directory of directories) {
+        if (nodesReady && physicalPathKey(directory.path) === physicalPathKey(plan?.target?.targetPath || '')) continue;
+        await removeCreatedPasteTargets([directory], { ownershipToken }).catch(() => undefined);
       }
       if (job.cancelled || error?.code === 'TASK_CANCELLED') return { success: false, cancelled: true, operationId, error: '选片任务已取消' };
       throw error;

@@ -28,12 +28,14 @@ export const nativeFileDragTargetFromElement = ({
 }): NativeFileDragTarget | null => {
   const entryTarget = element?.closest<HTMLElement>('[data-entry-path]');
   if (entryTarget) {
-    if (entryTarget.dataset.entryKind !== 'folder') return null;
+    if (entryTarget.dataset.dropCapable === 'false') return null;
+    if (entryTarget.dataset.dropCapable !== 'true' && entryTarget.dataset.entryKind !== 'folder') return null;
     return { relativePath: normalize(entryTarget.dataset.entryPath || ''), label: entryTarget.title || entryTarget.dataset.entryPath || rootLabel, element: entryTarget };
   }
   const recursiveTarget = element?.closest<HTMLElement>('[data-recursive-folder-path]');
   if (recursiveTarget) {
-    if (recursiveTarget.dataset.recursiveFolderReadonly === 'true') return null;
+    if (recursiveTarget.dataset.dropCapable === 'false' || recursiveTarget.dataset.recursiveFolderReadonly === 'true') return null;
+    if (recursiveTarget.dataset.dropCapable !== 'true' && recursiveTarget.dataset.recursiveFolderReadonly !== 'false') return null;
     return { relativePath: normalize(recursiveTarget.dataset.recursiveFolderPath || ''), label: recursiveTarget.dataset.recursiveFolderLabel || recursiveTarget.dataset.recursiveFolderPath || rootLabel, element: recursiveTarget };
   }
   const containingSurface = element?.closest<HTMLElement>('[data-photoflow-file-surface="true"]');

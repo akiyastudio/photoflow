@@ -127,6 +127,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
   const refreshQueuedFreshRef = useRef(false);
   const refreshQueuedCachedOnlyRef = useRef(true);
   const refreshGenerationRef = useRef(0);
+  const inspectionGenerationRef = useRef(0);
   const mountedRef = useRef(true);
   const statuses = useMemo<ProjectStatus[]>(() => {
     const ordered = ['未分类', ...normalizeProjectCategoryOrder(projectCategoryOrder, customProjectCategories), ...groups.map(group => group.status)];
@@ -139,11 +140,11 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       const saved = window.localStorage.getItem('photoflow:sidebar-expanded');
       if (saved) setExpanded(current => ({ ...current, ...JSON.parse(saved) }));
     } catch {
-      window.localStorage.removeItem('photoflow:sidebar-expanded');
+      try { window.localStorage.removeItem('photoflow:sidebar-expanded'); } catch { /* unavailable storage */ }
     }
   }, []);
   useEffect(() => {
-    window.localStorage.setItem('photoflow:sidebar-expanded', JSON.stringify(expanded));
+    try { window.localStorage.setItem('photoflow:sidebar-expanded', JSON.stringify(expanded)); } catch { /* unavailable storage */ }
   }, [expanded]);
   const [error, setError] = useState('');
   const [menu, setMenu] = useState<{ project: WorkspaceProject; x: number; y: number } | null>(null);
@@ -195,11 +196,13 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     setShowNew(true);
   };
   const chooseExistingProject = async () => {
+    const generation = ++inspectionGenerationRef.current;
     setChoosingExistingProject(true);
     setExistingProjectError('');
     setExistingProjectResult(null);
     try {
       const result = await window.electronAPI.chooseExistingProject();
+      if (generation !== inspectionGenerationRef.current) return;
       if (result.cancelled) return;
       if (!result.success || !result.sourcePath || !result.name) {
         toast.show(result.error || '无法读取已有项目', { tone: 'error', dedupeKey: 'project-import-inspection' });
@@ -219,10 +222,11 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       setExistingProjectName(draft.name);
       setExistingProjectMode('copy');
     } finally {
-      setChoosingExistingProject(false);
+      if (generation === inspectionGenerationRef.current) setChoosingExistingProject(false);
     }
   };
   const openExistingProjectImport = () => {
+    inspectionGenerationRef.current += 1;
     setShowCreateMenu(false);
     setExistingProjectDraft(null);
     setExistingProjectResult(null);
@@ -237,16 +241,18 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
     let sourcePath = '';
     try { sourcePath = window.electronAPI.getPathForFile(file); } catch { /* handled below */ }
     if (!sourcePath) { setExistingProjectError('无法读取拖入文件夹的系统路径'); return; }
+    const generation = ++inspectionGenerationRef.current;
     setChoosingExistingProject(true);
     setExistingProjectError('');
     try {
       const result = await window.electronAPI.inspectExistingProject(sourcePath);
+      if (generation !== inspectionGenerationRef.current) return;
       if (!result.success || !result.sourcePath || !result.name) { setExistingProjectError(result.error || '无法读取项目文件夹'); return; }
       const draft: ExistingProjectDraft = { sourcePath: result.sourcePath, inspectionToken: result.inspectionToken || '', name: result.name, fileCount: result.fileCount || 0, folderCount: result.folderCount || 0, totalBytes: result.totalBytes || 0, truncated: Boolean(result.truncated), candidates: result.candidates || [] };
       setExistingProjectDraft(draft);
       setExistingProjectName(draft.name);
       setExistingProjectMode('copy');
-    } finally { setChoosingExistingProject(false); }
+    } finally { if (generation === inspectionGenerationRef.current) setChoosingExistingProject(false); }
   };
   const cancelExistingProjectImport = async () => {
     if (!existingProjectImportTask?.cancellable || isCancellingExistingProject) return;
@@ -263,6 +269,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       void cancelExistingProjectImport();
       return;
     }
+    inspectionGenerationRef.current += 1;
     if (existingProjectResult) onSelectProject({ ...existingProjectResult.project, workspacePath: existingProjectResult.project.workspacePath || workspacePath });
     setExistingProjectDraft(null);
     setExistingProjectResult(null);
@@ -411,6 +418,7 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
       refreshQueuedFreshRef.current = false;
       refreshQueuedCachedOnlyRef.current = true;
       refreshGenerationRef.current += 1;
+      inspectionGenerationRef.current += 1;
     };
   }, []);
 
@@ -425,12 +433,12 @@ export const ProjectNavigator = ({ workspacePath, workspacePaths, backupEnabled,
         cleanupCheckedWorkspaces.add(key);
         const storageKey = `photoflow:maintenance:deleted-project-cleanup:${key}`;
         const today = localDateKey();
-        if (window.localStorage.getItem(storageKey) === today) continue;
+        try { if (window.localStorage.getItem(storageKey) === today) continue; } catch { /* unavailable storage */ }
         void window.electronAPI.cleanupDeletedWorkspaceProjects(currentWorkspacePath).then(result => {
-          if (!result.success) return;
-          window.localStorage.setItem(storageKey, today);
+          if (!result.success) { cleanupCheckedWorkspaces.delete(key); return; }
+          try { window.localStorage.setItem(storageKey, today); } catch { /* unavailable storage */ }
           if (!disposed && result.cleanedCount > 0) void refresh(true);
-        });
+        }).catch(() => { cleanupCheckedWorkspaces.delete(key); });
       }
     }, 15000);
     return () => { disposed = true; window.clearTimeout(timer); };
