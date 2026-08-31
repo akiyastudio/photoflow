@@ -5,11 +5,34 @@ const os = require('os');
 const path = require('path');
 const { createArchiveService } = require('../electron/services/archive-service.cjs');
 const { createBackgroundTaskService } = require('../electron/services/background-task-service.cjs');
-const { movePathAtomic } = require('../electron/services/file-transfer-service.cjs');
+
+const createTestMovePathAtomic = temporaryRoot => {
+  const resolvedRoot = path.resolve(temporaryRoot);
+  const assertInsideTemporaryRoot = candidate => {
+    const resolvedCandidate = path.resolve(candidate);
+    const relative = path.relative(resolvedRoot, resolvedCandidate);
+    assert.ok(relative && !relative.startsWith(`..${path.sep}`) && relative !== '..' && !path.isAbsolute(relative), `${candidate} must be inside the test temporary root`);
+  };
+
+  return async (source, destination) => {
+    assertInsideTemporaryRoot(source);
+    assertInsideTemporaryRoot(destination);
+    await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+    await assert.rejects(fs.promises.lstat(destination), error => error?.code === 'ENOENT', `test move destination already exists: ${destination}`);
+    try {
+      await fs.promises.rename(source, destination);
+    } catch (error) {
+      if (error?.code !== 'EXDEV') throw error;
+      await fs.promises.cp(source, destination, { recursive: true, force: false, errorOnExist: true });
+      await fs.promises.rm(source, { recursive: true });
+    }
+  };
+};
 
 const main = async () => {
   const temporaryRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-archive-service-'));
   try {
+    const movePathAtomic = createTestMovePathAtomic(temporaryRoot);
     const workspaceRoot = path.join(temporaryRoot, 'workspace');
     const projectRoot = path.join(workspaceRoot, '示例项目');
     const archiveRoot = path.join(temporaryRoot, 'archive');
