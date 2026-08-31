@@ -44,6 +44,65 @@ const sha256File = async filePath => {
   for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
   return hash.digest('hex');
 };
+const durableSync = async filePath => {
+  const handle = await fs.promises.open(filePath, 'r');
+  try { await handle.sync().catch(error => { if (!['EINVAL', 'EPERM', 'ENOTSUP'].includes(error?.code)) throw error; }); }
+  finally { await handle.close(); }
+};
+const durableSyncDirectory = async directory => {
+  try { await durableSync(directory); }
+  catch (error) { if (!['EINVAL', 'EPERM', 'EISDIR', 'ENOTSUP'].includes(error?.code)) throw error; }
+};
+const writeDurableJsonReplace = async (filePath, value) => {
+  await fs.promises.mkdir(path.dirname(filePath), { recursive: true });
+  const temporary = `${filePath}.${crypto.randomUUID()}.tmp`;
+  await fs.promises.writeFile(temporary, JSON.stringify(value), { encoding: 'utf8', flag: 'wx' });
+  await durableSync(temporary);
+  await fs.promises.rename(temporary, filePath).catch(async error => {
+    if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error;
+    await fs.promises.rm(filePath, { force: true });
+    await fs.promises.rename(temporary, filePath);
+  });
+  await durableSyncDirectory(path.dirname(filePath));
+};
+const captureSqlitePreimage = async (databasePath, preimageRoot, name) => {
+  const files = [];
+  for (const suffix of ['', '-wal', '-shm']) {
+    const source = `${databasePath}${suffix}`;
+    const stat = await fs.promises.lstat(source).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+    if (!stat) { if (!suffix) throw new Error(`SQLite preimage 源不存在：${databasePath}`); continue; }
+    if (!stat.isFile() || stat.isSymbolicLink()) throw new Error(`SQLite preimage 源不是普通文件：${source}`);
+    const destination = path.join(preimageRoot, `${name}${suffix}`);
+    await fs.promises.copyFile(source, destination, fs.constants.COPYFILE_EXCL);
+    await durableSync(destination);
+    const after = await fs.promises.lstat(source);
+    const hash = await sha256File(destination);
+    if (!after.isFile() || after.isSymbolicLink() || after.size !== stat.size || after.mtimeMs !== stat.mtimeMs || await sha256File(source) !== hash) throw new Error(`SQLite preimage 源在捕获期间发生变化：${source}`);
+    files.push({ suffix, path: destination, size: stat.size, hash });
+  }
+  await durableSyncDirectory(preimageRoot);
+  return { databasePath: path.resolve(databasePath), files };
+};
+const restoreSqlitePreimage = async (preimage, authorizedRoot) => {
+  if (!preimage || !inside(authorizedRoot, preimage.databasePath) || !Array.isArray(preimage.files)) throw new Error('SQLite preimage 日志无效');
+  const bySuffix = new Map(preimage.files.map(item => [item.suffix, item]));
+  if (!bySuffix.has('')) throw new Error('SQLite preimage 缺少主数据库');
+  for (const suffix of ['', '-wal', '-shm']) {
+    const destination = `${preimage.databasePath}${suffix}`;
+    const item = bySuffix.get(suffix);
+    if (!item) { await fs.promises.rm(destination, { force: true }); continue; }
+    if (!inside(authorizedRoot, item.path) || !validObjectHash(item.hash)) throw new Error('SQLite preimage 文件路径或哈希无效');
+    const stat = await fs.promises.lstat(item.path);
+    if (!stat.isFile() || stat.isSymbolicLink() || stat.size !== Number(item.size) || await sha256File(item.path) !== item.hash) throw new Error('SQLite preimage 文件缺失或损坏');
+    const temporary = `${destination}.${crypto.randomUUID()}.preimage`;
+    await fs.promises.copyFile(item.path, temporary, fs.constants.COPYFILE_EXCL);
+    await durableSync(temporary);
+    await fs.promises.rm(destination, { force: true });
+    await fs.promises.rename(temporary, destination);
+  }
+  await durableSyncDirectory(path.dirname(preimage.databasePath));
+};
+const inventoryUnsafe = message => Object.assign(new Error(message), { code: 'BACKUP_INVENTORY_UNSAFE' });
 const assertNoReparseAncestorsBeforeCreate = async candidate => {
   let cursor = path.resolve(candidate);
   while (true) {
@@ -247,14 +306,44 @@ const createBackupService = context => {
   const markerPath = workspaceRoot => path.join(workspaceRoot, '.photoflow-workspace-id');
   const readWorkspaceId = async workspaceRoot => (await fs.promises.readFile(markerPath(workspaceRoot), 'utf8')).trim();
   const ensureStore = async target => {
+    const descriptor = path.join(storeRoot(target), 'store.json');
+    if (await exists(storeRoot(target)) && !await exists(descriptor)) {
+      const entries = await fs.promises.readdir(storeRoot(target));
+      if (entries.length) throw inventoryUnsafe('备份存储缺少版本描述文件，拒绝初始化或修改');
+    }
+    if (await exists(descriptor)) {
+      let stored;
+      try { stored = JSON.parse(await fs.promises.readFile(descriptor, 'utf8')); }
+      catch { throw inventoryUnsafe('备份存储描述文件不可读或已损坏'); }
+      if (stored?.formatVersion !== STORE_FORMAT_VERSION) throw inventoryUnsafe(`不支持的备份存储版本：${stored?.formatVersion ?? 'unknown'}`);
+    }
     await fs.promises.mkdir(objectsRoot(target), { recursive: true });
     await fs.promises.mkdir(snapshotsRoot(target), { recursive: true });
     await fs.promises.mkdir(temporaryRoot(target), { recursive: true });
-    const descriptor = path.join(storeRoot(target), 'store.json');
     if (!await exists(descriptor)) {
       const temporary = `${descriptor}.${crypto.randomUUID()}.tmp`;
       await fs.promises.writeFile(temporary, JSON.stringify({ formatVersion: STORE_FORMAT_VERSION, createdAt: Date.now(), product: 'PhotoFlow' }, null, 2), 'utf8');
       await fs.promises.rename(temporary, descriptor);
+      await durableSync(descriptor);
+      await durableSyncDirectory(storeRoot(target));
+    }
+  };
+
+  const assertStoreSupported = async target => {
+    const descriptor = path.join(storeRoot(target), 'store.json');
+    let stored;
+    try { stored = JSON.parse(await fs.promises.readFile(descriptor, 'utf8')); }
+    catch { throw inventoryUnsafe('备份存储描述文件不可读或已损坏'); }
+    if (stored?.formatVersion !== STORE_FORMAT_VERSION) throw inventoryUnsafe(`不支持的备份存储版本：${stored?.formatVersion ?? 'unknown'}`);
+  };
+  const assertStoreLayoutPhysical = async target => {
+    await assertNoReparseAncestorsBeforeCreate(target);
+    const targetReal = await fs.promises.realpath(target);
+    for (const candidate of [storeRoot(target), snapshotsRoot(target), objectsRoot(target)]) {
+      const stat = await fs.promises.lstat(candidate).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+      if (!stat) continue;
+      if (!stat.isDirectory() || stat.isSymbolicLink()) throw inventoryUnsafe(`备份存储目录不是安全的物理目录：${candidate}`);
+      if (!inside(targetReal, await fs.promises.realpath(candidate))) throw inventoryUnsafe(`备份存储目录真实路径越界：${candidate}`);
     }
   };
 
@@ -494,33 +583,23 @@ const createBackupService = context => {
   };
   const verifyComponentRestoreSources = async (target, manifest, plan, task) => {
     const required = [manifest.database, ...manifest.files].sort((left, right) => `${left.scope || ''}\0${left.path || ''}`.localeCompare(`${right.scope || ''}\0${right.path || ''}`));
-    const checkpoint = task?.getCheckpoint?.() || {};
-    const savedVerification = checkpoint.verification || {};
-    const savedIndex = Math.max(0, Math.min(required.length, Number(savedVerification.verifiedIndex) || 0));
     const nextDigest = (previous, entry, stat) => crypto.createHash('sha256').update([previous, entry.hash, stat.size, stat.mtimeMs, stat.ctimeMs, stat.ino || 0].join('\0')).digest('hex');
     let identityDigest = '0'.repeat(64);
-    let verifiedIndex = savedIndex;
-    for (let index = 0; index < savedIndex; index += 1) {
-      const entry = required[index]; const stat = await fs.promises.lstat(objectPath(target, entry.hash)).catch(() => null);
-      if (!stat?.isFile() || stat.size !== Number(entry.size)) { verifiedIndex = 0; identityDigest = '0'.repeat(64); break; }
-      identityDigest = nextDigest(identityDigest, entry, stat);
-    }
-    if (verifiedIndex && identityDigest !== savedVerification.identityDigest) { verifiedIndex = 0; identityDigest = '0'.repeat(64); }
     for (const [index, entry] of required.entries()) {
       task?.throwIfCancelled?.();
       const source = objectPath(target, entry.hash);
       const stat = await fs.promises.lstat(source).catch(() => null);
-      if (!stat?.isFile() || stat.size !== Number(entry.size)) {
+      if (!stat?.isFile() || stat.isSymbolicLink() || (entry.size != null && stat.size !== Number(entry.size))) {
         const error = new Error(`备份对象缺失或大小不符：${entry.path || 'workspace.sqlite3'}`);
         error.code = 'BACKUP_OBJECT_PREFLIGHT_FAILED'; error.sourcePath = entry.path || 'workspace.sqlite3'; error.componentId = entry.scope === 'component-storage' ? componentIdFromStoragePath(entry.path) : undefined; throw error;
       }
-      if (index >= verifiedIndex && await sha256File(source) !== entry.hash) {
+      if (await sha256File(source) !== entry.hash) {
         const error = new Error(`备份对象预检哈希失败：${entry.path || 'workspace.sqlite3'}`);
         error.code = 'BACKUP_OBJECT_PREFLIGHT_FAILED'; error.sourcePath = entry.path || 'workspace.sqlite3'; error.componentId = entry.scope === 'component-storage' ? componentIdFromStoragePath(entry.path) : undefined; throw error;
       }
-      if (index >= verifiedIndex) identityDigest = nextDigest(identityDigest, entry, stat);
+      identityDigest = nextDigest(identityDigest, entry, stat);
       task?.report?.((index + 1) / Math.max(1, required.length) * 2, `正在预检恢复对象 ${index + 1}/${required.length}`);
-      if (index + 1 >= verifiedIndex && ((index + 1) % 64 === 0 || index + 1 === required.length)) task?.saveCheckpoint?.({ ...task.getCheckpoint(), phase: 'verifying', verification: { verifiedIndex: index + 1, identityDigest } }, (index + 1) / Math.max(1, required.length) * 2, `已验证恢复对象 ${index + 1}/${required.length}`);
+      if ((index + 1) % 64 === 0 || index + 1 === required.length) task?.saveCheckpoint?.({ ...task.getCheckpoint(), phase: 'verifying', verification: { verifiedIndex: index + 1, identityDigest } }, (index + 1) / Math.max(1, required.length) * 2, `已验证恢复对象 ${index + 1}/${required.length}`);
     }
     if (componentServiceManager?.prepareBackupRestore) {
       await componentServiceManager.prepareBackupRestore(plan.descriptors.map(item => item.descriptor.componentId));
@@ -702,8 +781,36 @@ const createBackupService = context => {
       }
       if (!preserve) await fs.promises.rm(transactionRoot, { recursive: true, force: true });
     };
+    const recoverPendingRelease = async transactionRoot => {
+      for (const state of ['committed', 'rolled-back']) {
+        const journal = await fs.promises.readFile(path.join(transactionRoot, `journal.${state}.json`), 'utf8').then(JSON.parse, () => null);
+        if (!journal) continue;
+        const pending = state === 'committed' ? journal.finalizePending : journal.releasePending;
+        if (!Array.isArray(pending) || !pending.length) { await fs.promises.rm(transactionRoot, { recursive: true, force: true }); return true; }
+        const phase = state === 'committed' ? 'finalize' : 'rollback';
+        const failures = [];
+        for (const item of pending) {
+          const descriptor = currentDescriptors.find(value => value.componentId === item?.componentId);
+          if (!descriptor || typeof item?.operationId !== 'string' || typeof item?.quiesceToken !== 'string') { failures.push(new Error('组件恢复待释放日志无效')); continue; }
+          try {
+            const result = await invokeBackupRestore(item.componentId, mode, {
+              schemaVersion: 1, phase, operationId: item.operationId, mode, quiesceToken: item.quiesceToken,
+              sourceWorkspace, targetWorkspace, ...(project ? { project } : {}),
+            }, phaseContext);
+            if (!result || result.operationId !== item.operationId) throw new Error(`组件 ${item.componentId} 返回了无效的 ${phase} 恢复回执`);
+          } catch (error) { failures.push(error); componentServiceManager.quarantine?.(item.componentId, `component-restore-${phase}-pending`); }
+        }
+        if (failures.length) throw new AggregateError(failures, `组件恢复 ${phase} 待处理日志恢复失败`);
+        await fs.promises.rm(transactionRoot, { recursive: true, force: true });
+        return true;
+      }
+      return false;
+    };
     for (const entry of await fs.promises.readdir(transactionsRoot, { withFileTypes: true }).catch(() => [])) {
-      if (entry.isDirectory()) await rollbackTransaction(path.join(transactionsRoot, entry.name));
+      if (entry.isDirectory()) {
+        const transactionRoot = path.join(transactionsRoot, entry.name);
+        if (!await recoverPendingRelease(transactionRoot)) await rollbackTransaction(transactionRoot);
+      }
     }
     const transactionId = componentRestoreOperationId(task.id, manifest.id || manifest.createdAt, mode, project?.id || targetWorkspace.root);
     const transactionRoot = safeDestination(transactionsRoot, transactionId);
@@ -983,7 +1090,8 @@ const createBackupService = context => {
     let sourceMutationRetries = 0;
     for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
       task.throwIfCancelled();
-      const before = await fs.promises.stat(sourcePath);
+      const before = await fs.promises.lstat(sourcePath);
+      if (!before.isFile() || before.isSymbolicLink()) throw new Error(`备份输入不是普通文件：${sourcePath}`);
       const temporary = path.join(temporaryRoot(target), `${crypto.randomUUID()}.part`);
       const hash = crypto.createHash('sha256');
       let copied = 0;
@@ -1005,7 +1113,8 @@ const createBackupService = context => {
       });
       try {
         await pipeline(fs.createReadStream(sourcePath), meter, fs.createWriteStream(temporary, { flags: 'wx' }));
-        const after = await fs.promises.stat(sourcePath);
+        const after = await fs.promises.lstat(sourcePath);
+        if (!after.isFile() || after.isSymbolicLink()) throw new Error(`备份输入在读取期间不再是普通文件：${sourcePath}`);
         if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
           await fs.promises.rm(temporary, { force: true });
           if (copied && progress) progress(-copied);
@@ -1013,15 +1122,30 @@ const createBackupService = context => {
           throw new Error(`文件在备份期间持续变化：${sourcePath}`);
         }
         const digest = hash.digest('hex');
+        const stableSource = await fs.promises.lstat(sourcePath);
+        if (!stableSource.isFile() || stableSource.isSymbolicLink() || stableSource.size !== after.size || stableSource.mtimeMs !== after.mtimeMs
+          || await sha256File(sourcePath) !== digest) {
+          await fs.promises.rm(temporary, { force: true });
+          if (copied && progress) progress(-copied);
+          if (sourceMutationRetries++ === 0) continue;
+          throw new Error(`文件内容在备份期间持续变化：${sourcePath}`);
+        }
         const destination = objectPath(target, digest);
         if (!await exists(destination)) {
           await fs.promises.mkdir(path.dirname(destination), { recursive: true });
+          await durableSync(temporary);
           try { await fs.promises.rename(temporary, destination); }
           catch (error) {
             if (!await exists(destination)) throw error;
             await fs.promises.rm(temporary, { force: true });
           }
         } else await fs.promises.rm(temporary, { force: true });
+        const storedStat = await fs.promises.lstat(destination);
+        if (!storedStat.isFile() || storedStat.isSymbolicLink() || storedStat.size !== after.size || await sha256File(destination) !== digest) {
+          throw Object.assign(new Error(`备份对象发生碰撞或已损坏：${digest}`), { code: 'BACKUP_OBJECT_COLLISION' });
+        }
+        await durableSync(destination);
+        await durableSyncDirectory(path.dirname(destination));
         return { hash: digest, size: after.size, mtimeMs: after.mtimeMs };
       } catch (error) {
         await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
@@ -1044,25 +1168,37 @@ const createBackupService = context => {
     throw new Error(`无法获得稳定的文件快照：${sourcePath}`);
   };
 
-  const listManifests = async target => {
+  const inventoryManifests = async target => {
     const root = snapshotsRoot(target);
-    if (!await exists(root)) return [];
+    if (!await exists(root)) return { manifests: [], unsafe: [] };
     const directories = await fs.promises.readdir(root, { withFileTypes: true });
     const manifests = [];
+    const unsafe = [];
     for (const directory of directories) {
-      if (!directory.isDirectory()) continue;
+      if (!directory.isDirectory() || directory.isSymbolicLink() || !/^[A-Za-z0-9_-]+$/.test(directory.name)) { unsafe.push(directory.name); continue; }
       try {
         const manifest = JSON.parse(await fs.promises.readFile(path.join(root, directory.name, 'manifest.json'), 'utf8'));
-        if (manifest?.complete === true && manifest.formatVersion === SNAPSHOT_FORMAT_VERSION) manifests.push(manifest);
-      } catch { /* incomplete snapshots are ignored */ }
+        if (manifest?.complete !== true || manifest.formatVersion !== SNAPSHOT_FORMAT_VERSION || manifest.id !== directory.name
+          || !validObjectHash(manifest.database?.hash) || !Array.isArray(manifest.files)
+          || manifest.files.some(entry => !validObjectHash(entry?.hash))) { unsafe.push(directory.name); continue; }
+        manifests.push(manifest);
+      } catch { unsafe.push(directory.name); }
     }
-    return manifests.sort((left, right) => right.createdAt - left.createdAt);
+    return { manifests: manifests.sort((left, right) => right.createdAt - left.createdAt), unsafe };
+  };
+  const listManifests = async (target, { requireSafe = false } = {}) => {
+    const inventory = await inventoryManifests(target);
+    if (requireSafe && inventory.unsafe.length) throw inventoryUnsafe(`备份快照库存包含不可读、损坏、不支持或未完成项目：${inventory.unsafe.join(', ')}`);
+    return inventory.manifests;
   };
 
   const manifestFor = async (target, id) => {
     if (!/^[A-Za-z0-9_-]+$/.test(String(id || ''))) throw new Error('备份快照标识无效');
+    await assertStoreLayoutPhysical(target);
+    await assertStoreSupported(target);
     const manifest = JSON.parse(await fs.promises.readFile(path.join(snapshotsRoot(target), String(id), 'manifest.json'), 'utf8'));
     if (!manifest?.complete || manifest.formatVersion !== SNAPSHOT_FORMAT_VERSION) throw new Error('备份快照无效或尚未完成');
+    if (manifest.id !== String(id)) throw new Error('备份清单标识与物理目录不一致');
     if (!validObjectHash(manifest.database?.hash) || !Array.isArray(manifest.files)
       || manifest.files.some(entry => !validObjectHash(entry?.hash))) throw new Error('备份清单包含无效对象');
     return manifest;
@@ -1089,19 +1225,47 @@ const createBackupService = context => {
     return keep;
   };
 
+  const assertObjectInventorySafe = async (target, manifests = []) => {
+    if (!await exists(objectsRoot(target))) {
+      if (manifests.length) throw inventoryUnsafe('备份对象目录缺失');
+      return;
+    }
+    const seen = new Map();
+    for (const prefix of await fs.promises.readdir(objectsRoot(target), { withFileTypes: true })) {
+      if (!prefix.isDirectory() || prefix.isSymbolicLink() || !/^[a-f0-9]{2}$/.test(prefix.name)) throw inventoryUnsafe(`备份对象库存包含无效项目：${prefix.name}`);
+      for (const item of await fs.promises.readdir(path.join(objectsRoot(target), prefix.name), { withFileTypes: true })) {
+        if (!item.isFile() || item.isSymbolicLink() || !/^[a-f0-9]{62}$/.test(item.name)) throw inventoryUnsafe(`备份对象库存包含无效对象：${prefix.name}${item.name}`);
+        const hash = `${prefix.name}${item.name}`;
+        const absolute = path.join(objectsRoot(target), prefix.name, item.name);
+        const stat = await fs.promises.lstat(absolute);
+        if (!stat.isFile() || stat.isSymbolicLink() || await sha256File(absolute) !== hash) throw inventoryUnsafe(`备份对象已损坏：${hash}`);
+        seen.set(hash, stat.size);
+      }
+    }
+    for (const manifest of manifests) for (const entry of [manifest.database, ...manifest.files]) {
+      if (!seen.has(entry.hash) || (entry.size != null && seen.get(entry.hash) !== Number(entry.size))) throw inventoryUnsafe(`备份清单引用缺失或大小不符的对象：${entry.hash}`);
+    }
+  };
+
   const cleanupRetention = async (target, backupConfig, workspaceId) => {
-    const allManifests = await listManifests(target);
+    await assertStoreLayoutPhysical(target);
+    await assertStoreSupported(target);
+    const allManifests = await listManifests(target, { requireSafe: true });
+    await assertObjectInventorySafe(target, allManifests);
     const workspaceManifests = allManifests.filter(manifest => manifest.workspace?.id === workspaceId);
     const retained = retainedSnapshotIds(workspaceManifests, backupConfig);
     let removedSnapshots = 0;
     for (const manifest of workspaceManifests) {
       if (!retained.has(manifest.id)) {
-        await fs.promises.rm(path.join(snapshotsRoot(target), manifest.id), { recursive: true, force: true });
+        if (!/^[A-Za-z0-9_-]+$/.test(manifest.id)) throw inventoryUnsafe('拒绝删除标识无效的备份快照');
+        const candidate = path.join(snapshotsRoot(target), manifest.id);
+        if (!inside(snapshotsRoot(target), candidate)) throw inventoryUnsafe('拒绝删除越界备份快照');
+        await fs.promises.rm(candidate, { recursive: true, force: true });
         removedSnapshots += 1;
       }
     }
     const referenced = new Set();
-    for (const manifest of await listManifests(target)) {
+    for (const manifest of await listManifests(target, { requireSafe: true })) {
       referenced.add(manifest.database.hash);
       for (const entry of manifest.files) referenced.add(entry.hash);
     }
@@ -1109,10 +1273,10 @@ const createBackupService = context => {
     let removedObjects = 0;
     let reclaimedBytes = 0;
     for (const prefix of await fs.promises.readdir(objectsRoot(target), { withFileTypes: true })) {
-      if (!prefix.isDirectory()) continue;
+      if (!prefix.isDirectory() || prefix.isSymbolicLink() || !/^[a-f0-9]{2}$/.test(prefix.name)) throw inventoryUnsafe(`备份对象库存包含无效项目：${prefix.name}`);
       const directory = path.join(objectsRoot(target), prefix.name);
       for (const item of await fs.promises.readdir(directory, { withFileTypes: true })) {
-        if (!item.isFile()) continue;
+        if (!item.isFile() || item.isSymbolicLink() || !/^[a-f0-9]{62}$/.test(item.name)) throw inventoryUnsafe(`备份对象库存包含无效对象：${prefix.name}${item.name}`);
         if (!referenced.has(`${prefix.name}${item.name}`)) {
           const candidate = path.join(directory, item.name);
           reclaimedBytes += (await fs.promises.stat(candidate).catch(() => ({ size: 0 }))).size;
@@ -1241,6 +1405,43 @@ const createBackupService = context => {
     return run();
   };
 
+  const snapshotWorkspaceDatabases = async (root, stage, task) => {
+    const liveDatabasePath = path.resolve(getWorkspaceDatabasePath(root));
+    const liveOperationsDatabasePath = getWorkspaceOperationsDatabasePath?.(root);
+    const liveMediaDatabasePath = getWorkspaceMediaDatabasePath?.(root);
+    const liveVersioningDatabasePath = getWorkspaceVersioningDatabasePath?.(root);
+    const available = async value => Boolean(value && await exists(value));
+    const domains = ['core'];
+    if (await available(liveOperationsDatabasePath)) domains.push('operations');
+    if (await available(liveMediaDatabasePath)) domains.push('media');
+    if (await available(liveVersioningDatabasePath)) domains.push('versioning');
+    return withWorkspaceRecoveryLease({ workspaceRoot: root, domains, signal: task.signal, deadlineAt: Date.now() + 30 * 60 * 1000 }, async () => {
+      task.report(1, '正在创建数据库快照');
+      const databaseSnapshot = path.join(stage, 'workspace.sqlite3');
+      let mediaSnapshot = null; let mediaDatabaseInfo = null;
+      if (domains.includes('media')) {
+        mediaSnapshot = path.join(stage, 'media.sqlite3');
+        mediaDatabaseInfo = await runPythonJsonAction('domain_recovery.py', ['snapshot', '--domain', 'media', '--source', liveMediaDatabasePath, '--destination', mediaSnapshot], 30 * 60 * 1000);
+      }
+      let versioningSnapshot = null; let versioningDatabaseInfo = null;
+      if (domains.includes('versioning')) {
+        versioningSnapshot = path.join(stage, 'versioning.sqlite3');
+        versioningDatabaseInfo = await runPythonJsonAction('domain_recovery.py', ['snapshot', '--domain', 'versioning', '--source', liveVersioningDatabasePath, '--destination', versioningSnapshot], 30 * 60 * 1000);
+      }
+      const databaseInfo = await runPythonJsonAction('backup_db.py', [
+        'snapshot', '--source', liveDatabasePath, '--destination', databaseSnapshot,
+        ...(domains.includes('media') ? ['--media', liveMediaDatabasePath] : []),
+      ], 30 * 60 * 1000);
+      let operationsSnapshot = null; let operationsDatabaseInfo = null;
+      if (domains.includes('operations')) {
+        operationsSnapshot = path.join(stage, 'operations.sqlite3');
+        operationsDatabaseInfo = await runPythonJsonAction('operations_db.py', ['snapshot', '--source', liveOperationsDatabasePath, '--destination', operationsSnapshot], 30 * 60 * 1000);
+      }
+      return { databaseSnapshot, databaseInfo, liveDatabasePath, liveOperationsDatabasePath, liveMediaDatabasePath, liveVersioningDatabasePath,
+        mediaSnapshot, mediaDatabaseInfo, versioningSnapshot, versioningDatabaseInfo, operationsSnapshot, operationsDatabaseInfo };
+    });
+  };
+
   const runBackup = async (workspaceRoot, reason = 'manual', resumeTask = null) => {
     const config = await configMutationService.read();
     const backupConfig = config?.backup || {};
@@ -1248,6 +1449,8 @@ const createBackupService = context => {
     if (!backupConfig.enabled || !target) throw new Error('请先在设置中启用备份并选择备份位置');
     if (!isApprovedTarget(target)) throw new Error('备份位置需要通过系统文件夹选择器授权');
     const root = path.resolve(workspaceRoot);
+    await assertNoReparseAncestorsBeforeCreate(root);
+    await assertNoReparseAncestorsBeforeCreate(target);
     if (inside(root, target) || inside(target, root)) throw new Error('备份位置不能位于工作区内部，也不能包含工作区');
     const run = () => backgroundTasks.run({
       ...(resumeTask?.id ? { id: resumeTask.id } : {}),
@@ -1263,44 +1466,17 @@ const createBackupService = context => {
       resumeFactory: snapshot => runBackup(root, reason, snapshot),
     }, async task => {
       await ensureTargetConnection(target, backupConfig);
+      await assertStoreLayoutPhysical(target);
       await ensureStore(target);
+      await assertStoreLayoutPhysical(target);
+      const [rootReal, targetReal] = await Promise.all([fs.promises.realpath(root), fs.promises.realpath(target)]);
+      if (inside(rootReal, targetReal) || inside(targetReal, rootReal)) throw new Error('备份位置不能位于工作区内部，也不能包含工作区');
       const id = snapshotId();
       const stage = path.join(temporaryRoot(target), `snapshot-${id}-${crypto.randomUUID()}`);
       await fs.promises.mkdir(stage, { recursive: true });
-      const databaseSnapshot = path.join(stage, 'workspace.sqlite3');
-      const liveDatabasePath = path.resolve(getWorkspaceDatabasePath(root));
-      const liveMediaDatabasePath = getWorkspaceMediaDatabasePath?.(root);
-      const liveVersioningDatabasePath = getWorkspaceVersioningDatabasePath?.(root);
-      let mediaSnapshot = null;
-      let mediaDatabaseInfo = null;
-      if (liveMediaDatabasePath && await exists(liveMediaDatabasePath)) {
-        mediaSnapshot = path.join(stage, 'media.sqlite3');
-        mediaDatabaseInfo = await runPythonJsonAction('domain_recovery.py', [
-          'snapshot', '--domain', 'media', '--source', liveMediaDatabasePath, '--destination', mediaSnapshot,
-        ], 30 * 60 * 1000);
-      }
-      let versioningSnapshot = null;
-      let versioningDatabaseInfo = null;
-      if (liveVersioningDatabasePath && await exists(liveVersioningDatabasePath)) {
-        versioningSnapshot = path.join(stage, 'versioning.sqlite3');
-        versioningDatabaseInfo = await runPythonJsonAction('domain_recovery.py', [
-          'snapshot', '--domain', 'versioning', '--source', liveVersioningDatabasePath, '--destination', versioningSnapshot,
-        ], 30 * 60 * 1000);
-      }
-      task.report(1, '正在创建数据库快照');
-      const databaseInfo = await runPythonJsonAction('backup_db.py', [
-        'snapshot', '--source', liveDatabasePath, '--destination', databaseSnapshot,
-        ...(liveMediaDatabasePath && await exists(liveMediaDatabasePath) ? ['--media', liveMediaDatabasePath] : []),
-      ], 30 * 60 * 1000);
-      const liveOperationsDatabasePath = getWorkspaceOperationsDatabasePath?.(root);
-      let operationsSnapshot = null;
-      let operationsDatabaseInfo = null;
-      if (liveOperationsDatabasePath && await exists(liveOperationsDatabasePath)) {
-        operationsSnapshot = path.join(stage, 'operations.sqlite3');
-        operationsDatabaseInfo = await runPythonJsonAction('operations_db.py', [
-          'snapshot', '--source', liveOperationsDatabasePath, '--destination', operationsSnapshot,
-        ], 30 * 60 * 1000);
-      }
+      try {
+      const { databaseSnapshot, databaseInfo, liveDatabasePath, liveOperationsDatabasePath, liveMediaDatabasePath, liveVersioningDatabasePath,
+        mediaSnapshot, mediaDatabaseInfo, versioningSnapshot, versioningDatabaseInfo, operationsSnapshot, operationsDatabaseInfo } = await snapshotWorkspaceDatabases(root, stage, task);
       const workspaceId = await readWorkspaceId(root);
       const previousManifest = (await listManifests(target)).find(manifest => manifest.workspace?.id === workspaceId);
       const previousByInput = new Map((previousManifest?.files || []).map(entry => [`${entry.scope}:${normalizeKey(entry.path)}`, entry]));
@@ -1326,7 +1502,7 @@ const createBackupService = context => {
       const workspaceDataFiles = await collectFiles(workspaceDataRoot, 'workspace-data', (relative, item) => {
         const normalized = normalizeKey(relative);
         const first = normalized.split('/')[0];
-        return (item.isDirectory() && ['thumbnails', 'backups', 'components', '.component-restore-transactions'].includes(first))
+        return (item.isDirectory() && ['thumbnails', 'backups', 'domain-backups', 'domain-restore', 'components', '.component-restore-transactions'].includes(first))
           || normalized === databaseRelative
           || normalized === `${databaseRelative}-wal`
           || normalized === `${databaseRelative}-shm`
@@ -1426,12 +1602,21 @@ const createBackupService = context => {
         const inputKey = `${input.scope}:${normalizeKey(input.relative)}`;
         const checkpointEntry = checkpointInputs.get(inputKey);
         const previous = checkpointEntry || previousByInput.get(inputKey);
-        const sourceStat = await fs.promises.stat(input.absolute);
-        const canReuse = previous
+        const sourceStat = await fs.promises.lstat(input.absolute);
+        if (!sourceStat.isFile() || sourceStat.isSymbolicLink()) throw new Error(`备份输入不是普通文件：${input.absolute}`);
+        let canReuse = previous
           && validObjectHash(previous.hash)
           && Number(previous.size) === sourceStat.size
           && Math.abs(Number(previous.mtimeMs) - sourceStat.mtimeMs) < 1
           && await exists(objectPath(target, previous.hash));
+        if (canReuse) {
+          const objectStat = await fs.promises.lstat(objectPath(target, previous.hash));
+          const sourceHash = objectStat.isFile() && !objectStat.isSymbolicLink() && objectStat.size === sourceStat.size ? await sha256File(input.absolute) : '';
+          const stableStat = await fs.promises.lstat(input.absolute);
+          canReuse = objectStat.isFile() && !objectStat.isSymbolicLink() && objectStat.size === sourceStat.size
+            && stableStat.isFile() && !stableStat.isSymbolicLink() && stableStat.size === sourceStat.size && stableStat.mtimeMs === sourceStat.mtimeMs
+            && sourceHash === previous.hash && await sha256File(objectPath(target, previous.hash)) === previous.hash;
+        }
         let result;
         if (canReuse) {
           result = { hash: previous.hash, size: sourceStat.size, mtimeMs: sourceStat.mtimeMs };
@@ -1495,12 +1680,21 @@ const createBackupService = context => {
       await fs.promises.mkdir(finalDirectory, { recursive: false });
       const manifestTemporary = path.join(finalDirectory, 'manifest.json.tmp');
       await fs.promises.writeFile(manifestTemporary, JSON.stringify(manifest, null, 2), 'utf8');
+      await durableSync(manifestTemporary);
       await fs.promises.rename(manifestTemporary, path.join(finalDirectory, 'manifest.json'));
-      await fs.promises.rm(stage, { recursive: true, force: true });
+      await durableSyncDirectory(finalDirectory);
+      await durableSyncDirectory(snapshotsRoot(target));
       task.report(97, '正在应用备份保留策略');
-      await cleanupRetention(target, backupConfig, workspaceId);
+      try { await cleanupRetention(target, backupConfig, workspaceId); }
+      catch (error) {
+        writeLog?.('warn', 'Backup retention deferred after snapshot commit', { snapshotId: id, error: error.message || String(error) });
+        task.report(99, '备份已完成，空间清理将在稍后重试', { snapshotId: id, cleanupWarning: error.message || String(error) });
+      }
       task.report(100, '备份完成', { snapshotId: id, copiedBytes: Math.max(0, transferredBytes), reusedBytes, totalBytes, completedFiles: inputs.length, totalFiles: inputs.length });
       return manifest;
+      } finally {
+        await fs.promises.rm(stage, { recursive: true, force: true }).catch(error => writeLog?.('warn', 'Backup staging cleanup failed', { stage, error: error.message || String(error) }));
+      }
     }, run);
     return run();
   };
@@ -1640,7 +1834,10 @@ const createBackupService = context => {
     if (!isApprovedTarget(target)) throw new Error('备份位置未经授权');
     const destination = path.resolve(targetRoot);
     if (workspaceRoot && inside(path.resolve(workspaceRoot), destination)) throw new Error('恢复位置不能位于当前工作区内部');
-    const existing = await fs.promises.readdir(destination).catch(() => []);
+    const existing = await fs.promises.readdir(destination).catch(error => {
+      if (error?.code === 'ENOENT') return [];
+      throw error;
+    });
     const incompleteMarker = path.join(destination, '.photoflow-restore-incomplete');
     const onlyUnboundIdentityMarker = existing.length > 0 && existing.every(name => name === '.photoflow-workspace-id');
     if (existing.length && !onlyUnboundIdentityMarker && !(resumeTask?.id && await exists(incompleteMarker))) throw new Error('请选择一个空文件夹作为恢复位置');
@@ -1824,8 +2021,12 @@ const createBackupService = context => {
     if (!project) throw new Error('备份快照中找不到该项目');
     const projectRoot = path.resolve(root, project.relativePath);
     if (!inside(root, projectRoot) || projectRoot === root) throw new Error('备份中的项目路径无效');
-    const incompleteMarker = path.join(root, `.photoflow-project-restore-${project.id}.incomplete`);
-    if (await exists(projectRoot) && !(resumeTask?.id && await exists(incompleteMarker))) throw new Error('原项目位置已被占用，请先重命名现有目录');
+    const restoreSessionId = String(resumeTask?.metadata?.restoreSessionId || resumeTask?.checkpoint?.restoreSessionId || crypto.randomUUID());
+    const markerKey = crypto.createHash('sha256').update([snapshot, project.id, restoreSessionId].join('\0')).digest('hex').slice(0, 32);
+    const incompleteMarker = path.join(root, `.photoflow-project-restore-${markerKey}.incomplete`);
+    const legacyMarker = /^[A-Za-z0-9_-]+$/.test(String(project.id || '')) ? path.join(root, `.photoflow-project-restore-${project.id}.incomplete`) : '';
+    const hasResumeMarker = resumeTask?.id && (await exists(incompleteMarker) || (legacyMarker && await exists(legacyMarker)));
+    if (await exists(projectRoot) && !hasResumeMarker) throw new Error('原项目位置已被占用，请先重命名现有目录');
     const run = () => backgroundTasks.run({
       ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'project-restore',
@@ -1836,7 +2037,7 @@ const createBackupService = context => {
       resumable: true,
       checkpoint: resumeTask?.checkpoint,
       progress: resumeTask?.progress,
-      metadata: { workspacePath: root, snapshotId: snapshot, projectId: project.id, projectName: project.name },
+      metadata: { workspacePath: root, snapshotId: snapshot, projectId: project.id, projectName: project.name, restoreSessionId },
       resumeFactory: taskSnapshot => restoreProject(root, snapshot, project.id, taskSnapshot),
     }, async task => {
       await verifyComponentRestoreSources(target, manifest, componentRestorePlan, task);
@@ -1854,7 +2055,16 @@ const createBackupService = context => {
           const projectStat = await fs.promises.lstat(projectRoot).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
           if (projectStat && (!projectStat.isDirectory() || projectStat.isSymbolicLink()
             || !inside(await fs.promises.realpath(root), await fs.promises.realpath(projectRoot)))) { const error = new Error('项目恢复目标包含链接或越过工作区'); error.code = 'COMPONENT_RESTORE_TARGET_UNSAFE'; throw error; }
-          await fs.promises.writeFile(incompleteMarker, String(Date.now()), 'utf8');
+          const marker = { schemaVersion: 1, snapshotId: snapshot, projectId: project.id, restoreSessionId, taskId: task.id };
+          const currentMarker = await fs.promises.readFile(incompleteMarker, 'utf8').then(value => { try { return JSON.parse(value); } catch { return null; } }, () => null);
+          if (currentMarker && (currentMarker.snapshotId !== snapshot || currentMarker.projectId !== project.id || currentMarker.restoreSessionId !== restoreSessionId || currentMarker.taskId !== task.id)) throw new Error('项目恢复标记与当前任务不匹配');
+          if (!currentMarker) {
+            const temporaryMarker = `${incompleteMarker}.${crypto.randomUUID()}.tmp`;
+            await fs.promises.writeFile(temporaryMarker, JSON.stringify(marker), { encoding: 'utf8', flag: 'wx' });
+            await durableSync(temporaryMarker);
+            await fs.promises.rename(temporaryMarker, incompleteMarker);
+            await durableSyncDirectory(root);
+          }
         },
         continuation: async componentRestore => {
       const prefix = normalizeKey(project.relativePath).replace(/\/$/, '') + '/';
@@ -1869,7 +2079,7 @@ const createBackupService = context => {
       }
       const archivePath = String(project.extra?.archive?.path || '');
       if (archivePath && !(manifest.materializedArchiveProjectIds || []).includes(project.id) && path.isAbsolute(archivePath)
-        && !await fs.promises.lstat(projectRoot).catch(() => null)) {
+        && !await fs.promises.lstat(projectRoot).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error))) {
         await fs.promises.mkdir(path.dirname(projectRoot), { recursive: true });
         await fs.promises.symlink(archivePath, projectRoot, process.platform === 'win32' ? 'junction' : 'dir');
       }
@@ -1881,30 +2091,68 @@ const createBackupService = context => {
         const progress = 76 + (index + 1) / Math.max(1, dataEntries.length) * 9;
         task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'project-data', completedProject: [...completedProject], completedData: [...completedData] }, progress, `正在恢复项目内部数据 ${index + 1}/${dataEntries.length}`);
       }
-      const portableDomainRoot = path.join(root, `.photoflow-project-domain-restore-${crypto.randomUUID()}`);
+      const portableDomainRoot = path.join(newDataRoot, 'domain-restore', `.photoflow-project-domain-restore-${crypto.randomUUID()}`);
       const mediaEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'media.sqlite3');
       const versioningEntry = manifest.files.find(item => item.scope === 'domain-database' && item.path === 'versioning.sqlite3');
       const portableCore = path.join(portableDomainRoot, 'core.sqlite3');
       const portableMedia = mediaEntry ? path.join(portableDomainRoot, 'media.sqlite3') : '';
       const portableVersioning = versioningEntry ? path.join(portableDomainRoot, 'versioning.sqlite3') : '';
+      const recoveryJournal = path.join(newDataRoot, 'domain-restore', `project-${markerKey}.journal.json`);
+      const existingRecovery = await fs.promises.readFile(recoveryJournal, 'utf8').then(JSON.parse, () => null);
+      if (existingRecovery && (existingRecovery.schemaVersion !== 1 || existingRecovery.snapshotId !== snapshot || existingRecovery.projectId !== project.id
+        || existingRecovery.restoreSessionId !== restoreSessionId || existingRecovery.taskId !== task.id)) throw new Error('项目数据库恢复日志与当前任务不匹配');
       await fs.promises.mkdir(portableDomainRoot, { recursive: true });
+      let preservePortableDomainRoot = false;
       try {
       await materialize(target, { ...manifest.database, path: 'workspace.sqlite3' }, portableCore, task);
       if (mediaEntry) await materialize(target, mediaEntry, portableMedia, task);
       if (versioningEntry) await materialize(target, versioningEntry, portableVersioning, task);
+      if (existingRecovery?.state !== 'committed') {
       await withWorkspaceRecoveryLease({
         workspaceRoot: root,
         domains: ['core', 'media', 'versioning'],
         signal: task.signal,
         deadlineAt: Date.now() + 30 * 60 * 1000,
       }, async () => {
-        await runRecoveryPythonAction('backup_db.py', [
+        if (['applying', 'rollbackPending'].includes(existingRecovery?.state)) {
+          const attempted = Array.isArray(existingRecovery.attemptedDomains) ? existingRecovery.attemptedDomains : [];
+          const preimages = existingRecovery.preimages || {};
+          if (attempted.includes('versioning')) await restoreSqlitePreimage(preimages.versioning, newDataRoot);
+          if (attempted.includes('media')) await restoreSqlitePreimage(preimages.media, newDataRoot);
+          if (attempted.includes('core')) await restoreSqlitePreimage(preimages.core, newDataRoot);
+          await writeDurableJsonReplace(recoveryJournal, { ...existingRecovery, state: 'rolled-back', recoveredAt: Date.now() });
+          const recoveredPortableRoot = path.dirname(path.dirname(preimages.core.files[0].path));
+          if (inside(root, recoveredPortableRoot) && path.basename(recoveredPortableRoot).startsWith('.photoflow-project-domain-restore-')) await fs.promises.rm(recoveredPortableRoot, { recursive: true, force: true });
+        }
+        const preimageRoot = path.join(portableDomainRoot, 'preimage');
+        await fs.promises.mkdir(preimageRoot, { recursive: true });
+        const preimageCore = path.join(preimageRoot, 'core.sqlite3');
+        const preimageMedia = mediaEntry && getWorkspaceMediaDatabasePath ? path.join(preimageRoot, 'media.sqlite3') : '';
+        const preimageVersioning = versioningEntry && mediaEntry && getWorkspaceVersioningDatabasePath ? path.join(preimageRoot, 'versioning.sqlite3') : '';
+        const corePreimage = await captureSqlitePreimage(getWorkspaceDatabasePath(root), preimageRoot, path.basename(preimageCore));
+        const mediaPreimage = preimageMedia ? await captureSqlitePreimage(getWorkspaceMediaDatabasePath(root), preimageRoot, path.basename(preimageMedia)) : null;
+        const versioningPreimage = preimageVersioning ? await captureSqlitePreimage(getWorkspaceVersioningDatabasePath(root), preimageRoot, path.basename(preimageVersioning)) : null;
+        const preimages = {
+          core: corePreimage,
+          ...(mediaPreimage ? { media: mediaPreimage } : {}),
+          ...(versioningPreimage ? { versioning: versioningPreimage } : {}),
+        };
+        const journalBase = { schemaVersion: 1, snapshotId: snapshot, projectId: project.id, restoreSessionId, taskId: task.id,
+          domains: ['core', ...(preimageMedia ? ['media'] : []), ...(preimageVersioning ? ['versioning'] : [])], preimages };
+        await writeDurableJsonReplace(recoveryJournal, { ...journalBase, state: 'prepared', completedDomains: [] });
+        const completedDomains = [];
+        const attemptedDomains = [];
+        try {
+          attemptedDomains.push('core'); await writeDurableJsonReplace(recoveryJournal, { ...journalBase, state: 'applying', attemptedDomains, completedDomains });
+          await runRecoveryPythonAction('backup_db.py', [
           'restore-project', '--source', portableCore, '--destination', getWorkspaceDatabasePath(root),
           '--project-id', project.id, '--old-root', manifest.workspace.root, '--new-root', root,
           '--target-relative-path', project.relativePath, '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
           '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
-        ], 30 * 60 * 1000);
+          ], 30 * 60 * 1000);
+          completedDomains.push('core'); await writeDurableJsonReplace(recoveryJournal, { ...journalBase, state: 'applying', attemptedDomains, completedDomains });
         if (mediaEntry && getWorkspaceMediaDatabasePath) {
+          attemptedDomains.push('media'); await writeDurableJsonReplace(recoveryJournal, { ...journalBase, state: 'applying', attemptedDomains, completedDomains });
           await runRecoveryPythonAction('domain_recovery.py', [
             'restore-project', '--domain', 'media', '--source', portableMedia,
             '--destination', getWorkspaceMediaDatabasePath(root), '--project-id', project.id,
@@ -1912,8 +2160,10 @@ const createBackupService = context => {
             '--old-root', manifest.workspace.root, '--new-root', root,
             '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
           ], 30 * 60 * 1000);
+          completedDomains.push('media'); await writeDurableJsonReplace(recoveryJournal, { ...journalBase, state: 'applying', attemptedDomains, completedDomains });
         }
         if (versioningEntry && mediaEntry && getWorkspaceVersioningDatabasePath) {
+          attemptedDomains.push('versioning'); await writeDurableJsonReplace(recoveryJournal, { ...journalBase, state: 'applying', attemptedDomains, completedDomains });
           await runRecoveryPythonAction('domain_recovery.py', [
             'restore-project', '--domain', 'versioning', '--source', portableVersioning,
             '--destination', getWorkspaceVersioningDatabasePath(root), '--project-id', project.id,
@@ -1921,9 +2171,23 @@ const createBackupService = context => {
             '--old-root', manifest.workspace.root, '--new-root', root,
             '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
           ], 30 * 60 * 1000);
+          completedDomains.push('versioning'); await writeDurableJsonReplace(recoveryJournal, { ...journalBase, state: 'applying', attemptedDomains, completedDomains });
+        }
+          await writeDurableJsonReplace(recoveryJournal, { ...journalBase, state: 'committed', attemptedDomains, completedDomains });
+        } catch (error) {
+          const rollbackErrors = [];
+          const rollback = async worker => { try { await worker(); } catch (rollbackError) { rollbackErrors.push(rollbackError); } };
+          if (versioningPreimage && attemptedDomains.includes('versioning')) await rollback(() => restoreSqlitePreimage(versioningPreimage, newDataRoot));
+          if (mediaPreimage && attemptedDomains.includes('media')) await rollback(() => restoreSqlitePreimage(mediaPreimage, newDataRoot));
+          if (attemptedDomains.includes('core')) await rollback(() => restoreSqlitePreimage(corePreimage, newDataRoot));
+          preservePortableDomainRoot = rollbackErrors.length > 0;
+          await writeDurableJsonReplace(recoveryJournal, { ...journalBase, state: rollbackErrors.length ? 'rollbackPending' : 'rolled-back', attemptedDomains, completedDomains });
+          if (rollbackErrors.length) throw new AggregateError([error, ...rollbackErrors], `项目数据库恢复失败且 preimage 回滚未完成：${error.message || String(error)}`);
+          throw error;
         }
       });
-      } finally { await fs.promises.rm(portableDomainRoot, { recursive: true, force: true }); }
+      }
+      } finally { if (!preservePortableDomainRoot) await fs.promises.rm(portableDomainRoot, { recursive: true, force: true }); }
       await mergeExternalLinkRegistry(
         target,
         manifest,
@@ -1931,13 +2195,17 @@ const createBackupService = context => {
         projectEntries.filter(entry => path.extname(entry.path).toLowerCase() === '.lnk').map(entry => safeDestination(projectRoot, entry.path.slice(prefix.length))),
         task,
       );
+      await fs.promises.rm(recoveryJournal, { force: true });
       task.report(100, '项目恢复完成');
       return { project, componentRestore: componentRestore.results };
         },
       });
     }, run);
     const execution = await run();
-    if (execution.task?.state === 'completed' && backgroundTasks.flush?.() !== false) await fs.promises.rm(incompleteMarker, { force: true });
+    if (execution.task?.state === 'completed' && backgroundTasks.flush?.() !== false) {
+      await fs.promises.rm(incompleteMarker, { force: true });
+      if (legacyMarker) await fs.promises.rm(legacyMarker, { force: true });
+    }
     return execution;
   };
 
@@ -1961,13 +2229,11 @@ const createBackupService = context => {
       resumeFactory: taskSnapshot => verify(workspaceRoot, snapshot, taskSnapshot),
     }, async task => {
       const entries = [{ path: 'workspace.sqlite3', hash: manifest.database.hash }, ...manifest.files];
-      const savedCheckpoint = task.getCheckpoint() || {};
-      const nextIndex = Math.max(0, Math.min(entries.length, Number(savedCheckpoint.nextIndex) || 0));
       for (const [index, entry] of entries.entries()) {
-        if (index < nextIndex) continue;
         task.throwIfCancelled();
         const source = objectPath(target, entry.hash);
-        if (!await exists(source)) throw new Error(`备份对象缺失：${entry.path}`);
+        const stat = await fs.promises.lstat(source).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+        if (!stat || !stat.isFile() || stat.isSymbolicLink() || (entry.size != null && stat.size !== Number(entry.size))) throw new Error(`备份对象缺失或大小无效：${entry.path}`);
         if (await sha256File(source) !== entry.hash) throw new Error(`备份对象校验失败：${entry.path}`);
         const progress = (index + 1) / entries.length * 100;
         task.saveCheckpoint({ version: 1, phase: 'verifying', nextIndex: index + 1 }, progress, `正在验证 ${index + 1}/${entries.length} 个文件`);

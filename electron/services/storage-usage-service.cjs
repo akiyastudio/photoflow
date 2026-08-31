@@ -2,10 +2,14 @@ const fs = require('fs');
 const path = require('path');
 
 const CACHE_VERSION = 1;
+const DIRTY_STATE_VERSION = 1;
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const BACKUP_STORE_DIRECTORY = '.photoflow-backup';
 
-const exists = filePath => fs.promises.access(filePath).then(() => true, () => false);
+const exists = filePath => fs.promises.access(filePath).then(() => true, error => {
+  if (error?.code === 'ENOENT') return false;
+  throw error;
+});
 const comparable = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
 const inside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -30,15 +34,44 @@ const roleDetails = {
 
 const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, resolveMediaCacheDirectory, writeLog }) => {
   const cachePath = path.join(app.getPath('userData'), 'storage-usage-cache.json');
+  const dirtyPath = path.join(app.getPath('userData'), 'storage-usage-dirty.json');
   const invalidatingTaskTypes = new Set(['project-file-operation', 'project-archive', 'project-unarchive', 'workspace-backup', 'backup-cleanup', 'workspace-restore', 'project-restore', 'cache-cleanup', 'deleted-project-cleanup']);
   let invalidatedAt = 0;
+  let dirtyGeneration = 0;
+  let dirtyLoadPromise = null;
+  let dirtyUpdatePromise = Promise.resolve();
+  const loadDirtyGeneration = async () => {
+    if (!dirtyLoadPromise) dirtyLoadPromise = fs.promises.readFile(dirtyPath, 'utf8').then(JSON.parse, error => {
+      if (error?.code === 'ENOENT' || error instanceof SyntaxError) return null;
+      throw error;
+    }).then(value => {
+      dirtyGeneration = Number.isSafeInteger(value?.generation) && value.generation >= 0 ? value.generation : 0;
+    });
+    await dirtyLoadPromise;
+    return dirtyGeneration;
+  };
+  const persistDirtyGeneration = async generation => {
+    const temporary = `${dirtyPath}.${process.pid}.${Date.now()}.tmp`;
+    await fs.promises.writeFile(temporary, JSON.stringify({ version: DIRTY_STATE_VERSION, generation }), 'utf8');
+    await fs.promises.rename(temporary, dirtyPath).catch(async error => {
+      if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error;
+      await fs.promises.rm(dirtyPath, { force: true });
+      await fs.promises.rename(temporary, dirtyPath);
+    });
+  };
   eventBus?.on('background-task:changed', delta => {
-    if (delta?.upserts?.some(task => task.state === 'completed' && invalidatingTaskTypes.has(task.type))) invalidatedAt = Date.now();
+    if (delta?.upserts?.some(task => task.state === 'completed' && invalidatingTaskTypes.has(task.type))) {
+      invalidatedAt = Date.now();
+      dirtyUpdatePromise = dirtyUpdatePromise.then(() => loadDirtyGeneration()).then(() => {
+        dirtyGeneration += 1;
+        return persistDirtyGeneration(dirtyGeneration);
+      }).catch(error => writeLog?.('warn', 'Storage usage dirty state update failed', { error: error.message || String(error) }));
+    }
   });
 
   const workspaceId = async root => {
     try { return (await fs.promises.readFile(path.join(root, '.photoflow-workspace-id'), 'utf8')).trim(); }
-    catch { return ''; }
+    catch (error) { if (error?.code === 'ENOENT') return ''; throw error; }
   };
 
   const configuredSources = async () => {
@@ -82,7 +115,7 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
       const parsed = JSON.parse(await fs.promises.readFile(cachePath, 'utf8'));
       if (parsed?.version !== CACHE_VERSION || parsed.signature !== signature || !Array.isArray(parsed.sources)) return null;
       return parsed;
-    } catch { return null; }
+    } catch (error) { if (error?.code === 'ENOENT' || error instanceof SyntaxError) return null; throw error; }
   };
   const writeCache = async value => {
     const temporary = `${cachePath}.${process.pid}.tmp`;
@@ -92,7 +125,10 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
   };
 
   const scanPath = async (sourcePath, task, state, excludedPaths = new Set()) => {
-    const initial = await fs.promises.lstat(sourcePath).catch(() => null);
+    const initial = await fs.promises.lstat(sourcePath).catch(error => {
+      if (error?.code === 'ENOENT') return null;
+      throw error;
+    });
     if (!initial) return { bytes: 0, files: 0, online: false };
     if (initial.isSymbolicLink()) return { bytes: 0, files: 0, online: true };
     if (initial.isFile()) return { bytes: initial.size, files: 1, online: true };
@@ -102,15 +138,15 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     while (pending.length) {
       task.throwIfCancelled();
       const directory = pending.pop();
-      const entries = await fs.promises.readdir(directory, { withFileTypes: true }).catch(() => []);
+      const entries = await fs.promises.readdir(directory, { withFileTypes: true });
       for (const entry of entries) {
         if (entry.isSymbolicLink()) continue;
         const absolute = path.join(directory, entry.name);
         if (excludedPaths.has(comparable(absolute))) continue;
         if (entry.isDirectory()) pending.push(absolute);
         else if (entry.isFile()) {
-          const stat = await fs.promises.stat(absolute).catch(() => null);
-          if (stat) { bytes += stat.size; files += 1; }
+          const stat = await fs.promises.stat(absolute);
+          bytes += stat.size; files += 1;
         }
         state.processed += 1;
         if (state.processed % 256 === 0) {
@@ -132,8 +168,8 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
       if (parent === probe) return { online: false };
       probe = parent;
     }
-    const stat = await fs.promises.statfs(probe).catch(() => null);
-    return stat ? { online: true, totalBytes: Number(stat.blocks) * Number(stat.bsize), freeBytes: Number(stat.bavail) * Number(stat.bsize) } : { online: true };
+    const stat = await fs.promises.statfs(probe);
+    return { online: true, totalBytes: Number(stat.blocks) * Number(stat.bsize), freeBytes: Number(stat.bavail) * Number(stat.bsize) };
   };
 
   const runScan = async (sources, signature, restartTask = null) => backgroundTasks.run({
@@ -144,6 +180,8 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     cancellable: true,
     metadata: { signature, sourceCount: sources.length },
   }, async task => {
+    await dirtyUpdatePromise;
+    const scanGeneration = await loadDirtyGeneration();
     const state = { processed: 0 };
     const measured = [];
     for (const [index, source] of sources.entries()) {
@@ -152,24 +190,33 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
       const result = await scanPath(source.path, task, state, excludedPaths);
       measured.push({ ...source, ...result });
     }
-    const cache = { version: CACHE_VERSION, signature, updatedAt: Date.now(), sources: measured };
+    await dirtyUpdatePromise;
+    await loadDirtyGeneration();
+    if (dirtyGeneration !== scanGeneration) {
+      const error = new Error('存储占用扫描期间数据发生变化，结果已丢弃');
+      error.code = 'STORAGE_USAGE_SCAN_DIRTY';
+      throw error;
+    }
+    const cache = { version: CACHE_VERSION, signature, generation: scanGeneration, updatedAt: Date.now(), sources: measured };
     await writeCache(cache);
     task.report(100, '存储占用统计完成', { updatedAt: cache.updatedAt });
     return cache;
   });
 
   const overview = async (force = false) => {
+    await loadDirtyGeneration();
     const sources = await configuredSources();
     const signature = signatureFor(sources);
     let cache = await readCache(signature);
     const active = backgroundTasks.list().some(task => task.type === 'storage-usage-scan' && ['queued', 'running'].includes(task.state));
-    const stale = !cache || Number(cache.updatedAt || 0) < invalidatedAt || Date.now() - Number(cache.updatedAt || 0) >= CACHE_MAX_AGE_MS;
+    const stale = !cache || Number(cache.generation ?? 0) !== dirtyGeneration || Number(cache.updatedAt || 0) < invalidatedAt || Date.now() - Number(cache.updatedAt || 0) >= CACHE_MAX_AGE_MS;
     if ((force || stale) && !active) {
       void runScan(sources, signature).catch(error => writeLog?.('warn', 'Storage usage scan failed', { error: error.message || String(error) }));
     }
     if (!cache) cache = { updatedAt: 0, sources: [] };
     const cachedByKey = new Map(cache.sources.map(item => [item.key, item]));
     const volumes = new Map();
+    const countedPhysicalPaths = new Set();
     for (const source of sources) {
       const root = volumeRoot(source.path);
       const id = process.platform === 'win32' ? root.toLocaleLowerCase() : root;
@@ -180,7 +227,8 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
       const volume = volumes.get(id);
       const cached = cachedByKey.get(source.key);
       const bytes = Number(cached?.bytes || 0);
-      volume.photoflowBytes += bytes;
+      const physicalKey = comparable(source.path);
+      if (!countedPhysicalPaths.has(physicalKey)) { volume.photoflowBytes += bytes; countedPhysicalPaths.add(physicalKey); }
       volume.items.push({ kind: source.kind, label: source.label, path: source.path, bytes, measured: Boolean(cached) });
     }
     for (const volume of volumes.values()) {

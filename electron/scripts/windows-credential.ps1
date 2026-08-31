@@ -63,10 +63,21 @@ function Read-PhotoFlowCredential([string]$target) {
 }
 
 $requestText = [Console]::In.ReadToEnd()
+$request = $null
+if ($requestText.Length -gt 1048576) { throw 'Credential request is too large' }
 $request = $requestText | ConvertFrom-Json
 $operation = [string]$request.operation
 $target = [string]$request.target
 if (-not $target.StartsWith('PhotoFlow/NAS/')) { throw 'Invalid credential reference' }
+function Get-PhotoFlowCredentialTarget([string]$remotePath) {
+  if ($remotePath -notmatch '^\\\\[^\\]+\\[^\\]+') { throw 'Invalid NAS share path' }
+  $share = $Matches[0].TrimEnd('\').ToLowerInvariant()
+  $sha = [Security.Cryptography.SHA256]::Create()
+  try { $digest = $sha.ComputeHash([Text.Encoding]::UTF8.GetBytes($share)) }
+  finally { $sha.Dispose() }
+  $hex = -join ($digest | ForEach-Object { $_.ToString('x2') })
+  return "PhotoFlow/NAS/$($hex.Substring(0, 24))"
+}
 
 if ($operation -eq 'write') {
   $passwordBytes = [Text.Encoding]::Unicode.GetBytes([string]$request.password)
@@ -107,13 +118,18 @@ if ($operation -eq 'delete') {
 }
 
 if ($operation -eq 'connect') {
+  if ((Get-PhotoFlowCredentialTarget ([string]$request.remotePath)) -ne $target) { throw 'Credential reference does not match NAS share path' }
   $credential = Read-PhotoFlowCredential $target
-  $resource = [PhotoFlowCredentialNative+NETRESOURCE]::new()
-  $resource.Type = 1
-  $resource.RemoteName = [string]$request.remotePath
-  $result = [PhotoFlowCredentialNative]::WNetAddConnection2([ref]$resource, $credential.password, $credential.username, 0)
-  if ($result -ne 0 -and $result -ne 85) { throw "NAS connection failed (Windows error $result)" }
-  @{ success = $true; username = $credential.username } | ConvertTo-Json -Compress
+  try {
+    $resource = [PhotoFlowCredentialNative+NETRESOURCE]::new()
+    $resource.Type = 1
+    $resource.RemoteName = [string]$request.remotePath
+    $result = [PhotoFlowCredentialNative]::WNetAddConnection2([ref]$resource, $credential.password, $credential.username, 0)
+    if ($result -ne 0 -and $result -ne 85) { throw "NAS connection failed (Windows error $result)" }
+    @{ success = $true; username = $credential.username } | ConvertTo-Json -Compress
+  } finally {
+    $credential.password = $null
+  }
   exit 0
 }
 
