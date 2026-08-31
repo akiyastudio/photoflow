@@ -26,6 +26,7 @@ const createCredentialService = ({ writeLog }) => {
     let outputBytes = 0;
     let settled = false;
     let terminationError = null;
+    let terminationProcessError = null;
     let forceTimer = null;
     let terminationDeadline = null;
     const settle = (callback, value) => {
@@ -45,7 +46,7 @@ const createCredentialService = ({ writeLog }) => {
       forceTimer.unref?.();
       terminationDeadline = setTimeout(() => {
         if (child.exitCode == null && child.signalCode == null) {
-          const failure = new AggregateError([terminationError], 'Windows 凭据进程无法在终止期限内退出');
+          const failure = new AggregateError([terminationError, ...(terminationProcessError ? [terminationProcessError] : [])], 'Windows 凭据进程无法在终止期限内退出');
           failure.code = 'PROCESS_TERMINATION_FAILED';
           terminationCompromised = true;
           settle(reject, failure);
@@ -65,7 +66,10 @@ const createCredentialService = ({ writeLog }) => {
     };
     child.stdout.on('data', chunk => append('stdout', chunk));
     child.stderr.on('data', chunk => append('stderr', chunk));
-    child.on('error', error => settle(reject, terminationError || error));
+    child.on('error', error => {
+      if (terminationError) { terminationProcessError = error; return; }
+      settle(reject, error);
+    });
     child.on('close', code => {
       if (settled) return;
       if (terminationError) { settle(reject, terminationError); return; }

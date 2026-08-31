@@ -2439,6 +2439,7 @@ const createBackupService = context => {
   const accepted = async starter => {
     try {
       const execution = await starter();
+      void execution.completion.catch(() => undefined);
       return { success: true, taskId: execution.task.id, deduplicated: execution.deduplicated, completion: execution.completion };
     } catch (error) {
       return { success: false, error: error.message || String(error), code: error.code || undefined };
