@@ -25,6 +25,7 @@ const DEFAULT_EXTERNAL_HTTPS_HOSTS = new Set([
   'huggingface.co',
   'pan.quark.cn',
   'pyinstaller.org',
+  'qingstudio.cn',
   'ubuntu.com',
   'www.gnu.org',
 ]);

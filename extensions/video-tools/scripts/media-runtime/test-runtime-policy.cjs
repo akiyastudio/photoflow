@@ -18,14 +18,14 @@ try {
     licenseArchive: create('licenses.zip'),
   };
   const ffmpeg = {
-    schemaVersion: 3,
+    schemaVersion: 4,
     kind: 'photoflow-ffmpeg-runtime',
     platform: 'windows-x64',
     license: 'GPL-2.0-or-later',
     reproducibleSource: true,
-    ffmpeg: { version: '7.1.1', commit: 'a'.repeat(40) },
-    configureFlags: ['--enable-gpl', '--enable-libx264', '--enable-libx265', '--enable-libass', '--enable-libzimg', '--enable-zlib', '--enable-mediafoundation', '--enable-d3d11va', '--enable-ffnvcodec', '--enable-nvenc', '--disable-autodetect', '--disable-network'],
-    components: ['x264', 'x265', 'zlib', 'zimg', 'freetype', 'fribidi', 'harfbuzz', 'libass', 'nv-codec-headers'].map(name => ({ name, commit: 'b'.repeat(40) })),
+    ffmpeg: { version: '7.1.5', commit: 'a'.repeat(40) },
+    configureFlags: ['--enable-gpl', '--enable-libx264', '--enable-libx265', '--enable-libass', '--enable-libzimg', '--enable-zlib', '--enable-mediafoundation', '--enable-d3d11va', '--enable-ffnvcodec', '--enable-nvenc', '--enable-vulkan', '--enable-libplacebo', '--disable-autodetect', '--disable-network'],
+    components: ['x264', 'x265', 'zlib', 'zimg', 'freetype', 'fribidi', 'harfbuzz', 'libass', 'nv-codec-headers', 'libplacebo'].map(name => ({ name, commit: 'b'.repeat(40) })),
     artifacts,
   };
   assert.doesNotThrow(() => validateFfmpegManifest(ffmpeg, root));
@@ -42,6 +42,8 @@ try {
   assert.throws(() => validateFfmpegManifest({ ...ffmpeg, components: ffmpeg.components.filter(component => component.name !== 'x265') }, root), /未声明固定版本.*x265/);
   assert.throws(() => validateFfmpegManifest({ ...ffmpeg, configureFlags: ffmpeg.configureFlags.filter(flag => flag !== '--enable-nvenc') }, root), /硬件加速构建参数/);
   assert.throws(() => validateFfmpegManifest({ ...ffmpeg, components: ffmpeg.components.filter(component => component.name !== 'nv-codec-headers') }, root), /未声明固定版本.*nv-codec-headers/);
+  assert.throws(() => validateFfmpegManifest({ ...ffmpeg, configureFlags: ffmpeg.configureFlags.filter(flag => flag !== '--enable-libplacebo') }, root), /GPU 色调映射构建参数/);
+  assert.throws(() => validateFfmpegManifest({ ...ffmpeg, components: ffmpeg.components.filter(component => component.name !== 'libplacebo') }, root), /未声明固定版本.*libplacebo/);
 
   console.log('媒体运行时策略测试通过');
 } finally {

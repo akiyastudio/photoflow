@@ -7,6 +7,7 @@
     "build": "node scripts/build.cjs",
     "build:runtime": "bash media-runtime/build-libmpv-lgpl-windows.sh",
     "build:release": "node scripts/build-release.cjs",
+    "package:host": "node scripts/package-host.cjs",
     "test": "node tests/test-protocol-contract.cjs && node tests/test-runtime-policy.cjs && node tests/test-package-contract.cjs && node tests/test-lifecycle.cjs && node tests/test-standalone-copy.cjs",
     "sign": "node scripts/sign.cjs",
     "verify": "node scripts/lifecycle.cjs verify",

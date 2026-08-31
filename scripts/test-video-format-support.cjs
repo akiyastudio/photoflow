@@ -38,4 +38,19 @@ const decoder = fs.readFileSync(path.join(root, 'extensions/video-playback-mpv/s
 assert(decoder.includes('SetOption("vo", probeOnly ? "null" : "gpu-next,gpu")'), 'advanced playback must prefer gpu-next with gpu fallback');
 assert.equal((decoder.match(/fflags=\+genpts\+igndts/g) || []).length, 1, 'timestamp repair must be limited to the bounded recovery path');
 
+const electronMain = fs.readFileSync(path.join(root, 'electron/main.cjs'), 'utf8');
+assert(electronMain.includes('`--video_tools_arg=${value}`') && !electronMain.includes("['--video_tools_arg', value]"), 'rename must bind forwarded video runtime flags with = so argparse accepts values such as -u');
+assert(electronMain.includes("baseName === 'rename' && renameNeedsFrameRuntime(args, { fs, path })") && electronMain.includes("error?.code !== 'PLUGIN_MISSING'"), 'image comparison must treat video-tools as an optional frame adapter rather than a required plugin');
+const { renameNeedsFrameRuntime } = require('../electron/services/rename-runtime-model.cjs');
+const runtimeProbeRoot = fs.mkdtempSync(path.join(require('node:os').tmpdir(), 'photoflow-rename-runtime-'));
+try {
+  const imageA = path.join(runtimeProbeRoot, 'image-a'); const imageB = path.join(runtimeProbeRoot, 'image-b');
+  fs.mkdirSync(imageA); fs.mkdirSync(imageB); fs.writeFileSync(path.join(imageA, 'one.jpg'), 'jpg'); fs.writeFileSync(path.join(imageB, 'one.tif'), 'tif');
+  assert.equal(renameNeedsFrameRuntime(['--folder_a', imageA, '--folder_b', imageB], { fs, path }), false, 'JPG/TIFF comparison stays independent from video-tools');
+  fs.writeFileSync(path.join(imageA, 'clip.mov'), 'mov');
+  assert.equal(renameNeedsFrameRuntime(['--folder_a', imageA, '--folder_b', imageB], { fs, path }), true, 'video comparison may request the optional frame runtime');
+  fs.rmSync(path.join(imageA, 'clip.mov')); fs.writeFileSync(path.join(imageB, 'camera.cr3'), 'raw');
+  assert.equal(renameNeedsFrameRuntime(['--folder_a', imageA, '--folder_b', imageB], { fs, path }), true, 'RAW comparison may request the optional frame runtime used for decoding');
+} finally { fs.rmSync(runtimeProbeRoot, { recursive: true, force: true }); }
+
 console.log('video format and smooth-playback regression tests passed.');

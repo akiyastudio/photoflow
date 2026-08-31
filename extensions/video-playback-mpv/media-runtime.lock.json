@@ -1,9 +1,9 @@
 {
   "schemaVersion": 1,
   "ffmpeg": {
-    "version": "7.1.1",
+    "version": "7.1.5",
     "repository": "https://git.ffmpeg.org/ffmpeg.git",
-    "commit": "68af2cc3feb8c78aec2722c728fd87f03515fa7c",
+    "commit": "3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587",
     "license": "GPL-2.0-or-later"
   },
   "x264": {

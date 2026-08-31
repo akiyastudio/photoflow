@@ -57,7 +57,7 @@ const isCompleteModelDirectory = modelId => {
 };
 const listModels = () => ({
   models: WHISPER_MODELS.map(item => ({ ...item, installed: isCompleteModelDirectory(item.id) })),
-  placement: 'models/<model-id>', downloadPolicy: 'manual-only',
+  placement: 'models/<model-id>', directory: MODEL_ROOT, downloadPolicy: 'manual-only',
 });
 const saveSettings = async (parentId, patch) => {
   const current = await readSettings(parentId);

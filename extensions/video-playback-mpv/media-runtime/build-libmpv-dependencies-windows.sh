@@ -28,6 +28,7 @@ lock_value() {
 
 ffmpeg_repo="${PHOTOFLOW_FFMPEG_REPOSITORY_OVERRIDE:-$(lock_value '.ffmpeg.repository')}"
 ffmpeg_commit="$(lock_value '.ffmpeg.commit')"
+ffmpeg_version="$(lock_value '.ffmpeg.version')"
 zlib_repo="$(lock_value '.zlib.repository')"
 zlib_commit="$(lock_value '.zlib.commit')"
 
@@ -250,8 +251,9 @@ printf '%s\n' "${ffmpeg_flags[@]}" > "$work_root/ffmpeg-configure-flags.txt"
 pushd "$source_root/ffmpeg"
 ./configure "${ffmpeg_flags[@]}"
 cp ffbuild/config.mak "$work_root/ffmpeg-config.mak"
-make -j"$jobs"
-make install
+rm -f .version
+make REVISION="$ffmpeg_version" -j"$jobs"
+make REVISION="$ffmpeg_version" install
 popd
 
 ffmpeg_exe="$prefix/bin/ffmpeg.exe"

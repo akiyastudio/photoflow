@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 // Plugin-owned regression test.
-import { assignmentKey, beginWorkflowReturnProgress, canEnterWorkflowStage, clampCrop, clampZoom, expandCrop, fitCropToMembers, isIdentityConfirmed, mergeAudit, normalizeRotation, normalizeWorkspace, progressCandidates, rankIdentityCandidates, relayChainForItems, resizeCrop, returnCandidates, returnMatchAssessment, returnModificationAssessment, returnReviewItems, shouldBlink, subjectsFromWorkspace, updateWorkflowReturnProgress, workflowGroups, workflowLayoutMode, workflowStageSummaries, workingImageMetrics } from '../renderer/src/interaction-model.ts';
+import { assignmentKey, beginWorkflowReturnProgress, canEnterWorkflowStage, clampCrop, clampZoom, expandCrop, fitCropToMembers, isIdentityConfirmed, isPhotoMergeComplete, latestWorkflowStage, mergeAudit, normalizeRotation, normalizeWorkspace, progressCandidates, rankIdentityCandidates, relayChainForItems, resizeCrop, returnCandidates, returnMatchAssessment, returnModificationAssessment, returnReviewItems, shouldBlink, subjectsFromWorkspace, updateWorkflowReturnProgress, workflowGroups, workflowLayoutMode, workflowStageSummaries, workingImageMetrics } from '../renderer/src/interaction-model.ts';
 
 const workspace = {
   identities: [{ id: 'alice', name: 'Alice' }, { id: 'pending', name: '待确认人物 2' }],
@@ -68,23 +68,42 @@ const legacyWorkspace = normalizeWorkspace({ photos: [{ photoId: 'old', baseVers
 assert.deepEqual(legacyWorkspace.identities, []);
 assert.deepEqual(legacyWorkspace.assignments, []);
 assert.equal(legacyWorkspace.photos[0].tasks[0].members[0].personIndex, 1, 'old single-person tasks must normalize without new fields');
-assert.equal(isIdentityConfirmed({ identityId: 'alice', completed: true, completionKind: 'manual', source: 'suggested' }, { id: 'alice', name: 'Alice' }), false, 'retouch completion must never confirm identity');
+assert.equal(isIdentityConfirmed({ identityId: 'alice', source: 'suggested' }, { id: 'alice', name: 'Alice' }), true, 'automatic identity candidates are accepted by default and remain user-editable');
+assert.equal(isIdentityConfirmed({ identityId: 'alice', source: 'suggested', identityConfirmed: false }, { id: 'alice', name: 'Alice' }), false, 'an explicit rejection still overrides the automatic default');
 assert.equal(isIdentityConfirmed({ identityId: 'alice', source: 'manual-group' }, { id: 'alice', name: 'Alice' }), true, 'legacy manual identity confirmation remains supported');
 
 const guardedWorkspace = {
   photos: [{ photoId: 'p1', baseVersionId: 'v1', tasks: [{ id: 't1', personIndex: 1, bbox: { x: 0, y: 0, width: 10, height: 10 }, crop: { x: 0, y: 0, width: 20, height: 20 } }] }],
   identities: [{ id: 'alice', name: 'Alice' }], assignments: [],
 };
-assert.equal(canEnterWorkflowStage(guardedWorkspace, 'assignment').allowed, false, 'stage 2 must be guarded until identity is manually confirmed');
+assert.equal(canEnterWorkflowStage(guardedWorkspace, 'assignment').allowed, false, 'stage 2 must be guarded until every person has an accepted identity');
+assert.equal(latestWorkflowStage(guardedWorkspace), 'detect');
 const confirmedWorkspace = { ...guardedWorkspace, assignments: [{ photoId: 'p1', baseVersionId: 'v1', personIndex: 1, identityId: 'alice', source: 'manual' }] };
 assert.equal(canEnterWorkflowStage(confirmedWorkspace, 'assignment').allowed, true);
+assert.equal(latestWorkflowStage(confirmedWorkspace), 'assignment');
+const automaticallyAcceptedWorkspace = { ...guardedWorkspace, assignments: [{ photoId: 'p1', baseVersionId: 'v1', personIndex: 1, identityId: 'alice', source: 'suggested', completed: true, completionKind: 'no-retouch' }] };
+assert.equal(canEnterWorkflowStage(automaticallyAcceptedWorkspace, 'assignment').allowed, true, 'automatic candidates satisfy identity assignment without a confirmation click');
+assert.equal(mergeAudit(automaticallyAcceptedWorkspace).ready, true, 'automatic candidates must not create a final merge blocker');
 assert.equal(canEnterWorkflowStage(confirmedWorkspace, 'relay').allowed, false, 'stage 3 must wait for generated assignment workflow');
 const generatedWorkspace = { ...confirmedWorkspace, workflowGenerated: true, workflowNeedsRegeneration: false, workflowParticipantKeys: ['p1:v1:1'] };
 assert.equal(canEnterWorkflowStage(generatedWorkspace, 'relay').allowed, true);
+assert.equal(latestWorkflowStage(generatedWorkspace), 'relay');
+const workflowAwaitingRegeneration = { ...generatedWorkspace, workflowNeedsRegeneration: true };
+assert.equal(canEnterWorkflowStage(workflowAwaitingRegeneration, 'assignment').allowed, true, 'stage 2 remains available so a changed historical workflow can be regenerated');
+assert.equal(canEnterWorkflowStage(workflowAwaitingRegeneration, 'relay').allowed, true, 'an existing relay remains inspectable while its changed schedule awaits regeneration');
+assert.equal(workflowStageSummaries(workflowAwaitingRegeneration, 'detect').find(item => item.id === 'relay').count, '0/1 已完成 · 0 已返图');
 assert.equal(canEnterWorkflowStage(generatedWorkspace, 'review').allowed, false, 'stage 4 must wait until every relay task is complete');
 assert.match(canEnterWorkflowStage(generatedWorkspace, 'review').reason, /1 个接力任务未完成/);
 const returnedWorkspace = { ...generatedWorkspace, assignments: [{ ...confirmedWorkspace.assignments[0], completed: true, completionKind: 'returned' }] };
 assert.equal(canEnterWorkflowStage(returnedWorkspace, 'review').allowed, true, 'stage 4 unlocks after relay completion');
+assert.equal(latestWorkflowStage(returnedWorkspace), 'review');
+assert.equal(latestWorkflowStage({ ...generatedWorkspace, photos: generatedWorkspace.photos.map(photo => ({ ...photo, tasks: photo.tasks.map(task => ({ ...task, status: 'merged', mergedVersionId: 'output-v1' })) })) }), 'review', 'any existing output resumes directly on the review/output page');
+const historicalMixedMerge = {
+  photos: [{ photoId: 'mixed', baseVersionId: 'mixed-base', tasks: [{ id: 'returned-task', personIndex: 1, status: 'merged', mergedVersionId: 'output-v1' }, { id: 'no-retouch-task', personIndex: 2, status: 'exported' }] }],
+  assignments: [{ photoId: 'mixed', baseVersionId: 'mixed-base', personIndex: 1, completed: true, completionKind: 'returned' }, { photoId: 'mixed', baseVersionId: 'mixed-base', personIndex: 2, completed: true, completionKind: 'no-retouch' }],
+};
+assert.equal(isPhotoMergeComplete(historicalMixedMerge, historicalMixedMerge.photos[0]), true, 'an existing merged photo stays complete when its artifact-free task was explicitly marked no-retouch');
+assert.equal(mergeAudit(historicalMixedMerge).completedPhotoCount, 1, 'historical mixed return/no-retouch photos must not remain in the pending merge count');
 const stageStates = workflowStageSummaries(generatedWorkspace, 'relay');
 assert.equal(stageStates.find(item => item.id === 'detect').complete, true);
 assert.equal(stageStates.find(item => item.id === 'relay').state, 'current');

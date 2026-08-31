@@ -75,6 +75,7 @@ main:has(> div > .workflow-board-view) > div { width: 100%; height: auto; min-he
 .workflow-task-thumbnail { width: 100%; height: 150px; overflow: hidden; background: #020617; }
 .workflow-task-thumbnail > [role="button"] { width: 100%; height: 100%; aspect-ratio: auto; overflow: hidden; }
 .workflow-board-view [role="button"] { cursor: pointer; }
+[data-merge-audit] { display: none !important; }
 
 /* Assignment is grouped by week: one week per row, no relationship chips or task imagery. */
 [data-assignment-sequence] { max-width: 72rem; padding: var(--pf-space-5); }

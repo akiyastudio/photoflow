@@ -210,7 +210,7 @@ class AdvancedBatchSession:
         return sorted(sam_root.glob("mask-*.png"))
 
 
-def probe_advanced(timeout=8):
+def probe_advanced(timeout=12, retry_timeout=12):
     try:
         pair_script = wsl_path(script_path("pairdetr_service.py"))
         sam_script = wsl_path(script_path("sam2_service.py"))
@@ -220,7 +220,15 @@ def probe_advanced(timeout=8):
             "test -s $HOME/model-lab/checkpoints/sam2/sam2.1_hiera_large.pt",
             f"test -r {shlex.quote(pair_script)}", f"test -r {shlex.quote(sam_script)}",
         ])
-        run_shell(command, timeout)
+        try:
+            run_shell(command, timeout)
+        except subprocess.TimeoutExpired:
+            # A stopped WSL 2 distribution can take longer than the original
+            # eight-second probe budget to cold-start. The timed-out wsl.exe is
+            # terminated, but the distribution commonly finishes starting in
+            # the background, so one bounded retry avoids reporting a healthy
+            # installation as incomplete. Other errors remain authoritative.
+            run_shell(command, retry_timeout)
         return True, ""
     except Exception as error:
         return False, str(error)

@@ -157,24 +157,73 @@ def edit_weight_and_delta(base_rgb, edited_rgb):
     changed = cv2.morphologyEx(changed, cv2.MORPH_CLOSE, kernel)
     changed = cv2.dilate(changed, kernel, iterations=1)
     soft_changed = cv2.GaussianBlur(changed.astype(np.float32) / 255.0, (0, 0), max(3.0, radius * 0.65))
-    weight = border_mask(base_rgb.shape[0], base_rgb.shape[1]) * np.maximum(strength, soft_changed * 0.72)
-    # Re-inject only trustworthy high-frequency detail from the source.
+    edit_support = np.maximum(strength, soft_changed * 0.72)
+    weight = border_mask(base_rgb.shape[0], base_rgb.shape[1]) * edit_support
+    # Preserve source texture only where the returned patch is effectively
+    # unchanged. Re-injecting source detail at a moved silhouette produces a
+    # faint copy of the old edge, which reads as ghosting after recomposition.
     original_detail = base_float - base_low
-    detail_factor = 0.62 * (1.0 - np.clip(weight[..., None] * 0.78, 0.0, 0.78))
+    unchanged = 1.0 - np.clip(edit_support[..., None] / 0.28, 0.0, 1.0)
+    detail_factor = 0.48 * unchanged * unchanged
     enhanced = np.clip(edit_float + original_detail * detail_factor, 0, 255)
     return weight.astype(np.float32), enhanced - base_float, {"noise": noise, "threshold": threshold}
 
 
-def task_mask_weight(task, image_width, image_height, crop):
-    """Return a soft target-person mask in crop coordinates.
+def fuse_patch_delta(base_rgb, current_rgb, previous_confidence, weight, delta):
+    """Fuse one crop without averaging visibly different overlapping edges.
+
+    Low-disagreement pixels may be blended safely. At a conflicting overlap we
+    choose one patch with a spatially smoothed confidence decision, so two
+    independently aligned silhouettes never become a semi-transparent double
+    edge. Ties intentionally prefer the later task: relay returns contain the
+    work of their predecessors and are therefore the more complete source.
+    """
+    base_float = base_rgb.astype(np.float32)
+    current_float = current_rgb.astype(np.float32)
+    previous = np.clip(previous_confidence.astype(np.float32), 0.0, 1.0)
+    candidate = np.clip(weight.astype(np.float32), 0.0, 1.0)
+    previous_delta = (current_float - base_float) / np.maximum(previous[..., None], 1e-4)
+
+    overlap = (previous > 0.12) & (candidate > 0.12)
+    disagreement = np.mean(np.abs(previous_delta - delta), axis=2)
+    # Even a modest per-channel mismatch can reveal a second contour on smooth
+    # clothing or skin. Use the lower threshold for source selection, while
+    # retaining the historical 18-level threshold for the review metric.
+    discordant = overlap & (disagreement > 8.0)
+    severe_conflict = overlap & (disagreement > 18.0)
+
+    combined_confidence = np.maximum(previous, candidate)
+    combined_delta = (
+        previous_delta * previous[..., None] + delta * candidate[..., None]
+    ) / np.maximum((previous + candidate)[..., None], 1e-5)
+
+    if np.any(discordant):
+        sigma = max(1.5, min(base_rgb.shape[:2]) * 0.002)
+        confidence_margin = cv2.GaussianBlur(candidate - previous, (0, 0), sigma)
+        current_wins = discordant & (confidence_margin >= 0.0)
+        previous_wins = discordant & ~current_wins
+        combined_delta[current_wins] = delta[current_wins]
+        combined_confidence[current_wins] = candidate[current_wins]
+        combined_delta[previous_wins] = previous_delta[previous_wins]
+        combined_confidence[previous_wins] = previous[previous_wins]
+
+    fused = np.clip(
+        base_float + combined_delta * combined_confidence[..., None], 0, 255
+    ).astype(np.uint8)
+    return fused, combined_confidence.astype(np.float16), int(np.count_nonzero(severe_conflict))
+
+
+def task_mask_weights(task, image_width, image_height, crop):
+    """Return core and outer-support person masks in crop coordinates.
 
     Detection masks are stored as full-image proxy PNGs.  The work patch stays
-    rectangular and contains all context; this mask only prevents a returned
-    patch from changing another person in an overlapping work area.
+    rectangular and contains all context. The core owns the detected person;
+    the narrower support band permits genuine silhouette edits without giving
+    ordinary background differences permission to create a halo.
     """
     mask_path = task.get("maskPath")
     if not mask_path or not os.path.isfile(mask_path):
-        return None
+        return None, None
     with Image.open(mask_path) as source:
         source.load()
         full_proxy = np.asarray(source.convert("L"))
@@ -188,11 +237,22 @@ def task_mask_weight(task, image_width, image_height, crop):
     bottom = max(top + 1, min(proxy_height, int(np.ceil((y + crop_height) * scale_y))))
     proxy_crop = full_proxy[top:bottom, left:right]
     target = cv2.resize(proxy_crop, (crop_width, crop_height), interpolation=cv2.INTER_LINEAR) / 255.0
-    radius = max(9, int(min(crop_height, crop_width) * 0.009))
-    radius += 1 - radius % 2
-    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (radius, radius))
-    expanded = cv2.dilate((target > 0.28).astype(np.uint8), kernel).astype(np.float32)
-    return cv2.GaussianBlur(expanded, (0, 0), max(3.0, radius * 0.42))
+    core = cv2.GaussianBlur(np.clip(target.astype(np.float32), 0.0, 1.0), (0, 0), 1.0)
+    kernel_size = max(7, int(min(crop_height, crop_width) * 0.006))
+    kernel_size += 1 - kernel_size % 2
+    kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (kernel_size, kernel_size))
+    expanded = cv2.dilate((target > 0.20).astype(np.uint8), kernel).astype(np.float32)
+    support = cv2.GaussianBlur(expanded, (0, 0), max(2.0, kernel_size * 0.28))
+    return np.clip(core, 0.0, 1.0), np.clip(support, 0.0, 1.0)
+
+
+def constrain_person_boundary(weight, delta, core, support):
+    """Reject low-contrast background changes from the mask expansion band."""
+    magnitude = np.mean(np.abs(delta), axis=2)
+    evidence = np.clip((magnitude - 32.0) / 64.0, 0.0, 1.0)
+    evidence = evidence * evidence * (3.0 - 2.0 * evidence)
+    allowed = np.maximum(core, support * evidence)
+    return weight * np.clip(allowed, 0.0, 1.0)
 
 
 def save_tiff(path, rgb, metadata):
@@ -225,11 +285,11 @@ def merge(input_path, manifest_path, output_path):
     with open(manifest_path, "r", encoding="utf-8") as source:
         manifest = json.load(source)
     height, width = base_rgb.shape[:2]
-    # Keep only an 8-bit working image plus a half-float coverage map. A full
-    # A full high-resolution float RGB accumulator would exceed 1 GB once temporary arrays are
-    # included; crop-local weighted updates keep memory bounded.
+    # Keep only an 8-bit working image plus a half-float confidence map. A full
+    # high-resolution float RGB accumulator would exceed 1 GB once temporary
+    # arrays are included; crop-local updates keep memory bounded.
     result_rgb = base_rgb.copy()
-    weight_sum = np.zeros((height, width), np.float16)
+    confidence_map = np.zeros((height, width), np.float16)
     conflict_pixels = 0
     seam_total = 0.0
     seam_samples = 0
@@ -274,29 +334,22 @@ def merge(input_path, manifest_path, output_path):
             "changedFraction": changed_fraction, "meanAbsoluteDelta": mean_delta,
             "returnWarnings": warnings,
         })
-        person_weight = task_mask_weight(task, width, height, (x, y, crop_width, crop_height))
-        if person_weight is not None:
-            weight *= np.clip(person_weight, 0.0, 1.0)
-            task_metrics["maskCoverage"] = float(np.mean(person_weight > 0.08))
+        person_core, person_support = task_mask_weights(task, width, height, (x, y, crop_width, crop_height))
+        if person_core is not None:
+            weight = constrain_person_boundary(weight, delta, person_core, person_support)
+            task_metrics["maskCoverage"] = float(np.mean(person_support > 0.08))
         if task.get("needsReview"):
             review_tasks.append({"taskId": task.get("id"), "reason": task.get("reviewReason") or "检测结果需要确认"})
         if warnings:
             review_tasks.append({"taskId": task.get("id"), "reason": "；".join(warnings), "returnWarnings": warnings})
-        previous_weight = weight_sum[y:y + crop_height, x:x + crop_width].astype(np.float32)
-        previous_coverage = np.clip(previous_weight, 0.0, 1.0)
-        current_crop = result_rgb[y:y + crop_height, x:x + crop_width].astype(np.float32)
-        previous_delta = (current_crop - base_crop.astype(np.float32)) / np.maximum(previous_coverage[..., None], 1e-4)
-        overlap = (previous_weight > 0.12) & (weight > 0.12)
-        if np.any(overlap):
-            disagreement = np.mean(np.abs(previous_delta - delta), axis=2)
-            conflict_pixels += int(np.count_nonzero(overlap & (disagreement > 18.0)))
-        combined_weight = previous_weight + weight
-        combined_delta = (previous_delta * previous_weight[..., None] + delta * weight[..., None]) / np.maximum(combined_weight[..., None], 1e-5)
-        combined_coverage = np.clip(combined_weight, 0.0, 1.0)
-        result_rgb[y:y + crop_height, x:x + crop_width] = np.clip(
-            base_crop.astype(np.float32) + combined_delta * combined_coverage[..., None], 0, 255
-        ).astype(np.uint8)
-        weight_sum[y:y + crop_height, x:x + crop_width] = combined_weight.astype(np.float16)
+        confidence_crop = confidence_map[y:y + crop_height, x:x + crop_width]
+        current_crop = result_rgb[y:y + crop_height, x:x + crop_width]
+        fused_crop, fused_confidence, task_conflicts = fuse_patch_delta(
+            base_crop, current_crop, confidence_crop, weight, delta
+        )
+        result_rgb[y:y + crop_height, x:x + crop_width] = fused_crop
+        confidence_map[y:y + crop_height, x:x + crop_width] = fused_confidence
+        conflict_pixels += task_conflicts
         seam_ring = (weight > 0.01) & (weight < 0.22)
         if np.any(seam_ring):
             seam_total += float(np.sum(np.mean(np.abs(delta), axis=2)[seam_ring]))

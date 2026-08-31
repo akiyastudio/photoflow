@@ -210,6 +210,8 @@ def process_folders(folder_a, folder_b, threshold, auto_copy_unmatched, preview_
     if register_heif_opener is None and any(file_name.lower().endswith(HEIF_EXTENSIONS) for file_name in [*list_a, *list_b]):
         log_error("HEIC/HEIF/HIF/AVIF 匹配需要 pi-heif；请运行 npm run setup:python")
         return False
+    if not VIDEO_TOOLS_COMMAND and any(file_name.lower().endswith(VIDEO_EXTENSIONS + RAW_EXTENSIONS) for file_name in [*list_a, *list_b]):
+        log_info("未安装视频处理插件；将跳过需要视频/RAW 抽帧的视觉匹配，普通图片仍会继续处理")
     all_a = {f: (os.path.join(folder_a, f), media_kind(f)) for f in list_a}
     all_b = {f: (os.path.join(folder_b, f), media_kind(f)) for f in list_b}
 

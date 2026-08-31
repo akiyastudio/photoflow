@@ -8,6 +8,7 @@ export const advancedEnvironmentPresentation = (value: unknown, loading: boolean
   if (failed) return { state: 'error', label: '检查失败', description: '暂时无法读取增强版状态；基础人物检测仍可正常使用。', tone: 'danger' };
   const status = value && typeof value === 'object' && !Array.isArray(value) ? value as Record<string, unknown> : {};
   if (status.advancedAvailable === true || status.state === 'ready') return { state: 'ready', label: '可用', description: '增强人物检测已就绪，将自动用于多人、遮挡和精细分割场景。', tone: 'success' };
+  if (status.errorCategory === 'wsl-start-timeout') return { state: 'unavailable', label: '启动较慢', description: 'WSL 未能在本次检查时限内完成启动；请稍候后重新进入此页面。', tone: 'warning' };
   if (status.errorCategory === 'wsl-access-denied') return { state: 'unavailable', label: '权限受限', description: status.runtimeSource === 'development' ? '当前开发运行进程无权访问 WSL；请从具有 WSL 权限的普通终端启动应用。' : '照片流当前无权访问 WSL；请使用安装高级环境时的 Windows 用户运行。', tone: 'warning' };
   if (status.state === 'not-installed' || status.installed === false) return { state: 'not-installed', label: '未安装', description: '当前使用基础人物检测；可通过离线安装包安装增强版。', tone: 'primary' };
   if (status.state === 'repair-needed') return { state: 'repair-needed', label: '需修复', description: '增强版运行环境不完整；当前已安全回退到基础人物检测。', tone: 'warning' };

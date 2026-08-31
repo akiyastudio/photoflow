@@ -93,6 +93,7 @@ const activatedStatus = statusGuard.begin(); assert(statusGuard.isCurrent(activa
 for (const [value, loading, failed, expected] of [
   [undefined, true, false, 'loading'],
   [{ advancedAvailable: true, state: 'ready' }, false, false, 'ready'],
+  [{ state: 'unavailable', errorCategory: 'wsl-start-timeout' }, false, false, 'unavailable'],
   [{ state: 'unavailable', errorCategory: 'wsl-access-denied', runtimeSource: 'development' }, false, false, 'unavailable'],
   [{ state: 'not-installed', installed: false }, false, false, 'not-installed'],
   [{ state: 'repair-needed' }, false, false, 'repair-needed'],
@@ -106,6 +107,9 @@ for (const [value, loading, failed, expected] of [
 const developmentAccessDenied = advancedEnvironmentPresentation({ state: 'unavailable', errorCategory: 'wsl-access-denied', runtimeSource: 'development' }, false, false);
 assert.equal(developmentAccessDenied.label, '权限受限');
 assert.match(developmentAccessDenied.description, /普通终端/);
+const coldStartTimeout = advancedEnvironmentPresentation({ state: 'unavailable', errorCategory: 'wsl-start-timeout' }, false, false);
+assert.equal(coldStartTimeout.label, '启动较慢');
+assert.match(coldStartTimeout.description, /稍候/);
 
 console.log('Team settings state-machine tests passed');
 

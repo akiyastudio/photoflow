@@ -143,6 +143,9 @@ html.dark {
 .pf-control-cluster { display: flex; align-items: center; justify-content: flex-end; gap: var(--pf-space-2); width: 100%; }
 .pf-control-cluster input[type="checkbox"] { width: 1rem; height: 1rem; margin: 0; accent-color: var(--pf-primary); }
 .pf-settings-field { width: 100%; max-width: 24rem; margin-left: auto; }
+.pf-path-field { display: flex; min-width: 0; align-items: center; gap: var(--pf-space-2); }
+.pf-path-field .pf-input { min-width: 0; width: 100%; flex: 1 1 auto; font-family: var(--pf-font-mono); font-size: var(--pf-text-xs); }
+.pf-path-field .pf-button { flex: 0 0 auto; }
 .pf-select, .pf-textarea { width: 100%; border: 1px solid var(--pf-border); border-radius: var(--pf-radius-sm); background: var(--pf-control-bg); color: var(--pf-text); font: inherit; transition: border-color var(--pf-transition), box-shadow var(--pf-transition); }
 .pf-select { min-height: var(--pf-control-md); padding: 0 var(--pf-space-3); }
 .pf-textarea { min-height: 96px; padding: var(--pf-space-3); resize: vertical; }

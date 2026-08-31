@@ -10,7 +10,7 @@ jobs:
         with:
           msystem: UCRT64
           update: true
-          install: base-devel autoconf automake libtool git make diffutils pkgconf nasm yasm mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-meson
+          install: base-devel autoconf automake libtool git make diffutils pkgconf nasm yasm mingw-w64-ucrt-x86_64-cmake mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-ninja mingw-w64-ucrt-x86_64-meson mingw-w64-ucrt-x86_64-shaderc
       - shell: msys2 {0}
         run: bash extensions/video-tools/scripts/media-runtime/build-ffmpeg-windows.sh
       - uses: actions/upload-artifact@v4

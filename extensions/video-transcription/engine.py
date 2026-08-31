@@ -35,6 +35,13 @@ SUPPORTED_MODELS = frozenset({
 })
 
 
+def component_root() -> Path:
+    """Return the installed component root in source and PyInstaller builds."""
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent.parent
+    return Path(__file__).resolve().parent
+
+
 def emit(value: dict) -> None:
     if CURRENT_REQUEST_ID and "requestId" not in value:
         value = {**value, "requestId": CURRENT_REQUEST_ID}
@@ -88,10 +95,10 @@ def write_srt(output_path: Path, segments: list[Segment]) -> None:
 def model_source(model: str) -> str:
     if model not in SUPPORTED_MODELS:
         raise RuntimeError("不支持的语音识别模型")
-    component_root = Path(__file__).resolve().parent
+    root_owner = component_root()
     try:
-        root = (component_root / "models").resolve(strict=True)
-        root.relative_to(component_root)
+        root = (root_owner / "models").resolve(strict=True)
+        root.relative_to(root_owner)
     except (FileNotFoundError, OSError, ValueError) as exc:
         raise RuntimeError("插件模型根目录缺失或不安全") from exc
     candidate = root / model

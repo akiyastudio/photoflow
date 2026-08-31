@@ -15,7 +15,7 @@ import { resolveTeamRetouchEntriesForOpen } from './legacy/legacy-entry-scope';
 import { createActivationRefreshGate, createHistoryContextLoadCoordinator, createLatestHistoryLoadGuard, historyLoadPresentation, historyMigrationDelayMs } from './legacy/legacy-history-load-model';
 import { legacyMigrationActivityLabel, legacyMigrationErrorMessage, legacyMigrationPausedMessage, legacyMigrationRunningMessage, nextLegacyMigrationNoProgressCount } from './legacy/legacy-migration-progress-model';
 import { workspaceSeedScopeKey } from './legacy/legacy-workspace-seed-model';
-import { canEnterWorkflowStage, normalizeWorkspace, workflowStageSummaries, type WorkflowStage } from './interaction-model';
+import { canEnterWorkflowStage, latestWorkflowStage, normalizeWorkspace, workflowStageSummaries, type WorkflowStage } from './interaction-model';
 import { TeamSettingsContent } from './team-settings-content';
 import { createTeamSettingsController, type TeamSettingsState } from './team-settings-model';
 import { historyToastTransition, type HistoryToastSnapshot } from './history-toast-model';
@@ -82,6 +82,7 @@ const App = () => {
   const activationRefreshGateRef = useRef(createActivationRefreshGate());
   const calibrationBusyRef = useRef(false);
   const reconcileStartedRef = useRef('');
+  const latestStageProjectRef = useRef('');
   const migrationToastRef = useRef<HistoryToastSnapshot>();
   const loadToastRef = useRef<HistoryToastSnapshot>();
   useEffect(() => { entriesRef.current = entries; }, [entries]);
@@ -227,7 +228,7 @@ const App = () => {
         loadGuardRef.current.invalidate();
         entriesRef.current = []; setEntries([]); entriesLoadedRef.current = false; setEntriesLoaded(false);
         setWorkspaceSnapshot(normalizeWorkspace(undefined)); setManagerWorkspaceSeed(undefined);
-        reconcileStartedRef.current = '';
+        reconcileStartedRef.current = ''; latestStageProjectRef.current = ''; setStep('detect');
       }
       legacyApi.setMediaAuthorizationScope(nextContext.projectId);
       contextRef.current = nextContext; setContext(nextContext); applyResolvedTheme(nextContext.resolvedTheme);
@@ -250,6 +251,12 @@ const App = () => {
     const stopDeactivate = window.photoFlowComponent.onDeactivate(() => { if (mounted) { activationRefreshGateRef.current.deactivate(); setComponentActive(false); } });
     return () => { mounted = false; settingsController.invalidate(); loadGuardRef.current.invalidate(); stopSettings(); stopTheme(); stopContext(); stopActivate(); stopDeactivate(); };
   }, [loadEntries, settingsController]);
+  useEffect(() => {
+    const projectId = String(context?.projectId || '');
+    if (!projectId || !entriesLoaded || historyLoadInFlight || latestStageProjectRef.current === projectId) return;
+    latestStageProjectRef.current = projectId;
+    setStep(latestWorkflowStage(workspaceSnapshot));
+  }, [context?.projectId, entriesLoaded, historyLoadInFlight, workspaceSnapshot]);
   const project = { id: context?.projectId || '', name: context?.projectName || '', status: context?.projectStatus || '', path: '' };
   const currentManagerScopeKey = workspaceSeedScopeKey(context?.projectId || '', project);
   const stageSummaries = workflowStageSummaries(workspaceSnapshot, step);

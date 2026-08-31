@@ -20,7 +20,7 @@ try {
     mpv: { version: '0.41.0', commit: 'c'.repeat(40) },
     components: ['zlib', 'freetype', 'fribidi', 'harfbuzz', 'libass', 'spirvCross', 'libplacebo'].map(name => ({ name, version: '1.0.0', commit: 'e'.repeat(40), license: 'LGPL-2.1-or-later' })),
     mesonOptions: ['-Dgpl=false', '-Dlibmpv=true', '-Dauto_features=disabled', '-Dwasapi=enabled', '-Dd3d11=enabled', '-Dd3d-hwaccel=enabled', '-Dzlib=enabled'],
-    linkedFfmpeg: { version: '7.1.1', commit: 'd'.repeat(40), license: 'LGPL-2.1-or-later', configureFlags: ['--disable-autodetect', '--disable-network', '--disable-gpl', '--disable-nonfree'] },
+    linkedFfmpeg: { version: '7.1.5', commit: 'd'.repeat(40), license: 'LGPL-2.1-or-later', configureFlags: ['--disable-autodetect', '--disable-network', '--disable-gpl', '--disable-nonfree'] },
     files: [create('libmpv-2.dll')],
     complianceArtifacts: { sourceArchive: create('libmpv-source.zip'), licenseArchive: create('libmpv-licenses.zip') },
   };

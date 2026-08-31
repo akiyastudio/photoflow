@@ -1,8 +1,8 @@
-const CURRENT_PRIVACY_NOTICE_VERSION = '2026-07-29';
-const CURRENT_TERMS_VERSION = '2026-07-29';
+const CURRENT_PRIVACY_NOTICE_VERSION = '2026-08-30';
+const CURRENT_TERMS_VERSION = '2026-08-30';
 const CURRENT_FACE_RULES_VERSION = '2026-07-29';
 const INSTALL_CONSENT_FILE_NAME = 'install-consent.ini';
-const INSTALL_CONSENT_SCHEMA_VERSION = '1';
+const INSTALL_CONSENT_SCHEMA_VERSION = '2';
 
 const LEGAL_DOCUMENTS = Object.freeze({
   privacy: 'PRIVACY_POLICY.html',
@@ -63,6 +63,7 @@ const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => n
       const receipt = parseInstallerConsent(fs.readFileSync(installConsentPath, 'utf8'));
       if (receipt.SchemaVersion !== INSTALL_CONSENT_SCHEMA_VERSION || receipt.Interactive !== '1') return state;
       if (receipt.PrivacyVersion !== CURRENT_PRIVACY_NOTICE_VERSION || receipt.TermsVersion !== CURRENT_TERMS_VERSION) return state;
+      if (!['0', '1'].includes(receipt.ExperienceProgram)) return state;
       if (!receipt.InstallerVersion || !/^\d+(?:\.\d+)+$/.test(receipt.InstallerVersion)) return state;
       const acceptedAt = new Date(receipt.AcceptedAtLocal);
       const acceptedAtMs = acceptedAt.getTime();
@@ -81,6 +82,7 @@ const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => n
         coreConsentSource: 'interactive-installer',
         installerConsentImportedAt: currentTime.toISOString(),
         installerVersion: receipt.InstallerVersion,
+        experienceProgramGranted: receipt.ExperienceProgram === '1',
       };
       writeStateSync(imported);
       return imported;
@@ -102,6 +104,7 @@ const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => n
       faceRecognitionGrantedAt: String(state.faceRecognitionGrantedAt || ''),
       faceRecognitionGranted: state.faceRecognitionGranted === true
         && state.faceRulesVersion === CURRENT_FACE_RULES_VERSION,
+      experienceProgramGranted: state.experienceProgramGranted === true,
       currentPrivacyNoticeVersion: CURRENT_PRIVACY_NOTICE_VERSION,
       currentTermsVersion: CURRENT_TERMS_VERSION,
       currentFaceRulesVersion: CURRENT_FACE_RULES_VERSION,
@@ -130,6 +133,7 @@ const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => n
       state.termsAcceptedAt = '';
       state.coreConsentRevokedAt = savedAt;
       state.coreConsentSource = '';
+      state.experienceProgramGranted = false;
     }
     if (request?.acceptCore === true) {
       state.privacyNoticeVersion = CURRENT_PRIVACY_NOTICE_VERSION;
@@ -138,6 +142,7 @@ const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => n
       state.termsAcceptedAt = savedAt;
       state.coreConsentRevokedAt = '';
       state.coreConsentSource = 'application';
+      state.experienceProgramGranted = request?.experienceProgramGranted === true;
     }
     if (typeof request?.faceRecognitionGranted === 'boolean') {
       state.faceRecognitionGranted = request.faceRecognitionGranted;

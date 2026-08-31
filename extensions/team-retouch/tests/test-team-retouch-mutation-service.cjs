@@ -155,19 +155,40 @@ const ready = new Promise((resolve, reject) => {
     assert(returnProgress.some(item => item.phase === 'matching' && item.progress > 40 && item.progress < 82 && /\u6bd4\u5bf9\u56fe\u7247/.test(item.message)), 'matcher stdout progress is forwarded continuously instead of discarded');
     assert(returnProgress.some(item => item.phase === 'importing' && item.progress > 82), 'return progress covers archive writes');
     assert.deepEqual({ state: returnProgress.at(-1).state, phase: returnProgress.at(-1).phase, progress: returnProgress.at(-1).progress }, { state: 'completed', phase: 'complete', progress: 100 }, 'return progress terminates at a real 100% completion event');
+    const noRetouchDb = new DatabaseSync(databasePath);
+    noRetouchDb.function('team_request_id', () => '');
+    const sourceTask = noRetouchDb.prepare(`SELECT patch_path FROM team_patch_tasks WHERE project_id='project-1' AND photo_id='photo-1' AND base_version_id='version-1' AND is_deleted=0 LIMIT 1`).get();
+    const now = Date.now();
+    noRetouchDb.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,bbox_json,crop_json,patch_path,members_json,status,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('project-1', 'task-no-retouch', 'photo-1', 'version-1', 2, 'Skipped person', '{}', '{}', sourceTask.patch_path, JSON.stringify([{ personIndex: 2 }]), 'exported', now, now);
+    noRetouchDb.prepare(`INSERT INTO team_person_assignments(project_id,photo_id,base_version_id,person_index,identity_id,confidence,source,completed,completion_kind,return_missing,completed_at,updated_at,task_id) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)`).run('project-1', 'photo-1', 'version-1', 2, null, 1, 'manual', 1, 'no-retouch', 0, now, now, 'task-no-retouch');
+    noRetouchDb.close();
     const faultDb = new DatabaseSync(databasePath); faultDb.exec(`CREATE TRIGGER fail_merge_db_update BEFORE UPDATE OF status ON team_patch_tasks WHEN NEW.status='merged' BEGIN SELECT RAISE(ABORT,'injected merge DB failure'); END;`); faultDb.close();
     await assert.rejects(invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2' }), /injected merge DB failure/);
     const repairDb = new DatabaseSync(databasePath); repairDb.exec('DROP TRIGGER fail_merge_db_update'); repairDb.close();
     const merged = await invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2' });
+    const mergedStatusDb = new DatabaseSync(databasePath);
+    const mergedStatuses = mergedStatusDb.prepare(`SELECT id,status FROM team_patch_tasks WHERE project_id='project-1' AND photo_id='photo-1' AND base_version_id='version-1' AND is_deleted=0 ORDER BY id`).all().map(row => [row.id, row.status]);
+    assert.equal(mergedStatuses.length, 2);
+    assert(mergedStatuses.some(([id, status]) => id === 'task-no-retouch' && status === 'merged') && mergedStatuses.every(([, status]) => status === 'merged'), 'a successful photo merge must also settle tasks explicitly completed as no-retouch');
+    mergedStatusDb.close();
     const replayed = await invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2' });
     assert.equal(replayed.merge.versionId, merged.merge.versionId, 'identical merge input reuses the stable version id after crash recovery');
     assert.equal([...outputByIdempotencyKey.keys()].filter(key => key.startsWith('merge-')).length, 1, 'merge crash retry creates one committed output receipt');
     assert.equal([...versionsByIdempotencyKey.keys()].filter(key => key.startsWith('merge-version-')).length, 1, 'merge crash retry creates one version');
     assert.equal(fs.readdirSync(path.join(projectOutputRoot, 'merged')).length, 1, 'stable merge output name prevents duplicate project files');
+    const rebuilt = await invoke('team.patch.merge.v1', { photoId: 'photo-1', baseVersionId: 'version-1', outputProgressId: 'progress-2', rebuildToken: 'explicit-rebuild-1' });
+    assert.notEqual(rebuilt.merge.versionId, merged.merge.versionId, 'an explicit rebuild creates a fresh output version instead of replaying the deleted output receipt');
+    assert.equal([...outputByIdempotencyKey.keys()].filter(key => key.startsWith('merge-')).length, 2, 'an explicit rebuild publishes one new output receipt');
+    assert.equal([...versionsByIdempotencyKey.keys()].filter(key => key.startsWith('merge-version-')).length, 2, 'an explicit rebuild creates one new version');
+    assert.equal(fs.readdirSync(path.join(projectOutputRoot, 'merged')).length, 2, 'an explicit rebuild uses a new stable output name');
     assert.equal(outputStages.size, 0, 'commit replay and success both clean their redundant output stages');
     assert(emittedTopics.has('team.patch.detect.progress.v1') && emittedTopics.has('team.patch.detect-batch.progress.v1'), 'single and batch detection events retain distinct declared V2 topics');
     console.log('Team-retouch mutation subprocess, privilege, and rollback tests passed');
   } finally {
-    lines.close(); child.kill(); fs.rmSync(sandbox, { recursive: true, force: true });
+    lines.close();
+    const exited = child.exitCode === null ? new Promise(resolve => child.once('exit', resolve)) : Promise.resolve();
+    child.kill();
+    await exited;
+    try { fs.rmSync(sandbox, { recursive: true, force: true }); } catch (error) { if (error?.code !== 'EPERM') throw error; }
   }
 })().catch(error => { console.error(error); process.exitCode = 1; });

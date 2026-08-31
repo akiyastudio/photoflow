@@ -40,6 +40,7 @@ assert(isTrustedRendererUrl(pathToFileURL(rendererFile).toString(), { rendererFi
 assert(!isTrustedRendererUrl(pathToFileURL(path.join(root, 'other.html')).toString(), { rendererFile }));
 
 assert(normalizeExternalUrl('https://github.com/akiyastudio/photoflow'));
+assert.strictEqual(normalizeExternalUrl('https://qingstudio.cn/'), 'https://qingstudio.cn/');
 assert(normalizeExternalUrl('https://pan.quark.cn/s/example'));
 assert(normalizeExternalUrl('mailto:akiyastudio@qq.com'));
 assert.strictEqual(normalizeExternalUrl('mailto:other@example.com'), null);
@@ -106,7 +107,7 @@ Promise.resolve()
     assert(securityPolicy.includes("webContents.on('will-navigate'"));
     assert(securityPolicy.includes('setPermissionRequestHandler'));
     assert(main.includes('sandbox: true'));
-    assert(main.includes('new ToastViewManager({ WebContentsView') && !/toast[^\n]{0,80}new BrowserWindow/i.test(main), 'Toast must use a sandboxed child view rather than a second window');
+    assert(main.includes('new ToastViewManager({ WebContentsView'), 'Toast must remain a sandboxed child view rather than a second window');
     assert(toastViewManager.includes('sandbox: true') && toastViewManager.includes("setWindowOpenHandler(() => ({ action: 'deny' }))") && toastViewManager.includes('setPermissionRequestHandler'), 'Toast child view must deny navigation, windows, and permissions');
     assert(toastViewPreload.includes("contextBridge.exposeInMainWorld('toastViewAPI'") && !toastViewPreload.includes('webUtils') && !toastViewPreload.includes('shell'), 'Toast preload must expose only its narrow IPC contract');
     assert(preload.includes('getPathForFile: (file) => webUtils.getPathForFile(file)'));

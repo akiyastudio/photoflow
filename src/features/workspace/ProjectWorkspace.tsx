@@ -30,7 +30,7 @@ import { nativeFileDragDecisionDetails, nativeFileDragOwnerIdentity, nativeFileD
 import { FOLDER_ALPHABET_FILTER_THRESHOLD, FOLDER_ALPHABET_KEYS, availableFolderAlphabetKeys, folderAlphabetKey } from './folder-alphabet-filter-model';
 import { useRecentFilesAutoLoad } from './useRecentFilesAutoLoad';
 import { collectProgressSubtree, inspectProgressRelations } from './progress-tree-model';
-import { FolderMarkPanel, createFolderMarkDraft, TrackingConfirmationPanel, ProgressPairPreview as SharedProgressPairPreview, type FolderMarkDraft, type ProgressPairPreviewMode, VersionProgressPanel, type VersionProgressDraft, defaultFolderMarkPurpose, defaultMainParentId, defaultWorkflowInputIds, exportedImageFolderCandidate, exportedImageFolderCandidates, isUserVersionKey, nextVersionKeys, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, trackingPolicyForRelationChange, trackingStateLabel, versionKeyMatchesParentKind, versionKindForParent, versionTreeNodeBadgeLabel, versionTreeTaskPanelProgress, workflowInputIdsForRelationChange, type VersionRelationKind, ProgressRelationMutationQueue } from '../versioning/public';
+import { FolderMarkPanel, createFolderMarkDraft, TrackingConfirmationPanel, ProgressPairPreview as SharedProgressPairPreview, type FolderMarkDraft, type ProgressPairPreviewMode, VersionProgressPanel, type VersionProgressDraft, defaultFolderMarkPurpose, defaultMainParentId, defaultWorkflowInputIds, exportedImageFolderCandidate, exportedImageFolderCandidates, exportFolderPromptWasShown, isUserVersionKey, nextVersionKeys, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressRelationChangeError, progressTrackingAction, progressTrackingActionLabel, rememberExportFolderPromptShown, selectableVersionParents, trackingPolicyForRelationChange, trackingStateLabel, versionKeyMatchesParentKind, versionKindForParent, versionTreeNodeBadgeLabel, versionTreeTaskPanelProgress, workflowInputIdsForRelationChange, type VersionRelationKind, ProgressRelationMutationQueue } from '../versioning/public';
 import { previewMetadataFieldsForEntry } from '../metadata/metadata-pane-model';
 import { projectWorkspaceClient } from '../../platform/project-workspace-client';
 import { useProjectFileSelection } from './useProjectFileSelection';
@@ -3084,7 +3084,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       if (!candidate) return;
       const key = candidateKey(candidate);
       exportCandidateChangedAtRef.current.set(key, Date.now());
-      if (offeredExportFoldersRef.current.has(key)) return;
+      if (offeredExportFoldersRef.current.has(key) || exportFolderPromptWasShown(window.localStorage, key)) {
+        offeredExportFoldersRef.current.add(key);
+        return;
+      }
       const previousTimer = exportCandidateTimersRef.current.get(key);
       if (previousTimer) window.clearTimeout(previousTimer);
       const timer = window.setTimeout(async () => {
@@ -3099,6 +3102,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
           return;
         }
         offeredExportFoldersRef.current.add(key);
+        rememberExportFolderPromptShown(window.localStorage, key);
         const folderName = candidate.split('/').pop() || candidate;
         const jpegFolder = /^(?:jpg|jpeg)$/iu.test(folderName);
         const accepted = await appDialog.confirm({

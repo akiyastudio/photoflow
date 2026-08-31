@@ -17,6 +17,18 @@ const { pathToFileURL } = require('url');
   assert.deepStrictEqual(model.exportedImageFolderCandidates([
     '工作目录/JPG', '工作目录/JPG/子文件夹', '工作目录/客户_导出', '普通文件夹',
   ]), ['工作目录/JPG', '工作目录/客户_导出'], 'activation reconciliation must deduplicate discovered export folders');
+  const promptMemory = new Map();
+  const promptStorage = {
+    getItem: key => promptMemory.get(key) || null,
+    setItem: (key, value) => promptMemory.set(key, value),
+  };
+  const exportFolderIdentity = 'c:/workspace/project|工作目录/jpg';
+  assert.strictEqual(model.exportFolderPromptWasShown(promptStorage, exportFolderIdentity), false);
+  model.rememberExportFolderPromptShown(promptStorage, exportFolderIdentity);
+  assert.strictEqual(model.exportFolderPromptWasShown(promptStorage, exportFolderIdentity), true, 'an export folder prompt must remain deduplicated after the workspace remounts');
+  assert.strictEqual(model.exportFolderPromptWasShown(promptStorage, `${exportFolderIdentity}-new`), false, 'a different export folder must still receive its own prompt');
+  assert.doesNotThrow(() => model.rememberExportFolderPromptShown({ setItem: () => { throw new Error('unavailable'); } }, exportFolderIdentity));
+  assert.strictEqual(model.exportFolderPromptWasShown({ getItem: () => { throw new Error('unavailable'); } }, exportFolderIdentity), false);
   const queuedTreeTask = {
     type: 'version-tree-update', state: 'queued', progress: 0,
     message: '等待“完善版本文件校验信息”完成',

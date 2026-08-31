@@ -14,7 +14,7 @@ import { TeamOutputProgressPicker } from './TeamRetouchOutputProgress';
 import { teamWorkflowSourcePaths, useTeamOutputProgress } from './useTeamOutputProgress';
 import { ensureFaceRecognitionConsent } from './legacy-privacy';
 import { ImageComparisonView, type ImageComparisonMode } from './ImageComparisonView';
-import { beginWorkflowReturnProgress, mergeAudit, relayChainForItems, returnMatchAssessment, returnModificationAssessment, updateWorkflowReturnProgress, workflowStageSummaries, WORKFLOW_STAGES, type WorkflowReturnProgressState } from '../interaction-model';
+import { beginWorkflowReturnProgress, isPhotoMergeComplete, mergeAudit, relayChainForItems, returnMatchAssessment, returnModificationAssessment, updateWorkflowReturnProgress, workflowStageSummaries, WORKFLOW_STAGES, type WorkflowReturnProgressState } from '../interaction-model';
 import { createWorkspaceSeedGate, isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
 import { shouldEmitTerminalToast } from '../task-terminal-notice-model';
 import { IdentityPickerPanel } from './IdentityPickerPanel';
@@ -366,6 +366,63 @@ const buildWorkflow = (subjects: Subject[], identities: TeamIdentity[], preferre
   return items.sort((left, right) => left.week - right.week || orderOf(left) - orderOf(right) || left.photo.name.localeCompare(right.photo.name));
 };
 
+const MergeReviewSurface = ({ workspace, subjects, mergeablePhotos, mergeReport, cacheConfig, componentActive, outputProgress, outputProgressDisabled, mergeActionLabel, mergeActionDisabled, mergeActionBusy, reoutputingPhotoId, onMergeAction, onReoutput }: {
+  workspace: TeamIdentityWorkspace;
+  subjects: Subject[];
+  mergeablePhotos: TeamProjectPhoto[];
+  mergeReport: ReturnType<typeof mergeAudit>;
+  cacheConfig: AppConfig['mediaCache'];
+  componentActive: boolean;
+  outputProgress: ReturnType<typeof useTeamOutputProgress>;
+  outputProgressDisabled: boolean;
+  mergeActionLabel: '开始合并' | '继续合并' | '全部重新合并';
+  mergeActionDisabled: boolean;
+  mergeActionBusy: boolean;
+  reoutputingPhotoId: string;
+  onMergeAction: () => void;
+  onReoutput: (photo: TeamProjectPhoto) => void;
+}) => {
+  const [showAllPhotos, setShowAllPhotos] = useState(false);
+  const [showQuality, setShowQuality] = useState(false);
+  const mergeableKeys = new Set(mergeablePhotos.map(photo => `${photo.photoId}:${photo.baseVersionId}`));
+  const photoRows = workspace.photos.map(photo => {
+    const photoSubjects = subjects.filter(subject => subject.photo.photoId === photo.photoId && subject.photo.baseVersionId === photo.baseVersionId);
+    const returned = photoSubjects.filter(subject => subject.assignment?.completed && subject.assignment.completionKind === 'returned' && !subject.assignment.returnMissing).length;
+    const skipped = photoSubjects.filter(subject => subject.assignment?.completed && subject.assignment.completionKind !== 'returned').length;
+    const incomplete = photoSubjects.filter(subject => !subject.assignment?.completed).length;
+    const missing = photoSubjects.filter(subject => subject.assignment?.returnMissing).length;
+    const pendingCropReview = photo.tasks.filter(task => task.needsReview || task.patchMissing).length;
+    const merged = isPhotoMergeComplete(workspace, photo);
+    const issues = [
+      missing ? `返图缺失 ${missing}` : '',
+      incomplete ? `任务未完成 ${incomplete}` : '',
+      pendingCropReview ? `工作图待复核 ${pendingCropReview}` : '',
+      !photoSubjects.length ? '没有人物任务' : '',
+    ].filter(Boolean);
+    const ready = merged || mergeableKeys.has(`${photo.photoId}:${photo.baseVersionId}`) && issues.length === 0;
+    return { photo, returned, skipped, incomplete, missing, merged, ready, issues, total: photoSubjects.length };
+  });
+  const exceptions = photoRows.filter(row => row.issues.length > 0);
+  const returnedCount = subjects.filter(subject => subject.assignment?.completed && subject.assignment.completionKind === 'returned' && !subject.assignment.returnMissing).length;
+  const skippedCount = subjects.filter(subject => subject.assignment?.completed && subject.assignment.completionKind !== 'returned').length;
+  const incompleteCount = subjects.filter(subject => !subject.assignment?.completed).length;
+  const readyCount = photoRows.filter(row => row.ready && !row.merged).length;
+  const visibleRows = showAllPhotos ? photoRows : exceptions;
+  const ready = mergeReport.blockers.length === 0;
+  return <section data-merge-review-surface className="space-y-4">
+    <div className={`overflow-hidden rounded-2xl border ${ready ? 'border-emerald-200 bg-emerald-50/35' : 'border-amber-200 bg-amber-50/35'}`}>
+      <div className="flex flex-wrap items-start gap-4 p-5"><span className={`mt-0.5 rounded-full p-2 ${ready ? 'bg-emerald-100 text-emerald-700' : 'bg-amber-100 text-amber-700'}`}>{ready ? <CheckCircle2 size={20}/> : <AlertTriangle size={20}/>}</span><div className="min-w-0 flex-1"><h3 className="text-base font-bold text-slate-900">{ready ? `${readyCount} 张照片已就绪，可以合并` : `还有 ${mergeReport.blockers.length} 项问题需要处理`}</h3><p className="mt-1 text-sm text-slate-600">{subjects.length} 个任务：{returnedCount} 个已返图 · {skippedCount} 个不用修 · {incompleteCount} 个未完成</p></div><div className="grid grid-cols-3 gap-2 text-center text-xs"><div className="rounded-lg bg-white/80 px-3 py-2"><strong className="block text-base text-slate-900">{readyCount}</strong><span className="text-slate-500">待合并</span></div><div className="rounded-lg bg-white/80 px-3 py-2"><strong className="block text-base text-emerald-700">{mergeReport.completedPhotoCount}</strong><span className="text-slate-500">已输出</span></div><div className="rounded-lg bg-white/80 px-3 py-2"><strong className={`block text-base ${exceptions.length ? 'text-amber-700' : 'text-emerald-700'}`}>{exceptions.length}</strong><span className="text-slate-500">异常照片</span></div></div></div>
+      {!ready && <div className="flex flex-wrap gap-2 border-t border-amber-100 px-5 py-3">{mergeReport.blockers.map(item => <span key={item.code} className="rounded-full bg-amber-100 px-3 py-1 text-xs font-bold text-amber-800">{item.label} {item.count}</span>)}</div>}
+    </div>
+    <div className="rounded-2xl border border-slate-200 bg-white">
+      <div className="flex flex-wrap items-center gap-3 px-5 py-4"><div className="min-w-0 flex-1"><h3 className="font-bold text-slate-900">{exceptions.length ? `需要注意的照片（${exceptions.length}）` : `全部 ${photoRows.length} 张照片检查通过`}</h3><p className="mt-1 text-xs text-slate-500">{exceptions.length ? '默认只显示异常；处理完后即可合并。' : '没有需要单独处理的照片。'}</p></div><button type="button" aria-expanded={showAllPhotos} onClick={() => setShowAllPhotos(current => !current)} className="dialog-secondary inline-flex items-center gap-2">{showAllPhotos ? '收起全部照片' : `查看全部照片（${photoRows.length}）`}<ChevronDown size={15} className={`transition-transform ${showAllPhotos ? 'rotate-180' : ''}`}/></button></div>
+      {visibleRows.length > 0 && <div className="grid gap-3 border-t border-slate-100 p-4 md:grid-cols-2 xl:grid-cols-3">{visibleRows.map(row => <article key={`${row.photo.photoId}:${row.photo.baseVersionId}`} className={`flex min-w-0 gap-3 rounded-xl border p-3 ${row.issues.length ? 'border-amber-200 bg-amber-50/40' : 'border-slate-200 bg-slate-50/50'}`}><ReturnImage active={componentActive} filePath={row.photo.sourcePath} cacheConfig={cacheConfig} className="h-16 w-24 shrink-0 rounded-lg"/><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><h4 className="min-w-0 flex-1 truncate text-sm font-bold text-slate-800">{row.photo.name || row.photo.photoId}</h4><span className={`shrink-0 rounded-full px-2 py-0.5 text-[10px] font-bold ${row.merged ? 'bg-blue-50 text-blue-700' : row.issues.length ? 'bg-amber-100 text-amber-800' : 'bg-emerald-50 text-emerald-700'}`}>{row.merged ? '已输出' : row.issues.length ? '需处理' : '已就绪'}</span></div><p className="mt-2 text-xs text-slate-500">{row.total} 个人物 · {row.returned} 个已返图 · {row.skipped} 个不用修</p>{row.issues.length > 0 && <p className="mt-1 text-xs font-bold text-amber-700">{row.issues.join('·')}</p>}{row.merged && <button type="button" disabled={Boolean(reoutputingPhotoId)} onClick={() => onReoutput(row.photo)} title="原输出被删除或需要替换时，生成新的输出文件和版本" className="dialog-secondary mt-2 inline-flex items-center gap-1.5 px-2.5 py-1.5 text-[11px]">{reoutputingPhotoId === row.photo.photoId ? <Loader2 size={12} className="animate-spin"/> : <Wand2 size={12}/>} 重新输出</button>}</div></article>)}</div>}
+    </div>
+    <div className="rounded-2xl border border-slate-200 bg-white"><button type="button" aria-expanded={showQuality} onClick={() => setShowQuality(current => !current)} className="flex w-full items-center gap-3 px-5 py-4 text-left"><div className="min-w-0 flex-1"><h3 className="font-bold text-slate-900">高级质量检查</h3><p className="mt-1 text-xs text-slate-500">旧数据没有自动评分时不影响合并；可在这里查看详情。</p></div><ChevronDown size={16} className={`text-slate-400 transition-transform ${showQuality ? 'rotate-180' : ''}`}/></button>{showQuality && <div className="grid gap-3 border-t border-slate-100 p-4 sm:grid-cols-3"><div className="rounded-xl bg-slate-50 p-4"><p className="text-xs text-slate-500">任务匹配</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.taskMatchRate === undefined ? '旧数据未记录' : `${Math.round(workspace.qualityMetrics.taskMatchRate * 100)}%`}</p></div><div className="rounded-xl bg-slate-50 p-4"><p className="text-xs text-slate-500">修改有效性</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.effectiveEditRate === undefined ? '旧数据未记录' : `${Math.round(workspace.qualityMetrics.effectiveEditRate * 100)}%`}</p></div><div className="rounded-xl bg-slate-50 p-4"><p className="text-xs text-slate-500">评分用途</p><p className="mt-1 text-xs font-bold leading-5 text-slate-700">仅用于辅助检查，不作为旧项目合并条件。</p></div></div>}</div>
+    <div data-merge-actions className="flex flex-col items-center gap-3 py-5"><TeamOutputProgressPicker controller={outputProgress} disabled={outputProgressDisabled}/><button type="button" disabled={mergeActionDisabled} onClick={onMergeAction} className="dialog-primary inline-flex min-w-40 items-center justify-center gap-2">{mergeActionBusy ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>} {mergeActionLabel}</button></div>
+  </section>;
+};
+
 export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace, initialWorkspacePending = false, historyIssue, onRetryHistory, cacheConfig, componentActive = true, activeStep, onStepChange, onBlockedStage, onNotice, onProjectChanged, onBusyChange }: Props) => {
   const appDialog = useAppDialog();
   const initialSeed = isUsableWorkspaceSeed(initialWorkspace) ? initialWorkspace : undefined;
@@ -376,6 +433,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
   const [workspaceLoadError, setWorkspaceLoadError] = useState('');
   const workspaceLoadSequenceRef = useRef(0);
   const [busy, setBusy] = useState('');
+  const [mergeProgress, setMergeProgress] = useState({ active: false, phase: 'idle', total: 0, completed: 0, succeeded: 0, failed: 0 });
   const [pendingResources, setPendingResources] = useState<Set<string>>(new Set());
   const setResourcePending = (key: string, pending: boolean) => setPendingResources(current => { const next = new Set(current); if (pending) next.add(key); else next.delete(key); return next; });
   const tab = 'workflow' as const;
@@ -1099,37 +1157,124 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     const photoSubjects = subjects.filter(subject => subject.photo.photoId === photo.photoId && subject.photo.baseVersionId === photo.baseVersionId);
     return photo.tasks.length > 0
       && photo.tasks.some(task => Boolean(task.editedPatchPath))
-      && photo.tasks.some(task => task.status !== 'merged')
+      && !isPhotoMergeComplete(workspace, photo)
       && photoSubjects.length > 0
       && photoSubjects.every(subject => Boolean(subject.assignment?.completed));
   });
+  const mergedPhotos = workspace.photos.filter(photo => isPhotoMergeComplete(workspace, photo));
+  const mergePhotoCount = workspace.photos.filter(photo => photo.tasks.length > 0).length;
+  const allPhotosMergedOnce = mergePhotoCount > 0 && mergedPhotos.length === mergePhotoCount;
+  const mergeActionLabel: '开始合并' | '继续合并' | '全部重新合并' = allPhotosMergedOnce ? '全部重新合并' : mergedPhotos.length ? '继续合并' : '开始合并';
   const mergeCompletedPhotos = async () => {
     if (!mergeablePhotos.length) return;
-    if (!await appDialog.confirm({ title: `审核通过并合并 ${mergeablePhotos.length} 张照片？`, message: '将按接力顺序把已确认返图合成到所选目标进度，并为每张照片生成新的输出版本。', confirmLabel: '确认合并输出' })) return;
+    if (!await appDialog.confirm({ title: `${mergeActionLabel} ${mergeablePhotos.length} 张照片？`, message: '将按接力顺序把已确认返图合并到所选位置，并为每张照片生成新的输出版本。', confirmLabel: mergeActionLabel })) return;
     setBusy('merge-workflow');
+    setMergeProgress({ active: true, phase: 'preparing', total: mergeablePhotos.length, completed: 0, succeeded: 0, failed: 0 });
     try {
       const target = await outputProgress.ensureTargetProgress(workspace.workflowNode?.id);
+      setMergeProgress(current => ({ ...current, phase: 'merging' }));
       let merged = 0;
       let cursor = 0;
       const worker = async () => {
         while (cursor < mergeablePhotos.length) {
           const photo = mergeablePhotos[cursor++];
-          const result = await legacyApi.mergeTeamPatches(workspacePath, project.status, project.name, {
-            photoId: photo.photoId,
-            baseVersionId: photo.baseVersionId,
+          let succeeded = false;
+          try {
+            const result = await legacyApi.mergeTeamPatches(workspacePath, project.status, project.name, {
+              photoId: photo.photoId,
+              baseVersionId: photo.baseVersionId,
             outputProgressId: target.id,
             versionName: '团片协作合成',
-          });
-          if (result.success) merged += 1;
+            rebuildToken: crypto.randomUUID(),
+            });
+            succeeded = Boolean(result.success);
+            if (succeeded) merged += 1;
+          } finally {
+            setMergeProgress(current => ({ ...current, completed: current.completed + 1, succeeded: current.succeeded + (succeeded ? 1 : 0), failed: current.failed + (succeeded ? 0 : 1) }));
+          }
         }
       };
-      await Promise.all(Array.from({ length: Math.min(3, mergeablePhotos.length) }, worker));
+      await worker();
       await load(false);
       onNotice(`已将 ${merged}/${mergeablePhotos.length} 张全部完成的图片合成到目标进度`, 'success');
     } catch (error) {
       onNotice(`合成照片失败：${error instanceof Error ? error.message : String(error)}`, 'error');
     } finally {
       setBusy('');
+      setMergeProgress(current => ({ ...current, active: false, phase: 'complete' }));
+    }
+  };
+
+  const reoutputPhoto = async (photo: TeamProjectPhoto) => {
+    if (busy) return;
+    const name = photo.name || photo.displayName || photo.photoId;
+    if (!await appDialog.confirm({ title: `重新输出“${name}”？`, message: '会使用已保存的返图重新合成，并在当前目标进度中生成新的输出文件和版本。不会复用已删除的旧输出记录。', confirmLabel: '重新输出' })) return;
+    setBusy(`remerge:${photo.photoId}`);
+    setMergeProgress({ active: true, phase: 'preparing', total: 1, completed: 0, succeeded: 0, failed: 0 });
+    try {
+      const target = await outputProgress.ensureTargetProgress(workspace.workflowNode?.id);
+      setMergeProgress(current => ({ ...current, phase: 'merging' }));
+      let succeeded = false;
+      try {
+        const result = await legacyApi.mergeTeamPatches(workspacePath, project.status, project.name, {
+          photoId: photo.photoId,
+          baseVersionId: photo.baseVersionId,
+          outputProgressId: target.id,
+          versionName: '团片协作合成（重新输出）',
+          rebuildToken: crypto.randomUUID(),
+        });
+        succeeded = Boolean(result.success);
+        if (!succeeded) throw new Error(result.error || '重新输出失败');
+      } finally {
+        setMergeProgress(current => ({ ...current, completed: 1, succeeded: succeeded ? 1 : 0, failed: succeeded ? 0 : 1 }));
+      }
+      await load(false);
+      onNotice(`已为“${name}”生成新的合成输出`, 'success');
+    } catch (error) {
+      onNotice(`重新输出失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally {
+      setBusy('');
+      setMergeProgress(current => ({ ...current, active: false, phase: 'complete' }));
+    }
+  };
+
+  const remergeAllPhotos = async () => {
+    if (busy || !mergedPhotos.length) return;
+    if (!await appDialog.confirm({ title: `全部重新合并 ${mergedPhotos.length} 张照片？`, message: '会使用已保存的返图重新合并所有照片，并在当前保存位置为每张照片生成新的文件和版本。', detail: '旧输出记录不会被复用；请确认当前选择的保存位置正确。', confirmLabel: '全部重新合并' })) return;
+    setBusy('remerge-all');
+    setMergeProgress({ active: true, phase: 'preparing', total: mergedPhotos.length, completed: 0, succeeded: 0, failed: 0 });
+    try {
+      const target = await outputProgress.ensureTargetProgress(workspace.workflowNode?.id);
+      setMergeProgress(current => ({ ...current, phase: 'merging' }));
+      let succeededCount = 0;
+      let cursor = 0;
+      const worker = async () => {
+        while (cursor < mergedPhotos.length) {
+          const photo = mergedPhotos[cursor++];
+          let succeeded = false;
+          try {
+            const result = await legacyApi.mergeTeamPatches(workspacePath, project.status, project.name, {
+              photoId: photo.photoId,
+              baseVersionId: photo.baseVersionId,
+              outputProgressId: target.id,
+              versionName: '团片协作合成（重新输出）',
+              rebuildToken: crypto.randomUUID(),
+            });
+            succeeded = Boolean(result.success);
+            if (succeeded) succeededCount += 1;
+          } finally {
+            setMergeProgress(current => ({ ...current, completed: current.completed + 1, succeeded: current.succeeded + (succeeded ? 1 : 0), failed: current.failed + (succeeded ? 0 : 1) }));
+          }
+        }
+      };
+      await worker();
+      await load(false);
+      onNotice(`已重新合并 ${succeededCount}/${mergedPhotos.length} 张照片`, succeededCount === mergedPhotos.length ? 'success' : 'warning');
+    } catch (error) {
+      onNotice(`全部重新合并失败：${error instanceof Error ? error.message : String(error)}`, 'error');
+    } finally {
+      setBusy('');
+      setMergeProgress(current => ({ ...current, active: false, phase: 'complete' }));
     }
   };
 
@@ -1160,14 +1305,16 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         {workflowReturnProgress?.active && <span role="status" aria-live="polite" data-workflow-return-progress data-phase={workflowReturnProgress.phase} className="max-w-72 truncate text-xs font-bold text-emerald-700" title={workflowReturnProgress.message}>{workflowReturnProgress.message} · {Math.round(workflowReturnProgress.progress)}%</span>}
         {activeStep === 'assignment' && <><span className={`text-xs ${workspace.workflowNeedsRegeneration ? 'font-bold text-amber-600' : workflowReady ? 'font-bold text-emerald-700' : 'text-slate-500'}`}>{workspace.workflowNeedsRegeneration ? '人物顺序已调整 · 待重新生成' : workflowReady ? '已生成最终人物顺序' : '拖拽人物调整顺序和所在周'}</span><button disabled={!workflowGroups.size || Boolean(busy) || workflowGenerating} onClick={() => void generateWorkflow()} className="dialog-primary ml-auto inline-flex items-center gap-2">{workflowGenerating ? <Loader2 size={15} className="animate-spin"/> : <FolderOutput size={15}/>} {workflowGenerating ? `生成中 ${Math.round(workflowGeneration.progress)}%` : workspace.workflowGenerated ? '按当前顺序重新生成' : '按当前顺序生成任务'}</button></>}
         {activeStep === 'relay' && <><span className="text-xs text-slate-500">可分发 {readyWorkflowItems.length} · 当前审核 {pendingWorkflowReturnReviewCount}</span>{workflowReturnResult?.reviewSessionId && !workflowReturnReviewOpen && <button disabled={Boolean(busy)} onClick={() => setWorkflowReturnReviewOpen(true)} className="dialog-secondary ml-auto inline-flex items-center gap-2"><CheckCircle2 size={15}/>恢复返图批次（{pendingWorkflowReturnReviewCount}）</button>}<button disabled={!workflowReady || !readyWorkflowItems.length || Boolean(busy) || Boolean(workflowReturnResult?.reviewSessionId)} title={workflowReturnResult?.reviewSessionId ? '请先恢复或放弃当前返图批次' : undefined} onClick={() => void receiveWorkflowBatch(readyWorkflowItems)} className="dialog-primary ml-auto inline-flex items-center gap-2">{busy === 'workflow-return' ? <Loader2 size={15} className="animate-spin"/> : <Upload size={15}/>}批量导入返图</button></>}
-        {activeStep === 'review' && <><span className="text-xs text-slate-500">{mergeReport.blockers.length} 项阻断 · {mergeReport.completedPhotoCount}/{mergeReport.photoCount} 已输出</span><TeamOutputProgressPicker controller={outputProgress} disabled={Boolean(busy)}/>{workflowReturnResult?.reviewSessionId && <button disabled={Boolean(busy)} onClick={() => setWorkflowReturnReviewOpen(true)} className="dialog-secondary ml-auto inline-flex items-center gap-2"><CheckCircle2 size={15}/>继续返图审核（{pendingWorkflowReturnReviewCount}）</button>}<button disabled={!mergeablePhotos.length || Boolean(busy) || mergeReport.blockers.some(item => item.code !== 'incomplete-task')} onClick={() => void mergeCompletedPhotos()} className="dialog-primary ml-auto inline-flex items-center gap-2">{busy === 'merge-workflow' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}审核通过并合并（{mergeablePhotos.length}）</button></>}
-      </div>
-    </>}
+        {activeStep === 'review' && <><span className="text-xs text-slate-500">{mergeReport.blockers.length} 项阻断 · {mergeReport.completedPhotoCount}/{mergeReport.photoCount} 已输出</span>{workflowReturnResult?.reviewSessionId && <button disabled={Boolean(busy)} onClick={() => setWorkflowReturnReviewOpen(true)} className="dialog-secondary ml-auto inline-flex items-center gap-2"><CheckCircle2 size={15}/>继续返图审核（{pendingWorkflowReturnReviewCount}）</button>}</>}
+       </div>
+     </>}
+    {mergeProgress.active && <div role="status" aria-live="polite" data-merge-progress data-phase={mergeProgress.phase} className="flex min-h-11 items-center gap-3 border-b border-blue-100 bg-blue-50 px-5 py-2 text-xs text-blue-800"><Loader2 size={15} className="shrink-0 animate-spin"/><span className="shrink-0 font-bold">{mergeProgress.phase === 'preparing' ? '正在准备合并目标…' : `正在合并 ${mergeProgress.completed}/${mergeProgress.total} 张`}</span><div className="h-2 min-w-24 flex-1 overflow-hidden rounded-full bg-blue-100" aria-hidden><span className="block h-full rounded-full bg-blue-600 transition-[width] duration-300" style={{ width: `${mergeProgress.total ? Math.round(mergeProgress.completed / mergeProgress.total * 100) : 0}%` }}/></div><span className="shrink-0 font-medium">成功 {mergeProgress.succeeded} · 失败 {mergeProgress.failed}</span></div>}
     {!!pendingResources.size && <div role="status" aria-live="polite" className="border-b border-emerald-100 bg-emerald-50 px-5 py-2 text-xs font-bold text-emerald-700">正在安全保存 {pendingResources.size} 个任务；其他照片仍可操作</div>}
     {loading ? <div className="flex flex-1 items-center justify-center text-sm text-slate-500"><Loader2 className="mr-2 animate-spin"/>正在读取团片历史人物…</div> : workspaceLoadError ? <div className="flex flex-1 flex-col items-center justify-center gap-3 px-6 text-center"><AlertTriangle size={28} className="text-red-500"/><h3 className="font-bold text-red-700">团片历史人物读取失败</h3><p className="max-w-2xl text-xs leading-5 text-slate-500">{workspaceLoadError}</p><button type="button" className="dialog-primary" onClick={() => void load(true)}>重新读取团片历史</button></div> : !workspace.photos.length ? <div className="flex flex-1 flex-col items-center justify-center text-center"><UsersRound size={42} className="text-slate-300"/><h3 className="mt-4 font-bold text-slate-700">尚未识别人物</h3><p className="mt-2 text-sm text-slate-500">请先加入图片并识别人物。</p><button onClick={() => onStepChange('detect')} className="dialog-primary mt-5">返回人物识别</button></div> : <main ref={peopleScrollRef} className="min-h-0 flex-1 overflow-y-auto p-6"><div className="mx-auto min-h-full max-w-[1800px]"><div className="workflow-board-view">
+      {activeStep === 'review' && <MergeReviewSurface workspace={workspace} subjects={subjects} mergeablePhotos={mergeablePhotos} mergeReport={mergeReport} cacheConfig={cacheConfig} componentActive={componentActive} outputProgress={outputProgress} outputProgressDisabled={Boolean(busy)} mergeActionLabel={mergeActionLabel} mergeActionDisabled={Boolean(busy) || (allPhotosMergedOnce ? !mergedPhotos.length : !mergeablePhotos.length || mergeReport.blockers.some(item => item.code !== 'incomplete-task'))} mergeActionBusy={busy === 'merge-workflow' || busy === 'remerge-all'} reoutputingPhotoId={busy.startsWith('remerge:') ? busy.slice('remerge:'.length) : ''} onMergeAction={() => void (allPhotosMergedOnce ? remergeAllPhotos() : mergeCompletedPhotos())} onReoutput={photo => void reoutputPhoto(photo)}/>}
       {activeStep === 'assignment' ? assignmentSequence : activeStep === 'review' ? <div className="grid gap-5 lg:grid-cols-[minmax(280px,.7fr)_minmax(0,1.3fr)]" data-merge-audit><section className="rounded-xl border border-slate-200 bg-white p-5"><h3 className="font-bold text-slate-800">合并前阻断清单</h3><p className="mt-1 text-xs text-slate-500">阻断归零后才能输出；未知证据仍需人工核对。</p><div className="mt-4 space-y-2">{mergeReport.blockers.length ? mergeReport.blockers.map(item => <div key={item.code} className="flex items-center justify-between rounded-lg bg-amber-50 px-3 py-2 text-xs font-bold text-amber-800"><span>{item.label}</span><span>{item.count}</span></div>) : <div className="rounded-lg bg-emerald-50 px-3 py-3 text-xs font-bold text-emerald-700">没有阻断项，可以合并</div>}</div></section><section className="rounded-xl border border-slate-200 bg-white p-5"><h3 className="font-bold text-slate-800">质量指标与目标进度</h3><div className="mt-4 grid gap-3 sm:grid-cols-3"><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">任务匹配</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.taskMatchRate === undefined ? '未知 · 需核对' : `${Math.round(workspace.qualityMetrics.taskMatchRate * 100)}%`}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">修改有效性</p><p className="mt-1 font-bold text-slate-800">{workspace.qualityMetrics?.effectiveEditRate === undefined ? '未知 · 需核对' : `${Math.round(workspace.qualityMetrics.effectiveEditRate * 100)}%`}</p></div><div className="rounded-lg bg-slate-50 p-3"><p className="text-[11px] text-slate-500">逐图结果</p><p className="mt-1 font-bold text-slate-800">{mergeablePhotos.length} 待合并 · {mergeReport.completedPhotoCount} 已输出</p></div></div><div className="mt-5 space-y-2">{workspace.photos.map(photo => { const tasks = photo.tasks || []; const mergedCount = tasks.filter(task => task.status === 'merged').length; return <div key={`${photo.photoId}:${photo.baseVersionId}`} className="flex items-center justify-between rounded-lg border border-slate-100 px-3 py-2 text-xs"><span className="truncate font-bold text-slate-700">{photo.name || photo.displayName || photo.photoId}</span><span className={mergedCount === tasks.length && tasks.length ? 'text-emerald-700' : 'text-slate-500'}>{mergedCount === tasks.length && tasks.length ? '已输出' : `${tasks.filter(task => Boolean(task.editedPatchPath)).length}/${tasks.length} 返图就绪`}</span></div>; })}</div></section></div> : <>{activeStep === 'relay' && <section className="mb-5 overflow-hidden rounded-xl border border-slate-200 bg-white" data-relay-chains><button type="button" aria-expanded={relayChainsOpen} onClick={() => setRelayChainsOpen(current => !current)} className="flex w-full items-center gap-3 p-4 text-left transition hover:bg-slate-50"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><h3 className="text-sm font-bold text-slate-800">接力链（{relayChains.length}）</h3><span className="text-xs text-slate-500">原始裁图 → 前一位返图 → 下一位</span></div><p className="mt-1 text-[11px] text-slate-400">{relayChainsOpen ? '点击收起接力关系' : '点击展开，查看当前持有人和等待原因'}</p></div><ChevronDown size={17} className={`shrink-0 text-slate-400 transition-transform ${relayChainsOpen ? 'rotate-180' : ''}`}/></button>{relayChainsOpen && <div className="grid gap-3 border-t border-slate-100 p-4 xl:grid-cols-2">{relayChains.map(chain => <article key={chain.key} className="rounded-lg border border-slate-100 bg-slate-50 p-3"><p className="mb-2 truncate text-xs font-bold text-slate-700">{chain.items[0]?.photo.name} · 工作图 {chain.items[0]?.task.taskOrder || chain.items[0]?.task.id}</p><ol className="flex min-w-0 items-stretch gap-1 overflow-x-auto" aria-label="修图接力链">{chain.nodes.map((node, index) => <li key={node.key} className="flex shrink-0 items-center gap-1">{index > 0 && <span aria-hidden className="text-slate-300">→</span>}<div className={`min-w-28 rounded-md border px-2.5 py-2 text-[11px] ${node.state === 'current' ? 'border-blue-300 bg-blue-50 text-blue-800' : node.state === 'warning' ? 'border-red-300 bg-red-50 text-red-700' : node.state === 'done' ? 'border-emerald-200 bg-emerald-50 text-emerald-700' : 'border-slate-200 bg-white text-slate-500'}`}><strong className="block truncate">{node.label}</strong><span className="mt-0.5 block truncate">{node.reason || (node.state === 'done' ? '已就绪' : '等待')}</span></div></li>)}</ol></article>)}</div>}</section>}
-      {tab === 'people' ? <><div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4"><div className="min-w-0 flex-1"><h3 className="text-sm font-bold text-blue-800">请确认自动分组</h3><p className="mt-1 text-xs leading-5 text-blue-700">系统会结合人脸和外观分组，无法确认的人保持未标注。请点击缩略图核对。</p></div>{subjects.length > subjectPageSize && <button onClick={() => setSubjectPageSize(current => current + 18)} className="dialog-secondary" aria-label="加载更多人物实例">再加载 18 张</button>}<button disabled={Boolean(busy)} onClick={() => void suggest()} className="dialog-primary inline-flex items-center gap-2">{busy === 'suggest' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动识别同一个人</button><button onClick={() => void createIdentity()} className="dialog-secondary">新建人物</button></div>
-        <div className="space-y-5">{[...workspace.identities, { id: '__unassigned__', name: '未标注人物', color: '#64748b', createdAt: 0, updatedAt: 0 }].map(identity => { const items = grouped.get(identity.id) || []; if (!items.length && identity.id === '__unassigned__') return null; const visibleItems = items.slice(0, subjectPageSize); return <section key={identity.id} className="team-card pf-card overflow-hidden"><header className="flex items-center gap-3 border-b border-slate-100 px-4 py-3"><span className="h-3 w-3 rounded-full" style={{ background: identity.color }}/>{identity.id === '__unassigned__' ? <h3 className="font-bold text-slate-700">未标注人物</h3> : <input defaultValue={identity.name} onBlur={event => void renameIdentity(identity, event.target.value)} className="min-w-40 rounded border border-transparent px-1 py-1 font-bold text-slate-800 hover:border-slate-200 focus:border-blue-400 focus:outline-none"/>}<span className="text-xs text-slate-400">{items.length} 张人物实例 · {new Set(items.map(item => item.photo.photoId)).size} 张照片{items.length > visibleItems.length ? ` · 当前显示 ${visibleItems.length} 张` : ''}</span>{identity.id !== '__unassigned__' && <button onClick={() => void removeIdentity(identity)} title="删除人物身份" className="ml-auto rounded p-2 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 size={15}/></button>}</header><div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6">{visibleItems.map(subject => <div key={subject.key} data-team-person-key={subject.key} className="space-y-2"><SubjectThumb active={componentActive} subject={subject} cacheConfig={cacheConfig}/><select value={subject.identity?.id || ''} onChange={event => void assign(subject, event.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700"><option value="">未标注</option>{workspace.identities.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}</select>{subject.assignment?.source === 'suggested' && <p className="text-[10px] text-amber-600">自动候选 · {Math.round(subject.assignment.confidence * 100)}% · 请人工确认</p>}</div>)}</div></section>; })}</div></> : <>{!workspace.identities.length ? <div className="team-card pf-card border-dashed p-10 text-center text-sm text-slate-500">请先在“标记人物”中确认身份。</div> : <div className="space-y-7">{weeks.map(week => <section key={week}><h3 className="mb-3 text-sm font-bold text-slate-700">第 {week} 周</h3><div className="space-y-4">{[...workflowGroups.values()].filter(group => group.week === week).map(group => {
+      {tab === 'people' ? <><div className="mb-5 flex flex-wrap items-center gap-3 rounded-xl border border-blue-100 bg-blue-50 p-4"><div className="min-w-0 flex-1"><h3 className="text-sm font-bold text-blue-800">自动分组已默认采用</h3><p className="mt-1 text-xs leading-5 text-blue-700">系统会结合人脸和外观分组；只需在发现识别错误时点击缩略图修改。</p></div>{subjects.length > subjectPageSize && <button onClick={() => setSubjectPageSize(current => current + 18)} className="dialog-secondary" aria-label="加载更多人物实例">再加载 18 张</button>}<button disabled={Boolean(busy)} onClick={() => void suggest()} className="dialog-primary inline-flex items-center gap-2">{busy === 'suggest' ? <Loader2 size={15} className="animate-spin"/> : <Wand2 size={15}/>}自动识别同一个人</button><button onClick={() => void createIdentity()} className="dialog-secondary">新建人物</button></div>
+        <div className="space-y-5">{[...workspace.identities, { id: '__unassigned__', name: '未标注人物', color: '#64748b', createdAt: 0, updatedAt: 0 }].map(identity => { const items = grouped.get(identity.id) || []; if (!items.length && identity.id === '__unassigned__') return null; const visibleItems = items.slice(0, subjectPageSize); return <section key={identity.id} className="team-card pf-card overflow-hidden"><header className="flex items-center gap-3 border-b border-slate-100 px-4 py-3"><span className="h-3 w-3 rounded-full" style={{ background: identity.color }}/>{identity.id === '__unassigned__' ? <h3 className="font-bold text-slate-700">未标注人物</h3> : <input defaultValue={identity.name} onBlur={event => void renameIdentity(identity, event.target.value)} className="min-w-40 rounded border border-transparent px-1 py-1 font-bold text-slate-800 hover:border-slate-200 focus:border-blue-400 focus:outline-none"/>}<span className="text-xs text-slate-400">{items.length} 张人物实例 · {new Set(items.map(item => item.photo.photoId)).size} 张照片{items.length > visibleItems.length ? ` · 当前显示 ${visibleItems.length} 张` : ''}</span>{identity.id !== '__unassigned__' && <button onClick={() => void removeIdentity(identity)} title="删除人物身份" className="ml-auto rounded p-2 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 size={15}/></button>}</header><div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6">{visibleItems.map(subject => <div key={subject.key} data-team-person-key={subject.key} className="space-y-2"><SubjectThumb active={componentActive} subject={subject} cacheConfig={cacheConfig}/><select value={subject.identity?.id || ''} onChange={event => void assign(subject, event.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700"><option value="">未标注</option>{workspace.identities.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}</select>{subject.assignment?.source === 'suggested' && <p className="text-[10px] text-blue-600">自动采用 · {Math.round(subject.assignment.confidence * 100)}% · 识别错误可修改</p>}</div>)}</div></section>; })}</div></> : <>{!workspace.identities.length ? <div className="team-card pf-card border-dashed p-10 text-center text-sm text-slate-500">请先在“标记人物”中分配身份。</div> : <div className="space-y-7">{weeks.map(week => <section key={week}><h3 className="mb-3 text-sm font-bold text-slate-700">第 {week} 周</h3><div className="space-y-4">{[...workflowGroups.values()].filter(group => group.week === week).map(group => {
           const pending = group.items.filter(item => !item.assignment?.completed);
           const ready = workflowReady ? pending.filter(item => item.ready) : [];
           return <article key={`${week}:${group.identity.id}`} className="workflow-person-lane team-card pf-card overflow-hidden"><header className="workflow-person-summary flex items-center gap-3 border-b border-slate-100 p-4"><span className="h-3 w-3 shrink-0 rounded-full" style={{ background: group.identity.color }}/><div className="min-w-0"><h4 className="truncate font-bold text-slate-800">{group.identity.name}</h4><p className="mt-1 text-xs leading-5 text-slate-400">本周 {group.items.length} 张<br/>可分发 {ready.length} 张 · 已完成 {group.items.length - pending.length} 张</p></div>{activeStep === 'relay' && <><button disabled={!workflowReady || Boolean(busy) || !ready.length} onClick={() => void markWeekNoRetouch(group.identity, week, group.items)} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : `将“${group.identity.name}”本周当前可分发的 ${ready.length} 个未上传任务标记为不用修`} className="dialog-secondary ml-auto inline-flex shrink-0 items-center gap-2">{busy === `skip:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}标记本周不用修</button><button disabled={!workflowReady || Boolean(busy) || !ready.length} title={!workspace.workflowGenerated ? '请先生成协作流程' : workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : !ready.length ? '等待上一位返图' : '打开当前可分发任务文件夹'} onClick={() => void openTaskFolder(group.identity, week)} className="dialog-secondary inline-flex shrink-0 items-center gap-2">{busy === `open:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <FolderOutput size={14}/>}打开任务文件夹</button></>}</header><div className="workflow-task-strip">{group.items.map(item => { const returnMissing = Boolean(item.assignment?.returnMissing); const returned = item.assignment?.completionKind === 'returned' && Boolean(item.assignment.editedPatchPath) && !returnMissing; return <div key={item.key} className="workflow-task-card p-3"><div className="workflow-task-thumbnail shrink-0"><SubjectThumb active={componentActive} subject={item} cacheConfig={cacheConfig} sourcePath={item.workflowImagePath} interactive={!item.assignment?.completed}/></div><div className="min-w-0"><p className="truncate text-sm font-bold text-slate-700">{item.photo.name} · 人物 {item.personIndex}</p><p className={`mt-1 truncate text-xs ${workspace.workflowNeedsRegeneration ? 'font-bold text-amber-600' : returnMissing ? 'font-bold text-red-600' : item.assignment?.completed ? 'text-emerald-600' : item.ready ? 'text-blue-600' : 'text-amber-600'}`} title={workspace.workflowNeedsRegeneration ? '排期已调整，请重新生成协作流程' : returnMissing ? '返图文件已被外部删除或移动；恢复原路径后会自动重新连接，也可以重新上传' : item.blockedBy.join('、')}>{workspace.workflowNeedsRegeneration ? '排期已调整，等待重新生成' : returnMissing ? '返图文件丢失' : item.assignment?.completed ? returned ? '已返图' : '不用修' : item.ready ? '可以分发' : `等待 ${item.blockedBy.join('、')} 完成`}</p></div>{activeStep === 'relay' && <><button disabled={!workflowReady || !item.ready || Boolean(busy)} onClick={() => void upload(item)} className="workflow-task-action dialog-secondary inline-flex items-center justify-center">{busy === `upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : <Upload size={12}/>}上传返图</button><button disabled={!workflowReady || !item.assignment || Boolean(busy) || !item.ready && !item.assignment.completed} onClick={() => void (item.assignment?.completed && returned ? removeUpload(item) : toggleComplete(item))} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : returnMissing ? '返图文件已丢失；可以重新上传，或明确标记为不用修' : item.assignment?.completed ? returned ? '删除返图并撤销完成标记' : '撤销不用修' : '该任务不用修，直接标记完成'} className={`workflow-task-action group inline-flex items-center justify-center rounded-md border font-bold transition ${returnMissing ? 'border-red-200 bg-red-50 text-red-700' : item.assignment?.completed ? returned ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600' : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-amber-200 hover:bg-amber-50 hover:text-amber-700' : 'border-slate-200 text-slate-600'}`}>{busy === `complete:${item.key}` || busy === `remove-upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : item.assignment?.completed ? <><CheckCircle2 size={12} className="group-hover:hidden"/>{returned ? <Trash2 size={12} className="hidden group-hover:block"/> : <X size={12} className="hidden group-hover:block"/>}</> : <AlertTriangle size={12}/>} {item.assignment?.completed ? <><span className="group-hover:hidden">{returned ? '已返图' : '不用修'}</span><span className="hidden group-hover:inline">{returned ? '删除返图' : '撤销不用修'}</span></> : returnMissing ? '返图丢失' : '不用修'}</button></>}</div>; })}</div></article>;

@@ -63,6 +63,7 @@ const { createMediaRatingService } = require('./services/media-rating-service.cj
 const { createRawOrientationService } = require('./services/raw-orientation-service.cjs');
 const { createImageThumbnailRuntime } = require('./services/image-thumbnail-runtime.cjs');
 const { createDevelopmentPythonResolver } = require('./services/python-environment-service.cjs');
+const { renameNeedsFrameRuntime } = require('./services/rename-runtime-model.cjs');
 const { createVersionService } = require('./domains/versioning/public.cjs');
 const { createVersionStaleDetectionService } = require('./services/version-stale-detection-service.cjs');
 const { createMediaTrackingScanScheduler } = require('./services/media-tracking-scan-scheduler.cjs');
@@ -660,14 +661,15 @@ const getRunConfig = (scriptName, args) => {
     }
     return pluginService.resolveRunConfig('video-tools', [baseName, ...args]);
   }
-  if (baseName === 'rename') {
-    if (!pluginService) {
-      const error = new Error('视频处理插件服务尚未初始化');
-      error.code = 'PLUGIN_MISSING';
-      throw error;
+  if (baseName === 'rename' && renameNeedsFrameRuntime(args, { fs, path })) {
+    if (pluginService) {
+      try {
+        const videoRuntime = pluginService.resolveRunConfig('video-tools', []);
+        args = [...args, '--video_tools_command', videoRuntime.command, ...videoRuntime.args.map(value => `--video_tools_arg=${value}`)];
+      } catch (error) {
+        if (error?.code !== 'PLUGIN_MISSING') throw error;
+      }
     }
-    const videoRuntime = pluginService.resolveRunConfig('video-tools', []);
-    args = [...args, '--video_tools_command', videoRuntime.command, ...videoRuntime.args.flatMap(value => ['--video_tools_arg', value])];
   }
 
   if (app.isPackaged) {
@@ -865,12 +867,15 @@ const getConfigPath = () => {
 const readSavedConfig = () => {
   try {
     const config = readConfigFileWithRecovery(fs, getConfigPath());
+    const hasCoreConsent = privacyService.hasCoreConsent();
+    const initialExperienceConsent = privacyService.getState().experienceProgramGranted === true;
+    const configuredTelemetry = config?.telemetry && typeof config.telemetry === 'object' ? config.telemetry : {};
     return {
       ...(config && typeof config === 'object' ? config : {}),
-      telemetry: privacyService.hasCoreConsent()
+      telemetry: hasCoreConsent
         ? {
-            enabled: true,
-            crashReports: true,
+            enabled: typeof configuredTelemetry.enabled === 'boolean' ? configuredTelemetry.enabled : initialExperienceConsent,
+            crashReports: typeof configuredTelemetry.crashReports === 'boolean' ? configuredTelemetry.crashReports : initialExperienceConsent,
           }
         : { enabled: false, crashReports: false },
     };

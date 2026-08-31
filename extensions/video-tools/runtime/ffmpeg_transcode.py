@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import functools
 import argparse
+import errno
 import json
 import os
 import re
@@ -69,6 +70,39 @@ GENERAL_TRANSCODE_INPUT_EXTENSIONS = {
 
 class FFmpegTranscodeError(RuntimeError):
     """Raised when FFmpeg cannot complete a requested media operation."""
+
+
+class DiskSpaceError(FFmpegTranscodeError):
+    """Raised when a transcode destination cannot safely hold the queue."""
+
+    def __init__(self, message: str, *, required_bytes: int = 0, free_bytes: int = 0, destination: str = ""):
+        super().__init__(message)
+        self.required_bytes = max(0, int(required_bytes))
+        self.free_bytes = max(0, int(free_bytes))
+        self.destination = destination
+
+
+def _format_bytes(size: int) -> str:
+    value = float(max(0, size))
+    for unit in ("B", "KB", "MB", "GB", "TB"):
+        if value < 1024 or unit == "TB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    return f"{int(size)} B"
+
+
+def _is_disk_space_error(error: object) -> bool:
+    if isinstance(error, DiskSpaceError):
+        return True
+    if isinstance(error, OSError) and (
+        getattr(error, "errno", None) == errno.ENOSPC or getattr(error, "winerror", None) == 112
+    ):
+        return True
+    detail = str(error or "").casefold()
+    return any(marker in detail for marker in (
+        "no space left on device", "not enough space on the disk", "disk full",
+        "enospc", "磁盘空间不足", "设备上没有空间", "磁盘已满",
+    ))
 
 
 def normalize_video_preview_quality(quality: str) -> str:
@@ -222,6 +256,7 @@ def available_transcode_capabilities(ffmpeg_exe: str) -> dict:
 
     encoders_text = output_for("-encoders")
     filters_text = output_for("-filters")
+    hwaccels_text = output_for("-hwaccels")
     encoder_names = {
         match.group(1) for match in re.finditer(r"(?m)^\s*V\S*\s+([\w-]+)\s", encoders_text)
     }
@@ -261,13 +296,19 @@ def available_transcode_capabilities(ffmpeg_exe: str) -> dict:
     filter_names = {
         match.group(1) for match in re.finditer(r"(?m)^\s*[\.A-Z|]{3,4}\s+([\w-]+)\s", filters_text)
     }
+    hardware_accelerators = {
+        value.strip() for value in hwaccels_text.splitlines()
+        if re.fullmatch(r"[a-z0-9_]+", value.strip())
+    }
     return {
         "encoders": sorted(encoder_names.intersection(relevant)),
         "usableHardwareEncoders": usable_hardware,
         "usableHardware10BitEncoders": usable_hardware_10bit,
         "pixelFormats": pixel_formats,
-        "filters": sorted(filter_names.intersection({"zscale", "tonemap", "subtitles", "loudnorm"})),
+        "filters": sorted(filter_names.intersection({"zscale", "tonemap", "libplacebo", "subtitles", "loudnorm"})),
+        "hardwareAccelerators": sorted(hardware_accelerators.intersection({"cuda", "d3d11va", "vulkan"})),
         "hdrToneMap": "zscale" in filter_names and "tonemap" in filter_names,
+        "gpuHdrToneMap": "libplacebo" in filter_names and "vulkan" in hardware_accelerators,
         "subtitleBurn": "subtitles" in filter_names,
         "av1Hardware": any(value in usable_hardware for value in AV1_GPU_VIDEO_ENCODERS),
         "hevc10Bit": SOFTWARE_H265_VIDEO_ENCODER in encoder_names and bool({"p010le", "yuv420p10le"}.intersection(pixel_formats.get(SOFTWARE_H265_VIDEO_ENCODER, [])))
@@ -556,6 +597,7 @@ def build_general_transcode_command(
     source_transfer: str = "unknown",
     source_primaries: str = "unknown",
     source_matrix: str = "unknown",
+    tone_map_backend: str = "cpu",
 ) -> list[str]:
     """Build a validated general-purpose video transcode command."""
     validate_general_transcode_options(
@@ -571,8 +613,15 @@ def build_general_transcode_command(
         audio_track=audio_track, video_bitrate_mbps=video_bitrate_mbps,
         audio_bitrate_kbps=audio_bitrate_kbps,
     )
+    if tone_map_backend not in {"cpu", "libplacebo"}:
+        raise ValueError("不支持的 HDR 色调映射后端")
+    output_color_mode = "sdr" if color_mode == "hdr-to-sdr" else color_mode
+    tone_map_to_sdr = output_color_mode == "sdr" and (source_hdr or color_mode == "hdr-to-sdr")
+    gpu_tone_map = tone_map_to_sdr and tone_map_backend == "libplacebo" and bit_depth == "8"
     command = [
         ffmpeg_exe, "-hide_banner", "-loglevel", "error", "-nostdin", "-n",
+        *(["-init_hw_device", "vulkan=photoflow_vk:0", "-filter_hw_device", "photoflow_vk",
+           "-hwaccel", "cuda"] if gpu_tone_map else []),
         *(["-noautorotate"] if rotation != "auto" else []),
         "-i", input_path,
         "-map", "0:v:0", "-map", "0:a?" if audio_track == "all" else "0:a:0?",
@@ -588,13 +637,14 @@ def build_general_transcode_command(
             filters.append("scale=trunc(iw*sar/2)*2:ih")
             filters.append("setsar=1")
         long_edge = GENERAL_TRANSCODE_LONG_EDGE[resolution]
-        if long_edge:
-            filters.append(
-                f"scale='min({long_edge},iw)':'min({long_edge},ih)'"
-                ":force_original_aspect_ratio=decrease:force_divisible_by=2"
-            )
-        else:
-            filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
+        if not gpu_tone_map:
+            if long_edge:
+                filters.append(
+                    f"scale='min({long_edge},iw)':'min({long_edge},ih)'"
+                    ":force_original_aspect_ratio=decrease:force_divisible_by=2"
+                )
+            else:
+                filters.append("scale=trunc(iw/2)*2:trunc(ih/2)*2")
         target_frame_rate = GENERAL_TRANSCODE_FRAME_RATES[frame_rate]
         if target_frame_rate and frame_rate_mode == "cfr":
             filters.append(f"fps={target_frame_rate}")
@@ -608,15 +658,31 @@ def build_general_transcode_command(
             filters.append(f"subtitles='{_escape_subtitle_filter_path(input_path)}':si=0")
         # ``hdr-to-sdr`` remains accepted for saved presets from older builds.
         # Rec.709 is now an output target and tone-maps only when the source is HDR.
-        output_color_mode = "sdr" if color_mode == "hdr-to-sdr" else color_mode
-        tone_map_to_sdr = output_color_mode == "sdr" and (source_hdr or color_mode == "hdr-to-sdr")
         output_bit_depth = "10" if output_color_mode in {"hdr10", "hlg"} or video_mode == "prores" else bit_depth
         if tone_map_to_sdr:
-            filters.extend([
-                "zscale=t=linear:npl=100", "format=gbrpf32le",
-                "zscale=p=bt709", "tonemap=tonemap=hable:desat=2",
-                "zscale=t=bt709:m=bt709:r=tv",
-            ])
+            if gpu_tone_map:
+                dimensions = (
+                    f"w='min({long_edge},iw)':h='min({long_edge},ih)':"
+                    "force_original_aspect_ratio=decrease:force_divisible_by=2:"
+                    if long_edge else "w=iw:h=ih:force_divisible_by=2:"
+                )
+                filters.append(
+                    "libplacebo=" + dimensions
+                    + "normalize_sar=1:format=yuv420p:colorspace=bt709:color_primaries=bt709:"
+                    "color_trc=bt709:range=tv:tonemapping=hable:gamut_mode=perceptual:"
+                    "peak_detect=1:dithering=blue"
+                )
+                # libplacebo produces Vulkan frames. Download its final SDR
+                # surface once, then let NVENC upload the already converted
+                # 8-bit frame; this still removes the expensive CPU float
+                # zscale/tonemap chain and is portable across NVIDIA drivers.
+                filters.extend(["hwdownload", "format=yuv420p", "setsar=1"])
+            else:
+                filters.extend([
+                    "zscale=t=linear:npl=100", "format=gbrpf32le",
+                    "zscale=p=bt709", "tonemap=tonemap=hable:desat=2",
+                    "zscale=t=bt709:m=bt709:r=tv",
+                ])
         elif output_color_mode in {"hdr10", "hlg"}:
             target_transfer = "smpte2084" if output_color_mode == "hdr10" else "arib-std-b67"
             if source_transfer != target_transfer:
@@ -843,6 +909,7 @@ def transcode_video(
     on_log: Callable[[str], None] | None = None,
     cancel_check: Callable[[], None] | None = None,
     pause_check: Callable[[], bool] | None = None,
+    source_info: dict | None = None,
 ) -> str:
     """Transcode one video through a temporary file, then commit atomically."""
     validate_general_transcode_options(
@@ -879,11 +946,14 @@ def transcode_video(
         os.path.dirname(destination),
         f".{os.path.splitext(os.path.basename(destination))[0]}.{uuid.uuid4().hex}.photoflow-transcode{output_extension}",
     )
-    duration = probe_duration(input_path)
-    try:
-        source_info = probe_media_info(input_path)
-    except Exception:
-        source_info = {"hdr": False, "hdrKind": "SDR", "bitDepth": 8}
+    if source_info is None:
+        try:
+            source_info = probe_media_info(input_path)
+        except Exception:
+            source_info = {"hdr": False, "hdrKind": "SDR", "bitDepth": 8}
+    duration = float(source_info.get("duration", 0) or 0)
+    if duration <= 0:
+        duration = probe_duration(input_path)
     resolved_color_mode = "sdr" if color_mode == "hdr-to-sdr" else color_mode
     if color_mode == "auto":
         if source_info.get("dynamicHdr") and video_mode != "copy":
@@ -955,11 +1025,53 @@ def transcode_video(
                 source_transfer=str(source_info.get("transfer", "unknown")),
                 source_primaries=str(source_info.get("primaries", "unknown")),
                 source_matrix=str(source_info.get("matrix", "unknown")),
+                tone_map_backend="libplacebo" if (
+                    resolved_color_mode == "sdr" and bool(source_info.get("hdr"))
+                    and resolved_bit_depth == "8"
+                    and capabilities.get("gpuHdrToneMap")
+                    and encoder in ALL_GPU_VIDEO_ENCODERS
+                ) else "cpu",
             )
+            using_gpu_tone_map = "libplacebo=" in command[command.index("-vf") + 1] if "-vf" in command else False
+            if using_gpu_tone_map and on_log:
+                on_log("HDR→SDR 处理：libplacebo/Vulkan（GPU）")
             attempt_arguments = (command, duration, on_progress, cancel_check)
             code, stderr = _run_general_transcode_attempt(
                 *attempt_arguments, **({"pause_check": pause_check} if pause_check is not None else {}),
             )
+            if _is_disk_space_error(stderr):
+                raise DiskSpaceError("磁盘空间不足，已立即停止整个转码队列。请释放空间或更换输出磁盘后重试。")
+            if code != 0 and using_gpu_tone_map:
+                if on_log:
+                    detail_lines = (stderr or "").strip().splitlines()
+                    detail = detail_lines[-1] if detail_lines else "GPU 色调映射初始化失败"
+                    on_log(f"GPU HDR→SDR 不可用，安全回退到 CPU：{detail}")
+                try:
+                    _retry_windows_sharing_violation(lambda: os.remove(temporary), cancel_check)
+                except FileNotFoundError:
+                    pass
+                command = build_general_transcode_command(
+                    ffmpeg_exe, input_path, temporary,
+                    container=container, video_mode=video_mode, quality=quality,
+                    resolution=resolution, frame_rate=frame_rate, audio_mode=audio_mode,
+                    encoder=encoder, subtitle_mode=subtitle_mode,
+                    color_mode=resolved_color_mode, bit_depth=resolved_bit_depth,
+                    frame_rate_mode=frame_rate_mode, rotation=rotation,
+                    aspect_mode=aspect_mode, audio_track=audio_track,
+                    video_bitrate_mbps=video_bitrate_mbps,
+                    audio_bitrate_kbps=audio_bitrate_kbps, encoder_preset=encoder_preset,
+                    source_hdr=bool(source_info.get("hdr")),
+                    source_transfer=str(source_info.get("transfer", "unknown")),
+                    source_primaries=str(source_info.get("primaries", "unknown")),
+                    source_matrix=str(source_info.get("matrix", "unknown")),
+                    tone_map_backend="cpu",
+                )
+                attempt_arguments = (command, duration, on_progress, cancel_check)
+                code, stderr = _run_general_transcode_attempt(
+                    *attempt_arguments, **({"pause_check": pause_check} if pause_check is not None else {}),
+                )
+                if _is_disk_space_error(stderr):
+                    raise DiskSpaceError("磁盘空间不足，已立即停止整个转码队列。请释放空间或更换输出磁盘后重试。")
             if code == 0 and os.path.isfile(temporary) and os.path.getsize(temporary) > 0:
                 try:
                     try:
@@ -1354,6 +1466,75 @@ def estimate_transcode_size_bytes(media: dict, settings: dict) -> int:
     return round(duration * (video_mbps + audio_mbps) * 1_000_000 / 8 * 1.015)
 
 
+def _existing_disk_usage_path(path_value: str) -> str:
+    candidate = os.path.abspath(path_value)
+    while not os.path.exists(candidate):
+        parent = os.path.dirname(candidate)
+        if parent == candidate:
+            break
+        candidate = parent
+    return candidate
+
+
+def _disk_space_safety_factor(settings: dict) -> float:
+    if settings.get("video_mode") == "copy" or settings.get("video_bitrate_mbps"):
+        return 1.20
+    if settings.get("video_mode") == "prores":
+        return 1.35
+    # CRF/CQ output varies materially with scene complexity. The previous
+    # estimate was 2.5x low for high-motion 4K60 camera footage, so reserve a
+    # conservative envelope instead of allowing a queue to fill the volume.
+    return 3.0
+
+
+def preflight_transcode_disk_space(
+    paths: Iterable[str],
+    settings: dict,
+    destination_roots: dict[str, str],
+) -> dict[str, dict]:
+    """Probe the queue once and reject destinations without safe headroom."""
+    media_by_path: dict[str, dict] = {}
+    volume_plans: dict[str, dict] = {}
+    factor = _disk_space_safety_factor(settings)
+    for input_path in paths:
+        info = probe_media_info(input_path)
+        info["estimatedOutputBytes"] = estimate_transcode_size_bytes(info, settings)
+        media_by_path[input_path] = info
+        destination_root = os.path.abspath(destination_roots[input_path])
+        usage_path = _existing_disk_usage_path(destination_root)
+        drive, _tail = os.path.splitdrive(usage_path)
+        volume_key = os.path.normcase(drive or usage_path)
+        plan = volume_plans.setdefault(volume_key, {
+            "usagePath": usage_path,
+            "destination": destination_root,
+            "estimated": 0,
+            "largest": 0,
+        })
+        estimate = int(info["estimatedOutputBytes"])
+        plan["estimated"] += estimate
+        plan["largest"] = max(int(plan["largest"]), estimate)
+
+    for plan in volume_plans.values():
+        reserve = max(512 * 1024 * 1024, int(plan["largest"] * .5))
+        required = int(plan["estimated"] * factor) + reserve
+        try:
+            free = int(shutil.disk_usage(plan["usagePath"]).free)
+        except OSError as error:
+            if _is_disk_space_error(error):
+                free = 0
+            else:
+                raise
+        if free < required:
+            raise DiskSpaceError(
+                f"磁盘空间不足：输出位置 {plan['destination']} 预计至少需要 {_format_bytes(required)}，"
+                f"当前可用 {_format_bytes(free)}。请释放空间或更换输出磁盘后重试。",
+                required_bytes=required,
+                free_bytes=free,
+                destination=str(plan["destination"]),
+            )
+    return media_by_path
+
+
 def run(args_list=None) -> int:
     parser = argparse.ArgumentParser(description="PhotoFlow general video transcoder")
     parser.add_argument("paths", nargs="*", help="输入视频路径")
@@ -1473,6 +1654,15 @@ def run(args_list=None) -> int:
                 raise FileNotFoundError(f"找不到视频：{path}")
             if args.output_mode == "replace" and os.path.splitext(path)[1].lower() != GENERAL_TRANSCODE_CONTAINERS[args.container]:
                 raise ValueError("替换原文件时输出封装必须与原文件扩展名一致")
+        destination_roots: dict[str, str] = {}
+        for input_path in paths:
+            containing_folders = [folder for folder in source_folders if _path_is_inside(input_path, folder)]
+            destination_roots[input_path] = (
+                os.path.dirname(max(containing_folders, key=len))
+                if containing_folders else os.path.dirname(input_path)
+            )
+        _emit_cli("status", "正在检查输出磁盘空间…", 0)
+        media_by_path = preflight_transcode_disk_space(paths, settings, destination_roots)
         folder_destinations: dict[str, str] = {}
         destination_directories: dict[str, str] = {}
         for input_path in paths:
@@ -1552,11 +1742,18 @@ def run(args_list=None) -> int:
                         destination_directory=destination_directories.get(path),
                         on_progress=emit_transcode_progress, on_log=emit_transcode_log,
                         cancel_check=check_cancelled, pause_check=check_paused,
+                        source_info=media_by_path.get(path),
                     )
                     break
                 except TranscodeCancelled:
                     raise
                 except Exception as error:
+                    if _is_disk_space_error(error):
+                        if isinstance(error, DiskSpaceError):
+                            raise
+                        raise DiskSpaceError(
+                            "磁盘空间不足，已立即停止整个转码队列。请释放空间或更换输出磁盘后重试。"
+                        ) from error
                     last_error = error
                     if retry_index < args.retry_count:
                         _emit_cli("warning", f"{name} 转码失败，正在重试（{retry_index + 1}/{args.retry_count}）：{error}")
@@ -1589,6 +1786,13 @@ def run(args_list=None) -> int:
     except TranscodeCancelled as error:
         _emit_cli("cancelled", str(error), outputs=outputs)
         return 0
+    except DiskSpaceError as error:
+        _emit_cli(
+            "error", str(error), outputs=outputs, code="ENOSPC",
+            requiredBytes=error.required_bytes, freeBytes=error.free_bytes,
+            destination=error.destination,
+        )
+        return 1
     except Exception as error:
         _emit_cli("error", str(error), outputs=outputs)
         return 1

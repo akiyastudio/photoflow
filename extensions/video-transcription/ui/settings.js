@@ -53,7 +53,7 @@
     model.disabled = installed.length === 0;
     if (currentModel) model.value = currentModel;
     document.querySelector('#model-summary').textContent = installed.length ? `已安装 ${installed.length} 个：${installed.map(item => item.id).join('、')}` : '未发现完整模型；请手动安装后刷新';
-    document.querySelector('#model-placement').textContent = `放置位置：${modelResult.placement}`;
+    document.querySelector('#model-placement').value = modelResult.directory || modelResult.placement;
   };
   const loadSettings = async () => {
     initialized = false;
@@ -63,6 +63,12 @@
     initialized = true;
   };
   const refreshModels = async () => { const currentModel = model.value; populateModels(await api.rpc('transcript.models.list.v1', {}), currentModel); };
+  const openModelDirectory = async () => {
+    const button = document.querySelector('#open-model-directory'); button.disabled = true;
+    try { await api.dialog({ kind: 'openComponentDirectory', relativePath: 'models' }); }
+    catch (error) { document.querySelector('#model-summary').textContent = `打开模型目录失败：${error.message}`; }
+    finally { button.disabled = false; }
+  };
   const diagnose = async () => {
     const detail = document.querySelector('#runtime-detail'); const button = document.querySelector('#diagnose'); detail.textContent = '正在诊断…'; button.disabled = true;
     try { const result = await api.rpc('transcript.runtime.status.v1', {}); const source = ({ 'host-development': '开发环境', 'plugin-development': '插件私有环境', packaged: '内置运行时', 'system-python': '系统 Python', 'environment-python': '自定义 Python', environment: '自定义运行时' })[result.source] || '本地运行时'; detail.textContent = result.ready ? `可用（${source}${result.packaged ? '，自包含发布运行时' : ''}）` : `不可用（${source}）：${result.message}`; detail.dataset.ready = String(result.ready); }
@@ -72,6 +78,7 @@
   form.addEventListener('change', scheduleSave);
   window.addEventListener('pagehide', () => saver.flush());
   document.querySelector('#refresh-models').addEventListener('click', () => void refreshModels().catch(error => { document.querySelector('#model-summary').textContent = error.message; }));
+  document.querySelector('#open-model-directory').addEventListener('click', () => void openModelDirectory());
   document.querySelector('#diagnose').addEventListener('click', () => void diagnose());
   api.getContext().then(context => applyTheme(context.resolvedTheme));
   api.onThemeChange(value => applyTheme(value.resolvedTheme));

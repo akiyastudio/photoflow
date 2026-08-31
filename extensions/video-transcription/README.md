@@ -28,7 +28,7 @@ Git 跟踪的源码和默认 thin ZIP 不包含 Python 环境、transcriber 可�
 - `PHOTOFLOW_TRANSCRIBER_EXECUTABLE`：已打包的 JSONL `transcriber.exe`。
 - `PHOTOFLOW_TRANSCRIBER_ARGS_PREFIX`：上述可执行文件的 JSON 参数数组（主要用于测试/开发）。
 
-设置页仅列出受控 allowlist 中且已安装的模型。安装时手动将完整的 faster-whisper CTranslate2 目录放入 `models/<model-id>`，目录必须包含 `config.json`、`model.bin` 和 `tokenizer.json`。组件不接受路径或仓库 ID，不在运行时隐式下载；缺失、不完整或越界链接都会返回可诊断错误。模型切换仅影响切换后新建的任务；已建任务保留其设置快照。
+设置页显示完整模型根目录并提供“打开”按钮，仅列出受控 allowlist 中且已安装的模型。安装时手动将完整的 faster-whisper CTranslate2 目录放入 `models/<model-id>`，目录必须包含 `config.json`、`model.bin` 和 `tokenizer.json`。组件不接受模型路径或仓库 ID，不在运行时隐式下载；缺失、不完整或越界链接都会返回可诊断错误。模型切换仅影响切换后新建的任务；已建任务保留其设置快照。
 
 CUDA 模型加载失败且启用回退时，算法会明确报告诊断并重试 CPU `int8`。运行时或依赖缺失会在工具页和设置页给出不含路径的诊断。
 
@@ -46,13 +46,13 @@ npm run build:components -- --only video-transcription
 
 开发组件不再通过 CMD/BAT 包装器启动。`npm run setup --prefix extensions/video-transcription` 会创建组件私有、被 Git 忽略的 `.venv`，并把 `requirements.txt` 依赖真正安装在该环境内。设置脚本会检查 `pyvenv.cfg`、依赖 `__file__` 和 `sys.path`；若现有环境由另一个 venv 创建或引用外部 site-packages，就重建该插件私有环境。Host 直接 spawn `.venv/Scripts/python.exe`。
 
-普通 Windows x64 打包生成 `PhotoFlow-video-transcription-26.8.29.10-win32-x64.zip` thin package，并保留清晰的缺失运行时诊断。打包脚本支持 `--runtime` 和 `--model-root`；正式离线包可指定已审计的 PyInstaller 产物及模型：
+普通 Windows x64 打包生成 `PhotoFlow-video-transcription-26.8.29.10-win32-x64.zip`。发布流程先用组件私有 Python 环境构建 `_internal/transcriber.exe`，其中包含 Python、faster-whisper、CTranslate2、PyAV/FFmpeg、OpenCC、ONNX Runtime 和 tokenizer 依赖，再生成组件 ZIP：
 
 ```powershell
-node extensions/video-transcription/scripts/package-component.cjs --runtime C:\release\transcriber.exe --model-root C:\release\models
+npm run package --prefix extensions/video-transcription
 ```
 
-不传这两个参数时生成 thin ZIP；它不会复制 Python env、transcriber 或任何模型，避免把 large-v3 意外提交或打进测试包。
+发布包始终包含自包含算法运行时，最终用户无需安装 Python 或算法依赖。模型始终排除，避免把大模型意外提交或打进发布包；用户通过设置页给出的模型根目录单独放置模型。
 
 ## 已知限制
 

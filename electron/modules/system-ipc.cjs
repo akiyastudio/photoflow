@@ -1401,8 +1401,8 @@ const registerSystemIpc = context => {
         projectCategoryOrder: normalizeProjectCategoryOrder(config?.projectCategoryOrder, customProjectCategories),
         progressNamePresets: normalizeProgressNamePresets(config?.progressNamePresets),
         telemetry: {
-          enabled: privacyService.hasCoreConsent(),
-          crashReports: privacyService.hasCoreConsent(),
+          enabled: privacyService.hasCoreConsent() && config?.telemetry?.enabled === true,
+          crashReports: privacyService.hasCoreConsent() && config?.telemetry?.crashReports === true,
         },
       };
       const requestedCacheDirectory = String(config?.mediaCache?.directory || '').trim();

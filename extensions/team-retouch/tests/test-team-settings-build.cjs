@@ -9,7 +9,7 @@ const cssFiles = fs.readdirSync(path.join(dist, 'assets')).filter(name => name.e
 assert(cssFiles.length > 0, 'independent plugin build must emit CSS assets');
 const css = cssFiles.map(name => fs.readFileSync(path.join(dist, 'assets', name), 'utf8')).join('\n');
 assert(!css.includes('@tailwind'), 'compiled plugin CSS must not retain Tailwind directives');
-for (const marker of ['.team-settings-container', '.team-settings-row', '.team-settings-select', '.team-settings-button', '.animate-spin', '.sr-only']) {
+for (const marker of ['.pf-settings-container', '.pf-settings-row', '.pf-select', '.pf-button', '.animate-spin', '.sr-only']) {
   assert(css.includes(marker), `compiled settings CSS missing representative Host/utility style: ${marker}`);
 }
 const linkedCss = [...settingsHtml.matchAll(/<link[^>]+href="([^"]+\.css)"/g)].map(match => match[1]);

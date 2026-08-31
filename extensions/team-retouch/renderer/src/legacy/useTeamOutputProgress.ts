@@ -3,7 +3,7 @@ import { legacyApi } from './legacy-api';
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import type { ProgressFolder, TeamProjectPhoto, WorkspaceProject } from './legacy-types';
 import { resolveLegacyTeamSourceProgressIds } from './legacy-progress-scope';
-import { normalizeLegacyProgressResult } from './legacy-progress-result-model';
+import { normalizeLegacyProgressResult, resolveLegacyTeamWorkflowProgressId } from './legacy-progress-result-model';
 
 const normalizePath = (value = '') => value.replace(/\\/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
 
@@ -11,6 +11,7 @@ const compareProgressKeys = (left: string, right: string) => left.localeCompare(
 
 export const isTeamSourceProgressCandidate = (folder: ProgressFolder) => folder.mediaKind === 'image'
   && !folder.folderMissing
+  && !folder.missing
   && folder.relationKind !== 'auxiliary'
   && folder.nodeRole === 'progress';
 
@@ -22,7 +23,7 @@ export const resolveTeamSourceProgressIds = resolveLegacyTeamSourceProgressIds;
 /** Only photos that produced at least one AI crop are real team-workflow inputs. */
 export const teamWorkflowSourcePaths = (photos: TeamProjectPhoto[]) => photos
   .filter(photo => photo.tasks.length > 0)
-  .map(photo => photo.sourcePath);
+  .map(photo => photo.relativePath || photo.sourcePath);
 
 export const useTeamOutputProgress = (sourceFilePaths: string | string[], workspacePath: string, project: WorkspaceProject, onNotice: (message: string, tone: 'info' | 'success' | 'warning' | 'error') => void) => {
   const normalizedSourcePaths = useMemo(
@@ -93,23 +94,32 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
   }, [refresh, workspacePath, project.status, project.name]);
 
   const ensureTargetProgress = async (workflowProgressId?: string) => {
-    if (!workflowProgressId) throw new Error('团片协作工作流节点尚未建立');
     const latest = await refresh();
+    const resolvedWorkflowProgressId = resolveLegacyTeamWorkflowProgressId(latest.progressFolders, workflowProgressId);
+    if (!resolvedWorkflowProgressId) throw new Error('团片协作工作流节点尚未建立');
     const selected = latest.progressFolders.find(folder => folder.id === targetProgressId && isTeamProgressCandidate(folder) && !latest.sourceProgressIds.includes(folder.id));
     const roots = latest.progressFolders.filter(folder => isTeamProgressCandidate(folder) && folder.nodeRole === 'progress' && !folder.versionKey.includes('_'));
+    const original = latest.progressFolders.find(folder => folder.mediaKind === 'image' && folder.nodeRole === 'original' && !folder.folderMissing && !folder.missing);
+    const hasProjectProgress = latest.progressFolders.some(folder => isTeamProgressCandidate(folder));
     const nextRoot = roots.reduce((highest, folder) => Math.max(highest, Number(folder.versionKey) || 0), 0) + 1;
     const requestProgress = selected
       ? { progressId: selected.id }
-      : {
+      : hasProjectProgress ? {
         mediaKind: 'image' as const,
         versionKey: String(nextRoot),
         parentProgressId: latest.sourceProgressIds[0],
         displayName: `图片后期_${nextRoot}_团片协作合成`,
+      } : {
+        mediaKind: 'image' as const,
+        versionKey: String(nextRoot),
+        parentProgressId: original?.id,
+        relativePath: '团片协作合并',
+        displayName: '团片协作合并',
       };
     const registered = await legacyApi.registerProgressWithGraph(workspacePath, project.status, {
       projectName: project.name,
       progress: requestProgress,
-      workflowInputProgressIds: [workflowProgressId],
+      workflowInputProgressIds: [resolvedWorkflowProgressId],
     });
     if (!registered.success || !registered.progressFolder) throw new Error(registered.error || '无法提交团片输出进度关系');
     setFolders(current => current.some(folder => folder.id === registered.progressFolder!.id)
@@ -123,6 +133,7 @@ export const useTeamOutputProgress = (sourceFilePaths: string | string[], worksp
   return {
     folders: [...folders].sort((left, right) => compareProgressKeys(left.versionKey, right.versionKey)),
     progressOptions: [...folders].sort((left, right) => compareProgressKeys(left.versionKey, right.versionKey)).map(folder => ({ folder, disabled: Boolean(disabledReason(folder)), reason: disabledReason(folder) })),
+    hasProjectProgress: folders.some(folder => isTeamProgressCandidate(folder)),
     sourceProgressIds,
     targetProgressId,
     setTargetProgressId,

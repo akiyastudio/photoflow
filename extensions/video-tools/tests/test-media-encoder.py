@@ -1,4 +1,5 @@
 import os
+import shutil
 import sys
 import unittest
 from unittest import mock
@@ -79,6 +80,22 @@ Duration: 00:00:01.00, start: 0.000000, bitrate: 100 kb/s
         self.assertEqual(command[command.index('-maxrate') + 1], '12.5M')
         self.assertNotIn('-crf', command)
 
+    def test_gpu_tone_map_uses_vulkan_libplacebo_and_hardware_decode(self):
+        command = ffmpeg_transcode.build_general_transcode_command(
+            'ffmpeg', 'in.mp4', 'out.mp4', video_mode='h264', encoder='h264_nvenc',
+            color_mode='sdr', bit_depth='8', source_hdr=True,
+            source_transfer='smpte2084', source_primaries='bt2020', source_matrix='bt2020nc',
+            tone_map_backend='libplacebo',
+        )
+        self.assertIn('vulkan=photoflow_vk:0', command)
+        self.assertIn('cuda', command)
+        filters = command[command.index('-vf') + 1]
+        self.assertIn('libplacebo=', filters)
+        self.assertIn('tonemapping=hable', filters)
+        self.assertIn('color_trc=bt709', filters)
+        self.assertIn('hwdownload', filters)
+        self.assertNotIn('zscale=t=linear', filters)
+
     def test_rec709_output_only_tone_maps_hdr_sources(self):
         sdr = ffmpeg_transcode.build_general_transcode_command(
             'ffmpeg', 'in.mp4', 'out.mp4', color_mode='sdr', bit_depth='8',
@@ -130,6 +147,40 @@ Duration: 00:00:01.00, start: 0.000000, bitrate: 100 kb/s
         )
         self.assertGreater(estimated, 76_000_000)
         self.assertLess(estimated, 79_000_000)
+
+    def test_disk_preflight_rejects_queue_before_encoding(self):
+        media = {
+            'duration': 60, 'width': 3840, 'height': 2160, 'frameRate': 60,
+            'audioTracks': 1, 'sizeBytes': 1_000_000_000,
+        }
+        usage = shutil._ntuple_diskusage(total=10_000_000_000, used=9_900_000_000, free=100_000_000)
+        with mock.patch.object(ffmpeg_transcode, 'probe_media_info', return_value=media), \
+                mock.patch.object(ffmpeg_transcode.shutil, 'disk_usage', return_value=usage):
+            with self.assertRaises(ffmpeg_transcode.DiskSpaceError) as raised:
+                ffmpeg_transcode.preflight_transcode_disk_space(
+                    ['clip.mp4'],
+                    {'video_mode': 'h264', 'quality': 'balanced', 'resolution': 'original',
+                     'frame_rate_mode': 'preserve', 'audio_mode': 'aac', 'audio_bitrate_kbps': 192},
+                    {'clip.mp4': os.getcwd()},
+                )
+        self.assertGreater(raised.exception.required_bytes, raised.exception.free_bytes)
+        self.assertIn('磁盘空间不足', str(raised.exception))
+
+    def test_enospc_stops_queue_without_retrying(self):
+        emitted = []
+        absolute = os.path.abspath('clip.mp4')
+        media = {'duration': 1, 'hdr': False, 'bitDepth': 8}
+        with mock.patch.object(ffmpeg_transcode.os.path, 'isfile', return_value=True), \
+                mock.patch.object(ffmpeg_transcode, 'get_ffmpeg_exe', return_value='ffmpeg'), \
+                mock.patch.object(ffmpeg_transcode, 'available_transcode_capabilities', return_value={}), \
+                mock.patch.object(ffmpeg_transcode, 'preflight_transcode_disk_space', return_value={absolute: media}), \
+                mock.patch.object(ffmpeg_transcode, 'transcode_video', side_effect=ffmpeg_transcode.DiskSpaceError('磁盘空间不足')) as transcode, \
+                mock.patch.object(ffmpeg_transcode, '_emit_cli', side_effect=lambda *args, **kwargs: emitted.append((args, kwargs))):
+            result = ffmpeg_transcode.run(['clip.mp4', '--retry-count', '3'])
+        self.assertEqual(result, 1)
+        self.assertEqual(transcode.call_count, 1)
+        self.assertEqual(emitted[-1][0][0], 'error')
+        self.assertEqual(emitted[-1][1]['code'], 'ENOSPC')
 
 
 if __name__ == '__main__':

@@ -29,6 +29,7 @@ def main():
         development_archive.parent.mkdir(parents=True)
         with zipfile.ZipFile(development_archive, "w") as bundle:
             bundle.writestr(executable_name, b"audited ffmpeg runtime")
+            bundle.writestr("libshaderc_shared.dll", b"shader compiler runtime")
         fake_module_path = root / "extensions" / "video-tools" / "runtime" / "ffmpeg_utils.py"
         development_cache = root / "development-cache"
         with mock.patch.object(ffmpeg_utils, "__file__", str(fake_module_path)), \
@@ -41,6 +42,7 @@ def main():
             ]
             development_executable = Path(ffmpeg_utils.get_ffmpeg_exe())
         assert development_executable.read_bytes() == b"audited ffmpeg runtime"
+        assert (development_executable.parent / "libshaderc_shared.dll").read_bytes() == b"shader compiler runtime"
 
         packaged_runtime_root = root / "packaged" / "components" / "video-tools" / "runtime"
         packaged_worker = packaged_runtime_root / ("video-tools-worker.exe" if sys.platform.startswith("win") else "video-tools-worker")

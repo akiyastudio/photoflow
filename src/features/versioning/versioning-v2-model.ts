@@ -69,6 +69,28 @@ export const exportedImageFolderCandidates = (relativePaths: readonly string[]) 
   .map(exportedImageFolderCandidate)
   .filter(Boolean))];
 
+const EXPORT_FOLDER_PROMPT_STORAGE_PREFIX = 'photoflow:export-folder-prompt-shown:v1:';
+
+export const exportFolderPromptStorageKey = (identity: string) => `${EXPORT_FOLDER_PROMPT_STORAGE_PREFIX}${encodeURIComponent(identity)}`;
+
+export const exportFolderPromptWasShown = (storage: Pick<Storage, 'getItem'> | undefined, identity: string) => {
+  if (!storage || !identity) return false;
+  try {
+    return storage.getItem(exportFolderPromptStorageKey(identity)) === '1';
+  } catch {
+    return false;
+  }
+};
+
+export const rememberExportFolderPromptShown = (storage: Pick<Storage, 'setItem'> | undefined, identity: string) => {
+  if (!storage || !identity) return;
+  try {
+    storage.setItem(exportFolderPromptStorageKey(identity), '1');
+  } catch {
+    // In-memory deduplication remains available when persistent storage is unavailable.
+  }
+};
+
 export const isUserVersionKey = (value: string) => /^\d+(?:_\d+)*$/.test(value);
 
 export const versionKeyWithFinalIndex = (suggestedVersionKey: string, value: string) => {

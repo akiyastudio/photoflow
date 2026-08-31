@@ -7,8 +7,9 @@
     "prepare:dev": "node scripts/setup-python.cjs && node scripts/verify-layout.cjs",
     "build": "node scripts/verify-layout.cjs",
     "test": "node tests/test-core.cjs && node tests/test-engine.cjs && node tests/test-service.cjs && node tests/test-runtime-models.cjs && node tests/test-manifest-security.cjs && node tests/test-ui-visual.cjs && node tests/test-settings-behavior.cjs && node tests/test-explicit-start-model.cjs && node tests/test-selection-preview-model.cjs && node tests/test-transcript-browser-model.cjs && node tests/test-refresh-coordinator.cjs",
-    "package": "node scripts/package-component.cjs",
-    "package:host": "node scripts/package-component.cjs"
+    "build:runtime": "node scripts/build-runtime.cjs",
+    "package": "node scripts/package-release.cjs",
+    "package:host": "node scripts/package-release.cjs"
   },
   "photoflowComponent": {
     "manifest": "component.json",

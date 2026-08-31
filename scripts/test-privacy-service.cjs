@@ -17,12 +17,13 @@ const localTimestamp = date => {
 const writeReceipt = (userData, acceptedAt, overrides = {}) => {
   fs.mkdirSync(userData, { recursive: true });
   const values = {
-    SchemaVersion: '1',
+    SchemaVersion: '2',
     Interactive: '1',
     TermsVersion: CURRENT_TERMS_VERSION,
     PrivacyVersion: CURRENT_PRIVACY_NOTICE_VERSION,
     InstallerVersion: '26.7.31',
     AcceptedAtLocal: localTimestamp(acceptedAt),
+    ExperienceProgram: '0',
     ...overrides,
   };
   fs.writeFileSync(path.join(userData, INSTALL_CONSENT_FILE_NAME), `[Consent]\n${Object.entries(values).map(([key, value]) => `${key}=${value}`).join('\n')}\n`, 'utf8');
@@ -54,6 +55,16 @@ try {
   const importedFile = JSON.parse(fs.readFileSync(path.join(installed.userData, 'privacy-consent.json'), 'utf8'));
   assert.strictEqual(importedFile.coreConsentSource, 'interactive-installer');
   assert.strictEqual(importedFile.installerVersion, '26.7.31');
+  assert.strictEqual(imported.experienceProgramGranted, false);
+
+  const optedIn = serviceFor('opted-in');
+  writeReceipt(optedIn.userData, new Date(optedIn.clock.value.getTime() - 60_000), { ExperienceProgram: '1' });
+  assert.strictEqual(optedIn.service.getState().experienceProgramGranted, true, 'installer experience program choice must be imported independently');
+
+  const applicationOnly = serviceFor('application-only');
+  await applicationOnly.service.saveConsent({ acceptCore: true, experienceProgramGranted: false });
+  assert.strictEqual(applicationOnly.service.hasCoreConsent(), true, 'core terms can be accepted without joining the experience program');
+  assert.strictEqual(applicationOnly.service.getState().experienceProgramGranted, false);
 
   await installed.service.saveConsent({ revokeCore: true });
   assert.strictEqual(installed.service.hasCoreConsent(), false, 'an old installer receipt must not undo an application withdrawal');

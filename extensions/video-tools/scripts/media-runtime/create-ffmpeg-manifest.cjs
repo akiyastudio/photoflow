@@ -9,7 +9,7 @@ const lock = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', '..', 'med
 const configureFlags = fs.readFileSync(path.resolve(configureFileArg), 'utf8').trim().split(/\s+/).filter(Boolean);
 const artifact = file => ({ file, sha256: sha256File(path.join(root, file)) });
 const manifest = {
-  schemaVersion: 3,
+  schemaVersion: 4,
   kind: 'photoflow-ffmpeg-runtime',
   platform: 'windows-x64',
   license: 'GPL-2.0-or-later',
@@ -22,6 +22,7 @@ const manifest = {
     { name: 'zimg', version: lock.zimg.version, repository: lock.zimg.repository, commit: lock.zimg.commit, license: lock.zimg.license },
     ...['freetype', 'fribidi', 'harfbuzz', 'libass'].map(name => ({ name, version: lock.mpvDependencies[name].version, repository: lock.mpvDependencies[name].repository, commit: lock.mpvDependencies[name].commit, license: lock.mpvDependencies[name].license })),
     { name: 'nv-codec-headers', version: lock.nvCodecHeaders.version, repository: lock.nvCodecHeaders.repository, commit: lock.nvCodecHeaders.commit, license: lock.nvCodecHeaders.license },
+    { name: 'libplacebo', version: lock.libplacebo.version, repository: lock.libplacebo.repository, commit: lock.libplacebo.commit, license: lock.libplacebo.license },
   ],
   configureFlags,
   artifacts: {

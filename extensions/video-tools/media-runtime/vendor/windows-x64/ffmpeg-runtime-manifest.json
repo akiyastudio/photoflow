@@ -1,13 +1,13 @@
 {
-  "schemaVersion": 3,
+  "schemaVersion": 4,
   "kind": "photoflow-ffmpeg-runtime",
   "platform": "windows-x64",
   "license": "GPL-2.0-or-later",
   "reproducibleSource": true,
   "ffmpeg": {
-    "version": "7.1.1",
+    "version": "7.1.5",
     "repository": "https://github.com/FFmpeg/FFmpeg.git",
-    "commit": "68af2cc3feb8c78aec2722c728fd87f03515fa7c"
+    "commit": "3a0867c2bfda4a4d4309ca1a8cbdc6175e67f587"
   },
   "components": [
     {
@@ -71,10 +71,17 @@
       "repository": "https://github.com/FFmpeg/nv-codec-headers.git",
       "commit": "1889e62e2d35ff7aa9baca2bceb14f053785e6f1",
       "license": "MIT"
+    },
+    {
+      "name": "libplacebo",
+      "version": "7.351.0",
+      "repository": "https://github.com/haasn/libplacebo.git",
+      "commit": "3188549fba13bbdf3a5a98de2a38c2e71f04e21e",
+      "license": "LGPL-2.1-or-later"
     }
   ],
   "configureFlags": [
-    "--prefix=/c/dev/app1/.cache/media-runtime-build/ffmpeg-lite/prefix",
+    "--prefix=/c/dev/app1/extensions/video-tools/.cache/media-runtime-build/ffmpeg-gpu/prefix",
     "--arch=x86_64",
     "--target-os=mingw32",
     "--enable-gpl",
@@ -87,6 +94,8 @@
     "--enable-d3d11va",
     "--enable-ffnvcodec",
     "--enable-nvenc",
+    "--enable-vulkan",
+    "--enable-libplacebo",
     "--enable-static",
     "--disable-shared",
     "--disable-autodetect",
@@ -97,24 +106,24 @@
     "--disable-ffprobe",
     "--pkg-config=pkg-config",
     "--pkg-config-flags=--static",
-    "--extra-cflags=-I/c/dev/app1/.cache/media-runtime-build/ffmpeg-lite/prefix/include",
+    "--extra-cflags=-I/c/dev/app1/extensions/video-tools/.cache/media-runtime-build/ffmpeg-gpu/prefix/include",
     "--extra-ldflags=-static",
     "-static-libgcc",
     "-static-libstdc++",
-    "-L/c/dev/app1/.cache/media-runtime-build/ffmpeg-lite/prefix/lib"
+    "-L/c/dev/app1/extensions/video-tools/.cache/media-runtime-build/ffmpeg-gpu/prefix/lib"
   ],
   "artifacts": {
     "runtimeArchive": {
       "file": "ffmpeg-runtime-windows-x64.zip",
-      "sha256": "a95f788953e5820a6deb41289900c590d0d436bee76dc5be5f09f32e66b84249"
+      "sha256": "f6f3ede4231312fc621d78460fb3076646121b677e943c1333b75cdd415d0f29"
     },
     "sourceArchive": {
       "file": "ffmpeg-corresponding-source.zip",
-      "sha256": "bf08d96cfa2b8fbc885a1432ee302e40d879434d78c70fd1e4133f49d3e0b4df"
+      "sha256": "e5da39f7fd47e2404e8804f9f59e54d3383f56b5ae9d0990aceffd98e4d15343"
     },
     "licenseArchive": {
       "file": "ffmpeg-licenses.zip",
-      "sha256": "5187a492843f8f3614567471dec8773227b09f84632d6c595f466e362ee93947"
+      "sha256": "27ef49f233fd71a61d48fd5e3b23174d343eea8b0c2008245cb978c4b57fbb02"
     }
   }
 }

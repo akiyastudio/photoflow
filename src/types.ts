@@ -386,6 +386,7 @@ export interface PrivacyConsentState {
   faceRulesVersion: string;
   faceRecognitionGrantedAt: string;
   faceRecognitionGranted: boolean;
+  experienceProgramGranted: boolean;
   currentPrivacyNoticeVersion: string;
   currentTermsVersion: string;
   currentFaceRulesVersion: string;
@@ -1001,7 +1002,7 @@ export interface IElectronAPI {
   loadStartupSnapshot?: () => Promise<{ config: AppConfig | null; birthdays: Record<string, string> }>;
   saveConfig: (config: AppConfig) => Promise<{success: boolean, savedConfig?: AppConfig, error?: string}>;
   getPrivacyConsentState: () => Promise<PrivacyConsentState>;
-  savePrivacyConsent: (request: { acceptCore?: boolean; revokeCore?: boolean; faceRecognitionGranted?: boolean }) => Promise<{ success: boolean; state?: PrivacyConsentState; error?: string }>;
+  savePrivacyConsent: (request: { acceptCore?: boolean; revokeCore?: boolean; experienceProgramGranted?: boolean; faceRecognitionGranted?: boolean }) => Promise<{ success: boolean; state?: PrivacyConsentState; error?: string }>;
   openLegalDocument: (documentId: LegalDocumentId) => Promise<{ success: boolean; path?: string; error?: string }>;
   clearTelemetryLocalData: () => Promise<{ success: boolean; error?: string }>;
   getUserPath: () => Promise<string>;

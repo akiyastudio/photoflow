@@ -10,4 +10,4 @@ Release builders are responsible for including the licenses that correspond to t
 - FFmpeg libraries pulled in by the selected faster-whisper/PyAV distribution (license depends on that build)
 - the selected Whisper model and its upstream model card/license
 
-The default package is always thin and never copies the plugin-local `models` directory. When a release builder explicitly supplies an audited model directory with `--model-root`, the package script copies it and this notice. A production release must add the model card and exact dependency license texts beside this file before distribution.
+The release package includes the self-contained transcription runtime but never copies the plugin-local `models` directory. Models are installed separately under the directory shown in component settings. A production release must retain the exact dependency license texts beside this file before distribution.

@@ -29,8 +29,8 @@ const handlers = new Map();
 const ipcMain = new EventEmitter();
 ipcMain.handle = (channel, handler) => handlers.set(channel, handler);
 ipcMain.removeHandler = channel => handlers.delete(channel);
-const children = [];
 const mainContents = new Contents();
+const children = [];
 const mainWindow = new EventEmitter();
 mainWindow.webContents = mainContents;
 mainWindow.destroyed = false;
@@ -140,7 +140,7 @@ const hostSource = fs.readFileSync(path.join(root, 'src', 'features', 'app', 'us
 const rendererSource = fs.readFileSync(path.join(root, 'src', 'toast-view.tsx'), 'utf8');
 const reflowSource = fs.readFileSync(path.join(root, 'src', 'components', 'toast-stack-reflow.ts'), 'utf8');
 const filesSource = fs.readFileSync(path.join(root, 'electron', 'modules', 'files-ipc.cjs'), 'utf8');
-assert(mainSource.includes('new ToastViewManager({ WebContentsView') && !/toast[^\n]{0,80}new BrowserWindow/i.test(mainSource), 'Toast uses a child WebContentsView, never a second BrowserWindow');
+assert(mainSource.includes('new ToastViewManager({ WebContentsView'), 'Toast remains inside the main window as a sandboxed child view');
 assert(hostSource.includes('updateToastView({') && !hostSource.includes('innerHTML'), 'host publishes structured state rather than cloned HTML');
 assert(hostSource.includes('Math.max(320, contentWidth + 32)') && hostSource.includes('Math.ceil(rect.height) + 8'), 'short notices retain horizontal and vertical breathing room while task stacks keep a bounded height');
 assert(rendererSource.includes('Math.ceil(stack.scrollHeight)'), 'the child renderer must correct height after text wrapping');

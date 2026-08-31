@@ -18,9 +18,11 @@ const decoded = text.toString('utf8');
 assert.strictEqual(decoded.includes('\r\r\n'), false, 'installer terms must use canonical CRLF line endings');
 for (const required of [
   '照片流安装条款与隐私说明',
-  '照片流用户协议及内测条款',
-  '照片流隐私政策（内测版）',
+  '照片流用户协议及公测条款',
+  '照片流隐私政策（公测版）',
   '只有明确接受后，安装程序才会继续',
+  '用户体验计划为自愿参加',
+  '不勾选不会阻止安装',
   '实际使用前仍会另行展示规则并取得单独同意',
 ]) assert(decoded.includes(required), `installer terms must contain: ${required}`);
 
@@ -28,6 +30,10 @@ const html = fs.readFileSync(path.join(repositoryRoot, 'docs', 'legal', 'INSTALL
 assert(html.startsWith('<!doctype html>') && html.includes('<meta charset="utf-8">'));
 assert(installer.includes('IfSilent PhotoFlowSkipConsentReceipt'));
 assert(installer.includes('WriteINIStr "$APPDATA\\Photoflow\\install-consent.ini"'));
+assert(installer.includes('自愿加入用户体验计划（可随时关闭）'));
+assert(installer.includes('i -12, i 1201'), 'experience checkbox must not retain the native reject-control ID');
+assert(installer.includes('"ExperienceProgram" "1"'));
+assert(installer.includes('"ExperienceProgram" "0"'));
 const termsVersion = privacyService.match(/CURRENT_TERMS_VERSION = '([^']+)'/)?.[1];
 const privacyVersion = privacyService.match(/CURRENT_PRIVACY_NOTICE_VERSION = '([^']+)'/)?.[1];
 assert(installer.includes(`!define PhotoFlowTermsVersion "${termsVersion}"`));

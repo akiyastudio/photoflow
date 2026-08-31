@@ -815,7 +815,7 @@ const registerComponentProjectCapabilities = ({
     if (!versionKey || versionKey.length > 128 || !parentProgressId) throw hostError(CODES.INVALID_REQUEST, 'Progress versionKey and parentProgressId are required');
     const sourceMetadata = progressSourceMetadata(payload.sourceMetadata, descriptor.componentId);
     const relativePath = assertRelativePath(path, payload.relativePath, 'progress relativePath');
-    const resolution = projectVirtualPaths?.resolve ? projectVirtualPaths.resolve(scope.projectRoot, relativePath, { externalRootMode: 'target' }) : { physicalPath: path.resolve(scope.projectRoot, relativePath), viaExternalLink: false };
+    const resolution = projectVirtualPaths?.resolve ? projectVirtualPaths.resolve(scope.projectRoot, relativePath, { externalRootMode: 'target', mustExist: false, allowMissingLeaf: true }) : { physicalPath: path.resolve(scope.projectRoot, relativePath), viaExternalLink: false };
     const folderPath = path.resolve(resolution.physicalPath);
     if (!resolution.viaExternalLink && !inside(path, scope.projectRoot, folderPath)) throw hostError(CODES.PERMISSION_DENIED, 'Progress folder escapes the project');
     if (resolution.viaExternalLink && resolution.externalTargetKind === 'file') throw hostError(CODES.INVALID_REQUEST, 'Progress requires a folder boundary');
@@ -869,7 +869,22 @@ const registerComponentProjectCapabilities = ({
   });
 
   broker.register('dialogs', async (payload, context, descriptor) => {
-    if (context?.surface === 'application.settings' && payload.kind !== 'confirm') throw hostError(CODES.PERMISSION_DENIED, 'Only confirmation dialogs are available on the application settings surface');
+    if (context?.surface === 'application.settings' && !['confirm', 'openComponentDirectory'].includes(payload.kind)) throw hostError(CODES.PERMISSION_DENIED, 'Only confirmation and component-directory dialogs are available on the application settings surface');
+    if (payload.kind === 'openComponentDirectory') {
+      const relativePath = assertRelativePath(path, payload.relativePath, 'relativePath');
+      if (relativePath.includes('/')) throw hostError(CODES.INVALID_REQUEST, 'Component directory must be a direct child');
+      const componentRoot = path.resolve(String(descriptor.componentRoot || ''));
+      const rootStat = await fs.promises.lstat(componentRoot).catch(() => null);
+      if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) throw hostError(CODES.NOT_FOUND, 'Component directory is unavailable');
+      const target = path.resolve(componentRoot, relativePath);
+      if (!inside(path, componentRoot, target)) throw hostError(CODES.INVALID_REQUEST, 'Component directory path escapes its component');
+      await fs.promises.mkdir(target, { recursive: true });
+      const [realRoot, realTarget] = await Promise.all([fs.promises.realpath(componentRoot), fs.promises.realpath(target)]);
+      if (!inside(path, realRoot, realTarget)) throw hostError(CODES.PERMISSION_DENIED, 'Component directory path is unsafe');
+      const error = await shell.openPath(realTarget);
+      if (error) throw hostError(CODES.INTERNAL, String(error));
+      return { apiVersion: 7, opened: true, componentDirectory: { relativePath } };
+    }
     if (['openOutput', 'revealOutput'].includes(payload.kind)) {
       const scope = { ...bound(context, descriptor), componentId: descriptor.componentId };
       const receipt = await loadCommitReceipt(scope, String(payload.commitId || ''));

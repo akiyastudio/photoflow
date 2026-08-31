@@ -35,6 +35,7 @@ esac
 work_root="$resolved_work_root"
 
 ffmpeg_commit="$(node -p "require('./media-runtime.lock.json').ffmpeg.commit")"
+ffmpeg_version="$(node -p "require('./media-runtime.lock.json').ffmpeg.version")"
 x264_commit="$(node -p "require('./media-runtime.lock.json').x264.commit")"
 x265_commit="$(node -p "require('./media-runtime.lock.json').x265.commit")"
 ffmpeg_repo="$(node -p "require('./media-runtime.lock.json').ffmpeg.repository")"
@@ -46,6 +47,8 @@ zlib_commit="$(node -p "require('./media-runtime.lock.json').zlib.commit")"
 zlib_repo="$(node -p "require('./media-runtime.lock.json').zlib.repository")"
 nv_codec_headers_commit="$(node -p "require('./media-runtime.lock.json').nvCodecHeaders.commit")"
 nv_codec_headers_repo="$(node -p "require('./media-runtime.lock.json').nvCodecHeaders.repository")"
+libplacebo_commit="$(node -p "require('./media-runtime.lock.json').libplacebo.commit")"
+libplacebo_repo="$(node -p "require('./media-runtime.lock.json').libplacebo.repository")"
 zimg_commit="$(node -p "require('./media-runtime.lock.json').zimg.commit")"
 zimg_repo="$(node -p "require('./media-runtime.lock.json').zimg.repository")"
 freetype_commit="$(node -p "require('./media-runtime.lock.json').mpvDependencies.freetype.commit")"
@@ -160,6 +163,9 @@ clone_locked_dependency freetype "$freetype_repo" "$freetype_commit" "$work_root
 clone_locked_dependency fribidi "$fribidi_repo" "$fribidi_commit" "$work_root/src/fribidi"
 clone_locked_dependency harfbuzz "$harfbuzz_repo" "$harfbuzz_commit" "$work_root/src/harfbuzz"
 clone_locked_dependency libass "$libass_repo" "$libass_commit" "$work_root/src/libass"
+clone_locked_dependency libplacebo "$libplacebo_repo" "$libplacebo_commit" "$work_root/src/libplacebo"
+git -C "$work_root/src/libplacebo" submodule update --init --depth 1 \
+  3rdparty/Vulkan-Headers 3rdparty/jinja 3rdparty/markupsafe
 
 apply_locked_patch() {
   local directory="$1" patch_file="$2"
@@ -172,9 +178,28 @@ apply_locked_patch() {
 }
 apply_locked_patch "$work_root/src/libass" "$repo_root/scripts/media-runtime/patches/libass-disable-iconv.patch"
 apply_locked_patch "$work_root/src/freetype" "$repo_root/scripts/media-runtime/patches/freetype-disable-bzip2.patch"
+apply_locked_patch "$work_root/src/libplacebo" "$repo_root/scripts/media-runtime/patches/libplacebo-static-winpthread.patch"
+apply_locked_patch "$work_root/src/libplacebo" "$repo_root/scripts/media-runtime/patches/libplacebo-python314-elementtree.patch"
 
 export PKG_CONFIG_PATH="$work_root/prefix/lib/pkgconfig:$work_root/prefix/share/pkgconfig"
 export PKG_CONFIG_LIBDIR="$PKG_CONFIG_PATH"
+mingw_prefix="${MINGW_PREFIX:-/ucrt64}"
+test -f "$mingw_prefix/lib/libshaderc_shared.dll.a" -a -f "$mingw_prefix/bin/libshaderc_shared.dll" || {
+  echo 'Missing shaderc runtime (install mingw-w64-ucrt-x86_64-shaderc)' >&2
+  exit 1
+}
+cp "$mingw_prefix/lib/libshaderc_shared.dll.a" "$work_root/prefix/lib/libshaderc_import.a"
+cat > "$work_root/prefix/lib/pkgconfig/shaderc.pc" <<EOF
+prefix=$work_root/prefix
+exec_prefix=\${prefix}
+libdir=\${exec_prefix}/lib
+includedir=$mingw_prefix/include
+Name: shaderc
+Description: Statically linked shaderc compiler for libplacebo
+Version: 2026.3.1
+Libs: -L\${libdir} -lshaderc_import
+Cflags: -I\${includedir}
+EOF
 if [[ ! -f "$work_root/prefix/lib/libfreetype.a" ]]; then
   meson setup "$work_root/freetype-build" "$work_root/src/freetype" --buildtype=release --default-library=static --prefix="$work_root/prefix" \
     -Dauto_features=disabled -Dzlib=system -Dbzip2=disabled -Dpng=disabled -Dbrotli=disabled -Dharfbuzz=disabled -Dtests=disabled
@@ -210,6 +235,23 @@ if [[ ! -f "$work_root/prefix/lib/libzimg.a" ]]; then
   make install
   popd
 fi
+if [[ ! -f "$work_root/prefix/lib/libplacebo.a" ]]; then
+  LDFLAGS="-Wl,--as-needed -static -static-libgcc -static-libstdc++" meson setup \
+    "$work_root/libplacebo-build" "$work_root/src/libplacebo" \
+    --buildtype=release --default-library=static --prefix="$work_root/prefix" \
+    -Dauto_features=disabled -Dvulkan=enabled -Dvk-proc-addr=disabled \
+    -Dshaderc=enabled -Dglslang=disabled -Dd3d11=disabled -Dopengl=disabled \
+    -Dlcms=disabled -Ddovi=disabled -Dlibdovi=disabled -Dunwind=disabled \
+    -Dxxhash=disabled -Ddemos=false -Dtests=false -Dbench=false -Dfuzz=false
+  meson compile -C "$work_root/libplacebo-build" -j "$jobs"
+  meson install -C "$work_root/libplacebo-build"
+fi
+# Keep the shader compiler import after libplacebo in FFmpeg's static link
+# line. pkg-config otherwise emits Requires before the archive that references
+# shaderc, which leaves the C API unresolved under --as-needed.
+libplacebo_pc="$work_root/prefix/lib/pkgconfig/libplacebo.pc"
+sed -i '/^Requires: shaderc/d' "$libplacebo_pc"
+sed -i 's|^Libs: .*$|Libs: -L${libdir} -lplacebo -lm -lshlwapi -lshaderc_import -lstdc++ -lwinpthread|' "$libplacebo_pc"
 
 if [[ ! -d "$work_root/src/ffmpeg/.git" ]]; then
   if ! git clone --filter=blob:none "$ffmpeg_repo" "$work_root/src/ffmpeg"; then
@@ -242,6 +284,8 @@ ffmpeg_flags=(
   --enable-d3d11va
   --enable-ffnvcodec
   --enable-nvenc
+  --enable-vulkan
+  --enable-libplacebo
   --enable-static
   --disable-shared
   --disable-autodetect
@@ -262,8 +306,9 @@ if [[ "${PHOTOFLOW_MEDIA_RESUME:-0}" == 1 && -f ffmpeg.exe ]]; then
 else
   PKG_CONFIG_PATH="$work_root/prefix/lib/pkgconfig" ./configure "${ffmpeg_flags[@]}"
   cp ffbuild/config.mak "$work_root/ffmpeg-config.mak"
-  make -j"$jobs" ffmpeg.exe
 fi
+rm -f .version
+make REVISION="$ffmpeg_version" -j"$jobs" ffmpeg.exe
 popd
 
 ffmpeg_exe="$work_root/src/ffmpeg/ffmpeg.exe"
@@ -280,7 +325,11 @@ if "$objdump_command" -p "$ffmpeg_exe" | grep -Eiq 'DLL Name:.*(libwinpthread|li
   "$objdump_command" -p "$ffmpeg_exe" | grep -Ei 'DLL Name:' >&2
   exit 1
 fi
-for required in --enable-gpl --enable-libx264 --enable-libx265 --enable-libass --enable-libzimg --enable-zlib --enable-mediafoundation --enable-d3d11va --enable-ffnvcodec --enable-nvenc --disable-autodetect --disable-network; do
+"$objdump_command" -p "$ffmpeg_exe" | grep -Eiq 'DLL Name:.*libshaderc_shared\.dll' || {
+  echo 'FFmpeg GPU tone mapping is not linked to the audited shaderc runtime' >&2
+  exit 1
+}
+for required in --enable-gpl --enable-libx264 --enable-libx265 --enable-libass --enable-libzimg --enable-zlib --enable-mediafoundation --enable-d3d11va --enable-ffnvcodec --enable-nvenc --enable-vulkan --enable-libplacebo --disable-autodetect --disable-network; do
   grep -Fq -- "$required" <<<"$configuration" || { echo "Missing FFmpeg option: $required" >&2; exit 1; }
 done
 "$ffmpeg_exe" -hide_banner -encoders 2>&1 | grep -Eq '^ V.* h264_mf ' || { echo 'Missing Media Foundation H.264 encoder' >&2; exit 1; }
@@ -290,6 +339,7 @@ done
 "$ffmpeg_exe" -hide_banner -encoders 2>&1 | grep -Eq '^ V.* libx265 ' || { echo 'Missing libx265 H.265 encoder' >&2; exit 1; }
 "$ffmpeg_exe" -hide_banner -encoders 2>&1 | grep -Eq '^ V.* av1_nvenc ' || { echo 'Missing NVIDIA NVENC AV1 encoder' >&2; exit 1; }
 "$ffmpeg_exe" -hide_banner -filters 2>&1 | grep -Eq '^ ... zscale ' || { echo 'Missing zscale HDR filter' >&2; exit 1; }
+"$ffmpeg_exe" -hide_banner -filters 2>&1 | grep -Eq '^ ... libplacebo ' || { echo 'Missing libplacebo GPU HDR filter' >&2; exit 1; }
 "$ffmpeg_exe" -hide_banner -filters 2>&1 | grep -Eq '^ ... subtitles ' || { echo 'Missing subtitles burn-in filter' >&2; exit 1; }
 "$ffmpeg_exe" -hide_banner -h encoder=libx265 2>&1 | grep -Eq 'Supported pixel formats:.*yuv420p10le' || { echo 'Missing x265 10-bit interface' >&2; exit 1; }
 
@@ -325,6 +375,7 @@ rm -rf "$work_root/package/runtime" "$work_root/package/licenses" "$work_root/pa
 mkdir -p "$work_root/package/runtime" "$work_root/package/licenses" "$work_root/package/source/build-materials"
 
 cp "$ffmpeg_exe" "$work_root/package/runtime/ffmpeg.exe"
+cp "$mingw_prefix/bin/libshaderc_shared.dll" "$work_root/package/runtime/libshaderc_shared.dll"
 cp "$work_root/src/ffmpeg/COPYING.GPLv2" "$work_root/package/runtime/COPYING.GPLv2"
 cp "$work_root/src/x264/COPYING" "$work_root/package/runtime/COPYING.x264"
 cp "$work_root/src/x265/COPYING" "$work_root/package/runtime/COPYING.x265"
@@ -334,6 +385,11 @@ cp "$work_root/src/libass/COPYING" "$work_root/package/runtime/LICENSE.libass"
 cp "$work_root/src/freetype/LICENSE.TXT" "$work_root/package/runtime/LICENSE.freetype"
 cp "$work_root/src/fribidi/COPYING" "$work_root/package/runtime/LICENSE.fribidi"
 cp "$work_root/src/harfbuzz/COPYING" "$work_root/package/runtime/LICENSE.harfbuzz"
+cp "$work_root/src/libplacebo/LICENSE" "$work_root/package/runtime/LICENSE.libplacebo"
+cp "$mingw_prefix/share/licenses/shaderc/LICENSE" "$work_root/package/runtime/LICENSE.shaderc"
+cp "$mingw_prefix/share/licenses/glslang/LICENSE.txt" "$work_root/package/runtime/LICENSE.glslang"
+cp "$mingw_prefix/share/licenses/spirv-tools/LICENSE" "$work_root/package/runtime/LICENSE.spirv-tools"
+cp "$mingw_prefix/share/licenses/vulkan-headers/LICENSE" "$work_root/package/runtime/LICENSE.vulkan-headers"
 # The repository has no standalone LICENSE file; preserve the MIT notice from
 # the NVENC API header in both redistributable license bundles.
 sed -n '1,/^ \*\/$/p' "$work_root/src/nv-codec-headers/include/ffnvcodec/nvEncodeAPI.h" > "$work_root/package/runtime/LICENSE.nv-codec-headers"
@@ -349,6 +405,11 @@ cp "$work_root/src/libass/COPYING" "$work_root/package/licenses/libass-COPYING"
 cp "$work_root/src/freetype/LICENSE.TXT" "$work_root/package/licenses/freetype-LICENSE"
 cp "$work_root/src/fribidi/COPYING" "$work_root/package/licenses/fribidi-COPYING"
 cp "$work_root/src/harfbuzz/COPYING" "$work_root/package/licenses/harfbuzz-COPYING"
+cp "$work_root/src/libplacebo/LICENSE" "$work_root/package/licenses/libplacebo-LICENSE"
+cp "$mingw_prefix/share/licenses/shaderc/LICENSE" "$work_root/package/licenses/shaderc-LICENSE"
+cp "$mingw_prefix/share/licenses/glslang/LICENSE.txt" "$work_root/package/licenses/glslang-LICENSE.txt"
+cp "$mingw_prefix/share/licenses/spirv-tools/LICENSE" "$work_root/package/licenses/spirv-tools-LICENSE"
+cp "$mingw_prefix/share/licenses/vulkan-headers/LICENSE" "$work_root/package/licenses/vulkan-headers-LICENSE"
 cp "$work_root/package/runtime/LICENSE.nv-codec-headers" "$work_root/package/licenses/nv-codec-headers-LICENSE"
 cp "$repo_root/LICENSES/README.md" "$work_root/package/licenses/OPEN_SOURCE_NOTICES.md"
 
@@ -362,10 +423,20 @@ git -C "$work_root/src/freetype" archive --format=zip --output="$work_root/packa
 git -C "$work_root/src/fribidi" archive --format=zip --output="$work_root/package/source/fribidi-$fribidi_commit.zip" HEAD
 git -C "$work_root/src/harfbuzz" archive --format=zip --output="$work_root/package/source/harfbuzz-$harfbuzz_commit.zip" HEAD
 git -C "$work_root/src/libass" archive --format=zip --output="$work_root/package/source/libass-$libass_commit.zip" HEAD
+git -C "$work_root/src/libplacebo" archive --format=zip --output="$work_root/package/source/libplacebo-$libplacebo_commit.zip" HEAD
+mkdir -p "$work_root/package/source/libplacebo-build-submodules"
+for submodule in 3rdparty/Vulkan-Headers 3rdparty/jinja 3rdparty/markupsafe; do
+  submodule_name="$(basename "$submodule")"
+  submodule_commit="$(git -C "$work_root/src/libplacebo/$submodule" rev-parse HEAD)"
+  git -C "$work_root/src/libplacebo/$submodule" archive --format=zip \
+    --output="$work_root/package/source/libplacebo-build-submodules/$submodule_name-$submodule_commit.zip" HEAD
+done
 cp "$repo_root/media-runtime.lock.json" "$work_root/package/source/build-materials/media-runtime.lock.json"
 cp "$repo_root/scripts/media-runtime/build-ffmpeg-windows.sh" "$work_root/package/source/build-materials/build-ffmpeg-windows.sh"
 cp "$repo_root/scripts/media-runtime/create-ffmpeg-manifest.cjs" "$work_root/package/source/build-materials/create-ffmpeg-manifest.cjs"
 cp "$repo_root/scripts/media-runtime/runtime-policy.cjs" "$work_root/package/source/build-materials/runtime-policy.cjs"
+cp "$repo_root/scripts/media-runtime/patches/libplacebo-static-winpthread.patch" "$work_root/package/source/build-materials/libplacebo-static-winpthread.patch"
+cp "$repo_root/scripts/media-runtime/patches/libplacebo-python314-elementtree.patch" "$work_root/package/source/build-materials/libplacebo-python314-elementtree.patch"
 cp "$repo_root/scripts/media-runtime/build-media-runtime.yml" "$work_root/package/source/build-materials/build-media-runtime.yml"
 cp "$work_root/configure-flags.txt" "$work_root/package/source/build-materials/configure-flags.txt"
 cp "$work_root/ffmpeg-config.mak" "$work_root/package/source/build-materials/ffmpeg-config.mak"
@@ -384,6 +455,7 @@ git -C "$work_root/src/freetype" diff --binary --ignore-space-at-eol > "$work_ro
 git -C "$work_root/src/fribidi" diff --binary --ignore-space-at-eol > "$work_root/package/source/build-materials/fribidi-changes.diff"
 git -C "$work_root/src/harfbuzz" diff --binary --ignore-space-at-eol > "$work_root/package/source/build-materials/harfbuzz-changes.diff"
 git -C "$work_root/src/libass" diff --binary --ignore-space-at-eol > "$work_root/package/source/build-materials/libass-changes.diff"
+git -C "$work_root/src/libplacebo" diff --binary --ignore-space-at-eol > "$work_root/package/source/build-materials/libplacebo-changes.diff"
 if command -v pacman >/dev/null 2>&1; then
   pacman -Q > "$work_root/package/source/build-materials/msys2-packages.txt"
 else

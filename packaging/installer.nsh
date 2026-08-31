@@ -13,8 +13,8 @@
   !endif
 !endif
 
-!define PhotoFlowTermsVersion "2026-07-29"
-!define PhotoFlowPrivacyVersion "2026-07-29"
+!define PhotoFlowTermsVersion "2026-08-30"
+!define PhotoFlowPrivacyVersion "2026-08-30"
 
 !ifdef BUILD_UNINSTALLER
 Var PhotoFlowDeleteUserDataCheckbox
@@ -58,8 +58,18 @@ FunctionEnd
 !ifndef BUILD_UNINSTALLER
 Var PhotoFlowDesktopShortcutCheckbox
 Var PhotoFlowCreateDesktopShortcut
+Var PhotoFlowExperienceProgramCheckbox
+Var PhotoFlowExperienceProgram
+
+; Keep electron-builder's native, scrollable license page, but separate the
+; mandatory legal acceptance from the optional experience program consent.
+; MUI uses control 1034 for acceptance and 1035 for rejection. The latter is
+; converted into an independent checkbox; the former continues to gate Next.
+!define MUI_PAGE_CUSTOMFUNCTION_SHOW PhotoFlowLicensePageShow
+!define MUI_PAGE_CUSTOMFUNCTION_LEAVE PhotoFlowLicensePageLeave
 
 !macro customInit
+  StrCpy $PhotoFlowExperienceProgram ${BST_UNCHECKED}
   StrCpy $PhotoFlowInstallDirectoryPolicy "normalize"
   IfSilent PhotoFlowPreserveRequestedInstallDirectory
   !ifdef INSTALL_MODE_PER_ALL_USERS_REQUIRED
@@ -74,6 +84,26 @@ Var PhotoFlowCreateDesktopShortcut
 
   PhotoFlowInstallDirectoryPolicyReady:
 !macroend
+
+Function PhotoFlowLicensePageShow
+  GetDlgItem $0 $HWNDPARENT 1034
+  SendMessage $0 0x000C 0 "STR:我已阅读并同意《用户协议》和《隐私政策》（安装必选）"
+
+  GetDlgItem $PhotoFlowExperienceProgramCheckbox $HWNDPARENT 1035
+  System::Call 'USER32::GetWindowLong(i $PhotoFlowExperienceProgramCheckbox, i -16) i .r0'
+  IntOp $0 $0 & 0xFFFFFFF0
+  IntOp $0 $0 | 0x00000003
+  System::Call 'USER32::SetWindowLong(i $PhotoFlowExperienceProgramCheckbox, i -16, i r0) i .r1'
+  ; Give the converted control its own ID so the native license page does not
+  ; interpret clicking the experience checkbox as choosing "reject".
+  System::Call 'USER32::SetWindowLong(i $PhotoFlowExperienceProgramCheckbox, i -12, i 1201) i .r1'
+  SendMessage $PhotoFlowExperienceProgramCheckbox 0x000C 0 "STR:自愿加入用户体验计划（可随时关闭）"
+  ${NSD_Uncheck} $PhotoFlowExperienceProgramCheckbox
+FunctionEnd
+
+Function PhotoFlowLicensePageLeave
+  ${NSD_GetState} $PhotoFlowExperienceProgramCheckbox $PhotoFlowExperienceProgram
+FunctionEnd
 
 !macro customPageAfterChangeDir
   !define MUI_PAGE_CUSTOMFUNCTION_PRE PhotoFlowDirectoryPagePre
@@ -119,11 +149,16 @@ FunctionEnd
   IfSilent PhotoFlowSkipConsentReceipt
   ${GetTime} "" "L" $0 $1 $2 $3 $4 $5 $6
   CreateDirectory "$APPDATA\Photoflow"
-  WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "SchemaVersion" "1"
+  WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "SchemaVersion" "2"
   WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "Interactive" "1"
   WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "TermsVersion" "${PhotoFlowTermsVersion}"
   WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "PrivacyVersion" "${PhotoFlowPrivacyVersion}"
   WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "InstallerVersion" "${VERSION}"
+  ${If} $PhotoFlowExperienceProgram == ${BST_CHECKED}
+    WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "ExperienceProgram" "1"
+  ${Else}
+    WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "ExperienceProgram" "0"
+  ${EndIf}
   WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "AcceptedAtLocal" "$2-$1-$0T$4:$5:$6"
   PhotoFlowSkipConsentReceipt:
   ${If} $PhotoFlowCreateDesktopShortcut == ${BST_CHECKED}

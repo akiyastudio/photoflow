@@ -252,6 +252,7 @@ const restoreManifestDirectory = () => {
     legacyPendingDb.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?)`).run('project', 'task-1', 'legacy-photo-id', '工作流程 task 链跨越了错误的照片版本', 1);
     legacyPendingDb.close();
     const legacyStatus = await invoke('team.project.get.v1');
+    assert.equal(legacyStatus.workflowNeedsRegeneration, false, 'a migrated photo id with the same stable version/person identity must not masquerade as a schedule change');
     assert.deepEqual({ state: legacyStatus.migration.state, phase: legacyStatus.migration.phase, pending: legacyStatus.migration.maintenancePendingCount }, { state: 'pending', phase: 'workflow-reconcile', pending: 1 });
     await invoke('team.project.migrate-step.v1');
     assert(JSON.parse(fs.readFileSync(manifestPath, 'utf8')).groups.flatMap(group => group.items || []).filter(item => item.taskId === 'task-1').every(item => item.photoId === 'photo'), 'all items in the stable task/base chain are atomically rewritten to the current project photo id');

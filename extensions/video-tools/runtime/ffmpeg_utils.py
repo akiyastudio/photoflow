@@ -42,25 +42,38 @@ def get_ffmpeg_exe():
     extracted_ffmpeg = os.path.join(cache_dir, executable_name)
     os.makedirs(cache_dir, exist_ok=True)
     with zipfile.ZipFile(archive_path) as archive:
-        expected_size = archive.getinfo(executable_name).file_size
-        extracted_size = os.path.getsize(extracted_ffmpeg) if os.path.isfile(extracted_ffmpeg) else -1
-        if extracted_size != expected_size:
-            temporary = f"{extracted_ffmpeg}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        entries = [entry for entry in archive.infolist() if not entry.is_dir()]
+        for entry in entries:
+            normalized = entry.filename.replace("\\", "/")
+            if not normalized or "/" in normalized or normalized in {".", ".."}:
+                raise RuntimeError(f"FFmpeg 运行时包含不安全路径：{entry.filename}")
+        if not any(entry.filename.replace("\\", "/") == executable_name for entry in entries):
+            raise RuntimeError(f"FFmpeg 运行时缺少 {executable_name}")
+        # Publish support DLLs before the executable. Concurrent workers only
+        # ever observe complete files, and seeing ffmpeg.exe implies that all
+        # of its colocated runtime dependencies are ready.
+        entries.sort(key=lambda entry: entry.filename.replace("\\", "/") == executable_name)
+        for entry in entries:
+            destination = os.path.join(cache_dir, entry.filename.replace("\\", "/"))
+            extracted_size = os.path.getsize(destination) if os.path.isfile(destination) else -1
+            if extracted_size == entry.file_size:
+                continue
+            temporary = f"{destination}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
             try:
-                with archive.open(executable_name) as source, open(temporary, "wb") as target:
+                with archive.open(entry) as source, open(temporary, "wb") as target:
                     shutil.copyfileobj(source, target, length=1024 * 1024)
                 # Multiple preview workers can start together. Only expose
                 # a complete executable and tolerate another worker winning
                 # the race while this process was extracting its copy.
-                current_size = os.path.getsize(extracted_ffmpeg) if os.path.isfile(extracted_ffmpeg) else -1
-                if current_size != expected_size:
+                current_size = os.path.getsize(destination) if os.path.isfile(destination) else -1
+                if current_size != entry.file_size:
                     try:
-                        os.replace(temporary, extracted_ffmpeg)
+                        os.replace(temporary, destination)
                     except PermissionError:
-                        if not os.path.isfile(extracted_ffmpeg) or os.path.getsize(extracted_ffmpeg) != expected_size:
+                        if not os.path.isfile(destination) or os.path.getsize(destination) != entry.file_size:
                             raise
-                if not sys.platform.startswith("win"):
-                    os.chmod(extracted_ffmpeg, 0o755)
+                if not sys.platform.startswith("win") and destination == extracted_ffmpeg:
+                    os.chmod(destination, 0o755)
             finally:
                 if os.path.exists(temporary):
                     os.unlink(temporary)

@@ -545,21 +545,21 @@ const App: React.FC = () => {
   const getDefaultSettings = useCallback(async () => {
     const userPath = await window.electronAPI.getUserPath().catch(() => '');
     const defaults = DEFAULT_CONFIG(userPath || '');
-    return { ...defaults, telemetry: { enabled: true, crashReports: true }, workspacePath: config?.workspacePath || '', workspacePaths: config?.workspacePaths || [], usagePreferencesVersion: config?.usagePreferencesVersion || USAGE_PREFERENCES_VERSION };
-  }, [config?.usagePreferencesVersion, config?.workspacePath, config?.workspacePaths]);
+    return { ...defaults, telemetry: config?.telemetry || defaults.telemetry, workspacePath: config?.workspacePath || '', workspacePaths: config?.workspacePaths || [], usagePreferencesVersion: config?.usagePreferencesVersion || USAGE_PREFERENCES_VERSION };
+  }, [config?.telemetry, config?.usagePreferencesVersion, config?.workspacePath, config?.workspacePaths]);
 
   const handleWorkspaceSetup = async (newConfig: AppConfig) => {
     await handleConfigUpdate(newConfig);
     if (newConfig.workspacePath.trim()) setShowWorkspaceSetup(false);
   };
-  const acceptInternalBetaPrivacy = async () => {
+  const acceptInternalBetaPrivacy = async (joinExperienceProgram: boolean) => {
     if (!config) return;
-    const consent = await window.electronAPI.savePrivacyConsent({ acceptCore: true });
+    const consent = await window.electronAPI.savePrivacyConsent({ acceptCore: true, experienceProgramGranted: joinExperienceProgram });
     if (!consent.success) {
       showNotice(`保存隐私确认失败：${consent.error || '未知错误'}`);
       return;
     }
-    const saved = await handleConfigUpdate({ ...config, telemetry: { enabled: true, crashReports: true } });
+    const saved = await handleConfigUpdate({ ...config, telemetry: { enabled: joinExperienceProgram, crashReports: joinExperienceProgram } });
     if (saved) setPrivacyConsentRequired(false);
   };
   const openProjectTab = (project: WorkspaceProject, operation: 'import' | 'broll' | 'match' | null = null, replacePath?: string) => {
@@ -696,7 +696,7 @@ const App: React.FC = () => {
     setProjectDestination(null);
     setActiveTab('inspiration');
   };
-  const { navigationRequests: browserNavigationRequests, openInNewTab: openInspirationDirectoryPage, navigateCurrent: navigateInspiration, sourceDragActive: folderTabSourceDragActive } = useFolderTabNavigation({ rootPath: config?.inspirationLibrary.rootPath.trim() || '', pages: projectPages, activePageId, createPage, requestInspirationPath, activateInspiration });
+  const { navigationRequests: browserNavigationRequests, openInNewTab: openInspirationDirectoryPage, navigateCurrent: navigateInspiration, sourceDragActive: folderTabSourceDragActive, dropProps: folderTabDropProps } = useFolderTabNavigation({ rootPath: config?.inspirationLibrary.rootPath.trim() || '', pages: projectPages, activePageId, createPage, requestInspirationPath, activateInspiration, openProjectInNewTab: project => openProjectDirectoryPage(project, '') });
   const openSettingsTab = async () => {
     if (activeTab === 'component') await componentHost.deactivate(); setSettingsTabOpen(true);
     setActiveTab('settings');
@@ -802,7 +802,7 @@ const App: React.FC = () => {
             <span className="truncate text-sm font-bold text-slate-800">照片流</span>
           </div>
         </div>
-        <div data-folder-tab-drop-zone={folderTabSourceDragActive ? 'true' : undefined} aria-label="标签栏" className={`relative flex min-w-0 flex-1 transition-colors ${folderTabSourceDragActive ? 'app-titlebar-control bg-blue-50/70 ring-1 ring-inset ring-blue-400/70' : ''}`}>
+        <div {...folderTabDropProps} data-folder-tab-drop-zone={folderTabSourceDragActive ? 'true' : undefined} aria-label="标签栏" className={`relative flex min-w-0 flex-1 transition-colors ${folderTabSourceDragActive ? 'app-titlebar-control bg-blue-50/70 ring-1 ring-inset ring-blue-400/70' : ''}`}>
           {titlebarTabScroll.overflow && <button type="button" aria-label="向左滚动标签" title="向左滚动标签" disabled={!titlebarTabScroll.canScrollLeft} onClick={() => scrollTitlebarTabs(-1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronLeft size={15}/></button>}
           <div ref={titlebarTabsRef} onWheel={handleTitlebarTabWheel} aria-label="已打开的窗口" className="titlebar-tabs-scroll scrollbar-hide flex min-w-0 shrink items-end gap-0 overflow-x-auto px-2 pt-1.5">
             <button type="button" {...titlebarTabDragProps('home')} title="主页" data-active-tab={activeTab === 'home'} onClick={showHomeTab} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[92px] max-w-[180px] items-center gap-2 rounded-t-lg border px-3 text-xs font-medium transition ${activeTab === 'home' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>

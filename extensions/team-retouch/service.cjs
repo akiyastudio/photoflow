@@ -661,6 +661,12 @@ const runAlgorithm = (parentId, args, { timeoutMs = 60 * 60 * 1000, topic = '', 
 const advancedRuntimeFailureStatus = (error, { development = Boolean(hostAlgorithmRuntime) } = {}) => {
   const detail = String(error?.message || error || '');
   const runtimeSource = development ? 'development' : 'packaged';
+  if (/timed out after|TimeoutExpired|WSL[^\n]*超时|启动[^\n]*超时/i.test(detail)) return {
+    success: true, advancedAvailable: false, state: 'unavailable', errorCategory: 'wsl-start-timeout', runtimeSource,
+    pairDetrReady: false, sam2Ready: false,
+    advancedError: '增强人物检测启动超时',
+    message: 'WSL 启动时间超过本次检查限制；请稍候后重新检查',
+  };
   if (/E_ACCESSDENIED|拒绝访问|access (?:is )?denied|permission denied/i.test(detail)) return {
     success: true, advancedAvailable: false, state: 'unavailable', errorCategory: 'wsl-access-denied', runtimeSource,
     pairDetrReady: false, sam2Ready: false,
@@ -1056,8 +1062,18 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   const bundle = media.items?.[0];
   const base = bundle?.versions?.find(item => String(item.id) === String(payload.baseVersionId));
   if (!base || !fs.existsSync(base.filePath)) { await materialized.cleanup(); throw new Error('基础版本文件不存在'); }
-  const tasks = listTasks(db, payload.photoId, payload.baseVersionId).filter(task => task.editedPatchPath && fs.existsSync(task.editedPatchPath));
+  const photoTasks = listTasks(db, payload.photoId, payload.baseVersionId);
+  const tasks = photoTasks.filter(task => task.editedPatchPath && fs.existsSync(task.editedPatchPath));
   if (!tasks.length) throw new Error('请至少上传一张工作图的修图结果');
+  const assignments = db.prepare(`SELECT person_index,completed,completion_kind,return_missing FROM team_person_assignments WHERE project_id=? AND photo_id=? AND base_version_id=?`).all(String(context.projectId), String(payload.photoId), String(payload.baseVersionId));
+  const assignmentByPerson = new Map(assignments.map(item => [Number(item.person_index), item]));
+  const isCompletedNoRetouchTask = task => (task.members?.length ? task.members : [{ personIndex: task.personIndex }]).every(member => {
+    const assignment = assignmentByPerson.get(Number(member.personIndex));
+    return Boolean(assignment?.completed) && !Boolean(assignment?.return_missing) && assignment?.completion_kind === 'no-retouch';
+  });
+  const completedTaskIds = new Set(tasks.map(task => String(task.id)));
+  for (const task of photoTasks) if (isCompletedNoRetouchTask(task)) completedTaskIds.add(String(task.id));
+  if (completedTaskIds.size !== photoTasks.length) throw new Error('这张照片仍有未完成或返图缺失的任务');
   await assertAuthorizedArtifacts(parentId, taskRows(db, payload.photoId, payload.baseVersionId));
   const progress = await callHost(parentId, 'project.progress', { action: 'list' });
   const outputProgress = (progress.progress || []).find(item => String(item.id) === String(payload.outputProgressId));
@@ -1066,7 +1082,10 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   const output = await artifactGrantForHost(parentId, { operation: 'artifacts', photoId: payload.photoId, baseVersionId: payload.baseVersionId });
   await fs.promises.mkdir(output.mergeDirectory, { recursive: true });
   const fingerprintTasks = await Promise.all([...tasks].sort((left, right) => String(left.id).localeCompare(String(right.id))).map(async task => ({ id: String(task.id), editedSha256: await fileSha256(task.editedPatchPath), crop: task.crop || {}, generation: task.generation || {} })));
-  const mergeFingerprint = sha256(JSON.stringify({ projectId: String(context.projectId), photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), outputProgressId: String(payload.outputProgressId), strategyVersion: 1, tasks: fingerprintTasks }));
+  const rebuildToken = String(payload.rebuildToken || '').trim().slice(0, 120);
+  const mergeFingerprintInput = { projectId: String(context.projectId), photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), outputProgressId: String(payload.outputProgressId), strategyVersion: 2, tasks: fingerprintTasks };
+  if (rebuildToken) mergeFingerprintInput.rebuildToken = rebuildToken;
+  const mergeFingerprint = sha256(JSON.stringify(mergeFingerprintInput));
   const operationId = `merge-${mergeFingerprint.slice(0, 32)}`;
   const manifestPath = path.join(output.mergeDirectory, `merge-${operationId}.json`);
   const outputName = `${safeSegment(path.parse(bundle.photo?.originalName || bundle.photo?.displayName || payload.photoId).name, '素材')}_多人修图_${mergeFingerprint.slice(0, 12)}.tif`;
@@ -1086,7 +1105,7 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
     const versionId = registered.versionId;
     db.exec('BEGIN IMMEDIATE');
     try {
-      for (const task of tasks) db.prepare(`UPDATE team_patch_tasks SET status='merged',merged_version_id=?,merge_metrics_json=?,updated_at=? WHERE project_id=? AND id=?`).run(versionId, JSON.stringify(merged.metrics?.find(item => item.taskId === task.id) || {}), Date.now(), String(context.projectId), task.id);
+      for (const task of photoTasks) db.prepare(`UPDATE team_patch_tasks SET status='merged',merged_version_id=?,merge_metrics_json=?,updated_at=? WHERE project_id=? AND id=?`).run(versionId, JSON.stringify(merged.metrics?.find(item => item.taskId === task.id) || {}), Date.now(), String(context.projectId), task.id);
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
     await appendCommand(storage, { operationId, type: 'patch-merge', state: 'committed', versionId });
@@ -1495,7 +1514,15 @@ const componentSettings = async (parentId, payload) => payload.action === 'get' 
 const listProjectProgress = async parentId => { const value = await callHost(parentId, 'project.progress', { action: 'list' }); const graphEdges = Array.isArray(value.graphEdges) ? value.graphEdges : Array.isArray(value.edges) ? value.edges : []; return { success: true, progressFolders: Array.isArray(value.progressFolders) ? value.progressFolders : Array.isArray(value.progress) ? value.progress : [], graphEdges, edges: graphEdges }; };
 const createProjectProgress = async (parentId, payload) => {
   const listed = await callHost(parentId, 'project.progress', { action: 'list' });
-  const raw = payload.progress || payload; const parentProgressId = String(raw.parentProgressId || payload.workflowInputProgressIds?.[0] || (listed.progress || []).find(item => item.nodeRole === 'original')?.id || '');
+  const raw = payload.progress || payload;
+  const existingProgressId = String(raw.progressId || '');
+  if (existingProgressId) {
+    const existing = (listed.progress || []).find(item => String(item.id) === existingProgressId);
+    if (!existing || existing.nodeRole !== 'progress' || existing.mediaKind !== 'image' || existing.missing) throw new Error('合成结果的目标图片进度不存在');
+    const edges = (listed.edges || []).filter(edge => String(edge.sourceProgressId) === existingProgressId || String(edge.targetProgressId) === existingProgressId);
+    return { success: true, progressFolder: existing, edges };
+  }
+  const parentProgressId = String(raw.parentProgressId || payload.workflowInputProgressIds?.[0] || (listed.progress || []).find(item => item.nodeRole === 'original')?.id || '');
   if (!parentProgressId) throw new Error('创建输出进度需要一个来源进度');
   const displayName = String(raw.displayName || '团片协作输出').slice(0, 120);
   const relativePath = String(raw.relativePath || safeSegment(displayName, '团片协作输出')).replace(/\\/g, '/');
@@ -1742,8 +1769,14 @@ const workspaceSnapshot = async (parentId, context) => {
     const generatedSameWeek = new Set(uniqueText(generatedSettings?.sameWeekIdentityIds));
     const workflowItems = (manifest?.groups || []).flatMap(group => group.items || []);
     const assignmentIdentityBySubject = new Map(normalizedAssignments.map(item => [`${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`, String(item.identityId || '')]));
+    const assignmentIdentityByStableSubject = new Map(normalizedAssignments.map(item => [`${item.baseVersionId}:${Number(item.personIndex)}`, String(item.identityId || '')]));
+    const workflowItemIdentity = item => {
+      const exactKey = `${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`;
+      if (assignmentIdentityBySubject.has(exactKey)) return assignmentIdentityBySubject.get(exactKey);
+      return assignmentIdentityByStableSubject.get(`${item.baseVersionId}:${Number(item.personIndex)}`);
+    };
     const generatedIdentityChanged = Boolean(manifest && (manifest.groups || []).some(group => (group.items || []).some(item =>
-      assignmentIdentityBySubject.get(`${item.photoId}:${item.baseVersionId}:${Number(item.personIndex)}`) !== String(group.identityId || '')
+      workflowItemIdentity(item) !== String(group.identityId || '')
     )));
     const workflowAvailableItems = workflowItems.filter(item => item.available && item.relativePath);
     const calibratedCount = registered.filter(row => Number(row.calibrated_at) > 0).length;
@@ -1930,7 +1963,7 @@ const workflowStatus = async (parentId, _payload, context) => {
   const key = `${context.projectId}:${context.projectStatus}:${context.projectName}`;
   const job = workflowJobs.get(key) || null;
   const reconciliation = await withDomain(parentId, db => {
-    const row = db.prepare(`SELECT COUNT(*) pendingCount,MIN(updated_at) oldestAt,MIN(CASE WHEN next_attempt_at>0 THEN next_attempt_at END) nextAttemptAt,MAX(attempt_count) maxAttemptCount FROM team_workflow_reconcile_pending pending
+    const row = db.prepare(`SELECT COUNT(*) pendingCount,MIN(pending.updated_at) oldestAt,MIN(CASE WHEN pending.next_attempt_at>0 THEN pending.next_attempt_at END) nextAttemptAt,MAX(pending.attempt_count) maxAttemptCount FROM team_workflow_reconcile_pending pending
       JOIN team_patch_tasks task ON task.id=pending.task_id
       JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
       WHERE registered.project_id=?`).get(String(context.projectId));

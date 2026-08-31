@@ -54,7 +54,7 @@ export type StageSummary = {
 };
 
 export const WORKFLOW_STAGES: ReadonlyArray<Pick<StageSummary, 'id' | 'number' | 'label' | 'completion'>> = [
-  { id: 'detect', number: 1, label: '提交工作图', completion: '完成识别、裁剪并人工确认全部人物' },
+  { id: 'detect', number: 1, label: '提交工作图', completion: '完成人物识别和裁剪；自动候选默认采用' },
   { id: 'assignment', number: 2, label: '设置任务分配', completion: '接收人和自动排期已确认，协作流程已生成' },
   { id: 'relay', number: 3, label: '分发任务与返图', completion: '全部接力任务已返图或明确标记不用修' },
   { id: 'review', number: 4, label: '审核与输出', completion: '返图审核通过且合并阻断项为零' },
@@ -83,7 +83,26 @@ export const isIdentityConfirmed = (assignment: Json | undefined, identity: Json
   if (!assignment?.identityId || !identity || generatedIdentity(identity)) return false;
   if (typeof assignment.identityConfirmed === 'boolean') return assignment.identityConfirmed;
   if (assignment.identityConfirmedAt || assignment.confirmedAt) return true;
-  return ['manual', 'manual-group'].includes(String(assignment.source || ''));
+  return ['manual', 'manual-group', 'suggested'].includes(String(assignment.source || ''));
+};
+
+export const assignmentKey = (photoId: unknown, baseVersionId: unknown, personIndex: unknown) =>
+  `${String(photoId || '')}:${String(baseVersionId || '')}:${Number(personIndex || 0)}`;
+
+export const taskMembers = (task: Json) => Array.isArray(task.members) && task.members.length
+  ? task.members
+  : [{ personIndex: task.personIndex, bbox: task.bbox }];
+
+export const isPhotoMergeComplete = (value: Json | undefined, photo: Json) => {
+  const workspace = normalizeWorkspace(value);
+  const tasks = photo?.tasks || [];
+  const hasPublishedMerge = tasks.some((task: Json) => task.status === 'merged' || task.mergedVersionId);
+  if (!tasks.length || !hasPublishedMerge) return false;
+  const assignments = new Map((workspace.assignments || []).map((assignment: Json) => [assignmentKey(assignment.photoId, assignment.baseVersionId, assignment.personIndex), assignment]));
+  return tasks.every((task: Json) => task.status === 'merged' || taskMembers(task).every((member: Json) => {
+    const assignment = assignments.get(assignmentKey(photo.photoId, photo.baseVersionId, member.personIndex)) as Json | undefined;
+    return Boolean(assignment?.completed) && !assignment?.returnMissing && assignment?.completionKind === 'no-retouch';
+  }));
 };
 
 export const workflowStageSummaries = (value: Json | undefined, active: WorkflowStage = 'detect'): StageSummary[] => {
@@ -94,28 +113,29 @@ export const workflowStageSummaries = (value: Json | undefined, active: Workflow
   const cropReview = tasks.filter((task: Json) => Boolean(task.needsReview || task.patchMissing)).length;
   const participantKeys = new Set((workspace.workflowParticipantKeys || []).map(String));
   const participantSubjectKeys = new Set((workspace.workflowParticipantSubjectKeys || []).map(String));
-  const verifiedWorkflow = Boolean(workspace.workflowGenerated && !workspace.workflowNeedsRegeneration && (participantKeys.size || participantSubjectKeys.size));
+  const existingWorkflow = Boolean(workspace.workflowGenerated && (participantKeys.size || participantSubjectKeys.size));
+  const verifiedWorkflow = Boolean(existingWorkflow && !workspace.workflowNeedsRegeneration);
   const isParticipant = (subject: Json) => participantKeys.has(String(subject.key))
     || participantSubjectKeys.has(`${subject.photo.baseVersionId}:${Number(subject.personIndex)}`);
-  const eligible = subjects.filter((subject: Json) => isIdentityConfirmed(subject.assignment, subject.identity) || verifiedWorkflow && isParticipant(subject));
+  const eligible = subjects.filter((subject: Json) => isIdentityConfirmed(subject.assignment, subject.identity) || existingWorkflow && isParticipant(subject));
   const completed = eligible.filter((subject: Json) => Boolean(subject.assignment?.completed)).length;
   const returned = eligible.filter((subject: Json) => subject.assignment?.completionKind === 'returned' && !subject.assignment?.returnMissing).length;
   const missingReturns = eligible.filter((subject: Json) => Boolean(subject.assignment?.returnMissing)).length;
   const pendingReviews = Number(workspace.pendingReturnReviewCount ?? workspace.reviewCount ?? 0) || 0;
   const mergeBlockers = mergeAudit(workspace).blockers.length;
-  const merged = workspace.photos.filter((photo: Json) => (photo.tasks || []).length && (photo.tasks || []).every((task: Json) => task.status === 'merged')).length;
+  const merged = workspace.photos.filter((photo: Json) => isPhotoMergeComplete(workspace, photo)).length;
   const detectComplete = verifiedWorkflow || Boolean(workspace.photos.length && tasks.length && subjects.length && confirmed === subjects.length && cropReview === 0);
   const assignmentComplete = verifiedWorkflow;
   const relayComplete = Boolean(assignmentComplete && eligible.length && completed === eligible.length && missingReturns === 0 && pendingReviews === 0);
   const stageComplete: Record<WorkflowStage, boolean> = { detect: detectComplete, assignment: assignmentComplete, relay: relayComplete, review: Boolean(relayComplete && workspace.photos.length && merged === workspace.photos.length && mergeBlockers === 0) };
   const reasons: Record<WorkflowStage, string> = {
     detect: '',
-    assignment: verifiedWorkflow ? '' : !workspace.photos.length ? '请先明确选择并识别工作图' : cropReview ? `还有 ${cropReview} 张工作图需要复核` : confirmed < subjects.length ? `还有 ${subjects.length - confirmed} 个人物需要人工确认` : '',
-    relay: !stageComplete.detect ? '请先完成识别、裁剪和人物确认' : !stageComplete.assignment ? '请先确认接收人和排期并生成协作流程' : '',
+    assignment: verifiedWorkflow ? '' : !workspace.photos.length ? '请先明确选择并识别工作图' : cropReview ? `还有 ${cropReview} 张工作图需要复核` : confirmed < subjects.length ? `还有 ${subjects.length - confirmed} 个人物尚未标记` : '',
+    relay: existingWorkflow ? '' : !stageComplete.detect ? '请先完成识别、裁剪和人物确认' : !stageComplete.assignment ? '请先确认接收人和排期并生成协作流程' : '',
     review: !stageComplete.detect ? '请先完成识别、裁剪和人物确认' : !stageComplete.assignment ? '请先生成协作流程' : !stageComplete.relay ? missingReturns ? `还有 ${missingReturns} 个返图文件缺失` : pendingReviews ? `还有 ${pendingReviews} 张返图等待确认` : `还有 ${Math.max(0, eligible.length - completed)} 个接力任务未完成` : '',
   };
   const counts: Record<WorkflowStage, string> = {
-    detect: verifiedWorkflow ? `${eligible.length}/${eligible.length} 人已进入历史流程` : `${confirmed}/${subjects.length} 人已确认`,
+    detect: verifiedWorkflow ? `${eligible.length}/${eligible.length} 人已进入历史流程` : `${confirmed}/${subjects.length} 人已采用`,
     assignment: `${new Set(eligible.map((subject: Json) => subject.identity?.id).filter(Boolean)).size} 人 · ${tasks.length} 工作图`,
     relay: `${completed}/${eligible.length} 已完成 · ${returned} 已返图`,
     review: `${merged}/${workspace.photos.length} 已输出 · ${mergeBlockers} 阻断`,
@@ -129,6 +149,19 @@ export const workflowStageSummaries = (value: Json | undefined, active: Workflow
 export const canEnterWorkflowStage = (workspace: Json | undefined, stage: WorkflowStage) => {
   const summary = workflowStageSummaries(workspace, stage).find(item => item.id === stage)!;
   return { allowed: !summary.blockedReason, reason: summary.blockedReason || '' };
+};
+
+export const latestWorkflowStage = (value: Json | undefined): WorkflowStage => {
+  const workspace = normalizeWorkspace(value);
+  const summaries = workflowStageSummaries(workspace, 'detect');
+  const relayComplete = Boolean(summaries.find(stage => stage.id === 'relay')?.complete);
+  const hasMergedOutput = workspace.photos.some((photo: Json) => (photo.tasks || []).some((task: Json) => task.status === 'merged' || task.mergedVersionId));
+  if (relayComplete || hasMergedOutput) return 'review';
+  const hasWorkflow = Boolean(workspace.workflowGenerated && ((workspace.workflowParticipantKeys || []).length || (workspace.workflowParticipantSubjectKeys || []).length));
+  const hasRelayActivity = (workspace.assignments || []).some((assignment: Json) => assignment.completed || assignment.returnMissing || assignment.editedPatchPath || assignment.completionKind);
+  if (hasWorkflow || hasRelayActivity) return 'relay';
+  if (canEnterWorkflowStage(workspace, 'assignment').allowed) return 'assignment';
+  return 'detect';
 };
 
 export const workflowLayoutMode = (width: number) => Number.isFinite(width) && width < 760 ? 'compact-menu' : width < 1120 ? 'scrollable-steps' : 'full-steps';
@@ -208,20 +241,13 @@ export const mergeAudit = (value: Json | undefined) => {
   const missing = subjects.filter((subject: Json) => Boolean(subject.assignment?.returnMissing)).length;
   const cropReview = workspace.photos.flatMap((photo: Json) => photo.tasks || []).filter((task: Json) => Boolean(task.needsReview || task.patchMissing)).length;
   const pendingReview = Number(workspace.pendingReturnReviewCount ?? workspace.reviewCount ?? 0) || 0;
-  if (unconfirmed) blockers.push({ code: 'unconfirmed-identity', label: '人物未确认', count: unconfirmed });
+  if (unconfirmed) blockers.push({ code: 'unconfirmed-identity', label: '人物未标记', count: unconfirmed });
   if (cropReview) blockers.push({ code: 'crop-review', label: '工作图待复核', count: cropReview });
   if (incomplete) blockers.push({ code: 'incomplete-task', label: '任务未完成', count: incomplete });
   if (missing) blockers.push({ code: 'missing-return', label: '返图缺失', count: missing });
   if (pendingReview) blockers.push({ code: 'pending-return-review', label: '返图待审核', count: pendingReview });
-  return { blockers, ready: blockers.length === 0, photoCount: workspace.photos.length, completedPhotoCount: workspace.photos.filter((photo: Json) => (photo.tasks || []).length && (photo.tasks || []).every((task: Json) => task.status === 'merged')).length };
+  return { blockers, ready: blockers.length === 0, photoCount: workspace.photos.length, completedPhotoCount: workspace.photos.filter((photo: Json) => isPhotoMergeComplete(workspace, photo)).length };
 };
-
-export const assignmentKey = (photoId: unknown, baseVersionId: unknown, personIndex: unknown) =>
-  `${String(photoId || '')}:${String(baseVersionId || '')}:${Number(personIndex || 0)}`;
-
-export const taskMembers = (task: Json) => Array.isArray(task.members) && task.members.length
-  ? task.members
-  : [{ personIndex: task.personIndex, bbox: task.bbox }];
 
 export const subjectsFromWorkspace = (workspace: Json): Json[] => {
   const identities = new Map((workspace.identities || []).map((identity: Json) => [String(identity.id), identity]));

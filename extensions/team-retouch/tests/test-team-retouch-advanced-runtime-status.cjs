@@ -29,4 +29,9 @@ const incomplete = advancedRuntimeFailureStatus('SAM 2.1 import failed', { devel
 assert.equal(incomplete.state, 'repair-needed');
 assert.equal(incomplete.errorCategory, 'runtime-incomplete');
 
+const coldStartTimeout = advancedRuntimeFailureStatus("Command ['wsl.exe'] timed out after 12 seconds", { development: false });
+assert.equal(coldStartTimeout.state, 'unavailable');
+assert.equal(coldStartTimeout.errorCategory, 'wsl-start-timeout');
+assert.match(coldStartTimeout.message, /稍候/);
+
 console.log('Team-retouch advanced runtime status tests passed');

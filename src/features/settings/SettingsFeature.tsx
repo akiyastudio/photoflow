@@ -36,26 +36,26 @@ const SETTINGS_SECTION_LABELS: Record<BuiltInSettingsSection, string> = {
   privacy: '隐私与数据',
 };
 
-export const PrivacyConsentPage = ({ onAccept }: { onAccept: () => void | Promise<void> }) => {
+export const PrivacyConsentPage = ({ onAccept }: { onAccept: (joinExperienceProgram: boolean) => void | Promise<void> }) => {
   const [acceptedLegal, setAcceptedLegal] = useState(false);
   const [acceptedTelemetry, setAcceptedTelemetry] = useState(false);
   const [saving, setSaving] = useState(false);
-  const ready = acceptedLegal && acceptedTelemetry;
+  const ready = acceptedLegal;
   const open = (id: 'privacy' | 'terms' | 'information-list' | 'third-parties') => void window.electronAPI.openLegalDocument(id);
   const accept = async () => {
     if (!ready || saving) return;
     setSaving(true);
-    try { await onAccept(); } finally { setSaving(false); }
+    try { await onAccept(acceptedTelemetry); } finally { setSaving(false); }
   };
   return <main className="fixed inset-0 z-[1200] flex items-center justify-center overflow-auto bg-slate-950/90 p-6">
     <section className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-white p-7 shadow-2xl">
-      <div className="flex items-start gap-4"><span className="rounded-2xl bg-blue-50 p-3 text-blue-600"><ShieldCheck size={28}/></span><div><h1 className="text-xl font-bold text-slate-900">内测版隐私与数据确认</h1><p className="mt-2 text-sm leading-6 text-slate-600">照片流当前为受控内测版。参加内测必须发送使用统计和崩溃报告；不同意时不能进入本次内测，可退出软件。统计不上传照片、文件名、完整路径或项目名称等隐私信息。</p></div></div>
+      <div className="flex items-start gap-4"><span className="rounded-2xl bg-blue-50 p-3 text-blue-600"><ShieldCheck size={28}/></span><div><h1 className="text-xl font-bold text-slate-900">公测版隐私与数据确认</h1><p className="mt-2 text-sm leading-6 text-slate-600">请先阅读并同意软件条款。用户体验计划为自愿参加，不参加也可以正常使用照片流；关闭后不会发送新的使用统计或崩溃报告。</p></div></div>
       <div className="mt-6 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
         <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={acceptedLegal} onChange={event => setAcceptedLegal(event.target.checked)} className="mt-1"/><span className="text-sm leading-6 text-slate-700">我已阅读并同意 <button type="button" onClick={event => { event.preventDefault(); open('terms'); }} className="font-bold text-blue-600 hover:underline">《用户协议》</button> 和 <button type="button" onClick={event => { event.preventDefault(); open('privacy'); }} className="font-bold text-blue-600 hover:underline">《隐私政策》</button></span></label>
-        <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={acceptedTelemetry} onChange={event => setAcceptedTelemetry(event.target.checked)} className="mt-1"/><span><span className="block text-sm font-bold text-slate-700">同意发送使用统计和崩溃报告（内测必选）</span><span className="mt-1 block text-xs leading-5 text-slate-500">使用统计包括随机安装ID、会话ID、版本、平台、功能代号、时间和数量区间；崩溃报告包括错误类型、调用栈和脱敏后的日志尾部。</span></span></label>
+        <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={acceptedTelemetry} onChange={event => setAcceptedTelemetry(event.target.checked)} className="mt-1"/><span><span className="block text-sm font-bold text-slate-700">自愿加入用户体验计划</span><span className="mt-1 block text-xs leading-5 text-slate-500">加入后会发送最小化的使用统计和崩溃报告，包括随机安装ID、版本、平台、功能代号、错误类型、调用栈和脱敏日志尾部；不上传照片、项目名、文件名或完整路径。可随时在设置中分别关闭。</span></span></label>
       </div>
       <div className="mt-4 flex flex-wrap gap-3 text-xs"><button type="button" onClick={() => open('information-list')} className="font-bold text-blue-600 hover:underline">查看个人信息清单</button><button type="button" onClick={() => open('third-parties')} className="font-bold text-blue-600 hover:underline">查看第三方服务清单</button></div>
-      <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => window.electronAPI.closeWindow()} className="dialog-secondary">不同意并退出</button><button type="button" disabled={!ready || saving} onClick={() => void accept()} className="dialog-primary disabled:cursor-not-allowed disabled:opacity-45">{saving ? '正在保存…' : '同意并进入内测'}</button></div>
+      <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => window.electronAPI.closeWindow()} className="dialog-secondary">不同意条款并退出</button><button type="button" disabled={!ready || saving} onClick={() => void accept()} className="dialog-primary disabled:cursor-not-allowed disabled:opacity-45">{saving ? '正在保存…' : acceptedTelemetry ? '同意并加入计划' : '仅同意条款并进入'}</button></div>
     </section>
   </main>;
 };
@@ -364,7 +364,7 @@ const SettingsNavigator = ({ activeSection, componentPages, onSelect }: { active
     <div className="mt-3 space-y-1 border-t border-slate-200 pt-3">
       {renderItem({ id: 'about', label: '关于', description: '版本、项目与开源许可', icon: <AtSign size={18}/> })}
       {renderItem({ id: 'feedback', label: '问题和建议', description: '向开发者发送反馈', icon: <MessageSquareText size={18}/> })}
-      {renderItem({ id: 'privacy', label: '隐私与数据', description: '内测统计、人脸信息与法律文件', icon: <ShieldCheck size={18}/> })}
+      {renderItem({ id: 'privacy', label: '隐私与数据', description: '公测统计、人脸信息与法律文件', icon: <ShieldCheck size={18}/> })}
     </div>
   </nav>;
 };
@@ -911,7 +911,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       {addingProjectCategory ? <form className="flex items-start gap-2 bg-slate-50 px-4 py-3" onSubmit={event => { event.preventDefault(); addProjectCategory(); }}><Plus size={17} className="mt-2.5 shrink-0 text-blue-600"/><div className="min-w-0 flex-1"><input autoFocus value={newProjectCategory} maxLength={24} onChange={event => { setNewProjectCategory(event.target.value); setProjectCategoryError(''); }} placeholder="输入新分类名称" className="form-input"/>{projectCategoryError && <p className="mt-1.5 text-xs text-red-500">{projectCategoryError}</p>}</div><button type="submit" className="dialog-primary shrink-0">添加</button><button type="button" onClick={() => { setAddingProjectCategory(false); setNewProjectCategory(''); setProjectCategoryError(''); }} title="取消" aria-label="取消新增分类" className="rounded-md p-2.5 text-slate-400 hover:bg-slate-200 hover:text-slate-700"><X size={16}/></button></form> : <button type="button" onClick={() => setAddingProjectCategory(true)} className="flex w-full items-center gap-3 bg-slate-50 px-4 py-3 text-left text-sm font-bold text-blue-600 hover:bg-blue-50"><span className="flex h-8 w-8 items-center justify-center rounded-lg border border-dashed border-blue-300 bg-white"><Plus size={17}/></span>新增分类</button>}
     </SettingsPageGroup>
     </>}
-    {activeSection === 'privacy' && <PrivacySettings onNotice={onNotice}/>}
+    {activeSection === 'privacy' && <PrivacySettings telemetry={draft.telemetry} onChange={telemetry => update('telemetry', telemetry)} onNotice={onNotice}/>}
     {(activeSection === 'backup' || activeSection === 'storage') && <>
       <SettingsPageGroup title="统计">
         <StorageVolumeOverview sourceSignature={[...normalizeWorkspacePaths(draft.workspacePath, draft.workspacePaths), inspirationLibrarySettings.rootPath, draft.archive.targetPath, draft.backup.targetPath, draft.mediaCache.directory].join('\u0000')}/>
@@ -1020,7 +1020,7 @@ const FeedbackSettings = ({ onNotice }: { onNotice: (message: string, duration?:
   </SettingsPageGroup>;
 };
 
-const PrivacySettings = ({ onNotice }: { onNotice: (message: string, duration?: number) => void }) => {
+const PrivacySettings = ({ telemetry, onChange, onNotice }: { telemetry: AppConfig['telemetry']; onChange: (telemetry: AppConfig['telemetry']) => void; onNotice: (message: string, duration?: number) => void }) => {
   const appDialog = useAppDialog();
   const [state, setState] = useState<PrivacyConsentState | null>(null);
   useEffect(() => { void window.electronAPI.getPrivacyConsentState().then(setState); }, []);
@@ -1060,22 +1060,9 @@ const PrivacySettings = ({ onNotice }: { onNotice: (message: string, duration?: 
     const result = await window.electronAPI.clearTelemetryLocalData();
     onNotice(result.success ? '本机统计标识和待发送队列已重置' : `清理失败：${result.error || '未知错误'}`, 5000);
   };
-  const leaveInternalBeta = async () => {
-    if (!await appDialog.confirm({
-      title: '撤回同意并退出内测吗？',
-      message: '撤回后，照片流将停止发送新的使用统计和崩溃报告并立即退出。下次启动仍需重新同意才能进入内测。',
-      detail: '此操作会清除本机待发送队列并重置随机安装ID，但不会自动删除服务器已经接收的数据；如需删除请通过隐私政策中的联系方式提出请求。',
-      confirmLabel: '撤回并退出',
-      cancelLabel: '继续参加内测',
-      tone: 'danger',
-    })) return;
-    await window.electronAPI.savePrivacyConsent({ revokeCore: true });
-    await window.electronAPI.clearTelemetryLocalData();
-    window.electronAPI.closeWindow();
-  };
   const legalDocuments: Array<[LegalDocumentId, string, string]> = [
     ['privacy', '隐私政策', '数据处理、保存期限和用户权利'],
-    ['terms', '用户协议', '内测资格、软件许可和使用责任'],
+    ['terms', '用户协议', '公测资格、软件许可和使用责任'],
     ['face', '人脸信息处理规则', '敏感个人信息的单独说明'],
     ['information-list', '个人信息清单', '逐项列明本地和联网数据'],
     ['third-parties', '第三方服务清单', '腾讯云及主动访问的外部链接'],
@@ -1085,10 +1072,10 @@ const PrivacySettings = ({ onNotice }: { onNotice: (message: string, duration?: 
     ['open-source', '开源许可证说明', '第三方软件和模型许可'],
   ];
   return <div className="space-y-10">
-    <SettingsPageGroup title="内测数据要求">
-      <SettingsRow title="发送使用统计" description="内测必须；包含随机安装ID、会话ID、版本、平台、功能代号、时间和数量区间。"><SettingsToggle label="发送使用统计" checked disabled/></SettingsRow>
-      <SettingsRow title="发送崩溃报告" description="内测必须；包含错误类型、调用栈和脱敏后的错误日志尾部。"><SettingsToggle label="发送崩溃报告" checked disabled/></SettingsRow>
-      <SettingsRow title="本机统计标识与队列" description="删除待发送队列并生成新的随机安装ID，不影响服务器已经接收的数据。"><div className="ml-auto flex w-fit flex-wrap gap-2"><button type="button" onClick={() => void clearTelemetry()} className="dialog-secondary inline-flex items-center gap-2"><Trash2 size={14}/>重置</button><button type="button" onClick={() => void leaveInternalBeta()} className="rounded-md border border-red-200 bg-white px-3 py-2 text-xs font-bold text-red-600 hover:bg-red-50">撤回并退出内测</button></div></SettingsRow>
+    <SettingsPageGroup title="用户体验计划（自愿参加）">
+      <SettingsRow title="发送使用统计" description="可随时关闭；包含随机安装ID、会话ID、版本、平台、功能代号、时间和数量区间。"><SettingsToggle label="发送使用统计" checked={telemetry.enabled} onChange={enabled => onChange({ ...telemetry, enabled })}/></SettingsRow>
+      <SettingsRow title="发送崩溃报告" description="可随时关闭；包含错误类型、调用栈和脱敏后的错误日志尾部。"><SettingsToggle label="发送崩溃报告" checked={telemetry.crashReports} onChange={crashReports => onChange({ ...telemetry, crashReports })}/></SettingsRow>
+      <SettingsRow title="本机统计标识与队列" description="删除待发送队列并生成新的随机安装ID，不影响服务器已经接收的数据。"><button type="button" onClick={() => void clearTelemetry()} className="dialog-secondary ml-auto inline-flex w-fit items-center gap-2"><Trash2 size={14}/>重置</button></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="人脸身份识别">
       <SettingsRow title="允许本机处理人脸特征" description="用于跨照片识别同一人物；可随时撤回，但不会自动删除已有项目数据。"><SettingsToggle label="允许本机处理人脸特征" checked={state?.faceRecognitionGranted === true} disabled={!state} onChange={checked => void setFaceConsent(checked)}/></SettingsRow>
@@ -1112,10 +1099,9 @@ const AboutSettings = () => {
 
   return <div className="space-y-10 text-sm leading-6 text-slate-600">
     <SettingsPageGroup title="版本与联系">
-      <SettingsRow title="照片流" description={`by秋也寻 · 版本 ${__APP_VERSION__} · 内测版`}><div className="ml-auto flex w-fit items-center gap-2"><button type="button" onClick={() => void checkForUpdates()} disabled={updateStatus === 'checking'} className="dialog-secondary disabled:opacity-60">{updateStatus === 'checking' ? '正在检查…' : '检查更新'}</button>{updateStatus === 'latest' && <span className="text-xs text-emerald-600">已是最新版本</span>}{updateStatus === 'error' && <span className="text-xs text-red-500">检查失败</span>}</div></SettingsRow>
-      <SettingsRow title="项目主页" description="查看照片流项目与源代码。"><button type="button" onClick={() => openExternal('https://github.com/akiyastudio/photoflow')} className="dialog-secondary ml-auto flex w-fit items-center gap-2">打开<ExternalLink size={13}/></button></SettingsRow>
+      <SettingsRow title="照片流" description={`by秋也寻 · 版本 ${__APP_VERSION__} · 公测版`}><div className="ml-auto flex w-fit items-center gap-2"><button type="button" onClick={() => void checkForUpdates()} disabled={updateStatus === 'checking'} className="dialog-secondary disabled:opacity-60">{updateStatus === 'checking' ? '正在检查…' : '检查更新'}</button>{updateStatus === 'latest' && <span className="text-xs text-emerald-600">已是最新版本</span>}{updateStatus === 'error' && <span className="text-xs text-red-500">检查失败</span>}</div></SettingsRow>
+      <SettingsRow title="官方网站" description="访问照片流官方网站。"><button type="button" onClick={() => openExternal('https://qingstudio.cn/')} className="dialog-secondary ml-auto flex w-fit items-center gap-2">打开<ExternalLink size={13}/></button></SettingsRow>
       <SettingsRow title="联系作者" description="通过电子邮件发送联系信息。"><button type="button" onClick={() => openExternal('mailto:akiyastudio@qq.com')} className="dialog-secondary ml-auto flex w-fit items-center gap-2">akiyastudio@qq.com<ExternalLink size={13}/></button></SettingsRow>
-      <SettingsRow title="使用提示" description="软件尚未经过充分测试。使用前请备份重要数据；作者不对使用本软件造成的损失负责。"><span className="ml-auto block w-fit text-xs font-bold text-slate-500">请谨慎使用</span></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="模型与权重">
       {FORMAL_MODEL_LICENSES.map(model => <SettingsRow key={model.bundledFile} title={model.name} description={`${model.purpose} · ${model.version} · ${model.license}`} align="start"><div><p className="break-all font-mono text-[11px] text-slate-500">{model.bundledFile}</p><p className="mt-1 break-all font-mono text-[10px] text-slate-400">SHA-256: {model.sha256}</p><div className="mt-2 flex flex-wrap gap-2"><button type="button" onClick={() => openExternal(model.sourceUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">来源<ExternalLink size={13}/></button><button type="button" onClick={() => openExternal(model.downloadUrl)} className="dialog-secondary inline-flex items-center gap-1.5 text-xs">下载<ExternalLink size={13}/></button></div><details className="mt-2 rounded-lg border border-slate-200 bg-white"><summary className="cursor-pointer px-3 py-2 text-xs font-bold text-slate-700">许可证全文</summary><pre className="max-h-80 overflow-auto whitespace-pre-wrap border-t border-slate-200 p-3 font-mono text-[11px] leading-5 text-slate-600">{model.licenseText}</pre></details></div></SettingsRow>)}

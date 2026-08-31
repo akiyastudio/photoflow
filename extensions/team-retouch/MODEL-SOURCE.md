@@ -11,7 +11,7 @@ fallback.
 - Upstream: OpenMMLab MMDetection / MMDeploy
 - Model family: RTMDet-Ins-m
 - Input: 640 × 640 letterboxed BGR image
-- Local SHA-256: `4773FC4106666366FFD6E61F7CAADAF4D1876D503E71382B5DD780A0D65D1055`.
+- Local SHA-256: `6041DDED9177D5BD0BCA9E3AA264CEB99EC1FF7B0D53320D2433587704840FCA`.
 
 ## Cross-photo identity models
 
@@ -19,13 +19,13 @@ Identity suggestions run locally and use three fixed model assets:
 
 - `face_detection_yunet_2023mar.onnx` from OpenCV Zoo's YuNet face detector.
   OpenCV Zoo is Apache-2.0 licensed. Local SHA-256:
-  `0B6CECCB83E3D6CB38AE9A92499469937EB210E0267F26F7E68C5A13B53818C3`.
+  `8F2383E4DD3CFBB4553EA8718107FC0423210DC964F9F4280604804ED2552FA4`.
 - `adaface_ir18_webface4m.onnx`, exported from the MIT-licensed AdaFace IR-18
   WebFace4M checkpoint. Local SHA-256:
-  `24AAF990F7BD73BBEC31DDB7C052FFF5190271867DFAA6B7830304DFB3A3866E`.
+  `6B6A35772FB636CDD4FA86520C1A259D0C41472A76F70F802B351837A00D9870`.
 - `osnet_x1_0_msmt17.onnx`, exported from Kaiyang Zhou's MIT-licensed Torchreid
   `osnet_x1_0_msmt17_combineall` checkpoint. Local SHA-256:
-  `878AB6A6686B61496FE0FC06853EEE379DEA65E1A1A381358334582976578EBE`.
+  `7F545CFF27644DCC7481D53B2F6DF0B4BA22CEFF71F1A839C83A1BE5C0973EAE`.
 
 YuNet supplies five facial landmarks, AdaFace supplies aligned face embeddings,
 and OSNet x1.0 supplies 512-dimensional full-body appearance embeddings. OSNet

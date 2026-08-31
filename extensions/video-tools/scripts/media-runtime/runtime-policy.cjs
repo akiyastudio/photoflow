@@ -24,6 +24,7 @@ const REQUIRED_GPU_FFMPEG_FLAGS = [
   '--enable-ffnvcodec',
   '--enable-nvenc',
 ];
+const REQUIRED_GPU_TONEMAP_FLAGS = ['--enable-vulkan', '--enable-libplacebo'];
 
 const sha256File = filePath => crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 const readJson = filePath => JSON.parse(fs.readFileSync(filePath, 'utf8'));
@@ -38,7 +39,7 @@ function assertHash(filePath, expected, label = path.basename(filePath)) {
 }
 
 function validateFfmpegManifest(manifest, artifactRoot) {
-  if (![1, 2, 3].includes(manifest.schemaVersion) || manifest.kind !== 'photoflow-ffmpeg-runtime') throw new Error('FFmpeg 运行时清单格式无效');
+  if (![1, 2, 3, 4].includes(manifest.schemaVersion) || manifest.kind !== 'photoflow-ffmpeg-runtime') throw new Error('FFmpeg 运行时清单格式无效');
   if (manifest.platform !== 'windows-x64') throw new Error(`FFmpeg 运行时平台不受支持：${manifest.platform || '未声明'}`);
   if (manifest.license !== 'GPL-2.0-or-later') throw new Error(`FFmpeg 运行时许可证必须是 GPL-2.0-or-later，实际为 ${manifest.license || '未声明'}`);
   if (manifest.reproducibleSource !== true) throw new Error('FFmpeg 清单未确认包含精确对应源码与构建材料');
@@ -48,6 +49,9 @@ function validateFfmpegManifest(manifest, artifactRoot) {
   if (manifest.schemaVersion >= 3) for (const flag of REQUIRED_ENCODER_LITE_FLAGS) if (!flags.includes(flag)) throw new Error(`FFmpeg 缺少 Media Encoder Lite 构建参数：${flag}`);
   if (manifest.schemaVersion >= 2) {
     for (const flag of REQUIRED_GPU_FFMPEG_FLAGS) if (!flags.includes(flag)) throw new Error(`FFmpeg 缺少硬件加速构建参数：${flag}`);
+  }
+  if (manifest.schemaVersion >= 4) {
+    for (const flag of REQUIRED_GPU_TONEMAP_FLAGS) if (!flags.includes(flag)) throw new Error(`FFmpeg 缺少 GPU 色调映射构建参数：${flag}`);
   }
   for (const flag of FORBIDDEN_FFMPEG_FLAGS) if (flags.includes(flag)) throw new Error(`FFmpeg 含有禁止构建参数：${flag}`);
   const x264 = Array.isArray(manifest.components) ? manifest.components.find(item => item.name === 'x264') : null;
@@ -66,6 +70,10 @@ function validateFfmpegManifest(manifest, artifactRoot) {
   if (manifest.schemaVersion >= 2 && (!nvCodecHeaders || !/^[a-f0-9]{40}$/i.test(String(nvCodecHeaders.commit || '')))) {
     throw new Error('FFmpeg 清单未声明固定版本和完整提交哈希的 nv-codec-headers');
   }
+  const libplacebo = Array.isArray(manifest.components) ? manifest.components.find(item => item.name === 'libplacebo') : null;
+  if (manifest.schemaVersion >= 4 && (!libplacebo || !/^[a-f0-9]{40}$/i.test(String(libplacebo.commit || '')))) {
+    throw new Error('FFmpeg 清单未声明固定版本和完整提交哈希的 libplacebo');
+  }
   for (const required of ['runtimeArchive', 'sourceArchive', 'licenseArchive']) {
     const entry = manifest.artifacts?.[required];
     if (!entry?.file || !entry.sha256) throw new Error(`FFmpeg 清单缺少 ${required}`);
@@ -81,6 +89,7 @@ module.exports = {
   FORBIDDEN_FFMPEG_FLAGS,
   REQUIRED_FFMPEG_FLAGS,
   REQUIRED_GPU_FFMPEG_FLAGS,
+  REQUIRED_GPU_TONEMAP_FLAGS,
   assertHash,
   readJson,
   sha256File,

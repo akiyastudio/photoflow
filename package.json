@@ -3,13 +3,13 @@
   "productName": "照片流",
   "private": true,
   "license": "UNLICENSED",
-  "version": "26.8.29",
+  "version": "26.8.30",
   "type": "module",
   "main": "electron/main.cjs",
   "scripts": {
     "generate:icon": "node scripts/generate-app-icon.cjs",
     "generate:installer-terms": "node scripts/generate-installer-terms.cjs",
-    "version:set": "node scripts/set-app-version.cjs",
+    "version:set": "node scripts/manage-release-versions.cjs",
     "release:json": "node scripts/generate-release-json.cjs",
     "release:publish": "node scripts/publish-release.cjs",
     "build:shell-thumbnail": "node scripts/build-shell-thumbnail.cjs",
@@ -64,7 +64,7 @@
     "test:electron-dev-contract": "node scripts/test-electron-dev-contract.cjs",
     "test:electron-smoke": "node scripts/test-electron-smoke.cjs",
     "test:component-electron-smoke": "node scripts/test-component-electron-smoke.cjs",
-    "test:privacy": "node scripts/test-privacy-service.cjs",
+    "test:privacy": "node scripts/test-privacy-service.cjs && node scripts/test-telemetry-consent.cjs",
     "test:installer-terms": "node scripts/test-installer-terms.cjs",
     "test:installer-directory": "node scripts/test-installer-directory.cjs",
     "test:background-tasks": "node scripts/test-background-task-service.cjs && node scripts/test-background-task-migrations.cjs && node scripts/test-background-task-renderer-model.cjs && node scripts/test-background-task-drawer.cjs && node scripts/test-file-operation-notifications.cjs && node scripts/test-dirty-coalescing-runner.cjs && node scripts/test-watch-change-filter.cjs && node scripts/test-media-cache-cleanup-ipc.cjs && node scripts/test-media-tracking-scan-scheduler.cjs && node scripts/test-version-tracking-background.cjs && node scripts/test-sliced-maintenance-runner.cjs",
@@ -227,7 +227,7 @@
     ]
   },
   "dependencies": {
-    "exiftool-vendored": "^30.5.0"
+    "exiftool-vendored": "37.2.0"
   },
   "devDependencies": {
     "@eslint/js": "^8.57.1",
@@ -239,7 +239,7 @@
     "autoprefixer": "^10.4.22",
     "concurrently": "^8.2.2",
     "cross-env": "^7.0.3",
-    "electron": "^43.2.0",
+    "electron": "43.4.1",
     "electron-builder": "^26.0.12",
     "eslint": "^8.57.0",
     "eslint-plugin-react-hooks": "^4.6.0",

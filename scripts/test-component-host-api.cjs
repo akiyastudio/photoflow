@@ -172,7 +172,7 @@ invalidManifest(value => { value.componentHost.service.backupRestore.sources[0].
 const capabilitySchema = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-host-api.schema.json'), 'utf8'));
 const schemaMethods = Object.values(capabilitySchema.$defs).map(value => value?.properties?.method?.const).filter(Boolean).sort();
 assert.deepEqual(schemaMethods, [...HOST_CAPABILITIES].sort(), 'machine-readable schema must discriminate every supported capability method');
-const dialogResults = capabilitySchema.$defs.dialogs.properties.result.oneOf; assert.equal(dialogResults.length, 3); const selectionResult = dialogResults.find(item => item.required?.includes('inputs')); assert.equal(selectionResult.additionalProperties, false); assert.equal(selectionResult.properties.inputs.maxItems, 2000); assert.equal(selectionResult.properties.inputs.items.additionalProperties, false); assert.equal(selectionResult.properties.truncated.type, 'boolean', 'dialogs schema and SDK expose the bounded directory truncation flag');
+const dialogResults = capabilitySchema.$defs.dialogs.properties.result.oneOf; assert.equal(dialogResults.length, 4); const selectionResult = dialogResults.find(item => item.required?.includes('inputs')); assert.equal(selectionResult.additionalProperties, false); assert.equal(selectionResult.properties.inputs.maxItems, 2000); assert.equal(selectionResult.properties.inputs.items.additionalProperties, false); assert.equal(selectionResult.properties.truncated.type, 'boolean', 'dialogs schema and SDK expose the bounded directory truncation flag');
 const runtimeSources = [
   'electron/services/component-project-capabilities.cjs',
   'electron/services/component-project-read-capabilities.cjs',
@@ -218,10 +218,12 @@ const mediaService = {
 const openedPaths = [];
 const shell = { openPath: async filePath => { openedPaths.push(filePath); return ''; }, showItemInFolder: filePath => { openedPaths.push(filePath); } };
 const managedLink = { shortcutVirtualPath: 'External', externalTargetRoot: externalRoot, externalTargetKind: 'folder', offline: false };
+const virtualResolveCalls = [];
 const projectVirtualPaths = {
   listManagedExternalLinks: () => [managedLink],
   toVirtualPath: (_root, candidate) => `External/${path.relative(externalRoot, candidate).replace(/\\/g, '/')}`,
-  resolve: (_root, relativePath) => {
+  resolve: (_root, relativePath, options = {}) => {
+    virtualResolveCalls.push({ relativePath, options });
     const normalized = String(relativePath || '').replace(/\\/g, '/');
     if (normalized === 'External' || normalized.startsWith('External/')) return { physicalPath: path.join(externalRoot, normalized.slice('External'.length).replace(/^\//, '')), mediaRoot: externalRoot, viaExternalLink: true };
     return { physicalPath: path.join(projectRoot, normalized), mediaRoot: projectRoot, viaExternalLink: false };
@@ -324,6 +326,7 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert.equal(listedProgress.progress[0].folderPath, undefined, 'progress responses do not expose host paths');
   const createdProgress = await broker.invoke(descriptor, 'project.progress', { action: 'create', relativePath: 'progress-v2', mediaKind: 'image', versionKey: '2', parentProgressId: 'progress-original', sourceMetadata: { category: 'progress', role: 'component-output', displayName: '组件进度', componentId: 'forged-component' }, sourceProgressIds: ['progress-original'] }, context);
   assert.equal(createdProgress.progress.id, 'progress-created');
+  assert.deepStrictEqual(virtualResolveCalls.find(call => call.relativePath === 'progress-v2')?.options, { externalRootMode: 'target', mustExist: false, allowMissingLeaf: true }, 'component progress creation must resolve a missing leaf before creating its directory');
   assert.deepStrictEqual(createdProgress.progress.sourceMetadata, { category: 'progress', role: 'component-output', displayName: '组件进度', parentCapability: 'structural', componentId: descriptor.componentId });
   await broker.invoke(descriptor, 'project.progress', { action: 'create', relativePath: 'progress-empty-metadata', mediaKind: 'image', versionKey: '3', parentProgressId: 'progress-original', sourceMetadata: {} }, context);
   const emptyMetadata = calls.filter(call => call.action === 'progress_register_with_graph').at(-1).payload.progress.sourceMetadata;
@@ -493,6 +496,12 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   assert.equal((await broker.invoke(descriptor, 'component.settings', { action: 'get' }, applicationSettingsContext)).revision, 1, 'application settings surface may read owner settings');
   assert.equal((await broker.invoke(descriptor, 'component.lifecycle', { action: 'describe' }, applicationSettingsContext)).state, 'active', 'application settings surface may inspect declared lifecycle state');
   assert((await broker.invoke(descriptor, 'dialogs', { kind: 'confirm', title: 'Confirm' }, applicationSettingsContext)).confirmed, 'application settings surface may use confirmation dialogs');
+  const installedDescriptor = { ...descriptor, componentRoot: manifestRoot };
+  const openedComponentDirectory = await broker.invoke(installedDescriptor, 'dialogs', { kind: 'openComponentDirectory', relativePath: 'models' }, applicationSettingsContext);
+  assert.equal(openedComponentDirectory.componentDirectory.relativePath, 'models');
+  assert.equal(openedPaths.at(-1), path.join(manifestRoot, 'models'), 'application settings may open a created directory only inside its own installed component');
+  await assert.rejects(broker.invoke(installedDescriptor, 'dialogs', { kind: 'openComponentDirectory', relativePath: '../escape' }, applicationSettingsContext), error => error.code === 'COMPONENT_HOST_INVALID_REQUEST', 'component-directory dialog rejects escapes');
+  await assert.rejects(broker.invoke(installedDescriptor, 'dialogs', { kind: 'openComponentDirectory', relativePath: 'nested/child' }, applicationSettingsContext), error => error.code === 'COMPONENT_HOST_INVALID_REQUEST', 'component-directory dialog cannot traverse a linked parent while creating a directory');
   await assert.rejects(broker.invoke(descriptor, 'dialogs', { kind: 'openFiles' }, applicationSettingsContext), error => error.code === 'COMPONENT_HOST_PERMISSION_DENIED', 'application settings surface cannot mint project input tokens');
   assert.throws(() => broker.invoke(descriptor, 'project.media.page', { pageSize: 10 }, applicationSettingsContext), /not available on the application.settings surface/, 'project capabilities fail closed on an application surface');
   assert.throws(() => broker.invoke(descriptor, 'component.storage', {}, applicationSettingsContext), /not available on the application.settings surface/, 'project-scoped component storage fails closed on an application surface');
