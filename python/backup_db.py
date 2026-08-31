@@ -24,6 +24,12 @@ PATH_COLUMNS = {
     "batch_items": ("source_path", "source_path_key"),
     "file_records": ("current_path",),
 }
+PATH_KEY_PAIRS = {
+    "versions": {"file_path": "file_path_key"},
+    "version_batches": {"source_folder_path": "source_folder_path_key"},
+    "progress_folders": {"folder_path": "folder_path_key"},
+    "batch_items": {"source_path": "source_path_key"},
+}
 
 PROJECT_TABLE_ORDER = (
     "projects",
@@ -57,17 +63,90 @@ def connect(path: str, *, readonly: bool = False) -> sqlite3.Connection:
     return db
 
 
+def _same_file(left: str, right: str) -> bool:
+    left_path, right_path = os.path.abspath(left), os.path.abspath(right)
+    if os.path.normcase(left_path) == os.path.normcase(right_path):
+        return True
+    try:
+        return os.path.samefile(left_path, right_path)
+    except (FileNotFoundError, OSError):
+        return False
+
+
+def verify_database(path: str, *, maximum_schema_version: int | None = None, allow_foreign_key_errors: bool = False) -> dict:
+    absolute = os.path.abspath(path)
+    if not os.path.isfile(absolute):
+        return {"success": False, "path": absolute, "state": "missing"}
+    try:
+        db = connect(absolute, readonly=True)
+        try:
+            quick = [row[0] for row in db.execute("PRAGMA quick_check").fetchall()]
+            tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+            schema = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone() if "meta" in tables else None
+            schema_version = int(schema[0]) if schema else 0
+            foreign_keys = db.execute("PRAGMA foreign_key_check").fetchall()
+            errors = []
+            missing = {"meta", "projects"} - tables
+            if missing: errors.append(f"missing required tables: {sorted(missing)}")
+            if schema_version <= 0: errors.append("missing schema version")
+            if maximum_schema_version is not None and schema_version > maximum_schema_version:
+                errors.append(f"future schema version: {schema_version}")
+            if foreign_keys and not allow_foreign_key_errors: errors.append(f"foreign key violations: {len(foreign_keys)}")
+            success = quick == ["ok"] and not errors
+            return {"success": success, "path": absolute, "state": "healthy" if success else "incompatible",
+                    "schemaVersion": schema_version, "quickCheck": quick[:10], "errors": errors,
+                    "foreignKeyErrors": len(foreign_keys), "tables": sorted(tables)}
+        finally:
+            db.close()
+    except (OSError, sqlite3.Error, ValueError) as error:
+        return {"success": False, "path": absolute, "state": "unavailable", "error": str(error)}
+
+
+def _consistent_copy(source: str, destination: str) -> dict:
+    source_path = os.path.abspath(source)
+    destination_path = os.path.abspath(destination)
+    if _same_file(source_path, destination_path):
+        raise ValueError("database copy source and destination must differ")
+    status = verify_database(source_path)
+    if not status["success"]:
+        raise RuntimeError(f"database copy source is incompatible: {status}")
+    os.makedirs(os.path.dirname(destination_path), exist_ok=True)
+    staged = f"{destination_path}.copy-{uuid.uuid4().hex}.tmp"
+    source_db = connect(source_path, readonly=True)
+    target_db = connect(staged)
+    try:
+        source_db.backup(target_db)
+        target_db.commit()
+        target_db.close(); target_db = None
+        copied = verify_database(staged)
+        if not copied["success"]:
+            raise RuntimeError(f"database copy verification failed: {copied}")
+        os.replace(staged, destination_path)
+        return copied
+    finally:
+        if target_db is not None: target_db.close()
+        source_db.close()
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(staged + suffix)
+            except FileNotFoundError: pass
+
+
 def snapshot(source: str, destination: str, media: str = "") -> dict:
-    source_db = connect(source, readonly=True)
+    source_path = os.path.abspath(source)
+    destination = os.path.abspath(destination)
+    if _same_file(source_path, destination):
+        raise ValueError("snapshot source and destination must differ")
+    source_status = verify_database(source_path)
+    if not source_status["success"]:
+        raise RuntimeError(f"数据库源快照不兼容：{source_status}")
+    source_db = connect(source_path, readonly=True)
     if media and os.path.isfile(media) and "photos" not in {
         row[0] for row in source_db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()
     }:
         source_db.execute("ATTACH DATABASE ? AS media", (os.path.abspath(media),))
-    destination = os.path.abspath(destination)
     os.makedirs(os.path.dirname(destination), exist_ok=True)
-    if os.path.exists(destination):
-        os.remove(destination)
-    target_db = connect(destination)
+    staged = f"{destination}.snapshot-{uuid.uuid4().hex}.tmp"
+    target_db = connect(staged)
     try:
         source_db.backup(target_db)
         check = target_db.execute("PRAGMA quick_check").fetchone()[0]
@@ -93,10 +172,35 @@ def snapshot(source: str, destination: str, media: str = "") -> dict:
                 project.update(extension or {})
             projects.append(project)
         schema = target_db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-        return {"success": True, "schemaVersion": int(schema[0] if schema else 0), "projects": projects}
-    finally:
+        result = {"success": True, "schemaVersion": int(schema[0] if schema else 0), "projects": projects}
         target_db.close()
+        target_db = None
+        staged_status = verify_database(staged)
+        if not staged_status["success"]:
+            raise RuntimeError(f"数据库快照验证失败：{staged_status}")
+        os.replace(staged, destination)
+        return result
+    finally:
+        if target_db is not None:
+            target_db.close()
         source_db.close()
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(staged + suffix)
+            except FileNotFoundError: pass
+
+
+def normalize_replacements(replacements):
+    normalized = []
+    for old_root, new_root in replacements or ():
+        if not old_root and not new_root:
+            continue
+        if not old_root or not new_root:
+            raise ValueError("路径重定位 old/new root 必须成对提供")
+        if not os.path.isabs(old_root) or not os.path.isabs(new_root):
+            raise ValueError("路径重定位 root 必须是绝对路径")
+        normalized.append((os.path.normpath(old_root), os.path.normpath(new_root)))
+    normalized.sort(key=lambda pair: len(os.path.normcase(pair[0])), reverse=True)
+    return normalized
 
 
 def path_replacement(value, replacements):
@@ -116,12 +220,14 @@ def path_replacement(value, replacements):
 
 
 def rebase_database(db: sqlite3.Connection, replacements):
+    replacements = normalize_replacements(replacements)
     existing_tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     for table, columns in PATH_COLUMNS.items():
         if table not in existing_tables:
             continue
         available = {row[1] for row in db.execute(f"PRAGMA table_info({table})")}
-        usable = [column for column in columns if column in available]
+        pairs = PATH_KEY_PAIRS.get(table, {})
+        usable = [column for column in columns if column in available and column not in set(pairs.values())]
         if not usable:
             continue
         rows = db.execute(f"SELECT rowid,{','.join(usable)} FROM {table}").fetchall()
@@ -132,10 +238,13 @@ def rebase_database(db: sqlite3.Connection, replacements):
                     updates[column] = None
                 else:
                     updates[column] = path_replacement(row[column], replacements)
-            assignments = ",".join(f"{column}=?" for column in usable)
+            for display_column, key_column in pairs.items():
+                if display_column in updates and key_column in available:
+                    updates[key_column] = str(updates[display_column] or "").casefold()
+            assignments = ",".join(f"{column}=?" for column in updates)
             db.execute(
                 f"UPDATE {table} SET {assignments} WHERE rowid=?",
-                (*[updates[column] for column in usable], row["rowid"]),
+                (*updates.values(), row["rowid"]),
             )
     if "file_records" in existing_tables:
         columns = {row[1] for row in db.execute("PRAGMA table_info(file_records)")}
@@ -152,6 +261,9 @@ def rebase_database(db: sqlite3.Connection, replacements):
         db.execute("UPDATE progress_folders SET folder_id=NULL")
     if "batch_items" in existing_tables:
         db.execute("UPDATE batch_items SET source_file_id=NULL")
+    for journal in ("progress_folder_relocations", "progress_external_link_renames"):
+        if journal in existing_tables:
+            db.execute(f"DELETE FROM {journal}")
 
 
 def clear_materialized_archives(db: sqlite3.Connection, project_ids):
@@ -167,10 +279,75 @@ def clear_materialized_archives(db: sqlite3.Connection, project_ids):
         db.execute("UPDATE projects SET extra_json=?,availability='available',missing_since=NULL,missing_checks=0 WHERE id=?", (json.dumps(extra, ensure_ascii=False), str(project_id)))
 
 
+def _upgrade_and_verify_staged(path: str, workspace_root: str) -> dict:
+    import workspace_db
+    status = verify_database(path, maximum_schema_version=workspace_db.TARGET_SCHEMA_VERSION, allow_foreign_key_errors=True)
+    if not status["success"]:
+        raise RuntimeError(f"恢复源数据库不兼容：{status}")
+    if status["schemaVersion"] < workspace_db.TARGET_SCHEMA_VERSION:
+        migrated = workspace_db.connect(workspace_root, path, include_domains=False)
+        migrated.close()
+    result = verify_database(path, maximum_schema_version=workspace_db.TARGET_SCHEMA_VERSION)
+    if not result["success"]:
+        raise RuntimeError(f"恢复后的数据库验证失败：{result}")
+    return result
+
+
+def _verify_restore_source(path: str) -> dict:
+    import workspace_db
+    status = verify_database(path, maximum_schema_version=workspace_db.TARGET_SCHEMA_VERSION, allow_foreign_key_errors=True)
+    if not status["success"]:
+        raise RuntimeError(f"恢复源数据库不兼容：{status}")
+    if status["foreignKeyErrors"] and status["schemaVersion"] >= workspace_db.TARGET_SCHEMA_VERSION:
+        raise RuntimeError(f"当前版本恢复源包含外键错误：{status}")
+    return status
+
+
+def _checkpoint_live(path: str) -> None:
+    db = connect(path)
+    try:
+        checkpoint = db.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if checkpoint and checkpoint[0]:
+            raise RuntimeError(f"live database checkpoint failed: {tuple(checkpoint)}")
+        mode = str(db.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).casefold()
+        if mode != "delete":
+            raise RuntimeError(f"unable to leave WAL mode before publication: {mode}")
+    finally:
+        db.close()
+    remaining = [suffix for suffix in ("-wal", "-shm") if os.path.exists(path + suffix)]
+    if remaining:
+        raise RuntimeError(f"live database sidecars remain after checkpoint: {remaining}")
+
+
+def _publish_staged(staged: str, destination: str, workspace_root: str, backup_prefix: str) -> str:
+    backup = ""
+    if os.path.isfile(destination):
+        current = verify_database(destination)
+        if not current["success"]:
+            raise RuntimeError(f"拒绝覆盖不可验证的 live 数据库：{current}")
+        backup = f"{destination}.{backup_prefix}.{uuid.uuid4().hex}.bak"
+        _consistent_copy(destination, backup)
+        _checkpoint_live(destination)
+    os.replace(staged, destination)
+    try:
+        _upgrade_and_verify_staged(destination, workspace_root)
+    except Exception:
+        if backup:
+            rescue = f"{destination}.rollback-{uuid.uuid4().hex}.tmp"
+            _consistent_copy(backup, rescue)
+            os.replace(rescue, destination)
+        raise
+    return backup
+
+
 def restore_workspace(source: str, destination: str, old_root: str, new_root: str,
                       old_data_root: str = "", new_data_root: str = "", materialized_archive_project_ids=None) -> dict:
-    source_db = connect(source, readonly=True)
+    source_path = os.path.abspath(source)
     destination = os.path.abspath(destination)
+    if _same_file(source_path, destination):
+        raise ValueError("restore source and destination must differ")
+    source_status = _verify_restore_source(source_path)
+    source_db = connect(source_path, readonly=True)
     os.makedirs(os.path.dirname(destination), exist_ok=True)
     if os.path.exists(destination):
         raise RuntimeError("目标工作区数据库已存在")
@@ -178,6 +355,11 @@ def restore_workspace(source: str, destination: str, old_root: str, new_root: st
     target_db = connect(staged)
     try:
         source_db.backup(target_db)
+        target_db.commit()
+        target_db.close()
+        target_db = None
+        _upgrade_and_verify_staged(staged, os.path.abspath(new_root))
+        target_db = connect(staged)
         replacements = [(old_root, new_root)]
         if old_data_root and new_data_root:
             replacements.insert(0, (old_data_root, new_data_root))
@@ -188,13 +370,10 @@ def restore_workspace(source: str, destination: str, old_root: str, new_root: st
             (os.path.abspath(new_root),),
         )
         target_db.commit()
-        check = target_db.execute("PRAGMA quick_check").fetchone()[0]
-        if check != "ok":
-            raise RuntimeError(f"恢复后的数据库完整性检查失败：{check}")
         target_db.close()
         target_db = None
-        os.replace(staged, destination)
-        return {"success": True}
+        backup = _publish_staged(staged, destination, os.path.abspath(new_root), "before-workspace-restore")
+        return {"success": True, "backup": backup}
     finally:
         if target_db is not None:
             target_db.close()
@@ -215,14 +394,27 @@ def table_columns(db: sqlite3.Connection, table: str):
 
 def restore_project(source: str, destination: str, project_id: str, old_root: str, new_root: str,
                     target_relative_path: str, old_data_root: str = "", new_data_root: str = "", materialized_archive_project_ids=None) -> dict:
-    source_db = connect(source, readonly=True)
+    source_path = os.path.abspath(source)
     destination = os.path.abspath(destination)
+    if _same_file(source_path, destination):
+        raise ValueError("project restore source and destination must differ")
+    _verify_restore_source(source_path)
+    destination_status = verify_database(destination)
+    if not destination_status["success"]:
+        raise RuntimeError(f"项目恢复目标数据库不兼容：{destination_status}")
     staged_target = f"{destination}.restore-project-{uuid.uuid4().hex}.tmp"
-    live_db = connect(destination, readonly=True)
+    try:
+        _consistent_copy(destination, staged_target)
+        _upgrade_and_verify_staged(staged_target, os.path.abspath(new_root))
+    except Exception:
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(staged_target + suffix)
+            except FileNotFoundError: pass
+        raise
     target_db = connect(staged_target)
-    live_db.backup(target_db)
-    live_db.close()
-    temporary = f"{destination}.project-import-{os.getpid()}.sqlite3"
+    source_db = connect(source_path, readonly=True)
+    temporary = f"{destination}.project-import-{uuid.uuid4().hex}.sqlite3"
+    temporary_db = None
     try:
         project = source_db.execute("SELECT * FROM projects WHERE id=?", (project_id,)).fetchone()
         if project is None:
@@ -232,10 +424,13 @@ def restore_project(source: str, destination: str, project_id: str, old_root: st
         ).fetchone()
         if name_conflict:
             raise RuntimeError("当前工作区已有同名项目")
-        if os.path.exists(temporary):
-            os.remove(temporary)
         temporary_db = connect(temporary)
         source_db.backup(temporary_db)
+        temporary_db.commit()
+        temporary_db.close()
+        temporary_db = None
+        _upgrade_and_verify_staged(temporary, os.path.abspath(new_root))
+        temporary_db = connect(temporary)
         replacements = [(old_root, new_root)]
         if old_data_root and new_data_root:
             replacements.insert(0, (old_data_root, new_data_root))
@@ -246,9 +441,39 @@ def restore_project(source: str, destination: str, project_id: str, old_root: st
             (target_relative_path, project_id),
         )
         temporary_db.commit()
+        temporary_tables = {row[0] for row in temporary_db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        source_photo_ids = [row[0] for row in temporary_db.execute("SELECT id FROM photos WHERE project_id=?", (project_id,)).fetchall()] if "photos" in temporary_tables else []
+        source_version_ids = [row[0] for row in temporary_db.execute(
+            f"SELECT id FROM versions WHERE photo_id IN ({','.join('?' for _ in source_photo_ids) or 'NULL'})", source_photo_ids
+        ).fetchall()] if "versions" in temporary_tables else []
+        source_batch_ids = [row[0] for row in temporary_db.execute("SELECT id FROM version_batches WHERE project_id=?", (project_id,)).fetchall()] if "version_batches" in temporary_tables else []
         temporary_db.close()
+        temporary_db = None
 
         target_db.execute("BEGIN IMMEDIATE")
+        target_tables = {row[0] for row in target_db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        target_photo_ids = [row[0] for row in target_db.execute("SELECT id FROM photos WHERE project_id=?", (project_id,)).fetchall()] if "photos" in target_tables else []
+        photo_ids = list(dict.fromkeys((*target_photo_ids, *source_photo_ids)))
+        if table_columns(target_db, "version_batches"):
+            target_batch_ids = [row[0] for row in target_db.execute("SELECT id FROM version_batches WHERE project_id=?", (project_id,)).fetchall()]
+            batch_ids = list(dict.fromkeys((*target_batch_ids, *source_batch_ids)))
+            if batch_ids:
+                batch_placeholders = ",".join("?" for _ in batch_ids)
+                for table in ("batch_file_operations", "batch_items"):
+                    if table_columns(target_db, table):
+                        target_db.execute(f"DELETE FROM {table} WHERE batch_id IN ({batch_placeholders})", batch_ids)
+            target_db.execute("DELETE FROM version_batches WHERE project_id=?", (project_id,))
+        if photo_ids and table_columns(target_db, "versions"):
+            placeholders = ",".join("?" for _ in photo_ids)
+            target_version_ids = [row[0] for row in target_db.execute(f"SELECT id FROM versions WHERE photo_id IN ({placeholders})", photo_ids).fetchall()]
+            version_ids = list(dict.fromkeys((*target_version_ids, *source_version_ids)))
+            if version_ids and table_columns(target_db, "file_records"):
+                version_placeholders = ",".join("?" for _ in version_ids)
+                target_db.execute(f"DELETE FROM file_records WHERE owner_id IN ({version_placeholders})", version_ids)
+            if table_columns(target_db, "version_compare_history"):
+                target_db.execute(f"DELETE FROM version_compare_history WHERE photo_id IN ({placeholders})", photo_ids)
+            target_db.execute(f"DELETE FROM versions WHERE photo_id IN ({placeholders})", photo_ids)
+            target_db.execute(f"DELETE FROM photos WHERE id IN ({placeholders})", photo_ids)
         target_db.execute("DELETE FROM projects WHERE id=?", (project_id,))
         target_db.execute("ATTACH DATABASE ? AS portable", (temporary,))
         try:
@@ -296,25 +521,20 @@ def restore_project(source: str, destination: str, project_id: str, old_root: st
         except Exception:
             target_db.rollback()
             raise
-        check = target_db.execute("PRAGMA quick_check").fetchone()[0]
-        if check != "ok":
-            raise RuntimeError(f"项目恢复临时数据库完整性检查失败：{check}")
         target_db.close()
         target_db = None
-        for suffix in ("-wal", "-shm"):
-            try:
-                os.remove(destination + suffix)
-            except FileNotFoundError:
-                pass
-        os.replace(staged_target, destination)
-        return {"success": True, "projectId": project_id, "name": project["name"]}
+        _upgrade_and_verify_staged(staged_target, os.path.abspath(new_root))
+        backup = _publish_staged(staged_target, destination, os.path.abspath(new_root), "before-project-restore")
+        return {"success": True, "projectId": project_id, "name": project["name"], "backup": backup}
     finally:
         if target_db is not None:
             target_db.close()
+        if temporary_db is not None:
+            temporary_db.close()
         source_db.close()
         try:
             os.remove(temporary)
-        except OSError:
+        except FileNotFoundError:
             pass
         for suffix in ("", "-wal", "-shm"):
             try:

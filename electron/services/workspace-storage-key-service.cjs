@@ -5,8 +5,16 @@ const createWorkspaceStorageKeyService = ({ fs, path, crypto, databaseDir, write
   const resolveRoot = root => path.resolve(root);
   const markerFor = root => path.join(resolveRoot(root), '.photoflow-workspace-id');
   const readMarker = root => {
-    try { const value = fs.readFileSync(markerFor(root), 'utf8').trim().toLowerCase(); return VALID_KEY.test(value) ? value : ''; }
-    catch { return ''; }
+    try {
+      const value = fs.readFileSync(markerFor(root), 'utf8').trim().toLowerCase();
+      if (VALID_KEY.test(value)) return value;
+      const error = new Error('工作区 identity marker 内容无效');
+      error.code = 'WORKSPACE_STORAGE_KEY_INVALID';
+      throw error;
+    } catch (error) {
+      if (error?.code === 'ENOENT') return '';
+      throw error;
+    }
   };
   const legacyKey = root => crypto.createHash('sha256').update(process.platform === 'win32' ? resolveRoot(root).toLocaleLowerCase() : resolveRoot(root)).digest('hex').slice(0, 24);
   const hasStorage = key => fs.existsSync(path.join(databaseDir, `${key}.sqlite3`)) || fs.existsSync(path.join(databaseDir, key));
@@ -16,7 +24,13 @@ const createWorkspaceStorageKeyService = ({ fs, path, crypto, databaseDir, write
     if (!key) {
       const legacy = legacyKey(resolved); key = hasStorage(legacy) ? legacy : crypto.randomUUID().replaceAll('-', '');
       try { fs.writeFileSync(markerFor(resolved), `${key}\n`, { encoding: 'utf8', flag: 'wx' }); }
-      catch (error) { key = readMarker(resolved) || legacy; writeLog('warn', 'Unable to persist stable workspace identity', { root: resolved, error: error.message || String(error) }); }
+      catch (error) {
+        if (error?.code !== 'EEXIST') {
+          writeLog('error', 'Unable to persist stable workspace identity', { root: resolved, error: error.message || String(error) });
+          throw error;
+        }
+        key = readMarker(resolved);
+      }
     }
     keys.set(resolved, key); return key;
   };

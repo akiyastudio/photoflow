@@ -36,31 +36,36 @@ def _connect(database: str) -> sqlite3.Connection:
     db.execute("PRAGMA busy_timeout=30000")
     db.execute("PRAGMA journal_mode=WAL")
     db.execute("PRAGMA synchronous=NORMAL")
-    db.executescript(
-        """
-        CREATE TABLE IF NOT EXISTS meta (
-            key TEXT PRIMARY KEY,
-            value TEXT NOT NULL
-        );
-        CREATE TABLE IF NOT EXISTS undo_records (
-            id TEXT PRIMARY KEY,
-            kind TEXT NOT NULL,
-            payload_json TEXT NOT NULL,
-            state TEXT NOT NULL DEFAULT 'ready',
-            created_at INTEGER NOT NULL,
-            updated_at INTEGER NOT NULL
-        );
-        CREATE INDEX IF NOT EXISTS undo_records_ready
-            ON undo_records(state, created_at DESC);
-        """
-    )
-    db.execute(
-        "INSERT INTO meta(key,value) VALUES('schema_version',?) "
-        "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-        (str(SCHEMA_VERSION),),
-    )
-    db.commit()
-    return db
+    try:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        schema = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        schema_version = int(schema[0]) if schema else 0
+        if schema_version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"operations database schema {schema_version} is newer than supported {SCHEMA_VERSION}"
+            )
+        identity = db.execute("SELECT value FROM meta WHERE key='domain_identity'").fetchone()
+        if identity is not None and identity[0] != "operations":
+            raise RuntimeError(f"operations database identity mismatch: {identity[0]}")
+        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if identity is None and {"photos", "versions", "projects"} & tables:
+            raise RuntimeError("cannot infer operations database identity from existing tables")
+        db.execute(
+            """CREATE TABLE IF NOT EXISTS undo_records (
+                 id TEXT PRIMARY KEY,kind TEXT NOT NULL,payload_json TEXT NOT NULL,
+                 state TEXT NOT NULL DEFAULT 'ready',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL
+               )"""
+        )
+        db.execute("CREATE INDEX IF NOT EXISTS undo_records_ready ON undo_records(state,created_at DESC)")
+        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
+        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('domain_identity','operations')")
+        db.commit()
+        return db
+    except Exception:
+        db.rollback()
+        db.close()
+        raise
 
 
 def _import_legacy(db: sqlite3.Connection, legacy_database: str) -> int:
@@ -83,18 +88,71 @@ def _import_legacy(db: sqlite3.Connection, legacy_database: str) -> int:
         rows = source.execute(
             "SELECT id,kind,payload_json,state,created_at,updated_at FROM undo_records"
         ).fetchall()
-        before = db.total_changes
-        db.executemany(
-            "INSERT OR IGNORE INTO undo_records(id,kind,payload_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)",
-            [tuple(row) for row in rows],
-        )
-        imported = db.total_changes - before
-        db.execute(
-            "INSERT OR REPLACE INTO meta(key,value) VALUES('legacy_undo_import_completed',?)",
-            (str(int(time.time() * 1000)),),
-        )
-        db.commit()
-        return imported
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            imported = 0
+            for row in rows:
+                current = db.execute(
+                    "SELECT id,kind,payload_json,state,created_at,updated_at FROM undo_records WHERE id=?",
+                    (row["id"],),
+                ).fetchone()
+                if current is not None:
+                    if tuple(current) != tuple(row):
+                        raise RuntimeError(f"legacy undo import conflicts for record {row['id']}")
+                    continue
+                db.execute(
+                    "INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+                    tuple(row),
+                )
+                imported += 1
+            db.execute(
+                "INSERT INTO meta(key,value) VALUES('legacy_undo_import_completed',?)",
+                (str(int(time.time() * 1000)),),
+            )
+            db.commit()
+            return imported
+        except Exception:
+            db.rollback()
+            raise
+    finally:
+        source.close()
+
+
+def _drain_legacy_outbox(db: sqlite3.Connection, legacy_database: str) -> int:
+    legacy = os.path.abspath(str(legacy_database or "")) if legacy_database else ""
+    if not legacy or not os.path.isfile(legacy):
+        return 0
+    source = sqlite3.connect(legacy, timeout=30)
+    source.row_factory = sqlite3.Row
+    source.execute("PRAGMA busy_timeout=30000")
+    try:
+        if source.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='meta'").fetchone() is None:
+            return 0
+        row = source.execute("SELECT value FROM meta WHERE key='operations_outbox_v1'").fetchone()
+        if row is None:
+            return 0
+        try:
+            payload = json.loads(row[0])
+            ids = list(dict.fromkeys(str(value) for value in payload.get("removeUndoIds") or [] if str(value)))
+        except (TypeError, ValueError, json.JSONDecodeError) as error:
+            raise RuntimeError("operations outbox is malformed") from error
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            if ids:
+                placeholders = ",".join("?" for _ in ids)
+                db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", ids)
+            db.commit()
+        except Exception:
+            db.rollback()
+            raise
+        source.execute("BEGIN IMMEDIATE")
+        try:
+            source.execute("DELETE FROM meta WHERE key='operations_outbox_v1'")
+            source.commit()
+        except Exception:
+            source.rollback()
+            raise
+        return len(ids)
     finally:
         source.close()
 
@@ -115,13 +173,14 @@ def execute(database: str, action: str, payload: dict):
     db = _connect(database)
     try:
         imported = _import_legacy(db, payload.get("legacyDatabase"))
+        recovered = _drain_legacy_outbox(db, payload.get("legacyDatabase"))
         now = int(time.time() * 1000)
         if action == "init":
             check = db.execute("PRAGMA quick_check").fetchone()[0]
             if check != "ok":
                 raise RuntimeError(f"operations 数据库完整性检查失败：{check}")
             count = db.execute("SELECT COUNT(*) FROM undo_records").fetchone()[0]
-            return {"success": True, "database": os.path.abspath(database), "schemaVersion": SCHEMA_VERSION, "records": count, "imported": imported}
+            return {"success": True, "database": os.path.abspath(database), "schemaVersion": SCHEMA_VERSION, "records": count, "imported": imported, "recovered": recovered}
         if action == "undo_record_add":
             record_id = str(payload.get("id") or uuid.uuid4())
             db.execute(
@@ -170,21 +229,58 @@ def execute(database: str, action: str, payload: dict):
 def snapshot(source: str, destination: str):
     source_path = os.path.abspath(source)
     destination_path = os.path.abspath(destination)
+    same_path = os.path.normcase(source_path) == os.path.normcase(destination_path)
+    try:
+        same_path = same_path or os.path.samefile(source_path, destination_path)
+    except (FileNotFoundError, OSError):
+        pass
+    if same_path:
+        raise ValueError("operations snapshot source and destination must differ")
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
-    if os.path.exists(destination_path):
-        os.remove(destination_path)
+    staged = f"{destination_path}.snapshot-{uuid.uuid4().hex}.tmp"
     source_db = sqlite3.connect(f"{Path(source_path).as_uri()}?mode=ro", uri=True, timeout=30)
-    target_db = sqlite3.connect(destination_path, timeout=30)
+    source_tables = {row[0] for row in source_db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if not {"meta", "undo_records"} <= source_tables:
+        source_db.close()
+        raise RuntimeError("operations snapshot source is missing required tables")
+    source_schema = source_db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+    source_identity = source_db.execute("SELECT value FROM meta WHERE key='domain_identity'").fetchone()
+    source_version = int(source_schema[0]) if source_schema else 0
+    source_check = source_db.execute("PRAGMA quick_check").fetchone()[0]
+    if source_check != "ok":
+        source_db.close()
+        raise RuntimeError(f"operations snapshot source integrity check failed: {source_check}")
+    if source_version <= 0 or source_version > SCHEMA_VERSION:
+        source_db.close()
+        raise RuntimeError(f"unsupported operations snapshot schema: {source_version}")
+    if source_identity is not None and source_identity[0] != "operations":
+        source_db.close()
+        raise RuntimeError(f"operations snapshot identity mismatch: {source_identity[0]}")
+    foreign_keys = source_db.execute("PRAGMA foreign_key_check").fetchall()
+    if foreign_keys:
+        source_db.close()
+        raise RuntimeError(f"operations snapshot foreign key check failed: {foreign_keys[:10]}")
+    target_db = sqlite3.connect(staged, timeout=30)
     try:
         source_db.backup(target_db)
         check = target_db.execute("PRAGMA quick_check").fetchone()[0]
         if check != "ok":
             raise RuntimeError(f"operations 数据库快照完整性检查失败：{check}")
         schema = target_db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
-        return {"success": True, "schemaVersion": int(schema[0] if schema else 0)}
-    finally:
+        result = {"success": True, "schemaVersion": int(schema[0] if schema else 0)}
         target_db.close()
+        target_db = None
+        os.replace(staged, destination_path)
+        return result
+    finally:
+        if target_db is not None:
+            target_db.close()
         source_db.close()
+        for suffix in ("", "-wal", "-shm"):
+            try:
+                os.remove(staged + suffix)
+            except FileNotFoundError:
+                pass
 
 
 def run_server():

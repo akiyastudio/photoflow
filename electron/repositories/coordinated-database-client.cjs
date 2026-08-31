@@ -27,29 +27,42 @@ class CoordinatedDatabaseClient {
     this.execute = execute;
     this.retryDelays = retryDelays;
     this.waitForRetry = waitForRetry;
+    this.singleFlight = Promise.resolve();
   }
 
-  async call(root, action, payload, { timeoutMs, signal, label, deadlineAt: requestedDeadlineAt } = {}) {
+  call(root, action, payload, options = {}) {
+    const run = () => this.callSingleFlight(root, action, payload, options);
+    const result = this.singleFlight.then(run, run);
+    this.singleFlight = result.catch(() => undefined);
+    return result;
+  }
+
+  async callSingleFlight(root, action, payload, { timeoutMs, signal, label, deadlineAt: requestedDeadlineAt, operationId: requestedOperationId } = {}) {
     const database = this.getDatabasePath(root);
     const policy = this.operationPolicy.classify({ root, database, action, payload, scriptName: this.scriptName });
-    const timeoutDeadline = Number.isFinite(timeoutMs) ? Date.now() + timeoutMs : undefined;
-    const deadlineAt = Number.isFinite(requestedDeadlineAt) && Number.isFinite(timeoutDeadline)
-      ? Math.min(requestedDeadlineAt, timeoutDeadline)
-      : Number.isFinite(requestedDeadlineAt) ? requestedDeadlineAt : timeoutDeadline;
+    const operationId = requestedOperationId || crypto.randomUUID();
+    let startedDeadlineAt;
     let attempt = 0;
     while (true) {
       try {
         // The lease exists only for this attempt. A rejected attempt unwinds
         // coordinator.run before backoff, so retries always rejoin the queue.
-        return await this.coordinator.run({ databases: policy.databases, signal, deadlineAt, label: label || action }, () => {
+        return await this.coordinator.run({ databases: policy.databases, signal, deadlineAt: requestedDeadlineAt, label: label || action }, () => {
+          if (!Number.isFinite(startedDeadlineAt)) {
+            const timeoutDeadline = Number.isFinite(timeoutMs) ? Date.now() + timeoutMs : undefined;
+            startedDeadlineAt = Number.isFinite(requestedDeadlineAt) && Number.isFinite(timeoutDeadline)
+              ? Math.min(requestedDeadlineAt, timeoutDeadline)
+              : Number.isFinite(requestedDeadlineAt) ? requestedDeadlineAt : timeoutDeadline;
+          }
+          const deadlineAt = startedDeadlineAt;
           const remainingMs = Number.isFinite(deadlineAt) ? Math.max(0, deadlineAt - Date.now()) : timeoutMs;
-          return this.execute({ root, database, databases: policy.databases, action, payload, timeoutMs: remainingMs, signal, deadlineAt });
+          return this.execute({ root, database, databases: policy.databases, action, payload, timeoutMs: remainingMs, signal, deadlineAt, operationId, idempotent: policy.idempotent });
         });
       } catch (error) {
         if (!policy.idempotent || !SQLITE_RETRYABLE_CODES.has(error?.code) || attempt >= this.retryDelays.length) throw error;
         const delay = this.retryDelays[attempt] + Math.floor(Math.random() * 60);
         attempt += 1;
-        if (Number.isFinite(deadlineAt) && Date.now() + delay >= deadlineAt) throw error;
+        if (Number.isFinite(startedDeadlineAt) && Date.now() + delay >= startedDeadlineAt) throw error;
         await this.waitForRetry(delay, signal);
         if (signal?.aborted) throw signal.reason || Object.assign(new Error('数据库操作已取消'), { code: 'ABORT_ERR' });
       }
@@ -58,3 +71,4 @@ class CoordinatedDatabaseClient {
 }
 
 module.exports = { CoordinatedDatabaseClient, SQLITE_RETRYABLE_CODES, DATABASE_LOCK_RETRY_DELAYS_MS };
+const crypto = require('crypto');

@@ -25,7 +25,7 @@ class WorkspaceDatabaseOperationPolicy {
     const databases = [{ path: database, mode }];
 
     if (scriptName === 'operations_db.py') {
-      if (action === 'init' && payload.legacyDatabase) databases.push({ path: payload.legacyDatabase, mode: 'read' });
+      if (payload.legacyDatabase) databases.push({ path: payload.legacyDatabase, mode: 'write' });
     } else if (scriptName === 'workspace_db.py') {
       const needsRetiredProjectCleanup = action === 'add';
       const needsDomains = action === 'maintenance_run' || VERSIONING_ONLY_ACTIONS.has(action)

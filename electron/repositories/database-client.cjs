@@ -10,9 +10,15 @@ const requestAbortError = reason => (
     ? reason
     : Object.assign(new Error(reason?.message || '数据库操作已取消'), { code: 'ABORT_ERR', cause: reason })
 );
+const markOutcomeUnknown = (error, request) => {
+  if (request?.idempotent) return error;
+  error.outcome = 'OUTCOME_UNKNOWN';
+  error.operationId = request?.operationId;
+  return error;
+};
 
 class PythonDatabaseClient {
-  constructor({ getRunConfig, getDatabasePath, writeLog, coordinator, operationPolicy = new WorkspaceDatabaseOperationPolicy(), defaultTimeoutMs = 30000, processStopTimeoutMs = 2000, rollbackSettleMs = 25, scriptName = 'workspace_db.py', processSupervisor = null, processId = '', domainId = '', onHealthChange = () => undefined, failureThreshold = 3, circuitCooldownMs = 5000, maximumPending = 100 }) {
+  constructor({ getRunConfig, getDatabasePath, writeLog, coordinator, operationPolicy = new WorkspaceDatabaseOperationPolicy(), defaultTimeoutMs = 30000, processStopTimeoutMs = 2000, rollbackSettleMs = 25, scriptName = 'workspace_db.py', processSupervisor = null, processId = '', domainId = '', onHealthChange = () => undefined, failureThreshold = 3, circuitCooldownMs = 5000, maximumPending = 100, maximumProtocolBuffer = 1024 * 1024 }) {
     this.getRunConfig = getRunConfig;
     this.getDatabasePath = getDatabasePath;
     this.writeLog = writeLog;
@@ -25,6 +31,7 @@ class PythonDatabaseClient {
     this.failureThreshold = failureThreshold;
     this.circuitCooldownMs = circuitCooldownMs;
     this.maximumPending = maximumPending;
+    this.maximumProtocolBuffer = maximumProtocolBuffer;
     this.processStopTimeoutMs = processStopTimeoutMs;
     this.rollbackSettleMs = rollbackSettleMs;
     this.health = { domainId: this.domainId, state: 'healthy', failures: 0, circuitOpenedAt: 0, lastError: '', updatedAt: Date.now() };
@@ -32,6 +39,7 @@ class PythonDatabaseClient {
     this.process = null;
     this.nextId = 0;
     this.pending = new Map();
+    this.queued = 0;
     this.processStops = new WeakMap();
     this.stopping = false;
     this.coordinated = new CoordinatedDatabaseClient({
@@ -49,7 +57,6 @@ class PythonDatabaseClient {
   }
 
   noteSuccess() {
-    if (this.health.quarantined) return;
     if (this.health.state !== 'healthy' || this.health.failures) this.updateHealth('healthy', { failures: 0, circuitOpenedAt: 0, lastError: '' });
   }
 
@@ -62,11 +69,6 @@ class PythonDatabaseClient {
   }
 
   assertCircuitAvailable() {
-    if (this.health.quarantined) {
-      const error = new Error(`${this.domainId} 数据库已隔离，需要人工恢复后才能继续写入`);
-      error.code = 'DATABASE_QUARANTINED';
-      throw error;
-    }
     if (this.health.state !== 'unavailable') return;
     if (Date.now() - this.health.circuitOpenedAt >= this.circuitCooldownMs) {
       this.updateHealth('recovering', { lastError: '' });
@@ -98,8 +100,7 @@ class PythonDatabaseClient {
   }
 
   quarantine(databases, error) {
-    this.updateHealth('unavailable', {
-      quarantined: true,
+    this.updateHealth('degraded', {
       failures: Math.max(this.failureThreshold, this.health.failures + 1),
       circuitOpenedAt: Date.now(),
       lastError: error?.message || String(error),
@@ -136,9 +137,21 @@ class PythonDatabaseClient {
   attachProcess(child, managedProcess) {
     this.process = child;
     let output = '';
+    let finished = false;
+    let protocolFailed = false;
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', data => {
       output += data;
+      if (output.length > this.maximumProtocolBuffer) {
+        if (protocolFailed) return;
+        protocolFailed = true;
+        const error = new Error('数据库服务协议响应超过允许上限');
+        error.code = 'DATABASE_PROTOCOL_ERROR';
+        void this.stopChildAndWait(child, 'protocol-buffer-overflow').then(
+          () => finishRequests(error), stopError => finishRequests(stopError),
+        );
+        return;
+      }
       const lines = output.split(/\r?\n/);
       output = lines.pop() || '';
       for (const line of lines) {
@@ -157,11 +170,22 @@ class PythonDatabaseClient {
           } else {
             const error = new Error(response.error || '工作区数据库操作失败');
             if (response.code) error.code = response.code;
+            if (response.outcome) error.outcome = response.outcome;
+            error.operationId = response.operationId || request.operationId;
             this.noteFailure(error);
             request.reject(error);
           }
         } catch (error) {
           this.writeLog('warn', 'Unable to parse database service response', { scriptName: this.scriptName, error: error.message, line: line.slice(0, 500) });
+          if (!protocolFailed) {
+            protocolFailed = true;
+            const protocolError = new Error('数据库服务返回了无效协议响应');
+            protocolError.code = 'DATABASE_PROTOCOL_ERROR';
+            void this.stopChildAndWait(child, 'protocol-parse-failure').then(
+              () => finishRequests(protocolError), stopError => finishRequests(stopError),
+            );
+          }
+          return;
         }
       }
     });
@@ -170,13 +194,15 @@ class PythonDatabaseClient {
     child.stderr.on('data', data => { stderr = (stderr + data).slice(-4000); });
     child.stdin.on('error', () => undefined);
     const finishRequests = error => {
+      if (finished) return;
+      finished = true;
       this.noteFailure(error);
       if (this.process === child) this.process = null;
       for (const [id, request] of this.pending.entries()) {
         if (request.child !== child) continue;
         clearTimeout(request.timer);
         request.signal?.removeEventListener?.('abort', request.onAbort);
-        request.reject(error);
+        request.reject(markOutcomeUnknown(error, request));
         this.pending.delete(id);
       }
       if (!this.stopping && !this.processSupervisor) this.writeLog('warn', 'Database service stopped', { scriptName: this.scriptName, error: error.message || String(error) });
@@ -191,14 +217,21 @@ class PythonDatabaseClient {
   }
 
   call(root, action, payload = {}, timeoutMs = this.defaultTimeoutMs, options = {}) {
-    return this.coordinated.call(root, action, payload, { ...options, timeoutMs });
+    if (this.queued >= this.maximumPending) {
+      const error = new Error(`${this.domainId} 请求队列已满`);
+      error.code = 'DOMAIN_BACKPRESSURE';
+      return Promise.reject(error);
+    }
+    this.queued += 1;
+    return this.coordinated.call(root, action, payload, { ...options, timeoutMs })
+      .finally(() => { this.queued = Math.max(0, this.queued - 1); });
   }
 
   callOnce(root, database, action, payload = {}, timeoutMs = this.defaultTimeoutMs, options = {}) {
     if (this.terminationPromise) return this.terminationPromise.then(() => this.callOnce(root, database, action, payload, timeoutMs, options));
     return new Promise((resolve, reject) => {
       try { this.assertCircuitAvailable(); } catch (error) { reject(error); return; }
-      const { signal, deadlineAt, databases = [{ path: database, mode: 'write' }] } = options;
+      const { signal, deadlineAt, databases = [{ path: database, mode: 'write' }], operationId, idempotent = false } = options;
       if (signal?.aborted) {
         reject(requestAbortError(signal.reason));
         return;
@@ -225,9 +258,11 @@ class PythonDatabaseClient {
         clearTimeout(timedOut.timer);
         signal?.removeEventListener?.('abort', timedOut.onAbort);
         this.noteFailure(error);
+        markOutcomeUnknown(error, timedOut);
         void this.stopChildAndWait(child, `request-timeout:${action}`).then(
           () => reject(error),
           stopError => {
+            markOutcomeUnknown(stopError, timedOut);
             this.quarantine(databases, stopError);
             reject(stopError);
           },
@@ -241,9 +276,9 @@ class PythonDatabaseClient {
       const onAbort = () => {
         terminateRequest(requestAbortError(signal.reason));
       };
-      const request = { id, root, database, action, payload };
+      const request = { id, root, database, action, payload, operationId };
       const serialized = JSON.stringify(request);
-      this.pending.set(id, { resolve, reject, timer, child, serialized, onAbort, signal });
+      this.pending.set(id, { resolve, reject, timer, child, serialized, onAbort, signal, operationId, idempotent });
       signal?.addEventListener?.('abort', onAbort, { once: true });
       try {
         child.stdin.write(`${serialized}\n`, error => {
@@ -253,7 +288,7 @@ class PythonDatabaseClient {
           this.pending.delete(id);
           clearTimeout(pending.timer);
           signal?.removeEventListener?.('abort', pending.onAbort);
-          pending.reject(error);
+          pending.reject(markOutcomeUnknown(error, pending));
         });
       } catch (error) {
         const pending = this.pending.get(id);
@@ -261,7 +296,7 @@ class PythonDatabaseClient {
         this.pending.delete(id);
         clearTimeout(pending.timer);
         signal?.removeEventListener?.('abort', pending.onAbort);
-        pending.reject(error);
+        pending.reject(markOutcomeUnknown(error, pending));
       }
     });
   }
@@ -287,7 +322,14 @@ class PythonDatabaseClient {
     await this.stop(timeoutMs);
   }
 
-  status() { return { ...this.health, pending: this.pending.size }; }
+  status() {
+    return {
+      ...this.health,
+      quarantined: (this.coordinated.coordinator.status?.().quarantinedDatabases || 0) > 0,
+      pending: this.pending.size,
+      queued: this.queued,
+    };
+  }
 }
 
 module.exports = { PythonDatabaseClient };

@@ -9534,26 +9534,95 @@ def deleted_project_cleanup_plan(db, payload: dict):
     return project_cleanup_plan(db, project, payload)
 
 
+def _delete_where_ids(db, table: str, column: str, values) -> None:
+    values = list(dict.fromkeys(str(value) for value in values if value is not None))
+    if not values:
+        return
+    placeholders = ",".join("?" for _ in values)
+    db.execute(f'DELETE FROM "{table}" WHERE "{column}" IN ({placeholders})', values)
+
+
+def _purge_project_rows_transaction(db, project, result: dict, payload: dict, *, deleted: bool) -> None:
+    project_id = str(project["id"])
+    # Connection setup may have recorded an idempotent schema marker. Finish
+    # that setup transaction before beginning the one indivisible purge.
+    if db.in_transaction:
+        db.commit()
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        expected = "is_deleted=1" if deleted else "is_deleted=0 AND availability='missing'"
+        if db.execute(f"SELECT 1 FROM projects WHERE id=? AND {expected}", (project_id,)).fetchone() is None:
+            raise RuntimeError("项目目录记录在清理开始前发生变化")
+        photo_ids = [row[0] for row in db.execute("SELECT id FROM photos WHERE project_id=?", (project_id,)).fetchall()]
+        version_ids = [row[0] for row in db.execute(
+            f"SELECT id FROM versions WHERE photo_id IN ({','.join('?' for _ in photo_ids) or 'NULL'})", photo_ids
+        ).fetchall()]
+        batch_ids = [row[0] for row in db.execute("SELECT id FROM version_batches WHERE project_id=?", (project_id,)).fetchall()]
+        session_ids = [row[0] for row in db.execute("SELECT id FROM tracking_sessions WHERE project_id=?", (project_id,)).fetchall()]
+        snapshot_ids = [row[0] for row in db.execute("SELECT snapshot_id FROM media_incremental_snapshots WHERE project_id=?", (project_id,)).fetchall()]
+        _delete_where_ids(db, "tracking_session_items", "session_id", session_ids)
+        db.execute("DELETE FROM tracking_sessions WHERE project_id=?", (project_id,))
+        for table in ("batch_file_operations", "batch_items"):
+            _delete_where_ids(db, table, "batch_id", batch_ids)
+        _delete_where_ids(db, "version_compare_history", "photo_id", photo_ids)
+        _delete_where_ids(db, "file_records", "owner_id", version_ids)
+        _delete_where_ids(db, "versions", "photo_id", photo_ids)
+        _delete_where_ids(db, "photos", "id", photo_ids)
+
+        for table in ("media_incremental_snapshot_files", "media_incremental_snapshot_scopes",
+                      "media_incremental_snapshot_baseline", "media_incremental_snapshot_batches"):
+            _delete_where_ids(db, table, "snapshot_id", snapshot_ids)
+        db.execute("DELETE FROM media_incremental_snapshots WHERE project_id=?", (project_id,))
+
+        for table in ("progress_folder_relocations", "progress_external_link_renames",
+                      "media_import_artifact_slots", "version_graph_edges",
+                      "legacy_selection_relation_repairs", "version_tree_node_positions",
+                      "version_tree_layouts", "media_import_graph_sessions"):
+            db.execute(f'DELETE FROM "{table}" WHERE project_id=?', (project_id,))
+        db.execute("DELETE FROM progress_folders WHERE project_id=?", (project_id,))
+        db.execute("DELETE FROM version_batches WHERE project_id=?", (project_id,))
+
+        run_compatibility_hooks("purge_project_rows", db, project_id)
+        db.execute("DELETE FROM project_properties WHERE project_id=?", (project_id,))
+        db.execute("DELETE FROM project_tags WHERE project_id=?", (project_id,))
+        removed = db.execute(f"DELETE FROM projects WHERE id=? AND {expected}", (project_id,)).rowcount
+        if removed != 1:
+            raise RuntimeError("项目目录记录在清理期间发生变化")
+
+        # Catalog and undo are the recovery anchors; delete them only after all
+        # owned domain rows and compatibility stores have succeeded.
+        removed_undo_ids = result.get("removedUndoIds") or []
+        if removed_undo_ids:
+            if "undoRecords" in payload:
+                pending = []
+                current_outbox = _meta_value(db, "operations_outbox_v1")
+                if current_outbox:
+                    try:
+                        pending = [str(value) for value in json.loads(current_outbox).get("removeUndoIds") or []]
+                    except (TypeError, ValueError, json.JSONDecodeError) as error:
+                        raise RuntimeError("operations outbox is malformed") from error
+                _set_meta(db, "operations_outbox_v1", json.dumps({
+                    "removeUndoIds": list(dict.fromkeys((*pending, *removed_undo_ids))),
+                    "updatedAt": int(time.time() * 1000),
+                }, sort_keys=True))
+            else:
+                _delete_where_ids(db, "undo_records", "id", removed_undo_ids)
+        for schema in (row[1] for row in db.execute("PRAGMA database_list").fetchall()):
+            violations = db.execute(f'PRAGMA "{schema}".foreign_key_check').fetchall()
+            if violations:
+                raise RuntimeError(f"{schema} foreign key check failed after project purge: {violations[:10]}")
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+
+
 def purge_deleted_project(db, payload: dict):
     result = deleted_project_cleanup_plan(db, payload)
-    project_id = str(payload.get("projectId") or "")
-    removed_undo_ids = result["removedUndoIds"]
-    if removed_undo_ids and "undoRecords" not in payload:
-        placeholders = ",".join("?" for _ in removed_undo_ids)
-        db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", removed_undo_ids)
-
-    db.commit()
-    db.execute("PRAGMA foreign_keys=OFF")
-    db.execute("DELETE FROM project_properties WHERE project_id=?", (project_id,))
-    db.execute("DELETE FROM project_tags WHERE project_id=?", (project_id,))
-    db.commit()
-    db.execute("PRAGMA foreign_keys=OFF")
-    db.execute("DELETE FROM project_properties WHERE project_id=?", (project_id,))
-    db.execute("DELETE FROM project_tags WHERE project_id=?", (project_id,))
-    db.execute("DELETE FROM projects WHERE id=? AND is_deleted=1", (project_id,))
-    db.commit()
-    db.execute("PRAGMA foreign_keys=ON")
-    db.execute("PRAGMA foreign_keys=ON")
+    project = db.execute("SELECT * FROM projects WHERE id=? AND is_deleted=1", (str(payload.get("projectId") or ""),)).fetchone()
+    if project is None:
+        raise ValueError("已删除项目记录不存在")
+    _purge_project_rows_transaction(db, project, result, payload, deleted=True)
     return result
 
 
@@ -9569,22 +9638,7 @@ def purge_missing_project(root: str, db, payload: dict):
     if os.path.exists(project_path):
         raise ValueError("项目文件夹仍然存在，不能只移除软件记录")
     result = project_cleanup_plan(db, project, payload)
-    removed_undo_ids = result["removedUndoIds"]
-    if removed_undo_ids and "undoRecords" not in payload:
-        placeholders = ",".join("?" for _ in removed_undo_ids)
-        db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", removed_undo_ids)
-    db.commit()
-    db.execute("PRAGMA foreign_keys=OFF")
-    db.execute("DELETE FROM project_properties WHERE project_id=?", (project["id"],))
-    db.execute("DELETE FROM project_tags WHERE project_id=?", (project["id"],))
-    db.commit()
-    db.execute("PRAGMA foreign_keys=OFF")
-    db.execute("DELETE FROM project_properties WHERE project_id=?", (project["id"],))
-    db.execute("DELETE FROM project_tags WHERE project_id=?", (project["id"],))
-    db.execute("DELETE FROM projects WHERE id=? AND is_deleted=0 AND availability='missing'", (project["id"],))
-    db.commit()
-    db.execute("PRAGMA foreign_keys=ON")
-    db.execute("PRAGMA foreign_keys=ON")
+    _purge_project_rows_transaction(db, project, result, payload, deleted=False)
     return result
 
 

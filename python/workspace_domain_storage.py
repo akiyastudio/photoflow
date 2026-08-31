@@ -8,9 +8,9 @@ from __future__ import annotations
 
 import os
 import re
-import shutil
 import sqlite3
 import time
+import uuid
 
 
 SCHEMA_VERSION = 1
@@ -39,48 +39,65 @@ def database_path_for_workspace_database(workspace_database: str, domain: str) -
     return os.path.join(os.path.dirname(absolute), workspace_key, "databases", f"{domain}.sqlite3")
 
 
-def _connect_domain(path: str) -> sqlite3.Connection:
+def _connect_domain(path: str, domain: str) -> sqlite3.Connection:
     os.makedirs(os.path.dirname(path), exist_ok=True)
     db = sqlite3.connect(path, timeout=30)
     try:
         db.execute("PRAGMA busy_timeout=30000")
         if str(db.execute("PRAGMA journal_mode").fetchone()[0]).casefold() != "wal":
             db.execute("PRAGMA journal_mode=WAL")
+        db.execute("BEGIN IMMEDIATE")
+        existing_tables = {
+            row[0] for row in db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()
+        }
         db.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-        db.execute(
-            "INSERT INTO meta(key,value) VALUES('schema_version',?) "
-            "ON CONFLICT(key) DO UPDATE SET value=excluded.value",
-            (str(SCHEMA_VERSION),),
-        )
+        schema = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        schema_version = int(schema[0]) if schema else 0
+        if schema_version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"{domain} database schema {schema_version} is newer than supported {SCHEMA_VERSION}"
+            )
+        identity = db.execute("SELECT value FROM meta WHERE key='domain_identity'").fetchone()
+        if identity is not None and identity[0] != domain:
+            raise RuntimeError(f"domain identity mismatch: expected {domain}, found {identity[0]}")
+        conflicting = set().union(*(
+            set(tables) for name, tables in DOMAIN_TABLES.items() if name != domain
+        )) & existing_tables
+        if identity is None and conflicting:
+            raise RuntimeError(f"cannot infer {domain} identity; conflicting tables: {sorted(conflicting)}")
+        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
+        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('domain_identity',?)", (domain,))
         db.commit()
         return db
     except Exception:
+        db.rollback()
         db.close()
         raise
 
 
-def _strip_cross_store_references(sql: str) -> str:
-    sql = re.sub(
-        r",?\s*FOREIGN\s+KEY\s*\([^)]*\)\s+REFERENCES\s+(?:[`\"\[]?[A-Za-z_][A-Za-z0-9_]*[`\"\]]?)\s*\([^)]*\)"
+def _strip_cross_store_references(sql: str, domain: str) -> str:
+    owned = set(DOMAIN_TABLES[domain])
+    table_constraint = re.compile(
+        r",?\s*FOREIGN\s+KEY\s*\([^)]*\)\s+REFERENCES\s+([`\"\[]?)([A-Za-z_][A-Za-z0-9_]*)[`\"\]]?\s*\([^)]*\)"
         r"(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|RESTRICT|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION))*",
-        "",
-        sql,
-        flags=re.IGNORECASE,
+        re.IGNORECASE,
     )
-    return re.sub(
-        r"\s+REFERENCES\s+(?:[`\"\[]?[A-Za-z_][A-Za-z0-9_]*[`\"\]]?)\s*\([^)]*\)"
+    inline = re.compile(
+        r"\s+REFERENCES\s+([`\"\[]?)([A-Za-z_][A-Za-z0-9_]*)[`\"\]]?\s*\([^)]*\)"
         r"(?:\s+ON\s+(?:DELETE|UPDATE)\s+(?:CASCADE|RESTRICT|SET\s+NULL|SET\s+DEFAULT|NO\s+ACTION))*",
-        "",
-        sql,
-        flags=re.IGNORECASE,
+        re.IGNORECASE,
     )
+    sql = table_constraint.sub(lambda match: match.group(0) if match.group(2) in owned else "", sql)
+    return inline.sub(lambda match: match.group(0) if match.group(2) in owned else "", sql)
 
 
-def _domain_create_table_sql(sql: str, alias: str, table: str) -> str:
+def _domain_create_table_sql(sql: str, alias: str, table: str, domain: str) -> str:
     rewritten = re.sub(
         r"^\s*CREATE\s+TABLE(?:\s+IF\s+NOT\s+EXISTS)?\s+(?:[`\"\[]?[A-Za-z_][A-Za-z0-9_]*[`\"\]]?)",
         f'CREATE TABLE IF NOT EXISTS {alias}."{table}"',
-        _strip_cross_store_references(sql),
+        _strip_cross_store_references(sql, domain),
         count=1,
         flags=re.IGNORECASE,
     )
@@ -105,7 +122,7 @@ def _copy_legacy_table(workspace_db: sqlite3.Connection, alias: str, table: str)
     ).fetchone()
     if schema is None or not schema[0]:
         return
-    create_sql = _domain_create_table_sql(schema[0], alias, table)
+    create_sql = _domain_create_table_sql(schema[0], alias, table, alias)
     try:
         workspace_db.execute(create_sql)
     except sqlite3.Error as error:
@@ -115,13 +132,32 @@ def _copy_legacy_table(workspace_db: sqlite3.Connection, alias: str, table: str)
     columns = [column for column in source_columns if column in target_columns]
     if columns:
         projection = ",".join(f'"{column}"' for column in columns)
-        workspace_db.execute(
-            f'INSERT OR IGNORE INTO {alias}."{table}"({projection}) SELECT {projection} FROM main."{table}"'
-        )
-        source_count = workspace_db.execute(f'SELECT COUNT(*) FROM main."{table}"').fetchone()[0]
+        primary_key = [row[1] for row in sorted(
+            workspace_db.execute(f'PRAGMA main.table_info("{table}")').fetchall(), key=lambda row: row[5]
+        ) if row[5]]
         target_count = workspace_db.execute(f'SELECT COUNT(*) FROM {alias}."{table}"').fetchone()[0]
-        if target_count < source_count:
-            raise RuntimeError(f"{alias}.{table} extraction lost rows: {source_count}->{target_count}")
+        if target_count and not primary_key:
+            raise RuntimeError(f"{alias}.{table} cannot merge existing rows without a primary key")
+        if primary_key:
+            identity = " AND ".join(f't."{column}" IS s."{column}"' for column in primary_key)
+            equality = " AND ".join(f't."{column}" IS s."{column}"' for column in columns)
+            conflicts = workspace_db.execute(
+                f'SELECT COUNT(*) FROM main."{table}" s JOIN {alias}."{table}" t ON {identity} WHERE NOT ({equality})'
+            ).fetchone()[0]
+            if conflicts:
+                raise RuntimeError(f"{alias}.{table} extraction has {conflicts} conflicting primary keys")
+            workspace_db.execute(
+                f'INSERT INTO {alias}."{table}"({projection}) SELECT {projection} FROM main."{table}" s '
+                f'WHERE NOT EXISTS(SELECT 1 FROM {alias}."{table}" t WHERE {identity})'
+            )
+        else:
+            workspace_db.execute(f'INSERT INTO {alias}."{table}"({projection}) SELECT {projection} FROM main."{table}"')
+        missing = workspace_db.execute(
+            f'SELECT COUNT(*) FROM main."{table}" s WHERE NOT EXISTS('
+            f'SELECT 1 FROM {alias}."{table}" t WHERE {" AND ".join(f"t.\"{column}\" IS s.\"{column}\"" for column in columns)})'
+        ).fetchone()[0]
+        if missing:
+            raise RuntimeError(f"{alias}.{table} extraction lost {missing} rows")
     indexes = workspace_db.execute(
         "SELECT sql FROM main.sqlite_master WHERE type='index' AND tbl_name=? AND sql IS NOT NULL", (table,)
     ).fetchall()
@@ -133,7 +169,18 @@ def _backup_before_extraction(workspace_database: str) -> str:
     stamp = time.strftime("%Y%m%d-%H%M%S")
     destination = f"{workspace_database}.before-domain-extraction.{stamp}.bak"
     if not os.path.exists(destination):
-        shutil.copy2(workspace_database, destination)
+        source = sqlite3.connect(f"file:{workspace_database}?mode=ro", uri=True, timeout=30)
+        staged = f"{destination}.{uuid.uuid4().hex}.tmp"
+        target = sqlite3.connect(staged, timeout=30)
+        try:
+            source.backup(target)
+            target.commit()
+            if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+                raise RuntimeError("pre-extraction backup integrity check failed")
+        finally:
+            target.close()
+            source.close()
+        os.replace(staged, destination)
     return destination
 
 
@@ -162,7 +209,7 @@ def attach_and_migrate(
     prepared = tuple(DOMAIN_TABLES) if owned_legacy else requested
     paths = {domain: database_path_for_workspace_database(workspace_database, domain) for domain in prepared}
     for domain, domain_path in paths.items():
-        probe = _connect_domain(domain_path)
+        probe = _connect_domain(domain_path, domain)
         try:
             check = probe.execute("PRAGMA quick_check").fetchone()[0]
             if check != "ok":
@@ -176,12 +223,13 @@ def attach_and_migrate(
             workspace_db.execute(f"PRAGMA {domain}.busy_timeout=30000")
 
     if owned_legacy:
-        with workspace_db:
+        backup_path = _backup_before_extraction(os.path.abspath(workspace_database))
+        workspace_db.commit()
+        workspace_db.execute("PRAGMA foreign_keys=OFF")
+        workspace_db.execute("BEGIN IMMEDIATE")
+        try:
             for domain, table in owned_legacy:
                 _copy_legacy_table(workspace_db, domain, table)
-        backup_path = _backup_before_extraction(os.path.abspath(workspace_database))
-        workspace_db.execute("PRAGMA foreign_keys=OFF")
-        with workspace_db:
             for _domain, table in reversed(owned_legacy):
                 workspace_db.execute(f'DROP TABLE IF EXISTS main."{table}"')
             workspace_db.execute(
@@ -192,7 +240,12 @@ def attach_and_migrate(
                 "INSERT OR REPLACE INTO main.meta(key,value) VALUES('domain_storage_backup',?)",
                 (backup_path,),
             )
-        workspace_db.execute("PRAGMA foreign_keys=ON")
+            workspace_db.commit()
+        except Exception:
+            workspace_db.rollback()
+            raise
+        finally:
+            workspace_db.execute("PRAGMA foreign_keys=ON")
     return paths
 
 
