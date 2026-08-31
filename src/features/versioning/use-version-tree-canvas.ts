@@ -444,7 +444,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         const activeDrag = nodeDragRef.current;
         savedPositions.forEach((position, id) => {
           persistedMutationByNodeRef.current.set(id, localMutationAtEnqueue);
-          if (!activeDrag?.ids.includes(id)) return;
+          if (!activeDrag?.ids.includes(id) || activeDrag.beforeMutationMarkers.get(id) !== localMutationAtEnqueue) return;
           // A save can finish after pointerdown. Advance only the gesture's
           // cancellation baseline; its currently displayed drag position must
           // remain untouched until the pointer gesture finishes.
@@ -462,6 +462,13 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         const persistedMutation = persistedMutationBeforeCommand.get(id);
         if (persistedMutation === undefined) localMutationByNodeRef.current.delete(id);
         else localMutationByNodeRef.current.set(id, persistedMutation);
+      });
+      const activeDrag = nodeDragRef.current;
+      savedPositions.forEach((_position, id) => {
+        if (!activeDrag?.ids.includes(id) || activeDrag.beforeMutationMarkers.get(id) !== localMutationAtEnqueue) return;
+        const previous = failureBaseline.get(id);
+        if (previous) activeDrag.before.set(id, previous);
+        activeDrag.beforeMutationMarkers.set(id, persistedMutationBeforeCommand.get(id));
       });
       applyPositions(alignVersionTreeHistoryPositions({
         nodes: nodesRef.current,

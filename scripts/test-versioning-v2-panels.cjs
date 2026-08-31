@@ -1322,6 +1322,93 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.deepStrictEqual({ left: activeRestoreReloadedNode.style.left, top: activeRestoreReloadedNode.style.top }, activeRestoreBeforeFinalGraphChange, 'active-gesture restoration must match a reload from the server layout');
   await React.act(async () => activeRestoreReloadRoot.unmount());
 
+  const failedActiveContainer = new TestNode(1, 'DIV', testDocument);
+  const failedActiveRoot = createRoot(failedActiveContainer);
+  let failedActiveController = null;
+  const failedActiveProps = { ...treeProps, projectName: 'Failed Active Restore Probe', pendingChildId: undefined, onCanvasControllerChange: controller => { failedActiveController = controller; } };
+  await React.act(async () => {
+    failedActiveRoot.render(React.createElement(tree.ProjectVersionTree, failedActiveProps));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  let failedActiveNode = allNodes(failedActiveContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  const ordinaryFailureBaseline = layoutRequests.positions.find(position => position.nodeKey === 'progress:free');
+  const savesBeforeOrdinaryActiveFailure = layoutRequests.saves.length;
+  layoutRequests.holdSaves = true;
+  layoutRequests.failAtSave = savesBeforeOrdinaryActiveFailure + 1;
+  await React.act(async () => {
+    dispatch(failedActiveNode, 'pointerdown', { pointerId: 71, button: 0, clientX: 100, clientY: 100 });
+    dispatch(failedActiveNode, 'pointermove', { pointerId: 71, button: 0, clientX: 220, clientY: 180 });
+    dispatch(failedActiveNode, 'pointerup', { pointerId: 71, button: 0, clientX: 220, clientY: 180 });
+    await Promise.resolve(); await Promise.resolve();
+    dispatch(failedActiveNode, 'pointerdown', { pointerId: 72, button: 0, clientX: 220, clientY: 180 });
+    dispatch(failedActiveNode, 'pointermove', { pointerId: 72, button: 0, clientX: 360, clientY: 300 });
+    await Promise.resolve();
+  });
+  const displayedSecondDrag = { left: failedActiveNode.style.left, top: failedActiveNode.style.top };
+  await React.act(async () => {
+    layoutRequests.holdSaves = false;
+    layoutRequests.saveReleases.splice(0).forEach(release => release());
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+  });
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeOrdinaryActiveFailure + 1, 'ordinary failed A1 must not save the still-active A2 gesture');
+  assert.deepStrictEqual({ left: failedActiveNode.style.left, top: failedActiveNode.style.top }, displayedSecondDrag, 'ordinary A1 failure must not overwrite the coordinate displayed by moved A2');
+  await React.act(async () => {
+    dispatch(failedActiveNode, 'pointercancel', { pointerId: 72, button: 0, clientX: 360, clientY: 300 });
+    await Promise.resolve();
+  });
+  assert.strictEqual(parseFloat(failedActiveNode.style.left), ordinaryFailureBaseline.x + 32, 'A2 pointercancel must restore the authoritative server X after ordinary A1 failure');
+  assert.strictEqual(parseFloat(failedActiveNode.style.top), ordinaryFailureBaseline.y + 32, 'A2 pointercancel must restore the authoritative server Y after ordinary A1 failure');
+  const failedActiveRelinkedFolders = treeProps.progressFolders.map(folder => folder.id === 'free' ? { ...folder, parentProgressId: 'tracked', updatedAt: folder.updatedAt + 30 } : folder);
+  await React.act(async () => {
+    failedActiveRoot.render(React.createElement(tree.ProjectVersionTree, { ...failedActiveProps, progressFolders: failedActiveRelinkedFolders }));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  failedActiveNode = allNodes(failedActiveContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  assert.strictEqual(parseFloat(failedActiveNode.style.left), ordinaryFailureBaseline.x + 32, 'ordinary failure cancellation baseline must remain manual across a graph change');
+
+  const savesBeforeStaleActiveFailure = layoutRequests.saves.length;
+  const staleActiveRemote = { nodeKey: 'progress:free', x: ordinaryFailureBaseline.x + 520, y: ordinaryFailureBaseline.y + 420 };
+  layoutRequests.holdSaves = true;
+  layoutRequests.staleNextSave = true;
+  layoutRequests.staleMutation = staleActiveRemote;
+  layoutRequests.failAtSave = savesBeforeStaleActiveFailure + 2;
+  await React.act(async () => {
+    dispatch(failedActiveNode, 'pointerdown', { pointerId: 73, button: 0, clientX: 100, clientY: 100 });
+    dispatch(failedActiveNode, 'pointermove', { pointerId: 73, button: 0, clientX: 220, clientY: 180 });
+    dispatch(failedActiveNode, 'pointerup', { pointerId: 73, button: 0, clientX: 220, clientY: 180 });
+    await Promise.resolve(); await Promise.resolve();
+    dispatch(failedActiveNode, 'pointerdown', { pointerId: 74, button: 0, clientX: 220, clientY: 180 });
+    layoutRequests.holdSaves = false;
+    layoutRequests.saveReleases.splice(0).forEach(release => release());
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+  });
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeStaleActiveFailure + 2, 'stale A1 followed by failed retry must leave no A2 save before pointerup');
+  assert.strictEqual(parseFloat(failedActiveNode.style.left), staleActiveRemote.x + 32, 'stale retry failure must immediately show the fetched remote baseline for an unmoved A2');
+  await React.act(async () => {
+    dispatch(failedActiveNode, 'pointerup', { pointerId: 74, button: 0, clientX: 220, clientY: 180 });
+    await Promise.resolve();
+  });
+  assert.strictEqual(parseFloat(failedActiveNode.style.left), staleActiveRemote.x + 32, 'unmoved A2 pointerup must not resurrect A1 optimistic coordinates after stale retry failure');
+  const failedActiveBeforeReload = { left: failedActiveNode.style.left, top: failedActiveNode.style.top };
+  await React.act(async () => {
+    failedActiveRoot.render(React.createElement(tree.ProjectVersionTree, failedActiveProps));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  failedActiveNode = allNodes(failedActiveContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  assert.deepStrictEqual({ left: failedActiveNode.style.left, top: failedActiveNode.style.top }, failedActiveBeforeReload, 'stale retry failure baseline must remain manual across a graph change');
+  await React.act(async () => failedActiveRoot.unmount());
+  const failedActiveReloadContainer = new TestNode(1, 'DIV', testDocument);
+  const failedActiveReloadRoot = createRoot(failedActiveReloadContainer);
+  await React.act(async () => {
+    failedActiveReloadRoot.render(React.createElement(tree.ProjectVersionTree, failedActiveProps));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const failedActiveReloadedNode = allNodes(failedActiveReloadContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  assert.deepStrictEqual({ left: failedActiveReloadedNode.style.left, top: failedActiveReloadedNode.style.top }, failedActiveBeforeReload, 'ordinary and stale active-failure restoration must match a server reload');
+  await React.act(async () => failedActiveReloadRoot.unmount());
+
   const manualQueueContainer = new TestNode(1, 'DIV', testDocument);
   const manualQueueRoot = createRoot(manualQueueContainer);
   let manualQueueController = null;
