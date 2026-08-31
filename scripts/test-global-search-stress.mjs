@@ -37,15 +37,42 @@ const loadedModule = { exports: {} };
 vm.runInThisContext(`(function(require, module, exports) { ${compiled}\n})`, { filename: sourcePath })(mockRequire, loadedModule, loadedModule.exports);
 const {
   GLOBAL_SEARCH_RESULT_PAGE_SIZE,
+  GLOBAL_SEARCH_MAX_MOUNTED_RESULTS,
   IndexedDbSearchStore,
   MemoryBoundedSearchStore,
+  calculateGlobalSearchVirtualWindow,
   cancelGlobalSearchCursors,
+  createRafSearchScrollScheduler,
   createTrailingSearchRefreshScheduler,
-  rescanGlobalSearchPage,
+  rescanGlobalSearchWindow,
   streamGlobalSearchSource,
 } = loadedModule.exports;
 
 assert.equal(GLOBAL_SEARCH_RESULT_PAGE_SIZE, 200);
+assert.equal(GLOBAL_SEARCH_MAX_MOUNTED_RESULTS, 400);
+
+const virtualAtTop = calculateGlobalSearchVirtualWindow({ totalCount: 100_000, scrollTop: 0, viewportHeight: 800, containerWidth: 1_100 });
+const virtualAtMiddle = calculateGlobalSearchVirtualWindow({ totalCount: 100_000, scrollTop: virtualAtTop.totalHeight / 2, viewportHeight: 800, containerWidth: 1_100 });
+const virtualAtEnd = calculateGlobalSearchVirtualWindow({ totalCount: 100_000, scrollTop: virtualAtTop.totalHeight - 800, viewportHeight: 800, containerWidth: 1_100 });
+const virtualBackAtTop = calculateGlobalSearchVirtualWindow({ totalCount: 100_000, scrollTop: 0, viewportHeight: 800, containerWidth: 1_100 });
+for (const windowModel of [virtualAtTop, virtualAtMiddle, virtualAtEnd, virtualBackAtTop]) {
+  assert.ok(windowModel.end - windowModel.start <= GLOBAL_SEARCH_MAX_MOUNTED_RESULTS, 'resident/DOM result count must remain fixed');
+  const renderedRows = Math.ceil((windowModel.end - windowModel.start) / windowModel.columns);
+  assert.ok(Math.abs(windowModel.topSpacer + renderedRows * windowModel.rowHeight + windowModel.bottomSpacer - windowModel.totalHeight) < 0.001, 'spacers and mounted rows must preserve total scroll height');
+}
+assert.equal(virtualAtTop.start, 0);
+assert.ok(virtualAtMiddle.start > 40_000 && virtualAtMiddle.end < 60_000, 'middle scroll must address the middle result window');
+assert.equal(virtualAtEnd.end, 100_000);
+assert.ok(Math.ceil((virtualAtEnd.end - virtualAtEnd.start) / virtualAtEnd.columns) >= Math.ceil(800 / virtualAtEnd.rowHeight), 'the end window must remain filled with at least the visible rows');
+assert.equal(virtualBackAtTop.start, 0, 'scrolling upward must revisit the first window');
+
+const rafCallbacks = [];
+const rafValues = [];
+const rafScheduler = createRafSearchScrollScheduler(value => rafValues.push(value), callback => { rafCallbacks.push(callback); return rafCallbacks.length; }, () => undefined);
+for (let scrollTop = 0; scrollTop < 10_000; scrollTop += 10) rafScheduler.push(scrollTop);
+assert.equal(rafCallbacks.length, 1, 'many scroll events in one frame must schedule one virtual-window update');
+rafCallbacks[0]();
+assert.deepEqual(rafValues, [9_990]);
 
 const scheduledRefreshes = [];
 const appliedRefreshes = [];
@@ -87,10 +114,10 @@ class SyntheticDiskPageStore {
     return { storedCount: this.totalCount, totalCount: this.totalCount, groupCount: 100, truncated: false };
   }
 
-  async readPage(pageIndex, pageSize) {
-    const count = Math.min(pageSize, Math.max(0, this.totalCount - pageIndex * pageSize));
+  async readWindow(start, limit) {
+    const count = Math.min(limit, Math.max(0, this.totalCount - start));
     const buffer = Buffer.alloc(count * 4);
-    fs.readSync(this.handle, buffer, 0, buffer.length, pageIndex * pageSize * 4);
+    fs.readSync(this.handle, buffer, 0, buffer.length, start * 4);
     const entries = Array.from({ length: count }, (_, offset) => {
       const index = buffer.readUInt32LE(offset * 4);
       return makeEntry(index);
@@ -149,19 +176,28 @@ try {
   let firstName = '';
   let middleName = '';
   let lastName = '';
-  for (let pageIndex = 0; pageIndex < 500; pageIndex += 1) {
-    const groups = await store.readPage(pageIndex, GLOBAL_SEARCH_RESULT_PAGE_SIZE);
+  for (let windowStart = 0; windowStart < 100_000; windowStart += GLOBAL_SEARCH_RESULT_PAGE_SIZE) {
+    const groups = await store.readWindow(windowStart, GLOBAL_SEARCH_RESULT_PAGE_SIZE);
     const entries = groups.flatMap(group => group.entries);
     traversed += entries.length;
-    if (pageIndex === 0) firstName = entries[0].name;
-    if (pageIndex === 250) middleName = entries[0].name;
-    if (pageIndex === 499) lastName = entries.at(-1).name;
+    if (windowStart === 0) firstName = entries[0].name;
+    if (windowStart === 50_000) middleName = entries[0].name;
+    if (windowStart === 99_800) lastName = entries.at(-1).name;
   }
   assert.equal(traversed, 100_000, 'previous/next paging must be able to traverse the complete result set');
   assert.equal(firstName, 'file000000.txt');
   assert.equal(middleName, 'file050000.txt');
   assert.equal(lastName, 'file099999.txt');
   assert.ok(store.maxResidentPage <= GLOBAL_SEARCH_RESULT_PAGE_SIZE, 'the resident/render model must remain one fixed-size page');
+  const topEntries = (await store.readWindow(virtualAtTop.start, virtualAtTop.end - virtualAtTop.start)).flatMap(group => group.entries);
+  const middleEntries = (await store.readWindow(virtualAtMiddle.start, virtualAtMiddle.end - virtualAtMiddle.start)).flatMap(group => group.entries);
+  const endEntries = (await store.readWindow(virtualAtEnd.start, virtualAtEnd.end - virtualAtEnd.start)).flatMap(group => group.entries);
+  const backEntries = (await store.readWindow(virtualBackAtTop.start, virtualBackAtTop.end - virtualBackAtTop.start)).flatMap(group => group.entries);
+  assert.equal(topEntries[0].name, 'file000000.txt');
+  assert.equal(middleEntries[0].name, makeEntry(virtualAtMiddle.start).name);
+  assert.equal(endEntries.at(-1).name, 'file099999.txt');
+  assert.equal(backEntries[0].name, 'file000000.txt');
+  assert.ok(Math.max(topEntries.length, middleEntries.length, endEntries.length, backEntries.length) <= GLOBAL_SEARCH_MAX_MOUNTED_RESULTS, 'continuous scroll reads must keep the resident window bounded');
   await store.dispose();
 
   const fallbackStore = new MemoryBoundedSearchStore();
@@ -171,14 +207,14 @@ try {
   const fallbackFetcher = async (...args) => { fallbackFetchCount += 1; return fallbackBaseFetcher(...args); };
   await streamGlobalSearchSource({ source: testSource, query: 'file', isCurrent: () => true, activeCursors: fallbackCursors, store: fallbackStore, fetchPage: fallbackFetcher, cancelCursor: async () => undefined });
   assert.ok(fallbackStore.rows.length <= 400, 'fallback metadata must remain fixed even after 100k results');
-  fallbackStore.setPageLoader((pageIndex, pageSize, isLoadCurrent) => rescanGlobalSearchPage({
-    sources: [testSource], query: 'file', pageIndex, pageSize, isCurrent: isLoadCurrent, activeCursors: fallbackCursors, fetchPage: fallbackFetcher, cancelCursor: async () => undefined,
+  fallbackStore.setWindowLoader((start, limit, isLoadCurrent) => rescanGlobalSearchWindow({
+    sources: [testSource], query: 'file', start, limit, isCurrent: isLoadCurrent, activeCursors: fallbackCursors, fetchPage: fallbackFetcher, cancelCursor: async () => undefined,
   }));
-  const fallbackFirst = (await fallbackStore.readPage(0, 200)).flatMap(group => group.entries);
+  const fallbackFirst = (await fallbackStore.readWindow(0, 200)).flatMap(group => group.entries);
   const beforeMiddle = fallbackFetchCount;
-  const fallbackMiddle = (await fallbackStore.readPage(250, 200)).flatMap(group => group.entries);
+  const fallbackMiddle = (await fallbackStore.readWindow(50_000, 200)).flatMap(group => group.entries);
   const middleFetches = fallbackFetchCount - beforeMiddle;
-  const fallbackLast = (await fallbackStore.readPage(499, 200)).flatMap(group => group.entries);
+  const fallbackLast = (await fallbackStore.readWindow(99_800, 200)).flatMap(group => group.entries);
   assert.equal(fallbackFirst[0].name, 'file000000.txt');
   assert.equal(fallbackMiddle[0].name, 'file050000.txt');
   assert.equal(fallbackLast.at(-1).name, 'file099999.txt');
@@ -236,7 +272,7 @@ try {
   };
   globalThis.IDBKeyRange = { only: value => value };
   const indexedStore = new IndexedDbSearchStore(fakeDatabase, 'fake');
-  const indexedGroups = await indexedStore.readPage(0, 200);
+  const indexedGroups = await indexedStore.readWindow(0, 200);
   assert.equal(transactionCalls, 2, 'group counts must use a fresh transaction after cursor paging commits');
   assert.equal(indexedGroups[0].totalCount, 2);
 
@@ -277,7 +313,7 @@ try {
   const appendCancelled = [];
   const hangingStore = {
     append: async () => { appendStarted = true; await appendGate; return { storedCount: 1, totalCount: 1, groupCount: 1, truncated: false }; },
-    readPage: async () => [],
+    readWindow: async () => [],
     dispose: async () => undefined,
   };
   const appendScan = streamGlobalSearchSource({

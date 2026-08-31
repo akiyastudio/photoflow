@@ -1,5 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ExternalLink, File, FileImage, FileVideo, Folder, Loader2, Search, X } from 'lucide-react';
+import { File, FileImage, FileVideo, Folder, Loader2, Search, X } from 'lucide-react';
 import type { AppConfig, ProjectFileEntry, WorkspaceProject } from '../../types';
 import { normalizeWorkspacePaths } from '../../types';
 import { projectWorkspaceClient } from '../../platform/project-workspace-client';
@@ -10,6 +10,7 @@ const SEARCH_PAGE_SIZE = 200;
 const SEARCH_CONCURRENCY = 4;
 export const GLOBAL_SEARCH_RESULT_PAGE_SIZE = 200;
 export const GLOBAL_SEARCH_MEMORY_FALLBACK_LIMIT = GLOBAL_SEARCH_RESULT_PAGE_SIZE * 2;
+export const GLOBAL_SEARCH_MAX_MOUNTED_RESULTS = 400;
 const SEARCH_DATABASE_PREFIX = 'photoflow-global-search-tmp-';
 
 export type GlobalSearchSource = {
@@ -29,7 +30,7 @@ class SearchStorageError extends Error {}
 
 export type GlobalSearchResultStore = {
   append: (source: GlobalSearchSource, entries: ProjectFileEntry[]) => Promise<SearchStoreSnapshot>;
-  readPage: (pageIndex: number, pageSize: number) => Promise<SearchGroup[]>;
+  readWindow: (start: number, limit: number) => Promise<SearchGroup[]>;
   dispose: () => Promise<void>;
 };
 
@@ -83,6 +84,65 @@ export const createTrailingSearchRefreshScheduler = <T,>(
   };
 };
 
+// eslint-disable-next-line react-refresh/only-export-components
+export const calculateGlobalSearchVirtualWindow = ({ totalCount, scrollTop, viewportHeight, containerWidth }: {
+  totalCount: number;
+  scrollTop: number;
+  viewportHeight: number;
+  containerWidth: number;
+}) => {
+  const gap = 12;
+  const columns = Math.max(1, Math.floor((Math.max(144, containerWidth) + gap) / (144 + gap)));
+  const columnWidth = Math.max(1, (Math.max(144, containerWidth) - gap * (columns - 1)) / columns);
+  const rowHeight = columnWidth + 65;
+  const totalRows = Math.ceil(totalCount / columns);
+  const firstVisibleRow = Math.max(0, Math.floor(scrollTop / rowHeight));
+  const visibleRows = Math.max(1, Math.ceil(viewportHeight / rowHeight));
+  const maximumRows = Math.max(1, Math.floor(GLOBAL_SEARCH_MAX_MOUNTED_RESULTS / columns));
+  const desiredRows = Math.min(maximumRows, visibleRows + 4);
+  const firstRow = Math.max(0, Math.min(Math.max(0, totalRows - desiredRows), firstVisibleRow - 2));
+  const endRow = Math.min(totalRows, firstRow + desiredRows);
+  const start = firstRow * columns;
+  const end = Math.min(totalCount, endRow * columns);
+  return {
+    start,
+    end,
+    columns,
+    rowHeight,
+    topSpacer: firstRow * rowHeight,
+    bottomSpacer: Math.max(0, (totalRows - endRow) * rowHeight),
+    totalHeight: totalRows * rowHeight,
+  };
+};
+
+// eslint-disable-next-line react-refresh/only-export-components
+export const createRafSearchScrollScheduler = <T,>(
+  apply: (value: T) => void,
+  request: (callback: () => void) => number = callback => window.requestAnimationFrame(callback),
+  cancel: (frame: number) => void = frame => window.cancelAnimationFrame(frame),
+) => {
+  let pending: T | undefined;
+  let frame: number | undefined;
+  const flush = () => {
+    frame = undefined;
+    if (pending === undefined) return;
+    const value = pending;
+    pending = undefined;
+    apply(value);
+  };
+  return {
+    push(value: T) {
+      pending = value;
+      if (frame === undefined) frame = request(flush);
+    },
+    clear() {
+      if (frame !== undefined) cancel(frame);
+      frame = undefined;
+      pending = undefined;
+    },
+  };
+};
+
 const normalizePathKey = (value: string) => value.trim().replace(/\\/g, '/').replace(/\/$/, '').toLocaleLowerCase();
 
 const naturalSortKey = (value: string) => value.normalize('NFKD').toLocaleLowerCase().replace(/\d+/g, digits => {
@@ -126,7 +186,7 @@ const groupPageHits = (rows: Array<StoredSearchHit & { groupTotal: number }>): S
 export class MemoryBoundedSearchStore implements GlobalSearchResultStore {
   private rows: StoredSearchHit[] = [];
   private totalCount = 0;
-  private pageLoader?: (pageIndex: number, pageSize: number, isLoadCurrent: () => boolean) => Promise<SearchGroup[]>;
+  private windowLoader?: (start: number, limit: number, isLoadCurrent: () => boolean) => Promise<SearchGroup[]>;
   private pageLoadSequence = 0;
 
   async append(source: GlobalSearchSource, entries: ProjectFileEntry[]) {
@@ -137,12 +197,12 @@ export class MemoryBoundedSearchStore implements GlobalSearchResultStore {
     return this.snapshot();
   }
 
-  async readPage(pageIndex: number, pageSize: number) {
-    if (this.pageLoader) {
+  async readWindow(start: number, limit: number) {
+    if (this.windowLoader) {
       const sequence = ++this.pageLoadSequence;
-      return this.pageLoader(pageIndex, pageSize, () => this.pageLoadSequence === sequence);
+      return this.windowLoader(start, limit, () => this.pageLoadSequence === sequence);
     }
-    const page = this.rows.slice(pageIndex * pageSize, (pageIndex + 1) * pageSize);
+    const page = this.rows.slice(start, start + limit);
     const counts = new Map<string, number>();
     for (const row of this.rows) counts.set(row.groupKey, (counts.get(row.groupKey) || 0) + 1);
     return groupPageHits(page.map(row => ({ ...row, groupTotal: counts.get(row.groupKey) || 0 })));
@@ -150,8 +210,8 @@ export class MemoryBoundedSearchStore implements GlobalSearchResultStore {
 
   async dispose() { this.pageLoadSequence += 1; this.rows = []; }
 
-  setPageLoader(loader: (pageIndex: number, pageSize: number, isLoadCurrent: () => boolean) => Promise<SearchGroup[]>) {
-    this.pageLoader = loader;
+  setWindowLoader(loader: (start: number, limit: number, isLoadCurrent: () => boolean) => Promise<SearchGroup[]>) {
+    this.windowLoader = loader;
   }
 
   private snapshot(): SearchStoreSnapshot {
@@ -213,7 +273,7 @@ export class IndexedDbSearchStore implements GlobalSearchResultStore {
     return this.snapshot();
   }
 
-  async readPage(pageIndex: number, pageSize: number) {
+  async readWindow(start: number, limit: number) {
     const transaction = this.database.transaction('hits');
     const done = transactionDone(transaction);
     const store = transaction.objectStore('hits');
@@ -221,14 +281,14 @@ export class IndexedDbSearchStore implements GlobalSearchResultStore {
     const rows = await new Promise<StoredSearchHit[]>((resolve, reject) => {
       const output: StoredSearchHit[] = [];
       const request = index.openCursor();
-      let skipped = pageIndex === 0;
+      let skipped = start === 0;
       request.onerror = () => reject(request.error || new Error('无法读取搜索结果'));
       request.onsuccess = () => {
         const cursor = request.result;
-        if (!cursor || output.length >= pageSize) return resolve(output);
+        if (!cursor || output.length >= limit) return resolve(output);
         if (!skipped) {
           skipped = true;
-          cursor.advance(pageIndex * pageSize);
+          cursor.advance(start);
           return;
         }
         output.push(cursor.value as StoredSearchHit);
@@ -433,11 +493,11 @@ export const streamGlobalSearchSource = async ({
 };
 
 // eslint-disable-next-line react-refresh/only-export-components
-export const rescanGlobalSearchPage = async ({
+export const rescanGlobalSearchWindow = async ({
   sources,
   query,
-  pageIndex,
-  pageSize,
+  start,
+  limit,
   isCurrent,
   activeCursors,
   fetchPage,
@@ -445,16 +505,15 @@ export const rescanGlobalSearchPage = async ({
 }: {
   sources: GlobalSearchSource[];
   query: string;
-  pageIndex: number;
-  pageSize: number;
+  start: number;
+  limit: number;
   isCurrent: () => boolean;
   activeCursors: Set<string>;
   fetchPage?: GlobalSearchPageFetcher;
   cancelCursor?: (cursor: string) => Promise<unknown>;
 }) => {
   const selected: StoredSearchHit[] = [];
-  const start = pageIndex * pageSize;
-  const end = start + pageSize;
+  const end = start + limit;
   let seen = 0;
   let pageComplete = false;
   const windowStore: GlobalSearchResultStore = {
@@ -469,7 +528,7 @@ export const rescanGlobalSearchPage = async ({
       }
       return { storedCount: seen, totalCount: seen, groupCount: 0, truncated: false };
     },
-    readPage: async () => [],
+    readWindow: async () => [],
     dispose: async () => { selected.length = 0; },
   };
   for (const source of sources) {
@@ -507,16 +566,18 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
   const [resultCount, setResultCount] = useState(0);
   const [storedCount, setStoredCount] = useState(0);
   const [groupCount, setGroupCount] = useState(0);
-  const [pageIndex, setPageIndex] = useState(0);
   const [storeRevision, setStoreRevision] = useState(0);
   const [degraded, setDegraded] = useState(false);
+  const [viewport, setViewport] = useState({ scrollTop: 0, height: 600, width: 1152 });
   const [error, setError] = useState('');
   const [selectedId, setSelectedId] = useState('');
   const inputRef = useRef<HTMLInputElement>(null);
+  const scrollContainerRef = useRef<HTMLDivElement>(null);
+  const resultContentRef = useRef<HTMLDivElement>(null);
   const requestSequenceRef = useRef(0);
   const activeStoreRef = useRef<GlobalSearchResultStore | null>(null);
   const activeCursorsRef = useRef(new Set<string>());
-  const pageReadSequenceRef = useRef(0);
+  const windowReadSequenceRef = useRef(0);
 
   useEffect(() => {
     const timer = window.setTimeout(() => setDebouncedQuery(query.trim()), 250);
@@ -528,6 +589,31 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
     const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 0);
     return () => window.clearTimeout(focusTimer);
   }, [active]);
+
+  useEffect(() => {
+    const scrollContainer = scrollContainerRef.current;
+    const resultContent = resultContentRef.current;
+    if (!scrollContainer || !resultContent) return;
+    const updateSize = () => setViewport(current => ({
+      ...current,
+      height: Math.max(1, scrollContainer.clientHeight),
+      width: Math.max(144, resultContent.clientWidth),
+    }));
+    const scrollScheduler = createRafSearchScrollScheduler<number>(scrollTop => {
+      setViewport(current => current.scrollTop === scrollTop ? current : { ...current, scrollTop });
+    });
+    const onScroll = () => scrollScheduler.push(scrollContainer.scrollTop);
+    const observer = new ResizeObserver(updateSize);
+    observer.observe(scrollContainer);
+    observer.observe(resultContent);
+    scrollContainer.addEventListener('scroll', onScroll, { passive: true });
+    updateSize();
+    return () => {
+      scrollScheduler.clear();
+      observer.disconnect();
+      scrollContainer.removeEventListener('scroll', onScroll);
+    };
+  }, []);
 
   useEffect(() => {
     const sequence = ++requestSequenceRef.current;
@@ -544,7 +630,8 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
     if (previousStore) void previousStore.dispose();
     void cancelGlobalSearchCursors(activeCursorsRef.current);
     setSelectedId('');
-    setPageIndex(0);
+    if (scrollContainerRef.current) scrollContainerRef.current.scrollTop = 0;
+    setViewport(current => ({ ...current, scrollTop: 0 }));
     setGroups([]);
     setResultCount(0);
     setStoredCount(0);
@@ -620,6 +707,7 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
         activeStoreRef.current = storage.store;
         setDegraded(true);
         setCompletedSources(0);
+        setSelectedId('');
         setGroups([]);
         setResultCount(0);
         setStoredCount(0);
@@ -629,11 +717,11 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
       if (!isCurrent() || activeStoreRef.current !== storage.store) return;
       refreshScheduler.flush();
       if (storage.store instanceof MemoryBoundedSearchStore) {
-        storage.store.setPageLoader((requestedPage, requestedSize, isLoadCurrent) => rescanGlobalSearchPage({
+        storage.store.setWindowLoader((requestedStart, requestedLimit, isLoadCurrent) => rescanGlobalSearchWindow({
           sources: discovery.sources,
           query: debouncedQuery,
-          pageIndex: requestedPage,
-          pageSize: requestedSize,
+          start: requestedStart,
+          limit: requestedLimit,
           isCurrent: () => isCurrent() && isLoadCurrent() && activeStoreRef.current === storage.store,
           activeCursors: activeCursorsRef.current,
         }));
@@ -641,7 +729,7 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
       }
       setDegraded(storage.degraded);
       const messages = [];
-      if (storage.degraded) messages.push('临时结果存储不可用，翻页时将重新扫描；全部结果仍可浏览');
+      if (storage.degraded) messages.push('临时结果存储不可用，滚动定位时将重新扫描；全部结果仍可浏览');
       if (failures.length) messages.push(`${failures.length} 个位置暂时无法检索，其余结果已显示`);
       setError(messages.join('；'));
     })().catch(searchError => {
@@ -659,21 +747,32 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
     };
   }, [active, config, debouncedQuery]);
 
+  const virtualWindow = useMemo(() => calculateGlobalSearchVirtualWindow({
+    totalCount: storedCount,
+    scrollTop: viewport.scrollTop,
+    viewportHeight: viewport.height,
+    containerWidth: viewport.width,
+  }), [storedCount, viewport]);
+
   useEffect(() => {
     const store = activeStoreRef.current;
-    if (!store) return;
+    const limit = virtualWindow.end - virtualWindow.start;
+    if (!store || limit <= 0) {
+      setGroups([]);
+      return;
+    }
     const sequence = requestSequenceRef.current;
-    const pageReadSequence = ++pageReadSequenceRef.current;
-    void store.readPage(pageIndex, GLOBAL_SEARCH_RESULT_PAGE_SIZE).then(pageGroups => {
-      if (requestSequenceRef.current === sequence && pageReadSequenceRef.current === pageReadSequence && activeStoreRef.current === store) setGroups(pageGroups);
-    }).catch(pageError => {
-      if (requestSequenceRef.current === sequence && pageReadSequenceRef.current === pageReadSequence) setError(pageError instanceof Error ? pageError.message : String(pageError));
+    const windowReadSequence = ++windowReadSequenceRef.current;
+    void store.readWindow(virtualWindow.start, limit).then(windowGroups => {
+      if (requestSequenceRef.current === sequence && windowReadSequenceRef.current === windowReadSequence && activeStoreRef.current === store) setGroups(windowGroups);
+    }).catch(windowError => {
+      if (requestSequenceRef.current === sequence && windowReadSequenceRef.current === windowReadSequence) setError(windowError instanceof Error ? windowError.message : String(windowError));
     });
-    return () => { pageReadSequenceRef.current += 1; };
-  }, [pageIndex, storeRevision]);
+    return () => { windowReadSequenceRef.current += 1; };
+  }, [storeRevision, virtualWindow.end, virtualWindow.start]);
 
-  const pageHitCount = useMemo(() => groups.reduce((count, group) => count + group.entries.length, 0), [groups]);
-  const pageCount = Math.max(1, Math.ceil(storedCount / GLOBAL_SEARCH_RESULT_PAGE_SIZE));
+  const windowHitCount = useMemo(() => groups.reduce((count, group) => count + group.entries.length, 0), [groups]);
+  const windowHits = useMemo(() => groups.flatMap(group => group.entries.map(entry => ({ group, entry }))), [groups]);
 
   const openEntry = async (source: GlobalSearchSource, entry: ProjectFileEntry) => {
     try {
@@ -704,38 +803,31 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
           <input ref={inputRef} value={query} onChange={event => setQuery(event.target.value)} placeholder="输入文件名关键词" aria-label="全局搜索文件" className="min-w-0 flex-1 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400"/>
           {query && <button type="button" onClick={() => setQuery('')} aria-label="清除搜索" title="清除搜索" className="rounded-md p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-700"><X size={16}/></button>}
         </div>
-        {debouncedQuery && <p role="status" aria-live="polite" className="mt-3 text-xs text-slate-500">{loading ? '已找到' : '找到'} <span className="font-bold text-slate-700">{resultCount}</span> 个文件{degraded ? '（有界重新扫描分页）' : `，分布在 ${groupCount} 个文件夹中`}</p>}
+        {debouncedQuery && <p role="status" aria-live="polite" className="mt-3 text-xs text-slate-500">{loading ? '已找到' : '找到'} <span className="font-bold text-slate-700">{resultCount}</span> 个文件{degraded ? '（有界重新扫描模式）' : `，分布在 ${groupCount} 个文件夹中`}</p>}
         {error && <p role="alert" className="mt-2 text-xs text-amber-600">{error}</p>}
       </div>
     </header>
-    <div className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
-      <div className="mx-auto max-w-6xl pb-8">
+    <div ref={scrollContainerRef} className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
+      <div ref={resultContentRef} className="mx-auto max-w-6xl pb-8">
         {!debouncedQuery && <div className="flex min-h-[360px] items-center justify-center text-center"><div><span className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-50 text-blue-500"><Search size={30}/></span><h2 className="mt-5 text-base font-bold text-slate-700">查找项目中的任意文件</h2><p className="mt-2 text-sm text-slate-400">输入文件名关键词，结果会按项目和文件夹整理</p></div></div>}
-        {debouncedQuery && loading && !pageHitCount && <p className="py-20 text-center text-sm text-slate-400"><Loader2 size={18} className="mr-2 inline animate-spin"/>正在搜索全部位置…</p>}
+        {debouncedQuery && loading && !windowHitCount && <p className="py-20 text-center text-sm text-slate-400"><Loader2 size={18} className="mr-2 inline animate-spin"/>正在搜索全部位置…</p>}
         {debouncedQuery && !loading && !resultCount && <div className="py-20 text-center"><Search size={32} className="mx-auto text-slate-300"/><p className="mt-4 text-sm text-slate-500">没有找到包含“{debouncedQuery}”的文件</p></div>}
         <div role="listbox" aria-label="全局搜索结果">
-        {groups.map((group, groupIndex) => <section key={group.id} role="group" aria-label={`${group.source.label} / ${group.folderPath || '项目根目录'}`} className={`${groupIndex ? 'mt-6 border-t border-slate-200 pt-5' : ''}`}>
-          <header className="mb-3 flex min-w-0 items-center gap-2">
-            <Folder size={17} className={group.source.kind === 'inspiration' ? 'shrink-0 text-amber-500' : 'shrink-0 text-blue-500'}/>
-            <button type="button" onClick={() => void openFolder(group)} title={`在新标签页打开 ${group.folderPath || group.source.label}`} className="min-w-0 truncate text-left text-sm font-bold text-slate-700 hover:text-blue-600">{group.source.label}<span className="font-normal text-slate-400"> / {group.folderPath || '项目根目录'}</span></button>
-            <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-500">{group.totalCount}</span><ExternalLink size={12} className="shrink-0 text-slate-300"/>
-          </header>
-          <div className="grid w-full content-start gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 132px), 1fr))' }}>
-            {group.entries.map((entry, entryIndex) => {
+          <div aria-hidden="true" style={{ height: virtualWindow.topSpacer }}/>
+          <div className="grid w-full content-start gap-x-3" style={{ gridTemplateColumns: `repeat(${virtualWindow.columns}, minmax(0, 1fr))` }}>
+            {windowHits.map(({ group, entry }, windowIndex) => {
               const id = `${group.id}\0${entry.relativePath}\0${entry.path}`;
-              return <button type="button" key={id} role="option" aria-selected={selectedId === id} aria-label={`${entry.name}，${entryTypeLabel(entry)}`} title={entry.relativePath} onClick={() => setSelectedId(id)} onDoubleClick={() => void openEntry(group.source, entry)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void openEntry(group.source, entry); } }} className={`group min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedId === id ? 'bg-blue-50 ring-1 ring-blue-400' : ''}`}>
-                <div className="relative flex aspect-square items-center justify-center overflow-hidden rounded-md bg-white shadow-sm ring-1 ring-slate-200/80"><SearchResultIcon entry={entry} config={config} queueOrder={groupIndex * 1000 + entryIndex}/></div>
-                <p className="mt-2 truncate text-xs font-medium text-slate-700">{entry.name}</p><p className="mt-0.5 truncate text-[10px] uppercase text-slate-400">{entryTypeLabel(entry)}</p>
-              </button>;
+              return <div key={id} style={{ height: virtualWindow.rowHeight }} className="min-w-0 overflow-hidden px-0.5 pt-0.5">
+                <button type="button" role="option" aria-setsize={storedCount} aria-posinset={virtualWindow.start + windowIndex + 1} aria-selected={selectedId === id} aria-label={`${entry.name}，${entryTypeLabel(entry)}`} title={entry.relativePath} onClick={() => setSelectedId(id)} onDoubleClick={() => void openEntry(group.source, entry)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void openEntry(group.source, entry); } }} className={`group block w-full min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedId === id ? 'bg-blue-50 ring-1 ring-blue-400' : ''}`}>
+                  <div className="relative flex aspect-square items-center justify-center overflow-hidden rounded-md bg-white shadow-sm ring-1 ring-slate-200/80"><SearchResultIcon entry={entry} config={config} queueOrder={windowIndex}/></div>
+                  <p className="mt-2 truncate text-xs font-medium text-slate-700">{entry.name}</p><p className="mt-0.5 truncate text-[10px] uppercase text-slate-400">{entryTypeLabel(entry)}</p>
+                </button>
+                <button type="button" onClick={() => void openFolder(group)} title={`打开 ${group.source.label} / ${group.folderPath || '项目根目录'}`} className="mt-1 flex w-full min-w-0 items-center gap-1 px-2 text-left text-[10px] text-slate-400 hover:text-blue-600"><Folder size={11} className="shrink-0"/><span className="truncate">{group.source.label} / {group.folderPath || '项目根目录'}</span></button>
+              </div>;
             })}
           </div>
-        </section>)}
+          <div aria-hidden="true" style={{ height: virtualWindow.bottomSpacer }}/>
         </div>
-        {storedCount > 0 && <nav aria-label="搜索结果分页" className="mt-7 flex items-center justify-center gap-3">
-          <button type="button" disabled={loading || pageIndex === 0} onClick={() => { setSelectedId(''); setPageIndex(value => Math.max(0, value - 1)); }} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-600 hover:border-blue-400 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40">上一页</button>
-          <span className="min-w-24 text-center text-xs text-slate-500">第 {pageIndex + 1} / {pageCount} 页</span>
-          <button type="button" disabled={loading || pageIndex + 1 >= pageCount} onClick={() => { setSelectedId(''); setPageIndex(value => Math.min(pageCount - 1, value + 1)); }} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-600 hover:border-blue-400 hover:text-blue-600 disabled:cursor-not-allowed disabled:opacity-40">下一页</button>
-        </nav>}
       </div>
     </div>
   </section>;
