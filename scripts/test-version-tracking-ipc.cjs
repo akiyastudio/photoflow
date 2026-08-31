@@ -21,6 +21,7 @@ const testShell = {
 const projectVirtualPaths = createProjectVirtualPathService({ shell: testShell, registryPath: path.join(workspaceRoot, 'managed-links.json') });
 const calls = {};
 const taskReports = [];
+let writeLogImplementation = () => undefined;
 
 const versionService = {
   createTrackingSession: async (root, request) => {
@@ -84,6 +85,7 @@ const versionService = {
     items: [],
   }),
   failTrackingCommit: async () => ({ success: true }),
+  decideTrackingItem: async (_root, request) => ({ success: true, ...request }),
   releaseTrackingSession: async (_root, sessionId) => {
     (calls.releasedSessions ||= []).push(sessionId);
     return { success: true, released: true, sessionId };
@@ -115,7 +117,8 @@ registerVersionIpc({
       (calls.taskDefinitions ||= []).push(definition);
       return ({
       context: { signal: new AbortController().signal, report: (...args) => taskReports.push(args), throwIfCancelled: () => undefined },
-      waitForStart: async () => undefined, complete: () => undefined, fail: () => undefined, cancelled: () => undefined,
+      waitForStart: async () => undefined, complete: () => undefined,
+      fail: error => (calls.taskFailures ||= []).push(error), cancelled: () => undefined,
       });
     },
     list: () => calls.activeTasks || [],
@@ -124,7 +127,9 @@ registerVersionIpc({
       return { result: await worker({ signal: new AbortController().signal, report: () => undefined, throwIfCancelled: () => undefined }) };
     },
   },
-  copyFileAtomic: async () => undefined,
+  buildVersionBatchImportKey: async () => 'test-version-batch-import-key',
+  cleanVersionName: value => String(value || '').trim(),
+  copyFileAtomic: async (sourcePath, destinationPath) => fs.promises.copyFile(sourcePath, destinationPath),
   crypto,
   ensureWorkspace: value => {
     assert.strictEqual(value, workspaceRoot);
@@ -155,10 +160,12 @@ registerVersionIpc({
   },
   shell: testShell,
   suppressWorkspaceWatchPath: value => (calls.suppressedWatchPaths ||= []).push(value),
+  supportedVersionFileKind: filePath => path.extname(filePath).toLowerCase() === '.jpg',
   undefined,
+  uniqueDestination: (folderPath, fileName) => path.join(folderPath, fileName),
   versionService,
   workspaceCatalogs: new Map([[workspaceRoot, {}]]),
-  writeLog: () => undefined,
+  writeLog: (...args) => writeLogImplementation(...args),
 });
 
 async function main() {
@@ -236,6 +243,81 @@ async function main() {
   const released = await release({}, workspaceRoot, { sessionId: started.sessionId });
   assert.deepStrictEqual(released, { success: true, released: true, sessionId: started.sessionId });
 
+  const decide = handlers.get('workspace-progress-tracking-decide');
+  const originalDecideTrackingItem = versionService.decideTrackingItem;
+  let releaseDecision;
+  const decisionGate = new Promise(resolve => { releaseDecision = resolve; });
+  versionService.decideTrackingItem = async (_root, request) => {
+    await decisionGate;
+    return { success: true, ...request };
+  };
+  const decisionSessionId = '77777777-7777-4777-8777-777777777777';
+  const decisionPromise = decide({}, workspaceRoot, {
+    sessionId: decisionSessionId,
+    itemId: '88888888-8888-4888-8888-888888888888',
+    status: 'accepted',
+  });
+  await Promise.resolve();
+  const commitDuringDecision = await commit({}, workspaceRoot, { sessionId: decisionSessionId });
+  const releaseDuringDecision = await release({}, workspaceRoot, { sessionId: decisionSessionId });
+  assert.strictEqual(commitDuringDecision.success, false, 'commit must not bypass an in-flight decision');
+  assert.match(commitDuringDecision.error, /其他操作/);
+  assert.strictEqual(releaseDuringDecision.success, false, 'release must not delete a session with an in-flight decision');
+  releaseDecision();
+  assert.strictEqual((await decisionPromise).success, true);
+  versionService.decideTrackingItem = originalDecideTrackingItem;
+
+  const originalReleaseTrackingSession = versionService.releaseTrackingSession;
+  let finishConcurrentRelease;
+  const concurrentReleaseGate = new Promise(resolve => { finishConcurrentRelease = resolve; });
+  const releasingSessionId = '99999999-9999-4999-8999-999999999999';
+  versionService.releaseTrackingSession = async (_root, sessionId) => {
+    if (sessionId === releasingSessionId) await concurrentReleaseGate;
+    return { success: true, released: true, sessionId };
+  };
+  const concurrentRelease = release({}, workspaceRoot, { sessionId: releasingSessionId });
+  await Promise.resolve();
+  calls.activeTasks = [{
+    id: 'queued-releasing-tracking-task', type: 'version-tracking', state: 'queued',
+    metadata: { sessionId: releasingSessionId },
+  }];
+  calls.createTrackingResponses = [{
+    sessionId: releasingSessionId, progressId: 'progress-node-id',
+    parentProgressId: 'parent-progress-id', mode: 'refresh', sessionStatus: 'pending_confirm', reused: true,
+    parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+  }];
+  const startDuringRelease = await start({}, workspaceRoot, 'Project', { progressId: 'progress-node-id', mode: 'refresh' });
+  assert.strictEqual(startDuringRelease.success, false, 'a reused session being released must not return its queued active task');
+  finishConcurrentRelease();
+  await concurrentRelease;
+  calls.activeTasks = [];
+  versionService.releaseTrackingSession = originalReleaseTrackingSession;
+
+  const originalPrepareTracking = versionService.prepareTracking;
+  const originalFailTrackingCommit = versionService.failTrackingCommit;
+  let loggedCompareFailureRecorded = 0;
+  versionService.prepareTracking = async () => { throw new Error('injected compare failure'); };
+  versionService.failTrackingCommit = async (_root, request) => {
+    if (request.sessionId === 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa') loggedCompareFailureRecorded += 1;
+    return { success: true };
+  };
+  writeLogImplementation = (level, message) => {
+    if (level === 'error' && message === 'Version tracking compare failed') throw new Error('injected tracking log failure');
+  };
+  calls.createTrackingResponses = [{
+    sessionId: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', progressId: 'progress-node-id',
+    parentProgressId: 'parent-progress-id', mode: 'refresh', sessionStatus: 'comparing', reused: false,
+    parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+  }];
+  const failedCompareStart = await start({}, workspaceRoot, 'Project', { progressId: 'progress-node-id', mode: 'refresh' });
+  assert.strictEqual(failedCompareStart.success, true);
+  for (let attempt = 0; attempt < 50 && loggedCompareFailureRecorded === 0; attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  writeLogImplementation = () => undefined;
+  assert.strictEqual(loggedCompareFailureRecorded, 1, 'logging failure must not skip failTrackingCommit');
+  assert(calls.taskFailures?.some(error => /injected compare failure/.test(error.message)), 'logging failure must not skip background task failure');
+  versionService.prepareTracking = originalPrepareTracking;
+  versionService.failTrackingCommit = originalFailTrackingCommit;
+
   const committed = await commit({}, workspaceRoot, {
     sessionId: '11111111-1111-4111-8111-111111111111',
     folderA: maliciousPath,
@@ -260,6 +342,23 @@ async function main() {
   ]);
   assert.strictEqual(calls.commitTaskDefinitions[0].notificationPolicy, 'progress-toast', 'detached tracking commits must remain visible while running');
   assert(!JSON.stringify(calls.commit.request).includes(maliciousPath));
+
+  const batchCommit = handlers.get('workspace-version-batch-commit');
+  const copiedReferencePath = path.join(trustedParent, 'copy-after-persist.jpg');
+  const copiedDestinationPath = path.join(trustedProgress, 'copy-after-persist.jpg');
+  fs.writeFileSync(copiedReferencePath, 'persisted-version-file');
+  writeLogImplementation = (level, message) => {
+    if (level === 'info' && message === 'Version batch committed') throw new Error('injected log failure after persistence');
+  };
+  const batchCommittedDespiteLogFailure = await batchCommit({}, workspaceRoot, 'active', 'Project', {
+    folderA: trustedParent,
+    folderB: trustedProgress,
+    copyMissingReferences: ['copy-after-persist.jpg'],
+    matches: [],
+  });
+  writeLogImplementation = () => undefined;
+  assert.strictEqual(batchCommittedDespiteLogFailure.success, true, 'post-persistence logging must not turn a committed batch into failure');
+  assert.strictEqual(fs.readFileSync(copiedDestinationPath, 'utf8'), 'persisted-version-file', 'post-persistence logging must not delete committed copies');
 
   const originalGetTrackingCommitPlan = versionService.getTrackingCommitPlan;
   let releaseCommitPlan;

@@ -2,7 +2,13 @@ const { registerVersionTrackingIpc } = require('./version-tracking-ipc.cjs');
 const { getProtectedProjectFolderRegistry } = require('../services/protected-project-folder.cjs');
 
 const registerVersionIpc = context => {
-  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog } = context;
+  const { Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, versionService, trackingScanService = mediaScanService || versionService, undefined, uniqueDestination, workspaceCatalogs, writeLog: unsafeWriteLog = () => undefined } = context;
+  const writeLog = (...args) => {
+    try {
+      const pending = unsafeWriteLog(...args);
+      pending?.catch?.(() => undefined);
+    } catch {}
+  };
   const protectedProjectFolders = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const pendingRelocateDecisions = new Map();
   const RELOCATE_DECISION_TTL_MS = 5 * 60 * 1000;
@@ -870,6 +876,7 @@ const registerVersionIpc = context => {
   
   ipcMain.handle('workspace-version-batch-commit', async (_event, workspacePath, status, projectName, request = {}) => {
     const copiedMissingPaths = [];
+    let batchPersisted = false;
     try {
       if (!request || typeof request !== 'object' || Array.isArray(request)) throw new Error('版本批次请求无效');
       const renameSources = compatibleBoolean(request.renameSources, '版本批次字段 renameSources');
@@ -951,6 +958,7 @@ const registerVersionIpc = context => {
       });
       if (!result) throw new Error('版本批次提交没有返回结果');
       if (!result.success && !result.repairRequired) throw new Error(result.error || '版本批次提交失败');
+      batchPersisted = true;
       writeLog(result.repairRequired ? 'warn' : 'info', result.repairRequired ? 'Version batch requires repair' : 'Version batch committed', {
         projectName, folderA, folderB, matchCount: matches.length,
         copiedMissingCount: copiedMissingPaths.length, copyMissingErrorCount: copyMissingErrors.length,
@@ -958,7 +966,7 @@ const registerVersionIpc = context => {
       });
       return { ...result, copiedMissingCount: copiedMissingPaths.length, copyMissingErrors };
     } catch (error) {
-      await Promise.all(copiedMissingPaths.map(filePath => fs.promises.rm(filePath, { force: true }).catch(() => undefined)));
+      if (!batchPersisted) await Promise.all(copiedMissingPaths.map(filePath => fs.promises.rm(filePath, { force: true }).catch(() => undefined)));
       writeLog('error', 'Unable to commit version batch', { projectName, error: error.message || String(error) });
       return { success: false, error: error.message || String(error) };
     }

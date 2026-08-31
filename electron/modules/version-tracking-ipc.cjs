@@ -1,7 +1,13 @@
 const FINGERPRINT_MAINTENANCE_IDLE_DELAY_MS = 15_000;
 
 const registerVersionTrackingIpc = context => {
-  const { backgroundTasks, crypto, ensureWorkspace, fs, getWorkspaceDataRoot = root => root, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs, writeLog = () => undefined } = context;
+  const { backgroundTasks, crypto, ensureWorkspace, fs, getWorkspaceDataRoot = root => root, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs, writeLog: unsafeWriteLog = () => undefined } = context;
+  const writeLog = (...args) => {
+    try {
+      const pending = unsafeWriteLog(...args);
+      pending?.catch?.(() => undefined);
+    } catch {}
+  };
   const trackingCommitJobs = new Map();
   const trackingLaunchJobs = new Map();
   const trackingCompareSessions = new Set();
@@ -31,7 +37,7 @@ const registerVersionTrackingIpc = context => {
   const releaseTrackingSessionExclusive = async (workspaceRoot, sessionId) => {
     const key = trackingSessionKey(workspaceRoot, sessionId);
     if (trackingCommitJobs.has(key) || trackingCompareSessions.has(key) || trackingSessionOperations.has(key)) {
-      throw new Error('跟踪结果正在提交或比较，暂时不能放弃会话');
+      throw new Error('跟踪结果正在提交、确认或比较，暂时不能放弃会话');
     }
     trackingSessionOperations.set(key, 'release');
     try {
@@ -187,6 +193,10 @@ const registerVersionTrackingIpc = context => {
         '无法创建版本跟踪会话',
       );
       if (!restartTask && created.reused) {
+        const sessionKey = trackingSessionKey(workspaceRoot, created.sessionId);
+        if (trackingCommitJobs.has(sessionKey) || trackingCompareSessions.has(sessionKey) || trackingSessionOperations.has(sessionKey)) {
+          throw new Error('版本跟踪会话正在执行其他操作，暂时不能恢复');
+        }
         const activeTask = backgroundTasks?.list?.().find(task => task.type === 'version-tracking'
           && task.metadata?.sessionId === created.sessionId
           && (task.state === 'queued' || task.state === 'running'));
@@ -346,6 +356,7 @@ const registerVersionTrackingIpc = context => {
   });
 
   ipcMain.handle('workspace-progress-tracking-decide', async (_event, workspacePath, request = {}) => {
+    let operationKey;
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       const sessionId = String(request.sessionId || '');
@@ -356,6 +367,11 @@ const registerVersionTrackingIpc = context => {
         const referenceName = String(request.referenceName || '');
         if (!referenceName || path.basename(referenceName) !== referenceName || /[\x00-\x1f]/.test(referenceName)) throw new Error('上一版本文件名无效');
       }
+      operationKey = trackingSessionKey(workspaceRoot, sessionId);
+      if (trackingCommitJobs.has(operationKey) || trackingCompareSessions.has(operationKey) || trackingSessionOperations.has(operationKey)) {
+        throw new Error('版本跟踪会话正在执行其他操作，暂时不能确认');
+      }
+      trackingSessionOperations.set(operationKey, 'decide');
       return await versionService.decideTrackingItem(workspaceRoot, {
         sessionId, itemId,
         status: request.status,
@@ -363,6 +379,8 @@ const registerVersionTrackingIpc = context => {
       });
     } catch (error) {
       return { success: false, error: error.message || String(error) };
+    } finally {
+      if (operationKey && trackingSessionOperations.get(operationKey) === 'decide') trackingSessionOperations.delete(operationKey);
     }
   });
 
