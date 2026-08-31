@@ -14,7 +14,11 @@ const brollImportSource = fs.readFileSync(path.join(__dirname, '..', 'electron',
 const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
 const pluginServiceSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'plugin-service.cjs'), 'utf8');
 assert(projectFileTaskSource.includes("scanning: '正在统计'") && projectFileTaskSource.includes('concurrencyLimit = 3') && projectFileTaskSource.includes('concurrencyWriteLimit = 2'), 'file tasks must allow three total disk tasks while retaining the two-writer limit');
-assert(brollImportSource.includes("concurrencyGroup: 'disk-io'") && /task\.withResources\(\{\r?\n\s+capacities: \[\{ key: 'heavy-media'/.test(brollImportSource), 'b-roll imports must reserve heavy media capacity only around their actual split/transcode phases');
+const compactBrollImportSource = brollImportSource.replace(/\s+/g, '');
+assert(/task=createProjectFileTask\(\{[^;]*concurrencyGroup:'disk-io',concurrencyLimit:3,concurrencyWriteLimit:2,/.test(compactBrollImportSource), 'b-roll imports must declare the three-task/two-writer disk-io limits');
+const heavyMediaPhasePattern = worker => new RegExp(`task\\.withResources\\(\\{\\s*capacities:\\s*\\[\\{\\s*key:\\s*'heavy-media',\\s*access:\\s*'write',\\s*limit:\\s*1,\\s*writeLimit:\\s*1\\s*\\}\\][^}]*\\},\\s*\\(\\)\\s*=>\\s*${worker}\\(`);
+assert(heavyMediaPhasePattern('runSplitter').test(brollImportSource), 'b-roll splitting must acquire the single-writer heavy-media capacity around the actual splitter');
+assert(heavyMediaPhasePattern('runTranscoder').test(brollImportSource), 'b-roll transcoding must acquire the single-writer heavy-media capacity around the actual transcoder');
 assert(systemIpcSource.includes('const pendingWorkerVideoTools = new Map()') && systemIpcSource.includes('const heartbeat = setInterval(sendHeartbeat, 5000)') && systemIpcSource.includes('abortAllWorkerVideoTools'), 'import video-tool requests must stay alive with heartbeats and be aborted with their Python owner');
 assert(systemIpcSource.includes('const pendingWorkerResourceLeases = new Map()') && systemIpcSource.includes("type: 'resource_waiting'") && systemIpcSource.includes('clearAllWorkerResourceWaits'), 'queued import media phases must receive resource heartbeats without leaking wait timers');
 assert(systemIpcSource.includes('}, controller.signal)') && pluginServiceSource.includes('onMessage, signal, requestedDeadlineAt'), 'video-tool cancellation must reach the supervised plugin process');
@@ -89,14 +93,21 @@ const main = async () => {
   assert.match(releaseFailureTask.job.releaseError, /injected release failure/);
 
   const ipcHandlers = new Map();
+  const ipcListeners = new Map();
+  let eventBusUnsubscribed = false;
   const ipcMain = {
-    on: () => undefined,
+    on: (channel, listener) => ipcListeners.set(channel, listener),
     handle: (channel, handler) => ipcHandlers.set(channel, handler),
-    removeListener: () => undefined,
+    removeHandler: channel => ipcHandlers.delete(channel),
+    removeListener: (channel, listener) => {
+      if (ipcListeners.get(channel) === listener) ipcListeners.delete(channel);
+    },
   };
-  registerBackgroundTasksIpc({
+  const trustedWebContents = { isDestroyed: () => false, send: () => undefined };
+  const mainWindow = { isDestroyed: () => false, webContents: trustedWebContents };
+  const disposeBackgroundTasksIpc = registerBackgroundTasksIpc({
     ipcMain,
-    eventBus: { on: () => () => undefined },
+    eventBus: { on: () => () => { eventBusUnsubscribed = true; } },
     backgroundTasks: {
       snapshot: () => ({ revision: 0, tasks: [] }), list: () => [], get: () => null,
       cancel: () => false, pause: () => false, continuePaused: () => false, dismiss: () => false,
@@ -106,13 +117,19 @@ const main = async () => {
         task: { id: 'replacement' }, completion: Promise.resolve({}),
       }),
     },
-    getMainWindow: () => null,
+    getMainWindow: () => mainWindow,
   });
-  const retryResponse = await ipcHandlers.get('background-task-retry')(null, 'source');
+  const retryHandler = ipcHandlers.get('background-task-retry');
+  const retryResponse = await retryHandler({ sender: trustedWebContents }, 'source');
   assert.equal(retryResponse.success, true);
   assert.equal(retryResponse.accepted, true);
   assert.equal(retryResponse.replacementTaskId, 'replacement');
   assert.equal('completion' in retryResponse, false, 'retry IPC must return acceptance immediately without serializing the completion promise');
+  await assert.rejects(retryHandler({ sender: { isDestroyed: () => false } }, 'source'), /Unauthorized IPC sender/, 'background-task IPC must reject a sender other than the main window webContents');
+  disposeBackgroundTasksIpc();
+  assert.equal(ipcHandlers.size, 0, 'background-task IPC disposer must remove every handler');
+  assert.equal(ipcListeners.size, 0, 'background-task IPC disposer must remove every listener');
+  assert.equal(eventBusUnsubscribed, true, 'background-task IPC disposer must unsubscribe from task changes');
 
   assert.equal(normalizeExternalProgress('workspace-selection-progress', { operationId: 'folder-listing', phase: 'listing_source_folders' }), null, 'opening filename selection must not create a background task for folder discovery');
   assert.equal(normalizeExternalProgress('workspace-selection-progress', { operationId: 'preflight-scan', phase: 'scanning_source' }), null, 'filename preflight scans must not create duplicate 0% background tasks');
