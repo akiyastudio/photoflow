@@ -1,4 +1,13 @@
-const ALLOWED_EVENT_NAME = /^[a-z][a-z0-9_]{1,63}$/;
+const EVENT_NAMES = Object.freeze([
+  'session_start',
+  'feature_opened',
+  'feature_used',
+  'project_created',
+  'photos_imported',
+  'update_checked',
+  'media_preview_failed',
+]);
+const EVENT_NAME_SET = new Set(EVENT_NAMES);
 const MAX_QUEUE_ITEMS = 1000;
 const MAX_PROPERTY_COUNT = 24;
 const MAX_STRING_LENGTH = 160;
@@ -19,9 +28,20 @@ const ALLOWED_PROPERTY_NAMES = new Set([
 
 const trimText = (value, maximum = MAX_STRING_LENGTH) => String(value ?? '').slice(0, maximum);
 
-const redactSensitiveText = value => trimText(value, 64 * 1024)
+const redactSensitiveText = (value, maximum = 64 * 1024) => String(value ?? '').slice(0, maximum)
+  .replace(/\bhttps?:\/\/[^\s<>"']+/gi, match => {
+    try {
+      const url = new URL(match);
+      const pathname = url.pathname && url.pathname !== '/' ? '/<redacted>' : url.pathname;
+      return `${url.protocol}//${url.host}${pathname}${url.search || url.hash ? '?<redacted>' : ''}`;
+    } catch {
+      return '<url>';
+    }
+  })
+  .replace(/\\\\[^\\\s]+\\[^\r\n"']+/g, '<local-path>')
   .replace(/\b[A-Z]:\\(?:[^\\\r\n]+\\)*[^\\\r\n]*/gi, '<local-path>')
-  .replace(/\/(?:Users|home)\/[^/\s]+\/[^\s]*/gi, '<local-path>')
+  .replace(/(^|[\s("'=:\[])\/(?:[^/\r\n"'<>]+\/)*[^/\r\n"'<>]+\.[A-Za-z0-9]{1,10}(?=:\d|\s|[)\],;]|$)/gm, '$1<local-path>')
+  .replace(/(^|[\s("'=:\[])\/(?!\/)(?:[^/\s"'<>]+\/)*[^/\s"'<>]+/gm, '$1<local-path>')
   .replace(/\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b/g, '<email>')
   .replace(/"(projectName|fileName|folderName|path|source|destination)"\s*:\s*"[^"]*"/gi, '"$1":"<redacted>"');
 
@@ -63,8 +83,10 @@ const createTelemetryService = ({
   const queuePath = path.join(app.getPath('userData'), 'telemetry-queue.json');
   const sessionId = crypto.randomUUID();
   let timer = null;
-  let flushing = false;
+  let flushPromise = null;
+  let started = false;
   let previousAnalyticsEnabled = false;
+  const uploadControllers = new Map();
   const recentCrashFingerprints = new Map();
 
   const readJson = (filePath, fallback) => {
@@ -75,9 +97,12 @@ const createTelemetryService = ({
     }
   };
   const writeJson = (filePath, value) => {
+    const temporaryPath = `${filePath}.${process.pid}.${crypto.randomUUID()}.tmp`;
     try {
-      fs.writeFileSync(filePath, JSON.stringify(value), 'utf8');
+      fs.writeFileSync(temporaryPath, JSON.stringify(value), 'utf8');
+      fs.renameSync(temporaryPath, filePath);
     } catch (error) {
+      try { if (fs.existsSync(temporaryPath)) fs.unlinkSync(temporaryPath); } catch { /* best effort */ }
       writeLog('warn', 'Unable to persist telemetry state', { error: error.message || String(error) });
     }
   };
@@ -96,11 +121,15 @@ const createTelemetryService = ({
       crashes: telemetry.crashReports === true,
     };
   };
-  const readQueue = () => {
+  let localQueue = (() => {
     const queue = readJson(queuePath, []);
     return Array.isArray(queue) ? queue.slice(-MAX_QUEUE_ITEMS) : [];
+  })();
+  const readQueue = () => localQueue.slice();
+  const saveQueue = queue => {
+    localQueue = queue.slice(-MAX_QUEUE_ITEMS);
+    writeJson(queuePath, localQueue);
   };
-  const saveQueue = queue => writeJson(queuePath, queue.slice(-MAX_QUEUE_ITEMS));
   const enqueue = item => {
     const queue = readQueue();
     queue.push(item);
@@ -116,7 +145,7 @@ const createTelemetryService = ({
   });
 
   const track = (eventName, properties = {}) => {
-    if (!getConsent().analytics || !ALLOWED_EVENT_NAME.test(String(eventName || ''))) return false;
+    if (!getConsent().analytics || !EVENT_NAME_SET.has(eventName)) return false;
     const now = new Date();
     enqueue({
       kind: 'event',
@@ -201,9 +230,10 @@ const createTelemetryService = ({
     }
   };
 
-  const postJson = async (route, body) => {
+  const postJson = async (route, body, uploadKind) => {
     if (!baseUrl) throw new Error('Cloud API URL is not configured');
     const controller = new AbortController();
+    if (uploadKind) uploadControllers.set(uploadKind, controller);
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
       const response = await fetch(`${baseUrl}${route}`, {
@@ -215,46 +245,87 @@ const createTelemetryService = ({
         body: JSON.stringify(body),
         signal: controller.signal,
       });
-      if (!response.ok) throw new Error(`Telemetry API returned ${response.status}`);
+      if (!response.ok) {
+        const error = new Error(`Telemetry API returned ${response.status}`);
+        error.status = response.status;
+        throw error;
+      }
     } finally {
       clearTimeout(timeout);
+      if (uploadKind && uploadControllers.get(uploadKind) === controller) uploadControllers.delete(uploadKind);
     }
   };
 
-  async function flush() {
-    if (flushing || !baseUrl) return false;
+  const removeQueuedIds = ids => {
+    const removed = new Set(ids);
+    saveQueue(readQueue().filter(item => !removed.has(item?.payload?.id)));
+  };
+  const retryableUploadError = error => !Number.isInteger(error?.status) || error.status >= 500;
+  const uploadEvents = async events => {
+    if (!events.length) return;
+    try {
+      await postJson('/v1/events', { ...commonPayload(), events: events.map(item => item.payload) }, 'event');
+      removeQueuedIds(events.map(item => item.payload.id));
+    } catch (error) {
+      if (retryableUploadError(error)) throw error;
+      if (events.length > 1) {
+        const middle = Math.ceil(events.length / 2);
+        await uploadEvents(events.slice(0, middle));
+        await uploadEvents(events.slice(middle));
+        return;
+      }
+      removeQueuedIds([events[0]?.payload?.id]);
+      writeLog('warn', 'Discarded rejected telemetry event', {
+        eventName: events[0]?.payload?.eventName,
+        status: error.status,
+      });
+    }
+  };
+
+  async function runFlush() {
+    if (!baseUrl) return false;
     const consent = getConsent();
     const queue = readQueue().filter(item =>
       (item.kind === 'event' && consent.analytics) || (item.kind === 'crash' && consent.crashes));
-    if (!queue.length) {
+    const validQueue = queue.filter(item => item.kind !== 'event' || EVENT_NAME_SET.has(item?.payload?.eventName));
+    if (validQueue.length !== readQueue().length) saveQueue(validQueue);
+    if (!validQueue.length) {
       saveQueue([]);
       return true;
     }
 
-    flushing = true;
     try {
-      const events = queue.filter(item => item.kind === 'event').slice(0, 50);
-      if (events.length) {
-        await postJson('/v1/events', { ...commonPayload(), events: events.map(item => item.payload) });
-      }
-      const crash = queue.find(item => item.kind === 'crash');
+      const events = validQueue.filter(item => item.kind === 'event').slice(0, 50);
+      await uploadEvents(events);
+      const crash = readQueue().find(item => item.kind === 'crash' && getConsent().crashes);
       if (crash) {
-        await postJson('/v1/crashes', { ...commonPayload(), ...crash.payload });
+        try {
+          await postJson('/v1/crashes', { ...commonPayload(), ...crash.payload }, 'crash');
+          removeQueuedIds([crash.payload.id]);
+        } catch (error) {
+          if (retryableUploadError(error)) throw error;
+          removeQueuedIds([crash.payload.id]);
+          writeLog('warn', 'Discarded rejected crash report', { status: error.status });
+        }
       }
-      const sentIds = new Set([...events.map(item => item.payload.id), crash?.payload.id].filter(Boolean));
-      saveQueue(readQueue().filter(item => !sentIds.has(item?.payload?.id)));
       return true;
     } catch (error) {
       writeLog('warn', 'Telemetry upload deferred', { error: error.message || String(error) });
       return false;
-    } finally {
-      flushing = false;
     }
+  }
+
+  function flush() {
+    if (flushPromise) return flushPromise;
+    flushPromise = runFlush().finally(() => { flushPromise = null; });
+    return flushPromise;
   }
 
   const syncConsent = telemetry => {
     const analytics = telemetry?.enabled === true;
     const crashes = telemetry?.crashReports === true;
+    if (!analytics) uploadControllers.get('event')?.abort();
+    if (!crashes) uploadControllers.get('crash')?.abort();
     if (!analytics || !crashes) {
       saveQueue(readQueue().filter(item =>
         (item.kind === 'event' && analytics) || (item.kind === 'crash' && crashes)));
@@ -269,6 +340,7 @@ const createTelemetryService = ({
   };
 
   const clearLocalData = () => {
+    for (const controller of uploadControllers.values()) controller.abort();
     state.installId = crypto.randomUUID();
     state.createdAt = new Date().toISOString();
     writeJson(statePath, state);
@@ -277,17 +349,21 @@ const createTelemetryService = ({
   };
 
   const start = () => {
-    previousAnalyticsEnabled = false;
+    if (started) return false;
+    started = true;
     syncConsent(getConfig()?.telemetry);
     timer = setInterval(() => void flush(), 30 * 1000);
+    return true;
   };
   const stop = () => {
+    if (!started) return flush();
+    started = false;
     if (timer) clearInterval(timer);
     timer = null;
-    void flush();
+    return flush();
   };
 
   return { start, stop, flush, track, reportCrash, submitFeedback, syncConsent, clearLocalData, countBucket };
 };
 
-module.exports = { createTelemetryService, countBucket };
+module.exports = { EVENT_NAMES, createTelemetryService, countBucket, redactSensitiveText };
