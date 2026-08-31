@@ -322,7 +322,8 @@ def _checkpoint_live(path: str) -> None:
 def _publish_staged(staged: str, destination: str, workspace_root: str, backup_prefix: str) -> str:
     backup = ""
     if os.path.isfile(destination):
-        current = verify_database(destination)
+        import workspace_db
+        current = verify_database(destination, maximum_schema_version=workspace_db.TARGET_SCHEMA_VERSION)
         if not current["success"]:
             raise RuntimeError(f"拒绝覆盖不可验证的 live 数据库：{current}")
         backup = f"{destination}.{backup_prefix}.{uuid.uuid4().hex}.bak"
@@ -399,7 +400,8 @@ def restore_project(source: str, destination: str, project_id: str, old_root: st
     if _same_file(source_path, destination):
         raise ValueError("project restore source and destination must differ")
     _verify_restore_source(source_path)
-    destination_status = verify_database(destination)
+    import workspace_db
+    destination_status = verify_database(destination, maximum_schema_version=workspace_db.TARGET_SCHEMA_VERSION)
     if not destination_status["success"]:
         raise RuntimeError(f"项目恢复目标数据库不兼容：{destination_status}")
     staged_target = f"{destination}.restore-project-{uuid.uuid4().hex}.tmp"

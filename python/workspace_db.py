@@ -21,7 +21,7 @@ try:
     from compatibility.registry import integrated_action_names, resolve_export as resolve_compatibility_export, run_hooks as run_compatibility_hooks
     from database_error_codes import error_response
     from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
-    from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
+    from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage, database_path_for_workspace_database
     from workspace_db_migrations import migration_26, migration_27, migration_28
 except ModuleNotFoundError:
     # Some regression tests load this file directly through importlib instead
@@ -32,7 +32,7 @@ except ModuleNotFoundError:
     from compatibility.registry import integrated_action_names, resolve_export as resolve_compatibility_export, run_hooks as run_compatibility_hooks
     from database_error_codes import error_response
     from workspace_db_domains import ALL_ACTIONS, MEDIA_ACTIONS, PROGRESS_ACTIONS, READ_ONLY_ACTIONS, TRACKING_ACTIONS, VERSIONING_ONLY_ACTIONS
-    from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage
+    from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage, database_path_for_workspace_database
     from workspace_db_migrations import migration_26, migration_27, migration_28
 
 STATUSES = ("未分类", "策划中", "待拍摄", "后期中", "已归档")
@@ -75,6 +75,7 @@ INTEGRITY_CHECK_INTERVAL_MS = 24 * 60 * 60 * 1000
 MIGRATION_BACKUP_LIMIT = 5
 AUTOMATIC_BACKUP_INTERVAL_MS = 24 * 60 * 60 * 1000
 AUTOMATIC_BACKUP_LIMIT = 7
+MIGRATION_JOURNAL_SUFFIX = ".migration-journal-v1.json"
 
 
 def __getattr__(name):
@@ -100,8 +101,26 @@ def _table_columns(db, table: str) -> set[str]:
     return {row[1] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
 
 
-def _table_exists(db, table: str) -> bool:
-    return db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?", (table,)).fetchone() is not None
+def _table_schema(db, table: str, preferred: str | None = None) -> str | None:
+    schemas = [str(row[1]) for row in db.execute("PRAGMA database_list").fetchall()]
+    ordered = list(dict.fromkeys(([preferred] if preferred in schemas else []) + schemas))
+    for schema in ordered:
+        quoted = schema.replace('"', '""')
+        if db.execute(f'SELECT 1 FROM "{quoted}".sqlite_master WHERE type=\'table\' AND name=?', (table,)).fetchone():
+            return schema
+    return None
+
+
+def _table_exists(db, table: str, schema: str | None = None) -> bool:
+    return _table_schema(db, table, schema) is not None
+
+
+def _qualified_table(db, table: str, preferred: str | None = None) -> str:
+    schema = _table_schema(db, table, preferred)
+    if schema is None:
+        raise RuntimeError(f"required table is not attached: {table}")
+    quoted = schema.replace('"', '""')
+    return f'"{quoted}"."{table}"'
 
 
 def _meta_value(db, key: str):
@@ -117,21 +136,148 @@ def _set_meta(db, key: str, value):
     )
 
 
+def _fsync_directory(directory: str) -> None:
+    try:
+        descriptor = os.open(directory, os.O_RDONLY)
+    except OSError as error:
+        if getattr(error, "winerror", None) in (5, 50) or error.errno in (13, 22):
+            return
+        raise
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        if getattr(error, "winerror", None) not in (5, 50) and error.errno not in (13, 22):
+            raise
+    finally:
+        os.close(descriptor)
+
+
+def _durable_json_write(path: str, payload: dict) -> None:
+    temporary = f"{path}.{uuid.uuid4().hex}.tmp"
+    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True).encode("utf-8")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=True) as stream:
+            stream.write(encoded)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(os.path.dirname(path))
+    finally:
+        try: os.remove(temporary)
+        except FileNotFoundError: pass
+
+
+def _migration_journal_path(database: str) -> str:
+    return os.path.abspath(database) + MIGRATION_JOURNAL_SUFFIX
+
+
+def _restore_migration_preimage(database: str, journal: dict) -> None:
+    preimage = os.path.abspath(str(journal.get("preimage") or ""))
+    if not preimage or not os.path.isfile(preimage):
+        raise RuntimeError("数据库迁移恢复缺少 preimage")
+    source = sqlite3.connect(f"{Path(preimage).resolve().as_uri()}?mode=ro", uri=True, timeout=30)
+    target = sqlite3.connect(os.path.abspath(database), timeout=30)
+    try:
+        target.execute("PRAGMA synchronous=FULL")
+        if source.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RuntimeError("数据库迁移 preimage 已损坏")
+        schema = source.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if (int(schema[0]) if schema else 0) != int(journal.get("schemaVersion") or 0):
+            raise RuntimeError("数据库迁移 preimage 版本与 journal 不匹配")
+        source.backup(target)
+        target.commit()
+        if target.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RuntimeError("数据库迁移 preimage 恢复验证失败")
+    finally:
+        target.close()
+        source.close()
+
+
+def _recover_interrupted_migration(database: str) -> None:
+    journal_path = _migration_journal_path(database)
+    if not os.path.isfile(journal_path):
+        return
+    try:
+        with open(journal_path, "r", encoding="utf-8") as stream:
+            journal = json.load(stream)
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("数据库迁移 journal 无法读取，拒绝开放业务连接") from error
+    if os.path.abspath(str(journal.get("database") or "")) != os.path.abspath(database):
+        raise RuntimeError("数据库迁移 journal 目标不匹配")
+    _restore_migration_preimage(database, journal)
+    os.remove(journal_path)
+    _fsync_directory(os.path.dirname(journal_path))
+
+
+def _complete_migration_journal(database: str) -> None:
+    journal_path = _migration_journal_path(database)
+    try:
+        os.remove(journal_path)
+    except FileNotFoundError:
+        return
+    _fsync_directory(os.path.dirname(journal_path))
+
+
+def _database_needs_initialization(database: str) -> bool:
+    if not os.path.isfile(database) or os.path.getsize(database) == 0:
+        return True
+    try:
+        probe = sqlite3.connect(f"{Path(database).resolve().as_uri()}?mode=ro", uri=True, timeout=5)
+        try:
+            return probe.execute("SELECT 1 FROM sqlite_master WHERE type='table' LIMIT 1").fetchone() is None
+        finally:
+            probe.close()
+    except sqlite3.Error:
+        return False
+
+
+def _initialize_database_staged(root: str, database: str) -> None:
+    staged = f"{database}.initialize-{uuid.uuid4().hex}.tmp"
+    connection = None
+    try:
+        connection = connect(root, staged, include_domains=False, include_compatibility=False, _staging_init=True)
+        _check_integrity(connection, force=True)
+        checkpoint = connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+        if checkpoint and checkpoint[0]:
+            raise RuntimeError(f"首次初始化 staging checkpoint 失败：{tuple(checkpoint)}")
+        if str(connection.execute("PRAGMA journal_mode=DELETE").fetchone()[0]).casefold() != "delete":
+            raise RuntimeError("首次初始化 staging 无法退出 WAL")
+        connection.close()
+        connection = None
+        os.replace(staged, database)
+        _fsync_directory(os.path.dirname(database))
+    finally:
+        if connection is not None:
+            connection.close()
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(staged + suffix)
+            except FileNotFoundError: pass
+
+
 def _backup_before_migration(db, database: str, schema_version: int) -> str:
     backup_dir = os.path.join(os.path.dirname(database), "backups")
     os.makedirs(backup_dir, exist_ok=True)
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    backup_path = os.path.join(
-        backup_dir,
-        f"{os.path.basename(database)}.v{schema_version}.{stamp}.{uuid.uuid4().hex[:6]}.bak",
-    )
+    backup_path = os.path.join(backup_dir, f"{os.path.basename(database)}.v{schema_version}.{stamp}.{uuid.uuid4().hex}.bak")
+    descriptor = os.open(backup_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(descriptor)
     backup = sqlite3.connect(backup_path)
     try:
         db.backup(backup)
         if backup.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RuntimeError("迁移备份完整性检查失败")
+        backup.commit()
     finally:
         backup.close()
+    sync_descriptor = os.open(backup_path, os.O_RDWR)
+    try: os.fsync(sync_descriptor)
+    finally: os.close(sync_descriptor)
+    _fsync_directory(backup_dir)
+    _durable_json_write(_migration_journal_path(database), {
+        "version": 1, "database": os.path.abspath(database), "preimage": backup_path,
+        "schemaVersion": int(schema_version), "state": "prepared", "createdAt": int(time.time() * 1000),
+    })
     prefix = f"{os.path.basename(database)}.v"
     backups = sorted(
         (
@@ -142,7 +288,8 @@ def _backup_before_migration(db, database: str, schema_version: int) -> str:
         key=os.path.getmtime,
         reverse=True,
     )
-    for stale_path in backups[MIGRATION_BACKUP_LIMIT:]:
+    retained = {backup_path, *[path for path in backups if path != backup_path][:MIGRATION_BACKUP_LIMIT - 1]}
+    for stale_path in (path for path in backups if path not in retained):
         try:
             os.remove(stale_path)
         except OSError:
@@ -435,18 +582,20 @@ def _progress_relation_cycles(db) -> list[tuple[str, ...]]:
 
 
 def _version_graph_adjacency(db, project_id: str, exclude_edge_id: str | None = None) -> dict[str, set[str]]:
+    progress_table = _qualified_table(db, "progress_folders", "versioning")
     rows = db.execute(
-        "SELECT id,parent_progress_id FROM progress_folders WHERE project_id=?",
+        f"SELECT id,parent_progress_id FROM {progress_table} WHERE project_id=?",
         (project_id,),
     ).fetchall()
     adjacency = {str(row["id"]): set() for row in rows}
     for row in rows:
         if row["parent_progress_id"]:
             adjacency.setdefault(str(row["parent_progress_id"]), set()).add(str(row["id"]))
-    edge_rows = db.execute(
-        "SELECT id,source_progress_id,target_progress_id FROM version_graph_edges WHERE project_id=?",
+    edge_schema = _table_schema(db, "version_graph_edges", "versioning")
+    edge_rows = [] if edge_schema is None else db.execute(
+        f'SELECT id,source_progress_id,target_progress_id FROM "{edge_schema}"."version_graph_edges" WHERE project_id=?',
         (project_id,),
-    ).fetchall() if _table_exists(db, "version_graph_edges") else []
+    ).fetchall()
     for edge in edge_rows:
         if exclude_edge_id and str(edge["id"]) == exclude_edge_id:
             continue
@@ -1995,10 +2144,14 @@ def _check_integrity(db, force: bool = False):
     db.commit()
 
 
-def connect(root: str, database: str, include_domains=None, include_compatibility: bool = False):
+def connect(root: str, database: str, include_domains=None, include_compatibility: bool = False, _staging_init: bool = False):
     root = os.path.abspath(root)
     database = os.path.abspath(database)
     os.makedirs(os.path.dirname(database), exist_ok=True)
+    _recover_interrupted_migration(database)
+    if not _staging_init and _database_needs_initialization(database):
+        _initialize_database_staged(root, database)
+        return connect(root, database, include_domains=include_domains, include_compatibility=include_compatibility, _staging_init=True)
     db = sqlite3.connect(database, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     db.row_factory = sqlite3.Row
     # The catalog and media workers intentionally share this database. Give a
@@ -2045,6 +2198,10 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
         requested_domains = tuple(DOMAIN_TABLES)
     else:
         requested_domains = ()
+    pending_purge = "meta" in existing_tables and bool(_meta_value(db, "purge_journal_v1"))
+    if pending_purge:
+        requested_domains = tuple(DOMAIN_TABLES)
+        include_compatibility = True
     if schema_is_current:
         domain_migrated = False
         purpose_constraints_migrated = False
@@ -2082,12 +2239,14 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
             db.commit()
             if _can_run_full_integrity_check(db):
                 _check_integrity(db, force=True)
+        if pending_purge:
+            _resume_purge_journal(db)
         return db
+    backup_path = None
+    if not is_fresh:
+        backup_path = _backup_before_migration(db, database, schema_version)
     db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
     db.commit()
-    backup_path = None
-    if not is_fresh and schema_version < TARGET_SCHEMA_VERSION:
-        backup_path = _backup_before_migration(db, database, schema_version)
     # Migrations that reconcile trusted relative paths must use the workspace
     # root from this connection, including after the workspace has moved.
     _set_meta(db, "workspace_root", root)
@@ -2297,33 +2456,40 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
         CREATE INDEX IF NOT EXISTS undo_records_ready ON undo_records(state, created_at DESC);
     """)
     if is_fresh:
-        with db:
-            _migration_13(db)
-            _migration_18(db)
-            _migration_19(db)
-            _migration_20(db)
-            _migration_21(db)
-            _migration_22(db)
-            _migration_23(db)
-            _migration_24(db)
-            _migration_25(db)
-            _migration_26(db)
-            _migration_27(db)
-            _migration_28(db)
-            _migration_29(db)
-            _migration_30(db)
-            _migration_32(db)
-            _migration_33(db)
-            _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
-    else:
-        for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
-            migration = MIGRATIONS.get(next_version)
-            if migration is None:
-                db.close()
-                raise RuntimeError(f"缺少数据库迁移：{next_version}")
+        try:
             with db:
-                migration(db)
-                _set_meta(db, "schema_version", next_version)
+                _migration_13(db)
+                _migration_18(db)
+                _migration_19(db)
+                _migration_20(db)
+                _migration_21(db)
+                _migration_22(db)
+                _migration_23(db)
+                _migration_24(db)
+                _migration_25(db)
+                _migration_26(db)
+                _migration_27(db)
+                _migration_28(db)
+                _migration_29(db)
+                _migration_30(db)
+                _migration_32(db)
+                _migration_33(db)
+                _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
+        except Exception:
+            db.close()
+            raise
+    else:
+        try:
+            for next_version in range(schema_version + 1, TARGET_SCHEMA_VERSION + 1):
+                migration = MIGRATIONS.get(next_version)
+                if migration is None:
+                    raise RuntimeError(f"缺少数据库迁移：{next_version}")
+                with db:
+                    migration(db)
+                    _set_meta(db, "schema_version", next_version)
+        except Exception:
+            db.close()
+            raise
     # Schema 24 was still under active development when import graph sessions
     # and original/companion nodes were added. Apply this idempotent revision
     # once so databases opened by an earlier schema-24 build are upgraded too.
@@ -2387,16 +2553,27 @@ def connect(root: str, database: str, include_domains=None, include_compatibilit
             _check_integrity(db, force=True)
         elif db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
             raise RuntimeError("目录数据库完整性检查失败")
+    if backup_path:
+        _complete_migration_journal(database)
+    if pending_purge:
+        _resume_purge_journal(db)
     return db
 
 
-def connect_read_only(database: str):
+def connect_read_only(database: str, domains=()):
     """Open the catalog without schema writes so WAL readers never need the writer slot."""
     database = os.path.abspath(database)
+    _recover_interrupted_migration(database)
     uri = f"{Path(database).resolve().as_uri()}?mode=ro"
     db = sqlite3.connect(uri, uri=True, timeout=SQLITE_BUSY_TIMEOUT_MS / 1000)
     db.row_factory = sqlite3.Row
     db.execute(f"PRAGMA busy_timeout={SQLITE_BUSY_TIMEOUT_MS}")
+    for domain in tuple(dict.fromkeys(domains or ())):
+        domain_path = database_path_for_workspace_database(database, domain)
+        if not os.path.isfile(domain_path):
+            raise RuntimeError(f"只读业务域尚未初始化：{domain}")
+        domain_uri = f"{Path(domain_path).resolve().as_uri()}?mode=ro"
+        db.execute(f'ATTACH DATABASE ? AS "{domain}"', (domain_uri,))
     db.execute("PRAGMA query_only=ON")
     return db
 
@@ -2565,7 +2742,7 @@ def backfill_full_fingerprints(db, requests: list[dict]):
 
 
 def project_row(db, project_name: str):
-    row = db.execute("SELECT * FROM projects WHERE name=? COLLATE NOCASE AND status != ''", (project_name,)).fetchone()
+    row = db.execute("SELECT * FROM projects WHERE name=? COLLATE NOCASE AND status != '' AND is_deleted=0", (project_name,)).fetchone()
     if row is None:
         raise ValueError("项目未登记，请先刷新项目列表")
     return row
@@ -9396,14 +9573,16 @@ def load(root: str, database: str):
     # single WAL writer slot.
     requires_initialization = database_needs_initialization(database)
     requires_wal = False
+    pending_purge = False
     if not requires_initialization:
         probe = connect_read_only(database)
         try:
             requires_wal = str(probe.execute("PRAGMA journal_mode").fetchone()[0]).lower() != "wal"
+            pending_purge = bool(_meta_value(probe, "purge_journal_v1"))
         finally:
             probe.close()
-    if requires_initialization or requires_wal:
-        initialized = connect(root, database, include_domains=False)
+    if requires_initialization or requires_wal or pending_purge:
+        initialized = connect(root, database, include_domains=True if pending_purge else False, include_compatibility=pending_purge)
         try:
             # Preserve eager creation/migration for a healthy installation, but
             # never make catalog startup depend on an optional compatibility domain.
@@ -9534,96 +9713,174 @@ def deleted_project_cleanup_plan(db, payload: dict):
     return project_cleanup_plan(db, project, payload)
 
 
-def _delete_where_ids(db, table: str, column: str, values) -> None:
+def _delete_where_ids(db, table: str, column: str, values, schema: str | None = None) -> None:
     values = list(dict.fromkeys(str(value) for value in values if value is not None))
-    if not values:
-        return
-    placeholders = ",".join("?" for _ in values)
-    db.execute(f'DELETE FROM "{table}" WHERE "{column}" IN ({placeholders})', values)
+    qualified = f'"{schema}"."{table}"' if schema else f'"{table}"'
+    for offset in range(0, len(values), 400):
+        chunk = values[offset:offset + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        db.execute(f'DELETE FROM {qualified} WHERE "{column}" IN ({placeholders})', chunk)
 
 
-def _purge_project_rows_transaction(db, project, result: dict, payload: dict, *, deleted: bool) -> None:
-    project_id = str(project["id"])
-    # Connection setup may have recorded an idempotent schema marker. Finish
-    # that setup transaction before beginning the one indivisible purge.
-    if db.in_transaction:
-        db.commit()
+def _select_ids_by_ids(db, qualified_table: str, select_column: str, where_column: str, values) -> list:
+    values = list(dict.fromkeys(str(value) for value in values if value is not None))
+    result = []
+    for offset in range(0, len(values), 400):
+        chunk = values[offset:offset + 400]
+        placeholders = ",".join("?" for _ in chunk)
+        result.extend(row[0] for row in db.execute(
+            f'SELECT "{select_column}" FROM {qualified_table} WHERE "{where_column}" IN ({placeholders})', chunk
+        ).fetchall())
+    return result
+
+
+def _read_purge_journal(db):
+    raw = _meta_value(db, "purge_journal_v1")
+    if not raw:
+        return None
+    try:
+        journal = json.loads(raw)
+    except (TypeError, ValueError, json.JSONDecodeError) as error:
+        raise RuntimeError("purge journal is malformed") from error
+    if int(journal.get("version") or 0) != 1 or not journal.get("projectId"):
+        raise RuntimeError("purge journal is incompatible")
+    return journal
+
+
+def _save_purge_stage(db, journal, stage: str):
+    updated = {**journal, "stage": stage, "updatedAt": int(time.time() * 1000)}
+    db.execute("PRAGMA main.synchronous=FULL")
     db.execute("BEGIN IMMEDIATE")
     try:
-        expected = "is_deleted=1" if deleted else "is_deleted=0 AND availability='missing'"
-        if db.execute(f"SELECT 1 FROM projects WHERE id=? AND {expected}", (project_id,)).fetchone() is None:
-            raise RuntimeError("项目目录记录在清理开始前发生变化")
-        photo_ids = [row[0] for row in db.execute("SELECT id FROM photos WHERE project_id=?", (project_id,)).fetchall()]
-        version_ids = [row[0] for row in db.execute(
-            f"SELECT id FROM versions WHERE photo_id IN ({','.join('?' for _ in photo_ids) or 'NULL'})", photo_ids
-        ).fetchall()]
-        batch_ids = [row[0] for row in db.execute("SELECT id FROM version_batches WHERE project_id=?", (project_id,)).fetchall()]
-        session_ids = [row[0] for row in db.execute("SELECT id FROM tracking_sessions WHERE project_id=?", (project_id,)).fetchall()]
-        snapshot_ids = [row[0] for row in db.execute("SELECT snapshot_id FROM media_incremental_snapshots WHERE project_id=?", (project_id,)).fetchall()]
-        _delete_where_ids(db, "tracking_session_items", "session_id", session_ids)
-        db.execute("DELETE FROM tracking_sessions WHERE project_id=?", (project_id,))
-        for table in ("batch_file_operations", "batch_items"):
-            _delete_where_ids(db, table, "batch_id", batch_ids)
-        _delete_where_ids(db, "version_compare_history", "photo_id", photo_ids)
-        _delete_where_ids(db, "file_records", "owner_id", version_ids)
-        _delete_where_ids(db, "versions", "photo_id", photo_ids)
-        _delete_where_ids(db, "photos", "id", photo_ids)
-
-        for table in ("media_incremental_snapshot_files", "media_incremental_snapshot_scopes",
-                      "media_incremental_snapshot_baseline", "media_incremental_snapshot_batches"):
-            _delete_where_ids(db, table, "snapshot_id", snapshot_ids)
-        db.execute("DELETE FROM media_incremental_snapshots WHERE project_id=?", (project_id,))
-
-        for table in ("progress_folder_relocations", "progress_external_link_renames",
-                      "media_import_artifact_slots", "version_graph_edges",
-                      "legacy_selection_relation_repairs", "version_tree_node_positions",
-                      "version_tree_layouts", "media_import_graph_sessions"):
-            db.execute(f'DELETE FROM "{table}" WHERE project_id=?', (project_id,))
-        db.execute("DELETE FROM progress_folders WHERE project_id=?", (project_id,))
-        db.execute("DELETE FROM version_batches WHERE project_id=?", (project_id,))
-
-        run_compatibility_hooks("purge_project_rows", db, project_id)
-        db.execute("DELETE FROM project_properties WHERE project_id=?", (project_id,))
-        db.execute("DELETE FROM project_tags WHERE project_id=?", (project_id,))
-        removed = db.execute(f"DELETE FROM projects WHERE id=? AND {expected}", (project_id,)).rowcount
-        if removed != 1:
-            raise RuntimeError("项目目录记录在清理期间发生变化")
-
-        # Catalog and undo are the recovery anchors; delete them only after all
-        # owned domain rows and compatibility stores have succeeded.
-        removed_undo_ids = result.get("removedUndoIds") or []
-        if removed_undo_ids:
-            if "undoRecords" in payload:
-                pending = []
-                current_outbox = _meta_value(db, "operations_outbox_v1")
-                if current_outbox:
-                    try:
-                        pending = [str(value) for value in json.loads(current_outbox).get("removeUndoIds") or []]
-                    except (TypeError, ValueError, json.JSONDecodeError) as error:
-                        raise RuntimeError("operations outbox is malformed") from error
-                _set_meta(db, "operations_outbox_v1", json.dumps({
-                    "removeUndoIds": list(dict.fromkeys((*pending, *removed_undo_ids))),
-                    "updatedAt": int(time.time() * 1000),
-                }, sort_keys=True))
-            else:
-                _delete_where_ids(db, "undo_records", "id", removed_undo_ids)
-        for schema in (row[1] for row in db.execute("PRAGMA database_list").fetchall()):
-            violations = db.execute(f'PRAGMA "{schema}".foreign_key_check').fetchall()
-            if violations:
-                raise RuntimeError(f"{schema} foreign key check failed after project purge: {violations[:10]}")
+        _set_meta(db, "purge_journal_v1", json.dumps(updated, ensure_ascii=False, sort_keys=True))
         db.commit()
     except Exception:
-        db.rollback()
-        raise
+        db.rollback(); raise
+    return updated
+
+
+def _prepare_durable_purge(db, project, result, payload, deleted: bool):
+    if db.in_transaction: db.commit()
+    db.execute("PRAGMA main.synchronous=FULL")
+    existing = _read_purge_journal(db)
+    project_id = str(project["id"])
+    if existing:
+        if str(existing["projectId"]) != project_id:
+            raise RuntimeError("另一个项目清理 journal 尚未完成")
+        return existing
+    media = _table_schema(db, "photos", "media")
+    versioning = _table_schema(db, "versions", "versioning")
+    if not media or not versioning:
+        raise RuntimeError("purge requires attached media and versioning stores")
+    photo_ids = [row[0] for row in db.execute(f'SELECT id FROM "{media}"."photos" WHERE project_id=?', (project_id,))]
+    versions_table = f'"{versioning}"."versions"'
+    journal = {
+        "version": 1, "projectId": project_id, "projectName": str(project["name"]), "deleted": bool(deleted),
+        "stage": "prepared", "photoIds": photo_ids,
+        "versionIds": _select_ids_by_ids(db, versions_table, "id", "photo_id", photo_ids),
+        "batchIds": [row[0] for row in db.execute(f'SELECT id FROM "{versioning}"."version_batches" WHERE project_id=?', (project_id,))],
+        "sessionIds": [row[0] for row in db.execute(f'SELECT id FROM "{versioning}"."tracking_sessions" WHERE project_id=?', (project_id,))],
+        "snapshotIds": [row[0] for row in db.execute(f'SELECT snapshot_id FROM "{media}"."media_incremental_snapshots" WHERE project_id=?', (project_id,))],
+        "removedUndoIds": list(dict.fromkeys(str(value) for value in result.get("removedUndoIds") or [])),
+        "externalUndo": "undoRecords" in payload, "result": result,
+        "createdAt": int(time.time() * 1000), "updatedAt": int(time.time() * 1000),
+    }
+    expected = "is_deleted=1" if deleted else "is_deleted=0 AND availability='missing'"
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        if db.execute(f"SELECT 1 FROM projects WHERE id=? AND {expected}", (project_id,)).fetchone() is None:
+            raise RuntimeError("项目目录记录在 purge journal 创建前发生变化")
+        _set_meta(db, "purge_journal_v1", json.dumps(journal, ensure_ascii=False, sort_keys=True))
+        db.commit()
+    except Exception:
+        db.rollback(); raise
+    return journal
+
+
+def _resume_purge_journal(db):
+    journal = _read_purge_journal(db)
+    if not journal: return None
+    project_id = str(journal["projectId"])
+    media = _table_schema(db, "photos", "media")
+    versioning = _table_schema(db, "versions", "versioning")
+    if not media or not versioning: raise RuntimeError("purge replay requires attached domain stores")
+    db.execute(f'PRAGMA "{media}".synchronous=FULL')
+    db.execute(f'PRAGMA "{versioning}".synchronous=FULL')
+    stage = str(journal.get("stage") or "prepared")
+    if stage == "prepared":
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            for table in ("media_incremental_snapshot_files", "media_incremental_snapshot_scopes", "media_incremental_snapshot_baseline", "media_incremental_snapshot_batches"):
+                _delete_where_ids(db, table, "snapshot_id", journal.get("snapshotIds") or [], media)
+            db.execute(f'DELETE FROM "{media}"."media_incremental_snapshots" WHERE project_id=?', (project_id,))
+            _delete_where_ids(db, "file_records", "owner_id", journal.get("versionIds") or [], media)
+            _delete_where_ids(db, "photos", "id", journal.get("photoIds") or [], media)
+            violations = db.execute(f'PRAGMA "{media}".foreign_key_check').fetchall()
+            if violations: raise RuntimeError(f"media purge foreign key check failed: {violations[:10]}")
+            db.commit()
+        except Exception:
+            db.rollback(); raise
+        journal = _save_purge_stage(db, journal, "media"); stage = "media"
+    if stage == "media":
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            _delete_where_ids(db, "tracking_session_items", "session_id", journal.get("sessionIds") or [], versioning)
+            db.execute(f'DELETE FROM "{versioning}"."tracking_sessions" WHERE project_id=?', (project_id,))
+            for table in ("batch_file_operations", "batch_items"):
+                _delete_where_ids(db, table, "batch_id", journal.get("batchIds") or [], versioning)
+            _delete_where_ids(db, "version_compare_history", "photo_id", journal.get("photoIds") or [], versioning)
+            _delete_where_ids(db, "versions", "photo_id", journal.get("photoIds") or [], versioning)
+            for table in ("progress_folder_relocations", "progress_external_link_renames", "media_import_artifact_slots", "version_graph_edges", "legacy_selection_relation_repairs", "version_tree_node_positions", "version_tree_layouts", "media_import_graph_sessions"):
+                db.execute(f'DELETE FROM "{versioning}"."{table}" WHERE project_id=?', (project_id,))
+            db.execute(f'DELETE FROM "{versioning}"."progress_folders" WHERE project_id=?', (project_id,))
+            db.execute(f'DELETE FROM "{versioning}"."version_batches" WHERE project_id=?', (project_id,))
+            violations = db.execute(f'PRAGMA "{versioning}".foreign_key_check').fetchall()
+            if violations: raise RuntimeError(f"versioning purge foreign key check failed: {violations[:10]}")
+            db.commit()
+        except Exception:
+            db.rollback(); raise
+        journal = _save_purge_stage(db, journal, "versioning"); stage = "versioning"
+    if stage == "versioning":
+        db.execute("BEGIN IMMEDIATE")
+        try:
+            run_compatibility_hooks("purge_project_rows", db, project_id); db.commit()
+        except Exception:
+            db.rollback(); raise
+        journal = _save_purge_stage(db, journal, "compatibility"); stage = "compatibility"
+    if stage != "compatibility": raise RuntimeError(f"unknown purge stage: {stage}")
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        db.execute("DELETE FROM project_properties WHERE project_id=?", (project_id,))
+        db.execute("DELETE FROM project_tags WHERE project_id=?", (project_id,))
+        undo_ids = journal.get("removedUndoIds") or []
+        if undo_ids and journal.get("externalUndo"):
+            raw = _meta_value(db, "operations_outbox_v1")
+            pending = [] if not raw else [str(value) for value in json.loads(raw).get("removeUndoIds") or []]
+            _set_meta(db, "operations_outbox_v1", json.dumps({"removeUndoIds": list(dict.fromkeys((*pending, *undo_ids))), "updatedAt": int(time.time() * 1000)}, sort_keys=True))
+        elif undo_ids:
+            _delete_where_ids(db, "undo_records", "id", undo_ids, "main")
+        expected = "is_deleted=1" if journal.get("deleted") else "is_deleted=0 AND availability='missing'"
+        if db.execute(f"DELETE FROM projects WHERE id=? AND {expected}", (project_id,)).rowcount != 1:
+            raise RuntimeError("项目目录记录在 purge finalization 期间发生变化")
+        _set_meta(db, f"purge_receipt:{project_id}", json.dumps({"result": journal.get("result") or {}, "completedAt": int(time.time() * 1000)}, ensure_ascii=False, sort_keys=True))
+        db.execute("DELETE FROM meta WHERE key='purge_journal_v1'")
+        db.commit()
+        return journal.get("result") or {}
+    except Exception:
+        db.rollback(); raise
 
 
 def purge_deleted_project(db, payload: dict):
-    result = deleted_project_cleanup_plan(db, payload)
-    project = db.execute("SELECT * FROM projects WHERE id=? AND is_deleted=1", (str(payload.get("projectId") or ""),)).fetchone()
+    project_id = str(payload.get("projectId") or "")
+    project = db.execute("SELECT * FROM projects WHERE id=? AND is_deleted=1", (project_id,)).fetchone()
     if project is None:
+        receipt = _meta_value(db, f"purge_receipt:{project_id}")
+        if receipt:
+            return json.loads(receipt).get("result") or {"success": True}
         raise ValueError("已删除项目记录不存在")
-    _purge_project_rows_transaction(db, project, result, payload, deleted=True)
-    return result
+    result = project_cleanup_plan(db, project, payload)
+    journal = _prepare_durable_purge(db, project, result, payload, deleted=True)
+    return _resume_purge_journal(db) or journal.get("result") or result
 
 
 def purge_missing_project(root: str, db, payload: dict):
@@ -9633,13 +9890,18 @@ def purge_missing_project(root: str, db, payload: dict):
         (name,),
     ).fetchone()
     if project is None:
+        for row in db.execute("SELECT value FROM meta WHERE key LIKE 'purge_receipt:%'").fetchall():
+            receipt = json.loads(row[0])
+            result = receipt.get("result") or {}
+            if str(result.get("name") or "").casefold() == name.casefold():
+                return result
         raise ValueError("离线项目记录不存在或项目已经恢复")
     project_path = os.path.abspath(os.path.join(root, project["relative_path"]))
     if os.path.exists(project_path):
         raise ValueError("项目文件夹仍然存在，不能只移除软件记录")
     result = project_cleanup_plan(db, project, payload)
-    _purge_project_rows_transaction(db, project, result, payload, deleted=False)
-    return result
+    journal = _prepare_durable_purge(db, project, result, payload, deleted=False)
+    return _resume_purge_journal(db) or journal.get("result") or result
 
 
 def missing_projects_list(db, payload: dict):
@@ -9873,9 +10135,23 @@ def mutate(root: str, database: str, action: str, payload: dict):
         "maintenance_run", "deleted_projects_list", "deleted_project_cleanup_plan",
         "purge_deleted_project", "purge_missing_project",
     }
-    needs_compatibility = action in compatibility_action_names() or action in integrated_action_names()
+    needs_compatibility = action in compatibility_action_names() or action in integrated_action_names() or action in {
+        "maintenance_run", "purge_deleted_project", "purge_missing_project",
+    }
     needs_domains = ("versioning",) if action in VERSIONING_ONLY_ACTIONS else needs_compatibility or action in domain_actions
-    db = connect(root, database, include_domains=needs_domains, include_compatibility=needs_compatibility)
+    db = None
+    if action in READ_ONLY_ACTIONS and not needs_compatibility:
+        read_domains = ("versioning",) if action not in {"media_versions_snapshot", "media_sync_prepare"} else ("media", "versioning")
+        try:
+            candidate = connect_read_only(database, read_domains)
+            if _meta_value(candidate, "purge_journal_v1"):
+                candidate.close()
+            else:
+                db = candidate
+        except (OSError, sqlite3.Error, RuntimeError):
+            db = None
+    if db is None:
+        db = connect(root, database, include_domains=needs_domains, include_compatibility=needs_compatibility)
     now = int(time.time() * 1000)
     if action == "catalog_sync":
         try:

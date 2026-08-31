@@ -12,9 +12,11 @@ const requestAbortError = reason => (
 );
 const markOutcomeUnknown = (error, request) => {
   if (request?.idempotent) return error;
-  error.outcome = 'OUTCOME_UNKNOWN';
-  error.operationId = request?.operationId;
-  return error;
+  const cloned = new Error(error?.message || String(error), error?.cause ? { cause: error.cause } : undefined);
+  Object.assign(cloned, error, { outcome: 'OUTCOME_UNKNOWN', operationId: request?.operationId });
+  cloned.name = error?.name || 'Error';
+  if (error?.stack) cloned.stack = error.stack;
+  return cloned;
 };
 
 class PythonDatabaseClient {
@@ -258,13 +260,13 @@ class PythonDatabaseClient {
         clearTimeout(timedOut.timer);
         signal?.removeEventListener?.('abort', timedOut.onAbort);
         this.noteFailure(error);
-        markOutcomeUnknown(error, timedOut);
+        const outcomeError = markOutcomeUnknown(error, timedOut);
         void this.stopChildAndWait(child, `request-timeout:${action}`).then(
-          () => reject(error),
+          () => reject(outcomeError),
           stopError => {
-            markOutcomeUnknown(stopError, timedOut);
-            this.quarantine(databases, stopError);
-            reject(stopError);
+            const outcomeStopError = markOutcomeUnknown(stopError, timedOut);
+            this.quarantine(databases, outcomeStopError);
+            reject(outcomeStopError);
           },
         );
       };

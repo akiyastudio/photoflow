@@ -1,3 +1,5 @@
+const crypto = require('crypto');
+
 const SQLITE_RETRYABLE_CODES = new Set(['SQLITE_BUSY', 'SQLITE_LOCKED']);
 const DATABASE_LOCK_RETRY_DELAYS_MS = [80, 180, 360, 700, 1400];
 
@@ -31,15 +33,18 @@ class CoordinatedDatabaseClient {
   }
 
   call(root, action, payload, options = {}) {
-    const run = () => this.callSingleFlight(root, action, payload, options);
+    const database = this.getDatabasePath(root);
+    const policy = this.operationPolicy.classify({ root, database, action, payload, scriptName: this.scriptName });
+    const run = () => this.callSingleFlight(root, action, payload, options, { database, policy });
+    if (policy.mode === 'read') return run();
     const result = this.singleFlight.then(run, run);
     this.singleFlight = result.catch(() => undefined);
     return result;
   }
 
-  async callSingleFlight(root, action, payload, { timeoutMs, signal, label, deadlineAt: requestedDeadlineAt, operationId: requestedOperationId } = {}) {
-    const database = this.getDatabasePath(root);
-    const policy = this.operationPolicy.classify({ root, database, action, payload, scriptName: this.scriptName });
+  async callSingleFlight(root, action, payload, { timeoutMs, signal, label, deadlineAt: requestedDeadlineAt, operationId: requestedOperationId } = {}, classified = {}) {
+    const database = classified.database || this.getDatabasePath(root);
+    const policy = classified.policy || this.operationPolicy.classify({ root, database, action, payload, scriptName: this.scriptName });
     const operationId = requestedOperationId || crypto.randomUUID();
     let startedDeadlineAt;
     let attempt = 0;
@@ -71,4 +76,3 @@ class CoordinatedDatabaseClient {
 }
 
 module.exports = { CoordinatedDatabaseClient, SQLITE_RETRYABLE_CODES, DATABASE_LOCK_RETRY_DELAYS_MS };
-const crypto = require('crypto');

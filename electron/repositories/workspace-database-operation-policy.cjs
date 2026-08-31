@@ -1,9 +1,11 @@
 const path = require('path');
 
-// workspace_db currently attaches domain stores through a helper that verifies
-// and updates domain schema metadata. Until that attachment path is genuinely
-// query-only, even logically read-only actions must take the writer lease.
-const CONFIRMED_READ_ACTIONS = new Set();
+// These actions use workspace_db.connect_read_only and attach initialized
+// domain stores with mode=ro; keep this allowlist limited to audited queries.
+const CONFIRMED_READ_ACTIONS = new Set([
+  'progress_snapshot', 'media_versions_snapshot', 'tracking_session_get',
+  'tracking_commit_resources', 'media_sync_prepare', 'progress_stale_prepare',
+]);
 
 const IDEMPOTENT_ACTIONS = new Set([
   'progress_snapshot', 'progress_locations_snapshot', 'tracking_session_get', 'tracking_commit_resources', 'version_tree_layout_get',

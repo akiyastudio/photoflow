@@ -26,6 +26,34 @@ UNDO_ACTIONS = (
     "undo_record_mark_unavailable",
 )
 ALL_ACTIONS = ("init", *UNDO_ACTIONS)
+_READY_CACHE = {}
+
+
+def _file_identity(path: str):
+    try:
+        stat = os.stat(path)
+        return (int(stat.st_dev), int(stat.st_ino))
+    except OSError:
+        return None
+
+
+def _migration_0_to_1(db):
+    tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+    if {"photos", "versions", "projects"} & tables:
+        raise RuntimeError("cannot migrate a non-operations database")
+    if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+        raise RuntimeError("operations schema-0 database failed integrity validation")
+    db.execute(
+        """CREATE TABLE IF NOT EXISTS undo_records (
+             id TEXT PRIMARY KEY,kind TEXT NOT NULL,payload_json TEXT NOT NULL,
+             state TEXT NOT NULL DEFAULT 'ready',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL
+           )"""
+    )
+    db.execute("CREATE INDEX IF NOT EXISTS undo_records_ready ON undo_records(state,created_at DESC)")
+    db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('domain_identity','operations')")
+
+
+MIGRATIONS = {0: _migration_0_to_1}
 
 
 def _connect(database: str) -> sqlite3.Connection:
@@ -34,9 +62,17 @@ def _connect(database: str) -> sqlite3.Connection:
     db = sqlite3.connect(absolute, timeout=30)
     db.row_factory = sqlite3.Row
     db.execute("PRAGMA busy_timeout=30000")
-    db.execute("PRAGMA journal_mode=WAL")
-    db.execute("PRAGMA synchronous=NORMAL")
+    if str(db.execute("PRAGMA journal_mode").fetchone()[0]).casefold() != "wal":
+        db.execute("PRAGMA journal_mode=WAL")
+    db.execute("PRAGMA synchronous=FULL")
     try:
+        identity_before = _file_identity(absolute)
+        if identity_before is not None and _READY_CACHE.get(absolute) == identity_before:
+            cached_schema = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            cached_domain = db.execute("SELECT value FROM meta WHERE key='domain_identity'").fetchone()
+            if cached_schema and int(cached_schema[0]) == SCHEMA_VERSION and cached_domain and cached_domain[0] == "operations":
+                return db
+            _READY_CACHE.pop(absolute, None)
         db.execute("BEGIN IMMEDIATE")
         db.execute("CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY,value TEXT NOT NULL)")
         schema = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
@@ -48,19 +84,20 @@ def _connect(database: str) -> sqlite3.Connection:
         identity = db.execute("SELECT value FROM meta WHERE key='domain_identity'").fetchone()
         if identity is not None and identity[0] != "operations":
             raise RuntimeError(f"operations database identity mismatch: {identity[0]}")
-        tables = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
-        if identity is None and {"photos", "versions", "projects"} & tables:
-            raise RuntimeError("cannot infer operations database identity from existing tables")
-        db.execute(
-            """CREATE TABLE IF NOT EXISTS undo_records (
-                 id TEXT PRIMARY KEY,kind TEXT NOT NULL,payload_json TEXT NOT NULL,
-                 state TEXT NOT NULL DEFAULT 'ready',created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL
-               )"""
-        )
-        db.execute("CREATE INDEX IF NOT EXISTS undo_records_ready ON undo_records(state,created_at DESC)")
-        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
-        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('domain_identity','operations')")
+        while schema_version < SCHEMA_VERSION:
+            migration = MIGRATIONS.get(schema_version)
+            if migration is None:
+                raise RuntimeError(f"missing operations migration {schema_version}->{schema_version + 1}")
+            migration(db)
+            schema_version += 1
+            db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (str(schema_version),))
+        if identity is None and schema_version == SCHEMA_VERSION:
+            db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('domain_identity','operations')")
+        required = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        if not {"meta", "undo_records"} <= required:
+            raise RuntimeError("operations migration did not create required tables")
         db.commit()
+        _READY_CACHE[absolute] = _file_identity(absolute)
         return db
     except Exception:
         db.rollback()
@@ -139,8 +176,10 @@ def _drain_legacy_outbox(db: sqlite3.Connection, legacy_database: str) -> int:
         db.execute("BEGIN IMMEDIATE")
         try:
             if ids:
-                placeholders = ",".join("?" for _ in ids)
-                db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", ids)
+                for offset in range(0, len(ids), 400):
+                    chunk = ids[offset:offset + 400]
+                    placeholders = ",".join("?" for _ in chunk)
+                    db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", chunk)
             db.commit()
         except Exception:
             db.rollback()
@@ -218,8 +257,10 @@ def execute(database: str, action: str, payload: dict):
         else:
             raise ValueError(f"不支持的 operations 数据库操作：{action}")
         if ids:
-            placeholders = ",".join("?" for _ in ids)
-            db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", ids)
+            for offset in range(0, len(ids), 400):
+                chunk = ids[offset:offset + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", chunk)
         db.commit()
         return {"success": True}
     finally:

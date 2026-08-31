@@ -97,8 +97,8 @@ def verify(path: str, domain: str | None = None) -> dict:
                 }.get(domain, set()) & set(tables)
                 if identity is None and inferred_conflicts:
                     errors.append(f"cannot infer domain identity: {sorted(inferred_conflicts)}")
-                if schema_version <= 0:
-                    errors.append("missing schema version")
+                if schema_version < 0:
+                    errors.append("invalid schema version")
                 if schema_version > SUPPORTED_SCHEMA_VERSIONS.get(domain, schema_version):
                     errors.append(f"future schema version: {schema_version}")
             if foreign_keys:
@@ -244,6 +244,17 @@ def _rebase(db: sqlite3.Connection, domain: str, replacements, *, project_id: st
 
 
 def _prepare_staged_domain(path: str, domain: str) -> dict:
+    initial = verify(path, domain)
+    if initial.get("schemaVersion", 0) < SUPPORTED_SCHEMA_VERSIONS.get(domain, 0):
+        if domain == "operations":
+            from operations_db import _connect as migrate_operations
+            migrated = migrate_operations(path)
+        elif domain in DOMAIN_TABLES:
+            from workspace_domain_storage import _connect_domain as migrate_domain
+            migrated = migrate_domain(path, domain)
+        else:
+            raise RuntimeError(f"no migration registry for domain {domain}")
+        migrated.close()
     db = _connect(path)
     try:
         db.execute("BEGIN IMMEDIATE")
@@ -253,7 +264,7 @@ def _prepare_staged_domain(path: str, domain: str) -> dict:
         if schema > supported:
             raise RuntimeError(f"future {domain} schema version {schema}")
         if schema < supported:
-            db.execute("UPDATE meta SET value=? WHERE key='schema_version'", (str(supported),))
+            raise RuntimeError(f"{domain} migration registry did not reach schema {supported}")
         foreign_keys = db.execute("PRAGMA foreign_key_check").fetchall()
         if foreign_keys:
             raise RuntimeError(f"{domain} foreign key check failed: {foreign_keys[:10]}")

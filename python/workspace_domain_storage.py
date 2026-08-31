@@ -29,6 +29,28 @@ DOMAIN_TABLES = {
         "progress_external_link_renames",
     ),
 }
+_DOMAIN_READY_CACHE = {}
+
+
+def _domain_file_identity(path: str):
+    try:
+        stat = os.stat(path)
+        return (int(stat.st_dev), int(stat.st_ino))
+    except OSError:
+        return None
+
+
+def _migrate_domain_0_to_1(db, domain: str, existing_tables: set[str]) -> None:
+    conflicting = set().union(*(set(tables) for name, tables in DOMAIN_TABLES.items() if name != domain)) & existing_tables
+    if conflicting:
+        raise RuntimeError(f"cannot infer {domain} identity; conflicting tables: {sorted(conflicting)}")
+    if db.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+        raise RuntimeError(f"{domain} schema-0 database failed integrity validation")
+    db.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+    db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('domain_identity',?)", (domain,))
+
+
+DOMAIN_MIGRATIONS = {0: _migrate_domain_0_to_1}
 
 
 def database_path_for_workspace_database(workspace_database: str, domain: str) -> str:
@@ -40,10 +62,18 @@ def database_path_for_workspace_database(workspace_database: str, domain: str) -
 
 
 def _connect_domain(path: str, domain: str) -> sqlite3.Connection:
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    db = sqlite3.connect(path, timeout=30)
+    absolute = os.path.abspath(path)
+    os.makedirs(os.path.dirname(absolute), exist_ok=True)
+    cached_identity = _domain_file_identity(absolute)
+    db = sqlite3.connect(absolute, timeout=30)
     try:
         db.execute("PRAGMA busy_timeout=30000")
+        if cached_identity is not None and _DOMAIN_READY_CACHE.get(absolute) == cached_identity:
+            cached_schema = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+            cached_domain = db.execute("SELECT value FROM meta WHERE key='domain_identity'").fetchone()
+            if cached_schema and int(cached_schema[0]) == SCHEMA_VERSION and cached_domain and cached_domain[0] == domain:
+                return db
+            _DOMAIN_READY_CACHE.pop(absolute, None)
         if str(db.execute("PRAGMA journal_mode").fetchone()[0]).casefold() != "wal":
             db.execute("PRAGMA journal_mode=WAL")
         db.execute("BEGIN IMMEDIATE")
@@ -52,24 +82,32 @@ def _connect_domain(path: str, domain: str) -> sqlite3.Connection:
                 "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             ).fetchall()
         }
-        db.execute("CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
-        schema = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if "meta" not in existing_tables:
+            schema = None
+        else:
+            schema = db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
         schema_version = int(schema[0]) if schema else 0
         if schema_version > SCHEMA_VERSION:
             raise RuntimeError(
                 f"{domain} database schema {schema_version} is newer than supported {SCHEMA_VERSION}"
             )
-        identity = db.execute("SELECT value FROM meta WHERE key='domain_identity'").fetchone()
+        identity = db.execute("SELECT value FROM meta WHERE key='domain_identity'").fetchone() if "meta" in existing_tables else None
         if identity is not None and identity[0] != domain:
             raise RuntimeError(f"domain identity mismatch: expected {domain}, found {identity[0]}")
-        conflicting = set().union(*(
-            set(tables) for name, tables in DOMAIN_TABLES.items() if name != domain
-        )) & existing_tables
-        if identity is None and conflicting:
-            raise RuntimeError(f"cannot infer {domain} identity; conflicting tables: {sorted(conflicting)}")
-        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('schema_version',?)", (str(SCHEMA_VERSION),))
-        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('domain_identity',?)", (domain,))
+        if identity is None and schema_version == SCHEMA_VERSION:
+            conflicting = set().union(*(set(tables) for name, tables in DOMAIN_TABLES.items() if name != domain)) & existing_tables
+            if conflicting:
+                raise RuntimeError(f"cannot infer {domain} identity; conflicting tables: {sorted(conflicting)}")
+            db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('domain_identity',?)", (domain,))
+        while schema_version < SCHEMA_VERSION:
+            migration = DOMAIN_MIGRATIONS.get(schema_version)
+            if migration is None:
+                raise RuntimeError(f"missing {domain} domain migration {schema_version}->{schema_version + 1}")
+            migration(db, domain, existing_tables)
+            schema_version += 1
+            db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (str(schema_version),))
         db.commit()
+        _DOMAIN_READY_CACHE[absolute] = _domain_file_identity(absolute)
         return db
     except Exception:
         db.rollback()
@@ -167,11 +205,12 @@ def _copy_legacy_table(workspace_db: sqlite3.Connection, alias: str, table: str)
 
 def _backup_before_extraction(workspace_database: str) -> str:
     stamp = time.strftime("%Y%m%d-%H%M%S")
-    destination = f"{workspace_database}.before-domain-extraction.{stamp}.bak"
-    if not os.path.exists(destination):
+    destination = f"{workspace_database}.before-domain-extraction.{stamp}.{uuid.uuid4().hex}.bak"
+    descriptor = os.open(destination, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    os.close(descriptor)
+    try:
         source = sqlite3.connect(f"file:{workspace_database}?mode=ro", uri=True, timeout=30)
-        staged = f"{destination}.{uuid.uuid4().hex}.tmp"
-        target = sqlite3.connect(staged, timeout=30)
+        target = sqlite3.connect(destination, timeout=30)
         try:
             source.backup(target)
             target.commit()
@@ -180,7 +219,20 @@ def _backup_before_extraction(workspace_database: str) -> str:
         finally:
             target.close()
             source.close()
-        os.replace(staged, destination)
+        sync_descriptor = os.open(destination, os.O_RDWR)
+        try: os.fsync(sync_descriptor)
+        finally: os.close(sync_descriptor)
+        try:
+            directory = os.open(os.path.dirname(destination), os.O_RDONLY)
+            try: os.fsync(directory)
+            finally: os.close(directory)
+        except OSError as error:
+            if getattr(error, "winerror", None) not in (5, 50) and error.errno not in (13, 22):
+                raise
+    except Exception:
+        try: os.remove(destination)
+        except FileNotFoundError: pass
+        raise
     return destination
 
 
@@ -209,11 +261,13 @@ def attach_and_migrate(
     prepared = tuple(DOMAIN_TABLES) if owned_legacy else requested
     paths = {domain: database_path_for_workspace_database(workspace_database, domain) for domain in prepared}
     for domain, domain_path in paths.items():
+        cached = _DOMAIN_READY_CACHE.get(os.path.abspath(domain_path)) == _domain_file_identity(domain_path)
         probe = _connect_domain(domain_path, domain)
         try:
-            check = probe.execute("PRAGMA quick_check").fetchone()[0]
-            if check != "ok":
-                raise RuntimeError(f"{domain} database integrity check failed: {check}")
+            if not cached:
+                check = probe.execute("PRAGMA quick_check").fetchone()[0]
+                if check != "ok":
+                    raise RuntimeError(f"{domain} database integrity check failed: {check}")
         finally:
             probe.close()
     attached = {row[1] for row in workspace_db.execute("PRAGMA database_list").fetchall()}
