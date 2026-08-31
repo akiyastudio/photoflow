@@ -194,17 +194,21 @@ const registerVersionTrackingIpc = context => {
       );
       if (!restartTask && created.reused) {
         const sessionKey = trackingSessionKey(workspaceRoot, created.sessionId);
-        if (trackingCommitJobs.has(sessionKey) || trackingCompareSessions.has(sessionKey) || trackingSessionOperations.has(sessionKey)) {
-          throw new Error('版本跟踪会话正在执行其他操作，暂时不能恢复');
-        }
         const activeTask = backgroundTasks?.list?.().find(task => task.type === 'version-tracking'
           && task.metadata?.sessionId === created.sessionId
           && (task.state === 'queued' || task.state === 'running'));
+        const sessionOperation = trackingSessionOperations.get(sessionKey);
+        if (trackingCommitJobs.has(sessionKey) || sessionOperation && sessionOperation !== 'compare') {
+          throw new Error('版本跟踪会话正在执行其他操作，暂时不能恢复');
+        }
         if (activeTask) return {
           task: activeTask,
           result: { sessionId: created.sessionId, progressId: created.progressId },
           response: { success: true, taskId: activeTask.id, sessionId: created.sessionId, sessionStatus: created.sessionStatus, resumed: true },
         };
+        if (trackingCompareSessions.has(sessionKey) || sessionOperation) {
+          throw new Error('版本跟踪会话正在执行其他操作，暂时不能恢复');
+        }
         if (created.sessionStatus === 'pending_confirm' || created.sessionStatus === 'committing' || created.sessionStatus === 'failed') {
           return {
             task: null,

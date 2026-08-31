@@ -115,13 +115,18 @@ registerVersionIpc({
   backgroundTasks: {
     create: definition => {
       (calls.taskDefinitions ||= []).push(definition);
+      const task = { id: definition.id, type: definition.type, state: 'queued', metadata: definition.metadata };
+      if (calls.useCreatedTaskRegistry) (calls.createdTaskRegistry ||= []).push(task);
       return ({
+      task,
       context: { signal: new AbortController().signal, report: (...args) => taskReports.push(args), throwIfCancelled: () => undefined },
-      waitForStart: async () => undefined, complete: () => undefined,
-      fail: error => (calls.taskFailures ||= []).push(error), cancelled: () => undefined,
+      waitForStart: async () => { task.state = 'running'; },
+      complete: () => { task.state = 'completed'; },
+      fail: error => { task.state = 'failed'; (calls.taskFailures ||= []).push(error); },
+      cancelled: () => { task.state = 'cancelled'; },
       });
     },
-    list: () => calls.activeTasks || [],
+    list: () => calls.useCreatedTaskRegistry ? calls.createdTaskRegistry || [] : calls.activeTasks || [],
     run: async (definition, worker) => {
       (calls.commitTaskDefinitions ||= []).push(definition);
       return { result: await worker({ signal: new AbortController().signal, report: () => undefined, throwIfCancelled: () => undefined }) };
@@ -225,6 +230,43 @@ async function main() {
   assert.strictEqual(resumedRunning.taskId, 'active-tracking-task', 'a live compare task must be reused');
   assert.strictEqual(resumedRunning.sessionId, '33333333-3333-4333-8333-333333333333');
   calls.activeTasks = [];
+
+  const liveCompareSessionId = 'cccccccc-cccc-4ccc-8ccc-cccccccccccc';
+  const originalPrepareForLiveResume = versionService.prepareTracking;
+  let markLiveCompareEntered;
+  let releaseLiveCompare;
+  const liveCompareEntered = new Promise(resolve => { markLiveCompareEntered = resolve; });
+  const liveCompareGate = new Promise(resolve => { releaseLiveCompare = resolve; });
+  versionService.prepareTracking = async (root, request) => {
+    if (request.sessionId === liveCompareSessionId) {
+      markLiveCompareEntered();
+      await liveCompareGate;
+    }
+    return { ...await originalPrepareForLiveResume(root, request), sessionId: request.sessionId };
+  };
+  calls.useCreatedTaskRegistry = true;
+  calls.createdTaskRegistry = [];
+  calls.createTrackingResponses = [{
+    sessionId: liveCompareSessionId, progressId: 'live-progress-node',
+    parentProgressId: 'parent-progress-id', mode: 'refresh', sessionStatus: 'comparing', reused: false,
+    parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+  }];
+  const firstLiveCompare = await start({}, workspaceRoot, 'Project', { progressId: 'live-progress-node', mode: 'refresh' });
+  await liveCompareEntered;
+  calls.createTrackingResponses = [{
+    sessionId: liveCompareSessionId, progressId: 'live-progress-node',
+    parentProgressId: 'parent-progress-id', mode: 'refresh', sessionStatus: 'comparing', reused: true,
+    parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+  }];
+  const resumedLiveCompare = await start({}, workspaceRoot, 'Project', { progressId: 'live-progress-node', mode: 'refresh' });
+  assert.deepStrictEqual(resumedLiveCompare, {
+    success: true, taskId: firstLiveCompare.taskId, sessionId: liveCompareSessionId, sessionStatus: 'comparing', resumed: true,
+  }, 'a running compare owned by this handler must resume its live task while the compare lease is held');
+  releaseLiveCompare();
+  for (let attempt = 0; attempt < 50 && calls.createdTaskRegistry[0]?.state === 'running'; attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.strictEqual(calls.createdTaskRegistry[0]?.state, 'completed');
+  calls.useCreatedTaskRegistry = false;
+  versionService.prepareTracking = originalPrepareForLiveResume;
 
   calls.createTrackingResponses = [{
     sessionId: '44444444-4444-4444-8444-444444444444', progressId: 'progress-node-id',
