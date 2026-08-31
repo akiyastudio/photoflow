@@ -8,30 +8,47 @@ export const ColumnResizeHandle = ({ onDrag, label, value, minimum, maximum, onR
     event.preventDefault();
     cleanupRef.current?.();
     const handle = event.currentTarget;
-    handle.setPointerCapture(event.pointerId);
+    const pointerId = event.pointerId;
+    handle.setPointerCapture(pointerId);
     let previousX = event.clientX;
+    let cleaned = false;
     const previousCursor = document.body.style.cursor;
     const previousUserSelect = document.body.style.userSelect;
     document.body.style.cursor = 'col-resize';
     document.body.style.userSelect = 'none';
     const move = (moveEvent: PointerEvent) => {
+      if (moveEvent.pointerId !== pointerId) return;
       const deltaX = moveEvent.clientX - previousX;
       previousX = moveEvent.clientX;
       onDrag(deltaX);
     };
-    const finish = () => {
+    const cleanup = () => {
+      if (cleaned) return;
+      cleaned = true;
       document.body.style.cursor = previousCursor;
       document.body.style.userSelect = previousUserSelect;
-      if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', finish);
       window.removeEventListener('pointercancel', finish);
-      cleanupRef.current = undefined;
+      window.removeEventListener('blur', cleanup);
+      handle.removeEventListener('lostpointercapture', lostCapture);
+      if (handle.hasPointerCapture(pointerId)) handle.releasePointerCapture(pointerId);
+      if (cleanupRef.current === cleanup) cleanupRef.current = undefined;
+    };
+    const finish = (finishEvent: PointerEvent) => {
+      if (finishEvent.pointerId !== pointerId) return;
+      cleanup();
+    };
+    const lostCapture = (captureEvent: PointerEvent) => {
+      if (captureEvent.pointerId !== pointerId) return;
+      cleanup();
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', finish);
     window.addEventListener('pointercancel', finish);
-    cleanupRef.current = finish;
+    window.addEventListener('blur', cleanup);
+    handle.addEventListener('lostpointercapture', lostCapture);
+    cleanupRef.current = cleanup;
   };
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;

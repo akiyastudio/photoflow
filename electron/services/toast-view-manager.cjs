@@ -97,6 +97,7 @@ class ToastViewManager {
         return;
       }
       this.clearEmptyHide();
+      if (layout.revision === this.renderedRevision) return;
       if (nextHeight === this.renderedHeight && this.presentationVisible) {
         this.renderedLayoutKey = this.layoutKey;
         this.renderedRevision = layout.revision;
@@ -104,6 +105,7 @@ class ToastViewManager {
       }
       const reflowMs = finiteInteger(layout.reflowMs) ? Math.max(0, Math.min(TOAST_VIEW_MAX_REFLOW_MS, layout.reflowMs)) : 0;
       if (this.presentationVisible && nextHeight < this.renderedHeight && reflowMs > 0) {
+        this.renderedRevision = layout.revision;
         this.scheduleLayoutShrink(nextHeight, reflowMs, layout.revision);
         return;
       }

@@ -79,6 +79,10 @@ handlers.get('toast-view:update')({ sender: mainContents }, { ...snapshot, revis
 ipcMain.emit('toast-view:layout', { sender: view.webContents }, { revision: 3, height: 118 });
 assert.equal(mainContents.sent.filter(message => message[0] === 'toast-view:presentation').length, presentationEventCount, 'progress revisions retain one stable native presentation lease');
 assert.equal(view.boundsCalls.length, stableBoundsCount + 1, 'each accepted revision may correct native height even when card identity is stable');
+const correctedBoundsCount = view.boundsCalls.length;
+ipcMain.emit('toast-view:layout', { sender: view.webContents }, { revision: 3, height: 124 });
+assert.equal(view.boundsCalls.length, correctedBoundsCount, 'repeat layout reports from the rendered revision ignore ResizeObserver height jitter');
+assert.equal(view.bounds.height, 118, 'same-revision jitter cannot replace the first accepted correction');
 
 const pluginView = { name: 'plugin' };
 children.push(pluginView);
