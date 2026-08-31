@@ -3211,13 +3211,24 @@ def media_sync_apply_batch(root: str, db, payload: dict):
     batch_index = int(payload.get("batchIndex") or 0)
     if batch_index < 0:
         raise ValueError("media_sync_batch_invalid: 扫描批次无效")
-    marker = _media_sync_marker(snapshot_id, f"batch:{batch_index}")
-    cached = _meta_value(db, marker)
-    if cached:
-        return json.loads(cached)
     files = payload.get("files") or []
     if not isinstance(files, list) or len(files) > 256:
         raise ValueError("media_sync_batch_invalid: 扫描批次过大")
+    payload_digest = _media_operation_digest("media_sync_apply_batch", payload)
+    completed_marker = _meta_value(db, _media_sync_marker(snapshot_id, "completed-batches"))
+    if completed_marker:
+        completed = json.loads(completed_marker).get(str(batch_index))
+        if completed:
+            if completed.get("payloadDigest") != payload_digest:
+                raise MediaSyncBatchMismatch("MEDIA_SYNC_BATCH_MISMATCH: 已完成批次载荷不匹配")
+            return completed["result"]
+    marker = _media_sync_marker(snapshot_id, f"batch:{batch_index}")
+    cached = _meta_value(db, marker)
+    if cached:
+        cached_digest = _meta_value(db, _media_sync_marker(snapshot_id, f"batch-digest:{batch_index}"))
+        if cached_digest and cached_digest != payload_digest:
+            raise MediaSyncBatchMismatch("MEDIA_SYNC_BATCH_MISMATCH: 批次载荷与已提交标记不一致")
+        return json.loads(cached)
     _authorized_roots, roots = _validated_media_scan_roots(root, project, payload.get("authorizedRoots") or [])
     count = 0
     pending_hashes = []
@@ -3232,6 +3243,7 @@ def media_sync_apply_batch(root: str, db, payload: dict):
             continue
     result = {"success": True, "snapshotId": snapshot_id, "batchIndex": batch_index, "count": count}
     _set_meta(db, marker, json.dumps(result, ensure_ascii=False))
+    _set_meta(db, _media_sync_marker(snapshot_id, f"batch-digest:{batch_index}"), payload_digest)
     db.commit()
     # Full-file hashing is deliberately not performed under this writer lease.
     # A later fingerprint-maintenance pass can fill the optional hashes.
@@ -3287,7 +3299,20 @@ def media_sync_finalize(root: str, db, payload: dict):
             for row in thumbnail_rows if not row["thumbnail_path"] or not os.path.isfile(row["thumbnail_path"])
         ],
     }
+    completed_batches = {}
+    result_prefix = f"media_sync:{snapshot_id}:batch:"
+    digest_prefix = f"media_sync:{snapshot_id}:batch-digest:"
+    digests = {
+        row["key"][len(digest_prefix):]: row["value"]
+        for row in db.execute("SELECT key,value FROM meta WHERE key LIKE ?", (f"{digest_prefix}%",)).fetchall()
+    }
+    for row in db.execute("SELECT key,value FROM meta WHERE key LIKE ?", (f"{result_prefix}%",)).fetchall():
+        batch_key = row["key"][len(result_prefix):]
+        if batch_key in digests:
+            completed_batches[batch_key] = {"payloadDigest": digests[batch_key], "result": json.loads(row["value"])}
+    _set_meta(db, _media_sync_marker(snapshot_id, "completed-batches"), json.dumps(completed_batches, ensure_ascii=False, sort_keys=True))
     db.execute("DELETE FROM meta WHERE key LIKE ?", (f"media_sync:{snapshot_id}:batch:%",))
+    db.execute("DELETE FROM meta WHERE key LIKE ?", (f"media_sync:{snapshot_id}:batch-digest:%",))
     _set_meta(db, marker, json.dumps(result, ensure_ascii=False))
     db.commit()
     return result
@@ -3851,13 +3876,17 @@ def media_sync_project(root: str, db, payload: dict):
 
 
 def media_get(root: str, db, payload: dict):
-    del root
     project = project_row(db, payload["projectName"])
     file_path = canonical_path(payload["filePath"])
-    version = source_version_row(db, project["id"], file_path)
-    if version is None:
-        raise ValueError("该文件尚未登记为可追踪素材")
-    return {"success": True, **media_bundle(db, version["photo_id"])}
+    mark_missing_project_versions(db, project["id"])
+    db.commit()
+    pending_hashes = []
+    photo_id = sync_media_file(db, project, file_path, pending_hashes)
+    db.commit()
+    backfill_full_fingerprints(db, pending_hashes)
+    if not photo_id:
+        raise ValueError("该文件不是可追踪的图片或视频")
+    return {"success": True, **media_bundle(db, photo_id)}
 
 
 def media_get_photo(db, payload: dict):
@@ -10323,6 +10352,30 @@ def _prune_media_operation_receipts(db, now: int | None = None) -> int:
     return removed
 
 
+def _cleanup_snapshot_apply_receipts(db, snapshot_id: str) -> int:
+    if not snapshot_id:
+        return 0
+    legacy_completed_raw = _meta_value(db, _media_sync_marker(snapshot_id, "completed-batches"))
+    legacy_completed = json.loads(legacy_completed_raw) if legacy_completed_raw else {}
+    removed = 0
+    for row in db.execute("SELECT key,value FROM meta WHERE key LIKE 'media_operation_receipt:%'").fetchall():
+        try:
+            receipt = json.loads(row[1])
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        if str(receipt.get("snapshotId") or "") != snapshot_id:
+            continue
+        action = str(receipt.get("action") or "")
+        if action == "media_sync_apply_batch":
+            batch_index = str((receipt.get("result") or {}).get("batchIndex"))
+            if batch_index not in legacy_completed:
+                continue
+        elif action != "media_sync_paths_apply_batch":
+            continue
+        removed += db.execute("DELETE FROM meta WHERE key=?", (row[0],)).rowcount
+    return removed
+
+
 def _clear_preparing_media_operation(database: str, journal: dict) -> None:
     db = sqlite3.connect(database, timeout=30)
     try:
@@ -10400,6 +10453,7 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
         live.close()
     staged_owner = sqlite3.connect(stage_core, timeout=30)
     try:
+        staged_owner.row_factory = sqlite3.Row
         staged_owner.execute("DELETE FROM meta WHERE key='media_operation_journal_v1'")
         staged_owner.commit()
     finally:
@@ -10408,6 +10462,7 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
     completed_at = int(time.time() * 1000)
     staged_owner = sqlite3.connect(stage_core, timeout=30)
     try:
+        staged_owner.row_factory = sqlite3.Row
         staged_owner.execute("PRAGMA synchronous=FULL")
         staged_owner.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
@@ -10417,6 +10472,8 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
             }, ensure_ascii=False, sort_keys=True)),
         )
         staged_owner.execute("DELETE FROM meta WHERE key='media_operation_journal_v1'")
+        if action in ("media_sync_finalize", "media_sync_paths_finalize"):
+            _cleanup_snapshot_apply_receipts(staged_owner, str(payload.get("snapshotId") or ""))
         _prune_media_operation_receipts(staged_owner, completed_at)
         staged_owner.commit()
     finally:
@@ -10424,6 +10481,19 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
     journal = {**journal, "result": result, "completedAt": completed_at}
     _set_media_operation_stage(database, journal, "ready")
     return _resume_media_operation_files(database) or result
+
+
+def _media_get_fast_path(root: str, database: str, payload: dict):
+    db = connect(root, database, include_domains=True)
+    try:
+        project = project_row(db, payload["projectName"])
+        file_path = canonical_path(payload["filePath"])
+        version = source_version_row(db, project["id"], file_path)
+        if version is None:
+            return None
+        return {"success": True, **media_bundle(db, version["photo_id"])}
+    finally:
+        db.close()
 
 
 def _mutate_impl(root: str, database: str, action: str, payload: dict):
@@ -10903,6 +10973,19 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
 
 
 def mutate(root: str, database: str, action: str, payload: dict, operation_id: str | None = None):
+    if action == "media_get":
+        if operation_id and os.path.isfile(database):
+            receipt_db = sqlite3.connect(database, timeout=30)
+            try:
+                receipt = receipt_db.execute("SELECT 1 FROM meta WHERE key=?", (f"media_operation_receipt:{operation_id}",)).fetchone()
+            finally:
+                receipt_db.close()
+            if receipt:
+                return _run_durable_media_operation(root, database, action, payload, operation_id)
+        existing = _media_get_fast_path(root, database, payload)
+        if existing is not None:
+            return existing
+        return _run_durable_media_operation(root, database, action, payload, operation_id)
     if action in MEDIA_DURABLE_ACTIONS:
         return _run_durable_media_operation(root, database, action, payload, operation_id)
     return _mutate_impl(root, database, action, payload)
