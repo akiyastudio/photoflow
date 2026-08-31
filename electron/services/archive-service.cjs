@@ -14,7 +14,7 @@ const sha256File = async filePath => {
 };
 const safeComponent = (value, label) => {
   const text = String(value || '');
-  if (!text || text === '.' || text === '..' || path.basename(text) !== text || text.includes('/') || text.includes('\\')) throw new Error(`${label}无效`);
+  if (!text || text.includes('\0') || text === '.' || text === '..' || path.basename(text) !== text || text.includes('/') || text.includes('\\')) throw new Error(`${label}无效`);
   return text;
 };
 const assertPhysicalDirectory = async (candidate, label) => {
@@ -35,6 +35,20 @@ const assertPhysicalDirectory = async (candidate, label) => {
 };
 const samePath = (left, right) => (process.platform === 'win32' ? path.resolve(left).toLocaleLowerCase() : path.resolve(left))
   === (process.platform === 'win32' ? path.resolve(right).toLocaleLowerCase() : path.resolve(right));
+const assertSafeDestinationAncestors = async (approvedRoot, destination) => {
+  const rootReal = await fs.promises.realpath(approvedRoot);
+  if (!inside(rootReal, destination) || samePath(rootReal, destination)) throw new Error('归档目标路径越界');
+  let cursor = path.resolve(destination);
+  while (inside(rootReal, cursor) && !samePath(rootReal, cursor)) {
+    const stat = await fs.promises.lstat(cursor).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+    if (stat) {
+      if (stat.isSymbolicLink() || !stat.isDirectory()) throw new Error(`归档目标祖先不是安全的物理目录：${cursor}`);
+      if (!inside(rootReal, await fs.promises.realpath(cursor))) throw new Error(`归档目标祖先真实路径越界：${cursor}`);
+    }
+    cursor = path.dirname(cursor);
+  }
+  if (!samePath(rootReal, cursor)) throw new Error('归档目标不在获批根目录内');
+};
 
 const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig, workspaceRepository, writeLog }) => {
   const approvedTargets = new Set();
@@ -55,6 +69,7 @@ const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig
     const targetReal = await assertPhysicalDirectory(target, '归档盘');
     const destination = path.resolve(targetReal, id, name);
     if (!inside(targetReal, destination) || samePath(targetReal, destination)) throw new Error('归档目标路径无效');
+    await assertSafeDestinationAncestors(targetReal, destination);
     return { destination, targetReal };
   };
   const parseArchive = row => {
@@ -107,7 +122,7 @@ const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig
     };
   };
 
-  const archiveProject = async (workspaceRoot, projectName, resumeTask = null) => {
+  const archiveProject = async (workspaceRoot, projectName, resumeTask = null, startOnly = false) => {
     const root = path.resolve(workspaceRoot);
     await assertPhysicalDirectory(root, '工作区');
     const config = readSavedConfig()?.archive || {};
@@ -125,7 +140,7 @@ const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig
     if (resumeTask?.metadata?.archivePath && !samePath(resumeTask.metadata.archivePath, destination)) throw new Error('归档任务目标与当前获批位置不一致');
     if (!await exists(source) && !await exists(destination)) throw new Error('项目文件夹当前不可用');
     if (await exists(destination) && !resumeTask?.id) throw new Error('归档盘中已存在同名项目');
-    const run = () => backgroundTasks.run({
+    const run = () => backgroundTasks.start({
       ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'project-archive',
       title: `归档项目 · ${project.name}`,
@@ -169,15 +184,22 @@ const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig
         return { projectName: project.name, archivePath: destination, ...expected };
       } catch (error) {
         if (metadataCommitted) throw error;
-        if (linked) await fs.promises.unlink(source).catch(() => undefined);
-        if (await exists(destination) && !await exists(source)) await movePathAtomic(destination, source).catch(rollbackError => writeLog?.('error', 'Archive rollback failed', rollbackError));
+        const rollbackErrors = [];
+        if (linked) try { await fs.promises.unlink(source); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+        if (await exists(destination) && !await exists(source)) try { await movePathAtomic(destination, source); }
+        catch (rollbackError) { rollbackErrors.push(rollbackError); writeLog?.('error', 'Archive rollback failed', rollbackError); }
+        if (rollbackErrors.length) {
+          task.saveCheckpoint({ version: 1, phase: 'rollbackPending', expected, rollbackErrors: rollbackErrors.map(item => item.message || String(item)) }, 95, '归档失败，回滚等待重试');
+          throw new AggregateError([error, ...rollbackErrors], `归档失败且回滚未完成：${error.message || String(error)}`);
+        }
         throw error;
       }
-    }, run);
-    return run();
+    }, () => archiveProject(root, project.name));
+    const execution = run();
+    return startOnly ? execution : execution.completion;
   };
 
-  const moveBack = async (workspaceRoot, projectName, statusAfter = '后期中', resumeTask = null) => {
+  const moveBack = async (workspaceRoot, projectName, statusAfter = '后期中', resumeTask = null, startOnly = false) => {
     const root = path.resolve(workspaceRoot);
     await assertPhysicalDirectory(root, '工作区');
     const catalog = await workspaceRepository.load(root);
@@ -194,7 +216,7 @@ const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig
     const resumedSource = resumeTask?.id ? await fs.promises.lstat(sourceLink).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error)) : null;
     const moveAlreadyCommitted = Boolean(resumedSource?.isDirectory() && !resumedSource.isSymbolicLink());
     if (!archiveAvailable && !moveAlreadyCommitted) throw new Error('归档盘当前未连接');
-    const run = () => backgroundTasks.run({
+    const run = () => backgroundTasks.start({
       ...(resumeTask?.id ? { id: resumeTask.id } : {}),
       type: 'project-unarchive',
       title: `移回工作盘 · ${project.name}`,
@@ -237,18 +259,35 @@ const createArchiveService = ({ backgroundTasks, movePathAtomic, readSavedConfig
         return { projectName: project.name, path: sourceLink, status: statusAfter };
       } catch (error) {
         if (metadataCommitted) throw error;
-        if (await exists(sourceLink) && !await exists(archivePath)) await movePathAtomic(sourceLink, archivePath).catch(() => undefined);
-        if (!await fs.promises.lstat(sourceLink).catch(statError => statError?.code === 'ENOENT' ? null : Promise.reject(statError))) await createLink(archivePath, sourceLink).catch(() => undefined);
+        const rollbackErrors = [];
+        if (await exists(sourceLink) && !await exists(archivePath)) try { await movePathAtomic(sourceLink, archivePath); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+        if (!await fs.promises.lstat(sourceLink).catch(statError => statError?.code === 'ENOENT' ? null : Promise.reject(statError))) try { await createLink(archivePath, sourceLink); } catch (rollbackError) { rollbackErrors.push(rollbackError); }
+        if (rollbackErrors.length) {
+          task.saveCheckpoint({ version: 1, phase: 'rollbackPending', expected, rollbackErrors: rollbackErrors.map(item => item.message || String(item)) }, 95, '移回失败，回滚等待重试');
+          throw new AggregateError([error, ...rollbackErrors], `移回失败且回滚未完成：${error.message || String(error)}`);
+        }
         throw error;
       }
-    }, run);
-    return run();
+    }, () => moveBack(root, project.name, statusAfter));
+    const execution = run();
+    return startOnly ? execution : execution.completion;
   };
+
+  const accepted = async starter => {
+    try {
+      const execution = await starter();
+      return { success: true, taskId: execution.task.id, deduplicated: execution.deduplicated, completion: execution.completion };
+    } catch (error) {
+      return { success: false, error: error.message || String(error), code: error.code || undefined };
+    }
+  };
+  const enqueueArchiveProject = (workspaceRoot, projectName) => accepted(() => archiveProject(workspaceRoot, projectName, null, true));
+  const enqueueMoveBack = (workspaceRoot, projectName, statusAfter = '后期中') => accepted(() => moveBack(workspaceRoot, projectName, statusAfter, null, true));
 
   backgroundTasks.registerTypeResumeFactory?.('project-archive', task => archiveProject(task.metadata?.workspacePath, task.metadata?.projectName, task));
   backgroundTasks.registerTypeResumeFactory?.('project-unarchive', task => moveBack(task.metadata?.workspacePath, task.metadata?.projectName, task.metadata?.statusAfter || '后期中', task));
 
-  return { approveTarget, isApprovedTarget, status, archiveProject, moveBack };
+  return { approveTarget, isApprovedTarget, status, archiveProject, enqueueArchiveProject, moveBack, enqueueMoveBack };
 };
 
 module.exports = { createArchiveService };

@@ -13,8 +13,10 @@ const CREDENTIAL_TIMEOUT_MS = 30 * 1000;
 
 const createCredentialService = ({ writeLog }) => {
   const scriptPath = path.join(__dirname, '..', 'scripts', 'windows-credential.ps1');
+  let terminationCompromised = false;
   const invokeWindowsCredential = (payload, { signal, timeoutMs = CREDENTIAL_TIMEOUT_MS } = {}) => new Promise((resolve, reject) => {
     if (process.platform !== 'win32') return reject(new Error('当前系统暂不支持 NAS 凭据管理'));
+    if (terminationCompromised) return reject(Object.assign(new Error('上一次 Windows 凭据进程未能确认终止，已阻止后续操作'), { code: 'PROCESS_TERMINATION_FAILED' }));
     const child = spawn('powershell.exe', ['-NoLogo', '-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
       windowsHide: true,
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -23,19 +25,33 @@ const createCredentialService = ({ writeLog }) => {
     let stderr = '';
     let outputBytes = 0;
     let settled = false;
+    let terminationError = null;
+    let forceTimer = null;
+    let terminationDeadline = null;
     const settle = (callback, value) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      clearTimeout(forceTimer);
+      clearTimeout(terminationDeadline);
       signal?.removeEventListener('abort', onAbort);
       callback(value);
     };
     const terminate = error => {
-      if (settled) return;
+      if (settled || terminationError) return;
+      terminationError = error;
       child.kill();
-      const killTimer = setTimeout(() => { if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL'); }, 2000);
-      killTimer.unref?.();
-      settle(reject, error);
+      forceTimer = setTimeout(() => { if (child.exitCode == null && child.signalCode == null) child.kill('SIGKILL'); }, 500);
+      forceTimer.unref?.();
+      terminationDeadline = setTimeout(() => {
+        if (child.exitCode == null && child.signalCode == null) {
+          const failure = new AggregateError([terminationError], 'Windows 凭据进程无法在终止期限内退出');
+          failure.code = 'PROCESS_TERMINATION_FAILED';
+          terminationCompromised = true;
+          settle(reject, failure);
+        }
+      }, 5000);
+      terminationDeadline.unref?.();
     };
     const onAbort = () => terminate(Object.assign(new Error('凭据操作已取消'), { code: 'TASK_CANCELLED' }));
     const timer = setTimeout(() => terminate(Object.assign(new Error('Windows 凭据管理器操作超时'), { code: 'CREDENTIAL_TIMEOUT' })), timeoutMs);
@@ -49,17 +65,18 @@ const createCredentialService = ({ writeLog }) => {
     };
     child.stdout.on('data', chunk => append('stdout', chunk));
     child.stderr.on('data', chunk => append('stderr', chunk));
-    child.on('error', error => settle(reject, error));
+    child.on('error', error => settle(reject, terminationError || error));
     child.on('close', code => {
       if (settled) return;
+      if (terminationError) { settle(reject, terminationError); return; }
       if (code !== 0) { settle(reject, new Error(stderr.trim() || 'Windows 凭据管理器操作失败')); return; }
       try { settle(resolve, JSON.parse(stdout.trim())); }
       catch (error) { settle(reject, new Error(`Windows 凭据管理器返回了无效结果：${error.message}`)); }
     });
     signal?.addEventListener('abort', onAbort, { once: true });
     if (signal?.aborted) { onAbort(); return; }
-    child.stdin.on('error', error => settle(reject, error));
-    child.stdin.end(JSON.stringify(payload), error => { if (error) settle(reject, error); });
+    child.stdin.on('error', terminate);
+    child.stdin.end(JSON.stringify(payload), error => { if (error) terminate(error); });
   });
 
   const credentialRefFor = remotePath => `PhotoFlow/NAS/${crypto.createHash('sha256').update(normalizedShare(remotePath)).digest('hex').slice(0, 24)}`;

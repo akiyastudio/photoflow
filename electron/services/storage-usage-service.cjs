@@ -40,19 +40,26 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
   let dirtyGeneration = 0;
   let dirtyLoadPromise = null;
   let dirtyUpdatePromise = Promise.resolve();
+  let dirtyCorrupt = false;
+  const dirtyTaskStates = new Map();
   const loadDirtyGeneration = async () => {
-    if (!dirtyLoadPromise) dirtyLoadPromise = fs.promises.readFile(dirtyPath, 'utf8').then(JSON.parse, error => {
-      if (error?.code === 'ENOENT' || error instanceof SyntaxError) return null;
+    if (!dirtyLoadPromise) dirtyLoadPromise = fs.promises.readFile(dirtyPath, 'utf8').then(text => {
+      try { return JSON.parse(text); }
+      catch { dirtyCorrupt = true; return null; }
+    }, error => {
+      if (error?.code === 'ENOENT') return null;
       throw error;
     }).then(value => {
-      dirtyGeneration = Number.isSafeInteger(value?.generation) && value.generation >= 0 ? value.generation : 0;
+      dirtyGeneration = Number.isSafeInteger(value?.generation) && value.generation >= 0 ? value.generation : (dirtyCorrupt ? 1 : 0);
+      for (const [id, state] of Array.isArray(value?.taskStates) ? value.taskStates : []) if (typeof id === 'string' && typeof state === 'string') dirtyTaskStates.set(id, state);
     });
     await dirtyLoadPromise;
     return dirtyGeneration;
   };
   const persistDirtyGeneration = async generation => {
     const temporary = `${dirtyPath}.${process.pid}.${Date.now()}.tmp`;
-    await fs.promises.writeFile(temporary, JSON.stringify({ version: DIRTY_STATE_VERSION, generation }), 'utf8');
+    const taskStates = [...dirtyTaskStates.entries()].slice(-512);
+    await fs.promises.writeFile(temporary, JSON.stringify({ version: DIRTY_STATE_VERSION, generation, taskStates }), 'utf8');
     await fs.promises.rename(temporary, dirtyPath).catch(async error => {
       if (!['EEXIST', 'EPERM'].includes(error?.code)) throw error;
       await fs.promises.rm(dirtyPath, { force: true });
@@ -60,17 +67,30 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     });
   };
   eventBus?.on('background-task:changed', delta => {
-    if (delta?.upserts?.some(task => task.state === 'completed' && invalidatingTaskTypes.has(task.type))) {
-      invalidatedAt = Date.now();
+    const relevant = (delta?.upserts || []).filter(task => invalidatingTaskTypes.has(task.type) && ['running', 'completed', 'failed', 'cancelled', 'canceled'].includes(task.state));
+    if (relevant.length) {
       dirtyUpdatePromise = dirtyUpdatePromise.then(() => loadDirtyGeneration()).then(() => {
-        dirtyGeneration += 1;
+        let changed = false;
+        for (const task of relevant) {
+          const id = String(task.id || `${task.type}:${task.dedupeKey || ''}`);
+          const state = task.state === 'canceled' ? 'cancelled' : task.state;
+          if (dirtyTaskStates.get(id) === state) continue;
+          dirtyTaskStates.delete(id); dirtyTaskStates.set(id, state);
+          dirtyGeneration += 1; changed = true;
+        }
+        if (!changed) return undefined;
+        invalidatedAt = Date.now();
         return persistDirtyGeneration(dirtyGeneration);
       }).catch(error => writeLog?.('warn', 'Storage usage dirty state update failed', { error: error.message || String(error) }));
     }
   });
 
   const workspaceId = async root => {
-    try { return (await fs.promises.readFile(path.join(root, '.photoflow-workspace-id'), 'utf8')).trim(); }
+    try {
+      const id = (await fs.promises.readFile(path.join(root, '.photoflow-workspace-id'), 'utf8')).trim();
+      if (!id || id.includes('\0') || id === '.' || id === '..' || path.basename(id) !== id || id.includes('/') || id.includes('\\')) throw new Error('工作区 ID 不是安全的单路径组件');
+      return id;
+    }
     catch (error) { if (error?.code === 'ENOENT') return ''; throw error; }
   };
 
@@ -106,11 +126,16 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
       ? resolveMediaCacheDirectory(config.mediaCache || {})
       : String(config.mediaCache?.directory || '').trim() || path.join(app.getPath('userData'), 'media-cache');
     add('cache', cacheRoot);
-    return sources.sort((left, right) => left.key.localeCompare(right.key));
+    const canonical = await Promise.all(sources.map(async source => {
+      const physical = await fs.promises.realpath(source.path).catch(error => error?.code === 'ENOENT' ? path.resolve(source.path) : Promise.reject(error));
+      return { ...source, physicalKey: comparable(physical) };
+    }));
+    return canonical.sort((left, right) => left.key.localeCompare(right.key));
   };
 
-  const signatureFor = sources => JSON.stringify(sources.map(item => [item.kind, comparable(item.path)]));
+  const signatureFor = sources => JSON.stringify(sources.map(item => [item.kind, comparable(item.path), item.physicalKey]));
   const readCache = async signature => {
+    if (dirtyCorrupt) return null;
     try {
       const parsed = JSON.parse(await fs.promises.readFile(cachePath, 'utf8'));
       if (parsed?.version !== CACHE_VERSION || parsed.signature !== signature || !Array.isArray(parsed.sources)) return null;
@@ -197,6 +222,7 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
       error.code = 'STORAGE_USAGE_SCAN_DIRTY';
       throw error;
     }
+    if (dirtyCorrupt) { await persistDirtyGeneration(dirtyGeneration); dirtyCorrupt = false; }
     const cache = { version: CACHE_VERSION, signature, generation: scanGeneration, updatedAt: Date.now(), sources: measured };
     await writeCache(cache);
     task.report(100, '存储占用统计完成', { updatedAt: cache.updatedAt });
@@ -204,6 +230,7 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
   });
 
   const overview = async (force = false) => {
+    await dirtyUpdatePromise;
     await loadDirtyGeneration();
     const sources = await configuredSources();
     const signature = signatureFor(sources);
@@ -216,7 +243,7 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     if (!cache) cache = { updatedAt: 0, sources: [] };
     const cachedByKey = new Map(cache.sources.map(item => [item.key, item]));
     const volumes = new Map();
-    const countedPhysicalPaths = new Set();
+    const countedPhysicalPaths = new Map();
     for (const source of sources) {
       const root = volumeRoot(source.path);
       const id = process.platform === 'win32' ? root.toLocaleLowerCase() : root;
@@ -227,8 +254,10 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
       const volume = volumes.get(id);
       const cached = cachedByKey.get(source.key);
       const bytes = Number(cached?.bytes || 0);
-      const physicalKey = comparable(source.path);
-      if (!countedPhysicalPaths.has(physicalKey)) { volume.photoflowBytes += bytes; countedPhysicalPaths.add(physicalKey); }
+      const physicalKey = source.physicalKey;
+      const counted = countedPhysicalPaths.get(physicalKey);
+      if (!counted) { volume.photoflowBytes += bytes; countedPhysicalPaths.set(physicalKey, { bytes, volume }); }
+      else if (bytes > counted.bytes) { counted.volume.photoflowBytes += bytes - counted.bytes; counted.bytes = bytes; }
       volume.items.push({ kind: source.kind, label: source.label, path: source.path, bytes, measured: Boolean(cached) });
     }
     for (const volume of volumes.values()) {
