@@ -6,6 +6,12 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain: 
   const trusted = event => { const window = getMainWindow(); return Boolean(window && !window.isDestroyed() && event?.sender === window.webContents && !event.sender.isDestroyed?.()); };
   const ipcMain = { handle(channel, listener) { channels.push(channel); electronIpcMain.handle(channel, async (event, ...args) => { if (!trusted(event)) throw new Error('Unauthorized IPC sender'); try { return await listener(event, ...args); } catch (error) { return serializeError(error); } }); } };
   const rootPath = value => { if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new Error('无效的工作区路径'); return path.resolve(value); };
+  const acceptedTask = (result, logMessage) => {
+    if (!result?.success) return { success: false, ...(result?.code ? { code: result.code } : {}), error: result?.error || '后台任务未能登记' };
+    if (typeof result.taskId !== 'string' || !result.taskId) return { success: false, code: 'INVALID_ACCEPTANCE', error: '后台任务登记结果无效' };
+    if (result.completion && typeof result.completion.catch === 'function') void result.completion.catch(error => writeLog('error', logMessage, error));
+    return { success: true, queued: true, accepted: true, taskId: result.taskId, deduplicated: Boolean(result.deduplicated) };
+  };
   const assertDomain = value => {
     const domain = String(value || '');
     if (!['media', 'versioning', 'operations'].includes(domain)) throw new Error('不支持的业务域');
@@ -70,7 +76,9 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain: 
 
   ipcMain.handle('backup-cleanup', async (_event, workspacePath) => {
     try {
-      void backupService.cleanup(rootPath(workspacePath)).catch(error => writeLog('error', 'Backup cleanup failed', error));
+      const root = rootPath(workspacePath);
+      if (typeof backupService.enqueueCleanup === 'function') return acceptedTask(await backupService.enqueueCleanup(root), 'Backup cleanup failed');
+      void backupService.cleanup(root).catch(error => writeLog('error', 'Backup cleanup failed', error));
       return { success: true, queued: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
@@ -79,9 +87,11 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain: 
 
   ipcMain.handle('backup-run', async (_event, workspacePath, reason = 'manual') => {
     try {
-      const current = await backupService.status(workspacePath);
+      const root = rootPath(workspacePath);
+      if (typeof backupService.enqueueBackup === 'function') return acceptedTask(await backupService.enqueueBackup(root, reason), 'Workspace backup failed');
+      const current = await backupService.status(root);
       if (!current.enabled) return { success: false, error: '请先启用备份并选择备份位置' };
-      void backupService.runBackup(rootPath(workspacePath), reason).catch(error => writeLog('error', 'Workspace backup failed', error));
+      void backupService.runBackup(root, reason).catch(error => writeLog('error', 'Workspace backup failed', error));
       return { success: true, queued: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
@@ -100,7 +110,9 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain: 
 
   ipcMain.handle('backup-verify', async (_event, workspacePath, snapshotId) => {
     try {
-      void backupService.verify(rootPath(workspacePath), snapshotId).catch(error => writeLog('error', 'Backup verification failed', error));
+      const root = rootPath(workspacePath);
+      if (typeof backupService.enqueueVerify === 'function') return acceptedTask(await backupService.enqueueVerify(root, snapshotId), 'Backup verification failed');
+      void backupService.verify(root, snapshotId).catch(error => writeLog('error', 'Backup verification failed', error));
       return { success: true, queued: true };
     } catch (error) {
       return { success: false, error: error.message || String(error) };

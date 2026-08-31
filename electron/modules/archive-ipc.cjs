@@ -6,6 +6,12 @@ const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain: el
   const ipcMain = { handle(channel, listener) { channels.push(channel); electronIpcMain.handle(channel, async (event, ...args) => { if (!trusted(event)) throw new Error('Unauthorized IPC sender'); try { return await listener(event, ...args); } catch (error) { return { success: false, code: typeof error?.code === 'string' ? error.code : 'ARCHIVE_IPC_FAILED', error: error?.message || String(error) }; } }); } };
   const rootPath = value => { if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new Error('无效的工作区路径'); return path.resolve(value); };
   const cleanProjectName = value => { if (typeof value !== 'string' || !value.trim() || value.length > 255 || /[\\/\0]/.test(value)) throw new Error('无效的项目名称'); return value.trim(); };
+  const acceptedTask = (result, logMessage, onComplete) => {
+    if (!result?.success) return { success: false, ...(result?.code ? { code: result.code } : {}), error: result?.error || '后台任务未能登记' };
+    if (typeof result.taskId !== 'string' || !result.taskId) return { success: false, code: 'INVALID_ACCEPTANCE', error: '后台任务登记结果无效' };
+    if (result.completion && typeof result.completion.then === 'function') void result.completion.then(onComplete).catch(error => writeLog('error', logMessage, error));
+    return { success: true, queued: true, accepted: true, taskId: result.taskId, deduplicated: Boolean(result.deduplicated) };
+  };
   ipcMain.handle('archive-choose-target', async (_event, currentPath = '') => {
     const result = await dialog.showOpenDialog(getMainWindow(), { title: '选择 PhotoFlow 项目归档盘', defaultPath: currentPath || undefined, properties: ['openDirectory', 'createDirectory'] });
     if (result.canceled || !result.filePaths[0]) return { cancelled: true };
@@ -14,7 +20,13 @@ const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain: el
   ipcMain.handle('archive-status', async () => archiveService.status());
   ipcMain.handle('archive-project', async (_event, workspacePath, projectName) => {
     try {
-      void archiveService.archiveProject(rootPath(workspacePath), cleanProjectName(projectName)).then(() => {
+      const root = rootPath(workspacePath);
+      const name = cleanProjectName(projectName);
+      if (typeof archiveService.enqueueArchiveProject === 'function') return acceptedTask(await archiveService.enqueueArchiveProject(root, name), 'Project archive failed', () => {
+        const window = getMainWindow();
+        if (window && !window.isDestroyed()) window.webContents.send('workspace-projects-changed', { root, reason: 'project-archived' });
+      });
+      void archiveService.archiveProject(root, name).then(() => {
         const window = getMainWindow();
         if (window && !window.isDestroyed()) window.webContents.send('workspace-projects-changed', { root: workspacePath, reason: 'project-archived' });
       }).catch(error => writeLog('error', 'Project archive failed', error));
@@ -23,7 +35,13 @@ const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain: el
   });
   ipcMain.handle('archive-move-back', async (_event, workspacePath, projectName, statusAfter) => {
     try {
-      void archiveService.moveBack(rootPath(workspacePath), cleanProjectName(projectName), statusAfter).then(() => {
+      const root = rootPath(workspacePath);
+      const name = cleanProjectName(projectName);
+      if (typeof archiveService.enqueueMoveBack === 'function') return acceptedTask(await archiveService.enqueueMoveBack(root, name, statusAfter), 'Project move-back failed', () => {
+        const window = getMainWindow();
+        if (window && !window.isDestroyed()) window.webContents.send('workspace-projects-changed', { root, reason: 'project-unarchived' });
+      });
+      void archiveService.moveBack(root, name, statusAfter).then(() => {
         const window = getMainWindow();
         if (window && !window.isDestroyed()) window.webContents.send('workspace-projects-changed', { root: workspacePath, reason: 'project-unarchived' });
       }).catch(error => writeLog('error', 'Project move-back failed', error));
