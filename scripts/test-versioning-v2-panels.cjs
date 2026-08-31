@@ -1245,6 +1245,83 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(layoutRequests.saves.length, savesBeforeFailedHistory + 1, 'undo after a failed drag must not issue an empty or retrying persistence command');
   await React.act(async () => failedHistoryRoot.unmount());
 
+  const activeRestoreContainer = new TestNode(1, 'DIV', testDocument);
+  const activeRestoreRoot = createRoot(activeRestoreContainer);
+  let activeRestoreController = null;
+  const activeRestoreProps = { ...treeProps, projectName: 'Active Restore Probe', pendingChildId: undefined, onCanvasControllerChange: controller => { activeRestoreController = controller; } };
+  await React.act(async () => {
+    activeRestoreRoot.render(React.createElement(tree.ProjectVersionTree, activeRestoreProps));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  let activeRestoreNode = allNodes(activeRestoreContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  const savesBeforeActiveCancel = layoutRequests.saves.length;
+  layoutRequests.holdSaves = true;
+  let refreshDuringActiveCancel;
+  await React.act(async () => {
+    refreshDuringActiveCancel = activeRestoreController.refreshLayout();
+    await Promise.resolve(); await Promise.resolve();
+    dispatch(activeRestoreNode, 'pointerdown', { pointerId: 69, button: 0, clientX: 100, clientY: 100 });
+    dispatch(activeRestoreNode, 'pointermove', { pointerId: 69, button: 0, clientX: 400, clientY: 320 });
+    await Promise.resolve();
+  });
+  const displayedActiveDrag = { left: activeRestoreNode.style.left, top: activeRestoreNode.style.top };
+  await React.act(async () => {
+    layoutRequests.holdSaves = false;
+    layoutRequests.saveReleases.splice(0).forEach(release => release());
+    assert.strictEqual(await refreshDuringActiveCancel, true);
+    await Promise.resolve();
+  });
+  const confirmedWhileDragging = layoutRequests.saves[savesBeforeActiveCancel].positions.find(position => position.nodeKey === 'progress:free');
+  assert.notDeepStrictEqual(displayedActiveDrag, { left: `${confirmedWhileDragging.x + 32}px`, top: `${confirmedWhileDragging.y + 32}px` }, 'active-drag setup must visibly differ from the confirmed refresh coordinate');
+  assert.deepStrictEqual({ left: activeRestoreNode.style.left, top: activeRestoreNode.style.top }, displayedActiveDrag, 'refresh success must not overwrite the coordinate currently displayed by an active drag');
+  await React.act(async () => {
+    dispatch(activeRestoreNode, 'pointercancel', { pointerId: 69, button: 0, clientX: 400, clientY: 320 });
+    await Promise.resolve();
+  });
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeActiveCancel + 1, 'cancelled active drag must not enqueue a second save after refresh');
+  const activeCancelPersisted = layoutRequests.saves[savesBeforeActiveCancel].positions.find(position => position.nodeKey === 'progress:free');
+  assert.strictEqual(parseFloat(activeRestoreNode.style.left), activeCancelPersisted.x + 32, 'pointercancel must restore the refresh coordinate confirmed while the drag was active');
+  const activeRestoreRelinkedFolders = treeProps.progressFolders.map(folder => folder.id === 'free' ? { ...folder, parentProgressId: 'tracked', updatedAt: folder.updatedAt + 20 } : folder);
+  await React.act(async () => {
+    activeRestoreRoot.render(React.createElement(tree.ProjectVersionTree, { ...activeRestoreProps, progressFolders: activeRestoreRelinkedFolders }));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  activeRestoreNode = allNodes(activeRestoreContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  assert.strictEqual(parseFloat(activeRestoreNode.style.left), activeCancelPersisted.x + 32, 'the pointercancel baseline must remain manual across a graph change');
+  const savesBeforeNoMovePointerUp = layoutRequests.saves.length;
+  layoutRequests.holdSaves = true;
+  let refreshDuringNoMovePointerUp;
+  await React.act(async () => {
+    refreshDuringNoMovePointerUp = activeRestoreController.refreshLayout();
+    await Promise.resolve(); await Promise.resolve();
+    dispatch(activeRestoreNode, 'pointerdown', { pointerId: 70, button: 0, clientX: 120, clientY: 120 });
+    layoutRequests.holdSaves = false;
+    layoutRequests.saveReleases.splice(0).forEach(release => release());
+    assert.strictEqual(await refreshDuringNoMovePointerUp, true);
+    dispatch(activeRestoreNode, 'pointerup', { pointerId: 70, button: 0, clientX: 120, clientY: 120 });
+    await Promise.resolve();
+  });
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeNoMovePointerUp + 1, 'no-move pointerup must not create a drag save');
+  const noMovePersisted = layoutRequests.saves[savesBeforeNoMovePointerUp].positions.find(position => position.nodeKey === 'progress:free');
+  assert.strictEqual(parseFloat(activeRestoreNode.style.left), noMovePersisted.x + 32, 'no-move pointerup must restore the newly confirmed manual baseline');
+  const activeRestoreBeforeFinalGraphChange = { left: activeRestoreNode.style.left, top: activeRestoreNode.style.top };
+  await React.act(async () => {
+    activeRestoreRoot.render(React.createElement(tree.ProjectVersionTree, activeRestoreProps));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  activeRestoreNode = allNodes(activeRestoreContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  assert.deepStrictEqual({ left: activeRestoreNode.style.left, top: activeRestoreNode.style.top }, activeRestoreBeforeFinalGraphChange, 'no-move restore must stay manual when the graph changes again');
+  await React.act(async () => activeRestoreRoot.unmount());
+  const activeRestoreReloadContainer = new TestNode(1, 'DIV', testDocument);
+  const activeRestoreReloadRoot = createRoot(activeRestoreReloadContainer);
+  await React.act(async () => {
+    activeRestoreReloadRoot.render(React.createElement(tree.ProjectVersionTree, activeRestoreProps));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const activeRestoreReloadedNode = allNodes(activeRestoreReloadContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  assert.deepStrictEqual({ left: activeRestoreReloadedNode.style.left, top: activeRestoreReloadedNode.style.top }, activeRestoreBeforeFinalGraphChange, 'active-gesture restoration must match a reload from the server layout');
+  await React.act(async () => activeRestoreReloadRoot.unmount());
+
   const manualQueueContainer = new TestNode(1, 'DIV', testDocument);
   const manualQueueRoot = createRoot(manualQueueContainer);
   let manualQueueController = null;

@@ -441,7 +441,16 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         else savedMountedNodeKeys.forEach(nodeKey => appliedServerNodeKeysRef.current.add(nodeKey));
         const persistedIds = new Set([...savedPositions.keys()].filter(id => localMutationByNodeRef.current.get(id) === localMutationAtEnqueue));
         if (persistedIds.size) applyPositions(markVersionTreeCanvasPositionsPersisted(positionsRef.current, persistedIds));
-        savedPositions.forEach((_position, id) => persistedMutationByNodeRef.current.set(id, localMutationAtEnqueue));
+        const activeDrag = nodeDragRef.current;
+        savedPositions.forEach((position, id) => {
+          persistedMutationByNodeRef.current.set(id, localMutationAtEnqueue);
+          if (!activeDrag?.ids.includes(id)) return;
+          // A save can finish after pointerdown. Advance only the gesture's
+          // cancellation baseline; its currently displayed drag position must
+          // remain untouched until the pointer gesture finishes.
+          activeDrag.before.set(id, { ...position, manual: true });
+          activeDrag.beforeMutationMarkers.set(id, localMutationAtEnqueue);
+        });
         return true;
       }
       invalidateHistoryEntry(historyEntry);
