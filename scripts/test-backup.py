@@ -62,7 +62,7 @@ def main():
         maintenance_db.commit()
         maintenance_db.close()
 
-        restored_root = os.path.join(temporary_root, "restored-workspace")
+        restored_root = os.path.join(temporary_root, "Restored-Workspace")
         restored_data_root = os.path.join(temporary_root, "restored-data")
         restored_database = os.path.join(temporary_root, "restored.sqlite3")
         os.makedirs(restored_root)
@@ -82,8 +82,10 @@ def main():
         version = restored.execute("SELECT * FROM versions WHERE id=?", (version_id,)).fetchone()
         assert photo["original_file_path"] == os.path.join(restored_root, project_relative, "原片.jpg")
         assert photo["original_file_id"] is None
-        assert version["file_path"] == os.path.join(restored_root, project_relative, "修图", "版本一.jpg")
-        assert version["file_path_key"] == os.path.join(restored_root, project_relative, "修图", "版本一.jpg")
+        restored_version_path = os.path.join(restored_root, project_relative, "修图", "版本一.jpg")
+        assert version["file_path"] == restored_version_path
+        assert version["file_path"] != restored_version_path.casefold(), "display path must preserve its original casing"
+        assert version["file_path_key"] == os.path.normpath(restored_version_path).casefold()
         assert version["file_id"] is None and version["thumbnail_path"] is None
         assert restored.execute("SELECT value FROM meta WHERE key='workspace_root'").fetchone()[0] == restored_root
         assert "archive" not in json.loads(restored.execute("SELECT extra_json FROM projects WHERE id=?", (project_id,)).fetchone()[0])
