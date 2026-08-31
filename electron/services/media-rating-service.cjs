@@ -204,6 +204,21 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
       return handle;
     } catch (error) { await handle.close().catch(() => undefined); throw error; }
   };
+  const openPublishedFile = async (filePath, flags = 'r') => {
+    const handle = await fs.promises.open(filePath, flags);
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile()) {
+        const error = new Error('media_rating_target_not_regular_file'); error.code = 'EINVAL'; throw error;
+      }
+      const heldIdentity = identityFromStat(await handle.stat({ bigint: true }));
+      const pathIdentity = await captureFileIdentity(filePath);
+      if (!sameFileIdentity(heldIdentity, pathIdentity)) {
+        const error = new Error('media_rating_target_identity_changed'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error;
+      }
+      return { handle, stat, identity: pathIdentity };
+    } catch (error) { await handle.close().catch(() => undefined); throw error; }
+  };
   const sortPending = key => (pendingRatings.get(key) || []).sort((left, right) => (Number(left.sequence) || 0) - (Number(right.sequence) || 0));
   const removePendingItem = (key, token) => {
     const remaining = (pendingRatings.get(key) || []).filter(item => item.token !== token);
@@ -329,12 +344,15 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     }
   };
   const reconcileCompletedCheckedWriteNow = async (key, item) => {
+    const preflightHandle = await openIntentIdentity(item);
+    await preflightHandle.close();
+    const aborted = () => item.stage === 'failed' || deadlineSignals.has(item.token);
+    if (aborted()) return false;
+    const physicalRating = await readPhysicalRating(item.filePath);
+    if (aborted() || physicalRating !== item.rating) return false;
     const handle = await openIntentIdentity(item, 'r+');
     try {
-      const aborted = () => item.stage === 'failed' || deadlineSignals.has(item.token);
       if (aborted()) return false;
-      const physicalRating = await readPhysicalRating(item.filePath);
-      if (aborted() || physicalRating !== item.rating) return false;
       let current = await handle.stat();
       if (aborted()) return false;
       const heldIdentity = identityFromStat(await handle.stat({ bigint: true }));
@@ -399,70 +417,105 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
       if (item.type === 'checked' && (deadlineSignals.has(item.token) || now() >= Number(item.deadlineAt))) throw checkedDeadlineError();
     }
     if (item.stage === 'writing') {
-      const identityHandle = await openIntentIdentity(item, item.type === 'checked' ? 'r+' : 'r');
-      try {
-        if (item.stage === 'failed') return;
-        if (item.type === 'checked' && deadlineSignals.has(item.token)) throw checkedDeadlineError();
-        const before = await identityHandle.stat();
-        let publishedIdentity;
-        let timestampBumped = false;
-        if (!before.isFile()) throw revisionConflict();
-        if (item.type === 'checked' && before.mtimeMs !== Number(item.expectedRevision)) {
-          if (await readPhysicalRating(ownedFilePath) !== item.rating) throw revisionConflict();
-          item.previousRevision = Number(item.expectedRevision);
-          item.revision = before.mtimeMs;
-          publishedIdentity = await captureFileIdentity(ownedFilePath);
-        } else {
-          const suppressedPaths = [ownedFilePath, `${ownedFilePath}_exiftool_tmp`, `${ownedFilePath}_original`];
-          suppressedPaths.forEach(suppressWorkspaceWatchPath);
-          try {
-            // Checked writes trade some performance and hidden/read-only file
-            // compatibility for a stable file object across the CAS write.
-            // Never fall back to rename publication for this strong path.
-            const writeArgs = item.type === 'checked' ? ['-overwrite_original_in_place'] : ['-overwrite_original', '-P'];
-            if (item.stage === 'failed') return;
-            if (item.type === 'checked' && (deadlineSignals.has(item.token) || now() >= Number(item.deadlineAt))) throw checkedDeadlineError();
-            if (item.type === 'checked') physicalAttemptedTokens.add(item.token);
-            if (item.type === 'checked') activePhysicalTokens.add(item.token);
-            const metadataWrite = exiftool.write(ownedFilePath, { 'XMP:Rating': item.rating }, { writeArgs });
-            itemAttemptStarts.get(item.token)?.();
-            itemAttemptStarts.delete(item.token);
-            await metadataWrite;
-          } finally {
-            activePhysicalTokens.delete(item.token);
-            suppressedPaths.forEach(releaseWorkspaceWatchPath);
+      const preflightHandle = await openIntentIdentity(item, item.type === 'checked' ? 'r+' : 'r');
+      let before;
+      try { before = await preflightHandle.stat(); }
+      finally { await preflightHandle.close(); }
+      if (item.stage === 'failed') return;
+      if (item.type === 'checked' && deadlineSignals.has(item.token)) throw checkedDeadlineError();
+      let publishedIdentity;
+      let timestampBumped = false;
+      if (!before.isFile()) throw revisionConflict();
+      if (item.type === 'checked' && before.mtimeMs !== Number(item.expectedRevision)) {
+        if (await readPhysicalRating(ownedFilePath) !== item.rating) throw revisionConflict();
+        const verified = await openIntentIdentity(item);
+        try {
+          const current = await verified.stat();
+          const heldIdentity = identityFromStat(await verified.stat({ bigint: true }));
+          const pathIdentity = await captureFileIdentity(ownedFilePath);
+          if (!sameFileIdentity(heldIdentity, pathIdentity)) {
+            const error = new Error('media_rating_target_identity_changed'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error;
           }
-          let after = await fs.promises.lstat(ownedFilePath);
-          const heldAfterWrite = identityFromStat(await identityHandle.stat({ bigint: true }));
-          const pathAfterWrite = await captureFileIdentity(ownedFilePath);
-          publishedIdentity = pathAfterWrite;
-          if (!sameFileIdentity(heldAfterWrite, pathAfterWrite)
-            && (item.type === 'checked' || await readPhysicalRating(ownedFilePath) !== item.rating)) {
+          item.previousRevision = Number(item.expectedRevision);
+          item.revision = current.mtimeMs;
+          publishedIdentity = pathIdentity;
+        } finally { await verified.close().catch(() => undefined); }
+      } else {
+        const suppressedPaths = [ownedFilePath, `${ownedFilePath}_exiftool_tmp`, `${ownedFilePath}_original`];
+        suppressedPaths.forEach(suppressWorkspaceWatchPath);
+        try {
+          // Checked writes publish in place so the durable identity remains valid;
+          // ordinary writes retain ExifTool's established rename publication.
+          const writeArgs = item.type === 'checked' ? ['-overwrite_original_in_place'] : ['-overwrite_original', '-P'];
+          if (item.stage === 'failed') return;
+          if (item.type === 'checked' && (deadlineSignals.has(item.token) || now() >= Number(item.deadlineAt))) throw checkedDeadlineError();
+          if (item.type === 'checked') physicalAttemptedTokens.add(item.token);
+          if (item.type === 'checked') activePhysicalTokens.add(item.token);
+          const metadataWrite = exiftool.write(ownedFilePath, { 'XMP:Rating': item.rating }, { writeArgs });
+          itemAttemptStarts.get(item.token)?.();
+          itemAttemptStarts.delete(item.token);
+          await metadataWrite;
+        } finally {
+          activePhysicalTokens.delete(item.token);
+          suppressedPaths.forEach(releaseWorkspaceWatchPath);
+        }
+        let after;
+        if (item.type === 'checked') {
+          const published = await openIntentIdentity(item, 'r+');
+          try {
+            after = await published.stat();
+            let heldIdentity = identityFromStat(await published.stat({ bigint: true }));
+            let pathIdentity = await captureFileIdentity(ownedFilePath);
+            if (!sameFileIdentity(heldIdentity, pathIdentity)) {
+              const error = new Error('media_rating_target_changed_without_expected_rating'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error;
+            }
+            if (after.mtimeMs === before.mtimeMs) {
+              const bumped = new Date(Math.max(now(), before.mtimeMs + 2000));
+              await published.utimes(after.atime, bumped);
+              after = await published.stat();
+              timestampBumped = true;
+              heldIdentity = identityFromStat(await published.stat({ bigint: true }));
+              pathIdentity = await captureFileIdentity(ownedFilePath);
+              if (!sameFileIdentity(heldIdentity, pathIdentity)) {
+                const error = new Error('media_rating_target_changed_after_write'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error;
+              }
+            }
+            publishedIdentity = pathIdentity;
+          } finally { await published.close().catch(() => undefined); }
+        } else {
+          const published = await openPublishedFile(ownedFilePath);
+          try {
+            after = published.stat;
+            publishedIdentity = published.identity;
+          } finally { await published.handle.close(); }
+          if (await readPhysicalRating(ownedFilePath) !== item.rating) {
             const error = new Error('media_rating_target_changed_without_expected_rating'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error;
           }
-          if (item.type === 'checked' && after.mtimeMs === before.mtimeMs) {
-            const bumped = new Date(Math.max(now(), before.mtimeMs + 2000));
-            await identityHandle.utimes(after.atime, bumped);
-            after = await fs.promises.lstat(ownedFilePath);
-            timestampBumped = true;
-          }
-          item.previousRevision = before.mtimeMs;
-          item.revision = after.mtimeMs;
+          const verified = await openPublishedFile(ownedFilePath);
+          try {
+            if (!sameFileIdentity(publishedIdentity, verified.identity)) {
+              const error = new Error('media_rating_target_changed_after_write'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error;
+            }
+            after = verified.stat;
+            publishedIdentity = verified.identity;
+          } finally { await verified.handle.close().catch(() => undefined); }
         }
-        const finalIdentity = await captureFileIdentity(ownedFilePath);
-        const stablePublishedIdentity = publishedIdentity.device !== '0' && publishedIdentity.inode !== '0' && finalIdentity.device !== '0' && finalIdentity.inode !== '0';
-        if ((stablePublishedIdentity && !sameFileIdentity(publishedIdentity, finalIdentity))
-          || (!stablePublishedIdentity && !timestampBumped && !sameFileIdentity(publishedIdentity, finalIdentity))) {
-          const error = new Error('media_rating_target_changed_after_write'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error;
-        }
-        item.identity = finalIdentity;
-        invalidate(ownedFilePath);
-        item.stage = 'fingerprint';
-        try { savePendingRatings(); }
-        catch (error) { item.stage = 'writing'; throw error; }
-        deadlineSignals.delete(item.token);
-        physicalAttemptedTokens.delete(item.token);
-      } finally { await identityHandle.close().catch(() => undefined); }
+        item.previousRevision = before.mtimeMs;
+        item.revision = after.mtimeMs;
+      }
+      const finalIdentity = await captureFileIdentity(ownedFilePath);
+      const stablePublishedIdentity = publishedIdentity.device !== '0' && publishedIdentity.inode !== '0' && finalIdentity.device !== '0' && finalIdentity.inode !== '0';
+      if ((stablePublishedIdentity && !sameFileIdentity(publishedIdentity, finalIdentity))
+        || (!stablePublishedIdentity && !timestampBumped && !sameFileIdentity(publishedIdentity, finalIdentity))) {
+        const error = new Error('media_rating_target_changed_after_write'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error;
+      }
+      item.identity = finalIdentity;
+      invalidate(ownedFilePath);
+      item.stage = 'fingerprint';
+      try { savePendingRatings(); }
+      catch (error) { item.stage = 'writing'; throw error; }
+      deadlineSignals.delete(item.token);
+      physicalAttemptedTokens.delete(item.token);
       settleCompletion(item, 'resolve', { rating: item.rating, previousRevision: item.previousRevision, revision: item.revision });
     }
     const fingerprintHandle = await openIntentIdentity(item);
