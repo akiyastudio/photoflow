@@ -32,6 +32,7 @@ class ManagedProcess extends EventEmitter {
   start() {
     if (this.released) throw new Error(`Managed process has been released: ${this.id}`);
     if (this.lifecycle?.terminationFailed) throw Object.assign(new Error(`Previous managed process generation has not exited: ${this.id}`), { code: 'PROCESS_TERMINATION_FAILED' });
+    if (this.lifecycle?.cleanupTimedOut) throw Object.assign(new Error(`Previous managed process cleanup is still pending: ${this.id}`), { code: 'PROCESS_CLEANUP_TIMEOUT' });
     if (this.child && !this.child.killed) return this.child;
     if (this.lifecycle && !this.lifecycle.settled) {
       this.lifecycle.startAfterSettle = true;
@@ -61,6 +62,7 @@ class ManagedProcess extends EventEmitter {
     const lifecycle = {
       child, generation, stopRequested: false, settled: false, cleanupPromise: Promise.resolve(),
       startAfterSettle: false, lastHealthyAt: 0, stderrTail: '', finalizePromise: null,
+      terminationFailed: false, cleanupTimedOut: false,
       settledPromise: new Promise(resolve => { resolveSettled = resolve; }), resolveSettled,
     };
     this.lifecycle = lifecycle;
@@ -218,16 +220,22 @@ class ManagedProcess extends EventEmitter {
         generation: lifecycle.generation, error: safeError(terminationError),
       }));
     }
-    return this._finalizeLifecycle(lifecycle, { error, terminationFailed });
+    if (terminationFailed) {
+      lifecycle.terminationFailed = true;
+      clearTimeout(this.healthTimer);
+      this.healthTimer = null;
+      this.lastExit = {
+        at: this.supervisor.now(), generation: lifecycle.generation, code: null, signal: null,
+        expected: false, error: safeError(error), stderr: lifecycle.stderrTail.trim(), terminationPending: true,
+      };
+      return { exited: false, terminationPending: true };
+    }
+    return this._finalizeLifecycle(lifecycle, { error });
   }
 
   _onExit(lifecycle, code, signal) {
     lifecycle.exitObserved = true;
-    if (lifecycle.settled && lifecycle.terminationFailed) {
-      lifecycle.terminationFailed = false;
-      if (this.lifecycle === lifecycle && this.child === lifecycle.child) this.child = null;
-      return lifecycle.settledPromise;
-    }
+    lifecycle.terminationFailed = false;
     return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error });
   }
 
@@ -249,17 +257,54 @@ class ManagedProcess extends EventEmitter {
     };
     this.state = expected ? 'stopped' : error || terminationFailed ? 'failed' : 'exited';
     this._safeLog(expected || code === 0 ? 'info' : 'warn', 'Managed process exited', this.details(this.lastExit));
+    let cleanupTimedOut = false;
+    let cleanupFailed = false;
     try {
       const cleanup = this.specification.onExitCleanup?.({ owner: this.owner, child: lifecycle.child, exit: this.lastExit, managedProcess: this });
       lifecycle.cleanupPromise = Promise.resolve(cleanup);
       if (cleanup && typeof cleanup.then === 'function') {
-        await lifecycle.cleanupPromise.catch(error => this._safeLog('warn', 'Managed process exit cleanup failed', this.details({ generation: lifecycle.generation, error: safeError(error) })));
+        const cleanupTimeoutMs = Math.max(1, Number(this.specification.cleanupTimeoutMs) || 2000);
+        let timeoutTimer;
+        const cleanupOutcome = lifecycle.cleanupPromise.then(
+          () => ({ settled: true }),
+          cleanupError => ({ settled: true, error: cleanupError }),
+        );
+        const outcome = await Promise.race([
+          cleanupOutcome,
+          new Promise(resolve => {
+            timeoutTimer = setTimeout(() => resolve({ settled: false }), cleanupTimeoutMs);
+            timeoutTimer.unref?.();
+          }),
+        ]);
+        if (outcome.settled) {
+          clearTimeout(timeoutTimer);
+          if (outcome.error) {
+            cleanupFailed = true;
+            this.lastExit.cleanupError = safeError(outcome.error);
+            this._safeLog('warn', 'Managed process exit cleanup failed', this.details({ generation: lifecycle.generation, error: safeError(outcome.error) }));
+          }
+        } else {
+          cleanupTimedOut = true;
+          lifecycle.cleanupTimedOut = true;
+          this.state = 'failed';
+          this.lastExit.cleanupTimedOut = true;
+          this._safeLog('error', 'Managed process exit cleanup timed out', this.details({ generation: lifecycle.generation, cleanupTimeoutMs }));
+          // Keep lifecycle ownership until the real cleanup settles. The
+          // timeout changes policy, but never pretends cleanup completed.
+          const eventualOutcome = await cleanupOutcome;
+          if (eventualOutcome.error) this._safeLog('warn', 'Managed process late exit cleanup failed', this.details({ generation: lifecycle.generation, error: safeError(eventualOutcome.error) }));
+        }
       }
-    } catch (error) { this._safeLog('warn', 'Managed process exit cleanup failed', this.details({ generation: lifecycle.generation, error: safeError(error) })); }
+    } catch (error) {
+      cleanupFailed = true;
+      this.lastExit.cleanupError = safeError(error);
+      this._safeLog('warn', 'Managed process exit cleanup failed', this.details({ generation: lifecycle.generation, error: safeError(error) }));
+    }
     this._safeEmit('exit', this.lastExit, lifecycle.child);
     this._settleLifecycle(lifecycle);
     if (this.lifecycle !== lifecycle) return;
-    if (this.specification.ephemeral && !terminationFailed) this.release();
+    if (cleanupTimedOut || cleanupFailed) this.state = 'failed';
+    else if (this.specification.ephemeral && !terminationFailed) this.release();
     else if (lifecycle.startAfterSettle && !this.stopping && !this.released && !this.supervisor.stopping && !terminationFailed) this.start();
     else if (!expected && !terminationFailed) this._scheduleRestart(error ? 'process-error' : 'unexpected-exit');
     return this.lastExit;
@@ -274,11 +319,7 @@ class ManagedProcess extends EventEmitter {
 
   _onClose(lifecycle, code, signal) {
     lifecycle.closeObserved = true;
-    if (lifecycle.settled && lifecycle.terminationFailed) {
-      lifecycle.terminationFailed = false;
-      if (this.lifecycle === lifecycle && this.child === lifecycle.child) this.child = null;
-      return lifecycle.settledPromise;
-    }
+    lifecycle.terminationFailed = false;
     return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error });
   }
 
@@ -294,8 +335,12 @@ class ManagedProcess extends EventEmitter {
     if (lifecycle.settled) return lifecycle.settledPromise;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
-        const error = Object.assign(new Error('managed process lifecycle did not settle after termination'), {
-          code: 'PROCESS_LIFECYCLE_TIMEOUT', pid: lifecycle.child?.pid || null, generation: lifecycle.generation,
+        const cleanupPending = lifecycle.cleanupTimedOut;
+        const error = Object.assign(new Error(cleanupPending
+          ? 'managed process cleanup did not settle before timeout'
+          : 'managed process lifecycle did not settle after termination'), {
+          code: cleanupPending ? 'PROCESS_CLEANUP_TIMEOUT' : 'PROCESS_LIFECYCLE_TIMEOUT',
+          pid: lifecycle.child?.pid || null, generation: lifecycle.generation,
         });
         reject(error);
       }, Math.max(1, Number(timeoutMs) || 2000));

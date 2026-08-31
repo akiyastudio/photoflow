@@ -7,9 +7,16 @@ const createDirtyCoalescingRunner = ({
   delayMs = 0,
   retryDelays = [250, 1000, 3000],
   onError = () => undefined,
+  completedStateTtlMs = 60 * 1000,
+  maxRetainedStates = 256,
 }) => {
   if (typeof merge !== 'function' || typeof worker !== 'function') throw new TypeError('dirty runner requires merge and worker');
   const states = new Map();
+  const ticketCompletions = new WeakMap();
+  const retentionTtl = Number.isFinite(Number(completedStateTtlMs)) && Number(completedStateTtlMs) >= 0
+    ? Math.min(24 * 60 * 60 * 1000, Number(completedStateTtlMs)) : 60 * 1000;
+  const retainedStateLimit = Number.isInteger(Number(maxRetainedStates)) && Number(maxRetainedStates) > 0
+    ? Math.min(4096, Number(maxRetainedStates)) : 256;
 
   const createState = key => ({
     key,
@@ -27,8 +34,22 @@ const createDirtyCoalescingRunner = ({
     controller: new AbortController(),
     predecessor: null,
     flushRequested: false,
+    ticketCompletions: [],
+    cleanupTimer: null,
+    completedAt: 0,
     lastResult: undefined,
   });
+
+  const createTicketCompletion = generation => {
+    let resolve;
+    let reject;
+    const record = { generation, settled: false };
+    record.promise = new Promise((resolvePromise, rejectPromise) => { resolve = resolvePromise; reject = rejectPromise; });
+    record.resolve = value => { if (!record.settled) { record.settled = true; resolve(value); } };
+    record.reject = error => { if (!record.settled) { record.settled = true; reject(error); } };
+    void record.promise.catch(() => undefined);
+    return record;
+  };
 
   const settleCompleted = state => {
     const remaining = [];
@@ -40,6 +61,15 @@ const createDirtyCoalescingRunner = ({
       else remaining.push(waiter);
     }
     state.waiters = remaining;
+    for (const record of state.ticketCompletions) {
+      if (record.generation <= state.completedGeneration) record.resolve(state.lastResult);
+    }
+    state.ticketCompletions = state.ticketCompletions.filter(record => !record.settled);
+  };
+
+  const rejectTicketCompletions = (state, error) => {
+    for (const record of state.ticketCompletions) record.reject(error);
+    state.ticketCompletions = [];
   };
 
   const rejectWaiters = (state, error) => {
@@ -49,6 +79,45 @@ const createDirtyCoalescingRunner = ({
       waiter.signal?.removeEventListener('abort', waiter.onAbort);
       waiter.reject(error);
     }
+    rejectTicketCompletions(state, error);
+  };
+
+  const retireState = state => {
+    if (state.cleanupTimer) clearTimeout(state.cleanupTimer);
+    state.cleanupTimer = null;
+    if (states.get(state.key) === state) states.delete(state.key);
+  };
+
+  const waitForTicketCompletion = (record, ticket) => {
+    const signal = ticket?.signal;
+    if (!signal) return record.promise;
+    if (signal.aborted) return Promise.reject(cancelledError(ticket?.key));
+    return new Promise((resolve, reject) => {
+      const abort = () => {
+        signal.removeEventListener('abort', abort);
+        reject(cancelledError(ticket?.key));
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      record.promise.then(value => {
+        signal.removeEventListener('abort', abort);
+        resolve(value);
+      }, error => {
+        signal.removeEventListener('abort', abort);
+        reject(error);
+      });
+    });
+  };
+
+  const retainCompletedState = state => {
+    if (state.cancelled || state.predecessor || state.executionPromise || state.retryTimer || hasWork(state.pendingBatch)) return;
+    state.completedAt = Date.now();
+    if (state.cleanupTimer) clearTimeout(state.cleanupTimer);
+    state.cleanupTimer = setTimeout(() => retireState(state), retentionTtl);
+    state.cleanupTimer.unref?.();
+    const retained = [...states.values()]
+      .filter(candidate => candidate.completedAt > 0 && !candidate.executionPromise && !candidate.predecessor && !candidate.retryTimer)
+      .sort((left, right) => left.completedAt - right.completedAt);
+    while (retained.length > retainedStateLimit) retireState(retained.shift());
   };
 
   const schedule = (state, waitMs) => {
@@ -76,7 +145,7 @@ const createDirtyCoalescingRunner = ({
       state.retryAttempt = 0;
       state.lastResult = result;
       settleCompleted(state);
-    }, async error => {
+    }, error => {
       if (state.cancelled || states.get(state.key) !== state) return;
       // Merge failed work before changes that arrived during execution. The
       // merge contract must preserve dominant flags such as fullScan.
@@ -93,12 +162,11 @@ const createDirtyCoalescingRunner = ({
       const retryIndex = state.retryAttempt;
       state.retryAttempt += 1;
       const willRetry = retryIndex < retryDelays.length;
-      // onError is an observer: wait for either sync or async settlement, but
-      // never let observer failure replace the worker error or alter retry.
-      await Promise.resolve().then(() => onError(error, {
+      // onError is a detached observer. Its sync/async failures are owned, but
+      // it can neither delay nor alter the worker retry/rejection transition.
+      void Promise.resolve().then(() => onError(error, {
         key: state.key, batch: state.pendingBatch, generation, willRetry, retryAttempt: state.retryAttempt,
       })).catch(() => undefined);
-      if (state.cancelled || states.get(state.key) !== state) return;
       if (willRetry) state.nextRetryDelay = retryDelays[retryIndex];
       else rejectWaiters(state, error);
     });
@@ -119,7 +187,9 @@ const createDirtyCoalescingRunner = ({
       if (hasWork(state.pendingBatch) && !state.retryTimer) {
         const retrying = state.retryAttempt > 0;
         if (!retrying) schedule(state, 0);
+        return;
       }
+      retainCompletedState(state);
     }).catch(error => {
       // Internal state transitions must always own their rejection.
       if (!state.cancelled && states.get(state.key) === state) {
@@ -160,26 +230,35 @@ const createDirtyCoalescingRunner = ({
       }
       states.set(normalizedKey, state);
     }
+    if (state.cleanupTimer) clearTimeout(state.cleanupTimer);
+    state.cleanupTimer = null;
+    state.completedAt = 0;
     state.pendingBatch = merge(state.pendingBatch, delta);
     state.generation += 1;
     // New external work reopens an exhausted retry cycle.
     if (!state.executionPromise && !state.retryTimer && state.retryAttempt > retryDelays.length) state.retryAttempt = 0;
     schedule(state, delayMs);
-    const ticket = { key: normalizedKey, generation: state.generation, signal: options.signal || null };
-    return Object.freeze(ticket);
+    const ticket = Object.freeze({ key: normalizedKey, generation: state.generation, signal: options.signal || null });
+    const completion = createTicketCompletion(state.generation);
+    state.ticketCompletions.push(completion);
+    ticketCompletions.set(ticket, completion);
+    return ticket;
   };
 
   const flush = ticket => {
     const state = states.get(String(ticket?.key || ''));
     const generation = Number(ticket?.generation) || 0;
-    if (!state || state.cancelled) return Promise.reject(cancelledError(ticket?.key));
+    const ticketCompletion = ticket && typeof ticket === 'object' ? ticketCompletions.get(ticket) : null;
+    if (!state || state.cancelled) return ticketCompletion
+      ? waitForTicketCompletion(ticketCompletion, ticket)
+      : Promise.reject(cancelledError(ticket?.key));
     if (state.completedGeneration >= generation) return Promise.resolve(state.lastResult);
     if (state.retryTimer) {
       clearTimeout(state.retryTimer);
       state.retryTimer = null;
     }
     state.retryAttempt = 0;
-    const promise = new Promise((resolve, reject) => {
+    const promise = ticketCompletion ? waitForTicketCompletion(ticketCompletion, ticket) : new Promise((resolve, reject) => {
       const waiter = { generation, resolve, reject, signal: ticket?.signal, onAbort: null };
       waiter.onAbort = () => {
         const index = state.waiters.indexOf(waiter);
@@ -204,6 +283,8 @@ const createDirtyCoalescingRunner = ({
     state.retryTimer = null;
     state.pendingBatch = null;
     rejectWaiters(state, cancelledError(normalizedKey));
+    if (state.cleanupTimer) clearTimeout(state.cleanupTimer);
+    state.cleanupTimer = null;
     if (!state.executionPromise && !state.predecessor) states.delete(normalizedKey);
     return true;
   };
