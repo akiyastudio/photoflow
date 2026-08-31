@@ -37,6 +37,20 @@ const { pathToFileURL } = require('url');
   assert.strictEqual(missingPaths.referencePath, '', 'placeholder does not invent a reference path');
   assert.strictEqual(missingPaths.sourcePath, 'C:\\current\\new.jpg');
 
+  const legalBasenamePaths = model.resolveTrackingComparisonPaths({ ...items[0], referenceName: '修图 成片 01.jpg', sourceName: '当前 成片 01.jpg' }, 'C:\\parent', 'C:\\current');
+  assert.deepStrictEqual(legalBasenamePaths, {
+    referencePath: 'C:\\parent\\修图 成片 01.jpg',
+    sourcePath: 'C:\\current\\当前 成片 01.jpg',
+    referenceMissing: false,
+  }, 'common Chinese and spaced basenames remain valid preview paths');
+  for (const unsafeName of ['../escape.jpg', '..\\escape.jpg', '/absolute.jpg', 'C:\\absolute.jpg', 'C:drive-relative.jpg', 'nested/file.jpg', 'nested\\file.jpg', `nul\0name.jpg`, 'line\nfeed.jpg', String.fromCharCode(0x7f) + 'control.jpg']) {
+    const unsafeReference = model.resolveTrackingComparisonPaths({ ...items[0], referenceName: unsafeName }, 'C:\\parent', 'C:\\current');
+    assert.strictEqual(unsafeReference.referencePath, '', `unsafe reference basename must fail closed: ${JSON.stringify(unsafeName)}`);
+    assert.strictEqual(unsafeReference.referenceMissing, true, `unsafe reference basename must render unavailable: ${JSON.stringify(unsafeName)}`);
+    const unsafeSource = model.resolveTrackingComparisonPaths({ ...items[0], sourceName: unsafeName }, 'C:\\parent', 'C:\\current');
+    assert.strictEqual(unsafeSource.sourcePath, '', `unsafe source basename must not create a preview path: ${JSON.stringify(unsafeName)}`);
+  }
+
   const minimized = model.setTrackingPanelMinimized(state, true);
   const resumed = model.setTrackingPanelMinimized(minimized, false);
   assert.strictEqual(resumed.sessionId, state.sessionId, 'minimize and resume retain the same session');
@@ -68,6 +82,11 @@ const { pathToFileURL } = require('url');
   assert(panelSource.includes('view.session?.unresolvedCount') && panelSource.includes('setPageCursor(view.nextCursor)'), 'pagination must use the session-wide unresolved count and expose navigation to later pending pages');
   assert(panelSource.includes("selectedItem?.kind === 'missing'") && panelSource.includes('!missingCurrentItem && hasReferenceCandidate'), 'missing current media must not expose relocation or acceptance controls');
   assert(panelSource.includes('actionGenerationRef') && workspaceSource.includes('key={`${workspacePath}:${trackingConfirmationSessionId}`}'), 'session switches must isolate pagination, optimistic decisions, and late async completions');
+  assert(panelSource.includes('const viewMatchesSession = view.sessionId === sessionId')
+    && panelSource.includes('const sessionActionsAvailable = viewMatchesSession && view.session?.id === sessionId')
+    && panelSource.includes('if (!sessionActionsAvailable || !selectedItem || actionInFlightRef.current) return;')
+    && panelSource.includes('if (!sessionActionsAvailable || actionInFlightRef.current) return;'), 'decide and release must fail closed while rendered view identity differs from the loaded session prop');
+  assert(panelSource.includes('const commitUnavailable = !sessionActionsAvailable') && panelSource.includes('useLayoutEffect(() => {'), 'session mismatch must disable commit UI and reset identity before paint');
   const commitSource = panelSource.slice(panelSource.indexOf('const commit = () =>'), panelSource.indexOf('const release = async'));
   assert(commitSource.indexOf('onClose();') < commitSource.indexOf('await window.electronAPI.commitProgressTracking'), 'submitting confirmation must close immediately before waiting for background commit');
   assert(commitSource.includes('window.electronAPI.commitProgressTracking') && !commitSource.includes('已转入后台提交') && !commitSource.includes('提交跟踪结果失败') && !commitSource.includes('跟踪结果已提交。'), 'the BackgroundTask card must be the sole started, failed, and completed notification for detached commit');

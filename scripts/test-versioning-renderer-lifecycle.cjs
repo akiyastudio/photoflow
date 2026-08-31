@@ -153,6 +153,55 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
   await React.act(async () => previewRootB.unmount());
   assert.deepStrictEqual(thumbnailCancels, [], 'sequence gating and unsubscribe are sufficient cleanup for every consumer');
 
+  const trackingModel = loadCommonJs(compile('src/features/versioning/tracking-confirmation-model.ts'));
+  const trackingCalls = { decide: [], commit: [], release: [] };
+  let resolveSessionB;
+  const trackingSession = id => ({ id, progressId: `progress-${id}`, parentProgressId: `parent-${id}`, mode: 'refresh', status: 'pending_confirm', renameFromParent: false, copyMissingFromParent: false, error: '', total: 1, unresolvedCount: 1 });
+  const trackingItem = { id: 'item-a', kind: 'new', sourceName: 'current.jpg', referenceName: 'reference.jpg', targetName: 'current.jpg', status: 'pending_confirmation' };
+  testWindow.electronAPI = {
+    async getProgressTrackingSession(_workspacePath, request) {
+      if (request.sessionId === 'A') return { success: true, session: trackingSession('A'), items: [trackingItem], nextCursor: null };
+      return new Promise(resolve => { resolveSessionB = resolve; });
+    },
+    async decideProgressTrackingItem(_workspacePath, request) { trackingCalls.decide.push(request); return { success: true }; },
+    async commitProgressTracking(_workspacePath, request) { trackingCalls.commit.push(request); return { success: true }; },
+    async releaseProgressTrackingSession(_workspacePath, request) { trackingCalls.release.push(request); return { success: true, released: true }; },
+  };
+  const trackingPanelModule = loadCommonJs(compile('src/features/versioning/TrackingConfirmationPanel.tsx'), request => {
+    if (request === 'lucide-react') return iconModule;
+    if (request === './ProgressPairPreview') return { ProgressPairPreview: () => React.createElement('div', { 'data-preview': 'true' }) };
+    if (request === '../../components/LayerProvider') return { useHostSurfaceSuspension() {} };
+    if (request === './tracking-confirmation-model') return trackingModel;
+    return require(request);
+  });
+  const trackingContainer = new TestNode(1, 'DIV', testDocument);
+  const trackingRoot = createRoot(trackingContainer);
+  const trackingProps = sessionId => ({
+    active: true, sessionId, workspacePath: 'C:/workspace',
+    progressFolders: [
+      { id: `parent-${sessionId}`, displayName: `Parent ${sessionId}`, folderPath: `C:/parent-${sessionId}` },
+      { id: `progress-${sessionId}`, displayName: `Progress ${sessionId}`, folderPath: `C:/progress-${sessionId}` },
+    ],
+    cacheConfig: { directory: '', maxSizeGB: 1 }, onClose() {}, onCommitted() {}, onReleased() {}, onNotice() {},
+  });
+  await React.act(async () => { trackingRoot.render(React.createElement(trackingPanelModule.TrackingConfirmationPanel, trackingProps('A'))); await Promise.resolve(); await Promise.resolve(); });
+  const oldDecisionButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent === '确认同一张');
+  assert(oldDecisionButton, 'session A renders its pending decision action');
+  await React.act(async () => { dispatch(oldDecisionButton, 'click'); await Promise.resolve(); });
+  assert.deepStrictEqual(trackingCalls.decide, [{ sessionId: 'A', itemId: 'item-a', status: 'accepted' }], 'session A decision uses its own loaded identity');
+  const oldCommitButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('提交结果'));
+  assert(oldCommitButton, 'resolving session A exposes its commit action before the prop switch');
+  await React.act(async () => { trackingRoot.render(React.createElement(trackingPanelModule.TrackingConfirmationPanel, trackingProps('B'))); await Promise.resolve(); });
+  const switchedReleaseButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent === '放弃本次确认');
+  assert(switchedReleaseButton.attributes.has('disabled'), 'session actions are disabled while session B has no matching loaded view');
+  await React.act(async () => { dispatch(oldDecisionButton, 'click'); dispatch(oldCommitButton, 'click'); dispatch(switchedReleaseButton, 'click'); await Promise.resolve(); });
+  assert.deepStrictEqual(trackingCalls, {
+    decide: [{ sessionId: 'A', itemId: 'item-a', status: 'accepted' }], commit: [], release: [],
+  }, 'old session A decision/commit controls and transitional release cannot be combined with the new session B prop for IPC');
+  resolveSessionB({ success: true, session: trackingSession('B'), items: [], nextCursor: null });
+  await React.act(async () => { await Promise.resolve(); });
+  await React.act(async () => trackingRoot.unmount());
+
   const updateResolvers = [];
   const updateRequests = [];
   const deleteResolvers = [];

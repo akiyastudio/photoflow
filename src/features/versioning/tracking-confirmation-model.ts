@@ -95,7 +95,17 @@ export const applyTrackingItemDecision = (
 export const canCommitTrackingSession = (items: readonly ProgressTrackingItem[]) =>
   !items.some(item => unresolvedTrackingStatus(item.status));
 
-const joinTrackingPath = (folderPath: string, name?: string) => folderPath && name
+export const validTrackingBasename = (name: string | undefined): name is string => Boolean(name
+  && name !== '.'
+  && name !== '..'
+  && !/^[a-zA-Z]:/.test(name)
+  && !/[\\/]/.test(name)
+  && ![...name].some(character => {
+    const codePoint = character.codePointAt(0) || 0;
+    return codePoint <= 0x1f || (codePoint >= 0x7f && codePoint <= 0x9f);
+  }));
+
+const joinTrackingPath = (folderPath: string, name?: string) => folderPath && validTrackingBasename(name)
   ? `${folderPath.replace(/[\\/]+$/, '')}${folderPath.includes('\\') ? '\\' : '/'}${name}`
   : '';
 
@@ -103,11 +113,14 @@ export const resolveTrackingComparisonPaths = (
   item: ProgressTrackingItem | undefined,
   parentFolderPath: string,
   progressFolderPath: string,
-) => ({
-  referencePath: joinTrackingPath(parentFolderPath, item?.referenceName),
-  sourcePath: joinTrackingPath(progressFolderPath, item?.sourceName),
-  referenceMissing: Boolean(item && (item.status === 'missing_reference' || !item.referenceName)),
-});
+) => {
+  const referencePath = joinTrackingPath(parentFolderPath, item?.referenceName);
+  return {
+    referencePath,
+    sourcePath: joinTrackingPath(progressFolderPath, item?.sourceName),
+    referenceMissing: Boolean(item && (item.status === 'missing_reference' || !referencePath)),
+  };
+};
 
 export const setTrackingPanelMinimized = (state: TrackingConfirmationViewState, minimized: boolean) => ({ ...state, minimized });
 
