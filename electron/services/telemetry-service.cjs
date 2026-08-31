@@ -11,6 +11,11 @@ const EVENT_NAME_SET = new Set(EVENT_NAMES);
 const MAX_QUEUE_ITEMS = 1000;
 const MAX_PROPERTY_COUNT = 24;
 const MAX_STRING_LENGTH = 160;
+const MAX_STATE_BYTES = 4096;
+const MAX_QUEUE_BYTES = 2 * 1024 * 1024;
+const MIN_RETRY_AFTER_MS = 1000;
+const MAX_RETRY_AFTER_MS = 15 * 60 * 1000;
+const MAX_UPLOAD_BODY_BYTES = 80 * 1024;
 const CRASH_DEDUPE_WINDOW_MS = 10 * 60 * 1000;
 const NON_CRASH_MESSAGE = /(?:\[hmr\]|validateDOMNesting|Original image (?:preview|decode)|decoder failed; falling back|Failed to reload)/i;
 const ALLOWED_PROPERTY_NAMES = new Set([
@@ -86,12 +91,20 @@ const createTelemetryService = ({
   let flushPromise = null;
   let started = false;
   let previousAnalyticsEnabled = false;
+  const uploadBackoff = {
+    event: { nextAt: 0, attempt: 0 },
+    crash: { nextAt: 0, attempt: 0 },
+  };
+  let eventUploadEpoch = 0;
+  let crashUploadEpoch = 0;
   const uploadControllers = new Map();
   const recentCrashFingerprints = new Map();
 
-  const readJson = (filePath, fallback) => {
+  const readJson = (filePath, fallback, maximumBytes) => {
     try {
-      return fs.existsSync(filePath) ? JSON.parse(fs.readFileSync(filePath, 'utf8')) : fallback;
+      if (!fs.existsSync(filePath)) return fallback;
+      if (fs.statSync(filePath).size > maximumBytes) return fallback;
+      return JSON.parse(fs.readFileSync(filePath, 'utf8'));
     } catch {
       return fallback;
     }
@@ -107,10 +120,14 @@ const createTelemetryService = ({
     }
   };
 
-  const storedState = readJson(statePath, {});
+  const storedState = readJson(statePath, {}, MAX_STATE_BYTES);
+  const validStoredIdentity = storedState && typeof storedState === 'object'
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(storedState.installId || ''))
+    && typeof storedState.createdAt === 'string'
+    && Number.isFinite(Date.parse(storedState.createdAt));
   const state = {
-    installId: typeof storedState.installId === 'string' ? storedState.installId : crypto.randomUUID(),
-    createdAt: typeof storedState.createdAt === 'string' ? storedState.createdAt : new Date().toISOString(),
+    installId: validStoredIdentity ? storedState.installId : crypto.randomUUID(),
+    createdAt: validStoredIdentity ? new Date(storedState.createdAt).toISOString() : new Date().toISOString(),
   };
   writeJson(statePath, state);
 
@@ -121,13 +138,42 @@ const createTelemetryService = ({
       crashes: telemetry.crashReports === true,
     };
   };
+  const normalizeQueue = value => {
+    if (!Array.isArray(value)) return [];
+    const kept = [];
+    let bytes = 2;
+    for (let index = value.length - 1; index >= 0 && kept.length < MAX_QUEUE_ITEMS; index -= 1) {
+      const item = value[index];
+      if (!item || typeof item !== 'object' || Array.isArray(item)
+        || (item.kind !== 'event' && item.kind !== 'crash')
+        || !item.payload || typeof item.payload !== 'object' || Array.isArray(item.payload)
+        || !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(item.payload.id || ''))) continue;
+      if (item.kind === 'event' && (typeof item.payload.eventName !== 'string' || item.payload.eventName.length > 80
+        || typeof item.payload.clientTime !== 'string' || item.payload.clientTime.length > 80
+        || typeof item.payload.localDate !== 'string' || item.payload.localDate.length > 20
+        || !Number.isFinite(item.payload.timezoneOffsetMin)
+        || (item.payload.properties !== undefined
+          && (!item.payload.properties || typeof item.payload.properties !== 'object' || Array.isArray(item.payload.properties))))) continue;
+      if (item.kind === 'crash' && (typeof item.payload.clientTime !== 'string' || item.payload.clientTime.length > 80
+        || (item.payload.message !== undefined && (typeof item.payload.message !== 'string' || item.payload.message.length > 2000))
+        || (item.payload.stack !== undefined && (typeof item.payload.stack !== 'string' || item.payload.stack.length > 16000))
+        || (item.payload.logTail !== undefined && (typeof item.payload.logTail !== 'string' || item.payload.logTail.length > 48 * 1024)))) continue;
+      let encoded;
+      try { encoded = JSON.stringify(item); } catch { continue; }
+      const itemBytes = Buffer.byteLength(encoded, 'utf8') + (kept.length ? 1 : 0);
+      if (itemBytes > 256 * 1024 || bytes + itemBytes > MAX_QUEUE_BYTES) continue;
+      bytes += itemBytes;
+      kept.push(item);
+    }
+    return kept.reverse();
+  };
   let localQueue = (() => {
-    const queue = readJson(queuePath, []);
-    return Array.isArray(queue) ? queue.slice(-MAX_QUEUE_ITEMS) : [];
+    const queue = readJson(queuePath, [], MAX_QUEUE_BYTES);
+    return normalizeQueue(queue);
   })();
   const readQueue = () => localQueue.slice();
   const saveQueue = queue => {
-    localQueue = queue.slice(-MAX_QUEUE_ITEMS);
+    localQueue = normalizeQueue(queue);
     writeJson(queuePath, localQueue);
   };
   const enqueue = item => {
@@ -230,12 +276,14 @@ const createTelemetryService = ({
     }
   };
 
-  const postJson = async (route, body, uploadKind) => {
+  const postJson = async (route, body, uploadKind, isCurrent) => {
     if (!baseUrl) throw new Error('Cloud API URL is not configured');
+    if (isCurrent && !isCurrent()) return false;
     const controller = new AbortController();
     if (uploadKind) uploadControllers.set(uploadKind, controller);
     const timeout = setTimeout(() => controller.abort(), 8000);
     try {
+      if (isCurrent && !isCurrent()) return false;
       const response = await fetch(`${baseUrl}${route}`, {
         method: 'POST',
         headers: {
@@ -248,8 +296,18 @@ const createTelemetryService = ({
       if (!response.ok) {
         const error = new Error(`Telemetry API returned ${response.status}`);
         error.status = response.status;
+        const retryAfter = response.headers?.get?.('retry-after');
+        if (retryAfter) {
+          const seconds = Number(retryAfter);
+          const dateDelay = Date.parse(retryAfter) - Date.now();
+          const delay = Number.isFinite(seconds) ? seconds * 1000 : dateDelay;
+          if (Number.isFinite(delay) && delay >= 0) {
+            error.retryAfterMs = Math.min(MAX_RETRY_AFTER_MS, Math.max(MIN_RETRY_AFTER_MS, Math.ceil(delay)));
+          }
+        }
         throw error;
       }
+      return true;
     } finally {
       clearTimeout(timeout);
       if (uploadKind && uploadControllers.get(uploadKind) === controller) uploadControllers.delete(uploadKind);
@@ -260,18 +318,42 @@ const createTelemetryService = ({
     const removed = new Set(ids);
     saveQueue(readQueue().filter(item => !removed.has(item?.payload?.id)));
   };
-  const retryableUploadError = error => !Number.isInteger(error?.status) || error.status >= 500;
-  const uploadEvents = async events => {
-    if (!events.length) return;
+  const retryableUploadError = error => !Number.isInteger(error?.status)
+    || [408, 425, 429].includes(error.status) || error.status >= 500;
+  const resetUploadBackoff = kind => {
+    uploadBackoff[kind].nextAt = 0;
+    uploadBackoff[kind].attempt = 0;
+  };
+  const deferUpload = (kind, error) => {
+    const state = uploadBackoff[kind];
+    state.attempt = Math.min(state.attempt + 1, 8);
+    const backoff = Math.min(MAX_RETRY_AFTER_MS, 5000 * (2 ** (state.attempt - 1)));
+    state.nextAt = Date.now() + Math.max(backoff, Number(error?.retryAfterMs) || 0);
+  };
+  const uploadEvents = async (events, epoch) => {
+    const isCurrent = () => epoch === eventUploadEpoch && getConsent().analytics;
+    if (!events.length || !isCurrent()) return;
+    const encodedBytes = Buffer.byteLength(JSON.stringify({ ...commonPayload(), events: events.map(item => item.payload) }), 'utf8');
+    if (encodedBytes > MAX_UPLOAD_BODY_BYTES && events.length > 1) {
+      const middle = Math.ceil(events.length / 2);
+      await uploadEvents(events.slice(0, middle), epoch);
+      await uploadEvents(events.slice(middle), epoch);
+      return;
+    }
     try {
-      await postJson('/v1/events', { ...commonPayload(), events: events.map(item => item.payload) }, 'event');
+      if (!isCurrent()) return;
+      const posted = await postJson('/v1/events', { ...commonPayload(), events: events.map(item => item.payload) }, 'event', isCurrent);
+      if (!posted || !isCurrent()) return;
+      resetUploadBackoff('event');
       removeQueuedIds(events.map(item => item.payload.id));
     } catch (error) {
+      if (!isCurrent()) return;
       if (retryableUploadError(error)) throw error;
+      resetUploadBackoff('event');
       if (events.length > 1) {
         const middle = Math.ceil(events.length / 2);
-        await uploadEvents(events.slice(0, middle));
-        await uploadEvents(events.slice(middle));
+        await uploadEvents(events.slice(0, middle), epoch);
+        await uploadEvents(events.slice(middle), epoch);
         return;
       }
       removeQueuedIds([events[0]?.payload?.id]);
@@ -294,25 +376,44 @@ const createTelemetryService = ({
       return true;
     }
 
-    try {
-      const events = validQueue.filter(item => item.kind === 'event').slice(0, 50);
-      await uploadEvents(events);
-      const crash = readQueue().find(item => item.kind === 'crash' && getConsent().crashes);
-      if (crash) {
-        try {
-          await postJson('/v1/crashes', { ...commonPayload(), ...crash.payload }, 'crash');
+    let deferred = false;
+    const eventEpoch = eventUploadEpoch;
+    const crashEpoch = crashUploadEpoch;
+    const events = validQueue.filter(item => item.kind === 'event').slice(0, 50);
+    if (events.length && uploadBackoff.event.nextAt > Date.now()) deferred = true;
+    else if (events.length) {
+      try {
+        await uploadEvents(events, eventEpoch);
+      } catch (error) {
+        deferUpload('event', error);
+        deferred = true;
+        writeLog('warn', 'Telemetry upload deferred', { kind: 'event', error: error.message || String(error) });
+      }
+    }
+    const crash = readQueue().find(item => item.kind === 'crash' && getConsent().crashes);
+    const crashIsCurrent = () => crashEpoch === crashUploadEpoch && getConsent().crashes;
+    if (crash && uploadBackoff.crash.nextAt > Date.now()) deferred = true;
+    else if (crash && crashIsCurrent()) {
+      try {
+        const posted = await postJson('/v1/crashes', { ...commonPayload(), ...crash.payload }, 'crash', crashIsCurrent);
+        if (posted && crashIsCurrent()) {
+          resetUploadBackoff('crash');
           removeQueuedIds([crash.payload.id]);
-        } catch (error) {
-          if (retryableUploadError(error)) throw error;
+        }
+      } catch (error) {
+        if (crashIsCurrent() && retryableUploadError(error)) {
+          deferUpload('crash', error);
+          deferred = true;
+          writeLog('warn', 'Telemetry upload deferred', { kind: 'crash', error: error.message || String(error) });
+        } else if (crashIsCurrent()) {
+          resetUploadBackoff('crash');
           removeQueuedIds([crash.payload.id]);
           writeLog('warn', 'Discarded rejected crash report', { status: error.status });
         }
       }
-      return true;
-    } catch (error) {
-      writeLog('warn', 'Telemetry upload deferred', { error: error.message || String(error) });
-      return false;
     }
+    if (deferred) scheduleFlush(0);
+    return !deferred;
   }
 
   function flush() {
@@ -321,30 +422,60 @@ const createTelemetryService = ({
     return flushPromise;
   }
 
+  const scheduleFlush = (delay = 30 * 1000) => {
+    if (!started) return;
+    if (timer) clearTimeout(timer);
+    const consent = getConsent();
+    const futureRetries = [
+      consent.analytics ? uploadBackoff.event.nextAt : 0,
+      consent.crashes ? uploadBackoff.crash.nextAt : 0,
+    ].filter(value => value > Date.now());
+    const retryDelay = futureRetries.length ? Math.max(0, Math.min(...futureRetries) - Date.now()) : 0;
+    timer = setTimeout(async () => {
+      timer = null;
+      await flush();
+      scheduleFlush();
+    }, Math.max(delay, retryDelay));
+  };
+
   const syncConsent = telemetry => {
     const analytics = telemetry?.enabled === true;
     const crashes = telemetry?.crashReports === true;
-    if (!analytics) uploadControllers.get('event')?.abort();
-    if (!crashes) uploadControllers.get('crash')?.abort();
+    if (!analytics) {
+      eventUploadEpoch += 1;
+      resetUploadBackoff('event');
+      uploadControllers.get('event')?.abort();
+    }
+    if (!crashes) {
+      crashUploadEpoch += 1;
+      resetUploadBackoff('crash');
+      uploadControllers.get('crash')?.abort();
+    }
     if (!analytics || !crashes) {
       saveQueue(readQueue().filter(item =>
         (item.kind === 'event' && analytics) || (item.kind === 'crash' && crashes)));
     }
     if (analytics && !previousAnalyticsEnabled) {
       track('session_start', {
-        first_launch: state.createdAt === storedState.createdAt ? false : true,
+        first_launch: !validStoredIdentity,
       });
     }
     previousAnalyticsEnabled = analytics;
     if (analytics || crashes) void flush();
+    scheduleFlush();
   };
 
   const clearLocalData = () => {
+    eventUploadEpoch += 1;
+    crashUploadEpoch += 1;
+    resetUploadBackoff('event');
+    resetUploadBackoff('crash');
     for (const controller of uploadControllers.values()) controller.abort();
     state.installId = crypto.randomUUID();
     state.createdAt = new Date().toISOString();
     writeJson(statePath, state);
     saveQueue([]);
+    scheduleFlush();
     return true;
   };
 
@@ -352,13 +483,13 @@ const createTelemetryService = ({
     if (started) return false;
     started = true;
     syncConsent(getConfig()?.telemetry);
-    timer = setInterval(() => void flush(), 30 * 1000);
+    scheduleFlush();
     return true;
   };
   const stop = () => {
     if (!started) return flush();
     started = false;
-    if (timer) clearInterval(timer);
+    if (timer) clearTimeout(timer);
     timer = null;
     return flush();
   };

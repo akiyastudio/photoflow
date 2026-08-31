@@ -18,6 +18,7 @@ assert(systemIpcSource.includes("config?.telemetry?.enabled === true"));
 assert(systemIpcSource.includes("config?.telemetry?.crashReports === true"));
 
 try {
+  fs.writeFileSync(statePath, JSON.stringify({ installId: 'corrupt-install-id', createdAt: 'not-a-date' }));
   const service = createTelemetryService({
     app: { isPackaged: true, getPath: key => key === 'userData' ? sandbox : sandbox, getVersion: () => '26.8.30' },
     fs,
@@ -29,6 +30,11 @@ try {
     apiBaseUrl: '',
     ingestKey: 'test',
   });
+
+  const repairedState = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+  assert.match(repairedState.installId, /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i);
+  assert.equal(new Date(repairedState.createdAt).toISOString(), repairedState.createdAt);
+  assert.notEqual(repairedState.installId, 'corrupt-install-id', 'corrupt identity is replaced before any upload');
 
   service.start();
   assert.strictEqual(service.track('feature_opened', { feature: 'home' }), false, 'opted-out analytics must not enqueue events');
