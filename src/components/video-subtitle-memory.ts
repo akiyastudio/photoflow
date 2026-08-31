@@ -15,7 +15,13 @@ type SubtitleMemoryEntry = SubtitleMemory & { fileKey: string };
 type SubtitleMemoryStore = { version: 2; entries: SubtitleMemoryEntry[] };
 
 export const normalizeVideoMemoryFileKey = (filePath: string) => {
-  const normalized = String(filePath || '').trim().replace(/[\\/]+/g, '/').toLowerCase();
+  const raw = String(filePath || '').trim().replace(/^file:\/\//i, '');
+  const unc = /^[\\/]{2}[^\\/]/.test(raw);
+  let normalized = raw.replace(/[\\/]+/g, '/');
+  if (unc && !normalized.startsWith('//')) normalized = `/${normalized}`;
+  try { normalized = decodeURIComponent(normalized); } catch { /* keep the original path when it is not a valid URI */ }
+  if (/^\/[a-z]:\//i.test(normalized)) normalized = normalized.slice(1);
+  if (/^[a-z]:\//i.test(normalized) || normalized.startsWith('//')) normalized = normalized.toLowerCase();
   return normalized.length > 3 ? normalized.replace(/\/+$/, '') : normalized;
 };
 
@@ -42,7 +48,8 @@ const normalizeMemory = (value: unknown): SubtitleMemory | undefined => {
 
 export const parseSubtitleMemoryStore = (currentRaw: string | null, legacyRaw: string | null = null): SubtitleMemoryStore => {
   const entries: SubtitleMemoryEntry[] = [];
-  const add = (filePath: string, value: unknown) => {
+  const add = (filePath: unknown, value: unknown) => {
+    if (typeof filePath !== 'string') return;
     const fileKey = normalizeVideoMemoryFileKey(filePath);
     const memory = normalizeMemory(value);
     if (fileKey && memory) entries.push({ fileKey, ...memory });
@@ -50,7 +57,10 @@ export const parseSubtitleMemoryStore = (currentRaw: string | null, legacyRaw: s
   try {
     const parsed = JSON.parse(currentRaw || 'null') as unknown;
     if (parsed && typeof parsed === 'object' && (parsed as Partial<SubtitleMemoryStore>).version === 2 && Array.isArray((parsed as Partial<SubtitleMemoryStore>).entries)) {
-      for (const item of (parsed as SubtitleMemoryStore).entries) add(item.fileKey, item);
+      for (const item of (parsed as SubtitleMemoryStore).entries) {
+        if (!item || typeof item !== 'object') continue;
+        add((item as Partial<SubtitleMemoryEntry>).fileKey, item);
+      }
     }
   } catch { /* corrupt storage is ignored */ }
   if (!entries.length) {

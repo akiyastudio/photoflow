@@ -4,6 +4,18 @@ import type { PointerEvent as ReactPointerEvent } from 'react';
 export type CropRectangle = { x: number; y: number; width: number; height: number };
 type CropHandle = 'move' | 'nw' | 'ne' | 'sw' | 'se';
 
+const normalizeCropRectangle = (value: CropRectangle, imageSize: { width: number; height: number }, minimumSize = 1): CropRectangle => {
+  const imageWidth = Math.max(0, imageSize.width);
+  const imageHeight = Math.max(0, imageSize.height);
+  const minimumWidth = Math.min(imageWidth, Math.max(0, minimumSize));
+  const minimumHeight = Math.min(imageHeight, Math.max(0, minimumSize));
+  const width = Math.max(minimumWidth, Math.min(imageWidth, value.width));
+  const height = Math.max(minimumHeight, Math.min(imageHeight, value.height));
+  const x = Math.max(0, Math.min(imageWidth - width, value.x));
+  const y = Math.max(0, Math.min(imageHeight - height, value.y));
+  return { x: Math.round(x), y: Math.round(y), width: Math.round(width), height: Math.round(height) };
+};
+
 const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange, large = false, embedded = false, snapGuides = { x: [], y: [] }, snapEnabled = false }: { previewUrl: string; imageSize: { width: number; height: number }; crop: CropRectangle; onChange: (crop: CropRectangle) => void; large?: boolean; embedded?: boolean; snapGuides?: { x: number[]; y: number[] }; snapEnabled?: boolean }) => {
   const svgRef = useRef<SVGSVGElement>(null);
   const dragRef = useRef<{ pointerId: number; handle: CropHandle; x: number; y: number; crop: CropRectangle } | null>(null);
@@ -50,7 +62,7 @@ const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange, large = 
       if (xSnap) x = Math.max(0, Math.min(imageSize.width - drag.crop.width, xSnap.value));
       if (ySnap) y = Math.max(0, Math.min(imageSize.height - drag.crop.height, ySnap.value));
       setActiveGuides({ x: xSnap?.guide, y: ySnap?.guide });
-      onChange({ ...drag.crop, x: Math.round(x), y: Math.round(y) });
+      onChange(normalizeCropRectangle({ ...drag.crop, x, y }, imageSize, minimumSize));
       return;
     }
     let left = drag.crop.x; let top = drag.crop.y; let right = drag.crop.x + drag.crop.width; let bottom = drag.crop.y + drag.crop.height;
@@ -65,7 +77,7 @@ const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange, large = 
     if (xSnap) { if (drag.handle.includes('w')) left = Math.min(right - minimumSize, xSnap.value); else right = Math.max(left + minimumSize, xSnap.value); }
     if (ySnap) { if (drag.handle.includes('n')) top = Math.min(bottom - minimumSize, ySnap.value); else bottom = Math.max(top + minimumSize, ySnap.value); }
     setActiveGuides({ x: xSnap?.value, y: ySnap?.value });
-    onChange({ x: Math.round(left), y: Math.round(top), width: Math.round(right - left), height: Math.round(bottom - top) });
+    onChange(normalizeCropRectangle({ x: left, y: top, width: right - left, height: bottom - top }, imageSize, minimumSize));
   };
   const endDrag = (event: ReactPointerEvent<SVGSVGElement>) => {
     if (dragRef.current?.pointerId !== event.pointerId) return;
@@ -77,7 +89,7 @@ const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange, large = 
     { handle: 'nw', x: crop.x, y: crop.y, cursor: 'nwse-resize' }, { handle: 'ne', x: crop.x + crop.width, y: crop.y, cursor: 'nesw-resize' },
     { handle: 'sw', x: crop.x, y: crop.y + crop.height, cursor: 'nesw-resize' }, { handle: 'se', x: crop.x + crop.width, y: crop.y + crop.height, cursor: 'nwse-resize' },
   ];
-  return <div className={`flex justify-center overflow-hidden bg-slate-950 ${embedded ? 'h-full w-full' : `mt-4 rounded-xl ${large ? 'h-[68vh] max-h-[760px] min-h-[420px]' : 'max-h-80'}`}`}><svg ref={svgRef} className={`${embedded || large ? 'h-full' : 'max-h-80'} w-full select-none touch-none`} viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet" onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag}>
+  return <div className={`flex justify-center overflow-hidden bg-slate-950 ${embedded ? 'h-full w-full' : `mt-4 rounded-xl ${large ? 'h-[68vh] max-h-[760px] min-h-[420px]' : 'max-h-80'}`}`}><svg ref={svgRef} className={`${embedded || large ? 'h-full' : 'max-h-80'} w-full select-none touch-none`} viewBox={`0 0 ${imageSize.width} ${imageSize.height}`} preserveAspectRatio="xMidYMid meet" onPointerMove={moveDrag} onPointerUp={endDrag} onPointerCancel={endDrag} onLostPointerCapture={endDrag}>
     <image href={previewUrl} width={imageSize.width} height={imageSize.height} pointerEvents="none"/>
     {activeGuides.x !== undefined && <line x1={activeGuides.x} y1="0" x2={activeGuides.x} y2={imageSize.height} stroke="#22d3ee" strokeWidth={Math.max(2, imageSize.width / 1000)} strokeDasharray={`${Math.max(8, imageSize.width / 120)} ${Math.max(6, imageSize.width / 180)}`} pointerEvents="none"/>}
     {activeGuides.y !== undefined && <line x1="0" y1={activeGuides.y} x2={imageSize.width} y2={activeGuides.y} stroke="#22d3ee" strokeWidth={Math.max(2, imageSize.width / 1000)} strokeDasharray={`${Math.max(8, imageSize.width / 120)} ${Math.max(6, imageSize.width / 180)}`} pointerEvents="none"/>}

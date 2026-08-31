@@ -4,6 +4,7 @@ export const DEFAULT_SUBTITLE_FONT_SIZE = 55;
 export const LEGACY_LARGE_SUBTITLE_FONT_SIZE = 74;
 
 export const normalizeSubtitleFontSize = (value: unknown) => {
+  if (value === null || value === '' || typeof value === 'boolean') return DEFAULT_SUBTITLE_FONT_SIZE;
   const migrated = value === 'large'
     ? LEGACY_LARGE_SUBTITLE_FONT_SIZE
     : value === 'default'

@@ -23,6 +23,7 @@ export type PlaybackBounds = {
   width: number;
   height: number;
   visible: boolean;
+  viewportDip?: { x: number; y: number; width: number; height: number };
   overlayHole?: { x: number; y: number; width: number; height: number; radius?: number };
   controlsOverlayHole?: { x: number; y: number; width: number; height: number };
   cornerOverlayHole?: { x: number; y: number; width: number; height: number };
@@ -73,6 +74,7 @@ export type PlaybackBackendContext = {
   electronApi: ElectronApi;
   onState: (state: VideoPlayerState) => void;
   onRuntimeFailure: (error: string, code?: PlaybackErrorCode) => void;
+  signal?: AbortSignal;
 };
 
 const stateEnvelope = (context: Omit<PlaybackBackendContext, 'onRuntimeFailure'>, type: VideoPlayerState['type'], state: Partial<VideoPlayerState> = {}): VideoPlayerState => ({
@@ -87,7 +89,7 @@ const chromiumPlaybackFailure = (video: HTMLVideoElement): PlaybackFailure => {
   const mediaError = video.error;
   const detail = String(mediaError?.message || '').trim();
   const state = `readyState=${video.readyState}，networkState=${video.networkState}`;
-  if (mediaError?.code === 1) return new PlaybackFailure('CANCELLED', detail || `Chromium 媒体读取已中止（${state}）`, true, [], 'none');
+  if (mediaError?.code === 1) return new PlaybackFailure('CANCELLED', detail || `Chromium 媒体读取已中止（${state}）`, false, [], 'none');
   if (mediaError?.code === 2) return new PlaybackFailure('MEDIA_IO_FAILED', detail || `Chromium 读取视频数据失败（MEDIA_ERR_NETWORK，${state}）`);
   if (mediaError?.code === 3) return new PlaybackFailure('DECODE_INITIALIZATION_FAILED', detail || `Chromium 解码视频数据失败（MEDIA_ERR_DECODE，${state}）`);
   if (mediaError?.code === 4) return new PlaybackFailure('UNSUPPORTED_CODEC', detail || `Chromium 不支持该媒体源（MEDIA_ERR_SRC_NOT_SUPPORTED，${state}）`);
@@ -96,20 +98,35 @@ const chromiumPlaybackFailure = (video: HTMLVideoElement): PlaybackFailure => {
 
 const benignPlayRejection = (error: unknown) => error instanceof DOMException && (error.name === 'NotAllowedError' || error.name === 'AbortError');
 const chromiumVideoOwners = new WeakMap<HTMLVideoElement, string>();
-const waitForChromiumFrame = (video: HTMLVideoElement, timeoutMs = 300) => new Promise<void>(resolve => {
+const cancelledFailure = (message = '视频播放操作已取消') => new PlaybackFailure('CANCELLED', message, false, [], 'none');
+const waitForChromiumFrame = (video: HTMLVideoElement, timeoutMs = 300, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
   let settled = false;
-  const finish = () => { if (!settled) { settled = true; globalThis.clearTimeout(timer); resolve(); } };
+  let frameId: number | undefined;
+  const cleanup = () => {
+    globalThis.clearTimeout(timer);
+    if (frameId !== undefined && typeof video.cancelVideoFrameCallback === 'function') video.cancelVideoFrameCallback(frameId);
+    signal?.removeEventListener('abort', cancel);
+  };
+  const finish = () => { if (!settled) { settled = true; cleanup(); resolve(); } };
+  const cancel = () => { if (!settled) { settled = true; cleanup(); reject(cancelledFailure('Chromium 等待视频帧已取消')); } };
   const timer = globalThis.setTimeout(finish, timeoutMs);
-  if (typeof video.requestVideoFrameCallback === 'function') video.requestVideoFrameCallback(() => finish());
+  if (signal?.aborted) { cancel(); return; }
+  signal?.addEventListener('abort', cancel, { once: true });
+  if (typeof video.requestVideoFrameCallback === 'function') frameId = video.requestVideoFrameCallback(() => finish());
   else globalThis.requestAnimationFrame(() => finish());
 });
 
-const withPlaybackTimeout = <T,>(promise: Promise<T>, timeoutMs: number, failure: () => PlaybackFailure) => new Promise<T>((resolve, reject) => {
-  const timer = globalThis.setTimeout(() => reject(failure()), timeoutMs);
-  promise.then(value => { globalThis.clearTimeout(timer); resolve(value); }, error => { globalThis.clearTimeout(timer); reject(error); });
+const withPlaybackTimeout = <T,>(promise: Promise<T>, timeoutMs: number, failure: () => PlaybackFailure, signal?: AbortSignal) => new Promise<T>((resolve, reject) => {
+  let settled = false;
+  const cancel = () => finish(() => reject(cancelledFailure()));
+  const finish = (complete: () => void) => { if (!settled) { settled = true; globalThis.clearTimeout(timer); signal?.removeEventListener('abort', cancel); complete(); } };
+  const timer = globalThis.setTimeout(() => finish(() => reject(failure())), timeoutMs);
+  if (signal?.aborted) { cancel(); return; }
+  signal?.addEventListener('abort', cancel, { once: true });
+  promise.then(value => finish(() => resolve(value)), error => finish(() => reject(error)));
 });
 
-const waitForChromiumReady = (video: HTMLVideoElement, timeoutMs = 8000) => new Promise<void>((resolve, reject) => {
+const waitForChromiumReady = (video: HTMLVideoElement, timeoutMs = 8000, signal?: AbortSignal) => new Promise<void>((resolve, reject) => {
   let timer = 0;
   const ready = () => { cleanup(); resolve(); };
   const failed = () => { cleanup(); reject(chromiumPlaybackFailure(video)); };
@@ -117,7 +134,11 @@ const waitForChromiumReady = (video: HTMLVideoElement, timeoutMs = 8000) => new 
     globalThis.clearTimeout(timer);
     video.removeEventListener('loadedmetadata', ready);
     video.removeEventListener('error', failed);
+    signal?.removeEventListener('abort', cancelled);
   };
+  const cancelled = () => { cleanup(); reject(cancelledFailure('Chromium 打开媒体已取消')); };
+  if (signal?.aborted) { cancelled(); return; }
+  signal?.addEventListener('abort', cancelled, { once: true });
   video.addEventListener('loadedmetadata', ready, { once: true });
   video.addEventListener('error', failed, { once: true });
   timer = globalThis.setTimeout(() => { cleanup(); reject(new PlaybackFailure('STARTUP_TIMEOUT', `Chromium 等待视频元数据超时（readyState=${video.readyState}，networkState=${video.networkState}）`)); }, timeoutMs);
@@ -130,10 +151,14 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
 
   async start(context: PlaybackBackendContext): Promise<PlaybackSession> {
     const { video } = context;
+    const lifecycleController = new AbortController();
+    const abortLifecycle = () => lifecycleController.abort();
+    context.signal?.addEventListener('abort', abortLifecycle, { once: true });
+    if (context.signal?.aborted) lifecycleController.abort();
     const ownerId = `${context.playerId}:${context.requestId}`;
     chromiumVideoOwners.set(video, ownerId);
     const ownsVideo = () => chromiumVideoOwners.get(video) === ownerId;
-    const requireOwnership = () => { if (!ownsVideo()) throw new PlaybackFailure('CANCELLED', 'Chromium 播放请求已被新的会话替换', false, [], 'none'); };
+    const requireOwnership = () => { if (closed || lifecycleController.signal.aborted || !ownsVideo()) throw new PlaybackFailure('CANCELLED', 'Chromium 播放请求已被新的会话替换', false, [], 'none'); };
     let closed = false;
     let loaded = false;
     let runtimeFailureReported = false;
@@ -158,7 +183,8 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
     video.preload = 'auto';
     video.playsInline = true;
     video.crossOrigin = 'anonymous';
-    const applyChromiumTransform = () => Object.assign(video.style, chromiumVideoStyle(transform, video.clientWidth || video.parentElement?.clientWidth || video.videoWidth, video.clientHeight || video.parentElement?.clientHeight || video.videoHeight));
+    const chromiumViewport = () => ({ width: video.clientWidth || video.parentElement?.clientWidth || video.videoWidth, height: video.clientHeight || video.parentElement?.clientHeight || video.videoHeight });
+    const applyChromiumTransform = () => { const viewport = chromiumViewport(); Object.assign(video.style, chromiumVideoStyle(transform, viewport.width, viewport.height, video.videoWidth || viewport.width, video.videoHeight || viewport.height)); };
     const transformResizeObserver = typeof globalThis.ResizeObserver === 'function' ? new globalThis.ResizeObserver(() => applyChromiumTransform()) : null;
     transformResizeObserver?.observe(video.parentElement || video);
     applyChromiumTransform();
@@ -220,18 +246,18 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
       for (let attempt = 0; attempt < 2; attempt += 1) {
         try {
           requireOwnership();
-          const source = await withPlaybackTimeout(context.electronApi.getVideoPlaybackSource(context.filePath), 5000, () => new PlaybackFailure('STARTUP_TIMEOUT', 'Chromium 媒体源授权超时'));
+          const source = await withPlaybackTimeout(context.electronApi.getVideoPlaybackSource(context.filePath), 5000, () => new PlaybackFailure('STARTUP_TIMEOUT', 'Chromium 媒体源授权超时'), lifecycleController.signal);
           requireOwnership();
           if (!source.success || !source.mediaUrl) throw new PlaybackFailure('MEDIA_IO_FAILED', source.error || '无法授权 Chromium 读取视频');
           video.src = source.mediaUrl;
-          await waitForChromiumReady(video);
+          await waitForChromiumReady(video, 8000, lifecycleController.signal);
           requireOwnership();
           startupFailure = null;
           break;
         } catch (error) {
           startupFailure = classifyPlaybackError(error, 'DECODE_INITIALIZATION_FAILED');
           if (!ownsVideo()) throw startupFailure;
-          const retryable = ['STARTUP_TIMEOUT', 'MEDIA_IO_FAILED', 'CANCELLED'].includes(startupFailure.code);
+          const retryable = ['STARTUP_TIMEOUT', 'MEDIA_IO_FAILED'].includes(startupFailure.code);
           if (attempt > 0 || !retryable) throw startupFailure;
           video.pause();
           video.removeAttribute('src');
@@ -240,6 +266,7 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
       }
       if (startupFailure) throw startupFailure;
       loaded = true;
+      applyChromiumTransform();
       context.onState(stateEnvelope(context, 'file-loaded', {
         duration: Number.isFinite(video.duration) ? video.duration : 0,
         width: video.videoWidth,
@@ -258,6 +285,8 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
     } catch (error) {
       events.forEach(([name, listener]) => video.removeEventListener(name, listener));
       transformResizeObserver?.disconnect();
+      context.signal?.removeEventListener('abort', abortLifecycle);
+      lifecycleController.abort();
       if (ownsVideo()) {
         chromiumVideoOwners.delete(video);
         video.removeAttribute('src');
@@ -296,20 +325,29 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
         if (closed || !ownsVideo()) return { success: false, error: '当前 Chromium 播放会话已结束' };
         if (video.readyState < 2 || !video.videoWidth || !video.videoHeight) return { success: false, error: '当前视频帧尚未就绪' };
         try {
-          await waitForChromiumFrame(video);
+          await waitForChromiumFrame(video, 300, lifecycleController.signal);
+          requireOwnership();
           const canvas = document.createElement('canvas');
           const captureTransform = mode === 'sourceFrame' ? DEFAULT_VIDEO_TRANSFORM : transform;
-          const size = transformedFrameSize(video.videoWidth, video.videoHeight, captureTransform);
+          const viewport = mode === 'sourceFrame' ? { width: 0, height: 0 } : chromiumViewport();
+          const size = transformedFrameSize(video.videoWidth, video.videoHeight, captureTransform, viewport.width, viewport.height);
           canvas.width = size.width; canvas.height = size.height;
           const drawing = canvas.getContext('2d');
           if (!drawing) return { success: false, error: '无法创建视频截图画布' };
-          drawTransformedVideoFrame(drawing, video, captureTransform);
+          requireOwnership();
+          drawTransformedVideoFrame(drawing, video, captureTransform, viewport.width, viewport.height);
+          requireOwnership();
           const blob = await new Promise<Blob | null>(resolve => {
             const timer = globalThis.setTimeout(() => resolve(null), 5000);
             canvas.toBlob(value => { globalThis.clearTimeout(timer); resolve(value); }, 'image/png');
           });
+          requireOwnership();
           if (!blob) return { success: false, error: 'Chromium 生成截图超时或失败' };
-          return await context.electronApi.publishVideoPlayerFrame(context.filePath, new Uint8Array(await blob.arrayBuffer()));
+          const bytes = new Uint8Array(await blob.arrayBuffer());
+          requireOwnership();
+          const result = await context.electronApi.publishVideoPlayerFrame(context.filePath, bytes);
+          requireOwnership();
+          return result;
         } catch (error) {
           return { success: false, error: `Chromium 截图失败：${error instanceof Error ? error.message : String(error)}` };
         }
@@ -318,6 +356,8 @@ export class ChromiumPlaybackBackend implements VideoPlaybackBackend {
       close: async () => {
         if (closed) return;
         closed = true;
+        context.signal?.removeEventListener('abort', abortLifecycle);
+        lifecycleController.abort();
         globalThis.clearInterval(statisticsTimer);
         transformResizeObserver?.disconnect();
         events.forEach(([name, listener]) => video.removeEventListener(name, listener));
@@ -341,12 +381,17 @@ export class BrokeredPlaybackBackend implements VideoPlaybackBackend {
     let sessionId = '';
     let closed = false;
     let ready = false;
+    let expectedStop = false;
     let loadError: Error | null = null;
     let resolveLoaded!: () => void;
     const loaded = new Promise<void>(resolve => { resolveLoaded = resolve; });
     const unsubscribe = context.electronApi.onVideoPlayerState(update => {
       if (update.playerId !== context.playerId || update.requestId !== context.requestId) return;
       if (sessionId && update.sessionId !== sessionId) return;
+      if (update.type === 'stopped' && expectedStop) {
+        context.onState(stateEnvelope(context, 'state', { paused: true, time: 0, buffering: false }));
+        return;
+      }
       if (update.type === 'fatal' || update.type === 'error' || update.type === 'stopped') {
         const error = update.error || '高级视频解码组件意外退出';
         if (ready && !closed) context.onRuntimeFailure(error, update.errorCode || 'BACKEND_CRASHED');
@@ -357,10 +402,12 @@ export class BrokeredPlaybackBackend implements VideoPlaybackBackend {
       context.onState(update);
     });
     let result;
+    const startRequest = context.electronApi.startVideoPlayer(context.filePath, context.settings, context.playerId, context.requestId, this.descriptor.backendId);
     try {
-      result = await context.electronApi.startVideoPlayer(context.filePath, context.settings, context.playerId, context.requestId, this.descriptor.backendId);
+      result = await withPlaybackTimeout(startRequest, 8000, () => new PlaybackFailure('STARTUP_TIMEOUT', '高级视频播放后端启动超时'), context.signal);
     } catch (error) {
       unsubscribe();
+      void startRequest.then(late => { if (late.success && late.sessionId) return context.electronApi.stopVideoPlayer(late.sessionId); }, () => undefined);
       throw error;
     }
     if (!result.success || !result.sessionId) {
@@ -368,25 +415,19 @@ export class BrokeredPlaybackBackend implements VideoPlaybackBackend {
       throw new PlaybackFailure(result.errorCode || 'BACKEND_UNAVAILABLE', result.error || '高级视频解码组件无法启动', result.recoverable !== false, [], result.suggestedFallback || 'component');
     }
     sessionId = result.sessionId;
-    let timer = 0;
     try {
-      await Promise.race([
-        loaded,
-        new Promise<never>((_resolve, reject) => { timer = window.setTimeout(() => reject(new Error('高级视频播放后端打开媒体超时')), 8000); }),
-      ]);
+      await withPlaybackTimeout(loaded, 8000, () => new PlaybackFailure('STARTUP_TIMEOUT', '高级视频播放后端打开媒体超时'), context.signal);
       if (loadError) throw loadError;
     } catch (error) {
       unsubscribe();
       await context.electronApi.stopVideoPlayer(sessionId);
       throw error;
-    } finally {
-      window.clearTimeout(timer);
-    }
+    } finally { /* timeout and cancellation cleanup is owned by withPlaybackTimeout */ }
     ready = true;
     return {
       id: sessionId,
       backendId: this.descriptor.backendId,
-      control: request => context.electronApi.controlVideoPlayer(sessionId, request),
+      control: request => { if (request.action === 'stop') expectedStop = true; else if (request.action === 'play') expectedStop = false; context.electronApi.controlVideoPlayer(sessionId, request); },
       setBounds: bounds => context.electronApi.setVideoPlayerBounds(sessionId, bounds),
       capture: mode => context.electronApi.captureVideoPlayerFrame(sessionId, mode || 'displayedFrame'),
       chooseSubtitle: () => context.electronApi.chooseVideoSubtitle(sessionId),
@@ -417,8 +458,10 @@ export const chromiumContainerProbe = (video: HTMLVideoElement, filePath: string
   return result === 'probably' || result === 'maybe' ? result : 'unknown';
 };
 
-export const discoverPlaybackBackends = async (context: Pick<PlaybackBackendContext, 'filePath' | 'video' | 'electronApi'>): Promise<VideoPlaybackBackend[]> => {
+export const discoverPlaybackBackends = async (context: Pick<PlaybackBackendContext, 'filePath' | 'video' | 'electronApi'> & { signal?: AbortSignal }): Promise<VideoPlaybackBackend[]> => {
+  if (context.signal?.aborted) throw cancelledFailure('播放后端发现已取消');
   const result = await context.electronApi.getVideoPlaybackBackends(context.filePath, chromiumContainerProbe(context.video, context.filePath));
+  if (context.signal?.aborted) throw cancelledFailure('播放后端发现已取消');
   if (!result.success) throw new Error(result.error || '无法发现视频播放后端');
   return result.backends.map(descriptor => descriptor.transport === 'chromium'
     ? new ChromiumPlaybackBackend(descriptor)
@@ -437,17 +480,18 @@ const initialSnapshot = (settings: VideoPlaybackSettings): PlaybackSessionSnapsh
   subtitleStyle: { fontSize: settings.subtitleSize, style: settings.subtitleStyle },
   transform: { ...DEFAULT_VIDEO_TRANSFORM }, hdrMode: settings.hdrMode || 'auto', toneMapping: settings.toneMapping || 'auto', targetPeakNits: Math.max(100, Math.min(4000, settings.targetPeakNits || 400)), statisticsLevel: 'off', audio: {},
 });
-const cloneSnapshot = (value: PlaybackSessionSnapshot): PlaybackSessionSnapshot => ({
-  ...value, subtitle: { ...value.subtitle }, subtitleStyle: { ...value.subtitleStyle }, transform: { ...value.transform }, audio: { ...value.audio },
-});
-
-const selectedStableId = (state: VideoPlayerState) => state.subtitleTracks?.find(track => track.id === String(state.subtitleTrackId ?? '') || track.selected)?.stableId;
+const selectedStableId = (state: VideoPlayerState) => {
+  const tracks = state.subtitleTracks || [];
+  return (tracks.find(track => track.id === String(state.subtitleTrackId ?? '')) || tracks.find(track => track.selected))?.stableId;
+};
+const AUTOMATIC_BACKEND_STABILITY_MS = 5000;
 
 export const startPlaybackSession = async ({ backends, context }: {
   backends: VideoPlaybackBackend[];
   context: Omit<PlaybackBackendContext, 'onRuntimeFailure'>;
 }): Promise<PlaybackSession> => {
-  const attempted = new Set<PlaybackBackendId>();
+  const automaticallyAttempted = new Set<PlaybackBackendId>();
+  const successfulBackends = new Set<PlaybackBackendId>();
   const attempts: PlaybackAttempt[] = [];
   let current: PlaybackSession | null = null;
   let currentTracks: VideoSubtitleTrack[] = [];
@@ -457,10 +501,41 @@ export const startPlaybackSession = async ({ backends, context }: {
   let closed = false;
   let switching = false;
   let fallbackPromise: Promise<void> | null = null;
+  let manualSwitchPromise: Promise<{ success: boolean; error?: string }> | null = null;
   let suppressBackendState = false;
   let lastError = '';
   let lastBounds: PlaybackBounds | null = null;
-  let snapshot = initialSnapshot(context.settings);
+  const snapshot = initialSnapshot(context.settings);
+  let operationGeneration = 0;
+  let operationController = new AbortController();
+  let automaticChainResetTimer = 0;
+  let pendingRuntimeFailure: { generation: number; backendId: PlaybackBackendId; error: string; code?: PlaybackErrorCode } | null = null;
+  let startingBackend: { generation: number; backendId: PlaybackBackendId } | null = null;
+  let drainPendingRuntimeFailure = () => undefined;
+  const abortOperation = () => operationController.abort();
+  context.signal?.addEventListener('abort', abortOperation, { once: true });
+  const clearAutomaticChainReset = () => { globalThis.clearTimeout(automaticChainResetTimer); automaticChainResetTimer = 0; };
+  const scheduleAutomaticChainReset = (generation: number, backendId: PlaybackBackendId) => {
+    clearAutomaticChainReset();
+    automaticChainResetTimer = globalThis.setTimeout(() => {
+      automaticChainResetTimer = 0;
+      if (!operationIsCurrent(generation) || switching || pendingRuntimeFailure || current?.backendId !== backendId) return;
+      automaticallyAttempted.clear();
+      automaticallyAttempted.add(backendId);
+    }, AUTOMATIC_BACKEND_STABILITY_MS);
+  };
+
+  const beginOperation = () => {
+    clearAutomaticChainReset();
+    pendingRuntimeFailure = null;
+    startingBackend = null;
+    operationController.abort();
+    operationController = new AbortController();
+    operationGeneration += 1;
+    return operationGeneration;
+  };
+  const operationIsCurrent = (generation: number) => !closed && !context.signal?.aborted && generation === operationGeneration && !operationController.signal.aborted;
+  const requireCurrentOperation = (generation: number) => { if (!operationIsCurrent(generation)) throw cancelledFailure('播放后端操作已被新的会话操作替换'); };
 
   const updateSnapshotFromState = (state: VideoPlayerState) => {
     if (Number.isFinite(state.time)) snapshot.time = Math.max(0, Number(state.time));
@@ -474,7 +549,8 @@ export const startPlaybackSession = async ({ backends, context }: {
     if (Number.isFinite(state.subtitleDelay)) snapshot.subtitle.delay = Math.max(-30, Math.min(30, Number(state.subtitleDelay)));
     if (typeof state.subtitleVisible === 'boolean' && (snapshot.subtitle.mode !== 'default' || stableId)) snapshot.subtitle.visible = state.subtitleVisible;
     if (stableId) snapshot.subtitle = { ...snapshot.subtitle, mode: 'track', stableId };
-    const selectedAudio = state.audioTracks?.find(track => track.id === String(state.audioTrackId ?? '') || track.selected);
+    const audioTracks = state.audioTracks || [];
+    const selectedAudio = audioTracks.find(track => track.id === String(state.audioTrackId ?? '')) || audioTracks.find(track => track.selected);
     if (selectedAudio) snapshot.audio = { stableId: selectedAudio.stableId, language: selectedAudio.language };
   };
 
@@ -498,7 +574,8 @@ export const startPlaybackSession = async ({ backends, context }: {
     session.control({ action: 'subtitle-visible', value: value.subtitle.visible });
   };
 
-  const handleBackendState = (state: VideoPlayerState) => {
+  const handleBackendState = (state: VideoPlayerState, generation: number) => {
+    if (!operationIsCurrent(generation)) return;
     if (!suppressBackendState) updateSnapshotFromState(state);
     if (state.type === 'subtitle-tracks') {
       currentTracks = state.subtitleTracks || [];
@@ -526,13 +603,11 @@ export const startPlaybackSession = async ({ backends, context }: {
     if (!value.paused) session.control({ action: 'play' });
   };
 
-  const startNext = async (preferredBackendId = ''): Promise<PlaybackSession> => {
-    if (closed) throw new Error('视频播放会话已经关闭');
-    const backend = (preferredBackendId ? backends.find(candidate => candidate.descriptor.backendId === preferredBackendId && !attempted.has(candidate.descriptor.backendId)) : null)
-      || backends.find(candidate => !attempted.has(candidate.descriptor.backendId));
-    if (!backend) throw new PlaybackFailure('BACKEND_UNAVAILABLE', lastError || 'Chromium 与高级视频解码组件均无法播放此视频', false, attempts.map(item => ({ ...item })), 'system-player');
-    attempted.add(backend.descriptor.backendId);
-    const attempt: PlaybackAttempt = { backendId: backend.descriptor.backendId, phase: 'start', startedAt: Date.now(), endedAt: 0, automatic: !preferredBackendId };
+  const startBackend = async (backend: VideoPlaybackBackend, automatic: boolean, generation: number): Promise<PlaybackSession> => {
+    requireCurrentOperation(generation);
+    startingBackend = { generation, backendId: backend.descriptor.backendId };
+    if (automatic) automaticallyAttempted.add(backend.descriptor.backendId);
+    const attempt: PlaybackAttempt = { backendId: backend.descriptor.backendId, phase: 'start', startedAt: Date.now(), endedAt: 0, automatic };
     attempts.push(attempt);
     currentTracks = [];
     currentAudioTracks = [];
@@ -541,79 +616,195 @@ export const startPlaybackSession = async ({ backends, context }: {
     try {
       const started = await backend.start({
         ...context,
-        onState: handleBackendState,
-        onRuntimeFailure: (error, code) => { void beginSwitch(error, '', code); },
+        signal: operationController.signal,
+        onState: state => handleBackendState(state, generation),
+        onRuntimeFailure: (error, code) => {
+          if (!operationIsCurrent(generation)) return;
+          pendingRuntimeFailure = { generation, backendId: backend.descriptor.backendId, error, code };
+          queueMicrotask(() => drainPendingRuntimeFailure());
+        },
       });
       attempt.endedAt = Date.now();
-      if (closed) {
-        await started.close();
-        throw new Error('视频播放会话已经关闭');
+      if (!operationIsCurrent(generation)) {
+        await started.close().catch(() => undefined);
+        throw cancelledFailure('播放后端启动已被取消');
       }
+      successfulBackends.add(backend.descriptor.backendId);
       return started;
     } catch (error) {
+      if (startingBackend?.generation === generation && startingBackend.backendId === backend.descriptor.backendId) startingBackend = null;
+      if (pendingRuntimeFailure?.generation === generation && pendingRuntimeFailure.backendId === backend.descriptor.backendId) pendingRuntimeFailure = null;
       const failure = classifyPlaybackError(error, 'BACKEND_UNAVAILABLE'); attempt.endedAt = Date.now(); attempt.errorCode = failure.code; attempt.message = failure.message;
       lastError = failure.message;
-      if (closed) throw error;
-      return startNext();
+      throw failure;
     }
   };
-  const switchAfterFailure = async (error: string, preferredBackendId = '', errorCode: PlaybackErrorCode = 'BACKEND_CRASHED') => {
-    if (closed || switching) return;
+
+  const startNextAutomatic = async (generation: number): Promise<PlaybackSession> => {
+    for (const backend of backends) {
+      requireCurrentOperation(generation);
+      if (automaticallyAttempted.has(backend.descriptor.backendId)) continue;
+      try {
+        return await startBackend(backend, true, generation);
+      } catch (error) {
+        const failure = classifyPlaybackError(error, 'BACKEND_UNAVAILABLE');
+        if (failure.code === 'CANCELLED' || !failure.recoverable) throw failure;
+      }
+    }
+    throw new PlaybackFailure('BACKEND_UNAVAILABLE', lastError || 'Chromium 与高级视频解码组件均无法播放此视频', false, attempts.map(item => ({ ...item })), 'system-player');
+  };
+
+  const publishRestoredState = () => {
+    if (currentSubtitleState) {
+      const restoredTrack = currentTracks.find(item => item.stableId === snapshot.subtitle.stableId);
+      context.onState({ ...currentSubtitleState, subtitleTrackId: restoredTrack?.id ?? null, subtitleVisible: snapshot.subtitle.visible, subtitleDelay: snapshot.subtitle.delay });
+    }
+    if (currentAudioState) {
+      const restoredAudio = currentAudioTracks.find(item => item.stableId === snapshot.audio.stableId) || currentAudioTracks.find(item => snapshot.audio.language && item.language === snapshot.audio.language);
+      context.onState({ ...currentAudioState, audioTrackId: restoredAudio?.id ?? null });
+    }
+    context.onState(stateEnvelope(context, 'state', {
+      time: snapshot.time, paused: snapshot.paused, volume: snapshot.volume, muted: snapshot.muted, speed: snapshot.speed,
+      subtitleDelay: snapshot.subtitle.delay, subtitleVisible: snapshot.subtitle.visible, buffering: false,
+    }));
+  };
+
+  const bindStartedSession = (started: PlaybackSession, generation: number) => {
+    current = started;
+    if (startingBackend?.generation === generation && startingBackend.backendId === started.backendId) startingBackend = null;
+  };
+  const installStartedSession = (started: PlaybackSession, generation: number) => {
+    bindStartedSession(started, generation);
+    if (lastBounds) started.setBounds(lastBounds);
+    restoreSnapshot(started, snapshot);
+    publishRestoredState();
+  };
+  const resetAutomaticFailureChain = (backendId: PlaybackBackendId) => {
+    automaticallyAttempted.clear();
+    automaticallyAttempted.add(backendId);
+  };
+
+  const switchAfterFailure = async (error: string, errorCode: PlaybackErrorCode = 'BACKEND_CRASHED') => {
+    clearAutomaticChainReset();
+    const runtimeFailure = classifyPlaybackError({ code: errorCode, message: error }, 'BACKEND_CRASHED');
+    if (closed || switching || runtimeFailure.code === 'CANCELLED') return;
+    if (!runtimeFailure.recoverable) {
+      if (current) attempts.push({ backendId: current.backendId, phase: 'runtime', startedAt: Date.now(), endedAt: Date.now(), errorCode: runtimeFailure.code, message: runtimeFailure.message, automatic: true });
+      const failed = current;
+      current = null;
+      void failed?.close().catch(() => undefined);
+      context.onState(stateEnvelope(context, 'fatal', { errorCode: runtimeFailure.code, suggestedFallback: runtimeFailure.suggestedFallback, attempts: attempts.map(item => ({ ...item })), error: runtimeFailure.message }));
+      return;
+    }
     switching = true;
     suppressBackendState = true;
-    const preserved = cloneSnapshot(snapshot);
-    if (current) attempts.push({ backendId: current.backendId, phase: 'runtime', startedAt: Date.now(), endedAt: Date.now(), errorCode, message: error, automatic: !preferredBackendId });
+    const generation = beginOperation();
+    if (current) {
+      automaticallyAttempted.add(current.backendId);
+      attempts.push({ backendId: current.backendId, phase: 'runtime', startedAt: Date.now(), endedAt: Date.now(), errorCode, message: error, automatic: true });
+    }
     lastError = error;
     const failed = current;
     current = null;
     await failed?.close().catch(() => undefined);
     if (!closed) context.onState(stateEnvelope(context, 'loading', { buffering: true, subtitleTracks: [], subtitleTrackId: null, subtitleVisible: false }));
     try {
-      const next = await startNext(preferredBackendId);
-      if (closed) {
-        await next.close();
-        return;
-      }
-      current = next;
-      snapshot = preserved;
-      if (lastBounds) current.setBounds(lastBounds);
-      restoreSnapshot(current, snapshot);
-      if (currentSubtitleState) {
-        const restoredTrack = currentTracks.find(item => item.stableId === snapshot.subtitle.stableId);
-        context.onState({ ...currentSubtitleState, subtitleTrackId: restoredTrack?.id ?? null, subtitleVisible: snapshot.subtitle.visible, subtitleDelay: snapshot.subtitle.delay });
-      }
-      if(currentAudioState){const restoredAudio=currentAudioTracks.find(item=>item.stableId===snapshot.audio.stableId)||currentAudioTracks.find(item=>snapshot.audio.language&&item.language===snapshot.audio.language);context.onState({...currentAudioState,audioTrackId:restoredAudio?.id??null});}
-      context.onState(stateEnvelope(context, 'state', {
-        time: snapshot.time, paused: snapshot.paused, volume: snapshot.volume, muted: snapshot.muted, speed: snapshot.speed,
-        subtitleDelay: snapshot.subtitle.delay, subtitleVisible: snapshot.subtitle.visible, buffering: false,
-      }));
+      const next = await startNextAutomatic(generation);
+      requireCurrentOperation(generation);
+      installStartedSession(next, generation);
+      scheduleAutomaticChainReset(generation, next.backendId);
     } catch (terminalError) {
-      if (!closed) context.onState(stateEnvelope(context, 'fatal', { errorCode: 'BACKEND_UNAVAILABLE', suggestedFallback: 'system-player', attempts: attempts.map(item => ({ ...item })), error: `视频无法播放：${terminalError instanceof Error ? terminalError.message : String(terminalError)}。请安装或修复高级解码组件，或使用系统播放器。` }));
+      const failure = classifyPlaybackError(terminalError, 'BACKEND_UNAVAILABLE');
+      if (!closed && failure.code !== 'CANCELLED') context.onState(stateEnvelope(context, 'fatal', { errorCode: failure.recoverable ? 'BACKEND_UNAVAILABLE' : failure.code, suggestedFallback: failure.suggestedFallback === 'none' ? 'system-player' : failure.suggestedFallback, attempts: attempts.map(item => ({ ...item })), error: `视频无法播放：${failure.message}。请安装或修复高级解码组件，或使用系统播放器。` }));
     } finally {
       suppressBackendState = false;
       switching = false;
+      queueMicrotask(() => drainPendingRuntimeFailure());
     }
   };
-  const beginSwitch = (error: string, preferredBackendId = '', errorCode: PlaybackErrorCode = 'BACKEND_CRASHED') => {
-    if (!fallbackPromise) fallbackPromise = switchAfterFailure(error, preferredBackendId, errorCode).finally(() => { fallbackPromise = null; });
+  const beginAutomaticSwitch = (error: string, errorCode: PlaybackErrorCode = 'BACKEND_CRASHED') => {
+    if (errorCode === 'CANCELLED') return Promise.resolve();
+    if (!fallbackPromise) fallbackPromise = switchAfterFailure(error, errorCode).finally(() => { fallbackPromise = null; queueMicrotask(() => drainPendingRuntimeFailure()); });
     return fallbackPromise;
   };
+  drainPendingRuntimeFailure = () => {
+    const pending = pendingRuntimeFailure;
+    if (!pending || closed || switching || fallbackPromise) return;
+    if (!operationIsCurrent(pending.generation)) { pendingRuntimeFailure = null; return; }
+    if (startingBackend?.generation === pending.generation && startingBackend.backendId === pending.backendId) return;
+    if (current?.backendId !== pending.backendId) { pendingRuntimeFailure = null; return; }
+    pendingRuntimeFailure = null;
+    void beginAutomaticSwitch(pending.error, pending.code).catch(() => undefined);
+  };
 
-  current = await startNext();
+  const initialGeneration = beginOperation();
+  const initialSession = await startNextAutomatic(initialGeneration);
+  bindStartedSession(initialSession, initialGeneration);
   // Native stdout may deliver file-loaded and subtitle-tracks before start()
   // resolves. Apply only the application-owned subtitle policy here; full
   // state restoration is reserved for an actual backend switch.
-  if (currentTracks.length) applySubtitleSnapshot(current, currentTracks);
-  current.control({ action: 'transform', transform: snapshot.transform });
-  current.control({ action: 'hdr-mode', hdrMode: snapshot.hdrMode });
-  current.control({ action: 'tone-mapping', toneMapping: snapshot.toneMapping, targetPeakNits: snapshot.targetPeakNits });
+  if (currentTracks.length) applySubtitleSnapshot(initialSession, currentTracks);
+  initialSession.control({ action: 'transform', transform: snapshot.transform });
+  initialSession.control({ action: 'hdr-mode', hdrMode: snapshot.hdrMode });
+  initialSession.control({ action: 'tone-mapping', toneMapping: snapshot.toneMapping, targetPeakNits: snapshot.targetPeakNits });
+  scheduleAutomaticChainReset(initialGeneration, initialSession.backendId);
+  queueMicrotask(() => drainPendingRuntimeFailure());
+
+  const performManualSwitch = async (target: VideoPlaybackBackend): Promise<{ success: boolean; error?: string }> => {
+    if (closed) return { success: false, error: '视频播放会话已经关闭' };
+    const previousBackendId = current?.backendId || '';
+    const previousBackend = backends.find(item => item.descriptor.backendId === previousBackendId);
+    switching = true;
+    suppressBackendState = true;
+    const generation = beginOperation();
+    const previous = current;
+    current = null;
+    await previous?.close().catch(() => undefined);
+    try {
+      const started = await startBackend(target, false, generation);
+      requireCurrentOperation(generation);
+      installStartedSession(started, generation);
+      resetAutomaticFailureChain(started.backendId);
+      return { success: true };
+    } catch (error) {
+      const failure = classifyPlaybackError(error, 'BACKEND_UNAVAILABLE');
+      lastError = failure.message;
+      let rollbackFailure: PlaybackFailure | null = null;
+      if (failure.code !== 'CANCELLED' && operationIsCurrent(generation) && previousBackend && successfulBackends.has(previousBackendId)) {
+        try {
+          const recovered = await startBackend(previousBackend, false, generation);
+          requireCurrentOperation(generation);
+          installStartedSession(recovered, generation);
+          resetAutomaticFailureChain(recovered.backendId);
+        } catch (recoveryError) {
+          rollbackFailure = classifyPlaybackError(recoveryError, 'BACKEND_UNAVAILABLE');
+          lastError = rollbackFailure.message;
+        }
+      }
+      if (!closed && failure.code !== 'CANCELLED' && !current) {
+        const compositeError = rollbackFailure
+          ? `切换至 ${target.descriptor.displayName || target.descriptor.backendId} 失败：${failure.message}；恢复 ${previousBackend?.descriptor.displayName || previousBackendId || '原播放后端'} 失败：${rollbackFailure.message}`
+          : `切换至 ${target.descriptor.displayName || target.descriptor.backendId} 失败：${failure.message}；没有可恢复的播放后端`;
+        lastError = compositeError;
+        context.onState(stateEnvelope(context, 'fatal', { errorCode: 'BACKEND_UNAVAILABLE', suggestedFallback: 'system-player', attempts: attempts.map(item => ({ ...item })), error: compositeError }));
+        return { success: false, error: compositeError };
+      }
+      return { success: false, error: failure.message || '无法切换播放后端' };
+    } finally {
+      suppressBackendState = false;
+      switching = false;
+      queueMicrotask(() => drainPendingRuntimeFailure());
+    }
+  };
+
   return {
     get id() { return current?.id || context.requestId; },
-    get backendId() { return current?.backendId || backends[0]?.descriptor.backendId || 'unavailable'; },
+    get backendId() { return current?.backendId || 'unavailable'; },
     get attempts() { return attempts.map(item => ({ ...item })); },
     control: request => {
       if (request.action === 'play') snapshot.paused = false;
-      else if (request.action === 'pause' || request.action === 'stop') snapshot.paused = true;
+      else if (request.action === 'pause') snapshot.paused = true;
+      else if (request.action === 'stop') { snapshot.paused = true; snapshot.time = 0; }
       else if (request.action === 'seek') snapshot.time = Math.max(0, Number(request.value) || 0);
       else if (request.action === 'volume') snapshot.volume = Math.max(0, Math.min(100, Number(request.value) || 0));
       else if (request.action === 'mute') snapshot.muted = Boolean(request.value);
@@ -630,28 +821,56 @@ export const startPlaybackSession = async ({ backends, context }: {
       else if (request.action === 'tone-mapping') { snapshot.toneMapping = request.toneMapping || 'auto'; snapshot.targetPeakNits = Math.max(100, Math.min(4000, request.targetPeakNits || 400)); }
       else if (request.action === 'statistics-level') snapshot.statisticsLevel = request.statisticsLevel || 'off';
       current?.control(request);
+      if (request.action === 'stop') context.onState(stateEnvelope(context, 'state', { paused: true, time: 0, buffering: false }));
     },
     setBounds: bounds => {
       lastBounds = bounds;
       current?.setBounds(bounds);
     },
-    capture: mode => current?.capture(mode) || Promise.resolve({ success: false, error: '视频播放会话不存在' }),
-    chooseSubtitle: () => current?.chooseSubtitle() || Promise.resolve({ success: false, error: '视频播放会话不存在' }),
+    capture: async mode => {
+      const session = current;
+      const generation = operationGeneration;
+      if (!session) return { success: false, error: '视频播放会话不存在' };
+      const result = await session.capture(mode);
+      return current === session && operationGeneration === generation && !closed ? result : { success: false, error: '截图所属播放会话已结束' };
+    },
+    chooseSubtitle: async () => {
+      const session = current;
+      const generation = operationGeneration;
+      if (!session) return { success: false, error: '视频播放会话不存在' };
+      const result = await session.chooseSubtitle();
+      return current === session && operationGeneration === generation && !closed ? result : { success: false, cancelled: true, error: '字幕选择所属播放会话已结束' };
+    },
     availableBackends: backends.map(item => item.descriptor),
     switchBackend: async backendId => {
       if (closed) return { success: false, error: '视频播放会话已经关闭' };
       if (current?.backendId === backendId) return { success: true };
-      if (!backends.some(item => item.descriptor.backendId === backendId)) return { success: false, error: '播放后端不存在' };
-      if (attempted.has(backendId)) return { success: false, error: '当前媒体已尝试过此后端；请重新打开视频后再试' };
-      await beginSwitch('用户请求切换播放后端', backendId);
-      return current?.backendId === backendId ? { success: true } : { success: false, error: lastError || '无法切换播放后端' };
+      const target = backends.find(item => item.descriptor.backendId === backendId);
+      if (!target) return { success: false, error: '播放后端不存在' };
+      if (fallbackPromise) await fallbackPromise;
+      if (closed) return { success: false, error: '视频播放会话已经关闭' };
+      if (manualSwitchPromise || switching) return { success: false, error: '播放后端正在切换' };
+      manualSwitchPromise = performManualSwitch(target);
+      try { return await manualSwitchPromise; }
+      finally { manualSwitchPromise = null; }
     },
     close: async () => {
       closed = true;
+      context.signal?.removeEventListener('abort', abortOperation);
+      operationController.abort();
+      operationGeneration += 1;
+      clearAutomaticChainReset();
+      pendingRuntimeFailure = null;
+      startingBackend = null;
       const active = current;
       current = null;
-      await active?.close();
-      await fallbackPromise;
+      let closeError: unknown;
+      try { await active?.close(); } catch (error) { closeError = error; }
+      finally {
+        try { await fallbackPromise; } catch (error) { closeError ||= error; }
+        finally { try { await manualSwitchPromise; } catch (error) { closeError ||= error; } }
+      }
+      if (closeError) throw closeError;
     },
   };
 };

@@ -10,7 +10,7 @@ import { discoverPlaybackBackends, startPlaybackSession } from '../platform/vide
 import type { PlaybackSession } from '../platform/video-playback/playback-session';
 import { DEFAULT_VIDEO_TRANSFORM, hdrModeAvailability, playbackCapabilityPresentation } from '../contracts/video-playback';
 import type { VideoTransform } from '../contracts/video-playback';
-import { bindingsForArrowMode, normalizeVideoShortcutBindings, resolveVideoShortcut, shortcutInputFromKeyboardEvent } from '../contracts/video-shortcuts';
+import { bindingsForArrowMode, normalizeVideoShortcutBindings, resolveVideoShortcut, shortcutInputFromKeyboardEvent, shouldDeferVideoShortcutToFocusedControl, videoShortcutAllowsRepeat } from '../contracts/video-shortcuts';
 import type { VideoActionId } from '../contracts/video-shortcuts';
 
 const formatTime = (seconds: number) => {
@@ -26,12 +26,14 @@ const formatTime = (seconds: number) => {
 
 const PLAYBACK_SPEEDS = [0.5, 1, 1.25, 1.5, 2, 3, 4];
 const SKIP_SECONDS = 5;
-const SUBTITLE_FONT_SIZE_PRESETS = [{ label: '小', value: 20 }, { label: '中', value: 30 }, { label: '大', value: 40 }] as const;
+const SUBTITLE_FONT_SIZE_PRESETS = [{ label: '小', value: 20 }, { label: '中', value: 30 }, { label: '大', value: 40 }, { label: '默认', value: DEFAULT_SUBTITLE_FONT_SIZE }] as const;
 const DEFAULT_VIDEO_SETTINGS: VideoPlaybackSettings = { arrowKeyAction: 'seek', subtitlesEnabled: false, subtitlePreferredLanguages: ['zh', 'chi', 'zho'], subtitleSize: DEFAULT_SUBTITLE_FONT_SIZE, subtitleStyle: 'standard', hdrMode: 'auto', toneMapping: 'auto', targetPeakNits: 400, shortcuts: {} };
 const createPlaybackToken = () => globalThis.crypto?.randomUUID?.() || `video_${Date.now().toString(36)}_${Math.random().toString(36).slice(2)}`;
 
 type VideoDirectionalInputGroup = 'arrows' | 'forward-back';
 type VideoDirectionalAction = 'navigate' | 'seek';
+type AddedSubtitleRequest = { phase: 'choosing' | 'awaiting-track'; requestId: string; sessionId: string; previousMemoryRestored: boolean; knownStableIds: string[]; chosenPath?: string };
+const comparableSubtitlePath = (value: string | undefined) => String(value || '').trim().replace(/[\\/]+/g, '/').toLowerCase();
 const videoDirectionalAction = (arrowKeyAction: VideoPlaybackSettings['arrowKeyAction'], group: VideoDirectionalInputGroup): VideoDirectionalAction => {
   if (group === 'arrows') return arrowKeyAction === 'navigate' ? 'navigate' : 'seek';
   return arrowKeyAction === 'navigate' ? 'seek' : 'navigate';
@@ -98,9 +100,13 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const onEscapeRef = useRef(onEscape);
   const onToggleFullscreenRef = useRef(onToggleFullscreen);
   const shortcutActionRef = useRef<(action: VideoActionId) => void>(() => undefined);
+  const dispatchShortcutRef = useRef<(action: VideoActionId, repeat?: boolean) => void>(() => undefined);
   const onPlaybackStateRef = useRef(onPlaybackState);
   const playbackPositionRef = useRef({ time: 0, duration: 0, paused: true });
   const nativeContextMenuOpenRef = useRef(false);
+  const displayCapabilityGenerationRef = useRef(0);
+  const captureGenerationRef = useRef(0);
+  const captureInFlightRef = useRef(false);
   onErrorRef.current = onError;
   onMetadataRef.current = onMetadata;
   onNavigateRef.current = navigate;
@@ -121,8 +127,38 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const [displayCapability, setDisplayCapability] = useState({ hdrAvailable: false, reason: '尚未检测当前显示器' });
   const [subtitleFontSize, setSubtitleFontSize] = useState(() => normalizeSubtitleFontSize(keyboardSettings.subtitleSize));
   const subtitleMemoryRestoredRef = useRef(false);
-  const rememberAddedSubtitleRef = useRef(false);
+  const rememberAddedSubtitleRef = useRef<AddedSubtitleRequest | null>(null);
   const [state, setState] = useState<VideoPlayerState>(initialState);
+  const latestStateRef = useRef(state);
+  latestStateRef.current = state;
+  const consumeAddedSubtitle = (nextState = latestStateRef.current) => {
+    const pending = rememberAddedSubtitleRef.current;
+    if (!pending || pending.phase !== 'awaiting-track' || pending.requestId !== requestIdRef.current || pending.sessionId !== sessionId || !nextState.subtitleTracks?.length) return;
+    const known = new Set(pending.knownStableIds);
+    const chosenPath = comparableSubtitlePath(pending.chosenPath);
+    const candidates = nextState.subtitleTracks.filter(track => !known.has(track.stableId) || Boolean(chosenPath && comparableSubtitlePath(track.path) === chosenPath));
+    const selected = candidates.find(track => track.id === String(nextState.subtitleTrackId ?? '')) || candidates.find(track => track.selected) || candidates.find(track => Boolean(chosenPath && comparableSubtitlePath(track.path) === chosenPath));
+    if (!selected) return;
+    rememberAddedSubtitleRef.current = null;
+    try { writeSubtitleMemory(localStorage, filePath, { selection: { mode: 'track', stableId: selected.stableId }, delay: Number(nextState.subtitleDelay) || 0, visible: nextState.subtitleVisible !== false, updatedAt: Date.now() }); } catch { /* storage can be unavailable */ }
+  };
+  const restoreRememberedSubtitle = (tracks: readonly VideoSubtitleTrack[]) => {
+    if (subtitleMemoryRestoredRef.current || !sessionRef.current || !tracks.length) return;
+    let memory;
+    try { memory = readSubtitleMemory(localStorage, filePath); } catch { return; }
+    const resolution = resolveRememberedSubtitle(memory, tracks);
+    if (resolution.mode === 'default') { subtitleMemoryRestoredRef.current = true; return; }
+    if (resolution.mode === 'missing') return;
+    subtitleMemoryRestoredRef.current = true;
+    if (resolution.mode === 'off') {
+      sessionRef.current.control({ action: 'subtitle-select', value: '' });
+      sessionRef.current.control({ action: 'subtitle-delay', value: resolution.delay });
+      return;
+    }
+    sessionRef.current.control({ action: 'subtitle-select', value: resolution.track.id });
+    sessionRef.current.control({ action: 'subtitle-delay', value: resolution.delay });
+    sessionRef.current.control({ action: 'subtitle-visible', value: resolution.visible });
+  };
   const shortcutBindings = useMemo(() => bindingsForArrowMode(normalizeVideoShortcutBindings(keyboardSettings.shortcuts), keyboardSettings.arrowKeyAction), [keyboardSettings.arrowKeyAction, keyboardSettings.shortcuts]);
 
   useEffect(() => setSubtitleFontSize(normalizeSubtitleFontSize(keyboardSettings.subtitleSize)), [keyboardSettings.subtitleSize]);
@@ -130,6 +166,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
 
   useEffect(() => {
     let active = true;
+    const controller = new AbortController();
     const requestId = createPlaybackToken();
     requestIdRef.current = requestId;
     sessionRef.current = null;
@@ -139,13 +176,15 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     setStarting(true);
     setSessionId('');
     setCapturing(false);
+    captureGenerationRef.current += 1;
+    captureInFlightRef.current = false;
     setCaptureNotice(null);
     setControlPanel(null);
     setVideoTransform(DEFAULT_VIDEO_TRANSFORM);
     setActiveBackendId('');
     setAvailableBackends([]);
     subtitleMemoryRestoredRef.current = false;
-    rememberAddedSubtitleRef.current = false;
+    rememberAddedSubtitleRef.current = null;
     setState(initialState());
     const handleState = (update: VideoPlayerState) => {
       if (update.playerId !== playerIdRef.current || update.requestId !== requestIdRef.current) return;
@@ -154,7 +193,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         const input = update.input;
         if (input.kind === 'pointer-move') onPointerActivityRef.current?.();
         else if (input.kind === 'pointer-button' && input.button === 'left') {
-          shortcutActionRef.current('video.playPause');
+          dispatchShortcutRef.current('video.playPause', input.repeat === true);
         } else if (input.kind === 'pointer-button' && input.button === 'right') {
           if (!onContextMenuAtRef.current) return;
           const rect = surfaceRef.current?.getBoundingClientRect();
@@ -165,12 +204,12 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
           }
         } else if (input.kind === 'key') {
           const action = resolveVideoShortcut({ key: input.key || '', code: input.code || input.key || '', ctrl: input.ctrl === true, alt: input.alt === true, shift: input.shift === true, meta: input.meta === true, repeat: input.repeat === true }, shortcutBindings, { scope: 'player' });
-          if (action) shortcutActionRef.current(action);
+          if (action) dispatchShortcutRef.current(action, input.repeat === true);
         }
         return;
       }
       if (update.type === 'navigate') {
-        onNavigateRef.current(update.direction === -1 ? -1 : 1);
+        dispatchShortcutRef.current(update.direction === -1 ? 'media.previous' : 'media.next');
         return;
       }
       if (update.type === 'context-menu') {
@@ -191,14 +230,21 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         onEscapeRef.current?.();
         return;
       }
-      if (update.type === 'fatal' || update.type === 'error' || update.type === 'stopped') {
+      if (update.type === 'fatal' || update.type === 'error') {
         if (!errorReportedRef.current) {
           errorReportedRef.current = true;
           onErrorRef.current(update.error || 'Chromium 与高级视频解码组件均无法播放此视频；请安装或修复高级解码组件，或使用系统播放器');
         }
         return;
       }
-      if (update.type === 'subtitle-tracks') {
+      if (update.type === 'display-output' && update.display) {
+        displayCapabilityGenerationRef.current += 1;
+        setDisplayCapability({ hdrAvailable: update.display.hdrAvailable, reason: update.display.reason });
+      }
+      if (update.type === 'stopped') {
+        setStarting(false);
+        setState(current => ({ ...current, ...update, paused: true, time: 0, buffering: false }));
+      } else if (update.type === 'subtitle-tracks') {
         setState(current => ({ ...current, ...update }));
       } else if (update.type === 'loading') setState(current => ({ ...current, ...update, buffering: true }));
       else if (update.type === 'file-loaded') {
@@ -215,7 +261,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     };
     const video = videoRef.current;
     if (!video) return undefined;
-    void discoverPlaybackBackends({ filePath, video, electronApi: window.electronAPI }).then(backends => startPlaybackSession({
+    void discoverPlaybackBackends({ filePath, video, electronApi: window.electronAPI, signal: controller.signal }).then(backends => startPlaybackSession({
       backends,
       context: {
         filePath,
@@ -225,10 +271,11 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         video,
         electronApi: window.electronAPI,
         onState: handleState,
+        signal: controller.signal,
       },
     })).then(session => {
       if (!active || requestIdRef.current !== requestId) {
-        void session.close();
+        void session.close().catch(() => undefined);
         return;
       }
       sessionRef.current = session;
@@ -236,44 +283,30 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       setAvailableBackends(session.availableBackends || []);
       setSessionId(requestId);
     }).catch(error => {
-      if (active && !errorReportedRef.current) {
+      if (active && (error as { code?: string })?.code !== 'CANCELLED' && !errorReportedRef.current) {
         errorReportedRef.current = true;
         onErrorRef.current(`视频无法播放：${error instanceof Error ? error.message : String(error)}。请安装或修复高级解码组件，或使用系统播放器。`);
       }
     });
     return () => {
       active = false;
+      controller.abort();
+      captureGenerationRef.current += 1;
       if (requestIdRef.current === requestId) requestIdRef.current = '';
       const currentSession = sessionRef.current;
       sessionRef.current = null;
-      void currentSession?.close();
+      void currentSession?.close().catch(() => undefined);
     };
   }, [filePath, keyboardSettings.arrowKeyAction, keyboardSettings.subtitlesEnabled, keyboardSettings.subtitlePreferredLanguages.join(','), keyboardSettings.subtitleSize, keyboardSettings.subtitleStyle, JSON.stringify(keyboardSettings.shortcuts)]);
 
   useEffect(() => {
-    if (!sessionId || subtitleMemoryRestoredRef.current || !state.subtitleTracks?.length) return;
-    subtitleMemoryRestoredRef.current = true;
-    let memory;
-    try { memory = readSubtitleMemory(localStorage, filePath); } catch { return; }
-    const resolution = resolveRememberedSubtitle(memory, state.subtitleTracks);
-    if (resolution.mode === 'default' || resolution.mode === 'missing') return;
-    if (resolution.mode === 'off') {
-      sessionRef.current?.control({ action: 'subtitle-select', value: '' });
-      sessionRef.current?.control({ action: 'subtitle-delay', value: resolution.delay });
-      return;
-    }
-    sessionRef.current?.control({ action: 'subtitle-select', value: resolution.track.id });
-    sessionRef.current?.control({ action: 'subtitle-delay', value: resolution.delay });
-    sessionRef.current?.control({ action: 'subtitle-visible', value: resolution.visible });
+    if (!sessionId) return;
+    restoreRememberedSubtitle(state.subtitleTracks || []);
   }, [filePath, sessionId, state.subtitleTracks]);
 
   useEffect(() => {
-    if (!rememberAddedSubtitleRef.current || !state.subtitleTracks?.length) return;
-    const selected = state.subtitleTracks.find(track => track.id === String(state.subtitleTrackId ?? '') || track.selected);
-    if (!selected) return;
-    rememberAddedSubtitleRef.current = false;
-    try { writeSubtitleMemory(localStorage, filePath, { selection: { mode: 'track', stableId: selected.stableId }, delay: Number(state.subtitleDelay) || 0, visible: state.subtitleVisible !== false, updatedAt: Date.now() }); } catch { /* storage can be unavailable */ }
-  }, [filePath, state.subtitleDelay, state.subtitleTrackId, state.subtitleTracks, state.subtitleVisible]);
+    consumeAddedSubtitle(state);
+  }, [filePath, sessionId, state.subtitleDelay, state.subtitleTrackId, state.subtitleTracks, state.subtitleVisible]);
 
   useEffect(() => {
     if (!captureNotice) return;
@@ -294,8 +327,9 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
 
   useEffect(() => {
     if (controlPanel !== 'display') return;
+    const generation = displayCapabilityGenerationRef.current;
     void window.electronAPI.getVideoDisplayCapabilities().then(result => {
-      if (result.success) setDisplayCapability({ hdrAvailable: result.display.hdrAvailable, reason: result.display.reason });
+      if (result.success && generation === displayCapabilityGenerationRef.current) setDisplayCapability({ hdrAvailable: result.display.hdrAvailable, reason: result.display.reason });
     });
   }, [controlPanel]);
 
@@ -345,6 +379,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       width: Math.round(rect.width * scale),
       height: Math.round(rect.height * scale),
       visible,
+      viewportDip: { x: rect.left, y: rect.top, width: rect.width, height: rect.height },
       overlayHole,
       controlsOverlayHole,
       cornerOverlayHole,
@@ -354,6 +389,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   useEffect(() => {
     if (!sessionId) return;
     let frame = 0;
+    let windowPosition = `${window.screenX}:${window.screenY}:${window.devicePixelRatio}`;
     const schedule = () => {
       window.cancelAnimationFrame(frame);
       frame = window.requestAnimationFrame(syncBounds);
@@ -361,17 +397,26 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     schedule();
     const observer = new ResizeObserver(schedule);
     if (surfaceRef.current) observer.observe(surfaceRef.current);
+    if (controlPanelRef.current) observer.observe(controlPanelRef.current);
+    const panelElement = controlPanelRef.current?.firstElementChild;
+    if (panelElement) observer.observe(panelElement);
+    if (controlsOverlayRef.current) observer.observe(controlsOverlayRef.current);
     window.addEventListener('resize', schedule);
     window.addEventListener('scroll', schedule, true);
     document.addEventListener('visibilitychange', schedule);
+    const moveTimer = window.setInterval(() => {
+      const nextPosition = `${window.screenX}:${window.screenY}:${window.devicePixelRatio}`;
+      if (nextPosition !== windowPosition) { windowPosition = nextPosition; schedule(); }
+    }, 500);
     return () => {
       window.cancelAnimationFrame(frame);
+      window.clearInterval(moveTimer);
       observer.disconnect();
       window.removeEventListener('resize', schedule);
       window.removeEventListener('scroll', schedule, true);
       document.removeEventListener('visibilitychange', schedule);
     };
-  }, [sessionId, syncBounds]);
+  }, [controlPanel, sessionId, syncBounds]);
 
   useEffect(() => {
     if (!sessionId) return;
@@ -457,12 +502,16 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         .filter(player => player.getClientRects().length > 0);
       if (visiblePlayers.length > 1 && !playerRootRef.current?.contains(document.activeElement)) return;
       const target = event.target as HTMLElement | null;
-      const editable = Boolean(target?.closest('input, textarea, select, [contenteditable="true"], [role="dialog"]'));
-      const action = resolveVideoShortcut(shortcutInputFromKeyboardEvent(event), shortcutBindings, { editable, scope: 'player' });
-      if (!action || event.repeat && ['video.capture','video.fullscreen','video.toggleSubtitles','video.toggleStatistics','video.switchBackend'].includes(action)) return;
+      const editable = Boolean(target?.closest('input, textarea, select, [contenteditable="true"]'));
+      const focusedControl = target?.closest('button, a[href], [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]');
+      const shortcutInput = shortcutInputFromKeyboardEvent(event);
+      if (shouldDeferVideoShortcutToFocusedControl(shortcutInput, Boolean(focusedControl))) return;
+      const action = resolveVideoShortcut(shortcutInput, shortcutBindings, { editable, scope: 'player' });
+      if (!action) return;
+      if ((action === 'media.previous' || action === 'media.next') && !showNavigation) return;
       event.preventDefault();
       event.stopPropagation();
-      shortcutActionRef.current(action);
+      dispatchShortcutRef.current(action, event.repeat);
     };
     window.addEventListener('keydown', handleShortcut);
     return () => {
@@ -471,22 +520,33 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   }, [shortcutBindings, showNavigation]);
   const captureFrame = async () => {
     const currentSession = sessionRef.current;
-    if (!currentSession || capturing) return;
+    if (!currentSession || captureInFlightRef.current) return;
+    const generation = captureGenerationRef.current;
+    const requestId = requestIdRef.current;
+    captureInFlightRef.current = true;
     setCapturing(true);
     setCaptureNotice(null);
     try {
-      const result = await currentSession.capture();
+      const descriptor = currentSession.availableBackends?.find(item => item.backendId === currentSession.backendId);
+      const result = descriptor?.features.capture.displayedFrame
+        ? await currentSession.capture()
+        : await currentSession.capture('sourceFrame');
+      if (generation !== captureGenerationRef.current || requestId !== requestIdRef.current || currentSession !== sessionRef.current) return;
       setCaptureNotice(result.success
         ? { text: '当前帧已保存' }
         : { text: result.error || '截图失败', error: true });
     } catch (error) {
+      if (generation !== captureGenerationRef.current || requestId !== requestIdRef.current || currentSession !== sessionRef.current) return;
       setCaptureNotice({ text: error instanceof Error ? error.message : '截图失败', error: true });
     } finally {
-      setCapturing(false);
+      if (generation === captureGenerationRef.current && requestId === requestIdRef.current && currentSession === sessionRef.current) {
+        captureInFlightRef.current = false;
+        setCapturing(false);
+      }
     }
   };
   const subtitleTracks = state.subtitleTracks || [];
-  const selectedSubtitle = subtitleTracks.find(track => track.id === String(state.subtitleTrackId ?? '') || track.selected);
+  const selectedSubtitle = subtitleTracks.find(track => track.id === String(state.subtitleTrackId ?? '')) || subtitleTracks.find(track => track.selected);
   const subtitleDelay = Math.max(-30, Math.min(30, Number(state.subtitleDelay) || 0));
   const audioTracks = state.audioTracks || [];
   const rememberSubtitle = (track: VideoSubtitleTrack | undefined = selectedSubtitle, delay = subtitleDelay, visible = state.subtitleVisible !== false) => {
@@ -515,10 +575,25 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const addSubtitle = async () => {
     if (!sessionRef.current) return;
     // Choosing a new subtitle is an explicit override of a remembered "off" state.
+    const previousMemoryRestored = subtitleMemoryRestoredRef.current;
     subtitleMemoryRestoredRef.current = true;
-    const chosen = await sessionRef.current.chooseSubtitle();
-    if (!chosen.success) setCaptureNotice({ text: chosen.requiresFeature ? `${chosen.error}；可在显示设置中切换后端` : chosen.error || '字幕加载失败', error: true });
-    else if (!chosen.cancelled) rememberAddedSubtitleRef.current = true;
+    const currentSession = sessionRef.current;
+    const requestId = requestIdRef.current;
+    const marker: AddedSubtitleRequest = { phase: 'choosing', requestId, sessionId, previousMemoryRestored, knownStableIds: subtitleTracks.map(track => track.stableId) };
+    rememberAddedSubtitleRef.current = marker;
+    const chosen = await currentSession.chooseSubtitle();
+    if (currentSession !== sessionRef.current || requestId !== requestIdRef.current) return;
+    if (!chosen.success || chosen.cancelled) {
+      if (rememberAddedSubtitleRef.current !== marker) return;
+      rememberAddedSubtitleRef.current = null;
+      subtitleMemoryRestoredRef.current = previousMemoryRestored;
+      if (!previousMemoryRestored) restoreRememberedSubtitle(latestStateRef.current.subtitleTracks || []);
+      if (!chosen.success) setCaptureNotice({ text: chosen.requiresFeature ? `${chosen.error}；可在显示设置中切换后端` : chosen.error || '字幕加载失败', error: true });
+      return;
+    }
+    if (rememberAddedSubtitleRef.current !== marker) return;
+    rememberAddedSubtitleRef.current = { ...marker, phase: 'awaiting-track', chosenPath: chosen.path };
+    consumeAddedSubtitle(latestStateRef.current);
   };
   const changeTransform = (patch: Partial<VideoTransform>) => {
     const next = { ...videoTransform, ...patch };
@@ -526,7 +601,10 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     sessionRef.current?.control({ action: 'transform', transform: next });
   };
   const switchPlaybackBackend = async (backendId: string) => {
-    const result = await sessionRef.current?.switchBackend?.(backendId);
+    const currentSession = sessionRef.current;
+    const requestId = requestIdRef.current;
+    const result = await currentSession?.switchBackend?.(backendId);
+    if (currentSession !== sessionRef.current || requestId !== requestIdRef.current) return;
     if (!result?.success) setCaptureNotice({ text: result?.error || '无法切换播放后端', error: true });
     else { setActiveBackendId(sessionRef.current?.backendId || backendId); setCaptureNotice({ text: '播放后端已切换' }); }
   };
@@ -552,11 +630,16 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     else if(action==='video.rotateClockwise'||action==='video.rotateCounterclockwise'){if(capabilityPresentation.rotationAvailable)changeTransform({rotation:((videoTransform.rotation+(action==='video.rotateClockwise'?90:270))%360)as VideoTransform['rotation']});else setCaptureNotice({text:'当前后端不支持旋转',error:true});}
     else if (action === 'video.toggleSubtitles') { if(!capabilityPresentation.subtitlesAvailable)setCaptureNotice({text:'Chromium 模式未启用字幕功能',error:true});else if(selectedSubtitle){const visible=state.subtitleVisible===false;control('subtitle-visible',visible);rememberSubtitle(selectedSubtitle,subtitleDelay,visible);}else setControlPanel('subtitles'); }
     else if(action==='video.nextSubtitle'){if(!capabilityPresentation.subtitlesAvailable)setCaptureNotice({text:'Chromium 模式未启用字幕功能',error:true});else{const index=selectedSubtitle?subtitleTracks.findIndex(item=>item.stableId===selectedSubtitle.stableId):-1;const next=subtitleTracks[(index+1)%Math.max(1,subtitleTracks.length)];if(next)selectSubtitle(next.id);}}
-    else if(action==='video.nextAudioTrack'){if(chromiumMode)setCaptureNotice({text:'Chromium 模式未启用音轨选择',error:true});else{const index=audioTracks.findIndex(item=>item.id===String(state.audioTrackId??'')||item.selected),next=audioTracks[(index+1)%Math.max(1,audioTracks.length)];if(next)sessionRef.current?.control({action:'audio-select',value:next.id});else setCaptureNotice({text:'当前后端未提供可选音轨',error:true});}}
+    else if(action==='video.nextAudioTrack'){if(chromiumMode)setCaptureNotice({text:'Chromium 模式未启用音轨选择',error:true});else{const explicitIndex=audioTracks.findIndex(item=>item.id===String(state.audioTrackId??'')),index=explicitIndex>=0?explicitIndex:audioTracks.findIndex(item=>item.selected),next=audioTracks[(index+1)%Math.max(1,audioTracks.length)];if(next)sessionRef.current?.control({action:'audio-select',value:next.id});else setCaptureNotice({text:'当前后端未提供可选音轨',error:true});}}
     else if (action === 'video.toggleStatistics') { if(capabilityPresentation.statisticsGroups.basic){const panel=chromiumMode?'basic-info':'info';setControlPanel(current => current === panel ? null : panel);}else setCaptureNotice({text:'当前后端不提供播放统计',error:true}); }
     else if(action==='video.switchBackend'){const index=availableBackends.findIndex(item=>item.backendId===activeBackendId),next=availableBackends[(index+1)%Math.max(1,availableBackends.length)];if(next&&next.backendId!==activeBackendId)void switchPlaybackBackend(next.backendId);else setCaptureNotice({text:'没有其他可切换后端',error:true});}
     else if (action === 'media.previous') onNavigateRef.current(-1);
     else if (action === 'media.next') onNavigateRef.current(1);
+  };
+  dispatchShortcutRef.current = (action, repeat = false) => {
+    if ((action === 'media.previous' || action === 'media.next') && !showNavigation) return;
+    if (repeat && !videoShortcutAllowsRepeat(action)) return;
+    shortcutActionRef.current(action);
   };
 
   const forwardBackAction = videoDirectionalAction(keyboardSettings.arrowKeyAction, 'forward-back');
@@ -648,10 +731,11 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       onKeyDown={event => {
         if (event.key === 'Enter') {
           event.preventDefault();
-          togglePlayback();
+          event.stopPropagation();
+          dispatchShortcutRef.current('video.playPause', event.repeat);
         }
       }}
-      className="relative min-h-0 flex-1 cursor-pointer bg-black bg-contain bg-center bg-no-repeat outline-none"
+      className="relative min-h-0 flex-1 cursor-pointer overflow-hidden bg-black bg-contain bg-center bg-no-repeat outline-none"
       style={poster && !sessionId ? { backgroundImage: `url(${JSON.stringify(poster).slice(1, -1)})` } : undefined}
     >
       <video ref={videoRef} className="pointer-events-none absolute inset-0 h-full w-full bg-black object-contain" aria-hidden="true"/>

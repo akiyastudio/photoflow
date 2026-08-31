@@ -32,6 +32,10 @@ const VideoHoverThumbnail = ({ src, poster, name, large, initialRatio, onError }
     const video = videoRef.current;
     if (!video) return;
     let active = true;
+    ratioRef.current = initialRatio;
+    setDuration(0);
+    setTime(0);
+    setPlaying(false);
     const beginPlayback = () => {
       if (!active) return;
       if (activeHoverVideo && activeHoverVideo !== video) activeHoverVideo.pause();
@@ -66,7 +70,7 @@ const VideoHoverThumbnail = ({ src, poster, name, large, initialRatio, onError }
       if (activeHoverVideo === video) activeHoverVideo = null;
       if (seekFrameRef.current !== undefined) window.cancelAnimationFrame(seekFrameRef.current);
     };
-  }, [src]);
+  }, [initialRatio, src]);
 
   useEffect(() => {
     if (!playing) return;
@@ -99,6 +103,7 @@ const VideoHoverThumbnail = ({ src, poster, name, large, initialRatio, onError }
     if (Math.abs(ratio - ratioRef.current) >= 0.002) seekToRatio(ratio);
   };
   const seekVideo = (event: ChangeEvent<HTMLInputElement>) => {
+    event.stopPropagation();
     const video = videoRef.current;
     if (!video) return;
     const nextTime = Number(event.currentTarget.value);
@@ -115,10 +120,10 @@ const VideoHoverThumbnail = ({ src, poster, name, large, initialRatio, onError }
   };
   const progress = duration > 0 ? Math.min(100, Math.max(0, time / duration * 100)) : 0;
 
-  return <span onMouseMove={event => updatePointerRatio(event.clientX)} className="absolute inset-0 z-[1] flex items-center justify-center overflow-hidden bg-black/5">
-    <video ref={videoRef} src={src} muted playsInline preload="auto" poster={poster} draggable={false} className="h-full w-full object-contain" onLoadedMetadata={event => setDuration(event.currentTarget.duration)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={restartPlayback} onError={() => onErrorRef.current()}/>
+  return <span onMouseMove={event => { if (!(event.target as HTMLElement).closest('input[type="range"]')) updatePointerRatio(event.clientX); }} className="absolute inset-0 z-[1] flex items-center justify-center overflow-hidden bg-black/5">
+    <video ref={videoRef} key={src} src={src} muted playsInline preload="auto" poster={poster} draggable={false} className="h-full w-full object-contain" onLoadedMetadata={event => setDuration(event.currentTarget.duration)} onPlay={() => setPlaying(true)} onPause={() => setPlaying(false)} onEnded={restartPlayback} onError={() => onErrorRef.current()}/>
     {!playing && <Play size={large ? 25 : 15} fill="currentColor" className="pointer-events-none absolute text-white drop-shadow-[0_1px_4px_rgba(0,0,0,.8)]"/>}
-    {duration > 0 && <span className="absolute inset-x-0 bottom-0 z-10 flex items-center gap-1.5 bg-gradient-to-t from-black/85 to-black/20 px-2 pb-1.5 pt-3" onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}>
+    {duration > 0 && <span className="absolute inset-x-0 bottom-0 z-10 flex items-center gap-1.5 bg-gradient-to-t from-black/85 to-black/20 px-2 pb-1.5 pt-3" onMouseMove={event => event.stopPropagation()} onPointerMove={event => event.stopPropagation()} onPointerDown={event => event.stopPropagation()} onClick={event => event.stopPropagation()} onDoubleClick={event => event.stopPropagation()}>
       <input type="range" min="0" max={duration} step="0.05" value={Math.min(time, duration)} onChange={seekVideo} aria-label={`调整 ${name} 的播放进度`} className="video-hover-seek min-w-0 flex-1" style={{ '--seek-progress': `${progress}%` } as React.CSSProperties}/>
     </span>}
   </span>;
