@@ -8,9 +8,80 @@ import json
 import mmap
 import os
 import sys
+import time
+import errno
+import uuid
 from pathlib import Path
 
 from PIL import Image, ImageOps
+
+MAX_OUTPUTS = 32
+MAX_OUTPUT_PIXELS = 16384
+STAGING_DIRECTORY = ".photoflow-thumbnail-staging"
+
+
+class InvalidRequestError(ValueError):
+    code = "EINVALIDREQUEST"
+
+
+class OutputError(OSError):
+    def __init__(self, error: Exception):
+        super().__init__(str(error))
+        self.code = "ENOSPC" if isinstance(error, OSError) and error.errno == errno.ENOSPC else "EPERM" if isinstance(error, PermissionError) else "EOUTPUT"
+
+
+def _error_code(error: Exception) -> str:
+    code = getattr(error, "code", None)
+    if code:
+        return str(code)
+    if isinstance(error, PermissionError):
+        return "EPERM"
+    if isinstance(error, OSError) and error.errno == errno.ENOSPC:
+        return "ENOSPC"
+    if isinstance(error, Image.DecompressionBombError):
+        return "EINVALIDREQUEST"
+    return "EIMAGEDECODE"
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    return path.is_symlink() or bool(getattr(os.path, "isjunction", lambda _path: False)(path))
+
+
+def _validated_outputs(outputs: list[dict]) -> list[dict]:
+    if not isinstance(outputs, list) or not outputs or len(outputs) > MAX_OUTPUTS:
+        raise InvalidRequestError("图片输出数量无效")
+    validated = []
+    for output in outputs:
+        if not isinstance(output, dict) or not output.get("sizeLabel") or not output.get("path"):
+            raise InvalidRequestError("图片输出参数无效")
+        pixels = int(output.get("pixels", -1))
+        if pixels < 0 or pixels > MAX_OUTPUT_PIXELS:
+            raise InvalidRequestError("图片输出尺寸超出限制")
+        target = Path(str(output["path"]))
+        if not target.is_absolute():
+            raise InvalidRequestError("图片输出路径必须为绝对路径")
+        if _is_link_or_junction(target):
+            raise InvalidRequestError("拒绝将图片写入符号链接")
+        target = Path(os.path.abspath(target))
+        validated.append({**output, "pixels": pixels, "path": str(target)})
+    return validated
+
+
+def _staged_path(target: Path) -> Path:
+    staging = target.parent / STAGING_DIRECTORY
+    if _is_link_or_junction(staging):
+        raise OutputError(PermissionError("缩略图临时目录不能是符号链接"))
+    staging.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if _is_link_or_junction(staging):
+        raise OutputError(PermissionError("缩略图临时目录不能是符号链接"))
+    now = time.time()
+    for candidate in staging.glob("*.tmp"):
+        try:
+            if candidate.is_file() and not _is_link_or_junction(candidate) and now - candidate.stat().st_mtime > 24 * 60 * 60:
+                candidate.unlink()
+        except OSError:
+            pass
+    return staging / f"{uuid.uuid4().hex}.tmp"
 
 HEIF_EXTENSIONS = {".heic", ".heif", ".hif", ".avif"}
 HEIF_DECODER_AVAILABLE = False
@@ -43,7 +114,7 @@ def _embedded_jpeg(source_path: str) -> Image.Image:
                 raise ValueError("RAW 文件中没有可用的内嵌 JPEG 预览")
             payload = mapped[best[0]:best[0] + best[1]]
     with Image.open(io.BytesIO(payload)) as embedded:
-        return ImageOps.exif_transpose(embedded).copy()
+        return embedded.copy()
 
 
 def _open_source(source_path: str, kind: str) -> Image.Image:
@@ -67,25 +138,55 @@ def _rgb(image: Image.Image) -> Image.Image:
 
 
 def generate(source_path: str, kind: str, outputs: list[dict]) -> list[dict]:
-    image = _rgb(_open_source(source_path, kind))
+    outputs = _validated_outputs(outputs)
+    opened = _open_source(source_path, kind)
+    embedded_orientation = int(opened.getexif().get(274, 1)) if kind == "raw" else 1
+    if embedded_orientation < 1 or embedded_orientation > 8:
+        embedded_orientation = 1
+    image = _rgb(opened)
+    if image is not opened:
+        opened.close()
     generated = []
     try:
         for output in sorted(outputs, key=lambda item: int(item["pixels"]), reverse=True):
             target = os.path.abspath(output["path"])
             pixels = int(output["pixels"])
-            Path(target).parent.mkdir(parents=True, exist_ok=True)
+            if _is_link_or_junction(Path(target)):
+                raise OutputError(PermissionError("拒绝将图片写入符号链接"))
+            try:
+                Path(target).parent.mkdir(parents=True, exist_ok=True)
+            except OSError as error:
+                raise OutputError(error) from error
             if not os.path.exists(target):
                 resized = image.copy()
                 if pixels > 0:
                     resized.thumbnail((pixels, pixels), Image.Resampling.LANCZOS)
-                temporary = f"{target}.tmp-{os.getpid()}"
+                temporary = None
+                owns_temporary = False
                 try:
-                    resized.save(temporary, format="JPEG", quality=84 if pixels >= 960 else 80,
-                                 optimize=True, progressive=True)
+                    temporary = _staged_path(Path(target))
+                    save_options = {"format": "JPEG", "quality": 84 if pixels >= 960 else 80,
+                                    "optimize": True, "progressive": True}
+                    if kind == "raw":
+                        exif = Image.Exif()
+                        exif[274] = embedded_orientation
+                        exif[305] = f"PhotoFlow embedded-preview-v2 orientation={embedded_orientation}"
+                        save_options["exif"] = exif
+                    output_file = temporary.open("xb")
+                    owns_temporary = True
+                    with output_file:
+                        resized.save(output_file, **save_options)
+                        output_file.flush()
+                        os.fsync(output_file.fileno())
                     os.replace(temporary, target)
+                    owns_temporary = False
+                except OutputError:
+                    raise
+                except Exception as error:
+                    raise OutputError(error) from error
                 finally:
-                    if os.path.exists(temporary):
-                        os.unlink(temporary)
+                    if owns_temporary and temporary is not None and not _is_link_or_junction(temporary):
+                        temporary.unlink(missing_ok=True)
                     resized.close()
             generated.append({"sizeLabel": output["sizeLabel"], "pixelSize": pixels, "path": target})
     finally:
@@ -109,7 +210,8 @@ def run_server() -> None:
             response = {"id": request.get("id"), "success": True, "generated": generated}
         except Exception as error:
             response = {"id": request.get("id") if isinstance(request, dict) else None,
-                        "success": False, "error": str(error)}
+                        "success": False, "error": str(error),
+                        "code": _error_code(error)}
         print(json.dumps(response, ensure_ascii=False), flush=True)
 
 

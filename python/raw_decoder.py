@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
+import uuid
 from pathlib import Path
 
 import rawpy
@@ -13,6 +15,52 @@ from PIL import Image
 
 DECODER_ID = "libraw-rawpy-v1"
 HALF_SIZE_LIMIT = 4000
+MAX_OUTPUTS = 32
+MAX_OUTPUT_PIXELS = 16384
+STAGING_DIRECTORY = ".photoflow-thumbnail-staging"
+
+
+def _is_link_or_junction(path: Path) -> bool:
+    return path.is_symlink() or bool(getattr(os.path, "isjunction", lambda _path: False)(path))
+
+
+def _validated_outputs(outputs: list[dict]) -> list[dict]:
+    if not isinstance(outputs, list) or not outputs or len(outputs) > MAX_OUTPUTS:
+        raise ValueError("没有请求 RAW 解码输出或输出数量超出限制")
+    validated = []
+    for output in outputs:
+        if not isinstance(output, dict) or not output.get("sizeLabel") or not output.get("path"):
+            raise ValueError("RAW 解码输出参数无效")
+        requested_size = int(output.get("pixels", -1))
+        if requested_size < 0 or requested_size > MAX_OUTPUT_PIXELS:
+            raise ValueError("RAW 解码输出尺寸超出限制")
+        target = Path(str(output["path"]))
+        if not target.is_absolute():
+            raise ValueError("RAW 解码输出路径必须为绝对路径")
+        if _is_link_or_junction(target):
+            raise ValueError("拒绝将 RAW 预览写入符号链接")
+        target = Path(os.path.abspath(target))
+        validated.append({**output, "pixels": requested_size, "path": str(target)})
+    return validated
+
+
+def _staged_path(target: Path) -> Path:
+    staging = target.parent / STAGING_DIRECTORY
+    if _is_link_or_junction(staging):
+        raise PermissionError("RAW 预览临时目录不能是符号链接")
+    staging.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if _is_link_or_junction(staging):
+        raise ValueError("RAW 预览临时目录不能是符号链接")
+    now = time.time()
+    for candidate in staging.glob("*.tmp"):
+        try:
+            if candidate.is_file() and not _is_link_or_junction(candidate) and now - candidate.stat().st_mtime > 24 * 60 * 60:
+                candidate.unlink()
+        except OSError:
+            pass
+    job_token = os.environ.get("PHOTOFLOW_RAW_JOB_TOKEN", "")
+    safe_token = job_token if job_token and all(character in "0123456789abcdef" for character in job_token) else ""
+    return staging / f"{safe_token + '-' if safe_token else ''}{uuid.uuid4().hex}.tmp"
 
 
 def _exif_orientation(libraw_flip: int) -> int:
@@ -31,8 +79,7 @@ def decode(source_path: str, outputs: list[dict]) -> list[dict]:
     source = Path(source_path).resolve()
     if not source.is_file():
         raise FileNotFoundError(f"RAW 文件不存在：{source}")
-    if not isinstance(outputs, list) or not outputs:
-        raise ValueError("没有请求 RAW 解码输出")
+    outputs = _validated_outputs(outputs)
 
     half_size = _use_half_size(outputs)
     with rawpy.imread(str(source)) as raw:
@@ -53,27 +100,38 @@ def decode(source_path: str, outputs: list[dict]) -> list[dict]:
         exif[274] = orientation
         exif[305] = f"PhotoFlow {DECODER_ID} / LibRaw {rawpy.libraw_version}"
         for output in sorted(outputs, key=lambda item: int(item.get("pixels", 0)), reverse=True):
-            target = Path(str(output["path"])).resolve()
+            target = Path(os.path.abspath(str(output["path"])))
             requested_size = int(output.get("pixels", 0))
+            if _is_link_or_junction(Path(str(output["path"]))):
+                raise PermissionError("拒绝将 RAW 预览写入符号链接")
             target.parent.mkdir(parents=True, exist_ok=True)
             if not target.exists():
                 resized = image.copy()
                 try:
                     if requested_size > 0:
                         resized.thumbnail((requested_size, requested_size), Image.Resampling.LANCZOS)
-                    temporary = Path(f"{target}.tmp-{os.getpid()}")
+                    temporary = None
+                    owns_temporary = False
                     try:
-                        resized.save(
-                            temporary,
-                            format="JPEG",
-                            quality=90 if requested_size == 0 else 84 if requested_size >= 960 else 80,
-                            optimize=True,
-                            progressive=True,
-                            exif=exif,
-                        )
+                        temporary = _staged_path(target)
+                        output_file = temporary.open("xb")
+                        owns_temporary = True
+                        with output_file:
+                            resized.save(
+                                output_file,
+                                format="JPEG",
+                                quality=90 if requested_size == 0 else 84 if requested_size >= 960 else 80,
+                                optimize=True,
+                                progressive=True,
+                                exif=exif,
+                            )
+                            output_file.flush()
+                            os.fsync(output_file.fileno())
                         os.replace(temporary, target)
+                        owns_temporary = False
                     finally:
-                        temporary.unlink(missing_ok=True)
+                        if owns_temporary and temporary is not None and not _is_link_or_junction(temporary):
+                            temporary.unlink(missing_ok=True)
                 finally:
                     resized.close()
             generated.append({
