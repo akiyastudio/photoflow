@@ -48,7 +48,7 @@ class TestNode extends TestEventTarget {
     return null;
   }
 }
-const layoutRequests = { loads: 0, saves: [], failLoadBudget: 0, failNextSave: false, staleNextSave: false, staleMutation: null, revision: 0, positions: [], holdSaves: false, saveReleases: [] };
+const layoutRequests = { loads: 0, saves: [], failLoadBudget: 0, failNextSave: false, failAtSave: 0, staleNextSave: false, staleMutation: null, revision: 0, positions: [], holdSaves: false, saveReleases: [] };
 const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode, HTMLIFrameElement: class {}, Node: TestNode, getSelection: () => null, electronAPI: {
   async inspectSourcePaths(paths) {
     return {
@@ -71,6 +71,7 @@ const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode,
   },
   async saveVersionTreeLayout(_workspacePath, _projectName, request) {
     layoutRequests.saves.push(request);
+    const saveNumber = layoutRequests.saves.length;
     if (layoutRequests.holdSaves) await new Promise(resolve => layoutRequests.saveReleases.push(resolve));
     if (layoutRequests.staleNextSave) {
       layoutRequests.staleNextSave = false;
@@ -82,6 +83,7 @@ const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode,
       }
       return { success: false, error: `stale_layout: 布局已更新（当前 revision=${layoutRequests.revision}）` };
     }
+    if (layoutRequests.failAtSave === saveNumber) { layoutRequests.failAtSave = 0; return { success: false, error: 'simulated ordered layout failure' }; }
     if (layoutRequests.failNextSave) { layoutRequests.failNextSave = false; return { success: false, error: 'simulated layout failure' }; }
     layoutRequests.revision += 1;
     if (request.mode === 'replace') layoutRequests.positions = request.positions;
@@ -1242,6 +1244,59 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(undoAfterFailedDrag, false, 'a failed drag must remove only its own history entry instead of leaving an undoable phantom');
   assert.strictEqual(layoutRequests.saves.length, savesBeforeFailedHistory + 1, 'undo after a failed drag must not issue an empty or retrying persistence command');
   await React.act(async () => failedHistoryRoot.unmount());
+
+  const manualQueueContainer = new TestNode(1, 'DIV', testDocument);
+  const manualQueueRoot = createRoot(manualQueueContainer);
+  let manualQueueController = null;
+  const manualQueueProps = { ...treeProps, projectName: 'Manual Queue Probe', pendingChildId: undefined, onCanvasControllerChange: controller => { manualQueueController = controller; } };
+  await React.act(async () => {
+    manualQueueRoot.render(React.createElement(tree.ProjectVersionTree, manualQueueProps));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const manualQueueA = allNodes(manualQueueContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  const manualQueueB = allNodes(manualQueueContainer).find(node => node.attributes?.get('data-version-progress-id') === 'raw');
+  const savesBeforeManualQueue = layoutRequests.saves.length;
+  layoutRequests.holdSaves = true;
+  let manualQueueRefresh;
+  await React.act(async () => {
+    manualQueueRefresh = manualQueueController.refreshLayout();
+    await Promise.resolve(); await Promise.resolve();
+    dispatch(manualQueueA, 'pointerdown', { pointerId: 67, button: 0, clientX: 100, clientY: 100 });
+    dispatch(manualQueueA, 'pointermove', { pointerId: 67, button: 0, clientX: 180, clientY: 160 });
+    dispatch(manualQueueA, 'pointerup', { pointerId: 67, button: 0, clientX: 180, clientY: 160 });
+    dispatch(manualQueueB, 'pointerdown', { pointerId: 68, button: 0, clientX: 200, clientY: 200 });
+    dispatch(manualQueueB, 'pointermove', { pointerId: 68, button: 0, clientX: 260, clientY: 240 });
+    dispatch(manualQueueB, 'pointerup', { pointerId: 68, button: 0, clientX: 260, clientY: 240 });
+    layoutRequests.failAtSave = savesBeforeManualQueue + 2;
+    layoutRequests.holdSaves = false;
+    layoutRequests.saveReleases.splice(0).forEach(release => release());
+    assert.strictEqual(await manualQueueRefresh, true, 'A1 refresh must persist before the later commands execute');
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+  });
+  assert.deepStrictEqual(layoutRequests.saves.slice(savesBeforeManualQueue).map(request => request.mode), ['replace', 'patch', 'patch'], 'A1, same-node A2, and different-node B must execute in command order');
+  const manualQueueA1 = layoutRequests.saves[savesBeforeManualQueue].positions.find(position => position.nodeKey === 'progress:free');
+  const manualQueueBSave = layoutRequests.saves.at(-1).positions.find(position => position.nodeKey === 'progress:raw');
+  assert.strictEqual(parseFloat(manualQueueA.style.left), manualQueueA1.x + 32, 'failed same-node A2 must restore the authoritative coordinate persisted by A1');
+  assert.strictEqual(parseFloat(manualQueueB.style.left), manualQueueBSave.x + 32, 'different-node B must remain visible and persisted');
+  const manualQueueABeforeGraphChange = { left: manualQueueA.style.left, top: manualQueueA.style.top };
+  const manualQueueRelinkedFolders = treeProps.progressFolders.map(folder => folder.id === 'free' ? { ...folder, parentProgressId: 'tracked', updatedAt: folder.updatedAt + 10 } : folder);
+  await React.act(async () => {
+    manualQueueRoot.render(React.createElement(tree.ProjectVersionTree, { ...manualQueueProps, progressFolders: manualQueueRelinkedFolders }));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const manualQueueAAfterGraphChange = allNodes(manualQueueContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  assert.deepStrictEqual({ left: manualQueueAAfterGraphChange.style.left, top: manualQueueAAfterGraphChange.style.top }, manualQueueABeforeGraphChange, 'A restored from A1 must remain manual during a graph layout change');
+  await React.act(async () => manualQueueRoot.unmount());
+  const manualReloadContainer = new TestNode(1, 'DIV', testDocument);
+  const manualReloadRoot = createRoot(manualReloadContainer);
+  await React.act(async () => {
+    manualReloadRoot.render(React.createElement(tree.ProjectVersionTree, { ...manualQueueProps, progressFolders: manualQueueRelinkedFolders }));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const manualQueueAAfterReload = allNodes(manualReloadContainer).find(node => node.attributes?.get('data-version-progress-id') === 'free');
+  assert.deepStrictEqual({ left: manualQueueAAfterReload.style.left, top: manualQueueAAfterReload.style.top }, manualQueueABeforeGraphChange, 'current-session graph behavior must match a reload from the persisted A1 coordinate');
+  await React.act(async () => manualReloadRoot.unmount());
 
   const pageAContainer = new TestNode(1, 'DIV', testDocument);
   const pageBContainer = new TestNode(1, 'DIV', testDocument);

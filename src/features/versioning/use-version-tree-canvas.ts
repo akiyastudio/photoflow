@@ -81,6 +81,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
   const loadPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const localMutationSequenceRef = useRef(0);
   const localMutationByNodeRef = useRef(new Map<string, number>());
+  const persistedMutationByNodeRef = useRef(new Map<string, number>());
   const disposedRef = useRef(false);
   const nodeDragRef = useRef<NodeDrag | null>(null);
   const canvasPanRef = useRef<CanvasPan | null>(null);
@@ -231,6 +232,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
     layoutReadyRef.current = false;
     localMutationSequenceRef.current = 0;
     localMutationByNodeRef.current = new Map();
+    persistedMutationByNodeRef.current = new Map();
     serverPositionsRef.current = new Map();
     appliedServerNodeKeysRef.current = new Set();
     undoStackRef.current = [];
@@ -356,7 +358,14 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         });
       };
       let payload = buildPayload();
-      let failureBaseline: ReadonlyMap<string, VersionTreeCanvasPosition> = before;
+      const persistedMutationBeforeCommand = new Map([...savedPositions.keys()].map(id => [id, persistedMutationByNodeRef.current.get(id)] as const));
+      const failureBaseline = new Map(before);
+      const currentNodesAtExecution = nodesRef.current;
+      currentNodesAtExecution.forEach(node => {
+        if (!savedPositions.has(node.id)) return;
+        const persisted = [node.nodeKey, ...(node.fallbackNodeKeys || [])].map(nodeKey => serverPositionsRef.current.get(nodeKey)).find(Boolean);
+        if (persisted) failureBaseline.set(node.id, persisted);
+      });
       let result = await window.electronAPI.saveVersionTreeLayout(workspacePath, projectName, {
         scopeKey,
         expectedRevision: revisionRef.current,
@@ -393,7 +402,9 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
           });
           // If the retry itself fails, the fetched winning revision—not the
           // obsolete pre-command UI snapshot—is the rollback authority.
-          failureBaseline = new Map(merged);
+          failureBaseline.clear();
+          merged.forEach((position, id) => failureBaseline.set(id, position));
+          savedPositions.forEach((_position, id) => persistedMutationBeforeCommand.set(id, undefined));
           savedPositions.forEach((position, id) => { if (currentNodeIds.has(id)) merged.set(id, position); });
           localMutationByNodeRef.current.forEach((mutation, id) => {
             const current = positionsRef.current.get(id);
@@ -430,6 +441,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         else savedMountedNodeKeys.forEach(nodeKey => appliedServerNodeKeysRef.current.add(nodeKey));
         const persistedIds = new Set([...savedPositions.keys()].filter(id => localMutationByNodeRef.current.get(id) === localMutationAtEnqueue));
         if (persistedIds.size) applyPositions(markVersionTreeCanvasPositionsPersisted(positionsRef.current, persistedIds));
+        savedPositions.forEach((_position, id) => persistedMutationByNodeRef.current.set(id, localMutationAtEnqueue));
         return true;
       }
       invalidateHistoryEntry(historyEntry);
@@ -438,6 +450,9 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         if (localMutationByNodeRef.current.get(id) !== localMutationAtEnqueue) return;
         const previous = failureBaseline.get(id);
         if (previous) rollback.set(id, previous);
+        const persistedMutation = persistedMutationBeforeCommand.get(id);
+        if (persistedMutation === undefined) localMutationByNodeRef.current.delete(id);
+        else localMutationByNodeRef.current.set(id, persistedMutation);
       });
       applyPositions(alignVersionTreeHistoryPositions({
         nodes: nodesRef.current,
