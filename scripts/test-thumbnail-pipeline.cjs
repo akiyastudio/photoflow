@@ -367,7 +367,8 @@ const run = async () => {
     assert.equal(maintenancePipeline.activeProjectScans, 0, 'cache maintenance must prevent a new project index writer from starting');
     assert.equal(maintenancePipeline.projectScanQueue.length, 1, 'a project scan requested during cache maintenance must remain queued');
     const queuedScan = maintenancePipeline.projectScanQueue.shift();
-    maintenancePipeline.projectScans.delete(path.resolve(temporaryRoot));
+    assert.equal(maintenancePipeline.scanProject(temporaryRoot, {}), deferredScan, 'the active cache-root generation must deduplicate the queued public project scan');
+    maintenancePipeline.projectScans.delete(queuedScan.scanKey);
     queuedScan.resolve(undefined);
     releaseMaintenance();
     await Promise.all([maintenanceRun, deferredScan]);
@@ -415,7 +416,7 @@ const run = async () => {
     console.log(`thumbnail maintenance foreground evidence: latency=${foregroundLatencyMs}ms pages=${recoveryPages} maintenanceCompletedAfterForeground=true`);
     cooperativePipeline.stop();
 
-    const failedDeletePath = path.join(temporaryRoot, 'delete-failure.jpg');
+    const failedDeletePath = path.join(temporaryRoot, `${'d'.repeat(64)}.jpg`);
     fs.writeFileSync(failedDeletePath, jpeg);
     const evictionPipeline = createPipeline({
       root: temporaryRoot,
@@ -635,10 +636,25 @@ const run = async () => {
     assert.equal(indexedCalls[0]?.args.collect_direct_convertible_images, true, 'folder menu inspection must request direct convertible image children');
     await indexedPipeline.inspectToolSources(temporaryRoot, [missingVideo], false, false, true);
     assert.equal(indexedCalls[1]?.args.collect_recursive_convertible_images, true, 'image conversion must request recursive convertible image source collection');
-    indexedPipeline.projectScans.set(path.resolve(temporaryRoot), Promise.resolve());
+    let releaseIndexedMaintenance;
+    let markIndexedMaintenanceEntered;
+    const indexedMaintenanceGate = new Promise(resolve => { releaseIndexedMaintenance = resolve; });
+    const indexedMaintenanceEntered = new Promise(resolve => { markIndexedMaintenanceEntered = resolve; });
+    const indexedMaintenance = indexedPipeline.runDatabaseMaintenance(async () => {
+      markIndexedMaintenanceEntered();
+      await indexedMaintenanceGate;
+    });
+    await indexedMaintenanceEntered;
+    const indexedScan = indexedPipeline.scanProject(temporaryRoot, {});
     const buildingResult = await indexedPipeline.inspectToolSources(temporaryRoot, [missingVideo], true);
     assert.equal(buildingResult.indexed, false, 'tool availability must report a queued background project scan as building');
-    assert.equal(indexedCalls.length, 2, 'a building project scan must not expose stale database results');
+    assert.equal(indexedCalls.filter(call => call.operation === 'inspect_tool_sources').length, 2, 'a building project scan must not expose stale database results');
+    const queuedIndexedScan = indexedPipeline.projectScanQueue.shift();
+    assert.match(queuedIndexedScan.scanKey, /\|g\d+$/, 'queued scans must be scoped to the active cache-root generation');
+    indexedPipeline.projectScans.delete(queuedIndexedScan.scanKey);
+    queuedIndexedScan.resolve(undefined);
+    releaseIndexedMaintenance();
+    await Promise.all([indexedMaintenance, indexedScan]);
     indexedPipeline.stop();
 
     const failureTarget = path.join(temporaryRoot, 'failure.jpg');

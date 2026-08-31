@@ -13,7 +13,7 @@ const run = async () => {
   const sourcePath = path.join(userDataPath, 'source.jpg');
   const finalPath = path.join(cacheRoot, 'ready.jpg');
   fs.mkdirSync(cacheRoot, { recursive: true });
-  const python = path.resolve('.venv', 'Scripts', 'python.exe');
+  const python = process.env.PHOTOFLOW_TEST_PYTHON || path.resolve('.venv', 'Scripts', 'python.exe');
   const script = path.resolve('python', 'thumbnail_db.py');
   const pipeline = new ThumbnailPipeline({
     getRunConfig: (_scriptName, args) => ({ command: python, args: [script, ...args] }),

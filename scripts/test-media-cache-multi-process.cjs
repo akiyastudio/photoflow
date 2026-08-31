@@ -22,6 +22,14 @@ const runFixture = (action, configuredDirectory, userDataPath) => new Promise((r
   });
 });
 
+const settleFixtures = async fixtures => {
+  const results = await Promise.allSettled(fixtures);
+  const failures = results.filter(result => result.status === 'rejected').map(result => result.reason);
+  if (failures.length === 1) throw failures[0];
+  if (failures.length > 1) throw new AggregateError(failures, 'multiple media cache fixtures failed');
+  return results.map(result => result.value);
+};
+
 const run = async () => {
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-cache-processes-'));
   try {
@@ -35,7 +43,7 @@ const run = async () => {
       fs.promises.writeFile(path.join(userDataA, 'installation-id'), `${idA}\n`),
       fs.promises.writeFile(path.join(userDataB, 'installation-id'), `${idB}\n`),
     ]);
-    const [a, b] = await Promise.all([runFixture('init', configured, userDataA), runFixture('init', configured, userDataB)]);
+    const [a, b] = await settleFixtures([runFixture('init', configured, userDataA), runFixture('init', configured, userDataB)]);
     assert.equal(a.cacheRoot, path.join(configured, '.photoflow-cache', idA));
     assert.equal(b.cacheRoot, path.join(configured, '.photoflow-cache', idB));
     assert(a.finalExists && b.finalExists && a.state === 'READY' && b.state === 'READY');
@@ -61,7 +69,11 @@ const run = async () => {
     assert.equal(untouchedA.integrity, 'ok');
     console.log(`multi-process namespace evidence: A=${a.cacheRoot} B=${b.cacheRoot} quick_check=ok`);
   } finally {
-    await fs.promises.rm(root, { recursive: true, force: true });
+    await fs.promises.rm(root, {
+      recursive: true,
+      force: true,
+      ...(process.platform === 'win32' ? { maxRetries: 20, retryDelay: 100 } : {}),
+    });
   }
 };
 

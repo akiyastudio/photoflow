@@ -140,7 +140,13 @@ const contextFor = (states = []) => ({
   session.control({ action: 'seek', value: 24 }); session.control({ action: 'pause' }); session.control({ action: 'transform', transform: { aspectMode: '1:1', rotation: 270, flipHorizontal: true, flipVertical: false, crop:{x:.1,y:.2,width:.7,height:.6} } });
   const switched = await session.switchBackend('manual.advanced'); assert.equal(switched.success, true); assert.equal(session.backendId, 'manual.advanced');
   assert(advanced.calls.controls.some(item => item.action === 'seek' && item.value === 24)); assert(advanced.calls.controls.some(item => item.action === 'transform' && item.transform.rotation === 270 && item.transform.crop.width === .7));
-  assert.equal((await session.switchBackend('manual.chromium')).success, false, 'manual switching cannot create an automatic retry loop for an already attempted backend'); await session.close();
+  const switchedBack = await session.switchBackend('manual.chromium');
+  assert.equal(switchedBack.success, true, 'a user may explicitly return to a backend that succeeded earlier');
+  assert.equal(session.backendId, 'manual.chromium');
+  assert.deepEqual([first.calls.starts, advanced.calls.starts], [2, 1], 'the explicit A to B to A sequence must start only the selected backend each time');
+  assert(first.calls.controls.some(item => item.action === 'seek' && item.value === 24), 'returning to A must restore the current seek position');
+  assert(first.calls.controls.some(item => item.action === 'transform' && item.transform.rotation === 270 && item.transform.crop.width === .7), 'returning to A must restore the current display transform');
+  await session.close();
 }
 
 {
@@ -153,7 +159,7 @@ const contextFor = (states = []) => ({
   assert.equal(second.calls.controls.at(-1)?.action, 'play', 'a playing snapshot must resume only after state restoration');
   second.calls.runtimeFailure('second failed');
   await nextTurn();
-  assert.deepEqual([first.calls.starts, second.calls.starts], [1, 1], 'each descriptor may be attempted only once per generation');
+  assert.deepEqual([first.calls.starts, second.calls.starts], [1, 1], 'automatic failure recovery must not revisit a backend in the same failure chain');
   assert.equal(states.at(-1)?.type, 'fatal');
   assert.equal(states.at(-1)?.errorCode, 'BACKEND_UNAVAILABLE'); assert.equal(states.at(-1)?.suggestedFallback,'system-player'); assert.deepEqual(states.at(-1)?.attempts.map(item => item.backendId), ['loop.a','loop.a','loop.b','loop.b']);
   await session.close();

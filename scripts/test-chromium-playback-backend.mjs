@@ -3,7 +3,15 @@ import { ChromiumPlaybackBackend, chromiumContainerProbe, startPlaybackSession }
 
 globalThis.HTMLMediaElement = { HAVE_FUTURE_DATA: 3 };
 globalThis.requestAnimationFrame = callback => { queueMicrotask(() => callback(0)); return 1; };
-globalThis.document = { createElement: name => { if (name === 'canvas') return { width: 0, height: 0, getContext: () => ({ save() {}, translate() {}, rotate() {}, scale() {}, drawImage() {}, restore() {} }), toBlob: callback => callback(new Blob(['png'], { type: 'image/png' })) }; if (name !== 'track') throw new Error(`unexpected element ${name}`); const element = new EventTarget(); element.track = { mode: 'disabled', cues: [] }; element.remove = () => { element.removed = true; }; return element; } };
+const createdCanvases = [];
+globalThis.document = { createElement: name => { if (name === 'canvas') { const calls = []; const canvas = { width: 0, height: 0, calls, getContext: () => ({ save() { calls.push('save'); }, translate(...values) { calls.push(['translate', ...values]); }, rotate(value) { calls.push(['rotate', value]); }, scale(...values) { calls.push(['scale', ...values]); }, drawImage(...values) { calls.push(['drawImage', ...values.slice(1)]); }, restore() { calls.push('restore'); } }), toBlob: callback => callback(new Blob(['png'], { type: 'image/png' })) }; createdCanvases.push(canvas); return canvas; } if (name !== 'track') throw new Error(`unexpected element ${name}`); const element = new EventTarget(); element.track = { mode: 'disabled', cues: [] }; element.remove = () => { element.removed = true; }; return element; } };
+
+const approximately = (actual, expected, message) => assert(Math.abs(actual - expected) < 1e-9, `${message}: expected ${expected}, got ${actual}`);
+const matrixValues = transform => {
+  const match = String(transform).match(/^matrix\(([^)]+)\)$/);
+  assert(match, `expected a CSS matrix transform, got ${transform}`);
+  return match[1].split(',').map(Number);
+};
 
 class FakeVideo extends EventTarget {
   constructor({ failLoad = false, failMessage = 'decode failed' } = {}) {
@@ -24,6 +32,8 @@ class FakeVideo extends EventTarget {
     this.playbackRate = 1;
     this.videoWidth = 1920;
     this.videoHeight = 1080;
+    this.clientWidth = 1000;
+    this.clientHeight = 800;
     this.style = {};
     this.error = null;
     this.nextPlayError = null;
@@ -89,9 +99,20 @@ const context = (video, states, failures, published, subtitleChoice = { success:
   session.control({ action: 'transform', transform: { aspectMode: 'cover', rotation: 180, flipHorizontal: true, flipVertical: false } });
   const statisticsBefore=states.filter(state=>state.type==='statistics').length;session.control({ action: 'statistics-level', statisticsLevel: 'detailed' });await new Promise(resolve=>setTimeout(resolve,550));const statisticsDelta=states.filter(state=>state.type==='statistics').length-statisticsBefore;assert(statisticsDelta>=2&&statisticsDelta<=3,'Chromium detailed statistics must be capped at 4 Hz plus immediate sample');
   assert.deepEqual({ paused: video.paused, time: video.currentTime, volume: video.volume, muted: video.muted, speed: video.playbackRate }, { paused: true, time: 33, volume: 0.4, muted: true, speed: 1.5 });
-  assert.equal(video.style.objectFit, 'cover'); assert.match(video.style.transform, /rotate\(180deg\)/); assert(states.some(state => state.type === 'statistics' && state.statistics.droppedFrames === 2));
+  assert.equal(video.style.objectFit, 'fill', 'Chromium must leave fitting to the geometry matrix');
+  const displayMatrix = matrixValues(video.style.transform);
+  approximately(displayMatrix[0], 64 / 45, 'cover plus horizontal flip and 180 degree rotation matrix a');
+  approximately(displayMatrix[1], 0, '180 degree rotation matrix b');
+  approximately(displayMatrix[2], 0, '180 degree rotation matrix c');
+  approximately(displayMatrix[3], -1, '180 degree rotation matrix d');
+  assert(states.some(state => state.type === 'statistics' && state.statistics.droppedFrames === 2));
   video.nextPlayError = new DOMException('The play() request was interrupted by a call to pause().', 'AbortError'); session.control({ action: 'play' }); await new Promise(resolve => setImmediate(resolve)); assert.deepEqual(failures, [], 'an interrupted Chromium play promise is a lifecycle race, not a decoder failure');
   const capture = await session.capture(); assert.equal(capture.success, true); assert.equal(published.length, 1, 'Chromium capture must publish a generated PNG frame');
+  const canvas = createdCanvases.at(-1);
+  assert.deepEqual({ width: canvas.width, height: canvas.height }, { width: 1350, height: 1080 }, 'displayed capture must use the same 5:4 visible frame as the 1000x800 viewport');
+  approximately(canvas.calls.find(item => Array.isArray(item) && item[0] === 'rotate')[1], Math.PI, 'capture rotation');
+  assert.deepEqual(canvas.calls.find(item => Array.isArray(item) && item[0] === 'scale'), ['scale', -1, 1], 'capture must preserve the display flip');
+  assert.deepEqual(canvas.calls.find(item => Array.isArray(item) && item[0] === 'drawImage').slice(1), [-960, -540, 1920, 1080], 'cover capture must center and clip the source to the visible frame');
   const subtitle = await session.chooseSubtitle(); assert.equal(subtitle.success, false); assert.equal(subtitle.requiresFeature, 'subtitles');
   video.error = { code: 3, message: 'runtime decode failure' };
   video.dispatchEvent(new Event('error'));

@@ -347,9 +347,12 @@ const run = async () => {
   assert.equal(retryAttempts, 3);
   assert.equal(candidates.length, 2, 'manual retry must use the same candidate-processing wrapper');
   retryScheduler.stop();
-  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
+  const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8').replace(/\r\n?/g, '\n');
   const watcherStop = mainSource.slice(mainSource.indexOf('const stopWorkspaceWatcher'), mainSource.indexOf('const stopFileRootWatchers'));
-  assert(watcherStop.includes('if (stopSchedulers)') && mainSource.includes('stopWorkspaceWatcher(true)') && mainSource.includes('const watchWorkspace = (root) => {\n  if (watchedWorkspacePath === root && workspaceWatcher) return;\n  stopWorkspaceWatcher();'), 'changing workspaces cancels old project scans without permanently stopping the shared scheduler; only final shutdown is terminal');
+  const watcherStart = mainSource.slice(mainSource.indexOf('const watchWorkspace'), mainSource.indexOf('const buildWorkspaceCatalog'));
+  assert.match(watcherStop, /if \(previousWorkspaceRoot\) for \(const project of [^\n]+\) mediaTrackingScanScheduler\?\.cancel\(previousWorkspaceRoot, project\.name\);\n  if \(stopSchedulers\) \{\n    mediaTrackingScanScheduler\?\.stop\(\);/, 'workspace watcher teardown must always cancel scans for the previous workspace, while scheduler stop remains conditional');
+  assert.match(watcherStart, /const watchWorkspace = \(root\) => \{\n  if \(watchedWorkspacePath === root && workspaceWatcher\) return;\n  stopWorkspaceWatcher\(\);/, 'switching workspaces must use non-terminal watcher teardown');
+  assert.match(mainSource, /onQuit: \(\) => \{[\s\S]*?stopWorkspaceWatcher\(true\);/, 'final application shutdown must perform terminal scheduler teardown');
   console.log('media tracking scan scheduler tests passed');
 };
 
