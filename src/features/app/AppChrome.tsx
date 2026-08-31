@@ -1,4 +1,4 @@
-import { useEffect, useState, type ReactNode } from 'react';
+import { useEffect, useRef, useState, type KeyboardEvent, type ReactNode } from 'react';
 import { AlertTriangle, ChevronRight, ExternalLink, Gift, HardDrive, Loader2, ShieldCheck } from 'lucide-react';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import type { AppUpdateInfo, BackupStatus } from '../../types';
@@ -47,13 +47,30 @@ export const BackupHomeCard = ({ status, onOpen, onRun }: { status: BackupStatus
 };
 
 export const UpdateModal = ({ version, notes, url, mandatory, onClose }: AppUpdateInfo & { onClose: () => void }) => {
+  const dialogRef = useRef<HTMLDivElement>(null);
   useEscapeLayer(true, onClose, !mandatory, true);
+  useEffect(() => {
+    const previousFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const frame = window.requestAnimationFrame(() => dialogRef.current?.querySelector<HTMLElement>('[data-default-focus="true"]')?.focus());
+    return () => {
+      window.cancelAnimationFrame(frame);
+      window.requestAnimationFrame(() => previousFocus?.isConnected && previousFocus.focus());
+    };
+  }, []);
+  const trapFocus = (event: KeyboardEvent<HTMLDivElement>) => {
+    if (event.key !== 'Tab') return;
+    const controls = [...(dialogRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+    if (!controls.length) { event.preventDefault(); dialogRef.current?.focus(); return; }
+    const first = controls[0]; const last = controls[controls.length - 1];
+    if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  };
   return <div className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-50/80 backdrop-blur-sm p-4 animate-in fade-in duration-300">
-    <div role="dialog" aria-modal="true" aria-label={`${mandatory ? '必须更新至' : '发现新版本'} ${version}`} className="bg-white border border-blue-500/30 w-full max-w-md rounded-2xl shadow-2xl flex flex-col relative overflow-hidden">
+    <div ref={dialogRef} tabIndex={-1} onKeyDown={trapFocus} role="dialog" aria-modal="true" aria-label={`${mandatory ? '必须更新至' : '发现新版本'} ${version}`} className="bg-white border border-blue-500/30 w-full max-w-md rounded-2xl shadow-2xl flex flex-col relative overflow-hidden">
       <div className="absolute top-0 right-0 p-16 bg-blue-500/20 blur-3xl rounded-full -translate-y-1/2 translate-x-1/2 pointer-events-none"/>
       <div className="p-6 pb-0 z-10"><div className="w-12 h-12 bg-blue-500/20 rounded-xl flex items-center justify-center text-blue-600 mb-4 border border-blue-500/20"><Gift size={24}/></div><h3 className="text-xl font-bold text-slate-800 mb-2">{mandatory ? '需要更新至' : '发现新版本'} {version}</h3><p className="text-slate-500 text-sm">{mandatory ? '此版本为必须更新版本，完成更新后才能继续使用照片流。' : '一个新的更新已准备就绪。下载安装包以体验最新功能。'}</p></div>
       <div className="p-6 z-10"><div className="bg-slate-50/50 rounded-lg p-4 border border-slate-200 max-h-40 overflow-y-auto"><p className="text-xs font-bold text-slate-500 uppercase mb-2">更新日志</p><p className="text-sm text-slate-800 whitespace-pre-wrap">{notes}</p></div></div>
-      <div className="p-6 pt-2 flex gap-3 z-10">{!mandatory && <button onClick={onClose} className="flex-1 py-2.5 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition font-medium text-sm">以后再说</button>}<button onClick={() => window.electronAPI?.openExternal?.(url)} className="flex-1 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-900/20 transition font-bold text-sm flex items-center justify-center gap-2">去下载 <ExternalLink size={14}/></button></div>
+      <div className="p-6 pt-2 flex gap-3 z-10">{!mandatory && <button type="button" onClick={onClose} className="flex-1 py-2.5 rounded-lg text-slate-500 hover:text-slate-800 hover:bg-slate-100 transition font-medium text-sm">以后再说</button>}<button type="button" data-default-focus="true" onClick={() => window.electronAPI?.openExternal?.(url)} className="flex-1 py-2.5 rounded-lg bg-blue-600 hover:bg-blue-700 text-white shadow-lg shadow-blue-900/20 transition font-bold text-sm flex items-center justify-center gap-2">去下载 <ExternalLink size={14}/></button></div>
     </div>
   </div>;
 };

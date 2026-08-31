@@ -3,6 +3,7 @@ export type RendererErrorOccurrence = { fingerprint: string; reportedAt: number 
 const MAXIMUM_UPDATE_DEPTH_NOTICE = '界面状态更新发生循环，详细信息已写入日志。';
 const NOTICE_LIMIT = 180;
 const DEDUPLICATION_WINDOW_MS = 5_000;
+const MAX_RECENT_OCCURRENCES = 64;
 
 const firstUsefulLine = (message: string) => message
   .split(/\r?\n/)
@@ -41,7 +42,10 @@ export const recordRendererError = (
   now: number,
 ) => {
   const fingerprint = rendererErrorFingerprint(next);
-  const occurrences = previous.filter(item => now - item.reportedAt < DEDUPLICATION_WINDOW_MS);
+  const occurrences = previous
+    .slice(-MAX_RECENT_OCCURRENCES)
+    .filter(item => now - item.reportedAt < DEDUPLICATION_WINDOW_MS)
+    .slice(-(MAX_RECENT_OCCURRENCES - 1));
   if (occurrences.some(item => item.fingerprint === fingerprint)) return { report: false, occurrences };
   return { report: true, occurrences: [...occurrences, { fingerprint, reportedAt: now }] };
 };

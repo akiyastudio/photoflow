@@ -1,7 +1,7 @@
 import { useEffect, useRef, useState } from 'react';
 import type React from 'react';
 import type { WorkspaceProject } from '../../types';
-import type { BrowserPageInstance } from './workspace-tab-model';
+import { normalizeWorkspaceRelativePath, pruneFolderNavigationRequests, type BrowserPageInstance, type FolderNavigationRequests } from './workspace-tab-model';
 
 type InspirationPageDraft = Omit<BrowserPageInstance, 'id'>;
 
@@ -22,7 +22,7 @@ export const useFolderTabNavigation = ({
   activateInspiration: () => void;
   openProjectInNewTab: (project: WorkspaceProject) => void;
 }) => {
-  const [navigationRequests, setNavigationRequests] = useState<Record<string, { path: string; id: number }>>({});
+  const [navigationRequests, setNavigationRequests] = useState<FolderNavigationRequests>({});
   const navigationRequestIdRef = useRef(0);
   const [sourceDragActive, setSourceDragActive] = useState(false);
   useEffect(() => {
@@ -36,16 +36,22 @@ export const useFolderTabNavigation = ({
     };
   }, []);
 
+  useEffect(() => {
+    setNavigationRequests(current => pruneFolderNavigationRequests(current, pages, rootPath));
+  }, [pages, rootPath]);
+
   const openInNewTab = (relativePath: string) => {
-    createPage({ kind: 'inspiration', projectId: `inspiration:${rootPath}`, project: null, inspirationRootPath: rootPath, currentRelativePath: relativePath, initialRelativePath: relativePath, operation: null });
+    const normalizedPath = normalizeWorkspaceRelativePath(relativePath);
+    createPage({ kind: 'inspiration', projectId: `inspiration:${rootPath}`, project: null, inspirationRootPath: rootPath, currentRelativePath: normalizedPath, initialRelativePath: normalizedPath, operation: null });
     activateInspiration();
   };
   const navigateCurrent = (relativePath: string) => {
+    const normalizedPath = normalizeWorkspaceRelativePath(relativePath);
     const activePage = pages.find(page => page.id === activePageId && page.kind === 'inspiration');
     if (activePage) {
       const id = ++navigationRequestIdRef.current;
-      setNavigationRequests(current => ({ ...current, [activePage.id]: { path: relativePath, id } }));
-    } else requestInspirationPath(rootPath, relativePath);
+      setNavigationRequests(current => ({ ...current, [activePage.id]: { path: normalizedPath, id } }));
+    } else requestInspirationPath(rootPath, normalizedPath);
     activateInspiration();
   };
   const dropProps = {

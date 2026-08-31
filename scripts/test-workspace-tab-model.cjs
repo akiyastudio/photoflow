@@ -32,6 +32,8 @@ const project = (overrides = {}) => ({
   assert(state.pages.every(page => page.projectId === 'project-1'));
   state = model.activateBrowserPage(state, 'page-child');
   assert.strictEqual(state.activePageId, 'page-child');
+  assert.strictEqual(model.activateBrowserPage(state, 'page-child'), state, 'activating the current page again must preserve state identity');
+  assert.strictEqual(model.activateBrowserPage(state, 'missing-page'), state, 'activating a missing page must preserve state identity');
 
   state = model.selectProjectFromSidebar(state, project(), 'page-root');
   assert.strictEqual(state.pages.length, 3, 'sidebar click must create a root page when only child pages exist');
@@ -57,6 +59,12 @@ const project = (overrides = {}) => ({
   assert.strictEqual(state.pages.length, pageCountBeforeRename, 'project metadata updates must not create a root page');
   assert.strictEqual(state.activePageId, activePageBeforeRename, 'project metadata updates must preserve the active page');
   assert.deepStrictEqual(state.pages.map(page => [page.id, page.currentRelativePath]), pathsBeforeRename, 'project metadata updates must preserve every current directory');
+  assert.strictEqual(model.updateProjectPages(state, { ...renamed }), state, 'semantically unchanged project metadata must preserve state identity');
+  const datedProject = { ...renamed, projectDate: { year: 2026, month: 8, day: 31, precision: 'day' } };
+  const datedState = model.updateProjectPages(state, datedProject);
+  assert.strictEqual(model.updateProjectPages(datedState, { ...datedProject, projectDate: { ...datedProject.projectDate } }), datedState, 'equivalent project dates must not cause state allocation');
+  assert.strictEqual(model.updateProjectPages(state, project({ id: 'missing-project' })), state, 'an update with no matching project must preserve state identity');
+  assert.strictEqual(model.closeProjectPages(state, 'missing-project'), state, 'closing a missing project must preserve state identity');
 
   state = model.closeBrowserPage(state, 'page-child');
   assert.strictEqual(state.pages.length, 2);
@@ -74,6 +82,7 @@ const project = (overrides = {}) => ({
   inspirationState = model.selectInspirationPath(inspirationState, 'C:/inspiration', 'weddings', 'unused-inspiration');
   assert.strictEqual(inspirationState.pages.length, 3, 'requesting an existing inspiration path must reuse its page');
   assert.strictEqual(inspirationState.activePageId, 'inspiration-weddings');
+  assert.strictEqual(model.normalizeWorkspaceRelativePath('\\weddings\\detail\\'), 'weddings/detail', 'all inspiration navigation must share the tab model path normalization');
   inspirationState = model.updateBrowserPagePath(inspirationState, 'inspiration-weddings', 'weddings/detail');
   assert.strictEqual(inspirationState.pages.find(page => page.id === 'inspiration-portraits').currentRelativePath, 'portraits', 'one inspiration page navigation must not affect siblings');
   let pinnedNavigatedState = model.selectInspirationPath(model.EMPTY_WORKSPACE_TABS, 'C:/inspiration', '', 'pinned-navigated-root');
@@ -158,6 +167,13 @@ const project = (overrides = {}) => ({
   const closeToHome = model.closeBrowserPage(model.createBrowserPage(model.EMPTY_WORKSPACE_TABS, { id: 'only-project', kind: 'project', projectId: 'project-1', project: project(), currentRelativePath: '', initialRelativePath: '', operation: null }), 'only-project');
   assert.deepStrictEqual(closeToHome, model.EMPTY_WORKSPACE_TABS, 'home is used only after the last browser page closes');
   assert.deepStrictEqual(model.browserPageActivation(undefined), { activeTab: 'home', selectedProject: null, projectDestination: null }, 'home must only be selected when no browser page remains');
+
+  const rootAPage = { id: 'root-a-page', kind: 'inspiration', projectId: 'inspiration:A', project: null, inspirationRootPath: 'A', currentRelativePath: '', initialRelativePath: '', operation: null };
+  const rootBPage = { ...rootAPage, id: 'root-b-page', projectId: 'inspiration:B', inspirationRootPath: 'B' };
+  const requests = { 'root-a-page': { path: 'a', id: 1 }, 'closed-page': { path: 'closed', id: 2 }, 'root-b-page': { path: 'b', id: 3 } };
+  assert.deepStrictEqual(model.pruneFolderNavigationRequests(requests, [rootAPage, rootBPage], 'A'), { 'root-a-page': requests['root-a-page'] }, 'closed pages and pages from a previous root must be pruned');
+  const alreadyPruned = { 'root-a-page': requests['root-a-page'] };
+  assert.strictEqual(model.pruneFolderNavigationRequests(alreadyPruned, [rootAPage], 'A'), alreadyPruned, 'pruning without changes must preserve request state identity');
   console.log('Workspace tab model tests passed');
 })().catch(error => {
   console.error(error);

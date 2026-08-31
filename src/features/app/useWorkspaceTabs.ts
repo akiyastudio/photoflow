@@ -30,9 +30,21 @@ export const useWorkspaceTabs = (initialState: WorkspaceTabsState = EMPTY_WORKSP
   const closePage = useCallback((id: string) => setState(current => closeBrowserPage(current, id)), []);
   const updateProject = useCallback((project: WorkspaceProject) => setState(current => updateProjectPages(current, project)), []);
   const closeProject = useCallback((projectId: string) => setState(current => closeProjectPages(current, projectId)), []);
-  const selectSidebarProject = useCallback((project: WorkspaceProject) => setState(current => selectProjectFromSidebar(current, project, createPageId())), []);
-  const requestInspirationPath = useCallback((rootPath: string, path: string) => setState(current => selectInspirationPath(current, rootPath, path, createPageId())), []);
-  const ensureInspirationRoot = useCallback((rootPath: string) => setState(current => ensureInspirationRootPage(current, rootPath, createPageId())), []);
-  const resetInspirationPages = useCallback((rootPath: string, keepRootPage: boolean) => setState(current => replaceInspirationRootPages(current, rootPath, keepRootPage, createPageId())), []);
+  const selectSidebarProject = useCallback((project: WorkspaceProject) => {
+    const pageId = createPageId();
+    setState(current => selectProjectFromSidebar(current, project, pageId));
+  }, []);
+  const requestInspirationPath = useCallback((rootPath: string, path: string) => {
+    const pageId = createPageId();
+    setState(current => selectInspirationPath(current, rootPath, path, pageId));
+  }, []);
+  const ensureInspirationRoot = useCallback((rootPath: string) => {
+    const pageId = createPageId();
+    setState(current => ensureInspirationRootPage(current, rootPath, pageId));
+  }, []);
+  const resetInspirationPages = useCallback((rootPath: string, keepRootPage: boolean) => {
+    const pageId = createPageId();
+    setState(current => replaceInspirationRootPages(current, rootPath, keepRootPage, pageId));
+  }, []);
   return { ...state, createPage, activatePage, updatePagePath, closePage, updateProject, closeProject, selectSidebarProject, requestInspirationPath, ensureInspirationRoot, resetInspirationPages };
 };

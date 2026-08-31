@@ -22,6 +22,8 @@ export interface WorkspaceTabsState {
   activePageId: string | null;
 }
 
+export type FolderNavigationRequests = Record<string, { path: string; id: number }>;
+
 export const browserPageActivation = (page?: BrowserPageInstance) => {
   if (page?.kind === 'inspiration') return { activeTab: 'inspiration' as const, selectedProject: null, projectDestination: null };
   if (page?.project) return { activeTab: 'project' as const, selectedProject: page.project, projectDestination: page.project.path };
@@ -35,9 +37,11 @@ export const createBrowserPage = (state: WorkspaceTabsState, page: BrowserPageIn
   return { pages: [...state.pages, page], activePageId: page.id };
 };
 
-export const activateBrowserPage = (state: WorkspaceTabsState, pageId: string): WorkspaceTabsState => state.pages.some(page => page.id === pageId)
-  ? { ...state, activePageId: pageId }
-  : state;
+export const activateBrowserPage = (state: WorkspaceTabsState, pageId: string): WorkspaceTabsState => state.activePageId === pageId
+  ? state
+  : state.pages.some(page => page.id === pageId)
+    ? { ...state, activePageId: pageId }
+    : state;
 
 export const updateBrowserPagePath = (state: WorkspaceTabsState, pageId: string, currentRelativePath: string): WorkspaceTabsState => {
   const page = state.pages.find(candidate => candidate.id === pageId);
@@ -57,12 +61,31 @@ export const closeBrowserPage = (state: WorkspaceTabsState, pageId: string): Wor
   return { pages, activePageId: nextActive?.id || null };
 };
 
-export const updateProjectPages = (state: WorkspaceTabsState, project: WorkspaceProject): WorkspaceTabsState => ({
-  ...state,
-  pages: state.pages.map(page => page.projectId === project.id ? { ...page, project } : page),
-});
+const projectsMatch = (left: WorkspaceProject | null, right: WorkspaceProject) => {
+  if (!left) return false;
+  const keysMatch = Object.keys(right).every(key => key === 'projectDate'
+    || left[key as keyof WorkspaceProject] === right[key as keyof WorkspaceProject])
+    && Object.keys(left).every(key => key === 'projectDate'
+      || left[key as keyof WorkspaceProject] === right[key as keyof WorkspaceProject]);
+  const datesMatch = left.projectDate === right.projectDate
+    || Boolean(left.projectDate && right.projectDate
+      && left.projectDate.year === right.projectDate.year
+      && left.projectDate.month === right.projectDate.month
+      && left.projectDate.day === right.projectDate.day
+      && left.projectDate.precision === right.projectDate.precision);
+  return keysMatch && datesMatch;
+};
+
+export const updateProjectPages = (state: WorkspaceTabsState, project: WorkspaceProject): WorkspaceTabsState => {
+  if (!state.pages.some(page => page.projectId === project.id && !projectsMatch(page.project, project))) return state;
+  return {
+    ...state,
+    pages: state.pages.map(page => page.projectId === project.id && !projectsMatch(page.project, project) ? { ...page, project } : page),
+  };
+};
 
 export const closeProjectPages = (state: WorkspaceTabsState, projectId: string): WorkspaceTabsState => {
+  if (!state.pages.some(page => page.projectId === projectId)) return state;
   const pages = state.pages.filter(page => page.projectId !== projectId);
   return { pages, activePageId: pages.some(page => page.id === state.activePageId) ? state.activePageId : pages[0]?.id || null };
 };
@@ -81,10 +104,23 @@ export const selectProjectFromSidebar = (state: WorkspaceTabsState, project: Wor
   });
 };
 
-const normalizeRelativePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+export const normalizeWorkspaceRelativePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+
+export const pruneFolderNavigationRequests = (
+  requests: FolderNavigationRequests,
+  pages: BrowserPageInstance[],
+  rootPath: string,
+) => {
+  const currentPageIds = new Set(pages
+    .filter(page => page.kind === 'inspiration' && page.inspirationRootPath === rootPath)
+    .map(page => page.id));
+  const entries = Object.entries(requests).filter(([pageId]) => currentPageIds.has(pageId));
+  if (entries.length === Object.keys(requests).length) return requests;
+  return Object.fromEntries(entries);
+};
 
 export const selectInspirationPath = (state: WorkspaceTabsState, rootPath: string, relativePath: string, newPageId: string): WorkspaceTabsState => {
-  const normalizedPath = normalizeRelativePath(relativePath);
+  const normalizedPath = normalizeWorkspaceRelativePath(relativePath);
   const activePage = state.pages.find(page => page.id === state.activePageId);
   if (activePage?.kind === 'inspiration' && activePage.inspirationRootPath === rootPath && activePage.currentRelativePath === normalizedPath) return state;
   const existing = state.pages.find(page => page.kind === 'inspiration' && page.inspirationRootPath === rootPath && page.currentRelativePath === normalizedPath);

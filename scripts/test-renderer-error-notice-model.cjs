@@ -25,6 +25,26 @@ const { pathToFileURL } = require('url');
     assert.strictEqual(decision.report, offset < 20, 'interleaved fingerprints are deduplicated independently within the window');
   }
 
+  recent = [];
+  for (let index = 0; index < 200; index += 1) {
+    const decision = model.recordRendererError(recent, `unique error ${index}`, now + index);
+    assert.strictEqual(decision.report, true, 'a new fingerprint must still be reported during a flood');
+    recent = decision.occurrences;
+    assert(recent.length <= 64, 'the five-second occurrence cache must remain bounded');
+  }
+  assert.strictEqual(recent[0].fingerprint, model.rendererErrorFingerprint('unique error 136'), 'bounded history must retain the latest fingerprints');
+  const expired = model.recordRendererError(recent, 'after expiry', now + 5_200);
+  assert.deepStrictEqual(expired.occurrences, [{ fingerprint: model.rendererErrorFingerprint('after expiry'), reportedAt: now + 5_200 }], 'expired fingerprints must be removed before recording a new occurrence');
+
+  const oversizedHistory = Array.from({ length: 10_000 }, (_, index) => ({
+    fingerprint: `history-${index}`,
+    reportedAt: index < 9_936 ? now : now + index,
+  }));
+  const bounded = model.recordRendererError(oversizedHistory, 'bounded-new-error', now + 10_000);
+  assert(bounded.occurrences.length <= 64, 'an unexpectedly oversized caller history must still produce a bounded result');
+  assert(bounded.occurrences.some(item => item.fingerprint === 'history-9999'), 'bounded processing must retain the latest valid historical fingerprint');
+  assert.strictEqual(bounded.occurrences.at(-1).fingerprint, model.rendererErrorFingerprint('bounded-new-error'));
+
   console.log('renderer error notice model tests passed');
 })().catch(error => {
   console.error(error);
