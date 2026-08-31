@@ -94,7 +94,18 @@ const mergeRestoredConfig = (current, restored, destination, legacySettingsAdopt
     const revision = restoredOwnsValue || restoredHasTombstone ? nextComponentRevision(Math.max(currentRevision, restoredRevision)) : Math.max(currentRevision, restoredRevision);
     if (revision > 0) componentSettingsRevisions[id] = revision;
   }
-  return adoptLegacyComponentSettings({ ...current, ...restored, workspacePath: destination, backup: current?.backup || restored.backup, componentSettings, componentSettingsRevisions }, legacySettingsAdoptions, adoptionPolicy);
+  const requestedWorkspacePath = String(destination || '').trim();
+  const workspacePath = requestedWorkspacePath ? path.resolve(requestedWorkspacePath) : '';
+  return adoptLegacyComponentSettings({
+    ...current,
+    ...restored,
+    telemetry: current?.telemetry || restored.telemetry,
+    workspacePath,
+    workspacePaths: workspacePath ? [workspacePath] : [],
+    backup: current?.backup || restored.backup,
+    componentSettings,
+    componentSettingsRevisions,
+  }, legacySettingsAdoptions, adoptionPolicy);
 };
 
 const createConfigMutationService = ({ fs, crypto, getConfigPath, readSavedConfig, legacySettingsAdoptions = [], legacySettingsAdoptionsProvider = null, adoptionPolicy = defaultComponentDataAdoptionPolicy, faultInjector = () => undefined }) => {

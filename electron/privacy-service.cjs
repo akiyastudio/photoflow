@@ -59,6 +59,18 @@ const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => n
     fs.writeFileSync(statePath, JSON.stringify(state, null, 2), 'utf8');
   };
 
+  let consentWriteTail = Promise.resolve();
+  const writeStateAtomic = async state => {
+    await fs.promises.mkdir(path.dirname(statePath), { recursive: true });
+    const temporaryPath = `${statePath}.${process.pid}.${Math.random().toString(36).slice(2)}.tmp`;
+    try {
+      await fs.promises.writeFile(temporaryPath, JSON.stringify(state, null, 2), 'utf8');
+      await fs.promises.rename(temporaryPath, statePath);
+    } finally {
+      await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
+    }
+  };
+
   const importInstallerConsent = state => {
     if (!app.isPackaged || platform !== 'win32') return state;
     if (state.privacyNoticeVersion === CURRENT_PRIVACY_NOTICE_VERSION && state.termsVersion === CURRENT_TERMS_VERSION) return state;
@@ -140,35 +152,38 @@ const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => n
       && state.faceRulesVersion === CURRENT_FACE_RULES_VERSION;
   };
 
-  const saveConsent = async request => {
-    const state = readState();
-    const savedAt = now().toISOString();
-    if (request?.revokeCore === true) {
-      state.privacyNoticeVersion = '';
-      state.privacyNoticeAcceptedAt = '';
-      state.termsVersion = '';
-      state.termsAcceptedAt = '';
-      state.coreConsentRevokedAt = savedAt;
-      state.coreConsentSource = '';
-      state.experienceProgramGranted = false;
-    }
-    if (request?.acceptCore === true) {
-      state.privacyNoticeVersion = CURRENT_PRIVACY_NOTICE_VERSION;
-      state.privacyNoticeAcceptedAt = savedAt;
-      state.termsVersion = CURRENT_TERMS_VERSION;
-      state.termsAcceptedAt = savedAt;
-      state.coreConsentRevokedAt = '';
-      state.coreConsentSource = 'application';
-      state.experienceProgramGranted = request?.experienceProgramGranted === true;
-    }
-    if (typeof request?.faceRecognitionGranted === 'boolean') {
-      state.faceRecognitionGranted = request.faceRecognitionGranted;
-      state.faceRulesVersion = request.faceRecognitionGranted ? CURRENT_FACE_RULES_VERSION : '';
-      state.faceRecognitionGrantedAt = request.faceRecognitionGranted ? savedAt : '';
-    }
-    await fs.promises.mkdir(path.dirname(statePath), { recursive: true });
-    await fs.promises.writeFile(statePath, JSON.stringify(state, null, 2), 'utf8');
-    return publicState();
+  const saveConsent = request => {
+    const operation = consentWriteTail.catch(() => undefined).then(async () => {
+      const state = readState();
+      const savedAt = now().toISOString();
+      if (request?.revokeCore === true) {
+        state.privacyNoticeVersion = '';
+        state.privacyNoticeAcceptedAt = '';
+        state.termsVersion = '';
+        state.termsAcceptedAt = '';
+        state.coreConsentRevokedAt = savedAt;
+        state.coreConsentSource = '';
+        state.experienceProgramGranted = false;
+      }
+      if (request?.acceptCore === true) {
+        state.privacyNoticeVersion = CURRENT_PRIVACY_NOTICE_VERSION;
+        state.privacyNoticeAcceptedAt = savedAt;
+        state.termsVersion = CURRENT_TERMS_VERSION;
+        state.termsAcceptedAt = savedAt;
+        state.coreConsentRevokedAt = '';
+        state.coreConsentSource = 'application';
+        state.experienceProgramGranted = request?.experienceProgramGranted === true;
+      }
+      if (typeof request?.faceRecognitionGranted === 'boolean') {
+        state.faceRecognitionGranted = request.faceRecognitionGranted;
+        state.faceRulesVersion = request.faceRecognitionGranted ? CURRENT_FACE_RULES_VERSION : '';
+        state.faceRecognitionGrantedAt = request.faceRecognitionGranted ? savedAt : '';
+      }
+      await writeStateAtomic(state);
+      return publicState();
+    });
+    consentWriteTail = operation.then(() => undefined, () => undefined);
+    return operation;
   };
 
   const openLegalDocument = async documentId => {

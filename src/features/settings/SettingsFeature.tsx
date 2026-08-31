@@ -11,7 +11,7 @@ import { normalizeConfiguredSdDeviceRecords, removeConfiguredSdDevice, syncLegac
 import { MAX_SUBTITLE_FONT_SIZE, MIN_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../app/video-player-settings';
 import { componentSettingsSectionKey, type ComponentSettingsSection } from './component-settings-page-model';
 import { componentRuntimeIsAvailable, componentUnavailableMessage } from '../components/component-availability-model';
-import { restoredWorkspaceConfig } from './restored-workspace-config';
+import { createSettingsSaveCoordinator, restoredWorkspaceConfig } from './restored-workspace-config';
 import { useUserFacingToast } from '../app/useUserFacingToast';
 import { defaultVideoShortcutBindings, exportVideoShortcuts, formatVideoShortcutChord, importVideoShortcuts, isModifierOnlyVideoShortcutInput, isReservedVideoShortcut, normalizeVideoShortcutBindings, shortcutChord, shortcutInputFromKeyboardEvent, VIDEO_ACTIONS, videoShortcutConflicts } from '../../contracts/video-shortcuts';
 import type { VideoActionId } from '../../contracts/video-shortcuts';
@@ -40,12 +40,18 @@ export const PrivacyConsentPage = ({ onAccept }: { onAccept: (joinExperienceProg
   const [acceptedLegal, setAcceptedLegal] = useState(false);
   const [acceptedTelemetry, setAcceptedTelemetry] = useState(false);
   const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
   const ready = acceptedLegal;
-  const open = (id: 'privacy' | 'terms' | 'information-list' | 'third-parties') => void window.electronAPI.openLegalDocument(id);
+  const open = async (id: 'privacy' | 'terms' | 'information-list' | 'third-parties') => {
+    try { const result = await window.electronAPI.openLegalDocument(id); if (!result.success) setError(result.error || '无法打开法律文件'); }
+    catch (reason) { setError(reason instanceof Error ? reason.message : String(reason)); }
+  };
   const accept = async () => {
     if (!ready || saving) return;
-    setSaving(true);
-    try { await onAccept(acceptedTelemetry); } finally { setSaving(false); }
+    setSaving(true); setError('');
+    try { await onAccept(acceptedTelemetry); }
+    catch (reason) { setError(`保存隐私确认失败：${reason instanceof Error ? reason.message : String(reason)}`); }
+    finally { setSaving(false); }
   };
   return <main className="fixed inset-0 z-[1200] flex items-center justify-center overflow-auto bg-slate-950/90 p-6">
     <section className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-white p-7 shadow-2xl">
@@ -55,6 +61,7 @@ export const PrivacyConsentPage = ({ onAccept }: { onAccept: (joinExperienceProg
         <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={acceptedTelemetry} onChange={event => setAcceptedTelemetry(event.target.checked)} className="mt-1"/><span><span className="block text-sm font-bold text-slate-700">我愿意加入用户体验改善计划</span><span className="mt-1 block text-xs leading-5 text-slate-500">加入后会发送最小化的使用统计和崩溃报告，包括随机安装ID、版本、平台、功能代号、错误类型、调用栈和脱敏日志尾部；不上传照片、项目名、文件名或完整路径。可随时在设置中分别关闭。</span></span></label>
       </div>
       <div className="mt-4 flex flex-wrap gap-3 text-xs"><button type="button" onClick={() => open('information-list')} className="font-bold text-blue-600 hover:underline">查看个人信息清单</button><button type="button" onClick={() => open('third-parties')} className="font-bold text-blue-600 hover:underline">查看第三方服务清单</button></div>
+      {error && <p role="alert" className="mt-4 text-sm font-medium text-red-600">{error}</p>}
       <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => window.electronAPI.closeWindow()} className="dialog-secondary">不同意条款并退出</button><button type="button" disabled={!ready || saving} onClick={() => void accept()} className="dialog-primary disabled:cursor-not-allowed disabled:opacity-45">{saving ? '正在保存…' : acceptedTelemetry ? '同意并加入计划' : '仅同意条款并进入'}</button></div>
     </section>
   </main>;
@@ -99,15 +106,22 @@ const WorkspaceSetupPage = ({ config, onSave }: { config: AppConfig; onSave: (co
   const [workspacePath, setWorkspacePath] = useState(config.workspacePath);
   const [recoveryStatus, setRecoveryStatus] = useState<BackupStatus>();
   const [restoringSnapshot, setRestoringSnapshot] = useState('');
+  const [recoveryBusy, setRecoveryBusy] = useState(false);
+  const [recoveryError, setRecoveryError] = useState('');
   const confirm = async () => {
     const selectedPath = workspacePath.trim();
     if (selectedPath) await onSave({ ...config, workspacePath: selectedPath, workspacePaths: [selectedPath] });
   };
   const inspectBackup = async () => {
-    const selected = await window.electronAPI.chooseBackupTarget(config.backup.targetPath);
-    if (selected.cancelled || !selected.path) return;
-    await onSave({ ...config, backup: { ...config.backup, enabled: true, targetType: selected.path.startsWith('\\\\') ? 'nas' : 'local', targetPath: selected.path } });
-    setRecoveryStatus(await window.electronAPI.getBackupStatus(''));
+    if (recoveryBusy) return;
+    setRecoveryBusy(true); setRecoveryError('');
+    try {
+      const selected = await window.electronAPI.chooseBackupTarget(config.backup.targetPath);
+      if (selected.cancelled || !selected.path) return;
+      await onSave({ ...config, backup: { ...config.backup, enabled: true, targetType: selected.path.startsWith('\\\\') ? 'nas' : 'local', targetPath: selected.path } });
+      setRecoveryStatus(await window.electronAPI.getBackupStatus(''));
+    } catch (error) { setRecoveryError(`读取备份失败：${error instanceof Error ? error.message : String(error)}`); }
+    finally { setRecoveryBusy(false); }
   };
   const restore = async (snapshotId: string) => {
     setRestoringSnapshot(snapshotId);
@@ -115,11 +129,13 @@ const WorkspaceSetupPage = ({ config, onSave }: { config: AppConfig; onSave: (co
       const result = await window.electronAPI.restoreBackupWorkspace('', snapshotId);
       if (result.success && result.workspacePath && result.savedConfig) {
         setWorkspacePath(result.workspacePath);
-        await onSave(restoredWorkspaceConfig(result.savedConfig, result.workspacePath));
+        await onSave(restoredWorkspaceConfig(result.savedConfig, result.workspacePath, config));
       }
-    } finally { setRestoringSnapshot(''); }
+      else if (!result.cancelled) setRecoveryError(result.error || '工作区恢复失败');
+    } catch (error) { setRecoveryError(`工作区恢复失败：${error instanceof Error ? error.message : String(error)}`); }
+    finally { setRestoringSnapshot(''); }
   };
-  return <main className="fixed inset-x-0 bottom-0 top-10 z-40 flex items-center justify-center overflow-auto bg-slate-50 p-8"><section className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-8 shadow-sm"><div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-50 text-blue-600"><FolderOpen size={28}/></div><div className="mt-5 text-center"><h1 className="text-2xl font-bold text-slate-900">选择工作文件夹</h1><p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate-500">请选择工作文件夹。选择磁盘根目录时，会在磁盘下创建“照片流”文件夹作为工作目录。</p></div><div className="mt-7"><WorkspaceFolderPicker value={workspacePath} onChange={setWorkspacePath}/></div><div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-5"><div><p className="text-sm font-bold text-slate-700">已有 PhotoFlow 备份？</p><p className="mt-1 text-xs text-slate-500">可以直接从完整快照恢复到新的工作文件夹。</p></div><button type="button" onClick={() => void inspectBackup()} className="dialog-secondary inline-flex items-center gap-2"><ShieldCheck size={15}/>从备份恢复</button></div>{recoveryStatus && <div className="mt-4 max-h-48 space-y-2 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3">{recoveryStatus.snapshots.map(snapshot => <div key={snapshot.id} className="flex items-center justify-between gap-3 rounded-lg bg-white px-3 py-2"><div><p className="text-sm font-bold text-slate-700">{new Date(snapshot.createdAt).toLocaleString()}</p><p className="mt-0.5 text-xs text-slate-400">{snapshot.projects} 个项目 · {formatStorageSize(snapshot.bytes)}</p></div><button type="button" disabled={Boolean(restoringSnapshot)} onClick={() => void restore(snapshot.id)} className="dialog-primary shrink-0 text-xs disabled:opacity-45">{restoringSnapshot === snapshot.id ? '恢复中…' : '恢复'}</button></div>)}{!recoveryStatus.snapshots.length && <p className="py-4 text-center text-sm text-slate-500">这个位置没有可用快照</p>}</div>}<div className="mt-7 flex justify-end"><button type="button" onClick={() => void confirm()} disabled={!workspacePath.trim()} className="dialog-primary disabled:cursor-not-allowed disabled:opacity-45">开始使用</button></div></section></main>;
+  return <main className="fixed inset-x-0 bottom-0 top-10 z-40 flex items-center justify-center overflow-auto bg-slate-50 p-8"><section className="w-full max-w-2xl rounded-2xl border border-slate-200 bg-white p-8 shadow-sm"><div className="mx-auto flex h-14 w-14 items-center justify-center rounded-2xl bg-blue-50 text-blue-600"><FolderOpen size={28}/></div><div className="mt-5 text-center"><h1 className="text-2xl font-bold text-slate-900">选择工作文件夹</h1><p className="mx-auto mt-2 max-w-xl text-sm leading-6 text-slate-500">请选择工作文件夹。选择磁盘根目录时，会在磁盘下创建“照片流”文件夹作为工作目录。</p></div><div className="mt-7"><WorkspaceFolderPicker value={workspacePath} onChange={setWorkspacePath}/></div><div className="mt-5 flex flex-wrap items-center justify-between gap-3 border-t border-slate-200 pt-5"><div><p className="text-sm font-bold text-slate-700">已有 PhotoFlow 备份？</p><p className="mt-1 text-xs text-slate-500">可以直接从完整快照恢复到新的工作文件夹。</p></div><button type="button" disabled={recoveryBusy} onClick={() => void inspectBackup()} className="dialog-secondary inline-flex items-center gap-2 disabled:opacity-50"><ShieldCheck size={15}/>{recoveryBusy ? '正在读取…' : '从备份恢复'}</button></div>{recoveryError && <p role="alert" className="mt-3 text-sm text-red-600">{recoveryError}</p>}{recoveryStatus && <div className="mt-4 max-h-48 space-y-2 overflow-y-auto rounded-xl border border-slate-200 bg-slate-50 p-3">{recoveryStatus.snapshots.map(snapshot => <div key={snapshot.id} className="flex items-center justify-between gap-3 rounded-lg bg-white px-3 py-2"><div><p className="text-sm font-bold text-slate-700">{new Date(snapshot.createdAt).toLocaleString()}</p><p className="mt-0.5 text-xs text-slate-400">{snapshot.projects} 个项目 · {formatStorageSize(snapshot.bytes)}</p></div><button type="button" disabled={Boolean(restoringSnapshot)} onClick={() => void restore(snapshot.id)} className="dialog-primary shrink-0 text-xs disabled:opacity-45">{restoringSnapshot === snapshot.id ? '恢复中…' : '恢复'}</button></div>)}{!recoveryStatus.snapshots.length && <p className="py-4 text-center text-sm text-slate-500">这个位置没有可用快照</p>}</div>}<div className="mt-7 flex justify-end"><button type="button" onClick={() => void confirm()} disabled={!workspacePath.trim()} className="dialog-primary disabled:cursor-not-allowed disabled:opacity-45">开始使用</button></div></section></main>;
 };
 
 const formatComponentSize = (sizeBytes: number) => sizeBytes > 0 ? `${(sizeBytes / 1024 / 1024).toFixed(sizeBytes >= 100 * 1024 * 1024 ? 0 : 1)} MB` : '';
@@ -149,10 +165,16 @@ const StorageVolumeOverview = ({ sourceSignature }: { sourceSignature: string })
   const [overview, setOverview] = useState<StorageUsageOverview>({ success: true, updatedAt: 0, scanning: true, stale: true, volumes: [] });
   const [refreshing, setRefreshing] = useState(false);
   const sourceSignatureRef = useRef(sourceSignature);
+  const overviewRequestRef = useRef(0);
   const load = useCallback(async (force = false) => {
+    const request = ++overviewRequestRef.current;
     if (force) setRefreshing(true);
-    try { setOverview(await window.electronAPI.getStorageUsageOverview(force)); }
-    finally { if (force) setRefreshing(false); }
+    try {
+      const next = await window.electronAPI.getStorageUsageOverview(force);
+      if (request === overviewRequestRef.current) setOverview(next);
+    } catch (error) {
+      if (request === overviewRequestRef.current) setOverview(current => ({ ...current, scanning: false, error: error instanceof Error ? error.message : String(error) }));
+    } finally { if (force && request === overviewRequestRef.current) setRefreshing(false); }
   }, []);
   useEffect(() => {
     return window.electronAPI.onBackgroundTaskChanged(delta => {
@@ -525,12 +547,29 @@ const SettingsToggle = ({ checked, onChange, disabled, label }: { checked: boole
   <span className="sr-only">{label}</span><input type="checkbox" checked={checked} disabled={disabled} onChange={event => onChange?.(event.target.checked)} className="h-4 w-4 accent-blue-600"/>
 </label>;
 
-const SettingsPanel = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => <div className="fixed inset-0 z-[500] flex items-center justify-center bg-slate-950/40 p-6" role="dialog" aria-modal="true" aria-label={title} onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
-  <section className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
+const SettingsPanel = ({ title, onClose, children }: { title: string; onClose: () => void; children: React.ReactNode }) => {
+  const panelRef = useRef<HTMLElement>(null);
+  const previousFocusRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    previousFocusRef.current = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    panelRef.current?.focus();
+    return () => { const previous = previousFocusRef.current; window.requestAnimationFrame(() => previous?.isConnected && previous.focus()); };
+  }, []);
+  const trapFocus = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.key !== 'Tab') return;
+    const controls = [...(panelRef.current?.querySelectorAll<HTMLElement>('button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [tabindex]:not([tabindex="-1"])') || [])];
+    if (!controls.length) { event.preventDefault(); return; }
+    const first = controls[0]; const last = controls[controls.length - 1];
+    if (event.shiftKey && (document.activeElement === first || document.activeElement === panelRef.current)) { event.preventDefault(); last.focus(); }
+    else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+  };
+  return <div className="fixed inset-0 z-[500] flex items-center justify-center bg-slate-950/40 p-6" role="dialog" aria-modal="true" aria-label={title} onMouseDown={event => { if (event.target === event.currentTarget) onClose(); }}>
+  <section ref={panelRef} tabIndex={-1} onKeyDown={trapFocus} className="flex max-h-[88vh] w-full max-w-4xl flex-col overflow-hidden rounded-2xl bg-white shadow-2xl">
     <header className="flex items-center justify-between border-b border-slate-200 px-5 py-4"><h3 className="text-base font-bold text-slate-800">{title}</h3><button type="button" onClick={onClose} aria-label="关闭" className="rounded-lg p-2 text-slate-400 hover:bg-slate-100 hover:text-slate-700"><X size={18}/></button></header>
     <div className="min-h-0 overflow-y-auto p-5">{children}</div>
   </section>
 </div>;
+};
 
 const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectFocus, config, components, componentInstallPath, componentsLoading, onRefreshComponents, onComponentsChanged, onSave, onConfigRestored, getDefaultSettings }: { activeSection: BuiltInSettingsSection; backupProjectFocus?: WorkspaceProject | null; onClearBackupProjectFocus?: () => void; config: AppConfig; components: ComponentStatus[]; componentInstallPath: string; componentsLoading: boolean; onRefreshComponents: () => void | Promise<void>; onComponentsChanged: () => void | Promise<void>; onSave: (config: AppConfig) => boolean | Promise<boolean>; onConfigRestored: (config: AppConfig) => void; getDefaultSettings: () => AppConfig | Promise<AppConfig> }) => {
   const toast = useUserFacingToast();
@@ -541,6 +580,8 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const [backupSpace, setBackupSpace] = useState<BackupSpaceStatus>({ success: false });
   const [archiveStatus, setArchiveStatus] = useState<{ success: boolean; enabled: boolean; state: 'unconfigured' | 'connected' | 'offline'; targetPath?: string; totalBytes?: number; freeBytes?: number }>({ success: true, enabled: false, state: 'unconfigured' });
   const [backupAction, setBackupAction] = useState('');
+  const backupActionRef = useRef('');
+  const backupRequestRef = useRef(0);
   const [backupTargetSetup, setBackupTargetSetup] = useState<AppConfig['backup']['targetType'] | ''>('');
   const [nasPath, setNasPath] = useState(config.backup.targetType === 'nas' ? config.backup.targetPath : '');
   const [nasUsername, setNasUsername] = useState('');
@@ -562,38 +603,35 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const [restoreProjects, setRestoreProjects] = useState<Record<string, string>>({});
   const [shortcutTransfer, setShortcutTransfer] = useState('');
   const [recordingShortcutAction, setRecordingShortcutAction] = useState<VideoActionId | ''>('');
-  const pendingSaveRef = useRef<AppConfig | null>(null);
-  const savingRef = useRef(false);
+  const draftRef = useRef(config);
+  const onSaveRef = useRef(onSave);
+  const onNoticeRef = useRef(onNotice);
+  onSaveRef.current = onSave;
+  onNoticeRef.current = onNotice;
+  const saveCoordinatorRef = useRef<ReturnType<typeof createSettingsSaveCoordinator<AppConfig>> | null>(null);
+  if (!saveCoordinatorRef.current) saveCoordinatorRef.current = createSettingsSaveCoordinator<AppConfig>({
+    initial: config,
+    normalize: next => { const workspacePaths = normalizeWorkspacePaths(next.workspacePath, next.workspacePaths); return { ...next, workspacePath: workspacePaths[0] || '', workspacePaths }; },
+    applyDraft: next => { draftRef.current = next; setDraft(next); },
+    save: next => onSaveRef.current(next),
+    onFailure: (_next, error) => onNoticeRef.current(`保存设置失败：${error.message || '未知错误'}`, 6000),
+  });
   const backupSnapshotsRef = useRef<HTMLDivElement>(null);
-  useEffect(() => { setDraft(current => ({ ...current, componentSettings: config.componentSettings, componentSettingsRevisions: config.componentSettingsRevisions })); }, [config.componentSettings, config.componentSettingsRevisions]);
+  useEffect(() => { setDraft(current => {
+    const next = { ...current, componentSettings: config.componentSettings, componentSettingsRevisions: config.componentSettingsRevisions };
+    draftRef.current = next;
+    saveCoordinatorRef.current?.mergePersisted(value => ({ ...value, componentSettings: config.componentSettings, componentSettingsRevisions: config.componentSettingsRevisions }));
+    return next;
+  }); }, [config.componentSettings, config.componentSettingsRevisions]);
   useEffect(() => {
     if (!backupProjectFocus) return;
     const frame = window.requestAnimationFrame(() => backupSnapshotsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
     return () => window.cancelAnimationFrame(frame);
   }, [backupProjectFocus]);
-  const flushPendingSettings = async () => {
-    if (savingRef.current) return;
-    savingRef.current = true;
-    let changed = false;
-    try {
-      while (pendingSaveRef.current) {
-        const next = pendingSaveRef.current;
-        pendingSaveRef.current = null;
-        const workspacePaths = normalizeWorkspacePaths(next.workspacePath, next.workspacePaths);
-        changed = await onSave({ ...next, workspacePath: workspacePaths[0] || '', workspacePaths }) || changed;
-      }
-    } finally {
-      savingRef.current = false;
-    }
-    if (changed) onNotice('已更改设置');
-    if (pendingSaveRef.current) void flushPendingSettings();
-  };
   const commitSettings = (next: AppConfig) => {
-    setDraft(next);
-    pendingSaveRef.current = next;
-    void flushPendingSettings();
+    void saveCoordinatorRef.current?.enqueue(next).then(saved => { if (saved) onNoticeRef.current('已更改设置'); });
   };
-  const update = <K extends keyof AppConfig,>(key: K, value: AppConfig[K]) => commitSettings({ ...draft, [key]: value });
+  const update = <K extends keyof AppConfig,>(key: K, value: AppConfig[K]) => commitSettings({ ...draftRef.current, [key]: value });
   const projectCategories = normalizeProjectCategoryOrder(draft.projectCategoryOrder, draft.customProjectCategories);
   const addProjectCategory = () => {
     const name = newProjectCategory.trim().replace(/\s+/g, ' ');
@@ -680,11 +718,23 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     const target = progressNamePresets[progressNamePresets.indexOf(name) + offset];
     if (target) reorderProgressNamePreset(name, target);
   };
+  useEffect(() => { backupRequestRef.current += 1; setBackupSpace({ success: false }); }, [draft.workspacePath, draft.backup.targetType, draft.backup.targetPath]);
   const refreshBackup = useCallback(async () => {
-    if (!draft.workspacePath) return;
-    setBackupStatus(await window.electronAPI.getBackupStatus(draft.workspacePath));
-    if (draft.backup.enabled && draft.backup.targetPath) setBackupSpace(await window.electronAPI.getBackupSpaceStatus(draft.workspacePath));
-    setArchiveStatus(await window.electronAPI.getArchiveStatus());
+    const request = ++backupRequestRef.current;
+    const current = draftRef.current;
+    if (!current.workspacePath) return;
+    if (!current.backup.enabled || !current.backup.targetPath) setBackupSpace({ success: false });
+    try {
+      const [status, space, archive] = await Promise.all([
+        window.electronAPI.getBackupStatus(current.workspacePath),
+        current.backup.enabled && current.backup.targetPath ? window.electronAPI.getBackupSpaceStatus(current.workspacePath) : Promise.resolve<BackupSpaceStatus>({ success: false }),
+        window.electronAPI.getArchiveStatus(),
+      ]);
+      if (request !== backupRequestRef.current) return;
+      setBackupStatus(status); setBackupSpace(space); setArchiveStatus(archive);
+    } catch (error) {
+      if (request === backupRequestRef.current) onNoticeRef.current(`读取存储状态失败：${error instanceof Error ? error.message : String(error)}`, 5000);
+    }
   }, [draft.workspacePath, draft.backup.enabled, draft.backup.targetPath]);
   useEffect(() => {
     if (activeSection === 'backup') void refreshBackup();
@@ -695,9 +745,11 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   useEffect(() => {
     const credentialRef = draft.backup.nas.credentialRef;
     if (!credentialRef) { setNasUsername(''); return; }
+    let active = true;
     void window.electronAPI.readNasCredential(credentialRef).then(result => {
-      if (result.success) setNasUsername(result.credential?.username || '');
-    });
+      if (active && result.success) setNasUsername(result.credential?.username || '');
+    }).catch(() => { if (active) setNasUsername(''); });
+    return () => { active = false; };
   }, [draft.backup.nas.credentialRef]);
   useEffect(() => {
     if (draft.backup.targetType === 'nas' && draft.backup.targetPath.startsWith('\\\\')) setNasPath(draft.backup.targetPath);
@@ -705,11 +757,14 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const activeBackupTargetType = backupTargetSetup || draft.backup.targetType;
   const backupTargetConfigurable = draft.backup.enabled || Boolean(backupTargetSetup);
   const chooseBackupTarget = async (currentPath = draft.backup.targetType === 'local' ? draft.backup.targetPath : '') => {
-    const selected = await window.electronAPI.chooseBackupTarget(currentPath);
-    if (selected.cancelled || !selected.path) return false;
-    setBackupTargetSetup('');
-    update('backup', { ...draft.backup, enabled: true, targetType: 'local', targetPath: selected.path });
-    return true;
+    try {
+      const selected = await window.electronAPI.chooseBackupTarget(currentPath);
+      if (selected.cancelled || !selected.path) return false;
+      setBackupTargetSetup('');
+      const backup = draftRef.current.backup;
+      update('backup', { ...backup, enabled: true, targetType: 'local', targetPath: selected.path });
+      return true;
+    } catch (error) { onNotice(`选择备份位置失败：${error instanceof Error ? error.message : String(error)}`, 5000); return false; }
   };
   const enableBackup = async () => {
     if (draft.backup.targetPath) {
@@ -749,93 +804,117 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     setNasPath('');
   };
   const saveNas = async () => {
+    if (backupActionRef.current) return;
+    backupActionRef.current = 'nas-save';
     setBackupAction('nas-save');
     try {
-      const target = await window.electronAPI.setNasBackupTarget(nasPath);
-      if (!target.success || !target.path) { onNotice(target.error || 'NAS 路径无效', 5000); return; }
-      let credentialRef = draft.backup.nas.credentialRef;
-      if (nasUsername.trim() || nasPassword) {
-        const credential = await window.electronAPI.saveNasCredential({ remotePath: target.path, username: nasUsername, password: nasPassword });
-        if (!credential.success || !credential.credentialRef) { onNotice(credential.error || '无法保存 NAS 凭据', 5000); return; }
-        credentialRef = credential.credentialRef;
-      }
-      if (!credentialRef) { onNotice('请填写 NAS 用户名和密码', 5000); return; }
-      const testingConfig = { ...draft, backup: { ...draft.backup, enabled: false, targetType: 'nas' as const, targetPath: target.path, nas: { ...draft.backup.nas, credentialRef } } };
-      if (!await onSave(testingConfig)) { onNotice('无法保存 NAS 目标', 5000); return; }
-      setDraft(testingConfig);
-      const tested = await window.electronAPI.testBackupConnection();
-      if (!tested.success || !tested.connection) {
-        const failedConfig = { ...testingConfig, backup: { ...testingConfig.backup, targetPath: '' } };
-        await onSave(failedConfig);
-        setDraft(failedConfig);
-        setBackupTargetSetup('nas');
-        onNotice(tested.error || 'NAS 连接测试失败，备份仍保持关闭', 6000);
-        return;
-      }
-      const enabledConfig = { ...testingConfig, backup: { ...testingConfig.backup, enabled: true } };
-      if (!await onSave(enabledConfig)) { onNotice('NAS 已连接，但无法启用备份', 5000); return; }
-      setDraft(enabledConfig);
-      setBackupTargetSetup('');
-      setNasPassword('');
-      const speed = tested.connection.speedMBps ? `，写入 ${tested.connection.speedMBps} MB/s` : '';
-      onNotice(`NAS 已保存并连接成功${speed}`);
+      await saveCoordinatorRef.current?.transaction(async saveConfig => {
+        const target = await window.electronAPI.setNasBackupTarget(nasPath);
+        if (!target.success || !target.path) { onNotice(target.error || 'NAS 路径无效', 5000); return; }
+        const base = draftRef.current;
+        let credentialRef = base.backup.nas.credentialRef;
+        if (nasUsername.trim() || nasPassword) {
+          const credential = await window.electronAPI.saveNasCredential({ remotePath: target.path, username: nasUsername, password: nasPassword });
+          if (!credential.success || !credential.credentialRef) { onNotice(credential.error || '无法保存 NAS 凭据', 5000); return; }
+          credentialRef = credential.credentialRef;
+        }
+        if (!credentialRef) { onNotice('请填写 NAS 用户名和密码', 5000); return; }
+        const testingConfig = { ...base, backup: { ...base.backup, enabled: false, targetType: 'nas' as const, targetPath: target.path, nas: { ...base.backup.nas, credentialRef } } };
+        if (!await saveConfig(testingConfig)) return;
+        const tested = await window.electronAPI.testBackupConnection();
+        if (!tested.success || !tested.connection) {
+          await saveConfig({ ...testingConfig, backup: { ...testingConfig.backup, targetPath: '' } });
+          setBackupTargetSetup('nas');
+          onNotice(tested.error || 'NAS 连接测试失败，备份仍保持关闭', 6000);
+          return;
+        }
+        const enabledConfig = { ...testingConfig, backup: { ...testingConfig.backup, enabled: true } };
+        if (!await saveConfig(enabledConfig)) return;
+        setBackupTargetSetup(''); setNasPassword('');
+        const speed = tested.connection.speedMBps ? `，写入 ${tested.connection.speedMBps} MB/s` : '';
+        onNotice(`NAS 已保存并连接成功${speed}`);
+      });
       await refreshBackup();
-    } finally { setBackupAction(''); }
+    } catch (error) {
+      onNotice(`保存 NAS 设置失败：${error instanceof Error ? error.message : String(error)}`, 6000);
+    } finally { backupActionRef.current = ''; setBackupAction(''); }
   };
   const cleanupBackup = async () => {
+    if (backupActionRef.current) return;
     const expired = backupSpace.expiredSnapshotCount || 0;
     const reclaimable = backupSpace.estimatedReclaimableBytes || 0;
-    if (!await appDialog.confirm({ title: '清理过期备份？', message: `预计删除 ${expired} 个过期快照，释放约 ${formatStorageSize(reclaimable)}。只会回收不再被任何保留快照使用的数据；不会删除工作区原文件、归档项目或仍保留的快照。`, confirmLabel: '清理过期备份' })) return;
-    const result = await window.electronAPI.cleanupBackup(draft.workspacePath);
-    if (!result.success) onNotice(result.error || '无法开始清理', 6000);
+    if (!await appDialog.confirm({ title: '清理过期备份？', message: `预计删除 ${expired} 个过期快照，释放约 ${formatStorageSize(reclaimable)}。只会回收不再被任何保留快照使用的数据；不会删除工作区原文件、归档项目或仍保留的快照。`, confirmLabel: '清理过期备份', tone: 'danger' })) return;
+    if (backupActionRef.current) return;
+    backupActionRef.current = 'cleanup'; setBackupAction('cleanup');
+    try {
+      const result = await window.electronAPI.cleanupBackup(draftRef.current.workspacePath);
+      if (!result.success) onNotice(result.error || '无法开始清理', 6000);
+      await refreshBackup();
+    } catch (error) { onNotice(`无法开始清理：${error instanceof Error ? error.message : String(error)}`, 6000); }
+    finally { backupActionRef.current = ''; setBackupAction(''); }
   };
   const chooseArchiveTarget = async () => {
-    const selected = await window.electronAPI.chooseArchiveTarget(draft.archive.targetPath);
-    if (selected.cancelled || !selected.path) return;
-    update('archive', { enabled: true, targetPath: selected.path });
-    setArchiveStatus({ success: true, enabled: true, state: 'connected', targetPath: selected.path });
+    try {
+      const selected = await window.electronAPI.chooseArchiveTarget(draftRef.current.archive.targetPath);
+      if (selected.cancelled || !selected.path) return;
+      update('archive', { enabled: true, targetPath: selected.path });
+      setArchiveStatus({ success: true, enabled: true, state: 'connected', targetPath: selected.path });
+    } catch (error) { onNotice(`选择归档位置失败：${error instanceof Error ? error.message : String(error)}`, 5000); }
   };
   const runBackup = async () => {
+    if (backupActionRef.current) return;
+    backupActionRef.current = 'run';
     setBackupAction('run');
     try {
-      const result = await window.electronAPI.runBackup(draft.workspacePath, 'manual');
+      const result = await window.electronAPI.runBackup(draftRef.current.workspacePath, 'manual');
       if (!result.success) onNotice(result.error || '无法开始备份', 5000);
       await refreshBackup();
-    } finally { setBackupAction(''); }
+    } catch (error) { onNotice(`无法开始备份：${error instanceof Error ? error.message : String(error)}`, 5000); }
+    finally { backupActionRef.current = ''; setBackupAction(''); }
   };
   const verifyBackup = async (snapshotId: string) => {
+    if (backupActionRef.current) return;
+    backupActionRef.current = `verify:${snapshotId}`;
     setBackupAction(`verify:${snapshotId}`);
     try {
-      const result = await window.electronAPI.verifyBackup(draft.workspacePath, snapshotId);
+      const result = await window.electronAPI.verifyBackup(draftRef.current.workspacePath, snapshotId);
       if (!result.success) onNotice(result.error || '无法开始验证', 5000);
-    } finally { setBackupAction(''); }
+    } catch (error) { onNotice(`无法开始验证：${error instanceof Error ? error.message : String(error)}`, 5000); }
+    finally { backupActionRef.current = ''; setBackupAction(''); }
   };
   const restoreWorkspace = async (snapshotId: string) => {
+    if (backupActionRef.current) return;
     if (!await appDialog.confirm({ title: '恢复整个工作区？', message: '软件会要求选择一个空文件夹，并把这个快照恢复为新的工作区。当前工作区不会被覆盖。', confirmLabel: '选择恢复位置' })) return;
-    while (savingRef.current) await new Promise(resolve => window.setTimeout(resolve, 10));
-    pendingSaveRef.current = null;
+    await saveCoordinatorRef.current?.drain();
+    if (backupActionRef.current) return;
+    backupActionRef.current = `workspace:${snapshotId}`;
     setBackupAction(`workspace:${snapshotId}`);
     try {
-      const result = await window.electronAPI.restoreBackupWorkspace(draft.workspacePath, snapshotId);
+      const result = await window.electronAPI.restoreBackupWorkspace(draftRef.current.workspacePath, snapshotId);
       if (result.cancelled) return;
       if (!result.success || !result.workspacePath || !result.savedConfig) { onNotice(result.error || '工作区恢复失败', 6000); return; }
-      const next = restoredWorkspaceConfig(result.savedConfig, result.workspacePath);
-      pendingSaveRef.current = null; setDraft(next); onConfigRestored(next);
+      const next = restoredWorkspaceConfig(result.savedConfig, result.workspacePath, draftRef.current);
+      draftRef.current = next; setDraft(next); saveCoordinatorRef.current?.syncPersisted(next); onConfigRestored(next);
       onNotice('工作区恢复完成，已切换到恢复位置', 6000);
       window.dispatchEvent(new Event('workspace-projects-changed'));
-    } finally { setBackupAction(''); }
+    } catch (error) { onNotice(`工作区恢复失败：${error instanceof Error ? error.message : String(error)}`, 6000); }
+    finally { backupActionRef.current = ''; setBackupAction(''); }
   };
   const restoreProject = async (snapshotId: string, requestedProjectId = '') => {
+    if (backupActionRef.current) return;
     const snapshot = backupStatus.snapshots.find(item => item.id === snapshotId);
     const projectId = requestedProjectId || restoreProjects[snapshotId] || snapshot?.projectItems?.[0]?.id || '';
     const project = snapshot?.projectItems?.find(item => item.id === projectId);
     if (!project || !await appDialog.confirm({ title: `恢复项目“${project?.name || ''}”？`, message: '项目会恢复到快照中的原状态和原分类；如果原位置已被占用，恢复会安全停止。', confirmLabel: '恢复项目' })) return;
+    if (backupActionRef.current) return;
+    backupActionRef.current = `project:${snapshotId}`;
     setBackupAction(`project:${snapshotId}`);
     try {
-      const result = await window.electronAPI.restoreBackupProject(draft.workspacePath, snapshotId, projectId);
+      const result = await window.electronAPI.restoreBackupProject(draftRef.current.workspacePath, snapshotId, projectId);
       onNotice(result.success ? `项目“${project.name}”已恢复` : result.error || '项目恢复失败', result.success ? 5000 : 6000);
       if (result.success) window.dispatchEvent(new Event('workspace-projects-changed'));
-    } finally { setBackupAction(''); }
+    } catch (error) { onNotice(`项目恢复失败：${error instanceof Error ? error.message : String(error)}`, 6000); }
+    finally { backupActionRef.current = ''; setBackupAction(''); }
   };
   const videoPlaybackSettings = draft.videoPlayback;
   const inspirationLibrarySettings = draft.inspirationLibrary;
@@ -924,16 +1003,16 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       </SettingsPageGroup>
       <SettingsPageGroup title="备份">
       <SettingsRow title="启用工作区备份" description={!draft.backup.enabled ? '备份已关闭。' : backupStatus.state === 'protected' ? '工作区已保护。' : backupStatus.state === 'running' ? '正在备份。' : backupStatus.error || '备份已启用。'}><SettingsToggle label="启用工作区备份" checked={draft.backup.enabled} onChange={checked => { if (checked) void enableBackup(); else { setBackupTargetSetup(''); update('backup', { ...draft.backup, enabled: false }); } }}/></SettingsRow>
-      <SettingsRow title="备份方式" description="选择本地磁盘、外接硬盘或 NAS 网络存储。"><select disabled={!backupTargetConfigurable} value={activeBackupTargetType} onChange={event => void switchBackupTargetType(event.target.value as AppConfig['backup']['targetType'])} className="form-input ml-auto max-w-sm disabled:opacity-50"><option value="local">本地磁盘或外接硬盘</option><option value="nas">NAS 网络存储</option></select></SettingsRow>
-      {activeBackupTargetType === 'local' && <SettingsRow title="本地备份位置" description="位置离线时暂停备份，重新连接后可以继续。"><fieldset disabled={!backupTargetConfigurable} className="flex min-w-0 gap-2 disabled:opacity-50"><input readOnly value={draft.backup.targetType === 'local' ? draft.backup.targetPath : ''} placeholder="尚未选择备份位置" className="form-input min-w-0 flex-1"/><button type="button" onClick={() => void chooseBackupTarget()} className="dialog-secondary shrink-0">选择</button><button type="button" onClick={() => void window.electronAPI.openBackupTarget()} disabled={draft.backup.targetType !== 'local' || !draft.backup.targetPath} className="dialog-secondary shrink-0 disabled:opacity-45">打开</button></fieldset></SettingsRow>}
+      <SettingsRow title="备份方式" description="选择本地磁盘、外接硬盘或 NAS 网络存储。"><select disabled={!backupTargetConfigurable || Boolean(backupAction)} value={activeBackupTargetType} onChange={event => void switchBackupTargetType(event.target.value as AppConfig['backup']['targetType'])} className="form-input ml-auto max-w-sm disabled:opacity-50"><option value="local">本地磁盘或外接硬盘</option><option value="nas">NAS 网络存储</option></select></SettingsRow>
+      {activeBackupTargetType === 'local' && <SettingsRow title="本地备份位置" description="位置离线时暂停备份，重新连接后可以继续。"><fieldset disabled={!backupTargetConfigurable || Boolean(backupAction)} className="flex min-w-0 gap-2 disabled:opacity-50"><input readOnly value={draft.backup.targetType === 'local' ? draft.backup.targetPath : ''} placeholder="尚未选择备份位置" className="form-input min-w-0 flex-1"/><button type="button" onClick={() => void chooseBackupTarget()} className="dialog-secondary shrink-0">选择</button><button type="button" onClick={() => void window.electronAPI.openBackupTarget()} disabled={draft.backup.targetType !== 'local' || !draft.backup.targetPath} className="dialog-secondary shrink-0 disabled:opacity-45">打开</button></fieldset></SettingsRow>}
       {activeBackupTargetType === 'nas' && <>
         <SettingsRow title="NAS 共享路径" description={backupStatus.connection?.connected ? 'NAS 已连接。' : '输入 Windows 可访问的网络共享路径。'}><input value={nasPath} onChange={event => setNasPath(event.target.value)} placeholder="\\studio-nas\backup" className="form-input font-mono"/></SettingsRow>
         <SettingsRow title="NAS 登录凭据" description="密码保存在 Windows 凭据管理器，配置文件不保存明文。"><div className="grid gap-2 sm:grid-cols-2"><input value={nasUsername} onChange={event => setNasUsername(event.target.value)} autoComplete="username" placeholder="用户名" className="form-input"/><input type="password" value={nasPassword} onChange={event => setNasPassword(event.target.value)} autoComplete="new-password" placeholder={draft.backup.nas.credentialRef ? '已保存；留空则不更改' : '密码'} className="form-input"/></div></SettingsRow>
-        <SettingsRow title="保存并测试 NAS" description={backupStatus.connection?.checkedAt ? `上次验证：${new Date(backupStatus.connection.checkedAt).toLocaleString()}` : '保存配置并立即验证连接。'}><div className="ml-auto flex w-fit gap-2"><button type="button" onClick={() => void saveNas()} disabled={!nasPath.trim() || backupAction === 'nas-save'} className="dialog-primary disabled:opacity-45">{backupAction === 'nas-save' ? '正在测试…' : '保存并测试'}</button><button type="button" onClick={() => void window.electronAPI.openBackupTarget()} disabled={!draft.backup.enabled || draft.backup.targetType !== 'nas' || !draft.backup.targetPath} className="dialog-secondary disabled:opacity-45">打开</button></div></SettingsRow>
+        <SettingsRow title="保存并测试 NAS" description={backupStatus.connection?.checkedAt ? `上次验证：${new Date(backupStatus.connection.checkedAt).toLocaleString()}` : '保存配置并立即验证连接。'}><div className="ml-auto flex w-fit gap-2"><button type="button" onClick={() => void saveNas()} disabled={!nasPath.trim() || Boolean(backupAction)} className="dialog-primary disabled:opacity-45">{backupAction === 'nas-save' ? '正在测试…' : '保存并测试'}</button><button type="button" onClick={() => void window.electronAPI.openBackupTarget()} disabled={Boolean(backupAction) || !draft.backup.enabled || draft.backup.targetType !== 'nas' || !draft.backup.targetPath} className="dialog-secondary disabled:opacity-45">打开</button></div></SettingsRow>
         <SettingsRow title="限制 NAS 带宽" description="在工作时间避免备份占满局域网带宽。"><SettingsToggle label="限制 NAS 带宽" checked={draft.backup.nas.limitEnabled} onChange={checked => update('backup', { ...draft.backup, nas: { ...draft.backup.nas, limitEnabled: checked } })}/></SettingsRow>
         {draft.backup.nas.limitEnabled && <SettingsRow title="NAS 带宽限制时段" description="设置限速值和生效时间。"><div className="grid gap-2 sm:grid-cols-3"><input aria-label="NAS 带宽上限" type="number" min="1" max="1000" value={draft.backup.nas.bandwidthLimitMBps} onChange={event => update('backup', { ...draft.backup, nas: { ...draft.backup.nas, bandwidthLimitMBps: Math.max(1, Number(event.target.value) || 1) } })} className="form-input"/><input aria-label="NAS 限速开始时间" type="time" value={draft.backup.nas.limitStart} onChange={event => update('backup', { ...draft.backup, nas: { ...draft.backup.nas, limitStart: event.target.value } })} className="form-input"/><input aria-label="NAS 限速结束时间" type="time" value={draft.backup.nas.limitEnd} onChange={event => update('backup', { ...draft.backup, nas: { ...draft.backup.nas, limitEnd: event.target.value } })} className="form-input"/></div></SettingsRow>}
       </>}
-      <SettingsRow title="立即备份" description={backupStatus.latestAt ? `上次成功：${new Date(backupStatus.latestAt).toLocaleString()} · ${backupStatus.snapshotCount || 0} 个快照` : '立即为当前工作区创建备份。'}><button type="button" onClick={() => void runBackup()} disabled={!draft.backup.enabled || !draft.backup.targetPath || backupAction === 'run'} className="dialog-primary ml-auto flex w-fit items-center gap-2 disabled:opacity-45">{backupAction === 'run' ? <Loader2 size={15} className="animate-spin"/> : <ShieldCheck size={15}/>}立即备份</button></SettingsRow>
+      <SettingsRow title="立即备份" description={backupStatus.latestAt ? `上次成功：${new Date(backupStatus.latestAt).toLocaleString()} · ${backupStatus.snapshotCount || 0} 个快照` : '立即为当前工作区创建备份。'}><button type="button" onClick={() => void runBackup()} disabled={!draft.backup.enabled || !draft.backup.targetPath || Boolean(backupAction)} className="dialog-primary ml-auto flex w-fit items-center gap-2 disabled:opacity-45">{backupAction === 'run' ? <Loader2 size={15} className="animate-spin"/> : <ShieldCheck size={15}/>}立即备份</button></SettingsRow>
       <SettingsRow title="历史策略" description="选择保留全部历史快照或只保留最新状态。"><select value={draft.backup.mode} onChange={event => update('backup', { ...draft.backup, mode: event.target.value as AppConfig['backup']['mode'] })} className="form-input ml-auto max-w-sm"><option value="history">保留全部历史快照</option><option value="latest">仅保留最新快照</option></select></SettingsRow>
       {draft.backup.mode === 'history' && <SettingsRow title="历史快照保留" description="快照按日、周、月自动保留。"><p className="text-sm text-slate-500">最近 7 天每日一份 · 最近 4 周每周一份 · 最近 12 个月每月一份</p></SettingsRow>}
       <SettingsRow title="每天自动备份" description="每天首次启动时检查，24 小时内已有成功快照则跳过。"><SettingsToggle label="每天自动备份" checked={draft.backup.automaticDaily} onChange={checked => update('backup', { ...draft.backup, automaticDaily: checked })}/></SettingsRow>
@@ -1005,14 +1084,13 @@ const FeedbackSettings = ({ onNotice }: { onNotice: (message: string, duration?:
   const submit = async () => {
     if (trimmed.length < 2 || trimmed.length > 4000 || submitting) return;
     setSubmitting(true);
-    const result = await window.electronAPI.submitFeedback(trimmed);
-    setSubmitting(false);
-    if (!result.success) {
-      onNotice(result.error || '发送失败，请稍后重试', 5000);
-      return;
-    }
-    setMessage('');
-    onNotice('感谢反馈，已成功发送');
+    try {
+      const result = await window.electronAPI.submitFeedback(trimmed);
+      if (!result.success) { onNotice(result.error || '发送失败，请稍后重试', 5000); return; }
+      setMessage(''); onNotice('感谢反馈，已成功发送');
+    } catch (error) {
+      onNotice(`发送失败，请稍后重试：${error instanceof Error ? error.message : String(error)}`, 5000);
+    } finally { setSubmitting(false); }
   };
   return <SettingsPageGroup title="问题和建议">
     <div className="px-4 py-3.5"><div><h4 className="text-sm font-bold text-slate-800">反馈内容</h4><p className="mt-1 text-xs leading-5 text-slate-500">请描述问题或建议，不要填写密码、密钥或私人路径。</p></div><textarea value={message} maxLength={4000} rows={9} onChange={event => setMessage(event.target.value)} placeholder="例如：我在……操作后遇到了……；希望能够……" className="mt-3 w-full resize-y rounded-xl border border-slate-300 bg-white px-4 py-3 text-sm leading-6 text-slate-800 outline-none transition placeholder:text-slate-400 focus:border-blue-500 focus:ring-2 focus:ring-blue-100"/><div className="mt-2 flex items-center justify-between gap-4"><span className={`text-xs ${message.length >= 3900 ? 'text-amber-600' : 'text-slate-400'}`}>{message.length}/4000</span><button type="button" onClick={() => void submit()} disabled={trimmed.length < 2 || submitting} className="dialog-primary inline-flex items-center gap-2 disabled:opacity-45">{submitting ? <Loader2 size={14} className="animate-spin"/> : <Send size={14}/>} {submitting ? '正在发送…' : '发送'}</button></div></div>
@@ -1023,12 +1101,23 @@ const FeedbackSettings = ({ onNotice }: { onNotice: (message: string, duration?:
 const PrivacySettings = ({ telemetry, onChange, onNotice }: { telemetry: AppConfig['telemetry']; onChange: (telemetry: AppConfig['telemetry']) => void; onNotice: (message: string, duration?: number) => void }) => {
   const appDialog = useAppDialog();
   const [state, setState] = useState<PrivacyConsentState | null>(null);
-  useEffect(() => { void window.electronAPI.getPrivacyConsentState().then(setState); }, []);
+  const [faceSaving, setFaceSaving] = useState(false);
+  const [clearingTelemetry, setClearingTelemetry] = useState(false);
+  useEffect(() => {
+    let active = true;
+    void window.electronAPI.getPrivacyConsentState().then(value => { if (active) setState(value); }).catch(error => {
+      if (active) onNotice(`读取隐私设置失败：${error instanceof Error ? error.message : String(error)}`, 5000);
+    });
+    return () => { active = false; };
+  }, [onNotice]);
   const open = async (id: LegalDocumentId) => {
-    const result = await window.electronAPI.openLegalDocument(id);
-    if (!result.success) onNotice(`打开法律文件失败：${result.error || '未知错误'}`, 5000);
+    try {
+      const result = await window.electronAPI.openLegalDocument(id);
+      if (!result.success) onNotice(`打开法律文件失败：${result.error || '未知错误'}`, 5000);
+    } catch (error) { onNotice(`打开法律文件失败：${error instanceof Error ? error.message : String(error)}`, 5000); }
   };
   const setFaceConsent = async (granted: boolean) => {
+    if (faceSaving) return;
     if (granted && !await appDialog.confirm({
       title: '单独同意处理人脸信息',
       message: '人物身份识别会在本机提取人脸身份特征和身体外观特征，用于跨照片生成同一人物候选分组。',
@@ -1044,12 +1133,16 @@ const PrivacySettings = ({ telemetry, onChange, onNotice }: { telemetry: AppConf
       cancelLabel: '保留',
       tone: 'danger',
     })) return;
-    const result = await window.electronAPI.savePrivacyConsent({ faceRecognitionGranted: granted });
-    if (!result.success || !result.state) { onNotice(`保存人脸识别选择失败：${result.error || '未知错误'}`, 5000); return; }
-    setState(result.state);
-    onNotice(granted ? '已单独同意本地人脸身份识别' : '已撤回人脸身份识别同意');
+    setFaceSaving(true);
+    try {
+      const result = await window.electronAPI.savePrivacyConsent({ faceRecognitionGranted: granted });
+      if (!result.success || !result.state) { onNotice(`保存人脸识别选择失败：${result.error || '未知错误'}`, 5000); return; }
+      setState(result.state); onNotice(granted ? '已单独同意本地人脸身份识别' : '已撤回人脸身份识别同意');
+    } catch (error) { onNotice(`保存人脸识别选择失败：${error instanceof Error ? error.message : String(error)}`, 5000); }
+    finally { setFaceSaving(false); }
   };
   const clearTelemetry = async () => {
+    if (clearingTelemetry) return;
     if (!await appDialog.confirm({
       title: '重置本机统计标识吗？',
       message: '将删除尚未发送的统计与崩溃队列，并生成新的随机安装ID。已经发送到服务器的数据不会因此自动删除。',
@@ -1057,8 +1150,12 @@ const PrivacySettings = ({ telemetry, onChange, onNotice }: { telemetry: AppConf
       cancelLabel: '取消',
       tone: 'danger',
     })) return;
-    const result = await window.electronAPI.clearTelemetryLocalData();
-    onNotice(result.success ? '本机统计标识和待发送队列已重置' : `清理失败：${result.error || '未知错误'}`, 5000);
+    setClearingTelemetry(true);
+    try {
+      const result = await window.electronAPI.clearTelemetryLocalData();
+      onNotice(result.success ? '本机统计标识和待发送队列已重置' : `清理失败：${result.error || '未知错误'}`, 5000);
+    } catch (error) { onNotice(`清理失败：${error instanceof Error ? error.message : String(error)}`, 5000); }
+    finally { setClearingTelemetry(false); }
   };
   const legalDocuments: Array<[LegalDocumentId, string, string]> = [
     ['privacy', '隐私政策', '数据处理、保存期限和用户权利'],
@@ -1075,10 +1172,10 @@ const PrivacySettings = ({ telemetry, onChange, onNotice }: { telemetry: AppConf
     <SettingsPageGroup title="用户体验改善计划（自愿参加）">
       <SettingsRow title="发送使用统计" description="可随时关闭；包含随机安装ID、会话ID、版本、平台、功能代号、时间和数量区间。"><SettingsToggle label="发送使用统计" checked={telemetry.enabled} onChange={enabled => onChange({ ...telemetry, enabled })}/></SettingsRow>
       <SettingsRow title="发送崩溃报告" description="可随时关闭；包含错误类型、调用栈和脱敏后的错误日志尾部。"><SettingsToggle label="发送崩溃报告" checked={telemetry.crashReports} onChange={crashReports => onChange({ ...telemetry, crashReports })}/></SettingsRow>
-      <SettingsRow title="本机统计标识与队列" description="删除待发送队列并生成新的随机安装ID，不影响服务器已经接收的数据。"><button type="button" onClick={() => void clearTelemetry()} className="dialog-secondary ml-auto inline-flex w-fit items-center gap-2"><Trash2 size={14}/>重置</button></SettingsRow>
+      <SettingsRow title="本机统计标识与队列" description="删除待发送队列并生成新的随机安装ID，不影响服务器已经接收的数据。"><button type="button" disabled={clearingTelemetry} onClick={() => void clearTelemetry()} className="dialog-secondary ml-auto inline-flex w-fit items-center gap-2 disabled:opacity-50"><Trash2 size={14}/>{clearingTelemetry ? '正在重置…' : '重置'}</button></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="人脸身份识别">
-      <SettingsRow title="允许本机处理人脸特征" description="用于跨照片识别同一人物；可随时撤回，但不会自动删除已有项目数据。"><SettingsToggle label="允许本机处理人脸特征" checked={state?.faceRecognitionGranted === true} disabled={!state} onChange={checked => void setFaceConsent(checked)}/></SettingsRow>
+      <SettingsRow title="允许本机处理人脸特征" description="用于跨照片识别同一人物；可随时撤回，但不会自动删除已有项目数据。"><SettingsToggle label="允许本机处理人脸特征" checked={state?.faceRecognitionGranted === true} disabled={!state || faceSaving} onChange={checked => void setFaceConsent(checked)}/></SettingsRow>
       <SettingsRow title="人脸信息处理规则" description="查看敏感个人信息处理的单独说明。"><button type="button" onClick={() => void open('face')} className="dialog-secondary ml-auto flex w-fit items-center gap-2">查看<ExternalLink size={14}/></button></SettingsRow>
     </SettingsPageGroup>
     <SettingsPageGroup title="法律与数据说明">
@@ -1092,8 +1189,10 @@ const AboutSettings = () => {
   const [updateStatus, setUpdateStatus] = useState<'idle' | 'checking' | 'latest' | 'error'>('idle');
   const checkForUpdates = async () => {
     setUpdateStatus('checking');
-    const result = await window.electronAPI.checkForUpdates();
-    setUpdateStatus(result.success && !result.updateAvailable ? 'latest' : result.success ? 'idle' : 'error');
+    try {
+      const result = await window.electronAPI.checkForUpdates();
+      setUpdateStatus(result.success && !result.updateAvailable ? 'latest' : result.success ? 'idle' : 'error');
+    } catch { setUpdateStatus('error'); }
   };
   const openExternal = (url: string) => window.electronAPI.openExternal(url);
 
@@ -1113,21 +1212,27 @@ const AboutSettings = () => {
 };
 
 const MediaCacheSettings = ({ config, onChange }: { config: AppConfig['mediaCache']; onChange: (config: AppConfig['mediaCache']) => void }) => {
+  const toast = useUserFacingToast();
   const [info, setInfo] = useState({ path: '', sizeBytes: 0, fileCount: 0 });
   const [busy, setBusy] = useState(false);
   const [capacityInput, setCapacityInput] = useState(String(config.maxSizeGB));
+  const infoRequestRef = useRef(0);
   const refreshInfo = async (nextConfig = config) => {
-    const result = await window.electronAPI.getMediaCacheInfo(nextConfig);
-    if (result.success) setInfo(result);
+    const request = ++infoRequestRef.current;
+    try {
+      const result = await window.electronAPI.getMediaCacheInfo(nextConfig);
+      if (request === infoRequestRef.current && result.success) setInfo(result);
+    } catch (error) { if (request === infoRequestRef.current) toast.show(`读取缓存信息失败：${error instanceof Error ? error.message : String(error)}`, 5000); }
   };
   useEffect(() => { refreshInfo(); }, [config.directory, config.maxSizeGB]);
   useEffect(() => { setCapacityInput(String(config.maxSizeGB)); }, [config.maxSizeGB]);
   const chooseDirectory = async () => {
-    const result = await window.electronAPI.chooseCacheDirectory();
-    if (!result.path) return;
-    const next = { ...config, directory: result.path };
-    onChange(next);
-    refreshInfo(next);
+    try {
+      const result = await window.electronAPI.chooseCacheDirectory();
+      if (!result.path) return;
+      const next = { ...config, directory: result.path };
+      onChange(next); void refreshInfo(next);
+    } catch (error) { toast.show(`选择缓存目录失败：${error instanceof Error ? error.message : String(error)}`, 5000); }
   };
   const commitCapacity = () => {
     const maxSizeGB = normalizeMediaCacheSize(capacityInput);
@@ -1137,9 +1242,11 @@ const MediaCacheSettings = ({ config, onChange }: { config: AppConfig['mediaCach
   const clearAll = async () => {
     setBusy(true);
     try {
-      await window.electronAPI.clearMediaCache(config);
+      const result = await window.electronAPI.clearMediaCache(config);
+      if (!result.success) { toast.show(`清空缓存失败：${result.error || '未知错误'}`, 5000); return; }
       await refreshInfo();
-    } finally { setBusy(false); }
+    } catch (error) { toast.show(`清空缓存失败：${error instanceof Error ? error.message : String(error)}`, 5000); }
+    finally { setBusy(false); }
   };
   const sizeText = info.sizeBytes >= 1024 * 1024 * 1024 ? `${(info.sizeBytes / 1024 / 1024 / 1024).toFixed(2)} GB` : `${Math.round(info.sizeBytes / 1024 / 1024)} MB`;
   return <>
@@ -1166,6 +1273,8 @@ const InterfaceCacheSettings = ({ onNotice }: { onNotice: (message: string, dura
       if (!result.success) { onNotice(`清理界面缓存失败：${result.error || '未知错误'}`); return; }
       const clearedMB = Math.round((result.clearedBytes || 0) / 1024 / 1024);
       onNotice(`界面缓存已清理${clearedMB ? `，释放约 ${clearedMB} MB` : ''}`);
+    } catch (error) {
+      onNotice(`清理界面缓存失败：${error instanceof Error ? error.message : String(error)}`, 5000);
     } finally {
       setBusy(false);
     }

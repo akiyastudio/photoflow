@@ -61,6 +61,14 @@ const service = createConfigMutationService({ fs, crypto, getConfigPath: () => c
   const restoredTombstone = service.mergeRestoredConfig({ componentSettings: { fixture: { stale: true } }, componentSettingsRevisions: { fixture: 2 } }, { componentSettings: {}, componentSettingsRevisions: { fixture: 7 } }, 'D:/restored');
   assert.equal(Object.hasOwn(restoredTombstone.componentSettings, 'fixture'), false, 'a restored no-value revision is an explicit tombstone that removes the current namespace');
   assert.equal(restoredTombstone.componentSettingsRevisions.fixture, 8, 'restored tombstones receive a new monotonic revision');
+  const machineLocal = service.mergeRestoredConfig(
+    { telemetry: { enabled: false, crashReports: true }, workspacePath: 'C:/current', workspacePaths: ['C:/current'], backup: { targetPath: 'E:/current' }, componentSettings: {}, componentSettingsRevisions: {} },
+    { telemetry: { enabled: true, crashReports: false }, workspacePath: 'C:/snapshot', workspacePaths: ['C:/snapshot'], backup: { targetPath: 'F:/snapshot' }, componentSettings: {}, componentSettingsRevisions: {} },
+    'D:/restored',
+  );
+  assert.deepEqual(machineLocal.telemetry, { enabled: false, crashReports: true }, 'restore preserves the current telemetry choice');
+  assert.deepEqual(machineLocal.backup, { targetPath: 'E:/current' }, 'restore preserves current backup settings');
+  assert.deepEqual(machineLocal.workspacePaths, [path.resolve('D:/restored')], 'restore replaces snapshot workspace roots with one canonical destination');
   const restoredLegacy = service.mergeRestoredConfig({ componentSettings: {}, componentSettingsRevisions: {} }, legacyOnly, 'D:/restored');
   assert.equal(Object.hasOwn(restoredLegacy.componentSettings, 'fixture-adopter'), false, 'undeclared services do not interpret component-specific legacy settings');
   const declaredPath = path.join(root, 'declared-config.json'); fs.writeFileSync(declaredPath, JSON.stringify(legacyOnly));

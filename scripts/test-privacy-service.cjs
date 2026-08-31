@@ -77,9 +77,14 @@ try {
   assert.strictEqual(optedIn.service.getState().experienceProgramGranted, true, 'installer experience program choice must be imported independently');
 
   const applicationOnly = serviceFor('application-only');
-  await applicationOnly.service.saveConsent({ acceptCore: true, experienceProgramGranted: false });
+  await Promise.all([
+    applicationOnly.service.saveConsent({ acceptCore: true, experienceProgramGranted: false }),
+    applicationOnly.service.saveConsent({ faceRecognitionGranted: true }),
+  ]);
   assert.strictEqual(applicationOnly.service.hasCoreConsent(), true, 'core terms can be accepted without joining the experience program');
   assert.strictEqual(applicationOnly.service.getState().experienceProgramGranted, false);
+  assert.strictEqual(applicationOnly.service.hasFaceRecognitionConsent(), true, 'concurrent core and face consent writes must not lose fields');
+  assert.equal(fs.readdirSync(applicationOnly.userData).some(name => name.endsWith('.tmp')), false, 'atomic consent writes clean temporary files');
 
   await installed.service.saveConsent({ revokeCore: true });
   assert.strictEqual(installed.service.hasCoreConsent(), false, 'an old installer receipt must not undo an application withdrawal');

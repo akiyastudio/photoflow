@@ -10,11 +10,15 @@ type ConsentDialog = {
   }) => Promise<string | null>;
 };
 
-export const ensureFaceRecognitionConsent = async (dialog: ConsentDialog) => {
+let inFlightConsentRef: Promise<boolean> | null = null;
+
+const requestFaceRecognitionConsent = async (dialog: ConsentDialog) => {
   const api = window.electronAPI;
   if (api?.apiContractVersion !== 1 || typeof api.getPrivacyConsentState !== 'function'
     || typeof api.savePrivacyConsent !== 'function' || typeof api.openLegalDocument !== 'function') return false;
-  const state = await api.getPrivacyConsentState();
+  let state;
+  try { state = await api.getPrivacyConsentState(); }
+  catch { return false; }
   if (state.faceRecognitionGranted) return true;
 
   let choice: string | null = 'rules';
@@ -29,12 +33,24 @@ export const ensureFaceRecognitionConsent = async (dialog: ConsentDialog) => {
       ],
       cancelLabel: '暂不启用',
       defaultValue: 'agree',
+      cancelDefault: true,
     });
     if (choice === 'rules') {
-      await api.openLegalDocument('face');
+      try {
+        const opened = await api.openLegalDocument('face');
+        if (!opened.success) return false;
+      } catch { return false; }
     }
   }
   if (choice !== 'agree') return false;
-  const result = await api.savePrivacyConsent({ faceRecognitionGranted: true });
-  return result.success && result.state?.faceRecognitionGranted === true;
+  try {
+    const result = await api.savePrivacyConsent({ faceRecognitionGranted: true });
+    return result.success && result.state?.faceRecognitionGranted === true;
+  } catch { return false; }
+};
+
+export const ensureFaceRecognitionConsent = (dialog: ConsentDialog) => {
+  if (inFlightConsentRef) return inFlightConsentRef;
+  inFlightConsentRef = requestFaceRecognitionConsent(dialog).finally(() => { inFlightConsentRef = null; });
+  return inFlightConsentRef;
 };

@@ -66,9 +66,14 @@ export const UsagePreferencesOnboarding = ({ config, onSave }: { config: AppConf
         dateFilter: keepMany ? limitedDateFilter || 'today_yesterday' : 'all',
       },
     };
-    const saved = await onSave(nextConfig);
-    if (!saved) setError('设置没有保存成功，请重试。完成保存后才能进入照片流。');
-    setSaving(false);
+    try {
+      const saved = await onSave(nextConfig);
+      if (!saved) setError('设置没有保存成功，请重试。完成保存后才能进入照片流。');
+    } catch (reason) {
+      setError(`设置没有保存成功，请重试。${reason instanceof Error && reason.message ? `（${reason.message}）` : ''}`);
+    } finally {
+      setSaving(false);
+    }
   };
 
   return <main className="usage-onboarding">
