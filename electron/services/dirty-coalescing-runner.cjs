@@ -24,13 +24,18 @@ const createDirtyCoalescingRunner = ({
     nextRetryDelay: null,
     waiters: [],
     cancelled: false,
+    controller: new AbortController(),
+    predecessor: null,
     lastResult: undefined,
   });
 
   const settleCompleted = state => {
     const remaining = [];
     for (const waiter of state.waiters) {
-      if (waiter.generation <= state.completedGeneration) waiter.resolve(state.lastResult);
+      if (waiter.generation <= state.completedGeneration) {
+        waiter.signal?.removeEventListener('abort', waiter.onAbort);
+        waiter.resolve(state.lastResult);
+      }
       else remaining.push(waiter);
     }
     state.waiters = remaining;
@@ -39,11 +44,14 @@ const createDirtyCoalescingRunner = ({
   const rejectWaiters = (state, error) => {
     const waiters = state.waiters;
     state.waiters = [];
-    for (const waiter of waiters) waiter.reject(error);
+    for (const waiter of waiters) {
+      waiter.signal?.removeEventListener('abort', waiter.onAbort);
+      waiter.reject(error);
+    }
   };
 
   const schedule = (state, waitMs) => {
-    if (state.cancelled || state.executionPromise || state.retryTimer || !hasWork(state.pendingBatch)) return;
+    if (state.cancelled || state.executionPromise || state.retryTimer || state.predecessor || !hasWork(state.pendingBatch)) return;
     state.retryTimer = setTimeout(() => {
       state.retryTimer = null;
       void execute(state);
@@ -57,7 +65,7 @@ const createDirtyCoalescingRunner = ({
     state.pendingBatch = null;
     const batch = state.inFlightBatch;
     const generation = state.inFlightGeneration;
-    const execution = Promise.resolve().then(() => worker({ key: state.key, batch, generation }));
+    const execution = Promise.resolve().then(() => worker({ key: state.key, batch, generation, signal: state.controller.signal }));
     state.executionPromise = execution;
     void execution.then(result => {
       if (state.cancelled || states.get(state.key) !== state) return;
@@ -71,17 +79,36 @@ const createDirtyCoalescingRunner = ({
       if (state.cancelled || states.get(state.key) !== state) return;
       // Merge failed work before changes that arrived during execution. The
       // merge contract must preserve dominant flags such as fullScan.
-      state.pendingBatch = merge(state.inFlightBatch, state.pendingBatch);
+      try {
+        state.pendingBatch = merge(state.inFlightBatch, state.pendingBatch);
+      } catch (mergeError) {
+        state.inFlightBatch = null;
+        rejectWaiters(state, mergeError);
+        state.cancelled = true;
+        states.delete(state.key);
+        return;
+      }
       state.inFlightBatch = null;
       const retryIndex = state.retryAttempt;
       state.retryAttempt += 1;
       const willRetry = retryIndex < retryDelays.length;
-      onError(error, { key: state.key, batch: state.pendingBatch, generation, willRetry, retryAttempt: state.retryAttempt });
+      try {
+        onError(error, { key: state.key, batch: state.pendingBatch, generation, willRetry, retryAttempt: state.retryAttempt });
+      } catch (observerError) {
+        rejectWaiters(state, observerError);
+        state.cancelled = true;
+        states.delete(state.key);
+        return;
+      }
       if (willRetry) state.nextRetryDelay = retryDelays[retryIndex];
       else rejectWaiters(state, error);
     }).finally(() => {
       if (state.executionPromise === execution) state.executionPromise = null;
-      if (state.cancelled || states.get(state.key) !== state) return;
+      if (state.cancelled) {
+        if (states.get(state.key) === state) states.delete(state.key);
+        return;
+      }
+      if (states.get(state.key) !== state) return;
       if (state.nextRetryDelay != null) {
         const retryDelay = state.nextRetryDelay;
         state.nextRetryDelay = null;
@@ -96,21 +123,29 @@ const createDirtyCoalescingRunner = ({
     return execution;
   };
 
-  const enqueue = (key, delta) => {
+  const enqueue = (key, delta, options = {}) => {
     const normalizedKey = String(key || '');
     if (!normalizedKey) throw new TypeError('dirty runner key is required');
+    if (options.signal?.aborted) throw cancelledError(normalizedKey);
     let state = states.get(normalizedKey);
-    if (!state) {
+    if (!state || state.cancelled) {
+      const predecessor = state?.executionPromise || state?.predecessor || null;
       state = createState(normalizedKey);
+      if (predecessor) {
+        state.predecessor = Promise.resolve(predecessor).catch(() => undefined).finally(() => {
+          state.predecessor = null;
+          if (states.get(normalizedKey) === state) schedule(state, delayMs);
+        });
+      }
       states.set(normalizedKey, state);
     }
-    state.cancelled = false;
     state.pendingBatch = merge(state.pendingBatch, delta);
     state.generation += 1;
     // New external work reopens an exhausted retry cycle.
     if (!state.executionPromise && !state.retryTimer && state.retryAttempt > retryDelays.length) state.retryAttempt = 0;
     schedule(state, delayMs);
-    return Object.freeze({ key: normalizedKey, generation: state.generation });
+    const ticket = { key: normalizedKey, generation: state.generation, signal: options.signal || null };
+    return Object.freeze(ticket);
   };
 
   const flush = ticket => {
@@ -123,7 +158,16 @@ const createDirtyCoalescingRunner = ({
       state.retryTimer = null;
     }
     state.retryAttempt = 0;
-    const promise = new Promise((resolve, reject) => state.waiters.push({ generation, resolve, reject }));
+    const promise = new Promise((resolve, reject) => {
+      const waiter = { generation, resolve, reject, signal: ticket?.signal, onAbort: null };
+      waiter.onAbort = () => {
+        const index = state.waiters.indexOf(waiter);
+        if (index >= 0) state.waiters.splice(index, 1);
+        reject(cancelledError(ticket?.key));
+      };
+      waiter.signal?.addEventListener('abort', waiter.onAbort, { once: true });
+      state.waiters.push(waiter);
+    });
     if (!state.executionPromise) void execute(state);
     return promise;
   };
@@ -133,11 +177,12 @@ const createDirtyCoalescingRunner = ({
     const state = states.get(normalizedKey);
     if (!state) return false;
     state.cancelled = true;
+    state.controller.abort();
     if (state.retryTimer) clearTimeout(state.retryTimer);
     state.retryTimer = null;
     state.pendingBatch = null;
     rejectWaiters(state, cancelledError(normalizedKey));
-    states.delete(normalizedKey);
+    if (!state.executionPromise) states.delete(normalizedKey);
     return true;
   };
 

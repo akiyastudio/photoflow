@@ -1,4 +1,18 @@
-const defaultYield = delayMs => new Promise(resolve => setTimeout(resolve, delayMs));
+const cancelledError = () => Object.assign(new Error('任务已取消'), { code: 'TASK_CANCELLED' });
+const defaultYield = (delayMs, signal) => new Promise((resolve, reject) => {
+  if (signal?.aborted) return reject(cancelledError());
+  const timer = setTimeout(done, Math.max(0, Number(delayMs) || 0));
+  function done() {
+    signal?.removeEventListener('abort', abort);
+    resolve();
+  }
+  function abort() {
+    clearTimeout(timer);
+    signal?.removeEventListener('abort', abort);
+    reject(cancelledError());
+  }
+  signal?.addEventListener('abort', abort, { once: true });
+});
 
 const mergeNumericMetrics = (current, delta) => {
   const merged = { ...current };
@@ -24,7 +38,7 @@ const createBatchedSliceMetricsReporter = ({
   };
   const emit = (outcome, timestamp = now()) => {
     if (!aggregate) return;
-    writeLog('info', message, {
+    try { writeLog('info', message, {
       ...context,
       windowMs: Math.max(0, timestamp - windowStartedAt),
       sliceCount: aggregate.sliceCount,
@@ -35,7 +49,7 @@ const createBatchedSliceMetricsReporter = ({
       foregroundWaitMs: aggregate.foregroundWaitMs,
       maxSliceMs: aggregate.maxSliceMs,
       outcome,
-    });
+    }); } catch (_) { /* metrics observers must not affect maintenance */ }
     reset(timestamp);
   };
   const report = metrics => {
@@ -94,7 +108,7 @@ const runSlicedMaintenance = async ({
 
   const throwIfCancelled = () => {
     if (typeof task?.throwIfCancelled === 'function') task.throwIfCancelled();
-    else if (task?.signal?.aborted) throw Object.assign(new Error('任务已取消'), { code: 'TASK_CANCELLED' });
+    else if (task?.signal?.aborted) throw cancelledError();
   };
   const report = (nextProgress, message, metadata) => {
     progress = Math.max(progress, Math.max(0, Math.min(100, Number(nextProgress) || 0)));
@@ -109,7 +123,6 @@ const runSlicedMaintenance = async ({
       const sliceStartedAt = now();
       const previousFingerprint = stateFingerprint(state);
       const result = await runSlice({ state, firstSlice, deadlineAt, signal: task?.signal });
-      throwIfCancelled();
       state = result?.nextState === undefined ? state : result.nextState;
       metrics = mergeMetrics(metrics, result?.metricsDelta || {});
       processedCount += Math.max(0, Number(result?.processedDelta) || 0);
@@ -119,28 +132,33 @@ const runSlicedMaintenance = async ({
       const processedDelta = Math.max(0, Number(result?.processedDelta) || 0);
       stalledSlices = !complete && !cursorAdvanced && processedDelta === 0 ? stalledSlices + 1 : 0;
       sliceCount += 1;
-      reportSliceMetrics({
+      let observerError = null;
+      try { reportSliceMetrics({
         maintenanceSliceMs: Math.max(0, now() - sliceStartedAt),
         inspectedCount: Number(result?.metricsDelta?.recoveryInspectedCount || result?.metricsDelta?.inspectedCount) || 0,
         deletedCount: Number(result?.metricsDelta?.deletedCount) || 0,
         cursorAdvanced,
         pendingPhase: complete ? 'complete' : result?.phase || 'pending',
         foregroundWaitMs: Math.max(0, Number(result?.foregroundWaitMs) || 0),
-      });
-      reportProgress({ state, metrics, processedCount, phase: result?.phase, deadlineAt, complete, firstSlice, sliceCount, progress, report });
+      }); } catch (error) { observerError = error; }
+      try { reportProgress({ state, metrics, processedCount, phase: result?.phase, deadlineAt, complete, firstSlice, sliceCount, progress, report }); }
+      catch (error) { observerError ||= error; }
+      // A completed slice is committed atomically before cancellation is observed.
+      throwIfCancelled();
       if (stalledSlices >= Math.max(1, Number(maxStalledSlices) || 1)) {
         throw Object.assign(new Error(`maintenance made no progress for ${stalledSlices} consecutive slices`), { code: 'SLICED_MAINTENANCE_STALLED' });
       }
+      if (observerError) throw observerError;
       firstSlice = false;
       if (!complete) {
         throwIfCancelled();
-        await yieldBetweenSlices(yieldMs);
+        await yieldBetweenSlices(yieldMs, task?.signal);
         throwIfCancelled();
       }
     }
     return { complete, state, metrics, processedCount, sliceCount, progress };
   } catch (error) {
-    reportSliceMetrics.flush?.('failed');
+    try { reportSliceMetrics.flush?.('failed'); } catch (_) { /* preserve the business error */ }
     if (error && typeof error === 'object') {
       error.lastCommittedState = state;
       error.metrics = metrics;

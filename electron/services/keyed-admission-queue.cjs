@@ -3,6 +3,21 @@ const admissionError = (code, message) => Object.assign(new Error(message), { co
 const createKeyedAdmissionQueue = () => {
   const states = new Map();
   let stopped = false;
+  let tokenSequence = 0;
+
+  const grant = (key, state, waiter = null) => {
+    const token = { id: ++tokenSequence, key, released: false, legacyArmed: waiter === null };
+    state.active = token;
+    const releaseToken = () => release(token);
+    const lease = Object.freeze({ key, token: token.id, release: releaseToken });
+    if (waiter) {
+      // A stale duplicate release(key) from the previous owner must not release
+      // the newly promoted owner in the same turn.
+      queueMicrotask(() => { if (state.active === token) token.legacyArmed = true; });
+      waiter.resolve(lease);
+    }
+    return lease;
+  };
 
   const acquire = (rawKey, options = {}) => {
     const key = String(rawKey || '');
@@ -11,9 +26,9 @@ const createKeyedAdmissionQueue = () => {
     if (options.signal?.aborted) return Promise.reject(admissionError('ADMISSION_CANCELLED', `admission cancelled: ${key}`));
     let state = states.get(key);
     if (!state) {
-      state = { active: true, waiters: [] };
+      state = { active: null, waiters: [] };
       states.set(key, state);
-      return Promise.resolve();
+      return Promise.resolve(grant(key, state));
     }
     return new Promise((resolve, reject) => {
       const waiter = { resolve, reject, signal: options.signal, onAbort: null };
@@ -28,16 +43,22 @@ const createKeyedAdmissionQueue = () => {
   };
 
   const release = rawKey => {
-    const key = String(rawKey || '');
+    const token = rawKey && typeof rawKey === 'object' && Number.isFinite(rawKey.id) ? rawKey : null;
+    const key = token ? token.key : String(rawKey || '');
     const state = states.get(key);
     if (!state) return false;
+    const active = state.active;
+    if (!active || active.released || (token ? active !== token : !active.legacyArmed)) return false;
+    active.released = true;
+    active.legacyArmed = false;
     while (state.waiters.length) {
       const waiter = state.waiters.shift();
       waiter.signal?.removeEventListener('abort', waiter.onAbort);
       if (waiter.signal?.aborted) continue;
-      waiter.resolve();
+      grant(key, state, waiter);
       return true;
     }
+    state.active = null;
     states.delete(key);
     return true;
   };

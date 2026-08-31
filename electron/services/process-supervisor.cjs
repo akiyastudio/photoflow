@@ -26,11 +26,15 @@ class ManagedProcess extends EventEmitter {
     this.healthTimer = null;
     this.stopping = false;
     this.released = false;
+    this.lifecycle = null;
   }
 
   start() {
     if (this.released) throw new Error(`Managed process has been released: ${this.id}`);
     if (this.child && !this.child.killed) return this.child;
+    if (this.lifecycle && !this.lifecycle.settled) {
+      return this.lifecycle.settledPromise.then(() => this.start());
+    }
     clearTimeout(this.restartTimer);
     this.restartTimer = null;
     this.stopping = false;
@@ -50,22 +54,39 @@ class ManagedProcess extends EventEmitter {
       throw error;
     }
     this.child = child;
+    let resolveSettled;
+    const lifecycle = {
+      child, generation, stopRequested: false, settled: false, cleanupPromise: Promise.resolve(),
+      settledPromise: new Promise(resolve => { resolveSettled = resolve; }), resolveSettled,
+    };
+    this.lifecycle = lifecycle;
     this.state = 'running';
-    this.supervisor.log('info', 'Managed process started', this.details({ pid: child.pid, generation }));
+    this._safeLog('info', 'Managed process started', this.details({ pid: child.pid, generation }));
     child.stderr?.on?.('data', data => {
+      if (this.lifecycle !== lifecycle) return;
       this.stderrTail = (this.stderrTail + data.toString()).slice(-16000);
-      this.emit('stderr', data, child);
+      this._safeEmit('stderr', data, child);
     });
-    child.once('error', error => this._onError(child, generation, error));
-    child.once('exit', (code, signal) => this._onExit(child, generation, code, signal));
-    spec.onSpawn?.(child, this);
-    this.emit('spawn', child, generation);
+    child.once('error', error => this._onError(lifecycle, error));
+    child.once('exit', (code, signal) => { void this._onExit(lifecycle, code, signal); });
+    child.once('close', (code, signal) => { void this._onClose(lifecycle, code, signal); });
+    try {
+      spec.onSpawn?.(child, this);
+      this._safeEmit('spawn', child, generation);
+    } catch (error) {
+      this._safeLog('error', 'Managed process spawn hook failed', this.details({ generation, error: safeError(error) }));
+      lifecycle.stopRequested = true;
+      void this.stop('spawn-hook-failed', { release: false }).catch(stopError => {
+        this._safeLog('error', 'Managed process cleanup after spawn hook failed', this.details({ generation, error: safeError(stopError) }));
+      });
+      throw error;
+    }
     const startupTimeoutMs = Number(spec.health?.startupTimeoutMs) || 0;
     if (startupTimeoutMs > 0) {
       this.healthTimer = setTimeout(() => {
-        if (this.child !== child || this.lastHealthyAt >= this.startedAt) return;
-        this.supervisor.log('warn', 'Managed process health check timed out', this.details({ generation, startupTimeoutMs }));
-        this.recycle('startup-health-timeout');
+        if (this.lifecycle !== lifecycle || lifecycle.settled || this.lastHealthyAt >= this.startedAt) return;
+        this._safeLog('warn', 'Managed process health check timed out', this.details({ generation, startupTimeoutMs }));
+        void this.recycle('startup-health-timeout').catch(error => this._safeLog('error', 'Managed process recycle failed', this.details({ generation, error: safeError(error) })));
       }, startupTimeoutMs);
       this.healthTimer.unref?.();
     }
@@ -74,24 +95,30 @@ class ManagedProcess extends EventEmitter {
 
   markHealthy(metadata = {}) {
     if (!this.child || this.child.killed) return false;
+    if (metadata && Number.isFinite(metadata.generation) && metadata.generation !== this.generation) return false;
     this.lastHealthyAt = this.supervisor.now();
     clearTimeout(this.healthTimer);
     this.healthTimer = null;
     if (this.state !== 'healthy') {
       this.state = 'healthy';
-      this.supervisor.log('info', 'Managed process healthy', this.details(metadata));
+      this._safeLog('info', 'Managed process healthy', this.details(metadata));
     }
-    this.emit('healthy', metadata);
+    this._safeEmit('healthy', metadata);
     return true;
   }
 
-  recycle(reason = 'recycle-requested') {
-    const child = this.child;
-    if (!child || child.killed) return this.start();
-    this.supervisor.log('warn', 'Managed process recycled', this.details({ reason }));
-    this._restartReason = reason;
-    child.kill();
-    return child;
+  async recycle(reason = 'recycle-requested', { timeoutMs = 2000, rollbackSettleMs = 25 } = {}) {
+    const lifecycle = this.lifecycle;
+    if (!lifecycle || lifecycle.settled) return this.start();
+    this._safeLog('warn', 'Managed process recycled', this.details({ reason, generation: lifecycle.generation }));
+    lifecycle.stopRequested = true;
+    await stopProcessAndWait(lifecycle.child, timeoutMs, { rollbackSettleMs });
+    if (!lifecycle.exitObserved && (lifecycle.child.exitCode != null || lifecycle.child.signalCode != null)) {
+      await this._onExit(lifecycle, lifecycle.child.exitCode, lifecycle.child.signalCode);
+    }
+    await this._waitForLifecycle(lifecycle, timeoutMs);
+    if (this.released || this.stopping || this.supervisor.stopping) return null;
+    return this.start();
   }
 
   async stop(reason = 'shutdown', { release = true, timeoutMs = 2000, rollbackSettleMs = 25 } = {}) {
@@ -103,10 +130,16 @@ class ManagedProcess extends EventEmitter {
     this.restartTimer = null;
     this.healthTimer = null;
     const child = this.child;
+    const lifecycle = this.lifecycle;
+    if (lifecycle) lifecycle.stopRequested = true;
     await stopProcessAndWait(child, timeoutMs, { rollbackSettleMs });
+    if (lifecycle && !lifecycle.exitObserved && (child?.exitCode != null || child?.signalCode != null)) {
+      await this._onExit(lifecycle, child.exitCode, child.signalCode);
+    }
+    if (lifecycle) await this._waitForLifecycle(lifecycle, timeoutMs);
     if (this.child === child) this.child = null;
     this.state = 'stopped';
-    this.supervisor.log('info', 'Managed process stopped', this.details({ reason }));
+    this._safeLog('info', 'Managed process stopped', this.details({ reason }));
     if (release) this.release();
     return { stopped: true };
   }
@@ -136,34 +169,79 @@ class ManagedProcess extends EventEmitter {
     return { processId: this.id, processKind: this.kind, ...extra };
   }
 
+  _safeLog(level, message, details) {
+    try { this.supervisor.log(level, message, details); } catch (_) { /* logging must never break ownership */ }
+  }
+
+  _safeEmit(event, ...args) {
+    try { this.emit(event, ...args); }
+    catch (error) { this._safeLog('warn', 'Managed process observer failed', this.details({ event, error: safeError(error) })); }
+  }
+
   _failedToStart(error, generation) {
     this.state = 'failed';
     this.lastExit = { at: this.supervisor.now(), generation, error: safeError(error) };
-    this.supervisor.log('error', 'Managed process failed to start', this.details(this.lastExit));
+    this._safeLog('error', 'Managed process failed to start', this.details(this.lastExit));
   }
 
-  _onError(child, generation, error) {
-    if (this.child !== child) return;
-    this.supervisor.log('warn', 'Managed process error', this.details({ generation, error: safeError(error) }));
-    this.emit('process-error', error, child);
+  _onError(lifecycle, error) {
+    if (this.lifecycle !== lifecycle || lifecycle.settled) return;
+    this._safeLog('warn', 'Managed process error', this.details({ generation: lifecycle.generation, error: safeError(error) }));
+    this._safeEmit('process-error', error, lifecycle.child);
   }
 
-  _onExit(child, generation, code, signal) {
-    if (this.child === child) this.child = null;
+  async _onExit(lifecycle, code, signal) {
+    if (lifecycle.exitObserved) return lifecycle.settledPromise;
+    lifecycle.exitObserved = true;
+    const current = this.lifecycle === lifecycle;
+    if (current && this.child === lifecycle.child) this.child = null;
+    if (!current) return this._settleLifecycle(lifecycle);
     clearTimeout(this.healthTimer);
     this.healthTimer = null;
-    const expected = this.stopping;
-    this.lastExit = { at: this.supervisor.now(), generation, code, signal, expected, stderr: this.stderrTail.trim() };
+    const expected = this.stopping || lifecycle.stopRequested;
+    this.lastExit = { at: this.supervisor.now(), generation: lifecycle.generation, code, signal, expected, stderr: this.stderrTail.trim() };
     this.state = expected ? 'stopped' : 'exited';
-    this.supervisor.log(expected || code === 0 ? 'info' : 'warn', 'Managed process exited', this.details(this.lastExit));
+    this._safeLog(expected || code === 0 ? 'info' : 'warn', 'Managed process exited', this.details(this.lastExit));
     try {
-      const cleanup = this.specification.onExitCleanup?.({ owner: this.owner, child, exit: this.lastExit, managedProcess: this });
-      Promise.resolve(cleanup).catch(error => this.supervisor.log('warn', 'Managed process exit cleanup failed', this.details({ error: safeError(error) })));
-    } catch (error) { this.supervisor.log('warn', 'Managed process exit cleanup failed', this.details({ error: safeError(error) })); }
-    this.emit('exit', this.lastExit, child);
+      const cleanup = this.specification.onExitCleanup?.({ owner: this.owner, child: lifecycle.child, exit: this.lastExit, managedProcess: this });
+      lifecycle.cleanupPromise = Promise.resolve(cleanup);
+      if (cleanup && typeof cleanup.then === 'function') {
+        await lifecycle.cleanupPromise.catch(error => this._safeLog('warn', 'Managed process exit cleanup failed', this.details({ generation: lifecycle.generation, error: safeError(error) })));
+      }
+    } catch (error) { this._safeLog('warn', 'Managed process exit cleanup failed', this.details({ generation: lifecycle.generation, error: safeError(error) })); }
+    this._safeEmit('exit', this.lastExit, lifecycle.child);
+    this._settleLifecycle(lifecycle);
+    if (this.lifecycle !== lifecycle) return;
     if (this.specification.ephemeral) this.release();
-    else if (!expected) this._scheduleRestart(this._restartReason || 'unexpected-exit');
-    this._restartReason = null;
+    else if (!expected) this._scheduleRestart('unexpected-exit');
+  }
+
+  _onClose(lifecycle, code, signal) {
+    lifecycle.closeObserved = true;
+    if (!lifecycle.exitObserved) return this._onExit(lifecycle, code, signal);
+    return lifecycle.settledPromise;
+  }
+
+  _settleLifecycle(lifecycle) {
+    if (!lifecycle.settled) {
+      lifecycle.settled = true;
+      lifecycle.resolveSettled();
+    }
+    return lifecycle.settledPromise;
+  }
+
+  _waitForLifecycle(lifecycle, timeoutMs) {
+    if (lifecycle.settled) return lifecycle.settledPromise;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        const error = Object.assign(new Error('managed process lifecycle did not settle after termination'), {
+          code: 'PROCESS_LIFECYCLE_TIMEOUT', pid: lifecycle.child?.pid || null, generation: lifecycle.generation,
+        });
+        reject(error);
+      }, Math.max(1, Number(timeoutMs) || 2000));
+      timer.unref?.();
+      lifecycle.settledPromise.then(() => { clearTimeout(timer); resolve(); });
+    });
   }
 
   _scheduleRestart(reason) {
@@ -176,8 +254,8 @@ class ManagedProcess extends EventEmitter {
     this.restartTimes = this.restartTimes.filter(value => now - value <= policy.windowMs);
     if (this.restartTimes.length >= policy.maxRestarts) {
       this.state = 'failed';
-      this.supervisor.log('error', 'Managed process restart limit reached', this.details({ reason, maxRestarts: policy.maxRestarts }));
-      this.emit('restart-exhausted', this.status());
+      this._safeLog('error', 'Managed process restart limit reached', this.details({ reason, maxRestarts: policy.maxRestarts }));
+      this._safeEmit('restart-exhausted', this.status());
       return false;
     }
     const attempt = this.restartTimes.length;
@@ -185,11 +263,11 @@ class ManagedProcess extends EventEmitter {
     const delays = Array.isArray(policy.backoffMs) && policy.backoffMs.length ? policy.backoffMs : [Number(policy.backoffMs) || 0];
     const delayMs = Math.max(0, Number(delays[Math.min(attempt, delays.length - 1)]) || 0);
     this.state = 'restarting';
-    this.supervisor.log('warn', 'Managed process restart scheduled', this.details({ reason, attempt: attempt + 1, delayMs }));
-    this.emit('restarting', { reason, attempt: attempt + 1, delayMs });
+    this._safeLog('warn', 'Managed process restart scheduled', this.details({ reason, attempt: attempt + 1, delayMs }));
+    this._safeEmit('restarting', { reason, attempt: attempt + 1, delayMs });
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
-      if (!this.stopping && !this.released) this.start();
+      if (!this.stopping && !this.released) Promise.resolve(this.start()).catch(error => this._safeLog('error', 'Managed process restart failed', this.details({ error: safeError(error) })));
     }, delayMs);
     this.restartTimer.unref?.();
     return true;
@@ -220,7 +298,9 @@ class ProcessSupervisor {
     try {
       managed.start();
     } catch (error) {
-      managed.release();
+      if (managed.child) {
+        void managed.stop('launch-failed').catch(stopError => managed._safeLog('error', 'Managed process launch cleanup failed', managed.details({ error: safeError(stopError) })));
+      } else managed.release();
       throw error;
     }
     return managed;

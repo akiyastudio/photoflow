@@ -4,12 +4,28 @@ const path = require('path');
 const { AsyncLocalStorage } = require('async_hooks');
 const { resolveBackgroundTaskPolicy } = require('./background-task-policies.cjs');
 const { migrateBackgroundTaskPayload } = require('./background-task-migrations.cjs');
-const { BACKGROUND_TASK_PERSISTENCE_VERSION } = require('./background-task-policy-versions.cjs');
+const { BACKGROUND_TASK_PERSISTENCE_VERSION, projectBackgroundTaskCapabilities } = require('./background-task-policy-versions.cjs');
 
 const TERMINAL_STATES = new Set(['completed', 'failed', 'cancelled']);
 const HISTORY_STATES = new Set([...TERMINAL_STATES, 'interrupted']);
 const DISMISSIBLE_STATES = new Set([...TERMINAL_STATES, 'interrupted']);
 const ACTIVE_STATES = new Set(['queued', 'running', 'pausing', 'paused', 'resuming']);
+const MAX_PERSISTENCE_BYTES = 8 * 1024 * 1024;
+const MAX_PERSISTED_TASKS = 5000;
+const MAX_VALUE_DEPTH = 24;
+const MAX_VALUE_NODES = 50000;
+
+const controlledClone = (value, limits = {}, depth = 0, budget = { nodes: 0 }) => {
+  const maxDepth = limits.maxDepth || MAX_VALUE_DEPTH;
+  const maxNodes = limits.maxNodes || MAX_VALUE_NODES;
+  if (depth > maxDepth || ++budget.nodes > maxNodes) throw Object.assign(new Error('background task data exceeds safety limits'), { code: 'TASK_DATA_TOO_LARGE' });
+  if (value === null || value === undefined || typeof value === 'boolean' || typeof value === 'number' || typeof value === 'string') return value;
+  if (Array.isArray(value)) return value.map(item => controlledClone(item, limits, depth + 1, budget));
+  if (typeof value !== 'object') return undefined;
+  const clone = {};
+  for (const [key, item] of Object.entries(value)) clone[key] = controlledClone(item, limits, depth + 1, budget);
+  return clone;
+};
 
 const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => Date.now(), persistencePath = '', writeLog = () => undefined }) => {
   const tasks = new Map();
@@ -18,6 +34,12 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   const typeResumeFactories = new Map();
   const restartFactories = new Map();
   const typeRestartFactories = new Map();
+  const typeResumeRegistrations = new Map();
+  const typeRestartRegistrations = new Map();
+  const resumeFactoryOwners = new Map();
+  const restartFactoryOwners = new Map();
+  const retryFactoryOwners = new Map();
+  const autoRestartTimers = new Map();
   const activeByKey = new Map();
   const completionByTaskId = new Map();
   const retryStarts = new Map();
@@ -27,17 +49,36 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   let persistenceTimer = null;
   let revision = 0;
   let resourceLeaseSequence = 0;
+  let persistenceReadOnlyReason = '';
 
-  const normalizeResource = value => String(value || '').replace(/[\\/]+/g, '/').replace(/\/+$/, '').toLocaleLowerCase();
+  const safeLog = (level, message, details) => {
+    try { writeLog(level, message, details); } catch (_) { /* logging is best effort */ }
+  };
+  const safeEmit = (event, payload) => {
+    try { eventBus.emit(event, payload); }
+    catch (error) { safeLog('warn', 'Background task observer failed', { event, error: error?.message || String(error) }); }
+  };
+
+  const normalizeResource = value => {
+    const input = String(value || '').trim();
+    if (!input) return '';
+    const windowsStyle = process.platform === 'win32' || /^[a-zA-Z]:[\\/]/.test(input) || input.startsWith('\\\\');
+    const pathApi = windowsStyle ? path.win32 : path.posix;
+    let normalized = pathApi.normalize(input.replace(windowsStyle ? /\//g : /\\/g, pathApi.sep));
+    const root = pathApi.parse(normalized).root;
+    while (normalized.length > root.length && normalized.endsWith(pathApi.sep)) normalized = normalized.slice(0, -1);
+    if (windowsStyle) normalized = normalized.toLocaleLowerCase('en-US');
+    return normalized.replace(/\\/g, '/');
+  };
   const normalizeResourceRequest = (value, defaultAccess) => {
     const requestedPath = value && typeof value === 'object' ? value.path : value;
     const normalizedPath = normalizeResource(requestedPath);
-    if (!normalizedPath) return null;
+    if (!normalizedPath || normalizedPath === '..' || normalizedPath.startsWith('../')) return null;
     const requestedAccess = value && typeof value === 'object' ? value.access : defaultAccess;
     return { path: normalizedPath, access: requestedAccess === 'read' ? 'read' : 'write' };
   };
   const normalizeCapacityRequest = (value, fallback = {}) => {
-    const key = String(value && typeof value === 'object' ? value.key || value.kind : value || '').trim();
+    const key = String(value && typeof value === 'object' ? value.key || value.kind : value || '').trim().toLocaleLowerCase('en-US');
     if (!key) return null;
     const access = value && typeof value === 'object' ? value.access : fallback.access;
     const limit = value && typeof value === 'object' ? value.limit : fallback.limit;
@@ -45,11 +86,13 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     return {
       key,
       access: access === 'read' ? 'read' : 'write',
-      limit: Math.max(1, Number(limit) || 1),
-      writeLimit: Math.max(1, Number(writeLimit) || Number(limit) || 1),
+      limit: Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 1,
+      writeLimit: Number.isInteger(Number(writeLimit)) && Number(writeLimit) > 0
+        ? Number(writeLimit) : Number.isInteger(Number(limit)) && Number(limit) > 0 ? Number(limit) : 1,
     };
   };
-  const resourcesConflict = (left, right) => left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`);
+  const isWithin = (value, parent) => value.startsWith(parent.endsWith('/') ? parent : `${parent}/`);
+  const resourcesConflict = (left, right) => left === right || isWithin(left, right) || isWithin(right, left);
   const blockingReservationIds = waiter => {
     const blockers = new Set();
     const activeReservations = [...reservations.entries()].filter(([, item]) => item.taskId !== waiter.taskId);
@@ -117,16 +160,32 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     const capacitiesByKey = new Map();
     for (const requested of definition.capacities || []) {
       const capacity = normalizeCapacityRequest(requested);
-      if (capacity) capacitiesByKey.set(capacity.key, capacity);
+      if (capacity) {
+        const existing = capacitiesByKey.get(capacity.key);
+        capacitiesByKey.set(capacity.key, existing ? {
+          key: capacity.key,
+          access: existing.access === 'write' || capacity.access === 'write' ? 'write' : 'read',
+          limit: Math.min(existing.limit, capacity.limit),
+          writeLimit: Math.min(existing.writeLimit, capacity.writeLimit),
+        } : capacity);
+      }
     }
-    const legacyGroup = String(definition.concurrencyGroup || '');
-    if (legacyGroup && !capacitiesByKey.has(legacyGroup)) {
+    const legacyGroup = String(definition.concurrencyGroup || '').trim().toLocaleLowerCase('en-US');
+    if (legacyGroup) {
       const capacity = normalizeCapacityRequest(legacyGroup, {
         access,
         limit: definition.concurrencyLimit,
         writeLimit: definition.concurrencyWriteLimit,
       });
-      if (capacity) capacitiesByKey.set(capacity.key, capacity);
+      if (capacity) {
+        const existing = capacitiesByKey.get(capacity.key);
+        capacitiesByKey.set(capacity.key, existing ? {
+          key: capacity.key,
+          access: existing.access === 'write' || capacity.access === 'write' ? 'write' : 'read',
+          limit: Math.min(existing.limit, capacity.limit),
+          writeLimit: Math.min(existing.writeLimit, capacity.writeLimit),
+        } : capacity);
+      }
     }
     const capacities = [...capacitiesByKey.values()];
     if (!resources.length && !capacities.length) return Promise.resolve('');
@@ -174,10 +233,11 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
 
   const publicTask = task => {
     const { controller: _controller, pauseRequested: _pauseRequested, pauseWaiters: _pauseWaiters, ...value } = task;
-    return { ...value };
+    return controlledClone(value);
   };
   const flushPersistence = () => {
     if (!persistencePath) return true;
+    if (persistenceReadOnlyReason) return false;
     try {
       const directory = path.dirname(persistencePath);
       const temporaryPath = `${persistencePath}.tmp`;
@@ -189,12 +249,12 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       fs.renameSync(temporaryPath, persistencePath);
       return true;
     } catch (error) {
-      eventBus.emit('background-task:persistence-error', { error: error?.message || String(error), path: persistencePath });
+      safeEmit('background-task:persistence-error', { error: error?.message || String(error), path: persistencePath });
       return false;
     }
   };
   const schedulePersistence = () => {
-    if (!persistencePath || persistenceTimer) return;
+    if (!persistencePath || persistenceReadOnlyReason || persistenceTimer) return;
     persistenceTimer = setTimeout(() => {
       persistenceTimer = null;
       flushPersistence();
@@ -207,16 +267,22 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     retryFactories.delete(id);
     resumeFactories.delete(id);
     restartFactories.delete(id);
+    retryFactoryOwners.delete(id);
+    resumeFactoryOwners.delete(id);
+    restartFactoryOwners.delete(id);
     return true;
   };
   const emitDelta = (upserts = [], removeIds = []) => {
     revision += 1;
-    eventBus.emit('background-task:changed', {
-      revision,
-      upserts: upserts.map(publicTask),
-      removeIds: [...new Set(removeIds)],
-    });
-    schedulePersistence();
+    try {
+      safeEmit('background-task:changed', {
+        revision,
+        upserts: upserts.map(publicTask),
+        removeIds: [...new Set(removeIds)],
+      });
+    } catch (error) {
+      safeLog('warn', 'Background task delta serialization failed', { error: error?.message || String(error) });
+    } finally { schedulePersistence(); }
   };
   const publish = task => {
     const upserts = [];
@@ -226,7 +292,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       if (task.state === 'completed' || task.state === 'failed') {
         if (previous && deleteTaskInternal(previous.id)) removeIds.push(previous.id);
         if (task.historyPolicy === 'ephemeral' || (task.state === 'completed' && resolveBackgroundTaskPolicy(task).successHistory === 'auto-clear')) {
-          if (task.state === 'failed') writeLog('error', 'Ephemeral background task failed', {
+          if (task.state === 'failed') safeLog('error', 'Ephemeral background task failed', {
             taskId: task.id, type: task.type, error: task.error || task.message, metadata: task.metadata,
           });
           if (deleteTaskInternal(task.id)) removeIds.push(task.id);
@@ -246,7 +312,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
         }
       }
     } else if ((task.historyPolicy === 'ephemeral' || (task.state === 'completed' && resolveBackgroundTaskPolicy(task).successHistory === 'auto-clear')) && HISTORY_STATES.has(task.state)) {
-      if (task.state === 'failed') writeLog('error', 'Ephemeral background task failed', {
+      if (task.state === 'failed') safeLog('error', 'Ephemeral background task failed', {
         taskId: task.id,
         type: task.type,
         error: task.error || task.message,
@@ -276,14 +342,22 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     return true;
   };
 
-  const createHandle = (definition, retryFactory = null) => {
+  const createHandle = (definition, retryFactory = null, { deferPublish = false } = {}) => {
+    definition = { ...definition,
+      metadata: controlledClone(definition?.metadata || {}),
+      checkpoint: controlledClone(definition?.checkpoint),
+    };
     const replacementContext = retryContext.getStore();
     const mayClaimRetry = definition.retryReplacement !== false;
     const dedupeKey = definition.dedupeKey || '';
     const activeId = dedupeKey ? activeByKey.get(dedupeKey) : '';
     if (activeId) {
       const activeTask = tasks.get(activeId);
-      if (replacementContext && mayClaimRetry && activeTask?.retryOfTaskId === replacementContext.task.id) {
+      const mayClaimActive = replacementContext && mayClaimRetry && (
+        activeTask?.retryOfTaskId === replacementContext.task.id
+        || (replacementContext.kind !== 'retry' && activeTask?.type === replacementContext.task.type)
+      );
+      if (mayClaimActive) {
         replacementContext.claimed = true;
         replacementContext.replacement = activeTask;
         replacementContext.deduplicated = true;
@@ -295,9 +369,10 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       }
       return { deduplicated: true, task: publicTask(activeTask) };
     }
-    const retryOfTask = replacementContext && mayClaimRetry && !replacementContext.closed && !replacementContext.claimed
-      && replacementContext.task && tasks.get(replacementContext.task.id) === replacementContext.task
+    const replacementSource = replacementContext && mayClaimRetry && !replacementContext.closed && !replacementContext.claimed
+      && replacementContext.task && (tasks.get(replacementContext.task.id) === replacementContext.task || replacementContext.sourceRemoved)
       ? replacementContext.task : null;
+    const retryOfTask = replacementContext?.kind === 'retry' ? replacementSource : null;
     const requestedDefinitionId = String(definition.id || '');
     const requestedId = retryOfTask && requestedDefinitionId === retryOfTask.id ? '' : requestedDefinitionId;
     const existing = requestedId ? tasks.get(requestedId) : null;
@@ -305,12 +380,11 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     const createdAt = now();
     const policy = resolveBackgroundTaskPolicy(definition);
     const resumeFactory = typeof definition.resumeFactory === 'function' ? definition.resumeFactory : null;
-    const capabilities = {
+    const capabilities = projectBackgroundTaskCapabilities(policy, {
       cancellable: definition.cancellable !== false,
-      pausable: Boolean(policy.pausable),
       resumable: Boolean(policy.resumable && resumeFactory),
       retryable: Boolean(retryFactory),
-    };
+    });
     const task = {
       id: requestedId || crypto.randomUUID(),
       type: definition.type,
@@ -334,7 +408,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       retryPending: false,
       checkpointVersion: Math.max(1, Number(definition.checkpointVersion) || 1),
       checkpoint: definition.checkpoint,
-      metadata: definition.metadata || {},
+      metadata: definition.metadata,
       createdAt,
       updatedAt: createdAt,
       startedAt: 0,
@@ -347,19 +421,30 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     if (dedupeKey) activeByKey.set(dedupeKey, task.id);
     if (retryFactory) retryFactories.set(task.id, retryFactory);
     if (resumeFactory) resumeFactories.set(task.id, resumeFactory);
-    if (retryOfTask) {
+    let published = false;
+    const publishInitial = () => {
+      if (published) return;
+      published = true;
+      if (retryOfTask) {
+        emitDelta([retryOfTask, task], []);
+        replacementContext.resolveStart(task);
+      } else if (replacementSource) {
+        emitDelta([task], replacementSource.id === task.id ? [] : [replacementSource.id]);
+        replacementContext.resolveStart(task);
+      } else publish(task);
+    };
+    if (replacementSource) {
       replacementContext.claimed = true;
       replacementContext.replacement = task;
-      Object.assign(retryOfTask, {
-        replacedByTaskId: task.id,
-        retryPending: true,
-        retryable: false,
-        capabilities: { ...retryOfTask.capabilities, retryable: false },
-        updatedAt: now(),
-      });
-      emitDelta([retryOfTask, task], []);
-      replacementContext.resolveStart(task);
-    } else publish(task);
+      if (retryOfTask) Object.assign(retryOfTask, {
+          replacedByTaskId: task.id,
+          retryPending: true,
+          retryable: false,
+          capabilities: { ...retryOfTask.capabilities, retryable: false },
+          updatedAt: now(),
+        });
+    }
+    if (!deferPublish) publishInitial();
     const context = {
       id: task.id,
       signal: task.controller.signal,
@@ -368,7 +453,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
         update(task, {
           progress: Math.max(task.progress, Math.max(0, Math.min(100, Number(progress) || 0))),
           message,
-          ...(metadata ? { metadata: { ...task.metadata, ...metadata } } : {}),
+          ...(metadata ? { metadata: { ...task.metadata, ...controlledClone(metadata) } } : {}),
         });
       },
       setCancellable: cancellable => {
@@ -391,13 +476,13 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       saveCheckpoint: (checkpoint, progress = task.progress, message = task.message, metadata) => {
         if (task.controller.signal.aborted || TERMINAL_STATES.has(task.state)) return;
         update(task, {
-          checkpoint,
+          checkpoint: controlledClone(checkpoint),
           progress: Math.max(task.progress, Math.max(0, Math.min(100, Number(progress) || 0))),
           message,
-          ...(metadata ? { metadata: { ...task.metadata, ...metadata } } : {}),
+          ...(metadata ? { metadata: { ...task.metadata, ...controlledClone(metadata) } } : {}),
         });
       },
-      getCheckpoint: () => task.checkpoint,
+      getCheckpoint: () => controlledClone(task.checkpoint),
       throwIfCancelled: () => {
         if (task.controller.signal.aborted) {
           const error = new Error('任务已取消');
@@ -453,6 +538,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       deduplicated: false,
       task: publicTask(task),
       context,
+      publishInitial,
       startLifecycle,
       waitForStart: async () => {
         const requiresLease = Boolean(
@@ -472,12 +558,14 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   };
 
   const start = (definition, worker, retryFactory = null) => {
-    const handle = createHandle(definition, retryFactory);
+    const handle = createHandle(definition, retryFactory, { deferPublish: true });
     if (handle.deduplicated) {
       const completion = completionByTaskId.get(handle.task.id) || Promise.resolve({ task: handle.task, deduplicated: true });
       return { task: handle.task, deduplicated: true, completion };
     }
-    const completion = (async () => {
+    // Defer execution one microtask so completion ownership is registered
+    // before lifecycle deltas or user code can observe the task.
+    const completion = Promise.resolve().then(async () => {
       try {
         handle.startLifecycle();
         const requiresLease = Boolean(
@@ -498,8 +586,9 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
         if (!cancelled) throw error;
         return { task: tasks.has(handle.task.id) ? publicTask(tasks.get(handle.task.id)) : handle.snapshot(), cancelled: true };
       }
-    })();
+    });
     completionByTaskId.set(handle.task.id, completion);
+    handle.publishInitial();
     completion.then(
       () => { if (completionByTaskId.get(handle.task.id) === completion) completionByTaskId.delete(handle.task.id); },
       () => { if (completionByTaskId.get(handle.task.id) === completion) completionByTaskId.delete(handle.task.id); },
@@ -569,6 +658,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     const started = new Promise((resolve, reject) => { resolveStart = resolve; rejectStart = reject; });
     void started.catch(() => undefined);
     const replacementContext = {
+      kind: 'retry',
       task,
       replacement: null,
       conflict: null,
@@ -628,11 +718,21 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     if (!factory || !task || task.state !== 'interrupted') throw new Error('该任务当前不能继续');
     tasks.delete(id);
     resumeFactories.delete(id);
+    resumeFactoryOwners.delete(id);
+    let resolveStart;
+    let rejectStart;
+    const started = new Promise((resolve, reject) => { resolveStart = resolve; rejectStart = reject; });
+    void started.catch(() => undefined);
+    const replacementContext = { kind: 'resume', task, sourceRemoved: true, claimed: false, closed: false, resolveStart, rejectStart };
     try {
-      const result = await factory(publicTask(task));
+      const execution = retryContext.run(replacementContext, () => factory(publicTask(task)));
+      const result = await execution;
+      if (replacementContext.claimed) await started;
+      else emitDelta([], [id]);
       schedulePersistence();
       return result;
     } catch (error) {
+      if (replacementContext.claimed) throw error;
       tasks.set(id, task);
       update(task, { state: 'failed', error: error?.message || String(error), message: error?.message || String(error), finishedAt: now(), resumeAvailable: false });
       throw error;
@@ -642,7 +742,9 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   const registerTypeResumeFactory = (type, factory, options = {}) => {
     const normalizedType = String(type || '');
     if (!normalizedType || typeof factory !== 'function') return () => undefined;
+    const registration = {};
     typeResumeFactories.set(normalizedType, factory);
+    typeResumeRegistrations.set(normalizedType, registration);
     for (const task of tasks.values()) {
       if (task.type !== normalizedType || task.state !== 'interrupted') continue;
       if (typeof options.canResume === 'function' && !options.canResume(publicTask(task))) continue;
@@ -656,6 +758,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
         continue;
       }
       resumeFactories.set(task.id, () => factory(publicTask(task)));
+      resumeFactoryOwners.set(task.id, registration);
       update(task, {
         resumable: true,
         resumeAvailable: true,
@@ -663,11 +766,15 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       });
     }
     return () => {
-      if (typeResumeFactories.get(normalizedType) !== factory) return;
+      if (typeResumeRegistrations.get(normalizedType) !== registration) return;
       typeResumeFactories.delete(normalizedType);
+      typeResumeRegistrations.delete(normalizedType);
       for (const task of tasks.values()) {
         if (task.type !== normalizedType || task.state !== 'interrupted') continue;
-        resumeFactories.delete(task.id);
+        if (resumeFactoryOwners.get(task.id) === registration) {
+          resumeFactories.delete(task.id);
+          resumeFactoryOwners.delete(task.id);
+        }
         update(task, { resumeAvailable: false });
       }
     };
@@ -679,14 +786,28 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     if (!factory || !task || task.state !== 'interrupted' || task.resumePolicy !== 'safe-restart') throw new Error('该任务当前不能重新执行');
     tasks.delete(id);
     restartFactories.delete(id);
+    restartFactoryOwners.delete(id);
+    let resolveStart;
+    let rejectStart;
+    const started = new Promise((resolve, reject) => { resolveStart = resolve; rejectStart = reject; });
+    void started.catch(() => undefined);
+    const replacementContext = { kind: 'restart', task, sourceRemoved: true, claimed: false, closed: false, resolveStart, rejectStart };
     try {
-      const result = await factory(publicTask(task));
+      const execution = retryContext.run(replacementContext, () => factory(publicTask(task)));
+      const result = await execution;
+      if (replacementContext.claimed) await started;
+      else emitDelta([], [id]);
       schedulePersistence();
       return result;
     } catch (error) {
+      if (replacementContext.claimed) throw error;
       tasks.set(id, task);
       const typeFactory = typeRestartFactories.get(task.type);
-      if (typeFactory) retryFactories.set(id, () => typeFactory(publicTask(task)));
+      const typeRegistration = typeRestartRegistrations.get(task.type);
+      if (typeFactory) {
+        retryFactories.set(id, () => typeFactory(publicTask(task)));
+        retryFactoryOwners.set(id, typeRegistration);
+      }
       update(task, {
         state: 'failed', error: error?.message || String(error), message: error?.message || String(error), finishedAt: now(),
         restartAvailable: false, retryable: Boolean(typeFactory), capabilities: { ...task.capabilities, retryable: Boolean(typeFactory) },
@@ -698,33 +819,56 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   const registerTypeRestartFactory = (type, factory, options = {}) => {
     const normalizedType = String(type || '');
     if (!normalizedType || typeof factory !== 'function') return () => undefined;
+    const registration = {};
+    const previousRegistration = typeRestartRegistrations.get(normalizedType);
+    for (const timer of autoRestartTimers.get(previousRegistration) || []) clearTimeout(timer);
+    autoRestartTimers.delete(previousRegistration);
     typeRestartFactories.set(normalizedType, factory);
+    typeRestartRegistrations.set(normalizedType, registration);
     const autoRestartIds = [];
     for (const task of tasks.values()) {
       if (task.type === normalizedType && task.state === 'failed' && !task.retryPending
           && (typeof options.canRestart !== 'function' || options.canRestart(publicTask(task)))) {
         retryFactories.set(task.id, () => factory(publicTask(task)));
+        retryFactoryOwners.set(task.id, registration);
         update(task, { retryable: true, capabilities: { ...task.capabilities, retryable: true } });
         continue;
       }
       if (task.type !== normalizedType || task.state !== 'interrupted' || task.resumePolicy !== 'safe-restart') continue;
       if (typeof options.canRestart === 'function' && !options.canRestart(publicTask(task))) continue;
       restartFactories.set(task.id, () => factory(publicTask(task)));
+      restartFactoryOwners.set(task.id, registration);
       update(task, { restartAvailable: true });
       if (options.autoRestart === true) autoRestartIds.push(task.id);
     }
     const autoRestartDelayMs = Math.max(0, Number(options.autoRestartDelayMs) || 0);
-    for (const id of autoRestartIds) setTimeout(() => void restart(id).catch(() => undefined), autoRestartDelayMs);
+    const ownedTimers = new Set();
+    autoRestartTimers.set(registration, ownedTimers);
+    for (const id of autoRestartIds) {
+      const timer = setTimeout(() => {
+        ownedTimers.delete(timer);
+        void restart(id).catch(() => undefined);
+      }, autoRestartDelayMs);
+      timer.unref?.();
+      ownedTimers.add(timer);
+    }
     return () => {
-      if (typeRestartFactories.get(normalizedType) !== factory) return;
+      if (typeRestartRegistrations.get(normalizedType) !== registration) return;
+      for (const timer of autoRestartTimers.get(registration) || []) clearTimeout(timer);
+      autoRestartTimers.delete(registration);
       typeRestartFactories.delete(normalizedType);
+      typeRestartRegistrations.delete(normalizedType);
       for (const task of tasks.values()) {
         if (task.type !== normalizedType) continue;
         if (task.state === 'interrupted') {
+          if (restartFactoryOwners.get(task.id) !== registration) continue;
           restartFactories.delete(task.id);
+          restartFactoryOwners.delete(task.id);
           update(task, { restartAvailable: false });
         } else if (task.state === 'failed') {
+          if (retryFactoryOwners.get(task.id) !== registration) continue;
           retryFactories.delete(task.id);
+          retryFactoryOwners.delete(task.id);
           update(task, { retryable: false, capabilities: { ...task.capabilities, retryable: false } });
         }
       }
@@ -740,6 +884,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   const upsertExternal = definition => {
     const id = String(definition?.id || '');
     if (!id || !definition?.type) return null;
+    const externalMetadata = controlledClone(definition.metadata || {});
     const requestedState = ['running', 'completed', 'failed', 'cancelled'].includes(definition.state) ? definition.state : 'running';
     const existing = tasks.get(id);
     const startsNewRun = !existing || (TERMINAL_STATES.has(existing.state) && requestedState === 'running');
@@ -752,7 +897,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       notificationPolicy: definition.notificationPolicy || 'progress-toast',
       historyPolicy: definition.historyPolicy,
       taskCenterPolicy: definition.taskCenterPolicy || 'always',
-      metadata: definition.metadata || {},
+      metadata: externalMetadata,
     });
     const task = tasks.get(id);
     if (!task) return null;
@@ -763,7 +908,7 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
       progress: requestedState === 'completed' ? 100 : nextProgress,
       message: definition.message || task.message,
       error: requestedState === 'failed' ? definition.error || definition.message || '任务失败' : '',
-      metadata: { ...task.metadata, ...(definition.metadata || {}), source: 'external-progress-bridge' },
+      metadata: { ...task.metadata, ...externalMetadata, source: 'external-progress-bridge' },
       startedAt: task.startedAt || now(),
       finishedAt: TERMINAL_STATES.has(requestedState) ? now() : 0,
     });
@@ -772,20 +917,54 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
 
   const restorePersistedTasks = () => {
     if (!persistencePath) return;
+    const readPayload = candidatePath => {
+      const stat = fs.statSync(candidatePath);
+      if (stat.size > MAX_PERSISTENCE_BYTES) throw Object.assign(new Error('background task history file is too large'), { code: 'TASK_HISTORY_TOO_LARGE' });
+      const parsed = JSON.parse(fs.readFileSync(candidatePath, 'utf8'));
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('background task history root must be an object');
+      if (Number(parsed.version) > BACKGROUND_TASK_PERSISTENCE_VERSION) {
+        throw Object.assign(new Error(`background task history version ${parsed.version} is newer than ${BACKGROUND_TASK_PERSISTENCE_VERSION}`), { code: 'TASK_HISTORY_FUTURE_VERSION' });
+      }
+      if (!Array.isArray(parsed.tasks) || parsed.tasks.length > MAX_PERSISTED_TASKS) {
+        throw Object.assign(new Error('background task history task count exceeds safety limits'), { code: 'TASK_HISTORY_TOO_LARGE' });
+      }
+      controlledClone(parsed);
+      return parsed;
+    };
+    let source;
     try {
-      const payload = migrateBackgroundTaskPayload(JSON.parse(fs.readFileSync(persistencePath, 'utf8')));
+      source = readPayload(persistencePath);
+    } catch (error) {
+      if (error?.code === 'ENOENT') {
+        try { source = readPayload(`${persistencePath}.tmp`); }
+        catch (temporaryError) {
+          if (temporaryError?.code !== 'ENOENT') safeLog('warn', 'Ignoring invalid temporary background task history', { path: `${persistencePath}.tmp`, error: temporaryError?.message || String(temporaryError) });
+          return;
+        }
+      } else {
+        persistenceReadOnlyReason = error?.code || 'TASK_HISTORY_CORRUPT';
+        safeEmit('background-task:persistence-error', { error: error?.message || String(error), path: persistencePath, readOnly: true, reason: persistenceReadOnlyReason });
+        if (error?.code === 'TASK_HISTORY_FUTURE_VERSION') return;
+        try {
+          source = readPayload(`${persistencePath}.tmp`);
+          safeLog('warn', 'Recovered background task history from temporary file in read-only mode', { path: `${persistencePath}.tmp` });
+        } catch (_) { return; }
+      }
+    }
+    try {
+      const payload = migrateBackgroundTaskPayload(source);
       const restored = payload.tasks;
       for (const value of restored) {
         if (!value?.id || !value?.type) continue;
         const policy = resolveBackgroundTaskPolicy(value);
         if ((value.historyPolicy || policy.historyPolicy) === 'ephemeral') continue;
         const wasActive = ACTIVE_STATES.has(value.state) || value.state === 'interrupted';
-        const capabilities = {
+        const capabilities = projectBackgroundTaskCapabilities(policy, {
           cancellable: false,
-          pausable: Boolean(value.capabilities?.pausable ?? policy.pausable),
+          pausable: value.capabilities?.pausable ?? policy.pausable,
           resumable: false,
           retryable: false,
-        };
+        });
         const state = wasActive ? 'interrupted' : value.state;
         const message = wasActive
           ? capabilities.resumable ? '任务在上次退出时中断，可从已保存进度继续' : value.resumePolicy === 'safe-restart' ? '任务在上次退出时中断，可安全重新执行' : '任务在上次退出时中断'
@@ -842,8 +1021,10 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
         .filter(task => HISTORY_STATES.has(task.state) && !task.retryPending)
         .sort((left, right) => right.updatedAt - left.updatedAt);
       for (const task of history.slice(maxHistory)) deleteTaskInternal(task.id);
-    } catch (_) {
-      // A missing or invalid history file is equivalent to an empty task history.
+    } catch (error) {
+      persistenceReadOnlyReason = persistenceReadOnlyReason || 'TASK_HISTORY_CORRUPT';
+      tasks.clear();
+      safeEmit('background-task:persistence-error', { error: error?.message || String(error), path: persistencePath, readOnly: true, reason: persistenceReadOnlyReason });
     }
   };
 
@@ -868,6 +1049,8 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     snapshot: () => ({ revision, tasks: [...tasks.values()].map(publicTask).sort((left, right) => right.createdAt - left.createdAt) }),
     get: id => tasks.has(id) ? publicTask(tasks.get(id)) : null,
     stop: () => {
+      for (const timers of autoRestartTimers.values()) for (const timer of timers) clearTimeout(timer);
+      autoRestartTimers.clear();
       for (const task of tasks.values()) if (!TERMINAL_STATES.has(task.state)) {
         task.controller.abort();
         for (const resolve of task.pauseWaiters) resolve();

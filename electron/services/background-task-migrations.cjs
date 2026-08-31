@@ -1,12 +1,18 @@
 const { resolveBackgroundTaskPolicy } = require('./background-task-policies.cjs');
-const { BACKGROUND_TASK_PERSISTENCE_VERSION } = require('./background-task-policy-versions.cjs');
+const {
+  BACKGROUND_TASK_PERSISTENCE_VERSION,
+  BACKGROUND_TASK_STATES,
+  BACKGROUND_TASK_ACTIVE_STATES,
+  BACKGROUND_TASK_POLICY_VALUES,
+  projectBackgroundTaskCapabilities,
+} = require('./background-task-policy-versions.cjs');
 
-const ACTIVE_STATES = new Set(['queued', 'running', 'pausing', 'paused', 'resuming', 'interrupted']);
-const STATES = new Set([...ACTIVE_STATES, 'completed', 'failed', 'cancelled']);
-const TASK_CENTER_POLICIES = new Set(['always', 'attention-only', 'hidden']);
-const RESUME_POLICIES = new Set(['atomic', 'checkpoint', 'safe-restart']);
-const NOTIFICATION_POLICIES = new Set(['silent', 'error-only', 'result-only', 'progress-toast', 'progress-and-result']);
-const HISTORY_POLICIES = new Set(['persistent', 'ephemeral']);
+const ACTIVE_STATES = new Set(BACKGROUND_TASK_ACTIVE_STATES);
+const STATES = new Set(BACKGROUND_TASK_STATES);
+const TASK_CENTER_POLICIES = new Set(BACKGROUND_TASK_POLICY_VALUES.taskCenterPolicy);
+const RESUME_POLICIES = new Set(BACKGROUND_TASK_POLICY_VALUES.resumePolicy);
+const NOTIFICATION_POLICIES = new Set(BACKGROUND_TASK_POLICY_VALUES.notificationPolicy);
+const HISTORY_POLICIES = new Set(BACKGROUND_TASK_POLICY_VALUES.historyPolicy);
 
 const isRecord = value => value && typeof value === 'object' && !Array.isArray(value);
 const validText = (value, maximum = 256) => typeof value === 'string' && value.length > 0
@@ -42,7 +48,7 @@ const normalizeTask = value => {
     progress: Math.max(0, Math.min(100, Number(value.progress) || 0)),
     message: text(value.message), error: text(value.error),
     cancellable: false, retryable: false, resumable, resumeAvailable: false, restartAvailable: false,
-    capabilities: { cancellable: false, pausable: Boolean(policy.pausable), resumable, retryable: false },
+    capabilities: projectBackgroundTaskCapabilities(policy, { cancellable: false, resumable, retryable: false }),
     resumePolicy: policy.resumePolicy,
     notificationPolicy: policy.notificationPolicy,
     historyPolicy: policy.historyPolicy,
