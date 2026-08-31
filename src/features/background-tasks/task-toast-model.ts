@@ -3,7 +3,6 @@ import type { BackgroundTask } from '../../types';
 const FAILURE_TOAST_MS = 10_000;
 const RESULT_TOAST_MS = 6_000;
 const TERMINAL_TASK_STATES = new Set<BackgroundTask['state']>(['completed', 'failed', 'cancelled', 'interrupted']);
-const ACTIVE_TASK_STATES = new Set<BackgroundTask['state']>(['queued', 'running', 'pausing', 'paused', 'resuming']);
 
 const twoDigits = (value: number) => String(value).padStart(2, '0');
 
@@ -40,7 +39,7 @@ export const compareTaskCenterPublishedAt = (left: TaskCenterPublishedTask, righ
   taskCenterPublishedAt(right) - taskCenterPublishedAt(left);
 
 export const normalizeBackgroundTaskSnapshots = (tasks: BackgroundTask[], limit = 200) => {
-  const retained = tasks.filter(task => task.historyPolicy !== 'ephemeral' && !TERMINAL_TASK_STATES.has(task.state));
+  const retained = tasks.filter(task => !TERMINAL_TASK_STATES.has(task.state));
   const history = tasks
     .filter(task => task.historyPolicy !== 'ephemeral' && TERMINAL_TASK_STATES.has(task.state))
     .sort((left, right) => right.updatedAt - left.updatedAt);
@@ -59,9 +58,7 @@ export const mergeBackgroundTaskSnapshots = (current: BackgroundTask[], incoming
 };
 
 export const collapseRetryPredecessors = (tasks: BackgroundTask[]) => {
-  const retrySources = new Set(tasks
-    .filter(task => task.retryOfTaskId && ACTIVE_TASK_STATES.has(task.state))
-    .map(task => String(task.retryOfTaskId)));
+  const retrySources = new Set(tasks.filter(task => task.retryOfTaskId).map(task => String(task.retryOfTaskId)));
   return tasks.filter(task => !retrySources.has(task.id));
 };
 
@@ -80,31 +77,32 @@ const showsProgressToast = (task: BackgroundTask) => task.notificationPolicy ===
 const showsSuccessToast = (task: BackgroundTask) => task.notificationPolicy === 'result-only'
   || task.notificationPolicy === 'progress-and-result';
 
-export const taskToastExpiresAt = (task: BackgroundTask) => task.state === 'failed'
-  ? task.updatedAt + FAILURE_TOAST_MS
+export const taskToastExpiresAt = (task: BackgroundTask, firstVisibleAt?: number) => task.state === 'failed'
+  ? (firstVisibleAt || task.updatedAt) + FAILURE_TOAST_MS
   : task.state === 'completed' && showsSuccessToast(task)
     ? task.updatedAt + RESULT_TOAST_MS
     : 0;
 
 export const taskToastLiveRole = (state: BackgroundTask['state']): 'alert' | 'status' | undefined => state === 'failed' ? 'alert' : state === 'completed' ? 'status' : undefined;
 
-export const isActiveProjectFileTask = (task: BackgroundTask, now = Date.now()) => {
+export const isActiveProjectFileTask = (task: BackgroundTask, now = Date.now(), firstVisibleAt?: number) => {
   const active = task.state === 'queued' || task.state === 'running' || task.state === 'pausing' || task.state === 'paused' || task.state === 'resuming';
   if (active) return showsProgressToast(task);
-  if (task.state === 'failed') return task.notificationPolicy !== 'silent' && now < taskToastExpiresAt(task);
+  if (task.state === 'failed') return task.notificationPolicy !== 'silent' && now < taskToastExpiresAt(task, firstVisibleAt);
   return task.state === 'completed' && showsSuccessToast(task) && now < taskToastExpiresAt(task);
 };
 
 export const compareProjectFileTasks = (left: BackgroundTask, right: BackgroundTask) => {
-  const priority = (task: BackgroundTask) => task.state === 'running' || task.state === 'resuming' ? 0
-    : task.state === 'paused' || task.state === 'pausing' ? 1
-      : task.state === 'queued' ? 2 : 3;
+  const priority = (task: BackgroundTask) => task.state === 'failed' ? 0
+    : task.state === 'running' || task.state === 'resuming' ? 1
+    : task.state === 'paused' || task.state === 'pausing' ? 2
+      : task.state === 'queued' ? 3 : 4;
   if (priority(left) !== priority(right)) return priority(left) - priority(right);
   return left.createdAt - right.createdAt;
 };
 
-export const selectProjectFileTaskToasts = (tasks: BackgroundTask[], minimizedTaskIds: ReadonlySet<string>, limit = 4, now = Date.now(), queuedDelayMs = 700) => {
-  const eligible = collapseRetryPredecessors(tasks).filter(task => isActiveProjectFileTask(task, now)
+export const selectProjectFileTaskToasts = (tasks: BackgroundTask[], minimizedTaskIds: ReadonlySet<string>, limit = 4, now = Date.now(), queuedDelayMs = 700, firstVisibleAt: ReadonlyMap<string, number> = new Map()) => {
+  const eligible = collapseRetryPredecessors(tasks).filter(task => isActiveProjectFileTask(task, now, firstVisibleAt.get(task.id))
     && !minimizedTaskIds.has(task.id)
     && (task.state !== 'queued' || now - task.createdAt >= queuedDelayMs)).sort(compareProjectFileTasks);
   return { visible: eligible.slice(0, limit), overflowCount: Math.max(0, eligible.length - limit) };

@@ -1,4 +1,12 @@
-const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain, shell, writeLog }) => {
+const path = require('path');
+const crypto = require('crypto');
+
+const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain: electronIpcMain, shell, writeLog }) => {
+  const channels = [];
+  const trusted = event => { const window = getMainWindow(); return Boolean(window && !window.isDestroyed() && event?.sender === window.webContents && !event.sender.isDestroyed?.()); };
+  const ipcMain = { handle(channel, listener) { channels.push(channel); electronIpcMain.handle(channel, async (event, ...args) => { if (!trusted(event)) throw new Error('Unauthorized IPC sender'); try { return await listener(event, ...args); } catch (error) { return { success: false, code: typeof error?.code === 'string' ? error.code : 'ARCHIVE_IPC_FAILED', error: error?.message || String(error) }; } }); } };
+  const rootPath = value => { if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new Error('无效的工作区路径'); return path.resolve(value); };
+  const cleanProjectName = value => { if (typeof value !== 'string' || !value.trim() || value.length > 255 || /[\\/\0]/.test(value)) throw new Error('无效的项目名称'); return value.trim(); };
   ipcMain.handle('archive-choose-target', async (_event, currentPath = '') => {
     const result = await dialog.showOpenDialog(getMainWindow(), { title: '选择 PhotoFlow 项目归档盘', defaultPath: currentPath || undefined, properties: ['openDirectory', 'createDirectory'] });
     if (result.canceled || !result.filePaths[0]) return { cancelled: true };
@@ -7,20 +15,26 @@ const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain, sh
   ipcMain.handle('archive-status', async () => archiveService.status());
   ipcMain.handle('archive-project', async (_event, workspacePath, projectName) => {
     try {
-      void archiveService.archiveProject(workspacePath, projectName).then(() => {
+      const taskId = crypto.randomUUID();
+      const completion = archiveService.archiveProject(rootPath(workspacePath), cleanProjectName(projectName), { id: taskId });
+      void completion.then(() => {
         const window = getMainWindow();
         if (window && !window.isDestroyed()) window.webContents.send('workspace-projects-changed', { root: workspacePath, reason: 'project-archived' });
       }).catch(error => writeLog('error', 'Project archive failed', error));
-      return { success: true, queued: true };
+      await Promise.resolve();
+      return { success: true, queued: true, accepted: true, taskId };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });
   ipcMain.handle('archive-move-back', async (_event, workspacePath, projectName, statusAfter) => {
     try {
-      void archiveService.moveBack(workspacePath, projectName, statusAfter).then(() => {
+      const taskId = crypto.randomUUID();
+      const completion = archiveService.moveBack(rootPath(workspacePath), cleanProjectName(projectName), statusAfter, { id: taskId });
+      void completion.then(() => {
         const window = getMainWindow();
         if (window && !window.isDestroyed()) window.webContents.send('workspace-projects-changed', { root: workspacePath, reason: 'project-unarchived' });
       }).catch(error => writeLog('error', 'Project move-back failed', error));
-      return { success: true, queued: true };
+      await Promise.resolve();
+      return { success: true, queued: true, accepted: true, taskId };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });
   ipcMain.handle('archive-open-target', async () => {
@@ -32,6 +46,7 @@ const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain, sh
       return { success: true };
     } catch (error) { return { success: false, error: error.message || String(error) }; }
   });
+  return () => channels.forEach(channel => electronIpcMain.removeHandler(channel));
 };
 
 module.exports = { registerArchiveIpc };

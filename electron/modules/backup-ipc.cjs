@@ -1,6 +1,12 @@
 const path = require('path');
+const crypto = require('crypto');
 
-const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain, getMainWindow, shell, writeLog }) => {
+const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain: electronIpcMain, getMainWindow, shell, writeLog }) => {
+  const channels = [];
+  const serializeError = error => ({ success: false, code: typeof error?.code === 'string' ? error.code : 'BACKUP_IPC_FAILED', error: error?.message || String(error) });
+  const trusted = event => { const window = getMainWindow(); return Boolean(window && !window.isDestroyed() && event?.sender === window.webContents && !event.sender.isDestroyed?.()); };
+  const ipcMain = { handle(channel, listener) { channels.push(channel); electronIpcMain.handle(channel, async (event, ...args) => { if (!trusted(event)) throw new Error('Unauthorized IPC sender'); try { return await listener(event, ...args); } catch (error) { return serializeError(error); } }); } };
+  const rootPath = value => { if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new Error('无效的工作区路径'); return path.resolve(value); };
   const assertDomain = value => {
     const domain = String(value || '');
     if (!['media', 'versioning', 'operations'].includes(domain)) throw new Error('不支持的业务域');
@@ -37,7 +43,8 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain, 
 
   ipcMain.handle('backup-read-nas-credential', async (_event, credentialRef) => {
     try {
-      return { success: true, credential: await credentialService.readNasCredential(credentialRef) };
+      const credential = await credentialService.readNasCredential(credentialRef);
+      return { success: true, credential: credential ? { credentialRef: credential.credentialRef || credentialRef, username: credential.username || '' } : null };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -64,8 +71,10 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain, 
 
   ipcMain.handle('backup-cleanup', async (_event, workspacePath) => {
     try {
-      void backupService.cleanup(workspacePath).catch(error => writeLog('error', 'Backup cleanup failed', error));
-      return { success: true, queued: true };
+      const taskId = crypto.randomUUID();
+      void backupService.cleanup(rootPath(workspacePath), { id: taskId }).catch(error => writeLog('error', 'Backup cleanup failed', error));
+      await Promise.resolve();
+      return { success: true, queued: true, accepted: true, taskId };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -75,8 +84,16 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain, 
     try {
       const current = await backupService.status(workspacePath);
       if (!current.enabled) return { success: false, error: '请先启用备份并选择备份位置' };
-      void backupService.runBackup(workspacePath, reason).catch(error => writeLog('error', 'Workspace backup failed', error));
-      return { success: true, queued: true };
+      const root = rootPath(workspacePath);
+      const taskId = crypto.randomUUID();
+      const completion = backupService.runBackup(root, reason, { id: taskId });
+      void completion.catch(error => writeLog('error', 'Workspace backup failed', error));
+      for (let attempt = 0; attempt < 50; attempt += 1) {
+        const status = await backupService.status(root);
+        if (status?.task?.id === taskId) return { success: true, queued: true, accepted: true, taskId };
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      return { success: false, error: '备份任务未能登记' };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -94,8 +111,10 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain, 
 
   ipcMain.handle('backup-verify', async (_event, workspacePath, snapshotId) => {
     try {
-      void backupService.verify(workspacePath, snapshotId).catch(error => writeLog('error', 'Backup verification failed', error));
-      return { success: true, queued: true };
+      const taskId = crypto.randomUUID();
+      void backupService.verify(rootPath(workspacePath), snapshotId, { id: taskId }).catch(error => writeLog('error', 'Backup verification failed', error));
+      await Promise.resolve();
+      return { success: true, queued: true, accepted: true, taskId };
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -160,6 +179,7 @@ const registerBackupIpc = ({ backupService, credentialService, dialog, ipcMain, 
       return { success: false, error: error.message || String(error) };
     }
   });
+  return () => channels.forEach(channel => electronIpcMain.removeHandler(channel));
 };
 
 module.exports = { registerBackupIpc };

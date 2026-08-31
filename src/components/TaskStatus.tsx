@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef } from 'react';
 import type { LogEntry } from '../types';
 import { ProgressBar } from './ProgressBar';
 import { usePanelTaskReporter } from '../features/background-tasks/TaskCenter';
+import { normalizeTaskProgress } from './useTaskPresentation';
 
 interface TaskProgressProps {
   logs: LogEntry[];
@@ -33,9 +34,10 @@ export const TaskProgress: React.FC<TaskProgressProps> = ({
   reportToTaskCenter = true,
 }) => {
   const latest = logs[logs.length - 1];
-  const message = statusMessage || latest?.message || (progress >= 100 ? '处理完成' : idleMessage);
-  const color = latest?.type === 'error' ? 'text-red-500' : latest?.type === 'success' || progress >= 100 ? 'text-emerald-600' : latest?.type === 'warning' ? 'text-amber-600' : 'text-slate-800';
-  const percentage = Math.min(100, Math.max(0, progress));
+  const percentage = normalizeTaskProgress(progress);
+  const completed = !isRunning && percentage === 100 && latest?.type !== 'error';
+  const message = statusMessage || latest?.message || (completed ? '处理完成' : idleMessage);
+  const color = latest?.type === 'error' ? 'text-red-500' : latest?.type === 'success' || completed ? 'text-emerald-600' : latest?.type === 'warning' ? 'text-amber-600' : 'text-slate-800';
   const reporter = usePanelTaskReporter();
   const latestType = latest?.type;
   const reporterRef = useRef(reporter);
@@ -68,7 +70,7 @@ export const TaskProgress: React.FC<TaskProgressProps> = ({
       }
       return;
     }
-    const state: TaskCenterProgressReport['state'] = isRunning ? 'running' : latestType === 'error' ? 'failed' : percentage >= 100 ? 'completed' : 'idle';
+    const state: TaskCenterProgressReport['state'] = isRunning ? 'running' : latestType === 'error' ? 'failed' : completed ? 'completed' : 'idle';
     pendingReportRef.current = {
       state,
       progress: percentage,
@@ -84,7 +86,7 @@ export const TaskProgress: React.FC<TaskProgressProps> = ({
     if (reportTimerRef.current === null) {
       reportTimerRef.current = window.setTimeout(flushTaskCenterReport, TASK_CENTER_REPORT_INTERVAL_MS - elapsed);
     }
-  }, [flushTaskCenterReport, isRunning, latestType, logs, message, percentage, reporter, reportToTaskCenter]);
+  }, [completed, flushTaskCenterReport, isRunning, latestType, logs, message, percentage, reporter, reportToTaskCenter]);
 
   useEffect(() => () => {
     if (reportTimerRef.current !== null) window.clearTimeout(reportTimerRef.current);

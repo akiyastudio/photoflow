@@ -24,12 +24,14 @@ type PanelTaskReport = Omit<PanelTaskSnapshot, 'key' | 'ownerPageId' | 'panelKin
 
 interface TaskCenterValue {
   backgroundTasks: BackgroundTask[];
+  backgroundTaskSyncing: boolean;
+  backgroundTaskDegraded: boolean;
   panelTasks: Record<string, PanelTaskSnapshot>;
   reportPanelTask: (identity: Pick<PanelTaskSnapshot, 'key' | 'ownerPageId' | 'panelKind' | 'title'>, report: PanelTaskReport) => void;
   dismissPanelTask: (key: string) => void;
   dismissPanelTasksByOwnerPageId: (pageId: string) => void;
-  dismissBackgroundTask: (id: string) => Promise<void>;
-  retryBackgroundTask: (id: string) => Promise<void>;
+  dismissBackgroundTask: (id: string) => Promise<unknown>;
+  retryBackgroundTask: (id: string) => Promise<unknown>;
   minimizeTaskToast: (id: string) => void;
   restoreTaskToast: (id: string) => void;
   isTaskToastMinimized: (id: string) => boolean;
@@ -59,7 +61,7 @@ type BackgroundTaskStreamAction =
 const backgroundTaskStreamReducer = (state: BackgroundTaskStreamState, action: BackgroundTaskStreamAction) => {
   if (action.type === 'delta') return receiveBackgroundTaskDelta(state, action.delta);
   if (action.type === 'snapshot') return receiveBackgroundTaskSnapshot(state, action.snapshot);
-  return { ...state, hydrated: false, snapshotRequest: state.snapshotRequest + 1 };
+  return { ...state, hydrated: false, syncing: true, degraded: true, retryAttempt: state.retryAttempt + 1, snapshotRequest: state.snapshotRequest + 1 };
 };
 
 export const TaskCenterProvider = ({ children }: { children: React.ReactNode }) => {
@@ -81,9 +83,9 @@ export const TaskCenterProvider = ({ children }: { children: React.ReactNode }) 
     void window.electronAPI.getBackgroundTasks().then(result => {
       if (!active) return;
       if (result.success) dispatchBackgroundTaskStream({ type: 'snapshot', snapshot: result });
-      else retryTimer = setTimeout(() => dispatchBackgroundTaskStream({ type: 'snapshot-retry' }), 1000);
+      else retryTimer = setTimeout(() => dispatchBackgroundTaskStream({ type: 'snapshot-retry' }), Math.min(30_000, 1000 * 2 ** backgroundTaskStream.retryAttempt));
     }).catch(() => {
-      if (active) retryTimer = setTimeout(() => dispatchBackgroundTaskStream({ type: 'snapshot-retry' }), 1000);
+      if (active) retryTimer = setTimeout(() => dispatchBackgroundTaskStream({ type: 'snapshot-retry' }), Math.min(30_000, 1000 * 2 ** backgroundTaskStream.retryAttempt));
     });
     return () => {
       active = false;
@@ -123,11 +125,11 @@ export const TaskCenterProvider = ({ children }: { children: React.ReactNode }) 
   }, []);
 
   const dismissBackgroundTask = useCallback(async (id: string) => {
-    await window.electronAPI.dismissBackgroundTask(id);
+    return window.electronAPI.dismissBackgroundTask(id);
   }, []);
 
   const retryBackgroundTask = useCallback(async (id: string) => {
-    await window.electronAPI.retryBackgroundTask(id);
+    return window.electronAPI.retryBackgroundTask(id);
   }, []);
 
   const minimizeTaskToast = useCallback((id: string) => {
@@ -138,7 +140,7 @@ export const TaskCenterProvider = ({ children }: { children: React.ReactNode }) 
   }, []);
   const isTaskToastMinimized = useCallback((id: string) => minimizedToastTaskIds.has(id), [minimizedToastTaskIds]);
 
-  const value = useMemo<TaskCenterValue>(() => ({ backgroundTasks, panelTasks, reportPanelTask, dismissPanelTask, dismissPanelTasksByOwnerPageId, dismissBackgroundTask, retryBackgroundTask, minimizeTaskToast, restoreTaskToast, isTaskToastMinimized }), [backgroundTasks, dismissBackgroundTask, dismissPanelTask, dismissPanelTasksByOwnerPageId, isTaskToastMinimized, minimizeTaskToast, panelTasks, reportPanelTask, restoreTaskToast, retryBackgroundTask]);
+  const value = useMemo<TaskCenterValue>(() => ({ backgroundTasks, backgroundTaskSyncing: backgroundTaskStream.syncing, backgroundTaskDegraded: backgroundTaskStream.degraded, panelTasks, reportPanelTask, dismissPanelTask, dismissPanelTasksByOwnerPageId, dismissBackgroundTask, retryBackgroundTask, minimizeTaskToast, restoreTaskToast, isTaskToastMinimized }), [backgroundTaskStream.degraded, backgroundTaskStream.syncing, backgroundTasks, dismissBackgroundTask, dismissPanelTask, dismissPanelTasksByOwnerPageId, isTaskToastMinimized, minimizeTaskToast, panelTasks, reportPanelTask, restoreTaskToast, retryBackgroundTask]);
   return <TaskCenterContext.Provider value={value}>{children}</TaskCenterContext.Provider>;
 };
 
