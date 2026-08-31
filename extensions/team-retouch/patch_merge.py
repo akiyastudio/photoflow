@@ -89,30 +89,126 @@ def load_rgb(path):
         return np.asarray(oriented.convert("RGB")), metadata
 
 
-def align_patch(base_rgb, edited_rgb):
+def _masked_mean_absolute_error(left_rgb, right_rgb, mask):
+    selected = np.asarray(mask, dtype=bool)
+    if not np.any(selected):
+        return float("inf")
+    difference = np.mean(np.abs(left_rgb.astype(np.float32) - right_rgb.astype(np.float32)), axis=2)
+    return float(np.mean(np.minimum(difference[selected], 64.0)))
+
+
+def align_patch(base_rgb, edited_rgb, person_support=None):
+    """Normalize dimensions, then apply only evidence-backed translation.
+
+    Returned files are allowed to have different pixel dimensions, so the
+    first resize is mandatory. A second geometric resample is much riskier:
+    intended body reshaping can look like registration error, especially on a
+    white studio background. Translation is therefore accepted only when
+    stable pixels outside the person mask have useful texture and their error
+    improves materially.
+    """
     height, width = base_rgb.shape[:2]
-    if edited_rgb.shape[:2] != (height, width):
-        edited_rgb = cv2.resize(edited_rgb, (width, height), interpolation=cv2.INTER_LANCZOS4)
+    returned_height, returned_width = edited_rgb.shape[:2]
+    resized = (returned_height, returned_width) != (height, width)
+    if resized:
+        if returned_height >= height and returned_width >= width:
+            interpolation = cv2.INTER_AREA
+        elif returned_height <= height and returned_width <= width:
+            interpolation = cv2.INTER_CUBIC
+        else:
+            interpolation = cv2.INTER_LINEAR
+        edited_rgb = cv2.resize(edited_rgb, (width, height), interpolation=interpolation)
+    diagnostics = {
+        "score": 0.0, "resized": resized, "attempted": False, "applied": False,
+        "dx": 0.0, "dy": 0.0, "identityError": 0.0,
+        "alignedError": 0.0, "reason": "identity",
+    }
     scale = min(1.0, 1100.0 / max(height, width))
     base_small = cv2.resize(base_rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else base_rgb
     edit_small = cv2.resize(edited_rgb, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA) if scale < 1 else edited_rgb
     template = cv2.cvtColor(base_small, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
     moving = cv2.cvtColor(edit_small, cv2.COLOR_RGB2GRAY).astype(np.float32) / 255.0
-    border_mask = np.ones(template.shape, np.uint8) * 255
-    margin_y = max(8, int(template.shape[0] * 0.13))
-    margin_x = max(8, int(template.shape[1] * 0.13))
-    border_mask[margin_y:-margin_y, margin_x:-margin_x] = 0
+    if person_support is None:
+        diagnostics["reason"] = "no-person-mask"
+        return edited_rgb, diagnostics
+    guard_size = max(5, round(min(height, width) * 0.015))
+    guard_size += 1 - guard_size % 2
+    guard_kernel = cv2.getStructuringElement(cv2.MORPH_ELLIPSE, (guard_size, guard_size))
+    guarded_person = cv2.dilate((np.asarray(person_support, dtype=np.float32) > 0.01).astype(np.uint8), guard_kernel) > 0
+    stable_full = ~guarded_person
+    edge_margin = max(3, round(min(height, width) * 0.015))
+    stable_full[:edge_margin] = False
+    stable_full[-edge_margin:] = False
+    stable_full[:, :edge_margin] = False
+    stable_full[:, -edge_margin:] = False
+    stable_small = cv2.resize(stable_full.astype(np.uint8), (template.shape[1], template.shape[0]), interpolation=cv2.INTER_NEAREST) > 0
+    minimum_pixels = max(256, round(stable_small.size * 0.008))
+    if int(np.count_nonzero(stable_small)) < minimum_pixels:
+        diagnostics["reason"] = "insufficient-background"
+        return edited_rgb, diagnostics
+    gradient_x = cv2.Sobel(template, cv2.CV_32F, 1, 0, ksize=3)
+    gradient_y = cv2.Sobel(template, cv2.CV_32F, 0, 1, ksize=3)
+    textured = np.hypot(gradient_x, gradient_y) > 0.025
+    texture_fraction = float(np.mean(textured[stable_small]))
+    diagnostics["textureFraction"] = texture_fraction
+    occupied_cells = 0
+    for row in range(4):
+        for column in range(4):
+            y1, y2 = row * template.shape[0] // 4, (row + 1) * template.shape[0] // 4
+            x1, x2 = column * template.shape[1] // 4, (column + 1) * template.shape[1] // 4
+            cell_stable = stable_small[y1:y2, x1:x2]
+            cell_texture = textured[y1:y2, x1:x2] & cell_stable
+            if np.count_nonzero(cell_texture) >= max(8, round(cell_stable.size * 0.003)):
+                occupied_cells += 1
+    diagnostics["textureCells"] = occupied_cells
+    if texture_fraction < 0.006 or occupied_cells < 3:
+        diagnostics["reason"] = "low-texture-background"
+        return edited_rgb, diagnostics
+    identity_error = _masked_mean_absolute_error(base_rgb, edited_rgb, stable_full)
+    diagnostics["identityError"] = identity_error
+    diagnostics["alignedError"] = identity_error
+    if identity_error < 1.25:
+        diagnostics["reason"] = "background-already-aligned"
+        return edited_rgb, diagnostics
     warp = np.eye(2, 3, dtype=np.float32)
-    score = 0.0
     try:
-        score, warp = cv2.findTransformECC(template, moving, warp, cv2.MOTION_AFFINE,
-                                           (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 80, 1e-5), border_mask, 3)
+        diagnostics["attempted"] = True
+        score, warp = cv2.findTransformECC(
+            template, moving, warp, cv2.MOTION_TRANSLATION,
+            (cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 80, 1e-5),
+            stable_small.astype(np.uint8) * 255, 3,
+        )
         warp[:, 2] /= scale
-        aligned = cv2.warpAffine(edited_rgb, warp, (width, height), flags=cv2.INTER_LANCZOS4 | cv2.WARP_INVERSE_MAP,
-                                 borderMode=cv2.BORDER_REFLECT_101)
-        return aligned, float(score)
+        proposed_dx, proposed_dy = float(warp[0, 2]), float(warp[1, 2])
+        dx, dy = int(round(proposed_dx)), int(round(proposed_dy))
+        diagnostics.update({
+            "score": float(score), "proposedDx": proposed_dx, "proposedDy": proposed_dy,
+            "dx": float(dx), "dy": float(dy),
+        })
+        shift = float(np.hypot(dx, dy))
+        maximum_shift = max(2.0, min(12.0, min(height, width) * 0.006))
+        if dx == 0 and dy == 0:
+            diagnostics["reason"] = "subpixel-translation-rejected"
+            return edited_rgb, diagnostics
+        if shift > maximum_shift:
+            diagnostics["reason"] = "translation-out-of-range"
+            return edited_rgb, diagnostics
+        candidate = cv2.warpAffine(
+            edited_rgb, np.asarray([[1.0, 0.0, dx], [0.0, 1.0, dy]], dtype=np.float32), (width, height),
+            flags=cv2.INTER_NEAREST | cv2.WARP_INVERSE_MAP,
+            borderMode=cv2.BORDER_REFLECT_101,
+        )
+        aligned_error = _masked_mean_absolute_error(base_rgb, candidate, stable_full)
+        diagnostics["alignedError"] = aligned_error
+        required_improvement = max(0.75, identity_error * 0.12)
+        if float(score) < 0.90 or identity_error - aligned_error < required_improvement:
+            diagnostics["reason"] = "insufficient-improvement"
+            return edited_rgb, diagnostics
+        diagnostics.update({"applied": True, "reason": "background-translation"})
+        return candidate, diagnostics
     except cv2.error:
-        return edited_rgb, score
+        diagnostics.update({"score": 0.0, "reason": "ecc-failed"})
+        return edited_rgb, diagnostics
 
 
 def border_mask(height, width, fraction=0.12):
@@ -124,20 +220,37 @@ def border_mask(height, width, fraction=0.12):
     return normalized * normalized * (3.0 - 2.0 * normalized)
 
 
-def match_border_color(base_rgb, edited_rgb):
+def match_border_color(base_rgb, edited_rgb, person_support=None):
     height, width = base_rgb.shape[:2]
     ring = border_mask(height, width, 0.14) < 0.58
+    if person_support is not None:
+        ring &= np.asarray(person_support, dtype=np.float32) < 0.05
+    minimum_pixels = max(512, round(height * width * 0.005))
+    diagnostics = {"applied": False, "beforeError": 0.0, "afterError": 0.0}
+    if int(np.count_nonzero(ring)) < minimum_pixels:
+        diagnostics["reason"] = "insufficient-stable-background"
+        return edited_rgb, diagnostics
     base_lab = cv2.cvtColor(base_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     edit_lab = cv2.cvtColor(edited_rgb, cv2.COLOR_RGB2LAB).astype(np.float32)
     adjusted = edit_lab.copy()
     for channel in range(3):
         base_values = base_lab[..., channel][ring]
         edit_values = edit_lab[..., channel][ring]
-        base_mean, edit_mean = float(base_values.mean()), float(edit_values.mean())
-        base_std, edit_std = float(base_values.std()), max(1.0, float(edit_values.std()))
-        scale = float(np.clip(base_std / edit_std, 0.82, 1.22))
-        adjusted[..., channel] = (adjusted[..., channel] - edit_mean) * scale + base_mean
-    return cv2.cvtColor(np.clip(adjusted, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
+        base_median, edit_median = float(np.median(base_values)), float(np.median(edit_values))
+        base_spread = float(np.percentile(base_values, 75) - np.percentile(base_values, 25))
+        edit_spread = max(1.0, float(np.percentile(edit_values, 75) - np.percentile(edit_values, 25)))
+        channel_scale = float(np.clip(base_spread / edit_spread, 0.94, 1.06))
+        offset = float(np.clip(base_median - edit_median, -18.0, 18.0))
+        adjusted[..., channel] = (adjusted[..., channel] - edit_median) * channel_scale + edit_median + offset
+    candidate = cv2.cvtColor(np.clip(adjusted, 0, 255).astype(np.uint8), cv2.COLOR_LAB2RGB)
+    before_error = _masked_mean_absolute_error(base_rgb, edited_rgb, ring)
+    after_error = _masked_mean_absolute_error(base_rgb, candidate, ring)
+    diagnostics.update({"beforeError": before_error, "afterError": after_error})
+    if before_error >= 2.0 and before_error - after_error >= max(1.0, before_error * 0.20):
+        diagnostics.update({"applied": True, "reason": "stable-background-improved"})
+        return candidate, diagnostics
+    diagnostics["reason"] = "insufficient-improvement"
+    return edited_rgb, diagnostics
 
 
 def edit_weight_and_delta(base_rgb, edited_rgb):
@@ -247,12 +360,23 @@ def task_mask_weights(task, image_width, image_height, crop):
 
 
 def constrain_person_boundary(weight, delta, core, support):
-    """Reject low-contrast background changes from the mask expansion band."""
+    """Reject background drift and make real high-contrast moves opaque.
+
+    A soft alpha is useful for tiny tonal differences, but it is destructive
+    where a dark silhouette moves over a light background: partial coverage
+    creates a gray copy of the old contour. Strong changes connected to the
+    person support therefore select the returned patch completely.
+    """
     magnitude = np.mean(np.abs(delta), axis=2)
     evidence = np.clip((magnitude - 32.0) / 64.0, 0.0, 1.0)
     evidence = evidence * evidence * (3.0 - 2.0 * evidence)
     allowed = np.maximum(core, support * evidence)
-    return weight * np.clip(allowed, 0.0, 1.0)
+    protected = weight * np.clip(allowed, 0.0, 1.0)
+    detected_change = weight > 0.08
+    opaque_core = detected_change & (core > 0.80) & (magnitude >= 32.0)
+    opaque_boundary = detected_change & (support > 0.08) & (magnitude >= 56.0)
+    protected[opaque_core | opaque_boundary] = 1.0
+    return protected
 
 
 def save_tiff(path, rgb, metadata):
@@ -319,22 +443,29 @@ def merge(input_path, manifest_path, output_path):
             warnings.append("返图尺寸与工作图比例异常")
         if (returned_width, returned_height) == (width, height) and (crop_width, crop_height) != (width, height):
             warnings.append("疑似误传整张原图")
-        aligned, alignment_score = align_patch(base_crop, edited_rgb)
-        color_matched = match_border_color(base_crop, aligned)
+        person_core, person_support = task_mask_weights(task, width, height, (x, y, crop_width, crop_height))
+        aligned, alignment = align_patch(base_crop, edited_rgb, person_support)
+        color_matched, color_match = match_border_color(base_crop, aligned, person_support)
         weight, delta, task_metrics = edit_weight_and_delta(base_crop, color_matched)
         changed_fraction = float(np.mean(weight > 0.08))
         mean_delta = float(np.mean(np.abs(delta)))
         if not exact_same and changed_fraction < 0.0005:
             warnings.append("有效修改面积过小，修改证据不足")
-        if alignment_score < 0.35:
-            warnings.append("返图与工作图对齐分过低")
         task_metrics.update({
             "returnedWidth": returned_width, "returnedHeight": returned_height,
             "aspectRatioDelta": float(aspect_delta), "dimensionScale": dimension_scale, "exactSame": bool(exact_same),
             "changedFraction": changed_fraction, "meanAbsoluteDelta": mean_delta,
-            "returnWarnings": warnings,
+            "returnWarnings": warnings, "resized": bool(alignment.get("resized")),
+            "alignmentAttempted": bool(alignment.get("attempted")),
+            "alignmentApplied": bool(alignment.get("applied")),
+            "alignmentDx": float(alignment.get("dx", 0.0)), "alignmentDy": float(alignment.get("dy", 0.0)),
+            "alignmentReason": str(alignment.get("reason") or ""),
+            "alignmentIdentityError": float(alignment.get("identityError", 0.0)),
+            "alignmentResultError": float(alignment.get("alignedError", 0.0)),
+            "colorMatchApplied": bool(color_match.get("applied")),
+            "colorMatchBeforeError": float(color_match.get("beforeError", 0.0)),
+            "colorMatchAfterError": float(color_match.get("afterError", 0.0)),
         })
-        person_core, person_support = task_mask_weights(task, width, height, (x, y, crop_width, crop_height))
         if person_core is not None:
             weight = constrain_person_boundary(weight, delta, person_core, person_support)
             task_metrics["maskCoverage"] = float(np.mean(person_support > 0.08))
@@ -354,7 +485,7 @@ def merge(input_path, manifest_path, output_path):
         if np.any(seam_ring):
             seam_total += float(np.sum(np.mean(np.abs(delta), axis=2)[seam_ring]))
             seam_samples += int(np.count_nonzero(seam_ring))
-        metrics.append({"taskId": task.get("id"), "alignmentScore": alignment_score, **task_metrics})
+        metrics.append({"taskId": task.get("id"), "alignmentScore": float(alignment.get("score", 0.0)), **task_metrics})
         merged_count += 1
     if merged_count == 0:
         raise ValueError("尚未上传任何可合并的修图 Patch")

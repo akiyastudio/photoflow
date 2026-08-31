@@ -1081,9 +1081,14 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   if (!outputProgress || outputProgress.mediaKind !== 'image' || !relativeDirectory) throw new Error('合成结果的目标图片进度不存在或不在项目内容边界内');
   const output = await artifactGrantForHost(parentId, { operation: 'artifacts', photoId: payload.photoId, baseVersionId: payload.baseVersionId });
   await fs.promises.mkdir(output.mergeDirectory, { recursive: true });
-  const fingerprintTasks = await Promise.all([...tasks].sort((left, right) => String(left.id).localeCompare(String(right.id))).map(async task => ({ id: String(task.id), editedSha256: await fileSha256(task.editedPatchPath), crop: task.crop || {}, generation: task.generation || {} })));
+  const fingerprintTasks = await Promise.all([...tasks].sort((left, right) => String(left.id).localeCompare(String(right.id))).map(async task => ({
+    id: String(task.id),
+    editedSha256: await fileSha256(task.editedPatchPath),
+    maskSha256: task.maskPath && fs.existsSync(task.maskPath) ? await fileSha256(task.maskPath) : '',
+    crop: task.crop || {}, generation: task.generation || {},
+  })));
   const rebuildToken = String(payload.rebuildToken || '').trim().slice(0, 120);
-  const mergeFingerprintInput = { projectId: String(context.projectId), photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), outputProgressId: String(payload.outputProgressId), strategyVersion: 2, tasks: fingerprintTasks };
+  const mergeFingerprintInput = { projectId: String(context.projectId), photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), outputProgressId: String(payload.outputProgressId), strategyVersion: 3, tasks: fingerprintTasks };
   if (rebuildToken) mergeFingerprintInput.rebuildToken = rebuildToken;
   const mergeFingerprint = sha256(JSON.stringify(mergeFingerprintInput));
   const operationId = `merge-${mergeFingerprint.slice(0, 32)}`;

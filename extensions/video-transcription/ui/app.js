@@ -8,7 +8,18 @@
   const $ = selector => document.querySelector(selector);
   const rpc = (method, payload = {}) => api.rpc(method, payload);
   const applyTheme = resolvedTheme => { const dark = resolvedTheme === 'dark'; document.documentElement.classList.toggle('dark', dark); document.documentElement.style.colorScheme = dark ? 'dark' : 'light'; };
-  const notice = (message, tone = 'info') => { const node = $('#notice'); node.hidden = !message; node.textContent = message; node.dataset.tone = tone; };
+  const notice = (message, tone = 'info') => { const node = $('#notice'); node.hidden = !message; node.replaceChildren(); node.textContent = message; node.dataset.tone = tone; node.dataset.kind = 'message'; };
+  const renderTaskNotice = operation => {
+    const view = browser.taskNoticeView(operation); if (!view) return;
+    const node = $('#notice'); node.hidden = false; node.dataset.tone = view.tone; node.dataset.kind = 'task'; node.replaceChildren();
+    const heading = document.createElement('div'); heading.className = 'task-notice-heading';
+    const copy = document.createElement('div'); copy.className = 'task-notice-copy';
+    const title = document.createElement('strong'); title.textContent = view.title;
+    const detail = document.createElement('span'); detail.textContent = view.detail;
+    const percent = document.createElement('span'); percent.className = 'task-notice-percent'; percent.textContent = `${view.progress}%`;
+    const progress = document.createElement('progress'); progress.className = 'task-notice-progress'; progress.max = 100; progress.value = view.progress; progress.setAttribute('aria-label', `${view.title} ${view.progress}%`);
+    copy.append(title, detail); heading.append(copy, percent); node.append(heading, progress);
+  };
   const shortTime = seconds => { const value = Math.max(0, Number(seconds) || 0); return `${String(Math.floor(value / 60)).padStart(2, '0')}:${String(Math.floor(value % 60)).padStart(2, '0')}`; };
   const stateLabel = value => ({ queued: '等待中', running: '识别中', completed: '已完成', partial_failure: '部分失败', failed: '失败', cancelled: '已取消', pending: '等待中' }[value] || value);
   const button = (label, action, value, className = 'pf-button') => { const node = document.createElement('button'); node.type = 'button'; node.className = className; node.textContent = label; node.dataset[action] = value; return node; };
@@ -151,6 +162,7 @@
     const signature = browser.operationSignature(operation);
     if (signature === state.operationSignature) return;
     state.operationSignature = signature; state.operation = operation; state.operationId = operation.id; $('#operation-select').value = operation.id;
+    renderTaskNotice(operation);
     $('#operation-summary').textContent = `${stateLabel(operation.state)} · ${operation.succeeded} 完成 / ${operation.failed} 失败 / ${operation.total} 总计${operation.error ? ` · ${operation.error}` : ''}`;
     const actions = $('#operation-actions'); actions.replaceChildren();
     if (operation.state === 'running' || operation.state === 'queued') actions.append(button('取消任务', 'cancel', operation.id));

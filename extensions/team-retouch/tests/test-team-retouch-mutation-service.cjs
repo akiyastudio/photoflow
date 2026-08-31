@@ -8,6 +8,9 @@ const readline = require('readline');
 const { spawn } = require('child_process');
 const { DatabaseSync } = require('node:sqlite');
 
+const serviceSource = fs.readFileSync(path.join(__dirname, '..', 'service.cjs'), 'utf8');
+assert(/strategyVersion:\s*3\b/.test(serviceSource), 'pixel-changing merge updates must advance the durable merge strategy version');
+
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-team-mutations-'));
 const dataRoot = path.join(sandbox, 'data', 'team-retouch');
 const databasePath = path.join(sandbox, 'data', 'databases', 'team-retouch.sqlite3');

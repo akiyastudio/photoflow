@@ -81,6 +81,7 @@ const assertPublic = value => { const serialized = JSON.stringify(value); assert
     const preview = await request('transcript.selection.preview.v1', { relativePaths: ['Library'] }); assert.deepEqual(preview.files.map(file => file.relativeName).sort(), ['Library/clip.mp4', 'Library/slow-panel.mp4', 'Library/slow.mp4']);
     const started = await request('transcript.project.start.v1', { relativePaths: ['Library/clip.mp4'] }); assertPublic(started);
     const completed = await request('transcript.operation.run.v1', { operationId: started.operationId }); assert.equal(completed.state, 'completed'); assert.equal(completed.succeeded, 1); assertPublic(completed);
+    const progressEvents = capabilityCalls.filter(call => call.method === 'component.events' && call.payload.event?.operationId === started.operationId).map(call => call.payload.event); assert(progressEvents.some(event => event.state === 'running' && event.file?.progress > 0), 'algorithm progress emits a live component event'); assert.equal(progressEvents.at(-1)?.state, 'completed', 'the final component event announces completion');
     const outputPath = path.join(projectRoot, 'Library', 'clip.srt'); assert(fs.existsSync(outputPath), 'SRT is committed directly beside its video'); assert.match(fs.readFileSync(outputPath, 'utf8'), /可搜索字幕/);
     assert(!fs.existsSync(path.join(privateRoot, 'storage.sqlite3')), 'the component creates no user database'); assert.equal(capabilityCalls.some(call => call.method === 'component.storage'), false, 'the component never requests database storage');
 
