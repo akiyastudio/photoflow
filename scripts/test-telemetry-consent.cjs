@@ -55,6 +55,17 @@ try {
   service.syncConsent(config.telemetry);
   assert.deepStrictEqual(readQueue(), [], 'disabling crash reports deletes unsent crash reports');
 
+  config = { telemetry: { enabled: true, crashReports: true } };
+  service.syncConsent(config.telemetry);
+  assert.strictEqual(service.track('feature_opened', { feature: 'home' }), true);
+  assert.strictEqual(service.reportCrash('main', new Error('purge this crash')), true);
+  assert(readQueue().length > 0);
+  assert.strictEqual(service.disableAndPurge(), true);
+  assert.strictEqual(service.disableAndPurge(), true, 'formal telemetry shutdown is idempotent');
+  assert.deepStrictEqual(readQueue(), [], 'formal telemetry shutdown purges every unconsented queue kind');
+  assert.strictEqual(service.track('feature_opened', { feature: 'home' }), false, 'runtime analytics remain disabled even while the backing config is stale true');
+  assert.strictEqual(service.reportCrash('main', new Error('must not enqueue')), false, 'runtime crash reporting remains disabled even while the backing config is stale true');
+
   const previousInstallId = JSON.parse(fs.readFileSync(statePath, 'utf8')).installId;
   service.clearLocalData();
   assert.notStrictEqual(JSON.parse(fs.readFileSync(statePath, 'utf8')).installId, previousInstallId);

@@ -124,6 +124,19 @@ const service = createConfigMutationService({ fs, crypto, getConfigPath: () => c
   assert.deepEqual(await bothExist.create().read(), { value: 'committed' });
   assert.equal(fs.existsSync(`${bothExist.filePath}.recovery`), false, 'a committed primary wins over stale recovery data');
 
+  const corruptPrimary = makeRecoveryFixture('corrupt-primary');
+  fs.writeFileSync(corruptPrimary.filePath, '{broken'); fs.writeFileSync(`${corruptPrimary.filePath}.recovery`, JSON.stringify({ value: 'last-good' }));
+  assert.deepEqual(readConfigFileWithRecovery(fs, corruptPrimary.filePath), { value: 'last-good' }, 'direct reads fall back to a validated recovery when primary JSON is corrupt');
+  assert.deepEqual(await corruptPrimary.create().read(), { value: 'last-good' }, 'startup restores a valid recovery over a corrupt primary');
+  assert.deepEqual(corruptPrimary.read(), { value: 'last-good' });
+
+  const bothCorrupt = makeRecoveryFixture('both-corrupt');
+  const corruptPrimaryText = '{bad-primary'; const corruptRecoveryText = '{bad-recovery';
+  fs.writeFileSync(bothCorrupt.filePath, corruptPrimaryText); fs.writeFileSync(`${bothCorrupt.filePath}.recovery`, corruptRecoveryText);
+  await assert.rejects(bothCorrupt.create().read(), error => error?.code === 'CONFIG_CORRUPT', 'two corrupt snapshots fail conservatively');
+  assert.equal(fs.readFileSync(bothCorrupt.filePath, 'utf8'), corruptPrimaryText, 'a corrupt primary is not overwritten');
+  assert.equal(fs.readFileSync(`${bothCorrupt.filePath}.recovery`, 'utf8'), corruptRecoveryText, 'the only recovery candidate is not deleted before validation');
+
   const backupFault = makeRecoveryFixture('backup-fault');
   fs.writeFileSync(backupFault.filePath, JSON.stringify({ value: 'old' }));
   const failing = backupFault.create(stage => { if (stage === 'after-backup') throw new Error('fault after backup'); });

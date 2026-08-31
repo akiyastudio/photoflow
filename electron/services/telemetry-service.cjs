@@ -97,6 +97,8 @@ const createTelemetryService = ({
   };
   let eventUploadEpoch = 0;
   let crashUploadEpoch = 0;
+  const initialTelemetry = getConfig()?.telemetry || {};
+  let activeConsent = { analytics: initialTelemetry.enabled === true, crashes: initialTelemetry.crashReports === true };
   const uploadControllers = new Map();
   const recentCrashFingerprints = new Map();
 
@@ -131,13 +133,7 @@ const createTelemetryService = ({
   };
   writeJson(statePath, state);
 
-  const getConsent = () => {
-    const telemetry = getConfig()?.telemetry || {};
-    return {
-      analytics: telemetry.enabled === true,
-      crashes: telemetry.crashReports === true,
-    };
-  };
+  const getConsent = () => activeConsent;
   const normalizeQueue = value => {
     if (!Array.isArray(value)) return [];
     const kept = [];
@@ -441,6 +437,7 @@ const createTelemetryService = ({
   const syncConsent = telemetry => {
     const analytics = telemetry?.enabled === true;
     const crashes = telemetry?.crashReports === true;
+    activeConsent = { analytics, crashes };
     if (!analytics) {
       eventUploadEpoch += 1;
       resetUploadBackoff('event');
@@ -463,6 +460,11 @@ const createTelemetryService = ({
     previousAnalyticsEnabled = analytics;
     if (analytics || crashes) void flush();
     scheduleFlush();
+  };
+
+  const disableAndPurge = () => {
+    syncConsent({ enabled: false, crashReports: false });
+    return true;
   };
 
   const clearLocalData = () => {
@@ -494,7 +496,7 @@ const createTelemetryService = ({
     return flush();
   };
 
-  return { start, stop, flush, track, reportCrash, submitFeedback, syncConsent, clearLocalData, countBucket };
+  return { start, stop, flush, track, reportCrash, submitFeedback, syncConsent, disableAndPurge, clearLocalData, countBucket };
 };
 
 module.exports = { EVENT_NAMES, createTelemetryService, countBucket, redactSensitiveText };

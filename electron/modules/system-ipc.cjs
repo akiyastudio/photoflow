@@ -202,6 +202,69 @@ const normalizeProgressNamePresets = value => {
   return result;
 };
 
+const PRIVACY_CONSENT_BOOLEAN_FIELDS = ['acceptCore', 'revokeCore', 'experienceProgramGranted', 'faceRecognitionGranted'];
+const validatePrivacyConsentRequest = request => {
+  if (!request || typeof request !== 'object' || Array.isArray(request) || ![Object.prototype, null].includes(Object.getPrototypeOf(request))) {
+    throw new TypeError('隐私同意请求必须是普通对象');
+  }
+  for (const field of PRIVACY_CONSENT_BOOLEAN_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(request, field) && typeof request[field] !== 'boolean') throw new TypeError(`隐私同意字段 ${field} 必须是布尔值`);
+  }
+  if (request.acceptCore === true && request.revokeCore === true) throw new TypeError('不能同时接受和撤回核心同意');
+  return request;
+};
+
+const savePrivacyConsentWithConfig = async ({ request, privacyService, configMutationService, telemetryService }) => {
+  let validatedRequest;
+  try { validatedRequest = validatePrivacyConsentRequest(request); }
+  catch (error) { return { success: false, error: error.message || String(error) }; }
+  const state = await privacyService.saveConsent(validatedRequest);
+  if (validatedRequest.revokeCore !== true) return { success: true, state };
+
+  const disabledTelemetry = { enabled: false, crashReports: false };
+  let telemetryDisabled = false;
+  let telemetryError;
+  try {
+    if (typeof telemetryService?.disableAndPurge !== 'function') throw new Error('遥测服务不支持安全停用');
+    await telemetryService.disableAndPurge();
+    telemetryDisabled = true;
+  }
+  catch (error) { telemetryError = error; }
+
+  let savedConfig;
+  try {
+    savedConfig = await configMutationService.mutate(current => ({
+      ...current,
+      telemetry: { ...(current?.telemetry && typeof current.telemetry === 'object' ? current.telemetry : {}), ...disabledTelemetry },
+    }));
+  } catch (error) {
+    const runtimeStatus = telemetryDisabled ? '且本进程遥测已停止' : '，但本进程遥测停止状态也无法确认';
+    return {
+      success: false,
+      error: `核心同意已撤回${runtimeStatus}；无法持久化遥测关闭状态：${error.message || String(error)}`,
+      state,
+      consentRevoked: true,
+      telemetryDisabled,
+      configPersisted: false,
+    };
+  }
+
+  try { await telemetryService.syncConsent(savedConfig.telemetry); telemetryDisabled = true; telemetryError = undefined; }
+  catch (error) { telemetryError ||= error; }
+  if (telemetryError) {
+    return {
+      success: false,
+      error: `核心同意已撤回且遥测配置已关闭，但无法确认本进程遥测已完全停止：${telemetryError.message || String(telemetryError)}`,
+      state,
+      consentRevoked: true,
+      telemetryDisabled,
+      configPersisted: true,
+      savedConfig,
+    };
+  }
+  return { success: true, state, savedConfig };
+};
+
 const registerSystemIpc = context => {
   const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
   if (!configMutationService?.mutate) throw new Error('System IPC requires the shared config mutation service');
@@ -517,8 +580,7 @@ const registerSystemIpc = context => {
   ipcMain.handle('privacy-consent-state', async () => privacyService.getState());
   ipcMain.handle('privacy-consent-save', async (_event, request) => {
     try {
-      const state = await privacyService.saveConsent(request);
-      return { success: true, state };
+      return await savePrivacyConsentWithConfig({ request, privacyService, configMutationService, telemetryService });
     } catch (error) {
       return { success: false, error: error.message || String(error) };
     }
@@ -1629,4 +1691,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, shouldTrackPythonToolAsBackgroundTask, transitionComponentEnabled };
+module.exports = { finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, transitionComponentEnabled, validatePrivacyConsentRequest };

@@ -69,7 +69,7 @@
     "test:electron-dev-contract": "node scripts/test-electron-dev-contract.cjs",
     "test:electron-smoke": "node scripts/test-electron-smoke.cjs",
     "test:component-electron-smoke": "node scripts/test-component-electron-smoke.cjs",
-    "test:privacy": "node scripts/test-privacy-service.cjs && node scripts/test-telemetry-consent.cjs",
+    "test:privacy": "node scripts/test-privacy-gate-contract.cjs && node scripts/test-privacy-service.cjs && node scripts/test-telemetry-consent.cjs && node scripts/test-privacy-revoke-telemetry.cjs",
     "test:cloudbase-telemetry": "npm --prefix services/cloudbase/telemetry-function run check && node scripts/test-cloudbase-function-package.cjs",
     "test:installer-terms": "node scripts/test-installer-terms.cjs",
     "test:installer-directory": "node scripts/test-installer-directory.cjs",

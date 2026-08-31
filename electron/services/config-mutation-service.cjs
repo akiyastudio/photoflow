@@ -46,13 +46,31 @@ const adoptLegacyComponentSettings = (config, descriptors, adoptionPolicy = defa
   }
   return changed ? { ...source, componentSettings, componentSettingsRevisions } : source;
 };
+const inspectConfigSnapshot = (fs, filePath) => {
+  if (!fs.existsSync(filePath)) return { exists: false, valid: false };
+  try {
+    const value = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+    if (!value || typeof value !== 'object' || Array.isArray(value)) throw new TypeError('Config snapshot must contain a JSON object');
+    return { exists: true, valid: true, value };
+  } catch (error) {
+    return { exists: true, valid: false, error };
+  }
+};
+const corruptConfigError = (filePath, primary, recovery) => {
+  const error = new Error(`Configuration is corrupt and no valid recovery snapshot is available: ${filePath}`);
+  error.code = 'CONFIG_CORRUPT';
+  error.primaryError = primary.error;
+  error.recoveryError = recovery.error;
+  return error;
+};
 const readConfigFileWithRecovery = (fs, filePath) => {
-  const primary = String(filePath);
-  const recovery = `${primary}.recovery`;
-  const selected = fs.existsSync(primary) ? primary : fs.existsSync(recovery) ? recovery : '';
-  if (!selected) return {};
-  const value = JSON.parse(fs.readFileSync(selected, 'utf8'));
-  return objectValue(value);
+  const primaryPath = String(filePath);
+  const primary = inspectConfigSnapshot(fs, primaryPath);
+  if (primary.valid) return primary.value;
+  const recovery = inspectConfigSnapshot(fs, `${primaryPath}.recovery`);
+  if (recovery.valid) return recovery.value;
+  if (!primary.exists && !recovery.exists) return {};
+  throw corruptConfigError(primaryPath, primary, recovery);
 };
 const configSnapshotExists = (fs, filePath) => fs.existsSync(String(filePath)) || fs.existsSync(`${String(filePath)}.recovery`);
 
@@ -114,10 +132,26 @@ const createConfigMutationService = ({ fs, crypto, getConfigPath, readSavedConfi
   const recover = async () => {
     const filePath = getConfigPath();
     const recovery = recoveryPath();
-    const mainExists = fs.existsSync(filePath);
-    const recoveryExists = fs.existsSync(recovery);
-    if (!mainExists && recoveryExists) await fs.promises.rename(recovery, filePath);
-    else if (mainExists && recoveryExists) await fs.promises.rm(recovery, { force: true }).catch(() => undefined);
+    const primarySnapshot = inspectConfigSnapshot(fs, filePath);
+    const recoverySnapshot = inspectConfigSnapshot(fs, recovery);
+    if (primarySnapshot.valid) {
+      if (recoverySnapshot.exists) await fs.promises.rm(recovery, { force: true }).catch(() => undefined);
+      return;
+    }
+    if (recoverySnapshot.valid) {
+      if (!primarySnapshot.exists) { await fs.promises.rename(recovery, filePath); return; }
+      const corruptPrimary = `${filePath}.${crypto.randomUUID()}.corrupt`;
+      await fs.promises.rename(filePath, corruptPrimary);
+      try {
+        await fs.promises.rename(recovery, filePath);
+      } catch (error) {
+        if (!fs.existsSync(filePath) && fs.existsSync(corruptPrimary)) await fs.promises.rename(corruptPrimary, filePath).catch(() => undefined);
+        throw error;
+      }
+      await fs.promises.rm(corruptPrimary, { force: true }).catch(() => undefined);
+      return;
+    }
+    if (primarySnapshot.exists || recoverySnapshot.exists) throw corruptConfigError(filePath, primarySnapshot, recoverySnapshot);
   };
   let tail = recover();
   const writeAtomic = async value => {

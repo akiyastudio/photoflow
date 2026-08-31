@@ -11,15 +11,11 @@ import { normalizeConfiguredSdDeviceRecords, removeConfiguredSdDevice, syncLegac
 import { MAX_SUBTITLE_FONT_SIZE, MIN_SUBTITLE_FONT_SIZE, normalizeSubtitleFontSize } from '../app/video-player-settings';
 import { componentSettingsSectionKey, type ComponentSettingsSection } from './component-settings-page-model';
 import { componentRuntimeIsAvailable, componentUnavailableMessage } from '../components/component-availability-model';
-import { createSettingsSaveCoordinator, patchSettingsDraft, restoredWorkspaceConfig } from './restored-workspace-config';
+import { createSettingsSaveCoordinator, patchSettingsDraft, restoredWorkspaceConfig, waitForPersistedSettings } from './restored-workspace-config';
 import { useUserFacingToast } from '../app/useUserFacingToast';
 import { defaultVideoShortcutBindings, exportVideoShortcuts, formatVideoShortcutChord, importVideoShortcuts, isModifierOnlyVideoShortcutInput, isReservedVideoShortcut, normalizeVideoShortcutBindings, shortcutChord, shortcutInputFromKeyboardEvent, VIDEO_ACTIONS, videoShortcutConflicts } from '../../contracts/video-shortcuts';
 import type { VideoActionId } from '../../contracts/video-shortcuts';
-
-const normalizeMediaCacheSize = (value: unknown, fallback = 50) => {
-  const number = Number(value);
-  return Number.isFinite(number) ? Math.max(0, number) : fallback;
-};
+import { normalizeMediaCacheSize } from '../app/app-config';
 export type BuiltInSettingsSection = 'general' | 'project' | 'privacy' | 'storage' | 'backup' | 'components' | 'import' | 'video' | 'about' | 'feedback';
 export type SettingsSection = BuiltInSettingsSection | ComponentSettingsSection;
 
@@ -628,11 +624,33 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     const frame = window.requestAnimationFrame(() => backupSnapshotsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }));
     return () => window.cancelAnimationFrame(frame);
   }, [backupProjectFocus]);
-  const commitSettings = (next: AppConfig) => {
-    void saveCoordinatorRef.current?.enqueue(next).then(saved => { if (saved) onNoticeRef.current('已更改设置'); });
+  const patchSettings = (patch: (current: AppConfig) => Partial<AppConfig>) => {
+    void saveCoordinatorRef.current?.enqueueMutation(current => patchSettingsDraft(current, patch)).then(saved => { if (saved) onNoticeRef.current('已更改设置'); });
   };
-  const patchSettings = (patch: (current: AppConfig) => Partial<AppConfig>) => commitSettings(patchSettingsDraft(draftRef.current, patch));
   const update = <K extends keyof AppConfig,>(key: K, value: AppConfig[K]) => patchSettings(() => ({ [key]: value }));
+  const drainSettingsBeforeBackupAction = async (actionLabel: string) => {
+    try {
+      const coordinator = saveCoordinatorRef.current;
+      if (!coordinator) return false;
+      const result = await waitForPersistedSettings(coordinator);
+      if (result.status === 'save-failed') {
+        onNotice(`${actionLabel}未开始：待保存的设置保存失败，请确认设置后重试`, 6000);
+        return false;
+      }
+      if (result.status === 'changed') {
+        onNotice(`${actionLabel}未开始：等待保存期间设置又有更改，请重试以使用最新设置`, 6000);
+        return false;
+      }
+      if (result.status === 'superseded') {
+        onNotice(`${actionLabel}未开始：目标设置已被更新版本取代，请重试以使用最新设置`, 6000);
+        return false;
+      }
+      return true;
+    } catch (error) {
+      onNotice(`${actionLabel}未开始：无法完成设置保存：${error instanceof Error ? error.message : String(error)}`, 6000);
+      return false;
+    }
+  };
   const projectCategories = normalizeProjectCategoryOrder(draft.projectCategoryOrder, draft.customProjectCategories);
   const addProjectCategory = () => {
     const name = newProjectCategory.trim().replace(/\s+/g, ' ');
@@ -762,9 +780,9 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     try {
       const selected = await window.electronAPI.chooseBackupTarget(currentPath);
       if (selected.cancelled || !selected.path) return false;
+      const targetPath = selected.path;
       setBackupTargetSetup('');
-      const backup = draftRef.current.backup;
-      update('backup', { ...backup, enabled: true, targetType: 'local', targetPath: selected.path });
+      patchSettings(current => ({ backup: { ...current.backup, enabled: true, targetType: 'local', targetPath } }));
       return true;
     } catch (error) { onNotice(`选择备份位置失败：${error instanceof Error ? error.message : String(error)}`, 5000); return false; }
   };
@@ -812,25 +830,27 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       await saveCoordinatorRef.current?.transaction(async saveConfig => {
         const target = await window.electronAPI.setNasBackupTarget(nasPath);
         if (!target.success || !target.path) { onNotice(target.error || 'NAS 路径无效', 5000); return; }
-        const base = draftRef.current;
-        let credentialRef = base.backup.nas.credentialRef;
+        let credentialRef = '';
         if (nasUsername.trim() || nasPassword) {
           const credential = await window.electronAPI.saveNasCredential({ remotePath: target.path, username: nasUsername, password: nasPassword });
           if (!credential.success || !credential.credentialRef) { onNotice(credential.error || '无法保存 NAS 凭据', 5000); return; }
           credentialRef = credential.credentialRef;
-        }
+        } else credentialRef = draftRef.current.backup.nas.credentialRef;
         if (!credentialRef) { onNotice('请填写 NAS 用户名和密码', 5000); return; }
-        const testingConfig = { ...base, backup: { ...base.backup, enabled: false, targetType: 'nas' as const, targetPath: target.path, nas: { ...base.backup.nas, credentialRef } } };
+        const latestForTesting = draftRef.current;
+        const testingConfig = { ...latestForTesting, backup: { ...latestForTesting.backup, enabled: false, targetType: 'nas' as const, targetPath: target.path, nas: { ...latestForTesting.backup.nas, credentialRef } } };
         if (!await saveConfig(testingConfig)) return;
         const tested = await window.electronAPI.testBackupConnection();
         if (!tested.success || !tested.connection) {
-          await saveConfig({ ...testingConfig, backup: { ...testingConfig.backup, targetPath: '' } });
+          const latest = draftRef.current;
+          await saveConfig({ ...latest, backup: { ...latest.backup, enabled: false, targetType: 'nas', targetPath: '', nas: { ...latest.backup.nas, credentialRef } } }, { incorporatesPending: true });
           setBackupTargetSetup('nas');
           onNotice(tested.error || 'NAS 连接测试失败，备份仍保持关闭', 6000);
           return;
         }
-        const enabledConfig = { ...testingConfig, backup: { ...testingConfig.backup, enabled: true } };
-        if (!await saveConfig(enabledConfig)) return;
+        const latest = draftRef.current;
+        const enabledConfig = { ...latest, backup: { ...latest.backup, enabled: true, targetType: 'nas' as const, targetPath: target.path, nas: { ...latest.backup.nas, credentialRef } } };
+        if (!await saveConfig(enabledConfig, { incorporatesPending: true })) return;
         setBackupTargetSetup(''); setNasPassword('');
         const speed = tested.connection.speedMBps ? `，写入 ${tested.connection.speedMBps} MB/s` : '';
         onNotice(`NAS 已保存并连接成功${speed}`);
@@ -845,6 +865,7 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     const expired = backupSpace.expiredSnapshotCount || 0;
     const reclaimable = backupSpace.estimatedReclaimableBytes || 0;
     if (!await appDialog.confirm({ title: '清理过期备份？', message: `预计删除 ${expired} 个过期快照，释放约 ${formatStorageSize(reclaimable)}。只会回收不再被任何保留快照使用的数据；不会删除工作区原文件、归档项目或仍保留的快照。`, confirmLabel: '清理过期备份', tone: 'danger' })) return;
+    if (!await drainSettingsBeforeBackupAction('备份清理')) return;
     if (backupActionRef.current) return;
     backupActionRef.current = 'cleanup'; setBackupAction('cleanup');
     try {
@@ -864,6 +885,8 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   };
   const runBackup = async () => {
     if (backupActionRef.current) return;
+    if (!await drainSettingsBeforeBackupAction('立即备份')) return;
+    if (backupActionRef.current) return;
     backupActionRef.current = 'run';
     setBackupAction('run');
     try {
@@ -874,6 +897,8 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
     finally { backupActionRef.current = ''; setBackupAction(''); }
   };
   const verifyBackup = async (snapshotId: string) => {
+    if (backupActionRef.current) return;
+    if (!await drainSettingsBeforeBackupAction('备份验证')) return;
     if (backupActionRef.current) return;
     backupActionRef.current = `verify:${snapshotId}`;
     setBackupAction(`verify:${snapshotId}`);
@@ -886,18 +911,22 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
   const restoreWorkspace = async (snapshotId: string) => {
     if (backupActionRef.current) return;
     if (!await appDialog.confirm({ title: '恢复整个工作区？', message: '软件会要求选择一个空文件夹，并把这个快照恢复为新的工作区。当前工作区不会被覆盖。', confirmLabel: '选择恢复位置' })) return;
-    await saveCoordinatorRef.current?.drain();
+    if (!await drainSettingsBeforeBackupAction('工作区恢复')) return;
     if (backupActionRef.current) return;
     backupActionRef.current = `workspace:${snapshotId}`;
     setBackupAction(`workspace:${snapshotId}`);
     try {
-      const result = await window.electronAPI.restoreBackupWorkspace(draftRef.current.workspacePath, snapshotId);
-      if (result.cancelled) return;
-      if (!result.success || !result.workspacePath || !result.savedConfig) { onNotice(result.error || '工作区恢复失败', 6000); return; }
-      const next = restoredWorkspaceConfig(result.savedConfig, result.workspacePath, draftRef.current);
-      draftRef.current = next; setDraft(next); saveCoordinatorRef.current?.syncPersisted(next); onConfigRestored(next);
-      onNotice('工作区恢复完成，已切换到恢复位置', 6000);
-      window.dispatchEvent(new Event('workspace-projects-changed'));
+      const coordinator = saveCoordinatorRef.current;
+      if (!coordinator) return;
+      await coordinator.transaction(async (_saveConfig, adoptConfig) => {
+        const result = await window.electronAPI.restoreBackupWorkspace(draftRef.current.workspacePath, snapshotId);
+        if (result.cancelled) return;
+        if (!result.success || !result.workspacePath || !result.savedConfig) { onNotice(result.error || '工作区恢复失败', 6000); return; }
+        const next = restoredWorkspaceConfig(result.savedConfig, result.workspacePath, draftRef.current);
+        adoptConfig(next); onConfigRestored(next);
+        onNotice('工作区恢复完成，已切换到恢复位置', 6000);
+        window.dispatchEvent(new Event('workspace-projects-changed'));
+      });
     } catch (error) { onNotice(`工作区恢复失败：${error instanceof Error ? error.message : String(error)}`, 6000); }
     finally { backupActionRef.current = ''; setBackupAction(''); }
   };
@@ -1002,21 +1031,21 @@ const SettingsPage = ({ activeSection, backupProjectFocus, onClearBackupProjectF
       <SettingsRow title="项目归档盘位置" description={archiveStatus.freeBytes !== undefined ? `剩余 ${formatStorageSize(archiveStatus.freeBytes)} / ${formatStorageSize(archiveStatus.totalBytes)}` : '选择用于保存已归档项目的位置。'}><fieldset disabled={!draft.archive.enabled} className="flex min-w-0 gap-2 disabled:opacity-50"><input readOnly value={draft.archive.targetPath} placeholder="尚未选择归档盘" className="form-input min-w-0 flex-1"/><button type="button" onClick={() => void chooseArchiveTarget()} className="dialog-secondary shrink-0">选择</button><button type="button" onClick={() => void window.electronAPI.openArchiveTarget()} disabled={!draft.archive.targetPath} className="dialog-secondary shrink-0 disabled:opacity-45">打开</button></fieldset></SettingsRow>
       </SettingsPageGroup>
       <SettingsPageGroup title="备份">
-      <SettingsRow title="启用工作区备份" description={!draft.backup.enabled ? '备份已关闭。' : backupStatus.state === 'protected' ? '工作区已保护。' : backupStatus.state === 'running' ? '正在备份。' : backupStatus.error || '备份已启用。'}><SettingsToggle label="启用工作区备份" checked={draft.backup.enabled} onChange={checked => { if (checked) void enableBackup(); else { setBackupTargetSetup(''); update('backup', { ...draft.backup, enabled: false }); } }}/></SettingsRow>
+      <SettingsRow title="启用工作区备份" description={!draft.backup.enabled ? '备份已关闭。' : backupStatus.state === 'protected' ? '工作区已保护。' : backupStatus.state === 'running' ? '正在备份。' : backupStatus.error || '备份已启用。'}><SettingsToggle label="启用工作区备份" checked={draft.backup.enabled} onChange={checked => { if (checked) void enableBackup(); else { setBackupTargetSetup(''); patchSettings(current => ({ backup: { ...current.backup, enabled: false } })); } }}/></SettingsRow>
       <SettingsRow title="备份方式" description="选择本地磁盘、外接硬盘或 NAS 网络存储。"><select disabled={!backupTargetConfigurable || Boolean(backupAction)} value={activeBackupTargetType} onChange={event => void switchBackupTargetType(event.target.value as AppConfig['backup']['targetType'])} className="form-input ml-auto max-w-sm disabled:opacity-50"><option value="local">本地磁盘或外接硬盘</option><option value="nas">NAS 网络存储</option></select></SettingsRow>
       {activeBackupTargetType === 'local' && <SettingsRow title="本地备份位置" description="位置离线时暂停备份，重新连接后可以继续。"><fieldset disabled={!backupTargetConfigurable || Boolean(backupAction)} className="flex min-w-0 gap-2 disabled:opacity-50"><input readOnly value={draft.backup.targetType === 'local' ? draft.backup.targetPath : ''} placeholder="尚未选择备份位置" className="form-input min-w-0 flex-1"/><button type="button" onClick={() => void chooseBackupTarget()} className="dialog-secondary shrink-0">选择</button><button type="button" onClick={() => void window.electronAPI.openBackupTarget()} disabled={draft.backup.targetType !== 'local' || !draft.backup.targetPath} className="dialog-secondary shrink-0 disabled:opacity-45">打开</button></fieldset></SettingsRow>}
       {activeBackupTargetType === 'nas' && <>
         <SettingsRow title="NAS 共享路径" description={backupStatus.connection?.connected ? 'NAS 已连接。' : '输入 Windows 可访问的网络共享路径。'}><input value={nasPath} onChange={event => setNasPath(event.target.value)} placeholder="\\studio-nas\backup" className="form-input font-mono"/></SettingsRow>
         <SettingsRow title="NAS 登录凭据" description="密码保存在 Windows 凭据管理器，配置文件不保存明文。"><div className="grid gap-2 sm:grid-cols-2"><input value={nasUsername} onChange={event => setNasUsername(event.target.value)} autoComplete="username" placeholder="用户名" className="form-input"/><input type="password" value={nasPassword} onChange={event => setNasPassword(event.target.value)} autoComplete="new-password" placeholder={draft.backup.nas.credentialRef ? '已保存；留空则不更改' : '密码'} className="form-input"/></div></SettingsRow>
         <SettingsRow title="保存并测试 NAS" description={backupStatus.connection?.checkedAt ? `上次验证：${new Date(backupStatus.connection.checkedAt).toLocaleString()}` : '保存配置并立即验证连接。'}><div className="ml-auto flex w-fit gap-2"><button type="button" onClick={() => void saveNas()} disabled={!nasPath.trim() || Boolean(backupAction)} className="dialog-primary disabled:opacity-45">{backupAction === 'nas-save' ? '正在测试…' : '保存并测试'}</button><button type="button" onClick={() => void window.electronAPI.openBackupTarget()} disabled={Boolean(backupAction) || !draft.backup.enabled || draft.backup.targetType !== 'nas' || !draft.backup.targetPath} className="dialog-secondary disabled:opacity-45">打开</button></div></SettingsRow>
-        <SettingsRow title="限制 NAS 带宽" description="在工作时间避免备份占满局域网带宽。"><SettingsToggle label="限制 NAS 带宽" checked={draft.backup.nas.limitEnabled} onChange={checked => update('backup', { ...draft.backup, nas: { ...draft.backup.nas, limitEnabled: checked } })}/></SettingsRow>
-        {draft.backup.nas.limitEnabled && <SettingsRow title="NAS 带宽限制时段" description="设置限速值和生效时间。"><div className="grid gap-2 sm:grid-cols-3"><input aria-label="NAS 带宽上限" type="number" min="1" max="1000" value={draft.backup.nas.bandwidthLimitMBps} onChange={event => update('backup', { ...draft.backup, nas: { ...draft.backup.nas, bandwidthLimitMBps: Math.max(1, Number(event.target.value) || 1) } })} className="form-input"/><input aria-label="NAS 限速开始时间" type="time" value={draft.backup.nas.limitStart} onChange={event => update('backup', { ...draft.backup, nas: { ...draft.backup.nas, limitStart: event.target.value } })} className="form-input"/><input aria-label="NAS 限速结束时间" type="time" value={draft.backup.nas.limitEnd} onChange={event => update('backup', { ...draft.backup, nas: { ...draft.backup.nas, limitEnd: event.target.value } })} className="form-input"/></div></SettingsRow>}
+        <SettingsRow title="限制 NAS 带宽" description="在工作时间避免备份占满局域网带宽。"><SettingsToggle label="限制 NAS 带宽" checked={draft.backup.nas.limitEnabled} onChange={checked => patchSettings(current => ({ backup: { ...current.backup, nas: { ...current.backup.nas, limitEnabled: checked } } }))}/></SettingsRow>
+        {draft.backup.nas.limitEnabled && <SettingsRow title="NAS 带宽限制时段" description="设置限速值和生效时间。"><div className="grid gap-2 sm:grid-cols-3"><input aria-label="NAS 带宽上限" type="number" min="1" max="1000" value={draft.backup.nas.bandwidthLimitMBps} onChange={event => { const bandwidthLimitMBps = Math.max(1, Number(event.target.value) || 1); patchSettings(current => ({ backup: { ...current.backup, nas: { ...current.backup.nas, bandwidthLimitMBps } } })); }} className="form-input"/><input aria-label="NAS 限速开始时间" type="time" value={draft.backup.nas.limitStart} onChange={event => { const limitStart = event.target.value; patchSettings(current => ({ backup: { ...current.backup, nas: { ...current.backup.nas, limitStart } } })); }} className="form-input"/><input aria-label="NAS 限速结束时间" type="time" value={draft.backup.nas.limitEnd} onChange={event => { const limitEnd = event.target.value; patchSettings(current => ({ backup: { ...current.backup, nas: { ...current.backup.nas, limitEnd } } })); }} className="form-input"/></div></SettingsRow>}
       </>}
       <SettingsRow title="立即备份" description={backupStatus.latestAt ? `上次成功：${new Date(backupStatus.latestAt).toLocaleString()} · ${backupStatus.snapshotCount || 0} 个快照` : '立即为当前工作区创建备份。'}><button type="button" onClick={() => void runBackup()} disabled={!draft.backup.enabled || !draft.backup.targetPath || Boolean(backupAction)} className="dialog-primary ml-auto flex w-fit items-center gap-2 disabled:opacity-45">{backupAction === 'run' ? <Loader2 size={15} className="animate-spin"/> : <ShieldCheck size={15}/>}立即备份</button></SettingsRow>
-      <SettingsRow title="历史策略" description="选择保留全部历史快照或只保留最新状态。"><select value={draft.backup.mode} onChange={event => update('backup', { ...draft.backup, mode: event.target.value as AppConfig['backup']['mode'] })} className="form-input ml-auto max-w-sm"><option value="history">保留全部历史快照</option><option value="latest">仅保留最新快照</option></select></SettingsRow>
+      <SettingsRow title="历史策略" description="选择保留全部历史快照或只保留最新状态。"><select value={draft.backup.mode} onChange={event => { const mode = event.target.value as AppConfig['backup']['mode']; patchSettings(current => ({ backup: { ...current.backup, mode } })); }} className="form-input ml-auto max-w-sm"><option value="history">保留全部历史快照</option><option value="latest">仅保留最新快照</option></select></SettingsRow>
       {draft.backup.mode === 'history' && <SettingsRow title="历史快照保留" description="快照按日、周、月自动保留。"><p className="text-sm text-slate-500">最近 7 天每日一份 · 最近 4 周每周一份 · 最近 12 个月每月一份</p></SettingsRow>}
-      <SettingsRow title="每天自动备份" description="每天首次启动时检查，24 小时内已有成功快照则跳过。"><SettingsToggle label="每天自动备份" checked={draft.backup.automaticDaily} onChange={checked => update('backup', { ...draft.backup, automaticDaily: checked })}/></SettingsRow>
-      <SettingsRow title="导入完成后自动备份" description="导入任务成功后备份当前工作区，并发触发会自动合并。"><SettingsToggle label="导入完成后自动备份" checked={draft.backup.afterImport} onChange={checked => update('backup', { ...draft.backup, afterImport: checked })}/></SettingsRow>
+      <SettingsRow title="每天自动备份" description="每天首次启动时检查，24 小时内已有成功快照则跳过。"><SettingsToggle label="每天自动备份" checked={draft.backup.automaticDaily} onChange={checked => patchSettings(current => ({ backup: { ...current.backup, automaticDaily: checked } }))}/></SettingsRow>
+      <SettingsRow title="导入完成后自动备份" description="导入任务成功后备份当前工作区，并发触发会自动合并。"><SettingsToggle label="导入完成后自动备份" checked={draft.backup.afterImport} onChange={checked => patchSettings(current => ({ backup: { ...current.backup, afterImport: checked } }))}/></SettingsRow>
       <SettingsRow title="清理过期备份" description="删除保留策略之外的旧快照，并回收只有这些快照使用的文件。不会删除工作区原文件、归档项目或仍保留的快照。"><div className="ml-auto w-fit text-right"><p className="text-sm font-bold text-slate-700">{backupSpace.success ? `预计删除 ${backupSpace.expiredSnapshotCount || 0} 个过期快照，释放约 ${formatStorageSize(backupSpace.estimatedReclaimableBytes)}` : '连接备份位置后显示预计结果'}</p>{backupSpace.success && <p className="mt-1 text-xs text-slate-400">实际占用 {formatStorageSize(backupSpace.actualBytes)} · 内容去重已自动启用，已节省 {formatStorageSize(backupSpace.deduplicatedBytes)}</p>}<button type="button" onClick={() => void cleanupBackup()} disabled={!backupSpace.success || Boolean(backupAction)} className="dialog-secondary mt-3 text-xs disabled:opacity-45">清理过期备份</button></div></SettingsRow>
       <div ref={backupSnapshotsRef} className="divide-y divide-slate-200">
         {backupProjectFocus && <SettingsRow title={`项目备份：${backupProjectFocus.name}`} description={`仅显示包含“${backupProjectFocus.name}”的工作区快照。`}><button type="button" onClick={onClearBackupProjectFocus} className="dialog-secondary ml-auto block w-fit text-xs">查看全部快照</button></SettingsRow>}

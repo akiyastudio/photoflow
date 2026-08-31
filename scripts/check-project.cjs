@@ -10,6 +10,7 @@ const steps = [
     ['lint', ['run', 'lint']],
     ['typecheck', ['run', 'typecheck']],
   ] : []),
+  ['privacy consent and telemetry', ['run', 'test:privacy']],
   ['architecture', ['run', 'test:architecture']],
   ['domain contracts', ['run', 'test:domain-contracts']],
   ['operations storage', ['run', 'test:operations-storage']],
