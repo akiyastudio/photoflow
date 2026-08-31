@@ -116,6 +116,7 @@ class ThumbnailDatabase:
                 source_hash TEXT,
                 cache_epoch INTEGER NOT NULL DEFAULT 1,
                 cache_root TEXT NOT NULL DEFAULT '',
+                publish_id TEXT NOT NULL DEFAULT '',
                 generated_at INTEGER NOT NULL,
                 last_accessed_at INTEGER NOT NULL,
                 PRIMARY KEY(file_path, size_label),
@@ -183,6 +184,8 @@ class ThumbnailDatabase:
             self.connection.execute("ALTER TABLE thumbnails ADD COLUMN cache_epoch INTEGER NOT NULL DEFAULT 1")
         if "cache_root" not in thumbnail_columns:
             self.connection.execute("ALTER TABLE thumbnails ADD COLUMN cache_root TEXT NOT NULL DEFAULT ''")
+        if "publish_id" not in thumbnail_columns:
+            self.connection.execute("ALTER TABLE thumbnails ADD COLUMN publish_id TEXT NOT NULL DEFAULT ''")
         maintenance_columns = {
             row["name"] for row in self.connection.execute("PRAGMA table_info(maintenance_state)").fetchall()
         }
@@ -582,6 +585,34 @@ class ThumbnailDatabase:
         result = json.loads(row["result_json"])
         return {"state": "COMMITTED", "committed": True, "publishId": identifier, "result": result}
 
+    def claim_thumbnail_backup_recovery(self, publish_id: str, thumbnail_paths: list[str]) -> dict:
+        identifier = str(publish_id or "")
+        normalized = list(dict.fromkeys(canonical(value) for value in (thumbnail_paths or []) if value))
+        with self.connection:
+            receipt = self.connection.execute(
+                "SELECT 1 FROM thumbnail_publish_receipts WHERE publish_id=?", (identifier,)
+            ).fetchone()
+            if receipt:
+                return {"state": "COMMITTED", "committed": True, "publishId": identifier}
+            owners = []
+            for offset in range(0, len(normalized), 400):
+                chunk = normalized[offset:offset + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                owners.extend(self.connection.execute(
+                    f"SELECT thumbnail_path,publish_id,file_path,size_label FROM thumbnails WHERE thumbnail_path IN ({placeholders})",
+                    chunk,
+                ).fetchall())
+            if owners:
+                return {
+                    "state": "SUPERSEDED", "committed": False, "publishId": identifier,
+                    "owners": [
+                        {"thumbnailPath": row["thumbnail_path"], "publishId": row["publish_id"],
+                         "filePath": row["file_path"], "sizeLabel": row["size_label"]}
+                        for row in owners
+                    ],
+                }
+            return {"state": "CLAIMED", "committed": False, "publishId": identifier}
+
     def commit_thumbnail_publish(self, publish_id: str, file_path: str, cache_epoch: int,
                                  source_version: int, source_size: int,
                                  source_mtime_ms: float, thumbnails: list[dict],
@@ -645,18 +676,18 @@ class ThumbnailDatabase:
                 self.connection.execute(
                     """INSERT INTO thumbnails
                        (file_path,size_label,pixel_size,thumbnail_path,thumbnail_size,
-                        thumbnail_version,source_mtime_ms,source_hash,cache_epoch,cache_root,
+                        thumbnail_version,source_mtime_ms,source_hash,cache_epoch,cache_root,publish_id,
                         generated_at,last_accessed_at)
-                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+                       VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)
                        ON CONFLICT(file_path,size_label) DO UPDATE SET
                          pixel_size=excluded.pixel_size,thumbnail_path=excluded.thumbnail_path,
                          thumbnail_size=excluded.thumbnail_size,thumbnail_version=excluded.thumbnail_version,
                          source_mtime_ms=excluded.source_mtime_ms,source_hash=excluded.source_hash,
-                         cache_epoch=excluded.cache_epoch,cache_root=excluded.cache_root,
+                         cache_epoch=excluded.cache_epoch,cache_root=excluded.cache_root,publish_id=excluded.publish_id,
                          generated_at=excluded.generated_at,last_accessed_at=excluded.last_accessed_at""",
                     (file_path, item["sizeLabel"], item["pixelSize"], final_path,
                      item["fileSize"], int(source_version), float(source_mtime_ms), source_digest,
-                    int(cache_epoch), canonical(os.path.dirname(final_path)), timestamp, timestamp),
+                    int(cache_epoch), canonical(os.path.dirname(final_path)), identifier, timestamp, timestamp),
                 )
             self.connection.execute(
                 """INSERT INTO thumbnail_publish_receipts
@@ -708,6 +739,7 @@ class ThumbnailDatabase:
                          thumbnail_size=excluded.thumbnail_size, thumbnail_version=excluded.thumbnail_version,
                          source_mtime_ms=excluded.source_mtime_ms, source_hash=excluded.source_hash,
                          cache_epoch=excluded.cache_epoch, cache_root=excluded.cache_root,
+                         publish_id='',
                          generated_at=excluded.generated_at, last_accessed_at=excluded.last_accessed_at""",
                     (file_path, item["sizeLabel"], item["pixelSize"], canonical(item["path"]),
                      item["fileSize"], source_version, source_mtime_ms, source_digest, cache_epoch,
@@ -761,7 +793,7 @@ class ThumbnailDatabase:
             raise ValueError("cache detach requires a bounded selector")
         where_sql = " AND ".join(conditions) if conditions else "1=1"
         rows = self.connection.execute(
-            f"""SELECT rowid,file_path,thumbnail_path,thumbnail_size FROM thumbnails
+            f"""SELECT rowid,file_path,thumbnail_path,thumbnail_size,cache_root FROM thumbnails
                 WHERE {where_sql} ORDER BY last_accessed_at,rowid LIMIT ?""",
             (*parameters, limit),
         ).fetchall()
@@ -789,6 +821,10 @@ class ThumbnailDatabase:
         return {
             "success": True,
             "thumbnailPaths": list(dict.fromkeys(row["thumbnail_path"] for row in rows if row["thumbnail_path"])),
+            "deletionClaims": [
+                {"path": row["thumbnail_path"], "cacheRoot": row["cache_root"]}
+                for row in rows if row["thumbnail_path"] and row["cache_root"]
+            ],
             "detachedCount": len(rows),
             "detachedBytes": sum(int(row["thumbnail_size"] or 0) for row in rows),
             "done": len(rows) < limit,
@@ -798,7 +834,7 @@ class ThumbnailDatabase:
         limit = max(1, min(CACHE_INVALIDATION_BATCH_SIZE, int(limit)))
         root = canonical(cache_root) if cache_root else None
         rows = self.connection.execute(
-            """SELECT thumbnails.rowid,thumbnails.file_path,thumbnails.thumbnail_path
+            """SELECT thumbnails.rowid,thumbnails.file_path,thumbnails.thumbnail_path,thumbnails.cache_root
                FROM thumbnails JOIN files ON files.path=thumbnails.file_path
                WHERE (files.exists_on_disk=0 OR files.thumbnail_state='MISSING')
                  AND (? IS NULL OR thumbnails.cache_root=?)
@@ -840,6 +876,10 @@ class ThumbnailDatabase:
         return {
             "success": True,
             "thumbnailPaths": list(dict.fromkeys(row["thumbnail_path"] for row in rows if row["thumbnail_path"])),
+            "deletionClaims": [
+                {"path": row["thumbnail_path"], "cacheRoot": row["cache_root"]}
+                for row in rows if row["thumbnail_path"] and row["cache_root"]
+            ],
             "detachedCount": len(rows),
             "sourceCount": len(removable),
             "done": remaining is None and remaining_sources is None,
@@ -1408,6 +1448,38 @@ class ThumbnailDatabase:
             )
         return {"success": True, "completedAt": timestamp, "cursor": payload}
 
+    def maintenance_state_list_prefix(self, prefix: str, after_key: str = "", limit: int = 128) -> dict:
+        normalized = str(prefix or "").strip()[:500]
+        if not normalized:
+            raise ValueError("maintenance state prefix is required")
+        bounded_limit = max(1, min(512, int(limit)))
+        rows = self.connection.execute(
+            """SELECT key,cursor_json FROM maintenance_state
+               WHERE key LIKE ? AND key>? AND completed_at=0 ORDER BY key LIMIT ?""",
+            (f"{normalized}%", str(after_key or ""), bounded_limit),
+        ).fetchall()
+        entries = []
+        for row in rows:
+            try:
+                cursor = json.loads(row["cursor_json"] or "{}")
+            except (TypeError, ValueError, json.JSONDecodeError):
+                cursor = {}
+            entries.append({"key": row["key"], "cursor": cursor})
+        return {
+            "success": True,
+            "entries": entries,
+            "afterKey": rows[-1]["key"] if rows else str(after_key or ""),
+            "done": len(rows) < bounded_limit,
+        }
+
+    def maintenance_state_delete(self, key: str) -> dict:
+        normalized = str(key or "").strip()[:500]
+        if not normalized:
+            raise ValueError("maintenance state key is required")
+        with self.connection:
+            deleted = self.connection.execute("DELETE FROM maintenance_state WHERE key=?", (normalized,)).rowcount
+        return {"success": True, "deletedCount": max(0, int(deleted or 0))}
+
     def list_cache_cleanup(self, before_ms: int, cache_root: str | None = None) -> dict:
         if cache_root:
             rows = self.connection.execute(
@@ -1559,6 +1631,19 @@ def run_server(database_path: str, recover: bool = True, crash_after_publish_com
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="strict")
     database = ThumbnailDatabase(database_path, recover=recover)
+    allowed_operations = {
+        "sync_directory", "sync_project", "inspect_tool_sources", "sync_paths",
+        "get_file", "set_state", "set_states", "get_cache_epoch", "get_thumbnail_publish",
+        "bump_cache_epoch", "begin_cache_maintenance", "capture_thumbnail_publish",
+        "resolve_thumbnail_publish", "commit_thumbnail_publish", "touch_thumbnails", "mark_ready",
+        "claim_thumbnail_backup_recovery",
+        "touch_thumbnail", "detach_cache_batch", "prune_missing_batch", "recover_cache_publications",
+        "record_orphan_delete_failures", "clear_orphan_delete_retries", "prepare_thumbnail_deletions",
+        "check_integrity", "run_thumbnail_cache_migration", "maintenance_state_get",
+        "maintenance_state_save", "maintenance_state_complete", "maintenance_state_list_prefix",
+        "maintenance_state_delete", "list_cache_cleanup",
+        "cleanup_orphan_cache", "invalidate_cache", "invalidate_sources", "prune_missing_sources",
+    }
     print(json.dumps({"type": "ready", "success": True, "userVersion": int(database.connection.execute("PRAGMA user_version").fetchone()[0])}), flush=True)
     try:
         for line in sys.stdin:
@@ -1568,6 +1653,8 @@ def run_server(database_path: str, recover: bool = True, crash_after_publish_com
                 request_id = request.get("id")
                 operation = request["op"]
                 args = request.get("args", {})
+                if operation not in allowed_operations:
+                    raise ValueError("unsupported thumbnail database operation")
                 handler = getattr(database, operation)
                 result = handler(**args)
                 if crash_after_publish_commit and operation == "commit_thumbnail_publish":
@@ -1576,6 +1663,7 @@ def run_server(database_path: str, recover: bool = True, crash_after_publish_com
                     os._exit(91)
                 response = {"id": request_id, "success": True, "result": result}
             except Exception as error:  # service errors must not terminate the index
+                database.connection.rollback()
                 response = {"id": request.get("id") if isinstance(request, dict) else None,
                             "success": False, "error": str(error),
                             "code": getattr(error, "code", "THUMBNAIL_DATABASE_ERROR")}

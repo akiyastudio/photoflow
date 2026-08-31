@@ -12,6 +12,7 @@ const { isInternalWorkspacePath } = require('./infrastructure/internal-workspace
 // larger tiers and therefore looked visibly soft when the renderer enlarged them.
 const THUMBNAIL_VERSION = 4;
 const THUMBNAIL_MAINTENANCE_TIMEOUT_MS = 10 * 60 * 1000;
+const THUMBNAIL_BACKUP_RECOVERY_PREFIX = 'thumbnail-publish-backup-recovery:';
 const THUMBNAIL_SIZES = [
   { label: 'small', pixels: 320 },
   { label: 'medium', pixels: 640 },
@@ -54,6 +55,7 @@ class ThumbnailDatabaseClient {
     this.processStops = new WeakMap();
     this.processReady = new WeakMap();
     this.terminationPromise = null;
+    this.permanentlyStopped = false;
   }
 
   stopChildAndWait(child, reason, timeoutMs = 2000) {
@@ -77,6 +79,7 @@ class ThumbnailDatabaseClient {
   }
 
   ensureProcess() {
+    if (this.permanentlyStopped) throw Object.assign(new Error('thumbnail database client stopped'), { code: 'THUMBNAIL_STOPPED' });
     if (this.process && !this.process.killed) return this.process;
     if (this.managedProcess && !this.managedProcess.released) {
       if (this.managedProcess.child && !this.managedProcess.child.killed) return this.managedProcess.child;
@@ -213,7 +216,8 @@ class ThumbnailDatabaseClient {
     });
   }
 
-  stop() {
+  stop(permanent = false) {
+    if (permanent) this.permanentlyStopped = true;
     const child = this.process;
     if (child) return this.stopChildAndWait(child, 'thumbnail-database-stop');
     if (this.managedProcess) {
@@ -283,6 +287,7 @@ class ThumbnailPipeline {
     this.resolveCacheDir = resolveCacheDir;
     this.coordinator = new ThumbnailCoordinator({
       touchFlusher: touches => this.database.call('touch_thumbnails', { touches }),
+      log,
     });
     this.maintenanceContext = new AsyncLocalStorage();
     this.getCacheDir = getCacheDir;
@@ -316,13 +321,22 @@ class ThumbnailPipeline {
     this.lastForegroundActivityAt = Date.now();
     this.directoryIdleDelayMs = 1500;
     this.projectIdleDelayMs = 5000;
+    this.stopped = false;
+    this.activeCacheRootKey = null;
+    this.cacheRootGeneration = 0;
+    this.cacheRootTransition = Promise.resolve();
+    this.delayedRetryTimers = new Set();
+    this.activeProjectScanner = null;
+    this.activeOperations = new Set();
   }
 
   noteForegroundActivity() {
+    if (this.stopped) return;
     this.lastForegroundActivityAt = Date.now();
     if (this.backgroundResumeTimer) clearTimeout(this.backgroundResumeTimer);
     this.backgroundResumeTimer = setTimeout(() => {
       this.backgroundResumeTimer = null;
+      if (this.stopped) return;
       this.pump();
       this.pumpProjectScans();
     }, this.directoryIdleDelayMs);
@@ -351,22 +365,24 @@ class ThumbnailPipeline {
   async isSafeManagedCachePath(cacheRoot, candidate) {
     const root = path.resolve(cacheRoot);
     const resolved = path.resolve(candidate);
-    const relative = path.relative(root, resolved);
+    const rootStat = await fs.promises.stat(root).catch(() => null);
+    if (!rootStat?.isDirectory()) return false;
+    const stat = await fs.promises.lstat(resolved).catch(() => null);
+    if (stat && (stat.isSymbolicLink() || !stat.isFile())) return false;
+    const [realRoot, realParent] = await Promise.all([
+      fs.promises.realpath(root).catch(() => null),
+      fs.promises.realpath(path.dirname(resolved)).catch(() => null),
+    ]);
+    if (!realRoot || !realParent) return false;
+    const realCandidate = path.join(realParent, path.basename(resolved));
+    const relative = path.relative(realRoot, realCandidate);
     if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return false;
     const segments = relative.split(path.sep);
     const fileName = segments.at(-1) || '';
     const finalName = /^[0-9a-f]{64}\.jpg$/i.test(fileName) && segments.length === 1;
     const stagingName = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.jpg$/i.test(fileName)
       && segments.length === 2 && segments[0] === '.staging';
-    if (!finalName && !stagingName) return false;
-    const stat = await fs.promises.lstat(resolved).catch(() => null);
-    if (stat?.isSymbolicLink()) return false;
-    const [realRoot, realParent] = await Promise.all([
-      fs.promises.realpath(root).catch(() => root),
-      fs.promises.realpath(path.dirname(resolved)).catch(() => path.dirname(resolved)),
-    ]);
-    const realRelative = path.relative(realRoot, realParent);
-    return !realRelative.startsWith('..') && !path.isAbsolute(realRelative);
+    return finalName || stagingName;
   }
 
   withIndexer(worker) {
@@ -441,9 +457,11 @@ class ThumbnailPipeline {
   }
 
   scheduleBackgroundResume(waitMs) {
+    if (this.stopped) return;
     if (this.backgroundResumeTimer) clearTimeout(this.backgroundResumeTimer);
     this.backgroundResumeTimer = setTimeout(() => {
       this.backgroundResumeTimer = null;
+      if (this.stopped) return;
       this.pump();
       this.pumpProjectScans();
     }, Math.max(8, waitMs));
@@ -457,8 +475,73 @@ class ThumbnailPipeline {
     }
   }
 
-  cacheKey(filePath, stat, sizeLabel) {
-    return `${pathKey(filePath)}|${stat.size}|${stat.mtimeMs}|${sizeLabel}|v${THUMBNAIL_VERSION}`;
+  cacheRootKey(cacheConfig = {}) {
+    return pathKey(this.cacheDirectory(cacheConfig));
+  }
+
+  activateCacheRoot(cacheConfig = {}) {
+    const requestedRoot = this.cacheRootKey(cacheConfig);
+    const transition = this.cacheRootTransition.catch(() => undefined).then(async () => {
+      if (this.stopped) throw Object.assign(new Error('thumbnail pipeline stopped'), { code: 'THUMBNAIL_STOPPED' });
+      if (this.activeCacheRootKey === requestedRoot) return this.cacheRootGeneration;
+      const applyRootGeneration = () => {
+        this.activeCacheRootKey = requestedRoot;
+        this.cacheRootGeneration += 1;
+        this.memory.clear();
+        for (const task of [...this.tasks.values()]) {
+          if (task.input.rootGeneration === this.cacheRootGeneration) continue;
+          task.rootObsolete = true;
+          task.cancelled = true;
+          if (task.running) continue;
+          this.tasks.delete(task.key);
+          task.resolveCompletion({ state: 'CANCELLED' });
+        }
+        for (const queue of this.queues) {
+          for (let index = queue.length - 1; index >= 0; index -= 1) {
+            if (queue[index].cancelled) queue.splice(index, 1);
+          }
+        }
+      };
+      if (this.activeCacheRootKey === null) applyRootGeneration();
+      else {
+        await this.coordinator.withMaintenance(async () => {
+          await this.database.call('begin_cache_maintenance', {});
+          applyRootGeneration();
+        });
+      }
+      return this.cacheRootGeneration;
+    });
+    this.activeOperations.add(transition);
+    void transition.finally(() => this.activeOperations.delete(transition)).catch(() => undefined);
+    this.cacheRootTransition = transition;
+    return transition;
+  }
+
+  assertRootGeneration(rootGeneration, cacheConfig = {}) {
+    if (this.stopped) throw Object.assign(new Error('thumbnail pipeline stopped'), { code: 'THUMBNAIL_STOPPED' });
+    if (rootGeneration !== this.cacheRootGeneration || this.cacheRootKey(cacheConfig) !== this.activeCacheRootKey) {
+      throw Object.assign(new Error('thumbnail cache root generation changed'), { code: 'ROOT_STALE' });
+    }
+  }
+
+  assertTaskRootCurrent(task) {
+    if (task.rootObsolete) throw Object.assign(new Error('thumbnail cache root generation changed'), { code: 'ROOT_STALE' });
+    this.assertRootGeneration(task.input.rootGeneration, task.input.cacheConfig || {});
+  }
+
+  trackActiveOperation(operation) {
+    const tracked = Promise.resolve(operation);
+    this.activeOperations.add(tracked);
+    void tracked.finally(() => this.activeOperations.delete(tracked)).catch(() => undefined);
+    return tracked;
+  }
+
+  taskKey(filePath, cacheConfig = {}) {
+    return `${pathKey(filePath)}|root:${this.cacheRootKey(cacheConfig)}`;
+  }
+
+  cacheKey(filePath, stat, sizeLabel, cacheConfig = {}) {
+    return `${this.taskKey(filePath, cacheConfig)}|${stat.size}|${stat.mtimeMs}|${sizeLabel}|v${THUMBNAIL_VERSION}`;
   }
 
   async waitForSourceStability(filePath, baselineStat, deadlineAt) {
@@ -489,51 +572,67 @@ class ThumbnailPipeline {
     return this.cacheFilePath(filePath, stat, this.getCacheDir(cacheConfig), size.pixels, THUMBNAIL_VERSION);
   }
 
-  async readDisk(filePath, stat, cacheConfig, size) {
+  async readDisk(filePath, stat, cacheConfig, size, rootGeneration) {
     const target = this.targetFor(filePath, stat, cacheConfig, size);
     let handle;
     let invalidThumbnail = false;
     try {
-      const durable = await this.coordinator.withIndexer(() => this.database.call('get_thumbnail_publish', {
-        file_path: filePath,
-        size_label: size.label,
-        source_size: stat.size,
-        source_mtime_ms: stat.mtimeMs,
-      }));
-      if (!durable || pathKey(durable.thumbnailPath) !== pathKey(target)) return null;
-      const thumbnailStat = await fs.promises.stat(target);
-      if (thumbnailStat.size < 128) {
-        invalidThumbnail = true;
-        throw new Error('thumbnail is empty or damaged');
-      }
-      handle = await fs.promises.open(target, 'r');
-      const markers = Buffer.alloc(4);
-      await handle.read(markers, 0, 2, 0);
-      await handle.read(markers, 2, 2, thumbnailStat.size - 2);
-      if (markers[0] !== 0xff || markers[1] !== 0xd8 || markers[2] !== 0xff || markers[3] !== 0xd9) {
-        invalidThumbnail = true;
-        throw new Error('thumbnail is empty or damaged');
-      }
-      await handle.close();
-      handle = null;
-      const now = new Date();
-      void fs.promises.utimes(target, now, now).catch(() => undefined);
-      const cachedPath = this.memory.put(this.cacheKey(filePath, stat, size.label), target, thumbnailStat.size);
-      this.coordinator.touch(filePath, size.label);
-      return { previewUrl: this.toPreviewUrl(cachedPath), target };
-    } catch {
+      return await this.coordinator.withIndexer(async () => {
+        this.assertRootGeneration(rootGeneration, cacheConfig);
+        const durable = await this.database.call('get_thumbnail_publish', {
+          file_path: filePath,
+          size_label: size.label,
+          source_size: stat.size,
+          source_mtime_ms: stat.mtimeMs,
+        });
+        if (!durable || pathKey(durable.thumbnailPath) !== pathKey(target)) return null;
+        const thumbnailStat = await fs.promises.stat(target);
+        if (thumbnailStat.size < 128) {
+          invalidThumbnail = true;
+          throw new Error('thumbnail is empty or damaged');
+        }
+        handle = await fs.promises.open(target, 'r');
+        const markers = Buffer.alloc(4);
+        await handle.read(markers, 0, 2, 0);
+        await handle.read(markers, 2, 2, thumbnailStat.size - 2);
+        if (markers[0] !== 0xff || markers[1] !== 0xd8 || markers[2] !== 0xff || markers[3] !== 0xd9) {
+          invalidThumbnail = true;
+          throw new Error('thumbnail is empty or damaged');
+        }
+        await handle.close();
+        handle = null;
+        const now = new Date();
+        await fs.promises.utimes(target, now, now).catch(() => undefined);
+        const cachedPath = this.memory.put(this.cacheKey(filePath, stat, size.label, cacheConfig), target, thumbnailStat.size);
+        this.coordinator.touch(filePath, size.label);
+        this.assertRootGeneration(rootGeneration, cacheConfig);
+        return { previewUrl: this.toPreviewUrl(cachedPath), target };
+      });
+    } catch (error) {
       await handle?.close().catch(() => undefined);
+      if (error?.code === 'ROOT_STALE' || error?.code === 'THUMBNAIL_STOPPED') throw error;
       // A second renderer request can arrive while the worker for this source
       // is publishing a cache tier. Never let that reader delete a file owned
       // by the in-flight task. Only remove a positively identified stale file.
-      if (invalidThumbnail && !this.tasks.has(pathKey(filePath))) {
-        await this.evictCache({ thumbnailPaths: [target] }).catch(() => undefined);
+      if (invalidThumbnail && !this.tasks.has(this.taskKey(filePath, cacheConfig))) {
+        await this.evictCache({ thumbnailPaths: [target], cacheRoot: this.cacheDirectory(cacheConfig) }).catch(() => undefined);
       }
       return null;
     }
   }
 
-  async request({ filePath, kind, cacheConfig = {}, requestedSize = 640, priority = PRIORITY.visible, queueOrder = Number.MAX_SAFE_INTEGER, requireDisk = false, forceRegenerate = false }) {
+  request(options) {
+    return this.trackActiveOperation(this.requestInternal(options));
+  }
+
+  async requestInternal({ filePath, kind, cacheConfig = {}, requestedSize = 640, priority = PRIORITY.visible, queueOrder = Number.MAX_SAFE_INTEGER, requireDisk = false, forceRegenerate = false }) {
+    if (this.stopped) return { success: false, state: 'NOT_READY', error: '缩略图服务已停止', cacheLayer: 'source' };
+    let rootGeneration;
+    try {
+      rootGeneration = await this.activateCacheRoot(cacheConfig);
+    } catch (error) {
+      return { success: false, state: 'NOT_READY', error: error?.message || String(error), cacheLayer: 'source' };
+    }
     const sourcePath = path.resolve(filePath);
     // Renderer file lists and watcher events are asynchronous. A just-created
     // publication staging file can therefore survive in one stale render even
@@ -555,43 +654,97 @@ class ThumbnailPipeline {
       void this.setPersistentState(sourcePath, 'MISSING').catch(() => undefined);
       return { success: false, state: 'MISSING', error: '原始文件不存在或磁盘离线' };
     }
+    try { this.assertRootGeneration(rootGeneration, cacheConfig); } catch {
+      return { success: false, state: 'CANCELLED', error: '缩略图缓存目录已切换', cacheLayer: 'source' };
+    }
 
     if (!requireDisk && !forceRegenerate) {
-      const memoryPath = this.memory.get(this.cacheKey(sourcePath, stat, size.label));
-      if (memoryPath) return { success: true, state: 'READY', previewUrl: this.toPreviewUrl(memoryPath), cacheLayer: 'memory', mediaUrl: kind === 'video' ? null : undefined };
+      let memoryReady;
+      try {
+        memoryReady = await this.coordinator.withIndexer(async () => {
+          this.assertRootGeneration(rootGeneration, cacheConfig);
+          const memoryPath = this.memory.get(this.cacheKey(sourcePath, stat, size.label, cacheConfig));
+          if (!memoryPath) return null;
+          const durable = await this.database.call('get_thumbnail_publish', {
+            file_path: sourcePath,
+            size_label: size.label,
+            source_size: stat.size,
+            source_mtime_ms: stat.mtimeMs,
+          });
+          if (!durable || pathKey(durable.thumbnailPath) !== pathKey(memoryPath)) return null;
+          const exists = await fs.promises.stat(memoryPath).then(value => value.isFile(), () => false);
+          if (!exists) return null;
+          const now = new Date();
+          await fs.promises.utimes(memoryPath, now, now).catch(() => undefined);
+          this.coordinator.touch(sourcePath, size.label);
+          this.assertRootGeneration(rootGeneration, cacheConfig);
+          return { previewUrl: this.toPreviewUrl(memoryPath) };
+        });
+      } catch (error) {
+        if (error?.code === 'ROOT_STALE' || error?.code === 'THUMBNAIL_STOPPED') {
+          return { success: false, state: 'CANCELLED', error: '缩略图缓存目录已切换', cacheLayer: 'source' };
+        }
+        memoryReady = null;
+      }
+      if (memoryReady) return { success: true, state: 'READY', previewUrl: memoryReady.previewUrl, cacheLayer: 'memory', mediaUrl: kind === 'video' ? null : undefined };
+      this.memory.deleteFile(sourcePath);
     }
 
     // Merge the request into an existing task before touching its output. This
     // closes the read/delete race between a foreground request and generation.
-    if (this.tasks.has(pathKey(sourcePath))) {
-      this.enqueue({ filePath: sourcePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [size], queueOrder, forceRegenerate }, priority);
+    try { this.assertRootGeneration(rootGeneration, cacheConfig); } catch {
+      return { success: false, state: 'CANCELLED', error: '缩略图缓存目录已切换', cacheLayer: 'source' };
+    }
+    const taskKey = this.taskKey(sourcePath, cacheConfig);
+    if (this.tasks.has(taskKey)) {
+      this.enqueue({ filePath: sourcePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [size], queueOrder, forceRegenerate, subscribe: true, rootGeneration }, priority);
       return {
         success: true, state: 'QUEUED', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined,
-        completion: this.tasks.get(pathKey(sourcePath))?.completion,
+        completion: this.tasks.get(taskKey)?.completion,
       };
     }
 
     if (!forceRegenerate) {
-      const disk = await this.readDisk(sourcePath, stat, cacheConfig, size);
+      let disk;
+      try { disk = await this.readDisk(sourcePath, stat, cacheConfig, size, rootGeneration); } catch (error) {
+        if (error?.code === 'ROOT_STALE' || error?.code === 'THUMBNAIL_STOPPED') {
+          return { success: false, state: 'CANCELLED', error: '缩略图缓存目录已切换', cacheLayer: 'source' };
+        }
+        throw error;
+      }
       if (disk) return { success: true, state: 'READY', previewUrl: disk.previewUrl, cacheLayer: 'disk', mediaUrl: kind === 'video' ? null : undefined };
     }
 
     // The database index is durable metadata, not a prerequisite for showing
     // an image. Visible cache misses enter the scheduler immediately; index
     // and state writes are completed asynchronously in the background.
-    const accepted = this.enqueue({ filePath: sourcePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [size], queueOrder }, priority);
+    try { this.assertRootGeneration(rootGeneration, cacheConfig); } catch {
+      return { success: false, state: 'CANCELLED', error: '缩略图缓存目录已切换', cacheLayer: 'source' };
+    }
+    const accepted = this.enqueue({ filePath: sourcePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [size], queueOrder, forceRegenerate, subscribe: true, rootGeneration }, priority);
     if (!accepted) {
       return { success: false, state: 'NOT_READY', error: '缩略图任务队列繁忙，请稍后重试', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined };
     }
     return {
       success: true, state: 'QUEUED', cacheLayer: 'source', mediaUrl: kind === 'video' ? null : undefined,
-      completion: this.tasks.get(pathKey(sourcePath))?.completion,
+      completion: this.tasks.get(taskKey)?.completion,
     };
   }
 
   enqueue(input, priority = PRIORITY.project) {
     const sourcePath = path.resolve(input.filePath);
-    const key = pathKey(sourcePath);
+    if (this.stopped) return false;
+    if (!Number.isFinite(input.rootGeneration)) {
+      const requestedRoot = this.cacheRootKey(input.cacheConfig || {});
+      if (this.activeCacheRootKey === null) {
+        this.activeCacheRootKey = requestedRoot;
+        this.cacheRootGeneration += 1;
+      }
+      if (this.activeCacheRootKey !== requestedRoot) return false;
+      input = { ...input, rootGeneration: this.cacheRootGeneration };
+    }
+    if (input.rootGeneration !== this.cacheRootGeneration) return false;
+    const key = this.taskKey(sourcePath, input.cacheConfig || {});
     const normalizedPriority = Math.max(0, Math.min(3, Number(priority) || 0));
     if (normalizedPriority <= PRIORITY.nearby) this.noteForegroundActivity();
     const queueOrder = Number.isFinite(Number(input.queueOrder)) ? Number(input.queueOrder) : Number.MAX_SAFE_INTEGER;
@@ -601,18 +754,23 @@ class ThumbnailPipeline {
       existing.order = Math.min(existing.order, queueOrder);
       for (const size of input.requestedSizes || [THUMBNAIL_SIZES[0]]) {
         existing.requestedSizes.set(size.label, size);
+        if (input.subscribe) existing.subscribers.set(size.label, (existing.subscribers.get(size.label) || 0) + 1);
+        else existing.backgroundDemand.add(size.label);
         if (input.forceRegenerate) existing.completedSizes.delete(size.label);
       }
       if (normalizedPriority < existing.priority && !existing.running) {
         existing.cancelled = true;
         const replacement = {
           key, input: existing.input, requestedSizes: existing.requestedSizes, completedSizes: existing.completedSizes,
+          subscribers: existing.subscribers,
+          backgroundDemand: existing.backgroundDemand,
           priority: normalizedPriority, order: existing.order, running: false, cancelled: false,
           completion: existing.completion, resolveCompletion: existing.resolveCompletion,
         };
         this.tasks.set(key, replacement);
         this.queues[normalizedPriority].push(replacement);
         this.queues[normalizedPriority].sort((left, right) => left.order - right.order);
+        this.schedulePump();
       } else if (!existing.running) {
         this.queues[existing.priority].sort((left, right) => left.order - right.order);
       }
@@ -623,6 +781,8 @@ class ThumbnailPipeline {
     const completion = taskCompletion();
     const task = {
       key, input: { ...input, filePath: sourcePath }, requestedSizes, completedSizes: new Set(),
+      subscribers: new Map([...requestedSizes.keys()].map(label => [label, input.subscribe ? 1 : 0])),
+      backgroundDemand: new Set(input.subscribe ? [] : requestedSizes.keys()),
       priority: normalizedPriority, order: queueOrder, running: false, cancelled: false,
       completion: completion.promise, resolveCompletion: completion.resolve,
     };
@@ -635,26 +795,41 @@ class ThumbnailPipeline {
   }
 
   schedulePump() {
+    if (this.stopped) return;
     if (this.thumbnailPumpTimer) return;
     // Collect the IntersectionObserver requests from the same render frame so
     // visible tiles can be sorted by their actual list position before work
     // starts. Eight milliseconds is below one 60 Hz frame.
     this.thumbnailPumpTimer = setTimeout(() => {
       this.thumbnailPumpTimer = null;
+      if (this.stopped) return;
       this.pump();
     }, 8);
   }
 
   cancel(filePath, requestedSize) {
-    const key = pathKey(filePath);
-    const task = this.tasks.get(key);
-    if (!task || task.running) return false;
-    task.requestedSizes.delete(chooseSize(requestedSize).label);
-    if (task.requestedSizes.size) return true;
-    task.cancelled = true;
-    this.tasks.delete(key);
-    task.resolveCompletion({ state: 'CANCELLED' });
-    return true;
+    const sourceKey = pathKey(filePath);
+    const label = chooseSize(requestedSize).label;
+    let settled = false;
+    for (const task of [...this.tasks.values()]) {
+      if (pathKey(task.input.filePath) !== sourceKey || task.input.rootGeneration !== this.cacheRootGeneration) continue;
+      const subscribers = task.subscribers.get(label) || 0;
+      if (!subscribers) continue;
+      settled = true;
+      if (subscribers > 1) {
+        task.subscribers.set(label, subscribers - 1);
+        continue;
+      }
+      task.subscribers.delete(label);
+      if (task.running) continue;
+      if (task.backgroundDemand.has(label)) continue;
+      task.requestedSizes.delete(label);
+      if (task.requestedSizes.size) continue;
+      task.cancelled = true;
+      this.tasks.delete(task.key);
+      task.resolveCompletion({ state: 'CANCELLED' });
+    }
+    return settled;
   }
 
   nextTask(allowBackground) {
@@ -678,6 +853,7 @@ class ThumbnailPipeline {
   }
 
   pump() {
+    if (this.stopped) return;
     while (this.activeWorkers < this.concurrency) {
       // Keep one slot free for a newly selected/visible item. Long-running RAW
       // or video background work must not occupy every decoder concurrently.
@@ -739,13 +915,87 @@ class ThumbnailPipeline {
     }
   }
 
-  async publishStagedThumbnailSet(filePath, capture, staged) {
+  async publishStagedThumbnailSet(filePath, capture, staged, advanceVisibility = null) {
     const ownedFinals = [];
+    const replacements = [];
     const publishId = crypto.randomUUID();
     let published = [];
     let publishRequest = null;
+    let commitAttempted = false;
+    let commitConfirmed = false;
+    let visibilityAdvanced = false;
+    const makeVisible = async () => {
+      if (visibilityAdvanced || typeof advanceVisibility !== 'function') return;
+      await advanceVisibility(published);
+      visibilityAdvanced = true;
+    };
+    const assertPublishRootCurrent = () => {
+      if (Number.isFinite(capture.rootGeneration)
+          && (capture.rootGeneration !== this.cacheRootGeneration || capture.cacheRootKey !== this.activeCacheRootKey)) {
+        throw Object.assign(new Error('thumbnail cache root changed before publish'), { code: 'ROOT_STALE' });
+      }
+    };
+    const rollbackFinals = async () => {
+      const failures = [];
+      for (const finalPath of ownedFinals) {
+        try { await fs.promises.unlink(finalPath); } catch (error) {
+          if (error?.code !== 'ENOENT') failures.push({ finalPath, phase: 'remove-owned-final', error: error?.message || String(error) });
+        }
+      }
+      for (const item of replacements) {
+        try { await fs.promises.unlink(item.finalPath); } catch (error) {
+          if (error?.code !== 'ENOENT') {
+            failures.push({ ...item, phase: 'remove-replacement', error: error?.message || String(error) });
+            continue;
+          }
+        }
+        try {
+          await fs.promises.rename(item.backupPath, item.finalPath);
+          const restored = await fs.promises.stat(item.finalPath);
+          if (!restored.isFile() || restored.size !== item.backupSize) throw new Error('restored thumbnail backup failed verification');
+          if (item.backupDigest) {
+            const digest = crypto.createHash('sha256').update(await fs.promises.readFile(item.finalPath)).digest('hex');
+            if (digest !== item.backupDigest) throw new Error('restored thumbnail backup digest mismatch');
+          }
+        } catch (error) {
+          failures.push({ ...item, phase: 'restore-backup', error: error?.message || String(error) });
+        }
+      }
+      if (!failures.length) return;
+      const receiptKey = `${THUMBNAIL_BACKUP_RECOVERY_PREFIX}${publishId}`;
+      let receiptError = null;
+      try {
+        await this.database.call('maintenance_state_save', {
+          key: receiptKey,
+          cursor: {
+            version: 1,
+            publishId,
+            filePath,
+            cacheEpoch: capture.cacheEpoch,
+            sourceVersion: capture.sourceVersion,
+            cacheRoot: replacements[0]?.finalPath ? path.dirname(replacements[0].finalPath) : null,
+            published,
+            replacements,
+            ownedFinals,
+            failures,
+            createdAt: Date.now(),
+          },
+        });
+      } catch (error) {
+        receiptError = error;
+      }
+      const rollbackError = Object.assign(new Error('thumbnail publish rollback requires recovery'), {
+        code: 'THUMBNAIL_PUBLISH_ROLLBACK_INCOMPLETE',
+        receiptKey,
+        failures,
+        receiptError: receiptError?.message || null,
+      });
+      this.log('error', rollbackError.message, { filePath, receiptKey, failures, receiptError: rollbackError.receiptError });
+      throw rollbackError;
+    };
     try {
       return await this.coordinator.withPublisher(async () => {
+        assertPublishRootCurrent();
         const currentSource = await fs.promises.stat(filePath);
         if (!currentSource.isFile() || currentSource.size !== capture.sourceSize || currentSource.mtimeMs !== capture.sourceMtimeMs) {
           throw Object.assign(new Error('thumbnail source changed before publish'), { code: 'SOURCE_STALE' });
@@ -757,12 +1007,20 @@ class ThumbnailPipeline {
         published = [];
         for (const item of staged) {
           await fs.promises.mkdir(path.dirname(item.finalPath), { recursive: true });
-          let ownsFinal = false;
+          let backupPath = null;
           if (await fs.promises.access(item.finalPath).then(() => true, () => false)) {
-            await fs.promises.unlink(item.stagingPath).catch(() => undefined);
+            backupPath = path.join(path.dirname(item.stagingPath), `${crypto.randomUUID()}.jpg`);
+            const previousStat = await fs.promises.stat(item.finalPath);
+            const backupDigest = crypto.createHash('sha256').update(await fs.promises.readFile(item.finalPath)).digest('hex');
+            await fs.promises.rename(item.finalPath, backupPath);
+            replacements.push({ finalPath: item.finalPath, backupPath, backupSize: previousStat.size, backupDigest });
+            try {
+              await fs.promises.rename(item.stagingPath, item.finalPath);
+            } catch (error) {
+              throw error;
+            }
           } else {
             await fs.promises.rename(item.stagingPath, item.finalPath);
-            ownsFinal = true;
             ownedFinals.push(item.finalPath);
           }
           const finalStat = await fs.promises.stat(item.finalPath);
@@ -771,7 +1029,6 @@ class ThumbnailPipeline {
             pixelSize: item.pixelSize,
             path: item.finalPath,
             fileSize: finalStat.size,
-            ownsFinal,
           });
         }
         publishRequest = {
@@ -782,24 +1039,50 @@ class ThumbnailPipeline {
           source_size: capture.sourceSize,
           source_mtime_ms: capture.sourceMtimeMs,
           source_digest: capture.sourceDigest || null,
-          thumbnails: published.map(({ ownsFinal: _ownsFinal, ...item }) => item),
+          thumbnails: published,
         };
+        assertPublishRootCurrent();
+        commitAttempted = true;
         await this.database.call('commit_thumbnail_publish', publishRequest);
+        commitConfirmed = true;
+        assertPublishRootCurrent();
+        await makeVisible();
+        await Promise.all(replacements.map(item => fs.promises.unlink(item.backupPath).catch(() => undefined)));
         return published;
       });
     } catch (error) {
       await Promise.all(staged.map(item => fs.promises.unlink(item.stagingPath).catch(() => undefined)));
-      const explicitlyRejected = error?.code === 'EPOCH_STALE' || error?.code === 'SOURCE_STALE';
+      const explicitlyRejected = !commitConfirmed
+        && (!commitAttempted || error?.code === 'EPOCH_STALE' || error?.code === 'SOURCE_STALE');
       if (explicitlyRejected) {
-        await Promise.all(ownedFinals.map(item => fs.promises.unlink(item).catch(() => undefined)));
+        await rollbackFinals();
         throw error;
       }
       try {
         const outcome = await this.resolveThumbnailPublish(publishId, publishRequest);
-        if (outcome?.state === 'COMMITTED') return published;
+        if (outcome?.state === 'COMMITTED') {
+          commitConfirmed = true;
+          return await this.coordinator.withPublisher(async () => {
+            const currentEpoch = await this.database.call('get_cache_epoch', {});
+            if (currentEpoch.cacheEpoch !== capture.cacheEpoch) {
+              throw Object.assign(new Error('thumbnail cache epoch changed before visibility'), { code: 'EPOCH_STALE' });
+            }
+            for (const item of published) {
+              const finalStat = await fs.promises.stat(item.path).catch(() => null);
+              if (!finalStat?.isFile() || finalStat.size !== item.fileSize) {
+                throw Object.assign(new Error('published thumbnail disappeared before visibility'), { code: 'SOURCE_STALE' });
+              }
+            }
+            await makeVisible();
+            await Promise.all(replacements.map(item => fs.promises.unlink(item.backupPath).catch(() => undefined)));
+            return published;
+          });
+        }
       } catch (resolutionError) {
         if (resolutionError?.code === 'EPOCH_STALE' || resolutionError?.code === 'SOURCE_STALE') {
-          await Promise.all(ownedFinals.map(item => fs.promises.unlink(item).catch(() => undefined)));
+          if (commitConfirmed) {
+            await Promise.all(replacements.map(item => fs.promises.unlink(item.backupPath).catch(() => undefined)));
+          } else await rollbackFinals();
           throw resolutionError;
         }
       }
@@ -843,9 +1126,11 @@ class ThumbnailPipeline {
     const { filePath, kind, cacheConfig, sourceHash } = task.input;
     let stat;
     try {
+      this.assertTaskRootCurrent(task);
       stat = await fs.promises.stat(filePath);
       if (!stat.isFile()) throw Object.assign(new Error('原始文件不存在'), { code: 'ENOENT' });
     } catch (error) {
+      if (error?.code === 'ROOT_STALE' || error?.code === 'THUMBNAIL_STOPPED') return { state: 'CANCELLED' };
       const state = 'MISSING';
       void this.setPersistentState(filePath, state, error.message || String(error)).catch(() => undefined);
       this.notify({ filePath, state, error: error.message || String(error) });
@@ -864,16 +1149,41 @@ class ThumbnailPipeline {
         let observedSourceChange = false;
         while (true) {
           try {
+            this.assertTaskRootCurrent(task);
             const capture = await this.coordinator.withIndexer(() => this.database.call('capture_thumbnail_publish', {
               file_path: filePath,
               kind,
             }));
             stat = await fs.promises.stat(filePath);
             const staged = await this.generateStagedThumbnailSet(filePath, stat, kind, cacheConfig, requestedSizes);
-            if (!staged.length) throw Object.assign(new Error('缩略图解码未产生输出；源文件可能仍在写入或内容无法解码'), { code: 'ECACHEMISS' });
-            published = await this.publishStagedThumbnailSet(filePath, { ...capture, sourceDigest: sourceHash || null }, staged);
+            try {
+              if (!staged.length) throw Object.assign(new Error('缩略图解码未产生输出；源文件可能仍在写入或内容无法解码'), { code: 'ECACHEMISS' });
+              this.assertTaskRootCurrent(task);
+              published = await this.publishStagedThumbnailSet(
+                filePath,
+                {
+                  ...capture,
+                  sourceDigest: sourceHash || null,
+                  rootGeneration: task.input.rootGeneration,
+                  cacheRootKey: this.cacheRootKey(cacheConfig),
+                },
+                staged,
+                committed => {
+                  const urls = {};
+                  for (const item of committed) {
+                    task.completedSizes.add(item.sizeLabel);
+                    const cachedPath = this.memory.put(this.cacheKey(filePath, stat, item.sizeLabel, cacheConfig), item.path, item.fileSize);
+                    urls[item.sizeLabel] = this.toPreviewUrl(cachedPath);
+                  }
+                  this.notify({ filePath, state: 'READY', previewUrls: urls });
+                },
+              );
+            } finally {
+              await Promise.all(staged.map(item => fs.promises.unlink(item.stagingPath).catch(() => undefined)));
+            }
             break;
           } catch (error) {
+            if (error?.code === 'ROOT_STALE' || error?.code === 'THUMBNAIL_STOPPED') throw error;
             let currentStat = null;
             try {
               currentStat = await fs.promises.stat(filePath);
@@ -908,32 +1218,37 @@ class ThumbnailPipeline {
               void this.setPersistentState(filePath, 'STALE').catch(() => undefined);
               const recoveryCount = Number(task.input.slowWriteRecoveryCount) || 0;
               if (recoveryCount >= 2) throw error;
-              setTimeout(() => this.enqueue({
-                ...task.input,
-                filePath,
-                stat: freshStat,
-                forceRegenerate: true,
-                requestedSizes,
-                slowWriteRecoveryCount: recoveryCount + 1,
-              }, task.priority), this.sourceStabilityDelayMs);
+              const retryTimer = setTimeout(() => {
+                this.delayedRetryTimers.delete(retryTimer);
+                if (this.stopped || task.input.rootGeneration !== this.cacheRootGeneration) return;
+                this.enqueue({
+                  ...task.input,
+                  filePath,
+                  stat: freshStat,
+                  forceRegenerate: true,
+                  subscribe: false,
+                  requestedSizes,
+                  slowWriteRecoveryCount: recoveryCount + 1,
+                }, task.priority);
+              }, this.sourceStabilityDelayMs);
+              this.delayedRetryTimers.add(retryTimer);
               return { state: 'STALE' };
             }
             throw error;
           }
         }
-        const urls = {};
-        for (const item of published) {
-          task.completedSizes.add(item.sizeLabel);
-          const cachedPath = this.memory.put(this.cacheKey(filePath, stat, item.sizeLabel), item.path, item.fileSize);
-          urls[item.sizeLabel] = this.toPreviewUrl(cachedPath);
+        try {
+          void this.trackActiveOperation(Promise.resolve().then(() => this.trimCache(
+            this.getCacheDir(cacheConfig), cacheConfig.maxSizeGB, published.map(item => item.path),
+          )))
+            .catch(error => this.log('warn', 'Thumbnail cache trim deferred', { filePath, error: error?.message || String(error) }));
+        } catch (error) {
+          this.log('warn', 'Thumbnail cache trim deferred', { filePath, error: error?.message || String(error) });
         }
-        // Durable DB commit happens in publishStagedThumbnailSet. Only now may
-        // memory state and renderer visibility advance to READY.
-        this.notify({ filePath, state: 'READY', previewUrls: urls });
-        this.trimCache(this.getCacheDir(cacheConfig), cacheConfig.maxSizeGB, published.map(item => item.path));
       }
       return { state: 'READY' };
     } catch (error) {
+      if (error?.code === 'ROOT_STALE' || error?.code === 'THUMBNAIL_STOPPED') return { state: 'CANCELLED' };
       let sourceExists = false;
       try { sourceExists = (await fs.promises.stat(filePath)).isFile(); } catch { /* source is genuinely missing/offline */ }
       const state = sourceExists ? 'FAILED' : 'MISSING';
@@ -945,28 +1260,51 @@ class ThumbnailPipeline {
   }
 
   indexDirectory(projectRoot, directory, entries, cacheConfig) {
-    const directoryKey = pathKey(directory);
-    const existing = this.directoryIndexes.get(directoryKey);
-    if (existing) return existing;
-    const job = this.runDirectoryIndex(projectRoot, directory, entries, cacheConfig)
-      .catch(error => {
-        this.log('warn', 'Directory thumbnail index update failed', { directory, error: error.message || String(error) });
-        return false;
-      })
-      .finally(() => this.directoryIndexes.delete(directoryKey));
-    this.directoryIndexes.set(directoryKey, job);
-    return job;
+    if (this.stopped) return Promise.resolve({ state: 'CANCELLED' });
+    const launch = this.activateCacheRoot(cacheConfig).then(rootGeneration => {
+      if (this.stopped) return { state: 'CANCELLED' };
+      try { this.assertRootGeneration(rootGeneration, cacheConfig); } catch {
+        return { state: 'CANCELLED' };
+      }
+      const directoryKey = `${pathKey(directory)}|${this.cacheRootKey(cacheConfig)}|g${rootGeneration}`;
+      const existing = this.directoryIndexes.get(directoryKey);
+      if (existing) return existing;
+      const job = this.runDirectoryIndex(projectRoot, directory, entries, cacheConfig, rootGeneration)
+        .catch(error => {
+          if (error?.code !== 'ROOT_STALE' && error?.code !== 'THUMBNAIL_STOPPED') {
+            this.log('warn', 'Directory thumbnail index update failed', { directory, error: error.message || String(error) });
+          }
+          return false;
+        })
+        .finally(() => this.directoryIndexes.delete(directoryKey));
+      this.directoryIndexes.set(directoryKey, job);
+      return job;
+    });
+    this.activeOperations.add(launch);
+    void launch.finally(() => this.activeOperations.delete(launch)).catch(() => undefined);
+    return launch;
   }
 
-  async runDirectoryIndex(projectRoot, directory, entries, cacheConfig) {
+  async runDirectoryIndex(projectRoot, directory, entries, cacheConfig, rootGeneration) {
+    if (!Number.isFinite(rootGeneration)) {
+      const requestedRoot = this.cacheRootKey(cacheConfig);
+      if (this.activeCacheRootKey === null) {
+        this.activeCacheRootKey = requestedRoot;
+        this.cacheRootGeneration += 1;
+      }
+      if (this.activeCacheRootKey !== requestedRoot) throw Object.assign(new Error('thumbnail cache root generation changed'), { code: 'ROOT_STALE' });
+      rootGeneration = this.cacheRootGeneration;
+    }
     // Let the renderer's visible thumbnail requests claim the disk first.
     // Directory indexing touches the same source and cache files and otherwise
     // creates a burst of duplicate I/O while a folder is opening.
     await new Promise(resolve => setTimeout(resolve, 50));
     await this.waitForBackgroundIdle(PRIORITY.directory);
+    this.assertRootGeneration(rootGeneration, cacheConfig);
     let lastError;
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       try {
+        this.assertRootGeneration(rootGeneration, cacheConfig);
         await this.coordinator.withIndexer(() => this.database.call('sync_directory', { project_root: projectRoot, directory }, 60 * 1000));
         lastError = null;
         break;
@@ -978,6 +1316,7 @@ class ThumbnailPipeline {
     if (lastError) throw lastError;
 
     for (const entry of entries) {
+      this.assertRootGeneration(rootGeneration, cacheConfig);
       if (!['image', 'raw', 'video'].includes(entry.kind)) continue;
       try {
         const stat = await fs.promises.stat(entry.path);
@@ -996,18 +1335,26 @@ class ThumbnailPipeline {
               path: item.target,
               fileSize: (await fs.promises.stat(item.target)).size,
           })));
-          await this.coordinator.withPublisher(() => this.database.call('commit_thumbnail_publish', {
-            publish_id: crypto.randomUUID(),
-            file_path: entry.path,
-            cache_epoch: capture.cacheEpoch,
-            source_version: capture.sourceVersion,
-            source_size: capture.sourceSize,
-            source_mtime_ms: capture.sourceMtimeMs,
-            source_digest: null,
-            thumbnails,
-          })).catch(() => undefined);
+          await this.coordinator.withPublisher(() => {
+            this.assertRootGeneration(rootGeneration, cacheConfig);
+            return this.database.call('commit_thumbnail_publish', {
+              publish_id: crypto.randomUUID(),
+              file_path: entry.path,
+              cache_epoch: capture.cacheEpoch,
+              source_version: capture.sourceVersion,
+              source_size: capture.sourceSize,
+              source_mtime_ms: capture.sourceMtimeMs,
+              source_digest: null,
+              thumbnails,
+            });
+          }).catch(error => {
+            if (error?.code === 'ROOT_STALE') throw error;
+          });
         }
-      } catch { /* the worker will classify missing/offline files */ }
+      } catch (error) {
+        if (error?.code === 'ROOT_STALE' || error?.code === 'THUMBNAIL_STOPPED') throw error;
+        // The worker will classify missing/offline files.
+      }
     }
     // Directory indexing is metadata-only. MediaThumbnail requests visible and
     // near-visible tiles through IntersectionObserver; warming every uncached
@@ -1016,18 +1363,38 @@ class ThumbnailPipeline {
   }
 
   scanProject(projectRoot, cacheConfig) {
-    const root = path.resolve(projectRoot);
-    const current = this.projectScans.get(root);
-    if (current) return current;
-    let resolveScan;
-    const scan = new Promise(resolve => { resolveScan = resolve; });
-    this.projectScanQueue.push({ root, cacheConfig, resolve: resolveScan });
-    this.projectScans.set(root, scan);
-    this.pumpProjectScans();
-    return scan;
+    if (this.stopped) return Promise.resolve({ state: 'CANCELLED' });
+    const queueScan = rootGeneration => {
+      if (this.stopped) return { state: 'CANCELLED' };
+      try { this.assertRootGeneration(rootGeneration, cacheConfig); } catch {
+        return { state: 'CANCELLED' };
+      }
+      const root = path.resolve(projectRoot);
+      const scanKey = `${pathKey(root)}|${this.cacheRootKey(cacheConfig)}|g${rootGeneration}`;
+      const current = this.projectScans.get(scanKey);
+      if (current) return current;
+      let resolveScan;
+      const scan = new Promise(resolve => { resolveScan = resolve; });
+      this.projectScanQueue.push({ root, scanKey, cacheConfig, rootGeneration, resolve: resolveScan });
+      this.projectScans.set(scanKey, scan);
+      this.pumpProjectScans();
+      return scan;
+    };
+    const requestedRoot = this.cacheRootKey(cacheConfig);
+    if (this.activeCacheRootKey === null) {
+      this.activeCacheRootKey = requestedRoot;
+      this.cacheRootGeneration += 1;
+      return queueScan(this.cacheRootGeneration);
+    }
+    if (this.activeCacheRootKey === requestedRoot) return queueScan(this.cacheRootGeneration);
+    const launch = this.activateCacheRoot(cacheConfig).then(queueScan);
+    this.activeOperations.add(launch);
+    void launch.finally(() => this.activeOperations.delete(launch)).catch(() => undefined);
+    return launch;
   }
 
   async runDatabaseMaintenance(worker, options = {}) {
+    if (this.stopped) throw Object.assign(new Error('thumbnail pipeline stopped'), { code: 'THUMBNAIL_STOPPED' });
     const existingContext = this.maintenanceContext.getStore();
     if (existingContext?.pipeline === this) return worker(existingContext.control);
     const control = {
@@ -1092,12 +1459,15 @@ class ThumbnailPipeline {
     this.assertMaintenanceBoundary(control, phase, control.processedCount || 0);
     const waited = await this.coordinator.yieldToReaders({ signal: control.signal, deadlineAt: control.deadlineAt });
     control.foregroundWaitMs += Number(waited) || 0;
+    await this.coordinator.drainTouches();
     this.assertMaintenanceBoundary(control, phase, control.processedCount || 0);
   }
 
   async inspectToolSources(projectRoot, filePaths, collectVideos = false, collectDirectConvertibleImages = false, collectRecursiveConvertibleImages = false) {
+    if (this.stopped) return { indexed: false, hasVideo: false, hasConvertibleImage: false, videoPaths: [], convertibleImagePaths: [] };
     const root = path.resolve(projectRoot);
-    if (this.projectScans.has(root) || (this.projectIndexUpdates.get(root) || 0) > 0) return { indexed: false, hasVideo: false, hasConvertibleImage: false, videoPaths: [], convertibleImagePaths: [] };
+    if ([...this.projectScans.keys()].some(key => key.startsWith(`${pathKey(root)}|`))
+        || [...this.projectIndexUpdates.keys()].some(key => key.startsWith(`${pathKey(root)}|`))) return { indexed: false, hasVideo: false, hasConvertibleImage: false, videoPaths: [], convertibleImagePaths: [] };
     return this.withIndexer(() => this.database.call('inspect_tool_sources', {
       project_root: root,
       paths: filePaths.map(filePath => path.resolve(filePath)),
@@ -1108,6 +1478,7 @@ class ThumbnailPipeline {
   }
 
   pumpProjectScans() {
+    if (this.stopped) return;
     if (this.databaseMaintenanceDepth || this.activeProjectScans || !this.projectScanQueue.length) return;
     // Foreground directory indexes are intentionally drained first. Starting a
     // whole-project metadata scan while other projects are opening can otherwise
@@ -1117,6 +1488,7 @@ class ThumbnailPipeline {
       if (!this.projectScanPumpTimer) {
         this.projectScanPumpTimer = setTimeout(() => {
           this.projectScanPumpTimer = null;
+          if (this.stopped) return;
           this.pumpProjectScans();
         }, Math.max(250, idleWaitMs));
       }
@@ -1125,10 +1497,12 @@ class ThumbnailPipeline {
     const job = this.projectScanQueue.shift();
     this.activeProjectScans = 1;
     const scanner = new ThumbnailDatabaseClient({ ...this.databaseConfig, serviceArgs: ['--no-recover'] });
+    this.activeProjectScanner = scanner;
     void this.coordinator.withIndexer(() => scanner.call('sync_project', { project_root: job.root }, 30 * 60 * 1000))
       .then(result => {
+        this.assertRootGeneration(job.rootGeneration, job.cacheConfig);
         for (const [index, record] of (result.pending || []).entries()) {
-          this.enqueue({ filePath: record.path, kind: record.kind, cacheConfig: job.cacheConfig, sourceHash: record.sourceHash, persistState: false, requestedSizes: [THUMBNAIL_SIZES[0]], queueOrder: index }, PRIORITY.project);
+          this.enqueue({ filePath: record.path, kind: record.kind, cacheConfig: job.cacheConfig, rootGeneration: job.rootGeneration, sourceHash: record.sourceHash, persistState: false, requestedSizes: [THUMBNAIL_SIZES[0]], queueOrder: index }, PRIORITY.project);
         }
         job.resolve(result);
       })
@@ -1138,7 +1512,8 @@ class ThumbnailPipeline {
       })
       .finally(() => {
         scanner.stop();
-        this.projectScans.delete(job.root);
+        if (this.activeProjectScanner === scanner) this.activeProjectScanner = null;
+        this.projectScans.delete(job.scanKey);
         this.activeProjectScans = 0;
         for (const resolve of this.projectScanIdleWaiters) resolve();
         this.projectScanIdleWaiters.clear();
@@ -1147,18 +1522,43 @@ class ThumbnailPipeline {
   }
 
   async syncChangedPaths(projectRoot, filePaths, cacheConfig) {
+    if (this.stopped) return { queued: 0, projectScanScheduled: false, cancelled: true };
     const root = path.resolve(projectRoot);
-    this.projectIndexUpdates.set(root, (this.projectIndexUpdates.get(root) || 0) + 1);
+    const rootGeneration = await this.activateCacheRoot(cacheConfig);
+    if (this.stopped) return { queued: 0, projectScanScheduled: false, cancelled: true };
+    try { this.assertRootGeneration(rootGeneration, cacheConfig); } catch {
+      return { queued: 0, projectScanScheduled: false, cancelled: true };
+    }
+    const updateKey = `${pathKey(root)}|${this.cacheRootKey(cacheConfig)}|g${rootGeneration}`;
+    this.projectIndexUpdates.set(updateKey, (this.projectIndexUpdates.get(updateKey) || 0) + 1);
+    const operation = this.runChangedPathSync(root, filePaths, cacheConfig, rootGeneration);
+    this.activeOperations.add(operation);
     try {
-      return await this.runChangedPathSync(root, filePaths, cacheConfig);
+      return await operation;
+    } catch (error) {
+      if (error?.code === 'ROOT_STALE' || error?.code === 'THUMBNAIL_STOPPED') {
+        return { queued: 0, projectScanScheduled: false, cancelled: true };
+      }
+      throw error;
     } finally {
-      const remaining = (this.projectIndexUpdates.get(root) || 1) - 1;
-      if (remaining > 0) this.projectIndexUpdates.set(root, remaining);
-      else this.projectIndexUpdates.delete(root);
+      this.activeOperations.delete(operation);
+      const remaining = (this.projectIndexUpdates.get(updateKey) || 1) - 1;
+      if (remaining > 0) this.projectIndexUpdates.set(updateKey, remaining);
+      else this.projectIndexUpdates.delete(updateKey);
     }
   }
 
-  async runChangedPathSync(projectRoot, filePaths, cacheConfig) {
+  async runChangedPathSync(projectRoot, filePaths, cacheConfig, rootGeneration) {
+    if (!Number.isFinite(rootGeneration)) {
+      const requestedRoot = this.cacheRootKey(cacheConfig);
+      if (this.activeCacheRootKey === null) {
+        this.activeCacheRootKey = requestedRoot;
+        this.cacheRootGeneration += 1;
+      }
+      if (this.activeCacheRootKey !== requestedRoot) return { queued: 0, projectScanScheduled: false, cancelled: true };
+      rootGeneration = this.cacheRootGeneration;
+    }
+    this.assertRootGeneration(rootGeneration, cacheConfig);
     const imageExtensions = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif']);
     const videoExtensions = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.mpeg', '.mpg', '.mts', '.m2ts']);
     const rawExtensions = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
@@ -1179,6 +1579,7 @@ class ThumbnailPipeline {
       this.sourceChangeVersions.set(key, version);
       this.memory.deleteFile(filePath);
       await new Promise(resolve => setTimeout(resolve, this.sourceStabilityDelayMs));
+      this.assertRootGeneration(rootGeneration, cacheConfig);
       if (this.sourceChangeVersions.get(key) !== version) return null;
       try {
         let stat = await fs.promises.stat(filePath);
@@ -1196,12 +1597,14 @@ class ThumbnailPipeline {
           stat = confirmed;
         }
         this.sourceChangeVersions.delete(key);
+        this.assertRootGeneration(rootGeneration, cacheConfig);
         const extension = path.extname(filePath).toLowerCase();
         const kind = videoExtensions.has(extension) ? 'video' : rawExtensions.has(extension) ? 'raw' : 'image';
         this.notify({ filePath, state: 'STALE', sourceMtimeMs: stat.mtimeMs, sourceSize: stat.size });
-        this.enqueue({ filePath, kind, cacheConfig, stat, persistState: false, requestedSizes: [THUMBNAIL_SIZES[0]], forceRegenerate: true }, PRIORITY.nearby);
+        this.enqueue({ filePath, kind, cacheConfig, rootGeneration, stat, persistState: false, requestedSizes: [THUMBNAIL_SIZES[0]], forceRegenerate: true }, PRIORITY.nearby);
         return filePath;
-      } catch {
+      } catch (error) {
+        if (error?.code === 'ROOT_STALE' || error?.code === 'THUMBNAIL_STOPPED') return null;
         if (this.sourceChangeVersions.get(key) !== version) return null;
         this.sourceChangeVersions.delete(key);
         this.notify({ filePath, state: 'MISSING' });
@@ -1209,9 +1612,11 @@ class ThumbnailPipeline {
       }
     }));
     if (mediaPaths.length) {
+      this.assertRootGeneration(rootGeneration, cacheConfig);
       await this.coordinator.withIndexer(() => this.database.call('sync_paths', { project_root: projectRoot, paths: mediaPaths, calculate_hash: false }, 60 * 1000))
         .catch(error => this.log('warn', 'Thumbnail watcher index update deferred', { projectRoot, error: error.message || String(error) }));
     }
+    this.assertRootGeneration(rootGeneration, cacheConfig);
     if (needsProjectScan) void this.scanProject(projectRoot, cacheConfig);
     return { queued: mediaPaths.length, projectScanScheduled: needsProjectScan };
   }
@@ -1230,12 +1635,151 @@ class ThumbnailPipeline {
   }
 
   async listCacheCleanupCandidates(beforeMs, cacheRoot = null) {
+    if (this.stopped) throw Object.assign(new Error('thumbnail pipeline stopped'), { code: 'THUMBNAIL_STOPPED' });
     return this.database.call('list_cache_cleanup', { before_ms: beforeMs, cache_root: cacheRoot }, THUMBNAIL_MAINTENANCE_TIMEOUT_MS);
+  }
+
+  async replayPublishBackupReceipts(cacheRoot, control) {
+    let afterKey = '';
+    let recoveredCount = 0;
+    while (true) {
+      const page = await this.database.call('maintenance_state_list_prefix', {
+        prefix: THUMBNAIL_BACKUP_RECOVERY_PREFIX,
+        after_key: afterKey,
+        limit: 128,
+      }, this.maintenanceCallTimeout(control));
+      for (const entry of page.entries || []) {
+        const cursor = entry.cursor && typeof entry.cursor === 'object' ? entry.cursor : {};
+        const replacements = Array.isArray(cursor.replacements) && cursor.replacements.length
+          ? cursor.replacements
+          : (cursor.failures || []).filter(item => item?.backupPath && item?.finalPath);
+        const ownedFinals = Array.isArray(cursor.ownedFinals) ? cursor.ownedFinals : [];
+        const relevant = replacements.some(item => item?.finalPath && pathKey(path.dirname(item.finalPath)) === pathKey(cacheRoot))
+          || ownedFinals.some(value => value && pathKey(path.dirname(value)) === pathKey(cacheRoot));
+        if (!relevant) continue;
+        const ownership = cursor.publishId
+          ? await this.database.call('claim_thumbnail_backup_recovery', {
+            publish_id: cursor.publishId,
+            thumbnail_paths: [...new Set([
+              ...replacements.map(item => item.finalPath),
+              ...ownedFinals,
+            ].filter(Boolean))],
+          }, this.maintenanceCallTimeout(control))
+          : { state: 'SUPERSEDED', committed: false };
+        if (ownership?.state === 'COMMITTED' || ownership?.state === 'SUPERSEDED') {
+          const failures = [];
+          for (const item of replacements) {
+            const backupPath = path.resolve(item.backupPath);
+            if (!await this.isSafeManagedCachePath(cacheRoot, backupPath)) {
+              failures.push({ backupPath, phase: 'validate-committed-backup', error: 'unsafe managed cache path' });
+              continue;
+            }
+            try { await fs.promises.unlink(backupPath); } catch (error) {
+              if (error?.code !== 'ENOENT') failures.push({ backupPath, phase: 'remove-committed-backup', error: error?.message || String(error) });
+            }
+          }
+          if (failures.length) {
+            throw Object.assign(new Error('committed thumbnail backup cleanup remains incomplete'), {
+              code: 'THUMBNAIL_PUBLISH_BACKUP_RECOVERY_INCOMPLETE', receiptKey: entry.key, failures,
+            });
+          }
+          await this.database.call('maintenance_state_delete', { key: entry.key }, this.maintenanceCallTimeout(control));
+          recoveredCount += 1;
+          control.processedCount += 1;
+          continue;
+        }
+        const failures = [];
+        for (const item of replacements) {
+          const finalPath = path.resolve(item.finalPath);
+          const backupPath = path.resolve(item.backupPath);
+          if (!await this.isSafeManagedCachePath(cacheRoot, finalPath)
+              || !await this.isSafeManagedCachePath(cacheRoot, backupPath)) {
+            failures.push({ finalPath, backupPath, phase: 'validate-recovery-paths', error: 'unsafe managed cache path' });
+            continue;
+          }
+          const [backupStat, finalStat] = await Promise.all([
+            fs.promises.stat(backupPath).catch(() => null),
+            fs.promises.stat(finalPath).catch(() => null),
+          ]);
+          if (!backupStat) {
+            if (finalStat?.isFile() && item.backupDigest) {
+              const digest = crypto.createHash('sha256').update(await fs.promises.readFile(finalPath)).digest('hex');
+              if (digest === item.backupDigest) continue;
+            }
+            failures.push({ finalPath, backupPath, phase: 'locate-backup', error: 'thumbnail rollback backup is missing' });
+            continue;
+          }
+          if (!backupStat.isFile() || (Number.isFinite(item.backupSize) && backupStat.size !== item.backupSize)) {
+            failures.push({ finalPath, backupPath, phase: 'verify-backup', error: 'thumbnail rollback backup failed verification' });
+            continue;
+          }
+          if (item.backupDigest) {
+            const digest = crypto.createHash('sha256').update(await fs.promises.readFile(backupPath)).digest('hex');
+            if (digest !== item.backupDigest) {
+              failures.push({ finalPath, backupPath, phase: 'verify-backup', error: 'thumbnail rollback backup digest mismatch' });
+              continue;
+            }
+          }
+          const displacedPath = path.join(path.dirname(backupPath), `${crypto.randomUUID()}.jpg`);
+          let displaced = false;
+          try {
+            if (finalStat) {
+              await fs.promises.rename(finalPath, displacedPath);
+              displaced = true;
+            }
+            await fs.promises.rename(backupPath, finalPath);
+            const restored = await fs.promises.stat(finalPath);
+            if (!restored.isFile() || restored.size !== backupStat.size) throw new Error('restored thumbnail backup failed verification');
+            if (item.backupDigest) {
+              const digest = crypto.createHash('sha256').update(await fs.promises.readFile(finalPath)).digest('hex');
+              if (digest !== item.backupDigest) throw new Error('restored thumbnail backup digest mismatch');
+            }
+            if (displaced) await fs.promises.unlink(displacedPath).catch(() => undefined);
+          } catch (error) {
+            if (displaced && !await fs.promises.stat(finalPath).then(() => true, () => false)) {
+              await fs.promises.rename(displacedPath, finalPath).catch(() => undefined);
+            }
+            failures.push({ finalPath, backupPath, displacedPath: displaced ? displacedPath : null, phase: 'restore-backup', error: error?.message || String(error) });
+          }
+        }
+        for (const value of ownedFinals) {
+          const finalPath = path.resolve(value);
+          if (!await this.isSafeManagedCachePath(cacheRoot, finalPath)) {
+            failures.push({ finalPath, phase: 'validate-owned-final', error: 'unsafe managed cache path' });
+            continue;
+          }
+          try { await fs.promises.unlink(finalPath); } catch (error) {
+            if (error?.code !== 'ENOENT') failures.push({ finalPath, phase: 'remove-owned-final', error: error?.message || String(error) });
+          }
+        }
+        if (failures.length) {
+          await this.database.call('maintenance_state_save', {
+            key: entry.key,
+            cursor: { ...cursor, replayFailures: failures, lastReplayAt: Date.now() },
+          }, this.maintenanceCallTimeout(control)).catch(() => undefined);
+          throw Object.assign(new Error('thumbnail publish backup recovery remains incomplete'), {
+            code: 'THUMBNAIL_PUBLISH_BACKUP_RECOVERY_INCOMPLETE',
+            receiptKey: entry.key,
+            failures,
+          });
+        }
+        await this.database.call('maintenance_state_delete', { key: entry.key }, this.maintenanceCallTimeout(control));
+        recoveredCount += 1;
+        control.processedCount += 1;
+      }
+      const nextAfterKey = page.afterKey || afterKey;
+      if (page.done !== false || !(page.entries || []).length || nextAfterKey === afterKey) break;
+      afterKey = nextAfterKey;
+    }
+    return { recoveredCount };
   }
 
   async evictCache(options = {}) {
     return this.runDatabaseMaintenance(async control => {
       this.memory.clear();
+      const backupRecovery = options.cacheRoot && options.recoverOrphans
+        ? await this.replayPublishBackupReceipts(path.resolve(options.cacheRoot), control)
+        : { recoveredCount: 0 };
       const physicalPaths = new Map();
       let detachedCount = 0;
       let detachedBytes = 0;
@@ -1253,9 +1797,20 @@ class ThumbnailPipeline {
       const collect = result => {
         detachedCount += Number(result?.detachedCount) || 0;
         detachedBytes += Number(result?.detachedBytes) || 0;
-        for (const value of result?.thumbnailPaths || []) {
-          const resolved = path.resolve(value);
-          physicalPaths.set(pathKey(resolved), resolved);
+        for (const claim of result?.deletionClaims || []) {
+          if (!claim?.path || !claim?.cacheRoot) continue;
+          const resolved = path.resolve(claim.path);
+          physicalPaths.set(pathKey(resolved), { path: resolved, cacheRoot: path.resolve(claim.cacheRoot) });
+        }
+        // Compatibility with the pre-claim database protocol: only paths
+        // positively returned by a successful detach count as declarations.
+        // Never fall back to the caller's selector values.
+        if (!result?.deletionClaims && Number(result?.detachedCount) > 0) {
+          const declaredRoot = path.resolve(options.cacheRoot || this.cacheDirectory({}));
+          for (const value of (result.thumbnailPaths || []).slice(0, Number(result.detachedCount))) {
+            const resolved = path.resolve(value);
+            physicalPaths.set(pathKey(resolved), { path: resolved, cacheRoot: declaredRoot });
+          }
         }
         control.processedCount = detachedCount;
       };
@@ -1284,7 +1839,6 @@ class ThumbnailPipeline {
           await detachSelector({ thumbnail_paths: values.slice(offset, offset + 512) });
           if (!detachComplete) break;
         }
-        for (const value of values) physicalPaths.set(pathKey(value), value);
       } else if (options.sourcePaths) {
         const values = [...new Set(options.sourcePaths.map(value => path.resolve(value)))];
         for (let offset = 0; offset < values.length; offset += 512) {
@@ -1326,15 +1880,17 @@ class ThumbnailPipeline {
       let deletedBytes = 0;
       const physicalDeletionPlan = physicalPaths.size
         ? await this.database.call('prepare_thumbnail_deletions', {
-          thumbnail_paths: [...physicalPaths.values()],
+          thumbnail_paths: [...physicalPaths.values()].map(claim => claim.path),
         }, this.maintenanceCallTimeout(control))
         : { deletablePaths: [] };
       for (const candidate of physicalDeletionPlan.deletablePaths || []) {
         const filePath = path.resolve(candidate);
+        const claim = physicalPaths.get(pathKey(filePath));
         this.assertMaintenanceBoundary(control, 'delete-cache-files', control.processedCount + deletedPaths.length + failedPaths.length);
-        if (options.cacheRoot && !await this.isSafeManagedCachePath(options.cacheRoot, filePath)) {
+        const requestedRootMatches = !options.cacheRoot || pathKey(options.cacheRoot) === pathKey(claim?.cacheRoot || '');
+        if (!claim || !requestedRootMatches || !await this.isSafeManagedCachePath(claim.cacheRoot, filePath)) {
           failedPaths.push(filePath);
-          this.log('warn', 'Skipped unsafe thumbnail cache deletion path', { cacheRoot: options.cacheRoot, filePath });
+          this.log('warn', 'Skipped unsafe thumbnail cache deletion path', { cacheRoot: claim?.cacheRoot, filePath });
           continue;
         }
         try {
@@ -1348,21 +1904,28 @@ class ThumbnailPipeline {
             physicalRetryClears.push(filePath);
           } else {
             failedPaths.push(filePath);
-            physicalRetryFailures.push({ path: filePath, error: error?.message || String(error) });
+          physicalRetryFailures.push({ path: filePath, cacheRoot: claim.cacheRoot, error: error?.message || String(error) });
           }
         }
         this.assertMaintenanceBoundary(control, 'delete-cache-file-settled', control.processedCount + deletedPaths.length + failedPaths.length);
       }
-      if (options.cacheRoot && physicalRetryClears.length) {
+      if (physicalRetryClears.length) {
         await this.database.call('clear_orphan_delete_retries', {
           thumbnail_paths: physicalRetryClears,
         }, this.maintenanceCallTimeout(control));
       }
-      if (options.cacheRoot && physicalRetryFailures.length) {
-        await this.database.call('record_orphan_delete_failures', {
-          cache_root: options.cacheRoot,
-          failures: physicalRetryFailures,
-        }, this.maintenanceCallTimeout(control));
+      if (physicalRetryFailures.length) {
+        const failuresByRoot = new Map();
+        for (const failure of physicalRetryFailures) {
+          if (!failuresByRoot.has(failure.cacheRoot)) failuresByRoot.set(failure.cacheRoot, []);
+          failuresByRoot.get(failure.cacheRoot).push({ path: failure.path, error: failure.error });
+        }
+        for (const [cacheRoot, failures] of failuresByRoot) {
+          await this.database.call('record_orphan_delete_failures', {
+            cache_root: cacheRoot,
+            failures,
+          }, this.maintenanceCallTimeout(control));
+        }
       }
 
       if (detachComplete && pruneComplete && options.recoverOrphans && options.cacheRoot
@@ -1372,7 +1935,7 @@ class ThumbnailPipeline {
         const maxRecoveryPages = Number.isFinite(Number(options.maxRecoveryPages))
           ? Math.max(1, Number(options.maxRecoveryPages)) : Number.POSITIVE_INFINITY;
         const attempted = new Set([
-          ...[...physicalPaths.values()].map(value => pathKey(value)),
+          ...[...physicalPaths.values()].map(value => pathKey(value.path)),
           ...(options.excludePaths || []).map(value => pathKey(value)),
         ]);
         while (true) {
@@ -1500,6 +2063,7 @@ class ThumbnailPipeline {
         orphanScanConsumedCount,
         orphanProgressCount,
         retryConsumedCount,
+        backupRecoveryCount: backupRecovery.recoveredCount,
         detachComplete,
         pruneComplete,
         recoveryComplete,
@@ -1565,6 +2129,14 @@ class ThumbnailPipeline {
   }
 
   stop() {
+    if (this.stopPromise) return this.stopPromise;
+    let resolveStop;
+    let rejectStop;
+    this.stopPromise = new Promise((resolve, reject) => {
+      resolveStop = resolve;
+      rejectStop = reject;
+    });
+    this.stopped = true;
     if (this.projectScanPumpTimer) clearTimeout(this.projectScanPumpTimer);
     if (this.thumbnailPumpTimer) clearTimeout(this.thumbnailPumpTimer);
     if (this.backgroundResumeTimer) clearTimeout(this.backgroundResumeTimer);
@@ -1576,10 +2148,54 @@ class ThumbnailPipeline {
     this.projectScanIdleWaiters.clear();
     this.backgroundResumeTimer = null;
     this.memory.clear();
+    for (const timer of this.delayedRetryTimers) clearTimeout(timer);
+    this.delayedRetryTimers.clear();
+    this.activeProjectScanner?.stop?.();
     for (const task of this.tasks.values()) task.resolveCompletion({ state: 'CANCELLED' });
     this.tasks.clear();
     for (const queue of this.queues) queue.length = 0;
-    this.database.stop();
+    for (const scan of this.projectScanQueue.splice(0)) scan.resolve?.({ state: 'CANCELLED' });
+    this.projectScans.clear();
+    const coordinatorCanStopDatabaseImmediately = this.coordinator.isIdle()
+      && this.coordinator.status().pendingTouches === 0;
+    const coordinatorStop = this.coordinator.stop();
+    const coordinatorStopSettled = coordinatorStop.then(
+      value => ({ status: 'fulfilled', value }),
+      reason => ({ status: 'rejected', reason }),
+    );
+    let immediateDatabaseStop = null;
+    if (coordinatorCanStopDatabaseImmediately) {
+      try {
+        immediateDatabaseStop = Promise.resolve(this.database.stop(true));
+      } catch (error) {
+        immediateDatabaseStop = Promise.reject(error);
+      }
+    }
+    const immediateDatabaseStopSettled = immediateDatabaseStop?.then(
+      value => ({ status: 'fulfilled', value }),
+      reason => ({ status: 'rejected', reason }),
+    ) || null;
+    const shutdown = (async () => {
+      while (this.activeWorkers || this.activeProjectScans || this.activeOperations.size || this.directoryIndexes.size
+          || this.databaseMaintenanceDepth) {
+        await new Promise(resolve => setTimeout(resolve, 10));
+      }
+      await this.databaseMaintenanceTail;
+      const coordinatorResult = await coordinatorStopSettled;
+      const databaseResult = immediateDatabaseStopSettled
+        ? await immediateDatabaseStopSettled
+        : await Promise.resolve().then(() => this.database.stop(true)).then(
+          value => ({ status: 'fulfilled', value }),
+          reason => ({ status: 'rejected', reason }),
+        );
+      const errors = [coordinatorResult, databaseResult]
+        .filter(result => result.status === 'rejected')
+        .map(result => result.reason);
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) throw new AggregateError(errors, 'thumbnail pipeline shutdown failed');
+    })();
+    void shutdown.then(resolveStop, rejectStop);
+    return this.stopPromise;
   }
 }
 

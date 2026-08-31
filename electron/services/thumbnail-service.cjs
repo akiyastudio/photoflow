@@ -25,6 +25,10 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
   const recoveryRuns = new Map();
   const startupGeneration = crypto.randomUUID();
   let unregisterRecoveryRestart = null;
+  let unregisterGenerateRestart = null;
+  let stopped = false;
+  let stopPromise = null;
+  const recoveryWaits = new Set();
 
   const recoveryDescriptor = (cacheConfig = {}) => {
     const cacheRoot = path.resolve(pipeline.cacheDirectory(cacheConfig));
@@ -36,6 +40,7 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
   };
 
   const startRecovery = (cacheConfig = {}, restartTask = null) => {
+    if (stopped) throw Object.assign(new Error('thumbnail service stopped'), { code: 'THUMBNAIL_STOPPED' });
     const descriptor = recoveryDescriptor(cacheConfig);
     const admission = deferred();
     let admitted = false;
@@ -178,6 +183,7 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
   };
 
   const activateStartupRecovery = () => {
+    if (stopped) return;
     if (unregisterRecoveryRestart) return;
     unregisterRecoveryRestart = backgroundTasks.registerTypeRestartFactory?.(RECOVERY_TYPE, task => (
       startRecovery(task.metadata?.cacheConfig || {}, task)
@@ -189,6 +195,7 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
   };
 
   const ensureStartupRecovery = (cacheConfig = {}) => {
+    if (stopped) throw Object.assign(new Error('thumbnail service stopped'), { code: 'THUMBNAIL_STOPPED' });
     const descriptor = recoveryDescriptor(cacheConfig);
     const existing = backgroundTasks.list().find(task => (
       task.type === RECOVERY_TYPE
@@ -198,7 +205,29 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
     if (!existing) return startRecovery(cacheConfig);
     if (ACTIVE_STATES.has(existing.state)) {
       const active = recoveryRuns.get(descriptor.maintenanceKey);
-      return active || { task: existing, admitted: Promise.resolve({ taskId: existing.id, reused: true }), completion: null, descriptor };
+      if (active) return active;
+      const completion = (async () => {
+        while (true) {
+          if (stopped) throw Object.assign(new Error('thumbnail service stopped while waiting for recovery'), { code: 'THUMBNAIL_STOPPED' });
+          const current = backgroundTasks.get?.(existing.id)
+            || backgroundTasks.list().find(task => task.id === existing.id);
+          if (!current) throw new Error('缩略图缓存启动修复任务已丢失');
+          if (!ACTIVE_STATES.has(current.state)) {
+            if (current.state === 'completed') return current.result;
+            throw new Error(current.error || current.message || '缩略图缓存启动修复失败');
+          }
+          await new Promise(resolve => setTimeout(resolve, 25));
+        }
+      })();
+      recoveryWaits.add(completion);
+      void completion.finally(() => recoveryWaits.delete(completion)).catch(() => undefined);
+      void completion.catch(() => undefined);
+      return {
+        task: existing,
+        admitted: Promise.resolve({ taskId: existing.id, maintenanceKey: descriptor.maintenanceKey, reused: true }),
+        completion,
+        descriptor,
+      };
     }
     if (existing.state === 'failed') {
       if (recoverableStartupFailure(existing) && existing.retryable) {
@@ -214,15 +243,19 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
       }
       return { task: existing, admitted: Promise.resolve({ taskId: existing.id, failed: true, reused: true }), completion: null, descriptor };
     }
-    const admitted = backgroundTasks.restart(existing.id).then(run => run?.admitted || { taskId: existing.id, restarted: true });
-    return { task: existing, admitted, completion: null, descriptor };
+    const restarted = backgroundTasks.restart(existing.id);
+    const admitted = restarted.then(run => run?.admitted || { taskId: existing.id, restarted: true });
+    const completion = restarted.then(run => run?.completion || run);
+    void completion.catch(() => undefined);
+    return { task: existing, admitted, completion, descriptor };
   };
 
   const recoverCache = (cacheConfig = {}, restartTask = null) => startRecovery(cacheConfig, restartTask).completion;
   const waitForStartupRecovery = async (cacheConfig = {}) => {
     const descriptor = recoveryDescriptor(cacheConfig);
-    const active = recoveryRuns.get(descriptor.maintenanceKey);
-    if (active?.completion) await active.completion;
+    const run = recoveryRuns.get(descriptor.maintenanceKey) || ensureStartupRecovery(cacheConfig);
+    await run.admitted;
+    if (run.completion) await run.completion;
     const failed = backgroundTasks.list().find(task => (
       task.type === RECOVERY_TYPE
       && task.metadata?.maintenanceKey === descriptor.maintenanceKey
@@ -231,6 +264,7 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
     if (failed) throw new Error(failed.error || '缩略图缓存启动修复失败');
   };
   const requestThumbnail = async (request, restartTask = null) => {
+    if (stopped) return { success: false, state: 'NOT_READY', error: '缩略图服务已停止' };
     const normalizedFilePath = path.resolve(request.filePath);
     const normalizedSize = Math.max(1, Number(request.requestedSize) || 640);
     const normalizedRequest = { ...request, filePath: normalizedFilePath, requestedSize: normalizedSize };
@@ -242,7 +276,7 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
         ...(restartTask?.id ? { id: restartTask.id } : {}),
         type: 'thumbnail-generate',
         title: `生成缩略图：${path.basename(normalizedFilePath)}`,
-        dedupeKey: `thumbnail-generate:${process.platform === 'win32' ? normalizedFilePath.toLocaleLowerCase() : normalizedFilePath}:${normalizedSize}`,
+        dedupeKey: `thumbnail-generate:${process.platform === 'win32' ? normalizedFilePath.toLocaleLowerCase() : normalizedFilePath}:${normalizedSize}:${recoveryDescriptor(normalizedRequest.cacheConfig || {}).maintenanceKey}`,
         cancellable: false,
         metadata: {
           ...normalizedRequest,
@@ -279,9 +313,27 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
     cleanupOrphanCache: (...args) => pipeline.cleanupOrphanCache(...args),
     invalidateSources: (...args) => pipeline.invalidateSources(...args),
     pruneMissingSources: () => pipeline.pruneMissingSources(),
-    stop: () => pipeline.stop(),
+    stop: () => {
+      if (stopPromise) return stopPromise;
+      stopped = true;
+      unregisterRecoveryRestart?.();
+      unregisterRecoveryRestart = null;
+      unregisterGenerateRestart?.();
+      unregisterGenerateRestart = null;
+      const pipelineStop = Promise.resolve().then(() => pipeline.stop());
+      stopPromise = (async () => {
+        const results = await Promise.allSettled([
+          ...[...recoveryRuns.values()].map(run => run.completion).filter(Boolean),
+          ...recoveryWaits,
+          pipelineStop,
+        ]);
+        const pipelineResult = results.at(-1);
+        if (pipelineResult?.status === 'rejected') throw pipelineResult.reason;
+      })();
+      return stopPromise;
+    },
   };
-  backgroundTasks.registerTypeRestartFactory?.('thumbnail-generate', task => service.request({
+  unregisterGenerateRestart = backgroundTasks.registerTypeRestartFactory?.('thumbnail-generate', task => service.request({
     filePath: task.metadata?.filePath,
     kind: task.metadata?.kind,
     cacheConfig: task.metadata?.cacheConfig,
@@ -290,7 +342,7 @@ const createThumbnailService = ({ pipeline, backgroundTasks, writeLog = pipeline
     queueOrder: task.metadata?.queueOrder,
     requireDisk: task.metadata?.requireDisk,
     forceRegenerate: task.metadata?.forceRegenerate,
-  }, task));
+  }, task)) || (() => undefined);
   return service;
 };
 
