@@ -73,7 +73,7 @@ const publishRelease = async record => {
     const detail = body.error || body.raw || `${response.status} ${response.statusText}`;
     throw new Error(`写入 release 数据库失败：${detail}`);
   }
-  if (body.saved !== true || body.id !== record._id) throw new Error('release 数据库返回了无法确认的写入结果');
+  if (body.saved !== true) throw new Error('release 数据库返回了无法确认的写入结果');
   return body;
 };
 
@@ -105,7 +105,6 @@ const run = async () => {
     const sha256 = await sha256File(installerPath);
     const versionCode = versionParts[0] * 10_000 + versionParts[1] * 100 + versionParts[2];
     const record = {
-      _id: `win32-stable-${version.replace(/\./g, '-')}`,
       channel: 'stable',
       downloadUrl,
       mandatory,
@@ -132,7 +131,7 @@ const run = async () => {
     console.log(outputPath);
     console.log(`安装包：${installerPath}`);
     console.log(`SHA-256：${sha256}`);
-    if (shouldPublish) console.log(`release 数据库：已写入 ${record._id}`);
+    if (shouldPublish) console.log('release 数据库：已新增记录（文档 ID 由数据库自动生成）');
     console.log('\n可导入 CloudBase 的内容：\n');
     console.log(JSON.stringify(record, null, 2));
   } finally {

@@ -1,5 +1,4 @@
 const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
 
 const MEDIA_EXTENSIONS = Object.freeze(['mp4', 'mov', 'mkv', 'avi', 'webm', 'm4v', 'mpg', 'mpeg', 'mts', 'm2ts', 'wmv', 'flv', 'mp3', 'wav', 'm4a', 'aac', 'flac', 'ogg', 'opus', 'wma']);
 const MEDIA_EXTENSION_SET = new Set(MEDIA_EXTENSIONS.map(value => `.${value}`));
@@ -58,65 +57,40 @@ const redactError = (value, { optional = false } = {}) => {
     .split(/\r?\n/)[0].slice(0, 500);
 };
 const srtNameFor = value => cleanRelativeName(value).replace(/\.[^.\/]+$/, '') + '.srt';
-const LEGACY_UNSCOPED_PROJECT = '__legacy_unscoped__';
-
-const openDatabase = databasePath => {
-  const db = new DatabaseSync(databasePath);
-  db.exec(`PRAGMA journal_mode=WAL; PRAGMA foreign_keys=ON; PRAGMA busy_timeout=1000;
-    CREATE TABLE IF NOT EXISTS transcript_operations (
-      id TEXT PRIMARY KEY, project_id TEXT NOT NULL, state TEXT NOT NULL, source_kind TEXT NOT NULL,
-      total INTEGER NOT NULL DEFAULT 0, succeeded INTEGER NOT NULL DEFAULT 0,
-      failed INTEGER NOT NULL DEFAULT 0, created_at INTEGER NOT NULL,
-      updated_at INTEGER NOT NULL, settings_json TEXT NOT NULL, error TEXT NOT NULL DEFAULT ''
-    );
-    CREATE TABLE IF NOT EXISTS transcript_files (
-      id TEXT PRIMARY KEY, operation_id TEXT NOT NULL REFERENCES transcript_operations(id) ON DELETE CASCADE,
-      ordinal INTEGER NOT NULL, display_name TEXT NOT NULL, relative_name TEXT NOT NULL,
-      source_kind TEXT NOT NULL, media_ref_json TEXT NOT NULL DEFAULT '{}', private_path TEXT NOT NULL DEFAULT '',
-      state TEXT NOT NULL DEFAULT 'pending', progress REAL NOT NULL DEFAULT 0, error TEXT NOT NULL DEFAULT '',
-      language TEXT NOT NULL DEFAULT '', srt_path TEXT NOT NULL DEFAULT '', output_json TEXT NOT NULL DEFAULT '{}',
-      segment_count INTEGER NOT NULL DEFAULT 0, UNIQUE(operation_id, ordinal)
-    );
-    CREATE TABLE IF NOT EXISTS transcript_segments (
-      id INTEGER PRIMARY KEY, file_id TEXT NOT NULL REFERENCES transcript_files(id) ON DELETE CASCADE,
-      seq INTEGER NOT NULL, start REAL NOT NULL, end REAL NOT NULL, text TEXT NOT NULL,
-      UNIQUE(file_id, seq)
-    );
-    CREATE INDEX IF NOT EXISTS transcript_segments_file ON transcript_segments(file_id, seq);
-    CREATE INDEX IF NOT EXISTS transcript_files_operation ON transcript_files(operation_id, ordinal);`);
-  const operationColumns = new Set(db.prepare('PRAGMA table_info(transcript_operations)').all().map(row => row.name));
-  if (!operationColumns.has('project_id')) {
-    db.exec(`BEGIN IMMEDIATE;
-      ALTER TABLE transcript_operations ADD COLUMN project_id TEXT NOT NULL DEFAULT '${LEGACY_UNSCOPED_PROJECT}';
-      COMMIT;`);
+const parseTimestamp = value => {
+  const match = String(value || '').trim().match(/^(\d{1,}):(\d{2}):(\d{2})[,.](\d{3})$/);
+  if (!match) return null;
+  return Number(match[1]) * 3600 + Number(match[2]) * 60 + Number(match[3]) + Number(match[4]) / 1000;
+};
+const parseSrt = value => {
+  const normalized = String(value || '').replace(/^\uFEFF/, '').replace(/\r\n?/g, '\n').trim();
+  if (!normalized) return [];
+  const segments = [];
+  for (const block of normalized.split(/\n{2,}/)) {
+    const lines = block.split('\n');
+    if (/^\d+$/.test(lines[0]?.trim() || '')) lines.shift();
+    const timing = lines.shift()?.match(/^\s*(\d+:\d{2}:\d{2}[,.]\d{3})\s*-->\s*(\d+:\d{2}:\d{2}[,.]\d{3})/);
+    if (!timing) continue;
+    const start = parseTimestamp(timing[1]); const end = parseTimestamp(timing[2]);
+    const text = lines.join('\n').trim();
+    if (start === null || end === null || !text) continue;
+    segments.push({ seq: segments.length + 1, start, end, text });
   }
-  db.exec(`UPDATE transcript_operations SET project_id='${LEGACY_UNSCOPED_PROJECT}' WHERE project_id='';
-    CREATE INDEX IF NOT EXISTS transcript_operations_project_created ON transcript_operations(project_id, created_at DESC);`);
-  try {
-    db.exec(`CREATE VIRTUAL TABLE IF NOT EXISTS transcript_segments_fts USING fts5(text, content='transcript_segments', content_rowid='id');
-      CREATE TRIGGER IF NOT EXISTS transcript_segments_ai AFTER INSERT ON transcript_segments BEGIN INSERT INTO transcript_segments_fts(rowid,text) VALUES(new.id,new.text); END;
-      CREATE TRIGGER IF NOT EXISTS transcript_segments_ad AFTER DELETE ON transcript_segments BEGIN INSERT INTO transcript_segments_fts(transcript_segments_fts,rowid,text) VALUES('delete',old.id,old.text); END;
-      CREATE TRIGGER IF NOT EXISTS transcript_segments_au AFTER UPDATE ON transcript_segments BEGIN INSERT INTO transcript_segments_fts(transcript_segments_fts,rowid,text) VALUES('delete',old.id,old.text); INSERT INTO transcript_segments_fts(rowid,text) VALUES(new.id,new.text); END;`);
-  } catch { /* FTS5 is optional; LIKE remains available. */ }
-  return db;
+  return segments;
 };
-const publicFile = row => ({
-  id: row.id, operationId: row.operation_id, ordinal: row.ordinal, displayName: row.display_name,
-  relativeName: row.relative_name, sourceKind: row.source_kind, state: row.state,
-  progress: Number(row.progress) || 0, error: redactError(row.error, { optional: true }), language: row.language,
-  segmentCount: Number(row.segment_count) || 0, output: JSON.parse(row.output_json || '{}'),
+const publicFile = file => ({
+  id: file.id, operationId: file.operationId, ordinal: file.ordinal, displayName: file.displayName,
+  relativeName: file.relativeName, sourceKind: file.sourceKind, state: file.state,
+  progress: Number(file.progress) || 0, error: redactError(file.error, { optional: true }), language: file.language || '',
+  segmentCount: Number(file.segmentCount) || 0, updatedAt: Number(file.updatedAt) || 0, output: file.output ? { ...file.output } : {},
 });
-const operationSnapshot = (db, projectId, operationId, includeFiles = true) => {
-  const row = db.prepare('SELECT * FROM transcript_operations WHERE id=? AND project_id=?').get(operationId, projectId);
-  if (!row) return null;
-  return {
-    id: row.id, state: row.state, sourceKind: row.source_kind, total: row.total,
-    succeeded: row.succeeded, failed: row.failed, createdAt: row.created_at, updatedAt: row.updated_at,
-    error: redactError(row.error, { optional: true }), terminal: TERMINAL_STATES.has(row.state),
-    ...(includeFiles ? { files: db.prepare(`SELECT f.* FROM transcript_files f
-      JOIN transcript_operations o ON o.id=f.operation_id
-      WHERE f.operation_id=? AND o.project_id=? ORDER BY f.ordinal`).all(operationId, projectId).map(publicFile) } : {}),
-  };
-};
+const operationSnapshot = (operation, includeFiles = true) => operation ? {
+  id: operation.id, state: operation.state, sourceKind: operation.sourceKind, total: operation.files.length,
+  succeeded: operation.files.filter(file => file.state === 'completed').length,
+  failed: operation.files.filter(file => file.state === 'failed').length,
+  createdAt: operation.createdAt, updatedAt: operation.updatedAt,
+  error: redactError(operation.error, { optional: true }), terminal: TERMINAL_STATES.has(operation.state),
+  ...(includeFiles ? { files: operation.files.map(publicFile) } : {}),
+} : null;
 
-module.exports = { MEDIA_EXTENSIONS, MEDIA_EXTENSION_SET, TERMINAL_STATES, WHISPER_MODELS, WHISPER_MODEL_IDS, DEFAULT_SETTINGS, LEGACY_UNSCOPED_PROJECT, cleanName, cleanRelativeName, isSupportedMediaName, normalizeDialogInputs, normalizeSettings, redactError, srtNameFor, openDatabase, publicFile, operationSnapshot };
+module.exports = { MEDIA_EXTENSIONS, MEDIA_EXTENSION_SET, TERMINAL_STATES, WHISPER_MODELS, WHISPER_MODEL_IDS, DEFAULT_SETTINGS, cleanName, cleanRelativeName, isSupportedMediaName, normalizeDialogInputs, normalizeSettings, redactError, srtNameFor, parseTimestamp, parseSrt, publicFile, operationSnapshot };

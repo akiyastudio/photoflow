@@ -118,7 +118,7 @@ const updateSelectedVersions = (selected, version, dryRun) => {
 };
 
 const runCommand = (command, args, cwd, label) => {
-  console.log(`\n=== 重新打包：${label} ===`);
+  console.log(`\n=== 打包更新：${label} ===`);
   const result = spawnSync(command, args, { cwd, stdio: 'inherit', windowsHide: true });
   if (result.error) throw result.error;
   if ((result.status ?? 1) !== 0) throw new Error(`${label}打包失败，退出代码 ${result.status ?? 'unknown'}`);

@@ -1,31 +1,26 @@
 const assert = require('node:assert/strict');
-const fs = require('node:fs'); const os = require('node:os'); const path = require('node:path');
-const { DatabaseSync } = require('node:sqlite');
-const { normalizeDialogInputs, isSupportedMediaName, srtNameFor, normalizeSettings, redactError, openDatabase, publicFile, operationSnapshot, LEGACY_UNSCOPED_PROJECT } = require('../core.cjs');
-assert.equal(isSupportedMediaName('A.MP4'), true); assert.equal(isSupportedMediaName('note.txt'), false);
+const { normalizeDialogInputs, isSupportedMediaName, srtNameFor, normalizeSettings, redactError, parseSrt, operationSnapshot } = require('../core.cjs');
+
+assert.equal(isSupportedMediaName('A.MP4'), true);
+assert.equal(isSupportedMediaName('note.txt'), false);
 assert.deepEqual(normalizeDialogInputs([{ name: 'a.MP4', token: 'component-input:one' }, { name: 'skip.exe', token: 'component-input:two' }, { name: 'x.wav', relativeName: '../nested/x.wav', token: 'component-input:three' }]).map(item => item.relativeName), ['a.MP4', 'nested/x.wav']);
 assert.equal(srtNameFor('folder/movie.mkv'), 'folder/movie.srt');
-assert.deepEqual(normalizeSettings({ language: 'auto', model: '../../bad model', device: 'cpu', computeType: 'wat', beamSize: 99 }).language, null);
-assert.equal(normalizeSettings({ model: '../../bad model' }).model, 'large-v3', 'model normalization is an allowlist, never a path sanitizer');
-assert.equal(normalizeSettings({ model: 'large-v3-turbo' }).model, 'large-v3-turbo');
+assert.equal(normalizeSettings({ language: 'auto', device: 'cpu', computeType: 'wat' }).language, null);
+assert.equal(normalizeSettings({ model: '../../bad model' }).model, 'large-v3');
 assert.equal(normalizeSettings({ device: 'cpu', computeType: 'wat' }).computeType, 'int8');
-assert.equal(normalizeSettings(normalizeSettings({ language: 'auto' })).language, null, 'automatic language survives settings round trips');
 assert(!redactError('failed at C:\\secret\\input.mp4').includes('C:\\secret'));
-assert.equal(redactError('', { optional: true }), '', 'empty persisted errors remain empty');
-assert.equal(redactError(null, { optional: true }), '', 'missing optional errors remain empty');
-assert.equal(redactError(new Error('')), '未知错误', 'real errors without a message retain the required fallback');
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'video-transcription-core-'));
-try {
-  const db = openDatabase(path.join(root, 'index.sqlite3'));
-  const now = Date.now(); db.prepare('INSERT INTO transcript_operations(id,project_id,state,source_kind,total,created_at,updated_at,settings_json) VALUES(?,?,?,?,?,?,?,?)').run('op', 'project-a', 'completed', 'external-files', 1, now, now, '{}');
-  db.prepare('INSERT INTO transcript_files(id,operation_id,ordinal,display_name,relative_name,source_kind,state) VALUES(?,?,?,?,?,?,?)').run('file', 'op', 0, '测试.mp4', '测试.mp4', 'external-files', 'completed');
-  db.prepare('INSERT INTO transcript_segments(file_id,seq,start,end,text) VALUES(?,?,?,?,?)').run('file', 1, 0, 1, '可搜索字幕');
-  assert.equal(db.prepare('SELECT text FROM transcript_segments WHERE text LIKE ?').get('%搜索%').text, '可搜索字幕');
-  assert.equal(publicFile(db.prepare('SELECT * FROM transcript_files WHERE id=?').get('file')).error, '', 'completed file does not invent an error');
-  const snapshot = operationSnapshot(db, 'project-a', 'op'); assert.equal(snapshot.error, '', 'completed operation does not invent an error'); assert.equal(snapshot.files[0].error, ''); db.close();
-  const legacyPath = path.join(root, 'legacy.sqlite3'); const legacy = new DatabaseSync(legacyPath);
-  legacy.exec('CREATE TABLE transcript_operations(id TEXT PRIMARY KEY,state TEXT NOT NULL,source_kind TEXT NOT NULL,total INTEGER NOT NULL DEFAULT 0,succeeded INTEGER NOT NULL DEFAULT 0,failed INTEGER NOT NULL DEFAULT 0,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL,settings_json TEXT NOT NULL,error TEXT NOT NULL DEFAULT "");');
-  legacy.prepare('INSERT INTO transcript_operations(id,state,source_kind,created_at,updated_at,settings_json) VALUES(?,?,?,?,?,?)').run('legacy', 'completed', 'external-files', now, now, '{}'); legacy.close();
-  const migrated = openDatabase(legacyPath); assert.equal(migrated.prepare('SELECT project_id FROM transcript_operations WHERE id=?').get('legacy').project_id, LEGACY_UNSCOPED_PROJECT, 'legacy shared rows are quarantined instead of assigned to whichever project opens the DB first'); migrated.close();
-} finally { fs.rmSync(root, { recursive: true, force: true }); }
-console.log('video-transcription core, filtering, SRT naming, and SQLite tests passed');
+
+const segments = parseSrt('\uFEFF1\r\n00:00:01,250 --> 00:00:02,500\r\n第一行\r\n\r\n2\n01:01:01.000 --> 01:01:02.250\n第二行\n继续');
+assert.deepEqual(segments, [
+  { seq: 1, start: 1.25, end: 2.5, text: '第一行' },
+  { seq: 2, start: 3661, end: 3662.25, text: '第二行\n继续' },
+]);
+assert.deepEqual(parseSrt('bad data'), []);
+
+const operation = { id: 'op', state: 'completed', sourceKind: 'project-media', createdAt: 1, updatedAt: 2, error: '', files: [{ id: 'f', operationId: 'op', ordinal: 0, displayName: 'a.mp4', relativeName: 'a.mp4', sourceKind: 'project-media', state: 'completed', progress: 100, error: '', language: 'zh', segmentCount: 2, output: { relativePath: 'a.srt' } }] };
+const snapshot = operationSnapshot(operation);
+assert.equal(snapshot.succeeded, 1);
+assert.equal(snapshot.failed, 0);
+assert.equal(snapshot.files[0].output.relativePath, 'a.srt');
+assert(!Object.hasOwn(snapshot.files[0], 'privatePath'));
+console.log('video-transcription core filtering, SRT parsing, and in-memory snapshot tests passed');

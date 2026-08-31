@@ -8,7 +8,7 @@ const files = [
 const tree = model.buildTree(files);
 assert.equal(tree.children[0].type, 'folder'); assert.equal(tree.children[0].name, 'Folder'); assert.equal(tree.children[0].children[0].type, 'folder');
 assert.equal(model.defaultFileId(files), 'a', 'first completed file is selected by default'); assert.equal(model.defaultFileId(files, 'b'), 'b');
-assert.equal(model.transcriptKey(files[0]), 'b\u0000running\u00002');
+assert.equal(model.transcriptKey(files[0]), 'b\u0000running\u00002\u00000');
 const text = model.transcriptText([{ start: 1.25, end: 2.5, text: '第一行' }, { start: 3661, end: 3662, text: '第二行' }]);
 assert.match(text, /00:00:01,250 – 00:00:02,500/); assert.match(text, /01:01:01,000/); assert.match(text, /第一行\n\n/);
 assert.equal(model.operationSignature({ id: 'op', state: 'running', total: 3, succeeded: 1, failed: 1, files }), model.operationSignature({ id: 'op', state: 'running', total: 3, succeeded: 1, failed: 1, files }));

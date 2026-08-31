@@ -3,7 +3,7 @@
   "id": "video-transcription",
   "version": "26.8.31",
   "displayName": "视频转文字",
-  "description": "本地批量语音识别、字幕搜索与受控 SRT 发布",
+  "description": "本地批量语音识别、同目录 SRT 与字幕浏览",
   "icon": "ui/icon.svg",
   "platforms": ["win32", "linux", "darwin"],
   "architectures": ["x64", "arm64"],
@@ -30,6 +30,7 @@
   "componentHost": {
     "contractVersion": 2,
     "compatibility": { "minHostApiVersion": 7, "maxHostApiVersion": 7 },
+    "adoptionGrants": ["project.output.existing.v1"],
     "contributions": [
       { "type": "workspace.toolbarAction", "id": "open", "label": "视频转文字", "pageId": "main" },
       { "type": "component.fullPage", "id": "main", "title": "视频转文字", "entry": "ui/index.html" },
@@ -45,8 +46,6 @@
         "transcript.search.v1",
         "transcript.file.get.v1",
         "transcript.operation.transcript.page.v1",
-        "transcript.output.publish.v1",
-        "transcript.output.publish-all.v1",
         "transcript.output.open.v1",
         "transcript.runtime.status.v1"
       ] }
@@ -66,8 +65,6 @@
         "transcript.search.v1",
         "transcript.file.get.v1",
         "transcript.operation.transcript.page.v1",
-        "transcript.output.publish.v1",
-        "transcript.output.publish-all.v1",
         "transcript.output.open.v1",
         "transcript.settings.get.v1",
         "transcript.settings.update.v1",
@@ -76,22 +73,22 @@
       ],
       "capabilities": [
         "project.media.page",
+        "project.files.page",
         "project.media.variants",
         "project.input.tokens",
         "project.output",
         "tasks",
         "dialogs",
-        "component.storage",
         "component.settings",
         "component.events"
       ],
       "permissions": [
         "project.media.read",
+        "project.files.read",
         "project.input.read",
         "project.output.write",
         "tasks",
         "dialogs",
-        "component.storage",
         "component.settings",
         "events"
       ],

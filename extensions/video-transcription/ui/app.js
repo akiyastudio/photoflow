@@ -4,7 +4,7 @@
   const explicitStart = window.VideoTranscriptionExplicitStart;
   const selectionPreview = window.VideoTranscriptionSelectionPreview;
   const browser = window.VideoTranscriptionBrowserModel;
-  const state = { context: null, operationId: '', operation: null, fileId: '', viewMode: 'single', sourceMode: 'selection', selectionContextKey: '', allCursor: '', transcriptRenderToken: 0, navigationToken: 0, searchToken: 0, searchQuery: '', searchCursor: '', operations: [], operationsSignature: '', operationSignature: '', transcriptCache: new Map(), publishAllPending: false, selectionPreview: { state: 'idle', files: [], total: 0, limitReached: false } };
+  const state = { context: null, operationId: '', operation: null, fileId: '', viewMode: 'single', sourceMode: 'selection', selectionContextKey: '', allCursor: '', transcriptRenderToken: 0, navigationToken: 0, searchToken: 0, searchQuery: '', searchCursor: '', operations: [], operationsSignature: '', operationSignature: '', transcriptCache: new Map(), selectionPreview: { state: 'idle', files: [], total: 0, limitReached: false } };
   const $ = selector => document.querySelector(selector);
   const rpc = (method, payload = {}) => api.rpc(method, payload);
   const applyTheme = resolvedTheme => { const dark = resolvedTheme === 'dark'; document.documentElement.classList.toggle('dark', dark); document.documentElement.style.colorScheme = dark ? 'dark' : 'light'; };
@@ -51,7 +51,7 @@
     if (hasSelection) { const option = document.createElement('option'); option.value = '__current_selection__'; option.textContent = preview.state === 'ready' ? `当前选择 · ${preview.total} 个视频` : preview.state === 'empty' ? '当前选择 · 没有视频' : preview.state === 'error' ? '当前选择 · 读取失败' : '当前选择 · 正在读取'; select.append(option); }
     if (!operations.length && !hasSelection) { const option = document.createElement('option'); option.value = ''; option.textContent = '还没有识别任务'; select.append(option); select.disabled = true; return; }
     select.disabled = false;
-    operations.forEach(operation => { const option = document.createElement('option'); option.value = operation.id; option.textContent = `${stateLabel(operation.state)} · ${operation.total} 个文件 · ${new Date(operation.createdAt).toLocaleString()}`; select.append(option); });
+    operations.forEach(operation => { const option = document.createElement('option'); option.value = operation.id; option.textContent = operation.sourceKind === 'srt-library' ? `全部 SRT · ${operation.total} 个文件` : `${stateLabel(operation.state)} · ${operation.total} 个文件 · ${new Date(operation.createdAt).toLocaleString()}`; select.append(option); });
     select.value = state.sourceMode === 'selection' && hasSelection ? '__current_selection__' : state.operationId;
   };
   const renderTreeNode = (node, root) => {
@@ -104,7 +104,7 @@
       title.textContent = '选择一个文件'; status.textContent = '从左侧目录选择文件'; return;
     }
     title.textContent = file.relativeName; status.textContent = `${stateLabel(file.state)}${file.error ? ` · ${file.error}` : ''}`;
-    if (file.state === 'completed') { actions.append(button(file.output?.commitId ? '重新发布' : '发布 SRT', 'publish', file.id)); if (file.output?.commitId) actions.append(button('打开输出', 'openOutput', file.id)); }
+    if (file.state === 'completed') actions.append(button('打开 SRT', 'openOutput', file.id));
     if (file.state !== 'completed') { text.textContent = file.error || `${stateLabel(file.state)}，识别完成后可查看文字。`; text.dataset.state = 'empty'; return; }
     const key = `${browser.transcriptKey(file)}\u0000${cursor}\u0000${highlightSeq}`; text.textContent = '正在读取识别文字…'; text.dataset.state = 'loading';
     let pending = state.transcriptCache.get(key);
@@ -155,7 +155,6 @@
     const actions = $('#operation-actions'); actions.replaceChildren();
     if (operation.state === 'running' || operation.state === 'queued') actions.append(button('取消任务', 'cancel', operation.id));
     if (['cancelled', 'failed', 'partial_failure'].includes(operation.state)) actions.append(button('从 checkpoint 恢复', 'resume', operation.id));
-    const publishAll = button(state.publishAllPending ? '正在发布…' : '发布全部 SRT', 'publishAll', operation.id); publishAll.disabled = state.publishAllPending || !operation.files.some(file => file.state === 'completed'); actions.append(publishAll);
     const tree = $('#file-tree'); tree.replaceChildren(); const model = browser.buildTree(operation.files); model.children.forEach(node => renderTreeNode(node, tree));
     if (!operation.files.length) tree.textContent = '这个任务没有文件';
     state.fileId = browser.defaultFileId(operation.files, state.fileId); if (!skipTranscript) { if (state.viewMode === 'all') void renderAllTranscript(); else void selectFile(state.fileId); }
@@ -171,20 +170,13 @@
     } catch (error) { notice(error.message, 'error'); }
   }
   const coordinator = window.VideoTranscriptionRefreshCoordinator.createRefreshCoordinator({ refresh, debounceMs: 400, pollMs: 3000 });
-  const publish = async fileId => { try { const result = await rpc('transcript.output.publish.v1', { fileId }); notice(result.message, 'success'); coordinator.request({ immediate: true }); } catch (error) { notice(error.message, 'error'); } };
-  const publishAll = async operationId => {
-    if (state.publishAllPending) return; state.publishAllPending = true; state.operationSignature = ''; renderOperation(state.operation); notice('发布任务已提交；可在 Host 任务面板查看逐文件进度。');
-    try { const result = await rpc('transcript.output.publish-all.v1', { operationId }); const successes = result.published + result.idempotent; notice(result.cancelled ? `发布已取消：${successes}/${result.total} 成功` : result.failed ? `发布完成：${successes} 成功，${result.failed} 失败` : `发布完成：${successes}/${result.total} 成功`, result.failed ? 'warning' : 'success'); }
-    catch (error) { notice(error.message, 'error'); }
-    finally { state.publishAllPending = false; state.operationSignature = ''; coordinator.request({ immediate: true }); }
-  };
   const runAccepted = result => { if (result.cancelled) return; state.sourceMode = 'operation'; state.operationId = result.operationId; notice(result.warning || '任务已恢复。', result.warning ? 'warning' : 'success'); void rpc('transcript.operation.run.v1', { operationId: result.operationId }).catch(error => notice(error.message, 'error')); coordinator.request({ immediate: true }); };
   const viewSearchFile = async item => { const navigationToken = ++state.navigationToken; try {
     let detail = null; if (state.operationId !== item.operationId) detail = await rpc('transcript.operation.get.v1', { operationId: item.operationId }); if (navigationToken !== state.navigationToken) return;
     state.viewMode = 'single'; state.sourceMode = 'operation'; if (detail) { state.operationId = item.operationId; state.operationSignature = ''; state.fileId = item.fileId; renderOperation(detail.operation, { skipTranscript: true }); }
     if (navigationToken !== state.navigationToken) return; await selectFile(item.fileId, item.seq); if (navigationToken !== state.navigationToken) return; $('#operation-select').value = item.operationId;
   } catch (error) { if (navigationToken === state.navigationToken) notice(error.message, 'error'); } };
-  document.addEventListener('click', event => { const target = event.target.closest('button'); if (!target) return; if (target.dataset.selectionAction !== undefined) void startCurrentSelection(); else if (target.dataset.selectFile) { ++state.navigationToken; selectFile(target.dataset.selectFile); } else if (target.dataset.cancel) void rpc('transcript.operation.cancel.v1', { operationId: target.dataset.cancel }).then(() => coordinator.request({ immediate: true })).catch(error => notice(error.message, 'error')); else if (target.dataset.resume) void rpc('transcript.operation.resume.v1', { operationId: target.dataset.resume }).then(runAccepted).catch(error => notice(error.message, 'error')); else if (target.dataset.publish) void publish(target.dataset.publish); else if (target.dataset.publishAll) void publishAll(target.dataset.publishAll); else if (target.dataset.openOutput) void rpc('transcript.output.open.v1', { fileId: target.dataset.openOutput }).catch(error => notice(error.message, 'error')); });
+  document.addEventListener('click', event => { const target = event.target.closest('button'); if (!target) return; if (target.dataset.selectionAction !== undefined) void startCurrentSelection(); else if (target.dataset.selectFile) { ++state.navigationToken; selectFile(target.dataset.selectFile); } else if (target.dataset.cancel) void rpc('transcript.operation.cancel.v1', { operationId: target.dataset.cancel }).then(() => coordinator.request({ immediate: true })).catch(error => notice(error.message, 'error')); else if (target.dataset.resume) void rpc('transcript.operation.resume.v1', { operationId: target.dataset.resume }).then(runAccepted).catch(error => notice(error.message, 'error')); else if (target.dataset.openOutput) void rpc('transcript.output.open.v1', { fileId: target.dataset.openOutput }).catch(error => notice(error.message, 'error')); });
   $('#operation-select').addEventListener('change', event => { ++state.navigationToken; state.fileId = ''; state.viewMode = 'single'; if (event.target.value === '__current_selection__') { state.sourceMode = 'selection'; state.operationId = ''; state.operation = null; state.operationSignature = ''; state.operationsSignature = ''; renderOperations(state.operations); renderSelectionPreview(); void renderTranscript(null); return; } state.sourceMode = 'operation'; state.operationId = event.target.value; state.operationSignature = ''; state.operationsSignature = ''; coordinator.request({ immediate: true }); });
   $('#refresh').addEventListener('click', () => coordinator.request({ immediate: true })); $('#reprocess').addEventListener('click', () => void startCurrentSelection());
   $('#browse-all').addEventListener('click', () => { ++state.navigationToken; state.viewMode === 'all' ? void selectFile(state.fileId) : void renderAllTranscript(); });

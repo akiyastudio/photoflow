@@ -5,7 +5,7 @@
   if (root) root.VideoTranscriptionBrowserModel = model;
 })(typeof globalThis === 'object' ? globalThis : this, () => {
   'use strict';
-  const fileSignature = file => [file.id, file.relativeName, file.state, Math.round(Number(file.progress) || 0), file.error || '', Number(file.segmentCount) || 0, file.output?.commitId || '', file.output?.sha256 || ''].join('\u0000');
+  const fileSignature = file => [file.id, file.relativeName, file.state, Math.round(Number(file.progress) || 0), file.error || '', Number(file.segmentCount) || 0, Number(file.updatedAt) || 0, file.output?.commitId || '', file.output?.sha256 || ''].join('\u0000');
   const operationSignature = operation => operation ? [operation.id, operation.state, operation.total, operation.succeeded, operation.failed, operation.error || '', ...(operation.files || []).map(fileSignature)].join('\u0001') : '';
   const operationsSignature = operations => (operations || []).map(item => [item.id, item.state, item.total, item.succeeded, item.failed, item.updatedAt].join('\u0000')).join('\u0001');
   const buildTree = files => {
@@ -27,7 +27,7 @@
     sort(root); return root;
   };
   const defaultFileId = (files, current = '') => (files || []).some(file => file.id === current) ? current : (files || []).find(file => file.state === 'completed')?.id || (files || [])[0]?.id || '';
-  const transcriptKey = file => file ? `${file.id}\u0000${file.state}\u0000${Number(file.segmentCount) || 0}` : '';
+  const transcriptKey = file => file ? `${file.id}\u0000${file.state}\u0000${Number(file.segmentCount) || 0}\u0000${Number(file.updatedAt) || 0}` : '';
   const formatTime = seconds => { const value = Math.max(0, Number(seconds) || 0); const hours = Math.floor(value / 3600); const minutes = Math.floor(value / 60) % 60; const secs = Math.floor(value % 60); const millis = Math.floor((value % 1) * 1000); return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(secs).padStart(2, '0')},${String(millis).padStart(3, '0')}`; };
   const transcriptText = segments => (segments || []).map(item => `${formatTime(item.start)} – ${formatTime(item.end)}\n${String(item.text || '').trim()}`).join('\n\n');
   const segmentKey = (fileId, seq) => `${String(fileId || '')}:${Math.max(0, Number(seq) || 0)}`;

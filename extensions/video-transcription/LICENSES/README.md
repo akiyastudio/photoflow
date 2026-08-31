@@ -1,7 +1,7 @@
 # Third-party notices and model policy
 
 The component source itself is covered by the PhotoFlow repository license.
-No third-party binary, virtual environment, subtitle database, or Whisper model is committed here.
+No third-party binary, virtual environment, or Whisper model is committed here. This component does not create a subtitle database.
 
 Release builders are responsible for including the licenses that correspond to the exact bundled versions of:
 

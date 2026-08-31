@@ -61,12 +61,107 @@ const findInstaller = version => {
   return candidates[0];
 };
 
+const hiddenQuestion = prompt => {
+  if (!stdin.isTTY || typeof stdin.setRawMode !== 'function') {
+    throw new Error('当前终端无法安全读取隐藏 Token；请改用交互式 PowerShell 或 set-version.bat 所在终端');
+  }
+  return new Promise((resolve, reject) => {
+    let value = '';
+    let finished = false;
+    const cleanup = () => {
+      stdin.off('data', onData);
+      stdin.setRawMode(false);
+      stdin.pause();
+      stdout.write('\n');
+    };
+    const complete = result => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      resolve(result);
+    };
+    const fail = error => {
+      if (finished) return;
+      finished = true;
+      cleanup();
+      reject(error);
+    };
+    const onData = chunk => {
+      for (const character of String(chunk)) {
+        if (character === '\u0003') return fail(new Error('已取消 Token 输入'));
+        if (character === '\r' || character === '\n') return complete(value);
+        if (character === '\u007f' || character === '\b') {
+          if (value) {
+            value = value.slice(0, -1);
+            stdout.write('\b \b');
+          }
+        } else if (character >= ' ') {
+          value += character;
+          stdout.write('*');
+        }
+      }
+    };
+    stdout.write(prompt);
+    stdin.setEncoding('utf8');
+    stdin.setRawMode(true);
+    stdin.resume();
+    stdin.on('data', onData);
+  });
+};
+
+const readWindowsUserToken = () => {
+  if (process.platform !== 'win32') return '';
+  const command = "[Console]::OutputEncoding=New-Object System.Text.UTF8Encoding($false);[Console]::Out.Write([Environment]::GetEnvironmentVariable('PHOTOFLOW_ADMIN_TOKEN','User'))";
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.error || result.status !== 0) return '';
+  return String(result.stdout || '').trim();
+};
+
+const persistWindowsUserToken = token => {
+  if (process.platform !== 'win32') return false;
+  const command = "[Console]::InputEncoding=New-Object System.Text.UTF8Encoding($false);$value=[Console]::In.ReadToEnd().Trim();if([string]::IsNullOrWhiteSpace($value)){exit 2};[Environment]::SetEnvironmentVariable('PHOTOFLOW_ADMIN_TOKEN',$value,'User')";
+  const result = spawnSync('powershell.exe', ['-NoProfile', '-NonInteractive', '-Command', command], {
+    input: token,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error(`无法保存管理员 Token，退出代码 ${result.status ?? 'unknown'}`);
+  return true;
+};
+
+const validateAdminToken = value => {
+  const token = String(value || '').trim();
+  if (!token) throw new Error('Token 不能为空');
+  if (!/^[\x21-\x7e]+$/.test(token)) {
+    throw new Error('Token 包含非 ASCII 或不可见字符；请使用 CloudBase 中由十六进制随机字符串生成的 Token，并只复制变量值');
+  }
+  return token;
+};
+
+const askYesNo = async (terminal, prompt, fallback = false) => {
+  while (true) {
+    const answer = (await terminal.question(prompt)).trim().toLowerCase();
+    if (!answer) return fallback;
+    if (['y', 'yes', 'true', '1', '是'].includes(answer)) return true;
+    if (['n', 'no', 'false', '0', '否'].includes(answer)) return false;
+    console.log('请输入 y 或 n。');
+  }
+};
+
 const run = async () => {
   const args = parseArguments(process.argv.slice(2));
-  const token = String(process.env.PHOTOFLOW_ADMIN_TOKEN || '').trim();
+  let token = String(process.env.PHOTOFLOW_ADMIN_TOKEN || '').trim() || readWindowsUserToken();
+  let persistToken = false;
   if (!token) {
-    throw new Error('缺少 PHOTOFLOW_ADMIN_TOKEN 环境变量；请配置为云函数使用的同一个管理员 Token');
+    token = await hiddenQuestion('未配置 PHOTOFLOW_ADMIN_TOKEN，请粘贴 CloudBase 管理 Token：');
+    persistToken = true;
   }
+  token = validateAdminToken(token);
+  process.env.PHOTOFLOW_ADMIN_TOKEN = token;
 
   const terminal = readline.createInterface({ input: stdin, output: stdout });
   try {
@@ -89,11 +184,23 @@ const run = async () => {
     if (!notes) notes = (await terminal.question('请输入发布说明：')).trim();
     if (!notes) throw new Error('发布说明不能为空');
     if (notes.length > 4000) throw new Error('发布说明不能超过 4000 个字符');
-    const mandatoryArgument = String(args.mandatory || 'false').trim().toLowerCase();
-    if (!['true', 'false'].includes(mandatoryArgument)) throw new Error('--mandatory 只接受 true 或 false');
+    let mandatory;
+    if (args.mandatory === undefined) {
+      mandatory = await askYesNo(terminal, '是否强制更新？输入 y 表示强制更新，输入 n 表示普通更新 [y/N]：');
+    } else {
+      const value = String(args.mandatory).trim().toLowerCase();
+      if (!['true', 'false', 'y', 'n', 'yes', 'no', '1', '0', '是', '否'].includes(value)) {
+        throw new Error('--mandatory 只接受 true/false 或 y/n');
+      }
+      mandatory = ['true', 'y', 'yes', '1', '是'].includes(value);
+    }
+    const mandatoryArgument = String(mandatory);
 
     console.log('\n正在验证 CloudBase release 发布接口和管理员 Token……');
     await assertPublisherReady(token);
+    if (persistToken && persistWindowsUserToken(token)) {
+      console.log('管理员 Token 已保存到 Windows 用户环境变量，以后发布会自动读取。');
+    }
 
     if (args['skip-upload-pause'] !== 'true') {
       console.log(`请先把新安装包上传或替换到固定发布地址：${releaseConfig.downloadUrl}`);

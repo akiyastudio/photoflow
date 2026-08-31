@@ -16,8 +16,9 @@ const appSource = fs.readFileSync(path.join(root, 'ui', 'app.js'), 'utf8'); cons
 assert.deepEqual([...projectAction.rpcMethods].sort(), pageMethods, 'project context action allowlist exactly matches the RPCs used by its main page'); assert(projectAction.rpcMethods.length <= 16); assert(!projectAction.rpcMethods.includes('transcript.settings.update.v1'));
 const serviceSource = fs.readFileSync(path.join(root, 'service.cjs'), 'utf8'); const handlerMethods = [...serviceSource.matchAll(/^  '(transcript\.[a-z.-]+\.v1)':/gm)].map(match => match[1]).sort(); assert.deepEqual([...manifest.componentHost.service.rpcMethods].sort(), handlerMethods, 'service RPC allowlist exactly matches implemented public handlers');
 assert(!manifest.componentHost.service.rpcMethods.includes('transcript.inputs.start.v1'), 'external input picker RPC is not exposed');
-assert.deepEqual(new Set(manifest.componentHost.service.permissions), new Set(['project.media.read', 'project.input.read', 'project.output.write', 'tasks', 'dialogs', 'component.storage', 'component.settings', 'events']));
-assert(!manifest.componentHost.service.permissions.includes('network.fetch')); assert(!manifest.componentHost.service.permissions.includes('project.files.read'));
+assert.deepEqual(new Set(manifest.componentHost.service.permissions), new Set(['project.media.read', 'project.files.read', 'project.input.read', 'project.output.write', 'tasks', 'dialogs', 'component.settings', 'events']));
+assert(!manifest.componentHost.service.permissions.includes('network.fetch')); assert(!manifest.componentHost.service.permissions.includes('component.storage'));
+assert.deepEqual(manifest.componentHost.adoptionGrants, ['project.output.existing.v1']);
 for (const name of ['index.html', 'settings.html', 'app.js', 'settings.js']) { const source = fs.readFileSync(path.join(root, 'ui', name), 'utf8'); assert(!/[A-Za-z]:\\|\\\\[^\s]+|file:\/\//.test(source), `${name} leaks an absolute path`); }
 const schema = fs.readFileSync(path.join(repo, 'electron', 'contracts', 'schemas', 'component-host-api.schema.json'), 'utf8'); assert(schema.includes('"openDirectory"'));
 const development = packageJson.photoflowComponent.development;
@@ -29,7 +30,7 @@ assert(!/\.(?:cmd|bat)$/i.test(runtimeCommand), 'development runtime must be a d
 assert.equal(runtimeCommand, process.platform === 'win32' ? '.venv/Scripts/python.exe' : '.venv/bin/python');
 assert(!fs.existsSync(path.join(root, 'dev-python.cmd')), 'the obsolete batch runtime wrapper must be removed');
 for (const copiedPath of Object.values(development.files)) assert(!copiedPath.startsWith('.venv/'), '.venv must not be copied into the packaged component');
-assert(!fs.existsSync(path.join(root, 'subtitle_index.db'))); assert(fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split(/\r?\n/).includes('models/'), 'plugin-local models remain ignored and outside the default package file list'); assert(!Object.values(development.files).some(value => value.startsWith('models/')), 'development contribution copying does not bundle models');
+assert(!fs.existsSync(path.join(root, 'subtitle_index.db'))); assert(!serviceSource.includes('node:sqlite') && !serviceSource.includes('openDatabase('), 'the component does not maintain a user database'); assert(fs.readFileSync(path.join(root, '.gitignore'), 'utf8').split(/\r?\n/).includes('models/'), 'plugin-local models remain ignored and outside the default package file list'); assert(!Object.values(development.files).some(value => value.startsWith('models/')), 'development contribution copying does not bundle models');
 let nextViewId = 1; const handlers = new Map(); const views = [];
 class Contents extends EventEmitter { constructor() { super(); this.id = nextViewId++; this.session = { setPermissionCheckHandler() {}, setPermissionRequestHandler() {} }; } isDestroyed() { return false; } loadFile() { return Promise.resolve(); } send() {} setWindowOpenHandler() {} close() { this.emit('destroyed'); } }
 class View { constructor() { this.webContents = new Contents(); views.push(this); } setBounds() {} setVisible() {} }
