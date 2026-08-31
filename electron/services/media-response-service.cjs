@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { takeVerifiedMediaHandle } = require('./media-access-service.cjs');
 
 const CONTENT_TYPES = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -40,71 +41,109 @@ const parseByteRange = (rangeHeader, fileSize) => {
   return { start, end: Math.min(requestedEnd, fileSize - 1) };
 };
 
-// Node's Readable.toWeb adapter can enqueue once more after Electron cancels a
-// protocol response, raising ERR_INVALID_STATE as an uncaught exception. Own
-// the cancellation boundary so late file events are ignored safely.
-const createFileWebStream = (filePath, options) => {
-  let source;
+// Read at most one bounded chunk for each consumer pull. Keeping the same open
+// handle for fstat and reads both enforces backpressure and prevents a path
+// replacement between stat and open from changing the response contents.
+const createFileWebStream = (handle, { start = 0, end }) => {
+  let position = start;
   let closed = false;
+  const close = async () => {
+    if (closed) return;
+    closed = true;
+    await handle.close().catch(() => undefined);
+  };
   return new ReadableStream({
-    start(controller) {
-      source = fs.createReadStream(filePath, options);
-      source.on('data', chunk => {
-        if (!closed) controller.enqueue(new Uint8Array(chunk));
-      });
-      source.once('end', () => {
-        if (closed) return;
-        closed = true;
+    async pull(controller) {
+      if (closed) return;
+      const remaining = end - position + 1;
+      if (remaining <= 0) {
+        await close();
         controller.close();
-      });
-      source.once('error', error => {
-        if (closed) return;
-        closed = true;
+        return;
+      }
+      const buffer = Buffer.allocUnsafe(Math.min(64 * 1024, remaining));
+      try {
+        const { bytesRead } = await handle.read(buffer, 0, buffer.length, position);
+        if (!bytesRead) {
+          await close();
+          controller.close();
+          return;
+        }
+        position += bytesRead;
+        controller.enqueue(new Uint8Array(buffer.buffer, buffer.byteOffset, bytesRead));
+        if (position > end) {
+          await close();
+          controller.close();
+        }
+      } catch (error) {
+        await close();
         controller.error(error);
-      });
+      }
     },
-    cancel() {
-      closed = true;
-      source?.destroy();
-    },
+    cancel: close,
   });
 };
 
+const mediaTokenFromRequest = request => {
+  try {
+    const url = new URL(request.url);
+    if (url.protocol !== 'photoflow-media:' || url.hostname !== 'file') return null;
+    const token = url.pathname.replace(/^\//, '');
+    return /^[A-Za-z0-9_-]{32}$/.test(token) ? token : null;
+  } catch { return null; }
+};
+
 const createMediaFileResponse = async (filePath, request) => {
-  const stat = await fs.promises.stat(filePath).catch(() => null);
-  if (!stat?.isFile()) return new Response('Not found', { status: 404 });
-
+  const requestToken = mediaTokenFromRequest(request);
+  const verifiedHandle = requestToken ? takeVerifiedMediaHandle(requestToken, filePath) : null;
   const method = String(request.method || 'GET').toUpperCase();
-  if (method !== 'GET' && method !== 'HEAD') return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } });
-
-  const rangeHeader = request.headers.get('range');
-  const range = parseByteRange(rangeHeader, stat.size);
-  const commonHeaders = {
-    'Accept-Ranges': 'bytes',
-    'Access-Control-Allow-Origin': '*',
-    'Cache-Control': 'private, max-age=3600',
-    'Content-Type': CONTENT_TYPES.get(path.extname(filePath).toLowerCase()) || 'application/octet-stream',
-  };
-
-  if (rangeHeader && !range) {
-    return new Response(null, { status: 416, headers: { ...commonHeaders, 'Content-Range': `bytes */${stat.size}` } });
+  if (method !== 'GET' && method !== 'HEAD') {
+    try { return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } }); }
+    finally { await verifiedHandle?.close().catch(() => undefined); }
   }
 
-  if (range) {
-    const contentLength = range.end - range.start + 1;
-    const body = method === 'HEAD' ? null : createFileWebStream(filePath, range);
-    return new Response(body, {
-      status: 206,
-      headers: {
-        ...commonHeaders,
-        'Content-Length': String(contentLength),
-        'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`,
-      },
-    });
-  }
+  const handle = verifiedHandle || (requestToken ? null : await fs.promises.open(filePath, 'r').catch(() => null));
+  if (!handle) return new Response('Not found', { status: 404 });
+  let streamOwnsHandle = false;
+  try {
+    const stat = await handle.stat().catch(() => null);
+    if (!stat?.isFile()) return new Response('Not found', { status: 404 });
 
-  const body = method === 'HEAD' || stat.size === 0 ? null : createFileWebStream(filePath);
-  return new Response(body, { status: 200, headers: { ...commonHeaders, 'Content-Length': String(stat.size) } });
+    const rangeHeader = request.headers.get('range');
+    const range = parseByteRange(rangeHeader, stat.size);
+    const commonHeaders = {
+      'Accept-Ranges': 'bytes',
+      'Access-Control-Allow-Origin': '*',
+      'Cache-Control': 'private, max-age=3600',
+      'Content-Type': CONTENT_TYPES.get(path.extname(filePath).toLowerCase()) || 'application/octet-stream',
+    };
+
+    if (rangeHeader && !range) {
+      return new Response(null, { status: 416, headers: { ...commonHeaders, 'Content-Range': `bytes */${stat.size}` } });
+    }
+
+    if (range) {
+      const contentLength = range.end - range.start + 1;
+      const body = method === 'HEAD' ? null : createFileWebStream(handle, range);
+      const response = new Response(body, {
+        status: 206,
+        headers: {
+          ...commonHeaders,
+          'Content-Length': String(contentLength),
+          'Content-Range': `bytes ${range.start}-${range.end}/${stat.size}`,
+        },
+      });
+      streamOwnsHandle = Boolean(body);
+      return response;
+    }
+
+    const body = method === 'HEAD' || stat.size === 0 ? null : createFileWebStream(handle, { end: stat.size - 1 });
+    const response = new Response(body, { status: 200, headers: { ...commonHeaders, 'Content-Length': String(stat.size) } });
+    streamOwnsHandle = Boolean(body);
+    return response;
+  } finally {
+    if (!streamOwnsHandle) await handle.close().catch(() => undefined);
+  }
 };
 
 module.exports = { createMediaFileResponse, parseByteRange };

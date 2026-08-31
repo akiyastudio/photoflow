@@ -40,9 +40,12 @@ const registerMediaRatingIpc = ({
   });
   ipcMain.handle('workspace-media-rating-write', async (_event, workspacePath, filePath, rating) => {
     try {
-      const sourcePath = await mediaService.authorizeInput(filePath);
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      const sourcePath = mediaService.authorizeWorkspaceInput
+        ? await mediaService.authorizeWorkspaceInput(workspaceRoot, filePath)
+        : await mediaService.authorizeInput(filePath);
       assertRateable(sourcePath);
-      return { success: true, rating: await mediaRatingService.write(ensureWorkspace(workspacePath), sourcePath, rating) };
+      return { success: true, rating: await mediaRatingService.write(workspaceRoot, sourcePath, rating) };
     } catch (error) {
       writeLog('warn', 'Unable to write media rating metadata', { filePath, rating, error: error.message || String(error) });
       return { success: false, rating: 0, error: error.message || String(error) };
@@ -51,8 +54,10 @@ const registerMediaRatingIpc = ({
   ipcMain.handle('workspace-final-version-summary', async (_event, workspacePath, status, projectName) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
-      const entries = await mediaRatingService.listProject(path.resolve(getProjectPath(workspacePath, status, projectName)), { workspaceRoot, projectName });
-      return { success: true, count: entries.length, availableCount: entries.length, missingCount: 0 };
+      const summary = mediaRatingService.summarizeProject
+        ? await mediaRatingService.summarizeProject(path.resolve(getProjectPath(workspacePath, status, projectName)), { workspaceRoot, projectName })
+        : { count: (await mediaRatingService.listProject(path.resolve(getProjectPath(workspacePath, status, projectName)), { workspaceRoot, projectName })).length, skippedDirectories: 0 };
+      return { success: true, count: summary.count, availableCount: summary.count, missingCount: 0 };
     } catch (error) {
       return { success: false, count: 0, availableCount: 0, missingCount: 0, error: error.message || String(error) };
     }

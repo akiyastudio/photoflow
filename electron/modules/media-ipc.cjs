@@ -37,6 +37,10 @@ const registerMediaIpc = context => {
 
   ipcMain.handle('media-thumbnail', async (_event, filePath, kind, cacheConfig = {}, requestedSize = 640, priority = PRIORITY.visible, queueOrder = Number.MAX_SAFE_INTEGER) => {
     try {
+      if (!['image', 'raw', 'video'].includes(kind)) throw new Error('媒体类型无效');
+      if (!Number.isSafeInteger(requestedSize) || requestedSize < 1 || requestedSize > 8192) throw new Error('缩略图尺寸无效');
+      if (!Number.isInteger(priority) || priority < PRIORITY.visible || priority > PRIORITY.project) throw new Error('缩略图优先级无效');
+      if (!Number.isSafeInteger(queueOrder)) throw new Error('缩略图队列顺序无效');
       const sourcePath = await mediaService.authorizeInput(filePath);
       const extension = path.extname(sourcePath).toLowerCase();
       const supported = kind === 'raw' ? RAW_EXTENSIONS.has(extension) : kind === 'video' ? VIDEO_EXTENSIONS.has(extension) : IMAGE_EXTENSIONS.has(extension);

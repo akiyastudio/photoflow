@@ -37,9 +37,13 @@ const createMediaRepository = client => {
   };
   const syncChangedPaths = async (root, projectName, changes, externalRoots = [], options = {}) => {
     if (!Array.isArray(changes) || changes.length > MAX_CHANGED_PATHS) throw new Error(`media_sync_paths_limit: 增量路径最多 ${MAX_CHANGED_PATHS} 条`);
-    const normalizedChanges = changes.map(change => typeof change === 'string'
-      ? { path: change, eventType: 'rename', kind: 'missing' }
-      : { ...change, path: String(change?.path || '') });
+    const normalizedChanges = changes.map(change => {
+      const input = typeof change === 'string' ? { path: change, eventType: 'rename', kind: 'missing' } : change;
+      if (!input || typeof input !== 'object' || typeof input.path !== 'string' || !input.path.trim()) throw new Error('media_sync_paths_invalid: 增量路径不能为空');
+      if (input.eventType !== undefined && !['rename', 'change'].includes(input.eventType)) throw new Error('media_sync_paths_invalid: 增量事件类型无效');
+      if (input.kind !== undefined && !['file', 'directory', 'missing'].includes(input.kind)) throw new Error('media_sync_paths_invalid: 增量路径类型无效');
+      return { ...input, path: input.path };
+    });
     const prepared = await prepareChangedPaths(root, {
       projectName, changes: normalizedChanges, externalRoots,
       ...(options.snapshotId ? { snapshotId: options.snapshotId } : {}),

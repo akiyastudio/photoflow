@@ -6,17 +6,23 @@ const { isMediaRelevantChange } = require('./watch-change-filter.cjs');
 const { MEDIA_RESCAN_POLICY_VERSION } = require('./background-task-policy-versions.cjs');
 const { MAX_CHANGED_PATHS } = require('../contracts/media-sync-limits.cjs');
 
-const comparablePath = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
+const CASE_INSENSITIVE_PATHS = process.platform === 'win32';
+const platformKey = value => CASE_INSENSITIVE_PATHS ? value.toLocaleLowerCase() : value;
+const comparablePath = value => platformKey(path.resolve(value));
 
-const normalizeChange = value => typeof value === 'string'
-  ? { path: path.resolve(value), eventType: 'rename', kind: 'missing' }
-  : { ...value, path: path.resolve(String(value?.path || '')), eventType: value?.eventType === 'rename' ? 'rename' : 'change', kind: ['file', 'directory', 'missing'].includes(value?.kind) ? value.kind : 'missing' };
+const normalizeChange = value => {
+  const inputPath = typeof value === 'string' ? value : value?.path;
+  if (typeof inputPath !== 'string' || !inputPath.trim()) return null;
+  return typeof value === 'string'
+    ? { path: path.resolve(value), eventType: 'rename', kind: 'missing' }
+    : { ...value, path: path.resolve(inputPath), eventType: value?.eventType === 'rename' ? 'rename' : 'change', kind: ['file', 'directory', 'missing'].includes(value?.kind) ? value.kind : 'missing' };
+};
 
 const coalesceMediaChanges = values => {
   const byPath = new Map();
   for (const raw of values || []) {
     const change = normalizeChange(raw);
-    if (!change.path || !isMediaRelevantChange(change)) continue;
+    if (!change?.path || !isMediaRelevantChange(change)) continue;
     const key = comparablePath(change.path);
     const previous = byPath.get(key);
     if (!previous || change.eventType === 'rename' || previous.eventType !== 'rename') byPath.set(key, previous && previous.eventType === 'rename' ? previous : change);
@@ -29,7 +35,11 @@ const coalesceMediaChanges = values => {
       return relative && !relative.startsWith('..') && !path.isAbsolute(relative);
     })());
     if (!covered) collapsed.push(change);
-    if (collapsed.length > MAX_CHANGED_PATHS) throw new Error(`media_sync_paths_limit: 增量路径最多 ${MAX_CHANGED_PATHS} 条`);
+    if (collapsed.length > MAX_CHANGED_PATHS) {
+      const error = new Error(`media_sync_paths_limit: 增量路径最多 ${MAX_CHANGED_PATHS} 条`);
+      error.code = 'MEDIA_SYNC_PATHS_LIMIT';
+      throw error;
+    }
   }
   return collapsed;
 };
@@ -37,11 +47,24 @@ const coalesceMediaChanges = values => {
 const mergeMediaScanBatch = (current, delta) => {
   const left = current || {};
   const right = delta || {};
+  let fullScan = Boolean(left.fullScan || right.fullScan);
+  let changes;
+  try {
+    changes = right.fullScan
+      ? coalesceMediaChanges(left.changes || left.changedPaths || [])
+      : left.fullScan
+        ? coalesceMediaChanges(left.changes || left.changedPaths || [])
+        : coalesceMediaChanges([...(left.changes || left.changedPaths || []), ...(right.changes || right.changedPaths || [])]);
+  } catch (error) {
+    if (error?.code !== 'MEDIA_SYNC_PATHS_LIMIT') throw error;
+    fullScan = true;
+    changes = [];
+  }
   return {
     root: right.root || left.root,
     projectName: right.projectName || left.projectName,
-    changes: coalesceMediaChanges([...(left.changes || left.changedPaths || []), ...(right.changes || right.changedPaths || [])]),
-    fullScan: Boolean(left.fullScan || right.fullScan),
+    changes,
+    fullScan,
     snapshotId: right.snapshotId || left.snapshotId || crypto.randomUUID(),
     restartTask: right.restartTask || left.restartTask || null,
   };
@@ -58,7 +81,7 @@ const createMediaTrackingScanScheduler = ({
   delayMs = 1500,
   runnerRetryDelays = undefined,
 }) => {
-  const keyFor = (root, projectName) => `${path.resolve(root).toLocaleLowerCase()}\0${String(projectName || '').toLocaleLowerCase()}`;
+  const keyFor = (root, projectName) => `${comparablePath(root)}\0${platformKey(String(projectName || ''))}`;
   const replayKeyFor = (root, projectName, taskId) => `${keyFor(root, projectName)}\0replay:${String(taskId || crypto.randomUUID())}`;
   const workspaceKey = root => comparablePath(root);
   const workspaceAdmission = createKeyedAdmissionQueue();
@@ -92,6 +115,8 @@ const createMediaTrackingScanScheduler = ({
 
   const executeWrapper = async ({ key, batch }) => {
     if (stopped) return { skipped: true, reason: 'scheduler-stopped' };
+    const projectKey = keyFor(batch.root, batch.projectName);
+    const epoch = cancellationEpoch(projectKey);
     const project = getProject(batch.root, batch.projectName);
     if (!project || project.availability === 'missing') {
       if (batch.restartTask?.id) throw new Error('项目目录尚未加载，自动索引将在目录可用后重试');
@@ -134,14 +159,27 @@ const createMediaTrackingScanScheduler = ({
       }, () => enqueueRetry(key, batch));
       // Candidate fan-out is part of the wrapper. Manual and automatic retries
       // therefore cannot report success while skipping thumbnail scheduling.
-      for (const candidate of (execution.result?.thumbnailCandidates || []).slice(0, 750)) {
-        onThumbnailCandidate({
-          workspaceRoot: batch.root,
-          photoId: candidate.photoId,
-          versionId: candidate.versionId,
-          filePath: candidate.filePath,
-          priority: thumbnailPriority,
-        });
+      const thumbnailCandidates = (execution.result?.thumbnailCandidates || []).slice(0, 750);
+      for (let candidateIndex = 0; candidateIndex < thumbnailCandidates.length; candidateIndex += 1) {
+        const candidate = thumbnailCandidates[candidateIndex];
+        if (stopped || cancellationEpoch(projectKey) !== epoch) break;
+        try {
+          const scheduled = onThumbnailCandidate({
+            workspaceRoot: batch.root,
+            photoId: candidate.photoId,
+            versionId: candidate.versionId,
+            filePath: candidate.filePath,
+            priority: thumbnailPriority,
+          });
+          Promise.resolve(scheduled).catch(error => writeLog('warn', 'Unable to schedule media thumbnail candidate', {
+            projectName: batch.projectName, filePath: candidate.filePath, error: error.message || String(error),
+          }));
+        } catch (error) {
+          writeLog('warn', 'Unable to schedule media thumbnail candidate', {
+            projectName: batch.projectName, filePath: candidate.filePath, error: error.message || String(error),
+          });
+        }
+        if (candidateIndex % 32 === 31) await new Promise(resolve => setImmediate(resolve));
       }
       return execution;
     } finally {
@@ -198,12 +236,19 @@ const createMediaTrackingScanScheduler = ({
     if (!projectName) return null;
     const project = getProject(root, projectName);
     if (!project || project.availability === 'missing') return null;
-    const normalizedChanges = coalesceMediaChanges(changes);
-    if (!fullScan && !normalizedChanges.length) return null;
-    versionStaleDetectionService.schedule(root, projectName, normalizedChanges.map(change => change.path), fullScan);
+    let effectiveFullScan = fullScan;
+    let normalizedChanges;
+    try { normalizedChanges = fullScan ? [] : coalesceMediaChanges(changes); }
+    catch (error) {
+      if (error?.code !== 'MEDIA_SYNC_PATHS_LIMIT') throw error;
+      effectiveFullScan = true;
+      normalizedChanges = [];
+    }
+    if (!effectiveFullScan && !normalizedChanges.length) return null;
+    versionStaleDetectionService.schedule(root, projectName, normalizedChanges.map(change => change.path), effectiveFullScan);
     return runner.enqueue(keyFor(root, projectName), {
       root: path.resolve(root), projectName: String(projectName),
-      changes: normalizedChanges, fullScan, snapshotId: crypto.randomUUID(),
+      changes: normalizedChanges, fullScan: effectiveFullScan, snapshotId: crypto.randomUUID(),
     });
   };
 
