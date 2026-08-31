@@ -863,6 +863,32 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(parseFloat(freeCanvasNode.style.top), concurrentFreePosition.y + 32, 'stale patch recovery must merge the winning server Y coordinate for untouched nodes');
   assert.strictEqual(layoutRequests.saves.at(-1).mode, 'patch', 'conflict-safe undo must only patch the nodes changed by its history entry');
   assert.strictEqual(parseFloat(freeCanvasNode.style.left), concurrentFreePosition.x + 32, 'undo after conflict recovery must preserve an untouched coordinate committed by another window');
+  const savesBeforeStaleRetryFailure = layoutRequests.saves.length;
+  const remoteRawAfterStale = { nodeKey: 'progress:raw', x: parseFloat(rawCanvasNode.style.left) + 410, y: parseFloat(rawCanvasNode.style.top) + 310 };
+  layoutRequests.staleMutation = remoteRawAfterStale;
+  layoutRequests.staleNextSave = true;
+  layoutRequests.failNextSave = true;
+  layoutRequests.holdSaves = true;
+  await React.act(async () => {
+    dispatch(rawCanvasNode, 'pointerdown', { pointerId: 421, button: 0, clientX: 700, clientY: 600 });
+    dispatch(rawCanvasNode, 'pointermove', { pointerId: 421, button: 0, clientX: 740, clientY: 640 });
+    dispatch(rawCanvasNode, 'pointerup', { pointerId: 421, button: 0, clientX: 740, clientY: 640 });
+    await Promise.resolve(); await Promise.resolve();
+    dispatch(freeCanvasNode, 'pointerdown', { pointerId: 422, button: 0, clientX: 300, clientY: 300 });
+    dispatch(freeCanvasNode, 'pointermove', { pointerId: 422, button: 0, clientX: 360, clientY: 340 });
+    dispatch(freeCanvasNode, 'pointerup', { pointerId: 422, button: 0, clientX: 360, clientY: 340 });
+    layoutRequests.holdSaves = false;
+    layoutRequests.saveReleases.splice(0).forEach(release => release());
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+  });
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeStaleRetryFailure + 3, 'stale then failed retry must still allow the queued different-node command to save');
+  assert.strictEqual(parseFloat(rawCanvasNode.style.left), remoteRawAfterStale.x + 32, 'a failed stale retry must restore A from the fetched remote baseline instead of its obsolete local before-map');
+  assert.strictEqual(parseFloat(rawCanvasNode.style.top), remoteRawAfterStale.y + 32, 'the fetched remote Y coordinate must remain authoritative after retry failure');
+  const queuedAfterStaleFailure = layoutRequests.saves.at(-1).positions.find(position => position.nodeKey === 'progress:free');
+  assert.strictEqual(parseFloat(freeCanvasNode.style.left), queuedAfterStaleFailure.x + 32, 'the queued B command must remain visible after A retry fails');
+  assert.deepStrictEqual(layoutRequests.positions.find(position => position.nodeKey === 'progress:raw'), remoteRawAfterStale, 'server A must retain the stale-recovery winner');
+  assert.deepStrictEqual(layoutRequests.positions.find(position => position.nodeKey === 'progress:free'), queuedAfterStaleFailure, 'UI and server B must retain the later queued patch');
   savedLeft = rawCanvasNode.style.left;
   savedTop = rawCanvasNode.style.top;
   const loadsBeforeFailure = layoutRequests.loads;
@@ -1192,6 +1218,30 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   await React.act(async () => dispatch(repairButton, 'click'));
   assert.deepStrictEqual(repairRequest, { progressId: 'legacy', sourceProgressId: 'raw' }, 'repair UI must submit only project node IDs');
   await React.act(async () => root.unmount());
+
+  const failedHistoryContainer = new TestNode(1, 'DIV', testDocument);
+  const failedHistoryRoot = createRoot(failedHistoryContainer);
+  let failedHistoryController = null;
+  await React.act(async () => {
+    failedHistoryRoot.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, projectName: 'Failed History Probe', pendingChildId: undefined, onCanvasControllerChange: controller => { failedHistoryController = controller; } }));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const failedHistoryNode = allNodes(failedHistoryContainer).find(node => node.attributes?.get('data-node-role') === 'original');
+  const savesBeforeFailedHistory = layoutRequests.saves.length;
+  layoutRequests.failNextSave = true;
+  await React.act(async () => {
+    dispatch(failedHistoryNode, 'pointerdown', { pointerId: 66, button: 0, clientX: 100, clientY: 100 });
+    dispatch(failedHistoryNode, 'pointermove', { pointerId: 66, button: 0, clientX: 180, clientY: 180 });
+    dispatch(failedHistoryNode, 'pointerup', { pointerId: 66, button: 0, clientX: 180, clientY: 180 });
+    await new Promise(resolve => setImmediate(resolve));
+    await new Promise(resolve => setImmediate(resolve));
+  });
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeFailedHistory + 1, 'failed-history setup must issue one rejected drag save');
+  let undoAfterFailedDrag;
+  await React.act(async () => { undoAfterFailedDrag = await failedHistoryController.undoLayout(); });
+  assert.strictEqual(undoAfterFailedDrag, false, 'a failed drag must remove only its own history entry instead of leaving an undoable phantom');
+  assert.strictEqual(layoutRequests.saves.length, savesBeforeFailedHistory + 1, 'undo after a failed drag must not issue an empty or retrying persistence command');
+  await React.act(async () => failedHistoryRoot.unmount());
 
   const pageAContainer = new TestNode(1, 'DIV', testDocument);
   const pageBContainer = new TestNode(1, 'DIV', testDocument);

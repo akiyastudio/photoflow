@@ -126,6 +126,26 @@ export const alignVersionTreeHistoryPositions = ({
   return reconcileVersionTreeCanvasPositions({ nodes, previous: aligned, nodeWidth, nodeHeight, horizontalGap, rowGap });
 };
 
+export const markVersionTreeCanvasPositionsPersisted = (
+  current: ReadonlyMap<string, VersionTreeCanvasPosition>,
+  persistedIds: ReadonlySet<string>,
+) => new Map([...current].map(([id, position]) => [id, persistedIds.has(id) ? { ...position, manual: true } : position]));
+
+export const updateVersionTreeServerPositionMirror = (
+  previous: ReadonlyMap<string, VersionTreeCanvasPosition>,
+  saved: ReadonlyMap<string, VersionTreeCanvasPosition>,
+  mode: 'patch' | 'replace',
+) => {
+  const next = mode === 'replace' ? new Map<string, VersionTreeCanvasPosition>() : new Map(previous);
+  saved.forEach((position, nodeKey) => next.set(nodeKey, { ...position, manual: true }));
+  return next;
+};
+
+export const mappedVersionTreeServerNodeKeys = (
+  serverNodeKeys: Iterable<string>,
+  mountedNodeKeys: ReadonlySet<string>,
+) => new Set([...serverNodeKeys].filter(nodeKey => mountedNodeKeys.has(nodeKey)));
+
 export const versionTreeCanvasBounds = (
   positions: ReadonlyMap<string, VersionTreeCanvasPosition>,
   nodeWidth: number,
