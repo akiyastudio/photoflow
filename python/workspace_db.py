@@ -3851,17 +3851,13 @@ def media_sync_project(root: str, db, payload: dict):
 
 
 def media_get(root: str, db, payload: dict):
+    del root
     project = project_row(db, payload["projectName"])
     file_path = canonical_path(payload["filePath"])
-    mark_missing_project_versions(db, project["id"])
-    db.commit()
-    pending_hashes = []
-    photo_id = sync_media_file(db, project, file_path, pending_hashes)
-    db.commit()
-    backfill_full_fingerprints(db, pending_hashes)
-    if not photo_id:
-        raise ValueError("该文件不是可追踪的图片或视频")
-    return {"success": True, **media_bundle(db, photo_id)}
+    version = source_version_row(db, project["id"], file_path)
+    if version is None:
+        raise ValueError("该文件尚未登记为可追踪素材")
+    return {"success": True, **media_bundle(db, version["photo_id"])}
 
 
 def media_get_photo(db, payload: dict):
@@ -10183,8 +10179,11 @@ def reconcile_cross_domain_references(db) -> dict:
 
 MEDIA_DURABLE_ACTIONS = frozenset((
     "media_sync_apply_batch", "media_sync_finalize",
-    "media_sync_paths_apply_batch", "media_sync_paths_finalize", "media_get",
+    "media_sync_paths_apply_batch", "media_sync_paths_finalize",
 ))
+MEDIA_RECEIPT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
+MEDIA_RECEIPT_RECENT_MS = 7 * 24 * 60 * 60 * 1000
+MEDIA_RECEIPT_SOFT_LIMIT = 512
 
 
 def _media_operation_digest(action: str, payload: dict) -> str:
@@ -10265,6 +10264,65 @@ def _set_media_operation_stage(database: str, journal: dict, state: str):
     return updated
 
 
+def _deterministic_media_stage_root(database: str, operation_id: str) -> str:
+    token = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:32]
+    return f"{os.path.abspath(database)}.media-operation-{token}"
+
+
+def _cleanup_committed_media_stage(database: str, operation_id: str, stage_root: str) -> bool:
+    expected = _deterministic_media_stage_root(database, operation_id)
+    if os.path.abspath(stage_root) != expected:
+        raise RuntimeError("refusing unsafe committed media stage cleanup")
+    warning_key = f"media_operation_cleanup:{operation_id}"
+    try:
+        if os.path.exists(expected):
+            shutil.rmtree(expected, ignore_errors=False)
+    except OSError as error:
+        db = sqlite3.connect(database, timeout=30)
+        try:
+            db.execute(
+                "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
+                (warning_key, json.dumps({"stageRoot": expected, "error": str(error), "updatedAt": int(time.time() * 1000)}, ensure_ascii=False, sort_keys=True)),
+            )
+            db.commit()
+        finally:
+            db.close()
+        return False
+    db = sqlite3.connect(database, timeout=30)
+    try:
+        db.execute("DELETE FROM meta WHERE key=?", (warning_key,))
+        db.commit()
+    finally:
+        db.close()
+    return True
+
+
+def _prune_media_operation_receipts(db, now: int | None = None) -> int:
+    now = int(now or time.time() * 1000)
+    rows = []
+    for row in db.execute("SELECT key,value FROM meta WHERE key LIKE 'media_operation_receipt:%'").fetchall():
+        try:
+            value = json.loads(row[1])
+            completed_at = int(value.get("completedAt") or value.get("updatedAt") or 0)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            # A malformed receipt must fail closed rather than silently losing
+            # operationId/digest mismatch protection.
+            continue
+        if completed_at <= 0:
+            completed_at = now
+            value = {**value, "completedAt": now, "updatedAt": now}
+            db.execute("UPDATE meta SET value=? WHERE key=?", (json.dumps(value, ensure_ascii=False, sort_keys=True), row[0]))
+        rows.append((str(row[0]), completed_at))
+    rows.sort(key=lambda item: (item[1], item[0]), reverse=True)
+    removed = 0
+    for index, (key, completed_at) in enumerate(rows):
+        expired = completed_at <= 0 or now - completed_at > MEDIA_RECEIPT_RETENTION_MS
+        beyond_limit_and_not_recent = index >= MEDIA_RECEIPT_SOFT_LIMIT and now - completed_at > MEDIA_RECEIPT_RECENT_MS
+        if expired or beyond_limit_and_not_recent:
+            removed += db.execute("DELETE FROM meta WHERE key=?", (key,)).rowcount
+    return removed
+
+
 def _clear_preparing_media_operation(database: str, journal: dict) -> None:
     db = sqlite3.connect(database, timeout=30)
     try:
@@ -10296,7 +10354,7 @@ def _resume_media_operation_files(database: str):
         journal = _set_media_operation_stage(database, journal, "versioning"); state = "versioning"
     if state == "versioning":
         _publish_sqlite_stage(stage_core, database)
-        shutil.rmtree(str(journal["stageRoot"]), ignore_errors=False)
+        _cleanup_committed_media_stage(database, str(journal["operationId"]), str(journal["stageRoot"]))
         return journal.get("result")
     return None
 
@@ -10315,9 +10373,11 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
             decoded = json.loads(receipt)
             if decoded.get("payloadDigest") != digest:
                 raise ValueError("media operationId payload digest mismatch")
+            _cleanup_committed_media_stage(
+                database, operation_id, _deterministic_media_stage_root(database, operation_id),
+            )
             return decoded.get("result") or {"success": True}
-        stage_token = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:32]
-        stage_root = f"{database}.media-operation-{stage_token}"
+        stage_root = _deterministic_media_stage_root(database, operation_id)
         stage_core = os.path.join(stage_root, "workspace.sqlite3")
         stage_media = database_path_for_workspace_database(stage_core, "media")
         stage_versioning = database_path_for_workspace_database(stage_core, "versioning")
@@ -10328,7 +10388,7 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
             "version": 1, "operationId": operation_id, "action": action, "payloadDigest": digest,
             "state": "preparing", "stageRoot": stage_root, "stageCore": stage_core,
             "stageMedia": stage_media, "stageVersioning": stage_versioning,
-            "createdAt": int(time.time() * 1000), "updatedAt": int(time.time() * 1000),
+            "createdAt": int(time.time() * 1000), "updatedAt": int(time.time() * 1000), "completedAt": None,
         }
         live.execute("PRAGMA main.synchronous=FULL")
         _set_meta(live, "media_operation_journal_v1", json.dumps(journal, ensure_ascii=False, sort_keys=True))
@@ -10345,18 +10405,23 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
     finally:
         staged_owner.close()
     result = _mutate_impl(root, stage_core, action, payload)
+    completed_at = int(time.time() * 1000)
     staged_owner = sqlite3.connect(stage_core, timeout=30)
     try:
         staged_owner.execute("PRAGMA synchronous=FULL")
         staged_owner.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
-            (f"media_operation_receipt:{operation_id}", json.dumps({"payloadDigest": digest, "result": result}, ensure_ascii=False, sort_keys=True)),
+            (f"media_operation_receipt:{operation_id}", json.dumps({
+                "action": action, "snapshotId": str(payload.get("snapshotId") or ""),
+                "payloadDigest": digest, "result": result, "completedAt": completed_at, "updatedAt": completed_at,
+            }, ensure_ascii=False, sort_keys=True)),
         )
         staged_owner.execute("DELETE FROM meta WHERE key='media_operation_journal_v1'")
+        _prune_media_operation_receipts(staged_owner, completed_at)
         staged_owner.commit()
     finally:
         staged_owner.close()
-    journal = {**journal, "result": result}
+    journal = {**journal, "result": result, "completedAt": completed_at}
     _set_media_operation_stage(database, journal, "ready")
     return _resume_media_operation_files(database) or result
 
