@@ -31,15 +31,18 @@ class ManagedProcess extends EventEmitter {
 
   start() {
     if (this.released) throw new Error(`Managed process has been released: ${this.id}`);
+    if (this.lifecycle?.terminationFailed) throw Object.assign(new Error(`Previous managed process generation has not exited: ${this.id}`), { code: 'PROCESS_TERMINATION_FAILED' });
     if (this.child && !this.child.killed) return this.child;
     if (this.lifecycle && !this.lifecycle.settled) {
-      return this.lifecycle.settledPromise.then(() => this.start());
+      this.lifecycle.startAfterSettle = true;
+      return this.lifecycle.child;
     }
     clearTimeout(this.restartTimer);
     this.restartTimer = null;
     this.stopping = false;
     this.state = 'starting';
     this.startedAt = this.supervisor.now();
+    this.lastHealthyAt = 0;
     this.stderrTail = '';
     const generation = ++this.generation;
     const spec = this.specification;
@@ -57,6 +60,7 @@ class ManagedProcess extends EventEmitter {
     let resolveSettled;
     const lifecycle = {
       child, generation, stopRequested: false, settled: false, cleanupPromise: Promise.resolve(),
+      startAfterSettle: false, lastHealthyAt: 0, stderrTail: '', finalizePromise: null,
       settledPromise: new Promise(resolve => { resolveSettled = resolve; }), resolveSettled,
     };
     this.lifecycle = lifecycle;
@@ -64,14 +68,15 @@ class ManagedProcess extends EventEmitter {
     this._safeLog('info', 'Managed process started', this.details({ pid: child.pid, generation }));
     child.stderr?.on?.('data', data => {
       if (this.lifecycle !== lifecycle) return;
-      this.stderrTail = (this.stderrTail + data.toString()).slice(-16000);
+      lifecycle.stderrTail = (lifecycle.stderrTail + data.toString()).slice(-16000);
+      this.stderrTail = lifecycle.stderrTail;
       this._safeEmit('stderr', data, child);
     });
-    child.once('error', error => this._onError(lifecycle, error));
+    child.once('error', error => { void this._onError(lifecycle, error); });
     child.once('exit', (code, signal) => { void this._onExit(lifecycle, code, signal); });
     child.once('close', (code, signal) => { void this._onClose(lifecycle, code, signal); });
     try {
-      spec.onSpawn?.(child, this);
+      spec.onSpawn?.(child, this._viewForGeneration(lifecycle));
       this._safeEmit('spawn', child, generation);
     } catch (error) {
       this._safeLog('error', 'Managed process spawn hook failed', this.details({ generation, error: safeError(error) }));
@@ -84,7 +89,7 @@ class ManagedProcess extends EventEmitter {
     const startupTimeoutMs = Number(spec.health?.startupTimeoutMs) || 0;
     if (startupTimeoutMs > 0) {
       this.healthTimer = setTimeout(() => {
-        if (this.lifecycle !== lifecycle || lifecycle.settled || this.lastHealthyAt >= this.startedAt) return;
+        if (this.lifecycle !== lifecycle || lifecycle.settled || lifecycle.lastHealthyAt >= this.startedAt) return;
         this._safeLog('warn', 'Managed process health check timed out', this.details({ generation, startupTimeoutMs }));
         void this.recycle('startup-health-timeout').catch(error => this._safeLog('error', 'Managed process recycle failed', this.details({ generation, error: safeError(error) })));
       }, startupTimeoutMs);
@@ -93,10 +98,12 @@ class ManagedProcess extends EventEmitter {
     return child;
   }
 
-  markHealthy(metadata = {}) {
-    if (!this.child || this.child.killed) return false;
-    if (metadata && Number.isFinite(metadata.generation) && metadata.generation !== this.generation) return false;
-    this.lastHealthyAt = this.supervisor.now();
+  markHealthy(metadata = {}, expectedGeneration = this.generation) {
+    const lifecycle = this.lifecycle;
+    if (Number.isFinite(metadata?.generation) && metadata.generation !== expectedGeneration) return false;
+    if (!lifecycle || lifecycle.settled || lifecycle.generation !== expectedGeneration || !this.child || this.child !== lifecycle.child || this.child.killed) return false;
+    lifecycle.lastHealthyAt = this.supervisor.now();
+    this.lastHealthyAt = lifecycle.lastHealthyAt;
     clearTimeout(this.healthTimer);
     this.healthTimer = null;
     if (this.state !== 'healthy') {
@@ -169,6 +176,18 @@ class ManagedProcess extends EventEmitter {
     return { processId: this.id, processKind: this.kind, ...extra };
   }
 
+  _viewForGeneration(lifecycle) {
+    const target = this;
+    return new Proxy(this, {
+      get(_managed, property) {
+        if (property === 'markHealthy') return metadata => target.markHealthy(metadata, lifecycle.generation);
+        const value = Reflect.get(target, property, target);
+        return typeof value === 'function' ? value.bind(target) : value;
+      },
+      set(_managed, property, value) { return Reflect.set(target, property, value, target); },
+    });
+  }
+
   _safeLog(level, message, details) {
     try { this.supervisor.log(level, message, details); } catch (_) { /* logging must never break ownership */ }
   }
@@ -184,23 +203,51 @@ class ManagedProcess extends EventEmitter {
     this._safeLog('error', 'Managed process failed to start', this.details(this.lastExit));
   }
 
-  _onError(lifecycle, error) {
+  async _onError(lifecycle, error) {
     if (this.lifecycle !== lifecycle || lifecycle.settled) return;
+    lifecycle.error = error;
     this._safeLog('warn', 'Managed process error', this.details({ generation: lifecycle.generation, error: safeError(error) }));
     this._safeEmit('process-error', error, lifecycle.child);
+    this.state = 'failed';
+    let terminationFailed = false;
+    try {
+      await stopProcessAndWait(lifecycle.child, Number(this.specification.errorExitTimeoutMs) || 2000);
+    } catch (terminationError) {
+      terminationFailed = true;
+      this._safeLog('error', 'Managed process error termination failed', this.details({
+        generation: lifecycle.generation, error: safeError(terminationError),
+      }));
+    }
+    return this._finalizeLifecycle(lifecycle, { error, terminationFailed });
   }
 
-  async _onExit(lifecycle, code, signal) {
-    if (lifecycle.exitObserved) return lifecycle.settledPromise;
+  _onExit(lifecycle, code, signal) {
     lifecycle.exitObserved = true;
+    if (lifecycle.settled && lifecycle.terminationFailed) {
+      lifecycle.terminationFailed = false;
+      if (this.lifecycle === lifecycle && this.child === lifecycle.child) this.child = null;
+      return lifecycle.settledPromise;
+    }
+    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error });
+  }
+
+  _finalizeLifecycle(lifecycle, { code = null, signal = null, error = null, terminationFailed = false } = {}) {
+    if (lifecycle.finalizePromise) return lifecycle.finalizePromise;
+    let resolveFinalize;
+    lifecycle.finalizePromise = new Promise(resolve => { resolveFinalize = resolve; });
+    void (async () => {
     const current = this.lifecycle === lifecycle;
-    if (current && this.child === lifecycle.child) this.child = null;
+    lifecycle.terminationFailed = terminationFailed;
+    if (current && this.child === lifecycle.child && !terminationFailed) this.child = null;
     if (!current) return this._settleLifecycle(lifecycle);
     clearTimeout(this.healthTimer);
     this.healthTimer = null;
     const expected = this.stopping || lifecycle.stopRequested;
-    this.lastExit = { at: this.supervisor.now(), generation: lifecycle.generation, code, signal, expected, stderr: this.stderrTail.trim() };
-    this.state = expected ? 'stopped' : 'exited';
+    this.lastExit = {
+      at: this.supervisor.now(), generation: lifecycle.generation, code, signal, expected,
+      stderr: lifecycle.stderrTail.trim(), ...(error ? { error: safeError(error) } : {}),
+    };
+    this.state = expected ? 'stopped' : error || terminationFailed ? 'failed' : 'exited';
     this._safeLog(expected || code === 0 ? 'info' : 'warn', 'Managed process exited', this.details(this.lastExit));
     try {
       const cleanup = this.specification.onExitCleanup?.({ owner: this.owner, child: lifecycle.child, exit: this.lastExit, managedProcess: this });
@@ -212,14 +259,27 @@ class ManagedProcess extends EventEmitter {
     this._safeEmit('exit', this.lastExit, lifecycle.child);
     this._settleLifecycle(lifecycle);
     if (this.lifecycle !== lifecycle) return;
-    if (this.specification.ephemeral) this.release();
-    else if (!expected) this._scheduleRestart('unexpected-exit');
+    if (this.specification.ephemeral && !terminationFailed) this.release();
+    else if (lifecycle.startAfterSettle && !this.stopping && !this.released && !this.supervisor.stopping && !terminationFailed) this.start();
+    else if (!expected && !terminationFailed) this._scheduleRestart(error ? 'process-error' : 'unexpected-exit');
+    return this.lastExit;
+    })().then(resolveFinalize, finalizeError => {
+      this._safeLog('error', 'Managed process finalizer failed', this.details({ generation: lifecycle.generation, error: safeError(finalizeError) }));
+      if (this.lifecycle === lifecycle) this.state = 'failed';
+      this._settleLifecycle(lifecycle);
+      resolveFinalize(this.lastExit);
+    });
+    return lifecycle.finalizePromise;
   }
 
   _onClose(lifecycle, code, signal) {
     lifecycle.closeObserved = true;
-    if (!lifecycle.exitObserved) return this._onExit(lifecycle, code, signal);
-    return lifecycle.settledPromise;
+    if (lifecycle.settled && lifecycle.terminationFailed) {
+      lifecycle.terminationFailed = false;
+      if (this.lifecycle === lifecycle && this.child === lifecycle.child) this.child = null;
+      return lifecycle.settledPromise;
+    }
+    return this._finalizeLifecycle(lifecycle, { code, signal, error: lifecycle.error });
   }
 
   _settleLifecycle(lifecycle) {

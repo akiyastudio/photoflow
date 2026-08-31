@@ -26,6 +26,7 @@ const createDirtyCoalescingRunner = ({
     cancelled: false,
     controller: new AbortController(),
     predecessor: null,
+    flushRequested: false,
     lastResult: undefined,
   });
 
@@ -59,15 +60,15 @@ const createDirtyCoalescingRunner = ({
   };
 
   const execute = state => {
-    if (state.cancelled || state.executionPromise || !hasWork(state.pendingBatch)) return state.executionPromise;
+    if (state.cancelled || state.predecessor || state.executionPromise || !hasWork(state.pendingBatch)) return state.executionPromise;
     state.inFlightBatch = state.pendingBatch;
     state.inFlightGeneration = state.generation;
     state.pendingBatch = null;
     const batch = state.inFlightBatch;
     const generation = state.inFlightGeneration;
-    const execution = Promise.resolve().then(() => worker({ key: state.key, batch, generation, signal: state.controller.signal }));
-    state.executionPromise = execution;
-    void execution.then(result => {
+    state.flushRequested = false;
+    const workerExecution = Promise.resolve().then(() => worker({ key: state.key, batch, generation, signal: state.controller.signal }));
+    const execution = workerExecution.then(result => {
       if (state.cancelled || states.get(state.key) !== state) return;
       // Only success acknowledges the in-flight delta.
       state.inFlightBatch = null;
@@ -75,7 +76,7 @@ const createDirtyCoalescingRunner = ({
       state.retryAttempt = 0;
       state.lastResult = result;
       settleCompleted(state);
-    }, error => {
+    }, async error => {
       if (state.cancelled || states.get(state.key) !== state) return;
       // Merge failed work before changes that arrived during execution. The
       // merge contract must preserve dominant flags such as fullScan.
@@ -92,17 +93,17 @@ const createDirtyCoalescingRunner = ({
       const retryIndex = state.retryAttempt;
       state.retryAttempt += 1;
       const willRetry = retryIndex < retryDelays.length;
-      try {
-        onError(error, { key: state.key, batch: state.pendingBatch, generation, willRetry, retryAttempt: state.retryAttempt });
-      } catch (observerError) {
-        rejectWaiters(state, observerError);
-        state.cancelled = true;
-        states.delete(state.key);
-        return;
-      }
+      // onError is an observer: wait for either sync or async settlement, but
+      // never let observer failure replace the worker error or alter retry.
+      await Promise.resolve().then(() => onError(error, {
+        key: state.key, batch: state.pendingBatch, generation, willRetry, retryAttempt: state.retryAttempt,
+      })).catch(() => undefined);
+      if (state.cancelled || states.get(state.key) !== state) return;
       if (willRetry) state.nextRetryDelay = retryDelays[retryIndex];
       else rejectWaiters(state, error);
-    }).finally(() => {
+    });
+    state.executionPromise = execution;
+    void execution.finally(() => {
       if (state.executionPromise === execution) state.executionPromise = null;
       if (state.cancelled) {
         if (states.get(state.key) === state) states.delete(state.key);
@@ -119,6 +120,13 @@ const createDirtyCoalescingRunner = ({
         const retrying = state.retryAttempt > 0;
         if (!retrying) schedule(state, 0);
       }
+    }).catch(error => {
+      // Internal state transitions must always own their rejection.
+      if (!state.cancelled && states.get(state.key) === state) {
+        state.cancelled = true;
+        rejectWaiters(state, error);
+        states.delete(state.key);
+      }
     });
     return execution;
   };
@@ -132,9 +140,22 @@ const createDirtyCoalescingRunner = ({
       const predecessor = state?.executionPromise || state?.predecessor || null;
       state = createState(normalizedKey);
       if (predecessor) {
-        state.predecessor = Promise.resolve(predecessor).catch(() => undefined).finally(() => {
+        state.predecessor = Promise.resolve(predecessor).catch(() => undefined).then(() => {
           state.predecessor = null;
-          if (states.get(normalizedKey) === state) schedule(state, delayMs);
+          if (state.cancelled) {
+            if (states.get(normalizedKey) === state) states.delete(normalizedKey);
+            return;
+          }
+          if (states.get(normalizedKey) !== state) return;
+          if (state.flushRequested) void execute(state);
+          else schedule(state, delayMs);
+        });
+        void state.predecessor.catch(error => {
+          if (states.get(normalizedKey) !== state) return;
+          state.predecessor = null;
+          state.cancelled = true;
+          rejectWaiters(state, error);
+          states.delete(normalizedKey);
         });
       }
       states.set(normalizedKey, state);
@@ -168,7 +189,8 @@ const createDirtyCoalescingRunner = ({
       waiter.signal?.addEventListener('abort', waiter.onAbort, { once: true });
       state.waiters.push(waiter);
     });
-    if (!state.executionPromise) void execute(state);
+    if (state.predecessor) state.flushRequested = true;
+    else if (!state.executionPromise) void execute(state);
     return promise;
   };
 
@@ -182,7 +204,7 @@ const createDirtyCoalescingRunner = ({
     state.retryTimer = null;
     state.pendingBatch = null;
     rejectWaiters(state, cancelledError(normalizedKey));
-    if (!state.executionPromise) states.delete(normalizedKey);
+    if (!state.executionPromise && !state.predecessor) states.delete(normalizedKey);
     return true;
   };
 
@@ -191,7 +213,7 @@ const createDirtyCoalescingRunner = ({
   };
 
   const pendingCount = () => [...states.values()].filter(state => (
-    hasWork(state.pendingBatch) || state.inFlightBatch || state.executionPromise || state.retryTimer
+    hasWork(state.pendingBatch) || state.inFlightBatch || state.executionPromise || state.predecessor || state.retryTimer
   )).length;
 
   const getState = key => {

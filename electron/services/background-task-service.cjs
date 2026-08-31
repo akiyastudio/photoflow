@@ -93,15 +93,29 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
   };
   const isWithin = (value, parent) => value.startsWith(parent.endsWith('/') ? parent : `${parent}/`);
   const resourcesConflict = (left, right) => left === right || isWithin(left, right) || isWithin(right, left);
+  const effectiveCapacityFor = key => {
+    const declarations = [];
+    for (const reservation of reservations.values()) {
+      declarations.push(...reservation.capacities.filter(capacity => capacity.key === key));
+    }
+    for (const waiting of resourceWaiters) {
+      declarations.push(...waiting.capacities.filter(capacity => capacity.key === key));
+    }
+    return declarations.reduce((effective, capacity) => ({
+      limit: Math.min(effective.limit, capacity.limit),
+      writeLimit: Math.min(effective.writeLimit, capacity.writeLimit),
+    }), { limit: Infinity, writeLimit: Infinity });
+  };
   const blockingReservationIds = waiter => {
     const blockers = new Set();
     const activeReservations = [...reservations.entries()].filter(([, item]) => item.taskId !== waiter.taskId);
     for (const requestedCapacity of waiter.capacities) {
+      const effective = effectiveCapacityFor(requestedCapacity.key);
       const activeInGroup = activeReservations.filter(([, item]) => item.capacities.some(capacity => capacity.key === requestedCapacity.key));
-      if (activeInGroup.length >= requestedCapacity.limit) activeInGroup.forEach(([id]) => blockers.add(id));
+      if (activeInGroup.length >= effective.limit) activeInGroup.forEach(([id]) => blockers.add(id));
       if (requestedCapacity.access === 'write') {
         const activeWriters = activeInGroup.filter(([, item]) => item.capacities.some(capacity => capacity.key === requestedCapacity.key && capacity.access === 'write'));
-        if (activeWriters.length >= requestedCapacity.writeLimit) activeWriters.forEach(([id]) => blockers.add(id));
+        if (activeWriters.length >= effective.writeLimit) activeWriters.forEach(([id]) => blockers.add(id));
       }
     }
     for (const [id, active] of activeReservations) {
