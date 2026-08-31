@@ -1,4 +1,5 @@
 const HANDLE = /^[1-9][0-9]{0,19}$/;
+const MAX_HANDSHAKE_BYTES = 16 * 1024;
 
 const nativeHandleValue = window => {
   const handle = window.getNativeWindowHandle();
@@ -16,35 +17,73 @@ const createNativeVideoSurfaceService = ({ app, path, processSupervisor = null, 
     const args = ['--parent-hwnd', nativeHandleValue(ownerWindow), '--child-hwnd', childHandle, '--expected-pid', String(expectedPid), '--session-id', sessionId];
     const managed = processSupervisor?.launch({ id: `video-surface:${sessionId}`, kind: 'native-helper', command, args, options: { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] }, health: { startupTimeoutMs }, ephemeral: true });
     const child = managed?.child || spawn(command, args, { windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'] });
-    let closed = false; let stderr = '';
+    let closed = false; let closeRequested = false; let stderr = ''; let handshakeReject = null;
+    const reportFailure = (message, error) => { try { writeLog('warn', message, { sessionId, error: error.message || String(error) }); } catch { /* logging must not escape cleanup */ } };
+    const stopHost = reason => {
+      try {
+        const result = managed ? managed.stop(reason) : !child.killed && child.kill();
+        void Promise.resolve(result).catch(error => reportFailure('Unable to stop native video surface host', error));
+      } catch (error) { reportFailure('Unable to stop native video surface host', error); }
+    };
+    const handleLifecycleError = error => {
+      if (handshakeReject) { handshakeReject(error); return; }
+      if (closed) return;
+      closed = true;
+      reportFailure('Native video surface host stream failed', error);
+      try { onLost(error); } catch { /* consumer failure must not escape stream cleanup */ }
+      stopHost('video-surface-stream-error');
+    };
+    child.on('error', handleLifecycleError);
+    child.stdin.on('error', handleLifecycleError);
+    child.stdout.on('error', handleLifecycleError);
+    child.on('exit', code => {
+      const error = new Error(stderr.trim() || `原生视频表面丢失（${code ?? '未知'}）`);
+      if (handshakeReject) { handshakeReject(error); return; }
+      if (closed) return;
+      closed = true;
+      try { onLost(error); } catch { /* consumer failure must not escape exit cleanup */ }
+    });
     child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString('utf8')).slice(-4000); });
     await new Promise((resolve, reject) => {
-      const timer = setTimeout(() => reject(new Error('原生视频表面附着超时')), startupTimeoutMs); timer.unref?.();
-      let buffered = '';
-      const fail = error => { clearTimeout(timer); reject(error); };
-      child.once('error', fail);
-      child.once('exit', code => fail(new Error(stderr.trim() || `原生视频表面宿主退出（${code ?? '未知'}）`)));
-      child.stdout.on('data', chunk => {
-        buffered += chunk.toString('utf8');
-        const line = buffered.split(/\r?\n/, 1)[0];
-        if (!line) return;
+      let settled = false; let buffered = Buffer.alloc(0);
+      const cleanup = () => { clearTimeout(timer); child.stdout.removeListener('data', onData); };
+      const succeed = () => { if (settled) return; settled = true; handshakeReject = null; cleanup(); resolve(); };
+      const fail = error => { if (settled) return; settled = true; closed = true; handshakeReject = null; cleanup(); reject(error); };
+      const onData = chunk => {
+        const next = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        const nextNewline = next.indexOf(0x0a);
+        const frameBytes = buffered.length + (nextNewline < 0 ? next.length : nextNewline);
+        if (frameBytes > MAX_HANDSHAKE_BYTES + 1) { fail(new Error('原生视频表面宿主握手帧过大')); return; }
+        buffered = Buffer.concat([buffered, nextNewline < 0 ? next : next.subarray(0, nextNewline + 1)]);
+        const newline = buffered.indexOf(0x0a);
+        if (newline < 0) {
+          if (buffered.length === MAX_HANDSHAKE_BYTES + 1 && buffered[buffered.length - 1] !== 0x0d) fail(new Error('原生视频表面宿主握手帧过大'));
+          return;
+        }
+        const jsonBytes = newline > 0 && buffered[newline - 1] === 0x0d ? newline - 1 : newline;
+        if (jsonBytes > MAX_HANDSHAKE_BYTES) { fail(new Error('原生视频表面宿主握手帧过大')); return; }
+        const line = buffered.subarray(0, newline).toString('utf8').replace(/\r$/, '');
         try {
           const value = JSON.parse(line);
           if (value.type !== 'ready' || value.sessionId !== sessionId) throw new Error('原生视频表面宿主握手无效');
-          clearTimeout(timer); managed?.markHealthy({ protocol: 'native-video-surface-v1' }); resolve();
+          managed?.markHealthy({ protocol: 'native-video-surface-v1' }); succeed();
         } catch (error) { fail(error); }
-      });
-    }).catch(error => { try { child.kill(); } catch { /* already exited */ } throw error; });
-    child.once('exit', code => { if (!closed) onLost(new Error(`原生视频表面丢失（${code ?? '未知'}）`)); });
+      };
+      const timer = setTimeout(() => fail(new Error('原生视频表面附着超时')), startupTimeoutMs); timer.unref?.();
+      handshakeReject = fail;
+      child.stdout.on('data', onData);
+    }).catch(error => { stopHost('video-surface-handshake-failed'); throw error; });
     const setBounds = bounds => {
       if (closed || !child.stdin.writable) return false;
-      try { child.stdin.write(`${JSON.stringify({ command: 'bounds', ...bounds })}\n`); return true; }
+      try { child.stdin.write(`${JSON.stringify({ command: 'bounds', ...bounds })}\n`, error => { if (error) handleLifecycleError(error); }); return true; }
       catch (error) { writeLog('warn', 'Unable to position native video surface', { sessionId, error: error.message || String(error) }); return false; }
     };
     const close = () => {
-      if (closed) return; closed = true;
+      if (closeRequested) return; closeRequested = true; closed = true;
       try { child.stdin.end(`${JSON.stringify({ command: 'close' })}\n`); } catch { /* already exited */ }
-      const timer = setTimeout(() => managed ? managed.stop('video-surface-close') : !child.killed && child.kill(), 1000); timer.unref?.();
+      const timer = setTimeout(() => {
+        stopHost('video-surface-close');
+      }, 1000); timer.unref?.();
     };
     return { setBounds, close, child, sessionId, expectedPid, surfaceHandle: childHandle };
   };

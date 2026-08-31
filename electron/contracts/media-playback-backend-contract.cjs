@@ -1,7 +1,7 @@
 const PLAYBACK_BACKEND_CONTRIBUTION_TYPE = 'media.playbackBackend';
 const PLAYBACK_BACKEND_PROTOCOL_VERSION = 1;
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
-const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+const SEMVER = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*)(?:\.(?:0|[1-9]\d*|\d*[A-Za-z-][0-9A-Za-z-]*))*))?(?:\+(?:[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*))?$/;
 const EXTENSION = /^\.[a-z0-9]{1,12}$/;
 const MEDIA_TOKEN = /^[a-z0-9][a-z0-9.+_-]{0,63}$/i;
 const ASPECT_MODES = new Set(['source', 'contain', 'cover', '16:9', '4:3', '1:1']);
@@ -13,9 +13,16 @@ const exactObject = (value, allowed, label) => {
   if (unknown.length) throw new Error(`Unknown media playback backend ${label} field: ${unknown[0]}`);
   return value;
 };
+const normalizedInteger = value => {
+  if (typeof value === 'number') return Number.isSafeInteger(value) ? value : NaN;
+  if (typeof value !== 'string' || !/^-?\d+$/.test(value.trim())) return NaN;
+  const result = Number(value.trim());
+  return Number.isSafeInteger(result) ? result : NaN;
+};
 const boundedUniqueStrings = (value, { label, pattern = MEDIA_TOKEN, allowed = null, min = 1, max = 64 }) => {
   if (!Array.isArray(value) || value.length < min || value.length > max) throw new Error(`Invalid media playback backend ${label}`);
-  const result = value.map(item => String(item).toLowerCase());
+  if (value.some(item => typeof item !== 'string')) throw new Error(`Invalid media playback backend ${label}`);
+  const result = value.map(item => item.toLowerCase());
   if (new Set(result).size !== result.length || result.some(item => allowed ? !allowed.has(item) : !pattern.test(item))) throw new Error(`Invalid media playback backend ${label}`);
   return Object.freeze(result);
 };
@@ -48,20 +55,21 @@ const parseMediaPlaybackBackendContributions = manifest => {
   const seen = new Set();
   return values.filter(value => value?.type === PLAYBACK_BACKEND_CONTRIBUTION_TYPE).map(value => {
     exactObject(value, ['type', 'protocolVersion', 'backendId', 'displayName', 'backendVersion', 'transport', 'priority', 'probe', 'features'], 'contribution');
-    if (Number(value.protocolVersion) !== PLAYBACK_BACKEND_PROTOCOL_VERSION) throw new Error(`Unsupported media playback backend protocol: ${value.protocolVersion}`);
-    const backendId = String(value.backendId || '');
+    const protocolVersion = normalizedInteger(value.protocolVersion);
+    if (protocolVersion !== PLAYBACK_BACKEND_PROTOCOL_VERSION) throw new Error(`Unsupported media playback backend protocol: ${value.protocolVersion}`);
+    const backendId = typeof value.backendId === 'string' ? value.backendId : '';
     if (!IDENTIFIER.test(backendId) || seen.has(backendId)) throw new Error('Invalid or duplicate media playback backendId');
     seen.add(backendId);
-    const displayName = String(value.displayName || '').trim(); if (!displayName || displayName.length > 120) throw new Error('Invalid media playback backend displayName');
-    const backendVersion = String(value.backendVersion || ''); if (!SEMVER.test(backendVersion)) throw new Error('Invalid media playback backend backendVersion');
+    const displayName = typeof value.displayName === 'string' ? value.displayName.trim() : ''; if (!displayName || displayName.length > 120) throw new Error('Invalid media playback backend displayName');
+    const backendVersion = typeof value.backendVersion === 'string' ? value.backendVersion : ''; if (!SEMVER.test(backendVersion)) throw new Error('Invalid media playback backend backendVersion');
     if (value.transport !== 'media-playback-backend-v1') throw new Error(`Unsupported media playback backend transport: ${value.transport}`);
-    const priority = Number(value.priority);
+    const priority = normalizedInteger(value.priority);
     if (!Number.isInteger(priority) || priority < -1000 || priority > 1000) throw new Error('Invalid media playback backend priority');
     const probe = exactObject(value.probe, ['containers', 'codecs', 'extensions'], 'probe');
     const codecs = exactObject(probe.codecs, ['video', 'audio'], 'codec probe');
     return Object.freeze({
       type: PLAYBACK_BACKEND_CONTRIBUTION_TYPE,
-      protocolVersion: PLAYBACK_BACKEND_PROTOCOL_VERSION,
+      protocolVersion,
       backendId,
       displayName,
       backendVersion,

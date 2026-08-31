@@ -65,7 +65,7 @@ const createVideoPlaybackBroker = ({ pluginService, path }) => {
     return { ...runConfig, componentId: match.component.id, descriptor: match.contribution };
   };
 
-  const defaultBackendId = () => contributions()[0]?.backendId || '';
+  const defaultBackendId = () => contributions().sort((left, right) => right.contribution.priority - left.contribution.priority || left.backendId.localeCompare(right.backendId))[0]?.backendId || '';
   const ownerForBackend = backendId => { const match = contributions().find(item => item.backendId === backendId); return match ? { componentId: match.component.id, descriptor: match.contribution } : null; };
 
   return { listDescriptors, resolveRunConfigAsync, defaultBackendId, ownerForBackend };

@@ -17,7 +17,7 @@ const createMediaPlaybackProcessAdapter = ({ sessionId, writeLine, now = Date.no
   const send = (event, payload = {}) => writer.emit(event, payload);
   const sendLegacy = (command, payload = {}) => {
     const event = LEGACY_COMMAND_TO_V1[command]; if (!event) throw new Error(`Unsupported playback command: ${command}`);
-    if (legacy) { if (writer.closed) throw new Error('Playback protocol session is closed'); writeLine(JSON.stringify({ command, ...payload })); return true; }
+    if (legacy) { if (writer.closed) throw new Error('Playback protocol session is closed'); writeLine(JSON.stringify({ ...payload, command })); return true; }
     return send(event, payload);
   };
   const receiveLine = line => {

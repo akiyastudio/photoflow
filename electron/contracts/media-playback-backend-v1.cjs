@@ -15,11 +15,20 @@ const assertNoBinaryPayload = (value, depth = 0) => {
   }
 };
 
+const validateWriterInput = (direction, event, payload, sequence, timestamp, sessionId) => {
+  const qualifiedEvent = `${direction}.${event}`;
+  if (!EVENT_NAME.test(qualifiedEvent) || !payload || typeof payload !== 'object' || Array.isArray(payload) || Object.prototype.hasOwnProperty.call(payload, 'type')) throw new Error('Invalid playback protocol writer event or payload');
+  assertNoBinaryPayload(payload);
+  const envelope = { protocol: PROTOCOL, protocolVersion: 1, sessionId, sequence, timestamp, event: qualifiedEvent, payload };
+  if (byteLength(envelope) > MAX_FRAME_BYTES) throw new Error('Playback protocol frame exceeds 256 KiB');
+  return envelope;
+};
+
 const validatePlaybackEnvelope = (value, state, { direction, now = Date.now() } = {}) => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid playback protocol envelope');
   const unknown = Object.keys(value).filter(field => !['protocol', 'protocolVersion', 'sessionId', 'sequence', 'timestamp', 'event', 'payload'].includes(field));
   if (unknown.length || value.protocol !== PROTOCOL || value.protocolVersion !== 1 || !SESSION_ID.test(String(value.sessionId || '')) || !EVENT_NAME.test(String(value.event || ''))) throw new Error('Invalid playback protocol envelope');
-  if (value.sessionId !== state.sessionId || state.closed) throw new Error('Playback protocol session is closed or mismatched');
+  if (value.sessionId !== state.sessionId || state.closed || !value.payload || typeof value.payload !== 'object' || Array.isArray(value.payload) || Object.prototype.hasOwnProperty.call(value.payload, 'type')) throw new Error('Playback protocol session is closed, mismatched, or has invalid payload');
   const sequence = Number(value.sequence); const timestamp = Number(value.timestamp);
   if (!Number.isSafeInteger(sequence) || sequence <= state.lastSequence || !Number.isFinite(timestamp) || Math.abs(now - timestamp) > 5 * 60 * 1000) throw new Error('Invalid playback protocol ordering');
   if (direction && !String(value.event).startsWith(`${direction}.`)) throw new Error('Invalid playback protocol direction');
@@ -30,25 +39,24 @@ const validatePlaybackEnvelope = (value, state, { direction, now = Date.now() } 
 };
 
 const createPlaybackEnvelopeWriter = ({ sessionId, direction, send, now = Date.now, maxHighFrequencyHz = 10 }) => {
-  if (!SESSION_ID.test(sessionId) || !['command', 'event'].includes(direction)) throw new Error('Invalid playback protocol writer');
+  if (!SESSION_ID.test(sessionId) || !['command', 'event'].includes(direction) || !Number.isFinite(maxHighFrequencyHz) || maxHighFrequencyHz <= 0) throw new Error('Invalid playback protocol writer');
   let sequence = 0; let closed = false; let lastHighFrequencyAt = 0; const pending = new Map();
   const emit = (event, payload = {}, options = {}) => {
     if (closed) throw new Error('Playback protocol session is closed');
-    assertNoBinaryPayload(payload);
     const timestamp = now();
-    if (options.highFrequency && timestamp - lastHighFrequencyAt < 1000 / maxHighFrequencyHz) {
+    const envelope = validateWriterInput(direction, event, payload, sequence + 1, timestamp, sessionId);
+    if (options.highFrequency && !options.force && timestamp - lastHighFrequencyAt < 1000 / maxHighFrequencyHz) {
       pending.set(event, payload);
       return false;
     }
     lastHighFrequencyAt = options.highFrequency ? timestamp : lastHighFrequencyAt;
-    const envelope = { protocol: PROTOCOL, protocolVersion: 1, sessionId, sequence: ++sequence, timestamp, event: `${direction}.${event}`, payload };
-    if (byteLength(envelope) > MAX_FRAME_BYTES) throw new Error('Playback protocol frame exceeds 256 KiB');
+    envelope.sequence = ++sequence;
     send(envelope);
     return true;
   };
   const flush = () => {
     const values = [...pending.entries()]; pending.clear();
-    for (const [event, payload] of values) emit(event, payload);
+    for (const [event, payload] of values) emit(event, payload, { highFrequency: true, force: true });
   };
   const close = () => { closed = true; pending.clear(); };
   return { emit, flush, close, get closed() { return closed; }, get sequence() { return sequence; } };

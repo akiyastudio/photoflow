@@ -1,6 +1,6 @@
-const { StringDecoder } = require('string_decoder');
 const { createMediaPlaybackProcessAdapter } = require('./media-playback-process-adapter.cjs');
 const { cleanPlaybackDiagnostics } = require('../contracts/playback-diagnostics.cjs');
+const { MAX_FRAME_BYTES } = require('../contracts/media-playback-backend-v1.cjs');
 
 const START_TIMEOUT_MS = 8000;
 const SCREENSHOT_TIMEOUT_MS = 8000;
@@ -28,7 +28,7 @@ const createVideoPlaybackProcessService = ({
     clearTimeout(pending.timer);
     pending.phase = 'settled';
     pending.cancelled = true;
-    void captureService.abort(pending.stageId).finally(() => pending.reject(error));
+    void Promise.resolve().then(() => captureService.abort(pending.stageId)).catch(() => undefined).then(() => pending.reject(error));
   };
   const captureOwner = session => ({ sessionId: session.id, componentId: session.componentId, processId: session.child.pid });
   const publishScreenshot = async (session, pending) => {
@@ -47,9 +47,11 @@ const createVideoPlaybackProcessService = ({
   const emit = (session, value) => {
     if (!session.sender.isDestroyed()) {
       const payload = { ...value, sessionId: session.id, playerId: session.playerId, requestId: session.requestId };
-      session.sender.send('video-player-state', payload);
+      try { session.sender.send('video-player-state', payload); }
+      catch (error) { writeLog('warn', 'Unable to emit video player state', { sessionId: session.id, error: error.message || String(error) }); }
       // Legacy boundary: older installed renderers listen on this channel.
-      session.sender.send('advanced-video-state', payload);
+      try { session.sender.send('advanced-video-state', payload); }
+      catch (error) { writeLog('warn', 'Unable to emit legacy video player state', { sessionId: session.id, error: error.message || String(error) }); }
     }
   };
 
@@ -65,30 +67,47 @@ const createVideoPlaybackProcessService = ({
     }
   };
 
-  const stop = (sessionId, senderId) => {
-    const session = sessions.get(String(sessionId || ''));
-    if (!session || senderId !== undefined && session.sender.id !== senderId) return false;
-    removeSession(session);
-    emit(session, { type: 'stopped' });
+  const finalizeSession = (session, { emitStopped = false, readyError = null } = {}) => {
+    if (!session || session.terminal) return false;
+    const terminalError = readyError || new Error('视频播放启动已取消');
+    session.terminal = true;
+    session.terminalError = terminalError;
     session.stopped = true;
-    session.processAdapter?.close();
-    session.surfaceController?.close();
-    mediaInputSessionService.revoke(session.id);
-    if (session.rejectReady) {
-      session.rejectReady(new Error('视频播放启动已取消'));
-      session.rejectReady = null;
+    if (session.startupTimer) {
+      clearTimeout(session.startupTimer);
+      session.startupTimer = null;
     }
     if (session.onSenderDestroyed) {
       session.sender.removeListener('destroyed', session.onSenderDestroyed);
       session.onSenderDestroyed = null;
     }
-    for (const pending of session.pendingScreenshots.values()) {
-      rejectPendingScreenshot(session, pending.requestId, pending, new Error('视频播放已经停止'));
+    removeSession(session);
+    if (emitStopped) emit(session, { type: 'stopped' });
+    try { session.processAdapter?.close(); } catch { /* already closed */ }
+    try { session.surfaceController?.close(); } catch { /* already closed */ }
+    session.surfaceController = null;
+    try { mediaInputSessionService.revoke(session.id); } catch { /* authorization cleanup is best effort */ }
+    if (session.rejectReady) {
+      session.rejectReady(terminalError);
+      session.rejectReady = null;
     }
+    for (const pending of session.pendingScreenshots.values()) {
+      try { rejectPendingScreenshot(session, pending.requestId, pending, new Error('视频播放已经停止')); } catch { /* continue finalizing remaining captures */ }
+    }
+    return true;
+  };
+
+  const stop = (sessionId, senderId) => {
+    const session = sessions.get(String(sessionId || ''));
+    if (!session || senderId !== undefined && session.sender.id !== senderId) return false;
+    if (!finalizeSession(session, { emitStopped: true })) return false;
     try { session.child.stdin.end(); } catch { /* process already exited */ }
+    const reportStopFailure = error => { try { writeLog('warn', 'Unable to stop advanced video decoder', { sessionId: session.id, error: error.message || String(error) }); } catch { /* logging must not escape cleanup */ } };
     const timer = setTimeout(() => {
-      if (session.managedProcess) session.managedProcess.stop('advanced-video-stop');
-      else if (!session.child.killed) session.child.kill();
+      try {
+        const result = session.managedProcess ? session.managedProcess.stop('advanced-video-stop') : !session.child.killed && session.child.kill();
+        void Promise.resolve(result).catch(reportStopFailure);
+      } catch (error) { reportStopFailure(error); }
     }, 1200);
     timer.unref?.();
     return true;
@@ -110,12 +129,16 @@ const createVideoPlaybackProcessService = ({
     const key = playerKey(sender.id, normalizedPlayerId);
     launches.set(key, normalizedRequestId);
     stopForPlayer(sender.id, normalizedPlayerId);
-    const assertCurrentLaunch = () => {
-      if (launches.get(key) !== normalizedRequestId) throw new Error('视频播放器请求已被替换');
-    };
     let session = null;
     let inputSessionId = '';
     let launchedChild = null;
+    let launchAborted = false;
+    let onSenderDestroyed = null;
+    const assertCurrentLaunch = () => {
+      if (session?.terminal) throw session.terminalError || new Error('视频播放已经终止');
+      if (launches.get(key) !== normalizedRequestId) throw new Error('视频播放器请求已被替换');
+      if (launchAborted || sender.isDestroyed?.()) throw new Error('照片流窗口已经关闭');
+    };
 
     try {
       const ownerWindow = BrowserWindow.fromWebContents(sender);
@@ -125,6 +148,16 @@ const createVideoPlaybackProcessService = ({
       const backendOwner = playbackBroker.ownerForBackend?.(backendId) || { componentId: 'playback-backend' };
       const id = crypto.randomUUID();
       inputSessionId = id;
+      onSenderDestroyed = () => {
+        launchAborted = true;
+        if (session) stop(id, sender.id);
+        else {
+          if (launches.get(key) === normalizedRequestId) launches.delete(key);
+          mediaInputSessionService.revoke(id);
+          if (launchedChild && !launchedChild.killed) { try { launchedChild.kill(); } catch { /* launch already exited */ } }
+        }
+      };
+      sender.once('destroyed', onSenderDestroyed);
       await mediaInputSessionService.prepare({ filePath, componentId: backendOwner.componentId, backendId, sessionId: id });
       assertCurrentLaunch();
       const runConfig = await playbackBroker.resolveRunConfigAsync(backendId, ['--session-id', id]);
@@ -149,9 +182,6 @@ const createVideoPlaybackProcessService = ({
         cwd: path.dirname(runConfig.command), windowsHide: true, stdio: ['pipe', 'pipe', 'pipe'],
       });
       launchedChild = child;
-      const inputGrant = mediaInputSessionService.bindProcess({ componentId: backendOwner.componentId, backendId, sessionId: id, processId: child.pid });
-      const inputOwner = { componentId: backendOwner.componentId, backendId, sessionId: id, processId: child.pid };
-      const authorizedPath = await mediaInputSessionService.resolve(inputGrant.token, inputOwner);
       session = {
         id,
         sender,
@@ -159,20 +189,24 @@ const createVideoPlaybackProcessService = ({
         managedProcess,
         playerId: normalizedPlayerId,
         requestId: normalizedRequestId,
-        filePath: authorizedPath,
+        filePath: '',
         stopped: false,
+        terminal: false,
+        terminalError: null,
+        startupTimer: null,
         ready: false,
         lastError: '',
         pendingScreenshots: new Map(),
-        onSenderDestroyed: null,
+        onSenderDestroyed,
         rejectReady: null,
         processAdapter: null,
         ownerWindow,
         componentId: backendOwner.componentId,
         backendId,
-        inputToken: inputGrant.token,
+        inputToken: '',
         pendingAuthorizedSubtitles: [],
         surfaceAttachPromise: null,
+        surfaceAttachError: null,
         surfaceController: null,
         lastDisplayKey: '',
       };
@@ -182,11 +216,8 @@ const createVideoPlaybackProcessService = ({
       });
       sessions.set(id, session);
       sessionsByPlayer.set(key, id);
-      session.onSenderDestroyed = () => stop(id, sender.id);
-      sender.once('destroyed', session.onSenderDestroyed);
 
-      const decoder = new StringDecoder('utf8');
-      let buffered = '';
+      let buffered = Buffer.alloc(0);
       let settleReady;
       let rejectReady;
       const readyPromise = new Promise((resolve, reject) => {
@@ -194,7 +225,11 @@ const createVideoPlaybackProcessService = ({
         rejectReady = reject;
         session.rejectReady = reject;
       });
-      const startupTimer = setTimeout(() => { const error = new Error('视频播放器启动超时，请在组件管理中修复或重新安装视频播放器运行时'); error.code = 'STARTUP_TIMEOUT'; rejectReady(error); }, startupTimeoutMs);
+      // Observe early startup failures immediately. Awaiting the original
+      // promise later still propagates the same rejection.
+      void readyPromise.catch(() => undefined);
+      const startupTimer = setTimeout(() => { session.startupTimer = null; const error = new Error('视频播放器启动超时，请在组件管理中修复或重新安装视频播放器运行时'); error.code = 'STARTUP_TIMEOUT'; rejectReady(error); }, startupTimeoutMs);
+      session.startupTimer = startupTimer;
       startupTimer.unref?.();
 
       const consumeLine = line => {
@@ -205,7 +240,7 @@ const createVideoPlaybackProcessService = ({
           writeLog('warn', 'Advanced video decoder emitted an invalid v1 frame', { line: line.slice(0, 500) });
           return;
         }
-        const value = { type: received.type, ...received.payload };
+        const value = { ...received.payload, type: received.type };
         if(value.type==='file-loaded'&&session.pendingAuthorizedSubtitles.length){for(const subtitlePath of session.pendingAuthorizedSubtitles)sendCommand(session,{command:'subtitle-add',path:subtitlePath});session.pendingAuthorizedSubtitles=[];}
         if (value.type === 'diagnostic') {
           try { emit(session, { type: 'diagnostic', diagnostic: cleanPlaybackDiagnostics(value.diagnostic) }); }
@@ -215,7 +250,10 @@ const createVideoPlaybackProcessService = ({
         if (value.type === 'surface-created') {
           if (session.surfaceAttachPromise) return;
           session.surfaceAttachPromise = nativeSurfaceService.attach({ ownerWindow: session.ownerWindow, componentProcess: session.child, surfaceHandle: value.surfaceHandle, sessionId: session.id, onLost: error => { if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'SURFACE_LOST', error: error.message }); } })
-            .then(controller => { session.surfaceController = controller; return controller; });
+            .then(controller => {
+              if (session.stopped) { controller.close(); return controller; }
+              session.surfaceController = controller; return controller;
+            }, error => { session.surfaceAttachError = error; rejectReady(error); return null; });
           return;
         }
         if (value.type === 'screenshot-result') {
@@ -239,55 +277,80 @@ const createVideoPlaybackProcessService = ({
         }
         if (value.type === 'ready') {
           if (!session.surfaceAttachPromise) { rejectReady(new Error('视频后端未声明原生渲染表面')); return; }
-          void session.surfaceAttachPromise.then(() => {
-            if (session.stopped) return;
+          void session.surfaceAttachPromise.then(controller => {
+            if (!controller || session.stopped || session.surfaceAttachError) return;
             session.ready = true;
             session.managedProcess?.markHealthy({ protocol: 'media-playback-backend-v1' });
             session.rejectReady = null;
             clearTimeout(startupTimer);
+            session.startupTimer = null;
             settleReady();
           }, rejectReady);
         } else if (value.type === 'fatal') {
           session.lastError = String(value.error || '视频播放器启动失败');
           clearTimeout(startupTimer);
+          session.startupTimer = null;
           rejectReady(new Error(session.lastError));
         }
         emit(session, value);
       };
+      const failProtocol = () => {
+        const error = new Error('视频播放后端输出帧超过 256 KiB');
+        session.lastError = error.message;
+        rejectReady(error);
+        if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'BACKEND_CRASHED', error: error.message });
+        try { child.kill(); } catch { /* process already exited */ }
+      };
       child.stdout.on('data', chunk => {
-        buffered += decoder.write(chunk);
-        let newline;
-        while ((newline = buffered.indexOf('\n')) >= 0) {
-          const line = buffered.slice(0, newline).replace(/\r$/, '');
-          buffered = buffered.slice(newline + 1);
+        let incoming = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+        while (incoming.length) {
+          const newline = incoming.indexOf(0x0a);
+          const segmentLength = newline < 0 ? incoming.length : newline;
+          if (buffered.length + segmentLength > MAX_FRAME_BYTES + 1) { buffered = Buffer.alloc(0); failProtocol(); return; }
+          buffered = Buffer.concat([buffered, incoming.subarray(0, segmentLength)]);
+          if (newline < 0) {
+            if (buffered.length === MAX_FRAME_BYTES + 1 && buffered[buffered.length - 1] !== 0x0d) { buffered = Buffer.alloc(0); failProtocol(); }
+            return;
+          }
+          if (buffered.length > MAX_FRAME_BYTES && buffered[buffered.length - 1] !== 0x0d) { buffered = Buffer.alloc(0); failProtocol(); return; }
+          const line = buffered.toString('utf8').replace(/\r$/, '');
+          buffered = Buffer.alloc(0);
+          incoming = incoming.subarray(newline + 1);
           consumeLine(line);
         }
       });
+      child.stdout.on('error', error => { session.lastError = error.message || String(error); rejectReady(error); });
+      child.stdin.on('error', error => { if (!session.stopped) writeLog('warn', 'Playback backend stdin failed', { sessionId: id, error: error.message || String(error) }); });
       let stderr = '';
       child.stderr.on('data', chunk => { stderr = (stderr + chunk.toString('utf8')).slice(-8000); });
       child.once('error', error => {
         session.lastError = error.message || String(error);
         clearTimeout(startupTimer);
+        session.startupTimer = null;
         rejectReady(error);
         if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'BACKEND_CRASHED', error: session.lastError });
       });
       child.once('exit', code => {
         clearTimeout(startupTimer);
-        session.processAdapter?.close();
-        session.surfaceController?.close();
-        mediaInputSessionService.revoke(session.id);
-        for (const [requestId, pending] of session.pendingScreenshots.entries()) {
-          rejectPendingScreenshot(session, requestId, pending, new Error('视频播放器在截图完成前退出'));
-        }
-        removeSession(session);
-        if (!session.ready) rejectReady(new Error(session.lastError || stderr.trim() || `视频播放器退出（${code ?? '未知'}），请修复或重新安装视频播放器运行时`));
-        else if (!session.stopped) emit(session, { type: 'fatal', errorCode: 'BACKEND_CRASHED', error: session.lastError || stderr.trim() || '视频播放器意外退出，请重新打开视频；若持续失败请修复视频播放器运行时' });
-        writeLog(code === 0 || session.stopped ? 'info' : 'warn', 'Advanced video decoder exited', { sessionId: id, code, error: stderr.trim() });
+        session.startupTimer = null;
+        const wasReady = session.ready; const wasStopped = session.stopped;
+        const exitMessage = session.lastError || stderr.trim() || `视频播放器退出（${code ?? '未知'}），请修复或重新安装视频播放器运行时`;
+        finalizeSession(session, { readyError: new Error(exitMessage) });
+        if (wasReady && !wasStopped) emit(session, { type: 'fatal', errorCode: 'BACKEND_CRASHED', error: session.lastError || stderr.trim() || '视频播放器意外退出，请重新打开视频；若持续失败请修复视频播放器运行时' });
+        writeLog(code === 0 || wasStopped ? 'info' : 'warn', 'Advanced video decoder exited', { sessionId: id, code, error: stderr.trim() });
       });
 
+      const inputGrant = mediaInputSessionService.bindProcess({ componentId: backendOwner.componentId, backendId, sessionId: id, processId: child.pid });
+      session.inputToken = inputGrant.token;
+      const inputOwner = { componentId: backendOwner.componentId, backendId, sessionId: id, processId: child.pid };
+      const authorizedPathPromise = Promise.resolve(mediaInputSessionService.resolve(inputGrant.token, inputOwner));
+      const authorizedPath = await authorizedPathPromise;
+      session.filePath = authorizedPath;
+      assertCurrentLaunch();
       await readyPromise;
       assertCurrentLaunch();
       if (subtitleInputService) session.pendingAuthorizedSubtitles = await subtitleInputService.discover(authorizedPath);
+      assertCurrentLaunch();
       if (!sendCommand(session, { command: 'open', path: authorizedPath })) throw new Error('无法向视频播放器发送文件');
       sendCommand(session, { command: 'subtitle-style', fontSize: normalizeSubtitleFontSize(settings.subtitleSize), style: settings.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard' });
       if (!sendCommand(session, { command: 'play' })) throw new Error('无法启动视频播放器');
@@ -296,6 +359,7 @@ const createVideoPlaybackProcessService = ({
     } catch (error) {
       if (session) stop(session.id, sender.id);
       else {
+        if (onSenderDestroyed) sender.removeListener('destroyed', onSenderDestroyed);
         if (inputSessionId) mediaInputSessionService.revoke(inputSessionId);
         if (launchedChild && !launchedChild.killed) { try { launchedChild.kill(); } catch { /* launch already exited */ } }
         if (launches.get(key) === normalizedRequestId) launches.delete(key);
@@ -347,7 +411,8 @@ const createVideoPlaybackProcessService = ({
       cornerHoleHeight,
     });
     if (displayOutputService) {
-      const output = displayOutputService.describe(session.ownerWindow, { x: number(bounds.x), y: number(bounds.y), width, height });
+      const viewport = bounds.viewportDip && typeof bounds.viewportDip === 'object' ? bounds.viewportDip : null;
+      const output = displayOutputService.describe(session.ownerWindow, { x: number(bounds.x), y: number(bounds.y), width, height }, viewport);
       const displayKey = `${output.displayId}:${output.scaleFactor}:${output.colorSpace}:${output.hdrAvailable}`;
       if (displayKey !== session.lastDisplayKey) {
         session.lastDisplayKey = displayKey;

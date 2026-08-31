@@ -7,7 +7,12 @@ const { createPlaybackCaptureService } = require('../services/playback-capture-s
 const { createPlaybackSubtitleInputService } = require('../services/playback-subtitle-input-service.cjs');
 const { playbackError } = require('../contracts/playback-errors.cjs');
 
-const registerVideoPlaybackIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog }) => {
+const MAX_CAPTURE_BYTES = 100 * 1024 * 1024;
+const validPngBytes = buffer => buffer.length >= 20
+  && buffer.subarray(0, 8).toString('hex') === '89504e470d0a1a0a'
+  && buffer.subarray(buffer.length - 12).toString('hex') === '0000000049454e44ae426082';
+
+const registerVideoPlaybackIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcMain, mediaService, path, pluginService, processSupervisor, screen, spawn, writeLog, VIDEO_EXTENSIONS: authoritativeVideoExtensions = null }) => {
   const playbackBroker = createVideoPlaybackBroker({ pluginService, path });
   const nativeSurfaceService = createNativeVideoSurfaceService({ app, path, processSupervisor, spawn, writeLog });
   const mediaInputSessionService = createMediaInputSessionService({ crypto, fs, path, authorizeProjectMedia: value => mediaService.authorizeInput(value) });
@@ -46,9 +51,12 @@ const registerVideoPlaybackIpc = ({ BrowserWindow, app, crypto, dialog, fs, ipcM
     let temporaryPath = '';
     try {
       const sourcePath = await mediaService.authorizeInput(filePath);
+      const sourceStat = await fs.promises.stat(sourcePath);
+      if (!sourceStat.isFile() || authoritativeVideoExtensions instanceof Set && !authoritativeVideoExtensions.has(path.extname(sourcePath).toLowerCase())) throw new Error('视频源文件当前不可用');
+      const declaredLength = Number(bytes?.byteLength);
+      if (!Number.isSafeInteger(declaredLength) || declaredLength < 20 || declaredLength > MAX_CAPTURE_BYTES || !ArrayBuffer.isView(bytes) && !Buffer.isBuffer(bytes)) throw new Error('视频截图数据无效');
       const buffer = Buffer.from(bytes || []);
-      const hasPngTrailer = buffer.length >= 20 && buffer.readUInt32BE(buffer.length - 12) === 0 && buffer.subarray(buffer.length - 8, buffer.length - 4).toString('ascii') === 'IEND';
-      if (!hasPngTrailer || buffer.length > 100 * 1024 * 1024 || buffer.subarray(0, 8).toString('hex') !== '89504e470d0a1a0a') throw new Error('视频截图数据无效');
+      if (buffer.length !== declaredLength || !validPngBytes(buffer)) throw new Error('视频截图数据无效');
       const target = screenshotTarget(sourcePath);
       temporaryPath = target.temporaryPath;
       await fs.promises.writeFile(temporaryPath, buffer, { flag: 'wx' });
