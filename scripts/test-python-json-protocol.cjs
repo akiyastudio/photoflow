@@ -3,6 +3,7 @@ const assert = require('assert');
 const {
   findPythonJsonFailureMessage,
   parsePythonJsonMessages,
+  classifyPythonJsonMessage,
 } = require('../electron/services/python-json-protocol.cjs');
 
 const messages = parsePythonJsonMessages([
@@ -19,5 +20,7 @@ assert.strictEqual(findPythonJsonFailureMessage([
   { type: 'cancelled', message: '视频导出已取消' },
 ]), '视频导出已取消');
 assert.strictEqual(findPythonJsonFailureMessage([{ type: 'success', message: '完成' }]), '');
+assert.deepStrictEqual(classifyPythonJsonMessage({ type: 'error', message: '' }), { kind: 'error', message: '' });
+assert.deepStrictEqual(classifyPythonJsonMessage({ type: 'progress' }), { kind: 'progress' });
 
 console.log('Python JSON protocol diagnostics regression tests passed');

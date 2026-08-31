@@ -1,13 +1,14 @@
 import assert from 'node:assert/strict';
 import { createRequire } from 'node:module';
 import { readFileSync } from 'node:fs';
-import { configuredSdDriveVideoActions, normalizeSavedSdDeviceRecords, normalizeSavedSdDriveVideoActions, reconcileConfiguredSdDevices, removeConfiguredSdDevice, resolveConfiguredSdDevices, storageDeviceMatchesId, upsertConfiguredSdDevice } from '../src/features/tools/sd-startup-import-model.ts';
+import { configuredSdDriveVideoActions, migrateLegacySdDeviceRecords, normalizeSavedSdDeviceRecords, normalizeSavedSdDriveVideoActions, reconcileConfiguredSdDevices, removeConfiguredSdDevice, resolveConfiguredSdDevices, storageDeviceMatchesId, upsertConfiguredSdDevice } from '../src/features/tools/sd-startup-import-model.ts';
 import { createStorageDeviceInventoryController, isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from '../src/features/tools/storage-device-inventory-model.ts';
 import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, shouldDeleteSourceForImportBatch } from '../src/features/tools/startup-sd-auto-import-model.ts';
 import { availableComponentIds, componentRuntimeIsAvailable, componentUnavailableMessage } from '../src/features/components/component-availability-model.ts';
+import { appendImportSuccess, createImportCompletion, describeImportCompletion, shouldForgetImportSession } from '../src/features/tools/import-completion-model.ts';
 
 const require = createRequire(import.meta.url);
-const { listWindowsStorageDevices, normalizeMountPath, parseDiskutilInfoPlist, parseWindowsLogicalDisks, parseWindowsMountvolOutput, parseWindowsVolOutput, probeWindowsStorageDevice, summarizeDarwinStorageDeviceResults } = require('../electron/services/storage-device-service.cjs');
+const { collectProcessOutput, listWindowsStorageDevices, normalizeMountPath, parseDiskutilInfoPlist, parseWindowsLogicalDisks, parseWindowsMountvolOutput, parseWindowsVolOutput, probeWindowsStorageDevice, summarizeDarwinStorageDeviceResults, summarizeWindowsStorageDeviceResults } = require('../electron/services/storage-device-service.cjs');
 const storageDeviceServiceSource = readFileSync(new URL('../electron/services/storage-device-service.cjs', import.meta.url), 'utf8');
 
 const config = (paths, ids = {}, types = {}) => ({
@@ -38,7 +39,46 @@ const device = (id, mountPath, overrides = {}) => ({
   ...overrides,
 });
 
+assert.equal(appendImportSuccess(createImportCompletion(), { sourceType: 'work', importedCount: 0, skipped: true }).outcome, 'skipped');
+assert.equal(appendImportSuccess(createImportCompletion(), { sourceType: 'work', importedCount: 2, failedCount: 1 }).outcome, 'partial');
+assert.equal(appendImportSuccess(createImportCompletion(), { sourceType: 'work', importedCount: 2, relationPending: true }).outcome, 'relation-pending');
+const earlierPartialThenSuccess = appendImportSuccess(
+  appendImportSuccess(createImportCompletion(), { sourceType: 'work', importedCount: 2, failedCount: 1 }),
+  { sourceType: 'broll', importedCount: 3, failedCount: 0 },
+);
+assert.equal(earlierPartialThenSuccess.outcome, 'partial', 'a final successful card must not erase an earlier partial result');
+assert.equal(describeImportCompletion(earlierPartialThenSuccess), '本批次成功导入 5 个文件，1 项未完成。', 'completion detail must describe the aggregate batch, not the final event');
+const stagedSession = { persistedSession: { session: 'session-1', stagingComplete: true }, requestId: 'request-1', stage: 'routing', currentDrive: 'G:/', currentSession: 'session-1', currentSessionKey: 'dest\0G:/\0work', busy: true };
+const persistedSessions = new Map([['dest\0G:/\0work', stagedSession.persistedSession]]);
+if (shouldForgetImportSession('destination-missing')) persistedSessions.delete('dest\0G:/\0work');
+assert.equal(persistedSessions.has('dest\0G:/\0work'), true, 'destination loss must preserve a staged resumable session');
+let resolveDiscard;
+const discardTerminal = new Promise(resolve => { resolveDiscard = resolve; });
+resolveDiscard(false);
+const firstDiscardSucceeded = await discardTerminal;
+if (shouldForgetImportSession(firstDiscardSucceeded ? 'discard-success' : 'cancel-failed')) persistedSessions.delete('dest\0G:/\0work');
+assert.equal(persistedSessions.has('dest\0G:/\0work'), true, 'a failed discard must preserve the staged session index');
+if (shouldForgetImportSession('discard-success')) persistedSessions.delete('dest\0G:/\0work');
+assert.equal(persistedSessions.has('dest\0G:/\0work'), false, 'only a confirmed discard success may forget the staged session index');
+const invalidSessionKey = 'dest\0H:/\0work';
+const invalidSessions = new Map([[invalidSessionKey, { session: 'invalid-session', stagingComplete: true }]]);
+let generatedSession = 0;
+const startWithPersistedSession = () => invalidSessions.get(invalidSessionKey)?.session || `new-session-${++generatedSession}`;
+const firstStartSession = startWithPersistedSession();
+assert.equal(firstStartSession, 'invalid-session');
+await Promise.resolve();
+if (shouldForgetImportSession('session-invalid')) invalidSessions.delete(invalidSessionKey);
+const secondStartSession = startWithPersistedSession();
+assert.notEqual(secondStartSession, firstStartSession, 'a second start must not reuse a session that the backend explicitly declared invalid');
+assert.equal(secondStartSession, 'new-session-1');
+assert.equal(shouldForgetImportSession('error'), false);
+assert.equal(shouldForgetImportSession('destination-missing'), false);
+assert.equal(shouldForgetImportSession('cancel-failed'), false);
+
 assert.equal(normalizeMountPath('h:\\DCIM', 'win32'), 'H:/');
+const silentChild = new (require('events').EventEmitter)();
+silentChild.stdout = new (require('stream').PassThrough)(); silentChild.stderr = new (require('stream').PassThrough)(); silentChild.kill = () => true;
+await assert.rejects(collectProcessOutput('silent-probe', [], { timeoutMs: 5, terminationGraceMs: 5, spawnImpl: () => silentChild }), /timed out/, 'timeout must settle even when a child never emits close');
 assert.deepEqual(parseWindowsLogicalDisks(JSON.stringify({ DeviceID: 'H:', DriveType: 2, VolumeName: 'CAMERA', VolumeSerialNumber: 'ab12-cd34' })), [{
   id: 'win-volume:AB12-CD34',
   mountPath: 'H:/',
@@ -69,9 +109,28 @@ const canonicalWithoutGuid = await probeWindowsStorageDevice(probeBase, async (c
   if (args.includes('vol')) return 'Volume Serial Number is AB12-CD34';
   throw new Error('mountvol timeout');
 });
+const guidFallback = await probeWindowsStorageDevice(probeBase, async (command, args) => {
+  if (command === 'powershell.exe') return windowsProbeOutput('H:\\');
+  if (args.includes('vol')) throw new Error('vol failed');
+  return '\\\\?\\Volume{F3444F32-8514-11F1-AB45-94E70BB1E2C4}\\';
+});
 assert.equal(canonicalWithGuid.device.id, 'win-volume:AB12-CD34');
 assert.equal(canonicalWithoutGuid.device.id, canonicalWithGuid.device.id, 'mountvol availability must never change the public device ID');
 assert.deepEqual(canonicalWithGuid.device.aliases, ['win-volume-guid:F3444F32-8514-11F1-AB45-94E70BB1E2C4']);
+assert.equal(guidFallback.device.id, 'win-volume-guid:F3444F32-8514-11F1-AB45-94E70BB1E2C4', 'a stable GUID must replace the path fallback when vol fails');
+
+const duplicateSerials = summarizeWindowsStorageDeviceResults([
+  { recognized: true, device: device('win-volume:DUPL-0001', 'H:/') },
+  { recognized: true, device: device('win-volume:DUPL-0001', 'I:/') },
+]);
+assert(duplicateSerials.devices.every(item => item.identityStable === false), 'a serial collision must invalidate both identities');
+assert(duplicateSerials.deviceErrors.some(item => item.error.includes('重复设备标识')));
+const sharedGuid = 'win-volume-guid:AAAAAAAA-BBBB-CCCC-DDDD-EEEEEEEEEEEE';
+const duplicateAliases = summarizeWindowsStorageDeviceResults([
+  { recognized: true, device: device('win-volume:1111-AAAA', 'H:/', { aliases: [sharedGuid] }) },
+  { recognized: true, device: device('win-volume:2222-BBBB', 'I:/', { aliases: [sharedGuid] }) },
+]);
+assert(duplicateAliases.devices.every(item => item.identityStable === false && item.eligibleForSdImport === false), 'a shared GUID alias must invalidate both otherwise-distinct serial identities');
 
 const isolatedWindowsInventory = await listWindowsStorageDevices({ collect: async (command, args) => {
   const commandText = args.join(' ');
@@ -117,7 +176,7 @@ const validMacSdDevice = device('darwin-volume:SD-1234', '/Volumes/SD_CARD');
 assert.deepEqual(summarizeDarwinStorageDeviceResults([
   { recognized: true, device: validMacSdDevice },
   { recognized: false, error: '/Volumes/NETWORK: not a disk' },
-]), { devices: [validMacSdDevice], complete: true }, 'an unrelated macOS volume failure must not block a validated removable device');
+]), { devices: [validMacSdDevice], complete: true, deviceErrors: [{ mountPath: '/Volumes/NETWORK', error: '/Volumes/NETWORK: not a disk' }], warning: '有 1 个设备探测步骤失败，其他存储卡仍可使用' }, 'an unrelated macOS volume failure must be reported without blocking a validated removable device');
 assert.deepEqual(summarizeDarwinStorageDeviceResults([
   { recognized: false, error: '/Volumes/BROKEN: diskutil failed' },
 ]), { devices: [], complete: false, error: '无法识别 macOS 存储设备：/Volumes/BROKEN: diskutil failed' }, 'a systemic macOS inspection failure must remain visible');
@@ -153,6 +212,18 @@ assert.equal(migratedVideoActions[0].transcodeVideosOnImport, true, 'legacy type
 assert.deepEqual(normalizeSavedSdDriveVideoActions(undefined, ['G:/'], { 'G:/': 'work' }, {
   work: { splitVideosOnImport: true, transcodeVideosOnImport: false },
 }), { 'G:/': { splitVideosOnImport: true, transcodeVideosOnImport: false } }, 'a legacy path-only record must receive its own migrated video behavior');
+assert.deepEqual(normalizeSavedSdDriveVideoActions(undefined, ['g:/'], { 'G:\\': 'broll' }, {
+  work: { splitVideosOnImport: false, transcodeVideosOnImport: false },
+  broll: { splitVideosOnImport: true, transcodeVideosOnImport: true },
+}), { 'g:/': { splitVideosOnImport: true, transcodeVideosOnImport: true } }, 'legacy video defaults must use a case/slash-insensitive path lookup');
+const caseInsensitiveSavedRecords = normalizeSavedSdDeviceRecords(undefined, ['g:/'], { 'G:\\': 'CARD-G' }, { 'G:/': 'broll' }, {
+  broll: { splitVideosOnImport: true, transcodeVideosOnImport: true },
+});
+assert.equal(caseInsensitiveSavedRecords[0]?.deviceId, 'CARD-G');
+assert.equal(caseInsensitiveSavedRecords[0]?.type, 'broll');
+assert.equal(caseInsensitiveSavedRecords[0]?.splitVideosOnImport, true);
+assert.equal(caseInsensitiveSavedRecords[0]?.transcodeVideosOnImport, true);
+assert.deepEqual(migrateLegacySdDeviceRecords({ sdPath: 'g:/', sdPaths: ['g:/'], sdDeviceIds: { 'G:\\': 'CARD-G' }, sdDriveTypes: { 'G:/': 'broll' } }).map(record => [record.deviceId, record.type]), [['CARD-G', 'broll']], 'legacy record migration must use path identity for IDs and types');
 
 const legacyPathWithActions = config(['g:/'], {}, { 'g:/': 'work' });
 legacyPathWithActions.sdDriveVideoActions = { 'g:/': { splitVideosOnImport: false, transcodeVideosOnImport: true } };
@@ -177,6 +248,14 @@ const migratedGuidConfig = reconcileConfiguredSdDevices(config(['H:/'], { 'H:/':
 assert.equal(migratedGuidConfig.sdDevices[0].deviceId, 'win-volume:AB12-CD34', 'legacy GUID enrollment must be rewritten to the canonical ID');
 assert.deepEqual(migratedGuidConfig.sdDeviceIds, { 'K:/': 'win-volume:AB12-CD34' }, 'canonical migration must remove the old GUID mirror and drive letter');
 assert.deepEqual(removeConfiguredSdDevice(migratedGuidConfig, canonicalCard.id).sdPaths, [], 'removing a migrated device must not resurrect its legacy path');
+const caseAliasConfig = config(['g:/'], { 'G:/': 'CARD-ALIAS' });
+caseAliasConfig.sdDriveTypes = { 'G:/': 'work' };
+caseAliasConfig.sdDriveVideoActions = { 'G:/': { splitVideosOnImport: true, transcodeVideosOnImport: false } };
+const removedCaseAlias = removeConfiguredSdDevice(caseAliasConfig, 'card-alias');
+assert.deepEqual(removedCaseAlias.sdPaths, [], 'device removal must match case-insensitive identity aliases');
+assert.deepEqual(removedCaseAlias.sdDeviceIds, {}, 'device removal must clear case-insensitive path mirrors');
+assert.deepEqual(removedCaseAlias.sdDriveTypes, {});
+assert.deepEqual(removedCaseAlias.sdDriveVideoActions, {});
 
 const guidWithoutAliasConfig = reconcileConfiguredSdDevices(
   config(['H:/'], { 'H:/': legacyGuid }),

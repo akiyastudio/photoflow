@@ -26,6 +26,14 @@ const trackingConfirmation = read('src/features/versioning/TrackingConfirmationP
 const versionManager = read('src/components/VersionManager.tsx');
 const videoToolsUi = read('extensions/video-tools/ui/app.js');
 
+assert(toolViews.includes("'relation-pending': '文件已导入，关系待提交'"), 'the completed import page must render relation-pending explicitly');
+assert(toolViews.includes("partial: '部分导入完成'"), 'the completed import page must render partial explicitly');
+assert(toolViews.includes("skipped: '本次导入已跳过'"), 'the completed import page must render skipped explicitly');
+assert(toolViews.includes('requestIdRef.current === requestId'), 'screenshot request cleanup must be owned by the active generation');
+assert(toolViews.includes('initialRelativePathKey'), 'equal screenshot path arrays must share a stable content key');
+assert(toolViews.includes('storageInventoryFresh ? lastKnownStorageDevices : []'), 'manual SD import must only receive a fresh ready inventory');
+assert(toolViews.includes("event.type === 'partial'"), 'Python partial terminal events must be handled explicitly');
+
 const compiledFileTransferToast = ts.transpileModule(fileTransferToast, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
 
 const compiledToastModel = ts.transpileModule(toastModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;

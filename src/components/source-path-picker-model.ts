@@ -3,9 +3,17 @@ const cleanSourcePath = (value: string) => value
   .replace(/^[\u201c\u201d"']+|[\u201c\u201d"']+$/g, '')
   .trim();
 
-const sourcePathKey = (value: string) => /^[a-z]:[\\/]/i.test(value)
-  ? value.replace(/\//g, '\\').toLocaleLowerCase()
-  : value;
+const sourcePathKey = (value: string) => {
+  const cleaned = cleanSourcePath(value);
+  const windowsPath = /^[a-z]:([\\/]|$)/i.test(cleaned) || /^[/\\]{2}[^/\\]+[/\\]+[^/\\]+/.test(cleaned);
+  if (!windowsPath) {
+    const normalized = cleaned.replace(/\/{2,}/g, '/');
+    return normalized.length > 1 ? normalized.replace(/\/$/, '') : normalized;
+  }
+  const normalized = cleaned.replace(/\//g, '\\').replace(/\\{2,}/g, '\\');
+  const rooted = cleaned.startsWith('\\\\') || cleaned.startsWith('//') ? `\\\\${normalized.replace(/^\\+/, '')}` : normalized;
+  return rooted.replace(/\\+$/, match => /^[a-z]:\\$/i.test(rooted) ? match : '').toLocaleLowerCase();
+};
 
 export const mergeSourcePaths = (...groups: ReadonlyArray<readonly string[]>) => {
   const seen = new Set<string>();

@@ -12,6 +12,7 @@ import hashlib
 import math
 import ctypes
 import uuid
+import stat
 import queue
 import threading
 from contextlib import contextmanager
@@ -24,6 +25,7 @@ from thumbnail_image import _embedded_jpeg
 EXIFTOOL_PATH = ''
 CAPTURE_TIME_MEMORY_CACHE = {}
 CAPTURE_TIME_MEMORY_CACHE_LIMIT = 100000
+IMPORT_MANIFEST_IDENTITIES = {}
 
 CANCEL_FILE = ''
 RESOURCE_PROTOCOL_ENABLED = False
@@ -245,8 +247,10 @@ def task_resource_lease(profile, phase):
             emit('resource_release', phase, data={'leaseId': lease_id, 'profile': profile})
 
 # --- 2. 辅助工具函数 ---
-def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None):
+def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None, collect_digest=False, durable=False):
+    """Copy once, collecting full chunk digests only for destructive-source batches."""
     bytes_copied = 0
+    chunk_hashes = [] if collect_digest else None
     try:
         with open(src, 'rb') as fsrc, open(dst, 'wb') as fdst:
             while True:
@@ -255,11 +259,19 @@ def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None):
                 if not buf:
                     break
                 fdst.write(buf)
+                if chunk_hashes is not None:
+                    chunk_hashes.append(hashlib.sha256(buf).hexdigest())
                 bytes_copied += len(buf)
                 if on_progress:
                     on_progress(bytes_copied)
+            if collect_digest or durable:
+                fdst.flush()
+                os.fsync(fdst.fileno())
         
         shutil.copystat(src, dst)
+        if chunk_hashes is not None:
+            return {'algorithm': 'sha256', 'chunkSize': int(chunk_size), 'chunks': chunk_hashes}
+        return None
     except Exception as e:
         # 如果中途出错（比如读卡器突然拔出），with open 会确保文件句柄被立即强制关闭
         # 避免 Windows 内核锁死
@@ -268,6 +280,213 @@ def safe_chunk_copy(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None):
         except OSError:
             pass
         raise e
+
+
+def _real_path_inside(root, path):
+    root_real = os.path.normcase(os.path.realpath(os.path.abspath(root)))
+    path_real = os.path.normcase(os.path.realpath(os.path.abspath(path)))
+    try:
+        return os.path.commonpath((root_real, path_real)) == root_real
+    except ValueError:
+        return False
+
+
+def _is_link_or_reparse(path):
+    try:
+        info = os.lstat(path)
+    except OSError:
+        return True
+    attributes = int(getattr(info, 'st_file_attributes', 0) or 0)
+    return stat.S_ISLNK(info.st_mode) or bool(attributes & 0x400)
+
+
+def _safe_directory_target(root, path):
+    root_abs = os.path.abspath(root)
+    path_abs = os.path.abspath(path)
+    existing_anchor = root_abs
+    while not os.path.lexists(existing_anchor):
+        parent = os.path.dirname(existing_anchor)
+        if parent == existing_anchor:
+            return False
+        existing_anchor = parent
+    if not os.path.isdir(existing_anchor) or existing_anchor != root_abs and _is_link_or_reparse(existing_anchor):
+        return False
+    try:
+        if os.path.commonpath((root_abs, path_abs)) != root_abs or not _real_path_inside(root_abs, path_abs):
+            return False
+        relative = os.path.relpath(path_abs, root_abs)
+    except ValueError:
+        return False
+    candidates = [root_abs]
+    current = root_abs
+    if relative not in ('', '.'):
+        for part in Path(relative).parts:
+            current = os.path.join(current, part)
+            candidates.append(current)
+    missing_seen = False
+    for candidate in candidates:
+        if not os.path.lexists(candidate):
+            missing_seen = True
+            continue
+        if missing_seen or not os.path.isdir(candidate):
+            return False
+    return True
+
+
+def _regular_file_without_links(path, root=None, nonempty=False):
+    """Reject symlinks/junction-like realpath escapes and non-regular outputs."""
+    absolute = os.path.abspath(path)
+    if root is not None and not _real_path_inside(root, absolute):
+        return False
+    try:
+        info = os.lstat(absolute)
+        if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
+            return False
+        if nonempty and info.st_size <= 0:
+            return False
+    except OSError:
+        return False
+    return True
+
+
+def _has_video_container_signature(path, extension):
+    try:
+        with open(path, 'rb') as media_file:
+            header = media_file.read(512)
+    except OSError:
+        return False
+    extension = extension.lower()
+    if extension in ('.mp4', '.mov', '.m4v', '.crm'):
+        return len(header) >= 12 and header[4:8] == b'ftyp'
+    if extension == '.avi':
+        return len(header) >= 12 and header[:4] == b'RIFF' and header[8:12] == b'AVI '
+    if extension in ('.mpeg', '.mpg'):
+        return header.startswith((b'\x00\x00\x01\xba', b'\x00\x00\x01\xb3'))
+    if extension in ('.mts', '.m2ts'):
+        return bool(header) and (header[0] == 0x47 or len(header) > 4 and header[4] == 0x47)
+    if extension in ('.mkv', '.webm'):
+        return header.startswith(b'\x1aE\xdf\xa3')
+    return False
+
+
+def validate_tool_output_paths(paths, target_root, input_path='', require_decodable=True, expected_extensions=None):
+    """Normalize and validate untrusted split/transcode tool results."""
+    normalized = []
+    seen = set()
+    input_real = os.path.normcase(os.path.realpath(input_path)) if input_path else ''
+    allowed_extensions = {
+        value.lower() if str(value).startswith('.') else f'.{str(value).lower()}'
+        for value in (expected_extensions or VIDEO_OUTPUT_EXTENSIONS)
+    }
+    for raw_path in paths or []:
+        if not isinstance(raw_path, (str, os.PathLike)) or not str(raw_path).strip():
+            raise ValueError('视频工具返回了无效输出路径')
+        output = os.path.abspath(os.fspath(raw_path))
+        key = os.path.normcase(os.path.realpath(output))
+        if key in seen or key == input_real:
+            raise ValueError('视频工具返回了重复输出或原片路径')
+        if not _regular_file_without_links(output, target_root, nonempty=True):
+            raise ValueError(f'视频工具输出不是目标树内的普通非空文件：{os.path.basename(output)}')
+        extension = os.path.splitext(output)[1].lower()
+        if extension not in allowed_extensions:
+            raise ValueError(f'视频工具输出扩展名不符合预期：{os.path.basename(output)}')
+        if require_decodable and not _has_video_container_signature(output, extension):
+            raise ValueError(f'视频工具输出容器签名无效：{os.path.basename(output)}')
+        if require_decodable and RESOURCE_PROTOCOL_ENABLED and os.path.splitext(output)[1].lower() in VIDEO_EXTENSIONS:
+            # The existing media probe opens and parses the container. A failure
+            # is fatal even when no creation-time tag is present.
+            probe_creation_time_values(output)
+        seen.add(key)
+        normalized.append(output)
+    if not normalized:
+        raise ValueError('视频工具没有返回可验证的输出文件')
+    return normalized
+
+
+class VerificationCheckpointThrottle:
+    """Coalesce verification progress across files into bounded durable windows."""
+    def __init__(self, checkpoint, interval_seconds=None, interval_bytes=None, clock=None):
+        self.checkpoint = checkpoint
+        self.interval_seconds = float(interval_seconds or VERIFICATION_CHECKPOINT_INTERVAL_SECONDS)
+        self.interval_bytes = int(interval_bytes or VERIFICATION_CHECKPOINT_INTERVAL_BYTES)
+        self.clock = clock or time.monotonic
+        self.last_checkpoint_at = self.clock()
+        self.pending_bytes = 0
+        self.dirty = False
+        self.checkpoint_count = 0
+
+    def advance(self, verified_bytes):
+        self.pending_bytes += max(0, int(verified_bytes or 0))
+        self.dirty = True
+        if self.pending_bytes >= self.interval_bytes:
+            self.flush(now=self.clock())
+
+    def mark_dirty(self):
+        self.dirty = True
+
+    def flush(self, force=False, now=None):
+        if not self.dirty:
+            return False
+        current = self.clock() if now is None else now
+        if not force and self.pending_bytes < self.interval_bytes:
+            return False
+        self.checkpoint()
+        self.checkpoint_count += 1
+        self.pending_bytes = 0
+        self.dirty = False
+        self.last_checkpoint_at = current
+        return True
+
+
+def _verify_entry_copy_chunks(entry, candidate, checkpoint_throttle=None):
+    """Read back only unfinished chunks and durably remember resumable progress."""
+    digest = entry.get('copyDigest') or {}
+    hashes = digest.get('chunks') if isinstance(digest, dict) else None
+    chunk_size = int(digest.get('chunkSize') or 0) if isinstance(digest, dict) else 0
+    expected_size = int(entry.get('size') or -1)
+    if not hashes or chunk_size <= 0 or not _regular_file_without_links(candidate, nonempty=expected_size > 0):
+        return False
+    try:
+        info = os.lstat(candidate)
+    except OSError:
+        return False
+    def stable_stat_integer(value):
+        return int(value) if isinstance(value, int) and not isinstance(value, bool) else 0
+
+    signature = {
+        'canonicalPath': os.path.normcase(os.path.realpath(os.path.abspath(candidate))),
+        'device': stable_stat_integer(getattr(info, 'st_dev', 0)),
+        'fileId': stable_stat_integer(getattr(info, 'st_ino', 0)),
+        'size': int(info.st_size),
+        'mtimeNs': int(info.st_mtime_ns),
+    }
+    verification = entry.get('copyVerification') if isinstance(entry.get('copyVerification'), dict) else {}
+    completed = int(verification.get('verifiedChunks') or 0) if verification.get('targetSignature') == signature else 0
+    if completed < 0 or completed > len(hashes):
+        completed = 0
+    try:
+        with open(candidate, 'rb') as copied:
+            copied.seek(completed * chunk_size)
+            for index in range(completed, len(hashes)):
+                ensure_not_cancelled()
+                block = copied.read(chunk_size)
+                if hashlib.sha256(block).hexdigest() != hashes[index]:
+                    entry.pop('copyVerification', None)
+                    if checkpoint_throttle:
+                        checkpoint_throttle.mark_dirty()
+                        checkpoint_throttle.flush(force=True)
+                    return False
+                entry['copyVerification'] = {
+                    'algorithm': 'sha256', 'targetSignature': signature,
+                    'verifiedChunks': index + 1, 'complete': index + 1 == len(hashes),
+                }
+                if checkpoint_throttle:
+                    checkpoint_throttle.advance(len(block))
+            if copied.read(1):
+                return False
+    except OSError:
+        return False
+    return int(info.st_size) == expected_size and len(hashes) == math.ceil(expected_size / chunk_size)
 
 
 def ensure_import_disk_space(destination, required_bytes, purpose='导入'):
@@ -346,7 +565,7 @@ def promote_staged_file(source, destination, on_progress=None, allow_atomic_move
     if os.path.exists(temporary) and not _files_have_same_import_content(source, temporary):
         os.remove(temporary)
     if not os.path.isfile(temporary):
-        safe_chunk_copy(source, temporary, on_progress=on_progress)
+        safe_chunk_copy(source, temporary, on_progress=on_progress, durable=True)
     if not _files_have_same_import_content(source, temporary):
         raise IOError(f'整理校验失败：{os.path.basename(source)}')
     if os.path.exists(destination):
@@ -359,6 +578,7 @@ IMPORT_DATE_FILTERS = ('all', 'today', 'today_yesterday')
 RAW_EXTENSIONS = ('.arw', '.cr2', '.cr3', '.dng', '.nef', '.orf', '.rwl', '.raf', '.3fr', '.fff')
 JPG_EXTENSIONS = ('.jpg', '.jpeg')
 VIDEO_EXTENSIONS = ('.mp4', '.mov', '.avi', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm')
+VIDEO_OUTPUT_EXTENSIONS = (*VIDEO_EXTENSIONS, '.m4v', '.mkv', '.webm')
 FOUR_GB = 4 * 1024 * 1024 * 1024
 SPLIT_TARGET_BYTES = int(3.95 * 1024 * 1024 * 1024)
 
@@ -416,7 +636,9 @@ def get_file_time(file_path):
     """Prefer the media capture time; use filesystem mtime only as a fallback."""
     extension = os.path.splitext(file_path)[1].lower()
     timestamp = _video_capture_timestamp(file_path) if extension in VIDEO_EXTENSIONS else _image_capture_timestamp(file_path)
-    if timestamp is not None:
+    # Reject camera/tool sentinel values and implausible future dates. Filesystem
+    # mtime is a safer routing fallback than creating a wildly wrong project.
+    if timestamp is not None and -2208988800 <= timestamp <= time.time() + 2 * 24 * 60 * 60:
         return timestamp
     try:
         return os.path.getmtime(file_path)
@@ -631,8 +853,11 @@ def filter_media_by_capture_date(files, date_filter='all', today=None, on_progre
 
 STAGING_MANIFEST_NAME = '.photoflow-import-manifest.json'
 IMPORT_GRAPH_RECEIPT_NAME = '.photoflow-import-graph-receipt.json'
+STAGING_PATCH_JOURNAL_NAME = '.photoflow-import-patches.jsonl'
 STAGING_RETENTION_SECONDS = 30 * 24 * 60 * 60
 SOURCE_FINGERPRINT_BYTES = 64 * 1024
+VERIFICATION_CHECKPOINT_INTERVAL_SECONDS = 3.0
+VERIFICATION_CHECKPOINT_INTERVAL_BYTES = 2 * 1024 * 1024 * 1024
 
 
 def _source_volume_identity(source_path):
@@ -683,11 +908,15 @@ def _source_sample_fingerprint(file_path, size=None):
 
 
 def _source_entry_metadata(file_path):
-    stat = os.stat(file_path)
+    link_stat = os.lstat(file_path)
+    if stat.S_ISLNK(link_stat.st_mode) or not stat.S_ISREG(link_stat.st_mode):
+        raise OSError(f'导入源不是普通文件：{file_path}')
+    file_stat = os.stat(file_path)
     return {
-        'size': int(stat.st_size),
-        'sourceMtimeNs': int(stat.st_mtime_ns),
-        'sourceFingerprint': _source_sample_fingerprint(file_path, stat.st_size),
+        'size': int(file_stat.st_size),
+        'sourceMtimeNs': int(file_stat.st_mtime_ns),
+        'sourceRealPath': os.path.normcase(os.path.realpath(file_path)),
+        'sourceFingerprint': _source_sample_fingerprint(file_path, file_stat.st_size),
     }
 
 
@@ -701,6 +930,9 @@ def _entry_current_source_status(entry):
         return 'changed'
     stored_mtime = entry.get('sourceMtimeNs')
     if isinstance(stored_mtime, int) and stored_mtime != current['sourceMtimeNs']:
+        return 'changed'
+    stored_real_path = str(entry.get('sourceRealPath') or '')
+    if stored_real_path and os.path.normcase(os.path.realpath(source_path)) != stored_real_path:
         return 'changed'
     stored_fingerprint = str(entry.get('sourceFingerprint') or '')
     return 'match' if not stored_fingerprint or stored_fingerprint == current['sourceFingerprint'] else 'changed'
@@ -742,6 +974,31 @@ def _validate_staged_source_identity(staged_import):
     return bool(entries) and all(status == 'match' for status in statuses)
 
 
+def verify_staged_import_for_source_cleanup(staged_import):
+    """Fully read back local copies before allowing any destructive source cleanup."""
+    entries = staged_import.get('entries') or []
+    if not entries:
+        return False
+    throttle = VerificationCheckpointThrottle(lambda: checkpoint_staged_import(staged_import))
+    try:
+        for entry in entries:
+            candidate = str(entry.get('committedDestination') or entry.get('staged') or '')
+            root = staged_import['stagingDir'] if candidate == entry.get('staged') else os.path.dirname(candidate)
+            if not _regular_file_without_links(candidate, root=root, nonempty=int(entry.get('size') or 0) > 0):
+                throttle.flush(force=True)
+                return False
+            if not _verify_entry_copy_chunks(entry, candidate, throttle):
+                throttle.flush(force=True)
+                return False
+        throttle.flush(force=True)
+        return True
+    except BaseException:
+        # Cancellation, disconnects and unexpected failures retain the latest
+        # in-memory progress at the critical boundary before propagating.
+        throttle.flush(force=True)
+        raise
+
+
 def cleanup_expired_import_staging(dest_path, retention_seconds=STAGING_RETENTION_SECONDS):
     staging_root = os.path.join(os.path.abspath(dest_path), '_PhotoFlow_Safety_Temp')
     if not os.path.isdir(staging_root):
@@ -775,6 +1032,57 @@ def _staging_manifest_path(staging_dir):
     return os.path.join(staging_dir, STAGING_MANIFEST_NAME)
 
 
+def _staging_patch_journal_path(staging_dir):
+    return os.path.join(staging_dir, STAGING_PATCH_JOURNAL_NAME)
+
+
+def _replay_staging_patch_journal(staging_dir, manifest):
+    entries = manifest.get('files') if isinstance(manifest, dict) else None
+    if not isinstance(entries, list):
+        return manifest
+    by_staged = {
+        os.path.normcase(os.path.abspath(str(entry.get('staged') or ''))): entry
+        for entry in entries if isinstance(entry, dict) and entry.get('staged')
+    }
+    try:
+        with open(_staging_patch_journal_path(staging_dir), 'r', encoding='utf-8') as journal:
+            for line in journal:
+                try:
+                    record = json.loads(line)
+                    target = by_staged.get(os.path.normcase(os.path.abspath(str(record.get('staged') or ''))))
+                    patch = record.get('patch')
+                    if target is not None and isinstance(patch, dict):
+                        patch_staged_entry_fields(target, patch)
+                except (TypeError, ValueError, json.JSONDecodeError):
+                    continue
+    except OSError:
+        pass
+    return manifest
+
+
+def journal_staged_entry(staged_import, entry, patch):
+    """Persist one small entry patch without rewriting the full manifest."""
+    patch_staged_entry_fields(entry, patch)
+    staging_dir = staged_import['stagingDir']
+    os.makedirs(staging_dir, exist_ok=True)
+    record = {'staged': str(entry.get('staged') or ''), 'patch': patch}
+    with open(_staging_patch_journal_path(staging_dir), 'a', encoding='utf-8') as journal:
+        journal.write(json.dumps(record, ensure_ascii=False, separators=(',', ':')) + '\n')
+        journal.flush()
+        os.fsync(journal.fileno())
+
+
+def compact_staging_patch_journal(staged_import):
+    journal_path = _staging_patch_journal_path(staged_import['stagingDir'])
+    if not os.path.exists(journal_path):
+        return
+    checkpoint_staged_import(staged_import)
+    try:
+        os.remove(journal_path)
+    except OSError:
+        pass
+
+
 def _write_staging_manifest(staging_dir, payload):
     os.makedirs(staging_dir, exist_ok=True)
     manifest_path = _staging_manifest_path(staging_dir)
@@ -798,10 +1106,21 @@ def write_import_graph_receipt(staging_dir, import_session, manifests):
     normalized = list(manifests or [])
     if not normalized or any(not isinstance(item, dict) or item.get('schemaVersion') != 2 or item.get('importSessionId') != session_id for item in normalized):
         raise ValueError('import_receipt_invalid: receipt manifests must use schema version 2 and the active session')
+    receipt_manifests = []
+    manifest_identities = []
+    for index, item in enumerate(normalized):
+        manifest_id = str(item.get('manifestId') or IMPORT_MANIFEST_IDENTITIES.get(id(item)) or hashlib.sha256(
+            f'{session_id}\0{index}\0{json.dumps(item, sort_keys=True, ensure_ascii=False)}'.encode('utf-8')
+        ).hexdigest())
+        enriched = dict(item)
+        enriched['manifestId'] = manifest_id
+        receipt_manifests.append(enriched)
+        manifest_identities.append(manifest_id)
     payload = {
         'receiptVersion': 1,
         'importSessionId': session_id,
-        'manifests': normalized,
+        'manifests': receipt_manifests,
+        'manifestIdentities': manifest_identities,
         'createdAt': int(time.time() * 1000),
     }
     os.makedirs(staging_dir, exist_ok=True)
@@ -834,11 +1153,12 @@ def load_staged_import(dest_path, import_session=''):
             manifest = json.load(manifest_file)
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return None
+    manifest = _replay_staging_patch_journal(staging_dir, manifest)
     entries = manifest.get('files') if isinstance(manifest, dict) else None
     if not isinstance(entries, list) or not entries:
         return None
-    normalized_staging = os.path.abspath(staging_dir)
-    normalized_destination_root = os.path.abspath(dest_path)
+    normalized_staging = os.path.realpath(os.path.abspath(staging_dir))
+    normalized_destination_root = os.path.realpath(os.path.abspath(dest_path))
     originals = []
     local_files = []
     normalized_entries = []
@@ -858,16 +1178,16 @@ def load_staged_import(dest_path, import_session=''):
         committed_path = os.path.abspath(str(entry.get('committedDestination') or entry.get('pendingDestination') or '')) if entry.get('committedDestination') or entry.get('pendingDestination') else ''
         output_paths = [os.path.abspath(str(value)) for value in entry.get('outputPaths', []) if value]
         try:
-            inside_staging = os.path.commonpath((normalized_staging, staged_path)) == normalized_staging
-            committed_inside_destination = not committed_path or os.path.commonpath((normalized_destination_root, committed_path)) == normalized_destination_root
-            outputs_inside_destination = all(os.path.commonpath((normalized_destination_root, value)) == normalized_destination_root for value in output_paths)
+            inside_staging = _real_path_inside(normalized_staging, staged_path)
+            committed_inside_destination = not committed_path or _real_path_inside(normalized_destination_root, committed_path)
+            outputs_inside_destination = all(_real_path_inside(normalized_destination_root, value) for value in output_paths)
         except ValueError:
             inside_staging = False
             committed_inside_destination = False
             outputs_inside_destination = False
-        staged_valid = inside_staging and os.path.isfile(staged_path) and os.path.getsize(staged_path) == expected_size
+        staged_valid = inside_staging and _regular_file_without_links(staged_path, normalized_staging) and os.path.getsize(staged_path) == expected_size
         committed_valid = committed_inside_destination and committed_path and _entry_matches_imported_content(entry, committed_path, expected_size)
-        outputs_valid = outputs_inside_destination and output_paths and all(os.path.isfile(value) and os.path.getsize(value) > 0 for value in output_paths)
+        outputs_valid = outputs_inside_destination and output_paths and all(_regular_file_without_links(value, normalized_destination_root, nonempty=True) for value in output_paths)
         if expected_size < 0 or not (staged_valid or committed_valid or outputs_valid):
             return None
         local_path = output_paths[0] if outputs_valid else committed_path if committed_valid else staged_path
@@ -991,6 +1311,101 @@ def staged_entry_for_local_path(staged_import, local_path):
     return None
 
 
+def post_process_record(entry, kind):
+    records = entry.get('postProcesses') if isinstance(entry.get('postProcesses'), dict) else {}
+    record = records.get(kind)
+    if isinstance(record, dict):
+        return record
+    legacy = entry.get('postProcess')
+    return legacy if isinstance(legacy, dict) and legacy.get('kind') == kind else None
+
+
+def checkpoint_post_process(staged_import, entry, kind, record=None):
+    records = dict(entry.get('postProcesses') or {})
+    if record is None:
+        records.pop(kind, None)
+    else:
+        records[kind] = record
+    update_staged_entry(staged_import, entry['staged'], {
+        'postProcesses': records or None,
+        'postProcess': None,
+    })
+
+
+def entry_for_post_process(staged_import, input_path, kind, state=None):
+    normalized = os.path.normcase(os.path.realpath(os.path.abspath(input_path)))
+    for entry in staged_import.get('entries') or []:
+        record = post_process_record(entry, kind)
+        if not record or state is not None and record.get('state') != state:
+            continue
+        recorded_input = str(record.get('inputPath') or '')
+        if recorded_input and os.path.normcase(os.path.realpath(os.path.abspath(recorded_input))) == normalized:
+            return entry
+    return None
+
+
+def _validated_derived_outputs(paths, target_root, input_path='', image_output=False):
+    expected = JPG_EXTENSIONS if image_output else VIDEO_OUTPUT_EXTENSIONS
+    outputs = validate_tool_output_paths(
+        paths, target_root, input_path,
+        require_decodable=not image_output, expected_extensions=expected,
+    )
+    if image_output:
+        for output in outputs:
+            try:
+                with Image.open(output) as image:
+                    image.verify()
+            except Exception as error:
+                raise ValueError(f'派生产物不可解码：{os.path.basename(output)}') from error
+    return outputs
+
+
+def recover_post_process(staged_import, entry, kind, target_root, image_output=False):
+    """Reuse verified committed output, adopt an exact pending output, or clear stale state."""
+    record = post_process_record(entry, kind)
+    if not record:
+        return []
+    input_path = str(record.get('inputPath') or entry.get('localPath') or '')
+    outputs = list(record.get('outputPaths') or [])
+    if record.get('state') == 'committed' and outputs:
+        try:
+            return _validated_derived_outputs(outputs, target_root, input_path, image_output)
+        except ValueError:
+            checkpoint_post_process(staged_import, entry, kind, None)
+            return []
+    pending_output = str(record.get('pendingOutput') or '')
+    if record.get('state') == 'pending' and pending_output:
+        try:
+            outputs = _validated_derived_outputs([pending_output], target_root, input_path, image_output)
+            checkpoint_post_process(staged_import, entry, kind, {
+                'kind': kind, 'state': 'committed', 'inputPath': input_path, 'outputPaths': outputs,
+            })
+            return outputs
+        except ValueError:
+            pass
+    if record.get('state') == 'pending' and not pending_output:
+        output_directory = str(record.get('outputDirectory') or '')
+        baseline = {os.path.normcase(os.path.realpath(value)) for value in record.get('baselineOutputs') or []}
+        expected_stem = str(record.get('expectedStem') or '').casefold()
+        try:
+            candidates = [
+                os.path.join(output_directory, name)
+                for name in os.listdir(output_directory)
+                if os.path.normcase(os.path.realpath(os.path.join(output_directory, name))) not in baseline
+                and (not expected_stem or Path(name).stem.casefold().startswith(expected_stem))
+            ]
+            if len(candidates) == 1:
+                outputs = _validated_derived_outputs(candidates, target_root, input_path, image_output)
+                checkpoint_post_process(staged_import, entry, kind, {
+                    'kind': kind, 'state': 'committed', 'inputPath': input_path, 'outputPaths': outputs,
+                })
+                return outputs
+        except (OSError, ValueError):
+            pass
+    checkpoint_post_process(staged_import, entry, kind, None)
+    return []
+
+
 def staged_files_with_capture_times(staged_import):
     cached = staged_import.get('timedFiles') or []
     if len(cached) == len(staged_import.get('stagedFiles') or []):
@@ -1036,7 +1451,7 @@ def _resumable_staging_entries(staging_dir, source_volume_identity=''):
     stored_volume_identity = str(manifest.get('sourceVolumeIdentity') or '')
     if stored_volume_identity and source_volume_identity and stored_volume_identity != source_volume_identity:
         raise SourceIdentityMismatch('检测到 SD 卡已经更换，旧暂存不会用于当前卡。')
-    normalized_staging = os.path.abspath(staging_dir)
+    normalized_staging = os.path.realpath(os.path.abspath(staging_dir))
     entries = {}
     for entry in raw_entries:
         if not isinstance(entry, dict):
@@ -1045,7 +1460,7 @@ def _resumable_staging_entries(staging_dir, source_volume_identity=''):
         staged_path = os.path.abspath(str(entry.get('staged') or ''))
         try:
             expected_size = int(entry.get('size'))
-            inside_staging = os.path.commonpath((normalized_staging, staged_path)) == normalized_staging
+            inside_staging = _real_path_inside(normalized_staging, staged_path)
         except (TypeError, ValueError, OSError):
             continue
         if not source_path or not staged_path or not inside_staging or expected_size < 0:
@@ -1055,17 +1470,81 @@ def _resumable_staging_entries(staging_dir, source_volume_identity=''):
             'staged': staged_path,
             'size': expected_size,
             **({'sourceMtimeNs': entry['sourceMtimeNs']} if isinstance(entry.get('sourceMtimeNs'), int) else {}),
+            **({'sourceRealPath': entry['sourceRealPath']} if entry.get('sourceRealPath') else {}),
             **({'sourceFingerprint': entry['sourceFingerprint']} if entry.get('sourceFingerprint') else {}),
+            **({'copyDigest': entry['copyDigest']} if isinstance(entry.get('copyDigest'), dict) else {}),
+            **({'copyVerification': entry['copyVerification']} if isinstance(entry.get('copyVerification'), dict) else {}),
             **({'captureTimestamp': entry['captureTimestamp']} if isinstance(entry.get('captureTimestamp'), (int, float)) and entry['captureTimestamp'] > 0 else {}),
         }
     return entries
 
 
-def stage_media_to_safety_temp(sd_path, dest_path, direct_source=False, source_paths=None, import_session='', progress_end=70, date_filter='all'):
+def backfill_missing_copy_digests(staged_import):
+    """Safely recopy digestless staged files once when their original source is online."""
+    failed = []
+    changed = False
+    staging_dir = staged_import['stagingDir']
+    for entry in staged_import.get('entries') or []:
+        digest = entry.get('copyDigest')
+        if isinstance(digest, dict) and digest.get('chunks'):
+            continue
+        source = str(entry.get('source') or '')
+        staged = str(entry.get('staged') or '')
+        if _entry_current_source_status(entry) != 'match' \
+                or not _regular_file_without_links(staged, staging_dir, nonempty=int(entry.get('size') or 0) > 0):
+            failed.append(source)
+            continue
+        temporary = f'{staged}.digest-backfill-{os.getpid()}'
+        try:
+            if os.path.exists(temporary):
+                os.remove(temporary)
+            copy_digest = safe_chunk_copy(source, temporary, collect_digest=True)
+            if not copy_digest or os.path.getsize(temporary) != int(entry.get('size') or -1):
+                raise IOError('摘要补录复制不完整')
+            os.replace(temporary, staged)
+            entry['copyDigest'] = copy_digest
+            entry.pop('copyVerification', None)
+            entry['localPath'] = staged
+            changed = True
+        except (ImportCancelled, KeyboardInterrupt, SystemExit):
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            if changed:
+                checkpoint_staged_import(staged_import)
+            raise
+        except Exception:
+            try:
+                os.remove(temporary)
+            except OSError:
+                pass
+            failed.append(source)
+    if changed:
+        checkpoint_staged_import(staged_import)
+    return failed
+
+
+def stage_media_to_safety_temp(sd_path, dest_path, direct_source=False, source_paths=None, import_session='', progress_end=70, date_filter='all', verify_copy=False):
     cleanup_expired_import_staging(dest_path)
     existing = load_staged_import(dest_path, import_session)
     if existing:
         existing['sourceValidated'] = _validate_staged_source_identity(existing)
+        unverified_sources = backfill_missing_copy_digests(existing) if verify_copy else []
+        existing['copyVerified'] = verify_staged_import_for_source_cleanup(existing) if verify_copy and not unverified_sources else False
+        if verify_copy and unverified_sources:
+            existing['sourceCleanupBlockedReason'] = 'verification-unavailable'
+            emit(
+                'warning',
+                '部分已有暂存无法验证所以未清源；将继续使用本地副本完成导入。',
+                data={
+                    'code': 'source_cleanup_unverified',
+                    'sourceCleanupAllowed': False,
+                    'unverifiedFiles': [os.path.basename(value) for value in unverified_sources],
+                },
+            )
+        elif verify_copy and not existing['copyVerified']:
+            raise IOError('导入副本完整读回校验失败；源文件已保留')
         log_progress(
             '素材已导入，准备读取本地副本...',
             progress_end,
@@ -1140,7 +1619,10 @@ def stage_media_to_safety_temp(sd_path, dest_path, direct_source=False, source_p
         if capture_timestamp is not None:
             entry['captureTimestamp'] = capture_timestamp
         entries.append(entry)
-    manifest = {'version': 2, 'baseSource': base_source, 'sourceVolumeIdentity': source_volume_identity, 'dateFilter': normalized_date_filter, 'sourceFileCount': source_file_count, 'files': entries}
+    manifest_identity = hashlib.sha256(
+        f'{os.path.normcase(os.path.realpath(dest_path))}\0{import_session or "default"}'.encode('utf-8', errors='surrogatepass')
+    ).hexdigest()
+    manifest = {'version': 2, 'manifestIdentity': manifest_identity, 'baseSource': base_source, 'sourceVolumeIdentity': source_volume_identity, 'dateFilter': normalized_date_filter, 'sourceFileCount': source_file_count, 'files': entries}
     _write_staging_manifest(staging_dir, manifest)
 
     total_bytes = sum(entry['size'] for entry in entries)
@@ -1149,7 +1631,8 @@ def stage_media_to_safety_temp(sd_path, dest_path, direct_source=False, source_p
     for entry in entries:
         staged_path = entry['staged']
         try:
-            if os.path.isfile(staged_path) and os.path.getsize(staged_path) == entry['size']:
+            has_digest = isinstance(entry.get('copyDigest'), dict) and bool(entry['copyDigest'].get('chunks'))
+            if _regular_file_without_links(staged_path, staging_dir) and os.path.getsize(staged_path) == entry['size'] and (has_digest or not verify_copy):
                 completed_entries.add(os.path.normcase(os.path.abspath(staged_path)))
                 completed_bytes += entry['size']
             elif os.path.exists(staged_path):
@@ -1191,12 +1674,36 @@ def stage_media_to_safety_temp(sd_path, dest_path, direct_source=False, source_p
                 },
             )
 
-        safe_chunk_copy(source_path, staged_path, on_progress=publish_staging_progress)
+        copy_digest = safe_chunk_copy(
+            source_path,
+            staged_path,
+            on_progress=publish_staging_progress,
+            collect_digest=verify_copy,
+        )
+        if copy_digest:
+            entry['copyDigest'] = copy_digest
+        else:
+            entry.pop('copyDigest', None)
+        entry.pop('copyVerification', None)
         if os.path.getsize(staged_path) != entry['size']:
             raise IOError(f'导入校验失败：{os.path.basename(source_path)}')
         completed_bytes += entry['size']
         publish_staging_progress(0, True)
         completed_file_count += 1
+
+    # One normal-path manifest sync records all copy-loop digests. Interrupted
+    # sessions without a recorded digest conservatively recopy that file.
+    _write_staging_manifest(staging_dir, manifest)
+    staged_import = {
+        'stagingDir': staging_dir, 'baseSource': base_source,
+        'originalFiles': [entry['source'] for entry in entries],
+        'stagedFiles': [entry['staged'] for entry in entries], 'entries': entries,
+        'totalBytes': total_bytes, 'sourceVolumeIdentity': source_volume_identity,
+        'manifestVersion': 2,
+    }
+    copy_verified = verify_staged_import_for_source_cleanup(staged_import) if verify_copy else False
+    if verify_copy and not copy_verified:
+        raise IOError('导入副本完整读回校验失败；源文件已保留')
 
     log_progress(
         '素材导入完成，后续处理将使用本地副本。',
@@ -1219,6 +1726,7 @@ def stage_media_to_safety_temp(sd_path, dest_path, direct_source=False, source_p
         'sourceVolumeIdentity': source_volume_identity,
         'manifestVersion': 2,
         'sourceValidated': True,
+        'copyVerified': copy_verified,
         'entries': entries,
     }
 
@@ -1238,7 +1746,9 @@ def source_files_are_safe_to_delete(staged_import):
     if not entries:
         return all(os.path.isfile(path) for path in staged_import.get('originalFiles') or [])
     try:
-        return _validate_staged_source_identity(staged_import)
+        return all(entry.get('sourceRealPath') for entry in entries) \
+            and bool(staged_import.get('copyVerified')) \
+            and _validate_staged_source_identity(staged_import)
     except SourceIdentityMismatch:
         return False
 
@@ -1358,12 +1868,12 @@ def build_capture_groups(files, split_threshold_hours=2.0, on_progress=None):
         split_threshold_hours,
     )
 
-def stage_plan_import(sd_path, dest_path, projects_json, import_type='work', split_threshold_hours=2.0, direct_source=False, source_paths=None, import_session='', date_filter='all'):
+def stage_plan_import(sd_path, dest_path, projects_json, import_type='work', split_threshold_hours=2.0, direct_source=False, source_paths=None, import_session='', date_filter='all', delete_source=False):
     if not dest_path or not os.path.isdir(dest_path):
         log_error('导入目标不存在，请重新选择工作目录。')
         return
     try:
-        staged_import = stage_media_to_safety_temp(sd_path, dest_path, direct_source, source_paths, import_session, progress_end=75, date_filter=date_filter)
+        staged_import = stage_media_to_safety_temp(sd_path, dest_path, direct_source, source_paths, import_session, progress_end=75, date_filter=date_filter, verify_copy=delete_source)
     except OSError as error:
         log_error(f'导入失败，源设备可能已断开，请重新连接后重试：{error}')
         return
@@ -1493,10 +2003,11 @@ def build_import_graph_manifest(dest_path, target_folder, project_name, import_s
                                 imported_paths, generated_jpg_paths=None, generated_preview_paths=None):
     """Describe importer-owned artifact slots from files already handled by this session."""
     target_folder = os.path.abspath(target_folder)
+    if not _safe_directory_target(dest_path, target_folder):
+        raise ValueError('导入项目目标包含符号链接、junction 或越界路径')
     imported = {os.path.abspath(value) for value in (imported_paths or [])}
     generated_jpg = {os.path.abspath(value) for value in (generated_jpg_paths or [])}
     generated_preview = {os.path.abspath(value) for value in (generated_preview_paths or [])}
-    del dest_path  # Project ownership is resolved later from the trusted workspace catalog.
     session_id = str(import_session or '').strip()
     if not session_id:
         raise ValueError('import_session_required: import graph manifest requires a session')
@@ -1508,7 +2019,7 @@ def build_import_graph_manifest(dest_path, target_folder, project_name, import_s
 
     def add(file_path, media_kind, import_slot):
         directory = os.path.abspath(os.path.dirname(file_path))
-        if os.path.commonpath((target_folder, directory)) != target_folder:
+        if not _safe_directory_target(target_folder, directory):
             raise ValueError(f'导入产物不属于目标项目：{os.path.basename(file_path)}')
         relative_path = os.path.relpath(directory, target_folder).replace(os.sep, '/')
         if relative_path in ('', '.'):
@@ -1540,12 +2051,24 @@ def build_import_graph_manifest(dest_path, target_folder, project_name, import_s
         add(file_path, 'image', 'generated_jpg')
     for file_path in generated_preview:
         add(file_path, 'video', 'video_transcode')
-    return {
+    workspace_real = os.path.normcase(os.path.realpath(os.path.abspath(dest_path)))
+    project_real = os.path.normcase(os.path.realpath(target_folder))
+    try:
+        project_identity = os.path.relpath(project_real, workspace_real).replace(os.sep, '/')
+    except ValueError:
+        project_identity = project_real
+    manifest_id = hashlib.sha256(
+        f'{session_id}\0{project_identity}'.encode('utf-8', errors='surrogatepass')
+    ).hexdigest()
+    payload = {
         'schemaVersion': 2,
+        'manifestId': manifest_id,
         'projectName': project_name,
         'importSessionId': session_id,
         'artifacts': sorted(artifacts_by_path.values(), key=lambda item: item['relativePath'].casefold()),
     }
+    IMPORT_MANIFEST_IDENTITIES[id(payload)] = manifest_id
+    return payload
 
 
 def classify_files_by_type(folder_path):
@@ -1609,7 +2132,7 @@ def generate_raw_jpg(source_path, target_path):
             os.remove(temporary)
 
 
-def generate_missing_raw_jpgs(target_folder, imported_paths, converter=generate_raw_jpg, on_progress=None, on_generated=None):
+def generate_missing_raw_jpgs(target_folder, imported_paths, converter=generate_raw_jpg, on_progress=None, on_generated=None, on_pending=None, on_result=None, on_failure=None):
     candidates = find_missing_raw_jpg_candidates(target_folder, imported_paths)
     if not candidates:
         return 0, 0
@@ -1621,20 +2144,26 @@ def generate_missing_raw_jpgs(target_folder, imported_paths, converter=generate_
         stem = os.path.splitext(os.path.basename(source_path))[0]
         target_path = os.path.join(jpg_dir, f'{stem}.jpg')
         try:
+            if on_pending:
+                on_pending(source_path, target_path)
             with task_resource_lease('raw-jpg', f'正在从 RAW 生成 JPG：{os.path.basename(source_path)}'):
                 converter(source_path, target_path)
             succeeded += 1
             if on_generated:
                 on_generated(target_path)
+            if on_result:
+                on_result(source_path, target_path)
         except (ImportCancelled, ResourceLeaseDenied):
             raise
         except Exception as error:
+            if on_failure:
+                on_failure(source_path, error)
             emit('warning', f'无法从 RAW 生成 JPG，已保留 RAW 文件 {os.path.basename(source_path)}：{error}')
         if on_progress:
             on_progress(index, len(candidates), os.path.basename(source_path))
     return succeeded, len(candidates)
 
-def generate_video_previews(target_folder, quality='medium', on_generated=None, source_paths=None):
+def generate_video_previews(target_folder, quality='medium', on_generated=None, source_paths=None, on_pending=None, on_result=None, on_failure=None):
     """Create H.264 MP4 previews for the already classified video files."""
     quality = normalize_video_preview_quality(quality)
     profile = VIDEO_PREVIEW_QUALITY_PROFILES[quality]
@@ -1671,21 +2200,28 @@ def generate_video_previews(target_folder, quality='medium', on_generated=None, 
             output_path = os.path.join(output_dir, f"{Path(file_name).stem}_{int(time.time())}.mp4")
 
         try:
+            if on_pending:
+                on_pending(input_path, output_path)
             with task_resource_lease('video-preview', f'正在生成视频预览：{file_name}'):
                 used_encoder = transcode_video_preview(input_path, output_path, quality, on_log=log_info)
+            validate_tool_output_paths([output_path], output_dir, input_path, expected_extensions={'.mp4'})
             succeeded += 1
             if used_encoder and announced_encoder != used_encoder:
                 announced_encoder = used_encoder
                 log_info(f"视频预览使用{' GPU' if used_encoder != 'libx264' else ' CPU'} 编码器：{used_encoder}")
             if on_generated:
                 on_generated(output_path)
+            if on_result:
+                on_result(input_path, output_path)
             log_info(f"视频预览版 {index}/{len(video_files)}：{os.path.basename(output_path)}")
         except FFmpegTranscodeError as error:
+            if on_failure:
+                on_failure(input_path, error)
             emit('warning', f"视频预览生成失败，已保留原视频 {file_name}：{error}")
 
     return succeeded, len(video_files)
 
-def split_large_videos(target_folder, on_split=None, source_paths=None):
+def split_large_videos(target_folder, on_split=None, source_paths=None, on_pending=None, on_failure=None):
     """Losslessly split imported videos for FAT32 and cloud single-file limits."""
     source_dir = os.path.join(target_folder, 'mov')
     if not os.path.isdir(source_dir):
@@ -1706,21 +2242,29 @@ def split_large_videos(target_folder, on_split=None, source_paths=None):
 
         log_info(f'正在将超过 4GB 的视频分割为约 3.95GB：{file_name}')
         try:
+            if on_pending:
+                on_pending(input_path)
             with task_resource_lease('video-split', f'正在分割大视频：{file_name}'):
                 segment_paths = split_video_by_size(
                     input_path,
                     split_threshold_bytes=target_size,
                     target_segment_bytes=target_size,
                     maximum_segment_bytes=FOUR_GB,
+                    keep_original=True,
                     cancel_check=ensure_not_cancelled,
                 )
-            if not segment_paths:
-                continue
+            segment_paths = validate_tool_output_paths(
+                segment_paths, source_dir, input_path,
+                expected_extensions={os.path.splitext(input_path)[1].lower()},
+            )
             if on_split:
                 on_split(input_path, segment_paths)
+            os.remove(input_path)
             split_count += 1
             log_info(f'视频分割完成：{file_name} → {len(segment_paths)} 段')
-        except FFmpegTranscodeError as error:
+        except (FFmpegTranscodeError, OSError, ValueError) as error:
+            if on_failure:
+                on_failure(input_path, error)
             emit('warning', f'视频分割失败，已保留原文件 {file_name}：{error}')
     return split_count
 
@@ -1747,7 +2291,7 @@ def video_transcode_settings_kwargs(settings):
     }
 
 
-def transcode_imported_video_folder(source_dir, settings, on_transcoded=None, source_paths=None):
+def transcode_imported_video_folder(source_dir, settings, on_transcoded=None, source_paths=None, on_pending=None, on_result=None, on_failure=None):
     """Transcode every imported video in one media folder into its sibling ``*_转码`` folder."""
     source_dir = os.path.abspath(source_dir)
     output_dir = f'{source_dir}_转码'
@@ -1762,6 +2306,8 @@ def transcode_imported_video_folder(source_dir, settings, on_transcoded=None, so
     for input_path in candidates:
         ensure_not_cancelled()
         try:
+            if on_pending:
+                on_pending(input_path)
             with task_resource_lease('video-transcode', f'正在转码导入视频：{os.path.basename(input_path)}'):
                 output_path = transcode_video(
                     input_path,
@@ -1771,22 +2317,33 @@ def transcode_imported_video_folder(source_dir, settings, on_transcoded=None, so
                     on_log=log_info,
                     cancel_check=ensure_not_cancelled,
                 )
+            expected_container = str((settings or {}).get('container') or 'mp4').lower()
+            output_path = validate_tool_output_paths(
+                [output_path], output_dir, input_path, expected_extensions={f'.{expected_container}'},
+            )[0]
             succeeded += 1
             outputs.append(output_path)
             if on_transcoded:
                 on_transcoded(output_path)
+            if on_result:
+                on_result(input_path, output_path)
         except (FFmpegTranscodeError, OSError, ValueError) as error:
+            if on_failure:
+                on_failure(input_path, error)
             emit('warning', f'视频转码失败，已保留原文件 {os.path.basename(input_path)}：{error}')
     return succeeded, len(candidates), outputs
 
 
-def transcode_imported_videos(target_folder, settings, on_transcoded=None, source_paths=None):
+def transcode_imported_videos(target_folder, settings, on_transcoded=None, source_paths=None, on_pending=None, on_result=None, on_failure=None):
     """Apply the shared video-transcode panel settings to this work-import batch."""
     return transcode_imported_video_folder(
         os.path.join(target_folder, 'mov'),
         settings,
         on_transcoded=on_transcoded,
         source_paths=source_paths,
+        on_pending=on_pending,
+        on_result=on_result,
+        on_failure=on_failure,
     )
 # --- 3. 核心导入流程 ---
 def split_broll_video(input_path, keep_original=False):
@@ -1805,6 +2362,10 @@ def split_broll_video(input_path, keep_original=False):
                 keep_original=keep_original,
                 cancel_check=ensure_not_cancelled,
             )
+        segments = validate_tool_output_paths(
+            segments, os.path.dirname(input_path), input_path,
+            expected_extensions={os.path.splitext(input_path)[1].lower()},
+        )
     except FFmpegTranscodeError as error:
         raise IOError(f'无法安全分割 {os.path.basename(input_path)}：{error}') from error
     log_info(f'花絮视频分割完成：{os.path.basename(input_path)} → {len(segments)} 段')
@@ -1820,7 +2381,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
     import_session = str(import_session or '').strip() or str(uuid.uuid4())
     try:
         # Step 1-2: 先完整复制到安全暂存区；若规划阶段已完成，则直接复用本地副本。
-        staged_import = stage_media_to_safety_temp(sd_path, dest_path, direct_source, source_paths, import_session, progress_end=75, date_filter=date_filter)
+        staged_import = stage_media_to_safety_temp(sd_path, dest_path, direct_source, source_paths, import_session, progress_end=75, date_filter=date_filter, verify_copy=delete_source)
         base_sd = staged_import['baseSource']
         original_sd_files = staged_import['originalFiles']
         temp_files_list = staged_import['stagedFiles']
@@ -1878,7 +2439,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
             # 命名文件夹
             if route_map:
                 target_folder = os.path.abspath(route_map.get(group_record['id'], ''))
-                if not target_folder or os.path.commonpath((os.path.abspath(dest_path), target_folder)) != os.path.abspath(dest_path) or not os.path.isdir(target_folder):
+                if not target_folder or not _safe_directory_target(dest_path, target_folder):
                     raise ValueError(f"分组 {group_record['id']} 的目标项目无效，请重新选择")
                 date_str = os.path.basename(target_folder)
             elif direct_project:
@@ -1962,6 +2523,8 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
             imported_paths = item.get('importedPaths')
             if imported_paths is None:
                 destination = item['destination']
+                if not _safe_directory_target(target_folder, os.path.dirname(destination)):
+                    raise ValueError('导入写入目标包含符号链接、junction 或越界路径')
                 promote_staged_file(item['sourcePath'], destination, temporary_path=item['temporary'])
                 patch_staged_entry_fields(entry, {
                     'committedDestination': destination,
@@ -1996,12 +2559,24 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
         if has_planned_moves:
             checkpoint_staged_import(staged_import)
 
+        organized_copy_verified = verify_staged_import_for_source_cleanup(staged_import) if delete_source else False
+
         processed_target_list = list(processed_targets)
+        post_process_failed = False
         generated_jpg_count = 0
         generated_jpg_paths_by_target = {}
         generated_video_paths_by_target = {}
         raw_without_jpg_count = 0
         if generate_jpg_from_raw:
+            for target_folder in processed_target_list:
+                for source_path in imported_paths_by_target.get(target_folder, []):
+                    entry = staged_entry_for_local_path(staged_import, source_path)
+                    if not entry or os.path.splitext(source_path)[1].lower() not in RAW_EXTENSIONS:
+                        continue
+                    recovered = recover_post_process(staged_import, entry, 'raw_jpg', os.path.join(target_folder, 'jpg'), image_output=True)
+                    for output_path in recovered:
+                        imported_output_paths.add(output_path)
+                        generated_jpg_paths_by_target.setdefault(target_folder, []).append(output_path)
             all_candidates = [
                 (target_folder, source_path)
                 for target_folder in processed_target_list
@@ -2019,6 +2594,27 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                         {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)},
                     )
 
+                def mark_raw_jpg_pending(source_path, target_path):
+                    entry = staged_entry_for_local_path(staged_import, source_path)
+                    if entry:
+                        checkpoint_post_process(staged_import, entry, 'raw_jpg', {
+                            'kind': 'raw_jpg', 'state': 'pending',
+                            'inputPath': os.path.abspath(source_path), 'pendingOutput': os.path.abspath(target_path),
+                        })
+
+                def commit_raw_jpg(source_path, target_path):
+                    entry = entry_for_post_process(staged_import, source_path, 'raw_jpg', 'pending')
+                    if entry:
+                        checkpoint_post_process(staged_import, entry, 'raw_jpg', {
+                            'kind': 'raw_jpg', 'state': 'committed',
+                            'inputPath': os.path.abspath(source_path), 'outputPaths': [os.path.abspath(target_path)],
+                        })
+
+                def clear_raw_jpg_pending(source_path, _error):
+                    entry = entry_for_post_process(staged_import, source_path, 'raw_jpg', 'pending')
+                    if entry:
+                        checkpoint_post_process(staged_import, entry, 'raw_jpg', None)
+
                 generated, candidate_count = generate_missing_raw_jpgs(
                     target_folder,
                     imported_paths_by_target.get(target_folder, []),
@@ -2027,6 +2623,9 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                         imported_output_paths.add(generated_path),
                         generated_jpg_paths_by_target.setdefault(target, []).append(generated_path),
                     ),
+                    on_pending=mark_raw_jpg_pending,
+                    on_result=commit_raw_jpg,
+                    on_failure=clear_raw_jpg_pending,
                 )
                 generated_jpg_count += generated
                 raw_without_jpg_count += candidate_count
@@ -2034,7 +2633,34 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                 log_info(f"RAW 转 JPG 完成：{generated_jpg_count}/{raw_without_jpg_count} 个文件已保存到 jpg 文件夹")
         for target_index, target_folder in enumerate(processed_target_list):
             ensure_not_cancelled()
+            def mark_post_process_pending(input_path, kind, pending_output=''):
+                entry = staged_entry_for_local_path(staged_import, input_path)
+                if entry:
+                    record = {
+                        'kind': kind, 'state': 'pending', 'inputPath': os.path.abspath(input_path),
+                        'pendingOutput': os.path.abspath(pending_output) if pending_output else '',
+                    }
+                    if kind == 'transcode':
+                        output_directory = os.path.join(target_folder, 'mov_转码')
+                        record.update({
+                            'outputDirectory': output_directory,
+                            'baselineOutputs': [os.path.join(output_directory, name) for name in os.listdir(output_directory)] if os.path.isdir(output_directory) else [],
+                            'expectedStem': Path(input_path).stem,
+                        })
+                    checkpoint_post_process(staged_import, entry, kind, {
+                        **record,
+                    })
+
+            def clear_post_process_pending(input_path, kind):
+                entry = entry_for_post_process(staged_import, input_path, kind, 'pending')
+                if entry:
+                    checkpoint_post_process(staged_import, entry, kind, None)
+
             if split_large_files or split_import_videos:
+                def record_split_failure(_input_path, _error):
+                    nonlocal post_process_failed
+                    post_process_failed = True
+
                 def record_split_output(input_path, segment_paths):
                     imported_output_paths.discard(input_path)
                     imported_output_paths.update(segment_paths)
@@ -2042,39 +2668,82 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                     imported_paths_by_target[target_folder] = [path for path in target_paths if path != input_path] + list(segment_paths)
                     entry = staged_entry_for_local_path(staged_import, input_path)
                     if entry:
-                        update_staged_entry(staged_import, entry['staged'], {'outputPaths': list(segment_paths)})
+                        patch_staged_entry_fields(entry, {'outputPaths': list(segment_paths)})
+                        checkpoint_post_process(staged_import, entry, 'split', {
+                            'kind': 'split', 'state': 'committed', 'inputPath': os.path.abspath(input_path), 'outputPaths': list(segment_paths),
+                        })
 
                 split_count = split_large_videos(
                     target_folder,
                     on_split=record_split_output,
                     source_paths=imported_paths_by_target.get(target_folder, []),
+                    on_pending=lambda input_path: mark_post_process_pending(input_path, 'split'),
+                    on_failure=record_split_failure,
                 )
                 if split_count:
                     log_info(f'大文件分割完成：共处理 {split_count} 个视频')
             if transcode_import_videos:
-                def record_transcode_output(output_path, target=target_folder):
+                transcode_sources = []
+                for input_path in imported_paths_by_target.get(target_folder, []):
+                    entry = staged_entry_for_local_path(staged_import, input_path)
+                    recovered = recover_post_process(staged_import, entry, 'transcode', f'{os.path.join(target_folder, "mov")}_转码') if entry else []
+                    if recovered:
+                        imported_output_paths.update(recovered)
+                        generated_video_paths_by_target.setdefault(target_folder, []).extend(recovered)
+                    else:
+                        transcode_sources.append(input_path)
+
+                def record_transcode_output(input_path, output_path, target=target_folder):
                     imported_output_paths.add(output_path)
                     generated_video_paths_by_target.setdefault(target, []).append(output_path)
+                    source_entry = entry_for_post_process(staged_import, input_path, 'transcode', 'pending')
+                    if source_entry:
+                        checkpoint_post_process(staged_import, source_entry, 'transcode', {
+                            'kind': 'transcode', 'state': 'committed', 'inputPath': os.path.abspath(input_path), 'outputPaths': [output_path],
+                        })
 
                 transcode_count, video_count, _transcode_outputs = transcode_imported_videos(
                     target_folder,
                     transcode_settings or {},
-                    on_transcoded=record_transcode_output,
-                    source_paths=imported_paths_by_target.get(target_folder, []),
+                    source_paths=transcode_sources,
+                    on_pending=lambda input_path: mark_post_process_pending(input_path, 'transcode'),
+                    on_result=record_transcode_output,
+                    on_failure=lambda input_path, _error: clear_post_process_pending(input_path, 'transcode'),
                 )
+                if transcode_count != video_count:
+                    post_process_failed = True
                 if video_count:
                     log_info(f'视频转码完成：{transcode_count}/{video_count} 个文件已保存到 mov_转码')
             if generate_video_preview:
-                def record_generated_preview(generated_path, target=target_folder):
+                preview_sources = []
+                for input_path in imported_paths_by_target.get(target_folder, []):
+                    entry = staged_entry_for_local_path(staged_import, input_path)
+                    recovered = recover_post_process(staged_import, entry, 'preview', os.path.join(target_folder, 'mov_转码')) if entry else []
+                    if recovered:
+                        imported_output_paths.update(recovered)
+                        generated_video_paths_by_target.setdefault(target_folder, []).extend(recovered)
+                    else:
+                        preview_sources.append(input_path)
+
+                def record_generated_preview(input_path, generated_path, target=target_folder):
                     imported_output_paths.add(generated_path)
                     generated_video_paths_by_target.setdefault(target, []).append(generated_path)
+                    source_entry = entry_for_post_process(staged_import, input_path, 'preview', 'pending')
+                    if source_entry:
+                        checkpoint_post_process(staged_import, source_entry, 'preview', {
+                            'kind': 'preview', 'state': 'committed', 'inputPath': os.path.abspath(input_path), 'outputPaths': [generated_path],
+                        })
 
                 preview_count, video_count = generate_video_previews(
                     target_folder,
                     video_preview_quality,
-                    on_generated=record_generated_preview,
-                    source_paths=imported_paths_by_target.get(target_folder, []),
+                    source_paths=preview_sources,
+                    on_pending=lambda input_path, output_path: mark_post_process_pending(input_path, 'preview', output_path),
+                    on_result=record_generated_preview,
+                    on_failure=lambda input_path, _error: clear_post_process_pending(input_path, 'preview'),
                 )
+                if preview_count != video_count:
+                    post_process_failed = True
                 if video_count:
                     log_info(f"视频转码完成：{preview_count}/{video_count} 个文件已保存到 mov_转码")
             log_progress(
@@ -2099,7 +2768,8 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
             deleted_source_count = 0
             should_delete_sources = False
             if delete_source:
-                source_cleanup_allowed = source_files_are_safe_to_delete(staged_import)
+                staged_import['copyVerified'] = organized_copy_verified
+                source_cleanup_allowed = not post_process_failed and source_files_are_safe_to_delete(staged_import)
                 if source_cleanup_allowed:
                     log_info("正在安全清理导入源文件...")
                     for cleanup_index, f in enumerate(original_sd_files):
@@ -2115,7 +2785,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                             {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": success_imported_count, "totalFiles": len(original_sd_files)},
                         )
                 else:
-                    emit('warning', '源设备已断开、已经更换或文件发生变化；为避免误删，本次不会清理任何源文件。')
+                    emit('warning', '导入校验或后处理未完整成功；为避免误删，本次不会清理任何源文件。')
                 should_delete_sources = deleted_source_count == len(original_sd_files)
                 if source_cleanup_allowed and not should_delete_sources:
                     emit('warning', f'导入已完成，但源设备不可用或部分源文件无法删除；已删除 {deleted_source_count}/{len(original_sd_files)} 个源文件。')
@@ -2135,7 +2805,14 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                         continue
                 if project_paths:
                     imported_paths_by_project[os.path.basename(target_absolute)] = sorted(set(project_paths))
-            log_success("导入完成，源文件已按设置处理", {"projectNames": created_projects, "importedCount": success_imported_count, "sourceFilesDeleted": should_delete_sources, "generatedJpgCount": generated_jpg_count, "importedPaths": sorted(imported_output_paths), "importedPathsByProject": imported_paths_by_project, "importSessionId": import_session, "importManifests": import_manifests, "receiptPending": True})
+            public_import_manifests = [
+                {key: value for key, value in manifest.items() if key != 'manifestId'}
+                for manifest in import_manifests
+            ]
+            success_payload = {"projectNames": created_projects, "importedCount": success_imported_count, "sourceFilesDeleted": should_delete_sources, "generatedJpgCount": generated_jpg_count, "importedPaths": sorted(imported_output_paths), "importedPathsByProject": imported_paths_by_project, "importSessionId": import_session, "importManifests": public_import_manifests, "receiptPending": True}
+            if post_process_failed:
+                success_payload['partialFailure'] = True
+            log_success("导入完成，源文件已按设置处理", success_payload)
         else:
             log_error(f"警告：导入数量不匹配（应有{len(original_sd_files)}，实际{success_imported_count}）。SD 卡未清理，请检查桌面临时文件夹。")
 
@@ -2156,9 +2833,10 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
     imported_video_paths_by_folder = {}
     source_cleanup_started = False
     deleted_source_count = 0
+    post_process_failed = False
 
     try:
-        staged_import = stage_media_to_safety_temp(sd_path, dest_path, direct_source, source_paths, import_session, progress_end=75, date_filter=date_filter)
+        staged_import = stage_media_to_safety_temp(sd_path, dest_path, direct_source, source_paths, import_session, progress_end=75, date_filter=date_filter, verify_copy=delete_source)
         base_sd = staged_import['baseSource']
         original_files = staged_import['originalFiles']
         import_files = staged_import['stagedFiles']
@@ -2176,7 +2854,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
             timed_files = staged_files_with_capture_times(staged_import)
             for group in _build_capture_groups_from_timed_files(timed_files):
                 project_path = os.path.abspath(route_map.get(group['id'], ''))
-                if not project_path or os.path.commonpath((os.path.abspath(dest_path), project_path)) != os.path.abspath(dest_path) or not os.path.isdir(project_path):
+                if not project_path or not _safe_directory_target(dest_path, project_path):
                     raise ValueError(f"分组 {group['id']} 的目标项目无效，请重新选择")
                 for file_path, _timestamp in group['files']:
                     file_routes[file_path] = project_path
@@ -2187,16 +2865,31 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
         log_info(f"正在把 {len(import_files)} 个已导入文件整理到花絮...")
         for index, source in enumerate(import_files):
             ensure_not_cancelled()
+            entry = staged_entry_for_local_path(staged_import, source)
             project_path = file_routes.get(source, dest_path)
             broll_folder = os.path.join(project_path, '花絮')
             if not os.path.isdir(broll_folder):
                 os.makedirs(broll_folder, exist_ok=False)
                 created_broll_folders.append(broll_folder)
-            source_size = os.path.getsize(source)
+            recovered_segments = []
+            split_record = post_process_record(entry, 'split') if entry else None
+            if split_record and split_record.get('state') == 'committed' and split_record.get('outputPaths'):
+                split_input = str(split_record.get('inputPath') or '')
+                try:
+                    recovered_segments = validate_tool_output_paths(
+                        split_record['outputPaths'], broll_folder, split_input,
+                        expected_extensions={os.path.splitext(split_input)[1].lower()},
+                    )
+                except ValueError:
+                    checkpoint_post_process(staged_import, entry, 'split', None)
+                    recovered_segments = []
+            source_size = int(entry.get('size') or 0) if recovered_segments else os.path.getsize(source)
             will_split = (split_large_files or split_import_videos) and os.path.splitext(source)[1].lower() in VIDEO_EXTENSIONS and source_size > FOUR_GB
             if will_split:
                 ensure_import_disk_space(project_path, source_size, '花絮视频分割')
-            destination = unique_broll_destination(broll_folder, os.path.basename(source), will_split)
+            committed_destination = str(entry.get('committedDestination') or '') if entry else ''
+            already_committed = bool(entry and committed_destination and _entry_matches_imported_content(entry, committed_destination, int(entry.get('size') or 0)))
+            destination = os.path.abspath(committed_destination) if already_committed else unique_broll_destination(broll_folder, os.path.basename(source), will_split)
 
             def publish_broll_progress(current_file_bytes, force=False):
                 nonlocal last_progress_at
@@ -2218,12 +2911,41 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                     },
                 )
 
-            moved_from_staging = promote_staged_file(
-                source,
-                destination,
-                on_progress=publish_broll_progress,
-                allow_atomic_move=True,
-            )
+            if recovered_segments:
+                for segment in recovered_segments:
+                    if segment not in created_files:
+                        created_files.append(segment)
+                split_input = str(split_record.get('inputPath') or '')
+                if split_input and os.path.isfile(split_input) and split_input not in split_originals:
+                    split_originals.append(split_input)
+                if transcode_import_videos:
+                    imported_video_paths_by_folder.setdefault(broll_folder, []).extend(recovered_segments)
+                completed_bytes += source_size
+                publish_broll_progress(0, True)
+                continue
+
+            moved_from_staging = False
+            if not already_committed:
+                if not _safe_directory_target(project_path, os.path.dirname(destination)):
+                    raise ValueError('花絮写入目标包含符号链接、junction 或越界路径')
+                if entry:
+                    journal_staged_entry(staged_import, entry, {
+                        'pendingDestination': destination,
+                        'promotion': {'state': 'pending', 'destination': destination},
+                    })
+                moved_from_staging = promote_staged_file(
+                    source,
+                    destination,
+                    on_progress=publish_broll_progress,
+                    allow_atomic_move=True,
+                )
+                if entry:
+                    journal_staged_entry(staged_import, entry, {
+                        'pendingDestination': None,
+                        'committedDestination': destination,
+                        'localPath': destination,
+                        'promotion': {'state': 'committed', 'destination': destination},
+                    })
             if os.path.getsize(destination) != source_size:
                 try:
                     os.remove(destination)
@@ -2235,6 +2957,10 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                 moved_staged_files[destination] = source
             post_process_video_paths = [destination]
             if will_split:
+                if entry:
+                    checkpoint_post_process(staged_import, entry, 'split', {
+                        'kind': 'split', 'state': 'pending', 'inputPath': destination,
+                    })
                 log_progress(
                     f"正在分割花絮大视频：{os.path.basename(destination)}",
                     75 + int(((completed_bytes + source_size) / max(1, total_bytes)) * 15),
@@ -2246,6 +2972,11 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                     created_files.extend(segments)
                     split_originals.append(destination)
                     post_process_video_paths = segments
+                    if entry:
+                        patch_staged_entry_fields(entry, {'outputPaths': list(segments)})
+                        checkpoint_post_process(staged_import, entry, 'split', {
+                            'kind': 'split', 'state': 'committed', 'inputPath': destination, 'outputPaths': list(segments),
+                        })
             if transcode_import_videos:
                 imported_video_paths_by_folder.setdefault(broll_folder, []).extend(post_process_video_paths)
             completed_bytes += source_size
@@ -2253,21 +2984,57 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
 
         transcode_count = 0
         transcode_candidate_count = 0
+        organized_copy_verified = verify_staged_import_for_source_cleanup(staged_import) if delete_source else False
         for broll_folder, imported_video_paths in imported_video_paths_by_folder.items():
             output_folder = f'{os.path.abspath(broll_folder)}_转码'
             output_folder_existed = os.path.isdir(output_folder)
+            pending_transcode_paths = []
+            for input_path in imported_video_paths:
+                recovered_entry = staged_entry_for_local_path(staged_import, input_path)
+                recovered = recover_post_process(staged_import, recovered_entry, 'transcode', output_folder) if recovered_entry else []
+                if recovered:
+                    created_files.extend(recovered)
+                else:
+                    pending_transcode_paths.append(input_path)
+
+            def mark_broll_transcode_pending(input_path):
+                pending_entry = staged_entry_for_local_path(staged_import, input_path)
+                if pending_entry:
+                    checkpoint_post_process(staged_import, pending_entry, 'transcode', {
+                        'kind': 'transcode', 'state': 'pending', 'inputPath': os.path.abspath(input_path),
+                        'outputDirectory': output_folder,
+                        'baselineOutputs': [os.path.join(output_folder, name) for name in os.listdir(output_folder)] if os.path.isdir(output_folder) else [],
+                        'expectedStem': Path(input_path).stem,
+                    })
+
+            def commit_broll_transcode(input_path, output_path):
+                created_files.append(output_path)
+                pending_entry = entry_for_post_process(staged_import, input_path, 'transcode', 'pending')
+                if pending_entry:
+                    checkpoint_post_process(staged_import, pending_entry, 'transcode', {
+                        'kind': 'transcode', 'state': 'committed',
+                        'inputPath': os.path.abspath(input_path), 'outputPaths': [output_path],
+                    })
+            def clear_broll_transcode_pending(input_path, _error):
+                pending_entry = entry_for_post_process(staged_import, input_path, 'transcode', 'pending')
+                if pending_entry:
+                    checkpoint_post_process(staged_import, pending_entry, 'transcode', None)
             try:
                 succeeded, candidate_count, _outputs = transcode_imported_video_folder(
                     broll_folder,
                     transcode_settings or {},
-                    on_transcoded=created_files.append,
-                    source_paths=imported_video_paths,
+                    source_paths=pending_transcode_paths,
+                    on_pending=mark_broll_transcode_pending,
+                    on_result=commit_broll_transcode,
+                    on_failure=clear_broll_transcode_pending,
                 )
             finally:
                 if not output_folder_existed and os.path.isdir(output_folder):
                     created_broll_folders.append(output_folder)
             transcode_count += succeeded
             transcode_candidate_count += candidate_count
+            if succeeded != candidate_count:
+                post_process_failed = True
         if transcode_candidate_count:
             log_info(f'花絮视频转码完成：{transcode_count}/{transcode_candidate_count} 个文件已保存到 花絮_转码')
 
@@ -2281,7 +3048,8 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
         # The source card is only cleaned after every destination file has passed validation.
         should_delete_sources = False
         if delete_source:
-            source_cleanup_allowed = source_files_are_safe_to_delete(staged_import)
+            staged_import['copyVerified'] = organized_copy_verified
+            source_cleanup_allowed = not post_process_failed and source_files_are_safe_to_delete(staged_import)
             if source_cleanup_allowed:
                 source_cleanup_started = True
                 for cleanup_index, source in enumerate(original_files):
@@ -2297,12 +3065,13 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                         {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": len(original_files), "totalFiles": len(original_files)},
                     )
             else:
-                emit('warning', '源设备已断开、已经更换或文件发生变化；为避免误删，本次不会清理任何源文件。')
+                emit('warning', '导入校验或后处理未完整成功；为避免误删，本次不会清理任何源文件。')
             should_delete_sources = deleted_source_count == len(original_files)
             if source_cleanup_allowed and not should_delete_sources:
                 emit('warning', f'花絮导入已完成，但源设备不可用或部分源文件无法删除；已删除 {deleted_source_count}/{len(original_files)} 个源文件。')
         else:
             log_progress("正在保留源文件...", 99, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": len(original_files), "totalFiles": len(original_files)})
+        compact_staging_patch_journal(staged_import)
         cleanup_import_staging(staging_dir)
         log_progress("花絮导入流程全部完成", 100, {"bytesCopied": total_bytes, "totalBytes": total_bytes, "filesCopied": len(original_files), "totalFiles": len(original_files)})
         broll_projects = sorted({os.path.abspath(project_path) for project_path in (file_routes.values() or [dest_path])})
@@ -2317,7 +3086,7 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
                     continue
             if project_files:
                 imported_paths_by_project[os.path.basename(os.path.normpath(project_path))] = sorted(set(project_files))
-        log_success("花絮导入完成，源文件已按设置处理", {
+        success_payload = {
             "projectNames": [os.path.basename(os.path.normpath(project_path)) for project_path in broll_projects],
             "importedCount": len(original_files),
             "destination": dest_path,
@@ -2326,7 +3095,10 @@ def stage_import_broll(sd_path, dest_path, project_routes=None, direct_source=Fa
             "transcodeCount": transcode_count,
             "importedPaths": sorted(created_files),
             "importedPathsByProject": imported_paths_by_project,
-        })
+        }
+        if post_process_failed:
+            success_payload['partialFailure'] = True
+        log_success("花絮导入完成，源文件已按设置处理", success_payload)
     except Exception as error:
         # Before source cleanup starts, remove a partial destination so retrying
         # is unambiguous. Once cleanup has begun, destination copies are the
@@ -2424,15 +3196,19 @@ def run(args_list):
             connected = os.path.isdir(args.sd_path) and _is_import_volume_root(args.sd_path)
             log_status("SD Card Detected" if connected else "No Device", {"connected": connected, "path": args.sd_path})
         elif args.stage == 'plan':
-            stage_plan_import(args.sd_path, args.dest_path, args.projects_json, args.import_type, args.time_gap, args.direct_source, source_paths, args.import_session, args.date_filter)
+            stage_plan_import(args.sd_path, args.dest_path, args.projects_json, args.import_type, args.time_gap, args.direct_source, source_paths, args.import_session, args.date_filter, args.delete_source)
         elif args.stage == 'import':
             stage_import_and_organize(args.sd_path, args.dest_path, args.time_gap, split_val, args.generate_video_preview, args.split_large_files, json.loads(args.project_routes or '{}'), args.direct_project, args.video_preview_quality, args.direct_source, source_paths, args.delete_source, args.generate_jpg_from_raw, args.import_session, args.date_filter, args.split_import_videos, args.transcode_import_videos, json.loads(args.transcode_settings or '{}'))
         elif args.stage == 'broll':
             stage_import_broll(args.sd_path, args.dest_path, json.loads(args.project_routes or '{}'), args.direct_source, source_paths, args.delete_source, args.split_large_files, args.import_session, args.date_filter, args.split_import_videos, args.transcode_import_videos, json.loads(args.transcode_settings or '{}'))
         elif args.stage == 'discard':
             discard_import_session(args.dest_path, args.import_session)
+        else:
+            raise ValueError(f'未知导入阶段：{args.stage}')
     except ImportCancelled:
         emit('cancelled', '素材分析已取消' if args.stage == 'plan' else '导入已取消')
+    except Exception as error:
+        log_error(str(error))
 
 if __name__ == "__main__":
     run(sys.argv[1:])

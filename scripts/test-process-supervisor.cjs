@@ -3,8 +3,10 @@ const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
 const { createProcessSupervisor } = require('../electron/services/process-supervisor.cjs');
 const { createJsonCommandRunner } = require('../electron/services/json-command-runner.cjs');
+const { createDevelopmentPythonResolver, developmentPythonPath } = require('../electron/services/python-environment-service.cjs');
 const fs = require('fs');
 const path = require('path');
+const os = require('os');
 
 class FakeChild extends EventEmitter {
   constructor(pid) {
@@ -158,9 +160,23 @@ const main = async () => {
   for (let index = 0; index < 256; index += 1) historyChild.stdout.write(`${JSON.stringify({ type: 'progress', index })}\n`);
   historyChild.stdout.write(`${JSON.stringify({ success: true, marker: 'latest-result' })}\n`);
   historyChild.emit('close', 0, null);
-  const historyResult = await historyPromise;
+  await assert.rejects(historyPromise, /evicted-old-error/);
   assert.equal(historyMessageCount, 258, 'all parsed messages must still reach the progress callback');
-  assert.equal(historyResult.marker, 'latest-result', 'only bounded history should influence final protocol resolution');
+
+  const protocolCase = async (lines, onMessage) => {
+    const child = new EventEmitter(); child.stdout = new PassThrough(); child.stderr = new PassThrough();
+    child.kill = () => { queueMicrotask(() => child.emit('exit', null, 'SIGTERM')); return true; };
+    const pending = createJsonCommandRunner({ spawnJob: () => child, terminationTimeoutMs: 200 })({}, 'terminal-state', 1000, onMessage);
+    child.stdout.write(lines); child.emit('close', 0, null); return pending;
+  };
+  await assert.rejects(protocolCase(`${JSON.stringify({ type: 'error', message: '' })}\n`), /返回错误/);
+  await assert.rejects(protocolCase(`${JSON.stringify({ type: 'progress', progress: 100 })}\n`), /未返回有效结果/);
+  let tailDelivered = false;
+  const tailResult = await protocolCase(JSON.stringify({ success: true, tail: true }), () => { tailDelivered = true; });
+  assert.equal(tailResult.tail, true); assert.equal(tailDelivered, true, 'the unterminated tail must use the same callback path');
+  const lastSuccess = await protocolCase(`${JSON.stringify({ success: true, sequence: 1 })}\n${JSON.stringify({ success: true, sequence: 2 })}\n`);
+  assert.equal(lastSuccess.sequence, 2, 'multiple successful terminal messages must preserve the legacy last-result behavior');
+  await assert.rejects(protocolCase(`${JSON.stringify({ type: 'progress' })}\n`, () => { throw new Error('callback crash'); }), error => error.code === 'PROCESS_MESSAGE_CALLBACK_FAILED');
 
   let expiredSpawned = false;
   const expiredRunner = createJsonCommandRunner({ spawnJob: () => { expiredSpawned = true; return jsonChild; } });
@@ -175,6 +191,43 @@ const main = async () => {
 
   await supervisor.stopAll();
   assert.deepStrictEqual(supervisor.list(), []);
+  const pythonRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-python-resolver-'));
+  try {
+    const pythonPath = developmentPythonPath(pythonRoot);
+    fs.mkdirSync(path.dirname(pythonPath), { recursive: true });
+    fs.mkdirSync(path.join(pythonRoot, '.venv', process.platform === 'win32' ? 'Lib' : 'lib'), { recursive: true });
+    fs.mkdirSync(path.join(pythonRoot, 'scripts'));
+    fs.writeFileSync(pythonPath, 'python');
+    fs.writeFileSync(path.join(pythonRoot, '.venv', 'pyvenv.cfg'), 'home=test');
+    fs.writeFileSync(path.join(pythonRoot, 'scripts', 'verify-python-environment.py'), 'pass');
+    let validationSpawns = 0;
+    let capturedEnvironment = null;
+    const resolver = createDevelopmentPythonResolver({ projectRoot: pythonRoot, spawnSyncImpl: (_command, _args, options) => {
+      validationSpawns += 1; capturedEnvironment = options.env;
+      return { status: 0, stdout: '', stderr: '' };
+    } });
+    assert.equal(resolver(), pythonPath); assert.equal(resolver(), pythonPath);
+    assert.equal(validationSpawns, 1, 'unchanged cheap sentinels must share one validation and never rescan the venv tree');
+    assert.equal(capturedEnvironment.PYTHONPATH, undefined); assert.equal(capturedEnvironment.PYTHONHOME, undefined);
+
+    let failedValidationCalls = 0;
+    const failingResolver = createDevelopmentPythonResolver({ projectRoot: pythonRoot, spawnSyncImpl: () => {
+      failedValidationCalls += 1;
+      const deadline = Date.now() + 25;
+      while (Date.now() < deadline) { /* simulate a delayed quick verifier */ }
+      return { status: 1, stdout: '', stderr: 'delayed verification failure' };
+    } });
+    const validationStartedAt = Date.now();
+    assert.throws(() => failingResolver(), /delayed verification failure/, 'the first task must not receive a Python path before quick validation succeeds');
+    assert(Date.now() - validationStartedAt >= 20, 'the synchronous resolver must wait for delayed first-call validation');
+    assert.equal(failedValidationCalls, 1);
+
+    fs.writeFileSync(path.join(pythonRoot, '.venv', 'pyvenv.cfg'), 'home=changed');
+    assert.equal(resolver(), pythonPath);
+    assert.equal(validationSpawns, 2, 'a sentinel change must synchronously revalidate exactly once');
+    for (let index = 0; index < 1000; index += 1) assert.equal(resolver(), pythonPath);
+    assert.equal(validationSpawns, 2, 'stable consecutive calls must remain an O(fixed sentinel stat) fast path');
+  } finally { fs.rmSync(pythonRoot, { recursive: true, force: true }); }
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
   assert.match(mainSource, /processId:\s*'python:workspace-catalog'/);
   assert.match(mainSource, /processId:\s*'python:media-interaction'/);

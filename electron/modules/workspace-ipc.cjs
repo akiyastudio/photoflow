@@ -1040,7 +1040,7 @@ const registerWorkspaceIpc = context => {
         return [{ id: row.id, name: row.name, path: projectPath, status: row.status, updatedAt: fs.statSync(projectPath).mtimeMs }];
       });
       await refreshWorkspaceCatalog(root);
-      scheduleSdImportedMedia({ root, projects, importedPathsByProject: options.importedPathsByProject, imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS, videoExtensions: VIDEO_EXTENSIONS, fs, path, scheduleMediaTrackingScan });
+      await scheduleSdImportedMedia({ root, projects, importedPathsByProject: options.importedPathsByProject, imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS, videoExtensions: VIDEO_EXTENSIONS, fs, path, scheduleMediaTrackingScan });
       mainWindow?.webContents.send('workspace-projects-changed', { root, reason: 'sd-import-finalized' });
       const movedProjects = projects.filter(project => movedNames.has(project.name.toLocaleLowerCase()));
       const unchangedProjects = projects.filter(project => !movedNames.has(project.name.toLocaleLowerCase()));
@@ -2138,7 +2138,7 @@ const registerWorkspaceIpc = context => {
       const catalog = workspaceCatalogs.get(workspaceRoot) || await refreshWorkspaceCatalog(workspaceRoot);
       const result = await commitImportManifest(workspaceRoot, manifest);
       const locations = await receiptLocationsForSession(workspaceRoot, catalog, manifest?.importSessionId);
-      for (const location of locations) await acknowledgeImportReceipt(location, String(manifest?.projectName || ''));
+      for (const location of locations) await acknowledgeImportReceipt(location, String(manifest?.manifestId || manifest?.projectName || ''));
       return { success: true, ...result };
     } catch (error) {
       writeLog('error', 'Unable to commit imported media workflow graph', { error: error.message || String(error) });
@@ -2162,12 +2162,11 @@ const registerWorkspaceIpc = context => {
           if (!receipt || receipt.importSessionId !== entry.name) continue;
           for (const manifest of receipt.manifests) {
             const projectName = String(manifest?.projectName || '');
-            const acknowledged = (receipt.acknowledgedProjects || []).map(value => String(value).toLocaleLowerCase());
-            if (acknowledged.includes(projectName.toLocaleLowerCase())) continue;
+            if ((receipt.acknowledgedManifestIds || []).includes(manifest.manifestId)) continue;
             try {
               await commitImportManifest(workspaceRoot, manifest);
               recovered.push({ importSessionId: entry.name, projectName });
-              await acknowledgeImportReceipt(location, projectName);
+              await acknowledgeImportReceipt(location, manifest.manifestId);
             } catch (error) {
               failures.push({ importSessionId: entry.name, projectName, error: error.message || String(error) });
             }
@@ -2632,6 +2631,7 @@ const registerWorkspaceIpc = context => {
     const adoptedProgressIds = [];
     let importWorkspaceRoot = '';
     let importUndoToken = '';
+    let importCleanupRoots = [];
     try {
       const deleteSourceAfterImport = options?.deleteSourceAfterImport === true;
       const linkOnly = options?.linkOnly === true;
@@ -2640,6 +2640,7 @@ const registerWorkspaceIpc = context => {
       importWorkspaceRoot = ensureWorkspace(workspacePath);
       const destinationResolution = virtualPaths.resolve(projectPath, relativePath, { externalRootMode: 'target' });
       const destinationDir = destinationResolution.physicalPath;
+      importCleanupRoots = [projectPath, destinationDir];
       if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('当前文件夹不存在');
       let sourcePaths = Array.isArray(options?.sourcePaths) ? options.sourcePaths.map(source => String(source)) : [];
       if (!sourcePaths.length) {
@@ -2810,7 +2811,7 @@ const registerWorkspaceIpc = context => {
           writeLog('error', 'Unable to roll back project file import', { move, error: rollbackError.message || String(rollbackError) });
         }
       }
-      const cleaned = await cleanupImportArtifacts({ fs, virtualPaths, targets: createdTargets, managedLinks: createdManagedLinks, preserveManagedLinks: preserveCreatedExternalLinks, cleanupErrors, writeLog, logLabel: 'import' });
+      const cleaned = await cleanupImportArtifacts({ fs, virtualPaths, targets: createdTargets, managedLinks: createdManagedLinks, preserveManagedLinks: preserveCreatedExternalLinks, cleanupErrors, writeLog, logLabel: 'import', allowedRoots: importCleanupRoots, ownedTargets: createdTargets });
       preserveCreatedExternalLinks = cleaned.preserveManagedLinks;
       if (createdManagedLinks.length) {
         try { await watchProjectFileRoot(workspacePath, status, projectName, { reconcile: true }); }
@@ -2847,6 +2848,7 @@ const registerWorkspaceIpc = context => {
     let createdExternalProgressId = '';
     let progressWorkspaceRoot = '';
     let progressUndoToken = '';
+    let progressCleanupRoots = [];
     const moves = [];
     try {
       const mediaKind = options.mediaKind === 'video' ? 'video' : 'image';
@@ -2868,6 +2870,7 @@ const registerWorkspaceIpc = context => {
       if (!cleanedName) throw new Error('进度文件夹名称不能为空');
       const projectPath = path.resolve(getProjectPath(workspacePath, status, projectName));
       const destinationDir = path.resolve(appendProgress ? appendProgress.folderPath : path.join(projectPath, cleanedName));
+      progressCleanupRoots = [projectPath, destinationDir];
       if (appendProgress?.externalLinkRelativePath) {
         const appendResolution = virtualPaths.resolve(projectPath, appendProgress.externalLinkRelativePath, { externalRootMode: 'target' });
         if (!appendResolution.viaExternalLink || path.resolve(appendResolution.physicalPath).toLocaleLowerCase() !== destinationDir.toLocaleLowerCase()) {
@@ -3156,7 +3159,8 @@ const registerWorkspaceIpc = context => {
           writeLog('error', 'Unable to roll back progress import move', { move, error: rollbackError.message || String(rollbackError) });
         }
       }
-      const cleaned = await cleanupImportArtifacts({ fs, virtualPaths, targets: [...createdTargets, createdFolder], managedLinks: createdManagedLinks, preserveManagedLinks: preserveCreatedExternalLink, cleanupErrors, writeLog, logLabel: 'progress import' });
+      const ownedTargets = [...createdTargets, createdFolder].filter(Boolean);
+      const cleaned = await cleanupImportArtifacts({ fs, virtualPaths, targets: ownedTargets, managedLinks: createdManagedLinks, preserveManagedLinks: preserveCreatedExternalLink, cleanupErrors, writeLog, logLabel: 'progress import', allowedRoots: progressCleanupRoots, ownedTargets });
       preserveCreatedExternalLink = cleaned.preserveManagedLinks;
       if (createdManagedLinks.length) {
         try { await watchProjectFileRoot(workspacePath, status, projectName, { reconcile: true }); }

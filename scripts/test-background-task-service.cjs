@@ -14,7 +14,7 @@ const brollImportSource = fs.readFileSync(path.join(__dirname, '..', 'electron',
 const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
 const pluginServiceSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'plugin-service.cjs'), 'utf8');
 assert(projectFileTaskSource.includes("scanning: '正在统计'") && projectFileTaskSource.includes('concurrencyLimit = 3') && projectFileTaskSource.includes('concurrencyWriteLimit = 2'), 'file tasks must allow three total disk tasks while retaining the two-writer limit');
-assert(brollImportSource.includes("concurrencyGroup: 'disk-io'") && brollImportSource.includes("task.withResources({\n              capacities: [{ key: 'heavy-media'"), 'b-roll imports must reserve heavy media capacity only around their actual split/transcode phases');
+assert(brollImportSource.includes("concurrencyGroup: 'disk-io'") && /task\.withResources\(\{\r?\n\s+capacities: \[\{ key: 'heavy-media'/.test(brollImportSource), 'b-roll imports must reserve heavy media capacity only around their actual split/transcode phases');
 assert(systemIpcSource.includes('const pendingWorkerVideoTools = new Map()') && systemIpcSource.includes('const heartbeat = setInterval(sendHeartbeat, 5000)') && systemIpcSource.includes('abortAllWorkerVideoTools'), 'import video-tool requests must stay alive with heartbeats and be aborted with their Python owner');
 assert(systemIpcSource.includes('const pendingWorkerResourceLeases = new Map()') && systemIpcSource.includes("type: 'resource_waiting'") && systemIpcSource.includes('clearAllWorkerResourceWaits'), 'queued import media phases must receive resource heartbeats without leaking wait timers');
 assert(systemIpcSource.includes('}, controller.signal)') && pluginServiceSource.includes('onMessage, signal, requestedDeadlineAt'), 'video-tool cancellation must reach the supervised plugin process');
@@ -45,6 +45,49 @@ const queued = async promise => {
 };
 
 const main = async () => {
+  let operationLeaseAcquires = 0;
+  let scopedWorkerRuns = 0;
+  const fixtureController = new AbortController();
+  const fixtureTask = createProjectFileTask({
+    backgroundTasks: { create: () => ({
+      context: {
+        signal: fixtureController.signal,
+        acquireResourceLease: async () => { operationLeaseAcquires += 1; return { release() {} }; },
+        withResources: (_definition, worker) => worker(),
+      },
+      waitForStart: async () => undefined,
+      complete() {}, fail() {}, cancelled() {}, isFinished: () => false,
+    }) },
+    event: { sender: { isDestroyed: () => false, send() {} } },
+    operationId: 'project-file-task-falsy-fixture', operation: 'import', title: 'fixture', projectName: 'fixture',
+  });
+  assert.strictEqual(fixtureTask.withResources({}, () => { scopedWorkerRuns += 1; return 0; }), 0);
+  assert.strictEqual(scopedWorkerRuns, 1, 'a synchronous falsy scoped worker result must not execute the worker twice');
+  await Promise.all([fixtureTask.start(), fixtureTask.start()]);
+  assert.strictEqual(operationLeaseAcquires, 1, 'concurrent start calls must share one operation lease acquisition');
+  fixtureTask.complete();
+
+  let terminalCompleteCalls = 0;
+  let throwingReleaseCalls = 0;
+  const releaseFailureTask = createProjectFileTask({
+    backgroundTasks: { create: () => ({
+      context: {
+        signal: new AbortController().signal,
+        acquireResourceLease: async () => ({ release() { throwingReleaseCalls += 1; throw new Error('injected release failure'); } }),
+      },
+      waitForStart: async () => undefined,
+      complete() { terminalCompleteCalls += 1; }, fail() {}, cancelled() {}, isFinished: () => false,
+    }) },
+    event: { sender: { isDestroyed: () => false, send() {} } },
+    operationId: 'release-failure-fixture', operation: 'import', title: 'fixture', projectName: 'fixture',
+  });
+  await releaseFailureTask.start();
+  releaseFailureTask.complete();
+  releaseFailureTask.complete();
+  assert.strictEqual(throwingReleaseCalls, 1, 'a throwing operation lease release must still be cleared exactly once');
+  assert.strictEqual(terminalCompleteCalls, 2, 'lease release failure must not prevent the handle terminal callback');
+  assert.match(releaseFailureTask.job.releaseError, /injected release failure/);
+
   const ipcHandlers = new Map();
   const ipcMain = {
     on: () => undefined,

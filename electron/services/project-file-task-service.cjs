@@ -42,10 +42,18 @@ const createProjectFileTask = ({
   const handle = backgroundTasks?.create?.(definition) || null;
   const job = { cancelled: false, finishing: false, taskId: operationId };
   let operationLease = null;
+  let startPromise = null;
   let highestProgress = 0;
   if (handle?.context?.signal) {
     handle.context.signal.addEventListener('abort', () => { job.cancelled = true; }, { once: true });
   }
+  const releaseOperationLease = () => {
+    const lease = operationLease;
+    operationLease = null;
+    if (!lease) return;
+    try { lease.release(); }
+    catch (error) { job.releaseError = error?.message || String(error); }
+  };
 
   const publish = payload => {
     const requestedProgress = Math.max(0, Math.min(100, Number(payload.progress) || 0));
@@ -75,38 +83,43 @@ const createProjectFileTask = ({
   return {
     job,
     publish,
-    start: async nextResources => {
+    start: nextResources => {
+      if (startPromise) return startPromise;
       if (Array.isArray(nextResources)) operationLeaseDefinition.resources = nextResources;
-      if (!handle || handle.deduplicated) return;
-      try {
-        await handle.waitForStart();
-        operationLease = await handle.context.acquireResourceLease(operationLeaseDefinition);
-      } catch (error) {
-        if (handle.context.signal.aborted || error?.code === 'TASK_CANCELLED') {
-          throw Object.assign(new Error('文件操作已取消'), { code: cancelledCode });
+      if (!handle || handle.deduplicated) return Promise.resolve();
+      startPromise = (async () => {
+        try {
+          await handle.waitForStart();
+          if (!operationLease) operationLease = await handle.context.acquireResourceLease(operationLeaseDefinition);
+        } catch (error) {
+          startPromise = null;
+          if (handle.context.signal.aborted || error?.code === 'TASK_CANCELLED') {
+            throw Object.assign(new Error('文件操作已取消'), { code: cancelledCode });
+          }
+          throw error;
         }
-        throw error;
-      }
+      })();
+      return startPromise;
     },
     cancel: () => backgroundTasks?.cancel?.(operationId),
     waitIfPaused: () => handle?.context?.waitIfPaused?.() || Promise.resolve(),
     acquireResourceLease: definition => handle?.context?.acquireResourceLease?.(definition),
-    withResources: (definition, worker) => handle?.context?.withResources?.(definition, worker) || worker(),
+    withResources: (definition, worker) => typeof handle?.context?.withResources === 'function'
+      ? handle.context.withResources(definition, worker)
+      : worker(),
     setPausable: pausableValue => handle?.context?.setPausable?.(pausableValue),
+    setCancellable: cancellableValue => handle?.context?.setCancellable?.(cancellableValue),
     saveCheckpoint: (checkpoint, progress, message, metadata) => handle?.context?.saveCheckpoint?.(checkpoint, progress, message, metadata),
     complete: message => {
-      operationLease?.release();
-      operationLease = null;
+      releaseOperationLease();
       if (handle && !handle.deduplicated) handle.complete(message);
     },
     fail: error => {
-      operationLease?.release();
-      operationLease = null;
+      releaseOperationLease();
       if (handle && !handle.deduplicated) handle.fail(error);
     },
     cancelled: () => {
-      operationLease?.release();
-      operationLease = null;
+      releaseOperationLease();
       if (handle && !handle.deduplicated) handle.cancelled();
     },
     isFinished: () => !handle || handle.deduplicated || handle.isFinished(),

@@ -1,10 +1,11 @@
 import os
 import sys
 import argparse
+import errno
 import uuid
 from io import BytesIO
 from pathlib import Path
-from event_protocol import log_error, log_info, log_progress, log_success
+from event_protocol import log_error, log_info, log_progress, log_success, log_warning
 from PIL import Image, ImageCms, ImageOps
 from send2trash import send2trash
 
@@ -26,6 +27,35 @@ else:
 # 所有输出统一为 sRGB；这是网页和大多数 Windows 软件的默认色彩空间。
 _SRGB_PROFILE = ImageCms.ImageCmsProfile(ImageCms.createProfile("sRGB"))
 _SRGB_ICC_PROFILE = _SRGB_PROFILE.tobytes()
+_LINK_FALLBACK_ERRORS = {
+    errno.EPERM, errno.EACCES, errno.EXDEV, errno.EINVAL, errno.ENOSYS,
+    errno.EOPNOTSUPP, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+}
+
+
+def _publication_marker(destination):
+    return destination.with_name(f".{destination.name}.photoflow-publishing")
+
+
+class PublicationUnsupportedError(OSError):
+    code = "atomic_no_replace_unsupported"
+
+    def __init__(self, staging):
+        self.recovery_path = str(staging)
+        super().__init__(errno.EOPNOTSUPP, "文件系统不支持安全的排他原子发布；完整 staging 已保留")
+
+
+def publish_file_no_replace(staging, destination):
+    try:
+        os.link(staging, destination)
+        staging.unlink()
+        return
+    except FileExistsError:
+        raise
+    except OSError as error:
+        if error.errno not in _LINK_FALLBACK_ERRORS:
+            raise
+    raise PublicationUnsupportedError(staging)
 
 
 def flatten_transparency(img):
@@ -63,6 +93,14 @@ def convert_to_srgb(img):
             flattened.close()
 
 
+def safe_exif_bytes(image):
+    """Keep descriptive/time EXIF while dropping geometry invalidated by conversion."""
+    exif = image.getexif()
+    for tag in (256, 257, 274, 40962, 40963):
+        exif.pop(tag, None)
+    return exif.tobytes() if exif else None
+
+
 def has_convertible_signature(file_path):
     """兼容扩展名错误的常见图片，同时避免对目录中的每个文件做完整解码。"""
     try:
@@ -87,41 +125,59 @@ def is_conversion_candidate(file_path):
 def unique_jpg_path(file_path):
     source = Path(file_path)
     preferred = source.with_suffix(".jpg")
-    if not preferred.exists():
+    if not preferred.exists() and not _publication_marker(preferred).exists():
         return preferred
     fallback = source.with_name(f"{source.stem}_转换.jpg")
-    if not fallback.exists():
+    if not fallback.exists() and not _publication_marker(fallback).exists():
         return fallback
     index = 2
     while True:
         candidate = source.with_name(f"{source.stem}_转换_{index}.jpg")
-        if not candidate.exists():
+        if not candidate.exists() and not _publication_marker(candidate).exists():
             return candidate
         index += 1
 
 
 def save_verified_jpeg(image, target, quality):
     temporary = target.with_name(f".{target.name}.photoflow-{uuid.uuid4().hex}.tmp")
+    preserve_staging = False
     try:
+        save_options = {
+            "quality": max(1, min(100, quality)),
+            "icc_profile": _SRGB_ICC_PROFILE,
+        }
+        for key in ("dpi", "exif"):
+            value = image.info.get(key)
+            if value:
+                save_options[key] = value
         image.save(
             temporary,
             "JPEG",
-            quality=max(1, min(100, quality)),
-            icc_profile=_SRGB_ICC_PROFILE,
+            **save_options,
         )
+        with temporary.open("r+b") as staged:
+            os.fsync(staged.fileno())
         with Image.open(temporary) as verification:
             verification.load()
             if verification.format != "JPEG":
                 raise OSError("生成文件未通过 JPG 格式验证")
-        os.replace(temporary, target)
+        # A hard-link publishes the fully verified same-directory staging file
+        # atomically and, unlike replace(), fails if another process won the name.
+        try:
+            publish_file_no_replace(temporary, target)
+        except PublicationUnsupportedError:
+            preserve_staging = True
+            raise
     finally:
-        if temporary.exists():
+        if temporary.exists() and not preserve_staging:
             temporary.unlink()
 
 def run(args_list):
     if sys.platform.startswith('win'):
-        sys.stdout.reconfigure(encoding='utf-8')
-        sys.stderr.reconfigure(encoding='utf-8')
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(encoding='utf-8')
+        if hasattr(sys.stderr, "reconfigure"):
+            sys.stderr.reconfigure(encoding='utf-8')
 
     parser = argparse.ArgumentParser()
     parser.add_argument("paths", nargs='+', help="要处理的文件或目录路径")
@@ -179,18 +235,54 @@ def run(args_list):
                 img.seek(0)
                 if img.format not in CONVERTIBLE_FORMATS:
                     raise ValueError(f"不支持的图片格式：{img.format or '未知'}")
+                frame_count = int(getattr(img, "n_frames", 1) or 1)
+                protect_multiframe = frame_count > 1
+                if frame_count > 1:
+                    log_warning(
+                        f"检测到多帧图片，将按现有行为仅转换首帧：{filename}",
+                        data={
+                            "code": "multi_frame_first_frame",
+                            "input": str(Path(file_path).resolve()),
+                            "format": img.format,
+                            "frameCount": frame_count,
+                            "sourceProtected": True,
+                        },
+                    )
                 oriented = ImageOps.exif_transpose(img)
+                # Preserve metadata that remains safe and meaningful for JPEG.
+                if img.info.get("dpi"):
+                    oriented.info["dpi"] = img.info["dpi"]
+                safe_exif = safe_exif_bytes(img)
+                if safe_exif:
+                    oriented.info["exif"] = safe_exif
                 rgb_img = convert_to_srgb(oriented)
+                for key in ("dpi", "exif"):
+                    if oriented.info.get(key):
+                        rgb_img.info[key] = oriented.info[key]
                 try:
-                    jpg_file_path = unique_jpg_path(file_path)
-                    save_verified_jpeg(rgb_img, jpg_file_path, args.quality)
+                    while True:
+                        jpg_file_path = unique_jpg_path(file_path)
+                        try:
+                            save_verified_jpeg(rgb_img, jpg_file_path, args.quality)
+                            break
+                        except FileExistsError:
+                            continue
                 finally:
                     if rgb_img is not oriented:
                         rgb_img.close()
                     if oriented is not img:
                         oriented.close()
 
-            if not args.keep_original:
+            try:
+                source_stat = os.stat(file_path)
+                os.utime(jpg_file_path, ns=(source_stat.st_atime_ns, source_stat.st_mtime_ns))
+            except OSError as metadata_error:
+                log_warning(
+                    f"JPG 已成功发布，但无法保留文件时间：{filename}",
+                    data={"code": "timestamp_preservation_failed", "output": str(jpg_file_path), "detail": str(metadata_error)},
+                )
+
+            if not args.keep_original and not protect_multiframe:
                 # 只有 JPG 成功写入并通过解码验证后才处理原文件。
                 send2trash(file_path)
 
@@ -200,9 +292,20 @@ def run(args_list):
             log_progress(f"转换完成: {filename} -> {jpg_file_path.name}", percent)
                 
         except Exception as e:
-            log_error(f"转换失败 '{filename}': {str(e)}")
+            if isinstance(e, PublicationUnsupportedError):
+                from event_protocol import emit
+                emit("error", f"转换失败 '{filename}': {str(e)}", data={
+                    "code": e.code,
+                    "recoveryPath": e.recovery_path,
+                    "input": str(Path(file_path).resolve()),
+                })
+            else:
+                log_error(f"转换失败 '{filename}': {str(e)}")
 
-    log_success(f"处理完成！成功转换 {success_count}/{total_files} 个文件。")
+    if success_count:
+        log_success(f"处理完成！成功转换 {success_count}/{total_files} 个文件。")
+    else:
+        log_error(f"处理失败：成功转换 0/{total_files} 个文件。")
 
 if __name__ == "__main__":
     try:

@@ -3,25 +3,134 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
+import uuid
 from pathlib import Path
 
 import cv2
 import numpy as np
+from PIL import Image
 
 
 SUPPORTED_EXTENSIONS = {".bmp", ".jpeg", ".jpg", ".png", ".tif", ".tiff", ".webp"}
 MAX_ANALYSIS_EDGE = 1400
 MIN_CONFIDENCE = 0.58
+MAX_IMAGE_PIXELS = 100_000_000
+MAX_COMPRESSED_BYTES = 512 * 1024 * 1024
+MAX_DECODED_BYTES = 384 * 1024 * 1024
+MAX_TOTAL_WORKING_BYTES = 512 * 1024 * 1024
+ANALYSIS_BYTES_PER_PIXEL = 64
+_LINK_FALLBACK_ERRORS = {
+    errno.EPERM, errno.EACCES, errno.EXDEV, errno.EINVAL, errno.ENOSYS,
+    errno.EOPNOTSUPP, getattr(errno, "ENOTSUP", errno.EOPNOTSUPP),
+}
 
 
 def _read_image(path: Path) -> np.ndarray:
     data = np.fromfile(path, dtype=np.uint8)
-    image = cv2.imdecode(data, cv2.IMREAD_COLOR)
+    image = cv2.imdecode(data, cv2.IMREAD_UNCHANGED)
     if image is None:
         raise ValueError("无法读取图片；当前仅支持 JPG、PNG、BMP、WebP 和 TIFF")
     return image
+
+
+def _probe_image(path: Path) -> tuple[int, int]:
+    if path.stat().st_size > MAX_COMPRESSED_BYTES:
+        raise ValueError("图片压缩文件大小超过安全上限")
+    try:
+        with Image.open(path) as probe:
+            width, height = probe.size
+    except (OSError, ImportError):
+        if path.suffix.lower() != ".webp":
+            raise
+        width, height = _probe_webp_without_pillow(path)
+    if width < 1 or height < 1 or width * height > MAX_IMAGE_PIXELS:
+        raise ValueError("图片像素数量超过安全上限")
+    return width, height
+
+
+def _probe_webp_without_pillow(path: Path) -> tuple[int, int]:
+    with path.open("rb") as source:
+        header = source.read(32)
+    if len(header) >= 30 and header[:4] == b"RIFF" and header[8:12] == b"WEBP":
+        chunk = header[12:16]
+        if chunk == b"VP8X" and len(header) >= 30:
+            return int.from_bytes(header[24:27], "little") + 1, int.from_bytes(header[27:30], "little") + 1
+        if chunk == b"VP8L" and len(header) >= 25 and header[20] == 0x2F:
+            bits = int.from_bytes(header[21:25], "little")
+            return (bits & 0x3FFF) + 1, ((bits >> 14) & 0x3FFF) + 1
+        if chunk == b"VP8 " and header[23:26] == b"\x9d\x01\x2a":
+            return int.from_bytes(header[26:28], "little") & 0x3FFF, int.from_bytes(header[28:30], "little") & 0x3FFF
+    decoded = _read_image(path)
+    return decoded.shape[1], decoded.shape[0]
+
+
+def _publish_file_no_replace(staging: Path, destination: Path) -> None:
+    try:
+        os.link(staging, destination)
+        staging.unlink()
+        return
+    except FileExistsError:
+        raise
+    except OSError as error:
+        if error.errno not in _LINK_FALLBACK_ERRORS:
+            raise
+    raise PublicationUnsupportedError(staging)
+
+
+class PublicationUnsupportedError(OSError):
+    code = "atomic_no_replace_unsupported"
+
+    def __init__(self, staging: Path):
+        self.recovery_path = str(staging)
+        super().__init__(errno.EOPNOTSUPP, "文件系统不支持安全的排他原子发布；完整 staging 已保留")
+
+
+def _analysis_bgr(image: np.ndarray) -> np.ndarray:
+    if image.dtype != np.uint8:
+        maximum = float(np.iinfo(image.dtype).max) if np.issubdtype(image.dtype, np.integer) else 1.0
+        image = np.clip(image.astype(np.float32) * (255.0 / maximum), 0, 255).astype(np.uint8)
+    if image.ndim == 2:
+        return cv2.cvtColor(image, cv2.COLOR_GRAY2BGR)
+    if image.shape[2] == 4:
+        return cv2.cvtColor(image, cv2.COLOR_BGRA2BGR)
+    if image.shape[2] == 3:
+        return image
+    raise ValueError("图片通道格式不受支持")
+
+
+def _estimated_decoded_bytes(path: Path, width: int, height: int) -> int:
+    if path.suffix.lower() == ".png":
+        with path.open("rb") as source:
+            header = source.read(29)
+        if len(header) >= 26 and header[:8] == b"\x89PNG\r\n\x1a\n":
+            bit_depth, color_type = header[24], header[25]
+            # OpenCV expands palette images conservatively to BGR/BGRA and
+            # grayscale+alpha PNGs to BGRA, including 16-bit type 4 images.
+            channels = {0: 1, 2: 3, 3: 4, 4: 4, 6: 4}.get(color_type, 4)
+            return width * height * channels * max(1, (bit_depth + 7) // 8)
+    bytes_per_pixel = 4
+    try:
+        with Image.open(path) as probe:
+            if path.suffix.lower() in {".tif", ".tiff"}:
+                bits = probe.tag_v2.get(258, (16,))
+                samples = int(probe.tag_v2.get(277, 4) or 4)
+                if samples == 2:
+                    # OpenCV commonly expands grayscale+alpha TIFF to BGRA.
+                    samples = 4
+                if isinstance(bits, int):
+                    bits = (bits,)
+                bytes_per_sample = max(1, (max(int(value) for value in bits) + 7) // 8)
+                return width * height * samples * bytes_per_sample
+            bytes_per_pixel = {
+                "1": 1, "L": 1, "P": 1, "LA": 2, "RGB": 3, "RGBA": 4,
+                "I;16": 2, "I;16B": 2, "I;16L": 2, "I": 4, "F": 4,
+            }.get(probe.mode, 8)
+    except (OSError, ImportError):
+        pass
+    return width * height * bytes_per_pixel
 
 
 def _smooth(values: np.ndarray, window: int) -> np.ndarray:
@@ -538,11 +647,12 @@ def _analyze_main_rectangle(image: np.ndarray) -> tuple[tuple[int, int, int, int
     if original_height < 160 or original_width < 120:
         return (0, 0, original_width, original_height), 0.0, "图片尺寸过小，请手动确认范围", False
     scale = min(1.0, MAX_ANALYSIS_EDGE / max(original_height, original_width))
-    analysis = image if scale == 1.0 else cv2.resize(
+    bounded = image if scale == 1.0 else cv2.resize(
         image,
         (max(1, round(original_width * scale)), max(1, round(original_height * scale))),
         interpolation=cv2.INTER_AREA,
     )
+    analysis = _analysis_bgr(bounded)
     maps = _analysis_maps(analysis)
     differences = (
         np.mean(np.abs(np.diff(analysis.astype(np.float32), axis=0)), axis=(1, 2)),
@@ -584,7 +694,9 @@ def _analyze_main_rectangle(image: np.ndarray) -> tuple[tuple[int, int, int, int
     # black lines inside it would remove intentional canvas around sparse art.
     if features["frame"] or features["panel"] >= 0.55:
         return resolved, score, "", True
-    return _trim_uniform_borders(image, resolved), score, "", True
+    if image.dtype == np.uint8 and image.ndim == 3 and image.shape[2] == 3:
+        return _trim_uniform_borders(image, resolved), score, "", True
+    return resolved, score, "", True
 
 
 def detect_main_rectangle(image: np.ndarray) -> tuple[tuple[int, int, int, int] | None, float, str]:
@@ -612,10 +724,17 @@ def _strong_axis_guides(image: np.ndarray, axis: int, maximum: int) -> list[int]
 
 def _snap_guides(image: np.ndarray, rectangle: tuple[int, int, int, int]) -> dict[str, list[int]]:
     height, width = image.shape[:2]
+    scale = min(1.0, MAX_ANALYSIS_EDGE / max(height, width))
+    bounded = image if scale == 1.0 else cv2.resize(
+        image, (max(1, round(width * scale)), max(1, round(height * scale))), interpolation=cv2.INTER_AREA
+    )
+    analysis = _analysis_bgr(bounded)
+    analysis_height, analysis_width = analysis.shape[:2]
+    inverse = 1.0 / scale
     left, top, right, bottom = rectangle
     return {
-        "x": sorted(set([left, right, *_strong_axis_guides(image, 1, width)])),
-        "y": sorted(set([top, bottom, *_strong_axis_guides(image, 0, height)])),
+        "x": sorted(set([left, right, *(min(width, round(value * inverse)) for value in _strong_axis_guides(analysis, 1, analysis_width))])),
+        "y": sorted(set([top, bottom, *(min(height, round(value * inverse)) for value in _strong_axis_guides(analysis, 0, analysis_height))])),
     }
 
 
@@ -655,12 +774,35 @@ def _unique_output_path(source: Path, label: str = "主图") -> Path:
     for index in range(1, 10000):
         extra = "" if index == 1 else f"_{index}"
         candidate = source.with_name(f"{source.stem}_{label}{extra}{suffix}")
-        if not candidate.exists():
+        marker = candidate.with_name(f".{candidate.name}.photoflow-publishing")
+        if not candidate.exists() and not marker.exists():
             return candidate
     raise RuntimeError("无法创建唯一的输出文件名")
 
 
-def _write_image_atomic(destination: Path, image: np.ndarray) -> None:
+def _safe_metadata(source: Path | None) -> dict[str, object]:
+    if source is None:
+        return {}
+    try:
+        with Image.open(source) as opened:
+            metadata: dict[str, object] = {}
+            if opened.info.get("icc_profile"):
+                metadata["icc_profile"] = opened.info["icc_profile"]
+            if opened.info.get("dpi"):
+                metadata["dpi"] = opened.info["dpi"]
+            exif = opened.getexif()
+            if exif:
+                # Orientation and pixel dimensions no longer describe a crop.
+                for tag in (256, 257, 274, 40962, 40963):
+                    exif.pop(tag, None)
+                if exif:
+                    metadata["exif"] = exif.tobytes()
+            return metadata
+    except (OSError, ValueError):
+        return {}
+
+
+def _write_image_atomic(destination: Path, image: np.ndarray, source: Path | None = None) -> None:
     suffix = destination.suffix.lower()
     params: list[int] = []
     if suffix in {".jpg", ".jpeg"}:
@@ -669,15 +811,49 @@ def _write_image_atomic(destination: Path, image: np.ndarray) -> None:
         params = [cv2.IMWRITE_PNG_COMPRESSION, 3]
     elif suffix == ".webp":
         params = [cv2.IMWRITE_WEBP_QUALITY, 100]
-    success, encoded = cv2.imencode(suffix, image, params)
-    if not success:
-        raise RuntimeError("无法编码裁剪后的图片")
-    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.photoflow-part")
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.{uuid.uuid4().hex}.photoflow-part")
+    preserve_staging = False
     try:
-        encoded.tofile(temporary)
-        os.replace(temporary, destination)
+        metadata = _safe_metadata(source)
+        if metadata and image.dtype == np.uint8:
+            if image.ndim == 2:
+                pil_image = Image.fromarray(image, "L")
+            elif image.shape[2] == 4:
+                pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGRA2RGBA), "RGBA")
+            else:
+                pil_image = Image.fromarray(cv2.cvtColor(image, cv2.COLOR_BGR2RGB), "RGB")
+            try:
+                image_format = {".jpg": "JPEG", ".jpeg": "JPEG", ".png": "PNG", ".webp": "WEBP", ".tif": "TIFF", ".tiff": "TIFF", ".bmp": "BMP"}[suffix]
+                save_options = dict(metadata)
+                if image_format == "JPEG":
+                    save_options.update(quality=100, optimize=True)
+                elif image_format == "PNG":
+                    save_options["compress_level"] = 3
+                elif image_format == "WEBP":
+                    save_options.update(quality=100, lossless=True)
+                pil_image.save(temporary, format=image_format, **save_options)
+            finally:
+                pil_image.close()
+        else:
+            success, encoded = cv2.imencode(suffix, image, params)
+            if not success:
+                raise RuntimeError("无法编码裁剪后的图片")
+            encoded.tofile(temporary)
+        with temporary.open("r+b") as staged:
+            os.fsync(staged.fileno())
+        verification = cv2.imdecode(np.fromfile(temporary, dtype=np.uint8), cv2.IMREAD_UNCHANGED)
+        if verification is None or verification.shape != image.shape or verification.dtype != image.dtype:
+            raise RuntimeError("裁剪输出未通过完整性验证")
+        if suffix in {".png", ".bmp", ".tif", ".tiff"} and not np.array_equal(verification, image):
+            raise RuntimeError("裁剪输出像素未通过完整性验证")
+        try:
+            _publish_file_no_replace(temporary, destination)
+        except PublicationUnsupportedError:
+            preserve_staging = True
+            raise
     finally:
-        temporary.unlink(missing_ok=True)
+        if not preserve_staging:
+            temporary.unlink(missing_ok=True)
 
 
 def _load_source(input_path: str) -> tuple[Path, np.ndarray]:
@@ -686,7 +862,15 @@ def _load_source(input_path: str) -> tuple[Path, np.ndarray]:
         raise ValueError("图片不存在")
     if source.suffix.lower() not in SUPPORTED_EXTENSIONS:
         raise ValueError("当前仅支持 JPG、PNG、BMP、WebP 和 TIFF")
-    return source, _read_image(source)
+    width, height = _probe_image(source)
+    estimated_bytes = _estimated_decoded_bytes(source, width, height)
+    analysis_pixels = min(width * height, MAX_ANALYSIS_EDGE * MAX_ANALYSIS_EDGE)
+    if estimated_bytes > MAX_DECODED_BYTES or estimated_bytes + analysis_pixels * ANALYSIS_BYTES_PER_PIXEL > MAX_TOTAL_WORKING_BYTES:
+        raise ValueError("图片解码后内存大小超过安全上限")
+    original = _read_image(source)
+    if original.nbytes > MAX_DECODED_BYTES:
+        raise ValueError("图片解码后内存大小超过安全上限")
+    return source, original
 
 
 def analyze_main_image(input_path: str) -> dict[str, object]:
@@ -718,8 +902,8 @@ def crop_main_image(input_path: str, rectangle: str, output_suffix: str = "主�
     source = Path(input_path).resolve()
     result: dict[str, object] = {"input": str(source), "inputName": source.name, "success": False, "cropped": False}
     try:
-        source, image = _load_source(input_path)
-        original_height, original_width = image.shape[:2]
+        source, original = _load_source(input_path)
+        original_height, original_width = original.shape[:2]
         values = [int(value) for value in rectangle.split(",")]
         if len(values) != 4:
             raise ValueError("裁剪范围格式无效")
@@ -727,8 +911,13 @@ def crop_main_image(input_path: str, rectangle: str, output_suffix: str = "主�
         right, bottom = left + crop_width, top + crop_height
         if left < 0 or top < 0 or crop_width < 20 or crop_height < 20 or right > original_width or bottom > original_height:
             raise ValueError("裁剪范围超出图片边界")
-        destination = _unique_output_path(source, "裁剪" if output_suffix == "裁剪" else "主图")
-        _write_image_atomic(destination, image[top:bottom, left:right])
+        while True:
+            destination = _unique_output_path(source, "裁剪" if output_suffix == "裁剪" else "主图")
+            try:
+                _write_image_atomic(destination, original[top:bottom, left:right], source)
+                break
+            except FileExistsError:
+                continue
         result.update(
             success=True,
             cropped=True,
@@ -741,6 +930,8 @@ def crop_main_image(input_path: str, rectangle: str, output_suffix: str = "主�
         return result
     except Exception as error:
         result["error"] = str(error)
+        if isinstance(error, PublicationUnsupportedError):
+            result.update(code=error.code, recoveryPath=error.recovery_path)
         return result
 
 
@@ -753,8 +944,9 @@ def extract_main_image(input_path: str) -> dict[str, object]:
         "cropped": False,
     }
     try:
-        source, image = _load_source(input_path)
-        original_height, original_width = image.shape[:2]
+        source, original = _load_source(input_path)
+        image = original
+        original_height, original_width = original.shape[:2]
         rectangle, confidence, reason = detect_main_rectangle(image)
         result["confidence"] = round(confidence, 4)
         result["originalSize"] = {"width": original_width, "height": original_height}
@@ -762,9 +954,14 @@ def extract_main_image(input_path: str) -> dict[str, object]:
             result.update(success=True, skipped=True, reason=reason)
             return result
         left, top, right, bottom = rectangle
-        cropped = image[top:bottom, left:right]
-        destination = _unique_output_path(source)
-        _write_image_atomic(destination, cropped)
+        cropped = original[top:bottom, left:right]
+        while True:
+            destination = _unique_output_path(source)
+            try:
+                _write_image_atomic(destination, cropped, source)
+                break
+            except FileExistsError:
+                continue
         result.update(
             success=True,
             cropped=True,
@@ -776,6 +973,8 @@ def extract_main_image(input_path: str) -> dict[str, object]:
         return result
     except Exception as error:
         result["error"] = str(error)
+        if isinstance(error, PublicationUnsupportedError):
+            result.update(code=error.code, recoveryPath=error.recovery_path)
         return result
 
 

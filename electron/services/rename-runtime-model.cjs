@@ -4,8 +4,13 @@ const FRAME_RUNTIME_EXTENSIONS = new Set([
 ]);
 
 const optionValue = (args, option) => {
-  const index = args.indexOf(option);
-  return index >= 0 && index + 1 < args.length ? String(args[index + 1] || '') : '';
+  let result = '';
+  for (let index = 0; index < args.length; index += 1) {
+    const value = String(args[index] || '');
+    if (value === option && index + 1 < args.length) result = String(args[index + 1] || '');
+    else if (value.startsWith(`${option}=`)) result = value.slice(option.length + 1);
+  }
+  return result;
 };
 
 const renameNeedsFrameRuntime = (args, { fs, path }) => {

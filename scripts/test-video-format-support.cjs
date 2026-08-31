@@ -51,6 +51,7 @@ try {
   assert.equal(renameNeedsFrameRuntime(['--folder_a', imageA, '--folder_b', imageB], { fs, path }), true, 'video comparison may request the optional frame runtime');
   fs.rmSync(path.join(imageA, 'clip.mov')); fs.writeFileSync(path.join(imageB, 'camera.cr3'), 'raw');
   assert.equal(renameNeedsFrameRuntime(['--folder_a', imageA, '--folder_b', imageB], { fs, path }), true, 'RAW comparison may request the optional frame runtime used for decoding');
+  assert.equal(renameNeedsFrameRuntime([`--folder_a=${imageA}`, `--folder_b=${imageB}`], { fs, path }), true, 'argparse equals-form folder options must be recognized');
 } finally { fs.rmSync(runtimeProbeRoot, { recursive: true, force: true }); }
 
 console.log('video format and smooth-playback regression tests passed.');

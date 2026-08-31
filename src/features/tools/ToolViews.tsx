@@ -11,8 +11,8 @@ import { ImportSourceControls, type ImportMaterialKind } from '../../components/
 import { SourcePathPicker } from '../../components/SourcePathPicker';
 import { mergeSourcePaths, sourcePathIdentity } from '../../components/source-path-picker-model';
 import { PanelSwitch } from '../../components/PanelSwitch';
-import { appendImportSuccess, type ImportCompletion } from './import-completion-model';
-import { filenameSelectionOutputName, resolveFilenameSelectionSource } from './filename-selection-model';
+import { appendImportSuccess, describeImportCompletion, resolveImportOutcome, shouldForgetImportSession, type ImportCompletion } from './import-completion-model';
+import { createFilenameSelectionTaskOwnership, filenameSelectionOutputName, resolveFilenameSelectionSource } from './filename-selection-model';
 import { configuredSdDriveTypes, configuredSdDriveVideoActions, configuredSdSelectionPaths, isTrustedSdImportDevice, normalizeConfiguredSdDeviceRecords, reconcileConfiguredSdDevices, resolveConfiguredSdDevices, storageDeviceMatchesId, syncLegacySdMirrors, upsertConfiguredSdDevice } from './sd-startup-import-model';
 import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, shouldDeleteSourceForImportBatch, type StartupSdAutoImportRequest } from './startup-sd-auto-import-model';
 import { isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from './storage-device-inventory-model';
@@ -26,7 +26,7 @@ const VIDEO_SOURCE_PREVIEW_EXTENSIONS = ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'web
 const IMAGE_SOURCE_PREVIEW_EXTENSIONS = ['png', 'webp', 'heic', 'heif', 'avif', 'tif', 'tiff', 'bmp', 'gif'];
 
 interface PythonEvent {
-  type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'warning' | 'preview' | 'cancelled' | 'complete';
+  type: 'log' | 'error' | 'progress' | 'status' | 'ask_user' | 'success' | 'partial' | 'warning' | 'preview' | 'cancelled' | 'complete';
   message: string;
   data?: any;
   progress?: number;
@@ -82,6 +82,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
   const requestIdRef = React.useRef('');
   const taskHadErrorRef = React.useRef(false);
   const taskHadSuccessRef = React.useRef(false);
+  const taskHadPartialRef = React.useRef(false);
   const taskCancelledRef = React.useRef(false);
   const taskAwaitingPreviewRef = React.useRef(false);
   const successEventRef = React.useRef<PythonEvent | null>(null);
@@ -107,14 +108,18 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
     return window.electronAPI.onPythonEvent((event: PythonEvent) => {
       if (event.scriptName !== scriptName) return;
       if (!requestIdRef.current || event.requestId !== requestIdRef.current) return;
-      if (event.type === 'log' || event.type === 'error' || event.type === 'warning' || event.type === 'success') {
-        const type: LogEntry['type'] = event.type === 'log' ? 'info' : event.type;
+      if (event.type === 'log' || event.type === 'error' || event.type === 'warning' || event.type === 'success' || event.type === 'partial') {
+        const type: LogEntry['type'] = event.type === 'log' ? 'info' : event.type === 'partial' ? 'warning' : event.type;
         appendLog(event.message, type);
         if (event.type === 'success') {
           taskHadSuccessRef.current = true;
           successEventRef.current = event;
           setProgress(100);
           setStatusMsg('正在结束任务…');
+        } else if (event.type === 'partial') {
+          taskHadPartialRef.current = true;
+          successEventRef.current = event;
+          setStatusMsg('部分处理完成，正在结束任务…');
         } else if (event.type === 'error') {
           taskHadErrorRef.current = true;
           setStatusMsg('出现错误，正在结束任务…');
@@ -138,20 +143,26 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
         setIsPausedState(false);
         setProgress(0);
         setStatusMsg('已取消并回滚');
+        requestIdRef.current = '';
       } else if (event.type === 'complete') {
         if (taskCancelledRef.current || taskAwaitingPreviewRef.current) return;
         const exitCode = event.data?.exitCode;
-        const failed = exitCode !== 0 || (taskHadErrorRef.current && !taskHadSuccessRef.current);
+        const failed = exitCode !== 0 || (taskHadErrorRef.current && !taskHadSuccessRef.current && !taskHadPartialRef.current);
         setIsRunning(false);
         setIsCancelling(false);
         setIsPausedState(false);
         if (failed) {
           setStatusMsg('发生错误');
+        } else if (taskHadPartialRef.current) {
+          setProgress(100);
+          setStatusMsg('部分处理完成');
+          setCompletion({ requestId: event.requestId || requestIdRef.current, event: successEventRef.current || event });
         } else {
           setProgress(100);
           setStatusMsg('处理完成');
           setCompletion({ requestId: event.requestId || requestIdRef.current, event: successEventRef.current || event });
         }
+        requestIdRef.current = '';
       }
     });
   }, [appendLog, scriptName]);
@@ -164,6 +175,7 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
     setLogs([]);
     taskHadErrorRef.current = false;
     taskHadSuccessRef.current = false;
+    taskHadPartialRef.current = false;
     taskCancelledRef.current = false;
     taskAwaitingPreviewRef.current = false;
     successEventRef.current = null;
@@ -188,22 +200,31 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
     if (!isRunning || !requestIdRef.current || isCancelling) return false;
     setIsCancelling(true);
     setStatusMsg('正在取消并回滚……');
-    const result = await window.electronAPI.cancelPythonTask(requestIdRef.current);
-    if (!result.success) {
+    try {
+      const result = await window.electronAPI.cancelPythonTask(requestIdRef.current);
+      if (result.success) return true;
       setIsCancelling(false);
       appendLog(result.error || '无法取消任务。', 'error');
+    } catch (error) {
+      setIsCancelling(false);
+      appendLog(error instanceof Error ? error.message : String(error || '无法取消任务。'), 'error');
     }
-    return result.success;
+    return false;
   };
 
   const setPaused = async (paused: boolean) => {
     if (!isRunning || !requestIdRef.current || isCancelling) return false;
-    const result = await window.electronAPI.controlPythonTask(requestIdRef.current, paused ? 'pause' : 'resume');
-    if (result.success) {
-      setIsPausedState(paused);
-      setStatusMsg(paused ? '队列已暂停' : '正在恢复编码…');
-    } else appendLog(result.error || '无法更改暂停状态。', 'error');
-    return result.success;
+    try {
+      const result = await window.electronAPI.controlPythonTask(requestIdRef.current, paused ? 'pause' : 'resume');
+      if (result.success) {
+        setIsPausedState(paused);
+        setStatusMsg(paused ? '队列已暂停' : '正在恢复编码…');
+      } else appendLog(result.error || '无法更改暂停状态。', 'error');
+      return result.success;
+    } catch (error) {
+      appendLog(error instanceof Error ? error.message : String(error || '无法更改暂停状态。'), 'error');
+      return false;
+    }
   };
 
   return { logs, isRunning, isCancelling, isPaused, progress, statusMsg, preview, completion, clearPreview: () => setPreview(null), start, cancel, setPaused };
@@ -217,6 +238,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const [transferStats, setTransferStats] = useState<ImportTransferStats | null>(null);
   const [completedProjectNames, setCompletedProjectNames] = useState<string[]>([]);
+  const [completedOutcome, setCompletedOutcome] = useState<ImportCompletion['outcome']>('success');
+  const [completedDetail, setCompletedDetail] = useState('');
   const [isCancellingImport, setIsCancellingImport] = useState(false);
   const [shouldDeleteSourceAfterImport, setShouldDeleteSourceAfterImport] = useState(deleteSourceAfterImport);
   const [linkOnly, setLinkOnly] = useState(false);
@@ -247,6 +270,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   const importedBrollProjectNamesRef = React.useRef<string[]>([]);
   const importedPathsByProjectRef = React.useRef<Record<string, string[]>>({});
   const importedCountRef = React.useRef(0);
+  const failedImportCountRef = React.useRef(0);
   const completedDriveCountRef = React.useRef(0);
   const failedDrivesRef = React.useRef<string[]>([]);
   const skippedDrivesRef = React.useRef<string[]>([]);
@@ -326,6 +350,24 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     else delete sessions[key];
     window.localStorage.setItem(importSessionStorageKey, JSON.stringify(sessions));
   };
+  const clearImportTerminalState = () => {
+    importQueueRef.current = [];
+    importRequestIdRef.current = '';
+    currentStageRef.current = '';
+    currentDriveRef.current = '';
+    currentImportSessionRef.current = '';
+    currentImportSessionKeyRef.current = '';
+    stagingCompleteRef.current = false;
+    cancelRequestedRef.current = false;
+    isBusyRef.current = false;
+    setDecisionData(null);
+    setIsCancellingImport(false);
+  };
+  const forgetCurrentImportSession = (terminal: 'success' | 'discard-success' | 'session-invalid') => {
+    if (!shouldForgetImportSession(terminal) || !currentImportSessionKeyRef.current) return;
+    driveImportSessionsRef.current.delete(currentImportSessionKeyRef.current);
+    persistImportSession(currentImportSessionKeyRef.current, '');
+  };
   const importDestinationForType = (type: 'work' | 'broll') => workspaceProjects !== undefined ? destinationPath : type === 'broll' ? brollDestinationPath : destinationPath;
   const importSessionKeyFor = (sdPath: string, type: 'work' | 'broll') => {
     const resolvedDestinationPath = importDestinationForType(type);
@@ -342,6 +384,9 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     importedPathsByProject: { ...importedPathsByProjectRef.current },
     importedCount: importedCountRef.current,
     skipped: importedCountRef.current === 0 && skippedDrivesRef.current.length > 0,
+    failedCount: failedImportCountRef.current + failedDrivesRef.current.length,
+    relationPending: false,
+    outcome: resolveImportOutcome({ importedCount: importedCountRef.current, skipped: importedCountRef.current === 0 && skippedDrivesRef.current.length > 0, failedCount: failedImportCountRef.current + failedDrivesRef.current.length, relationPending: false }),
   });
   continueAfterDriveFailureRef.current = (failedDrive, message, requestId = '') => {
     if (failedDrive && !failedDrivesRef.current.includes(failedDrive)) failedDrivesRef.current.push(failedDrive);
@@ -382,6 +427,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
         setStatus('completed');
         setProgress(100);
         setCompletedProjectNames(completedProjectNames);
+        setCompletedOutcome(completion.outcome);
+        setCompletedDetail(describeImportCompletion(completion));
         setStatusMsg(`批量导入已结束：${completedDriveCountRef.current} 张卡完成，${failedLabel} 未完成，可重新插卡后续传`);
         void onImportCompleteRef.current?.(completion);
       } else {
@@ -404,6 +451,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     setDecisionData(null);
     setTransferStats(null);
     setCompletedProjectNames([]);
+    setCompletedOutcome('success');
+    setCompletedDetail('');
     setLogs([]);
     setIsCancellingImport(false);
   }, []);
@@ -477,18 +526,40 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   const cancelImport = async () => {
     if (isCancellingImport || !isBusyRef.current) return;
     setIsCancellingImport(true);
-    importQueueRef.current = [];
     if (status === 'decision') {
       const usesProjectRouting = workspaceProjects !== undefined;
       const resolvedDestinationPath = usesProjectRouting ? destinationPath : currentDriveTypeRef.current === 'broll' ? brollDestinationPath : destinationPath;
       const discardSession = currentImportSessionRef.current;
+      if (!resolvedDestinationPath || !discardSession) {
+        setIsCancellingImport(false);
+        setStatusMsg('Missing import destination or staging session; the session was preserved.');
+        return;
+      }
       if (resolvedDestinationPath && discardSession) {
-        window.electronAPI.runScript('classify.py', ['--stage', 'discard', '--dest_path', resolvedDestinationPath, '--import_session', discardSession], crypto.randomUUID());
+        const discardRequestId = crypto.randomUUID();
+        let discarded = false;
+        try {
+          discarded = await new Promise<boolean>(resolve => {
+            let unsubscribe = () => {};
+            const timeout = window.setTimeout(() => { unsubscribe(); resolve(false); }, 30_000);
+            unsubscribe = window.electronAPI.onPythonEvent((event: PythonEvent) => {
+              if (event.scriptName !== 'classify.py' || event.requestId !== discardRequestId) return;
+              if (event.type !== 'complete' && event.type !== 'cancelled') return;
+              window.clearTimeout(timeout);
+              unsubscribe();
+              resolve(event.type === 'complete' && event.data?.exitCode === 0);
+            });
+            window.electronAPI.runScript('classify.py', ['--stage', 'discard', '--dest_path', resolvedDestinationPath, '--import_session', discardSession], discardRequestId);
+          });
+        } catch { discarded = false; }
+        if (!discarded) {
+          setIsCancellingImport(false);
+          setStatusMsg('清理导入暂存失败，可重试取消');
+          return;
+        }
       }
-      if (currentImportSessionKeyRef.current) {
-        driveImportSessionsRef.current.delete(currentImportSessionKeyRef.current);
-        persistImportSession(currentImportSessionKeyRef.current, '');
-      }
+      importQueueRef.current = [];
+      forgetCurrentImportSession('discard-success');
       cancelRequestedRef.current = true;
       currentDriveRef.current = '';
       currentImportSessionRef.current = '';
@@ -499,10 +570,17 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
       setIsCancellingImport(false);
       return;
     }
-    const result = await window.electronAPI.cancelPythonTask(importRequestIdRef.current);
-    if (!result.success) {
+    try {
+      const result = await window.electronAPI.cancelPythonTask(importRequestIdRef.current);
+      if (result.success) {
+        importQueueRef.current = [];
+        return;
+      }
       setIsCancellingImport(false);
-      setStatusMsg(result.error || '无法取消当前导入任务');
+      setStatusMsg(result.error || 'Unable to cancel the current import task.');
+    } catch (error) {
+      setIsCancellingImport(false);
+      setStatusMsg(error instanceof Error ? error.message : String(error || 'Unable to cancel the current import task.'));
     }
   };
 
@@ -525,7 +603,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
             timestamp: new Date().toLocaleTimeString(),
             message: event.message,
             type: event.type as any
-           }];
+           }].slice(-200);
         });
       }
 
@@ -605,10 +683,25 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
                 setStatusMsg('正在保存媒体工作流关系…');
                 await commitImportGraphs(importManifests);
               } catch (error) {
+                const relationPendingCompletion = appendImportSuccess(importCompletion(), {
+                  projectNames: event.data?.projectNames,
+                  importedPathsByProject: event.data?.importedPathsByProject,
+                  importedCount: event.data?.importedCount,
+                  skipped: event.data?.skipped === true,
+                  failedCount: event.data?.failedCount,
+                  relationPending: true,
+                  sourceType: currentDriveTypeRef.current,
+                });
                 isBusyRef.current = false;
+                importRequestIdRef.current = '';
+                currentStageRef.current = '';
                 setStatus('completed');
-                setStatusMsg(`文件已导入，但媒体关系保存失败；将保留导入会话并重试：${error instanceof Error ? error.message : String(error)}`);
+                setCompletedProjectNames(relationPendingCompletion.projectNames);
+                setCompletedOutcome(relationPendingCompletion.outcome);
+                setCompletedDetail(describeImportCompletion(relationPendingCompletion));
+                setStatusMsg(`文件已导入（关系待提交），媒体关系保存失败；将保留导入会话并重试：${error instanceof Error ? error.message : String(error)}`);
                 setIsCancellingImport(false);
+                void onImportCompleteRef.current?.(relationPendingCompletion);
                 return;
               }
             }
@@ -626,6 +719,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
               importedPathsByProject: event.data?.importedPathsByProject,
               importedCount: event.data?.importedCount,
               skipped,
+              failedCount: event.data?.failedCount,
               sourceType: currentDriveTypeRef.current,
             });
             importedProjectNamesRef.current = completion.projectNames;
@@ -633,10 +727,10 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
             importedBrollProjectNamesRef.current = completion.brollProjectNames;
             importedPathsByProjectRef.current = completion.importedPathsByProject;
             importedCountRef.current = completion.importedCount;
+            failedImportCountRef.current = completion.failedCount;
             const completedDrive = currentDriveRef.current;
             if (completedDrive && currentImportSessionKeyRef.current) {
-              driveImportSessionsRef.current.delete(currentImportSessionKeyRef.current);
-              persistImportSession(currentImportSessionKeyRef.current, '');
+              forgetCurrentImportSession('success');
             }
             if (skipped) {
               if (completedDrive && !skippedDrivesRef.current.includes(completedDrive)) skippedDrivesRef.current.push(completedDrive);
@@ -667,16 +761,21 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
               importedBrollProjectNamesRef.current = [];
               importedPathsByProjectRef.current = {};
               importedCountRef.current = 0;
+              failedImportCountRef.current = 0;
               setStatus('completed');
               setProgress(100);
               setStatusMsg(failedDrivesRef.current.length
                 ? `批量导入已结束：${completedDriveCountRef.current} 张卡完成，${failedDrivesRef.current.join('、')} 未完成，可重新插卡后续传`
                 : skippedDrivesRef.current.length
                   ? `${completedDriveCountRef.current ? `${completedDriveCountRef.current} 张卡导入完成；` : ''}${skippedDrivesRef.current.join('、')} 没有符合条件的媒体，已跳过`
-                  : '导入完成');
+                  : completion.outcome === 'partial'
+                    ? describeImportCompletion(completion)
+                    : '导入完成');
               retryDrivePathsRef.current = failedDrivesRef.current.length ? [...failedDrivesRef.current] : [];
               setDecisionData(null);
               setCompletedProjectNames(completedProjectNames);
+              setCompletedOutcome(completion.outcome);
+              setCompletedDetail(describeImportCompletion(completion));
               setIsCancellingImport(false);
               void onImportCompleteRef.current?.(completion);
             }
@@ -688,10 +787,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
           if (event.message.includes("警告")) return;
 
           if (event.message.includes('旧暂存不会用于当前卡') || event.message.includes('检测到源文件已变化')) {
-            if (currentImportSessionKeyRef.current) {
-              driveImportSessionsRef.current.delete(currentImportSessionKeyRef.current);
-              persistImportSession(currentImportSessionKeyRef.current, '');
-            }
+            forgetCurrentImportSession('session-invalid');
             currentImportSessionRef.current = '';
             currentImportSessionKeyRef.current = '';
           } else if (!directSource && currentDriveRef.current && (!drivesRef.current.includes(currentDriveRef.current) || event.message.includes('源设备可能已断开'))) {
@@ -703,6 +799,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
           setStatus('idle');
           importQueueRef.current = [];
           currentDriveRef.current = '';
+          importRequestIdRef.current = '';
+          currentStageRef.current = '';
           isBusyRef.current = false; // 【解锁】
           setIsCancellingImport(false);
           break;
@@ -712,6 +810,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
           setStatus('idle');
           importQueueRef.current = [];
           currentDriveRef.current = '';
+          importRequestIdRef.current = '';
+          currentStageRef.current = '';
           isBusyRef.current = false;
           setIsCancellingImport(false);
           cancelRequestedRef.current = false;
@@ -729,7 +829,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     if (!resolvedDestinationPath) {
       setStatus('idle');
       setStatusMsg('无法确定导入目录。');
-      isBusyRef.current = false;
+      clearImportTerminalState();
       return;
     }
     let resolvedRoutes = routes;
@@ -838,6 +938,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     importedBrollProjectNamesRef.current = [];
     importedPathsByProjectRef.current = {};
     importedCountRef.current = 0;
+    failedImportCountRef.current = 0;
     completedDriveCountRef.current = 0;
     failedDrivesRef.current = [];
     skippedDrivesRef.current = [];
@@ -900,7 +1001,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
       if (!resolvedDestinationPath) {
         setStatus('idle');
         setStatusMsg(currentDriveTypeRef.current === 'broll' ? '请先选择花絮要导入的目标项目。' : '无法确定导入目录。');
-        isBusyRef.current = false;
+        clearImportTerminalState();
         return;
       }
       args.push('--sd_path', currentDriveRef.current || selectedDrives[0] || config.sdPath);
@@ -989,6 +1090,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
           isBusyRef.current = false;
           onBusyChange?.(false);
           setStatus('completed');
+          setCompletedOutcome('success');
+          setCompletedDetail('');
           setStatusMsg('外链已导入');
         }).catch(error => {
           isBusyRef.current = false;
@@ -1061,9 +1164,15 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
               <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-full bg-emerald-50 text-emerald-600">
                 <CheckCircle2 size={34} />
               </div>
-              <p className="text-lg font-bold text-slate-800">导入完成</p>
+              <p className="text-lg font-bold text-slate-800">{{ success: '导入完成', partial: '部分导入完成', skipped: '本次导入已跳过', 'relation-pending': '文件已导入，关系待提交' }[completedOutcome]}</p>
               <p className="mt-1 text-sm text-slate-500">
-                {completedProjectNames.length
+                {completedOutcome === 'relation-pending'
+                  ? completedDetail
+                  : completedOutcome === 'partial'
+                    ? completedDetail
+                    : completedOutcome === 'skipped'
+                      ? completedDetail
+                      : completedProjectNames.length
                   ? `素材已导入到 ${completedProjectNames.length} 个项目。`
                   : directSource ? '所选原始素材已成功导入。' : '所选 SD 卡素材已成功导入。'}
               </p>
@@ -1328,8 +1437,9 @@ const DashboardView = ({
     panelOpen: importPanelOpen,
     startupRequest: startupAutoImportRequest,
   }));
-  const storageDevices = useMemo(() => storageInventory.devices.filter(device => device.eligibleForSdImport), [storageInventory.devices]);
   const storageInventoryFresh = isFreshStorageDeviceInventory(storageInventory, Date.now());
+  const lastKnownStorageDevices = useMemo(() => storageInventory.devices.filter(device => device.eligibleForSdImport), [storageInventory.devices]);
+  const storageDevices = useMemo(() => storageInventoryFresh ? lastKnownStorageDevices : [], [lastKnownStorageDevices, storageInventoryFresh]);
   const drives = useMemo(() => storageDevices.map(device => device.mountPath), [storageDevices]);
   const startupAutoImportSelections = useMemo(() => resolveConfiguredSdDevices(config, storageDevices).map(device => ({ path: device.mountPath, type: device.type })), [config, storageDevices]);
 
@@ -1427,6 +1537,7 @@ const DashboardView = ({
       {section !== 'birthday' && <HomePanel title="从 SD 卡导入" initiallyOpen onOpenChange={setImportPanelOpen} {...dragProps}>
         <div className="flex flex-col gap-6">
           {storageInventory.warning && <div role="status" className="rounded-lg border border-amber-200 bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-700">{storageInventory.warning}{storageInventory.deviceErrors.length ? `；故障位置：${storageInventory.deviceErrors.map(item => item.mountPath || '未知设备').join('、')}` : ''}</div>}
+          {!storageInventoryFresh && lastKnownStorageDevices.length > 0 && <div role="status" className="rounded-lg border border-slate-200 bg-slate-50 px-3 py-2 text-xs leading-5 text-slate-600">设备清单正在刷新或读取失败；仅展示上次检测到的 {lastKnownStorageDevices.length} 个设备，暂不能开始手动导入。</div>}
           <ImportCard config={config} drives={drives} storageDevices={storageDevices} workspacePath={workspacePath} destinationPath={projectDestination ?? workspacePath} brollDestinationPath={projectDestination} workspaceProjects={projectDestination ? undefined : workspaceProjects} active={active} startupAutoImportRequest={startupAutoImportRequest} startupAutoImportReady={storageInventoryFresh && (Boolean(projectDestination) || workspaceProjectsLoaded)} startupAutoImportError={storageInventory.error || workspaceProjectsError} startupAutoImportSelections={startupAutoImportSelections} deleteSourceAfterImport={importDefaults.deleteSourceAfterImport} generateJpgFromRaw={importDefaults.generateJpgFromRaw} splitVideosOnImport={importDefaults.splitVideosOnImport} transcodeVideosOnImport={importDefaults.transcodeVideosOnImport} splitBrollVideosOnImport={brollConfig.splitVideosOnImport} transcodeBrollVideosOnImport={brollConfig.transcodeVideosOnImport} transcodeSettings={videoTools.transcode} videoToolsAvailable={videoToolsAvailable} onBusyChange={setImportBusy} onImportConfigChange={onImportConfigChange} onImportComplete={projectDestination ? undefined : result => { void onImportComplete?.(result); }} completedActionLabel="刷新卡片" />
         </div>
       </HomePanel>}
@@ -1645,6 +1756,7 @@ const ScreenshotMainImageView = ({
   onFilesChanged?: () => void | Promise<void>;
 }) => {
   const appDialog = useAppDialog();
+  const initialRelativePathKey = JSON.stringify(initialRelativePaths.filter(Boolean));
   const [targetPaths, setTargetPaths] = useState(() => initialRelativePaths.filter(Boolean));
   const [isRunning, setIsRunning] = useState(false);
   const [preserveOriginal, setPreserveOriginal] = useState(cropMode);
@@ -1671,7 +1783,9 @@ const ScreenshotMainImageView = ({
   }] : reviewItems.length ? [{ timestamp: new Date().toLocaleTimeString(), message: statusMessage, type: pendingReviewCount ? 'warning' : 'success' }] : [], [pendingReviewCount, reviewItems.length, statusMessage, summary]);
 
   useEffect(() => {
-    setTargetPaths(initialRelativePaths.filter(Boolean));
+    requestIdRef.current = '';
+    setIsRunning(false);
+    setTargetPaths(JSON.parse(initialRelativePathKey) as string[]);
     setSummary(null);
     setReviewItems([]);
     setAnalysisErrors([]);
@@ -1679,7 +1793,7 @@ const ScreenshotMainImageView = ({
     setProgress(0);
     setStatusMessage('进度');
     setPreserveOriginal(cropMode);
-  }, [initialRelativePaths, cropMode]);
+  }, [initialRelativePathKey, cropMode]);
 
   useEffect(() => window.electronAPI.onScreenshotMainImageProgress(value => {
     if (!requestIdRef.current || value.requestId !== requestIdRef.current) return;
@@ -1701,6 +1815,7 @@ const ScreenshotMainImageView = ({
     setStatusMessage(cropMode ? '正在识别图片边缘…' : '正在分析截图主图…');
     try {
       const analysis = await window.electronAPI.extractScreenshotMainImages(workspacePath, projectStatus, projectName, targetPaths, { requestId, analyzeOnly: true });
+      if (requestIdRef.current !== requestId) return;
       const nextItems = analysis.results.flatMap((result, index) => result.success && result.crop && result.originalSize ? [{
         relativePath: targetPaths[index], input: result.input, inputName: result.inputName, crop: result.crop, snapGuides: result.snapGuides || { x: [0, result.originalSize.width], y: [0, result.originalSize.height] },
         originalSize: result.originalSize, confidence: Number(result.confidence || 0), reason: result.reason,
@@ -1711,12 +1826,15 @@ const ScreenshotMainImageView = ({
       setProgress(100);
       setStatusMessage(nextItems.some(item => !item.confirmed) ? '请确认需要检查的裁剪范围' : '范围分析完成，可以生成主图');
     } catch (error) {
+      if (requestIdRef.current !== requestId) return;
       const message = error instanceof Error ? error.message : String(error);
       setSummary({ success: false, results: [], error: message });
       setStatusMessage(message);
     } finally {
-      requestIdRef.current = '';
-      setIsRunning(false);
+      if (requestIdRef.current === requestId) {
+        requestIdRef.current = '';
+        setIsRunning(false);
+      }
     }
   };
 
@@ -1732,36 +1850,56 @@ const ScreenshotMainImageView = ({
     const confirmedPaths = includedReviewItems.map(item => item.relativePath);
     try {
       const extraction = await window.electronAPI.extractScreenshotMainImages(workspacePath, projectStatus, projectName, confirmedPaths, { requestId, crops: includedReviewItems.map(item => item.crop), ...(cropMode ? { outputSuffix: '裁剪' as const } : {}) });
+      if (requestIdRef.current !== requestId) return;
       let nextSummary: ScreenshotMainImageSummary = extraction;
       const croppedRelativePaths = confirmedPaths.filter((_relativePath, index) => extraction.results[index]?.success && extraction.results[index]?.cropped);
       if (!preserveOriginal && croppedRelativePaths.length) {
         setProgress(90);
         setStatusMessage(`正在将 ${croppedRelativePaths.length} 张原图移入回收站…`);
-        const recycled = await window.electronAPI.projectFileOperation(workspacePath, projectStatus, projectName, 'trash', croppedRelativePaths);
-        if (recycled.success) {
-          nextSummary = { ...extraction, recycledOriginalCount: recycled.count || 0, permanentOriginalCount: recycled.permanentCount || 0 };
-        } else {
-          const recycleError = recycled.error || '原图未能移入回收站';
+        try {
+          const recycled = await window.electronAPI.projectFileOperation(workspacePath, projectStatus, projectName, 'trash', croppedRelativePaths);
+          if (requestIdRef.current !== requestId) return;
+          if (recycled.success) {
+            nextSummary = { ...extraction, recycledOriginalCount: recycled.count || 0, permanentOriginalCount: recycled.permanentCount || 0 };
+          } else {
+            const recycleError = recycled.error || '原图未能移入回收站';
+            nextSummary = { ...extraction, success: false, recycleError, error: recycleError };
+            if (isRecycleBinFailure(recycled.error, recycled.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
+          }
+        } catch (error) {
+          const recycleError = error instanceof Error ? error.message : String(error || '原图未能移入回收站');
           nextSummary = { ...extraction, success: false, recycleError, error: recycleError };
-          if (isRecycleBinFailure(recycled.error, recycled.errorCode)) await appDialog.alert(RECYCLE_BIN_FAILURE_DIALOG);
         }
       }
-      if (croppedRelativePaths.length) await onFilesChanged?.();
+      let refreshError = '';
+      if (croppedRelativePaths.length) {
+        try { await onFilesChanged?.(); }
+        catch (error) { refreshError = error instanceof Error ? error.message : String(error || '刷新文件失败'); }
+      }
+      if (requestIdRef.current !== requestId) return;
+      if (refreshError) nextSummary = { ...nextSummary, success: false, error: `处理结果已保留，但刷新文件失败：${refreshError}` };
       setSummary(nextSummary);
       setReviewItems([]);
       setProgress(nextSummary.recycleError ? 90 : 100);
       setStatusMessage(nextSummary.recycleError ? '主图已生成，但回收原图失败' : nextSummary.success ? '处理完成' : nextSummary.error || '提取失败');
     } catch (error) {
+      if (requestIdRef.current !== requestId) return;
       const message = error instanceof Error ? error.message : String(error);
       setSummary({ success: false, results: [], error: message });
       setStatusMessage(message);
     } finally {
-      requestIdRef.current = '';
-      setIsRunning(false);
+      if (requestIdRef.current === requestId) {
+        requestIdRef.current = '';
+        setIsRunning(false);
+      }
     }
   };
 
-  const updateReviewItem = (index: number, changes: Partial<ScreenshotCropReviewItem>) => setReviewItems(items => items.map((item, itemIndex) => itemIndex === index ? { ...item, ...changes } : item));
+  const updateReviewItem = (index: number, changes: Partial<ScreenshotCropReviewItem>) => setReviewItems(items => items.map((item, itemIndex) => {
+    if (itemIndex !== index) return item;
+    const restored = item.included === false && changes.included === true;
+    return { ...item, ...changes, ...(restored ? { confirmed: item.confirmed } : {}) };
+  }));
   const saveEditedCrop = () => {
     if (!cropEditor) return;
     const item = reviewItems[cropEditor.index];
@@ -1944,6 +2082,11 @@ const MatchView = ({
   const [logs, setLogs] = useState<LogEntry[]>([]);
   const operationIdRef = React.useRef('');
   const folderListingOperationIdRef = React.useRef('');
+  const activeProjectPathRef = React.useRef(projectPath);
+  const sourceFolderGenerationRef = React.useRef(0);
+  const selectionTaskOwnershipRef = React.useRef<ReturnType<typeof createFilenameSelectionTaskOwnership>>();
+  if (!selectionTaskOwnershipRef.current) selectionTaskOwnershipRef.current = createFilenameSelectionTaskOwnership();
+  activeProjectPathRef.current = projectPath;
   const executionProgressRef = React.useRef({ label: '', start: 40, end: 90 });
   const appDialog = useAppDialog();
   const selectedImageRelativePath = resolveFilenameSelectionSource(sourceFolders, config.imageSourceFolderName, 'raw');
@@ -1954,6 +2097,15 @@ const MatchView = ({
   ].filter((source): source is { mediaKind: 'image' | 'video'; label: string; relativePath: string } => Boolean(source));
 
   useEffect(() => {
+    const ownedStaleOperationId = selectionTaskOwnershipRef.current!.invalidate();
+    const staleOperationId = operationIdRef.current || ownedStaleOperationId;
+    operationIdRef.current = '';
+    setIsRunning(false);
+    setIsConfirming(false);
+    setIsCancelling(false);
+    setProgress(0);
+    if (staleOperationId) void window.electronAPI.cancelSelectionOperation(staleOperationId).catch(() => undefined);
+    const generation = ++sourceFolderGenerationRef.current;
     let active = true;
     if (!projectPath) {
       setSourceFolders([]);
@@ -1964,11 +2116,16 @@ const MatchView = ({
     folderListingOperationIdRef.current = operationId;
     setLoadingFolders(true);
     void window.electronAPI.getSelectionSourceFolders(projectPath, { pageSize: 500, operationId }).then(result => {
-      if (!active) return;
+      if (!active || sourceFolderGenerationRef.current !== generation) return;
       setSourceFolders(result.success ? result.folders : []);
       setSourceFoldersNextCursor(result.nextCursor || null);
       setSourceFoldersTruncated(result.truncated);
       if (!result.success) setStatusMsg(result.error || '无法读取项目文件夹');
+    }).catch(error => {
+      if (!active || sourceFolderGenerationRef.current !== generation) return;
+      setSourceFolders([]);
+      setSourceFoldersNextCursor(null);
+      setStatusMsg(error instanceof Error ? error.message : String(error || '无法读取项目文件夹'));
     }).finally(() => { if (active) setLoadingFolders(false); });
     return () => { active = false; if (folderListingOperationIdRef.current === operationId) void window.electronAPI.cancelSelectionOperation(operationId); };
   }, [projectPath]);
@@ -1991,27 +2148,44 @@ const MatchView = ({
 
   const loadMoreSourceFolders = async () => {
     if (!projectPath || !sourceFoldersNextCursor || loadingFolders) return;
+    const requestedProjectPath = projectPath;
+    const requestedCursor = sourceFoldersNextCursor;
+    const requestedGeneration = sourceFolderGenerationRef.current;
     setLoadingFolders(true);
     try {
-      const result = await window.electronAPI.getSelectionSourceFolders(projectPath, { cursor: sourceFoldersNextCursor, pageSize: 500 });
+      const result = await window.electronAPI.getSelectionSourceFolders(requestedProjectPath, { cursor: requestedCursor, pageSize: 500 });
+      if (activeProjectPathRef.current !== requestedProjectPath || sourceFolderGenerationRef.current !== requestedGeneration) return;
       if (!result.success) { setStatusMsg(result.error || '无法继续读取项目文件夹'); return; }
       setSourceFolders(current => [...current, ...result.folders]);
       setSourceFoldersNextCursor(result.nextCursor || null);
       setSourceFoldersTruncated(result.truncated);
-    } finally { setLoadingFolders(false); }
+    } catch (error) {
+      if (activeProjectPathRef.current === requestedProjectPath && sourceFolderGenerationRef.current === requestedGeneration) setStatusMsg(error instanceof Error ? error.message : String(error || '无法继续读取项目文件夹'));
+    } finally { if (activeProjectPathRef.current === requestedProjectPath && sourceFolderGenerationRef.current === requestedGeneration) setLoadingFolders(false); }
   };
 
   const appendLog = (message: string, type: LogEntry['type'] = 'info') => {
-    setLogs(current => [...current, { timestamp: new Date().toLocaleTimeString(), message, type }]);
+    setLogs(current => [...current, { timestamp: new Date().toLocaleTimeString(), message, type }].slice(-200));
   };
   const cancel = async () => {
     if (!operationIdRef.current || isCancelling) return;
     setIsCancelling(true);
+    selectionTaskOwnershipRef.current!.setPhase(selectionTaskOwnershipRef.current!.getSnapshot().generation, 'cancelling');
     setStatusMsg('正在取消并回滚本次复制…');
-    await window.electronAPI.cancelSelectionOperation(operationIdRef.current);
+    try {
+      const result = await window.electronAPI.cancelSelectionOperation(operationIdRef.current);
+      if (!result.success) {
+        setIsCancelling(false);
+        setStatusMsg('无法取消当前选片任务，请重试。');
+      }
+    } catch (error) {
+      setIsCancelling(false);
+      setStatusMsg(error instanceof Error ? error.message : String(error || '无法取消当前选片任务，请重试。'));
+    }
   };
   const runTask = async () => {
     if (!projectPath || !selectedSources.length || !keywords.trim() || isRunning || isConfirming) return;
+    const taskGeneration = selectionTaskOwnershipRef.current!.begin();
     setIsRunning(true);
     setProgress(0);
     setStatusMsg('正在预检来源与目标…');
@@ -2022,6 +2196,7 @@ const MatchView = ({
       for (const [index, source] of selectedSources.entries()) {
         const preflightOperationId = crypto.randomUUID();
         operationIdRef.current = preflightOperationId;
+        selectionTaskOwnershipRef.current!.setOperation(taskGeneration, preflightOperationId);
         setStatusMsg(`正在预检${source.label}来源…`);
         const preview = await window.electronAPI.preflightFilenameSelection(projectPath, {
           sourceFolderRelativePath: source.relativePath,
@@ -2029,6 +2204,7 @@ const MatchView = ({
           keywords: tokens,
           operationId: preflightOperationId,
         });
+        if (!selectionTaskOwnershipRef.current!.isCurrent(taskGeneration)) return;
         if (preview.cancelled) { setStatusMsg('已取消来源扫描'); setProgress(0); return; }
         if (!preview.success || !preview.signature) throw new Error(preview.error || `${source.label}选片预检失败`);
         previews.push({ source, preview });
@@ -2046,6 +2222,7 @@ const MatchView = ({
         return;
       }
       setIsConfirming(true);
+      selectionTaskOwnershipRef.current!.setPhase(taskGeneration, 'confirm');
       const filesToCopy = matchedPreviews.reduce((sum, { preview }) => sum + Number(preview.filesToCopy || 0), 0);
       const totalBytes = matchedPreviews.reduce((sum, { preview }) => sum + Number(preview.totalBytes || 0), 0);
       const imageCount = matchedPreviews.reduce((sum, { preview }) => sum + Number(preview.imageCount || 0), 0);
@@ -2056,9 +2233,15 @@ const MatchView = ({
       const details = [
         `图片 ${imageCount} 个，视频 ${videoCount} 个`,
         existingCount ? `目标中已存在 ${existingCount} 个，将保留原文件` : '',
-        conflictCount ? `发现 ${conflictCount} 个来源同名冲突，将跳过以避免覆盖` : '',
+        conflictCount ? `发现 ${conflictCount} 个来源同名冲突，必须处理后才能执行` : '',
         missingKeywords.length ? `未找到 ${missingKeywords.length} 个编号：${missingKeywords.slice(0, 10).join('、')}${missingKeywords.length > 10 ? '…' : ''}` : '',
       ].filter(Boolean).join('；');
+      if (conflictCount > 0) {
+        const message = `发现 ${conflictCount} 个来源同名冲突，必须处理后重新预检`;
+        setStatusMsg(message);
+        appendLog(message, 'error');
+        return;
+      }
       const confirmed = await appDialog.confirm({
         title: '确认从文件名选片',
         message: `将复制 ${filesToCopy} 个文件，共 ${formatTransferBytes(totalBytes)}。`,
@@ -2066,6 +2249,7 @@ const MatchView = ({
         confirmLabel: '开始复制',
         cancelLabel: '取消',
       });
+      if (!selectionTaskOwnershipRef.current!.isCurrent(taskGeneration)) return;
       setIsConfirming(false);
       if (!confirmed) {
         setStatusMsg('已取消，未写入文件');
@@ -2077,6 +2261,8 @@ const MatchView = ({
       for (const [index, { source, preview }] of matchedPreviews.entries()) {
         const operationId = crypto.randomUUID();
         operationIdRef.current = operationId;
+        selectionTaskOwnershipRef.current!.setPhase(taskGeneration, 'copy');
+        selectionTaskOwnershipRef.current!.setOperation(taskGeneration, operationId);
         const executionStart = 40 + index / matchedPreviews.length * 50;
         const executionEnd = 40 + (index + 1) / matchedPreviews.length * 50;
         executionProgressRef.current = { label: source.label, start: executionStart, end: executionEnd };
@@ -2089,6 +2275,7 @@ const MatchView = ({
           expectedSignature: preview.signature!,
           operationId,
         });
+        if (!selectionTaskOwnershipRef.current!.isCurrent(taskGeneration)) return;
         if (!result.success) {
           if (result.cancelled) {
             appendLog(`${source.label}任务已取消，当前来源的新增内容已回滚`, 'warning');
@@ -2104,14 +2291,17 @@ const MatchView = ({
       setProgress(100);
       setStatusMsg(`选片完成，复制 ${copiedCount} 个文件`);
     } catch (error) {
+      if (!selectionTaskOwnershipRef.current!.isCurrent(taskGeneration)) return;
       const message = error instanceof Error ? error.message : String(error);
       setStatusMsg(message);
       appendLog(message, 'error');
     } finally {
-      operationIdRef.current = '';
-      setIsRunning(false);
-      setIsConfirming(false);
-      setIsCancelling(false);
+      if (selectionTaskOwnershipRef.current!.finish(taskGeneration)) {
+        operationIdRef.current = '';
+        setIsRunning(false);
+        setIsConfirming(false);
+        setIsCancelling(false);
+      }
     }
   };
 
@@ -2243,7 +2433,7 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
     '--bit-depth', settings.bitDepth, '--frame-rate-mode', settings.frameRateMode,
     '--rotation', settings.rotation, '--aspect-mode', settings.aspectMode,
     '--audio-track', settings.audioTrack, '--audio-bitrate-kbps', String(settings.audioBitrateKbps),
-    '--encoder-preset', settings.encoderPreset, '--retry-count', '1',
+    '--encoder-preset', settings.encoderPreset, '--retry-count', String(settings.retryCount),
     ...(settings.videoBitrateMbps ? ['--video-bitrate-mbps', String(settings.videoBitrateMbps)] : []),
     ...activeSourceFolders.flatMap(folder => ['--source-folder', folder]),
   ], [activeSourceFolders, paths, settings]);
@@ -2318,7 +2508,8 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
   };
   const disabled = task.isRunning;
   const videoDisabled = disabled || settings.videoMode === 'copy';
-  const canStartTranscode = paths.length > 0 && !task.isRunning && !inspection.isRunning && !sourcesLoading && !resolvingKinds && blockingErrors.length === 0;
+  const inspectionReady = Boolean(inspection.completion) && activeInspectionKeyRef.current === inspectionKey;
+  const canStartTranscode = paths.length > 0 && inspectionReady && !task.isRunning && !inspection.isRunning && !sourcesLoading && !resolvingKinds && blockingErrors.length === 0;
   const automaticEstimateStatus = !paths.length
     ? '添加视频后自动估算预计输出'
     : inspection.isRunning || lastRequestedInspectionKeyRef.current !== inspectionKey
@@ -2376,6 +2567,7 @@ const VideoTranscodeView = ({ embedded = false, initialTargetPaths = [], initial
         </section>
       </div>
       {settingsOnly && <div className="flex items-center gap-3"><button type="button" disabled={inspection.isRunning || task.isRunning} onClick={() => inspection.start(['--inspect-only'], '正在检测媒体运行库与硬件编码能力…')} className="rounded-md border border-blue-300 px-4 py-2 text-sm font-bold text-blue-700 disabled:opacity-40">{inspection.isRunning ? '正在检测…' : '检测编码器与滤镜能力'}</button><span className="text-xs text-slate-500">{capabilities ? `可用硬件：${capabilities.usableHardwareEncoders?.join('、') || '无'}；滤镜：${capabilities.filters.join('、') || '基础集'}` : inspection.statusMsg}</span></div>}
+      {!settingsOnly && paths.length > 0 && !inspection.isRunning && lastRequestedInspectionKeyRef.current === inspectionKey && !inspectionReady && <div className="flex items-center justify-between gap-3 rounded-lg bg-amber-50 px-3 py-2 text-xs text-amber-800"><span>媒体探测未成功，必须重新探测后才能开始编码。</span><button type="button" onClick={() => { lastRequestedInspectionKeyRef.current = ''; activeInspectionKeyRef.current = inspectionKey; startInspectionRef.current([...taskArguments, '--inspect-only'], '正在重新探测媒体…'); }} className="shrink-0 rounded border border-amber-300 bg-white px-2.5 py-1 font-bold">重试探测</button></div>}
       {blockingErrors.map(message => <div key={message} className="flex gap-2 rounded-lg bg-red-50 px-3 py-2 text-xs leading-5 text-red-800"><AlertCircle size={15} className="mt-0.5 shrink-0"/>{message}</div>)}
       {warnings.map(message => <div key={message} className="flex gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800"><AlertCircle size={15} className="mt-0.5 shrink-0"/>{message}</div>)}
       {mediaInfo.filter(item => item.dynamicHdr).map(item => <div key={`dynamic-hdr:${item.path}`} className="flex gap-2 rounded-lg bg-amber-50 px-3 py-2 text-xs leading-5 text-amber-800"><AlertCircle size={15} className="mt-0.5 shrink-0"/>{item.name} 含 {item.dynamicHdr} 动态元数据；跟随来源模式会阻止有损转码，请复制视频流或明确指定 SDR/HDR10/HLG 输出。</div>)}

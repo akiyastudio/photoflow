@@ -55,16 +55,50 @@ export const DEFAULT_VIDEO_TRANSCODE_SETTINGS: VideoTranscodeSettings = {
 };
 
 export const normalizeVideoTranscodeSettings = (value?: Partial<VideoTranscodeSettings> | null): VideoTranscodeSettings => {
-  const migratedColorMode = value?.colorMode === 'hdr-to-sdr' ? 'sdr' : value?.colorMode;
-  const videoMode = value?.videoMode || DEFAULT_VIDEO_TRANSCODE_SETTINGS.videoMode;
-  return {
-    ...DEFAULT_VIDEO_TRANSCODE_SETTINGS,
-    ...(value || {}),
-    ...(migratedColorMode ? { colorMode: migratedColorMode } : {}),
-    ...(['hdr10', 'hlg'].includes(String(migratedColorMode)) ? { bitDepth: '10' as const } : {}),
-    videoBitrateMbps: videoMode === 'prores' || videoMode === 'copy' ? null : Number(value?.videoBitrateMbps) > 0 ? Number(value?.videoBitrateMbps) : null,
-    retryCount: 1,
+  const input = value || {};
+  const oneOf = <T extends string | number>(candidate: unknown, allowed: readonly T[], fallback: T): T => allowed.includes(candidate as T) ? candidate as T : fallback;
+  const videoMode = oneOf(input.videoMode, ['h264', 'h265', 'av1', 'prores', 'copy'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.videoMode);
+  const migratedColorMode = input.colorMode === 'hdr-to-sdr' ? 'sdr' : input.colorMode;
+  const colorMode = oneOf(migratedColorMode, ['auto', 'sdr', 'hdr10', 'hlg'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.colorMode);
+  const frameRateMode = oneOf(input.frameRateMode, ['preserve', 'cfr', 'vfr'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.frameRateMode);
+  const bitrate = Number(input.videoBitrateMbps);
+  const normalized: VideoTranscodeSettings = {
+    container: oneOf(input.container, ['mp4', 'mov', 'mkv'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.container),
+    videoMode,
+    quality: oneOf(input.quality, ['high', 'balanced', 'small'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.quality),
+    resolution: oneOf(input.resolution, ['original', '2160p', '1080p', '720p'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.resolution),
+    frameRate: oneOf(input.frameRate, ['original', '24', '25', '30', '50', '60'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.frameRate),
+    audioMode: oneOf(input.audioMode, ['copy', 'aac', 'remove'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.audioMode),
+    subtitleMode: oneOf(input.subtitleMode, ['copy', 'burn', 'remove'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.subtitleMode),
+    colorMode,
+    bitDepth: oneOf(input.bitDepth, ['auto', '8', '10'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.bitDepth),
+    frameRateMode,
+    rotation: oneOf(input.rotation, ['auto', '0', '90', '180', '270'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.rotation),
+    aspectMode: oneOf(input.aspectMode, ['preserve', 'square-pixels'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.aspectMode),
+    audioTrack: oneOf(input.audioTrack, ['all', 'first'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.audioTrack),
+    videoBitrateMbps: videoMode === 'prores' || videoMode === 'copy' || !Number.isFinite(bitrate) || bitrate <= 0 || bitrate > 800 ? null : bitrate,
+    audioBitrateKbps: oneOf(Number(input.audioBitrateKbps), [96, 128, 160, 192, 256, 320] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.audioBitrateKbps),
+    encoderPreset: oneOf(input.encoderPreset, ['fast', 'balanced', 'quality'] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.encoderPreset),
+    retryCount: oneOf(Number(input.retryCount), [0, 1, 2, 3] as const, DEFAULT_VIDEO_TRANSCODE_SETTINGS.retryCount),
   };
+  if (videoMode === 'prores') {
+    normalized.container = 'mov';
+    normalized.bitDepth = '10';
+  }
+  if (videoMode === 'av1' && normalized.container === 'mov') normalized.container = 'mp4';
+  if (videoMode === 'copy') {
+    normalized.resolution = 'original';
+    normalized.frameRateMode = 'preserve';
+    normalized.frameRate = 'original';
+    normalized.rotation = 'auto';
+    normalized.aspectMode = 'preserve';
+    normalized.colorMode = 'auto';
+    normalized.bitDepth = 'auto';
+    if (normalized.subtitleMode === 'burn') normalized.subtitleMode = 'copy';
+  } else if (frameRateMode !== 'cfr') normalized.frameRate = 'original';
+  if (normalized.colorMode === 'hdr10' || normalized.colorMode === 'hlg') normalized.bitDepth = '10';
+  if (normalized.audioMode === 'remove') normalized.audioTrack = 'all';
+  return normalized;
 };
 
 const preset = (id: string, name: string, settings: Partial<VideoTranscodeSettings>): VideoTranscodePreset => ({
@@ -112,6 +146,8 @@ export const videoTranscodeBlockingErrors = (
 ) => {
   const errors: string[] = [];
   const hasHdrSource = mediaInfo.some(item => item.hdr);
+  const dynamicHdrSources = mediaInfo.filter(item => item.dynamicHdr);
+  if (dynamicHdrSources.length && settings.videoMode !== 'copy' && settings.colorMode === 'auto') errors.push(`队列中有 ${dynamicHdrSources.length} 个动态 HDR 来源；跟随来源无法安全保留动态元数据，请复制视频流或明确指定 SDR/HDR10/HLG 输出。`);
   if (settings.videoMode === 'h264' && ['hdr10', 'hlg'].includes(settings.colorMode)) errors.push('H.264 不支持此 HDR 输出设置；请选择 HEVC、AV1 或 ProRes。');
   if (settings.videoMode === 'h264' && settings.bitDepth === '10') errors.push('H.264 10-bit 兼容性过低；请选择 HEVC、AV1 或 ProRes。');
   if (settings.videoMode === 'h264' && settings.colorMode === 'auto' && hasHdrSource) errors.push('H.264 无法保留队列中的 HDR；请选择 HEVC、AV1、ProRes，或将色彩输出设为 Rec.709 SDR。');

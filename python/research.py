@@ -1,14 +1,21 @@
 import argparse
 import ctypes
+import errno
+import hashlib
+import json
+import math
 import os
+import re
 import shutil
+import stat
 import sys
 import unicodedata
+import uuid
 from pathlib import Path
 
 import cv2
 import numpy as np
-from event_protocol import log_error, log_info, log_progress, log_success, log_warning
+from event_protocol import emit, log_error, log_info, log_progress, log_success, log_warning
 from PIL import Image
 from send2trash import send2trash
 
@@ -19,6 +26,359 @@ PREVIEW_WIDTH = 384
 QUALITY_WIDTH = 640
 MIN_FRAME_SHARPNESS = 24.0
 BLACK_FRAME_LUMA_P99 = 18.0
+
+
+class FrameResults(list):
+    def __init__(self, values=(), failure_count=0):
+        super().__init__(values)
+        self.failure_count = failure_count
+
+
+class PublishCleanupError(OSError):
+    def __init__(self, source, destination, cause, cleanup_error, recovery_marker):
+        message = (
+            f"未提交目标清理失败：{destination}；完整 staging/源保留于 {source}；"
+            f"恢复标记：{recovery_marker or '创建失败'}；原错误：{cause}；清理错误：{cleanup_error}"
+        )
+        super().__init__(message)
+        self.source = str(source)
+        self.destination = str(destination)
+        self.cause = cause
+        self.cleanup_error = cleanup_error
+        self.recovery_marker = recovery_marker
+
+
+def file_identity(path):
+    stat = os.stat(path, follow_symlinks=False)
+    return [stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns]
+
+
+def file_digest(path):
+    digest = hashlib.sha256()
+    with open(path, "rb") as source:
+        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def path_is_within(path, allowed_root):
+    path = os.path.abspath(path)
+    root = os.path.abspath(allowed_root)
+    try:
+        if os.path.normcase(os.path.commonpath((path, root))) != os.path.normcase(root):
+            return False
+        probe = path
+        while not os.path.exists(probe):
+            parent = os.path.dirname(probe)
+            if parent == probe:
+                return False
+            probe = parent
+        return os.path.normcase(os.path.commonpath((os.path.realpath(probe), os.path.realpath(root)))) == os.path.normcase(os.path.realpath(root))
+    except ValueError:
+        return False
+
+
+def atomic_write_recovery_payload(marker, payload, create):
+    marker = str(marker)
+    temporary = f"{marker}.{uuid.uuid4().hex}.tmp"
+    try:
+        with open(temporary, "xb") as output:
+            output.write(json.dumps(payload, ensure_ascii=False).encode("utf-8")); output.flush(); os.fsync(output.fileno())
+        if create:
+            if not try_atomic_rename_no_replace(temporary, marker): os.rename(temporary, marker)
+        else:
+            os.replace(temporary, marker)
+        return True
+    except OSError:
+        try: os.unlink(temporary)
+        except OSError: pass
+        return False
+
+
+def write_recovery_marker(source, destination, cause=None, cleanup_error=None, recovery_path=None,
+                          marker_path=None, state="uncommitted"):
+    destination = Path(destination)
+    operation_id = uuid.uuid4().hex
+    marker = Path(marker_path) if marker_path else destination.with_name(
+        f".{destination.name}.photoflow-recovery-{operation_id}.json"
+    )
+    if marker_path:
+        match = re.fullmatch(r"\..+\.photoflow-recovery-([0-9a-f]{32})\.json", marker.name)
+        operation_id = match.group(1) if match else ""
+    identity = file_identity(destination) if destination.exists() else None
+    staging_identity = file_identity(source) if os.path.isfile(source) else None
+    payload = {
+        "version": 1,
+        "operationId": operation_id,
+        "state": state,
+        "stagingPath": os.path.abspath(source),
+        "partialPath": os.path.abspath(destination),
+        "recoveryPath": os.path.abspath(destination),
+        "stagingIdentity": staging_identity,
+        "stagingSize": staging_identity[2] if staging_identity else None,
+        "stagingDigest": file_digest(source) if staging_identity else None,
+        "ownershipIdentity": identity[:2] if identity else None,
+        "partialIdentity": identity,
+        "error": str(cause) if cause is not None else "",
+        "cleanupError": str(cleanup_error) if cleanup_error is not None else "",
+    }
+    return str(marker) if atomic_write_recovery_payload(marker, payload, create=not marker_path) else None
+
+
+def update_recovery_marker(marker, **updates):
+    try:
+        with open(marker, "r", encoding="utf-8") as source:
+            payload = json.load(source)
+        payload.update(updates)
+        return atomic_write_recovery_payload(marker, payload, create=False)
+    except (OSError, ValueError):
+        return False
+
+
+def recover_incomplete_publication(marker_path, allowed_root, expected_directory):
+    """Remove an owned partial target while preserving/restoring the full staging file."""
+    marker_path = os.path.abspath(marker_path)
+    marker_stat = os.lstat(marker_path)
+    if stat.S_ISLNK(marker_stat.st_mode) or not stat.S_ISREG(marker_stat.st_mode) or marker_stat.st_size > 64 * 1024:
+        raise ValueError(f"无效恢复 marker 文件：{marker_path}")
+    expected_directory = os.path.abspath(expected_directory)
+    if not path_is_within(marker_path, allowed_root) or os.path.dirname(marker_path) != expected_directory:
+        raise ValueError(f"恢复 marker 超出允许目录：{marker_path}")
+    match = re.fullmatch(r"\.(?P<base>[^/\\]+)\.photoflow-recovery-(?P<op>[0-9a-f]{32})\.json", os.path.basename(marker_path))
+    if not match:
+        raise ValueError(f"恢复 marker 命名无效：{marker_path}")
+    with open(marker_path, "r", encoding="utf-8") as marker_file:
+        payload = json.load(marker_file)
+    if payload.get("version") != 1 or payload.get("operationId") != match.group("op"):
+        raise ValueError(f"恢复 marker schema/version 无效：{marker_path}")
+    if payload.get("state") not in {"reservation", "copying", "ready", "committing", "uncommitted", "committed"}:
+        raise ValueError(f"恢复 marker state 无效：{marker_path}")
+    derived_partial = os.path.join(expected_directory, match.group("base"))
+    staging = payload["stagingPath"]
+    partial = derived_partial
+    if os.path.abspath(payload.get("partialPath", "")) != partial or os.path.abspath(payload.get("recoveryPath", "")) != partial:
+        raise ValueError(f"恢复 marker 目标关系无效：{marker_path}")
+    staging_name = os.path.basename(staging)
+    if (os.path.dirname(os.path.abspath(staging)) != expected_directory
+            or not staging_name.startswith(".") or ".photoflow-" not in staging_name or not staging_name.endswith(".part")
+            or not path_is_within(staging, allowed_root)):
+        raise ValueError(f"恢复 staging 路径无效：{staging}")
+    state = payload.get("state")
+    if state in {"ready", "committing", "committed"} and os.path.isfile(partial):
+        final_valid = (
+            file_identity(partial) == payload.get("finalIdentity")
+            and os.path.getsize(partial) == payload.get("finalSize")
+            and file_digest(partial) == payload.get("finalDigest")
+        )
+        if final_valid:
+            if os.path.exists(staging):
+                if (file_identity(staging) != payload.get("stagingIdentity")
+                        or file_digest(staging) != payload.get("stagingDigest")):
+                    raise ValueError(f"提交清理 staging 身份不匹配：{staging}")
+                os.unlink(staging)
+            os.unlink(marker_path)
+            return partial
+    if not os.path.exists(staging) or stat.S_ISLNK(os.lstat(staging).st_mode) or not stat.S_ISREG(os.lstat(staging).st_mode):
+        raise ValueError(f"恢复 staging 不是普通文件：{staging}")
+    if not os.path.exists(partial) and state == "reservation":
+        if os.path.isfile(staging):
+            if file_identity(staging) != payload.get("stagingIdentity") or os.path.getsize(staging) != payload.get("stagingSize") or file_digest(staging) != payload.get("stagingDigest"):
+                raise ValueError(f"恢复 staging 身份校验失败：{staging}")
+            move_file_no_replace(staging, partial)
+            staging = partial
+        os.unlink(marker_path)
+        return staging
+    if not os.path.isfile(staging):
+        raise FileNotFoundError(f"恢复所需的完整 staging 不存在：{staging}")
+    if file_identity(staging) != payload.get("stagingIdentity") or os.path.getsize(staging) != payload.get("stagingSize") or file_digest(staging) != payload.get("stagingDigest"):
+        raise ValueError(f"恢复 staging 身份校验失败：{staging}")
+    if os.path.exists(partial):
+        ownership_identity = payload.get("ownershipIdentity")
+        if not ownership_identity:
+            raise OSError(f"reservation 后出现无身份目标，拒绝自动清理：{partial}")
+        if ownership_identity and file_identity(partial)[:2] != ownership_identity:
+            raise OSError(f"正式目标已被其他文件替换，拒绝清理：{partial}")
+        os.unlink(partial)
+    recovery_path = partial
+    if recovery_path and os.path.abspath(staging) != os.path.abspath(recovery_path):
+        if os.path.exists(recovery_path):
+            raise FileExistsError(f"恢复路径已存在：{recovery_path}")
+        move_file_no_replace(staging, recovery_path)
+        staging = recovery_path
+    os.unlink(marker_path)
+    return staging
+
+
+def recover_pending_publications(directory, allowed_root=None):
+    directory = Path(directory)
+    if not directory.is_dir():
+        return []
+    recovered = []
+    for marker in sorted(directory.glob(".*.photoflow-recovery-*.json")):
+        recovered.append(recover_incomplete_publication(marker, allowed_root or directory, directory))
+    return recovered
+
+
+def paths_identify_same_file(source, destination):
+    try:
+        return os.path.exists(destination) and os.path.samefile(source, destination)
+    except OSError:
+        return False
+
+
+def try_atomic_rename_no_replace(source, destination):
+    """Use a platform no-replace rename, returning False when unavailable."""
+    if paths_identify_same_file(source, destination):
+        os.rename(source, destination)
+        return True
+    if os.name == "nt":
+        # MoveFileEx without MOVEFILE_REPLACE_EXISTING is atomic and refuses an
+        # existing target; Python's os.rename maps to those semantics.
+        os.rename(source, destination)
+        return True
+    if sys.platform.startswith("linux"):
+        renameat2 = getattr(ctypes.CDLL(None, use_errno=True), "renameat2", None)
+        if renameat2 is None:
+            return False
+        renameat2.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        renameat2.restype = ctypes.c_int
+        if renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1) == 0:
+            return True
+        error_number = ctypes.get_errno()
+        if error_number in {errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP, errno.ENOTSUP}:
+            return False
+        raise OSError(error_number, os.strerror(error_number), destination)
+    if sys.platform == "darwin":
+        renamex_np = getattr(ctypes.CDLL(None, use_errno=True), "renamex_np", None)
+        if renamex_np is None:
+            return False
+        renamex_np.argtypes = [ctypes.c_char_p, ctypes.c_char_p, ctypes.c_uint]
+        renamex_np.restype = ctypes.c_int
+        if renamex_np(os.fsencode(source), os.fsencode(destination), 0x00000004) == 0:
+            return True
+        error_number = ctypes.get_errno()
+        if error_number in {errno.ENOTSUP, errno.EINVAL}:
+            return False
+        raise OSError(error_number, os.strerror(error_number), destination)
+    return False
+
+
+def move_file_no_replace(source, destination):
+    """Move without overwrite.
+
+    The fallback claims the destination with ``xb`` and never overwrites it.
+    Unlike native rename, a process or machine crash can leave a partial target
+    alongside the intact source; callers report this degraded crash guarantee.
+    """
+    if try_atomic_rename_no_replace(source, destination):
+        return "atomic"
+    original_source = os.path.abspath(source)
+    source_name = os.path.basename(original_source)
+    if (os.path.dirname(original_source) != os.path.dirname(os.path.abspath(destination))
+            or not source_name.startswith(".") or ".photoflow-" not in source_name or not source_name.endswith(".part")):
+        fallback_staging = os.path.join(
+            os.path.dirname(destination),
+            f".{os.path.basename(destination)}.photoflow-staging-{uuid.uuid4().hex}.part",
+        )
+        shutil.copy2(original_source, fallback_staging)
+        with open(fallback_staging, "r+b") as durable_staging:
+            os.fsync(durable_staging.fileno())
+        source = fallback_staging
+    created = False
+    marker = write_recovery_marker(source, destination, recovery_path=destination, state="reservation")
+    if not marker:
+        raise OSError("无法在正式目标创建前持久化 fallback reservation")
+    try:
+        with open(source, "rb") as input_file, open(destination, "xb") as output_file:
+            created = True
+            identity = file_identity(destination)
+            if not update_recovery_marker(
+                marker, state="copying", ownershipIdentity=identity[:2], partialIdentity=identity
+            ):
+                raise OSError("无法持久化 fallback 目标 ownership")
+            shutil.copyfileobj(input_file, output_file, 8 * 1024 * 1024)
+            output_file.flush()
+            os.fsync(output_file.fileno())
+        shutil.copystat(source, destination)
+        with open(destination, "r+b") as output_file:
+            os.fsync(output_file.fileno())
+        identity = file_identity(destination)
+        final_digest = file_digest(destination)
+        if not update_recovery_marker(
+            marker, state="ready", partialIdentity=identity,
+            finalIdentity=identity, finalSize=identity[2], finalDigest=final_digest,
+        ):
+            raise OSError("无法持久化 fallback ready 状态")
+        if not update_recovery_marker(marker, state="committing"):
+            raise OSError("无法持久化 fallback committing 状态")
+        if original_source != os.path.abspath(source):
+            os.unlink(original_source)
+        os.unlink(source)
+        update_recovery_marker(marker, state="committed")
+        try:
+            os.unlink(marker)
+            marker = None
+        except OSError:
+            log_warning(f"目标已完整提交，但恢复 marker 清理失败，将在下次运行重试：{marker}")
+        return "safe-fallback"
+    except PublishCleanupError:
+        raise
+    except BaseException as cause:
+        if created:
+            try:
+                os.unlink(destination)
+            except OSError as cleanup_error:
+                marker = write_recovery_marker(
+                    source, destination, cause, cleanup_error, marker_path=marker, state="uncommitted"
+                )
+                raise PublishCleanupError(source, destination, cause, cleanup_error, marker) from cause
+            if marker and os.path.exists(marker):
+                try:
+                    os.unlink(marker)
+                except OSError:
+                    pass
+        elif marker and os.path.exists(marker):
+            try:
+                os.unlink(marker)
+            except OSError:
+                pass
+        raise
+
+
+def atomic_publish_bytes_no_replace(destination, payload, validator=None):
+    """Durably write beside the destination and atomically publish without replacement."""
+    destination = Path(destination)
+    temporary = destination.with_name(f".{destination.name}.photoflow-{uuid.uuid4().hex}.part")
+    preserve_temporary = False
+    try:
+        with open(temporary, "xb") as target:
+            target.write(payload)
+            target.flush()
+            os.fsync(target.fileno())
+        if validator is not None:
+            validator(temporary)
+        try:
+            return move_file_no_replace(temporary, destination)
+        except PublishCleanupError:
+            preserve_temporary = True
+            raise
+    finally:
+        if not preserve_temporary:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def validate_jpeg(path):
+    with Image.open(path) as image:
+        if image.format != "JPEG":
+            raise ValueError("截图临时文件不是有效的 JPEG")
+        image.verify()
+
+
+def atomic_move_no_replace(source, destination):
+    return move_file_no_replace(source, destination)
 
 
 def detected_video_container(file_path):
@@ -262,64 +622,70 @@ def calculate_frame_quality(frame):
 
 
 def extract_best_frames(video_path, shots, fps, original_name):
+    if not math.isfinite(fps) or fps <= 0:
+        fps = 25.0
     cap = open_video(video_path)
     if not cap.isOpened():
+        cap.release()
         raise RuntimeError("无法重新打开视频以提取截图")
 
     output_dir = os.path.dirname(video_path)
     base_name = sanitize_filename(os.path.splitext(original_name)[0])
-    metadata = []
+    metadata = FrameResults()
     skipped_black_shots = 0
     skipped_blurry_shots = 0
-    for number, (start, end) in enumerate(shots, 1):
-        length = end - start + 1
-        margin = min(max(2, round(fps * 0.15)), max(0, (length - 1) // 3))
-        search_start, search_end = start + margin, end - margin
-        stride = max(1, round((search_end - search_start + 1) / 90))
-        cap.set(cv2.CAP_PROP_POS_FRAMES, search_start)
+    try:
+        for number, (start, end) in enumerate(shots, 1):
+            length = end - start + 1
+            margin = min(max(2, round(fps * 0.15)), max(0, (length - 1) // 3))
+            search_start, search_end = start + margin, end - margin
+            stride = max(1, round((search_end - search_start + 1) / 90))
+            cap.set(cv2.CAP_PROP_POS_FRAMES, search_start)
 
-        best = None
-        sampled_count = 0
-        non_black_count = 0
-        for frame_index in range(search_start, search_end + 1):
-            ok, frame = cap.read()
+            best = None
+            sampled_count = 0
+            non_black_count = 0
+            for frame_index in range(search_start, search_end + 1):
+                ok, frame = cap.read()
+                if not ok:
+                    break
+                if (frame_index - search_start) % stride:
+                    continue
+                sampled_count += 1
+                metrics = frame_quality_metrics(frame)
+                if metrics["is_black"]:
+                    continue
+                non_black_count += 1
+                if metrics["is_blurry"]:
+                    continue
+                if best is None or metrics["quality"] > best[0]:
+                    best = (
+                        metrics["quality"], metrics["sharpness"], metrics["brightness"],
+                        metrics["luma_p99"], metrics["black_pixel_ratio"], frame_index, frame,
+                    )
+
+            if best is None:
+                if sampled_count and not non_black_count:
+                    skipped_black_shots += 1
+                elif non_black_count:
+                    skipped_blurry_shots += 1
+                continue
+            _, sharpness, brightness, luma_p99, black_pixel_ratio, frame_index, frame = best
+            filename = f"{base_name}_{number:03d}_{frame_index / fps:.3f}s.jpg"
+            output_path = os.path.join(output_dir, filename)
+            ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
             if not ok:
-                break
-            if (frame_index - search_start) % stride:
+                metadata.failure_count += 1
                 continue
-            sampled_count += 1
-            metrics = frame_quality_metrics(frame)
-            if metrics["is_black"]:
+            try:
+                publication = atomic_publish_bytes_no_replace(output_path, encoded.tobytes(), validate_jpeg)
+            except FileExistsError:
+                metadata.failure_count += 1
+                log_warning(f"截图已存在，未覆盖：{filename}")
                 continue
-            non_black_count += 1
-            if metrics["is_blurry"]:
-                continue
-            if best is None or metrics["quality"] > best[0]:
-                best = (
-                    metrics["quality"],
-                    metrics["sharpness"],
-                    metrics["brightness"],
-                    metrics["luma_p99"],
-                    metrics["black_pixel_ratio"],
-                    frame_index,
-                    frame,
-                )
-
-        if best is None:
-            if sampled_count and not non_black_count:
-                skipped_black_shots += 1
-            elif non_black_count:
-                skipped_blurry_shots += 1
-            continue
-        _, sharpness, brightness, luma_p99, black_pixel_ratio, frame_index, frame = best
-        filename = f"{base_name}_{number:03d}_{frame_index / fps:.3f}s.jpg"
-        output_path = os.path.join(output_dir, filename)
-        ok, encoded = cv2.imencode(".jpg", frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-        if not ok:
-            continue
-        with open(output_path, "wb") as target:
-            target.write(encoded.tobytes())
-        metadata.append({
+            if publication == "safe-fallback":
+                log_warning("当前文件系统不支持原子 no-replace；已安全降级为不覆盖复制，异常崩溃可能留下不完整目标文件")
+            metadata.append({
             "shot": number,
             "start_seconds": round(start / fps, 3),
             "end_seconds": round(end / fps, 3),
@@ -330,8 +696,9 @@ def extract_best_frames(video_path, shots, fps, original_name):
             "luma_p99": round(luma_p99, 2),
             "black_pixel_ratio": round(black_pixel_ratio, 4),
             "file": filename,
-        })
-    cap.release()
+            })
+    finally:
+        cap.release()
     if skipped_black_shots or skipped_blurry_shots:
         log_info(
             f"{original_name}：质量筛选跳过 {skipped_black_shots} 个黑场分镜、"
@@ -345,24 +712,28 @@ def analyze_video(video_path, sensitivity, min_duration):
     log_info(f"正在分析视频：{name}")
     cap = open_video(video_path)
     if not cap.isOpened():
-        return None
-    fps = float(cap.get(cv2.CAP_PROP_FPS)) or 25.0
-    total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-    ok, first = cap.read()
-    if not ok:
         cap.release()
         return None
-
-    previous = preview_features(first)
-    scores = []
-    while True:
-        ok, frame = cap.read()
+    try:
+        fps = float(cap.get(cv2.CAP_PROP_FPS))
+        if not math.isfinite(fps) or fps <= 0:
+            fps = 25.0
+            log_warning(f"{name}：视频缺少有效 FPS 元数据，已安全回退为 25 FPS")
+        ok, first = cap.read()
         if not ok:
-            break
-        current = preview_features(frame)
-        scores.append(frame_difference(previous, current))
-        previous = current
-    cap.release()
+            return None
+
+        previous = preview_features(first)
+        scores = []
+        while True:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            current = preview_features(frame)
+            scores.append(frame_difference(previous, current))
+            previous = current
+    finally:
+        cap.release()
     if not scores:
         return []
 
@@ -406,10 +777,21 @@ def calculate_image_hash(file_path):
         return None
 
 
-def process_images_deduplication(directory):
-    files = [path for path in Path(directory).iterdir() if path.suffix.lower() in IMAGE_EXTENSIONS]
+def images_are_strong_duplicates(first, second):
+    try:
+        with Image.open(first) as left, Image.open(second) as right:
+            if left.size != right.size:
+                return False
+            return np.array_equal(np.asarray(left.convert("RGB")), np.asarray(right.convert("RGB")))
+    except Exception:
+        return False
+
+
+def process_images_deduplication(generated_files):
+    files = [Path(path) for path in generated_files if Path(path).is_file() and Path(path).suffix.lower() in IMAGE_EXTENSIONS]
+    result = {"duplicateCount": 0, "recycledCount": 0, "failedCount": 0}
     if not files:
-        return
+        return result
     hashes = {}
     for path in files:
         image_hash = calculate_image_hash(path)
@@ -419,24 +801,57 @@ def process_images_deduplication(directory):
     for paths in hashes.values():
         if len(paths) > 1:
             paths.sort(key=lambda path: path.stat().st_size, reverse=True)
-            duplicates.extend(paths[1:])
+            keepers = []
+            for path in paths:
+                if any(images_are_strong_duplicates(path, keeper) for keeper in keepers):
+                    duplicates.append(path)
+                else:
+                    keepers.append(path)
+    result["duplicateCount"] = len(duplicates)
     for path in duplicates:
         try:
             send2trash(str(path))
-        except Exception:
-            pass
-    log_success(f"图片去重完成：移入回收站 {len(duplicates)} 张重复图片")
+            result["recycledCount"] += 1
+        except Exception as error:
+            result["failedCount"] += 1
+            log_warning(f"重复截图回收失败：{path.name}（{error}）")
+    log_info(f"图片去重完成：发现 {len(duplicates)} 张重复截图，移入回收站 {result['recycledCount']} 张")
+    return result
 
 
 def move_txt_files(directory):
-    txt_files = [path for path in Path(directory).iterdir() if path.suffix.lower() == ".txt"]
-    if not txt_files:
-        return
-    data_dir = Path(directory) / "data"
+    result = {"movedCount": 0, "failedCount": 0}
+    directory = Path(directory)
+    data_dir = directory / "data"
     data_dir.mkdir(exist_ok=True)
+    try:
+        recovered = recover_pending_publications(data_dir, allowed_root=data_dir)
+        for recovered_path in recovered:
+            recovered_path = Path(recovered_path)
+            source_path = directory / recovered_path.name
+            if source_path.is_file():
+                if source_path.stat().st_size != recovered_path.stat().st_size or file_digest(source_path) != file_digest(recovered_path):
+                    raise OSError(f"恢复后的 TXT 与源文件内容不一致：{source_path.name}")
+                source_path.unlink()
+            result["movedCount"] += 1
+    except Exception as error:
+        result["failedCount"] += 1
+        log_warning(f"TXT 自动恢复失败：{error}")
+        return result
+    txt_files = [path for path in directory.iterdir() if path.suffix.lower() == ".txt"]
+    if not txt_files:
+        return result
     for path in txt_files:
-        shutil.move(str(path), str(data_dir / path.name))
-    log_info(f"已将 {len(txt_files)} 个 TXT 文件移至 data 文件夹")
+        try:
+            publication = atomic_move_no_replace(path, data_dir / path.name)
+            result["movedCount"] += 1
+            if publication == "safe-fallback":
+                log_warning("当前文件系统不支持原子 no-replace；TXT 整理已安全降级，异常崩溃可能同时保留源文件和不完整目标")
+        except Exception as error:
+            result["failedCount"] += 1
+            log_warning(f"TXT 文件整理失败：{path.name}（{error}）")
+    log_info(f"已将 {result['movedCount']} 个 TXT 文件移至 data 文件夹")
+    return result
 
 
 def collect_video_inputs(raw_paths):
@@ -495,43 +910,59 @@ def run(args_list):
     if not videos and not selected_directories:
         log_error("没有可处理的视频或文件夹")
         return
+    recovery_directories = []
+    seen_recovery_directories = set()
+    for directory in [*selected_directories, *(video.parent for video in videos)]:
+        key = os.path.normcase(os.path.abspath(directory))
+        if key not in seen_recovery_directories:
+            seen_recovery_directories.add(key)
+            recovery_directories.append(directory)
+    try:
+        for directory in recovery_directories:
+            recovered = recover_pending_publications(directory, allowed_root=directory)
+            if recovered:
+                log_info(f"已恢复 {len(recovered)} 个上次未完成的文件发布")
+    except Exception as error:
+        log_error(f"检测到无法自动恢复的未提交文件，请按恢复标记处理：{error}")
+        return
     log_progress("扫描视频文件…", 0)
     sensitivity = args.sensitivity or normalize_sensitivity(args.threshold)
     skipped_videos = []
     processed_videos = 0
+    generated_files = []
+    operation_failures = 0
     for index, video in enumerate(videos, 1):
         if detected_video_container(video) is None:
             skipped_videos.append(video.name)
         else:
-            result = analyze_video(str(video), sensitivity, max(0.05, args.min_duration))
+            try:
+                result = analyze_video(str(video), sensitivity, max(0.05, args.min_duration))
+            except Exception as error:
+                log_warning(f"视频处理失败，已跳过：{video.name}（{error}）")
+                result = None
             if result is None:
                 skipped_videos.append(video.name)
             else:
                 processed_videos += 1
+                operation_failures += getattr(result, "failure_count", 0)
+                generated_files.extend(video.parent / item["file"] for item in result)
         log_progress(f"处理视频：{index}/{len(videos)}", int(index / max(1, len(videos)) * 90))
     if not videos:
         log_info("所选文件夹中未找到视频文件，跳过分镜识别")
     # Direct file selections must not reorganize unrelated sibling files. Folder
     # selections retain the legacy cleanup behavior for every directory in which
     # a selected-folder video produced frames.
-    cleanup_directories = []
-    seen_cleanup_directories = set()
-    for video in videos:
-        parent = video.parent
-        if not any(parent == selected or selected in parent.parents for selected in selected_directories):
-            continue
-        key = os.path.normcase(os.path.abspath(parent))
-        if key in seen_cleanup_directories:
-            continue
-        seen_cleanup_directories.add(key)
-        cleanup_directories.append(parent)
-    if selected_directories and not cleanup_directories:
-        cleanup_directories = selected_directories
-    for directory in cleanup_directories:
-        process_images_deduplication(directory)
+    folder_generated_files = [
+        path for path in generated_files
+        if any(path.parent == selected or selected in path.parent.parents for selected in selected_directories)
+    ]
+    if folder_generated_files:
+        deduplication_result = process_images_deduplication(folder_generated_files) or {}
+        operation_failures += deduplication_result.get("failedCount", 0)
     if args.organize_data:
         for directory in selected_directories:
-            move_txt_files(directory)
+            organization_result = move_txt_files(directory) or {}
+            operation_failures += organization_result.get("failedCount", 0)
     if skipped_videos:
         preview_names = "、".join(f"“{name}”" for name in skipped_videos[:5])
         remaining = len(skipped_videos) - min(5, len(skipped_videos))
@@ -541,10 +972,12 @@ def run(args_list):
             data={"skippedCount": len(skipped_videos), "processedCount": processed_videos},
         )
     log_progress("任务全部完成", 100)
-    log_success(
-        f"分镜处理完成：成功处理 {processed_videos} 个视频，跳过 {len(skipped_videos)} 个无效或不可读文件。",
-        data={"processedCount": processed_videos, "skippedCount": len(skipped_videos)},
-    )
+    message = f"分镜处理完成：成功处理 {processed_videos} 个视频，跳过 {len(skipped_videos)} 个无效或不可读文件。"
+    data = {"processedCount": processed_videos, "skippedCount": len(skipped_videos)}
+    if skipped_videos or operation_failures:
+        emit("error", message, data=data)
+    else:
+        log_success(message, data=data)
 
 
 if __name__ == "__main__":

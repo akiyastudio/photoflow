@@ -92,6 +92,8 @@ const { pathToFileURL } = require('url');
   assert.deepStrictEqual(partialOfficeResult.extractionFailures, [{ documentName: 'bad.docx', error: '文档损坏' }]);
   const publicationFailure = presentOfficeExtractionResult({ success: false, error: '已提取但链接发布失败', results: [{ document: '方案.docx', documentName: '方案.docx', success: true, count: 2, outputFolder: 'C:/项目/方案_media', publishSuccess: false, publishError: '快捷方式写入失败' }] }, 1);
   assert.strictEqual(publicationFailure.state, 'publication-failed');
+  const mixedPublication = presentOfficeExtractionResult({ success: false, error: 'aggregate publish failure', results: [{ document: 'published.docx', documentName: 'published.docx', success: true, count: 1, publishSuccess: true }, { document: 'unknown.docx', documentName: 'unknown.docx', success: true, count: 1 }] }, 2);
+  assert.deepStrictEqual(mixedPublication.publicationFailures.map(item => item.documentName), ['unknown.docx'], 'aggregate failure must preserve explicitly published items and infer failure only for the rest');
   assert.strictEqual(publicationFailure.publicationFailures[0].outputFolder, 'C:/项目/方案_media');
   assert.strictEqual(presentOfficeExtractionResult({ success: false, error: '提取失败', results: [] }, 1), null, 'an authoritative extraction failure must remain a retryable failure state');
   const authoritativeEmpty = presentOfficeExtractionResult({ success: true, documentCount: 1, successfulCount: 1, imageCount: 0, results: [{ document: '空.xlsx', documentName: '空.xlsx', success: true, count: 0, message: '文档中没有图片' }] }, 1);

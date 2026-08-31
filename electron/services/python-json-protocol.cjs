@@ -17,4 +17,15 @@ const findPythonJsonFailureMessage = messages => {
   return '';
 };
 
-module.exports = { findPythonJsonFailureMessage, parsePythonJsonMessages };
+const classifyPythonJsonMessage = message => {
+  if (!message || typeof message !== 'object' || Array.isArray(message)) return { kind: 'ignore' };
+  if (message.type === 'error' || message.type === 'cancelled') {
+    return { kind: message.type, message: String(message.message || '').trim() };
+  }
+  if (message.type === 'progress') return { kind: 'progress' };
+  if (message.type === 'success' || message.success === true) return { kind: 'success', value: message };
+  if (!message.type) return { kind: 'success', value: message };
+  return { kind: 'message' };
+};
+
+module.exports = { classifyPythonJsonMessage, findPythonJsonFailureMessage, parsePythonJsonMessages };

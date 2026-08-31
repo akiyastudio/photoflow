@@ -25,9 +25,9 @@ export const presentOfficeExtractionResult = (
   const explicitPublicationFailures = successful
     .filter(item => item.publishSuccess === false)
     .map(item => ({ documentName: item.documentName, error: item.publishError || result.error || '发布失败', outputFolder: item.outputFolder }));
-  const publicationFailures = explicitPublicationFailures.length || result.success
+  const publicationFailures = result.success
     ? explicitPublicationFailures
-    : successful.map(item => ({ documentName: item.documentName, error: result.error || '发布状态失败', outputFolder: item.outputFolder }));
+    : successful.filter(item => item.publishSuccess !== true).map(item => ({ documentName: item.documentName, error: item.publishError || result.error || '发布状态失败', outputFolder: item.outputFolder }));
   return {
     state: publicationFailures.length ? 'publication-failed' : extractionFailures.length ? 'partial' : 'success',
     documents: result.acceptedCount ?? result.documentCount ?? requestedDocuments,

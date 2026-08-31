@@ -3,6 +3,8 @@ const path = require('path');
 const { spawn } = require('child_process');
 
 const PROCESS_TIMEOUT_MS = 5000;
+const PROCESS_OUTPUT_LIMIT_BYTES = 4 * 1024 * 1024;
+const PROCESS_TERMINATION_GRACE_MS = 1000;
 const errorMessage = error => error instanceof Error ? error.message : String(error);
 
 const normalizeMountPath = (value, platform = process.platform) => {
@@ -64,27 +66,41 @@ const parseWindowsMountvolOutput = (output, mountPath) => {
 };
 
 const collectProcessOutput = (command, args, options = {}) => new Promise((resolve, reject) => {
-  const { timeoutMs = PROCESS_TIMEOUT_MS, ...spawnOptions } = options;
-  const child = spawn(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...spawnOptions });
+  const { timeoutMs = PROCESS_TIMEOUT_MS, terminationGraceMs = PROCESS_TERMINATION_GRACE_MS, spawnImpl = spawn, ...spawnOptions } = options;
+  const child = spawnImpl(command, args, { windowsHide: true, stdio: ['ignore', 'pipe', 'pipe'], ...spawnOptions });
   let stdout = '';
   let stderr = '';
   let settled = false;
+  let terminationFence = null;
   const finish = (callback, value) => {
     if (settled) return;
     settled = true;
     clearTimeout(timeoutId);
+    clearTimeout(terminationFence);
     callback(value);
   };
+  let terminalError = null;
   const timeoutId = setTimeout(() => {
+    terminalError = new Error(`${command} timed out after ${timeoutMs}ms`);
+    terminationFence = setTimeout(() => finish(reject, terminalError), terminationGraceMs);
     child.kill();
-    finish(reject, new Error(`${command} timed out after ${timeoutMs}ms`));
   }, timeoutMs);
   child.stdout.setEncoding('utf8');
   child.stderr.setEncoding('utf8');
-  child.stdout.on('data', chunk => { stdout += chunk; });
-  child.stderr.on('data', chunk => { stderr += chunk; });
-  child.once('error', error => finish(reject, error));
+  const append = (current, chunk) => {
+    const next = current + chunk;
+    if (Buffer.byteLength(next, 'utf8') > PROCESS_OUTPUT_LIMIT_BYTES) {
+      terminalError ||= new Error(`${command} output exceeded ${PROCESS_OUTPUT_LIMIT_BYTES} bytes`);
+      child.kill();
+      return current;
+    }
+    return next;
+  };
+  child.stdout.on('data', chunk => { stdout = append(stdout, chunk); });
+  child.stderr.on('data', chunk => { stderr = append(stderr, chunk); });
+  child.once('error', error => finish(reject, terminalError || error));
   child.once('close', code => {
+    if (terminalError) return finish(reject, terminalError);
     if (code === 0) finish(resolve, stdout);
     else finish(reject, new Error(stderr.trim() || `${command} exited with code ${code}`));
   });
@@ -152,8 +168,9 @@ const probeWindowsStorageDevice = async (device, collect = collectProcessOutput)
   if (!metadata) return { recognized: false, mountPath: device.mountPath, error: `${device.mountPath}: 设备探测没有返回有效结果` };
   const serialIdentity = serialResult.status === 'fulfilled' ? parseWindowsVolOutput(serialResult.value, device.mountPath) : null;
   const guidIdentity = guidResult.status === 'fulfilled' ? parseWindowsMountvolOutput(guidResult.value, device.mountPath) : null;
-  const aliases = guidIdentity?.identityStable ? [guidIdentity.id] : [];
-  const canonicalIdentity = serialIdentity?.identityStable ? serialIdentity : parseWindowsVolOutput('', device.mountPath);
+  const canonicalIdentity = serialIdentity?.identityStable ? serialIdentity
+    : (guidIdentity?.identityStable ? guidIdentity : parseWindowsVolOutput('', device.mountPath));
+  const aliases = guidIdentity?.identityStable && guidIdentity.id !== canonicalIdentity.id ? [guidIdentity.id] : [];
   const finalized = await finalizeStorageDevice({ ...device, ...metadata, id: canonicalIdentity.id, identityStable: canonicalIdentity.identityStable, aliases }, 'win32');
   const warnings = [
     ...(serialResult.status === 'rejected' ? [`${device.mountPath} 卷序列号：${errorMessage(serialResult.reason)}`] : []),
@@ -169,6 +186,20 @@ const summarizeWindowsStorageDeviceResults = results => {
     ...((result.warnings || []).map(error => ({ mountPath: result.device?.mountPath || result.mountPath || '', error }))),
   ]);
   const recognizedCount = results.filter(result => result.recognized === true).length;
+  const stableIds = new Map();
+  for (const device of devices) {
+    if (!device.identityStable) continue;
+    for (const identity of [...new Set([device.id, ...(Array.isArray(device.aliases) ? device.aliases : [])].filter(Boolean))]) {
+      const previous = stableIds.get(identity);
+      if (previous && previous !== device) {
+        device.identityStable = false;
+        device.eligibleForSdImport = false;
+        previous.identityStable = false;
+        previous.eligibleForSdImport = false;
+        deviceErrors.push({ mountPath: device.mountPath, error: `检测到重复设备标识 ${identity}` });
+      } else stableIds.set(identity, device);
+    }
+  }
   if (deviceErrors.length && recognizedCount === 0) {
     return { devices, complete: false, deviceErrors, error: `无法识别 Windows 存储设备：${deviceErrors.map(item => item.error).join('；')}` };
   }
@@ -208,7 +239,7 @@ const parseDiskutilInfoPlist = (output, mountPath) => {
   return {
     id: stableId ? `darwin-volume:${stableId.toUpperCase()}` : `darwin-path:${mountPath}`,
     identityStable: Boolean(stableId),
-    removable: removableMedia === true || legacyRemovable === true,
+    removable: removableMedia === undefined ? legacyRemovable === true : removableMedia,
   };
 };
 
@@ -219,7 +250,10 @@ const summarizeDarwinStorageDeviceResults = results => {
   if (errors.length && recognizedCount === 0) {
     return { devices, complete: false, error: `无法识别 macOS 存储设备：${errors.join('；')}` };
   }
-  return { devices, complete: true };
+  return { devices, complete: true, ...(errors.length ? {
+    deviceErrors: errors.map(error => ({ mountPath: String(error).split(':')[0], error })),
+    warning: `有 ${errors.length} 个设备探测步骤失败，其他存储卡仍可使用`,
+  } : {}) };
 };
 
 const listDarwinStorageDevices = async () => {
@@ -254,6 +288,7 @@ const listStorageDevices = async (platform = process.platform) => {
 };
 
 module.exports = {
+  collectProcessOutput,
   listStorageDevices,
   listWindowsStorageDevices,
   normalizeMountPath,

@@ -8,6 +8,7 @@ const { pathToFileURL } = require('url');
 const { normalizeSdImportAutoMove } = require('../electron/modules/system-ipc.cjs');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
 const { MAX_CHANGED_PATHS } = require('../electron/contracts/media-sync-limits.cjs');
+const { scheduleSdImportedMedia } = require('../electron/modules/workspace/sd-import-media-scan.cjs');
 
 const handlers = new Map();
 const root = 'trusted-workspace';
@@ -21,6 +22,8 @@ let refreshCount = 0;
 let statusUpdates = [];
 let scans = [];
 let projectEvents = 0;
+let delayedRealpath = false;
+let releaseRealpath;
 
 const catalog = () => ({ projects: [...statuses].map(([key, status]) => ({
   id: `id-${key}`, name: names.get(key), status, relative_path: names.get(key),
@@ -29,7 +32,16 @@ const cleanProjectName = value => /^[A-Za-z]+$/.test(value.trim()) ? value.trim(
 const fakeFs = {
   existsSync: value => !String(value).includes('data-root'),
   statSync: () => ({ mtimeMs: 123, isFile: () => true }),
-  promises: {},
+  promises: {
+    realpath: async value => {
+      if (delayedRealpath) {
+        delayedRealpath = false;
+        await new Promise(resolve => { releaseRealpath = resolve; });
+      }
+      return value;
+    },
+    lstat: async () => ({ isSymbolicLink: () => false, isFile: () => true }),
+  },
 };
 
 registerWorkspaceIpc({
@@ -59,6 +71,25 @@ registerWorkspaceIpc({
 });
 
 (async () => {
+  const directScans = [];
+  let directLstatCount = 0;
+  const directFs = { promises: {
+    realpath: async value => value,
+    lstat: async () => { directLstatCount += 1; return { isSymbolicLink: () => false, isFile: () => true }; },
+  } };
+  await scheduleSdImportedMedia({ root, projects: [{ name: 'A', path: path.resolve(root, 'A') }],
+    importedPathsByProject: { A: Array.from({ length: MAX_CHANGED_PATHS + 1 }, (_, index) => path.resolve(root, 'A', `${index}.jpg`)) },
+    imageExtensions: new Set(['.jpg']), rawExtensions: new Set(), videoExtensions: new Set(), fs: directFs, path,
+    scheduleMediaTrackingScan: (...args) => directScans.push(args) });
+  assert.equal(directLstatCount, 0, 'over-limit scans must fall back before touching individual paths');
+  assert.equal(directScans[0][3], true);
+  directScans.length = 0;
+  directFs.promises.lstat = async () => { throw new Error('simulated TOCTOU disappearance'); };
+  await scheduleSdImportedMedia({ root, projects: [{ name: 'A', path: path.resolve(root, 'A') }], importedPathsByProject: { A: [path.resolve(root, 'A', 'gone.jpg')] },
+    imageExtensions: new Set(['.jpg']), rawExtensions: new Set(), videoExtensions: new Set(), fs: directFs, path,
+    scheduleMediaTrackingScan: (...args) => directScans.push(args) });
+  assert.equal(directScans[0][3], true, 'an async validation race must degrade to a full scan');
+
   assert.strictEqual(normalizeSdImportAutoMove(undefined), true, 'old config must default to enabled');
   assert.strictEqual(normalizeSdImportAutoMove('invalid'), true, 'invalid config must retain enabled default');
   assert.strictEqual(normalizeSdImportAutoMove(false), false, 'only explicit false may disable the setting');
@@ -77,12 +108,36 @@ registerWorkspaceIpc({
 
   const skippedCompletion = completionModel.appendImportSuccess(completionModel.createImportCompletion(), { sourceType: 'work', projectNames: ['A'], importedCount: 0, skipped: true });
   assert.strictEqual(skippedCompletion.skipped, true);
+  assert.strictEqual(skippedCompletion.outcome, 'skipped');
   assert.deepStrictEqual(skippedCompletion.workProjectNames, []);
+  const partialCompletion = completionModel.appendImportSuccess(completionModel.createImportCompletion(), { sourceType: 'work', projectNames: ['A'], importedCount: 2, failedCount: 1 });
+  assert.strictEqual(partialCompletion.outcome, 'partial');
+  const relationPendingCompletion = completionModel.appendImportSuccess(completionModel.createImportCompletion(), { sourceType: 'work', projectNames: ['A'], importedCount: 2, relationPending: true });
+  assert.strictEqual(relationPendingCompletion.outcome, 'relation-pending');
   const finalize = handlers.get('workspace-finalize-sd-imports');
   assert(finalize, 'finalize SD imports IPC must be registered');
+  const finalizeAndDrain = async (...args) => {
+    const value = await finalize(...args);
+    await new Promise(resolve => setImmediate(resolve));
+    return value;
+  };
 
   const importedA = path.resolve(root, 'A', 'imported.jpg');
-  let result = await finalize(null, root, ['A'], { moveProjectAfterImport: false, workProjectNames: ['A'], importedPathsByProject: { A: [importedA] } });
+  delayedRealpath = true;
+  scans = [];
+  let delayedSettled = false;
+  const delayedFinalize = finalize(null, root, ['A'], { moveProjectAfterImport: false, workProjectNames: ['A'], importedPathsByProject: { A: [importedA] } })
+    .then(value => { delayedSettled = true; return value; });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.strictEqual(delayedSettled, false, 'finalize IPC must wait for delayed realpath validation before returning');
+  assert.strictEqual(scans.length, 0);
+  releaseRealpath();
+  let result = await delayedFinalize;
+  delayedRealpath = false;
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(scans.length, 1, 'delayed validation must schedule before the IPC response resolves');
+  scans = [];
+  result = await finalizeAndDrain(null, root, ['A'], { moveProjectAfterImport: false, workProjectNames: ['A'], importedPathsByProject: { A: [importedA] } });
   assert.strictEqual(result.success, true);
   assert.strictEqual(statuses.get('a'), '待拍摄', 'disabled setting must keep the project category');
   assert.deepStrictEqual(result.movedProjects, []);
@@ -92,7 +147,7 @@ registerWorkspaceIpc({
 
   const boundaryPaths = Array.from({ length: MAX_CHANGED_PATHS }, (_, index) => path.resolve(root, 'I', `boundary-${index}.jpg`));
   scans = [];
-  result = await finalize(null, root, ['I'], {
+  result = await finalizeAndDrain(null, root, ['I'], {
     moveProjectAfterImport: false, workProjectNames: ['I'], importedPathsByProject: { I: boundaryPaths },
   });
   assert.strictEqual(result.success, true);
@@ -103,7 +158,7 @@ registerWorkspaceIpc({
 
   const overflowPaths = [...boundaryPaths, path.resolve(root, 'I', 'overflow.jpg')];
   scans = [];
-  result = await finalize(null, root, ['I'], {
+  result = await finalizeAndDrain(null, root, ['I'], {
     moveProjectAfterImport: true, workProjectNames: ['I'], importedPathsByProject: { I: overflowPaths },
   });
   assert.strictEqual(result.success, true, 'overflow fallback must not fail after moving the project status');
@@ -111,7 +166,7 @@ registerWorkspaceIpc({
   assert.deepStrictEqual(scans, [{ root, name: 'I', changes: [], fullScan: true }], 'over-limit imports must schedule exactly one full scan and no partial increment');
 
   scans = [];
-  result = await finalize(null, root, ['A', 'B', 'C', 'D', 'E', 'G'], {
+  result = await finalizeAndDrain(null, root, ['A', 'B', 'C', 'D', 'E', 'G'], {
     moveProjectAfterImport: true,
     workProjectNames: ['A', 'B', 'C', 'D', 'G'],
   });
@@ -126,11 +181,11 @@ registerWorkspaceIpc({
   assert(scans.every(scan => scan.changes.length === 0 && scan.fullScan === true), 'missing precise import paths must explicitly request a full scan');
 
   const updatesBeforeRepeat = statusUpdates.length;
-  result = await finalize(null, root, ['A', 'A'], { moveProjectAfterImport: true, workProjectNames: ['A', 'A'] });
+  result = await finalizeAndDrain(null, root, ['A', 'A'], { moveProjectAfterImport: true, workProjectNames: ['A', 'A'] });
   assert.strictEqual(result.success, true);
   assert.strictEqual(statusUpdates.length, updatesBeforeRepeat, 'repeated completion must be idempotent');
 
-  result = await finalize(null, root, ['H', 'F', 'H'], { moveProjectAfterImport: true, workProjectNames: ['H', 'F', 'H'] });
+  result = await finalizeAndDrain(null, root, ['H', 'F', 'H'], { moveProjectAfterImport: true, workProjectNames: ['H', 'F', 'H'] });
   assert.strictEqual(statuses.get('h'), '后期中', 'one project failure must not block other projects');
   assert.strictEqual(statuses.get('f'), '待拍摄');
   assert.deepStrictEqual(result.movedProjects.map(project => project.name), ['H']);
@@ -138,11 +193,11 @@ registerWorkspaceIpc({
   assert.strictEqual(result.projects.filter(project => project.name === 'H').length, 1, 'batch project names must be deduplicated');
 
   const updatesBeforeEmpty = statusUpdates.length;
-  result = await finalize(null, root, [], { moveProjectAfterImport: true, workProjectNames: [] });
+  result = await finalizeAndDrain(null, root, [], { moveProjectAfterImport: true, workProjectNames: [] });
   assert.strictEqual(result.success, true);
   assert.strictEqual(statusUpdates.length, updatesBeforeEmpty, 'skipped, cancelled, failed, or zero-count completions must submit no work projects and move nothing');
 
-  const malicious = await finalize(null, root, ['C:\\outside', '../A'], { moveProjectAfterImport: true, workProjectNames: ['C:\\outside', '../A'] });
+  const malicious = await finalizeAndDrain(null, root, ['C:\\outside', '../A'], { moveProjectAfterImport: true, workProjectNames: ['C:\\outside', '../A'] });
   assert.strictEqual(malicious.success, true);
   assert.deepStrictEqual(malicious.projects, [], 'renderer must not finalize arbitrary absolute or traversal paths');
 
@@ -153,7 +208,8 @@ registerWorkspaceIpc({
     const database = path.join(realRoot, 'workspace.sqlite3');
     fs.mkdirSync(realProject);
     for (const importedFile of importedFiles) fs.writeFileSync(importedFile, 'real imported media');
-    const python = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
+    const bundledPython = path.join(__dirname, '..', '.venv', process.platform === 'win32' ? 'Scripts' : 'bin', process.platform === 'win32' ? 'python.exe' : 'python');
+    const python = fs.existsSync(bundledPython) ? bundledPython : (process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3'));
     const pythonModules = path.join(__dirname, '..', 'python');
     const invokeCode = 'import json,sys;sys.path.insert(0,sys.argv[1]);import workspace_db;a,r,d=sys.argv[2:];p=json.load(sys.stdin);v=workspace_db.load(r,d) if a=="init" else workspace_db.mutate(r,d,a,p);print(json.dumps(v,ensure_ascii=False))';
     const invoke = (action, payload = {}) => {

@@ -87,6 +87,7 @@ export const InspirationLibraryNavigator = ({
   const [targetProjectsAvailable, setTargetProjectsAvailable] = useState(false);
   const [targetProject, setTargetProject] = useState<WorkspaceProject | null>(null);
   const folderLoadInFlightRef = useRef(false);
+  const folderLoadGenerationRef = useRef(0);
   const folderLoadQueuedRef = useRef(false);
   const folderTreeDirtyRef = useRef(true);
   const lastFolderLoadAtRef = useRef(0);
@@ -116,18 +117,22 @@ export const InspirationLibraryNavigator = ({
   useEffect(() => {
     let disposed = false;
     const loadTargetProject = async () => {
+      setTargetProjectsAvailable(false);
+      setTargetProject(null);
       if (!targetWorkspacePath.trim()) {
-        setTargetProjectsAvailable(false);
-        setTargetProject(null);
         return;
       }
-      const result = await window.electronAPI.getWorkspaceProjects(targetWorkspacePath);
-      if (disposed || !result.success) return;
-      const projects = result.statuses.flatMap(group => group.projects).filter(project => project.availability !== 'missing');
-      let preferredPath = '';
-      try { preferredPath = window.localStorage.getItem('photoflow:inspiration-target-project') || ''; } catch { /* storage unavailable */ }
-      setTargetProjectsAvailable(projects.length > 0);
-      setTargetProject(projects.find(project => project.path === preferredPath) || null);
+      try {
+        const result = await window.electronAPI.getWorkspaceProjects(targetWorkspacePath);
+        if (disposed || !result.success) return;
+        const projects = result.statuses.flatMap(group => group.projects).filter(project => project.availability !== 'missing');
+        let preferredPath = '';
+        try { preferredPath = window.localStorage.getItem('photoflow:inspiration-target-project') || ''; } catch { /* storage unavailable */ }
+        setTargetProjectsAvailable(projects.length > 0);
+        setTargetProject(projects.find(project => project.path === preferredPath) || null);
+      } catch (error) {
+        if (!disposed) onNotice(`读取目标项目失败：${error instanceof Error ? error.message : String(error || '未知错误')}`, 6000);
+      }
     };
     void loadTargetProject();
     const changed = () => void loadTargetProject();
@@ -140,6 +145,7 @@ export const InspirationLibraryNavigator = ({
     };
   }, [targetWorkspacePath]);
   const loadFolders = useCallback(async () => {
+    const loadGeneration = ++folderLoadGenerationRef.current;
     const requestedRootPath = rootPath;
     const requestedGeneration = rootGeneration;
     if (!rootPath.trim()) {
@@ -153,7 +159,7 @@ export const InspirationLibraryNavigator = ({
     setLoading(true);
     try {
       const result = await window.electronAPI.listWorkspaceFolders(rootPath, '未分类', INSPIRATION_PROJECT_NAME);
-      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
+      if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration) || folderLoadGenerationRef.current !== loadGeneration) return;
       if (result.success) {
         setFolders(current => current.length === result.folders.length
           && current.every((folder, index) => folder.relativePath === result.folders[index]?.relativePath
@@ -168,9 +174,14 @@ export const InspirationLibraryNavigator = ({
         setFolders([]);
         setTreeError(result.error || '无法读取目录');
       }
+    } catch (error) {
+      if (rootRequestIsCurrent(requestedRootPath, requestedGeneration) && folderLoadGenerationRef.current === loadGeneration) {
+        setFolders([]);
+        setTreeError(error instanceof Error ? error.message : String(error || '无法读取目录'));
+      }
     } finally {
       folderLoadInFlightRef.current = false;
-      if (rootRequestIsCurrent(requestedRootPath, requestedGeneration)) setLoading(false);
+      if (rootRequestIsCurrent(requestedRootPath, requestedGeneration) && folderLoadGenerationRef.current === loadGeneration) setLoading(false);
       if (folderLoadQueuedRef.current) {
         folderLoadQueuedRef.current = false;
         setFolderLoadRevision(current => current + 1);
@@ -308,7 +319,7 @@ export const InspirationLibraryNavigator = ({
       const nextRelativePath = renamedEntryDestinationPath(folder.relativePath, nextName, result.movedItems);
       const navigationTarget = requestedCurrentPath === folder.relativePath || requestedCurrentPath.startsWith(`${folder.relativePath}/`)
         ? `${nextRelativePath}${requestedCurrentPath.slice(folder.relativePath.length)}`
-        : nextRelativePath;
+        : '';
       setCollapsedPaths(current => {
         const next = new Set<string>();
         for (const collapsedPath of current) {
@@ -324,6 +335,7 @@ export const InspirationLibraryNavigator = ({
       if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
       const latestNavigation = navigationContextRef.current;
       if (latestNavigation.rootPath === requestedRootPath
+        && navigationTarget
         && latestNavigation.currentRelativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '') === requestedCurrentPath) onNavigate(navigationTarget);
     } catch (error) {
       if (!rootRequestIsCurrent(requestedRootPath, requestedGeneration)) return;
@@ -476,6 +488,8 @@ export const InspirationLibraryPage = ({
       const saved = await onUpdateConfig(nextConfig);
       if (saved === false) onNotice('保存灵感库文件夹失败，请重试。', 6000);
       else onDirectoryChange(pageId, '');
+    } catch (error) {
+      onNotice(`选择灵感库文件夹失败：${error instanceof Error ? error.message : String(error || '未知错误')}`, 6000);
     } finally {
       setChoosingRoot(false);
     }

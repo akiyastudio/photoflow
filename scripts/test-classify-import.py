@@ -1,15 +1,18 @@
 import datetime
 import contextlib
 import errno
+import hashlib
 import io
 import json
 import os
 import shutil
+import subprocess
 import sys
 import tempfile
 import threading
 import time
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest import mock
 
@@ -23,6 +26,8 @@ sys.path.insert(0, str(ROOT / 'python'))
 import classify  # noqa: E402
 import ffmpeg_transcode  # noqa: E402
 import workspace_db  # noqa: E402
+
+FAKE_MP4_BYTES = b'\x00\x00\x00\x18ftypisom\x00\x00\x00\x00isommp42'
 
 
 class ClassifyImportTests(unittest.TestCase):
@@ -158,6 +163,24 @@ class ClassifyImportTests(unittest.TestCase):
             expected = datetime.datetime(2024, 5, 6, 7, 8, 9, tzinfo=datetime.timezone.utc).timestamp()
             self.assertEqual(actual, expected)
 
+    def test_implausible_video_capture_time_falls_back_to_filesystem_mtime(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            source = Path(temporary) / 'clip.mp4'
+            source.write_bytes(b'video')
+            filesystem_time = datetime.datetime(2025, 4, 3, 2, 1).timestamp()
+            os.utime(source, (filesystem_time, filesystem_time))
+            classify.get_file_time.cache_clear()
+            with mock.patch.object(classify, 'probe_creation_time_values', return_value=('2999-01-01T00:00:00Z',)):
+                self.assertEqual(classify.get_file_time(str(source)), filesystem_time)
+
+    def test_unknown_stage_emits_error_protocol_event(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output), mock.patch.object(classify.sys, 'platform', 'linux'):
+            classify.run(['--stage', 'mystery'])
+        events = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith('{')]
+        self.assertEqual(events[-1]['type'], 'error')
+        self.assertIn('未知导入阶段', events[-1]['message'])
+
     def test_ffmpeg_metadata_probe_orders_creation_time_fields(self):
         metadata = """
             creation_time : 2024-05-06T07:08:09Z
@@ -249,11 +272,11 @@ class ClassifyImportTests(unittest.TestCase):
             sources[1].write_bytes(b'second-file')
             original_copy = classify.safe_chunk_copy
 
-            def disconnect_on_second(source, target, chunk_size=4 * 1024 * 1024, on_progress=None):
+            def disconnect_on_second(source, target, chunk_size=4 * 1024 * 1024, on_progress=None, collect_digest=False):
                 if Path(source).name == 'two.jpg':
                     Path(target).write_bytes(b'partial')
                     raise OSError('device disconnected')
-                return original_copy(source, target, chunk_size, on_progress)
+                return original_copy(source, target, chunk_size, on_progress, collect_digest)
 
             with mock.patch.object(classify, 'scan_import_media', return_value=(str(card), [str(path) for path in sources])), \
                     mock.patch.object(classify, 'safe_chunk_copy', side_effect=disconnect_on_second):
@@ -711,7 +734,7 @@ class ClassifyImportTests(unittest.TestCase):
                 calls.append(Path(input_path).name)
                 destination = Path(kwargs['destination_directory']) / f'{Path(input_path).stem}.mp4'
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(b'transcoded')
+                destination.write_bytes(FAKE_MP4_BYTES)
                 return str(destination)
 
             output = io.StringIO()
@@ -838,6 +861,34 @@ class ClassifyImportTests(unittest.TestCase):
             copy_file.assert_called_once()
             self.assertTrue(source.exists())
             self.assertEqual(destination.read_bytes(), b'local-copy')
+
+    def test_cross_device_promotion_copy_is_fsynced_without_rehashing(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'staged.bin'
+            destination = root / 'target' / 'media.bin'
+            source.write_bytes(b'durable-cross-device-copy')
+            destination.parent.mkdir()
+            real_stat = classify.os.stat
+
+            def cross_device_stat(path, *args, **kwargs):
+                actual = real_stat(path, *args, **kwargs)
+                overridden_device = 101 if os.path.abspath(path) == os.path.abspath(source) else 202 if os.path.abspath(path) == os.path.abspath(destination.parent) else actual.st_dev
+                values = {name: getattr(actual, name) for name in dir(actual) if name.startswith('st_')}
+                values['st_dev'] = overridden_device
+                return SimpleNamespace(**values)
+
+            with mock.patch.object(classify.os, 'stat', side_effect=cross_device_stat), \
+                    mock.patch.object(classify.os, 'fsync') as fsync, \
+                    mock.patch.object(classify.hashlib, 'sha256', wraps=hashlib.sha256) as sha256:
+                moved = classify.promote_staged_file(str(source), str(destination), allow_atomic_move=True)
+
+            self.assertFalse(moved)
+            self.assertEqual(destination.read_bytes(), b'durable-cross-device-copy')
+            self.assertGreaterEqual(fsync.call_count, 1)
+            # Promotion may sample source/target for collision safety, but it
+            # must not compute one SHA per copied chunk again.
+            self.assertLess(sha256.call_count, 6)
 
     def test_cancelled_broll_restores_files_atomically_moved_from_staging(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1407,7 +1458,7 @@ class ClassifyImportTests(unittest.TestCase):
             def fake_transcode(input_path, **kwargs):
                 destination = Path(kwargs['destination_directory']) / 'clip.mp4'
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                destination.write_bytes(b'transcoded-video')
+                destination.write_bytes(FAKE_MP4_BYTES)
                 self.assertEqual(kwargs['output_mode'], 'new')
                 return str(destination)
 
@@ -1421,7 +1472,7 @@ class ClassifyImportTests(unittest.TestCase):
                 )
 
             self.assertEqual((project / 'mov' / 'clip.mov').read_bytes(), b'original-video')
-            self.assertEqual((project / 'mov_转码' / 'clip.mp4').read_bytes(), b'transcoded-video')
+            self.assertEqual((project / 'mov_转码' / 'clip.mp4').read_bytes(), FAKE_MP4_BYTES)
             events = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith('{')]
             self.assertTrue(any('已保存到 mov_转码' in event.get('message', '') for event in events))
             success = next(event for event in events if event.get('type') == 'success')
@@ -1464,7 +1515,7 @@ class ClassifyImportTests(unittest.TestCase):
                 if Path(input_path).name == 'broken.mov':
                     raise classify.FFmpegTranscodeError('simulated failure')
                 destination = output_dir / 'clip (1).mp4'
-                destination.write_bytes(b'new')
+                destination.write_bytes(FAKE_MP4_BYTES)
                 return str(destination)
 
             with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(
@@ -1477,6 +1528,156 @@ class ClassifyImportTests(unittest.TestCase):
             self.assertEqual(result, (1, 2, [str(output_dir / 'clip (1).mp4')]))
             self.assertTrue(all(path.is_file() for path in sources))
             self.assertEqual((output_dir / 'clip.mp4').read_bytes(), b'existing')
+
+    def test_work_multi_video_failure_commits_output_to_exact_input_entry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            card = root / 'card' / 'DCIM'
+            project = root / 'project'
+            card.mkdir(parents=True)
+            project.mkdir()
+            (card / 'broken.mov').write_bytes(b'broken-original')
+            (card / 'good.mov').write_bytes(b'good-original')
+            session = 'work-exact-postprocess'
+
+            def fake_transcode(input_path, **kwargs):
+                if Path(input_path).name == 'broken.mov':
+                    raise classify.FFmpegTranscodeError('first failed')
+                output = Path(kwargs['destination_directory']) / 'good.mp4'
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(FAKE_MP4_BYTES)
+                return str(output)
+
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(
+                classify, 'transcode_video', side_effect=fake_transcode,
+            ):
+                classify.stage_import_and_organize(
+                    str(root / 'card'), str(project), direct_project=True,
+                    transcode_import_videos=True, import_session=session,
+                )
+
+            manifest_path = Path(classify.get_import_staging_dir(str(project), session)) / classify.STAGING_MANIFEST_NAME
+            entries = {Path(entry['source']).name: entry for entry in json.loads(manifest_path.read_text(encoding='utf-8'))['files']}
+            self.assertNotIn('transcode', entries['broken.mov'].get('postProcesses', {}))
+            committed = entries['good.mov']['postProcesses']['transcode']
+            self.assertEqual(committed['state'], 'committed')
+            self.assertEqual(Path(committed['inputPath']).name, 'good.mov')
+            self.assertEqual([Path(path).name for path in committed['outputPaths']], ['good.mp4'])
+
+    def test_committed_transcode_and_raw_jpg_are_reused_on_retry(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staging = root / 'staging'
+            target = root / 'project'
+            source = target / 'mov' / 'clip.mov'
+            output = target / 'mov_转码' / 'clip.mp4'
+            raw = target / 'raw' / 'photo.cr3'
+            jpg = target / 'jpg' / 'photo.jpg'
+            for path, data in ((source, b'video'), (output, FAKE_MP4_BYTES), (raw, b'raw')):
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(data)
+            jpg.parent.mkdir(parents=True, exist_ok=True)
+            Image.new('RGB', (4, 4), 'white').save(jpg)
+            staging.mkdir()
+            entries = [
+                {'source': str(source), 'staged': str(source), 'size': source.stat().st_size, 'localPath': str(source), 'postProcesses': {
+                    'transcode': {'kind': 'transcode', 'state': 'committed', 'inputPath': str(source), 'outputPaths': [str(output)]},
+                }},
+                {'source': str(raw), 'staged': str(raw), 'size': raw.stat().st_size, 'localPath': str(raw), 'postProcesses': {
+                    'raw_jpg': {'kind': 'raw_jpg', 'state': 'pending', 'inputPath': str(raw), 'pendingOutput': str(jpg)},
+                }},
+            ]
+            staged_import = {'stagingDir': str(staging), 'entries': entries}
+            (staging / classify.STAGING_MANIFEST_NAME).write_text(json.dumps({'version': 2, 'files': entries}), encoding='utf-8')
+
+            self.assertEqual(classify.recover_post_process(staged_import, entries[0], 'transcode', str(output.parent)), [str(output)])
+            self.assertEqual(classify.recover_post_process(staged_import, entries[1], 'raw_jpg', str(jpg.parent), image_output=True), [str(jpg)])
+            self.assertEqual(post := classify.post_process_record(entries[1], 'raw_jpg'), {
+                'kind': 'raw_jpg', 'state': 'committed', 'inputPath': str(raw), 'outputPaths': [str(jpg)],
+            })
+            self.assertEqual(classify.recover_post_process(staged_import, entries[1], 'raw_jpg', str(jpg.parent), image_output=True), [str(jpg)])
+
+    def test_broll_multi_video_checkpoint_mapping_survives_first_failure(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            card = root / 'card' / 'DCIM'
+            project = root / 'project'
+            card.mkdir(parents=True)
+            project.mkdir()
+            (card / 'broken.mov').write_bytes(b'broken')
+            (card / 'good.mov').write_bytes(b'good')
+            events = []
+            real_checkpoint = classify.checkpoint_post_process
+
+            def recording_checkpoint(staged_import, entry, kind, record=None):
+                events.append((Path(entry['source']).name, kind, None if record is None else record.get('state')))
+                return real_checkpoint(staged_import, entry, kind, record)
+
+            def fake_transcode(input_path, **kwargs):
+                if Path(input_path).name == 'broken.mov':
+                    raise classify.FFmpegTranscodeError('failed first')
+                output = Path(kwargs['destination_directory']) / 'good.mp4'
+                output.parent.mkdir(parents=True, exist_ok=True)
+                output.write_bytes(FAKE_MP4_BYTES)
+                return str(output)
+
+            with contextlib.redirect_stdout(io.StringIO()), \
+                    mock.patch.object(classify, 'checkpoint_post_process', side_effect=recording_checkpoint), \
+                    mock.patch.object(classify, 'transcode_video', side_effect=fake_transcode):
+                classify.stage_import_broll(
+                    str(root / 'card'), str(project), transcode_import_videos=True,
+                    import_session='broll-exact-postprocess',
+                )
+
+            self.assertIn(('broken.mov', 'transcode', 'pending'), events)
+            self.assertIn(('broken.mov', 'transcode', None), events)
+            self.assertIn(('good.mov', 'transcode', 'committed'), events)
+            self.assertNotIn(('broken.mov', 'transcode', 'committed'), events)
+
+    def test_broll_resume_reuses_all_committed_split_segments(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / 'project'
+            card = root / 'card'
+            source = card / 'clip.mp4'
+            broll = project / '花絮'
+            full = broll / 'clip.mp4'
+            segments = [broll / 'clip_part001.mp4', broll / 'clip_part002.mp4']
+            source.parent.mkdir(parents=True)
+            broll.mkdir(parents=True)
+            source.write_bytes(b'full-original')
+            full.write_bytes(source.read_bytes())
+            for segment in segments:
+                segment.write_bytes(FAKE_MP4_BYTES)
+            session = 'broll-split-resume'
+            staging = Path(classify.get_import_staging_dir(str(project), session))
+            staging.mkdir(parents=True)
+            metadata = classify._source_entry_metadata(str(source))
+            entry = {
+                'source': str(source), 'staged': str(staging / 'clip.mp4'), **metadata,
+                'committedDestination': str(full), 'outputPaths': [str(path) for path in segments],
+                'postProcesses': {'split': {
+                    'kind': 'split', 'state': 'committed', 'inputPath': str(full),
+                    'outputPaths': [str(path) for path in segments],
+                }},
+            }
+            (staging / classify.STAGING_MANIFEST_NAME).write_text(json.dumps({
+                'version': 2, 'baseSource': str(card),
+                'sourceVolumeIdentity': classify._source_volume_identity(str(card)),
+                'files': [entry],
+            }), encoding='utf-8')
+
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output), mock.patch.object(
+                classify, 'promote_staged_file', side_effect=AssertionError('committed segments must skip promotion'),
+            ):
+                classify.stage_import_broll(str(card), str(project), import_session=session)
+
+            self.assertTrue(all(path.is_file() for path in segments))
+            self.assertFalse(full.exists())
+            events = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith('{')]
+            success = next(event for event in events if event.get('type') == 'success')
+            self.assertEqual(success['data']['importedPaths'], sorted(str(path) for path in segments))
 
     def test_import_transcode_cancellation_propagates_and_keeps_original(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1503,13 +1704,488 @@ class ClassifyImportTests(unittest.TestCase):
             new_video = source_dir / 'new.mov'
             old_video.write_bytes(b'old')
             new_video.write_bytes(b'new')
-            with mock.patch.object(classify, 'transcode_video_preview', return_value='libx264') as transcode:
+            def fake_preview(_input, output, _quality, on_log=None):
+                Path(output).write_bytes(FAKE_MP4_BYTES)
+                return 'libx264'
+
+            with mock.patch.object(classify, 'transcode_video_preview', side_effect=fake_preview) as transcode:
                 result = classify.generate_video_previews(str(target), source_paths=[str(new_video)])
 
             self.assertEqual(result, (1, 1))
             self.assertEqual(transcode.call_count, 1)
             self.assertEqual(transcode.call_args.args[0], str(new_video))
             self.assertNotEqual(transcode.call_args.args[0], str(old_video))
+
+    def test_delete_mode_rejects_same_size_middle_corruption_and_keeps_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'card' / 'DCIM' / 'clip.mp4'
+            workspace = root / 'workspace'
+            source.parent.mkdir(parents=True)
+            workspace.mkdir()
+            payload = b'A' * 4096 + b'B' * 4096 + b'C' * 4096
+            source.write_bytes(payload)
+            original_copy = classify.safe_chunk_copy
+
+            def corrupt_middle(src, dst, chunk_size=4 * 1024 * 1024, on_progress=None, collect_digest=False):
+                digest = original_copy(src, dst, 4096, on_progress, collect_digest)
+                damaged = bytearray(Path(dst).read_bytes())
+                damaged[5000] ^= 0xFF
+                Path(dst).write_bytes(damaged)
+                shutil.copystat(src, dst)
+                return digest
+
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(
+                classify, 'safe_chunk_copy', side_effect=corrupt_middle,
+            ):
+                classify.stage_import_and_organize(
+                    str(root / 'card'), str(workspace), direct_project=True,
+                    delete_source=True, import_session='middle-corruption',
+                )
+
+            self.assertTrue(source.is_file(), 'an incompletely verified copy must never authorize source deletion')
+            self.assertFalse((workspace / 'mov' / source.name).exists())
+
+    def test_retain_source_copy_skips_chunk_sha_and_omits_copy_digest(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source.jpg'
+            copied = root / 'copied.jpg'
+            source.write_bytes(b'ordinary-retained-import' * 1024)
+            with mock.patch.object(classify.hashlib, 'sha256', side_effect=AssertionError('chunk SHA must be disabled')):
+                self.assertIsNone(classify.safe_chunk_copy(str(source), str(copied), collect_digest=False))
+            self.assertEqual(copied.read_bytes(), source.read_bytes())
+
+            workspace = root / 'workspace'
+            workspace.mkdir()
+            with mock.patch.object(classify, 'safe_chunk_copy', wraps=classify.safe_chunk_copy) as copy_file:
+                staged = classify.stage_media_to_safety_temp(
+                    str(source), str(workspace), direct_source=True,
+                    source_paths=[str(source)], import_session='retain-no-digest', verify_copy=False,
+                )
+            self.assertIs(copy_file.call_args.kwargs['collect_digest'], False)
+            manifest = json.loads((Path(staged['stagingDir']) / classify.STAGING_MANIFEST_NAME).read_text(encoding='utf-8'))
+            self.assertNotIn('copyDigest', manifest['files'][0])
+
+    def test_delete_source_copy_collects_digest_and_completes_full_verification(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source.jpg'
+            workspace = root / 'workspace'
+            workspace.mkdir()
+            source.write_bytes(b'A' * (5 * 1024 * 1024) + b'B' * (5 * 1024 * 1024))
+            staged = classify.stage_media_to_safety_temp(
+                str(source), str(workspace), direct_source=True,
+                source_paths=[str(source)], import_session='delete-with-digest', verify_copy=True,
+            )
+            entry = staged['entries'][0]
+            self.assertTrue(staged['copyVerified'])
+            self.assertEqual(len(entry['copyDigest']['chunks']), 3)
+            self.assertTrue(entry['copyVerification']['complete'])
+
+    def test_enabling_delete_for_digestless_session_keeps_source(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source.jpg'
+            workspace = root / 'workspace'
+            workspace.mkdir()
+            source.write_bytes(b'legacy-retained-copy')
+            classify.stage_media_to_safety_temp(
+                str(source), str(workspace), direct_source=True,
+                source_paths=[str(source)], import_session='digestless-retry', verify_copy=False,
+            )
+            with mock.patch.object(classify, 'safe_chunk_copy', wraps=classify.safe_chunk_copy) as copy_file:
+                resumed = classify.stage_media_to_safety_temp(
+                    str(source), str(workspace), direct_source=True,
+                    source_paths=[str(source)], import_session='digestless-retry', verify_copy=True,
+                )
+            self.assertTrue(source.is_file())
+            self.assertTrue(resumed['copyVerified'])
+            self.assertTrue(any(call.kwargs.get('collect_digest') is True for call in copy_file.call_args_list))
+
+    def test_digestless_session_with_offline_source_continues_but_blocks_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source.jpg'
+            workspace = root / 'workspace'
+            workspace.mkdir()
+            source.write_bytes(b'offline-after-plan')
+            initial = classify.stage_media_to_safety_temp(
+                str(source), str(workspace), direct_source=True,
+                source_paths=[str(source)], import_session='digestless-offline', verify_copy=False,
+            )
+            source.unlink()
+            output = io.StringIO()
+            with contextlib.redirect_stdout(output):
+                resumed = classify.stage_media_to_safety_temp(
+                    str(source), str(workspace), direct_source=True,
+                    source_paths=[str(source)], import_session='digestless-offline', verify_copy=True,
+                )
+            events = [json.loads(line) for line in output.getvalue().splitlines() if line.startswith('{')]
+            warning = next(event for event in events if event.get('type') == 'warning')
+            self.assertEqual(warning['data']['code'], 'source_cleanup_unverified')
+            self.assertFalse(warning['data']['sourceCleanupAllowed'])
+            self.assertEqual(resumed['sourceCleanupBlockedReason'], 'verification-unavailable')
+            self.assertFalse(resumed['copyVerified'])
+            self.assertTrue(Path(initial['stagedFiles'][0]).is_file())
+
+    def test_plan_then_delete_import_collects_digest_during_initial_copy(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'card' / 'photo.jpg'
+            project = root / 'project'
+            source.parent.mkdir()
+            project.mkdir()
+            source.write_bytes(b'plan-delete-source')
+            session = 'plan-delete-regression'
+
+            with contextlib.redirect_stdout(io.StringIO()), mock.patch.object(
+                classify, 'safe_chunk_copy', wraps=classify.safe_chunk_copy,
+            ) as copy_file:
+                classify.stage_plan_import(
+                    str(source), str(project), '[]', direct_source=True,
+                    source_paths=[str(source)], import_session=session, delete_source=True,
+                )
+            self.assertTrue(any(call.kwargs.get('collect_digest') is True for call in copy_file.call_args_list))
+            staging = Path(classify.get_import_staging_dir(str(project), session))
+            manifest = json.loads((staging / classify.STAGING_MANIFEST_NAME).read_text(encoding='utf-8'))
+            self.assertIn('copyDigest', manifest['files'][0])
+
+            with contextlib.redirect_stdout(io.StringIO()):
+                classify.stage_import_and_organize(
+                    str(source), str(project), direct_project=True, direct_source=True,
+                    source_paths=[str(source)], delete_source=True, import_session=session,
+                )
+            self.assertFalse(source.exists())
+            self.assertEqual((project / 'jpg' / 'photo.jpg').read_bytes(), b'plan-delete-source')
+
+    def test_plan_cli_forwards_delete_source_to_digest_collection_policy(self):
+        with mock.patch.object(classify.sys, 'platform', 'linux'), \
+                mock.patch.object(classify, 'stage_plan_import') as plan:
+            classify.run(['--stage', 'plan', '--delete_source'])
+        self.assertIs(plan.call_args.args[-1], True)
+
+    def test_tool_outputs_must_be_unique_regular_nonempty_files_inside_target(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            target = root / 'target'
+            target.mkdir()
+            valid = target / 'one.mp4'
+            valid.write_bytes(FAKE_MP4_BYTES)
+            outside = root / 'outside.mp4'
+            outside.write_bytes(FAKE_MP4_BYTES)
+            self.assertEqual(classify.validate_tool_output_paths([str(valid)], str(target)), [str(valid)])
+            with self.assertRaisesRegex(ValueError, '重复'):
+                classify.validate_tool_output_paths([str(valid), str(valid)], str(target))
+            with self.assertRaisesRegex(ValueError, '目标树'):
+                classify.validate_tool_output_paths([str(outside)], str(target))
+            empty = target / 'empty.mp4'
+            empty.touch()
+            with self.assertRaisesRegex(ValueError, '普通非空'):
+                classify.validate_tool_output_paths([str(empty)], str(target))
+            text_output = target / 'segment.txt'
+            text_output.write_bytes(b'not-video')
+            with self.assertRaisesRegex(ValueError, '扩展名'):
+                classify.validate_tool_output_paths([str(text_output)], str(target))
+            fake_mp4 = target / 'fake.mp4'
+            fake_mp4.write_bytes(b'not-an-mp4-container')
+            with self.assertRaisesRegex(ValueError, '容器签名'):
+                classify.validate_tool_output_paths([str(fake_mp4)], str(target))
+            realpath = os.path.realpath
+            with mock.patch.object(
+                classify.os.path, 'realpath',
+                side_effect=lambda value: str(outside) if os.path.abspath(value) == os.path.abspath(valid) else realpath(value),
+            ), self.assertRaisesRegex(ValueError, '目标树'):
+                classify.validate_tool_output_paths([str(valid)], str(target))
+
+    def test_copy_verification_resumes_only_unfinished_chunks(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            copied = Path(temporary) / 'copy.bin'
+            copied.write_bytes(b'a' * 4 + b'b' * 4 + b'c' * 4)
+            info = copied.stat()
+            signature = {
+                'canonicalPath': os.path.normcase(os.path.realpath(str(copied))),
+                'device': int(info.st_dev), 'fileId': int(info.st_ino),
+                'size': info.st_size, 'mtimeNs': info.st_mtime_ns,
+            }
+            entry = {
+                'size': 12,
+                'copyDigest': {'algorithm': 'sha256', 'chunkSize': 4, 'chunks': [
+                    hashlib.sha256(b'a' * 4).hexdigest(),
+                    hashlib.sha256(b'b' * 4).hexdigest(),
+                    hashlib.sha256(b'c' * 4).hexdigest(),
+                ]},
+                'copyVerification': {'targetSignature': signature, 'verifiedChunks': 2},
+            }
+            reads = []
+
+            class TrackingReader:
+                def __init__(self, wrapped): self.wrapped = wrapped
+                def __enter__(self): return self
+                def __exit__(self, *args): self.wrapped.close()
+                def seek(self, offset): reads.append(('seek', offset)); return self.wrapped.seek(offset)
+                def read(self, size=-1): reads.append(('read', size)); return self.wrapped.read(size)
+
+            builtin_open = open
+            with mock.patch.object(classify, 'open', side_effect=lambda path, mode='r', **kwargs: TrackingReader(builtin_open(path, mode, **kwargs))):
+                self.assertTrue(classify._verify_entry_copy_chunks(entry, str(copied)))
+            self.assertEqual(reads[0], ('seek', 8))
+
+    def test_copy_verification_does_not_reuse_signature_for_different_target_path(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged = root / 'staged.bin'
+            committed = root / 'committed.bin'
+            correct = b'A' * 4 + b'B' * 4 + b'C' * 4
+            damaged = b'A' * 4 + b'X' * 4 + b'C' * 4
+            staged.write_bytes(correct)
+            committed.write_bytes(damaged)
+            timestamp = time.time() - 60
+            os.utime(staged, (timestamp, timestamp))
+            os.utime(committed, (timestamp, timestamp))
+            staged_info = staged.stat()
+            entry = {
+                'size': len(correct),
+                'copyDigest': {'algorithm': 'sha256', 'chunkSize': 4, 'chunks': [
+                    hashlib.sha256(correct[index:index + 4]).hexdigest() for index in range(0, len(correct), 4)
+                ]},
+                'copyVerification': {
+                    'targetSignature': {
+                        'canonicalPath': os.path.normcase(os.path.realpath(str(staged))),
+                        'device': int(staged_info.st_dev), 'fileId': int(staged_info.st_ino),
+                        'size': staged_info.st_size, 'mtimeNs': staged_info.st_mtime_ns,
+                    },
+                    'verifiedChunks': 3,
+                    'complete': True,
+                },
+            }
+            self.assertFalse(classify._verify_entry_copy_chunks(entry, str(committed)))
+            self.assertNotIn('copyVerification', entry)
+
+    def test_hundred_gib_verification_throttles_25600_chunks_to_bounded_checkpoints(self):
+        chunk_size = 4 * 1024 * 1024
+        chunk_count = 25_600
+        entry = {
+            'size': chunk_size * chunk_count,
+            'copyDigest': {'algorithm': 'sha256', 'chunkSize': chunk_size, 'chunks': ['digest'] * chunk_count},
+        }
+        checkpoint = mock.Mock()
+        throttle = classify.VerificationCheckpointThrottle(
+            checkpoint,
+            interval_seconds=10_000,
+            interval_bytes=2 * 1024 * 1024 * 1024,
+            clock=lambda: 0.0,
+        )
+
+        class SyntheticHundredGibReader:
+            def __init__(self): self.blocks = 0
+            def __enter__(self): return self
+            def __exit__(self, *_args): return False
+            def seek(self, _offset): return None
+            def read(self, size=-1):
+                if size == chunk_size and self.blocks < chunk_count:
+                    self.blocks += 1
+                    return synthetic_block
+                return b''
+
+        class SyntheticBlock:
+            def __len__(self): return chunk_size
+
+        synthetic_block = SyntheticBlock()
+        fake_stat = mock.Mock(st_size=entry['size'], st_mtime_ns=123, st_dev=7, st_ino=11)
+        fake_digest = mock.Mock(hexdigest=mock.Mock(return_value='digest'))
+        with mock.patch.object(classify, '_regular_file_without_links', return_value=True), \
+                mock.patch.object(classify.os, 'lstat', return_value=fake_stat), \
+                mock.patch.object(classify, 'open', return_value=SyntheticHundredGibReader()), \
+                mock.patch.object(classify.hashlib, 'sha256', return_value=fake_digest):
+            self.assertTrue(classify._verify_entry_copy_chunks(entry, 'synthetic.bin', throttle))
+            throttle.flush(force=True)
+
+        self.assertEqual(checkpoint.call_count, 50)
+        self.assertLess(checkpoint.call_count, chunk_count // 100)
+
+    def test_slow_hundred_gib_verification_is_not_time_checkpointed(self):
+        checkpoints = []
+        clock_value = [0.0]
+
+        def slow_clock():
+            clock_value[0] += 60.0
+            return clock_value[0]
+
+        throttle = classify.VerificationCheckpointThrottle(
+            lambda: checkpoints.append(1), interval_bytes=2 * 1024 * 1024 * 1024,
+            interval_seconds=3, clock=slow_clock,
+        )
+        for _ in range(25_600):
+            throttle.advance(4 * 1024 * 1024)
+        throttle.flush(force=True)
+        self.assertEqual(len(checkpoints), 50)
+
+    def test_clearable_copy_fsyncs_before_digest_can_authorize_cleanup(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source.bin'
+            source.write_bytes(b'fsync-required')
+            with mock.patch.object(classify.os, 'fsync') as fsync:
+                classify.safe_chunk_copy(str(source), str(root / 'retained.bin'), collect_digest=False)
+                fsync.assert_not_called()
+                classify.safe_chunk_copy(str(source), str(root / 'clearable.bin'), collect_digest=True)
+                self.assertEqual(fsync.call_count, 1)
+
+    def test_broll_promotion_journal_write_volume_is_linear_for_500_files(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            staging = Path(temporary)
+            entries = [
+                {'source': f'source-{index}.jpg', 'staged': str(staging / f'{index}.jpg'), 'size': 1}
+                for index in range(500)
+            ]
+            staged_import = {'stagingDir': str(staging), 'entries': entries}
+            (staging / classify.STAGING_MANIFEST_NAME).write_text(json.dumps({'version': 2, 'files': entries}), encoding='utf-8')
+            with mock.patch.object(classify.os, 'fsync'), mock.patch.object(classify, '_write_staging_manifest') as rewrite:
+                for index, entry in enumerate(entries):
+                    destination = str(staging / 'target' / f'{index}.jpg')
+                    classify.journal_staged_entry(staged_import, entry, {'pendingDestination': destination})
+                    classify.journal_staged_entry(staged_import, entry, {'pendingDestination': None, 'committedDestination': destination})
+            rewrite.assert_not_called()
+            journal = staging / classify.STAGING_PATCH_JOURNAL_NAME
+            self.assertLess(journal.stat().st_size, 300_000)
+            manifest = json.loads((staging / classify.STAGING_MANIFEST_NAME).read_text(encoding='utf-8'))
+            replayed = classify._replay_staging_patch_journal(str(staging), manifest)
+            self.assertEqual(replayed['files'][499]['committedDestination'], str(staging / 'target' / '499.jpg'))
+
+    def test_real_temporary_file_verification_uses_one_final_checkpoint(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / 'source.bin'
+            copied = root / 'copied.bin'
+            block = b'photoflow-checkpoint-benchmark' * 4096
+            with source.open('wb') as output:
+                for _ in range(512):
+                    output.write(block)
+            digest = classify.safe_chunk_copy(str(source), str(copied), collect_digest=True)
+            entry = {'size': source.stat().st_size, 'copyDigest': digest}
+            checkpoint = mock.Mock()
+            throttle = classify.VerificationCheckpointThrottle(checkpoint)
+
+            started = time.perf_counter()
+            self.assertTrue(classify._verify_entry_copy_chunks(entry, str(copied), throttle))
+            throttle.flush(force=True)
+            elapsed = time.perf_counter() - started
+
+            self.assertEqual(checkpoint.call_count, 1)
+            self.assertGreater(entry['size'] / max(elapsed, 0.001), 8 * 1024 * 1024)
+
+    def test_staging_manifest_identity_is_stable_and_old_receipt_remains_readable(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            card = root / 'card'
+            card.mkdir()
+            source = card / 'one.jpg'
+            source.write_bytes(b'image')
+            first = classify.stage_media_to_safety_temp(str(card), str(root), direct_source=True, source_paths=[str(source)], import_session='stable')
+            manifest_path = Path(first['stagingDir']) / classify.STAGING_MANIFEST_NAME
+            identity = json.loads(manifest_path.read_text(encoding='utf-8'))['manifestIdentity']
+            second = classify.load_staged_import(str(root), 'stable')
+            self.assertIsNotNone(second)
+            self.assertEqual(json.loads(manifest_path.read_text(encoding='utf-8'))['manifestIdentity'], identity)
+
+            receipt_path = Path(first['stagingDir']) / classify.IMPORT_GRAPH_RECEIPT_NAME
+            receipt_path.write_text(json.dumps({'receiptVersion': 1, 'importSessionId': 'old', 'manifests': []}), encoding='utf-8')
+            self.assertEqual(classify.load_import_graph_receipt(first['stagingDir'])['importSessionId'], 'old')
+
+    def test_manifest_rejects_link_or_junction_project_route(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / 'linked-project'
+            media = project / 'jpg' / 'one.jpg'
+            media.parent.mkdir(parents=True)
+            media.write_bytes(b'image')
+            with mock.patch.object(
+                classify, '_real_path_inside',
+                return_value=False,
+            ):
+                with self.assertRaisesRegex(ValueError, '符号链接|junction'):
+                    classify.build_import_graph_manifest(str(root), str(project), project.name, 'linked', [str(media)])
+
+    def test_manifest_planning_allows_safe_uncreated_slot_directories(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            project = root / 'future-project'
+            future_media = project / 'jpg' / 'one.jpg'
+            manifest = classify.build_import_graph_manifest(
+                str(root), str(project), project.name, 'future', [str(future_media)],
+            )
+            self.assertEqual(manifest['artifacts'][0]['relativePath'], 'jpg')
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows junction behavior')
+    def test_authorized_workspace_root_junction_is_allowed(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            real_workspace = root / 'real-workspace'
+            alias = root / 'workspace-alias'
+            project = real_workspace / 'project'
+            project.mkdir(parents=True)
+            completed = subprocess.run(
+                ['cmd', '/c', 'mklink', '/J', str(alias), str(real_workspace)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            if completed.returncode != 0:
+                self.skipTest('junction creation unavailable')
+            try:
+                self.assertTrue(classify._safe_directory_target(str(alias), str(alias / 'project')))
+            finally:
+                os.rmdir(alias)
+
+    @unittest.skipUnless(os.name == 'nt', 'Windows junction behavior')
+    def test_child_junction_escaping_canonical_workspace_is_rejected(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            workspace = root / 'workspace'
+            outside = root / 'outside'
+            escape = workspace / 'escape'
+            workspace.mkdir()
+            (outside / 'project').mkdir(parents=True)
+            completed = subprocess.run(
+                ['cmd', '/c', 'mklink', '/J', str(escape), str(outside)],
+                stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=False,
+            )
+            if completed.returncode != 0:
+                self.skipTest('junction creation unavailable')
+            try:
+                self.assertFalse(classify._safe_directory_target(str(workspace), str(escape / 'project')))
+            finally:
+                os.rmdir(escape)
+
+    def test_same_named_projects_receive_distinct_stable_receipt_manifest_ids(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            projects = [root / 'a' / 'same-name', root / 'b' / 'same-name']
+            manifests = []
+            for project in projects:
+                media = project / 'jpg' / 'one.jpg'
+                media.parent.mkdir(parents=True)
+                media.write_bytes(b'image')
+                manifests.append(classify.build_import_graph_manifest(
+                    str(root), str(project), project.name, 'same-session', [str(media)],
+                ))
+            receipt_dir = root / 'receipt'
+            self.assertEqual(len({manifest['manifestId'] for manifest in manifests}), 2)
+            classify.write_import_graph_receipt(str(receipt_dir), 'same-session', manifests)
+            receipt = classify.load_import_graph_receipt(str(receipt_dir))
+            ids = [manifest['manifestId'] for manifest in receipt['manifests']]
+            self.assertEqual(len(set(ids)), 2)
+            self.assertEqual(receipt['manifestIdentities'], ids)
+
+            second_dir = root / 'receipt-again'
+            second = [
+                classify.build_import_graph_manifest(str(root), str(project), project.name, 'same-session', [str(project / 'jpg' / 'one.jpg')])
+                for project in projects
+            ]
+            classify.write_import_graph_receipt(str(second_dir), 'same-session', second)
+            self.assertEqual(
+                [manifest['manifestId'] for manifest in classify.load_import_graph_receipt(str(second_dir))['manifests']],
+                ids,
+            )
 
     def test_import_fails_before_copy_when_disk_space_is_insufficient(self):
         with tempfile.TemporaryDirectory() as temporary:

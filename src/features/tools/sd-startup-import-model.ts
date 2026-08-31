@@ -24,6 +24,7 @@ const isLegacyWindowsGuid = (value: string) => identityKey(value).startsWith('wi
 const uniquePaths = (paths: string[]) => paths.filter((path, index) => paths.findIndex(candidate => pathKey(candidate) === pathKey(path)) === index);
 const legacySelectedPaths = (config: SmartImportConfig) => [...new Set(config.sdPaths?.length ? config.sdPaths : config.sdPath ? [config.sdPath] : [])];
 const videoActionsAtPath = (actions: Record<string, SdImportVideoActions> | undefined, path: string) => Object.entries(actions || {}).find(([candidate]) => pathKey(candidate) === pathKey(path))?.[1];
+const valueAtPath = <T>(values: Record<string, T> | undefined, path: string) => Object.entries(values || {}).find(([candidate]) => pathKey(candidate) === pathKey(path))?.[1];
 
 export const normalizeSavedSdDriveVideoActions = (
   value: Record<string, SdImportVideoActions> | undefined,
@@ -31,7 +32,7 @@ export const normalizeSavedSdDriveVideoActions = (
   types: Record<string, 'work' | 'broll'> | undefined,
   defaults: SdImportVideoActionDefaults = {},
 ) => Object.fromEntries(uniquePaths(paths).map(path => {
-  const type = types?.[path] === 'broll' ? 'broll' : 'work';
+  const type = valueAtPath(types, path) === 'broll' ? 'broll' : 'work';
   const saved = videoActionsAtPath(value, path);
   return [path, {
     splitVideosOnImport: typeof saved?.splitVideosOnImport === 'boolean' ? saved.splitVideosOnImport : defaults[type]?.splitVideosOnImport === true,
@@ -55,7 +56,9 @@ export const normalizeConfiguredSdDeviceRecords = (records: ConfiguredSdDevice[]
     const lastMountPath = String(record?.lastMountPath || '').trim();
     if (!deviceId || !lastMountPath) continue;
     const type = record.type === 'broll' ? 'broll' : 'work';
-    byId.set(deviceId, {
+    const key = identityKey(deviceId);
+    const previous = byId.get(key);
+    const next: ConfiguredSdDevice = {
       deviceId,
       lastMountPath,
       type,
@@ -63,7 +66,8 @@ export const normalizeConfiguredSdDeviceRecords = (records: ConfiguredSdDevice[]
       transcodeVideosOnImport: typeof record.transcodeVideosOnImport === 'boolean' ? record.transcodeVideosOnImport : defaults[type]?.transcodeVideosOnImport === true,
       confirmedAt: Math.max(0, Number(record.confirmedAt) || 0),
       enabled: record.enabled !== false,
-    });
+    };
+    byId.set(key, previous && previous.confirmedAt > next.confirmedAt ? previous : { ...previous, ...next });
   }
   return [...byId.values()];
 };
@@ -71,12 +75,12 @@ export const normalizeConfiguredSdDeviceRecords = (records: ConfiguredSdDevice[]
 export const migrateLegacySdDeviceRecords = (config: Pick<SmartImportConfig, 'sdPath' | 'sdPaths' | 'sdDriveTypes' | 'sdDeviceIds'>): ConfiguredSdDevice[] => {
   const ids = config.sdDeviceIds || {};
   return legacySelectedPaths(config as SmartImportConfig).flatMap(lastMountPath => {
-    const deviceId = String(ids[lastMountPath] || '').trim();
+    const deviceId = String(valueAtPath(ids, lastMountPath) || '').trim();
     if (!deviceId) return [];
     return [{
       deviceId,
       lastMountPath,
-      type: config.sdDriveTypes?.[lastMountPath] === 'broll' ? 'broll' as const : 'work' as const,
+      type: valueAtPath(config.sdDriveTypes, lastMountPath) === 'broll' ? 'broll' as const : 'work' as const,
       splitVideosOnImport: false,
       transcodeVideosOnImport: false,
       confirmedAt: 0,
@@ -93,13 +97,14 @@ export const normalizeSavedSdDeviceRecords = (
   defaults: SdImportVideoActionDefaults = {},
 ) => {
   const normalized = normalizeConfiguredSdDeviceRecords(records, defaults);
-  if (normalized.length) return normalized;
-  const byId = new Map<string, ConfiguredSdDevice>();
+  const byId = new Map<string, ConfiguredSdDevice>(normalized.map(record => [identityKey(record.deviceId), record]));
   for (const lastMountPath of paths) {
-    const deviceId = String(ids?.[lastMountPath] || '').trim();
+    const deviceId = String(valueAtPath(ids, lastMountPath) || '').trim();
     if (!deviceId) continue;
-    const type = types?.[lastMountPath] === 'broll' ? 'broll' : 'work';
-    byId.set(deviceId, {
+    const type = valueAtPath(types, lastMountPath) === 'broll' ? 'broll' : 'work';
+    const key = identityKey(deviceId);
+    if (byId.has(key)) continue;
+    byId.set(key, {
       deviceId,
       lastMountPath,
       type,
@@ -113,12 +118,12 @@ export const normalizeSavedSdDeviceRecords = (
 };
 
 const legacyUnboundPaths = (config: SmartImportConfig, records: ConfiguredSdDevice[]) => {
-  const recordIds = new Set(records.map(record => record.deviceId));
+  const recordIds = new Set(records.map(record => identityKey(record.deviceId)));
   const recordPaths = new Set(records.map(record => pathKey(record.lastMountPath)));
   return legacySelectedPaths(config).filter(path => {
     if (recordPaths.has(pathKey(path))) return false;
-    const legacyId = config.sdDeviceIds?.[path];
-    return !legacyId || !recordIds.has(legacyId);
+    const legacyId = valueAtPath(config.sdDeviceIds, path);
+    return !legacyId || !recordIds.has(identityKey(legacyId));
   });
 };
 
@@ -131,9 +136,10 @@ export const syncLegacySdMirrors = (config: SmartImportConfig, records: Configur
   const sdDriveVideoActions: Record<string, SdImportVideoActions> = {};
   const sdDeviceIds: Record<string, string> = {};
   for (const path of unboundPaths) {
-    sdDriveTypes[path] = config.sdDriveTypes?.[path] || 'work';
+    sdDriveTypes[path] = valueAtPath(config.sdDriveTypes, path) || 'work';
     sdDriveVideoActions[path] = videoActionsAtPath(config.sdDriveVideoActions, path) || { splitVideosOnImport: false, transcodeVideosOnImport: false };
-    if (config.sdDeviceIds?.[path]) sdDeviceIds[path] = config.sdDeviceIds[path];
+    const legacyId = valueAtPath(config.sdDeviceIds, path);
+    if (legacyId) sdDeviceIds[path] = legacyId;
   }
   for (const record of enabledRecords) {
     sdDriveTypes[record.lastMountPath] = record.type;
@@ -204,27 +210,27 @@ export const upsertConfiguredSdDevice = (
 };
 
 export const removeConfiguredSdDevice = (config: SmartImportConfig, deviceId: string) => {
-  const removedPaths = Object.entries(config.sdDeviceIds || {}).filter(([, id]) => id === deviceId).map(([path]) => path);
-  const sdPaths = legacySelectedPaths(config).filter(path => !removedPaths.includes(path));
-  const sdDriveTypes = { ...(config.sdDriveTypes || {}) };
-  const sdDriveVideoActions = { ...(config.sdDriveVideoActions || {}) };
-  const sdDeviceIds = { ...(config.sdDeviceIds || {}) };
-  for (const path of removedPaths) {
-    delete sdDriveTypes[path];
-    delete sdDriveVideoActions[path];
-    delete sdDeviceIds[path];
-  }
+  const removedPathKeys = new Set(Object.entries(config.sdDeviceIds || {}).filter(([, id]) => identityKey(id) === identityKey(deviceId)).map(([path]) => pathKey(path)));
+  const sdPaths = legacySelectedPaths(config).filter(path => !removedPathKeys.has(pathKey(path)));
+  const sdDriveTypes = Object.fromEntries(Object.entries(config.sdDriveTypes || {}).filter(([path]) => !removedPathKeys.has(pathKey(path))));
+  const sdDriveVideoActions = Object.fromEntries(Object.entries(config.sdDriveVideoActions || {}).filter(([path]) => !removedPathKeys.has(pathKey(path))));
+  const sdDeviceIds = Object.fromEntries(Object.entries(config.sdDeviceIds || {}).filter(([path, id]) => !removedPathKeys.has(pathKey(path)) && identityKey(id) !== identityKey(deviceId)));
   const baseConfig = { ...config, sdPath: sdPaths[0] || '', sdPaths, sdDriveTypes, sdDriveVideoActions, sdDeviceIds };
-  return syncLegacySdMirrors(baseConfig, normalizeConfiguredSdDeviceRecords(config.sdDevices).filter(record => record.deviceId !== deviceId));
+  return syncLegacySdMirrors(baseConfig, normalizeConfiguredSdDeviceRecords(config.sdDevices).filter(record => identityKey(record.deviceId) !== identityKey(deviceId)));
 };
 
 export const resolveConfiguredSdDevices = (
   config: SmartImportConfig,
   devices: StorageDevice[],
-): ResolvedSdDevice[] => normalizeConfiguredSdDeviceRecords(config.sdDevices).flatMap(record => {
+): ResolvedSdDevice[] => {
+  const physicalDevices = new Set<string>();
+  return normalizeConfiguredSdDeviceRecords(config.sdDevices).flatMap(record => {
   if (!record.enabled || record.confirmedAt <= 0) return [];
   const device = devices.find(candidate => storageDeviceMatchesId(candidate, record.deviceId) && isTrustedSdImportDevice(candidate));
   if (!device) return [];
+  const physicalIdentity = identityKey(device.id) || pathKey(device.mountPath);
+  if (physicalDevices.has(physicalIdentity)) return [];
+  physicalDevices.add(physicalIdentity);
   return [{
     configuredPath: record.lastMountPath,
     mountPath: device.mountPath,
@@ -233,7 +239,8 @@ export const resolveConfiguredSdDevices = (
     splitVideosOnImport: record.splitVideosOnImport,
     transcodeVideosOnImport: record.transcodeVideosOnImport,
   }];
-});
+  });
+};
 
 export const reconcileConfiguredSdDevices = (
   config: SmartImportConfig,

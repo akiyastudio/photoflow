@@ -1565,6 +1565,7 @@ const run = async () => {
     let failManagedLinkRevoke = false;
     let failManagedExternalWatcher = false;
     let failCreatedTargetRemoval = false;
+    let escapedCleanupTarget = '';
     let managedWatcherAcquisitions = 0;
     let trackingReconciliations = 0;
     let materializedProgressFolders = [];
@@ -1576,6 +1577,9 @@ const run = async () => {
       promises: {
         ...fs.promises,
         readdir: async (...args) => { importInspectionReadCalls += 1; return fs.promises.readdir(...args); },
+        realpath: async target => path.resolve(target) === path.resolve(escapedCleanupTarget || '__none__')
+          ? path.join(root, 'outside-replacement-target')
+          : fs.promises.realpath(target),
         rm: async (target, options) => {
           if (failShortcutRemoval && path.extname(String(target)).toLowerCase() === '.lnk') throw Object.assign(new Error('simulated shortcut lock'), { code: 'EPERM' });
           if (failCreatedTargetRemoval && String(target).includes('cleanup-copy')) throw Object.assign(new Error('simulated copied target lock'), { code: 'EPERM' });
@@ -2006,6 +2010,37 @@ const run = async () => {
     assert.strictEqual(failedCopyCleanup.recoveryRequired, true, 'ordinary copy cleanup failures must be surfaced');
     assert(failedCopyCleanup.recovery.leftoverPaths.includes(cleanupCopyTarget));
     assert.strictEqual(fs.existsSync(cleanupCopyTarget), true);
+
+    const normalRollbackSource = path.join(root, 'normal-rollback-source.jpg');
+    const normalRollbackTarget = path.join(fileLinkProjectPath, 'normal-rollback-source.jpg');
+    fs.writeFileSync(normalRollbackSource, 'normal-rollback');
+    failImportUndoOperation = true;
+    const normalRollback = await importProjectHandlers.get('workspace-import-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, '', {
+        deleteSourceAfterImport: false, sourcePaths: [normalRollbackSource],
+      },
+    );
+    failImportUndoOperation = false;
+    assert.strictEqual(normalRollback.success, false, 'post-copy failure must report failure after rollback');
+    assert.strictEqual(normalRollback.recoveryRequired, undefined, 'a normal rollback must not request recovery');
+    assert.strictEqual(fs.existsSync(normalRollbackTarget), false, 'normal failure rollback must remove this transaction\'s created target');
+
+    const escapedRollbackSource = path.join(root, 'escaped-rollback-source.jpg');
+    const escapedRollbackTarget = path.join(fileLinkProjectPath, 'escaped-rollback-source.jpg');
+    fs.writeFileSync(escapedRollbackSource, 'escaped-rollback');
+    failImportUndoOperation = true;
+    escapedCleanupTarget = escapedRollbackTarget;
+    const escapedRollback = await importProjectHandlers.get('workspace-import-files')(
+      null, importWorkspaceRoot, '策划中', fileLinkProjectName, '', {
+        deleteSourceAfterImport: false, sourcePaths: [escapedRollbackSource],
+      },
+    );
+    escapedCleanupTarget = '';
+    failImportUndoOperation = false;
+    assert.strictEqual(escapedRollback.recoveryRequired, true, 'a replaced target resolving outside allowed roots must require recovery');
+    assert(escapedRollback.recovery.leftoverPaths.includes(escapedRollbackTarget));
+    assert(escapedRollback.recovery.cleanupErrors.some(item => /realpath.*逃逸/.test(item.error)));
+    assert.strictEqual(fs.existsSync(escapedRollbackTarget), true, 'cleanup must refuse to delete an out-of-bounds replacement');
 
     const retryableUndoSource = path.join(root, 'retryable-undo-source');
     fs.mkdirSync(retryableUndoSource, { recursive: true });

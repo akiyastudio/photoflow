@@ -2,10 +2,14 @@ from __future__ import annotations
 
 import argparse
 import base64
+import errno
+import io
 import json
 import subprocess
 import sys
 import tempfile
+import threading
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from PIL import Image
@@ -137,6 +141,99 @@ def assert_image_converter(root: Path) -> None:
         corner = decoded.convert("RGB").getpixel((0, 0))
         assert min(corner) >= 240, f"transparent pixels were not composited onto white: {corner}"
     assert collision_source.exists(), "--keep-original must preserve source images"
+
+    # Animated inputs retain the historical first-frame conversion, but the
+    # source must be protected unless deletion was explicitly made safe.
+    animated = converter_root / "multi.gif"
+    frames = [Image.new("RGB", (24, 18), color) for color in ("red", "blue")]
+    frames[0].save(animated, save_all=True, append_images=frames[1:], duration=20, loop=0)
+    for frame in frames:
+        frame.close()
+    output = io.StringIO()
+    with redirect_stdout(output):
+        run_image_converter([str(animated)])
+    events = [json.loads(line) for line in output.getvalue().splitlines()]
+    warning = next(event for event in events if event["type"] == "warning")
+    assert warning["data"]["frameCount"] == 2 and warning["data"]["sourceProtected"] is True, warning
+    assert animated.exists(), "multi-frame originals are protected by default"
+
+    # Concurrent writers targeting the same preferred name must each publish
+    # a complete JPEG and never replace the first process' file.
+    concurrent = converter_root / "parallel.png"
+    create_source(concurrent, "PNG")
+    barrier = threading.Barrier(2)
+    thread_state = threading.local()
+    original_save = __import__("png_to_jpg").save_verified_jpeg
+
+    def synchronized_save(*args, **kwargs):
+        if not getattr(thread_state, "synchronized", False):
+            thread_state.synchronized = True
+            barrier.wait(timeout=5)
+        return original_save(*args, **kwargs)
+
+    module = __import__("png_to_jpg")
+    module.save_verified_jpeg = synchronized_save
+    try:
+        threads = [threading.Thread(target=lambda: run_image_converter(["--keep-original", str(concurrent)])) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=10)
+        assert all(not thread.is_alive() for thread in threads)
+    finally:
+        module.save_verified_jpeg = original_save
+    parallel_outputs = sorted(converter_root.glob("parallel*.jpg"))
+    assert len(parallel_outputs) == 2, parallel_outputs
+    for target in parallel_outputs:
+        with Image.open(target) as decoded:
+            decoded.load()
+            assert decoded.format == "JPEG"
+
+    fallback_stage = converter_root / ".fallback.tmp"
+    fallback_target = converter_root / "fallback.jpg"
+    fallback_stage.write_bytes(b"complete-jpeg-bytes")
+    original_link = module.os.link
+    module.os.link = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError(errno.EOPNOTSUPP, "links unsupported"))
+    try:
+        try:
+            module.publish_file_no_replace(fallback_stage, fallback_target)
+        except module.PublicationUnsupportedError as error:
+            assert error.code == "atomic_no_replace_unsupported"
+            assert Path(error.recovery_path) == fallback_stage
+        else:
+            raise AssertionError("unsupported filesystem published a visible final file")
+        assert not fallback_target.exists() and fallback_stage.read_bytes() == b"complete-jpeg-bytes"
+
+        unsupported_root = converter_root / "unsupported"
+        unsupported_root.mkdir()
+        unsupported_source = unsupported_root / "source.png"
+        create_source(unsupported_source, "PNG")
+        unsupported_output = io.StringIO()
+        with redirect_stdout(unsupported_output):
+            run_image_converter(["--keep-original", str(unsupported_source)])
+        unsupported_events = [json.loads(line) for line in unsupported_output.getvalue().splitlines()]
+        publication_error = next(event for event in unsupported_events if event.get("data", {}).get("code") == "atomic_no_replace_unsupported")
+        assert Path(publication_error["data"]["recoveryPath"]).exists(), publication_error
+        assert not list(unsupported_root.glob("*.jpg"))
+    finally:
+        module.os.link = original_link
+
+    timestamp_root = converter_root / "timestamp"
+    timestamp_root.mkdir()
+    timestamp_source = timestamp_root / "source.png"
+    create_source(timestamp_source, "PNG")
+    original_utime = module.os.utime
+    module.os.utime = lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("timestamps unsupported"))
+    timestamp_output = io.StringIO()
+    try:
+        with redirect_stdout(timestamp_output):
+            run_image_converter(["--keep-original", str(timestamp_source)])
+    finally:
+        module.os.utime = original_utime
+    timestamp_events = [json.loads(line) for line in timestamp_output.getvalue().splitlines()]
+    assert len(list(timestamp_root.glob("*.jpg"))) == 1
+    assert any(event.get("type") == "warning" and event.get("data", {}).get("code") == "timestamp_preservation_failed" for event in timestamp_events)
+    assert timestamp_events[-1]["type"] == "success", timestamp_events
 
 
 def main() -> None:

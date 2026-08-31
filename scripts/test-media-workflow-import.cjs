@@ -5,6 +5,8 @@ const os = require('node:os');
 const { spawnSync } = require('node:child_process');
 const path = require('node:path');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
+const { createImportReceiptService } = require('../electron/modules/workspace/import-receipt-service.cjs');
+const { cleanupImportArtifacts } = require('../electron/modules/workspace/import-recovery.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const python = process.env.PYTHON || (process.platform === 'win32' ? 'python' : 'python3');
@@ -116,6 +118,71 @@ const createReceipt = () => {
 };
 
 (async () => {
+  const receiptRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-receipt-cas-'));
+  try {
+    const receiptService = createImportReceiptService({ crypto, fs, path, pathExists: async value => fs.existsSync(value), versionService: { commitImportGraph: async () => ({}) } });
+    const location = { sessionDir: path.join(receiptRoot, 'session-cas') };
+    location.receiptPath = path.join(location.sessionDir, '.photoflow-import-graph-receipt.json');
+    fs.mkdirSync(location.sessionDir);
+    const manifests = ['A', 'B'].map((projectName, index) => ({ schemaVersion: 2, projectName, importSessionId: 'session-cas', artifacts: [{ relativePath: `slot-${index}`, mediaKind: 'image', importSlot: 'raw' }] }));
+    fs.writeFileSync(location.receiptPath, JSON.stringify({ receiptVersion: 1, importSessionId: 'session-cas', manifests }));
+    const loaded = await receiptService.readImportReceipt(location.receiptPath);
+    assert.equal(loaded.manifests.every(item => /^m-[a-f0-9]{64}$/.test(item.manifestId)), true, 'legacy manifests receive stable content identities');
+    await Promise.all(loaded.manifests.map(item => receiptService.acknowledgeImportReceipt(location, item.manifestId)));
+    assert.equal(fs.existsSync(location.sessionDir), false, 'serialized ACK merge removes staging only after all manifest IDs are durable');
+    assert.equal((await receiptService.inspectImportReceipt(location.receiptPath)).status, 'absent');
+    fs.mkdirSync(location.sessionDir);
+    fs.writeFileSync(location.receiptPath, '{broken');
+    assert.equal((await receiptService.inspectImportReceipt(location.receiptPath)).status, 'corrupt');
+    fs.writeFileSync(location.receiptPath, JSON.stringify({ receiptVersion: 1, importSessionId: 'wrong', manifests }));
+    assert.equal((await receiptService.inspectImportReceipt(location.receiptPath)).status, 'corrupt', 'receipt and manifest sessions must match');
+
+    const duplicateLocation = { sessionDir: path.join(receiptRoot, 'session-duplicate') };
+    duplicateLocation.receiptPath = path.join(duplicateLocation.sessionDir, '.photoflow-import-graph-receipt.json');
+    fs.mkdirSync(duplicateLocation.sessionDir);
+    const duplicateManifests = [0, 1].map(index => ({ schemaVersion: 2, projectName: 'SAME', importSessionId: 'session-duplicate', artifacts: [{ relativePath: `slot-${index}`, mediaKind: 'image', importSlot: 'raw' }] }));
+    fs.writeFileSync(duplicateLocation.receiptPath, JSON.stringify({ receiptVersion: 1, importSessionId: 'session-duplicate', manifests: duplicateManifests, acknowledgedProjects: ['same'] }));
+    let duplicateReceipt = await receiptService.readImportReceipt(duplicateLocation.receiptPath);
+    assert.deepEqual(duplicateReceipt.acknowledgedManifestIds, [], 'legacy name ACK must not migrate when names are duplicated');
+    await receiptService.commitImportManifest(receiptRoot, duplicateManifests[1]);
+    await receiptService.acknowledgeImportReceipt(duplicateLocation, 'SAME');
+    duplicateReceipt = await receiptService.readImportReceipt(duplicateLocation.receiptPath);
+    assert.deepEqual(duplicateReceipt.acknowledgedManifestIds, [duplicateReceipt.manifests[1].manifestId], 'projectName ACK consumes the exact successfully committed manifest ID');
+    await receiptService.commitImportManifest(receiptRoot, duplicateManifests[1]);
+    await receiptService.acknowledgeImportReceipt(duplicateLocation, 'SAME');
+    duplicateReceipt = await receiptService.readImportReceipt(duplicateLocation.receiptPath);
+    assert.deepEqual(duplicateReceipt.acknowledgedManifestIds, [duplicateReceipt.manifests[1].manifestId], 'retrying an already ACKed same-name commit must be an idempotent no-op');
+    assert.equal(fs.existsSync(duplicateLocation.sessionDir), true, 'a retry must not consume another same-name manifest or delete staging');
+    await receiptService.commitImportManifest(receiptRoot, duplicateManifests[0]);
+    await receiptService.acknowledgeImportReceipt(duplicateLocation, 'SAME');
+    assert.equal(fs.existsSync(duplicateLocation.sessionDir), false, 'staging is removed only after the remaining exact manifest is committed and ACKed');
+
+    fs.mkdirSync(duplicateLocation.sessionDir);
+    fs.writeFileSync(duplicateLocation.receiptPath, JSON.stringify({ receiptVersion: 1, importSessionId: 'session-duplicate', manifests: duplicateManifests }));
+    duplicateReceipt = await receiptService.readImportReceipt(duplicateLocation.receiptPath);
+    const exactFirst = duplicateReceipt.manifests[0];
+    await receiptService.commitImportManifest(receiptRoot, exactFirst);
+    await receiptService.commitImportManifest(receiptRoot, exactFirst);
+    await receiptService.acknowledgeImportReceipt(duplicateLocation, exactFirst.manifestId);
+    await receiptService.acknowledgeImportReceipt(duplicateLocation, exactFirst.manifestId);
+    duplicateReceipt = await receiptService.readImportReceipt(duplicateLocation.receiptPath);
+    assert.deepEqual(duplicateReceipt.acknowledgedManifestIds, [duplicateReceipt.manifests[0].manifestId]);
+    await receiptService.acknowledgeImportReceipt(duplicateLocation, 'SAME');
+    duplicateReceipt = await receiptService.readImportReceipt(duplicateLocation.receiptPath);
+    assert.deepEqual(duplicateReceipt.acknowledgedManifestIds, [duplicateReceipt.manifests[0].manifestId], 'repeated exact ACKs must leave no stale queue item that can consume another same-name manifest');
+
+    const allowedRoot = path.join(receiptRoot, 'owned');
+    const owned = path.join(allowedRoot, 'child');
+    fs.mkdirSync(owned, { recursive: true });
+    const unauthorized = await cleanupImportArtifacts({ fs, virtualPaths: { revokeManagedExternalLinkIds: () => undefined }, targets: [owned] });
+    assert.equal(unauthorized.leftoverPaths.includes(owned), true);
+    assert.match(unauthorized.cleanupErrors[0].error, /缺少 allowedRoots\/ownedTargets/);
+    const denied = await cleanupImportArtifacts({ fs, virtualPaths: { revokeManagedExternalLinkIds: () => undefined }, targets: [owned], allowedRoots: [allowedRoot], ownedTargets: [] });
+    assert.equal(denied.leftoverPaths.includes(owned), true, 'cleanup must reject a target absent from the explicit ownership set');
+    const cleaned = await cleanupImportArtifacts({ fs, virtualPaths: { revokeManagedExternalLinkIds: () => undefined }, targets: [owned], allowedRoots: [allowedRoot], ownedTargets: [owned] });
+    assert.deepEqual(cleaned.leftoverPaths, []);
+  } finally { fs.rmSync(receiptRoot, { recursive: true, force: true }); }
+
   let sessionDir = createReceipt();
   failDatabase = true;
   let result = await recover(null, temporaryRoot);
@@ -134,6 +201,27 @@ const createReceipt = () => {
   assert.equal(result.success, true, `restart recovery must replay an unacknowledged receipt without renderer storage: ${JSON.stringify(result)}`);
   assert.equal(fs.existsSync(sessionDir), false, 'successful ACK must remove the exact session staging directory');
   assert.equal(fs.readFileSync(importedMediaPath, 'utf8'), initialMedia);
+
+  const sameSession = 'same-name-ipc';
+  const sameSessionDir = path.join(temporaryRoot, '_PhotoFlow_Safety_Temp', sameSession);
+  const sameReceiptPath = path.join(sameSessionDir, '.photoflow-import-graph-receipt.json');
+  const sameManifests = ['manifest-first', 'manifest-second'].map((manifestId, index) => ({
+    schemaVersion: 2, manifestId, projectName: 'P', importSessionId: sameSession,
+    artifacts: [{ relativePath: `raw-${index}`, mediaKind: 'image', importSlot: 'raw', displayName: `RAW ${index}` }],
+  }));
+  fs.mkdirSync(sameSessionDir, { recursive: true });
+  fs.writeFileSync(sameReceiptPath, JSON.stringify({ receiptVersion: 1, importSessionId: sameSession, manifests: sameManifests }));
+  result = await commit(null, temporaryRoot, sameManifests[1]);
+  assert.equal(result.success, true);
+  let sameReceipt = JSON.parse(fs.readFileSync(sameReceiptPath, 'utf8'));
+  assert.deepEqual(sameReceipt.acknowledgedManifestIds, ['manifest-second'], 'commit IPC must ACK the exact same-name manifest ID');
+  assert.equal(fs.existsSync(sameSessionDir), true, 'ACKing one same-name manifest must not delete the receipt');
+  const committedBeforeSameRecovery = committedPayloads.length;
+  result = await recover(null, temporaryRoot);
+  assert.equal(result.success, true, JSON.stringify(result));
+  assert.equal(committedPayloads.length, committedBeforeSameRecovery + 1, 'recover IPC must replay only the unacknowledged manifest ID');
+  assert.equal(committedPayloads.at(-1).artifacts[0].relativePath, 'raw-0');
+  assert.equal(fs.existsSync(sameSessionDir), false, 'receipt may be removed only after both exact manifest IDs are acknowledged');
 
   const rendererPayload = { ...manifest, importSessionId: 'renderer-contract', artifacts: [{ ...manifest.artifacts[0], nodeRole: 'selection', edgeKind: 'workflow_input' }], relations: [{ edgeKind: 'workflow_input' }] };
   result = await commit(null, temporaryRoot, rendererPayload);
