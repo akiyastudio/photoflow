@@ -460,6 +460,8 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
   const loadRequestRef = useRef(0);
   const pageGenerationRef = useRef(0);
   const busyRef = useRef(false);
+  const mutationSequenceRef = useRef(0);
+  const busyOwnerRef = useRef<number | null>(null);
   const pageIdentityKey = `${workspacePath}\0${project.status}\0${project.name}\0${entry.path}\0${entry.updatedAt}\0${progressId}\0${progressVersionKey}\0${initialCompareKey}`;
   const pageIdentityRef = useRef(pageIdentityKey);
   if (pageIdentityRef.current !== pageIdentityKey) {
@@ -467,24 +469,32 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     pageGenerationRef.current += 1;
     loadRequestRef.current += 1;
     branchPhotoRequestRef.current += 1;
+    mutationSequenceRef.current += 1;
+    busyOwnerRef.current = null;
+    busyRef.current = false;
   }
   const pageGenerationIsCurrent = (generation: number) => generation === pageGenerationRef.current;
-  const setMutationBusy = (value: boolean) => {
-    busyRef.current = value;
-    setBusy(value);
-  };
-  const settleMutationBusy = (pageGeneration: number) => {
+  const resetMutationBusy = () => {
+    mutationSequenceRef.current += 1;
+    busyOwnerRef.current = null;
     busyRef.current = false;
-    const current = pageGenerationIsCurrent(pageGeneration);
-    if (current) setBusy(false);
-    return current;
+    setBusy(false);
+  };
+  const settleMutationBusy = (pageGeneration: number, owner: number) => {
+    if (busyOwnerRef.current !== owner) return;
+    busyOwnerRef.current = null;
+    busyRef.current = false;
+    if (pageGenerationIsCurrent(pageGeneration)) setBusy(false);
   };
   const runMutation = async <T,>(pageGeneration: number, operation: () => Promise<T>) => {
-    setMutationBusy(true);
+    const owner = ++mutationSequenceRef.current;
+    busyOwnerRef.current = owner;
+    busyRef.current = true;
+    setBusy(true);
     try {
       return await operation();
     } finally {
-      settleMutationBusy(pageGeneration);
+      settleMutationBusy(pageGeneration, owner);
     }
   };
   const publishCommittedMutation = () => onVersionStateChanged?.();
@@ -572,7 +582,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
     if (busyRef.current) return false;
     const pageGeneration = ++pageGenerationRef.current;
     loadRequestRef.current += 1;
-    setMutationBusy(false);
+    resetMutationBusy();
     return loadBranchPhoto(photoId, undefined, branchPhotos, pageGeneration);
   };
 
@@ -637,7 +647,7 @@ export const VersionManager = ({ active = true, entry, workspacePath, project, c
   useEffect(() => {
     const pageGeneration = ++pageGenerationRef.current;
     if (!initialCompareKey) initialCompareAppliedRef.current = '';
-    setMutationBusy(false);
+    resetMutationBusy();
     void load(pageGeneration);
     return () => {
       pageGenerationRef.current += 1;

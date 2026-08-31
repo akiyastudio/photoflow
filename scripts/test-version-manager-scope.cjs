@@ -11,9 +11,10 @@ const { pathToFileURL } = require('url');
   assert(source.includes('aria-expanded={open}') && source.includes('openMetadataGroups'), 'version metadata groups must use explicit controlled buttons');
   assert(source.includes('const branchPhotoRequestRef = useRef(0)') && !source.includes('disabled={branchPhotoLoading} aria-pressed={activePhotoId'), 'branch photos must remain clickable while another photo request is pending');
   assert(source.includes('const loadRequestRef = useRef(0)') && source.includes('requestId !== loadRequestRef.current'), 'stale version-load responses must not overwrite a newer entry');
-  assert(source.includes('const pageGenerationRef = useRef(0)') && (source.match(/runMutation\(pageGeneration/g) || []).length >= 5, 'every committed version write must use the shared finally-backed busy lifecycle');
+  assert(source.includes('const pageGenerationRef = useRef(0)') && source.includes('const busyOwnerRef = useRef<number | null>(null)') && (source.match(/runMutation\(pageGeneration/g) || []).length >= 5, 'every committed version write must use the shared owner-token busy lifecycle');
   const busyLifecycleSource = source.slice(source.indexOf('const runMutation = async'), source.indexOf('const publishCommittedMutation ='));
-  assert(busyLifecycleSource.includes('try {') && busyLifecycleSource.includes('finally {') && busyLifecycleSource.includes('settleMutationBusy(pageGeneration)'), 'the shared mutation lifecycle must settle both busy representations in finally');
+  assert(busyLifecycleSource.includes('const owner = ++mutationSequenceRef.current') && busyLifecycleSource.includes('try {') && busyLifecycleSource.includes('finally {') && busyLifecycleSource.includes('settleMutationBusy(pageGeneration, owner)'), 'the shared mutation lifecycle must settle its owned busy lease in finally');
+  assert(source.includes('if (busyOwnerRef.current !== owner) return;'), 'an older generation must not release a newer mutation busy lease');
   assert(source.includes('const selectBranchPhoto = async') && source.includes('const pageGeneration = ++pageGenerationRef.current') && source.includes('selectBranchPhoto(photo.photoId)'), 'switching the active main-branch photo must start a new page generation');
   for (const marker of ['updateMediaVersion(workspacePath, request)', 'deleteProjectMissingMediaVersion(workspacePath, version.id)', 'deleteMediaVersion(workspacePath', 'relocateMediaVersion(workspacePath']) {
     const index = source.indexOf(marker);

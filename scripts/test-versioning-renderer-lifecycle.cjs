@@ -153,7 +153,7 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
   await React.act(async () => previewRootB.unmount());
   assert.deepStrictEqual(thumbnailCancels, [], 'sequence gating and unsubscribe are sufficient cleanup for every consumer');
 
-  let resolveUpdate;
+  const updateResolvers = [];
   const updateRequests = [];
   const recycleAlerts = [];
   const version = (id, name) => ({ id, photoId: `photo-${id}`, versionNumber: 1, versionName: name, versionType: 'custom', filePath: `C:/project/${id}.jpg`, fileSize: 100, note: '', status: 'ready', isCurrent: false, isFinal: false, fileMissing: false, contentChanged: false, createdAt: 1, updatedAt: 1 });
@@ -166,7 +166,7 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
     async getMediaMetadata() { return { success: true, fields: [] }; },
     async getMediaThumbnail(filePath) { return { success: true, previewUrl: `preview:${filePath}` }; },
     async getMediaOriginal(filePath) { return { success: true, mediaUrl: `original:${filePath}` }; },
-    updateMediaVersion(_workspace, request) { updateRequests.push(request); return new Promise(resolve => { resolveUpdate = resolve; }); },
+    updateMediaVersion(_workspace, request) { updateRequests.push(request); return new Promise(resolve => updateResolvers.push(resolve)); },
     async getMediaVersionDeleteScope() { return { success: true, selectedChildCount: 0, childCount: 0, allMissing: false, versionCount: 1, versionNumber: 1 }; },
     async deleteMediaVersion() { return { ...bundles['b.jpg'], warning: 'simulated recycle failure' }; },
     async saveMediaComparisonPreference() { return { success: true }; },
@@ -215,17 +215,42 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
   await React.act(async () => managerRoot.render(React.createElement(versionManagerModule.VersionManager, managerProps(entryB))));
   await flush();
   assert(managerContainer.textContent.includes('B current'), 'switching page identity renders the new photo before the old write completes');
-  await React.act(async () => { resolveUpdate({ ...bundles['a.jpg'], versions: [{ ...bundles['a.jpg'].versions[0], isCurrent: true, versionName: 'A committed' }] }); await Promise.resolve(); });
+  const bActionsButton = allNodes(managerContainer).find(node => node.attributes.get('aria-label') === '版本操作');
+  await React.act(async () => dispatch(bActionsButton, 'click'));
+  const bMakeCurrentButton = allNodes(managerContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('设为当前工作版本'));
+  await React.act(async () => dispatch(bMakeCurrentButton, 'click'));
+  assert.deepStrictEqual(updateRequests.at(-1), { versionId: 'b', makeCurrent: true }, 'the new page may begin its own mutation after invalidating the old page lease');
+
+  await React.act(async () => { updateResolvers[0]({ ...bundles['a.jpg'], versions: [{ ...bundles['a.jpg'].versions[0], isCurrent: true, versionName: 'A committed' }] }); await Promise.resolve(); });
   assert.strictEqual(invalidations, 1, 'a successful write publishes outer invalidation even after page generation changes');
   assert.deepStrictEqual(notices, ['已切换当前版本'], 'a successful stale-page write still publishes its completion notice exactly once');
   assert(managerContainer.textContent.includes('B current') && !managerContainer.textContent.includes('A committed'), 'the stale successful result cannot overwrite the newly selected page');
+  const busyCloseButtons = allNodes(managerContainer).filter(node => node.attributes.get('aria-label') === '关闭版本管理' || node.attributes.get('aria-label') === '关闭版本对比');
+  assert(busyCloseButtons.every(node => node.attributes.has('disabled')), 'settling old mutation A must not clear new mutation B busy state');
+
+  const busyActionsButton = allNodes(managerContainer).find(node => node.attributes.get('aria-label') === '版本操作');
+  await React.act(async () => dispatch(busyActionsButton, 'click'));
+  const blockedThirdMutationButton = allNodes(managerContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('设为当前工作版本'));
+  assert(blockedThirdMutationButton.attributes.has('disabled'), 'the current mutation action remains disabled after the stale owner settles');
+  await React.act(async () => dispatch(blockedThirdMutationButton, 'click'));
+  assert.strictEqual(updateRequests.length, 2, 'a third write cannot bypass the ref guard while mutation B owns the busy lease');
+
+  await React.act(async () => { updateResolvers[1]({ ...bundles['b.jpg'], versions: [{ ...bundles['b.jpg'].versions[0], versionName: 'B committed' }] }); await Promise.resolve(); });
+  assert.strictEqual(invalidations, 2, 'the current-page mutation publishes its own invalidation');
+  const releasedCloseButtons = allNodes(managerContainer).filter(node => node.attributes.get('aria-label') === '关闭版本管理' || node.attributes.get('aria-label') === '关闭版本对比');
+  assert(releasedCloseButtons.every(node => !node.attributes.has('disabled')), 'the current busy lease releases when mutation B settles');
+  const allowedThirdMutationButton = allNodes(managerContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('设为当前工作版本'));
+  await React.act(async () => dispatch(allowedThirdMutationButton, 'click'));
+  assert.strictEqual(updateRequests.length, 3, 'a third write may start only after mutation B releases its lease');
+  await React.act(async () => { updateResolvers[2](bundles['b.jpg']); await Promise.resolve(); });
+  assert.strictEqual(invalidations, 3);
   assert.strictEqual(closes, 0, 'disabled close controls do not close the manager during the tested write');
 
-  const bActionsButton = allNodes(managerContainer).find(node => node.attributes.get('aria-label') === '版本操作');
-  await React.act(async () => dispatch(bActionsButton, 'click'));
+  const deleteActionsButton = allNodes(managerContainer).find(node => node.attributes.get('aria-label') === '版本操作');
+  await React.act(async () => dispatch(deleteActionsButton, 'click'));
   const deleteButton = allNodes(managerContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('删除版本记录'));
   await React.act(async () => { dispatch(deleteButton, 'click'); await Promise.resolve(); await Promise.resolve(); });
-  assert.strictEqual(invalidations, 2, 'a delete committed with a recycle warning still invalidates outer version state');
+  assert.strictEqual(invalidations, 4, 'a delete committed with a recycle warning still invalidates outer version state');
   assert.strictEqual(recycleAlerts.length, 1, 'a recycle warning retains the established failure dialog');
   assert(!notices.some(message => message.includes('文件已移入回收站')), 'a recycle warning must never claim that the file reached the recycle bin');
   await React.act(async () => managerRoot.unmount());
