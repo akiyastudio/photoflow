@@ -1,4 +1,5 @@
 const assert = require('assert');
+const fs = require('fs');
 const path = require('path');
 const { pathToFileURL } = require('url');
 
@@ -98,6 +99,8 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
     'app',
     'useTitlebarTabOrder.ts',
   )).href);
+  const hookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'app', 'useTitlebarTabOrder.ts'), 'utf8');
+  assert(hookSource.includes('sourceElement.setPointerCapture(pointerId)') && hookSource.includes('sourceElement.releasePointerCapture(pointerId)'), 'titlebar dragging must retain and release its initiating pointer');
 
   const storageKey = 'photoflow:titlebar-tab-order';
   const legacyId = 'project:C:\\workspace\\project-one';

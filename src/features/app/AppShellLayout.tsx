@@ -1,9 +1,12 @@
-import type React from 'react';
+import React, { useEffect, useRef } from 'react';
 
 export const ColumnResizeHandle = ({ onDrag, label, value, minimum, maximum, onReset }: { onDrag: (deltaX: number) => void; label: string; value?: number; minimum?: number; maximum?: number; onReset?: () => void }) => {
+  const cleanupRef = useRef<() => void>();
+  useEffect(() => () => cleanupRef.current?.(), []);
   const onPointerDown = (event: React.PointerEvent<HTMLDivElement>) => {
     if (event.button !== 0) return;
     event.preventDefault();
+    cleanupRef.current?.();
     const handle = event.currentTarget;
     handle.setPointerCapture(event.pointerId);
     let previousX = event.clientX;
@@ -23,10 +26,12 @@ export const ColumnResizeHandle = ({ onDrag, label, value, minimum, maximum, onR
       window.removeEventListener('pointermove', move);
       window.removeEventListener('pointerup', finish);
       window.removeEventListener('pointercancel', finish);
+      cleanupRef.current = undefined;
     };
     window.addEventListener('pointermove', move);
     window.addEventListener('pointerup', finish);
     window.addEventListener('pointercancel', finish);
+    cleanupRef.current = finish;
   };
   const onKeyDown = (event: React.KeyboardEvent<HTMLDivElement>) => {
     if (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight') return;

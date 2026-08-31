@@ -68,9 +68,17 @@ export const TopToastProvider = ({ children }: { children: ReactNode }) => {
     const message = (patch.message ?? target.message).trim() || '发生未知错误';
     const tone = patch.tone || target.tone || hostNoticeTone(message);
     const lifecycle = patch.lifecycle || (target.persistent ? 'persistent' : 'auto');
+    const dedupeKey = patch.dedupeKey ?? target.dedupeKey;
+    const conflict = dedupeKey ? noticesRef.current.find(notice => notice.id !== target.id && notice.dedupeKey === dedupeKey) : undefined;
+    if (conflict) clearTimer(conflict.id);
     const policy = schedule(target.id, { ...patch, lifecycle }, tone);
-    commit(current => current.map(notice => notice.id === target.id ? { ...notice, ...policy, message, tone, dedupeKey: patch.dedupeKey ?? notice.dedupeKey } : notice));
-  }, [commit, schedule]);
+    commit(current => {
+      const retained = current.filter(notice => notice.id !== target.id && notice.id !== conflict?.id);
+      const result = upsertTopToastNotice(retained, { ...target, ...policy, message, tone, dedupeKey });
+      clearTopToastNoticeTimers(timersRef.current, result.evictedIds, timer => window.clearTimeout(timer));
+      return result.notices;
+    });
+  }, [clearTimer, commit, schedule]);
   const show = useCallback((rawMessage: string, rawOptions?: ToastOptions | ToastTone | number): ToastHandle => {
     const message = rawMessage.trim() || '发生未知错误';
     const options = normalizeOptions(message, rawOptions);
@@ -101,7 +109,7 @@ export const TopToastProvider = ({ children }: { children: ReactNode }) => {
     const handle = show(message, { ...options, tone: 'info', lifecycle: options.lifecycle || 'persistent' });
     return { ...handle,
       succeed: (next, nextOptions = {}) => update(handle.id, { ...nextOptions, message: next, tone: 'success', lifecycle: nextOptions.lifecycle || 'auto' }),
-      fail: (next, nextOptions = {}) => update(handle.id, { ...nextOptions, message: next, tone: 'error', lifecycle: nextOptions.lifecycle || 'persistent' }),
+      fail: (next, nextOptions = {}) => update(handle.id, { ...nextOptions, message: next, tone: 'error', lifecycle: nextOptions.lifecycle || (nextOptions.durationMs === undefined ? 'persistent' : 'auto') }),
     };
   }, [show, update]);
   const api = useMemo<ToastApi>(() => ({ show, update, dismiss, activity }), [activity, dismiss, show, update]);
@@ -146,6 +154,8 @@ export const TopToastViewport = () => {
   const [nativePresentationVisible, setNativePresentationVisible] = useState(false);
   const snapshotRevisionRef = useRef(0);
   const snapshotFrameRef = useRef<number | null>(null);
+  const snapshotContentRef = useRef({ notices, visibleTasks: presentation.visibleTasks, overflowCount: presentation.overflowCount });
+  snapshotContentRef.current = { notices, visibleTasks: presentation.visibleTasks, overflowCount: presentation.overflowCount };
   const flushSnapshot = useCallback(() => {
     snapshotFrameRef.current = null;
     const stack = stackRef.current;
@@ -155,17 +165,18 @@ export const TopToastViewport = () => {
     const viewWidth = hasContent && rect ? Math.min(Math.ceil(rect.width), Math.max(320, contentWidth + 32)) : 0;
     const viewHeight = hasContent && rect ? Math.min(448, Math.max(1, Math.ceil(rect.height) + 8)) : 0;
     const revision = snapshotRevisionRef.current++;
+    const latest = snapshotContentRef.current;
     void window.electronAPI.updateToastView({
       revision,
       dark: document.documentElement.classList.contains('dark'),
       top: hasContent && rect ? Math.max(0, Math.round(rect.top)) : 0,
       width: viewWidth,
       height: viewHeight,
-      notices,
-      tasks: presentation.visibleTasks,
-      overflowCount: presentation.overflowCount,
+      notices: latest.notices,
+      tasks: latest.visibleTasks,
+      overflowCount: latest.overflowCount,
     }).catch(() => undefined);
-  }, [notices, presentation.overflowCount, presentation.visibleTasks, stackRef]);
+  }, [stackRef]);
   const scheduleSnapshot = useCallback(() => {
     if (snapshotFrameRef.current !== null) return;
     snapshotFrameRef.current = window.requestAnimationFrame(flushSnapshot);

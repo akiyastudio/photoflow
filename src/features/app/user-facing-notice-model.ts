@@ -8,6 +8,7 @@ const SYSTEM_CODE = /\b(EPERM|EACCES|EBUSY|ENOENT|ENOSPC|EROFS|SQLITE_BUSY|SQLIT
 const TECHNICAL_DETAIL = /(?:\b(?:error|exception|traceback|spawn|errno|syscall|sqlite|workspace database service|exited with code|timed? out|permission denied|not found)\b|\bat\s+[A-Za-z_$][\w$.[\]]*\s*\(|https?:\/\/|[A-Za-z]:\\)/i;
 const ERROR_WORDS = /失败|错误|异常|无法|不能|不存在|无效|冲突|占用|只读|过期|请.*重试/;
 const SERIOUS_ERROR = /(?:数据库.*(?:损坏|不可用|失败)|回滚失败|状态不确定|部分.*失败|永久删除|无法安全|无法重试|修复面板|隐私确认失败|备份.*失败|工作区恢复失败|项目恢复失败|提交.*失败|会话释放失败|跟踪启动失败|已.+(?:但|；).+失败)/;
+const SERIOUS_SYSTEM_CODE = /\b(?:SQLITE_CORRUPT|SQLITE_IOERR)\b/i;
 
 const CODE_RULES: Array<{ test: RegExp; detail: string; durationMs: number }> = [
   { test: /(?:target|name|key)_conflict|duplicate|output_name_conflict/, detail: '这个名称已经存在，请换一个', durationMs: 4000 },
@@ -108,6 +109,7 @@ const positiveTone = (message: string): ToastTone | undefined => {
 };
 
 export const prepareUserFacingNotice = (rawMessage: string, rawOptions?: ToastShowOptions): PreparedUserNotice => {
+  const seriousRawError = SERIOUS_SYSTEM_CODE.test(String(rawMessage || ''));
   const normalized = normalizeTechnicalMessage(rawMessage);
   const options = optionsObject(rawOptions);
   const tone = positiveTone(normalized.message);
@@ -116,7 +118,7 @@ export const prepareUserFacingNotice = (rawMessage: string, rawOptions?: ToastSh
   const hasExplicitLifecycle = options.lifecycle === 'persistent';
   const hasExplicitDuration = options.durationMs !== undefined;
   const errorLike = normalized.normalizedError || ERROR_WORDS.test(normalized.message);
-  if (!hasExplicitLifecycle && !hasExplicitDuration && errorLike && !SERIOUS_ERROR.test(normalized.message)) {
+  if (!hasExplicitLifecycle && !hasExplicitDuration && errorLike && !seriousRawError && !SERIOUS_ERROR.test(normalized.message)) {
     options.durationMs = normalized.durationMs
       || (/复制/.test(normalized.message) ? 3500 : /拖入/.test(normalized.message) ? 4000 : 5000);
   }

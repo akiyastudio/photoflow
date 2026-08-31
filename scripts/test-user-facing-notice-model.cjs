@@ -54,6 +54,8 @@ assert.strictEqual(seriousRollback.options, undefined, 'rollback failures must k
 
 const seriousDatabase = prepareUserFacingNotice('数据库损坏，读取项目失败');
 assert.strictEqual(seriousDatabase.options, undefined, 'database integrity failures must remain persistent');
+const seriousSqliteCode = prepareUserFacingNotice('读取失败：SQLITE_CORRUPT: database disk image is malformed');
+assert.strictEqual(seriousSqliteCode.options, undefined, 'SQLITE_CORRUPT must remain persistent after technical-message normalization');
 
 const explicitErrorTone = prepareUserFacingNotice('打开失败：ENOENT: missing', 'error');
 assert.strictEqual(explicitErrorTone.options.tone, 'error');

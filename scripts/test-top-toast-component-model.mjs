@@ -39,6 +39,9 @@ assert(hook.indexOf('timersRef.current.set') < hook.indexOf('upsertTopToastNotic
 let keyed = model.upsertTopToastNotice([], { id: 30, message: 'first', persistent: false, count: 1, tone: 'info', dedupeKey: 'same' }).notices;
 keyed = model.upsertTopToastNotice(keyed, { id: 31, message: 'replacement', persistent: true, count: 1, tone: 'error', dedupeKey: 'same' }).notices;
 assert.deepEqual(keyed.map(item => ({ id: item.id, message: item.message, tone: item.tone, persistent: item.persistent })), [{ id: 30, message: 'replacement', tone: 'error', persistent: true }], 'same dedupeKey replaces the existing card while preserving identity');
+const distinctPersistent = model.enqueueTopToastNoticeWithEvictions([], { id: 40, message: 'same failure', persistent: true, count: 1, tone: 'error', dedupeKey: 'alpha', sourceComponentId: 'component-a' });
+const distinctPersistentNext = model.enqueueTopToastNoticeWithEvictions(distinctPersistent.notices, { id: 41, message: 'same failure', persistent: true, count: 1, tone: 'error', dedupeKey: 'beta', sourceComponentId: 'component-b' });
+assert.deepEqual(distinctPersistentNext.notices.map(item => item.id), [40, 41], 'persistent notices with distinct keys and sources retain independent live handles');
 const taskToast = fs.readFileSync(path.join(root, 'src/features/background-tasks/FileTransferToast.tsx'), 'utf8');
 const toastReflow = fs.readFileSync(path.join(root, 'src/components/toast-stack-reflow.ts'), 'utf8');
 assert(taskToast.includes('useToastStackReflow(stackRef, reflowKey)') && toastReflow.includes('[layoutKey, stackRef]') && toastReflow.includes("matchMedia('(prefers-reduced-motion: reduce)').matches") && toastReflow.indexOf('matchMedia') < toastReflow.indexOf('element.animate'), 'shared Toast reordering runs only for structural changes and skips Web Animations when reduced motion is requested');

@@ -47,7 +47,7 @@ export const normalizeProjectToolbar = (value: unknown): AppConfig['projectToolb
     return undefined;
   };
   const order = Array.isArray(source.order) ? source.order.map(migrateToolbarId).filter((id): id is ProjectToolbarActionId => Boolean(id)) : [];
-  const hidden = Array.isArray(source.hidden) ? source.hidden.filter((id): id is ProjectToolbarActionId => valid.has(id as ProjectToolbarActionId)) : [];
+  const hidden = Array.isArray(source.hidden) ? source.hidden.map(migrateToolbarId).filter((id): id is ProjectToolbarActionId => Boolean(id)) : [];
   return {
     order: [...new Set([...order, ...PROJECT_TOOLBAR_ACTION_IDS])],
     hidden: [...new Set(hidden)],
@@ -84,7 +84,7 @@ export const DEFAULT_CONFIG = (userPath: string): AppConfig => ({
   favoriteDisplayMode: 'binary',
   usagePreferencesVersion: 0,
   projectToolbar: normalizeProjectToolbar(undefined),
-  homeOrder: DEFAULT_HOME_ORDER,
+  homeOrder: [...DEFAULT_HOME_ORDER],
   birthdayEnabled: true,
   pinInspirationLibrary: false,
   componentSettings: {},

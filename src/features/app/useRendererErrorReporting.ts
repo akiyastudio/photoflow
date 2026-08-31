@@ -1,8 +1,7 @@
 import { useEffect, useRef } from 'react';
 import {
-  rendererErrorFingerprint,
+  recordRendererError,
   rendererErrorNoticeSummary,
-  shouldReportRendererError,
   type RendererErrorOccurrence,
 } from './renderer-error-notice-model';
 
@@ -15,13 +14,14 @@ interface PythonErrorEvent {
 }
 
 export const useRendererErrorReporting = (showNotice: Notice) => {
-  const lastRendererErrorRef = useRef<RendererErrorOccurrence | null>(null);
+  const recentRendererErrorsRef = useRef<RendererErrorOccurrence[]>([]);
 
   useEffect(() => {
     const report = (message: string, details?: string) => {
       const now = Date.now();
-      if (!shouldReportRendererError(lastRendererErrorRef.current, message, now)) return;
-      lastRendererErrorRef.current = { fingerprint: rendererErrorFingerprint(message), reportedAt: now };
+      const decision = recordRendererError(recentRendererErrorsRef.current, message, now);
+      recentRendererErrorsRef.current = decision.occurrences;
+      if (!decision.report) return;
       showNotice(`发生错误：${rendererErrorNoticeSummary(message)}`);
       window.electronAPI?.reportRendererError?.(message, details);
     };

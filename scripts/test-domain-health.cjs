@@ -28,4 +28,6 @@ const preloadSource = fs.readFileSync(path.join(root, 'electron', 'preload.cjs')
 const systemIpcSource = fs.readFileSync(path.join(root, 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
 assert(appSource.includes('<DomainHealthBanner') && bannerSource.includes('getDomainHealth') && bannerSource.includes('部分功能已隔离') && bannerSource.includes('retryDomainCommand'), 'renderer must expose domain degradation and dead-letter recovery');
 assert(preloadSource.includes("ipcRenderer.invoke('domain-command-retry'") && systemIpcSource.includes("ipcMain.handle('domain-command-retry'"), 'dead-letter retry must use a bounded IPC channel');
+assert(bannerSource.includes('setTimeout') && !bannerSource.includes('setInterval'), 'health polling must wait for each request before scheduling the next');
+assert(bannerSource.includes('retryBusy') && bannerSource.includes('Promise.allSettled'), 'dead-letter retry exposes busy state and contains per-command rejections');
 console.log('Domain health and circuit-breaker tests passed.');

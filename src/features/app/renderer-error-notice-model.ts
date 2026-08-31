@@ -34,3 +34,14 @@ export const shouldReportRendererError = (
   next: string,
   now: number,
 ) => !previous || previous.fingerprint !== rendererErrorFingerprint(next) || now - previous.reportedAt >= DEDUPLICATION_WINDOW_MS;
+
+export const recordRendererError = (
+  previous: RendererErrorOccurrence[],
+  next: string,
+  now: number,
+) => {
+  const fingerprint = rendererErrorFingerprint(next);
+  const occurrences = previous.filter(item => now - item.reportedAt < DEDUPLICATION_WINDOW_MS);
+  if (occurrences.some(item => item.fingerprint === fingerprint)) return { report: false, occurrences };
+  return { report: true, occurrences: [...occurrences, { fingerprint, reportedAt: now }] };
+};

@@ -147,12 +147,35 @@ const flushFrames = timestamp => {
   assert(failedCard && failedCard.getAttribute('data-toast-tone') === 'error' && /处理失败/.test(failedCard.textContent), 'activity.fail in the creation tick updates the mounted card');
   assert(!cards.some(node => node.getAttribute('data-top-toast-id') === `notice:${dismissedActivity.id}`), 'activity.dismiss in the creation tick removes the card');
 
+  let timedFailure;
+  await React.act(async () => {
+    timedFailure = toast.activity('正在重试', { dedupeKey: 'timed-failure' });
+    timedFailure.fail('重试失败', { durationMs: 1200 });
+  });
+  assert([...timers.values()].some(timer => timer.delay === 1200), 'activity.fail with an explicit duration remains transient');
+
+  let sourceA; let sourceB;
+  await React.act(async () => {
+    sourceA = toast.show('相同错误', { tone: 'error', dedupeKey: 'source-a', lifecycle: 'persistent' });
+    sourceB = toast.show('相同错误', { tone: 'error', dedupeKey: 'source-b', lifecycle: 'persistent' });
+  });
+  assert.notEqual(sourceA.id, sourceB.id, 'distinct persistent keys return independent handles');
+  await React.act(async () => sourceB.update({ durationMs: 1300, lifecycle: 'auto' }));
+  await React.act(async () => sourceA.update({ dedupeKey: 'source-b', message: '接管提示', durationMs: 1000, lifecycle: 'auto' }));
+  cards = findAll(container, node => node.getAttribute?.('data-top-toast-id'));
+  assert(cards.some(node => node.getAttribute('data-top-toast-id') === `notice:${sourceA.id}`), 'updating into an occupied key preserves the caller handle');
+  assert(!cards.some(node => node.getAttribute('data-top-toast-id') === `notice:${sourceB.id}`), 'updating into an occupied key removes the conflicting card');
+  assert(![...timers.values()].some(timer => timer.delay === 1300), 'key replacement clears the conflicting card timer');
+
   assert.equal(frames.size, 1, 'batched notice mutations schedule at most one pending Toast view frame');
+  await React.act(async () => {
+    toast.show('frame-latest', { tone: 'info', dedupeKey: 'frame-latest', durationMs: 900 });
+  });
   observers.forEach(observer => { observer.callback([]); observer.callback([]); observer.callback([]); });
   assert.equal(frames.size, 1, 'repeated resize callbacks coalesce into the pending Toast view frame');
   await React.act(async () => flushFrames(2));
   assert.equal(snapshots.length, 2, 'one animation frame produces only one additional structured snapshot');
-  assert.equal(snapshots.at(-1).notices[0].message, '保存失败');
+  assert(snapshots.at(-1).notices.some(notice => notice.message === 'frame-latest'), 'the queued frame reads the latest Toast snapshot');
   await React.act(async () => presentationListener({ visible: true }));
   assert(findAll(container, node => node.getAttribute?.('data-toast-view-model'))[0].getAttribute('class').includes('top-toast-stack--model'), 'the host fallback hides only after native presentation acknowledgement');
   await React.act(async () => {

@@ -18,6 +18,12 @@ const { pathToFileURL } = require('url');
   assert(!model.shouldReportRendererError(previous, 'same error', now + 100), 'identical errors must be suppressed briefly');
   assert(model.shouldReportRendererError(previous, 'different error', now + 100));
   assert(model.shouldReportRendererError(previous, 'same error', now + 5_000), 'the same error may be reported again after the window');
+  let recent = [];
+  for (const [message, offset] of [['A error', 0], ['B error', 10], ['A error', 20], ['B error', 30]]) {
+    const decision = model.recordRendererError(recent, message, now + offset);
+    recent = decision.occurrences;
+    assert.strictEqual(decision.report, offset < 20, 'interleaved fingerprints are deduplicated independently within the window');
+  }
 
   console.log('renderer error notice model tests passed');
 })().catch(error => {

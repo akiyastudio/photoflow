@@ -78,7 +78,7 @@ const stableBoundsCount = view.boundsCalls.length;
 handlers.get('toast-view:update')({ sender: mainContents }, { ...snapshot, revision: 3, height: 112, notices: [{ ...snapshot.notices[0], message: 'updated' }] });
 ipcMain.emit('toast-view:layout', { sender: view.webContents }, { revision: 3, height: 118 });
 assert.equal(mainContents.sent.filter(message => message[0] === 'toast-view:presentation').length, presentationEventCount, 'progress revisions retain one stable native presentation lease');
-assert.equal(view.boundsCalls.length, stableBoundsCount, 'stable progress revisions ignore incidental height jitter instead of resizing the native Toast surface');
+assert.equal(view.boundsCalls.length, stableBoundsCount + 1, 'each accepted revision may correct native height even when card identity is stable');
 
 const pluginView = { name: 'plugin' };
 children.push(pluginView);
@@ -109,9 +109,12 @@ ipcMain.emit('toast-view:layout', { sender: view.webContents }, { revision: 8, h
 assert.equal(view.boundsCalls.length, expandedBoundsCount, 'removing one of several cards keeps the old bounds during reflow');
 assert.equal([...retryTimers.values()][0].delay, TOAST_VIEW_MAX_REFLOW_MS, 'renderer-requested shrink delays are safely bounded');
 const shrinkTimer = [...retryTimers.entries()][0];
+handlers.get('toast-view:update')({ sender: mainContents }, { ...snapshot, revision: 9, height: 90, notices: [{ ...snapshot.notices[0], id: 2, message: 'two' }] });
+ipcMain.emit('toast-view:layout', { sender: view.webContents }, { revision: 9, height: 90, reflowMs: 200 });
 retryTimers.delete(shrinkTimer[0]);
 shrinkTimer[1].callback();
-assert.equal(view.bounds.height, 100, 'the native surface shrinks once after remaining cards finish moving');
+assert.equal(view.bounds.height, 90, 'a coalesced shrink timer applies the latest accepted revision height');
+assert.equal(retryTimers.size, 0, 'coalesced shrink correction does not leave a stale second timer');
 
 assert(validAction({ action: 'task-pause', id: 'task-1' }));
 assert(!validAction({ action: 'open-url', id: 'x' }));

@@ -8,6 +8,7 @@ import { MediaThumbnail } from '../workspace/ProjectWorkspace';
 const INSPIRATION_PROJECT_NAME = '.__photoflow_inspiration__';
 const SEARCH_PAGE_SIZE = 200;
 const SEARCH_CONCURRENCY = 4;
+const VISIBLE_RESULT_BATCH = 160;
 
 export type GlobalSearchSource = {
   id: string;
@@ -32,10 +33,13 @@ const entryTypeLabel = (entry: ProjectFileEntry) => {
 
 const discoverSources = async (config: AppConfig): Promise<{ sources: GlobalSearchSource[]; errors: string[] }> => {
   const roots = normalizeWorkspacePaths(config.workspacePath, config.workspacePaths);
-  const catalogs = await Promise.all(roots.map(async requestedRoot => ({
-    requestedRoot,
-    result: await projectWorkspaceClient.getWorkspaceProjects(requestedRoot),
-  })));
+  const catalogs = await Promise.all(roots.map(async requestedRoot => {
+    try {
+      return { requestedRoot, result: await projectWorkspaceClient.getWorkspaceProjects(requestedRoot) };
+    } catch(catalogError) {
+      return { requestedRoot, result: { success: false as const, statuses: [], error: catalogError instanceof Error ? catalogError.message : String(catalogError) } };
+    }
+  }));
   const errors: string[] = [];
   const projectSources: GlobalSearchSource[] = [];
   const seenPaths = new Set<string>();
@@ -91,7 +95,8 @@ const searchSource = async (source: GlobalSearchSource, query: string, isCurrent
       { query },
     );
     if (!isCurrent()) {
-      if (result.cursor) void projectWorkspaceClient.cancelListProjectFiles(result.cursor);
+      const staleCursor = result.cursor || cursor;
+      if (staleCursor) void projectWorkspaceClient.cancelListProjectFiles(staleCursor);
       return entries;
     }
     if (!result.success) throw new Error(result.error || '读取文件失败');
@@ -126,6 +131,7 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
   const [sourceCount, setSourceCount] = useState(0);
   const [error, setError] = useState('');
   const [selectedId, setSelectedId] = useState('');
+  const [visibleHitCount, setVisibleHitCount] = useState(VISIBLE_RESULT_BATCH);
   const inputRef = useRef<HTMLInputElement>(null);
   const requestSequenceRef = useRef(0);
 
@@ -135,13 +141,16 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
   }, [query]);
 
   useEffect(() => {
-    if (active) window.setTimeout(() => inputRef.current?.focus(), 0);
+    if (!active) return;
+    const focusTimer = window.setTimeout(() => inputRef.current?.focus(), 0);
+    return () => window.clearTimeout(focusTimer);
   }, [active]);
 
   useEffect(() => {
     const sequence = ++requestSequenceRef.current;
     const isCurrent = () => requestSequenceRef.current === sequence;
     setSelectedId('');
+    setVisibleHitCount(VISIBLE_RESULT_BATCH);
     if (!active || !debouncedQuery) {
       setLoading(false);
       if (!debouncedQuery) {
@@ -171,7 +180,11 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
           if (!source) return;
           try {
             const entries = await searchSource(source, debouncedQuery, isCurrent);
-            if (isCurrent()) nextHits.push(...entries.map(entry => ({ source, entry })));
+            if (isCurrent()) {
+              const sourceHits = entries.map(entry => ({ source, entry }));
+              nextHits.push(...sourceHits);
+              setHits(current => [...current, ...sourceHits]);
+            }
           } catch (sourceError) {
             failures.push(`${source.label}：${sourceError instanceof Error ? sourceError.message : String(sourceError)}`);
           } finally {
@@ -206,9 +219,30 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
     return [...grouped.values()];
   }, [hits]);
 
+  const visibleGroups = useMemo(() => {
+    const visibleIds = new Set(hits.slice(0, visibleHitCount).map(hit => `${hit.source.id}\0${hit.entry.relativePath}\0${hit.entry.path}`));
+    return groups.map(group => ({
+      ...group,
+      totalCount: group.entries.length,
+      entries: group.entries.filter(entry => visibleIds.has(`${group.source.id}\0${entry.relativePath}\0${entry.path}`)),
+    })).filter(group => group.entries.length > 0);
+  }, [groups, hits, visibleHitCount]);
+
   const openEntry = async (source: GlobalSearchSource, entry: ProjectFileEntry) => {
-    const result = await projectWorkspaceClient.openProjectEntry(source.workspacePath, source.project.status, source.project.name, entry.relativePath);
-    if (!result.success) onNotice(`打开文件失败：${result.error || '未知错误'}`, 'error');
+    try {
+      const result = await projectWorkspaceClient.openProjectEntry(source.workspacePath, source.project.status, source.project.name, entry.relativePath);
+      if (!result.success) onNotice(`打开文件失败：${result.error || '未知错误'}`, 'error');
+    } catch (openError) {
+      onNotice(`打开文件失败：${openError instanceof Error ? openError.message : String(openError)}`, 'error');
+    }
+  };
+
+  const openFolder = async (group: SearchGroup) => {
+    try {
+      await Promise.resolve(onOpenFolder(group.source, group.folderPath));
+    } catch (openError) {
+      onNotice(`打开文件夹失败：${openError instanceof Error ? openError.message : String(openError)}`, 'error');
+    }
   };
 
   return <section className="flex h-full min-h-0 flex-col bg-slate-50">
@@ -216,15 +250,15 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
       <div className="mx-auto max-w-6xl">
         <div className="flex items-center justify-between gap-4">
           <div><h1 className="text-xl font-bold text-slate-900">全局搜索</h1><p className="mt-1 text-xs text-slate-500">检索所有项目工作目录与灵感库中的文件</p></div>
-          {loading && <p className="flex shrink-0 items-center gap-2 text-xs text-blue-600"><Loader2 size={14} className="animate-spin"/>正在检索 {completedSources}/{sourceCount || '…'}</p>}
+          {loading && <p role="status" aria-live="polite" className="flex shrink-0 items-center gap-2 text-xs text-blue-600"><Loader2 size={14} className="animate-spin"/>正在检索 {completedSources}/{sourceCount || '…'}</p>}
         </div>
         <div className="mt-4 flex h-11 items-center gap-3 rounded-xl border border-slate-300 bg-slate-50 px-4 shadow-sm focus-within:border-blue-500 focus-within:bg-white focus-within:ring-2 focus-within:ring-blue-100">
           <Search size={19} className="shrink-0 text-slate-400"/>
           <input ref={inputRef} value={query} onChange={event => setQuery(event.target.value)} placeholder="输入文件名关键词" aria-label="全局搜索文件" className="min-w-0 flex-1 bg-transparent text-sm text-slate-800 outline-none placeholder:text-slate-400"/>
           {query && <button type="button" onClick={() => setQuery('')} aria-label="清除搜索" title="清除搜索" className="rounded-md p-1 text-slate-400 hover:bg-slate-200 hover:text-slate-700"><X size={16}/></button>}
         </div>
-        {debouncedQuery && !loading && <p className="mt-3 text-xs text-slate-500">找到 <span className="font-bold text-slate-700">{hits.length}</span> 个文件，分布在 {groups.length} 个文件夹中</p>}
-        {error && <p className="mt-2 text-xs text-amber-600">{error}</p>}
+        {debouncedQuery && !loading && <p role="status" aria-live="polite" className="mt-3 text-xs text-slate-500">找到 <span className="font-bold text-slate-700">{hits.length}</span> 个文件，分布在 {groups.length} 个文件夹中</p>}
+        {error && <p role="alert" className="mt-2 text-xs text-amber-600">{error}</p>}
       </div>
     </header>
     <div className="min-h-0 flex-1 overflow-y-auto px-7 py-5">
@@ -232,22 +266,25 @@ export const SearchAllPage = ({ active, config, onOpenFolder, onNotice }: {
         {!debouncedQuery && <div className="flex min-h-[360px] items-center justify-center text-center"><div><span className="mx-auto flex h-16 w-16 items-center justify-center rounded-2xl bg-blue-50 text-blue-500"><Search size={30}/></span><h2 className="mt-5 text-base font-bold text-slate-700">查找项目中的任意文件</h2><p className="mt-2 text-sm text-slate-400">输入文件名关键词，结果会按项目和文件夹整理</p></div></div>}
         {debouncedQuery && loading && !hits.length && <p className="py-20 text-center text-sm text-slate-400"><Loader2 size={18} className="mr-2 inline animate-spin"/>正在搜索全部位置…</p>}
         {debouncedQuery && !loading && !hits.length && <div className="py-20 text-center"><Search size={32} className="mx-auto text-slate-300"/><p className="mt-4 text-sm text-slate-500">没有找到包含“{debouncedQuery}”的文件</p></div>}
-        {groups.map((group, groupIndex) => <section key={group.id} className={`${groupIndex ? 'mt-6 border-t border-slate-200 pt-5' : ''}`}>
+        <div role="listbox" aria-label="全局搜索结果">
+        {visibleGroups.map((group, groupIndex) => <section key={group.id} role="group" aria-label={`${group.source.label} / ${group.folderPath || '项目根目录'}`} className={`${groupIndex ? 'mt-6 border-t border-slate-200 pt-5' : ''}`}>
           <header className="mb-3 flex min-w-0 items-center gap-2">
             <Folder size={17} className={group.source.kind === 'inspiration' ? 'shrink-0 text-amber-500' : 'shrink-0 text-blue-500'}/>
-            <button type="button" onClick={() => onOpenFolder(group.source, group.folderPath)} title={`在新标签页打开 ${group.folderPath || group.source.label}`} className="min-w-0 truncate text-left text-sm font-bold text-slate-700 hover:text-blue-600">{group.source.label}<span className="font-normal text-slate-400"> / {group.folderPath || '项目根目录'}</span></button>
-            <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-500">{group.entries.length}</span><ExternalLink size={12} className="shrink-0 text-slate-300"/>
+            <button type="button" onClick={() => void openFolder(group)} title={`在新标签页打开 ${group.folderPath || group.source.label}`} className="min-w-0 truncate text-left text-sm font-bold text-slate-700 hover:text-blue-600">{group.source.label}<span className="font-normal text-slate-400"> / {group.folderPath || '项目根目录'}</span></button>
+            <span className="shrink-0 rounded-full bg-slate-200 px-2 py-0.5 text-[10px] font-medium text-slate-500">{group.totalCount}</span><ExternalLink size={12} className="shrink-0 text-slate-300"/>
           </header>
           <div className="grid w-full content-start gap-3" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 132px), 1fr))' }}>
             {group.entries.map((entry, entryIndex) => {
               const id = `${group.id}\0${entry.relativePath}\0${entry.path}`;
-              return <div key={id} role="button" tabIndex={0} title={entry.relativePath} onClick={() => setSelectedId(id)} onDoubleClick={() => void openEntry(group.source, entry)} onKeyDown={event => { if (event.key === 'Enter') void openEntry(group.source, entry); }} className={`group min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedId === id ? 'bg-blue-50 ring-1 ring-blue-400' : ''}`}>
+              return <button type="button" key={id} role="option" aria-selected={selectedId === id} aria-label={`${entry.name}，${entryTypeLabel(entry)}`} title={entry.relativePath} onClick={() => setSelectedId(id)} onDoubleClick={() => void openEntry(group.source, entry)} onKeyDown={event => { if (event.key === 'Enter') { event.preventDefault(); void openEntry(group.source, entry); } }} className={`group min-w-0 cursor-default overflow-hidden rounded-lg p-2 text-left transition hover:bg-blue-50 ${selectedId === id ? 'bg-blue-50 ring-1 ring-blue-400' : ''}`}>
                 <div className="relative flex aspect-square items-center justify-center overflow-hidden rounded-md bg-white shadow-sm ring-1 ring-slate-200/80"><SearchResultIcon entry={entry} config={config} queueOrder={groupIndex * 1000 + entryIndex}/></div>
                 <p className="mt-2 truncate text-xs font-medium text-slate-700">{entry.name}</p><p className="mt-0.5 truncate text-[10px] uppercase text-slate-400">{entryTypeLabel(entry)}</p>
-              </div>;
+              </button>;
             })}
           </div>
         </section>)}
+        </div>
+        {visibleHitCount < hits.length && <div className="mt-7 flex justify-center"><button type="button" onClick={() => setVisibleHitCount(count => Math.min(hits.length, count + VISIBLE_RESULT_BATCH))} className="rounded-lg border border-slate-300 bg-white px-4 py-2 text-xs font-bold text-slate-600 hover:border-blue-400 hover:text-blue-600">显示更多结果（剩余 {hits.length - visibleHitCount}）</button></div>}
       </div>
     </div>
   </section>;

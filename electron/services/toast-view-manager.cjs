@@ -48,10 +48,12 @@ class ToastViewManager {
     this.loadRetryTimer = null;
     this.emptyHideTimer = null;
     this.layoutShrinkTimer = null;
+    this.layoutShrinkTarget = null;
     this.presentationVisible = false;
     this.snapshot = { revision: 0, dark: false, top: 40, width: 0, height: 0, notices: [], tasks: [], overflowCount: 0 };
     this.layoutKey = snapshotLayoutKey(this.snapshot);
     this.renderedLayoutKey = '';
+    this.renderedRevision = -1;
     this.onWindowResize = () => this.publishPresentation(this.syncBounds());
     this.onUpdate = (event, snapshot) => {
       if (event.sender !== this.mainWindow?.webContents) throw new Error('Unauthorized toast view sender');
@@ -95,16 +97,20 @@ class ToastViewManager {
         return;
       }
       this.clearEmptyHide();
-      if (this.presentationVisible && this.renderedLayoutKey === this.layoutKey) return;
-      if (nextHeight === this.renderedHeight && this.presentationVisible) return;
+      if (nextHeight === this.renderedHeight && this.presentationVisible) {
+        this.renderedLayoutKey = this.layoutKey;
+        this.renderedRevision = layout.revision;
+        return;
+      }
       const reflowMs = finiteInteger(layout.reflowMs) ? Math.max(0, Math.min(TOAST_VIEW_MAX_REFLOW_MS, layout.reflowMs)) : 0;
       if (this.presentationVisible && nextHeight < this.renderedHeight && reflowMs > 0) {
-        this.scheduleLayoutShrink(nextHeight, reflowMs);
+        this.scheduleLayoutShrink(nextHeight, reflowMs, layout.revision);
         return;
       }
       this.clearLayoutShrink();
       this.renderedHeight = nextHeight;
       this.renderedLayoutKey = this.layoutKey;
+      this.renderedRevision = layout.revision;
       this.publishPresentation(this.syncBounds());
     };
     this.onAction = (event, action) => {
@@ -216,14 +222,17 @@ class ToastViewManager {
     this.emptyHideTimer = null;
   }
 
-  scheduleLayoutShrink(height, delay) {
+  scheduleLayoutShrink(height, delay, revision) {
+    this.layoutShrinkTarget = { height, revision, layoutKey: this.layoutKey };
     if (this.layoutShrinkTimer !== null) return;
-    const expectedLayoutKey = this.layoutKey;
     this.layoutShrinkTimer = this.setTimeoutFn(() => {
       this.layoutShrinkTimer = null;
-      if (this.layoutKey !== expectedLayoutKey) return;
-      this.renderedHeight = height;
-      this.renderedLayoutKey = expectedLayoutKey;
+      const target = this.layoutShrinkTarget;
+      this.layoutShrinkTarget = null;
+      if (!target || this.layoutKey !== target.layoutKey || this.snapshot.revision !== target.revision) return;
+      this.renderedHeight = target.height;
+      this.renderedLayoutKey = target.layoutKey;
+      this.renderedRevision = target.revision;
       this.publishPresentation(this.syncBounds());
     }, delay);
   }
@@ -231,6 +240,7 @@ class ToastViewManager {
   clearLayoutShrink() {
     if (this.layoutShrinkTimer !== null) this.clearTimeoutFn(this.layoutShrinkTimer);
     this.layoutShrinkTimer = null;
+    this.layoutShrinkTarget = null;
   }
 
   sendSnapshot() {

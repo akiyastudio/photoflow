@@ -166,6 +166,7 @@ export const useTitlebarTabOrder = ({
         let started = false;
         const previousUserSelect = document.body.style.userSelect;
         const previousCursor = document.body.style.cursor;
+        sourceElement.setPointerCapture(pointerId);
 
         const finish = () => {
           window.removeEventListener('pointermove', move);
@@ -180,6 +181,7 @@ export const useTitlebarTabOrder = ({
           }
           document.body.style.userSelect = previousUserSelect;
           document.body.style.cursor = previousCursor;
+          if (sourceElement.hasPointerCapture(pointerId)) sourceElement.releasePointerCapture(pointerId);
           setDraggedId(undefined);
           setDropTarget(undefined);
           activeDragCleanupRef.current = undefined;
