@@ -602,6 +602,26 @@ const App: React.FC = () => {
     setProjectDestination(project.path);
     setActiveTab('project');
   };
+  useEffect(() => window.electronAPI.onComponentProjectDirectoryOpenRequested(request => {
+    void (async () => {
+      let project = projectPages.find(page => page.projectId === request.projectId && page.project)?.project || null;
+      if (!project) {
+        const result = await window.electronAPI.getWorkspaceProjects(request.workspacePath);
+        const matched = result.success
+          ? result.statuses.flatMap(group => group.projects).find(candidate => candidate.id === request.projectId)
+          : undefined;
+        if (matched) project = { ...matched, workspacePath: result.root || request.workspacePath };
+      }
+      if (!project) {
+        showNotice(`无法在软件内打开“${request.projectName}”的任务文件夹`, 'error');
+        return;
+      }
+      createPage({ kind: 'project', projectId: project.id, project, currentRelativePath: request.relativePath, initialRelativePath: request.relativePath, operation: null });
+      setSelectedProject(project);
+      setProjectDestination(project.path);
+      setActiveTab('project');
+    })().catch(error => showNotice(`打开任务文件夹失败：${error instanceof Error ? error.message : String(error)}`, 'error'));
+  }), [createPage, projectPages, showNotice]);
   const openWorkspaceToolTab = (ownerPageId: string, project: WorkspaceProject, kind: WorkspaceToolKind, label: string) => {
     setWorkspaceToolTabs(current => {
       const existing = current.find(tab => tab.ownerPageId === ownerPageId && tab.kind === kind);

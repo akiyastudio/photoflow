@@ -2034,17 +2034,24 @@ const MatchView = ({
         previews.push({ source, preview });
         setProgress(10 + Math.round((index + 1) / selectedSources.length * 20));
         appendLog(`${source.label}来源：${preview.sourceFolderRelativePath}`, 'info');
-        appendLog(`${source.label}目标：${preview.targetFolderRelativePath}`, 'info');
+        if (Number(preview.matchedCount || 0) > 0) appendLog(`${source.label}目标：${preview.targetFolderRelativePath}`, 'info');
+        else appendLog(`${source.label}来源未匹配到选片，不会创建输出文件夹`, 'info');
       }
       operationIdRef.current = '';
       setProgress(30);
+      const matchedPreviews = previews.filter(({ preview }) => Number(preview.matchedCount || 0) > 0);
+      if (!matchedPreviews.length) {
+        setStatusMsg('未找到与输入文件名匹配的图片或视频');
+        setProgress(0);
+        return;
+      }
       setIsConfirming(true);
-      const filesToCopy = previews.reduce((sum, { preview }) => sum + Number(preview.filesToCopy || 0), 0);
-      const totalBytes = previews.reduce((sum, { preview }) => sum + Number(preview.totalBytes || 0), 0);
-      const imageCount = previews.reduce((sum, { preview }) => sum + Number(preview.imageCount || 0), 0);
-      const videoCount = previews.reduce((sum, { preview }) => sum + Number(preview.videoCount || 0), 0);
-      const existingCount = previews.reduce((sum, { preview }) => sum + Number(preview.existingCount || 0), 0);
-      const conflictCount = previews.reduce((sum, { preview }) => sum + Number(preview.conflictCount || 0), 0);
+      const filesToCopy = matchedPreviews.reduce((sum, { preview }) => sum + Number(preview.filesToCopy || 0), 0);
+      const totalBytes = matchedPreviews.reduce((sum, { preview }) => sum + Number(preview.totalBytes || 0), 0);
+      const imageCount = matchedPreviews.reduce((sum, { preview }) => sum + Number(preview.imageCount || 0), 0);
+      const videoCount = matchedPreviews.reduce((sum, { preview }) => sum + Number(preview.videoCount || 0), 0);
+      const existingCount = matchedPreviews.reduce((sum, { preview }) => sum + Number(preview.existingCount || 0), 0);
+      const conflictCount = matchedPreviews.reduce((sum, { preview }) => sum + Number(preview.conflictCount || 0), 0);
       const missingKeywords = tokens.filter(keyword => previews.every(({ preview }) => preview.missingKeywords?.includes(keyword)));
       const details = [
         `图片 ${imageCount} 个，视频 ${videoCount} 个`,
@@ -2065,13 +2072,13 @@ const MatchView = ({
         setProgress(0);
         return;
       }
-      if (previews.some(({ preview }) => Number(preview.conflictCount || 0) > 0)) throw new Error('存在输出名称或同名目标冲突，请处理后重新预检');
+      if (matchedPreviews.some(({ preview }) => Number(preview.conflictCount || 0) > 0)) throw new Error('存在输出名称或同名目标冲突，请处理后重新预检');
       let copiedCount = 0;
-      for (const [index, { source, preview }] of previews.entries()) {
+      for (const [index, { source, preview }] of matchedPreviews.entries()) {
         const operationId = crypto.randomUUID();
         operationIdRef.current = operationId;
-        const executionStart = 40 + index / previews.length * 50;
-        const executionEnd = 40 + (index + 1) / previews.length * 50;
+        const executionStart = 40 + index / matchedPreviews.length * 50;
+        const executionEnd = 40 + (index + 1) / matchedPreviews.length * 50;
         executionProgressRef.current = { label: source.label, start: executionStart, end: executionEnd };
         setProgress(executionStart);
         setStatusMsg(`正在复制${source.label}选片文件…`);

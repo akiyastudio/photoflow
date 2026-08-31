@@ -1,6 +1,6 @@
-const CURRENT_PRIVACY_NOTICE_VERSION = '2026-08-30';
-const CURRENT_TERMS_VERSION = '2026-08-30';
-const CURRENT_FACE_RULES_VERSION = '2026-07-29';
+const CURRENT_PRIVACY_NOTICE_VERSION = '2026-08-31';
+const CURRENT_TERMS_VERSION = '2026-08-31';
+const CURRENT_FACE_RULES_VERSION = '2026-08-31';
 const INSTALL_CONSENT_FILE_NAME = 'install-consent.ini';
 const INSTALL_CONSENT_SCHEMA_VERSION = '2';
 
@@ -35,11 +35,14 @@ const parseInstallerConsent = content => {
   return values;
 };
 
-const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => new Date(), platform = process.platform }) => {
+const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => new Date(), platform = process.platform, resourcesPath = process.resourcesPath }) => {
   const statePath = path.join(app.getPath('userData'), 'privacy-consent.json');
-  const installConsentPath = path.join(app.getPath('userData'), INSTALL_CONSENT_FILE_NAME);
+  const installConsentPaths = () => [...new Set([
+    path.join(app.getPath('userData'), INSTALL_CONSENT_FILE_NAME),
+    ...(app.isPackaged && resourcesPath ? [path.join(resourcesPath, INSTALL_CONSENT_FILE_NAME)] : []),
+  ])];
   const legalRoot = () => app.isPackaged
-    ? path.join(process.resourcesPath, 'legal')
+    ? path.join(resourcesPath, 'legal')
     : path.join(projectRoot, 'docs', 'legal');
 
   const readStateFile = () => {
@@ -57,19 +60,32 @@ const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => n
   };
 
   const importInstallerConsent = state => {
-    if (!app.isPackaged || platform !== 'win32' || !fs.existsSync(installConsentPath)) return state;
+    if (!app.isPackaged || platform !== 'win32') return state;
     if (state.privacyNoticeVersion === CURRENT_PRIVACY_NOTICE_VERSION && state.termsVersion === CURRENT_TERMS_VERSION) return state;
+    const currentTime = now();
+    const currentTimeMs = currentTime.getTime();
+    if (!Number.isFinite(currentTimeMs)) return state;
+    let selected;
+    for (const receiptPath of installConsentPaths()) {
+      if (!fs.existsSync(receiptPath)) continue;
+      try {
+        const receipt = parseInstallerConsent(fs.readFileSync(receiptPath, 'utf8'));
+        if (receipt.SchemaVersion !== INSTALL_CONSENT_SCHEMA_VERSION || receipt.Interactive !== '1') continue;
+        if (receipt.PrivacyVersion !== CURRENT_PRIVACY_NOTICE_VERSION || receipt.TermsVersion !== CURRENT_TERMS_VERSION) continue;
+        if (!['0', '1'].includes(receipt.ExperienceProgram)) continue;
+        if (!receipt.InstallerVersion || !/^\d+(?:\.\d+)+$/.test(receipt.InstallerVersion)) continue;
+        const acceptedAt = new Date(receipt.AcceptedAtLocal);
+        const acceptedAtMs = acceptedAt.getTime();
+        if (!Number.isFinite(acceptedAtMs) || acceptedAtMs > currentTimeMs + 10 * 60 * 1000) continue;
+        if (!selected || acceptedAtMs > selected.acceptedAtMs) selected = { receipt, receiptPath, acceptedAt, acceptedAtMs };
+      } catch {
+        // A damaged receipt in one location must not hide a valid receipt from
+        // the other location.
+      }
+    }
+    if (!selected) return state;
     try {
-      const receipt = parseInstallerConsent(fs.readFileSync(installConsentPath, 'utf8'));
-      if (receipt.SchemaVersion !== INSTALL_CONSENT_SCHEMA_VERSION || receipt.Interactive !== '1') return state;
-      if (receipt.PrivacyVersion !== CURRENT_PRIVACY_NOTICE_VERSION || receipt.TermsVersion !== CURRENT_TERMS_VERSION) return state;
-      if (!['0', '1'].includes(receipt.ExperienceProgram)) return state;
-      if (!receipt.InstallerVersion || !/^\d+(?:\.\d+)+$/.test(receipt.InstallerVersion)) return state;
-      const acceptedAt = new Date(receipt.AcceptedAtLocal);
-      const acceptedAtMs = acceptedAt.getTime();
-      const currentTime = now();
-      const currentTimeMs = currentTime.getTime();
-      if (!Number.isFinite(acceptedAtMs) || !Number.isFinite(currentTimeMs) || acceptedAtMs > currentTimeMs + 10 * 60 * 1000) return state;
+      const { receipt, receiptPath, acceptedAt, acceptedAtMs } = selected;
       const revokedAtMs = Date.parse(String(state.coreConsentRevokedAt || ''));
       if (state.coreConsentRevokedAt && (!Number.isFinite(revokedAtMs) || acceptedAtMs <= revokedAtMs)) return state;
       const imported = {
@@ -82,6 +98,7 @@ const createPrivacyService = ({ app, fs, path, shell, projectRoot, now = () => n
         coreConsentSource: 'interactive-installer',
         installerConsentImportedAt: currentTime.toISOString(),
         installerVersion: receipt.InstallerVersion,
+        installerConsentReceipt: receiptPath === path.join(app.getPath('userData'), INSTALL_CONSENT_FILE_NAME) ? 'user-data' : 'application-resources',
         experienceProgramGranted: receipt.ExperienceProgram === '1',
       };
       writeStateSync(imported);

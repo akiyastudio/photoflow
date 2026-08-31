@@ -45,10 +45,29 @@ for (const file of manifest.requiredFiles) if (!fs.statSync(path.join(packageRoo
 fs.mkdirSync(archiveRoot, { recursive: true });
 const archive = path.join(archiveRoot, `PhotoFlow-${manifest.id}-${manifest.version}-${process.platform}-${process.arch}.zip`);
 fs.rmSync(archive, { force: true });
-const quote = value => `'${String(value).replace(/'/g, "''")}'`;
-const result = process.platform === 'win32'
-  ? spawnSync('powershell.exe', ['-NoProfile', '-Command', `Compress-Archive -LiteralPath ${quote(packageRoot)} -DestinationPath ${quote(archive)} -CompressionLevel Optimal -Force`], { stdio: 'inherit' })
-  : spawnSync('python3', ['-c', 'import pathlib,sys,zipfile\ns,t=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2])\nwith zipfile.ZipFile(t,"w",zipfile.ZIP_DEFLATED) as z:\n for p in sorted(s.rglob("*")):\n  if p.is_file(): z.write(p,pathlib.Path(s.name)/p.relative_to(s))', packageRoot, archive], { stdio: 'inherit' });
+const archiveScript = [
+  'import os,pathlib,sys,time,zipfile',
+  'source,target=pathlib.Path(sys.argv[1]),pathlib.Path(sys.argv[2])',
+  'temporary=target.with_suffix(target.suffix+".tmp")',
+  'for attempt in range(5):',
+  ' try:',
+  '  temporary.unlink(missing_ok=True)',
+  '  with zipfile.ZipFile(temporary,"w",zipfile.ZIP_DEFLATED,compresslevel=9) as archive:',
+  '   for item in sorted(source.rglob("*")):',
+  '    if item.is_file(): archive.write(item,pathlib.Path(source.name)/item.relative_to(source))',
+  '  with zipfile.ZipFile(temporary,"r") as archive:',
+  '   corrupt=archive.testzip()',
+  '   if corrupt: raise RuntimeError(f"Corrupt ZIP entry: {corrupt}")',
+  '  os.replace(temporary,target)',
+  '  break',
+  ' except OSError as error:',
+  '  temporary.unlink(missing_ok=True)',
+  '  if attempt==4: raise',
+  '  print(f"Archive input temporarily unavailable, retrying ({attempt+1}/5): {error}",file=sys.stderr)',
+  '  time.sleep(1)',
+].join('\n');
+const result = spawnSync(python, ['-c', archiveScript, packageRoot, archive], { stdio: 'inherit' });
 if (result.error) throw result.error;
 if (result.status !== 0) throw new Error(`Archive failed: ${result.status}`);
+if (!fs.statSync(archive, { throwIfNoEntry: false })?.isFile()) throw new Error(`Archive was not produced: ${archive}`);
 console.log(`Installable component package: ${archive}`);

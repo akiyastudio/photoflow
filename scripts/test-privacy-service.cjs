@@ -30,6 +30,7 @@ const writeReceipt = (userData, acceptedAt, overrides = {}) => {
 };
 const serviceFor = (name, options = {}) => {
   const userData = path.join(sandbox, name);
+  const resourcesPath = path.join(sandbox, `${name}-resources`);
   const clock = options.clock || { value: new Date('2026-08-02T08:00:00.000Z') };
   const service = createPrivacyService({
     app: { isPackaged: options.isPackaged !== false, getPath: key => key === 'userData' ? userData : sandbox },
@@ -39,8 +40,9 @@ const serviceFor = (name, options = {}) => {
     projectRoot: path.resolve(__dirname, '..'),
     now: () => new Date(clock.value),
     platform: 'win32',
+    resourcesPath,
   });
-  return { userData, service, clock };
+  return { userData, resourcesPath, service, clock };
 };
 
 (async () => {
@@ -56,6 +58,19 @@ try {
   assert.strictEqual(importedFile.coreConsentSource, 'interactive-installer');
   assert.strictEqual(importedFile.installerVersion, '26.7.31');
   assert.strictEqual(imported.experienceProgramGranted, false);
+
+  const elevated = serviceFor('elevated');
+  writeReceipt(elevated.resourcesPath, new Date(elevated.clock.value.getTime() - 60_000), { ExperienceProgram: '1' });
+  const elevatedImported = elevated.service.getState();
+  assert.strictEqual(elevated.service.hasCoreConsent(), true, 'a per-machine installer receipt in application resources must suppress duplicate application consent');
+  assert.strictEqual(elevatedImported.experienceProgramGranted, true);
+  assert.strictEqual(JSON.parse(fs.readFileSync(path.join(elevated.userData, 'privacy-consent.json'), 'utf8')).installerConsentReceipt, 'application-resources');
+
+  const fallback = serviceFor('damaged-user-receipt');
+  writeReceipt(fallback.resourcesPath, new Date(fallback.clock.value.getTime() - 60_000), { ExperienceProgram: '1' });
+  fs.mkdirSync(fallback.userData, { recursive: true });
+  fs.writeFileSync(path.join(fallback.userData, INSTALL_CONSENT_FILE_NAME), 'not-an-ini', 'utf8');
+  assert.strictEqual(fallback.service.hasCoreConsent(), true, 'a damaged user receipt must not mask a valid application resource receipt');
 
   const optedIn = serviceFor('opted-in');
   writeReceipt(optedIn.userData, new Date(optedIn.clock.value.getTime() - 60_000), { ExperienceProgram: '1' });

@@ -1021,6 +1021,7 @@ export interface IElectronAPI {
   openComponentContribution: (request: { componentId: string; contributionId: string; type: ComponentContributionType; workspacePath?: string; projectId?: string; projectName?: string; projectStatus?: ProjectStatus; scopeRelativePath?: string; selectedRelativePaths?: string[]; sourcePageId?: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string; surface: ComponentContributionType; contentHeight?: number }; error?: string }>;
   onComponentPanelCloseRequested: (callback: (instanceId: string) => void) => () => void;
   onComponentPanelContentSizeChanged: (callback: (value: { instanceId: string; width: number; height: number }) => void) => () => void;
+  onComponentProjectDirectoryOpenRequested: (callback: (request: { workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus; relativePath: string }) => void) => () => void;
   releaseComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean }>;
   activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
   setHostSurfaceSuspended: (update: { rendererToken: string; revision: number; suspended: boolean }) => Promise<{ success: boolean }>;

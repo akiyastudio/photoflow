@@ -52,6 +52,7 @@ let breakManifestOnArtifactCall = 0;
 let outputFaultInjected = false;
 let artifactScopeCount = 0;
 let manifestDirectoryBackup = '';
+let lastOutputDirectoryDialog = null;
 const inputTokens = new Map(); const outputStages = new Map();
 const emittedTopics = new Set();
 const capabilityCounts = new Map();
@@ -90,13 +91,15 @@ const ready = new Promise((resolve, reject) => {
         } else if (frame.method === 'project.input.tokens') { const source = inputTokens.get(frame.payload.token) || frame.payload.token.slice('test-input:'.length); const inputId = require('crypto').randomUUID(); const directory = path.join(dataRoot, 'inputs', inputId); fs.mkdirSync(directory, { recursive: true }); const privatePath = path.join(directory, path.basename(source)); fs.copyFileSync(source, privatePath); result = { apiVersion: 7, inputId, privatePath, byteLength: fs.statSync(privatePath).size }; }
         else if (frame.method === 'tasks') result = { apiVersion: 7, task: frame.payload.action === 'complete' ? { state: 'completed' } : null, cancelled: false };
         else if (frame.method === 'component.events') { emittedTopics.add(frame.payload.topic); result = { apiVersion: 7, emitted: true }; }
+        else if (frame.method === 'dialogs' && frame.payload.kind === 'openOutputDirectory') { lastOutputDirectoryDialog = frame.payload; result = { apiVersion: 7, opened: true, outputRef: { commitId: frame.payload.commitId, artifactId: frame.payload.artifactId } }; }
         else if (frame.method === 'dialogs') { const token = `test-input:${returnedSource}`; inputTokens.set(token, returnedSource); result = { apiVersion: 7, cancelled: false, inputs: [{ name: path.basename(returnedSource), token, expiresAt: Date.now() + 1000 }] }; }
         else if (frame.method === 'project.output') {
           if (breakManifestOnArtifactCall && !outputFaultInjected && frame.payload.action === 'stage') {
             const manifestDirectory = path.dirname(manifestPath); manifestDirectoryBackup = `${manifestDirectory}.backup`;
             fs.renameSync(manifestDirectory, manifestDirectoryBackup); fs.writeFileSync(manifestDirectory, 'block manifest writes'); outputFaultInjected = true;
           }
-          if (frame.payload.action === 'stage') { const stageId = require('crypto').randomUUID(); const privatePath = path.join(dataRoot, 'v2-stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); result = { apiVersion: 7, stageId, privatePath, expiresAt: Date.now() + 60000 }; }
+          if (frame.payload.action === 'adopt') { const commitId = require('crypto').randomUUID(); result = { apiVersion: 7, commitId, outputs: frame.payload.outputs.map(item => { const source = path.resolve(projectRoot, item.relativePath); if (!fs.statSync(source).isFile()) throw new Error('legacy output missing'); return { artifactId: require('crypto').randomUUID(), relativePath: item.relativePath, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(source)).digest('hex') }; }) }; }
+          else if (frame.payload.action === 'stage') { const stageId = require('crypto').randomUUID(); const privatePath = path.join(dataRoot, 'v2-stages', stageId); fs.mkdirSync(privatePath, { recursive: true }); outputStages.set(stageId, { privatePath, files: [] }); result = { apiVersion: 7, stageId, privatePath, expiresAt: Date.now() + 60000 }; }
           else if (frame.payload.action === 'write') { const stage = outputStages.get(frame.payload.stageId); stage.files.push(frame.payload); result = { apiVersion: 7, stageId: frame.payload.stageId, artifactId: require('crypto').randomUUID(), byteLength: fs.statSync(path.join(stage.privatePath, frame.payload.sourceName)).size }; }
           else if (frame.payload.action === 'validate') result = { apiVersion: 7, stageId: frame.payload.stageId, valid: true, fileCount: outputStages.get(frame.payload.stageId).files.length, totalBytes: 1 };
           else if (frame.payload.action === 'commit') { const stage = outputStages.get(frame.payload.stageId); const commitId = require('crypto').randomUUID(); result = { apiVersion: 7, commitId, idempotencyKey: frame.payload.idempotencyKey, outputs: stage.files.map(file => ({ artifactId: require('crypto').randomUUID(), relativePath: file.outputRelativePath, sha256: require('crypto').createHash('sha256').update(fs.readFileSync(path.join(stage.privatePath, file.sourceName))).digest('hex') })) }; }
@@ -213,6 +216,20 @@ const restoreManifestDirectory = () => {
     const taskTwoActive = assertActive('task-2', 3, 'ORIGINAL-TASK-TWO');
     assertInactive('task-1', 2);
     assertInactive('task-2', 4);
+
+    const legacyOpenManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const legacyOpenGroup = legacyOpenManifest.groups.find(group => Number(group.week) === 1 && group.identityId === 'identity-1');
+    const legacyOpenItem = legacyOpenGroup.items.find(item => item.available && item.relativePath);
+    const legacyOpenRelativePath = `团片协作/${legacyOpenItem.relativePath.replace(/\\/g, '/')}`;
+    delete legacyOpenManifest.outputOwnership[legacyOpenRelativePath];
+    fs.writeFileSync(manifestPath, JSON.stringify(legacyOpenManifest, null, 2));
+    const legacyPublicPath = path.join(projectRoot, legacyOpenRelativePath);
+    fs.mkdirSync(path.dirname(legacyPublicPath), { recursive: true });
+    fs.copyFileSync(path.join(outputDirectory, legacyOpenItem.relativePath), legacyPublicPath);
+    const legacyOpened = await invoke('team.workflow.open-export.v1', { week: 1, identityId: 'identity-1' });
+    assert.equal(legacyOpened.success, true);
+    assert(lastOutputDirectoryDialog?.commitId && lastOutputDirectoryDialog?.artifactId, 'an adopted legacy output opens through its new Host receipt');
+    assert(JSON.parse(fs.readFileSync(manifestPath, 'utf8')).outputOwnership[legacyOpenRelativePath], 'opening a legacy folder durably backfills its missing ownership');
 
     const expandedManifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
     const taskThreeWeekOne = '第1周/E/任务三_人物5.png';

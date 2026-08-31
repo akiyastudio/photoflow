@@ -216,6 +216,7 @@ const mediaService = {
   },
 };
 const openedPaths = [];
+const projectDirectoryRequests = [];
 const shell = { openPath: async filePath => { openedPaths.push(filePath); return ''; }, showItemInFolder: filePath => { openedPaths.push(filePath); } };
 const managedLink = { shortcutVirtualPath: 'External', externalTargetRoot: externalRoot, externalTargetKind: 'folder', offline: false };
 const virtualResolveCalls = [];
@@ -264,7 +265,8 @@ const registrationOptions = overrides => ({
   readConfig: async () => config,
   mutateConfig: async mutator => { config = await mutator(config); await atomicJson({ filePath: configPath, value: config }); return config; },
   getProjectPath: () => projectRoot,
-  dialog: { showOpenDialog: async () => safeOpenDialogResult, showMessageBox: async () => ({ response: 1 }) }, mainWindow: {},
+  dialog: { showOpenDialog: async () => safeOpenDialogResult, showMessageBox: async () => ({ response: 1 }) },
+  mainWindow: { webContents: { send: (channel, value) => projectDirectoryRequests.push({ channel, value }) } },
   mediaService, backgroundTasks, ensureTrackedVersionThumbnail: async () => undefined, shell,
   getBoundProject: () => ({ id: 'project-1', name: 'Project', status: 'active' }),
   projectVirtualPaths,
@@ -371,6 +373,11 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   const replay = await broker.invoke(descriptor, 'project.output', { action: 'commit', stageId: stage.stageId, idempotencyKey: 'export-001' }, context);
   assert.equal(replay.commitId, committed.commitId, 'committed journal replays after Host restart without its consumed stage');
   await broker.invoke(descriptor, 'dialogs', { kind: 'revealOutput', commitId: committed.commitId, artifactId: committed.outputs[0].artifactId }, context);
+  await broker.invoke(descriptor, 'dialogs', { kind: 'openOutputDirectory', commitId: committed.commitId, artifactId: committed.outputs[0].artifactId }, context);
+  assert.deepEqual(projectDirectoryRequests.at(-1), {
+    channel: 'component-host:open-project-directory',
+    value: { workspacePath: workspaceRoot, projectId: 'project-1', projectName: 'Project', projectStatus: 'active', relativePath: 'exports' },
+  }, 'output directories open through a project-browser navigation request instead of the system shell');
 
   resetComponentHostCapabilityStateForTest();
   const created = await broker.invoke(descriptor, 'version.create', { commitId: committed.commitId, artifactId: committed.outputs[0].artifactId, photoId: 'photo-1', parentVersionId: 'version-1', idempotencyKey: 'version-001', name: 'Fixture output' }, context);

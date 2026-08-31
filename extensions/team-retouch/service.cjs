@@ -7,7 +7,7 @@ const { AsyncLocalStorage } = require('async_hooks');
 const { DatabaseSync } = require('node:sqlite');
 const { CANCELLED_CODE, buildWorkflowPlan, copyWorkflowPlan } = require('./workflow-generation.cjs');
 const { createTeamWorkflowArtifactService } = require('./workflow-artifact.cjs');
-const { createWorkflowManifestResolver } = require('./workflow-manifest.cjs');
+const { createWorkflowManifestResolver, findOwnedWorkflowOutput, workflowOutputOwnershipKey } = require('./workflow-manifest.cjs');
 const PROJECT_FOLDER_COMPATIBILITY = require('./compatibility/project-folder-policy.cjs');
 const { restoreProjectBundle, restoreWorkspaceBundle, selectRestoreSource, loadRestoreSources, writeRestoreReceipt } = require('./compatibility/storage-restore.cjs');
 
@@ -1989,7 +1989,7 @@ const cancelWorkflow = async (parentId, payload) => {
 };
 
 const exportWorkflow = async (parentId, payload, context, open = false) => {
-  let { outputDirectory, manifest } = await readWorkflowManifest(parentId, context);
+  let { outputDirectory, manifest, manifestPath } = await readWorkflowManifest(parentId, context);
   if (!manifest) throw new Error('请先生成工作流程');
   let group = (manifest.groups || []).find(item => Number(item.week) === Number(payload.week) && String(item.identityId || '') === String(payload.identityId || ''));
   const availableCount = () => (group?.items || []).filter(item => item.available && item.relativePath && isInside(outputDirectory, path.resolve(outputDirectory, item.relativePath)) && fs.existsSync(path.resolve(outputDirectory, item.relativePath))).length;
@@ -2012,10 +2012,24 @@ const exportWorkflow = async (parentId, payload, context, open = false) => {
   const count = availableCount();
   if (!count) throw new Error('本周任务仍在等待上一位返图');
   if (open) {
-    const first = (group.items || []).find(item => item.available && item.relativePath);
-    const owned = first ? manifest.outputOwnership?.[`团片协作/${String(first.relativePath).replace(/\\/g, '/')}`] : null;
-    if (!owned) throw new Error('任务输出尚未进入 Host ownership，请重新生成工作流程');
-    await callHost(parentId, 'dialogs', { kind: 'revealOutput', commitId: owned.commitId, artifactId: owned.artifactId });
+    const availableOutputs = (group.items || []).filter(item => item.available && item.relativePath).map(item => ({ relativePath: workflowOutputOwnershipKey(item.relativePath) }));
+    const missingOutputs = availableOutputs.filter(item => !manifest.outputOwnership?.[item.relativePath]);
+    let adoptionError = null;
+    if (missingOutputs.length) {
+      try {
+        const migrationId = `workflow-open-${sha256(`${context.projectId}\0${missingOutputs.map(item => item.relativePath).sort().join('\0')}`).slice(0, 24)}`;
+        const adopted = await callHost(parentId, 'project.output', { action: 'adopt', migrationId, outputs: missingOutputs });
+        const ownership = { ...(manifest.outputOwnership || {}) };
+        for (const item of adopted.outputs || []) ownership[item.relativePath] = { commitId: adopted.commitId, artifactId: item.artifactId, sha256: item.sha256 };
+        if ((adopted.outputs || []).length) {
+          manifest.outputOwnership = ownership;
+          await writeJsonAtomic(manifestPath, manifest);
+        }
+      } catch (error) { adoptionError = error; }
+    }
+    const owned = findOwnedWorkflowOutput(group, manifest.outputOwnership);
+    if (!owned) throw new Error(adoptionError ? `旧版任务文件夹自动迁移失败：${adoptionError.message || String(adoptionError)}；请重新生成工作流程` : '任务文件夹尚无可用的 Host ownership，请重新生成工作流程');
+    await callHost(parentId, 'dialogs', { kind: 'openOutputDirectory', commitId: owned.ownership.commitId, artifactId: owned.ownership.artifactId });
   }
   return { success: true, count };
 };
@@ -2873,7 +2887,7 @@ const handlers = {
   'team.workflow.cancel.v1': cancelWorkflow,
   'team.workflow.generate.v1': (parentId, payload, context) => payload.acceptOnly ? acceptDurableOperation(parentId, payload, context, 'workflow-generate') : generateWorkflow(parentId, payload, context),
   'team.workflow.export.v1': (parentId, payload, context) => exportWorkflow(parentId, payload, context, false),
-  'team.workflow.open-export.v1': (parentId, payload, context) => exportWorkflow(parentId, payload, context, true),
+  'team.workflow.open-export.v1': (parentId, payload, context) => withProjectWorkflowOperation(context.projectId, () => exportWorkflow(parentId, payload, context, true)),
   'team.workflow.return-review.get.v1': reviewGet,
   'team.workflow.return-review.discard.v1': reviewDiscard,
   'team.workflow.return-review.ignore.v1': reviewIgnore,

@@ -885,13 +885,25 @@ const registerComponentProjectCapabilities = ({
       if (error) throw hostError(CODES.INTERNAL, String(error));
       return { apiVersion: 7, opened: true, componentDirectory: { relativePath } };
     }
-    if (['openOutput', 'revealOutput'].includes(payload.kind)) {
+    if (['openOutput', 'revealOutput', 'openOutputDirectory'].includes(payload.kind)) {
       const scope = { ...bound(context, descriptor), componentId: descriptor.componentId };
       const receipt = await loadCommitReceipt(scope, String(payload.commitId || ''));
       if (!receipt || receipt.state !== 'committed') throw hostError(CODES.NOT_FOUND, 'Committed output reference was not found');
       const output = receipt.outputs.find(item => item.artifactId === String(payload.artifactId || ''));
       if (!output || !await outputMatches(scope, output)) throw hostError(CODES.CONFLICT, 'Committed output is missing or changed');
       const filePath = path.resolve(scope.projectRoot, output.relativePath);
+      if (payload.kind === 'openOutputDirectory') {
+        if (!mainWindow?.webContents || mainWindow.isDestroyed?.() || mainWindow.webContents.isDestroyed?.()) throw hostError(CODES.INTERNAL, 'Project browser is unavailable');
+        const relativeDirectory = normalizeRelativePath(path.dirname(output.relativePath));
+        mainWindow.webContents.send('component-host:open-project-directory', {
+          workspacePath: scope.workspaceRoot,
+          projectId: String(scope.project.id),
+          projectName: String(scope.project.name || context.projectName),
+          projectStatus: String(scope.project.status || context.projectStatus),
+          relativePath: relativeDirectory === '.' ? '' : relativeDirectory,
+        });
+        return { apiVersion: 7, opened: true, outputRef: { commitId: receipt.commitId, artifactId: output.artifactId } };
+      }
       let error = '';
       if (payload.kind === 'revealOutput' && typeof shell.showItemInFolder === 'function') shell.showItemInFolder(filePath);
       else error = await shell.openPath(payload.kind === 'revealOutput' ? path.dirname(filePath) : filePath);

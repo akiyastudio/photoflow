@@ -205,6 +205,15 @@ const run = async () => {
     assert.strictEqual(mixedVideoPreview.videoCount, 1);
     assert.notStrictEqual(mixedImagePreview.signature, mixedVideoPreview.signature, '媒体类型必须绑定到预检签名');
 
+    const nodeCountBeforeEmptyVideoSelection = versionService.nodes.length;
+    const emptyVideoPreview = await service.preflightFilename({ ...request('MOV'), mediaKind: 'video', keywords: '1001' });
+    assert.strictEqual(emptyVideoPreview.matchedCount, 0, '项目存在 MOV 来源不等于实际选中了视频');
+    const emptyVideoSelection = await service.executeFilename({ ...request('MOV'), mediaKind: 'video', keywords: '1001', expectedSignature: emptyVideoPreview.signature, operationId: 'empty-video-selection' });
+    assert.strictEqual(emptyVideoSelection.success, true);
+    assert.strictEqual(emptyVideoSelection.copiedCount, 0);
+    assert.strictEqual(fs.existsSync(path.join(projectRoot, '视频选片')), false, '零视频匹配不得创建视频选片目录');
+    assert.strictEqual(versionService.nodes.length, nodeCountBeforeEmptyVideoSelection, '零视频匹配不得登记空的来源或选片节点');
+
     const scanProgress = [];
     const rootPreview = await service.preflightFilename({ ...request('RAW'), keywords: '1001 9999', operationId: 'progress-scan-001', onProgress: progress => scanProgress.push(progress) });
     assert(scanProgress.some(progress => progress.phase === 'scanning_source' && progress.filesScanned >= 1), '来源扫描必须报告进度');

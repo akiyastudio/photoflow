@@ -3,6 +3,7 @@ const { listStorageDevices } = require('../services/storage-device-service.cjs')
 const { decideComponentStatusRefresh, nextComponentProbeTimestamps } = require('../services/component-status-refresh-policy.cjs');
 const { createComponentLifecycleService } = require('../services/component-lifecycle-service.cjs');
 const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
+const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
 
@@ -797,6 +798,7 @@ const registerSystemIpc = context => {
           await recycle(path.join(root, componentId));
           for (const suffix of ['', '-wal', '-shm']) await recycle(path.join(root, 'databases', `${componentId}.sqlite3${suffix}`));
         }
+        for (const temporaryDataPath of componentTemporaryDataPaths({ path, tempRoot: app.getPath('temp'), componentId })) await recycle(temporaryDataPath);
         try {
           await mutateConfig(config => {
             const componentSettings = { ...(config.componentSettings || {}) };

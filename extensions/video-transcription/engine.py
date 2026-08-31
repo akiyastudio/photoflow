@@ -35,6 +35,14 @@ SUPPORTED_MODELS = frozenset({
 })
 
 
+def configure_protocol_encoding() -> None:
+    """Keep the JSONL pipe UTF-8 even when a packaged Windows runtime uses an ANSI locale."""
+    for stream in (sys.stdin, sys.stdout, sys.stderr):
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            reconfigure(encoding="utf-8", errors="strict")
+
+
 def component_root() -> Path:
     """Return the installed component root in source and PyInstaller builds."""
     if getattr(sys, "frozen", False):
@@ -214,6 +222,7 @@ def diagnose() -> int:
 
 
 def main() -> int:
+    configure_protocol_encoding()
     if "--diagnose" in sys.argv:
         return diagnose()
     session = ModelSession()

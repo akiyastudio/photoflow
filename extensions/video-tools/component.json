@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "video-tools",
-  "version": "26.8.29.2",
+  "version": "26.8.31",
   "displayName": "视频处理",
   "description": "视频转码与无损切割工具",
   "icon": "ui/icon.svg",

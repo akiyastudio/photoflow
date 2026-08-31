@@ -42,6 +42,7 @@ def main():
             ]
             development_executable = Path(ffmpeg_utils.get_ffmpeg_exe())
         assert development_executable.read_bytes() == b"audited ffmpeg runtime"
+        assert development_executable.parent.parent == development_cache / "photoflow" / "components" / "video-tools" / "ffmpeg"
         assert (development_executable.parent / "libshaderc_shared.dll").read_bytes() == b"shader compiler runtime"
 
         packaged_runtime_root = root / "packaged" / "components" / "video-tools" / "runtime"
@@ -60,6 +61,7 @@ def main():
             ]
             packaged_executable = Path(ffmpeg_utils.get_ffmpeg_exe())
         assert packaged_executable.read_bytes() == b"packaged audited runtime"
+        assert packaged_executable.parent.parent == packaged_cache / "photoflow" / "components" / "video-tools" / "ffmpeg"
 
     child_environment = os.environ.copy()
     child_environment["PYTHONIOENCODING"] = "gbk"

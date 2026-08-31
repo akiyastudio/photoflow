@@ -10,8 +10,9 @@ const root = fs.mkdtempSync(path.join(os.tmpdir(), 'video-transcription-engine-'
     { type: 'transcribe', requestId: 'two', inputPath: secondInput, outputPath: secondOutput, options: { language: 'zh', simplifyChinese: true } },
     { type: 'shutdown' },
   ];
-  const result = spawnSync(command, [...prefix, path.resolve(__dirname, '..', 'engine.py')], { input: `${requests.map(JSON.stringify).join('\n')}\n`, encoding: 'utf8', env: { ...process.env, PHOTOFLOW_TRANSCRIPTION_FAKE: '1', PYTHONUTF8: '1' } });
+  const result = spawnSync(command, [...prefix, path.resolve(__dirname, '..', 'engine.py')], { input: `${requests.map(JSON.stringify).join('\n')}\n`, encoding: 'utf8', env: { ...process.env, PHOTOFLOW_TRANSCRIPTION_FAKE: '1', PYTHONUTF8: '0', PYTHONIOENCODING: 'gbk' } });
   assert.equal(result.status, 0, result.stderr); const frames = result.stdout.trim().split(/\r?\n/).map(line => JSON.parse(line)); const results = frames.filter(frame => frame.type === 'result'); assert.deepEqual(results.map(frame => frame.requestId), ['one', 'two']); assert.equal(results[0].segments.length, 2);
+  assert.deepEqual(results[0].segments.map(segment => segment.text), ['第一句', '第二句'], 'the engine protocol remains UTF-8 when the packaged environment requests a Windows ANSI code page');
   const srt = fs.readFileSync(outputPath, 'utf8').replace(/\r\n/g, '\n'); assert.match(srt, /^\ufeff1\n00:00:00,000 --> 00:00:01,500\n第一句/m); assert.match(srt, /2\n00:00:01,500 --> 00:00:03,000\n第二句/);
   assert(fs.existsSync(secondOutput));
   const { runEngine } = require('../service.cjs'); const savedExecutable = process.env.PHOTOFLOW_TRANSCRIBER_EXECUTABLE; const savedPrefix = process.env.PHOTOFLOW_TRANSCRIBER_ARGS_PREFIX;

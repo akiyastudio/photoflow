@@ -36,6 +36,8 @@ def get_ffmpeg_exe():
     cache_dir = os.path.join(
         tempfile.gettempdir(),
         "photoflow",
+        "components",
+        "video-tools",
         "ffmpeg",
         f"{archive_stat.st_size}-{archive_stat.st_mtime_ns}",
     )

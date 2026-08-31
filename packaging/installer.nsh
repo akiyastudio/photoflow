@@ -13,8 +13,8 @@
   !endif
 !endif
 
-!define PhotoFlowTermsVersion "2026-08-30"
-!define PhotoFlowPrivacyVersion "2026-08-30"
+!define PhotoFlowTermsVersion "2026-08-31"
+!define PhotoFlowPrivacyVersion "2026-08-31"
 
 !ifdef BUILD_UNINSTALLER
 Var PhotoFlowDeleteUserDataCheckbox
@@ -58,18 +58,24 @@ FunctionEnd
 !ifndef BUILD_UNINSTALLER
 Var PhotoFlowDesktopShortcutCheckbox
 Var PhotoFlowCreateDesktopShortcut
+Var PhotoFlowLicensePage
+Var PhotoFlowNativeConsentControl
 Var PhotoFlowExperienceProgramCheckbox
 Var PhotoFlowExperienceProgram
 
 ; Keep electron-builder's native, scrollable license page, but separate the
-; mandatory legal acceptance from the optional experience program consent.
-; MUI uses control 1034 for acceptance and 1035 for rejection. The latter is
-; converted into an independent checkbox; the former continues to gate Next.
+; legal acceptance from the experience program consent. NSIS creates one real
+; checkbox, which remains checked but hidden to unlock the native action
+; button. A separate Win32 checkbox at the same position owns the experience
+; program choice, so toggling it cannot gate installation.
+!define MUI_LICENSEPAGE_CHECKBOX
+!define MUI_LICENSEPAGE_CHECKBOX_TEXT "我愿意加入用户体验改善计划"
+!define MUI_LICENSEPAGE_BUTTON "我同意"
 !define MUI_PAGE_CUSTOMFUNCTION_SHOW PhotoFlowLicensePageShow
 !define MUI_PAGE_CUSTOMFUNCTION_LEAVE PhotoFlowLicensePageLeave
 
 !macro customInit
-  StrCpy $PhotoFlowExperienceProgram ${BST_UNCHECKED}
+  StrCpy $PhotoFlowExperienceProgram ${BST_CHECKED}
   StrCpy $PhotoFlowInstallDirectoryPolicy "normalize"
   IfSilent PhotoFlowPreserveRequestedInstallDirectory
   !ifdef INSTALL_MODE_PER_ALL_USERS_REQUIRED
@@ -86,19 +92,42 @@ Var PhotoFlowExperienceProgram
 !macroend
 
 Function PhotoFlowLicensePageShow
-  GetDlgItem $0 $HWNDPARENT 1034
-  SendMessage $0 0x000C 0 "STR:我已阅读并同意《用户协议》和《隐私政策》（安装必选）"
+  FindWindow $PhotoFlowLicensePage "#32770" "" $HWNDPARENT
+  GetDlgItem $0 $PhotoFlowLicensePage 1006
+  SendMessage $0 0x000C 0 "STR:如果你接受协议中的条款，请单击 [我同意] 继续安装。"
+  GetDlgItem $PhotoFlowNativeConsentControl $PhotoFlowLicensePage 1034
+  GetDlgItem $PhotoFlowExperienceProgramCheckbox $PhotoFlowLicensePage 1201
 
-  GetDlgItem $PhotoFlowExperienceProgramCheckbox $HWNDPARENT 1035
-  System::Call 'USER32::GetWindowLong(i $PhotoFlowExperienceProgramCheckbox, i -16) i .r0'
-  IntOp $0 $0 & 0xFFFFFFF0
-  IntOp $0 $0 | 0x00000003
-  System::Call 'USER32::SetWindowLong(i $PhotoFlowExperienceProgramCheckbox, i -16, i r0) i .r1'
-  ; Give the converted control its own ID so the native license page does not
-  ; interpret clicking the experience checkbox as choosing "reject".
-  System::Call 'USER32::SetWindowLong(i $PhotoFlowExperienceProgramCheckbox, i -12, i 1201) i .r1'
-  SendMessage $PhotoFlowExperienceProgramCheckbox 0x000C 0 "STR:自愿加入用户体验计划（可随时关闭）"
-  ${NSD_Uncheck} $PhotoFlowExperienceProgramCheckbox
+  ; Keep NSIS's own consent checkbox selected so "我同意" remains enabled.
+  ${NSD_GetState} $PhotoFlowNativeConsentControl $0
+  ${If} $0 != ${BST_CHECKED}
+    SendMessage $PhotoFlowNativeConsentControl 0x00F5 0 0
+  ${EndIf}
+
+  ${If} $PhotoFlowExperienceProgramCheckbox == 0
+    ; Copy the native control's DPI-aware rectangle, then create an unrelated
+    ; auto-checkbox with a private control ID at exactly the same position.
+    System::Alloc 16
+    Pop $R0
+    System::Call 'USER32::GetWindowRect(i $PhotoFlowNativeConsentControl, i $R0)'
+    System::Call 'USER32::MapWindowPoints(i 0, i $PhotoFlowLicensePage, i $R0, i 2)'
+    System::Call '*$R0(i .r1, i .r2, i .r3, i .r4)'
+    IntOp $3 $3 - $1
+    IntOp $4 $4 - $2
+    System::Call 'USER32::CreateWindowExW(i 0, w "Button", w "我愿意加入用户体验改善计划", i 0x50010003, i r1, i r2, i r3, i r4, i $PhotoFlowLicensePage, i 1201, i 0, i 0) i .r5'
+    StrCpy $PhotoFlowExperienceProgramCheckbox $5
+    SendMessage $PhotoFlowNativeConsentControl 0x0031 0 0 $6
+    SendMessage $PhotoFlowExperienceProgramCheckbox 0x0030 $6 1
+    System::Free $R0
+  ${EndIf}
+
+  ShowWindow $PhotoFlowNativeConsentControl ${SW_HIDE}
+  SendMessage $PhotoFlowExperienceProgramCheckbox 0x000C 0 "STR:我愿意加入用户体验改善计划"
+  ${If} $PhotoFlowExperienceProgram == ${BST_CHECKED}
+    ${NSD_Check} $PhotoFlowExperienceProgramCheckbox
+  ${Else}
+    ${NSD_Uncheck} $PhotoFlowExperienceProgramCheckbox
+  ${EndIf}
 FunctionEnd
 
 Function PhotoFlowLicensePageLeave
@@ -160,6 +189,22 @@ FunctionEnd
     WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "ExperienceProgram" "0"
   ${EndIf}
   WriteINIStr "$APPDATA\Photoflow\install-consent.ini" "Consent" "AcceptedAtLocal" "$2-$1-$0T$4:$5:$6"
+
+  ; Per-machine elevation can make $APPDATA resolve to the administrator's
+  ; profile. Store the same receipt beside the packaged application so the
+  ; normal user process can import it without showing a duplicate consent page.
+  CreateDirectory "$INSTDIR\resources"
+  WriteINIStr "$INSTDIR\resources\install-consent.ini" "Consent" "SchemaVersion" "2"
+  WriteINIStr "$INSTDIR\resources\install-consent.ini" "Consent" "Interactive" "1"
+  WriteINIStr "$INSTDIR\resources\install-consent.ini" "Consent" "TermsVersion" "${PhotoFlowTermsVersion}"
+  WriteINIStr "$INSTDIR\resources\install-consent.ini" "Consent" "PrivacyVersion" "${PhotoFlowPrivacyVersion}"
+  WriteINIStr "$INSTDIR\resources\install-consent.ini" "Consent" "InstallerVersion" "${VERSION}"
+  ${If} $PhotoFlowExperienceProgram == ${BST_CHECKED}
+    WriteINIStr "$INSTDIR\resources\install-consent.ini" "Consent" "ExperienceProgram" "1"
+  ${Else}
+    WriteINIStr "$INSTDIR\resources\install-consent.ini" "Consent" "ExperienceProgram" "0"
+  ${EndIf}
+  WriteINIStr "$INSTDIR\resources\install-consent.ini" "Consent" "AcceptedAtLocal" "$2-$1-$0T$4:$5:$6"
   PhotoFlowSkipConsentReceipt:
   ${If} $PhotoFlowCreateDesktopShortcut == ${BST_CHECKED}
     CreateShortCut "$newDesktopLink" "$appExe" "" "$appExe" 0 "" "" "${APP_DESCRIPTION}"

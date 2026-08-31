@@ -446,6 +446,17 @@ const createSelectionService = ({ fs, crypto, copyFileAtomic, versionService, pr
     try {
       plan = await buildPlan(job);
       if (!request.expectedSignature || request.expectedSignature !== plan.signature) throw new Error('预检结果已经过期，请重新预检');
+      // A filename-selection request may scan both the configured image and
+      // video sources. A source with no matching media is only a search miss;
+      // it must not materialize an empty selection folder or database node.
+      if (!plan.candidates.length) {
+        return {
+          ...plan.summary,
+          success: true,
+          operationId,
+          copiedCount: 0,
+        };
+      }
       if (plan.context.outputConflict || plan.conflicts.length) throw new Error('output_name_conflict：选片输出名称或文件目标存在冲突');
       if (!plan.context.targetNode) {
         if (!plan.context.recoverableEmptyTarget) {

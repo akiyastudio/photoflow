@@ -49,10 +49,10 @@ export const PrivacyConsentPage = ({ onAccept }: { onAccept: (joinExperienceProg
   };
   return <main className="fixed inset-0 z-[1200] flex items-center justify-center overflow-auto bg-slate-950/90 p-6">
     <section className="w-full max-w-3xl rounded-2xl border border-slate-200 bg-white p-7 shadow-2xl">
-      <div className="flex items-start gap-4"><span className="rounded-2xl bg-blue-50 p-3 text-blue-600"><ShieldCheck size={28}/></span><div><h1 className="text-xl font-bold text-slate-900">公测版隐私与数据确认</h1><p className="mt-2 text-sm leading-6 text-slate-600">请先阅读并同意软件条款。用户体验计划为自愿参加，不参加也可以正常使用照片流；关闭后不会发送新的使用统计或崩溃报告。</p></div></div>
+      <div className="flex items-start gap-4"><span className="rounded-2xl bg-blue-50 p-3 text-blue-600"><ShieldCheck size={28}/></span><div><h1 className="text-xl font-bold text-slate-900">公测版隐私与数据确认</h1><p className="mt-2 text-sm leading-6 text-slate-600">请先阅读并同意软件条款。用户体验改善计划为自愿参加，不参加也可以正常使用照片流；关闭后不会发送新的使用统计或崩溃报告。</p></div></div>
       <div className="mt-6 space-y-3 rounded-xl border border-slate-200 bg-slate-50 p-4">
         <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={acceptedLegal} onChange={event => setAcceptedLegal(event.target.checked)} className="mt-1"/><span className="text-sm leading-6 text-slate-700">我已阅读并同意 <button type="button" onClick={event => { event.preventDefault(); open('terms'); }} className="font-bold text-blue-600 hover:underline">《用户协议》</button> 和 <button type="button" onClick={event => { event.preventDefault(); open('privacy'); }} className="font-bold text-blue-600 hover:underline">《隐私政策》</button></span></label>
-        <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={acceptedTelemetry} onChange={event => setAcceptedTelemetry(event.target.checked)} className="mt-1"/><span><span className="block text-sm font-bold text-slate-700">自愿加入用户体验计划</span><span className="mt-1 block text-xs leading-5 text-slate-500">加入后会发送最小化的使用统计和崩溃报告，包括随机安装ID、版本、平台、功能代号、错误类型、调用栈和脱敏日志尾部；不上传照片、项目名、文件名或完整路径。可随时在设置中分别关闭。</span></span></label>
+        <label className="flex cursor-pointer items-start gap-3"><input type="checkbox" checked={acceptedTelemetry} onChange={event => setAcceptedTelemetry(event.target.checked)} className="mt-1"/><span><span className="block text-sm font-bold text-slate-700">我愿意加入用户体验改善计划</span><span className="mt-1 block text-xs leading-5 text-slate-500">加入后会发送最小化的使用统计和崩溃报告，包括随机安装ID、版本、平台、功能代号、错误类型、调用栈和脱敏日志尾部；不上传照片、项目名、文件名或完整路径。可随时在设置中分别关闭。</span></span></label>
       </div>
       <div className="mt-4 flex flex-wrap gap-3 text-xs"><button type="button" onClick={() => open('information-list')} className="font-bold text-blue-600 hover:underline">查看个人信息清单</button><button type="button" onClick={() => open('third-parties')} className="font-bold text-blue-600 hover:underline">查看第三方服务清单</button></div>
       <div className="mt-6 flex justify-end gap-3"><button type="button" onClick={() => window.electronAPI.closeWindow()} className="dialog-secondary">不同意条款并退出</button><button type="button" disabled={!ready || saving} onClick={() => void accept()} className="dialog-primary disabled:cursor-not-allowed disabled:opacity-45">{saving ? '正在保存…' : acceptedTelemetry ? '同意并加入计划' : '仅同意条款并进入'}</button></div>
@@ -1065,14 +1065,14 @@ const PrivacySettings = ({ telemetry, onChange, onNotice }: { telemetry: AppConf
     ['terms', '用户协议', '公测资格、软件许可和使用责任'],
     ['face', '人脸信息处理规则', '敏感个人信息的单独说明'],
     ['information-list', '个人信息清单', '逐项列明本地和联网数据'],
-    ['third-parties', '第三方服务清单', '腾讯云及主动访问的外部链接'],
+    ['third-parties', '第三方服务清单', '服务器及主动访问的外部链接'],
     ['permissions', '权限与文件访问说明', '工作目录、磁盘和外部程序'],
     ['children', '儿童个人信息规则', '不满十四周岁被摄者信息'],
     ['customer-data', '客户数据处理条款', '影楼和摄影工作室使用规则'],
     ['open-source', '开源许可证说明', '第三方软件和模型许可'],
   ];
   return <div className="space-y-10">
-    <SettingsPageGroup title="用户体验计划（自愿参加）">
+    <SettingsPageGroup title="用户体验改善计划（自愿参加）">
       <SettingsRow title="发送使用统计" description="可随时关闭；包含随机安装ID、会话ID、版本、平台、功能代号、时间和数量区间。"><SettingsToggle label="发送使用统计" checked={telemetry.enabled} onChange={enabled => onChange({ ...telemetry, enabled })}/></SettingsRow>
       <SettingsRow title="发送崩溃报告" description="可随时关闭；包含错误类型、调用栈和脱敏后的错误日志尾部。"><SettingsToggle label="发送崩溃报告" checked={telemetry.crashReports} onChange={crashReports => onChange({ ...telemetry, crashReports })}/></SettingsRow>
       <SettingsRow title="本机统计标识与队列" description="删除待发送队列并生成新的随机安装ID，不影响服务器已经接收的数据。"><button type="button" onClick={() => void clearTelemetry()} className="dialog-secondary ml-auto inline-flex w-fit items-center gap-2"><Trash2 size={14}/>重置</button></SettingsRow>

@@ -1,5 +1,17 @@
 const workflowManifestKey = (crypto, value) => crypto.createHash('sha256').update(String(value)).digest('hex');
 
+const workflowOutputOwnershipKey = relativePath => `团片协作/${String(relativePath || '').replace(/\\/g, '/')}`;
+
+const findOwnedWorkflowOutput = (group, outputOwnership = {}) => {
+  for (const item of Array.isArray(group?.items) ? group.items : []) {
+    if (!item?.available || !item.relativePath) continue;
+    const relativePath = workflowOutputOwnershipKey(item.relativePath);
+    const ownership = outputOwnership?.[relativePath];
+    if (ownership?.commitId && ownership?.artifactId) return { item, relativePath, ownership };
+  }
+  return null;
+};
+
 const verifiedWorkflowManifest = (value, binding = {}) => {
   if (!value || typeof value !== 'object' || Array.isArray(value) || Number(value.version) < 2 || !Array.isArray(value.groups)) return null;
   if (!value.groups.every(group => group && typeof group === 'object' && !Array.isArray(group) && Array.isArray(group.items)
@@ -52,4 +64,4 @@ const createWorkflowManifestResolver = ({ crypto, fs, path, writeJsonAtomic }) =
   return { ...scope, manifest: restored, source: 'legacy-status-name', legacyPath };
 };
 
-module.exports = { createWorkflowManifestResolver, verifiedWorkflowManifest, workflowManifestKey };
+module.exports = { createWorkflowManifestResolver, findOwnedWorkflowOutput, verifiedWorkflowManifest, workflowManifestKey, workflowOutputOwnershipKey };

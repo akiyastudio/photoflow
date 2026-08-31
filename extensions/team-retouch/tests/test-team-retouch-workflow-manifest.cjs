@@ -4,7 +4,7 @@ const crypto = require('crypto');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const { createWorkflowManifestResolver, workflowManifestKey } = require('../workflow-manifest.cjs');
+const { createWorkflowManifestResolver, findOwnedWorkflowOutput, workflowManifestKey } = require('../workflow-manifest.cjs');
 
 const sandbox = fs.mkdtempSync(path.join(os.tmpdir(), 'team-retouch-manifest-'));
 const writeJsonAtomic = async (target, value) => {
@@ -32,6 +32,24 @@ const seedLegacy = async (project, value) => {
 
 (async () => {
   try {
+    const partiallyMigratedGroup = {
+      items: [
+        { available: true, relativePath: '第三周/香奈乎/first.png' },
+        { available: true, relativePath: '第三周/香奈乎/second.png' },
+        { available: false, relativePath: '第三周/香奈乎/future.png' },
+      ],
+    };
+    const selectedOwnership = { commitId: 'commit-2', artifactId: 'artifact-2', sha256: 'digest-2' };
+    assert.deepEqual(findOwnedWorkflowOutput(partiallyMigratedGroup, {
+      '团片协作/第三周/香奈乎/second.png': selectedOwnership,
+      '团片协作/第三周/香奈乎/future.png': { commitId: 'future', artifactId: 'future-artifact' },
+    }), {
+      item: partiallyMigratedGroup.items[1],
+      relativePath: '团片协作/第三周/香奈乎/second.png',
+      ownership: selectedOwnership,
+    }, 'a partially migrated folder opens through the first available item that actually has Host ownership');
+    assert.equal(findOwnedWorkflowOutput(partiallyMigratedGroup, {}), null, 'a folder with no owned available output has no candidate before Host adoption');
+
     const projects = [
       { context: { projectId: 'edcf361f-64a4-4a64-b582-1dd046cd8119', projectName: '26-6-6', projectStatus: 'active' }, items: 140, available: 46 },
       { context: { projectId: '56b985d7-e022-4d35-81e2-d4a311681780', projectName: '26-7-11', projectStatus: 'active' }, items: 196, available: 25 },

@@ -12,15 +12,30 @@ const packages = fs.readdirSync(extensionRoot, { withFileTypes: true }).filter(e
   if (!fs.existsSync(packagePath)) return [];
   const manifest = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
   if (!manifest.photoflowComponent || !manifest.scripts?.['package:host']) return [];
-  return [{ directory, id: entry.name }];
+  const componentManifestPath = path.join(directory, String(manifest.photoflowComponent.manifest || ''));
+  if (!fs.existsSync(componentManifestPath)) throw new Error(`Component manifest missing: ${entry.name}`);
+  const componentManifest = JSON.parse(fs.readFileSync(componentManifestPath, 'utf8'));
+  return [{ directory, id: entry.name, version: String(componentManifest.version || '') }];
 }).filter(component => !only || component.id === only);
 if (only && !packages.length) throw new Error(`No buildable component discovered for: ${only}`);
 fs.mkdirSync(outputRoot, { recursive: true });
 for (const component of packages) {
   const npmCli = process.env.npm_execpath;
   if (!npmCli) throw new Error('npm_execpath is unavailable; run component orchestration through npm');
+  const expectedArchive = path.join(outputRoot, `PhotoFlow-${component.id}-${component.version}-${process.platform}-${process.arch}.zip`);
+  fs.rmSync(expectedArchive, { force: true });
   const result = spawnSync(process.execPath, [npmCli, 'run', 'package:host', '--', '--output-dir', outputRoot], { cwd: component.directory, stdio: 'inherit' });
-  if (result.error) throw result.error;
-  if ((result.status ?? 1) !== 0) throw new Error(`Component package failed: ${component.id}`);
+  if (result.error) {
+    fs.rmSync(expectedArchive, { force: true });
+    throw result.error;
+  }
+  if ((result.status ?? 1) !== 0) {
+    fs.rmSync(expectedArchive, { force: true });
+    throw new Error(`Component package failed: ${component.id}`);
+  }
+  if (!fs.statSync(expectedArchive, { throwIfNoEntry: false })?.isFile() || fs.statSync(expectedArchive).size < 22) {
+    fs.rmSync(expectedArchive, { force: true });
+    throw new Error(`Component package was not produced: ${component.id} ${component.version}`);
+  }
 }
 console.log(`Built ${packages.length} discovered component package(s).`);

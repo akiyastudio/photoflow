@@ -32,17 +32,17 @@
 <body>
   <main>
     <h1>照片流开源软件与模型许可说明</h1>
-    <p>版本：2026-08-21</p>
+    <p>版本：2026-08-31</p>
     <p>软件内“设置 → 关于”列出了主要第三方软件、模型来源、版本、哈希及许可证链接。发行包还必须保留Electron/Chromium等组件随附的完整机器可读许可证。</p>
     <p>特别注意：</p>
     <ol>
-    <li>FFmpeg 7.1.5 与固定提交的 x264、x265 使用 GPL-2.0-or-later。构建启用照片流 H.264/H.265 转码需要的 x264、x265 外部组件、MIT 许可的固定版本 nv-codec-headers，以及 LGPL-2.1-or-later 的 libplacebo 7.351.0 和 Apache-2.0 的 shaderc/Vulkan 着色器工具链；同时禁用 xvid、Avisynth、rubberband、nonfree 和网络功能。每个二进制版本必须在同一腾讯云发布记录提供精确对应源码、构建参数、许可证与 SHA-256。</li>
+    <li>FFmpeg 7.1.5 与固定提交的 x264、x265 使用 GPL-2.0-or-later。构建启用照片流 H.264/H.265 转码需要的 x264、x265 外部组件、MIT 许可的固定版本 nv-codec-headers，以及 LGPL-2.1-or-later 的 libplacebo 7.351.0 和 Apache-2.0 的 shaderc/Vulkan 着色器工具链；同时禁用 xvid、Avisynth、rubberband、nonfree 和网络功能。每个二进制版本必须在同一服务端发布记录提供精确对应源码、构建参数、许可证与 SHA-256。</li>
     <li>高级视频组件只接受 <code>-Dgpl=false</code> 的 LGPL-2.1-or-later libmpv；其链接的 FFmpeg 及传递依赖也必须保持 LGPL 兼容。组件归档保留对应源码、构建配置、许可证和哈希清单。</li>
     <li>HEIC/HEIF 解码使用 pi-heif 1.4.0。其 Python 代码为 BSD-3-Clause；该组件的 Windows 二进制包包含 LGPL-3.0 的 libheif 1.23.0 与 libde265 1.1.1。pi-heif 仍使用仅解码构建，不包含 HEIF 编码功能；FFmpeg 所使用的 x265 则按上一项单独提供对应源码和许可证。</li>
     <li>ONNX模型、训练数据和转换脚本分别适用其上游许可及使用限制。</li>
     <li>照片流自主代码采用专有许可并保留所有权利，不属于开源软件；仓库根目录 <code>LICENSE</code> 不改变任何第三方组件原有的开源许可。</li>
     </ol>
-    <p>本文件只是发行检查索引，不替代各第三方许可证全文。发布者必须确保安装包内许可文件与实际二进制完全一致。</p>
+    <p>本文件只是发行检查索引，不替代各第三方许可证全文。成都市金牛区拾玖寻铃摄影工作室必须确保安装包内许可文件与实际二进制完全一致。</p>
   </main>
 </body>
 </html>

@@ -156,7 +156,7 @@ stage 状态不只存在内存中。宿主在可写载荷子目录外原子持�
 
 ### 安全对话框、事件与生命周期
 
-`dialogs` 支持 `confirm`、`openFiles`、`openDirectory`、`openComponentDirectory`、`openOutput`、`revealOutput`。文件选择返回受限令牌，而不是调用方选择的输出路径。`openComponentDirectory` 只接受调用组件根目录内的安全相对路径，可用于设置页打开模型等组件自有目录，不向组件返回绝对路径。输出动作只接受收据和当前摘要仍匹配的已提交 `{commitId, artifactId}`。扩展过滤规范化后最多 64 项；最多返回 2,000 个选择。
+`dialogs` 支持 `confirm`、`openFiles`、`openDirectory`、`openComponentDirectory`、`openOutput`、`revealOutput`、`openOutputDirectory`。文件选择返回受限令牌，而不是调用方选择的输出路径。`openComponentDirectory` 只接受调用组件根目录内的安全相对路径，可用于设置页打开模型等组件自有目录，不向组件返回绝对路径。`openOutputDirectory` 会在软件内的新项目标签页打开输出所在目录；其他输出动作保留系统打开/定位语义。所有输出动作只接受收据和当前摘要仍匹配的已提交 `{commitId, artifactId}`。扩展过滤规范化后最多 64 项；最多返回 2,000 个选择。
 
 `component.events` 只发送 `service.events` 声明的版本化主题和最大 256 KiB JSON 对象。投递为尽力而为、至少一次；消费者处理器必须幂等。事件不携带文件路径，也不修改宿主状态。
 

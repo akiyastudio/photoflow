@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "video-playback-mpv",
-  "version": "26.8.28.3",
+  "version": "26.8.31",
   "name": "高级视频解码",
   "description": "使用独立 libmpv 进程、硬件解码和预读缓存播放相机原始视频。",
   "platforms": ["win32"],

@@ -21,7 +21,7 @@ for (const required of [
   '照片流用户协议及公测条款',
   '照片流隐私政策（公测版）',
   '只有明确接受后，安装程序才会继续',
-  '用户体验计划为自愿参加',
+  '用户体验改善计划为自愿参加',
   '不勾选不会阻止安装',
   '实际使用前仍会另行展示规则并取得单独同意',
 ]) assert(decoded.includes(required), `installer terms must contain: ${required}`);
@@ -30,8 +30,17 @@ const html = fs.readFileSync(path.join(repositoryRoot, 'docs', 'legal', 'INSTALL
 assert(html.startsWith('<!doctype html>') && html.includes('<meta charset="utf-8">'));
 assert(installer.includes('IfSilent PhotoFlowSkipConsentReceipt'));
 assert(installer.includes('WriteINIStr "$APPDATA\\Photoflow\\install-consent.ini"'));
-assert(installer.includes('自愿加入用户体验计划（可随时关闭）'));
-assert(installer.includes('i -12, i 1201'), 'experience checkbox must not retain the native reject-control ID');
+assert(installer.includes('WriteINIStr "$INSTDIR\\resources\\install-consent.ini"'));
+assert(installer.includes('我愿意加入用户体验改善计划'));
+assert(installer.includes('!define MUI_LICENSEPAGE_CHECKBOX'));
+assert(installer.includes('!define MUI_LICENSEPAGE_BUTTON "我同意"'));
+assert(installer.includes('如果你接受协议中的条款，请单击 [我同意] 继续安装。'));
+assert(installer.includes('FindWindow $PhotoFlowLicensePage "#32770" "" $HWNDPARENT'));
+assert(installer.includes('GetDlgItem $PhotoFlowNativeConsentControl $PhotoFlowLicensePage 1034'));
+assert(installer.includes('GetDlgItem $PhotoFlowExperienceProgramCheckbox $PhotoFlowLicensePage 1201'));
+assert(installer.includes('StrCpy $PhotoFlowExperienceProgram ${BST_CHECKED}'));
+assert(installer.includes('CreateWindowExW'));
+assert(installer.includes('ShowWindow $PhotoFlowNativeConsentControl ${SW_HIDE}'));
 assert(installer.includes('"ExperienceProgram" "1"'));
 assert(installer.includes('"ExperienceProgram" "0"'));
 const termsVersion = privacyService.match(/CURRENT_TERMS_VERSION = '([^']+)'/)?.[1];

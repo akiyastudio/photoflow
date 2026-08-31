@@ -5,13 +5,26 @@ const { spawnSync } = require('node:child_process');
 const componentRoot = path.resolve(__dirname, '..');
 const repositoryRoot = path.resolve(componentRoot, '..', '..');
 const manifest = JSON.parse(fs.readFileSync(path.join(componentRoot, 'component.template.json'), 'utf8'));
+const runtimeLock = JSON.parse(fs.readFileSync(path.join(componentRoot, 'media-runtime.lock.json'), 'utf8'));
 const outputIndex = process.argv.indexOf('--output-dir');
 const outputRoot = outputIndex >= 0 ? path.resolve(process.argv[outputIndex + 1]) : path.join(componentRoot, 'dist');
 const runtimeCandidates = [
   path.join(repositoryRoot, 'artifacts', 'installers', 'media-runtime', 'libmpv-lgpl-windows-x64'),
   path.join(componentRoot, 'artifacts', 'installers', 'media-runtime', 'libmpv-lgpl-windows-x64'),
 ];
-const runtimeRoot = runtimeCandidates.find(candidate => fs.existsSync(path.join(candidate, 'runtime-manifest.json')));
+const compatibleRuntime = candidate => {
+  const manifestPath = path.join(candidate, 'runtime-manifest.json');
+  if (!fs.existsSync(manifestPath)) return false;
+  try {
+    const runtime = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    return runtime.mpv?.version === runtimeLock.mpv.version
+      && runtime.mpv?.commit === runtimeLock.mpv.commit
+      && runtime.linkedFfmpeg?.commit === runtimeLock.ffmpeg.commit;
+  } catch {
+    return false;
+  }
+};
+const runtimeRoot = runtimeCandidates.find(compatibleRuntime);
 
 const run = (command, args) => {
   const result = spawnSync(command, args, { cwd: componentRoot, stdio: 'inherit', windowsHide: true });
@@ -19,7 +32,16 @@ const run = (command, args) => {
   if ((result.status ?? 1) !== 0) throw new Error(`视频播放器组件打包失败，退出代码 ${result.status ?? 'unknown'}`);
 };
 
-if (runtimeRoot) run(process.execPath, [path.join(componentRoot, 'scripts', 'build.cjs'), '--mpv-root', runtimeRoot]);
+if (process.argv.includes('--check-runtime')) {
+  if (!runtimeRoot) throw new Error('没有找到与 media-runtime.lock.json 匹配的 libmpv 运行时');
+  console.log(`Compatible libmpv runtime: ${runtimeRoot}`);
+  process.exit(0);
+}
+
+if (runtimeRoot) {
+  console.log(`Using compatible libmpv runtime: ${runtimeRoot}`);
+  run(process.execPath, [path.join(componentRoot, 'scripts', 'build.cjs'), '--mpv-root', runtimeRoot]);
+}
 else if (process.platform === 'win32') run(process.env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', 'npm run build:release']);
 else run('npm', ['run', 'build:release']);
 
