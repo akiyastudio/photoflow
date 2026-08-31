@@ -1,29 +1,61 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import os from 'node:os';
 import path from 'node:path';
 import vm from 'node:vm';
 import { createRequire } from 'node:module';
+import { performance } from 'node:perf_hooks';
+
+class VirtualFile {
+  content = '';
+  failNextClose = false;
+  async getFile() { return { text: async () => this.content }; }
+  async createWritable() {
+    let pending = '';
+    return {
+      write: async value => { pending = String(value); },
+      close: async () => {
+        if (this.failNextClose) { this.failNextClose = false; throw new Error('synthetic OPFS write failure'); }
+        this.content = pending;
+      },
+    };
+  }
+}
+class VirtualDirectory {
+  files = new Map();
+  directories = new Map();
+  failNextWrite = false;
+  async getFileHandle(name, options = {}) {
+    let file = this.files.get(name);
+    if (!file && options.create) { file = new VirtualFile(); this.files.set(name, file); }
+    if (!file) throw new DOMException('missing', 'NotFoundError');
+    if (this.failNextWrite && options.create) { file.failNextClose = true; this.failNextWrite = false; }
+    return file;
+  }
+  async getDirectoryHandle(name, options = {}) {
+    let directory = this.directories.get(name);
+    if (!directory && options.create) { directory = new VirtualDirectory(); this.directories.set(name, directory); }
+    if (!directory) throw new DOMException('missing', 'NotFoundError');
+    return directory;
+  }
+  async removeEntry(name) { this.files.delete(name); this.directories.delete(name); }
+  async *entries() {
+    for (const item of this.directories) yield item;
+    for (const item of this.files) yield item;
+  }
+}
+const opfsStorageRoot = new VirtualDirectory();
+Object.defineProperty(globalThis, 'navigator', { configurable: true, value: {
+  storage: { getDirectory: async () => opfsStorageRoot },
+  locks: { request: async (_name, _options, callback) => callback({ name: _name }) },
+} });
 
 const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const sourcePath = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, value => value.slice(1))), '..', 'src', 'features', 'search', 'SearchAllPage.tsx');
 const source = fs.readFileSync(sourcePath, 'utf8');
-const compiled = ts.transpileModule(source, {
-  compilerOptions: {
-    target: ts.ScriptTarget.ES2022,
-    module: ts.ModuleKind.CommonJS,
-    jsx: ts.JsxEmit.ReactJSX,
-    esModuleInterop: true,
-  },
-  fileName: sourcePath,
-}).outputText;
-
+const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true }, fileName: sourcePath }).outputText;
 const noopComponent = () => null;
-const projectWorkspaceClient = {
-  listProjectFiles: async () => { throw new Error('test must inject fetchPage'); },
-  cancelListProjectFiles: async () => undefined,
-};
+const projectWorkspaceClient = { listProjectFiles: async () => { throw new Error('test must inject fetchPage'); }, cancelListProjectFiles: async () => undefined };
 const mockRequire = specifier => {
   if (specifier === 'react') return { useEffect: () => undefined, useMemo: fn => fn(), useRef: value => ({ current: value }), useState: value => [value, () => undefined] };
   if (specifier === 'react/jsx-runtime') return { Fragment: Symbol('Fragment'), jsx: noopComponent, jsxs: noopComponent };
@@ -38,313 +70,252 @@ vm.runInThisContext(`(function(require, module, exports) { ${compiled}\n})`, { f
 const {
   GLOBAL_SEARCH_RESULT_PAGE_SIZE,
   GLOBAL_SEARCH_MAX_MOUNTED_RESULTS,
-  IndexedDbSearchStore,
-  MemoryBoundedSearchStore,
+  GLOBAL_SEARCH_MAX_INDEX_RESIDENT_HITS,
+  DiskBPlusTreeSearchStore,
+  IndexedDbTreeBackend,
+  OpfsTreeBackend,
   calculateGlobalSearchVirtualWindow,
   cancelGlobalSearchCursors,
   createRafSearchScrollScheduler,
+  createSearchResultStore,
   createTrailingSearchRefreshScheduler,
-  rescanGlobalSearchWindow,
   streamGlobalSearchSource,
 } = loadedModule.exports;
 
 assert.equal(GLOBAL_SEARCH_RESULT_PAGE_SIZE, 200);
 assert.equal(GLOBAL_SEARCH_MAX_MOUNTED_RESULTS, 400);
+const virtualModels = [0, 0.5, 1].map(fraction => {
+  const top = calculateGlobalSearchVirtualWindow({ totalCount: 100_000, scrollTop: 0, viewportHeight: 800, containerWidth: 1_100 });
+  return calculateGlobalSearchVirtualWindow({ totalCount: 100_000, scrollTop: Math.max(0, top.totalHeight * fraction - 800 * fraction), viewportHeight: 800, containerWidth: 1_100 });
+});
+for (const model of virtualModels) assert.ok(model.end - model.start <= GLOBAL_SEARCH_MAX_MOUNTED_RESULTS, 'DOM/React/MediaThumbnail window must remain bounded');
+assert.equal(virtualModels[0].start, 0);
+assert.ok(virtualModels[1].start > 40_000 && virtualModels[1].end < 60_000);
+assert.equal(virtualModels[2].end, 100_000);
 
-const virtualAtTop = calculateGlobalSearchVirtualWindow({ totalCount: 100_000, scrollTop: 0, viewportHeight: 800, containerWidth: 1_100 });
-const virtualAtMiddle = calculateGlobalSearchVirtualWindow({ totalCount: 100_000, scrollTop: virtualAtTop.totalHeight / 2, viewportHeight: 800, containerWidth: 1_100 });
-const virtualAtEnd = calculateGlobalSearchVirtualWindow({ totalCount: 100_000, scrollTop: virtualAtTop.totalHeight - 800, viewportHeight: 800, containerWidth: 1_100 });
-const virtualBackAtTop = calculateGlobalSearchVirtualWindow({ totalCount: 100_000, scrollTop: 0, viewportHeight: 800, containerWidth: 1_100 });
-for (const windowModel of [virtualAtTop, virtualAtMiddle, virtualAtEnd, virtualBackAtTop]) {
-  assert.ok(windowModel.end - windowModel.start <= GLOBAL_SEARCH_MAX_MOUNTED_RESULTS, 'resident/DOM result count must remain fixed');
-  const renderedRows = Math.ceil((windowModel.end - windowModel.start) / windowModel.columns);
-  assert.ok(Math.abs(windowModel.topSpacer + renderedRows * windowModel.rowHeight + windowModel.bottomSpacer - windowModel.totalHeight) < 0.001, 'spacers and mounted rows must preserve total scroll height');
-}
-assert.equal(virtualAtTop.start, 0);
-assert.ok(virtualAtMiddle.start > 40_000 && virtualAtMiddle.end < 60_000, 'middle scroll must address the middle result window');
-assert.equal(virtualAtEnd.end, 100_000);
-assert.ok(Math.ceil((virtualAtEnd.end - virtualAtEnd.start) / virtualAtEnd.columns) >= Math.ceil(800 / virtualAtEnd.rowHeight), 'the end window must remain filled with at least the visible rows');
-assert.equal(virtualBackAtTop.start, 0, 'scrolling upward must revisit the first window');
-
-const rafCallbacks = [];
-const rafValues = [];
+const rafCallbacks = []; const rafValues = [];
 const rafScheduler = createRafSearchScrollScheduler(value => rafValues.push(value), callback => { rafCallbacks.push(callback); return rafCallbacks.length; }, () => undefined);
-for (let scrollTop = 0; scrollTop < 10_000; scrollTop += 10) rafScheduler.push(scrollTop);
-assert.equal(rafCallbacks.length, 1, 'many scroll events in one frame must schedule one virtual-window update');
-rafCallbacks[0]();
-assert.deepEqual(rafValues, [9_990]);
+for (let value = 0; value < 10_000; value += 10) rafScheduler.push(value);
+assert.equal(rafCallbacks.length, 1); rafCallbacks[0](); assert.deepEqual(rafValues, [9_990]);
+const refreshCallbacks = []; const refreshed = [];
+const refresh = createTrailingSearchRefreshScheduler(value => refreshed.push(value), 75, callback => { refreshCallbacks.push(callback); return 1; }, () => undefined);
+for (let count = 200; count <= 100_000; count += 200) refresh.push(count);
+assert.equal(refreshCallbacks.length, 1, 'stream updates must coalesce without changing continuous-window semantics');
+refreshCallbacks[0](); assert.deepEqual(refreshed, [100_000]);
 
-const scheduledRefreshes = [];
-const appliedRefreshes = [];
-const refreshScheduler = createTrailingSearchRefreshScheduler(
-  value => appliedRefreshes.push(value),
-  75,
-  callback => { scheduledRefreshes.push(callback); return scheduledRefreshes.length; },
-  () => undefined,
-);
-for (let batch = 1; batch <= 500; batch += 1) refreshScheduler.push(batch * 200);
-assert.equal(scheduledRefreshes.length, 1, '100k / 200 batches must coalesce into one pending page refresh');
-assert.equal(appliedRefreshes.length, 0);
-scheduledRefreshes[0]();
-assert.deepEqual(appliedRefreshes, [100_000], 'the trailing refresh must retain the final snapshot');
-refreshScheduler.push(100_001);
-refreshScheduler.flush();
-assert.deepEqual(appliedRefreshes, [100_000, 100_001], 'final flush must not lose the newest count');
-
-const tempDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-search-stress-'));
-const resultFile = path.join(tempDirectory, 'results.bin');
-
-class SyntheticDiskPageStore {
-  constructor(filePath) {
-    this.handle = fs.openSync(filePath, 'w+');
-    this.totalCount = 0;
-    this.maxAppendBatch = 0;
-    this.maxResidentPage = 0;
+class MemoryTreeBackend {
+  kind = 'opfs'; nodes = new Map(); values = new Map(); readGeneration = 0;
+  nodeGets = 0; readNodeGets = 0; maxDirtyRows = 0; editCount = 0; readCount = 0;
+  failEditAt = 0;
+  scanNodeDelayMs = 0; scanNodeStarted = undefined; scanNodeGets = 0; scanFailure = undefined;
+  async edit(operation) {
+    this.editCount += 1;
+    if (this.failEditAt === this.editCount) throw new Error('synthetic IndexedDB write failure');
+    const cache = new Map(); const dirty = new Map(); const values = new Map();
+    const flush = async () => {
+      for (const [key, value] of dirty) this.nodes.set(key, structuredClone(value));
+      for (const [key, value] of values) this.values.set(key, structuredClone(value));
+      dirty.clear(); values.clear(); cache.clear();
+    };
+    const access = {
+      getNode: async id => {
+        if (!cache.has(id)) { this.nodeGets += 1; cache.set(id, structuredClone(this.nodes.get(id))); }
+        return cache.get(id);
+      },
+      putNode: node => {
+        cache.set(node.id, node); dirty.set(node.id, node);
+        this.maxDirtyRows = Math.max(this.maxDirtyRows, [...dirty.values()].reduce((sum, item) => sum + (item.kind === 'leaf' ? item.rows.length : 0), 0));
+      },
+      getValue: async key => values.has(key) ? values.get(key) : structuredClone(this.values.get(key)),
+      putValue: (key, value) => values.set(key, structuredClone(value)),
+      flush,
+    };
+    const result = await operation(access);
+    await flush();
+    return result;
   }
-
-  async append(_source, entries) {
-    this.maxAppendBatch = Math.max(this.maxAppendBatch, entries.length);
-    for (const entry of entries) {
-      const index = Number(entry.name.slice(4, -4));
-      const buffer = Buffer.allocUnsafe(4);
-      buffer.writeUInt32LE(index);
-      fs.writeSync(this.handle, buffer, 0, 4, index * 4);
-    }
-    this.totalCount += entries.length;
-    return { storedCount: this.totalCount, totalCount: this.totalCount, groupCount: 100, truncated: false };
+  async read(operation) {
+    const generation = ++this.readGeneration; this.readCount += 1;
+    try {
+      return await operation({
+        getNode: async id => { await Promise.resolve(); if (generation !== this.readGeneration) throw new DOMException('stale', 'AbortError'); this.readNodeGets += 1; return structuredClone(this.nodes.get(id)); },
+        putNode: () => { throw new Error('readonly'); }, getValue: async key => structuredClone(this.values.get(key)), putValue: () => { throw new Error('readonly'); }, flush: async () => undefined,
+      });
+    } catch (error) { if (error instanceof DOMException && error.name === 'AbortError') return undefined; throw error; }
   }
-
-  async readWindow(start, limit) {
-    const count = Math.min(limit, Math.max(0, this.totalCount - start));
-    const buffer = Buffer.alloc(count * 4);
-    fs.readSync(this.handle, buffer, 0, buffer.length, start * 4);
-    const entries = Array.from({ length: count }, (_, offset) => {
-      const index = buffer.readUInt32LE(offset * 4);
-      return makeEntry(index);
+  async scan(operation) {
+    if (this.scanFailure) throw this.scanFailure;
+    return operation({
+      getNode: async id => {
+        this.scanNodeStarted?.();
+        if (this.scanNodeDelayMs) await new Promise(resolve => setTimeout(resolve, this.scanNodeDelayMs));
+        this.scanNodeGets += 1;
+        return structuredClone(this.nodes.get(id));
+      },
+      putNode: () => { throw new Error('readonly'); }, getValue: async key => structuredClone(this.values.get(key)), putValue: () => { throw new Error('readonly'); }, flush: async () => undefined,
     });
-    this.maxResidentPage = Math.max(this.maxResidentPage, entries.length);
-    return count ? [{ id: 'source\0folder', source: testSource, folderPath: 'folder', entries, totalCount: this.totalCount }] : [];
   }
-
-  async dispose() { fs.closeSync(this.handle); }
+  async dispose() { this.readGeneration += 1; }
 }
 
-const testSource = {
-  id: 'project:stress',
-  kind: 'project',
-  label: 'Stress 2',
-  workspacePath: '/workspace',
-  project: { id: 'stress', name: 'Stress', path: '/workspace/Stress', workspacePath: '/workspace', status: 'active', updatedAt: 0 },
-};
-const makeEntry = index => {
-  const number = String(index).padStart(6, '0');
-  return { kind: 'file', extension: '.txt', name: `file${number}.txt`, path: `/workspace/Stress/folder/file${number}.txt`, relativePath: `folder/file${number}.txt`, parentRelativePath: 'folder' };
-};
-const makeSyntheticFetcher = total => async (_source, _query, cursor) => {
-  const start = cursor ? Number(cursor) : 0;
-  const count = Math.min(GLOBAL_SEARCH_RESULT_PAGE_SIZE, total - start);
+const testSource = { id: 'project:stress', kind: 'project', label: 'Stress 2', workspacePath: '/workspace', project: { id: 'stress', name: 'Stress', path: '/workspace/Stress', workspacePath: '/workspace', status: 'active', updatedAt: 0 } };
+const makeEntry = index => { const number = String(index).padStart(6, '0'); return { kind: 'file', extension: '.txt', name: `file${number}.txt`, path: `/workspace/Stress/folder/file${number}.txt`, relativePath: `folder/file${number}.txt`, parentRelativePath: 'folder' }; };
+const makeFetcher = total => async (_source, _query, cursor) => {
+  const start = cursor ? Number(cursor) : 0; const count = Math.min(200, total - start);
   const entries = Array.from({ length: count }, (_, offset) => makeEntry(start + count - offset - 1));
-  const next = start + count;
-  return { success: true, entries, cursor: next < total ? String(next) : '', hasMore: next < total };
+  const next = start + count; return { success: true, entries, cursor: next < total ? String(next) : '', hasMore: next < total };
 };
 
-try {
-  const store = new SyntheticDiskPageStore(resultFile);
-  const activeCursors = new Set();
-  let maximumReturnedBatch = 0;
-  await streamGlobalSearchSource({
-    source: testSource,
-    query: 'file',
-    isCurrent: () => true,
-    activeCursors,
-    store,
-    fetchPage: async (...args) => {
-      const result = await makeSyntheticFetcher(100_000)(...args);
-      const entries = result.entries;
-      maximumReturnedBatch = Math.max(maximumReturnedBatch, entries.length);
-      return result;
-    },
-    cancelCursor: async () => undefined,
-  });
+const backend = new MemoryTreeBackend();
+backend.kind = 'indexeddb';
+const store = await DiskBPlusTreeSearchStore.open(backend);
+const cursors = new Set();
+let firstSnapshot;
+const started = performance.now();
+await streamGlobalSearchSource({ source: testSource, query: 'file', isCurrent: () => true, activeCursors: cursors, store, fetchPage: makeFetcher(100_000), cancelCursor: async () => undefined, onStored: snapshot => { firstSnapshot ||= snapshot; } });
+await store.finalize();
+const appendMilliseconds = performance.now() - started;
+assert.equal(firstSnapshot.storedCount, 200, 'the first completed disk batch must be progressively visible');
+assert.equal(firstSnapshot.groupsFinalized, false, 'progressive results must not claim that they span zero folders');
+assert.equal(cursors.size, 0);
+assert.ok(appendMilliseconds < 30_000, `100k index construction took ${appendMilliseconds.toFixed(0)}ms`);
+assert.ok(backend.nodeGets < 50_000, `transaction-local cache and fixed write chunks must bound 100k node reads, got ${backend.nodeGets}`);
+assert.ok(backend.maxDirtyRows <= 400, `index construction resident hit metadata must be bounded, got ${backend.maxDirtyRows}`);
+assert.ok(backend.editCount <= 502, `100k ingestion must use one readwrite transaction per IPC batch plus finalize, got ${backend.editCount}`);
+assert.equal((await store.append(testSource, [])).groupCount, 1, 'the disk snapshot must retain the global unique folder count');
+assert.equal((await store.append(testSource, [])).groupsFinalized, true, 'the final snapshot must expose the completed folder count');
 
-  assert.equal(store.totalCount, 100_000, 'all synthetic results must reach temporary storage');
-  assert.equal(activeCursors.size, 0, 'a completed scan must retain no IPC cursor');
-  assert.ok(maximumReturnedBatch <= 200 && store.maxAppendBatch <= 200, 'streaming batches must stay bounded');
-  assert.equal(Object.values(store).some(value => Array.isArray(value)), false, 'the test storage model must not hide a full JS array');
+const first = (await store.readWindow(0, 200)).flatMap(group => group.entries);
+const beforeMiddleGets = backend.readNodeGets;
+const middle = (await store.readWindow(50_000, 200)).flatMap(group => group.entries);
+const middleGets = backend.readNodeGets - beforeMiddleGets;
+const beforeEndGets = backend.readNodeGets;
+const end = (await store.readWindow(99_800, 200)).flatMap(group => group.entries);
+const endGets = backend.readNodeGets - beforeEndGets;
+assert.equal(first[0].name, 'file000000.txt'); assert.equal(middle[0].name, 'file050000.txt'); assert.equal(end.at(-1).name, 'file099999.txt');
+assert.ok(middleGets < 20 && endGets < 20, `rank reads must be O(tree height + window leaves), got middle=${middleGets}, end=${endGets}`);
+assert.ok(Math.max(first.length, middle.length, end.length) <= 200);
+let traversed = 0;
+for (let start = 0; start < 100_000; start += 200) traversed += (await store.readWindow(start, 200)).flatMap(group => group.entries).length;
+assert.equal(traversed, 100_000, 'all results must remain accessible through one continuous sequence of bounded windows');
 
-  let traversed = 0;
-  let firstName = '';
-  let middleName = '';
-  let lastName = '';
-  for (let windowStart = 0; windowStart < 100_000; windowStart += GLOBAL_SEARCH_RESULT_PAGE_SIZE) {
-    const groups = await store.readWindow(windowStart, GLOBAL_SEARCH_RESULT_PAGE_SIZE);
-    const entries = groups.flatMap(group => group.entries);
-    traversed += entries.length;
-    if (windowStart === 0) firstName = entries[0].name;
-    if (windowStart === 50_000) middleName = entries[0].name;
-    if (windowStart === 99_800) lastName = entries.at(-1).name;
-  }
-  assert.equal(traversed, 100_000, 'previous/next paging must be able to traverse the complete result set');
-  assert.equal(firstName, 'file000000.txt');
-  assert.equal(middleName, 'file050000.txt');
-  assert.equal(lastName, 'file099999.txt');
-  assert.ok(store.maxResidentPage <= GLOBAL_SEARCH_RESULT_PAGE_SIZE, 'the resident/render model must remain one fixed-size page');
-  const topEntries = (await store.readWindow(virtualAtTop.start, virtualAtTop.end - virtualAtTop.start)).flatMap(group => group.entries);
-  const middleEntries = (await store.readWindow(virtualAtMiddle.start, virtualAtMiddle.end - virtualAtMiddle.start)).flatMap(group => group.entries);
-  const endEntries = (await store.readWindow(virtualAtEnd.start, virtualAtEnd.end - virtualAtEnd.start)).flatMap(group => group.entries);
-  const backEntries = (await store.readWindow(virtualBackAtTop.start, virtualBackAtTop.end - virtualBackAtTop.start)).flatMap(group => group.entries);
-  assert.equal(topEntries[0].name, 'file000000.txt');
-  assert.equal(middleEntries[0].name, makeEntry(virtualAtMiddle.start).name);
-  assert.equal(endEntries.at(-1).name, 'file099999.txt');
-  assert.equal(backEntries[0].name, 'file000000.txt');
-  assert.ok(Math.max(topEntries.length, middleEntries.length, endEntries.length, backEntries.length) <= GLOBAL_SEARCH_MAX_MOUNTED_RESULTS, 'continuous scroll reads must keep the resident window bounded');
-  await store.dispose();
+const readsBeforeRapid = backend.readCount;
+const rapid = [10_000, 30_000, 70_000, 99_000].map(start => store.readWindow(start, 200));
+const rapidResults = await Promise.all(rapid);
+assert.deepEqual(rapidResults.slice(0, -1), [[], [], []], 'obsolete rapid-scroll windows must be cancelled');
+assert.equal(rapidResults.at(-1).flatMap(group => group.entries)[0].name, 'file099000.txt');
+assert.ok(backend.readCount - readsBeforeRapid <= 1, 'only the latest queued continuous-window read should execute');
 
-  const fallbackStore = new MemoryBoundedSearchStore();
-  const fallbackCursors = new Set();
-  const fallbackBaseFetcher = makeSyntheticFetcher(100_000);
-  let fallbackFetchCount = 0;
-  const fallbackFetcher = async (...args) => { fallbackFetchCount += 1; return fallbackBaseFetcher(...args); };
-  await streamGlobalSearchSource({ source: testSource, query: 'file', isCurrent: () => true, activeCursors: fallbackCursors, store: fallbackStore, fetchPage: fallbackFetcher, cancelCursor: async () => undefined });
-  assert.ok(fallbackStore.rows.length <= 400, 'fallback metadata must remain fixed even after 100k results');
-  fallbackStore.setWindowLoader((start, limit, isLoadCurrent) => rescanGlobalSearchWindow({
-    sources: [testSource], query: 'file', start, limit, isCurrent: isLoadCurrent, activeCursors: fallbackCursors, fetchPage: fallbackFetcher, cancelCursor: async () => undefined,
-  }));
-  const fallbackFirst = (await fallbackStore.readWindow(0, 200)).flatMap(group => group.entries);
-  const beforeMiddle = fallbackFetchCount;
-  const fallbackMiddle = (await fallbackStore.readWindow(50_000, 200)).flatMap(group => group.entries);
-  const middleFetches = fallbackFetchCount - beforeMiddle;
-  const fallbackLast = (await fallbackStore.readWindow(99_800, 200)).flatMap(group => group.entries);
-  assert.equal(fallbackFirst[0].name, 'file000000.txt');
-  assert.equal(fallbackMiddle[0].name, 'file050000.txt');
-  assert.equal(fallbackLast.at(-1).name, 'file099999.txt');
-  assert.equal(middleFetches, 251, 'fallback rescan must stop and cancel as soon as the requested page is complete');
-  assert.ok(Math.max(fallbackFirst.length, fallbackMiddle.length, fallbackLast.length) <= 200, 'fallback rescans must retain only the requested page');
-  await fallbackStore.dispose();
+let indexedAbortCount = 0; let indexedTransactionId = 0;
+const fakeIndexedDatabase = { close: () => undefined, transaction: () => {
+  const transactionId = ++indexedTransactionId; const requests = new Set();
+  const transaction = { error: null, oncomplete: null, onabort: null, onerror: null, objectStore: () => ({ get: () => {
+    const request = { result: undefined, error: null, onsuccess: null, onerror: null }; requests.add(request);
+    setImmediate(() => {
+      if (transaction.error) return;
+      request.result = transactionId === 1 ? undefined : { id: 'n0', kind: 'leaf', count: 0, maxKey: '', rows: [] };
+      request.onsuccess?.(); setImmediate(() => transaction.oncomplete?.());
+    });
+    return request;
+  } }), abort: () => {
+    indexedAbortCount += 1; transaction.error = new DOMException('aborted', 'AbortError');
+    for (const request of requests) { request.error = transaction.error; request.onerror?.(); }
+    transaction.onabort?.();
+  } };
+  return transaction;
+} };
+const indexedReadBackend = new IndexedDbTreeBackend(fakeIndexedDatabase, 'fake-idb', { name: 'fake-idb', release: async () => undefined });
+const obsoleteIndexedRead = indexedReadBackend.read(access => access.getNode('n0'));
+const latestIndexedRead = indexedReadBackend.read(access => access.getNode('n0'));
+assert.equal(await obsoleteIndexedRead, undefined, 'AbortError from an obsolete IndexedDB window must be silent');
+assert.equal((await latestIndexedRead).id, 'n0');
+assert.equal(indexedAbortCount, 1, 'starting a newer IndexedDB window must abort the old readonly transaction');
 
-  const indexedRows = [makeEntry(0), makeEntry(1)].map(entry => ({ orderKey: entry.name, groupKey: 'project:stress\0folder', hit: { source: testSource, entry } }));
-  let transactionCalls = 0;
-  const complete = transaction => setImmediate(() => { transaction.active = false; transaction.oncomplete?.(); });
-  const fakeDatabase = {
-    transaction() {
-      transactionCalls += 1;
-      const transaction = { active: true, error: null, oncomplete: null, onabort: null, onerror: null };
-      if (transactionCalls === 1) {
-        transaction.objectStore = () => ({ index: name => {
-          assert.equal(name, 'orderKey');
-          return { openCursor: () => {
-            const request = { result: null, error: null, onsuccess: null, onerror: null };
-            let index = 0;
-            const advance = () => setImmediate(() => {
-              if (index >= indexedRows.length) {
-                request.result = null;
-                request.onsuccess?.();
-                complete(transaction);
-                return;
-              }
-              request.result = { value: indexedRows[index], continue: () => { index += 1; advance(); }, advance: count => { index += count; advance(); } };
-              request.onsuccess?.();
-            });
-            advance();
-            return request;
-          } };
-        } });
-      } else {
-        let pending = 0;
-        transaction.objectStore = () => ({ index: name => {
-          assert.equal(name, 'groupKey');
-          return { count: () => {
-            if (!transaction.active) throw new Error('TransactionInactiveError');
-            pending += 1;
-            const request = { result: 0, error: null, onsuccess: null, onerror: null };
-            setImmediate(() => {
-              request.result = 2;
-              request.onsuccess?.();
-              pending -= 1;
-              if (pending === 0) complete(transaction);
-            });
-            return request;
-          } };
-        } });
-      }
-      return transaction;
-    },
-  };
-  globalThis.IDBKeyRange = { only: value => value };
-  const indexedStore = new IndexedDbSearchStore(fakeDatabase, 'fake');
-  const indexedGroups = await indexedStore.readWindow(0, 200);
-  assert.equal(transactionCalls, 2, 'group counts must use a fresh transaction after cursor paging commits');
-  assert.equal(indexedGroups[0].totalCount, 2);
+const disorderBackend = new MemoryTreeBackend(); const disorderStore = await DiskBPlusTreeSearchStore.open(disorderBackend);
+await disorderStore.append(testSource, [makeEntry(20), makeEntry(2), makeEntry(11), { ...makeEntry(2), name: 'file000002.txt' }]);
+await disorderStore.append(testSource, [makeEntry(10), makeEntry(1), makeEntry(3)]);
+const disorderNames = (await disorderStore.readWindow(0, 20)).flatMap(group => group.entries).map(entry => entry.name);
+assert.deepEqual(disorderNames, [...disorderNames].sort((a, b) => a.localeCompare(b, 'en', { numeric: true })), 'cross-batch disorder must still produce one globally natural order');
+assert.equal(disorderNames.filter(name => name === 'file000002.txt').length, 2, 'duplicate keys must remain stable and accessible');
 
-  let current = true;
-  let resolveSecondPage;
-  const secondPage = new Promise(resolve => { resolveSecondPage = resolve; });
-  const cancelled = [];
-  const switchingStore = new SyntheticDiskPageStore(path.join(tempDirectory, 'switch.bin'));
-  const switchingCursors = new Set();
-  let fetchCount = 0;
-  const scanning = streamGlobalSearchSource({
-    source: testSource,
-    query: 'old query',
-    isCurrent: () => current,
-    activeCursors: switchingCursors,
-    store: switchingStore,
-    fetchPage: async () => {
-      fetchCount += 1;
-      if (fetchCount === 1) return { success: true, entries: [makeEntry(0)], cursor: 'cursor-1', hasMore: true };
-      return secondPage;
-    },
-    cancelCursor: async cursor => { cancelled.push(cursor); },
-  });
-  while (fetchCount < 2) await new Promise(resolve => setImmediate(resolve));
-  current = false;
-  await cancelGlobalSearchCursors(switchingCursors, async cursor => { cancelled.push(cursor); });
-  resolveSecondPage({ success: true, entries: [makeEntry(1)], cursor: 'cursor-2', hasMore: true });
-  await scanning;
-  assert.deepEqual(cancelled.sort(), ['cursor-1', 'cursor-2'], 'query switching must cancel known and stale-response cursors');
-  assert.equal(switchingStore.totalCount, 1, 'stale query results must not be persisted');
-  await switchingStore.dispose();
+const makeFolderEntry = (folderIndex, inserted = false) => {
+  const folder = `folder${String(folderIndex).padStart(6, '0')}`; const name = inserted ? 'insert.txt' : 'base.txt';
+  return { kind: 'file', extension: '.txt', name, path: `/workspace/Stress/${folder}/${name}`, relativePath: `${folder}/${name}`, parentRelativePath: folder };
+};
+const scatteredBackend = new MemoryTreeBackend(); const scatteredStore = await DiskBPlusTreeSearchStore.open(scatteredBackend);
+for (let start = 0; start < 10_000; start += 200) await scatteredStore.append(testSource, Array.from({ length: 200 }, (_, offset) => makeFolderEntry(start + offset)));
+scatteredBackend.maxDirtyRows = 0; const scatteredGetsBefore = scatteredBackend.nodeGets; const scatteredStarted = performance.now();
+const scatteredSnapshot = await scatteredStore.append(testSource, Array.from({ length: 200 }, (_, index) => makeFolderEntry(index * 50, true)));
+const scatteredMilliseconds = performance.now() - scatteredStarted; const scatteredGets = scatteredBackend.nodeGets - scatteredGetsBefore;
+const scatteredFinalSnapshot = await scatteredStore.finalize();
+assert.equal(scatteredSnapshot.groupCount, 0, 'folder counting may wait until ingestion completes');
+assert.equal(scatteredSnapshot.groupsFinalized, false);
+assert.equal(scatteredFinalSnapshot.groupCount, 10_000, 'bounded sorted traversal must count folders without marker files or a resident full Set');
+assert.equal(scatteredFinalSnapshot.groupsFinalized, true);
+assert.ok(scatteredBackend.maxDirtyRows <= GLOBAL_SEARCH_MAX_INDEX_RESIDENT_HITS, `a 200-hit batch scattered across old leaves retained ${scatteredBackend.maxDirtyRows} hits`);
+assert.ok(scatteredMilliseconds < 2_000, `scattered 200-hit append took ${scatteredMilliseconds.toFixed(0)}ms`);
+assert.ok(scatteredGets < 1_000, `scattered fixed-chunk append issued ${scatteredGets} node reads`);
 
-  let appendCurrent = true;
-  let releaseAppend;
-  let appendStarted = false;
-  const appendGate = new Promise(resolve => { releaseAppend = resolve; });
-  const appendCursors = new Set();
-  const appendCancelled = [];
-  const hangingStore = {
-    append: async () => { appendStarted = true; await appendGate; return { storedCount: 1, totalCount: 1, groupCount: 1, truncated: false }; },
-    readWindow: async () => [],
-    dispose: async () => undefined,
-  };
-  const appendScan = streamGlobalSearchSource({
-    source: testSource, query: 'old query', isCurrent: () => appendCurrent, activeCursors: appendCursors, store: hangingStore,
-    fetchPage: async () => ({ success: true, entries: [makeEntry(0)], cursor: 'append-cursor', hasMore: true }),
-    cancelCursor: async cursor => { appendCancelled.push(cursor); },
-  });
-  while (!appendStarted) await new Promise(resolve => setImmediate(resolve));
-  assert.deepEqual([...appendCursors], ['append-cursor'], 'the returned server cursor must remain tracked while append is pending');
-  appendCurrent = false;
-  await cancelGlobalSearchCursors(appendCursors, async cursor => { appendCancelled.push(cursor); });
-  releaseAppend();
-  await appendScan;
-  assert.deepEqual(appendCancelled, ['append-cursor'], 'an append-time query switch must cancel the cursor exactly once');
+const failedStatsBackend = new MemoryTreeBackend(); const failedStatsStore = await DiskBPlusTreeSearchStore.open(failedStatsBackend);
+await failedStatsStore.append(testSource, Array.from({ length: 1_000 }, (_, index) => makeEntry(index)));
+failedStatsBackend.scanFailure = new Error('synthetic statistics failure');
+const failedStatsSnapshot = await failedStatsStore.finalize();
+assert.equal(failedStatsSnapshot.groupsFinalized, false, 'folder statistics failure must remain auxiliary');
+assert.equal((await failedStatsStore.readWindow(0, 1_000)).flatMap(group => group.entries).length, 1_000, 'statistics failure must preserve the complete readable index');
 
-  const failedCursors = new Set();
-  const failedCancelled = [];
-  let failureFetches = 0;
-  await assert.rejects(streamGlobalSearchSource({
-    source: testSource, query: 'failure', isCurrent: () => true, activeCursors: failedCursors, store: hangingStore,
-    fetchPage: async () => {
-      failureFetches += 1;
-      if (failureFetches === 1) return { success: true, entries: [], cursor: 'failed-cursor', hasMore: true };
-      throw new Error('synthetic fetch failure');
-    },
-    cancelCursor: async cursor => { failedCancelled.push(cursor); },
-  }), /synthetic fetch failure/);
-  assert.equal(failedCursors.size, 0, 'fetch failure must remove its in-flight cursor');
-  assert.deepEqual(failedCancelled, ['failed-cursor'], 'fetch failure must cancel its server cursor');
+let releaseFinalizeStart;
+const finalizeStartedReading = new Promise(resolve => { releaseFinalizeStart = resolve; });
+scatteredBackend.scanNodeDelayMs = 5;
+scatteredBackend.scanNodeStarted = () => { scatteredBackend.scanNodeStarted = undefined; releaseFinalizeStart(); };
+const nodesBeforeCancelledFinalize = scatteredBackend.scanNodeGets;
+const cancelledFinalize = scatteredStore.finalize();
+const cancelledFinalizeRejected = assert.rejects(cancelledFinalize, error => error instanceof DOMException && error.name === 'AbortError');
+await finalizeStartedReading;
+const concurrentReadStarted = performance.now();
+assert.equal((await scatteredStore.readWindow(5_000, 200)).flatMap(group => group.entries).length, 200, 'a normal window must remain readable during folder statistics');
+assert.ok(performance.now() - concurrentReadStarted < 150, 'folder statistics must not serialize ordinary window reads');
+const disposeStarted = performance.now();
+await scatteredStore.dispose();
+const disposeMilliseconds = performance.now() - disposeStarted;
+await cancelledFinalizeRejected;
+assert.ok(scatteredBackend.scanNodeGets - nodesBeforeCancelledFinalize < 10, 'disposing must stop finalize without scanning the remaining tree');
+assert.ok(disposeMilliseconds < 150, `dispose waited ${disposeMilliseconds.toFixed(0)}ms for a cancelled finalize`);
+await assert.rejects(scatteredStore.append(testSource, [makeEntry(1)]), error => error instanceof DOMException && error.name === 'AbortError');
+assert.deepEqual(await scatteredStore.readWindow(0, 10), [], 'a disposed store must not publish another read window');
 
-  console.log('global search 100k stress tests passed');
-} finally {
-  fs.rmSync(tempDirectory, { recursive: true, force: true });
-}
+const opfsRoot = new VirtualDirectory(); const opfsDirectory = await opfsRoot.getDirectoryHandle('session', { create: true });
+const fakeLease = { name: 'session', release: async () => undefined };
+const opfsStore = await DiskBPlusTreeSearchStore.open(new OpfsTreeBackend(opfsRoot, opfsDirectory, 'session', fakeLease));
+await opfsStore.append(testSource, [makeEntry(1)]);
+opfsDirectory.failNextWrite = true;
+await assert.rejects(opfsStore.append(testSource, [makeEntry(2)]), /synthetic OPFS write failure/);
+await assert.rejects(opfsStore.readWindow(0, 10), /OPFS 临时索引已失效/, 'a partial non-transactional write must invalidate the whole tree');
+await opfsStore.dispose();
+
+const savedIndexedDb = globalThis.indexedDB;
+Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: { databases: async () => [], open: () => { throw new Error('synthetic IDB open failure'); } } });
+const fallback = await createSearchResultStore();
+assert.equal(fallback.store.storageKind, 'opfs', 'IndexedDB open failure must select real OPFS storage');
+await fallback.store.append(testSource, [makeEntry(7), makeEntry(6)]);
+assert.deepEqual((await fallback.store.readWindow(0, 10)).flatMap(group => group.entries).map(entry => entry.name), ['file000006.txt', 'file000007.txt']);
+await fallback.store.dispose();
+Object.defineProperty(globalThis, 'indexedDB', { configurable: true, value: savedIndexedDb });
+
+const failingBackend = new MemoryTreeBackend(); failingBackend.kind = 'indexeddb'; failingBackend.failEditAt = 3;
+const failingStore = await DiskBPlusTreeSearchStore.open(failingBackend); const failedWriteCursors = new Set(); const failedWriteCancelled = [];
+await assert.rejects(streamGlobalSearchSource({ source: testSource, query: 'file', isCurrent: () => true, activeCursors: failedWriteCursors, store: failingStore, fetchPage: makeFetcher(1_000), cancelCursor: async cursor => { failedWriteCancelled.push(cursor); } }), /synthetic IndexedDB write failure/);
+assert.equal(failedWriteCursors.size, 0, 'a mid-scan disk write failure must not leak an IPC cursor');
+assert.deepEqual(failedWriteCancelled, ['400'], 'the cursor returned with the failed write must be cancelled');
+const recoveredStore = await loadedModule.exports.createOpfsSearchStore();
+await streamGlobalSearchSource({ source: testSource, query: 'file', isCurrent: () => true, activeCursors: new Set(), store: recoveredStore, fetchPage: makeFetcher(1_000), cancelCursor: async () => undefined });
+assert.equal((await recoveredStore.readWindow(980, 20)).flatMap(group => group.entries).at(-1).name, 'file000999.txt', 'OPFS recovery must rebuild the complete scan, not expose the partial IndexedDB tree');
+await Promise.all([failingStore.dispose(), recoveredStore.dispose()]);
+
+let current = true; let releaseSecond; const second = new Promise(resolve => { releaseSecond = resolve; }); const cancelled = []; let fetchCount = 0;
+const switching = streamGlobalSearchSource({ source: testSource, query: 'old', isCurrent: () => current, activeCursors: cursors, store: disorderStore, fetchPage: async () => ++fetchCount === 1 ? { success: true, entries: [], cursor: 'c1', hasMore: true } : second, cancelCursor: async cursor => { cancelled.push(cursor); } });
+while (fetchCount < 2) await new Promise(resolve => setImmediate(resolve));
+current = false; await cancelGlobalSearchCursors(cursors, async cursor => { cancelled.push(cursor); }); releaseSecond({ success: true, entries: [], cursor: 'c2', hasMore: true }); await switching;
+assert.deepEqual(cancelled.sort(), ['c1', 'c2']);
+
+await Promise.all([store.dispose(), disorderStore.dispose(), failedStatsStore.dispose()]);
+console.log(`global search 100k stress tests passed (${appendMilliseconds.toFixed(0)}ms append, ${backend.nodeGets} cached node reads, middle/end ${middleGets}/${endGets}; scattered ${scatteredMilliseconds.toFixed(0)}ms/${scatteredGets} reads/${scatteredBackend.maxDirtyRows} resident hits)`);
