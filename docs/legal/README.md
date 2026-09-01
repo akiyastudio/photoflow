@@ -26,8 +26,15 @@
 - [人脸身份识别个人信息保护影响评估模板](PIPIA_TEMPLATE.md)
 - [数据保存、清理与个人权利请求运行手册模板](DATA_RETENTION_AND_RIGHTS_RUNBOOK_TEMPLATE.md)
 - [第三方发行证据核对表](THIRD_PARTY_DISTRIBUTION_EVIDENCE.md)
+- [非敏感发布批准索引模板](RELEASE_APPROVAL_TEMPLATE.json)
 
 模板中的 `[待填写]`、`[待核验]` 和未签署栏均表示证据尚未闭环。不得因为模板已创建而将发布阻断项标记为完成。
+
+## 发布批准严格门禁
+
+证据模板应保留“待填写 / 待核验”占位标记作为可复用指南，门禁不会以“清空模板占位符”判定可发布。五项阻断证据和三类批准都已在受控证据库完成后，复制 `RELEASE_APPROVAL_TEMPLATE.json` 为 `RELEASE_APPROVAL.json`，仅填写版本、安装包 SHA-256、批准角色以及证据 ID / SHA-256 / 日期索引。
+
+签名原件、证照、身份材料、管理 Token、密钥和控制台导出必须留在可审计的受控证据库；Git 中的 `RELEASE_APPROVAL.json` 只是非敏感索引。`npm run check:legal-release-ready` 会严格验证该索引，发布脚本还会把其安装包哈希与当前选中的安装包进行匹配。
 
 ## 发布阻断项
 

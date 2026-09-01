@@ -1,4 +1,5 @@
 const crypto = require('crypto');
+const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline/promises');
@@ -26,6 +27,16 @@ const booleanValue = (value, fallback) => {
   if (/^(?:1|true|yes|y|是)$/i.test(String(value).trim())) return true;
   if (/^(?:0|false|no|n|否)$/i.test(String(value).trim())) return false;
   throw new Error(`无法识别布尔值：${value}`);
+};
+
+const runLegalReleaseReadyGate = installerPath => {
+  const result = spawnSync(process.execPath, [
+    path.join(repositoryRoot, 'scripts', 'test-legal-release-evidence.cjs'),
+    '--require-ready',
+    '--installer', installerPath,
+  ], { cwd: repositoryRoot, stdio: 'inherit', windowsHide: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error('法律发布批准严格门禁未通过，未生成发布记录且未执行网络操作');
 };
 
 const sha256File = filePath => new Promise((resolve, reject) => {
@@ -79,6 +90,9 @@ const publishRelease = async record => {
 
 const run = async () => {
   const args = parseArguments(process.argv.slice(2));
+  const shouldPublish = booleanValue(args.publish, false);
+  const published = booleanValue(args.published, false);
+  const requiresReleaseApproval = shouldPublish || published;
   const version = String(args.version || packageJson.version || '').trim();
   const versionParts = version.split('.').map(Number);
   if (!/^\d+\.\d+\.\d+$/.test(version) || versionParts.some(value => !Number.isSafeInteger(value)) || versionParts[1] > 99 || versionParts[2] > 99) {
@@ -89,6 +103,7 @@ const run = async () => {
   try {
     const installerPath = path.resolve(args.installer || findInstaller(version));
     if (!fs.statSync(installerPath).isFile()) throw new Error(`安装包不存在：${installerPath}`);
+    if (requiresReleaseApproval) runLegalReleaseReadyGate(installerPath);
     const downloadUrl = String(args.url || releaseConfig.downloadUrl || '').trim();
     if (!downloadUrl) throw new Error('scripts/release-config.cjs 中没有配置固定下载链接');
     let parsedUrl;
@@ -101,7 +116,6 @@ const run = async () => {
     if (notes.length > 4000) throw new Error('更新说明不能超过 4000 个字符');
 
     const mandatory = booleanValue(args.mandatory, false);
-    const published = booleanValue(args.published, true);
     const sha256 = await sha256File(installerPath);
     const versionCode = versionParts[0] * 10_000 + versionParts[1] * 100 + versionParts[2];
     const record = {
@@ -124,7 +138,6 @@ const run = async () => {
     JSON.parse(fs.readFileSync(temporaryPath, 'utf8'));
     fs.renameSync(temporaryPath, outputPath);
 
-    const shouldPublish = booleanValue(args.publish, false);
     if (shouldPublish) await publishRelease(record);
 
     console.log('\n发布 JSON 已生成：');

@@ -28,6 +28,16 @@ const runCommand = (command, args, label) => {
   if (result.status !== 0) throw new Error(`${label}失败，退出代码 ${result.status ?? 'unknown'}`);
 };
 
+const runLegalReleaseReadyGate = installerPath => {
+  const result = spawnSync(process.execPath, [
+    path.join(repositoryRoot, 'scripts', 'test-legal-release-evidence.cjs'),
+    '--require-ready',
+    '--installer', installerPath,
+  ], { cwd: repositoryRoot, stdio: 'inherit', windowsHide: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error('法律发布批准严格门禁未通过，未读取 Token 且未执行网络或发布操作');
+};
+
 const requestJson = async (url, options) => {
   const response = await fetch(url, { ...options, signal: AbortSignal.timeout(10_000) });
   const text = await response.text();
@@ -154,6 +164,21 @@ const askYesNo = async (terminal, prompt, fallback = false) => {
 
 const run = async () => {
   const args = parseArguments(process.argv.slice(2));
+  const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+  const version = String(packageJson.version || '').trim();
+  if (!VERSION_PATTERN.test(version)) throw new Error('package.json 中的版本号无效；请先运行 set-version.bat');
+  const versionFields = version.split('.').map(Number);
+  if (versionFields.some(value => !Number.isSafeInteger(value) || value < 0)
+    || versionFields[1] > 99 || versionFields[2] > 99) {
+    throw new Error('版本号各段必须是非负整数，且第二、第三段不能超过 99');
+  }
+  if (args.version && String(args.version).trim() !== version) {
+    throw new Error(`--version 与 package.json 不一致；当前版本是 ${version}`);
+  }
+  const installerPath = path.resolve(args.installer || findInstaller(version));
+  if (!fs.existsSync(installerPath) || !fs.statSync(installerPath).isFile()) throw new Error(`安装包不存在：${installerPath}`);
+  runLegalReleaseReadyGate(installerPath);
+
   let token = String(process.env.PHOTOFLOW_ADMIN_TOKEN || '').trim() || readWindowsUserToken();
   let persistToken = false;
   if (!token) {
@@ -165,18 +190,6 @@ const run = async () => {
 
   const terminal = readline.createInterface({ input: stdin, output: stdout });
   try {
-    const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
-    const version = String(packageJson.version || '').trim();
-    if (!VERSION_PATTERN.test(version)) throw new Error('package.json 中的版本号无效；请先运行 set-version.bat');
-    const versionFields = version.split('.').map(Number);
-    if (versionFields.some(value => !Number.isSafeInteger(value) || value < 0)
-      || versionFields[1] > 99 || versionFields[2] > 99) {
-      throw new Error('版本号各段必须是非负整数，且第二、第三段不能超过 99');
-    }
-    if (args.version && String(args.version).trim() !== version) {
-      throw new Error(`--version 与 package.json 不一致；当前版本是 ${version}`);
-    }
-    const installerPath = findInstaller(version);
     console.log(`\n准备发布版本：${version}`);
     console.log(`安装包：${installerPath}`);
 
@@ -212,6 +225,7 @@ const run = async () => {
       '--version', version,
       '--notes', notes,
       '--mandatory', mandatoryArgument,
+      '--installer', installerPath,
       '--published', 'true',
       '--publish', 'true',
     ], '生成并发布 release 记录');

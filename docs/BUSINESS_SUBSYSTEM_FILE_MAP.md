@@ -14,6 +14,7 @@
 - `docs/legal/DATA_RETENTION_AND_RIGHTS_RUNBOOK_TEMPLATE.md`
 - `docs/legal/PIPIA_TEMPLATE.md`
 - `docs/legal/README.md`
+- `docs/legal/RELEASE_APPROVAL_TEMPLATE.json`
 - `docs/legal/RELEASE_EVIDENCE_GUIDE.md`
 - `docs/legal/THIRD_PARTY_DISTRIBUTION_EVIDENCE.md`
 - `electron/modules/system-ipc.cjs`
@@ -26,7 +27,9 @@
 - `package.json`
 - `scripts/build-recycle-bin-service.cjs`
 - `scripts/check-project.cjs`
+- `scripts/generate-release-json.cjs`
 - `scripts/package-cloudbase-function.py`
+- `scripts/publish-release.cjs`
 - `scripts/source-boundary-policy.cjs`
 - `scripts/test-cloudbase-function-package.cjs`
 - `scripts/test-cloudbase-function-package.py`
@@ -139,8 +142,14 @@
 
 - `docs/legal/DATA_RETENTION_AND_RIGHTS_RUNBOOK_TEMPLATE.md`
 - `docs/legal/PIPIA_TEMPLATE.md`
+- `docs/legal/README.md`
+- `docs/legal/RELEASE_APPROVAL_TEMPLATE.json`
 - `docs/legal/RELEASE_EVIDENCE_GUIDE.md`
 - `docs/legal/THIRD_PARTY_DISTRIBUTION_EVIDENCE.md`
+- `package.json`（法律证据结构与发布严格门禁命令）
+- `scripts/check-project.cjs`（默认结构检查与 `--release-ready` 严格模式）
+- `scripts/generate-release-json.cjs`
+- `scripts/publish-release.cjs`
 - `scripts/test-legal-release-evidence.cjs`
 
 ### 隐私行为验收
@@ -158,8 +167,6 @@
 
 ### 云端遥测发布与行为验收
 
-- `package.json`（根级 CloudBase 验收命令）
-- `scripts/check-project.cjs`（默认门禁接入）
 - `scripts/package-cloudbase-function.py`
 - `scripts/test-cloudbase-function-package.cjs`
 - `scripts/test-cloudbase-function-package.py`

@@ -3,6 +3,7 @@ const { spawnSync } = require('child_process');
 const npmCli = process.env.npm_execpath;
 if (!npmCli) throw new Error('npm_execpath is unavailable; run this check through npm.');
 const testsOnly = process.argv.includes('--tests-only');
+const releaseReady = process.argv.includes('--release-ready');
 
 const steps = [
   ['Python environment', ['run', 'check:python']],
@@ -11,7 +12,8 @@ const steps = [
     ['typecheck', ['run', 'typecheck']],
   ] : []),
   ['privacy consent and telemetry', ['run', 'test:privacy']],
-  ['legal release evidence', ['run', 'test:legal-release-evidence']],
+  ['法律证据结构', ['run', 'test:legal-release-evidence']],
+  ...(releaseReady ? [['法律发布批准严格门禁', ['run', 'check:legal-release-ready']]] : []),
   ['architecture', ['run', 'test:architecture']],
   ['domain contracts', ['run', 'test:domain-contracts']],
   ['operations storage', ['run', 'test:operations-storage']],
@@ -53,4 +55,6 @@ for (const [label, args] of steps) {
   if (result.status !== 0) process.exit(result.status || 1);
 }
 
-process.stdout.write('\nProject checks passed.\n');
+process.stdout.write(releaseReady
+  ? '\nProject checks and the strict legal release approval gate passed.\n'
+  : '\nProject checks passed. Legal evidence structure was checked; this does not mean the release is approved or publishable.\n');

@@ -1,0 +1,44 @@
+{
+  "schemaVersion": 1,
+  "releaseVersion": "0.0.0",
+  "status": "pending",
+  "approvedAt": "YYYY-MM-DDTHH:mm:ss.sssZ",
+  "installerSha256": "64_HEX_INSTALLER_SHA256",
+  "approvalRoles": {
+    "business": "BUSINESS_APPROVER_ROLE",
+    "privacy": "PRIVACY_APPROVER_ROLE",
+    "legal": "LEGAL_APPROVER_ROLE"
+  },
+  "blockers": {
+    "operatorAddress": {
+      "evidenceId": "CONTROLLED_EVIDENCE_ID",
+      "sha256": "64_HEX_EVIDENCE_SHA256",
+      "approvedAt": "YYYY-MM-DDTHH:mm:ss.sssZ",
+      "approvedByRole": "APPROVER_ROLE"
+    },
+    "rightsRequestChannel": {
+      "evidenceId": "CONTROLLED_EVIDENCE_ID",
+      "sha256": "64_HEX_EVIDENCE_SHA256",
+      "approvedAt": "YYYY-MM-DDTHH:mm:ss.sssZ",
+      "approvedByRole": "APPROVER_ROLE"
+    },
+    "cloudbaseRetention": {
+      "evidenceId": "CONTROLLED_EVIDENCE_ID",
+      "sha256": "64_HEX_EVIDENCE_SHA256",
+      "approvedAt": "YYYY-MM-DDTHH:mm:ss.sssZ",
+      "approvedByRole": "APPROVER_ROLE"
+    },
+    "faceRecognitionPipia": {
+      "evidenceId": "CONTROLLED_EVIDENCE_ID",
+      "sha256": "64_HEX_EVIDENCE_SHA256",
+      "approvedAt": "YYYY-MM-DDTHH:mm:ss.sssZ",
+      "approvedByRole": "APPROVER_ROLE"
+    },
+    "thirdPartyDistribution": {
+      "evidenceId": "CONTROLLED_EVIDENCE_ID",
+      "sha256": "64_HEX_EVIDENCE_SHA256",
+      "approvedAt": "YYYY-MM-DDTHH:mm:ss.sssZ",
+      "approvedByRole": "APPROVER_ROLE"
+    }
+  }
+}

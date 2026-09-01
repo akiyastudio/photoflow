@@ -72,6 +72,8 @@
     "test:privacy": "node scripts/test-privacy-gate-contract.cjs && node scripts/test-privacy-service.cjs && node scripts/test-telemetry-consent.cjs && node scripts/test-privacy-revoke-telemetry.cjs",
     "test:cloudbase-telemetry": "npm --prefix services/cloudbase/telemetry-function run check && node scripts/test-cloudbase-function-package.cjs",
     "test:legal-release-evidence": "node scripts/test-legal-release-evidence.cjs",
+    "check:legal-release-ready": "node scripts/test-legal-release-evidence.cjs --require-ready",
+    "check:release": "node scripts/check-project.cjs --release-ready",
     "test:installer-terms": "node scripts/test-installer-terms.cjs",
     "test:installer-directory": "node scripts/test-installer-directory.cjs",
     "test:background-tasks": "node scripts/test-background-task-service.cjs && node scripts/test-background-task-migrations.cjs && node scripts/test-background-task-renderer-model.cjs && node scripts/test-background-task-drawer.cjs && node scripts/test-file-operation-notifications.cjs && node scripts/test-dirty-coalescing-runner.cjs && node scripts/test-watch-change-filter.cjs && node scripts/test-media-cache-cleanup-ipc.cjs && node scripts/test-media-tracking-scan-scheduler.cjs && node scripts/test-version-tracking-background.cjs && node scripts/test-sliced-maintenance-runner.cjs",
