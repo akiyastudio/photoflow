@@ -86,6 +86,11 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const surfaceRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const controlPanelRef = useRef<HTMLDivElement>(null);
+  const speedTriggerRef = useRef<HTMLButtonElement>(null);
+  const subtitlesTriggerRef = useRef<HTMLButtonElement>(null);
+  const displayTriggerRef = useRef<HTMLButtonElement>(null);
+  const volumeTriggerRef = useRef<HTMLButtonElement>(null);
+  const suppressPanelFocusOpenRef = useRef<'speed' | 'volume' | null>(null);
   const controlsOverlayRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<PlaybackSession | null>(null);
   const playerIdRef = useRef(createPlaybackToken());
@@ -120,6 +125,12 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const [capturing, setCapturing] = useState(false);
   const [captureNotice, setCaptureNotice] = useState<{ text: string; error?: boolean } | null>(null);
   const [controlPanel, setControlPanel] = useState<'speed' | 'volume' | 'subtitles' | 'display' | 'basic-info' | 'info' | null>(null);
+  const controlPanelIds = useMemo(() => ({
+    speed: `${playerIdRef.current}-speed-panel`,
+    subtitles: `${playerIdRef.current}-subtitles-panel`,
+    display: `${playerIdRef.current}-display-panel`,
+    volume: `${playerIdRef.current}-volume-panel`,
+  }), []);
   const [videoTransform, setVideoTransform] = useState<VideoTransform>(DEFAULT_VIDEO_TRANSFORM);
   const [activeBackendId, setActiveBackendId] = useState('');
   const chromiumMode = activeBackendId === 'core.chromium';
@@ -460,6 +471,20 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     if (muted) control('mute', false);
     control('volume', nextVolume);
   };
+  const closeControlPanelToTrigger = (panel: 'speed' | 'volume' | 'subtitles' | 'display', trigger: HTMLButtonElement | null) => {
+    setControlPanel(current => current === panel ? null : current);
+    window.requestAnimationFrame(() => {
+      if (panel === 'speed' || panel === 'volume') suppressPanelFocusOpenRef.current = panel;
+      trigger?.focus();
+      suppressPanelFocusOpenRef.current = null;
+    });
+  };
+  const closeControlPanelOnEscape = (event: React.KeyboardEvent<HTMLDivElement>, panel: 'speed' | 'volume' | 'subtitles' | 'display', trigger: HTMLButtonElement | null) => {
+    if (event.key !== 'Escape' || controlPanel !== panel) return;
+    event.preventDefault();
+    event.stopPropagation();
+    closeControlPanelToTrigger(panel, trigger);
+  };
 
   useEffect(() => {
     onPlaybackStateRef.current?.({ time, duration, paused });
@@ -656,21 +681,22 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         <span className="w-10 text-right text-[11px] tabular-nums text-slate-300">{formatTime(time)}</span>
         <input type="range" min={0} max={Math.max(0.01, duration)} step={0.01} value={Math.min(time, Math.max(0.01, duration))} disabled={!duration} onChange={event => control('seek', Number(event.currentTarget.value))} aria-label="播放进度" className="min-w-12 flex-1 accent-blue-500 disabled:opacity-40"/>
         <span className="w-10 text-[11px] tabular-nums text-slate-300">{formatTime(duration)}</span>
-        <div className="relative shrink-0" onPointerEnter={() => setControlPanel('speed')} onPointerLeave={() => setControlPanel(null)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
+        <div className="relative shrink-0" onPointerEnter={() => setControlPanel('speed')} onPointerLeave={() => setControlPanel(null)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }} onKeyDown={event => closeControlPanelOnEscape(event, 'speed', speedTriggerRef.current)}>
+          <button ref={speedTriggerRef} type="button" disabled={!sessionId} onFocus={() => { if (suppressPanelFocusOpenRef.current !== 'speed') setControlPanel('speed'); }} onClick={cyclePlaybackSpeed} title={`播放速度 ${speed}×；单击切换，悬停选择`} aria-label={`当前播放速度 ${speed} 倍，单击切换到下一档`} aria-haspopup="dialog" aria-expanded={controlPanel === 'speed'} aria-controls={controlPanelIds.speed} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'speed' ? 'bg-white/10' : ''}`}><Gauge size={16}/></button>
           {controlPanel === 'speed' && <div ref={controlPanelRef} className="absolute bottom-full right-1/2 z-30 w-32 translate-x-1/2 pb-2" onClick={event => event.stopPropagation()}>
-            <div className="rounded-lg border border-white/15 bg-[#101827] p-2 shadow-2xl shadow-black/70">
+            <div id={controlPanelIds.speed} role="dialog" aria-label="播放速度" className="rounded-lg border border-white/15 bg-[#101827] p-2 shadow-2xl shadow-black/70">
               <div className="mb-1.5 flex items-center justify-between text-[10px] font-medium text-slate-300"><span>播放速度</span><span className="tabular-nums">{speed}×</span></div>
               <div className="grid grid-cols-2 gap-1">
                 {PLAYBACK_SPEEDS.map(value => <button key={value} type="button" onClick={() => control('speed', value)} aria-label={`设置 ${value} 倍播放速度`} aria-pressed={Math.abs(value - speed) < 0.001} className={`rounded px-1 py-1.5 text-[11px] font-semibold tabular-nums transition-colors ${Math.abs(value - speed) < 0.001 ? 'bg-blue-500 text-white' : 'bg-white/5 text-slate-200 hover:bg-white/15'}`}>{value}×</button>)}
               </div>
             </div>
           </div>}
-          <button type="button" disabled={!sessionId} onFocus={() => setControlPanel('speed')} onClick={cyclePlaybackSpeed} title={`播放速度 ${speed}×；单击切换，悬停选择`} aria-label={`当前播放速度 ${speed} 倍，单击切换到下一档`} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'speed' ? 'bg-white/10' : ''}`}><Gauge size={16}/></button>
         </div>
         <button type="button" disabled={!sessionId || starting || capturing || !capabilityPresentation.captureAvailable} onClick={() => void captureFrame()} title="截取当前视频帧并保存到原视频目录" aria-label="截取当前视频帧" className="rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40">{capturing ? <Loader2 size={16} className="animate-spin"/> : <Camera size={16}/>}</button>
-        {capabilityPresentation.subtitlesAvailable&&<div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
+        {capabilityPresentation.subtitlesAvailable&&<div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }} onKeyDown={event => closeControlPanelOnEscape(event, 'subtitles', subtitlesTriggerRef.current)}>
+          <button ref={subtitlesTriggerRef} type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'subtitles' ? null : 'subtitles')} title="字幕" aria-label="字幕菜单" aria-haspopup="menu" aria-expanded={controlPanel === 'subtitles'} aria-controls={controlPanelIds.subtitles} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'subtitles' ? 'bg-white/10' : ''}`}><Captions size={17}/></button>
           {controlPanel === 'subtitles' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-72 pb-2" onClick={event => event.stopPropagation()}>
-            <div role="menu" aria-label="字幕" className="max-h-80 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-2 text-xs shadow-2xl shadow-black/70">
+            <div id={controlPanelIds.subtitles} role="menu" aria-label="字幕" className="max-h-80 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-2 text-xs shadow-2xl shadow-black/70">
               <div className="mb-2 flex items-center justify-between px-1 text-slate-300"><span className="font-bold">字幕</span><button type="button" onClick={() => void addSubtitle()} className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-white/10"><Plus size={13}/>添加本地字幕</button></div>
               <button role="menuitemradio" aria-checked={!selectedSubtitle} type="button" onClick={disableSubtitles} className={`block w-full rounded px-2 py-1.5 text-left ${!selectedSubtitle ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>关闭</button>
               {subtitleTracks.map(track => <button key={track.stableId} role="menuitemradio" aria-checked={selectedSubtitle?.stableId === track.stableId} type="button" onClick={() => selectSubtitle(track.id)} className={`block w-full truncate rounded px-2 py-1.5 text-left ${selectedSubtitle?.stableId === track.stableId ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>{track.source === 'external' ? '外挂' : '内嵌'} · {track.title || track.language || track.format || `轨道 ${track.id}`}</button>)}
@@ -681,10 +707,10 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
               </div>
             </div>
           </div>}
-          <button type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'subtitles' ? null : 'subtitles')} title="字幕" aria-label="字幕菜单" aria-expanded={controlPanel === 'subtitles'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'subtitles' ? 'bg-white/10' : ''}`}><Captions size={17}/></button>
         </div>}
-        <div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
-          {controlPanel === 'display' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-80 pb-2" onClick={event => event.stopPropagation()}><div className="max-h-96 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-3 text-xs text-slate-200 shadow-2xl shadow-black/70">
+        <div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }} onKeyDown={event => closeControlPanelOnEscape(event, 'display', displayTriggerRef.current)}>
+          <button ref={displayTriggerRef} type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'display' ? null : 'display')} title="显示设置" aria-label="显示设置" aria-haspopup="dialog" aria-expanded={controlPanel === 'display'} aria-controls={controlPanelIds.display} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40 ${controlPanel === 'display' ? 'bg-white/10' : ''}`}><Settings2 size={16}/></button>
+          {controlPanel === 'display' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-80 pb-2" onClick={event => event.stopPropagation()}><div id={controlPanelIds.display} role="dialog" aria-label="显示设置" className="max-h-96 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-3 text-xs text-slate-200 shadow-2xl shadow-black/70">
             <div className="mb-2 font-bold">显示与播放后端</div>
             <div className="mb-2 grid grid-cols-2 gap-1">{availableBackends.map(backend => <button key={backend.backendId} type="button" aria-pressed={backend.backendId === activeBackendId} onClick={() => void switchPlaybackBackend(backend.backendId)} className={`truncate rounded px-2 py-1.5 text-left ${backend.backendId === activeBackendId ? 'bg-blue-500 text-white' : 'bg-white/5 hover:bg-white/15'}`}>{backend.displayName}</button>)}</div>
             <div className="border-t border-white/10 pt-2"><span className="text-slate-400">画面比例</span><div className="mt-1 grid grid-cols-3 gap-1">{(['source','contain','cover','16:9','4:3','1:1'] as const).filter(mode => capabilityPresentation.transformControls.includes(mode)).map(mode => <button key={mode} type="button" aria-pressed={videoTransform.aspectMode === mode} onClick={() => changeTransform({ aspectMode: mode })} className={`rounded px-1 py-1 ${videoTransform.aspectMode === mode ? 'bg-blue-500 text-white' : 'bg-white/5 hover:bg-white/15'}`}>{mode}</button>)}</div></div>
@@ -692,7 +718,6 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
             {capabilityPresentation.hdrControlsAvailable&&<div className="mt-2 border-t border-white/10 pt-2"><span>HDR：{keyboardSettings.hdrMode}</span><p className={`mt-1 text-[10px] ${hdrAvailability.available ? 'text-emerald-300' : 'text-amber-300'}`}>{hdrAvailability.available ? `当前后端可用${keyboardSettings.hdrMode === 'hdr-passthrough' ? '，显示器已报告 HDR' : ''}` : hdrAvailability.reason || displayCapability.reason}</p>{keyboardSettings.hdrMode==='tone-map'&&<p className={`mt-1 text-[10px] ${capabilityPresentation.toneMappingAlgorithms.includes(keyboardSettings.toneMapping)?'text-slate-300':'text-amber-300'}`}>算法：{keyboardSettings.toneMapping} · 峰值：{capabilityPresentation.targetPeakControl?`${keyboardSettings.targetPeakNits} nits`:'当前后端不可调'}</p>}</div>}
             {!chromiumMode&&audioTracks.length>0&&<div className="mt-2 border-t border-white/10 pt-2"><span className="text-slate-400">音轨</span><div className="mt-1 space-y-1">{audioTracks.map(track=><button key={track.stableId} type="button" onClick={()=>sessionRef.current?.control({action:'audio-select',value:track.id})} className={`block w-full truncate rounded px-2 py-1 text-left ${track.id===String(state.audioTrackId??'')||track.selected?'bg-blue-500 text-white':'bg-white/5'}`}>{track.title||track.language||track.codec||`音轨 ${track.id}`}</button>)}</div></div>}
           </div></div>}
-          <button type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'display' ? null : 'display')} title="显示设置" aria-label="显示设置" aria-expanded={controlPanel === 'display'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40 ${controlPanel === 'display' ? 'bg-white/10' : ''}`}><Settings2 size={16}/></button>
         </div>
         {chromiumMode&&<div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
           {controlPanel === 'basic-info' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-72 pb-2" onClick={event => event.stopPropagation()}><div className="rounded-lg border border-white/15 bg-[#101827] p-3 text-[11px] text-slate-200 shadow-2xl shadow-black/70"><div className="mb-2 font-bold">基础播放信息</div>{state.statistics?<dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1"><dt>容器</dt><dd>{state.statistics.container||'未知'}</dd><dt>画面尺寸</dt><dd>{state.width&&state.height?`${state.width} × ${state.height}`:'—'}</dd><dt>时长</dt><dd>{formatTime(duration)}</dd><dt>播放位置</dt><dd>{formatTime(time)}</dd><dt>源 / 显示 FPS</dt><dd>{state.statistics.sourceFps?.toFixed(2)||'—'} / {state.statistics.displayFps?.toFixed(2)||'—'}</dd><dt>丢帧</dt><dd>{state.statistics.droppedFrames??'—'}</dd><dt>渲染器</dt><dd>{state.statistics.renderer||'Chromium HTMLVideoElement'}</dd></dl>:<p className="text-slate-400">正在采集 Chromium 基础播放信息…</p>}</div></div>}
@@ -702,14 +727,14 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
           {controlPanel === 'info' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-72 pb-2" onClick={event => event.stopPropagation()}><div className="max-h-96 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-3 text-[11px] text-slate-200 shadow-2xl shadow-black/70"><div className="mb-2 font-bold">播放信息</div>{state.statistics ? <div className="space-y-2"><dl className="grid grid-cols-[auto_1fr] gap-x-3"><dt>容器</dt><dd>{state.statistics.container||'未知'}</dd><dt>视频 / 音频</dt><dd>{state.statistics.videoCodec||'—'} / {state.statistics.audioCodec||'—'}</dd></dl><dl className="grid grid-cols-[auto_1fr] gap-x-3 border-t border-white/10 pt-1"><dt>解码器</dt><dd>{state.statistics.decoder||'—'}</dd><dt>硬件解码</dt><dd>{state.statistics.hardwareDecoding?state.statistics.hardwareDecoder||'是':'否/未知'}</dd><dt>像素</dt><dd>{state.statistics.pixelFormat||'—'} {state.statistics.bitDepth?`${state.statistics.bitDepth}bit`:''}</dd></dl><dl className="grid grid-cols-[auto_1fr] gap-x-3 border-t border-white/10 pt-1"><dt>HDR</dt><dd>{state.statistics.hdrFormat||'—'}</dd><dt>Primaries</dt><dd>{state.statistics.colorPrimaries||'—'}</dd><dt>Transfer / Matrix</dt><dd>{state.statistics.transfer||'—'} / {state.statistics.colorMatrix||'—'}</dd><dt>Tone map</dt><dd>{state.statistics.toneMapping||'—'}</dd></dl><dl className="grid grid-cols-[auto_1fr] gap-x-3 border-t border-white/10 pt-1"><dt>源 / 显示 FPS</dt><dd>{state.statistics.sourceFps?.toFixed(2)||'—'} / {state.statistics.displayFps?.toFixed(2)||'—'}</dd><dt>丢帧 / 延迟</dt><dd>{state.statistics.droppedFrames??'—'} / {state.statistics.delayedFrames??'—'}</dd><dt>A/V 同步</dt><dd>{state.statistics.avSyncMs?.toFixed(1)||'—'} ms</dd></dl><dl className="grid grid-cols-[auto_1fr] gap-x-3 border-t border-white/10 pt-1"><dt>缓存</dt><dd>{state.statistics.cacheSeconds?.toFixed(1)||'—'} s / {state.statistics.cacheBytes??'—'} B</dd><dt>GPU</dt><dd>{state.statistics.gpuApi||'—'} · {state.statistics.gpuAdapter||'—'}</dd><dt>渲染器</dt><dd>{state.statistics.renderer||activeBackend?.displayName||'—'}</dd></dl></div> : <p className="text-slate-400">正在采集当前后端可提供的信息…</p>}</div></div>}
           <button type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'info' ? null : 'info')} title="播放信息" aria-label="播放信息" aria-expanded={controlPanel === 'info'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40 ${controlPanel === 'info' ? 'bg-white/10' : ''}`}><Info size={16}/></button>
         </div>}
-        <div className="relative shrink-0" onPointerEnter={() => setControlPanel('volume')} onPointerLeave={() => setControlPanel(null)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }}>
+        <div className="relative shrink-0" onPointerEnter={() => setControlPanel('volume')} onPointerLeave={() => setControlPanel(null)} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }} onKeyDown={event => closeControlPanelOnEscape(event, 'volume', volumeTriggerRef.current)}>
+          <button ref={volumeTriggerRef} type="button" disabled={!sessionId} onFocus={() => { if (suppressPanelFocusOpenRef.current !== 'volume') setControlPanel('volume'); }} onClick={() => control('mute', !muted)} title={`${muted ? '开启声音' : '关闭声音'}；悬停调整音量`} aria-label={muted ? '开启声音' : '关闭声音'} aria-haspopup="dialog" aria-expanded={controlPanel === 'volume'} aria-controls={controlPanelIds.volume} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'volume' ? 'bg-white/10' : ''}`}>{muted || volume === 0 ? <VolumeX size={16}/> : <Volume2 size={16}/>}</button>
           {controlPanel === 'volume' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-44 pb-2" onClick={event => event.stopPropagation()}>
-            <div className="rounded-lg border border-white/15 bg-[#101827] p-3 shadow-2xl shadow-black/70">
+            <div id={controlPanelIds.volume} role="dialog" aria-label="音量" className="rounded-lg border border-white/15 bg-[#101827] p-3 shadow-2xl shadow-black/70">
               <div className="mb-2 flex items-center justify-between text-[11px] font-medium text-slate-300"><span>音量</span><span className="tabular-nums">{muted ? 0 : Math.round(volume)}%</span></div>
               <input type="range" min={0} max={100} step={1} value={muted ? 0 : volume} onChange={event => changeVolume(Number(event.currentTarget.value))} aria-label="调整音量" className="block w-full accent-blue-500"/>
             </div>
           </div>}
-          <button type="button" disabled={!sessionId} onFocus={() => setControlPanel('volume')} onClick={() => control('mute', !muted)} title={`${muted ? '开启声音' : '关闭声音'}；悬停调整音量`} aria-label={muted ? '开启声音' : '关闭声音'} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'volume' ? 'bg-white/10' : ''}`}>{muted || volume === 0 ? <VolumeX size={16}/> : <Volume2 size={16}/>}</button>
         </div>
         {(starting || state.buffering) && <span role="status" className="inline-flex items-center gap-1 whitespace-nowrap text-[11px] text-blue-200"><Loader2 size={13} className="animate-spin"/>加载中</span>}
         {captureNotice && <span role="status" aria-live="polite" title={captureNotice.text} className={`max-w-24 truncate whitespace-nowrap text-[11px] ${captureNotice.error ? 'text-red-300' : 'text-emerald-300'}`}>{captureNotice.text}</span>}
