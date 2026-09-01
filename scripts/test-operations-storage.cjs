@@ -3,6 +3,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { createWorkspaceRepository } = require('../electron/repositories/workspace-repository.cjs');
 
 const root = path.join(__dirname, '..');
 const python = fs.existsSync(path.join(root, '.venv', 'Scripts', 'python.exe'))
@@ -23,6 +24,11 @@ try {
   const snapshot = path.join(temporary, 'snapshots', 'operations.sqlite3');
   fs.mkdirSync(workspace);
 
+  const fallbackCalls = [];
+  const fallbackRepository = createWorkspaceRepository({ call: (_root, action, payload) => { fallbackCalls.push({ action, payload }); return action === 'undo_record_list' ? { records: [] } : { success: true }; }, stop: () => undefined });
+  fallbackRepository.listUndoRecords(workspace); fallbackRepository.removeUndoRecords(workspace, ['a', 'b']);
+  assert.deepStrictEqual(fallbackCalls, [{ action: 'undo_record_list', payload: {} }, { action: 'undo_record_remove_many', payload: { ids: ['a', 'b'] } }]);
+
   run('workspace_db.py', 'init', ['--root', workspace, '--database', legacyDatabase]);
   run('workspace_db.py', 'undo_record_add', [
     '--root', workspace,
@@ -34,7 +40,7 @@ try {
     '--database', operationsDatabase,
     '--payload', JSON.stringify({ legacyDatabase }),
   ]);
-  assert.strictEqual(migration.schemaVersion, 1);
+  assert.strictEqual(migration.schemaVersion, 2);
   assert.strictEqual(migration.imported, 1, 'legacy undo records must migrate once');
   assert.strictEqual(run('operations_db.py', 'undo_record_latest', [
     '--database', operationsDatabase,
@@ -61,7 +67,7 @@ try {
   assert.deepStrictEqual(records.map(record => record.id), ['owned-undo']);
 
   const snapshotResult = run('operations_db.py', 'snapshot', ['--source', operationsDatabase, '--destination', snapshot]);
-  assert.strictEqual(snapshotResult.schemaVersion, 1);
+  assert.strictEqual(snapshotResult.schemaVersion, 2);
   assert.strictEqual(run('operations_db.py', 'undo_record_latest', [
     '--database', snapshot,
     '--payload', '{}',

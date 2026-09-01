@@ -185,6 +185,15 @@ const registerWorkspaceIpc = context => {
   const persistentUndoClaimLastScans = new Map();
   const persistentUndoLegacyCursors = new Map();
   const persistentUndoV2Cursors = new Map();
+  const persistentUndoPendingCleanups = new Map();
+  const persistentUndoPendingCleanupCapacity = Math.max(1, Number(context.persistentUndoPendingCleanupCapacity) || 128);
+  const persistentUndoPendingCleanupTimers = new Map();
+  const persistentUndoInteractiveLegacyScans = new Map();
+  const persistentUndoInteractiveAdmissionTimers = new Map();
+  const persistentUndoInteractiveBudgetMs = Math.max(1, Number(context.persistentUndoInteractiveBudgetMs) || 10);
+  const persistentUndoInteractiveVisitedLimit = Math.max(1, Number(context.persistentUndoInteractiveVisitedLimit) || 128);
+  const persistentUndoInteractiveCapacity = Math.max(1, Number(context.persistentUndoInteractiveCapacity) || 64);
+  const persistentUndoInteractiveTtlMs = Math.max(1000, Number(context.persistentUndoInteractiveTtlMs) || 5 * 60 * 1000);
   const blockedPersistentUndoTtlMs = Math.max(1, Number(context.persistentUndoQuarantineTtlMs) || 30 * 60 * 1000);
   const blockedPersistentUndoCapacity = Math.max(1, Number(context.persistentUndoQuarantineCapacity) || 256);
   const persistentUndoClaimPlatform = context.platform || process.platform;
@@ -259,46 +268,120 @@ const registerWorkspaceIpc = context => {
     const digest = crypto.createHash('sha256').update(`${workspaceId}\0${persistentId}`).digest('hex');
     return { workspaceRoot, workspaceId, persistentId, directory, path: directory ? path.join(directory, `${digest}.json`) : null };
   };
-  const legacyPersistentUndoClaimExists = async descriptor => {
-    let directory;
-    try {
-      directory = await fs.promises.opendir(descriptor.workspaceRoot);
-      for await (const entry of directory) {
-        if (!entry.name.startsWith(persistentUndoClaimPrefix)) continue;
-        if (!/^\.photoflow-undo-claim-[0-9a-f]{64}\.json$/u.test(entry.name) || !entry.isFile()) continue;
-        let handle;
-        try {
-          handle = await fs.promises.open(path.join(descriptor.workspaceRoot, entry.name), fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
-          const stat = await handle.stat({ bigint: true });
-          if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > BigInt(persistentUndoClaimMaxBytes)) continue;
-          const bytes = await handle.readFile();
-          if (bytes.length !== Number(stat.size) || bytes.length > persistentUndoClaimMaxBytes) continue;
-          const marker = JSON.parse(bytes.toString('utf8'));
-          const createdAt = Date.parse(marker?.createdAt);
-          if (marker?.schema === 1 && marker?.kind === 'trash' && marker?.id === descriptor.persistentId
-              && typeof marker?.createdAt === 'string' && Number.isFinite(createdAt) && new Date(createdAt).toISOString() === marker.createdAt
-              && typeof marker?.nonce === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(marker.nonce)) return true;
-        } catch { /* Invalid legacy markers are retained for GC quarantine. */ }
-        finally { await handle?.close().catch(() => undefined); }
-      }
-      return false;
-    }
-    catch (cause) {
-      throw claimFailure(`无法完整检查旧版持久撤销 claim，已拒绝执行：${cause?.message || String(cause)}`, cause);
-    } finally { await directory?.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') throw error; }); }
+  const legacyInteractiveKey = descriptor => `${comparablePath(descriptor.workspaceRoot)}\0${descriptor.workspaceId}\0${descriptor.persistentId}`;
+  const rootDirectoryIdentity = async root => {
+    const stat = await fs.promises.lstat(root, { bigint: true });
+    if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error('workspace root identity is unsafe');
+    return `${stat.dev}:${stat.ino}:${stat.mtimeNs}:${stat.ctimeNs}`;
   };
-  const persistentUndoClaimExists = async descriptor => {
+  const closeInteractiveLegacyState = async (key, state) => {
+    persistentUndoInteractiveLegacyScans.delete(key);
+    await state?.directory?.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') throw error; });
+  };
+  const pruneInteractiveLegacyScans = async excludeKey => {
+    const now = Date.now();
+    for (const [key, state] of persistentUndoInteractiveLegacyScans) if (key !== excludeKey && !state.running && !state.scheduled && state.expiresAt <= now) await closeInteractiveLegacyState(key, state);
+    while (persistentUndoInteractiveLegacyScans.size > persistentUndoInteractiveCapacity) {
+      const candidate = [...persistentUndoInteractiveLegacyScans.entries()].find(([key, state]) => key !== excludeKey && !state.running && !state.scheduled);
+      if (!candidate) break;
+      const [key, state] = candidate;
+      await closeInteractiveLegacyState(key, state);
+    }
+  };
+  const validLegacyMarkerForDescriptor = async (descriptor, entry) => {
+    if (!entry.name.startsWith(persistentUndoClaimPrefix)
+        || !/^\.photoflow-undo-claim-[0-9a-f]{64}\.json$/u.test(entry.name) || !entry.isFile()) return false;
+    let handle;
+    try {
+      handle = await fs.promises.open(path.join(descriptor.workspaceRoot, entry.name), fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      const stat = await handle.stat({ bigint: true });
+      if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > BigInt(persistentUndoClaimMaxBytes)) return false;
+      const bytes = await handle.readFile();
+      if (bytes.length !== Number(stat.size) || bytes.length > persistentUndoClaimMaxBytes) return false;
+      const marker = JSON.parse(bytes.toString('utf8'));
+      const createdAt = Date.parse(marker?.createdAt);
+      return marker?.schema === 1 && marker?.kind === 'trash' && marker?.id === descriptor.persistentId
+        && typeof marker?.createdAt === 'string' && Number.isFinite(createdAt) && new Date(createdAt).toISOString() === marker.createdAt
+        && typeof marker?.nonce === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(marker.nonce);
+    } catch { return false; }
+    finally { await handle?.close().catch(() => undefined); }
+  };
+  const scheduleInteractiveLegacyContinuation = (descriptor, key, state) => {
+    if (state.scheduled || state.complete) return;
+    state.scheduled = true;
+    setTimeout(() => {
+      legacyPersistentUndoClaimStatus(descriptor, true)
+        .catch(error => writeLog('warn', 'Legacy undo claim interactive scan continuation failed', { workspaceRoot: descriptor.workspaceRoot, error: error?.message || String(error) }))
+        .finally(() => { state.scheduled = false; if (!state.complete && persistentUndoInteractiveLegacyScans.get(key) === state) scheduleInteractiveLegacyContinuation(descriptor, key, state); });
+    }, 0);
+  };
+  const scheduleInteractiveLegacyAdmission = (descriptor, key) => {
+    if (persistentUndoInteractiveAdmissionTimers.has(key)) return;
+    if (persistentUndoInteractiveAdmissionTimers.size >= persistentUndoInteractiveCapacity) return;
+    const timer = setTimeout(() => {
+      persistentUndoInteractiveAdmissionTimers.delete(key);
+      legacyPersistentUndoClaimStatus(descriptor, true).then(status => {
+        if (!status.complete && status.capacityPending) scheduleInteractiveLegacyAdmission(descriptor, key);
+      }).catch(error => writeLog('warn', 'Legacy undo claim scan admission retry failed', { workspaceRoot: descriptor.workspaceRoot, error: error?.message || String(error) }));
+    }, 25);
+    persistentUndoInteractiveAdmissionTimers.set(key, timer);
+  };
+  const legacyPersistentUndoClaimStatus = async (descriptor, continuation = false) => {
+    const key = legacyInteractiveKey(descriptor);
+    await pruneInteractiveLegacyScans(key);
+    const identity = await rootDirectoryIdentity(descriptor.workspaceRoot);
+    let state = persistentUndoInteractiveLegacyScans.get(key);
+    if (state && state.rootIdentity !== identity) { await closeInteractiveLegacyState(key, state); state = null; }
+    if (state?.complete) return { exists: state.exists, complete: true };
+    if (!state) {
+      while (persistentUndoInteractiveLegacyScans.size >= persistentUndoInteractiveCapacity) {
+        const candidate = [...persistentUndoInteractiveLegacyScans.entries()].find(([candidateKey, candidateState]) => candidateKey !== key && !candidateState.running && !candidateState.scheduled);
+        if (!candidate) { scheduleInteractiveLegacyAdmission(descriptor, key); return { exists: false, complete: false, capacityPending: true }; }
+        await closeInteractiveLegacyState(candidate[0], candidate[1]);
+      }
+      state = { directory: await fs.promises.opendir(descriptor.workspaceRoot), rootIdentity: identity, complete: false, exists: false, scheduled: false, running: false, expiresAt: Date.now() + persistentUndoInteractiveTtlMs };
+      persistentUndoInteractiveLegacyScans.set(key, state);
+    }
+    if (state.running) return { exists: false, complete: false };
+    state.running = true;
+    const deadline = Date.now() + persistentUndoInteractiveBudgetMs;
+    let visited = 0;
+    try {
+      while (visited < persistentUndoInteractiveVisitedLimit && Date.now() < deadline) {
+        const entry = await state.directory.read();
+        if (!entry) {
+          await state.directory.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') throw error; });
+          state.directory = null; state.complete = true; state.exists = false; state.expiresAt = Date.now() + persistentUndoInteractiveTtlMs;
+          return { exists: false, complete: true };
+        }
+        visited += 1;
+        if (await validLegacyMarkerForDescriptor(descriptor, entry)) {
+          await state.directory.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') throw error; });
+          state.directory = null; state.complete = true; state.exists = true; state.expiresAt = Date.now() + persistentUndoInteractiveTtlMs;
+          return { exists: true, complete: true };
+        }
+      }
+      state.expiresAt = Date.now() + persistentUndoInteractiveTtlMs;
+      scheduleInteractiveLegacyContinuation(descriptor, key, state);
+      return { exists: false, complete: false, continuation };
+    } catch (cause) {
+      await closeInteractiveLegacyState(key, state).catch(() => undefined);
+      throw claimFailure(`无法检查旧版持久撤销 claim，已拒绝执行：${cause?.message || String(cause)}`, cause);
+    } finally { state.running = false; }
+  };
+  const persistentUndoClaimStatus = async descriptor => {
     try {
       if (descriptor.path) {
         const stat = await fs.promises.lstat(descriptor.path).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
-        if (stat) return true;
+        if (stat) return { exists: true, complete: true };
       }
-      return legacyPersistentUndoClaimExists(descriptor);
+      return legacyPersistentUndoClaimStatus(descriptor);
     } catch (cause) {
       if (cause?.code === 'CLAIM_PERSIST_FAILED') throw cause;
       throw claimFailure(`无法确认持久撤销 claim 状态，已拒绝执行：${cause?.message || String(cause)}`, cause);
     }
   };
+  /* Legacy marker parsing remains stream-based; an incomplete interactive scan never authorizes restore. */
   const syncPersistentUndoClaimDirectory = async directory => {
     if (persistentUndoClaimPlatform === 'win32') return;
     let handle;
@@ -331,6 +414,25 @@ const registerWorkspaceIpc = context => {
       });
       throw error;
     }
+  };
+  const pendingPersistentUndoError = (message, cause) => Object.assign(new Error(message), {
+    code: 'PERSISTENT_UNDO_RECOVERY_PENDING', recoveryRequired: true, rollbackPending: true, cause,
+  });
+  const claimPersistentUndoExecution = async (operation, boundRecord, descriptor) => {
+    await createPersistentUndoClaim(operation, descriptor);
+    let latestAfterClaim;
+    try { latestAfterClaim = await workspaceRepository.latestUndoRecord(operation.workspaceRoot); }
+    catch (cause) { throw pendingPersistentUndoError(`claim 已持久化，但无法复核撤销 journal；已拒绝执行：${cause?.message || String(cause)}`, cause); }
+    if (!latestAfterClaim.record || latestAfterClaim.record.id !== operation.persistentId
+        || latestAfterClaim.record.claimToken !== boundRecord.claimToken) {
+      throw pendingPersistentUndoError('claim 后的撤销记录版本已变化；当前 tombstone 保留且不会执行');
+    }
+    let executionClaim;
+    try { executionClaim = await workspaceRepository.claimUndoRecordExecution(operation.workspaceRoot, operation.persistentId, boundRecord.claimToken); }
+    catch (cause) { throw pendingPersistentUndoError(`持久撤销 claim 已建立，但无法原子隔离执行权；不会执行恢复：${cause?.message || String(cause)}`, cause); }
+    if (executionClaim?.claimed !== true) throw pendingPersistentUndoError('持久撤销记录版本已变化或执行权已被其他进程取得；当前 tombstone 保留且不会执行恢复');
+    await context.afterPersistentUndoExecutionClaim?.({ operation, descriptor });
+    return descriptor;
   };
   const processPersistentUndoClaimGcCandidate = async ({ root, workspaceId, markerPath, entryName, schema, result, deadline, now }) => {
     if (result.checked >= persistentUndoClaimScanLimit || Date.now() >= deadline) { result.truncated = true; return; }
@@ -374,7 +476,12 @@ const registerWorkspaceIpc = context => {
       let claim;
       try { claim = await workspaceRepository.retireUndoRecordClaim(root, marker.id); }
       catch (error) { result.skipped += 1; result.warnings.push(`journal-retire-failed:${entryName}:${error?.message || String(error)}`); return; }
-      if (Date.now() >= deadline) { result.skipped += 1; result.truncated = true; result.warnings.push(`deadline-after-retire:${entryName}`); return; }
+      if (Date.now() >= deadline) {
+        if (claim?.retired === true) {
+          enqueuePersistentUndoPendingCleanup({ root, markerPath, entryName, expectedIdentity });
+        }
+        result.skipped += 1; result.truncated = true; result.warnings.push(`deadline-after-retire:${entryName}`); return;
+      }
       if (claim?.retired !== true) { result.skipped += 1; result.warnings.push(`journal-cas-retained:${entryName}`); return; }
       let deleteDeadlineExpired = false;
       const removed = await removeOwnedPathIdentityBound(markerPath, expectedIdentity, { beforeQuarantineMove: async item => {
@@ -390,6 +497,46 @@ const registerWorkspaceIpc = context => {
     } catch (error) {
       result.skipped += 1; result.warnings.push(`${error?.code || 'invalid-marker'}:${entryName}`);
     } finally { await handle?.close().catch(() => undefined); }
+  };
+  const schedulePersistentUndoPendingCleanupRetry = (root, delayMs = 50) => {
+    const rootKey = comparablePath(root);
+    if (persistentUndoPendingCleanupTimers.has(rootKey)) return;
+    const timer = setTimeout(async () => {
+      persistentUndoPendingCleanupTimers.delete(rootKey);
+      for (const cursorMap of [persistentUndoV2Cursors, persistentUndoLegacyCursors]) {
+        const state = cursorMap.get(rootKey);
+        if (state?.running) { schedulePersistentUndoPendingCleanupRetry(root, delayMs); return; }
+        if (state) { cursorMap.delete(rootKey); await state.directory?.close().catch(() => undefined); }
+      }
+      runPersistentUndoClaimGc(root, { continuation: true }).catch(error => writeLog('warn', 'Persistent undo pending cleanup retry failed', { workspaceRoot: root, error: error?.message || String(error) }));
+    }, delayMs);
+    persistentUndoPendingCleanupTimers.set(rootKey, timer);
+  };
+  const enqueuePersistentUndoPendingCleanup = pending => {
+    const key = comparablePath(pending.markerPath);
+    if (!persistentUndoPendingCleanups.has(key) && persistentUndoPendingCleanups.size >= persistentUndoPendingCleanupCapacity) {
+      const [evictedKey, evicted] = persistentUndoPendingCleanups.entries().next().value;
+      persistentUndoPendingCleanups.delete(evictedKey);
+      schedulePersistentUndoPendingCleanupRetry(evicted.root);
+    }
+    persistentUndoPendingCleanups.set(key, pending);
+    schedulePersistentUndoPendingCleanupRetry(pending.root);
+  };
+  const processPersistentUndoPendingCleanups = async ({ root, result, deadline }) => {
+    for (const [key, pending] of [...persistentUndoPendingCleanups]) {
+      if (comparablePath(pending.root) !== comparablePath(root)) continue;
+      if (Date.now() >= deadline || result.checked >= persistentUndoClaimScanLimit) { result.truncated = true; break; }
+      persistentUndoPendingCleanups.delete(key);
+      result.checked += 1;
+      let deadlineExpired = false;
+      const removed = await removeOwnedPathIdentityBound(pending.markerPath, pending.expectedIdentity, { beforeQuarantineMove: async item => {
+        await context.beforePersistentUndoClaimGcDelete?.(item);
+        if (Date.now() >= deadline) { deadlineExpired = true; throw Object.assign(new Error('claim GC deadline expired before pending deletion'), { code: 'GC_DEADLINE_EXPIRED' }); }
+      } });
+      if (deadlineExpired) { enqueuePersistentUndoPendingCleanup(pending); result.truncated = true; result.skipped += 1; result.warnings.push(`pending-deadline:${pending.entryName}`); continue; }
+      if (removed.success) result.removed += 1;
+      else { result.skipped += 1; result.warnings.push(`${removed.code || 'pending-cleanup-failed'}:${pending.entryName}`); }
+    }
   };
   const scheduleLegacyPersistentUndoClaimGcContinuation = root => {
     const key = comparablePath(root); const state = persistentUndoLegacyCursors.get(key);
@@ -491,6 +638,7 @@ const registerWorkspaceIpc = context => {
     let workspaceId;
     try { workspaceId = await readPersistentUndoWorkspaceId(root); }
     catch (error) { result.warnings.push(`workspace-id-unavailable:${error?.message || String(error)}`); return result; }
+    await processPersistentUndoPendingCleanups({ root, result, deadline });
     if (!options.skipV2 && Date.now() < deadline) {
       let claimDirectory;
       try { claimDirectory = await persistentUndoClaimDirectory(root, false); }
@@ -852,6 +1000,7 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-projects', async (_event, workspacePath) => {
     try {
       const root = ensureWorkspace(workspacePath);
+      schedulePersistentUndoClaimGc(root);
       const catalog = workspaceCatalogs.get(root) || await refreshWorkspaceCatalog(root);
       await retryDeferredInterruptedTrimCleanup(root);
       watchWorkspace(root);
@@ -1360,6 +1509,7 @@ const registerWorkspaceIpc = context => {
     let operation;
     let loadedFromJournal = false;
     let persistentClaimDescriptor;
+    let persistentBoundRecord;
     try {
       pruneBlockedPersistentUndos();
       const requestedDecisionToken = String(options?.decisionToken || '');
@@ -1376,6 +1526,7 @@ const registerWorkspaceIpc = context => {
         const latest = await workspaceRepository.latestUndoRecord(workspaceRoot);
         if (latest.record) {
           operation = { kind: latest.record.kind, ...latest.record.payload, persistentId: latest.record.id, workspaceRoot };
+          persistentBoundRecord = latest.record;
           loadedFromJournal = true;
         }
       }
@@ -1383,13 +1534,26 @@ const registerWorkspaceIpc = context => {
       if (operation.persistentId && operation.workspaceRoot) {
         if (operation.kind === 'trash') {
           persistentClaimDescriptor = await persistentUndoClaimDescriptor(operation);
-          if (await persistentUndoClaimExists(persistentClaimDescriptor)) {
+          const claimStatus = await persistentUndoClaimStatus(persistentClaimDescriptor);
+          if (!claimStatus.complete) {
+            return serializeUndoRecoveryError(pendingPersistentUndoError('旧版持久撤销 claim 扫描尚未完成；后台将继续检查，当前不会执行恢复'));
+          }
+          if (claimStatus.exists) {
             const pendingError = Object.assign(new Error('该持久撤销记录已有恢复 tombstone；当前进程不会探测、恢复或修改 journal'), {
               code: 'PERSISTENT_UNDO_RECOVERY_PENDING', recoveryRequired: true, rollbackPending: true,
             });
             const claimed = blockPersistentUndo(operation, pendingError);
             return serializeUndoRecoveryError(claimed.error);
           }
+          if (!persistentBoundRecord) {
+            const latest = await workspaceRepository.latestUndoRecord(operation.workspaceRoot);
+            persistentBoundRecord = latest.record;
+          }
+          if (!persistentBoundRecord || persistentBoundRecord.id !== operation.persistentId
+              || persistentBoundRecord.kind !== 'trash' || !/^[0-9a-f]{64}$/u.test(String(persistentBoundRecord.claimToken || ''))) {
+            return serializeUndoRecoveryError(pendingPersistentUndoError('无法将持久撤销操作绑定到当前 ready journal 版本；不会执行恢复'));
+          }
+          operation = { kind: persistentBoundRecord.kind, ...persistentBoundRecord.payload, persistentId: persistentBoundRecord.id, workspaceRoot: operation.workspaceRoot };
         }
         const blocked = blockedPersistentUndos.get(persistentUndoKey(operation.workspaceRoot, operation.persistentId));
         if (blocked) {
@@ -1474,6 +1638,10 @@ const registerWorkspaceIpc = context => {
           if (originalExists) restoreConflicts.push(item);
           const probe = await recycleBinService.probe(item.recyclePidl);
           if (!probe.exists) {
+            if (operation.persistentId && operation.workspaceRoot) {
+              persistentClaimDescriptor ||= await persistentUndoClaimDescriptor(operation);
+              await claimPersistentUndoExecution(operation, persistentBoundRecord, persistentClaimDescriptor);
+            }
             throw Object.assign(new Error('系统回收站中的文件已不存在，可能已经被还原或清空'), { code: 'RECYCLE_ITEM_MISSING' });
           }
           restorePreflight.push({ item, action: originalExists ? 'conflict' : 'restore', restoreTarget: item.original });
@@ -1548,7 +1716,7 @@ const registerWorkspaceIpc = context => {
         }
         if (operation.persistentId && operation.workspaceRoot) {
           persistentClaimDescriptor ||= await persistentUndoClaimDescriptor(operation);
-          try { await createPersistentUndoClaim(operation, persistentClaimDescriptor); }
+          try { await claimPersistentUndoExecution(operation, persistentBoundRecord, persistentClaimDescriptor); }
           catch (claimError) {
             if (claimError.code === 'PERSISTENT_UNDO_RECOVERY_PENDING') {
               const claimed = blockPersistentUndo(operation, claimError);
@@ -1556,40 +1724,6 @@ const registerWorkspaceIpc = context => {
             }
             throw claimError;
           }
-          let latestAfterClaim;
-          try { latestAfterClaim = await workspaceRepository.latestUndoRecord(operation.workspaceRoot); }
-          catch (cause) {
-            throw Object.assign(new Error(`claim 已持久化，但无法复核撤销 journal；已拒绝执行：${cause?.message || String(cause)}`), {
-              code: 'PERSISTENT_UNDO_RECOVERY_PENDING', recoveryRequired: true, rollbackPending: true, cause,
-            });
-          }
-          if (!latestAfterClaim.record) {
-            return { success: false, error: '没有可撤销的操作' };
-          }
-          if (latestAfterClaim.record.id !== operation.persistentId) {
-            const staleError = Object.assign(new Error('claim 后的最新撤销记录已变化；为避免恢复错误记录，当前 tombstone 已保留且不会执行'), {
-              code: 'PERSISTENT_UNDO_RECOVERY_PENDING', recoveryRequired: true, rollbackPending: true,
-            });
-            blockPersistentUndo(operation, staleError);
-            return serializeUndoRecoveryError(staleError);
-          }
-          let executionClaim;
-          try { executionClaim = await workspaceRepository.claimUndoRecordExecution(operation.workspaceRoot, operation.persistentId); }
-          catch (cause) {
-            const pendingError = Object.assign(new Error(`持久撤销 claim 已建立，但无法原子隔离执行权；不会执行恢复：${cause?.message || String(cause)}`), {
-              code: 'PERSISTENT_UNDO_RECOVERY_PENDING', recoveryRequired: true, rollbackPending: true, cause,
-            });
-            blockPersistentUndo(operation, pendingError);
-            return serializeUndoRecoveryError(pendingError);
-          }
-          if (executionClaim?.claimed !== true) {
-            const pendingError = Object.assign(new Error('持久撤销执行权已被其他进程取得或记录状态已变化；当前 tombstone 保留且不会执行恢复'), {
-              code: 'PERSISTENT_UNDO_RECOVERY_PENDING', recoveryRequired: true, rollbackPending: true,
-            });
-            blockPersistentUndo(operation, pendingError);
-            return serializeUndoRecoveryError(pendingError);
-          }
-          await context.afterPersistentUndoExecutionClaim?.({ operation, descriptor: persistentClaimDescriptor });
         }
         const restoredItems = [];
         for (const plan of restorePreflight) {

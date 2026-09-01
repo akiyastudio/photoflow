@@ -45,6 +45,14 @@ const context = (handlers, overrides = {}) => {
   pathExists: async candidate => fs.existsSync(candidate), workspaceCatalogs: new Map(), activeProjectFileOperations: new Map(),
   pushUndoOperation: async () => undefined, renameHistory: [], writeLog: () => undefined, ...overrides,
   });
+  if (result.workspaceRepository?.latestUndoRecord) {
+    const latestUndoRecord = result.workspaceRepository.latestUndoRecord.bind(result.workspaceRepository);
+    result.workspaceRepository = { ...result.workspaceRepository, latestUndoRecord: async root => {
+      const response = await latestUndoRecord(root); const record = response?.record;
+      if (record && !record.claimToken) record.claimToken = crypto.createHash('sha256').update(JSON.stringify([record.id, record.kind, record.payload, record.state || 'ready', record.created_at || 0, record.updated_at || 0])).digest('hex');
+      return response;
+    } };
+  }
   if (result.workspaceRepository && !result.workspaceRepository.retireUndoRecordClaim) {
     result.workspaceRepository = { ...result.workspaceRepository, retireUndoRecordClaim: async (root, id) => {
       const records = (await result.workspaceRepository.listUndoRecords?.(root))?.records || [];
@@ -53,7 +61,8 @@ const context = (handlers, overrides = {}) => {
     } };
   }
   if (result.workspaceRepository && !result.workspaceRepository.claimUndoRecordExecution) {
-    result.workspaceRepository = { ...result.workspaceRepository, claimUndoRecordExecution: async (root, id) => {
+    result.workspaceRepository = { ...result.workspaceRepository, claimUndoRecordExecution: async (root, id, claimToken) => {
+      assert.match(String(claimToken || ''), /^[0-9a-f]{64}$/u);
       await result.workspaceRepository.markUndoRecordUnavailable?.(root, id);
       return { success: true, claimed: true };
     } };
@@ -167,7 +176,29 @@ const run = async () => {
     workspaceRepository: { retireUndoRecordClaim: async () => { delayedCalls += 1; await new Promise(resolve => setTimeout(resolve, 100)); return { retired: true }; } },
   }));
   const delayedSecond = await delayedControllerTwo.runPersistentUndoClaimGc(delayedCasRootTwo);
-  assert.strictEqual(delayedCalls, 2); assert.strictEqual(fs.existsSync(delayedMarker), true); assert.strictEqual(fs.existsSync(delayedMarkerTwo), true, 'a CAS completing after either deadline never authorizes deletion'); assert.strictEqual(delayedFirst.truncated, true); assert.strictEqual(delayedSecond.truncated, true);
+  for (let attempt = 0; attempt < 100 && (fs.existsSync(delayedMarker) || fs.existsSync(delayedMarkerTwo)); attempt += 1) await new Promise(resolve => setTimeout(resolve, 10));
+  assert(delayedCalls >= 2); assert.strictEqual(fs.existsSync(delayedMarker), false); assert.strictEqual(fs.existsSync(delayedMarkerTwo), false, 'a confirmed retired marker is deleted by a fresh-deadline continuation'); assert.strictEqual(delayedFirst.truncated, true); assert.strictEqual(delayedSecond.truncated, true);
+
+  const pendingRetryRoot = path.join(temporaryRoot, 'claim-gc-pending-retry'); fs.mkdirSync(pendingRetryRoot); const pendingRetryMarker = writeClaimMarker(pendingRetryRoot, 'pending-retry'); let pendingDeleteHooks = 0;
+  const pendingRetryController = registerWorkspaceIpc(context(new Map(), {
+    persistentUndoClaimRetentionMs: 0, persistentUndoClaimNowMs: () => gcNow, persistentUndoClaimThrottleMs: 0, persistentUndoClaimScanBudgetMs: 50,
+    workspaceRepository: { retireUndoRecordClaim: async () => { await new Promise(resolve => setTimeout(resolve, 100)); return { retired: true }; } },
+    beforePersistentUndoClaimGcDelete: async () => { pendingDeleteHooks += 1; if (pendingDeleteHooks <= 2) await new Promise(resolve => setTimeout(resolve, 75)); },
+  }));
+  await pendingRetryController.runPersistentUndoClaimGc(pendingRetryRoot);
+  for (let attempt = 0; attempt < 100 && fs.existsSync(pendingRetryMarker); attempt += 1) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.strictEqual(fs.existsSync(pendingRetryMarker), false, 'bounded backoff retries pending cleanup after two delete-hook deadline overruns'); assert(pendingDeleteHooks >= 3);
+
+  const pendingReplacementRoot = path.join(temporaryRoot, 'claim-gc-pending-replacement'); fs.mkdirSync(pendingReplacementRoot); const pendingReplacementMarker = writeClaimMarker(pendingReplacementRoot, 'pending-replacement'); const pendingReplacementBytes = fs.readFileSync(pendingReplacementMarker); let pendingReplacementDone = false;
+  const pendingReplacementController = registerWorkspaceIpc(context(new Map(), { persistentUndoClaimRetentionMs: 0, persistentUndoClaimNowMs: () => gcNow, persistentUndoClaimThrottleMs: 0, persistentUndoClaimScanBudgetMs: 50, workspaceRepository: { retireUndoRecordClaim: async () => { await new Promise(resolve => setTimeout(resolve, 50)); if (!pendingReplacementDone) { pendingReplacementDone = true; fs.unlinkSync(pendingReplacementMarker); fs.writeFileSync(pendingReplacementMarker, Buffer.alloc(pendingReplacementBytes.length, 0x78)); } await new Promise(resolve => setTimeout(resolve, 50)); return { retired: true }; } } }));
+  await pendingReplacementController.runPersistentUndoClaimGc(pendingReplacementRoot); await new Promise(resolve => setTimeout(resolve, 250));
+  assert.strictEqual(pendingReplacementDone, true); assert.strictEqual(fs.existsSync(pendingReplacementMarker), true, 'pending cleanup retains a path replacement that no longer matches the retired marker identity');
+
+  const capacityRootA = path.join(temporaryRoot, 'claim-gc-pending-capacity-a'); const capacityRootB = path.join(temporaryRoot, 'claim-gc-pending-capacity-b'); fs.mkdirSync(capacityRootA); fs.mkdirSync(capacityRootB); const capacityMarkerA = writeClaimMarker(capacityRootA, 'capacity-a'); const capacityMarkerB = writeClaimMarker(capacityRootB, 'capacity-b');
+  const capacityController = registerWorkspaceIpc(context(new Map(), { persistentUndoClaimRetentionMs: 0, persistentUndoClaimNowMs: () => gcNow, persistentUndoClaimThrottleMs: 0, persistentUndoClaimScanBudgetMs: 50, persistentUndoPendingCleanupCapacity: 1, workspaceRepository: { retireUndoRecordClaim: async () => { await new Promise(resolve => setTimeout(resolve, 100)); return { retired: true }; } } }));
+  await Promise.all([capacityController.runPersistentUndoClaimGc(capacityRootA), capacityController.runPersistentUndoClaimGc(capacityRootB)]);
+  for (let attempt = 0; attempt < 150 && (fs.existsSync(capacityMarkerA) || fs.existsSync(capacityMarkerB)); attempt += 1) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.strictEqual(fs.existsSync(capacityMarkerA), false); assert.strictEqual(fs.existsSync(capacityMarkerB), false, 'capacity eviction schedules unthrottled rescans so every retired marker is eventually collected');
 
   const sqliteGcRoot = path.join(temporaryRoot, 'claim-gc-real-sqlite'); fs.mkdirSync(sqliteGcRoot); const sqliteGcMarker = writeClaimMarker(sqliteGcRoot, 'sqlite-gc-race'); const sqliteOperations = path.join(temporaryRoot, 'claim-gc-operations.sqlite3');
   const python = fs.existsSync(path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe')) ? path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe') : 'python';
@@ -190,6 +221,16 @@ const run = async () => {
   assert.strictEqual(sqliteAddRejected, true, 'a real SQLite add racing at the delete hook is rejected by the retired ID'); assert.strictEqual(sqliteGc.removed, 1); assert.strictEqual(fs.existsSync(sqliteGcMarker), false);
   const sqliteState = spawnSync(python, ['-c', 'import sqlite3,sys; print(sqlite3.connect(sys.argv[1]).execute("SELECT state FROM undo_records WHERE id=?",(sys.argv[2],)).fetchone()[0])', sqliteOperations, 'sqlite-gc-race'], { encoding: 'utf8' });
   assert.strictEqual(sqliteState.stdout.trim(), 'retired', 'marker deletion cannot leave a ready journal row');
+
+  const loadGcRoot = path.join(temporaryRoot, 'claim-gc-workspace-load'); fs.mkdirSync(loadGcRoot); const loadGcMarker = writeClaimMarker(loadGcRoot, 'workspace-load-gc'); const loadGcHandlers = new Map();
+  registerWorkspaceIpc(context(loadGcHandlers, {
+    workspaceCatalogs: new Map([[loadGcRoot, { projects: [] }]]), watchWorkspace: () => undefined, reconcileWorkspaceCatalog: async () => undefined,
+    persistentUndoClaimRetentionMs: 0, persistentUndoClaimNowMs: () => gcNow, persistentUndoClaimThrottleMs: 0,
+    workspaceRepository: { retireUndoRecordClaim: async () => ({ retired: true }) },
+  }));
+  await loadGcHandlers.get('workspace-projects')(null, loadGcRoot);
+  for (let attempt = 0; attempt < 100 && fs.existsSync(loadGcMarker); attempt += 1) await new Promise(resolve => setTimeout(resolve, 10));
+  assert.strictEqual(fs.existsSync(loadGcMarker), false, 'normal workspace project-list loading schedules non-blocking undo claim GC');
   assert.throws(() => normalizeProjectDate({ year: '', month: 1 }), /年份不能为空/);
   assert.strictEqual(readProjectDate({ extra_json: '{"projectDate":{"year":1999,"month":1}}' }), undefined);
   assert.throws(() => normalizeProjectFileListFilter({ extensions: Array.from({ length: 65 }, (_, i) => `.x${i}`) }), /最多/);
@@ -447,7 +488,7 @@ const run = async () => {
   assert.strictEqual(unavailable.has('persistent-undo'), true); assert.strictEqual(restoreCalls, 2);
   await new Promise(resolve => setTimeout(resolve, 10));
   const secondPersistentUndo = await persistentHandlers.get('workspace-undo-rename')(null, persistentRoot);
-  assert.strictEqual(secondPersistentUndo.error, '没有可撤销的操作'); assert.strictEqual(latestCalls, 2); assert.strictEqual(restoreCalls, 2, 'terminal persistent recovery must not execute again');
+  assert.strictEqual(secondPersistentUndo.error, '没有可撤销的操作'); assert.strictEqual(latestCalls, 3); assert.strictEqual(restoreCalls, 2, 'terminal persistent recovery must not execute again');
 
   const blockedRoot = path.join(temporaryRoot, 'blocked-persistent'); fs.mkdirSync(blockedRoot); const blockedOriginal = path.join(blockedRoot, 'restore.txt');
   const blockedPayload = { items: [{ original: blockedOriginal, originalIdentity: null, recyclePidl: 'blocked-pidl' }] }; const blockedOperation = { kind: 'trash', workspaceRoot: blockedRoot, persistentId: 'blocked-undo', ...blockedPayload };
@@ -461,7 +502,7 @@ const run = async () => {
   await new Promise(resolve => setTimeout(resolve, 10));
   const secondBlocked = await blockedHandlers.get('workspace-undo-rename')(null, blockedRoot);
   assert.strictEqual(firstBlocked.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(secondBlocked.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.match(firstBlocked.error, /operations DB offline/);
-  assert.strictEqual(blockedRestoreCalls, 0, 'failed execution CAS stops before restore'); assert.strictEqual(blockedLatestCalls, 2); assert.strictEqual(blockedClaimCalls, 1, 'an existing tombstone never retries execution CAS as a loser'); assert.strictEqual(blockedHistory.length, 0);
+  assert.strictEqual(blockedRestoreCalls, 0, 'failed execution CAS stops before restore'); assert.strictEqual(blockedLatestCalls, 3); assert.strictEqual(blockedClaimCalls, 1, 'an existing tombstone never retries execution CAS as a loser'); assert.strictEqual(blockedHistory.length, 0);
   assert.strictEqual(claimMarkers(blockedRoot).length, 1, 'failed marking retains the durable claim');
 
   const rejectedClaimRoot = path.join(temporaryRoot, 'execution-claim-rejected'); fs.mkdirSync(rejectedClaimRoot); let rejectedClaimRestores = 0;
@@ -472,6 +513,16 @@ const run = async () => {
   }));
   const rejectedClaim = await rejectedClaimHandlers.get('workspace-undo-rename')(null, rejectedClaimRoot);
   assert.strictEqual(rejectedClaim.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(rejectedClaimRestores, 0); assert.strictEqual(claimMarkers(rejectedClaimRoot).length, 1, 'a false execution CAS retains its marker with zero restore side effects');
+
+  const versionRaceRoot = path.join(temporaryRoot, 'execution-version-race'); fs.mkdirSync(versionRaceRoot); const versionRaceOldPayload = { items: [{ original: path.join(versionRaceRoot, 'old.txt'), recyclePidl: 'old-pidl' }] }; const versionRaceNewPayload = { items: [{ original: path.join(versionRaceRoot, 'new.txt'), recyclePidl: 'new-pidl' }] }; let versionRaceLatestCalls = 0; let versionRaceClaimCalls = 0; let versionRaceRestores = 0;
+  const oldVersionToken = '1'.repeat(64); const newVersionToken = '2'.repeat(64);
+  const versionRaceHandlers = new Map(); registerWorkspaceIpc(context(versionRaceHandlers, {
+    renameHistory: [{ kind: 'trash', workspaceRoot: versionRaceRoot, persistentId: 'same-id-version-race', items: [{ original: path.join(versionRaceRoot, 'memory.txt'), recyclePidl: 'memory-pidl' }] }],
+    workspaceRepository: { latestUndoRecord: async () => ({ record: versionRaceLatestCalls++ === 0 ? { id: 'same-id-version-race', kind: 'trash', payload: versionRaceOldPayload, claimToken: oldVersionToken } : { id: 'same-id-version-race', kind: 'trash', payload: versionRaceNewPayload, claimToken: newVersionToken } }), claimUndoRecordExecution: async () => { versionRaceClaimCalls += 1; return { claimed: true }; } },
+    recycleBinService: { probe: async pidl => ({ exists: pidl === 'old-pidl' }), restore: async () => { versionRaceRestores += 1; } },
+  }));
+  const versionRace = await versionRaceHandlers.get('workspace-undo-rename')(null, '');
+  assert.strictEqual(versionRace.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(versionRaceClaimCalls, 0); assert.strictEqual(versionRaceRestores, 0, 'same-ID replacement between bind and CAS cannot restore the old DB payload'); assert.strictEqual(claimMarkers(versionRaceRoot).length, 1);
 
   const crossRoot = path.join(temporaryRoot, 'cross-process-unknown'); fs.mkdirSync(crossRoot); const crossId = 'cross-process-undo'; const crossOriginal = path.join(crossRoot, 'restore.txt');
   const crossPayload = { items: [{ original: crossOriginal, originalIdentity: null, recyclePidl: 'cross-pidl' }] }; let crossRestoreCalls = 0; let crossProbeCalls = 0; let crossMarkCalls = 0;
@@ -523,6 +574,37 @@ const run = async () => {
   }));
   const legacyPreflight = await legacyPreflightHandlers.get('workspace-undo-rename')(null, legacyPreflightRoot);
   assert.strictEqual(legacyPreflight.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(legacyPreflightProbes, 0); assert.strictEqual(legacyPreflightRestores, 0, 'schema-1 tombstones are found by a complete streaming preflight');
+  for (let attempt = 0; attempt < 100 && legacyPreflightProbes === 0; attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  const legacyPreflightAgain = await legacyPreflightHandlers.get('workspace-undo-rename')(null, legacyPreflightRoot);
+  assert.strictEqual(legacyPreflightAgain.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(legacyPreflightProbes, 0, 'background completion keeps a discovered legacy marker permanently blocking');
+
+  const legacyAbsentRoot = path.join(temporaryRoot, 'legacy-preflight-absent'); fs.mkdirSync(legacyAbsentRoot); for (let index = 0; index < 180; index += 1) fs.writeFileSync(path.join(legacyAbsentRoot, `ordinary-${String(index).padStart(3, '0')}.txt`), 'ordinary'); let legacyAbsentState = 'ready'; let legacyAbsentRestores = 0;
+  const legacyAbsentPayload = { items: [{ original: path.join(legacyAbsentRoot, 'restore.txt'), recyclePidl: 'legacy-absent-pidl' }] }; const legacyAbsentHandlers = new Map(); registerWorkspaceIpc(context(legacyAbsentHandlers, {
+    resolveWorkspaceRoot: value => value, persistentUndoInteractiveVisitedLimit: 4, persistentUndoInteractiveBudgetMs: 10000,
+    workspaceRepository: { latestUndoRecord: async () => ({ record: legacyAbsentState === 'ready' ? { id: 'legacy-absent-id', kind: 'trash', payload: legacyAbsentPayload } : null }), claimUndoRecordExecution: async () => { legacyAbsentState = 'retired'; return { claimed: true }; }, removeUndoRecord: async () => undefined },
+    recycleBinService: { probe: async () => ({ exists: true }), restore: async ({ originalPath }) => { legacyAbsentRestores += 1; fs.writeFileSync(originalPath, 'restored'); } },
+  }));
+  const legacyAbsentFirst = await legacyAbsentHandlers.get('workspace-undo-rename')(null, legacyAbsentRoot); assert.strictEqual(legacyAbsentFirst.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(legacyAbsentRestores, 0);
+  let legacyAbsentSecond;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    await new Promise(resolve => setTimeout(resolve, 10));
+    legacyAbsentSecond = await legacyAbsentHandlers.get('workspace-undo-rename')(null, legacyAbsentRoot);
+    if (legacyAbsentSecond.success) break;
+  }
+  assert.strictEqual(legacyAbsentSecond.success, true, legacyAbsentSecond.error); assert.strictEqual(legacyAbsentRestores, 1, 'undo proceeds only after the background legacy scan reaches EOF');
+
+  const capacityInteractiveRoots = ['a', 'b'].map(name => path.join(temporaryRoot, `legacy-interactive-capacity-${name}`)); for (const root of capacityInteractiveRoots) { fs.mkdirSync(root); for (let index = 0; index < 20; index += 1) fs.writeFileSync(path.join(root, `ordinary-${index}.txt`), 'ordinary'); }
+  const capacityInteractiveStates = new Map(capacityInteractiveRoots.map(root => [root, 'ready'])); const capacityInteractiveHandlers = new Map(); registerWorkspaceIpc(context(capacityInteractiveHandlers, {
+    resolveWorkspaceRoot: value => value, persistentUndoInteractiveCapacity: 1, persistentUndoInteractiveVisitedLimit: 1, persistentUndoInteractiveBudgetMs: 10000,
+    workspaceRepository: { latestUndoRecord: async root => ({ record: capacityInteractiveStates.get(root) === 'ready' ? { id: `capacity-${path.basename(root)}`, kind: 'trash', payload: { items: [{ original: path.join(root, 'restore.txt'), recyclePidl: `pidl-${path.basename(root)}` }] } } : null }), claimUndoRecordExecution: async root => { capacityInteractiveStates.set(root, 'retired'); return { claimed: true }; }, removeUndoRecord: async () => undefined },
+    recycleBinService: { probe: async () => ({ exists: true }), restore: async ({ originalPath }) => { fs.writeFileSync(originalPath, 'restored'); } },
+  }));
+  for (const root of capacityInteractiveRoots) assert.strictEqual((await capacityInteractiveHandlers.get('workspace-undo-rename')(null, root)).code, 'PERSISTENT_UNDO_RECOVERY_PENDING');
+  for (const root of [...capacityInteractiveRoots].reverse()) {
+    let outcome;
+    for (let attempt = 0; attempt < 100; attempt += 1) { await new Promise(resolve => setTimeout(resolve, 10)); outcome = await capacityInteractiveHandlers.get('workspace-undo-rename')(null, root); if (outcome.success) break; }
+    assert.strictEqual(outcome.success, true, `capacity-one interactive scan must eventually admit ${root}`);
+  }
 
   const unsafeDirectoryRoot = path.join(temporaryRoot, 'claim-directory-symlink'); fs.mkdirSync(unsafeDirectoryRoot); const unsafeTarget = path.join(temporaryRoot, 'claim-directory-target'); fs.mkdirSync(unsafeTarget); let unsafeDirectoryCreated = false;
   try { fs.symlinkSync(unsafeTarget, path.join(unsafeDirectoryRoot, '.photoflow-undo-claims'), process.platform === 'win32' ? 'junction' : 'dir'); unsafeDirectoryCreated = true; } catch (error) { if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(error?.code)) throw error; }
@@ -572,11 +654,11 @@ const run = async () => {
 
   const staleNullRoot = path.join(temporaryRoot, 'claim-stale-null'); fs.mkdirSync(staleNullRoot); const staleNullId = 'stale-null-id'; let staleNullMarkCalls = 0; let staleNullRestoreCalls = 0;
   const staleNullHandlers = new Map(); registerWorkspaceIpc(context(staleNullHandlers, { renameHistory: [{ kind: 'trash', workspaceRoot: staleNullRoot, persistentId: staleNullId, items: [{ original: path.join(staleNullRoot, 'restore.txt'), originalIdentity: null, recyclePidl: 'stale-null-pidl' }] }], workspaceRepository: { latestUndoRecord: async () => ({ record: null }), markUndoRecordUnavailable: async () => { staleNullMarkCalls += 1; } }, recycleBinService: { probe: async () => ({ exists: true }), restore: async () => { staleNullRestoreCalls += 1; } } }));
-  const staleNull = await staleNullHandlers.get('workspace-undo-rename')(null, ''); assert.strictEqual(staleNull.error, '没有可撤销的操作'); assert.strictEqual(staleNullMarkCalls, 0); assert.strictEqual(staleNullRestoreCalls, 0); assert.strictEqual(claimMarkers(staleNullRoot).length, 1, 'null stale reread retains tombstone');
+  const staleNull = await staleNullHandlers.get('workspace-undo-rename')(null, ''); assert.strictEqual(staleNull.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(staleNullMarkCalls, 0); assert.strictEqual(staleNullRestoreCalls, 0); assert.strictEqual(claimMarkers(staleNullRoot).length, 0, 'an unbound memory operation stops before marker creation');
 
   const staleOtherRoot = path.join(temporaryRoot, 'claim-stale-other'); fs.mkdirSync(staleOtherRoot); const staleOtherId = 'stale-other-id'; let staleOtherMarkCalls = 0; let staleOtherRestoreCalls = 0;
   const staleOtherHandlers = new Map(); registerWorkspaceIpc(context(staleOtherHandlers, { renameHistory: [{ kind: 'trash', workspaceRoot: staleOtherRoot, persistentId: staleOtherId, items: [{ original: path.join(staleOtherRoot, 'restore.txt'), originalIdentity: null, recyclePidl: 'stale-other-pidl' }] }], workspaceRepository: { latestUndoRecord: async () => ({ record: { id: 'different-ready-id', kind: 'trash', payload: { items: [] } } }), markUndoRecordUnavailable: async () => { staleOtherMarkCalls += 1; } }, recycleBinService: { probe: async () => ({ exists: true }), restore: async () => { staleOtherRestoreCalls += 1; } } }));
-  const staleOther = await staleOtherHandlers.get('workspace-undo-rename')(null, ''); assert.strictEqual(staleOther.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(staleOtherMarkCalls, 0); assert.strictEqual(staleOtherRestoreCalls, 0); assert.strictEqual(claimMarkers(staleOtherRoot).length, 1, 'different-id stale reread fails closed and retains tombstone');
+  const staleOther = await staleOtherHandlers.get('workspace-undo-rename')(null, ''); assert.strictEqual(staleOther.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(staleOtherMarkCalls, 0); assert.strictEqual(staleOtherRestoreCalls, 0); assert.strictEqual(claimMarkers(staleOtherRoot).length, 0, 'different-id binding fails before marker creation');
 
   const successRoot = path.join(temporaryRoot, 'claim-success'); fs.mkdirSync(successRoot); const successId = 'success-id'; const successOriginal = path.join(successRoot, 'restore.txt'); let successState = 'ready'; let successClaimCalls = 0; let successRestoreCalls = 0; let successUnlinkCalls = 0;
   const successFs = { ...fs, promises: { ...fs.promises, unlink: async () => { successUnlinkCalls += 1; throw new Error('marker unlink must never run'); } } };
@@ -589,9 +671,11 @@ const run = async () => {
   const removeFailure = await removeFailureHandlers.get('workspace-undo-rename')(null, removeFailureRoot); assert.strictEqual(removeFailure.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(claimMarkers(removeFailureRoot).length, 1, 'DB removal failure retains claim');
 
   const retryRoot = path.join(temporaryRoot, 'claim-preflight-retry'); fs.mkdirSync(retryRoot); const retryVolume = path.join(retryRoot, 'offline-volume'); const retryConflict = path.join(retryRoot, 'conflict.txt'); fs.writeFileSync(retryConflict, 'occupant');
-  const volumeHandlers = new Map(); registerWorkspaceIpc(context(volumeHandlers, { renameHistory: [{ kind: 'trash', workspaceRoot: retryRoot, persistentId: 'volume-id', items: [{ original: path.join(retryVolume, 'item.txt'), originalIdentity: null, recyclePidl: 'volume-pidl' }] }], pathExists: async candidate => candidate !== path.parse(path.join(retryVolume, 'item.txt')).root, recycleBinService: { probe: async () => ({ exists: true }) } }));
+  const volumePayload = { items: [{ original: path.join(retryVolume, 'item.txt'), originalIdentity: null, recyclePidl: 'volume-pidl' }] };
+  const volumeHandlers = new Map(); registerWorkspaceIpc(context(volumeHandlers, { renameHistory: [{ kind: 'trash', workspaceRoot: retryRoot, persistentId: 'volume-id', ...volumePayload }], workspaceRepository: { latestUndoRecord: async () => ({ record: { id: 'volume-id', kind: 'trash', payload: volumePayload } }) }, pathExists: async candidate => candidate !== path.parse(path.join(retryVolume, 'item.txt')).root, recycleBinService: { probe: async () => ({ exists: true }) } }));
   const volumeRetry = await volumeHandlers.get('workspace-undo-rename')(null, ''); assert.strictEqual(volumeRetry.code, 'RESTORE_VOLUME_UNAVAILABLE'); assert.strictEqual(claimMarkers(retryRoot).length, 0, 'volume preflight errors precede claim creation');
-  const conflictHandlers = new Map(); registerWorkspaceIpc(context(conflictHandlers, { renameHistory: [{ kind: 'trash', workspaceRoot: retryRoot, persistentId: 'conflict-id', items: [{ original: retryConflict, originalIdentity: null, recyclePidl: 'conflict-pidl' }] }], samePathIdentity: async () => false, capturePathIdentity: async candidate => { const stat = await fs.promises.stat(candidate, { bigint: true }); return { device: String(stat.dev), inode: String(stat.ino), directory: stat.isDirectory() }; }, recycleBinService: { probe: async () => ({ exists: true }) } }));
+  const conflictPayload = { items: [{ original: retryConflict, originalIdentity: null, recyclePidl: 'conflict-pidl' }] };
+  const conflictHandlers = new Map(); registerWorkspaceIpc(context(conflictHandlers, { renameHistory: [{ kind: 'trash', workspaceRoot: retryRoot, persistentId: 'conflict-id', ...conflictPayload }], workspaceRepository: { latestUndoRecord: async () => ({ record: { id: 'conflict-id', kind: 'trash', payload: conflictPayload } }) }, samePathIdentity: async () => false, capturePathIdentity: async candidate => { const stat = await fs.promises.stat(candidate, { bigint: true }); return { device: String(stat.dev), inode: String(stat.ino), directory: stat.isDirectory() }; }, recycleBinService: { probe: async () => ({ exists: true }) } }));
   const conflictRetry = await conflictHandlers.get('workspace-undo-rename')(null, ''); assert.strictEqual(conflictRetry.requiresDecision.kind, 'restore-conflict'); assert.strictEqual(claimMarkers(retryRoot).length, 0, 'conflict decision precedes claim creation');
 
   const overflowRoot = path.join(temporaryRoot, 'overflow-persistent'); fs.mkdirSync(overflowRoot); const overflowHistory = []; const overflowHandlers = new Map(); let overflowRestoreCalls = 0; let overflowMarkCalls = 0; let overflowLatestId = 'overflow-a';
@@ -612,16 +696,16 @@ const run = async () => {
   assert.strictEqual(overflowRestoreCalls, 0, 'failed claiming and overflow both stop before restore'); assert.strictEqual(overflowMarkCalls, 5);
 
   const missingPersistentRoot = path.join(temporaryRoot, 'missing-persistent'); fs.mkdirSync(missingPersistentRoot); const missingPersistentPayload = { items: [{ original: path.join(missingPersistentRoot, 'gone'), originalIdentity: null, recyclePidl: 'gone-pidl' }] };
-  const missingPersistentHistory = [{ kind: 'trash', workspaceRoot: missingPersistentRoot, persistentId: 'missing-undo', ...missingPersistentPayload }]; const missingPersistentHandlers = new Map(); let missingProbeCalls = 0; let missingMarkCalls = 0;
+  const missingPersistentHistory = [{ kind: 'trash', workspaceRoot: missingPersistentRoot, persistentId: 'missing-undo', ...missingPersistentPayload }]; const missingPersistentHandlers = new Map(); let missingProbeCalls = 0; let missingMarkCalls = 0; let missingPersistentState = 'ready';
   registerWorkspaceIpc(context(missingPersistentHandlers, {
     renameHistory: missingPersistentHistory, resolveWorkspaceRoot: value => value,
-    workspaceRepository: { markUndoRecordUnavailable: async () => { missingMarkCalls += 1; throw new Error('mark unavailable failed'); }, latestUndoRecord: async () => ({ record: { id: 'missing-undo', kind: 'trash', payload: missingPersistentPayload } }) },
+    workspaceRepository: { markUndoRecordUnavailable: async () => { missingMarkCalls += 1; throw new Error('mark unavailable failed'); }, latestUndoRecord: async () => ({ record: missingPersistentState === 'ready' ? { id: 'missing-undo', kind: 'trash', payload: missingPersistentPayload } : null }), claimUndoRecordExecution: async () => { if (missingPersistentState !== 'ready') return { claimed: false }; missingPersistentState = 'retired'; return { claimed: true }; } },
     recycleBinService: { probe: async () => { missingProbeCalls += 1; return { exists: false }; } },
   }));
   const firstMissingPersistent = await missingPersistentHandlers.get('workspace-undo-rename')(null, '');
   const secondMissingPersistent = await missingPersistentHandlers.get('workspace-undo-rename')(null, missingPersistentRoot);
-  assert.strictEqual(firstMissingPersistent.code, 'RECYCLE_ITEM_MISSING'); assert.strictEqual(secondMissingPersistent.code, 'RECYCLE_ITEM_MISSING'); assert.match(secondMissingPersistent.cleanupWarning, /mark unavailable failed/);
-  assert.strictEqual(missingProbeCalls, 1, 'missing recycle item is not probed or executed again after persistence marking fails'); assert.strictEqual(missingMarkCalls, 6); assert.strictEqual(missingPersistentHistory.length, 0);
+  assert.strictEqual(firstMissingPersistent.code, 'RECYCLE_ITEM_MISSING'); assert.match(firstMissingPersistent.cleanupWarning, /mark unavailable failed/); assert.strictEqual(secondMissingPersistent.error, '没有可撤销的操作');
+  assert.strictEqual(missingPersistentState, 'retired'); assert.strictEqual(missingProbeCalls, 1, 'terminal missing is version-CAS retired before another instance can probe'); assert.strictEqual(missingMarkCalls, 3); assert.strictEqual(missingPersistentHistory.length, 0);
 
   const missingHistory = [{ kind: 'trash', items: [{ original: path.join(temporaryRoot, 'missing-restore'), originalIdentity: null, recyclePidl: 'missing-pidl' }] }]; const missingHandlers = new Map();
   registerWorkspaceIpc(context(missingHandlers, { renameHistory: missingHistory, recycleBinService: { probe: async () => ({ exists: false }) } }));

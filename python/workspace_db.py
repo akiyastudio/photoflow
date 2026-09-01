@@ -58,7 +58,7 @@ VERSION_TREE_DEFAULT_LAYOUT_REVISION = "2"
 PROGRESS_PURPOSE_CONSTRAINT_REVISION = "1"
 TRANSCODE_GRAPH_SCHEMA_REVISION = "1"
 LEGACY_PROGRESS_PARENT_REPAIR_REVISION = "1"
-TARGET_SCHEMA_VERSION = 33
+TARGET_SCHEMA_VERSION = 34
 MEDIA_INCREMENTAL_BATCH_SIZE = 64
 MEDIA_INCREMENTAL_COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
 MEDIA_INCREMENTAL_INCOMPLETE_RETENTION_MS = 24 * 60 * 60 * 1000
@@ -1951,6 +1951,14 @@ def _migration_33(db):
     return migrated
 
 
+def _migration_34(db):
+    """Fence permanent retired-ID and version-bound undo execution semantics."""
+    columns = {row[1] for row in db.execute("PRAGMA table_info(undo_records)").fetchall()}
+    if not {"id", "kind", "payload_json", "state", "created_at", "updated_at"} <= columns:
+        raise RuntimeError("workspace undo_records contract is incomplete")
+    return False
+
+
 def _ensure_transcode_graph_schema(db):
     """Upgrade graph CHECK constraints without preserving retired video-preview slots."""
     changed = False
@@ -2075,6 +2083,7 @@ MIGRATIONS = {
     31: _migration_31,
     32: _migration_32,
     33: _migration_33,
+    34: _migration_34,
 }
 
 
@@ -2226,6 +2235,7 @@ def _connect_impl(root: str, database: str, include_domains=None, include_compat
         legacy_parent_revision_recorded = False
         relocation_migrated = False
         try:
+            _migration_34(db)
             run_compatibility_hooks("prepare_connection", db, database, False)
             if requested_domains:
                 attach_workspace_domain_storage(db, database, requested_domains)
@@ -2491,6 +2501,7 @@ def _connect_impl(root: str, database: str, include_domains=None, include_compat
                 _migration_30(db)
                 _migration_32(db)
                 _migration_33(db)
+                _migration_34(db)
                 _set_meta(db, "schema_version", TARGET_SCHEMA_VERSION)
         except Exception:
             db.close()
@@ -2540,6 +2551,7 @@ def _connect_impl(root: str, database: str, include_domains=None, include_compat
             _migration_30(db)
             _migration_32(db)
             _migration_33(db)
+            _migration_34(db)
         if include_compatibility:
             run_compatibility_hooks("prepare_connection", db, database, True)
     except Exception:
@@ -9967,6 +9979,21 @@ def _operation_undo_records(db, payload=None):
     return sorted(records, key=lambda record: int(record.get("created_at") or 0), reverse=True)
 
 
+def _undo_claim_token(row) -> str:
+    fields = [row[key] for key in ("id", "kind", "payload_json", "state", "created_at", "updated_at")]
+    encoded = json.dumps(fields, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _undo_record_response(row):
+    if row is None:
+        return None
+    record = dict(row)
+    record["claimToken"] = _undo_claim_token(row)
+    record["payload"] = json.loads(record.pop("payload_json"))
+    return record
+
+
 def deleted_projects_list(db, payload=None):
     records_by_name = {}
     for record in _operation_undo_records(db, payload):
@@ -11420,6 +11447,7 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
         )
         if cursor.rowcount != 1:
             db.rollback()
+            db.close()
             raise UndoRecordRetiredError(f"undo record {record_id} is permanently retired")
         db.commit()
         db.close()
@@ -11427,48 +11455,68 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
     elif action == "undo_record_retire_claim":
         record_id = str(payload.get("id") or "")
         if not record_id:
+            db.close()
             raise ValueError("undo record id is required")
-        db.execute("BEGIN IMMEDIATE")
-        db.execute(
-            """INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at)
-               VALUES(?, 'claim-retired', '{}', 'retired', ?, ?)
-               ON CONFLICT(id) DO UPDATE SET
-                 kind='claim-retired',payload_json='{}',state='retired',updated_at=excluded.updated_at
-               WHERE undo_records.state IN ('unavailable','retired')""",
-            (record_id, now, now),
-        )
-        row = db.execute("SELECT state FROM undo_records WHERE id=?", (record_id,)).fetchone()
-        retired = row is not None and row["state"] == "retired"
-        db.commit()
-        db.close()
-        return {"success": True, "retired": retired}
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at)
+                   VALUES(?, 'claim-retired', '{}', 'retired', ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     kind='claim-retired',payload_json='{}',state='retired',updated_at=excluded.updated_at
+                   WHERE undo_records.state IN ('unavailable','retired')""",
+                (record_id, now, now),
+            )
+            row = db.execute("SELECT state FROM undo_records WHERE id=?", (record_id,)).fetchone()
+            retired = row is not None and row["state"] == "retired"
+            db.commit()
+            return {"success": True, "retired": retired}
+        except Exception:
+            if db.in_transaction: db.rollback()
+            raise
+        finally:
+            db.close()
     elif action == "undo_record_claim_execute":
         record_id = str(payload.get("id") or "")
+        claim_token = str(payload.get("claimToken") or "")
         if not record_id:
+            db.close()
             raise ValueError("undo record id is required")
-        db.execute("BEGIN IMMEDIATE")
-        cursor = db.execute(
-            """UPDATE undo_records SET
-                 kind='claim-retired',payload_json='{}',state='retired',updated_at=?
-               WHERE id=? AND state='ready' AND kind='trash'""",
-            (now, record_id),
-        )
-        claimed = cursor.rowcount == 1
-        db.commit()
-        db.close()
-        return {"success": True, "claimed": claimed}
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            row = db.execute("SELECT id,kind,payload_json,state,created_at,updated_at FROM undo_records WHERE id=?", (record_id,)).fetchone()
+            claimed = bool(row is not None and row["state"] == "ready" and row["kind"] == "trash"
+                           and claim_token and _undo_claim_token(row) == claim_token)
+            if claimed:
+                db.execute(
+                    "UPDATE undo_records SET kind='claim-retired',payload_json='{}',state='retired',updated_at=? WHERE id=?",
+                    (now, record_id),
+                )
+            db.commit()
+            return {"success": True, "claimed": claimed}
+        except Exception:
+            if db.in_transaction: db.rollback()
+            raise
+        finally:
+            db.close()
     elif action == "undo_record_latest":
         row = db.execute(
             "SELECT * FROM undo_records WHERE state='ready' AND kind='trash' ORDER BY created_at DESC LIMIT 1"
         ).fetchone()
         db.close()
-        if row is None:
-            return {"success": True, "record": None}
-        record = dict(row)
-        record["payload"] = json.loads(record.pop("payload_json"))
-        return {"success": True, "record": record}
+        return {"success": True, "record": _undo_record_response(row)}
+    elif action == "undo_record_list":
+        rows = db.execute("SELECT * FROM undo_records WHERE state <> 'retired' ORDER BY created_at DESC").fetchall()
+        db.close()
+        return {"success": True, "records": [_undo_record_response(row) for row in rows]}
     elif action == "undo_record_remove":
         db.execute("DELETE FROM undo_records WHERE id=? AND state <> 'retired'", (str(payload.get("id") or ""),))
+    elif action == "undo_record_remove_many":
+        ids = list(dict.fromkeys(str(value) for value in payload.get("ids") or [] if str(value)))
+        for offset in range(0, len(ids), 400):
+            chunk = ids[offset:offset + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders}) AND state <> 'retired'", chunk)
     elif action == "undo_record_mark_unavailable":
         db.execute("UPDATE undo_records SET state='unavailable', updated_at=? WHERE id=? AND state <> 'retired'", (now, str(payload.get("id") or "")))
     else:

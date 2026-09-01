@@ -2,6 +2,7 @@
 
 import multiprocessing
 import json
+import hashlib
 import os
 import sqlite3
 import sys
@@ -25,6 +26,12 @@ def raw(database, record_id):
         ).fetchone()
     finally:
         db.close()
+
+
+def claim_token(database, record_id):
+    row = raw(database, record_id)
+    fields = list(row)
+    return hashlib.sha256(json.dumps(fields, ensure_ascii=False, separators=(",", ":")).encode("utf-8")).hexdigest()
 
 
 def retire_in_process(database, record_id, completed):
@@ -59,6 +66,15 @@ def simultaneous_add(database, record_id, barrier, outcome):
         outcome.put(("add", getattr(error, "code", type(error).__name__)))
 
 
+def replace_record_in_process(database, record_id):
+    operations_db.execute(database, "undo_record_add", {"id": record_id, "kind": "trash", "payload": {"version": "new"}})
+
+
+def claim_old_token_in_process(database, record_id, token, outcome):
+    result = operations_db.execute(database, "undo_record_claim_execute", {"id": record_id, "claimToken": token})
+    outcome.put(result["claimed"])
+
+
 def assert_backend_retirement(add, retire, claim_execute, remove, mark, database):
     add("ready", {"large": "x" * 100_000})
     assert retire("ready")["retired"] is False
@@ -87,10 +103,11 @@ def assert_backend_retirement(add, retire, claim_execute, remove, mark, database
     assert raw(database, "unknown")[3] == "future-state", "unknown states fail closed without mutation"
     remove("unknown")
     add("execute", {"large": "y" * 100_000})
-    assert claim_execute("execute")["claimed"] is True
+    execute_token = claim_token(database, "execute")
+    assert claim_execute("execute", execute_token)["claimed"] is True
     assert raw(database, "execute")[1:4] == ("claim-retired", "{}", "retired")
-    assert claim_execute("execute")["claimed"] is False
-    assert claim_execute("missing-execute")["claimed"] is False
+    assert claim_execute("execute", execute_token)["claimed"] is False
+    assert claim_execute("missing-execute", "0" * 64)["claimed"] is False
     add("wrong-kind", {})
     wrong_kind = sqlite3.connect(database)
     try:
@@ -98,9 +115,15 @@ def assert_backend_retirement(add, retire, claim_execute, remove, mark, database
         wrong_kind.commit()
     finally:
         wrong_kind.close()
-    assert claim_execute("wrong-kind")["claimed"] is False
+    assert claim_execute("wrong-kind", claim_token(database, "wrong-kind"))["claimed"] is False
     assert raw(database, "wrong-kind")[3] == "ready"
     remove("wrong-kind")
+    add("version-race", {"version": "old"})
+    old_token = claim_token(database, "version-race")
+    add("version-race", {"version": "new"})
+    assert claim_execute("version-race", old_token)["claimed"] is False
+    assert raw(database, "version-race")[3] == "ready"
+    remove("version-race")
 
 
 def run():
@@ -111,7 +134,7 @@ def run():
         assert_backend_retirement(
             lambda record_id, payload: operations_db.execute(operations, "undo_record_add", {"id": record_id, "kind": "trash", "payload": payload}),
             lambda record_id: operations_db.execute(operations, "undo_record_retire_claim", {"id": record_id}),
-            lambda record_id: operations_db.execute(operations, "undo_record_claim_execute", {"id": record_id}),
+            lambda record_id, token: operations_db.execute(operations, "undo_record_claim_execute", {"id": record_id, "claimToken": token}),
             lambda record_id: operations_db.execute(operations, "undo_record_remove", {"id": record_id}),
             lambda record_id: operations_db.execute(operations, "undo_record_mark_unavailable", {"id": record_id}),
             operations,
@@ -159,35 +182,95 @@ def run():
                 assert state == "retired"
                 assert ("retire", True) in outcomes and ("add", "UNDO_RECORD_RETIRED") in outcomes
 
+        operations_db.execute(operations, "undo_record_add", {"id": "process-version-race", "kind": "trash", "payload": {"version": "old"}})
+        process_old_token = claim_token(operations, "process-version-race")
+        replacement_process = multiprocessing.Process(target=replace_record_in_process, args=(operations, "process-version-race"))
+        replacement_process.start(); replacement_process.join(15); assert replacement_process.exitcode == 0
+        version_outcome = multiprocessing.Queue()
+        claim_process = multiprocessing.Process(target=claim_old_token_in_process, args=(operations, "process-version-race", process_old_token, version_outcome))
+        claim_process.start(); claim_process.join(15); assert claim_process.exitcode == 0
+        assert version_outcome.get(timeout=2) is False and raw(operations, "process-version-race")[3] == "ready"
+        operations_db.execute(operations, "undo_record_remove", {"id": "process-version-race"})
+
         snapshot = str(temporary_path / "snapshot.sqlite3")
         operations_db.snapshot(operations, snapshot)
         assert raw(snapshot, "process-race")[3] == "retired", "snapshots preserve retired rows"
 
         # Restoring an older ready row over a live retired row must union the tombstone set.
         old = str(temporary_path / "old.sqlite3")
-        operations_db.execute(old, "init", {})
-        operations_db.execute(old, "undo_record_add", {"id": "process-race", "kind": "trash", "payload": {"old": True}})
+        old_db = sqlite3.connect(old)
+        try:
+            old_db.execute("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            old_db.execute("CREATE TABLE undo_records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,payload_json TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)")
+            old_db.execute("INSERT INTO meta VALUES('schema_version','1')")
+            old_db.execute("INSERT INTO meta VALUES('domain_identity','operations')")
+            old_db.execute("INSERT INTO undo_records VALUES('process-race','trash','{\"old\":true}','ready',1,1)")
+            old_db.commit()
+        finally:
+            old_db.close()
         domain_recovery.restore_workspace(old, operations, "operations", [])
         restored = raw(operations, "process-race")
         assert restored[1:4] == ("claim-retired", "{}", "retired")
+        schema_probe = sqlite3.connect(operations)
+        try:
+            assert schema_probe.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+        finally:
+            schema_probe.close()
         try:
             operations_db.execute(operations, "undo_record_add", {"id": "process-race", "kind": "trash", "payload": {}})
             raise AssertionError("restore revived a retired ID")
         except Exception as error:
             assert getattr(error, "code", "") == "UNDO_RECORD_RETIRED"
+        domain_recovery.reset_store(operations, "operations")
+        assert raw(operations, "process-race")[1:4] == ("claim-retired", "{}", "retired")
+        domain_recovery.restore_workspace(old, operations, "operations", [])
+        assert raw(operations, "process-race")[3] == "retired", "reset followed by an old ready snapshot cannot revive a retired ID"
+        try:
+            operations_db.execute(operations, "undo_record_add", {"id": "process-race", "kind": "trash", "payload": {}})
+            raise AssertionError("reset lost a retired ID")
+        except Exception as error:
+            assert getattr(error, "code", "") == "UNDO_RECORD_RETIRED"
+        supported_operations_schema = operations_db.SCHEMA_VERSION
+        try:
+            operations_db.SCHEMA_VERSION = 1
+            operations_db._READY_CACHE.clear()
+            try:
+                operations_db.execute(operations, "init", {})
+                raise AssertionError("schema-1 worker accepted semantic schema 2")
+            except RuntimeError as error:
+                assert "newer than supported" in str(error)
+        finally:
+            operations_db.SCHEMA_VERSION = supported_operations_schema
+            operations_db._READY_CACHE.clear()
 
         workspace_root = str(temporary_path / "workspace")
         os.makedirs(workspace_root)
         core = str(temporary_path / "workspace.sqlite3")
         workspace_db.load(workspace_root, core)
+        supported_core_schema = workspace_db.TARGET_SCHEMA_VERSION
+        try:
+            workspace_db.TARGET_SCHEMA_VERSION = 33
+            try:
+                workspace_db.connect(workspace_root, core)
+                raise AssertionError("schema-33 core worker accepted semantic schema 34")
+            except RuntimeError as error:
+                assert "高于当前软件支持" in str(error)
+        finally:
+            workspace_db.TARGET_SCHEMA_VERSION = supported_core_schema
         assert_backend_retirement(
             lambda record_id, payload: workspace_db.mutate(workspace_root, core, "undo_record_add", {"id": record_id, "kind": "trash", "payload": payload}),
             lambda record_id: workspace_db.mutate(workspace_root, core, "undo_record_retire_claim", {"id": record_id}),
-            lambda record_id: workspace_db.mutate(workspace_root, core, "undo_record_claim_execute", {"id": record_id}),
+            lambda record_id, token: workspace_db.mutate(workspace_root, core, "undo_record_claim_execute", {"id": record_id, "claimToken": token}),
             lambda record_id: workspace_db.mutate(workspace_root, core, "undo_record_remove", {"id": record_id}),
             lambda record_id: workspace_db.mutate(workspace_root, core, "undo_record_mark_unavailable", {"id": record_id}),
             core,
         )
+        workspace_db.mutate(workspace_root, core, "undo_record_add", {"id": "fallback-ready", "kind": "trash", "payload": {"visible": True}})
+        fallback_list = workspace_db.mutate(workspace_root, core, "undo_record_list", {})["records"]
+        assert [record["id"] for record in fallback_list] == ["fallback-ready"]
+        workspace_db.mutate(workspace_root, core, "undo_record_remove_many", {"ids": ["fallback-ready", "ready", "absent", "execute"]})
+        assert raw(core, "fallback-ready") is None
+        assert raw(core, "ready")[3] == raw(core, "absent")[3] == raw(core, "execute")[3] == "retired"
         db = sqlite3.connect(core)
         db.row_factory = sqlite3.Row
         try:

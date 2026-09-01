@@ -3,6 +3,7 @@
 import argparse
 import base64
 import errno
+import hashlib
 import json
 import os
 import sqlite3
@@ -18,7 +19,7 @@ except ModuleNotFoundError:
     from database_error_codes import error_response
 
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 UNDO_ACTIONS = (
     "undo_record_add",
     "undo_record_retire_claim",
@@ -90,7 +91,14 @@ def _migration_0_to_1(db):
     db.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('domain_identity','operations')")
 
 
-MIGRATIONS = {0: _migration_0_to_1}
+def _migration_1_to_2(db):
+    """Fence the permanent retired-ID and version-bound execution semantics."""
+    columns = {row[1] for row in db.execute("PRAGMA table_info(undo_records)").fetchall()}
+    if not {"id", "kind", "payload_json", "state", "created_at", "updated_at"} <= columns:
+        raise RuntimeError("operations schema-1 undo_records contract is incomplete")
+
+
+MIGRATIONS = {0: _migration_0_to_1, 1: _migration_1_to_2}
 
 
 def _connect(database: str) -> sqlite3.Connection:
@@ -239,12 +247,19 @@ def _record(row):
     if row is None:
         return None
     result = dict(row)
+    result["claimToken"] = _claim_token(row)
     try:
         result["payload"] = json.loads(result.pop("payload_json"))
     except (TypeError, ValueError, json.JSONDecodeError):
         result["payload"] = {}
         result.pop("payload_json", None)
     return result
+
+
+def _claim_token(row) -> str:
+    fields = [row[key] for key in ("id", "kind", "payload_json", "state", "created_at", "updated_at")]
+    encoded = json.dumps(fields, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def execute(database: str, action: str, payload: dict):
@@ -293,16 +308,18 @@ def execute(database: str, action: str, payload: dict):
             return {"success": True, "retired": retired}
         if action == "undo_record_claim_execute":
             record_id = str(payload.get("id") or "")
+            claim_token = str(payload.get("claimToken") or "")
             if not record_id:
                 raise ValueError("undo record id is required")
             db.execute("BEGIN IMMEDIATE")
-            cursor = db.execute(
-                """UPDATE undo_records SET
-                     kind='claim-retired',payload_json='{}',state='retired',updated_at=?
-                   WHERE id=? AND state='ready' AND kind='trash'""",
-                (now, record_id),
-            )
-            claimed = cursor.rowcount == 1
+            row = db.execute("SELECT id,kind,payload_json,state,created_at,updated_at FROM undo_records WHERE id=?", (record_id,)).fetchone()
+            claimed = bool(row is not None and row["state"] == "ready" and row["kind"] == "trash"
+                           and claim_token and _claim_token(row) == claim_token)
+            if claimed:
+                db.execute(
+                    "UPDATE undo_records SET kind='claim-retired',payload_json='{}',state='retired',updated_at=? WHERE id=?",
+                    (now, record_id),
+                )
             db.commit()
             return {"success": True, "claimed": claimed}
         if action == "undo_record_latest":

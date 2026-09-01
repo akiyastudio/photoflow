@@ -83,7 +83,7 @@ LEGACY_REQUIRED_COLUMNS = {
                      "file_path_key", "created_at", "updated_at"},
     },
 }
-SUPPORTED_SCHEMA_VERSIONS = {"media": 1, "versioning": 1, "operations": 1}
+SUPPORTED_SCHEMA_VERSIONS = {"media": 1, "versioning": 1, "operations": 2}
 for extension in run_compatibility_hooks("recovery_declaration"):
     PATH_COLUMNS.update(extension.get("pathColumns") or {})
 
@@ -496,6 +496,30 @@ def _publish_staged(staged: str, destination: str, domain: str, backup_prefix: s
     return backup
 
 
+def _live_retired_records(path: str):
+    if not os.path.isfile(path):
+        return []
+    live = _connect(path, readonly=True)
+    try:
+        return [tuple(row) for row in live.execute(
+            "SELECT id,created_at,updated_at FROM undo_records WHERE state='retired'"
+        ).fetchall()]
+    finally:
+        live.close()
+
+
+def _merge_retired_records(db: sqlite3.Connection, records) -> None:
+    now = int(time.time() * 1000)
+    for record_id, created_at, updated_at in records:
+        db.execute(
+            """INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at)
+               VALUES(?, 'claim-retired', '{}', 'retired', ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 kind='claim-retired',payload_json='{}',state='retired',updated_at=excluded.updated_at""",
+            (record_id, created_at or now, max(int(updated_at or 0), now)),
+        )
+
+
 def restore_workspace(source: str, destination: str, domain: str, replacements) -> dict:
     if domain not in REQUIRED_TABLES:
         raise ValueError(f"unknown domain: {domain}")
@@ -508,15 +532,7 @@ def restore_workspace(source: str, destination: str, domain: str, replacements) 
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
     staged = f"{destination_path}.restore-{uuid.uuid4().hex}.tmp"
     backup = ""
-    retired_records = []
-    if domain == "operations" and os.path.isfile(destination_path):
-        live = _connect(destination_path, readonly=True)
-        try:
-            retired_records = [tuple(row) for row in live.execute(
-                "SELECT id,created_at,updated_at FROM undo_records WHERE state='retired'"
-            ).fetchall()]
-        finally:
-            live.close()
+    retired_records = _live_retired_records(destination_path) if domain == "operations" else []
     try:
         snapshot(source, staged, domain)
         db = _connect(staged)
@@ -524,15 +540,7 @@ def restore_workspace(source: str, destination: str, domain: str, replacements) 
             db.execute("BEGIN IMMEDIATE")
             _rebase(db, domain, replacements)
             if domain == "operations":
-                now = int(time.time() * 1000)
-                for record_id, created_at, updated_at in retired_records:
-                    db.execute(
-                        """INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at)
-                           VALUES(?, 'claim-retired', '{}', 'retired', ?, ?)
-                           ON CONFLICT(id) DO UPDATE SET
-                             kind='claim-retired',payload_json='{}',state='retired',updated_at=excluded.updated_at""",
-                        (record_id, created_at or now, max(int(updated_at or 0), now)),
-                    )
+                _merge_retired_records(db, retired_records)
             db.commit()
         except Exception:
             db.rollback()
@@ -730,11 +738,21 @@ def reset_store(destination: str, domain: str) -> dict:
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
     staged = f"{destination_path}.reset-{uuid.uuid4().hex}.tmp"
     quarantine = ""
+    retired_records = _live_retired_records(destination_path) if domain == "operations" else []
     try:
         if domain == "operations":
             from operations_db import _connect as connect_operations
             db = connect_operations(staged)
-            db.close()
+            try:
+                try:
+                    db.execute("BEGIN IMMEDIATE")
+                    _merge_retired_records(db, retired_records)
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+            finally:
+                db.close()
         elif any(run_compatibility_hooks("recovery_reset_store", domain, staged)):
             pass
         elif domain in DOMAIN_TABLES:
