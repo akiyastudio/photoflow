@@ -91,12 +91,21 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
       if (descriptor !== undefined) fs.closeSync(descriptor);
     }
   };
+  const isReclaimableFailedItem = item => item.stage === 'failed' && !item.bindingNonce && item.physicalStarted !== true;
+  const reclaimFailedItemsInMemory = () => {
+    for (const [key, queue] of pendingRatings) {
+      const remaining = queue.filter(item => !isReclaimableFailedItem(item));
+      if (remaining.length) pendingRatings.set(key, remaining); else pendingRatings.delete(key);
+      refreshOptimistic(key);
+    }
+  };
   const savePendingRatings = () => {
-    if (!pendingFile) return;
+    if (!pendingFile) { reclaimFailedItemsInMemory(); return; }
     if (outboxLoadError) throw new Error(`媒体评级待处理文件损坏，已停止覆盖: ${outboxLoadError.message || String(outboxLoadError)}`);
+    const items = [...pendingRatings.values()].flat().filter(item => !isReclaimableFailedItem(item));
+    if (items.length > 10000) throw new Error('媒体评级待处理文件超过安全容量，已停止覆盖');
     fs.mkdirSync(path.dirname(pendingFile), { recursive: true });
     const temporary = `${pendingFile}.tmp-${process.pid}-${Date.now()}-${++writeSequence}`;
-    const items = [...pendingRatings.values()].flat();
     try {
       writePendingTemporary(temporary, items);
       try {
@@ -113,6 +122,7 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     } finally {
       fs.rmSync(temporary, { force: true });
     }
+    reclaimFailedItemsInMemory();
   };
   if (recoveredFromBackup) {
     const temporary = `${pendingFile}.recovery-${process.pid}-${Date.now()}-${++writeSequence}`;
@@ -647,12 +657,21 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     if (fileDrains.has(key)) return fileDrains.get(key);
     const drain = (async () => {
       while (true) {
+        let failedCleanupPending = false;
         for (const failed of sortPending(key).filter(candidate => candidate.stage === 'failed' && candidate.bindingNonce)) {
           try { await cleanupFailedIntentBinding(failed); }
-          catch (error) { writeLog('warn', 'Unable to clean failed media rating binding', { filePath: failed.filePath, error: error.message || String(error) }); }
+          catch (error) { failedCleanupPending = true; writeLog('warn', 'Unable to clean failed media rating binding', { filePath: failed.filePath, error: error.message || String(error) }); }
+        }
+        if (sortPending(key).some(isReclaimableFailedItem)) {
+          try { savePendingRatings(); }
+          catch (error) { failedCleanupPending = true; writeLog('warn', 'Unable to reclaim terminal media rating record', { error: error.message || String(error) }); }
         }
         const item = sortPending(key).find(candidate => candidate.stage !== 'failed');
-        if (!item) return;
+        if (!item) {
+          if (!failedCleanupPending) return;
+          await backgroundRetryDelay();
+          continue;
+        }
         const boundedChecked = item.type === 'checked' && ['metadata', 'writing'].includes(item.stage);
         const hasCompletion = itemCompletions.has(item.token);
         if (item.stage === 'fingerprint' && terminalStates.get(item.token)?.error?.code === 'MEDIA_RATING_CHECKED_DEADLINE_EXCEEDED') terminalStates.delete(item.token);

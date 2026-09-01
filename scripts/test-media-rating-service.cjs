@@ -39,13 +39,13 @@ const waitFor = async predicate => {
   throw new Error('timed out waiting for media rating state');
 };
 
-const ratingService = ({ root, outbox, readRaw, write, refresh = async () => undefined, links = () => [], fileSystem = fs }) => createMediaRatingService({
+const ratingService = ({ root, outbox, readRaw, write, refresh = async () => undefined, links = () => [], fileSystem = fs, retryDelayMs = 60000 }) => createMediaRatingService({
   exiftool: { readRaw, write }, fs: fileSystem, path,
   imageExtensions: new Set(['.jpg']), rawExtensions: new Set(),
   releaseWorkspaceWatchPath: () => undefined, suppressWorkspaceWatchPath: () => undefined,
   versionService: { refreshMetadataFingerprint: refresh, listProgress: async () => ({ progressFolders: [] }) },
   projectVirtualPaths: { listManagedExternalLinks: links }, writeLog: () => undefined,
-  pendingRatingsPath: outbox, retryDelayMs: 60000, checkedRetryDelayMs: 5, checkedRetryDeadlineMs: 1000,
+  pendingRatingsPath: outbox, retryDelayMs, checkedRetryDelayMs: 5, checkedRetryDeadlineMs: 1000,
 });
 
 const run = async () => {
@@ -184,19 +184,34 @@ const run = async () => {
 
     const terminalRoot = path.join(temporaryRoot, 'terminal-crash'); fs.mkdirSync(terminalRoot);
     const terminalFile = path.join(terminalRoot, 'terminal.jpg'); const terminalOutbox = path.join(terminalRoot, 'outbox.json'); fs.writeFileSync(terminalFile, 'rating=0');
-    const terminalFs = Object.create(fs); let rejectedCleanupSaves = 0; let terminalWrites = 0;
+    const terminalFs = Object.create(fs); let rejectedCleanupSaves = 0; let terminalWrites = 0; let rejectCleanedTerminalSaves = false;
     terminalFs.writeFileSync = (target, data, ...args) => {
       let document;
       try { document = JSON.parse(String(data)); } catch { document = null; }
-      if (document?.items?.some(item => item.stage === 'failed' && !item.bindingNonce)) { rejectedCleanupSaves += 1; throw new Error('simulated crash before cleaned terminal receipt'); }
+      if (rejectCleanedTerminalSaves && document?.items?.length === 0) { rejectedCleanupSaves += 1; throw new Error('simulated crash before cleaned terminal receipt'); }
       return fs.writeFileSync(target, data, ...args);
     };
-    const terminalService = ratingService({ root: terminalRoot, outbox: terminalOutbox, fileSystem: terminalFs, readRaw: async target => parseRating(target), write: async target => { terminalWrites += 1; await fs.promises.appendFile(target, '|rating=3'); const error = new Error('permanent failure after physical write'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error; } });
+    const terminalService = ratingService({ root: terminalRoot, outbox: terminalOutbox, fileSystem: terminalFs, readRaw: async target => parseRating(target), write: async target => { terminalWrites += 1; await fs.promises.appendFile(target, '|rating=3'); rejectCleanedTerminalSaves = true; const error = new Error('permanent failure after physical write'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error; } });
     await terminalService.write(terminalRoot, terminalFile, 3);
     await waitFor(() => { const item = JSON.parse(fs.readFileSync(terminalOutbox, 'utf8')).items[0]; return rejectedCleanupSaves > 0 && item?.stage === 'failed' && item.bindingNonce && item.physicalStarted === true; });
     ratingService({ root: terminalRoot, outbox: terminalOutbox, readRaw: async target => parseRating(target), write: async () => { terminalWrites += 1; } });
-    await waitFor(() => { const item = JSON.parse(fs.readFileSync(terminalOutbox, 'utf8')).items[0]; return item?.stage === 'failed' && !item.bindingNonce && !item.physicalStarted; });
+    await waitFor(() => JSON.parse(fs.readFileSync(terminalOutbox, 'utf8')).items.length === 0);
     assert.strictEqual(terminalWrites, 1, 'a crash between durable failure and binding cleanup must never re-run the physical write');
+
+    const capacityRoot = path.join(temporaryRoot, 'terminal-capacity'); fs.mkdirSync(capacityRoot);
+    const capacityFile = path.join(capacityRoot, 'capacity.jpg'); const capacityOutbox = path.join(capacityRoot, 'outbox.json'); fs.writeFileSync(capacityFile, 'rating=0');
+    const terminalHistory = Array.from({ length: 10000 }, (_, index) => ({ workspaceRoot: capacityRoot, filePath: capacityFile, token: `failed-${index}`, type: 'ordinary', stage: 'failed', rating: index % 6, sequence: index + 1, updatedAt: Date.now() }));
+    fs.writeFileSync(capacityOutbox, JSON.stringify({ version: 1, items: terminalHistory }));
+    const capacityService = ratingService({ root: capacityRoot, outbox: capacityOutbox, readRaw: async target => parseRating(target), write: async () => undefined });
+    await waitFor(() => JSON.parse(fs.readFileSync(capacityOutbox, 'utf8')).items.length === 0);
+    await assert.rejects(capacityService.writeChecked(capacityRoot, capacityFile, 2, fs.statSync(capacityFile).mtimeMs - 1), error => error?.code === 'MEDIA_RATING_REVISION_CONFLICT');
+    await waitFor(() => JSON.parse(fs.readFileSync(capacityOutbox, 'utf8')).items.length === 0);
+    assert.strictEqual(JSON.parse(fs.readFileSync(capacityOutbox, 'utf8')).items.length, 0, 'more than 10000 historical permanent failures must still leave a restart-readable outbox');
+    fs.writeFileSync(capacityOutbox, JSON.stringify({ version: 1, items: [...terminalHistory, { ...terminalHistory[0], token: 'oversized' }] }));
+    fs.rmSync(`${capacityOutbox}.backup`, { force: true });
+    const oversizedService = ratingService({ root: capacityRoot, outbox: capacityOutbox, readRaw: async target => parseRating(target), write: async () => undefined });
+    await assert.rejects(oversizedService.write(capacityRoot, capacityFile, 2), /待处理文件损坏/);
+    assert.strictEqual(JSON.parse(fs.readFileSync(capacityOutbox, 'utf8')).items.length, 10001, 'an oversized outbox must remain untouched and fail closed');
 
     const legacyRoot = path.join(temporaryRoot, 'legacy-outbox'); fs.mkdirSync(legacyRoot);
     const legacyMetadata = path.join(legacyRoot, 'metadata.jpg'); const legacyWriting = path.join(legacyRoot, 'writing.jpg'); const legacyProven = path.join(legacyRoot, 'proven.jpg'); const legacyOutbox = path.join(legacyRoot, 'outbox.json');
@@ -208,7 +223,7 @@ const run = async () => {
     ] }));
     let legacyWrites = 0; let legacyFingerprints = 0;
     ratingService({ root: legacyRoot, outbox: legacyOutbox, readRaw: async target => parseRating(target), write: async () => { legacyWrites += 1; }, refresh: async () => { legacyFingerprints += 1; } });
-    await waitFor(() => { const items = JSON.parse(fs.readFileSync(legacyOutbox, 'utf8')).items; return items.length === 2 && items.every(item => item.stage === 'failed'); });
+    await waitFor(() => JSON.parse(fs.readFileSync(legacyOutbox, 'utf8')).items.length === 0);
     assert.strictEqual(legacyWrites, 0, 'unproven legacy metadata/writing intents must fail closed');
     assert.strictEqual(legacyFingerprints, 1, 'a legacy writing intent proven by rating and revision may finish fingerprinting');
 
