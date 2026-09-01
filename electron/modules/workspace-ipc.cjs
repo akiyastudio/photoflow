@@ -195,6 +195,9 @@ const registerWorkspaceIpc = context => {
   const persistentUndoPendingCleanupBaseDelayMs = Math.max(10, Number(context.persistentUndoPendingCleanupBaseDelayMs) || 50);
   const persistentUndoGcScheduled = new Set();
   const persistentUndoGcRunning = new Set();
+  const persistentUndoRequestedCanonicalRoots = new Map();
+  const persistentUndoRequestedCanonicalCapacity = Math.max(1, Number(context.persistentUndoRequestedCanonicalCapacity) || 64);
+  const persistentUndoRequestedCanonicalTtlMs = Math.max(1000, Number(context.persistentUndoRequestedCanonicalTtlMs) || 5 * 60 * 1000);
   const persistentUndoInteractiveLegacyScans = new Map();
   const persistentUndoInteractiveAdmissionTimers = new Map();
   const persistentUndoInteractiveBudgetMs = Math.max(1, Number(context.persistentUndoInteractiveBudgetMs) || 10);
@@ -531,23 +534,30 @@ const registerWorkspaceIpc = context => {
     const rootKey = comparablePath(root);
     if (persistentUndoPendingCleanupTimers.has(rootKey) || persistentUndoPendingCleanupRetryRunning.has(rootKey)) return;
     const attempt = (persistentUndoPendingCleanupAttempts.get(rootKey) || 0) + 1;
-    if (attempt > persistentUndoPendingCleanupMaxAttempts) { persistentUndoPendingCleanupRescanNeeded.add(rootKey); return; }
+    if (attempt > persistentUndoPendingCleanupMaxAttempts) {
+      while (persistentUndoPendingCleanupRescanNeeded.size >= persistentUndoPendingCleanupCapacity) persistentUndoPendingCleanupRescanNeeded.delete(persistentUndoPendingCleanupRescanNeeded.values().next().value);
+      persistentUndoPendingCleanupRescanNeeded.add(rootKey); return;
+    }
     persistentUndoPendingCleanupAttempts.set(rootKey, attempt);
     context.onPersistentUndoPendingCleanupSchedule?.({ root, attempt });
     const delayMs = persistentUndoPendingCleanupBaseDelayMs * (2 ** (attempt - 1));
     const timer = setTimeout(async () => {
       persistentUndoPendingCleanupTimers.delete(rootKey);
       persistentUndoPendingCleanupRetryRunning.add(rootKey);
+      let cursorBusy = false;
       try {
         for (const cursorMap of [persistentUndoV2Cursors, persistentUndoLegacyCursors]) {
           const state = cursorMap.get(rootKey);
-          if (state?.running) return;
+          if (state?.running) { cursorBusy = true; break; }
           if (state) { cursorMap.delete(rootKey); await state.directory?.close().catch(() => undefined); }
         }
-        try { await runPersistentUndoClaimGc(root, { continuation: true, pendingRetry: true }); }
-        catch (error) { writeLog('warn', 'Persistent undo pending cleanup retry failed', { workspaceRoot: root, error: error?.message || String(error) }); }
+        if (!cursorBusy) {
+          try { await runPersistentUndoClaimGc(root, { continuation: true, pendingRetry: true }); }
+          catch (error) { writeLog('warn', 'Persistent undo pending cleanup retry failed', { workspaceRoot: root, error: error?.message || String(error) }); }
+        }
       } finally {
         persistentUndoPendingCleanupRetryRunning.delete(rootKey);
+        if (cursorBusy) persistentUndoPendingCleanupAttempts.set(rootKey, Math.max(0, attempt - 1));
       }
       if ([...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === rootKey)
           && !persistentUndoPendingCleanupTimers.has(rootKey) && !persistentUndoPendingCleanupRescanNeeded.has(rootKey)) schedulePersistentUndoPendingCleanupRetry(root);
@@ -692,21 +702,49 @@ const registerWorkspaceIpc = context => {
     for (const [key, pending] of persistentUndoPendingCleanups) if (comparablePath(pending.root) === rootKey) persistentUndoPendingCleanups.delete(key);
     const timer = persistentUndoPendingCleanupTimers.get(rootKey); if (timer) clearTimeout(timer);
     persistentUndoPendingCleanupTimers.delete(rootKey); persistentUndoPendingCleanupRetryRunning.delete(rootKey); persistentUndoPendingCleanupAttempts.delete(rootKey);
-    persistentUndoClaimLastScans.delete(rootKey); persistentUndoPendingCleanupRescanNeeded.add(rootKey);
+    persistentUndoClaimLastScans.delete(rootKey); persistentUndoPendingCleanupRescanNeeded.delete(rootKey);
+  };
+  const knownCanonicalRootKey = requestedKey => {
+    const entry = persistentUndoRequestedCanonicalRoots.get(requestedKey);
+    if (!entry) return '';
+    if (entry.expiresAt <= Date.now()) { persistentUndoRequestedCanonicalRoots.delete(requestedKey); return ''; }
+    return entry.canonicalKey;
+  };
+  const rememberCanonicalRootKey = (requestedKey, canonicalKey) => {
+    const now = Date.now();
+    for (const [key, entry] of persistentUndoRequestedCanonicalRoots) if (entry.expiresAt <= now) persistentUndoRequestedCanonicalRoots.delete(key);
+    if (!persistentUndoRequestedCanonicalRoots.has(requestedKey)) while (persistentUndoRequestedCanonicalRoots.size >= persistentUndoRequestedCanonicalCapacity) persistentUndoRequestedCanonicalRoots.delete(persistentUndoRequestedCanonicalRoots.keys().next().value);
+    persistentUndoRequestedCanonicalRoots.set(requestedKey, { canonicalKey, expiresAt: now + persistentUndoRequestedCanonicalTtlMs });
   };
   const runPersistentUndoClaimGc = async (workspaceRoot, options = {}) => {
     const result = { checked: 0, removed: 0, skipped: 0, warnings: [], visited: 0 };
     const startedAt = Date.now();
     const deadline = startedAt + persistentUndoClaimScanBudgetMs;
     const requestedRootKey = comparablePath(path.resolve(String(workspaceRoot || '')));
+    const knownCanonicalKey = knownCanonicalRootKey(requestedRootKey);
     let root;
     try { root = await fs.promises.realpath(path.resolve(String(workspaceRoot || ''))); }
-    catch (error) { await cleanupPersistentUndoGcRoot(requestedRootKey); result.warnings.push(`workspace-unavailable:${error?.code || error?.message || String(error)}`); return result; }
+    catch (error) {
+      await cleanupPersistentUndoGcRoot(requestedRootKey);
+      if (knownCanonicalKey && knownCanonicalKey !== requestedRootKey) await cleanupPersistentUndoGcRoot(knownCanonicalKey);
+      for (const key of [requestedRootKey, knownCanonicalKey].filter(Boolean)) {
+        while (persistentUndoPendingCleanupRescanNeeded.size >= persistentUndoPendingCleanupCapacity) persistentUndoPendingCleanupRescanNeeded.delete(persistentUndoPendingCleanupRescanNeeded.values().next().value);
+        persistentUndoPendingCleanupRescanNeeded.add(key);
+      }
+      result.warnings.push(`workspace-unavailable:${error?.code || error?.message || String(error)}`); return result;
+    }
     const throttleKey = comparablePath(root);
+    rememberCanonicalRootKey(requestedRootKey, throttleKey);
     const now = Number(context.persistentUndoClaimNowMs?.() ?? Date.now());
     const hasPendingCleanup = [...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === throttleKey);
     if (options.continuation && !options.pendingRetry && (hasPendingCleanup || persistentUndoPendingCleanupRescanNeeded.has(throttleKey) || persistentUndoPendingCleanupTimers.has(throttleKey))) { result.deferred = true; return result; }
-    const forceRescan = !options.continuation && persistentUndoPendingCleanupRescanNeeded.delete(throttleKey);
+    let forceRescan = false;
+    if (!options.continuation) {
+      const forcedCanonical = persistentUndoPendingCleanupRescanNeeded.delete(throttleKey);
+      const forcedRequested = persistentUndoPendingCleanupRescanNeeded.delete(requestedRootKey);
+      const forcedKnown = Boolean(knownCanonicalKey && persistentUndoPendingCleanupRescanNeeded.delete(knownCanonicalKey));
+      forceRescan = forcedCanonical || forcedRequested || forcedKnown;
+    }
     if (!options.continuation && !forceRescan && now - (persistentUndoClaimLastScans.get(throttleKey) || 0) < persistentUndoClaimThrottleMs) {
       result.skipped += 1; result.throttled = true; return result;
     }
@@ -733,7 +771,8 @@ const registerWorkspaceIpc = context => {
     return result;
   };
   const schedulePersistentUndoClaimGc = workspaceRoot => {
-    const key = comparablePath(path.resolve(String(workspaceRoot || '')));
+    const requestedKey = comparablePath(path.resolve(String(workspaceRoot || '')));
+    const key = knownCanonicalRootKey(requestedKey) || requestedKey;
     if (persistentUndoGcScheduled.has(key) || persistentUndoGcRunning.has(key)) return;
     persistentUndoGcScheduled.add(key);
     setTimeout(() => {

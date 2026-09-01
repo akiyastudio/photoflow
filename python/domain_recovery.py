@@ -499,6 +499,10 @@ def _publish_staged(staged: str, destination: str, domain: str, backup_prefix: s
 def _live_retired_records(path: str):
     if not os.path.isfile(path):
         return []
+    status = verify(path, "operations")
+    if (not status["success"] or not (1 <= int(status.get("schemaVersion") or 0) <= SUPPORTED_SCHEMA_VERSIONS["operations"])
+            or status.get("domainIdentity") != "operations"):
+        raise RuntimeError(f"live operations retired source failed its schema fence: {status}")
     live = _connect(path, readonly=True)
     try:
         return [tuple(row) for row in live.execute(
@@ -823,9 +827,32 @@ def reset_store(destination: str, domain: str, retired_source: str = "") -> dict
     return {**result, "quarantine": quarantine, "requiresReindex": domain == "media"}
 
 
+def sync_retired_shadow(source: str, destination: str) -> dict:
+    """Union the final operations retired set into the schema-fenced core shadow."""
+    source_path, destination_path = os.path.abspath(source), os.path.abspath(destination)
+    source_status = verify(source_path, "operations")
+    if (not source_status["success"] or source_status.get("schemaVersion") != SUPPORTED_SCHEMA_VERSIONS["operations"]
+            or source_status.get("domainIdentity") != "operations"):
+        raise RuntimeError(f"operations retired source is not healthy: {source_status}")
+    # This validates the core schema fence and undo table before any write.
+    _core_shadow_retired_records(destination_path)
+    records = _live_retired_records(source_path)
+    core = _connect(destination_path)
+    try:
+        core.execute("BEGIN IMMEDIATE")
+        _merge_retired_records(core, records)
+        core.commit()
+    except Exception:
+        core.rollback()
+        raise
+    finally:
+        core.close()
+    return {"success": True, "retired": len(records), "source": source_path, "destination": destination_path}
+
+
 def main(argv=None):
     parser = argparse.ArgumentParser()
-    parser.add_argument("action", choices=("verify", "snapshot", "restore-workspace", "restore-project", "reset"))
+    parser.add_argument("action", choices=("verify", "snapshot", "restore-workspace", "restore-project", "reset", "sync-retired-shadow"))
     parser.add_argument("--domain", required=True, choices=tuple(PATH_COLUMNS))
     parser.add_argument("--source")
     parser.add_argument("--destination", required=True)
@@ -846,6 +873,10 @@ def main(argv=None):
         result = restore_workspace(args.source, args.destination, args.domain, replacements, args.retired_source)
     elif args.action == "restore-project":
         result = restore_project(args.source, args.destination, args.domain, args.project_id, args.peer_source, replacements)
+    elif args.action == "sync-retired-shadow":
+        if args.domain != "operations" or not args.source:
+            raise ValueError("sync-retired-shadow requires --domain operations and --source")
+        result = sync_retired_shadow(args.source, args.destination)
     else:
         result = reset_store(args.destination, args.domain, args.retired_source)
     print(json.dumps(result, ensure_ascii=False), flush=True)

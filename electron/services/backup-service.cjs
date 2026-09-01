@@ -19,6 +19,21 @@ const FIXED_RETENTION = Object.freeze({ daily: 7, weekly: 4, monthly: 12 });
 const FULL_SOURCE_SCRUB_INTERVAL_MS = 7 * DAY_MS;
 const SOURCE_FINGERPRINT_CHUNK_BYTES = 64 * 1024;
 
+const assertRecoveryActionLease = (lease, args) => {
+  const action = String(args?.[0] || '');
+  const destinationIndex = args.indexOf('--destination');
+  const requiredLeasePaths = [destinationIndex >= 0 ? path.resolve(String(args[destinationIndex + 1] || '')) : ''];
+  const retiredSourceIndex = args.indexOf('--retired-source');
+  if (retiredSourceIndex >= 0) requiredLeasePaths.push(path.resolve(String(args[retiredSourceIndex + 1] || '')));
+  if (action === 'sync-retired-shadow') {
+    const sourceIndex = args.indexOf('--source');
+    requiredLeasePaths.push(sourceIndex >= 0 ? path.resolve(String(args[sourceIndex + 1] || '')) : '');
+  }
+  if (!lease || requiredLeasePaths.some(requiredPath => !requiredPath || !lease.databases.has(requiredPath))) {
+    throw new Error(`恢复工具禁止在目标 SQLite exclusive 租约外执行：${action}`);
+  }
+};
+
 const exists = filePath => fs.promises.access(filePath).then(() => true, () => false);
 const normalizeKey = value => String(value || '').replaceAll('\\', '/').replace(/^\/+/, '');
 const inside = (root, candidate) => {
@@ -285,14 +300,10 @@ const createBackupService = context => {
   const runRecoveryPythonAction = async (scriptName, args, timeoutMs) => {
     const action = String(args?.[0] || '');
     const restoreTool = ['backup_db.py', 'domain_recovery.py'].includes(scriptName)
-      && (action.startsWith('restore-') || action === 'reset');
+      && (action.startsWith('restore-') || action === 'reset' || action === 'sync-retired-shadow');
     if (restoreTool) {
       const lease = recoveryLeaseContext.getStore();
-      const destinationIndex = args.indexOf('--destination');
-      const destination = destinationIndex >= 0 ? path.resolve(String(args[destinationIndex + 1] || '')) : '';
-      if (!lease || !destination || !lease.databases.has(destination)) {
-        throw new Error(`恢复工具禁止在目标 SQLite exclusive 租约外执行：${scriptName} ${action}`);
-      }
+      assertRecoveryActionLease(lease, args);
       const remainingMs = Number.isFinite(lease.deadlineAt) ? Math.max(0, lease.deadlineAt - Date.now()) : timeoutMs;
       try {
         return await runPythonJsonAction(scriptName, args, Math.min(timeoutMs, remainingMs), undefined, lease.signal, lease.deadlineAt);
@@ -340,6 +351,9 @@ const createBackupService = context => {
     });
   };
   const connectionStates = new Map();
+  const syncOperationsRetiredShadow = root => runRecoveryPythonAction('domain_recovery.py', [
+    'sync-retired-shadow', '--domain', 'operations', '--source', getWorkspaceOperationsDatabasePath(root), '--destination', getWorkspaceDatabasePath(root),
+  ], 30 * 60 * 1000);
   const approvedTargets = new Set();
   const approveTarget = value => {
     if (!value) return '';
@@ -2222,6 +2236,7 @@ const createBackupService = context => {
             '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
           ], 30 * 60 * 1000);
         } finally { await fs.promises.rm(portableCore, { force: true }); }
+        await syncOperationsRetiredShadow(destination);
       });
       const restoredConfigEntry = manifest.files.find(entry => entry.scope === 'app-config' && entry.path === 'photoflow_config.json');
       let restoredConfig = {};
@@ -2563,16 +2578,18 @@ const createBackupService = context => {
     try {
       return await withWorkspaceRecoveryLease({
         workspaceRoot: root,
-        domains: [domain],
+        domains: domain === 'operations' ? ['core', 'operations'] : [domain],
         deadlineAt: Date.now() + 30 * 60 * 1000,
       }, async () => {
         try {
-          return await runRecoveryPythonAction('domain_recovery.py', [
+          const restored = await runRecoveryPythonAction('domain_recovery.py', [
             'restore-workspace', '--domain', domain, '--source', portable, '--destination', database,
             ...(domain === 'operations' ? ['--retired-source', getWorkspaceDatabasePath(root)] : []),
             '--old-root', manifest.workspace.root, '--new-root', root,
             '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', getWorkspaceDataRoot(root),
           ], 30 * 60 * 1000);
+          if (domain === 'operations') await syncOperationsRetiredShadow(root);
+          return restored;
         } finally {
           await fs.promises.rm(portable, { force: true });
         }
@@ -2588,10 +2605,14 @@ const createBackupService = context => {
     if (!database) throw new Error(`不支持的业务域：${domain}`);
     return withWorkspaceRecoveryLease({
       workspaceRoot,
-      domains: [domain],
+      domains: domain === 'operations' ? ['core', 'operations'] : [domain],
       deadlineAt: Date.now() + 30 * 60 * 1000,
-    }, () => runRecoveryPythonAction('domain_recovery.py', ['reset', '--domain', domain, '--destination', database,
-      ...(domain === 'operations' ? ['--retired-source', getWorkspaceDatabasePath(workspaceRoot)] : [])], 30 * 60 * 1000));
+    }, async () => {
+      const reset = await runRecoveryPythonAction('domain_recovery.py', ['reset', '--domain', domain, '--destination', database,
+        ...(domain === 'operations' ? ['--retired-source', getWorkspaceDatabasePath(workspaceRoot)] : [])], 30 * 60 * 1000);
+      if (domain === 'operations') await syncOperationsRetiredShadow(path.resolve(workspaceRoot));
+      return reset;
+    });
   };
 
   const accepted = async starter => {
@@ -2616,4 +2637,4 @@ const createBackupService = context => {
   return { approveTarget, isApprovedTarget, runBackup, enqueueBackup, runDomainBackup, runIfDue, status, restoreWorkspace, restoreProject, restoreDomain, resetDomain, verify, enqueueVerify, verifyDomain, testConnection, spaceStatus, cleanup, enqueueCleanup, withWorkspaceRecoveryLease };
 };
 
-module.exports = { createBackupService, safeDestination, STORE_DIRECTORY };
+module.exports = { assertRecoveryActionLease, createBackupService, safeDestination, STORE_DIRECTORY };

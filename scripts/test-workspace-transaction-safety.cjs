@@ -160,7 +160,7 @@ const run = async () => {
   }));
   const continuationFirst = await continuationController.runPersistentUndoClaimGc(continuationRoot);
   assert.strictEqual(continuationFirst.truncated, true);
-  for (let attempt = 0; attempt < 100 && fs.existsSync(continuationEligible); attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  for (let attempt = 0; attempt < 100 && fs.existsSync(continuationEligible); attempt += 1) await new Promise(resolve => setTimeout(resolve, 20));
   assert.strictEqual(fs.existsSync(continuationEligible), false, 'v2 continuation eventually reaches an eligible marker after a retained prefix');
 
   const legacyContinuationRoot = path.join(temporaryRoot, 'claim-gc-legacy-continuation'); fs.mkdirSync(legacyContinuationRoot);
@@ -187,7 +187,7 @@ const run = async () => {
     workspaceRepository: { retireUndoRecordClaim: async () => { delayedCalls += 1; await new Promise(resolve => setTimeout(resolve, 100)); return { retired: true }; } },
   }));
   const delayedSecond = await delayedControllerTwo.runPersistentUndoClaimGc(delayedCasRootTwo);
-  for (let attempt = 0; attempt < 100 && (fs.existsSync(delayedMarker) || fs.existsSync(delayedMarkerTwo)); attempt += 1) await new Promise(resolve => setTimeout(resolve, 10));
+  for (let attempt = 0; attempt < 100 && (fs.existsSync(delayedMarker) || fs.existsSync(delayedMarkerTwo)); attempt += 1) await new Promise(resolve => setTimeout(resolve, 30));
   assert(delayedCalls >= 2); assert.strictEqual(fs.existsSync(delayedMarker), false); assert.strictEqual(fs.existsSync(delayedMarkerTwo), false, 'a confirmed retired marker is deleted by a fresh-deadline continuation'); assert.strictEqual(delayedFirst.truncated, true); assert.strictEqual(delayedSecond.truncated, true);
 
   const pendingRetryRoot = path.join(temporaryRoot, 'claim-gc-pending-retry'); fs.mkdirSync(pendingRetryRoot); const pendingRetryMarker = writeClaimMarker(pendingRetryRoot, 'pending-retry'); let pendingDeleteHooks = 0;
@@ -257,6 +257,17 @@ const run = async () => {
   await offlineGcController.runPersistentUndoClaimGc(offlineGcRoot); offline = true; const offlineResult = await offlineGcController.runPersistentUndoClaimGc(offlineGcRoot); assert.match(offlineResult.warnings.join('\n'), /workspace-unavailable/); offline = false;
   for (let attempt = 0; attempt < 100 && fs.existsSync(offlineGcMarker); attempt += 1) { await offlineGcController.runPersistentUndoClaimGc(offlineGcRoot); await new Promise(resolve => setTimeout(resolve, 5)); }
   assert.strictEqual(fs.existsSync(offlineGcMarker), false, 'same-path recovery forces an immediate unthrottled rescan after cursor cleanup');
+
+  const aliasTargetRoot = path.join(temporaryRoot, 'claim-gc-alias-target'); fs.mkdirSync(aliasTargetRoot); const aliasMarker = writeLegacyClaimMarker(aliasTargetRoot, 'alias-offline-recovery'); for (let index = 0; index < 12; index += 1) fs.writeFileSync(path.join(aliasTargetRoot, `ordinary-${index}.txt`), 'ordinary'); const aliasRoot = path.join(temporaryRoot, 'claim-gc-alias-link'); let aliasCreated = false;
+  try { fs.symlinkSync(aliasTargetRoot, aliasRoot, process.platform === 'win32' ? 'junction' : 'dir'); aliasCreated = true; } catch (error) { if (!['EPERM', 'EACCES', 'ENOTSUP'].includes(error?.code)) throw error; }
+  if (aliasCreated) {
+    let aliasOffline = false; const aliasFs = { ...fs, promises: { ...fs.promises, realpath: async candidate => { if (aliasOffline && path.resolve(candidate) === path.resolve(aliasRoot)) throw Object.assign(new Error('alias offline'), { code: 'ENOENT' }); return fs.promises.realpath(candidate); } } };
+    const aliasController = registerWorkspaceIpc(context(new Map(), { fs: aliasFs, persistentUndoClaimRetentionMs: 0, persistentUndoClaimNowMs: () => gcNow, persistentUndoClaimThrottleMs: 60 * 60 * 1000, persistentUndoClaimMaxVisitedEntries: 1, persistentUndoClaimScanLimit: 1, persistentUndoClaimScanBudgetMs: 10000, workspaceRepository: { retireUndoRecordClaim: async () => ({ retired: true }) } }));
+    await aliasController.runPersistentUndoClaimGc(aliasRoot); aliasOffline = true; await aliasController.runPersistentUndoClaimGc(aliasRoot); aliasOffline = false; const aliasRecovered = await aliasController.runPersistentUndoClaimGc(aliasRoot);
+    assert(aliasRecovered.visited > 0 && !aliasRecovered.throttled, 'requested alias forced-rescan state transfers to its canonical root after recovery');
+    for (let attempt = 0; attempt < 100 && fs.existsSync(aliasMarker); attempt += 1) { await aliasController.runPersistentUndoClaimGc(aliasRoot); await new Promise(resolve => setTimeout(resolve, 5)); }
+    assert.strictEqual(fs.existsSync(aliasMarker), false);
+  }
   assert.throws(() => normalizeProjectDate({ year: '', month: 1 }), /年份不能为空/);
   assert.strictEqual(readProjectDate({ extra_json: '{"projectDate":{"year":1999,"month":1}}' }), undefined);
   assert.throws(() => normalizeProjectFileListFilter({ extensions: Array.from({ length: 65 }, (_, i) => `.x${i}`) }), /最多/);
@@ -720,10 +731,15 @@ const run = async () => {
   const conflictHandlers = new Map(); registerWorkspaceIpc(context(conflictHandlers, { renameHistory: [{ kind: 'trash', workspaceRoot: retryRoot, persistentId: 'conflict-id', ...conflictPayload }], workspaceRepository: { latestUndoRecord: async () => ({ record: { id: 'conflict-id', kind: 'trash', payload: conflictPayload } }) }, samePathIdentity: async () => false, capturePathIdentity: async candidate => { const stat = await fs.promises.stat(candidate, { bigint: true }); return { device: String(stat.dev), inode: String(stat.ino), directory: stat.isDirectory() }; }, recycleBinService: { probe: async () => ({ exists: true }) } }));
   const conflictRetry = await conflictHandlers.get('workspace-undo-rename')(null, ''); assert.strictEqual(conflictRetry.requiresDecision.kind, 'restore-conflict'); assert.strictEqual(claimMarkers(retryRoot).length, 0, 'conflict decision precedes claim creation');
 
+  const waitForPersistentDecision = async (handler, root) => {
+    let outcome;
+    for (let attempt = 0; attempt < 100; attempt += 1) { outcome = await handler(null, root); if (outcome.requiresDecision) return outcome; await new Promise(resolve => setTimeout(resolve, 10)); }
+    throw new Error(`persistent decision was not produced: ${JSON.stringify(outcome)}`);
+  };
   const runPersistentConflictDecision = async policy => {
     const root = path.join(temporaryRoot, `persistent-conflict-${policy}`); fs.mkdirSync(root); const original = path.join(root, 'occupied.txt'); fs.writeFileSync(original, 'occupant'); const token = crypto.createHash('sha256').update(`persistent-conflict-${policy}`).digest('hex'); const payload = { items: [{ original, originalIdentity: null, recyclePidl: `${policy}-pidl` }] }; let state = 'ready'; let claimCalls = 0; let restoreCalls = 0; let trashCalls = 0; const order = [];
     const handlers = new Map(); registerWorkspaceIpc(context(handlers, { resolveWorkspaceRoot: value => value, workspaceRepository: { latestUndoRecord: async () => ({ record: state === 'ready' ? { id: `${policy}-record`, kind: 'trash', payload, claimToken: token } : null }), claimUndoRecordExecution: async (_root, id, claimToken) => { assert.strictEqual(id, `${policy}-record`); assert.strictEqual(claimToken, token); claimCalls += 1; order.push('cas'); state = 'retired'; return { claimed: true }; }, removeUndoRecord: async () => undefined, addUndoRecord: async () => ({ id: `${policy}-replacement` }) }, recycleBinService: { probe: async () => ({ exists: true }), trash: async candidate => { trashCalls += 1; order.push('trash'); fs.unlinkSync(candidate); return { recyclePidl: 'replacement-pidl' }; }, restore: async ({ originalPath }) => { restoreCalls += 1; order.push('restore'); fs.writeFileSync(originalPath, 'restored'); } } }));
-    const first = await handlers.get('workspace-undo-rename')(null, root); assert.strictEqual(first.requiresDecision?.kind, 'restore-conflict', JSON.stringify(first));
+    const first = await waitForPersistentDecision(handlers.get('workspace-undo-rename'), root); assert.strictEqual(first.requiresDecision?.kind, 'restore-conflict', JSON.stringify(first));
     const second = await handlers.get('workspace-undo-rename')(null, root, { decisionToken: first.requiresDecision.decisionToken, restoreConflictPolicy: policy });
     assert.strictEqual(second.success, true, second.error); assert.strictEqual(claimCalls, 1); assert.strictEqual(restoreCalls, 1); assert.strictEqual(trashCalls, policy === 'overwrite' ? 1 : 0); assert.strictEqual(order[0], 'cas'); if (policy === 'overwrite') assert.deepStrictEqual(order, ['cas', 'trash', 'restore']);
   };
@@ -731,13 +747,13 @@ const run = async () => {
 
   const changedDecisionRoot = path.join(temporaryRoot, 'persistent-conflict-token-change'); fs.mkdirSync(changedDecisionRoot); const changedDecisionOriginal = path.join(changedDecisionRoot, 'occupied.txt'); fs.writeFileSync(changedDecisionOriginal, 'occupant'); const changedDecisionPayload = { items: [{ original: changedDecisionOriginal, originalIdentity: null, recyclePidl: 'changed-token-pidl' }] }; let changedDecisionToken = '3'.repeat(64); let changedDecisionClaims = 0; let changedDecisionRestores = 0;
   const changedDecisionHandlers = new Map(); registerWorkspaceIpc(context(changedDecisionHandlers, { resolveWorkspaceRoot: value => value, workspaceRepository: { latestUndoRecord: async () => ({ record: { id: 'changed-token-record', kind: 'trash', payload: changedDecisionPayload, claimToken: changedDecisionToken } }), claimUndoRecordExecution: async () => { changedDecisionClaims += 1; return { claimed: true }; } }, recycleBinService: { probe: async () => ({ exists: true }), restore: async () => { changedDecisionRestores += 1; } } }));
-  const changedDecisionFirst = await changedDecisionHandlers.get('workspace-undo-rename')(null, changedDecisionRoot); changedDecisionToken = '4'.repeat(64);
+  const changedDecisionFirst = await waitForPersistentDecision(changedDecisionHandlers.get('workspace-undo-rename'), changedDecisionRoot); changedDecisionToken = '4'.repeat(64);
   const changedDecisionSecond = await changedDecisionHandlers.get('workspace-undo-rename')(null, changedDecisionRoot, { decisionToken: changedDecisionFirst.requiresDecision.decisionToken, restoreConflictPolicy: 'rename' });
   assert.strictEqual(changedDecisionSecond.code, 'PERSISTENT_UNDO_RECOVERY_PENDING'); assert.strictEqual(changedDecisionClaims, 0); assert.strictEqual(changedDecisionRestores, 0, 'journal token changes invalidate but do not consume a persistent decision');
 
   const changedIdentityRoot = path.join(temporaryRoot, 'persistent-conflict-identity-change'); fs.mkdirSync(changedIdentityRoot); const changedIdentityOriginal = path.join(changedIdentityRoot, 'occupied.txt'); fs.writeFileSync(changedIdentityOriginal, 'occupant'); const changedIdentityPayload = { items: [{ original: changedIdentityOriginal, originalIdentity: null, recyclePidl: 'changed-identity-pidl' }] }; let changedIdentityClaims = 0; let changedIdentityRestores = 0;
   const changedIdentityHandlers = new Map(); registerWorkspaceIpc(context(changedIdentityHandlers, { resolveWorkspaceRoot: value => value, workspaceRepository: { latestUndoRecord: async () => ({ record: { id: 'changed-identity-record', kind: 'trash', payload: changedIdentityPayload, claimToken: '5'.repeat(64) } }), claimUndoRecordExecution: async () => { changedIdentityClaims += 1; return { claimed: true }; } }, recycleBinService: { probe: async () => ({ exists: true }), restore: async () => { changedIdentityRestores += 1; } } }));
-  const changedIdentityFirst = await changedIdentityHandlers.get('workspace-undo-rename')(null, changedIdentityRoot); fs.writeFileSync(changedIdentityOriginal, 'changed occupant');
+  const changedIdentityFirst = await waitForPersistentDecision(changedIdentityHandlers.get('workspace-undo-rename'), changedIdentityRoot); fs.writeFileSync(changedIdentityOriginal, 'changed occupant');
   const changedIdentitySecond = await changedIdentityHandlers.get('workspace-undo-rename')(null, changedIdentityRoot, { decisionToken: changedIdentityFirst.requiresDecision.decisionToken, restoreConflictPolicy: 'rename' });
   assert.strictEqual(changedIdentitySecond.requiresDecision.kind, 'restore-conflict'); assert.notStrictEqual(changedIdentitySecond.requiresDecision.decisionToken, changedIdentityFirst.requiresDecision.decisionToken); assert.strictEqual(changedIdentityClaims, 0); assert.strictEqual(changedIdentityRestores, 0, 'conflict identity changes require a fresh decision with zero destructive side effects');
 

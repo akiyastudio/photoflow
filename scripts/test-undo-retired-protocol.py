@@ -221,6 +221,20 @@ def run():
             raise AssertionError("restore revived a retired ID")
         except Exception as error:
             assert getattr(error, "code", "") == "UNDO_RECORD_RETIRED"
+        schema_one_live = str(temporary_path / "schema-one-live.sqlite3")
+        schema_one_db = sqlite3.connect(schema_one_live)
+        try:
+            schema_one_db.execute("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+            schema_one_db.execute("CREATE TABLE undo_records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,payload_json TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)")
+            schema_one_db.execute("INSERT INTO meta VALUES('schema_version','1')"); schema_one_db.execute("INSERT INTO meta VALUES('domain_identity','operations')")
+            schema_one_db.execute("INSERT INTO undo_records VALUES('schema-one-retired','claim-retired','{}','retired',1,1)"); schema_one_db.commit()
+        finally:
+            schema_one_db.close()
+        domain_recovery.reset_store(schema_one_live, "operations")
+        assert raw(schema_one_live, "schema-one-retired")[3] == "retired"
+        schema_one_probe = sqlite3.connect(schema_one_live)
+        try: assert schema_one_probe.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0] == "2"
+        finally: schema_one_probe.close()
         domain_recovery.reset_store(operations, "operations")
         assert raw(operations, "process-race")[1:4] == ("claim-retired", "{}", "retired")
         domain_recovery.restore_workspace(old, operations, "operations", [])
@@ -276,6 +290,8 @@ def run():
         assert raw(core, "ready")[3] == raw(core, "absent")[3] == raw(core, "execute")[3] == "retired"
         workspace_db.mutate(workspace_root, core, "undo_record_shadow_retire", {"id": "shadow-only"})
         assert raw(core, "shadow-only")[1:4] == ("claim-retired", "{}", "retired")
+        domain_recovery.sync_retired_shadow(operations, core)
+        assert raw(core, "process-race")[3] == "retired", "final operations retired IDs are unioned into core after restore"
 
         broken_operations = str(temporary_path / "broken-operations.sqlite3")
         broken = sqlite3.connect(broken_operations); broken.execute("CREATE TABLE unrelated(value TEXT)"); broken.execute("INSERT INTO unrelated VALUES('preserve')"); broken.commit(); broken.close()
@@ -306,6 +322,19 @@ def run():
         except RuntimeError as error:
             assert "cannot verify any retired-ID source" in str(error)
         assert Path(doubly_broken).read_bytes() == before_doubly_broken
+        wrong_identity = str(temporary_path / "wrong-identity-operations.sqlite3")
+        wrong_db = sqlite3.connect(wrong_identity)
+        try:
+            wrong_db.execute("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL)"); wrong_db.execute("INSERT INTO meta VALUES('schema_version','2')"); wrong_db.execute("INSERT INTO meta VALUES('domain_identity','media')")
+            wrong_db.execute("CREATE TABLE undo_records(id TEXT PRIMARY KEY,kind TEXT NOT NULL,payload_json TEXT NOT NULL,state TEXT NOT NULL,created_at INTEGER NOT NULL,updated_at INTEGER NOT NULL)"); wrong_db.commit()
+        finally: wrong_db.close()
+        before_wrong_identity = Path(wrong_identity).read_bytes()
+        try:
+            domain_recovery.reset_store(wrong_identity, "operations", broken_core)
+            raise AssertionError("wrong-domain retired source was trusted")
+        except RuntimeError as error:
+            assert "cannot verify any retired-ID source" in str(error)
+        assert Path(wrong_identity).read_bytes() == before_wrong_identity
         db = sqlite3.connect(core)
         db.row_factory = sqlite3.Row
         try:

@@ -11,13 +11,19 @@ const { PythonDatabaseClient } = require('../electron/repositories/database-clie
 const { createWorkspaceRepository } = require('../electron/repositories/workspace-repository.cjs');
 const { createMediaRepository } = require('../electron/repositories/media-repository.cjs');
 const { createOperationsRepository } = require('../electron/repositories/operations-repository.cjs');
-const { createBackupService, safeDestination, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
+const { assertRecoveryActionLease, createBackupService, safeDestination, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
 const { createConfigMutationService } = require('../electron/services/config-mutation-service.cjs');
 const { defaultComponentDataAdoptionPolicy } = require('../electron/compatibility/component-data-adoption-policy.cjs');
 const { cleanupRetiredCaptureTimeCache } = require('../electron/services/retired-cache-service.cjs');
 const VENV_PYTHON = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
 const TEST_PYTHON = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : process.env.PYTHON || 'python';
 const sha256FileForTest = filePath => crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
+
+const leaseCore = path.resolve('lease-core.sqlite3'); const leaseOperations = path.resolve('lease-operations.sqlite3');
+const syncLeaseArgs = ['sync-retired-shadow', '--domain', 'operations', '--source', leaseOperations, '--destination', leaseCore];
+assert.throws(() => assertRecoveryActionLease(null, syncLeaseArgs), /exclusive/);
+assert.throws(() => assertRecoveryActionLease({ databases: new Set([leaseCore]) }, syncLeaseArgs), /exclusive/);
+assert.doesNotThrow(() => assertRecoveryActionLease({ databases: new Set([leaseCore, leaseOperations]) }, syncLeaseArgs));
 
 const waitForCoordinatorQueue = async (coordinator, minimum, timeoutMs = 5000) => {
   const deadline = Date.now() + timeoutMs;
@@ -357,6 +363,7 @@ const main = async () => {
     currentWorkspace = first;
     config.workspacePath = first.root;
     await fs.promises.writeFile(path.join(first.project, '新增文件.txt'), 'incremental-content', 'utf8');
+    assert.strictEqual((await operationsRepository.retireUndoRecordClaim(first.root, 'workspace-shadow-sync')).retired, true);
     const replacementRun = await service.runBackup(first.root, 'manual');
     assert.strictEqual(replacementRun.task.state, 'completed');
     assert.ok(replacementRun.result.incremental.reusedFiles > 0, 'unchanged files must reuse their existing backup objects');
@@ -542,15 +549,31 @@ const main = async () => {
     versioningBarrier.release();
     await Promise.all([versioningRestore, versioningWrite]);
 
+    await operationsRepository.addUndoRecord(first.root, { id: 'claim-before-shadow-ack', kind: 'trash', payload: { items: [] } });
+    const claimBeforeShadow = await operationsRepository.latestUndoRecord(first.root);
+    assert.strictEqual((await operationsRepository.claimUndoRecordExecution(first.root, 'claim-before-shadow-ack', claimBeforeShadow.record.claimToken)).claimed, true);
+    await operationsClient.stop(); await writerClient.stop();
     const operationsBarrier = armRecoveryBarrier();
     const operationsReset = service.resetDomain(first.root, 'operations');
     await operationsBarrier.admitted;
     const operationsWrite = operationsRepository.addUndoRecord(first.root, { id: 'queued-after-reset', kind: 'trash', payload: { items: [] } });
-    await waitForCoordinatorQueue(physicalCoordinator, 1);
+    const delayedShadowAck = writerRepository.shadowRetireUndoRecord(first.root, 'claim-before-shadow-ack');
+    await waitForCoordinatorQueue(physicalCoordinator, 2);
     assert.equal(operationsClient.process, null, 'operations writer must remain queued behind operations reset');
+    assert.equal(writerClient.process, null, 'core shadow ACK must remain queued behind operations reset');
     operationsBarrier.release();
-    await Promise.all([operationsReset, operationsWrite]);
-    assert.deepStrictEqual(recoveryLeases.at(-1).databases, [{ path: path.resolve(first.operationsDatabase), mode: 'exclusive' }], 'domain reset must lock only its target database');
+    await Promise.all([operationsReset, operationsWrite, delayedShadowAck]);
+    assert.deepStrictEqual(recoveryLeases.at(-1).databases, [
+      { path: path.resolve(first.database), mode: 'exclusive' },
+      { path: path.resolve(first.operationsDatabase), mode: 'exclusive' },
+    ], 'operations reset must lock core then operations for retired-shadow consistency');
+    const interleavedStates = await runPython('-c', ['import json,sqlite3,sys\nprint(json.dumps([sqlite3.connect(path).execute("SELECT state FROM undo_records WHERE id=?",(sys.argv[3],)).fetchone()[0] for path in sys.argv[1:3]]))', first.operationsDatabase, first.database, 'claim-before-shadow-ack']);
+    assert.deepStrictEqual(interleavedStates, ['retired', 'retired'], 'reset serializes the delayed shadow ACK and leaves both stores retired');
+    await service.restoreDomain(first.root, replacementRun.result.id, 'operations');
+    assert.deepStrictEqual(recoveryLeases.at(-1).databases, [
+      { path: path.resolve(first.database), mode: 'exclusive' },
+      { path: path.resolve(first.operationsDatabase), mode: 'exclusive' },
+    ], 'operations restore must lock core then operations and sync the final shadow before returning');
     assert.equal(databaseLogs.some(line => /SQLITE_BUSY|database is locked/i.test(line)), false, 'recovery concurrency logs must not contain SQLite lock failures');
     assert.deepStrictEqual(await Promise.all([
       first.database, first.mediaDatabase, first.versioningDatabase, first.operationsDatabase,
@@ -645,6 +668,8 @@ const main = async () => {
     assert.ok((await fs.promises.stat(restoredDatabase)).isFile());
     const restoredUndo = await runPython('operations_db.py', ['undo_record_latest', '--database', restoredOperationsDatabase, '--payload', '{}']);
     assert.strictEqual(restoredUndo.record.id, 'workspace-one-id-undo', 'workspace restore must restore the operations journal');
+    const workspaceShadowStates = await runPython('-c', ['import json,sqlite3,sys\nprint(json.dumps([sqlite3.connect(path).execute("SELECT state FROM undo_records WHERE id=?",(sys.argv[3],)).fetchone()[0] for path in sys.argv[1:3]]))', restoredOperationsDatabase, restoredDatabase, 'workspace-shadow-sync']);
+    assert.deepStrictEqual(workspaceShadowStates, ['retired', 'retired'], 'full restore resynchronizes final operations retired IDs after the old core snapshot is published');
     assert.equal(await fs.promises.readFile(path.join(restoredDataRoot, 'components', 'sample-component', 'storage.sqlite3'), 'utf8'), 'opaque-database-workspace-one-id');
     assert.equal(JSON.parse(await fs.promises.readFile(path.join(restoredDataRoot, 'components', 'sample-component', 'private', 'state.json'), 'utf8')).id, 'workspace-one-id');
     assert.equal(await sha256FileForTest(path.join(restoredDataRoot, 'components', 'sample-component', 'private', 'state.json')),
