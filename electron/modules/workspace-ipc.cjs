@@ -1334,6 +1334,7 @@ const registerWorkspaceIpc = context => {
     let projectPath = '';
     let catalogAdded = false;
     let projectOwnershipRebased = false;
+    let rollbackCleanup = null;
     const publish = payload => task?.publish(payload);
     try {
       const mode = String(options.mode || '');
@@ -1434,15 +1435,19 @@ const registerWorkspaceIpc = context => {
       const cancelled = error?.code === CANCELLED_CODE;
       if (stagedPath) {
         const cleanup = await removeCreatedPasteTargets([stagedPath], { ownershipToken: operationId }).catch(cleanupError => ({ success: false, outcomes: [{ path: stagedPath, code: cleanupError?.code || 'CLEANUP_FAILED' }] }));
+        rollbackCleanup = cleanup;
         if (!cleanup.success) writeLog('warn', 'Unable to prove complete ownership of failed import staging; recovery retained', { stagedPath, operationId, outcomes: cleanup.outcomes, recoveryPaths: cleanup.recoveryPaths });
+        else if (cleanup.cleanupWarning || cleanup.outcomeUnknown) writeLog('warn', 'Failed import staging was deleted with uncertain cleanup durability', { stagedPath, operationId, cleanupWarning: cleanup.cleanupWarning, outcomeUnknown: cleanup.outcomeUnknown, deletedCleanupCount: cleanup.deletedCleanupCount, outcomes: cleanup.outcomes });
       }
       if (projectPath && !catalogAdded && projectOwnershipRebased) {
         const cleanup = await removeCreatedPasteTargets([projectPath], { ownershipToken: operationId }).catch(cleanupError => ({ success: false, outcomes: [{ path: projectPath, code: cleanupError?.code || 'CLEANUP_FAILED' }] }));
+        rollbackCleanup = cleanup;
         if (!cleanup.success) writeLog('warn', 'Published failed import tree retained after ownership rebase conflict', { projectPath, operationId, outcomes: cleanup.outcomes, recoveryPaths: cleanup.recoveryPaths });
+        else if (cleanup.cleanupWarning || cleanup.outcomeUnknown) writeLog('warn', 'Published failed import tree was deleted with uncertain cleanup durability', { projectPath, operationId, cleanupWarning: cleanup.cleanupWarning, outcomeUnknown: cleanup.outcomeUnknown, deletedCleanupCount: cleanup.deletedCleanupCount, outcomes: cleanup.outcomes });
       } else if (projectPath && !catalogAdded && fs.existsSync(projectPath)) writeLog('warn', 'Published failed import tree retained because complete ownership is unproven', { projectPath, operationId });
       publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, currentName: '', error: error.message || String(error) });
       if (cancelled) task?.cancelled(); else task?.fail(error);
-      return { success: false, cancelled, operationId, error: cancelled ? '项目接管已取消' : error.message || String(error), errorCode: error?.code || undefined, outcomeUnknown: Boolean(error?.outcomeUnknown), catalogReconcilePending: Boolean(error?.catalogReconcilePending) };
+      return { success: false, cancelled, operationId, error: cancelled ? '项目接管已取消' : error.message || String(error), errorCode: error?.code || undefined, outcomeUnknown: Boolean(error?.outcomeUnknown || rollbackCleanup?.outcomeUnknown), cleanupWarning: rollbackCleanup?.cleanupWarning, deletedCleanupCount: Number(rollbackCleanup?.deletedCleanupCount || 0), recoveryPaths: rollbackCleanup?.recoveryPaths || [], cleanupOutcomes: (rollbackCleanup?.outcomes || []).slice(0, 64), cleanupOutcomeCount: Number(rollbackCleanup?.cleanupOutcomeCount || 0), cleanupOutcomesTruncated: Boolean(rollbackCleanup?.cleanupOutcomesTruncated), catalogReconcilePending: Boolean(error?.catalogReconcilePending) };
     } finally {
       releaseCleanupOwnership(operationId);
       if (activeProjectFileOperations.get(operationId) === job || activeProjectFileOperations.get(operationId) === operationReservation) activeProjectFileOperations.delete(operationId);

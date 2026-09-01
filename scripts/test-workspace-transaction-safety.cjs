@@ -369,10 +369,11 @@ const run = async () => {
     assertDiskSpace: async () => undefined, throwIfCancelled: () => undefined, collectCopyPlan: async (sourceRoot, destinationRoot, plan) => { plan.push({ kind: 'directory', source: sourceRoot, destination: destinationRoot, size: 0 }); plan.push({ kind: 'file', source: path.join(sourceRoot, 'photo.jpg'), destination: path.join(destinationRoot, 'photo.jpg'), size: 5 }); },
     copyPlannedFiles: async plan => { for (const entry of plan) { if (entry.kind === 'directory') await fs.promises.mkdir(entry.destination); else await fs.promises.copyFile(entry.source, entry.destination); } },
     publishPathNoClobber: noClobberRename, rebaseCleanupOwnership: async () => ({ success: true }),
-    removeCreatedPasteTargets: async targets => { importRollbackCleanupCalls += 1; fs.rmSync(targets[0], { recursive: true }); return { success: true, outcomes: [] }; },
+    removeCreatedPasteTargets: async targets => { importRollbackCleanupCalls += 1; fs.rmSync(targets[0], { recursive: true }); return { success: true, cleanupWarning: '1项已删除但持久化确认不确定', outcomeUnknown: true, deletedCleanupCount: 1, cleanupOutcomeCount: 1, outcomes: [{ success: true, cleanupOutcomes: [{ deleted: true, outcomeUnknown: true, cleanupWarning: true }] }] }; },
   }));
   const importRollback = await importRollbackHandlers.get('workspace-import-existing-project')({ sender: { isDestroyed: () => false, send: () => undefined } }, importRollbackRoot, importSource, { name: 'Rollback', mode: 'copy' });
   assert.strictEqual(importRollback.success, false); assert.strictEqual(importRollbackCleanupCalls, 1); assert.strictEqual(fs.existsSync(path.join(importRollbackRoot, 'Rollback')), false, 'a successfully rebased published import tree uses ledger cleanup when catalog insertion is definitely absent');
+  assert.strictEqual(importRollback.cleanupWarning, '1项已删除但持久化确认不确定'); assert.strictEqual(importRollback.outcomeUnknown, true); assert.strictEqual(importRollback.deletedCleanupCount, 1); assert.strictEqual(importRollback.cleanupOutcomeCount, 1); assert.strictEqual(importRollback.cleanupOutcomes.length, 1, 'workspace import failure surfaces bounded rollback cleanup warning details');
 
   const statGapRoot = path.join(temporaryRoot, 'stat-gap'); fs.mkdirSync(statGapRoot, { recursive: true }); const statGapHandlers = new Map();
   registerWorkspaceIpc(context(statGapHandlers, {

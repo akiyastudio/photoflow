@@ -26,10 +26,12 @@ internal static class FilePublicationService
     private const uint FILE_SHARE_DELETE = 0x4;
     private const uint OPEN_EXISTING = 3;
     private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
+    private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
     private const int FileDispositionInfo = 4;
     private const int FileBasicInfo = 0;
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
     private const uint FILE_ATTRIBUTE_READONLY = 0x1;
+    private const uint FILE_ATTRIBUTE_REPARSE_POINT = 0x400;
     private const uint INVALID_FILE_ATTRIBUTES = 0xffffffff;
 
     [StructLayout(LayoutKind.Sequential)] private struct FILE_DISPOSITION_INFO { [MarshalAs(UnmanagedType.Bool)] public bool DeleteFile; }
@@ -54,6 +56,8 @@ internal static class FilePublicationService
             else if (args[0] == "move-no-replace-batch") result = MoveNoReplaceBatch(Required(options, "manifest"));
             else if (args[0] == "inspect-path-batch") result = InspectPathBatch(Required(options, "manifest"));
             else if (args[0] == "delete-paths-batch") result = DeletePathsBatch(Required(options, "manifest"));
+            else if (args[0] == "compare-delete-files-batch") result = CompareDeleteFilesBatch(Required(options, "manifest"));
+            else if (args[0] == "delete-directories-batch") result = DeleteDirectoriesBatch(Required(options, "manifest"));
             else if (args[0] == "commit-cross-volume-file") result = CommitCrossVolume(Required(options, "source"), Required(options, "staged"), Required(options, "target"), Required(options, "sha256"), long.Parse(Required(options, "size")), Required(options, "source-identity"));
             else if (args[0] == "compare-delete-file") result = CompareDelete(Required(options, "target"), Required(options, "sha256"), long.Parse(Required(options, "size")), Required(options, "identity"));
             else if (args[0] == "inspect-path") result = Inspect(Required(options, "path"));
@@ -135,7 +139,7 @@ internal static class FilePublicationService
             string value; try { value = utf8.GetString(Convert.FromBase64String(parts[1])); } catch (Exception error) { throw new ArgumentException("批量检查路径编码无效", error); }
             try {
                 var requested = Full(value); var attributes = GetFileAttributes(requested); if (attributes == INVALID_FILE_ATTRIBUTES) throw new Win32Exception(Marshal.GetLastWin32Error()); var directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-                using (var handle = OpenLocked(requested, GENERIC_READ, directory)) results.Add(new Dictionary<string, object> { { "index", index }, { "success", true }, { "identity", Identity(handle) }, { "directory", directory } });
+                using (var handle = OpenLocked(requested, directory ? 0 : GENERIC_READ, directory, directory ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : FILE_SHARE_READ)) results.Add(new Dictionary<string, object> { { "index", index }, { "success", true }, { "identity", Identity(handle) }, { "directory", directory } });
             } catch (Exception error) {
                 var native = error as Win32Exception; var code = error is PathTooLongException ? "ENAMETOOLONG" : error is ArgumentException ? "EINVAL" : native == null ? "FILE_PUBLICATION_FAILED" : NativeCode(native.NativeErrorCode);
                 results.Add(new Dictionary<string, object> { { "index", index }, { "success", false }, { "error", error.Message }, { "code", code }, { "nativeError", native == null ? 0 : native.NativeErrorCode } });
@@ -159,6 +163,49 @@ internal static class FilePublicationService
                 var native = error as Win32Exception; var code = error is OwnershipConflictException ? "PUBLISH_OWNERSHIP_CONFLICT" : error is PathTooLongException ? "ENAMETOOLONG" : error is ArgumentException ? "EINVAL" : native == null ? "FILE_PUBLICATION_FAILED" : NativeCode(native.NativeErrorCode);
                 results.Add(new Dictionary<string, object> { { "index", index }, { "success", false }, { "error", error.Message }, { "code", code }, { "nativeError", native == null ? 0 : native.NativeErrorCode } });
             }
+        }
+        return new Dictionary<string, object> { { "success", true }, { "results", results } };
+    }
+    private static object CompareDeleteFilesBatch(string manifestValue)
+    {
+        Full(manifestValue); var manifest = Path.GetFullPath(manifestValue); var results = new List<Dictionary<string, object>>(); var utf8 = new UTF8Encoding(false, true); var lines = File.ReadAllLines(manifest, utf8); string root = null; var directories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var files = new List<string[]>();
+        foreach (var line in lines) { var parts = line.Split('\t'); if (parts.Length == 2 && parts[0] == "R") root = Full(utf8.GetString(Convert.FromBase64String(parts[1]))); else if (parts.Length == 3 && parts[0] == "D") directories[Full(utf8.GetString(Convert.FromBase64String(parts[1])))] = utf8.GetString(Convert.FromBase64String(parts[2])); else if (parts.Length == 6 && parts[0] == "F") files.Add(parts); else throw new ArgumentException("批量摘要清理清单格式无效"); }
+        if (root == null || !directories.ContainsKey(root) || files.Count > 2048) throw new ArgumentException("批量摘要清理缺少根身份或项目过多");
+        for (var expectedIndex = 0; expectedIndex < files.Count; expectedIndex++) {
+            var parts = files[expectedIndex]; int index; long size; if (!Int32.TryParse(parts[1], out index) || index != expectedIndex || !Int64.TryParse(parts[4], out size) || size < 0) throw new ArgumentException("批量摘要清理清单索引或大小无效");
+            string value; string identity; try { value = utf8.GetString(Convert.FromBase64String(parts[2])); identity = utf8.GetString(Convert.FromBase64String(parts[3])); } catch (Exception error) { throw new ArgumentException("批量摘要清理路径编码无效", error); }
+            try {
+                var target = Full(value); var heldParents = OpenVerifiedParentChain(root, target, directories);
+                try { FILE_BASIC_INFO attributes; bool changed; using (var handle = OpenVerifiedDelete(target, identity, parts[5], size, "批量补偿目标", out attributes, out changed)) { try { VerifyParentChainAgain(root, target, directories); MarkDelete(handle); } catch { RestoreAttributes(handle, attributes, changed); throw; } } }
+                finally { foreach (var held in heldParents) held.Dispose(); }
+                results.Add(new Dictionary<string, object> { { "index", index }, { "success", true }, { "deleted", true } });
+            } catch (Exception error) {
+                var native = error as Win32Exception; var code = error is OwnershipConflictException || error is InvalidDataException ? "PUBLISH_OWNERSHIP_CONFLICT" : error is PathTooLongException ? "ENAMETOOLONG" : error is ArgumentException ? "EINVAL" : native == null ? "FILE_PUBLICATION_FAILED" : NativeCode(native.NativeErrorCode);
+                results.Add(new Dictionary<string, object> { { "index", index }, { "success", false }, { "deleted", false }, { "error", error.Message }, { "code", code }, { "nativeError", native == null ? 0 : native.NativeErrorCode } });
+            }
+        }
+        return new Dictionary<string, object> { { "success", true }, { "results", results } };
+    }
+    private static List<SafeFileHandle> OpenVerifiedParentChain(string root, string target, Dictionary<string, string> directories)
+    {
+        var prefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar; if (!target.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("批量摘要清理目标超出隔离根"); var relative = target.Substring(prefix.Length); if (relative.Length == 0 || Path.IsPathRooted(relative)) throw new ArgumentException("批量摘要清理目标超出隔离根");
+        var held = new List<SafeFileHandle>(); var current = root;
+        try {
+            var rootHandle = OpenParentLocked(root); VerifyIdentity(rootHandle, directories[root], "批量清理根"); held.Add(rootHandle);
+            var segments = relative.Split(Path.DirectorySeparatorChar);
+            for (var index = 0; index < segments.Length - 1; index++) { current = Path.Combine(current, segments[index]); string expected; if (!directories.TryGetValue(current, out expected)) throw new OwnershipConflictException("批量清理父链未登记"); var handle = OpenParentLocked(current); VerifyIdentity(handle, expected, "批量清理父目录"); held.Add(handle); }
+            return held;
+        } catch { foreach (var handle in held) handle.Dispose(); throw; }
+    }
+    private static void VerifyParentChainAgain(string root, string target, Dictionary<string, string> directories) { var verified = OpenVerifiedParentChain(root, target, directories); foreach (var handle in verified) handle.Dispose(); }
+    private static object DeleteDirectoriesBatch(string manifestValue)
+    {
+        var utf8 = new UTF8Encoding(false, true); var lines = File.ReadAllLines(Path.GetFullPath(manifestValue), utf8); string root = null; var directories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var targets = new List<string[]>(); var results = new List<Dictionary<string, object>>();
+        foreach (var line in lines) { var parts = line.Split('\t'); if (parts.Length == 2 && parts[0] == "R") root = Full(utf8.GetString(Convert.FromBase64String(parts[1]))); else if (parts.Length == 3 && parts[0] == "D") directories[Full(utf8.GetString(Convert.FromBase64String(parts[1])))] = utf8.GetString(Convert.FromBase64String(parts[2])); else if (parts.Length == 4 && parts[0] == "T") targets.Add(parts); else throw new ArgumentException("批量目录清理清单格式无效"); }
+        if (root == null || !directories.ContainsKey(root) || targets.Count > 2048) throw new ArgumentException("批量目录清理缺少根身份或项目过多");
+        for (var expectedIndex = 0; expectedIndex < targets.Count; expectedIndex++) { var parts = targets[expectedIndex]; int index; if (!Int32.TryParse(parts[1], out index) || index != expectedIndex) throw new ArgumentException("批量目录清理索引无效"); var target = Full(utf8.GetString(Convert.FromBase64String(parts[2]))); var identity = utf8.GetString(Convert.FromBase64String(parts[3]));
+            try { var held = String.Equals(target, root, StringComparison.OrdinalIgnoreCase) ? new List<SafeFileHandle>() : OpenVerifiedParentChain(root, target, directories); try { FILE_BASIC_INFO original; bool changed; using (var handle = OpenIdentityDelete(target, identity, true, "批量空目录", out original, out changed)) { if (!String.Equals(target, root, StringComparison.OrdinalIgnoreCase)) VerifyParentChainAgain(root, target, directories); MarkDelete(handle); } } finally { foreach (var handle in held) handle.Dispose(); } results.Add(new Dictionary<string, object> { { "index", index }, { "success", true }, { "deleted", true } }); }
+            catch (Exception error) { var native = error as Win32Exception; var code = error is OwnershipConflictException || error is InvalidDataException ? "PUBLISH_OWNERSHIP_CONFLICT" : native == null ? "FILE_PUBLICATION_FAILED" : NativeCode(native.NativeErrorCode); results.Add(new Dictionary<string, object> { { "index", index }, { "success", false }, { "deleted", false }, { "code", code }, { "error", error.Message } }); }
         }
         return new Dictionary<string, object> { { "success", true }, { "results", results } };
     }
@@ -196,7 +243,7 @@ internal static class FilePublicationService
     private static object Inspect(string value)
     {
         var requested = Full(value); var attributes = GetFileAttributes(requested); if (attributes == INVALID_FILE_ATTRIBUTES) throw new Win32Exception(Marshal.GetLastWin32Error()); var directory = (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
-        using (var handle = OpenLocked(requested, GENERIC_READ, directory)) return new Dictionary<string, object> { { "success", true }, { "identity", Identity(handle) }, { "directory", directory } };
+        using (var handle = OpenLocked(requested, directory ? 0 : GENERIC_READ, directory, directory ? FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE : FILE_SHARE_READ)) return new Dictionary<string, object> { { "success", true }, { "identity", Identity(handle) }, { "directory", directory } };
     }
     private static object CommitTreeFile(string sourceValue, string targetValue, string hash, long size, string identity)
     {
@@ -220,9 +267,15 @@ internal static class FilePublicationService
 
     private static SafeFileHandle OpenLocked(string filePath, uint access, bool directory = false, uint share = FILE_SHARE_READ)
     {
-        var handle = CreateFile(filePath, access, share, IntPtr.Zero, OPEN_EXISTING, directory ? FILE_FLAG_BACKUP_SEMANTICS : 0, IntPtr.Zero);
+        var flags = (directory ? FILE_FLAG_BACKUP_SEMANTICS : 0) | FILE_FLAG_OPEN_REPARSE_POINT;
+        var handle = CreateFile(filePath, access, share, IntPtr.Zero, OPEN_EXISTING, flags, IntPtr.Zero);
         if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
         return handle;
+    }
+    private static SafeFileHandle OpenParentLocked(string filePath)
+    {
+        try { return OpenLocked(filePath, 0, true, FILE_SHARE_READ | FILE_SHARE_WRITE); }
+        catch (Win32Exception error) { if (error.NativeErrorCode != 5) throw; return OpenLocked(filePath, 0, true, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE); }
     }
     private static SafeFileHandle OpenVerifiedDelete(string filePath, string expectedIdentity, string expectedHash, long expectedSize, string label, out FILE_BASIC_INFO originalAttributes, out bool attributesChanged)
     {

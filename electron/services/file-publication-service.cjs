@@ -140,6 +140,52 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
       await fs.promises.rm(manifest, { force: true }).catch(() => undefined);
     }
   };
+  const compareDeleteFilesBatch = async requests => {
+    if (!Array.isArray(requests) || requests.length === 0) return [];
+    if (requests.length > MAX_BATCH_ITEMS) throw Object.assign(new Error(`单次摘要清理不得超过 ${MAX_BATCH_ITEMS} 项`), { code: 'EINVAL' });
+    const manifest = path.join(os.tmpdir(), `photoflow-compare-cleanup-${process.pid}-${crypto.randomUUID()}.batch`);
+    const rootPath = path.resolve(requests[0]?.rootPath || '');
+    if (!path.isAbsolute(rootPath) || requests.some(request => path.resolve(request.rootPath || '') !== rootPath)) throw Object.assign(new Error('批量摘要清理缺少唯一隔离根'), { code: 'EINVAL' });
+    const directories = new Map();
+    for (const request of requests) for (const directory of request.parentChain || []) {
+      const resolved = path.resolve(directory.path); const existing = directories.get(resolved);
+      if (typeof directory.identity !== 'string' || !directory.identity || existing && existing !== directory.identity) throw Object.assign(new Error('批量摘要清理父链身份无效或冲突'), { code: 'EINVAL' });
+      directories.set(resolved, directory.identity);
+    }
+    if (!directories.has(rootPath)) throw Object.assign(new Error('批量摘要清理父链缺少隔离根'), { code: 'EINVAL' });
+    const header = [`R\t${Buffer.from(rootPath, 'utf8').toString('base64')}`, ...[...directories].map(([directory, identity]) => `D\t${Buffer.from(directory, 'utf8').toString('base64')}\t${Buffer.from(identity, 'utf8').toString('base64')}`)];
+    const files = requests.map((request, index) => {
+      if (typeof request.identity !== 'string' || !request.identity || !/^[a-f0-9]{64}$/i.test(String(request.sha256 || '')) || !/^\d+$/.test(String(request.size))) throw Object.assign(new Error('批量摘要清理缺少有效身份、大小或 SHA-256'), { code: 'EINVAL' });
+      return `F\t${index}\t${Buffer.from(path.resolve(request.path), 'utf8').toString('base64')}\t${Buffer.from(request.identity, 'utf8').toString('base64')}\t${String(request.size)}\t${String(request.sha256).toLowerCase()}`;
+    });
+    const contents = [...header, ...files].join('\n');
+    if (Buffer.byteLength(contents) > MAX_BATCH_MANIFEST_BYTES) throw Object.assign(new Error('批量摘要清理清单过大'), { code: 'EINVAL' });
+    let handle;
+    try {
+      handle = await fs.promises.open(manifest, 'wx', 0o600); await handle.writeFile(contents, 'utf8'); await handle.sync(); await handle.close(); handle = null;
+      const payload = await invoke('compare-delete-files-batch', { manifest }, batchTimeoutMs(requests.length));
+      const results = Array.isArray(payload?.results) ? payload.results : [];
+      if (results.length !== requests.length || results.some((item, index) => Number(item?.index) !== index)) throw Object.assign(new Error('批量摘要清理服务返回了不完整结果'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
+      for (let index = 0; index < results.length; index += 1) if (results[index]?.recoveryPathBase64) results[index].recoveryPath = decodeRecoveryPath(results[index].recoveryPathBase64, path.resolve(requests[index].path), 'photoflow-quarantine-');
+      return results;
+    } finally {
+      if (handle) await handle.close().catch(() => undefined);
+      await fs.promises.rm(manifest, { force: true }).catch(() => undefined);
+    }
+  };
+  const deleteDirectoriesBatch = async requests => {
+    if (!Array.isArray(requests) || requests.length === 0) return [];
+    if (requests.length > MAX_BATCH_ITEMS) throw Object.assign(new Error(`单次目录清理不得超过 ${MAX_BATCH_ITEMS} 项`), { code: 'EINVAL' });
+    const rootPath = path.resolve(requests[0]?.rootPath || ''); const directories = new Map();
+    if (requests.some(request => path.resolve(request.rootPath || '') !== rootPath)) throw Object.assign(new Error('批量目录清理缺少唯一隔离根'), { code: 'EINVAL' });
+    for (const request of requests) { for (const directory of request.parentChain || []) { const resolved = path.resolve(directory.path); const existing = directories.get(resolved); if (typeof directory.identity !== 'string' || !directory.identity || existing && existing !== directory.identity) throw Object.assign(new Error('批量目录清理父链身份无效或冲突'), { code: 'EINVAL' }); directories.set(resolved, directory.identity); } const target = path.resolve(request.path); const existing = directories.get(target); if (typeof request.identity !== 'string' || !request.identity || existing && existing !== request.identity) throw Object.assign(new Error('批量目录清理目标身份无效或冲突'), { code: 'EINVAL' }); directories.set(target, request.identity); }
+    if (!directories.has(rootPath)) throw Object.assign(new Error('批量目录清理缺少隔离根身份'), { code: 'EINVAL' });
+    const lines = [`R\t${Buffer.from(rootPath).toString('base64')}`, ...[...directories].map(([directory, identity]) => `D\t${Buffer.from(directory).toString('base64')}\t${Buffer.from(identity).toString('base64')}`), ...requests.map((request, index) => `T\t${index}\t${Buffer.from(path.resolve(request.path)).toString('base64')}\t${Buffer.from(request.identity).toString('base64')}`)];
+    const contents = lines.join('\n'); if (Buffer.byteLength(contents) > MAX_BATCH_MANIFEST_BYTES) throw Object.assign(new Error('批量目录清理清单过大'), { code: 'EINVAL' });
+    const manifest = path.join(os.tmpdir(), `photoflow-directory-cleanup-${process.pid}-${crypto.randomUUID()}.batch`); let handle;
+    try { handle = await fs.promises.open(manifest, 'wx', 0o600); await handle.writeFile(contents); await handle.sync(); await handle.close(); handle = null; const payload = await invoke('delete-directories-batch', { manifest }, batchTimeoutMs(requests.length)); const results = Array.isArray(payload?.results) ? payload.results : []; if (results.length !== requests.length || results.some((item, index) => Number(item?.index) !== index)) throw Object.assign(new Error('批量目录清理服务返回了不完整结果'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' }); return results; }
+    finally { if (handle) await handle.close().catch(() => undefined); await fs.promises.rm(manifest, { force: true }).catch(() => undefined); }
+  };
   const createPortableQuarantine = async candidate => {
     for (let attempt = 0; attempt < 16; attempt += 1) {
       const directory = path.join(path.dirname(candidate), `.photoflow-quarantine-${crypto.randomUUID()}`);
@@ -166,6 +212,8 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
     moveNoReplaceBatch,
     inspectPathsBatch,
     deletePathsBatch,
+    compareDeleteFilesBatch,
+    deleteDirectoriesBatch,
     commitCrossVolumeFile: async request => {
       return invoke('commit-cross-volume-file', { source: path.resolve(request.source), staged: path.resolve(request.staged), target: path.resolve(request.target), sha256: request.sha256, size: request.size, 'source-identity': request.sourceIdentity }, 30 * 60 * 1000);
     },

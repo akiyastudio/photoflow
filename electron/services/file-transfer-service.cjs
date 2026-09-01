@@ -1119,36 +1119,90 @@ const inspectOwnedTree = async (treeRoot, originalRoot, expectedItems, nativeSer
   return { success: true, deletionEntries };
 };
 
+const inspectCleanupAnchorChain = async (candidate, nativeService) => {
+  const target = path.resolve(candidate); const anchorRoot = path.parse(target).root; const paths = [anchorRoot]; let current = anchorRoot;
+  for (const segment of path.relative(anchorRoot, target).split(path.sep).filter(Boolean)) { current = path.join(current, segment); paths.push(current); }
+  const states = await nativeService.inspectPathsBatch(paths).catch(() => null);
+  if (!states || states.length !== paths.length) return { success: false, code: 'CLEANUP_TREE_ANCHOR_INSPECTION_FAILED' };
+  if (states.some(state => state?.success === false || state?.directory !== true || typeof state?.identity !== 'string' || !state.identity)) return { success: false, code: 'CLEANUP_TREE_ANCHOR_INSPECTION_FAILED' };
+  const chain = paths.map((directory, index) => ({ path: directory, identity: states[index].identity }));
+  return { success: true, anchorRoot, chain };
+};
+
 const deleteOwnedTreeEntries = async (entries, nativeService, rootEntry, privateRoot, options = {}) => {
-  const ordered = [...entries].sort((left, right) => {
-    const depth = value => value.relative ? value.relative.split(path.sep).length : 0;
-    const kindOrder = value => value.item.identity.kind === 'directory' ? 1 : 0;
-    return depth(right) - depth(left) || kindOrder(left) - kindOrder(right);
-  });
   const outcomes = [];
-  for (let offset = 0; offset < ordered.length; offset += CLEANUP_TREE_BATCH_SIZE) {
-    const batch = ordered.slice(offset, offset + CLEANUP_TREE_BATCH_SIZE);
-    for (const entry of batch) {
-      if (entry === rootEntry) await options.beforeQuarantinedRootDelete?.({ quarantine: entry.candidate, privateRoot, entries, outcomes });
-      try {
-        let result;
-        if (entry.item.identity.kind === 'file') {
-          if (!entry.item.identity.sha256 || typeof nativeService.compareDeleteFile !== 'function') throw Object.assign(new Error('owned file digest delete unavailable'), { code: 'CLEANUP_FILE_IDENTITY_MISSING' });
-          result = await nativeService.compareDeleteFile({ target: entry.candidate, sha256: entry.item.identity.sha256, size: Number(entry.item.identity.size), identity: entry.item.identity.nativeIdentity || entry.nativeIdentity });
-        } else {
-          if (typeof nativeService.deleteEmptyDirectory !== 'function') throw Object.assign(new Error('owned directory identity delete unavailable'), { code: 'FILE_PUBLICATION_SERVICE_MISSING' });
-          result = await nativeService.deleteEmptyDirectory({ source: entry.candidate, identity: entry.item.identity.nativeIdentity || entry.nativeIdentity });
-        }
-        outcomes.push({ success: result?.success !== false, deleted: result?.deleted !== false, path: entry.candidate, relativePath: entry.relative, cleanupWarning: result?.cleanupWarning, outcomeUnknown: result?.outcomeUnknown });
-      } catch (error) {
-        outcomes.push({ success: error?.deleted === true, deleted: error?.deleted === true, path: entry.candidate, relativePath: entry.relative, code: error?.code || 'CLEANUP_DELETE_FAILED', cleanupWarning: error?.cleanupWarning, outcomeUnknown: error?.outcomeUnknown, recoveryPath: error?.recoveryPath });
-      }
+  let processed = 0;
+  let deletedCount = 0;
+  let failedCount = 0;
+  let deletedCleanupCount = 0;
+  let cleanupOutcomeCount = 0;
+  let cleanupOutcomeUnknown = false;
+  const appendResults = (batch, results) => {
+    for (let index = 0; index < batch.length; index += 1) {
+      const entry = batch[index]; const result = results[index] || {};
+      const outcome = { success: result.success === true || result.deleted === true, deleted: result.deleted === true, path: entry.candidate, relativePath: entry.relative, code: result.code, error: result.error, cleanupWarning: result.cleanupWarning, outcomeUnknown: result.outcomeUnknown, recoveryPath: result.recoveryPath, phase: result.phase };
+      if (outcome.deleted) deletedCount += 1;
+      if (!outcome.success) failedCount += 1;
+      if (outcome.deleted && (outcome.cleanupWarning || outcome.outcomeUnknown)) { deletedCleanupCount += 1; cleanupOutcomeUnknown ||= Boolean(outcome.outcomeUnknown); }
+      if (!outcome.success || outcome.cleanupWarning || outcome.outcomeUnknown || outcome.recoveryPath) { cleanupOutcomeCount += 1; if (outcomes.length < 64) outcomes.push(outcome); }
     }
-    await options.onTreeDeleteBatch?.({ batchSize: batch.length, processed: Math.min(offset + batch.length, ordered.length), total: ordered.length, outcomes });
-    await yieldCleanupTurn(options);
+    processed += batch.length;
+  };
+  const runBatches = async (items, invokeBatch, measure) => {
+    for (let offset = 0; offset < items.length;) {
+      const batch = takeBoundedBatch(items, offset, CLEANUP_TREE_BATCH_SIZE, measure);
+      let results;
+      try { results = await invokeBatch(batch); }
+      catch (error) {
+        results = batch.map(() => ({ success: error?.deleted === true, deleted: error?.deleted === true, code: error?.code || 'CLEANUP_BATCH_FAILED', cleanupWarning: error?.cleanupWarning, outcomeUnknown: error?.outcomeUnknown, recoveryPath: error?.recoveryPath, phase: error?.phase }));
+        appendResults(batch, results); return false;
+      }
+      appendResults(batch, results);
+      await options.onTreeDeleteBatch?.({ batchSize: batch.length, processed, total: entries.length, outcomes });
+      await yieldCleanupTurn(options);
+      offset += batch.length;
+    }
+    return true;
+  };
+  const files = entries.filter(entry => entry.item.identity.kind === 'file');
+  const directoriesByPath = new Map(entries.filter(entry => entry.item.identity.kind === 'directory').map(entry => [physicalPathKey(entry.candidate), entry]));
+  const treeParentChainFor = entry => {
+    const chain = [];
+    for (let current = path.dirname(entry.candidate);;) {
+      const directory = directoriesByPath.get(physicalPathKey(current));
+      if (!directory) return [];
+      chain.push({ path: directory.candidate, identity: directory.item.identity.nativeIdentity || directory.nativeIdentity });
+      if (directory === rootEntry) return chain.reverse();
+      const parent = path.dirname(current); if (parent === current) return [];
+      current = parent;
+    }
+  };
+  const anchorRoot = options.cleanupAnchorRoot || rootEntry.candidate;
+  const anchorChain = Array.isArray(options.cleanupAnchorChain) ? options.cleanupAnchorChain : [{ path: rootEntry.candidate, identity: rootEntry.item.identity.nativeIdentity || rootEntry.nativeIdentity }];
+  const parentChainFor = entry => {
+    const treeChain = treeParentChainFor(entry);
+    if (!treeChain.length) return [];
+    return [...anchorChain.slice(0, -1), ...treeChain];
+  };
+  if (files.some(entry => !entry.item.identity.sha256)) { const missing = files.filter(entry => !entry.item.identity.sha256); return { success: false, outcomes: missing.slice(0, 64).map(entry => ({ success: false, deleted: false, path: entry.candidate, relativePath: entry.relative, code: 'CLEANUP_FILE_IDENTITY_MISSING' })), cleanupOutcomeCount: missing.length, cleanupOutcomesTruncated: missing.length > 64, deletedCount: 0, deletedCleanupCount: 0 }; }
+  if (files.some(entry => !parentChainFor(entry).length)) return { success: false, outcomes: [{ success: false, deleted: false, code: 'CLEANUP_TREE_PARENT_UNOWNED' }], cleanupOutcomeCount: 1, deletedCount: 0, deletedCleanupCount: 0 };
+  const filesCompleted = await runBatches(files, batch => nativeService.compareDeleteFilesBatch(batch.map(entry => ({ path: entry.candidate, rootPath: anchorRoot, parentChain: parentChainFor(entry), sha256: entry.item.identity.sha256, size: entry.item.identity.size, identity: entry.item.identity.nativeIdentity || entry.nativeIdentity }))), entry => Math.ceil(Buffer.byteLength(entry.candidate) / 3) * 4 + Math.ceil(Buffer.byteLength(entry.item.identity.nativeIdentity || entry.nativeIdentity) / 3) * 4 + parentChainFor(entry).reduce((sum, directory) => sum + Math.ceil(Buffer.byteLength(directory.path) / 3) * 4 + Math.ceil(Buffer.byteLength(directory.identity) / 3) * 4, 0) + 96);
+  if (filesCompleted) {
+    const directoryLayers = new Map();
+    for (const entry of entries.filter(candidate => candidate.item.identity.kind === 'directory')) {
+      const depth = entry.relative ? entry.relative.split(path.sep).length : 0;
+      if (!directoryLayers.has(depth)) directoryLayers.set(depth, []);
+      directoryLayers.get(depth).push(entry);
+    }
+    for (const depth of [...directoryLayers.keys()].sort((left, right) => right - left)) {
+      const layer = directoryLayers.get(depth);
+      if (layer.includes(rootEntry)) await options.beforeQuarantinedRootDelete?.({ quarantine: rootEntry.candidate, privateRoot, entries, outcomes });
+      const completed = await runBatches(layer, batch => nativeService.deleteDirectoriesBatch(batch.map(entry => ({ path: entry.candidate, rootPath: anchorRoot, parentChain: entry === rootEntry ? anchorChain.slice(0, -1) : parentChainFor(entry), identity: entry.item.identity.nativeIdentity || entry.nativeIdentity }))), entry => Math.ceil(Buffer.byteLength(entry.candidate) / 3) * 4 + Math.ceil(Buffer.byteLength(entry.item.identity.nativeIdentity || entry.nativeIdentity) / 3) * 4 + (entry === rootEntry ? anchorChain : parentChainFor(entry)).reduce((sum, directory) => sum + Buffer.byteLength(directory.path) + Buffer.byteLength(directory.identity), 0));
+      if (!completed) break;
+      await yieldCleanupTurn(options);
+    }
   }
-  const failed = outcomes.filter(outcome => !outcome.success);
-  return { success: failed.length === 0, outcomes, deletedCount: outcomes.filter(outcome => outcome.deleted).length };
+  return { success: failedCount === 0, outcomes, cleanupOutcomeCount, cleanupOutcomesTruncated: cleanupOutcomeCount > outcomes.length, deletedCount, deletedCleanupCount, cleanupWarning: deletedCleanupCount ? `${deletedCleanupCount}项已删除但持久化确认不确定` : undefined, outcomeUnknown: cleanupOutcomeUnknown, recoveryPaths: outcomes.map(outcome => outcome.recoveryPath).filter(Boolean) };
 };
 
 const quarantineOwnedTreeRoot = async (rootItem, treeItems, options = {}) => {
@@ -1176,20 +1230,34 @@ const quarantineOwnedTreeRoot = async (rootItem, treeItems, options = {}) => {
   }
   await options.afterRootQuarantineMove?.({ ...rootItem, quarantine, privateRoot, treeItems });
   const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
-  const proof = await inspectOwnedTree(quarantine, originalRoot, treeItems, nativeService, options);
+  if (typeof nativeService?.inspectPathsBatch !== 'function' || typeof nativeService?.compareDeleteFilesBatch !== 'function' || typeof nativeService?.deleteDirectoriesBatch !== 'function') {
+    const restored = await restoreQuarantine(quarantine, originalRoot, options);
+    if (restored) await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => undefined);
+    return { success: false, path: originalRoot, code: 'FILE_PUBLICATION_SERVICE_MISSING', recoveryPath: restored ? undefined : privateRoot };
+  }
+  let proof = await inspectOwnedTree(quarantine, originalRoot, treeItems, nativeService, options);
   if (!proof.success) {
     const restored = await restoreQuarantine(quarantine, originalRoot, options);
     if (restored) await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => undefined);
     return { success: false, path: originalRoot, code: proof.code, conflictPath: proof.path, recoveryPath: restored ? undefined : privateRoot };
   }
   await options.beforeQuarantinedTreeDelete?.({ ...rootItem, quarantine, privateRoot, treeItems, proof });
+  proof = await inspectOwnedTree(quarantine, originalRoot, treeItems, nativeService, options);
+  if (!proof.success) {
+    const restored = await restoreQuarantine(quarantine, originalRoot, options);
+    if (restored) await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => undefined);
+    return { success: false, path: originalRoot, code: proof.code, conflictPath: proof.path, recoveryPath: restored ? undefined : privateRoot };
+  }
   const rootEntry = proof.deletionEntries.find(entry => entry.relative === '');
-  const deletion = await deleteOwnedTreeEntries(proof.deletionEntries, nativeService, rootEntry, privateRoot, options);
+  const anchor = await inspectCleanupAnchorChain(quarantine, nativeService);
+  if (!anchor.success) return { success: false, path: originalRoot, code: anchor.code, recoveryPath: privateRoot };
+  const deletion = await deleteOwnedTreeEntries(proof.deletionEntries, nativeService, rootEntry, privateRoot, { ...options, cleanupAnchorRoot: anchor.anchorRoot, cleanupAnchorChain: anchor.chain });
   const quarantineRetained = await pathExistsObject(quarantine);
-  if (!deletion.success || quarantineRetained) return { success: false, path: originalRoot, code: 'CLEANUP_TREE_PARTIAL', recoveryPath: privateRoot, partial: deletion.deletedCount > 0, deletedCount: deletion.deletedCount, cleanupOutcomes: deletion.outcomes };
+  const deletionFields = { partial: !deletion.success && deletion.deletedCount > 0, deletedCount: deletion.deletedCount, deletedCleanupCount: deletion.deletedCleanupCount, cleanupWarning: deletion.cleanupWarning, outcomeUnknown: deletion.outcomeUnknown, cleanupOutcomes: deletion.outcomes, cleanupOutcomeCount: deletion.cleanupOutcomeCount, cleanupOutcomesTruncated: deletion.cleanupOutcomesTruncated };
+  if (!deletion.success || quarantineRetained) return { success: false, path: originalRoot, code: 'CLEANUP_TREE_PARTIAL', recoveryPath: privateRoot, recoveryPaths: [...new Set([privateRoot, ...(deletion.recoveryPaths || [])])], ...deletionFields };
   const rootRemoved = await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => false);
-  if (!rootRemoved) return { success: false, path: originalRoot, code: 'CLEANUP_PRIVATE_ROOT_RETAINED', recoveryPath: privateRoot, partial: deletion.deletedCount > 0, deletedCount: deletion.deletedCount, cleanupOutcomes: deletion.outcomes };
-  return { success: true, path: originalRoot, quarantined: true, deletedCount: deletion.deletedCount, cleanupOutcomes: deletion.outcomes };
+  if (!rootRemoved) return { success: false, path: originalRoot, code: 'CLEANUP_PRIVATE_ROOT_RETAINED', recoveryPath: privateRoot, recoveryPaths: [privateRoot], ...deletionFields };
+  return { success: true, path: originalRoot, quarantined: true, ...deletionFields };
 };
 
 const removeCreatedPasteTargets = async (targets, options = {}) => {
@@ -1236,10 +1304,12 @@ const removeCreatedPasteTargets = async (targets, options = {}) => {
     }
     outcomes.push(outcome);
   }
-  const recoveryPaths = outcomes.map(item => item.recoveryPath).filter(Boolean);
+  const recoveryPaths = [...new Set(outcomes.flatMap(item => [...(item.recoveryPaths || []), item.recoveryPath]).filter(Boolean))];
   if (requestedToken) terminalTokens.add(requestedToken);
   for (const token of terminalTokens) releaseCleanupOwnership(token);
-  return { success: outcomes.every(item => item.success), outcomes, recoveryPaths, ownershipToken: requestedToken || undefined };
+  const deletedCleanupCount = outcomes.reduce((sum, item) => sum + Number(item.deletedCleanupCount || 0), 0);
+  const cleanupOutcomeCount = outcomes.reduce((sum, item) => sum + Number(item.cleanupOutcomeCount || 0), 0);
+  return { success: outcomes.every(item => item.success), outcomes: outcomes.slice(0, 64), recoveryPaths, cleanupWarning: deletedCleanupCount ? `${deletedCleanupCount}项已删除但持久化确认不确定` : undefined, outcomeUnknown: outcomes.some(item => item.outcomeUnknown), deletedCleanupCount, cleanupOutcomeCount, cleanupOutcomesTruncated: outcomes.length > 64 || outcomes.some(item => item.cleanupOutcomesTruncated), ownershipToken: requestedToken || undefined };
 };
 
 const removeOwnedPathIdentityBound = async (candidate, identity, options = {}) => {
@@ -1448,6 +1518,7 @@ module.exports = {
   copyFileAtomic,
   copyPlannedFiles,
   copySmallFileAtomic,
+  deleteOwnedTreeEntries,
   isInside,
   moveFileAtomic,
   movePathAtomic,

@@ -27,6 +27,7 @@ const {
   copyFileAtomic,
   copySmallFileAtomic,
   copyPlannedFiles,
+  deleteOwnedTreeEntries,
   moveFileAtomic,
   movePathAtomic,
   publishPathNoClobber,
@@ -40,7 +41,8 @@ const {
 } = require('../electron/services/file-transfer-service.cjs');
 const { createFilePublicationService } = require('../electron/services/file-publication-service.cjs');
 
-const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-transfer-test-'));
+const transferTestBase = process.platform === 'win32' && fs.existsSync('C:\\dev\\app2') ? 'C:\\dev\\app2' : os.tmpdir();
+const root = fs.mkdtempSync(path.join(transferTestBase, 'photoflow-transfer-test-'));
 const filesIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'files-ipc.cjs'), 'utf8');
 const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
 
@@ -110,6 +112,23 @@ const run = async () => {
     const completeTreeCleanup = await removeCreatedPasteTargets([completeTree.project], { ownershipToken: 'root-complete-owner', afterRootQuarantineMove: async ({ privateRoot }) => { completePrivateRoot = privateRoot; assert.match(path.basename(privateRoot), /^\.photoflow-cleanup-tree-[0-9a-f-]{36}$/); if (process.platform !== 'win32') assert.strictEqual(fs.statSync(privateRoot).mode & 0o777, 0o700); } });
     assert.strictEqual(completeTreeCleanup.success, true); assert.strictEqual(fs.existsSync(completeTree.project), false, 'a complete exclusively owned publication tree is deleted as one isolated root'); assert.strictEqual(fs.existsSync(completePrivateRoot), false, 'the private tree quarantine is removed after successful cleanup');
 
+    const publishManyOwnedFiles = async (label, token, count) => {
+      const source = path.join(root, `${label}-source`); const staged = path.join(root, `${label}-staged`); const project = path.join(root, `${label}-project`); fs.mkdirSync(source);
+      for (let index = 0; index < count; index += 1) fs.writeFileSync(path.join(source, `f-${index}.txt`), `v${index}`);
+      const plan = []; await collectCopyPlan(source, staged, plan); await copyPlannedFiles(plan, { ownershipToken: token }); fs.renameSync(staged, project); assert.strictEqual((await rebaseCleanupOwnership(token, staged, project, { publishedRootIdentity: await capturePathIdentity(project) })).success, true); return project;
+    };
+    for (const count of [128, 512]) {
+      const token = `root-batch-${count}-owner`; const project = await publishManyOwnedFiles(`root-batch-${count}`, token, count); let compareBatchCalls = 0; let maxCompareBatch = 0; const started = Date.now();
+      const batchNative = { ...nativePublication, compareDeleteFilesBatch: async requests => { compareBatchCalls += 1; maxCompareBatch = Math.max(maxCompareBatch, requests.length); return nativePublication.compareDeleteFilesBatch(requests); } };
+      const cleanup = await removeCreatedPasteTargets([project], { ownershipToken: token, nativePublicationService: batchNative }); const elapsed = Date.now() - started;
+      assert.strictEqual(cleanup.success, true); assert.strictEqual(compareBatchCalls, Math.ceil(count / 128)); assert(maxCompareBatch <= 128); assert(elapsed < (count === 128 ? 12000 : 30000), `${count} real files must use native batches instead of one helper spawn per file`);
+    }
+
+    const warningTree = await publishOwnedTree('root-cleanup-warning', 'root-cleanup-warning-owner');
+    const warningNative = { ...nativePublication, compareDeleteFilesBatch: async requests => { const results = await nativePublication.compareDeleteFilesBatch(requests); return results.map((result, index) => index ? result : { ...result, success: false, deleted: true, cleanupWarning: true, outcomeUnknown: true, phase: 'post-unlink-cleanup' }); } };
+    const warningCleanup = await removeCreatedPasteTargets([warningTree.project], { ownershipToken: 'root-cleanup-warning-owner', nativePublicationService: warningNative });
+    assert.strictEqual(warningCleanup.success, true); assert.strictEqual(warningCleanup.outcomeUnknown, true); assert.strictEqual(warningCleanup.deletedCleanupCount, 1); assert.strictEqual(warningCleanup.cleanupWarning, '1项已删除但持久化确认不确定'); assert.strictEqual(warningCleanup.outcomes[0].cleanupOutcomes.length, 1, 'successful entries stay summarized while warning outcomes remain bounded and visible');
+
     const escapedTree = await publishOwnedTree('root-link-escape', 'root-link-escape-owner'); const escapedRecovery = path.join(root, 'root-link-escape-outside'); fs.renameSync(escapedTree.project, escapedRecovery);
     fs.symlinkSync(escapedRecovery, escapedTree.project, process.platform === 'win32' ? 'junction' : 'dir');
     const escapedCleanup = await removeCreatedPasteTargets([escapedTree.project], { ownershipToken: 'root-link-escape-owner' });
@@ -127,6 +146,24 @@ const run = async () => {
     const isolatedRaceCleanup = await removeCreatedPasteTargets([isolatedRaceTree.project], { ownershipToken: 'root-isolated-race-owner', afterRootQuarantineMove: async ({ quarantine }) => { fs.writeFileSync(path.join(quarantine, 'nested', 'owned.txt'), 'replacement-after-isolation'); } });
     assert.strictEqual(isolatedRaceCleanup.success, false); assert.strictEqual(fs.readFileSync(path.join(isolatedRaceTree.project, 'nested', 'owned.txt'), 'utf8'), 'replacement-after-isolation', 'a replacement after root isolation retains the complete quarantined tree instead of continuing deletion');
 
+    const isolatedLinkTree = await publishOwnedTree('root-isolated-link', 'root-isolated-link-owner'); const isolatedLinkOutside = path.join(root, 'root-isolated-link-outside');
+    const isolatedLinkCleanup = await removeCreatedPasteTargets([isolatedLinkTree.project], { ownershipToken: 'root-isolated-link-owner', beforeQuarantinedTreeDelete: async ({ quarantine }) => { fs.renameSync(path.join(quarantine, 'nested'), isolatedLinkOutside); fs.symlinkSync(isolatedLinkOutside, path.join(quarantine, 'nested'), process.platform === 'win32' ? 'junction' : 'dir'); } });
+    assert.strictEqual(isolatedLinkCleanup.success, false); assert.strictEqual(fs.readFileSync(path.join(isolatedLinkOutside, 'owned.txt'), 'utf8'), 'root-isolated-link', 'a child replaced by a junction after isolation must not let batch cleanup follow into the external tree');
+
+    const batchWindowTree = await publishOwnedTree('root-batch-window-link', 'root-batch-window-link-owner'); const batchWindowOutside = path.join(root, 'root-batch-window-link-outside'); let batchWindowInjected = false;
+    const batchWindowNative = { ...nativePublication, compareDeleteFilesBatch: async requests => { if (!batchWindowInjected) { batchWindowInjected = true; const parent = requests[0].parentChain.at(-1).path; fs.renameSync(parent, batchWindowOutside); fs.symlinkSync(batchWindowOutside, parent, process.platform === 'win32' ? 'junction' : 'dir'); } return nativePublication.compareDeleteFilesBatch(requests); } };
+    const batchWindowCleanup = await removeCreatedPasteTargets([batchWindowTree.project], { ownershipToken: 'root-batch-window-link-owner', nativePublicationService: batchWindowNative });
+    assert.strictEqual(batchWindowCleanup.success, false); assert.strictEqual(fs.readFileSync(path.join(batchWindowOutside, 'owned.txt'), 'utf8'), 'root-batch-window-link', 'native batch parent-chain binding must reject a junction inserted after the final JS proof without deleting the external child');
+
+    const privateWindowTree = await publishOwnedTree('root-private-window-link', 'root-private-window-link-owner'); const privateWindowOutside = path.join(root, 'root-private-window-link-outside'); let privateWindowInjected = false;
+    const privateWindowNative = { ...nativePublication, compareDeleteFilesBatch: async requests => { if (!privateWindowInjected) { privateWindowInjected = true; const privateRoot = requests[0].parentChain.find(directory => path.basename(directory.path).startsWith('.photoflow-cleanup-tree-')).path; fs.renameSync(privateRoot, privateWindowOutside); fs.symlinkSync(privateWindowOutside, privateRoot, process.platform === 'win32' ? 'junction' : 'dir'); } return nativePublication.compareDeleteFilesBatch(requests); } };
+    const privateWindowCleanup = await removeCreatedPasteTargets([privateWindowTree.project], { ownershipToken: 'root-private-window-link-owner', nativePublicationService: privateWindowNative }); assert.strictEqual(privateWindowCleanup.success, false); const privateRetainedTree = fs.readdirSync(privateWindowOutside).find(name => name.startsWith('tree-')); assert.strictEqual(fs.readFileSync(path.join(privateWindowOutside, privateRetainedTree, 'nested', 'owned.txt'), 'utf8'), 'root-private-window-link', 'volume-root anchored file batch must reject a moved private root reached through a junction');
+
+    const directoryWindowSource = path.join(root, 'root-directory-window-source'); const directoryWindowStaged = path.join(root, 'root-directory-window-staged'); const directoryWindowProject = path.join(root, 'root-directory-window-project'); const directoryWindowOutside = path.join(root, 'root-directory-window-outside'); fs.mkdirSync(path.join(directoryWindowSource, 'parent', 'empty'), { recursive: true });
+    const directoryWindowPlan = []; await collectCopyPlan(directoryWindowSource, directoryWindowStaged, directoryWindowPlan); await copyPlannedFiles(directoryWindowPlan, { ownershipToken: 'root-directory-window-owner' }); fs.renameSync(directoryWindowStaged, directoryWindowProject); assert.strictEqual((await rebaseCleanupOwnership('root-directory-window-owner', directoryWindowStaged, directoryWindowProject, { publishedRootIdentity: await capturePathIdentity(directoryWindowProject) })).success, true); let directoryWindowInjected = false;
+    const directoryWindowNative = { ...nativePublication, deleteDirectoriesBatch: async requests => { if (!directoryWindowInjected) { directoryWindowInjected = true; const privateRoot = requests[0].parentChain.find(directory => path.basename(directory.path).startsWith('.photoflow-cleanup-tree-')).path; fs.renameSync(privateRoot, directoryWindowOutside); fs.symlinkSync(directoryWindowOutside, privateRoot, process.platform === 'win32' ? 'junction' : 'dir'); } return nativePublication.deleteDirectoriesBatch(requests); } };
+    const directoryWindowCleanup = await removeCreatedPasteTargets([directoryWindowProject], { ownershipToken: 'root-directory-window-owner', nativePublicationService: directoryWindowNative }); const directoryRetainedTree = fs.readdirSync(directoryWindowOutside).find(name => name.startsWith('tree-')); assert.strictEqual(directoryWindowCleanup.success, false); assert.strictEqual(fs.statSync(path.join(directoryWindowOutside, directoryRetainedTree, 'parent', 'empty')).isDirectory(), true, 'volume-root anchored directory batch must reject a moved private root reached through a junction and preserve external empty directories');
+
     const occupiedIsolationTree = await publishOwnedTree('root-isolation-occupied', 'root-isolation-occupied-owner');
     const occupiedIsolationCleanup = await removeCreatedPasteTargets([occupiedIsolationTree.project], { ownershipToken: 'root-isolation-occupied-owner', afterRootQuarantineMove: async ({ quarantine }) => { fs.mkdirSync(occupiedIsolationTree.project); fs.writeFileSync(path.join(occupiedIsolationTree.project, 'occupant.txt'), 'occupant'); fs.writeFileSync(path.join(quarantine, 'nested', 'owned.txt'), 'retained-tree'); } });
     assert.strictEqual(occupiedIsolationCleanup.success, false); assert.strictEqual(fs.readFileSync(path.join(occupiedIsolationTree.project, 'occupant.txt'), 'utf8'), 'occupant'); assert.strictEqual(fs.existsSync(occupiedIsolationCleanup.recoveryPaths[0]), true, 'a failed proof with an occupied original path reports the complete private recovery root');
@@ -142,6 +179,11 @@ const run = async () => {
     const manifestBatches = []; let manifestYields = 0; const manifestStarted = Date.now();
     const largeManifest = await buildOwnedTreeManifest(manifestRoot, manifestItems, { onTreeManifestBatch: state => manifestBatches.push(state), yieldTreeCleanup: async () => { manifestYields += 1; } });
     assert.strictEqual(largeManifest.success, true); assert.strictEqual(largeManifest.expected.size, 10001); assert(manifestBatches.length > 75 && manifestBatches.every(batch => batch.batchSize <= 128)); assert(manifestYields >= manifestBatches.length * 2, 'both manifest construction and parent validation must yield in bounded batches'); assert(Date.now() - manifestStarted < 3000, '10k nested manifest construction must remain map-based rather than regress to quadratic parent scans');
+    const fakeRootEntry = { candidate: manifestRoot, relative: '', item: { identity: { kind: 'directory', nativeIdentity: 'root-id' } }, nativeIdentity: 'root-id' };
+    const fakeDeleteEntries = [fakeRootEntry, ...Array.from({ length: 10000 }, (_, index) => ({ candidate: path.join(manifestRoot, `f-${index}`), relative: `f-${index}`, item: { identity: { kind: 'file', size: '1', sha256: 'a'.repeat(64), nativeIdentity: `id-${index}` } }, nativeIdentity: `id-${index}` }))];
+    let fakeCompareCalls = 0; let fakeDirectoryCalls = 0; let fakeDeleteYields = 0;
+    const fakeDeletion = await deleteOwnedTreeEntries(fakeDeleteEntries, { compareDeleteFilesBatch: async requests => { fakeCompareCalls += 1; assert(requests.length <= 128); return requests.map((_, index) => ({ index, success: true, deleted: true })); }, deleteDirectoriesBatch: async requests => { fakeDirectoryCalls += 1; return requests.map((_, index) => ({ index, success: true, deleted: true })); } }, fakeRootEntry, manifestRoot, { yieldTreeCleanup: async () => { fakeDeleteYields += 1; } });
+    assert.strictEqual(fakeDeletion.success, true); assert.strictEqual(fakeCompareCalls, Math.ceil(10000 / 128)); assert.strictEqual(fakeDirectoryCalls, 1); assert(fakeDeleteYields >= fakeCompareCalls + fakeDirectoryCalls, '10k cleanup must batch helper calls and yield between batches/layers'); assert.strictEqual(fakeDeletion.outcomes.length, 0); assert.strictEqual(fakeDeletion.deletedCount, 10001);
 
     const configuredInspirationRoot = path.join(root, 'configured-inspiration');
     const unconfiguredInspirationRoot = path.join(root, 'renderer-selected-root');
