@@ -7,6 +7,7 @@ const {
   ALLOWED_IPC_REGISTRAR_EDGES,
   ALLOWED_RENDERER_FEATURE_EDGES,
   ENTRY_FILE_BUDGETS,
+  REVIEWED_FEATURE_COUPLED_SHARED_COMPONENTS,
 } = require('./source-boundary-policy.cjs');
 
 const root = path.resolve(__dirname, '..');
@@ -26,6 +27,7 @@ const resolveSpecifier = (file, specifier) => normalize(path.relative(root, path
 
 const rendererFeatureEdges = new Set();
 const componentFeatureEdges = new Set();
+const reviewedFeatureCoupledSharedComponents = new Set(REVIEWED_FEATURE_COUPLED_SHARED_COMPONENTS);
 for (const file of sourceFiles) {
   const relativeFile = normalize(path.relative(root, file));
   const source = fs.readFileSync(file, 'utf8');
@@ -34,6 +36,7 @@ for (const file of sourceFiles) {
     const sourceFeature = /^src\/features\/([^/]+)\//.exec(relativeFile)?.[1];
     const targetFeature = /^src\/features\/([^/]+)\//.exec(target)?.[1];
     if (sourceFeature && targetFeature && sourceFeature !== targetFeature) rendererFeatureEdges.add(`${sourceFeature}->${targetFeature}`);
+    if (sourceFeature && reviewedFeatureCoupledSharedComponents.has(target)) rendererFeatureEdges.add(`${sourceFeature}->components`);
     if (relativeFile.startsWith('src/components/') && targetFeature) componentFeatureEdges.add(`components->${targetFeature}`);
 
     if (relativeFile.startsWith('src/contracts/')) {
@@ -60,6 +63,8 @@ for (const domain of ['workspace', 'file-operations', 'media', 'versioning']) {
 assert(!fs.existsSync(path.join(root, 'electron', 'domains', 'sample-component')) && !fs.existsSync(path.join(root, 'electron', 'repositories', 'sample-component-repository.cjs')),
   'sample-component business persistence must live only in its component service');
 
+assert(!rendererFeatureEdges.has('search->workspace'),
+  'global search must consume reviewed shared UI rather than the workspace composition root');
 assert.deepStrictEqual([...rendererFeatureEdges].sort(), [...ALLOWED_RENDERER_FEATURE_EDGES].sort(),
   'renderer feature dependency graph changed; use a public contract or update the reviewed boundary policy');
 assert.deepStrictEqual([...componentFeatureEdges].sort(), [...ALLOWED_COMPONENT_FEATURE_EDGES].sort(),
@@ -90,6 +95,7 @@ for (const file of electronFiles) {
   }
 }
 
+// Each value is a reviewed hard ceiling. Exact shell/IPC baselines are pinned, so one added line still fails this gate.
 for (const [relativeFile, maximumLines] of Object.entries(ENTRY_FILE_BUDGETS)) {
   const lineCount = fs.readFileSync(path.join(root, relativeFile), 'utf8').split(/\r?\n/).length;
   assert(lineCount <= maximumLines, `${relativeFile} exceeded its ${maximumLines}-line composition budget (${lineCount})`);

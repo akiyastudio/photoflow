@@ -184,6 +184,7 @@
 
 - `src/components/AdvancedVideoPlayer.tsx`
 - `src/components/InteractiveCropEditor.tsx`
+- `src/components/MediaThumbnail.tsx`
 - `src/components/VideoHoverThumbnail.tsx`
 - `src/components/video-subtitle-memory.ts`
 - `src/features/app/video-player-settings.ts`

@@ -3,6 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 
 const source = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'search', 'SearchAllPage.tsx'), 'utf8');
+assert(source.includes("from '../../components/MediaThumbnail'") && !source.includes("from '../workspace/ProjectWorkspace'"), 'global search must consume the neutral thumbnail component without loading the workspace composition root');
 assert(source.includes('GLOBAL_SEARCH_RESULT_PAGE_SIZE = 200') && source.includes('GLOBAL_SEARCH_MAX_MOUNTED_RESULTS = 400'), 'disk ingestion and mounted virtual results must have fixed bounds');
 assert(source.includes('SEARCH_TREE_MAX_ITEMS = 64') && source.includes("kind: 'branch'; count: number; maxKey: string"), 'ranked disk tree nodes must have fixed fanout and subtree counts');
 assert(!/上一页|下一页|搜索结果分页|previous\/next|one page/i.test(source), 'global results must be one continuous scroll surface without paging interaction');

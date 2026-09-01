@@ -8,6 +8,8 @@ const player = read('src/components/AdvancedVideoPlayer.tsx');
 const preload = read('electron/preload.cjs');
 const ipc = read('electron/modules/video-playback-ipc.cjs');
 const workspace = read('src/features/workspace/ProjectWorkspace.tsx');
+const search = read('src/features/search/SearchAllPage.tsx');
+const mediaThumbnail = read('src/components/MediaThumbnail.tsx');
 const hoverThumbnail = read('src/components/VideoHoverThumbnail.tsx');
 const versions = read('src/components/VersionManager.tsx');
 const config = read('src/features/app/app-config.ts');
@@ -73,8 +75,13 @@ assert(hoverThumbnail.includes('<video ref={videoRef}')
   && hoverThumbnail.includes('activeHoverVideo')
   && hoverThumbnail.includes('onMouseMove')
   && hoverThumbnail.includes('onEnded={restartPlayback}')
-  && workspace.includes('HOVER_VIDEO_PLAY_DELAY_MS = 300'),
+  && mediaThumbnail.includes('HOVER_VIDEO_PLAY_DELAY_MS = 300'),
 'thumbnail hover previews must use one delayed, muted, seekable, looping Chromium playback surface');
+assert(workspace.includes("from '../../components/MediaThumbnail'")
+  && search.includes("from '../../components/MediaThumbnail'")
+  && !workspace.includes('export const MediaThumbnail')
+  && !search.includes("from '../workspace/ProjectWorkspace'"),
+'workspace and global search must share the thumbnail component without loading or re-exporting the workspace composition root');
 assert(player.includes('<video ref={videoRef}') && player.includes('startPlaybackSession'), 'formal playback must retain an application-owned Chromium surface behind the shared player UI');
 assert(playbackSession.includes('languageMatches') && playbackSession.includes('context.settings.subtitlePreferredLanguages') && playbackSession.includes('if (track) break;'), 'preferred-language selection must be owned by the application session and accept language subtags');
 

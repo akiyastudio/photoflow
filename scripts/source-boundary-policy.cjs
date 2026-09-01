@@ -6,6 +6,7 @@ const ALLOWED_RENDERER_FEATURE_EDGES = Object.freeze([
   'inspiration->components',
   'inspiration->file-browser',
   'inspiration->workspace',
+  'search->components',
   'settings->app',
   'settings->components',
   'settings->tools',
@@ -16,6 +17,10 @@ const ALLOWED_RENDERER_FEATURE_EDGES = Object.freeze([
   'workspace->metadata',
   'workspace->tools',
   'workspace->versioning',
+]);
+
+const REVIEWED_FEATURE_COUPLED_SHARED_COMPONENTS = Object.freeze([
+  'src/components/MediaThumbnail',
 ]);
 
 const ALLOWED_COMPONENT_FEATURE_EDGES = Object.freeze([
@@ -36,4 +41,4 @@ const ALLOWED_IPC_REGISTRAR_EDGES = Object.freeze([
   'electron/modules/versions-ipc.cjs->electron/modules/version-tracking-ipc.cjs',
 ]);
 
-module.exports = { ALLOWED_COMPONENT_FEATURE_EDGES, ALLOWED_IPC_REGISTRAR_EDGES, ALLOWED_RENDERER_FEATURE_EDGES, ENTRY_FILE_BUDGETS };
+module.exports = { ALLOWED_COMPONENT_FEATURE_EDGES, ALLOWED_IPC_REGISTRAR_EDGES, ALLOWED_RENDERER_FEATURE_EDGES, ENTRY_FILE_BUDGETS, REVIEWED_FEATURE_COUPLED_SHARED_COMPONENTS };
