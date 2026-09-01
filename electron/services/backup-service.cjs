@@ -2206,6 +2206,7 @@ const createBackupService = context => {
         signal: task.signal,
         deadlineAt: Date.now() + 30 * 60 * 1000,
       }, async () => {
+        let restoredOperationsDomain = false;
         for (const [domain, getter] of [
           ['operations', getWorkspaceOperationsDatabasePath],
           ['media', getWorkspaceMediaDatabasePath],
@@ -2222,6 +2223,7 @@ const createBackupService = context => {
               '--old-root', manifest.workspace.root, '--new-root', destination,
               '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
             ], 30 * 60 * 1000);
+            if (domain === 'operations') restoredOperationsDomain = true;
           } finally {
             await fs.promises.rm(portable, { force: true });
           }
@@ -2236,7 +2238,7 @@ const createBackupService = context => {
             '--materialized-archive-project-ids', JSON.stringify(manifest.materializedArchiveProjectIds || []),
           ], 30 * 60 * 1000);
         } finally { await fs.promises.rm(portableCore, { force: true }); }
-        await syncOperationsRetiredShadow(destination);
+        if (restoredOperationsDomain) await syncOperationsRetiredShadow(destination);
       });
       const restoredConfigEntry = manifest.files.find(entry => entry.scope === 'app-config' && entry.path === 'photoflow_config.json');
       let restoredConfig = {};

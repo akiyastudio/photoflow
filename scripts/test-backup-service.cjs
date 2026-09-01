@@ -364,6 +364,7 @@ const main = async () => {
     config.workspacePath = first.root;
     await fs.promises.writeFile(path.join(first.project, '新增文件.txt'), 'incremental-content', 'utf8');
     assert.strictEqual((await operationsRepository.retireUndoRecordClaim(first.root, 'workspace-shadow-sync')).retired, true);
+    await runPython('workspace_db.py', ['undo_record_add', '--root', first.root, '--database', first.database, '--payload', JSON.stringify({ id: 'legacy-core-only', kind: 'trash', payload: { items: [] } })]);
     const replacementRun = await service.runBackup(first.root, 'manual');
     assert.strictEqual(replacementRun.task.state, 'completed');
     assert.ok(replacementRun.result.incremental.reusedFiles > 0, 'unchanged files must reuse their existing backup objects');
@@ -629,6 +630,7 @@ const main = async () => {
       assert.strictEqual(fs.existsSync(currentSnapshotPath), true, 'fail-closed GC must preserve the healthy snapshot');
       await fs.promises.rm(unsafePath, { recursive: true, force: true });
     }
+    const legacyWorkspaceSnapshotId = 'legacy-workspace-without-operations'; const legacyWorkspaceSnapshotPath = path.join(target, STORE_DIRECTORY, 'snapshots', legacyWorkspaceSnapshotId); await fs.promises.cp(currentSnapshotPath, legacyWorkspaceSnapshotPath, { recursive: true }); const legacyWorkspaceManifestPath = path.join(legacyWorkspaceSnapshotPath, 'manifest.json'); const legacyWorkspaceManifest = JSON.parse(await fs.promises.readFile(legacyWorkspaceManifestPath, 'utf8')); legacyWorkspaceManifest.id = legacyWorkspaceSnapshotId; legacyWorkspaceManifest.files = legacyWorkspaceManifest.files.filter(entry => !(entry.scope === 'domain-database' && entry.path === 'operations.sqlite3')); await fs.promises.writeFile(legacyWorkspaceManifestPath, JSON.stringify(legacyWorkspaceManifest), 'utf8');
 
     currentWorkspace = second;
     config.workspacePath = second.root;
@@ -684,6 +686,9 @@ const main = async () => {
     assert.equal(canonicalRestoredConfig.componentSettingsRevisions['concurrent-fixture'], 10, 'workspace restore preserves newer opaque component settings through the shared mutation queue');
     assert.ok((await fs.promises.readdir(path.join(target, STORE_DIRECTORY, 'objects'))).length > 0);
     assert.equal(componentQuiesceCount, componentResumeCount, 'every component storage quiesce must resume even across the complete backup suite');
+    const legacyRestoreRoot = path.join(temporaryRoot, 'legacy-restored'); await fs.promises.mkdir(legacyRestoreRoot); const legacyRestoredDataRoot = path.join(temporaryRoot, 'workspace-data', 'legacy-restored-id'); const legacyRestoredDatabase = path.join(temporaryRoot, 'workspace-data', 'legacy-restored-id.sqlite3'); const legacyRestoredOperations = path.join(legacyRestoredDataRoot, 'databases', 'operations.sqlite3'); currentWorkspace = { ...first, dataRoot: legacyRestoredDataRoot, database: legacyRestoredDatabase, operationsDatabase: legacyRestoredOperations };
+    const legacyRestored = await service.restoreWorkspace(first.root, legacyWorkspaceSnapshotId, legacyRestoreRoot); assert.strictEqual(legacyRestored.task.state, 'completed'); assert.strictEqual(fs.existsSync(legacyRestoredOperations), false, 'legacy workspace restore does not require an operations domain entry');
+    const importedLegacyUndo = await runPython('operations_db.py', ['init', '--database', legacyRestoredOperations, '--payload', JSON.stringify({ legacyDatabase: legacyRestoredDatabase })]); assert.strictEqual(importedLegacyUndo.imported, 1); const latestLegacyUndo = await runPython('operations_db.py', ['undo_record_latest', '--database', legacyRestoredOperations, '--payload', '{}']); assert.strictEqual(latestLegacyUndo.record.id, 'legacy-core-only', 'legacy core undo records migrate when operations is initialized later');
     currentWorkspace = { ...first, dataRoot: originalDataRoot, database: originalDatabase };
 
     await Promise.all([maintenanceClient.stop(), writerClient.stop(), domainWriterClient.stop(), operationsClient.stop()]);
