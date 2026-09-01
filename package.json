@@ -77,7 +77,7 @@
     "test:file-operation-state": "node scripts/test-file-operation-state-model.cjs",
     "test:process-supervisor": "node scripts/test-process-supervisor.cjs",
     "test:panel-task-sessions": "node scripts/test-panel-task-sessions.cjs",
-    "test:workspace-tabs": "node scripts/test-workspace-tab-model.cjs && node scripts/test-titlebar-tab-order-hook.cjs",
+    "test:workspace-tabs": "node scripts/test-workspace-tab-model.cjs && node scripts/test-titlebar-tab-order-hook.cjs && node --experimental-strip-types scripts/test-titlebar-tab-scroll.mjs",
     "test:startup-catalog": "node scripts/test-startup-catalog-client.cjs",
     "test:marquee-model": "node scripts/test-marquee-selection-model.cjs",
     "test:project-workspace-layout": "node scripts/test-project-workspace-layout-model.cjs",

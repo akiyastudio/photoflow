@@ -5,7 +5,9 @@ import { ProjectNavigator } from './components/ProjectNavigator';
 import { ProjectWorkspace } from './features/workspace/ProjectWorkspace';
 import { AppErrorBoundary } from './features/app/AppErrorBoundary';
 import { BackupHomeCard, StartupWindowFrame, UpdateModal, WindowControls } from './features/app/AppChrome';
-import { componentTabId, inspirationTabId, projectTabId, useTitlebarTabOrder, workspaceToolTabId } from './features/app/useTitlebarTabOrder';
+import { componentTabId, inspirationTabId, projectTabId, workspaceToolTabId } from './features/app/useTitlebarTabOrder';
+import { useTitlebarTabScroll } from './features/app/useTitlebarTabScroll';
+import { useBackgroundTaskDrawerWidthPersistence, useSidebarCollapsedPersistence, useSidebarWidthPersistence, useViewportWidth } from './features/app/useAppShellLayoutState';
 import { useWorkspaceTabs } from './features/app/useWorkspaceTabs';
 import { useFolderTabNavigation } from './features/app/useFolderTabNavigation';
 import { browserPageActivation } from './features/app/workspace-tab-model';
@@ -18,6 +20,7 @@ import { ComponentPageSurface } from './features/components/ComponentPageSurface
 import { ComponentDeclarativeSettingsSurface } from './features/components/ComponentDeclarativeSettingsSurface';
 import { ComponentContributionDock } from './features/components/ComponentContributionDock';
 import { componentRuntimeIsAvailable } from './features/components/component-availability-model';
+import { readCachedComponentStatuses } from './features/components/component-cache';
 import { componentHostCatalogKey, useComponentPages } from './features/components/useComponentPages';
 import { ComponentIcon } from './components/ComponentIcon';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature'; import { componentSettingsSectionKey } from './features/settings/component-settings-page-model';
@@ -32,14 +35,10 @@ import { SearchAllPage, type GlobalSearchSource } from './features/search/Search
 import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
 import type { AppConfig, AppUpdateInfo, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentSettingsPageContribution, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
 import { normalizeVideoShortcutBindings } from './contracts/video-shortcuts'; import { LEGACY_VIDEO_PLAYBACK_SETTINGS_ID } from './compatibility/legacy-video-playback-settings'; import { ColumnResizeHandle } from './features/app/AppShellLayout';
-import { clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
+import { BACKGROUND_TASK_DRAWER_DEFAULT_WIDTH, BACKGROUND_TASK_DRAWER_MAX_WIDTH, BACKGROUND_TASK_DRAWER_MIN_WIDTH, BACKGROUND_TASK_DRAWER_STORAGE_KEY, clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
 import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, IMAGE_SELECTION_FOLDER_NAME, VIDEO_SELECTION_FOLDER_NAME, isMac, localDateKey, normalizeHomeOrder, normalizeMediaCacheSize, normalizeProjectCategories, normalizeProjectToolbar, normalizeVideoPreviewQuality } from './features/app/app-config';
 import { normalizeSubtitleFontSize } from './features/app/video-player-settings';
 type WorkspaceToolKind = 'version'; type WorkspaceToolTab = { ownerPageId: string; projectId: string; projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
-const BACKGROUND_TASK_DRAWER_STORAGE_KEY = 'photoflow:background-task-drawer-width';
-const BACKGROUND_TASK_DRAWER_DEFAULT_WIDTH = 320;
-const BACKGROUND_TASK_DRAWER_MIN_WIDTH = 260;
-const BACKGROUND_TASK_DRAWER_MAX_WIDTH = 640;
 // --- 主组件 ---
 const App: React.FC = () => {
   const appDialog = useAppDialog();
@@ -72,9 +71,7 @@ const App: React.FC = () => {
   const backgroundTaskDrawerHostRef = useRef<HTMLDivElement>(null);
   const [backupStatus, setBackupStatus] = useState<BackupStatus>({ success: true, enabled: false, state: 'unconfigured', snapshots: [] });
   const [backupProjectFocus, setBackupProjectFocus] = useState<WorkspaceProject | null>(null);
-  const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
   const titlebarTabsRef = useRef<HTMLDivElement>(null);
-  const [titlebarTabScroll, setTitlebarTabScroll] = useState({ overflow: false, canScrollLeft: false, canScrollRight: false });
   useEffect(() => {
     const restorePanelTask = (event: Event) => {
       const ownerPageId = (event as CustomEvent<{ ownerPageId?: string }>).detail?.ownerPageId;
@@ -90,16 +87,7 @@ const App: React.FC = () => {
     window.addEventListener('photoflow:restore-panel-task', restorePanelTask);
     return () => window.removeEventListener('photoflow:restore-panel-task', restorePanelTask);
   }, [activatePage, projectPages]);
-  const [components, setComponents] = useState<ComponentStatus[]>(() => {
-    try {
-      const cached = JSON.parse(window.localStorage.getItem('photoflow:components-cache') || '[]');
-      return Array.isArray(cached)
-        ? cached.filter(component => component && !['application', 'legacy-application', 'bundled'].includes(String(component.source || '')))
-        : [];
-    } catch {
-      return [];
-    }
-  });
+  const [components, setComponents] = useState<ComponentStatus[]>(readCachedComponentStatuses);
   const [componentInstallPath, setComponentInstallPath] = useState('');
   const [componentsLoading, setComponentsLoading] = useState(true);
   const [componentSettingsPages, setComponentSettingsPages] = useState<ComponentSettingsPageContribution[]>([]);
@@ -112,13 +100,8 @@ const App: React.FC = () => {
   const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); } });
   const { actions: componentHostActions, contributions: componentContributions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
 
-  useEffect(() => {
-    window.localStorage.setItem('photoflow:sidebar-width', String(Math.round(sidebarWidth)));
-  }, [sidebarWidth]);
-
-  useEffect(() => {
-    window.localStorage.setItem(BACKGROUND_TASK_DRAWER_STORAGE_KEY, String(Math.round(backgroundTaskDrawerWidth)));
-  }, [backgroundTaskDrawerWidth]);
+  useSidebarWidthPersistence(sidebarWidth);
+  useBackgroundTaskDrawerWidthPersistence(backgroundTaskDrawerWidth);
 
   useEffect(() => { if (activeTab !== 'component') void componentHost.deactivate(); }, [activeTab, componentHost.deactivate]);
 
@@ -133,7 +116,7 @@ const App: React.FC = () => {
     return () => { active = false; };
   }, [componentCatalogKey]);
 
-  useEffect(() => { window.localStorage.setItem('photoflow:sidebar-collapsed', String(sidebarCollapsed)); }, [sidebarCollapsed]);
+  useSidebarCollapsedPersistence(sidebarCollapsed);
   const previousInspirationRootRef = useRef<string>(); const previousInspirationPinnedRef = useRef<boolean>();
   useEffect(() => {
     if (!configLoaded || !config) return;
@@ -151,76 +134,20 @@ const App: React.FC = () => {
     if (activeWasInspiration) { setSelectedProject(null); setActiveTab(config.pinInspirationLibrary ? 'inspiration' : 'home'); }
   }, [activePageId, config, configLoaded, ensureInspirationRoot, projectPages, resetInspirationPages]);
 
-  const titlebarPages = useMemo(() => ({
-    inspiration: projectPages.filter(page => page.kind === 'inspiration').map(page => ({ id: page.id, currentRelativePath: page.currentRelativePath })),
-    pinnedInspirationPageId: config?.pinInspirationLibrary ? projectPages.find(page => page.kind === 'inspiration' && page.initialRelativePath === '')?.id : undefined,
-    projects: projectPages.filter(page => page.project).map(page => ({ id: page.id, projectPath: page.project!.path })),
-  }), [config?.pinInspirationLibrary, projectPages]);
-  const titlebarTabDragProps = useTitlebarTabOrder({
-    inspirationPages: titlebarPages.inspiration,
-    pinnedInspirationPageId: titlebarPages.pinnedInspirationPageId,
-    projectPages: titlebarPages.projects,
-    toolTabs: workspaceToolTabs,
+  const { titlebarTabScroll, titlebarTabDragProps, scrollTitlebarTabs, handleTitlebarTabWheel } = useTitlebarTabScroll({
+    tabsRef: titlebarTabsRef,
     componentPages,
-    searchAllOpen: searchAllTabOpen,
-    settingsOpen: settingsTabOpen,
+    configLoaded,
+    activeTab,
+    activePageId,
+    projectPages,
+    pinInspirationLibrary: config?.pinInspirationLibrary,
+    searchAllTabOpen,
+    settingsTabOpen,
+    workspaceToolTabs,
   });
-  const updateTitlebarTabScroll = useCallback(() => {
-    const element = titlebarTabsRef.current;
-    if (!element) return;
-    const overflow = element.scrollWidth > element.clientWidth + 1;
-    const next = {
-      overflow,
-      canScrollLeft: overflow && element.scrollLeft > 1,
-      canScrollRight: overflow && element.scrollLeft + element.clientWidth < element.scrollWidth - 1,
-    };
-    setTitlebarTabScroll(current => current.overflow === next.overflow
-      && current.canScrollLeft === next.canScrollLeft
-      && current.canScrollRight === next.canScrollRight ? current : next);
-  }, []);
 
-  useEffect(() => {
-    const element = titlebarTabsRef.current;
-    if (!element) return;
-    const observer = new ResizeObserver(updateTitlebarTabScroll);
-    observer.observe(element);
-    element.addEventListener('scroll', updateTitlebarTabScroll, { passive: true });
-    updateTitlebarTabScroll();
-    return () => {
-      observer.disconnect();
-      element.removeEventListener('scroll', updateTitlebarTabScroll);
-    };
-  }, [componentPages.length, configLoaded, projectPages.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
-
-  useEffect(() => {
-    const frame = window.requestAnimationFrame(() => {
-      const element = titlebarTabsRef.current;
-      element?.querySelector<HTMLElement>('[data-active-tab="true"]')?.scrollIntoView({ behavior: 'smooth', block: 'nearest', inline: 'nearest' });
-      updateTitlebarTabScroll();
-    });
-    return () => window.cancelAnimationFrame(frame);
-  }, [componentPages.length, configLoaded, activeTab, activePageId, projectPages.length, settingsTabOpen, updateTitlebarTabScroll, workspaceToolTabs.length]);
-
-  const scrollTitlebarTabs = (direction: -1 | 1) => {
-    const element = titlebarTabsRef.current;
-    if (!element) return;
-    element.scrollBy({ left: direction * Math.max(180, element.clientWidth * 0.65), behavior: 'smooth' });
-  };
-
-  const handleTitlebarTabWheel = (event: React.WheelEvent<HTMLDivElement>) => {
-    const element = event.currentTarget;
-    if (element.scrollWidth <= element.clientWidth + 1) return;
-    const delta = Math.abs(event.deltaX) > Math.abs(event.deltaY) ? event.deltaX : event.deltaY;
-    if (!delta) return;
-    event.preventDefault();
-    element.scrollBy({ left: delta, behavior: 'auto' });
-  };
-
-  useEffect(() => {
-    const measureViewport = () => setViewportWidth(window.innerWidth);
-    window.addEventListener('resize', measureViewport);
-    return () => window.removeEventListener('resize', measureViewport);
-  }, []);
+  const viewportWidth = useViewportWidth();
 
   useEffect(() => {
     if (!config?.mediaCache.autoCleanup30Days || cacheCleanupCheckedRef.current) return;

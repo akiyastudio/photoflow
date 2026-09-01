@@ -10,6 +10,7 @@ const app = read('src/App.tsx');
 const indicator = read('src/features/background-tasks/BackgroundTaskIndicator.tsx');
 const resizeHandle = read('src/features/app/AppShellLayout.tsx');
 const resizeModel = read('src/features/app/app-shell-layout-model.ts');
+const layoutState = read('src/features/app/useAppShellLayoutState.ts');
 const inspirationLibrary = read('src/features/inspiration/InspirationLibrary.tsx');
 const settingsFeature = read('src/features/settings/SettingsFeature.tsx');
 const toast = read('src/features/app/useTopToastStack.tsx');
@@ -25,8 +26,9 @@ assert(app.includes('style={{ width: renderedBackgroundTaskDrawerWidth }}') && a
 assert(!app.includes("backgroundTaskDrawerOpen ? 'shrink-0 overflow-hidden border-l") && !inspirationLibrary.includes('aria-label="灵感库导航" className="flex min-h-0 flex-1 flex-col border-r') && !settingsFeature.includes('aria-label="设置分类" className="flex min-h-0 flex-1 flex-col overflow-y-auto overscroll-contain border-r'), 'resize handles must be the single visual divider for side panels');
 assert(indicator.includes('useEscapeLayer(open, closeAndRestoreFocus)') && !indicator.includes('suspendExternalSurfaces') && !indicator.includes('useHostSurfaceSuspension'), 'opening the drawer must not suspend native plugin surfaces');
 
-assert(app.includes("photoflow:background-task-drawer-width") && app.includes('readStoredNumber(BACKGROUND_TASK_DRAWER_STORAGE_KEY') && app.includes('localStorage.setItem(BACKGROUND_TASK_DRAWER_STORAGE_KEY'), 'drawer width must persist across renderer sessions');
-assert(app.includes('BACKGROUND_TASK_DRAWER_MIN_WIDTH = 260') && app.includes('BACKGROUND_TASK_DRAWER_MAX_WIDTH = 640') && app.includes('viewportWidth - (sidebarCollapsed ? 0 : renderedSidebarWidth) - 420'), 'drawer width must preserve a usable main-content area');
+assert(resizeModel.includes("BACKGROUND_TASK_DRAWER_STORAGE_KEY = 'photoflow:background-task-drawer-width'") && app.includes('readStoredNumber(BACKGROUND_TASK_DRAWER_STORAGE_KEY') && layoutState.includes('localStorage.setItem(BACKGROUND_TASK_DRAWER_STORAGE_KEY'), 'drawer width must persist across renderer sessions');
+assert(resizeModel.includes('BACKGROUND_TASK_DRAWER_MIN_WIDTH = 260') && resizeModel.includes('BACKGROUND_TASK_DRAWER_MAX_WIDTH = 640') && app.includes('viewportWidth - (sidebarCollapsed ? 0 : renderedSidebarWidth) - 420'), 'drawer width must preserve a usable main-content area');
+assert(layoutState.includes('useState(() => window.innerWidth)') && layoutState.includes("window.addEventListener('resize', measureViewport)") && layoutState.includes("window.removeEventListener('resize', measureViewport)"), 'viewport width must initialize synchronously and clean up its resize listener');
 assert(app.includes('width - deltaX') && app.includes('onReset={() => setBackgroundTaskDrawerWidth(BACKGROUND_TASK_DRAWER_DEFAULT_WIDTH)}'), 'dragging the left edge must resize in the correct direction and support resetting');
 assert(resizeHandle.includes('setPointerCapture(pointerId)') && resizeHandle.includes('releasePointerCapture(pointerId)'), 'the resize handle must capture and release its initiating pointer');
 assert(resizeHandle.includes('moveEvent.pointerId !== pointerId') && resizeHandle.includes('finishEvent.pointerId !== pointerId') && resizeHandle.includes("addEventListener('pointerup', finish)") && resizeHandle.includes("addEventListener('pointercancel', finish)"), 'move, pointerup, and pointercancel must ignore every pointer except the initiating pointer');
