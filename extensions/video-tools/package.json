@@ -25,6 +25,6 @@
         "LICENSES/README.md": "LICENSES/README.md"
       }
     },
-    "tests": { "package-layout": ["tests/test-service.cjs", "tests/test-runtime-boundary.cjs"] }
+    "tests": { "package-layout": ["tests/test-service.cjs", "tests/test-runtime-boundary.cjs", "tests/test-private-python-environment-boundary.cjs"] }
   }
 }
