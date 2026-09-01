@@ -1,10 +1,11 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { Folder, X, Settings, PanelLeftClose, PanelLeftOpen, ChevronLeft, ChevronRight, GitBranch, Home, Lightbulb, Pin, Search } from 'lucide-react';
+import { Settings, ChevronRight, Lightbulb, Search } from 'lucide-react';
 import { useAppDialog } from './components/AppDialogProvider';
 import { ProjectNavigator } from './components/ProjectNavigator';
 import { ProjectWorkspace } from './features/workspace/ProjectWorkspace';
 import { AppErrorBoundary } from './features/app/AppErrorBoundary';
-import { BackupHomeCard, StartupWindowFrame, UpdateModal, WindowControls } from './features/app/AppChrome';
+import { BackupHomeCard, StartupWindowFrame, UpdateModal } from './features/app/AppChrome';
+import { AppTitlebar, type WorkspaceToolTab } from './features/app/AppTitlebar';
 import { componentTabId, inspirationTabId, projectTabId, workspaceToolTabId } from './features/app/useTitlebarTabOrder';
 import { useTitlebarTabScroll } from './features/app/useTitlebarTabScroll';
 import { useBackgroundTaskDrawerWidthPersistence, useSidebarCollapsedPersistence, useSidebarWidthPersistence, useViewportWidth } from './features/app/useAppShellLayoutState';
@@ -15,30 +16,25 @@ import { BackgroundTaskIndicator } from './features/background-tasks/BackgroundT
 import { useTaskCenter } from './features/background-tasks/TaskCenter';
 import { useUserFacingToast } from './features/app/useUserFacingToast';
 import { useRendererErrorReporting } from './features/app/useRendererErrorReporting';
-import { DomainHealthBanner } from './features/app/DomainHealthBanner';
 import { ComponentPageSurface } from './features/components/ComponentPageSurface'; import { ComponentSettingsPageSurface } from './features/components/ComponentSettingsPageSurface';
 import { ComponentDeclarativeSettingsSurface } from './features/components/ComponentDeclarativeSettingsSurface';
 import { ComponentContributionDock } from './features/components/ComponentContributionDock';
 import { componentRuntimeIsAvailable } from './features/components/component-availability-model';
-import { readCachedComponentStatuses } from './features/components/component-cache';
-import { componentHostCatalogKey, useComponentPages } from './features/components/useComponentPages';
-import { ComponentIcon } from './components/ComponentIcon';
+import { useComponentPages } from './features/components/useComponentPages';
+import { useComponentCatalog } from './features/components/useComponentCatalog';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature'; import { componentSettingsSectionKey } from './features/settings/component-settings-page-model';
 import { UsagePreferencesOnboarding, USAGE_PREFERENCES_VERSION } from './features/settings/UsagePreferencesOnboarding';
 import type { BuiltInSettingsSection, SettingsSection } from './features/settings/SettingsFeature';
+import { useStartupConfig } from './features/settings/startup-config';
 import { DashboardView, MatchView, VideoSplitView, type ImportCompletion } from './features/tools/ToolViews';
 import { useStartupSdAutoImport } from './features/tools/use-startup-sd-auto-import';
-import { normalizeSavedSdDeviceRecords, normalizeSavedSdDriveVideoActions } from './features/tools/sd-startup-import-model';
-import { normalizeVideoTranscodeSettings } from './features/tools/video-transcode-model';
 import { InspirationLibraryNavigator, InspirationLibraryPage } from './features/inspiration/InspirationLibrary';
 import { SearchAllPage, type GlobalSearchSource } from './features/search/SearchAllPage';
-import { normalizeProgressNamePresets, normalizeProjectCategoryOrder, normalizeWorkspacePaths } from './types';
-import type { AppConfig, AppUpdateInfo, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentSettingsPageContribution, ComponentStatus, HomeCardId, ToolType, WorkspaceProject } from './types';
-import { normalizeVideoShortcutBindings } from './contracts/video-shortcuts'; import { LEGACY_VIDEO_PLAYBACK_SETTINGS_ID } from './compatibility/legacy-video-playback-settings'; import { ColumnResizeHandle } from './features/app/AppShellLayout';
+import type { AppConfig, AppUpdateInfo, BackupStatus, ComponentHostAction, ComponentPageOpenScope, ComponentSettingsPageContribution, HomeCardId, ToolType, WorkspaceProject } from './types';
+import { ColumnResizeHandle } from './features/app/AppShellLayout';
 import { BACKGROUND_TASK_DRAWER_DEFAULT_WIDTH, BACKGROUND_TASK_DRAWER_MAX_WIDTH, BACKGROUND_TASK_DRAWER_MIN_WIDTH, BACKGROUND_TASK_DRAWER_STORAGE_KEY, clampNumber, readStoredNumber } from './features/app/app-shell-layout-model';
-import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, IMAGE_SELECTION_FOLDER_NAME, VIDEO_SELECTION_FOLDER_NAME, isMac, localDateKey, normalizeHomeOrder, normalizeMediaCacheSize, normalizeProjectCategories, normalizeProjectToolbar, normalizeVideoPreviewQuality } from './features/app/app-config';
-import { normalizeSubtitleFontSize } from './features/app/video-player-settings';
-type WorkspaceToolKind = 'version'; type WorkspaceToolTab = { ownerPageId: string; projectId: string; projectPath: string; kind: WorkspaceToolKind; label: string; busy: boolean };
+import { DEFAULT_CONFIG, DEFAULT_HOME_ORDER, localDateKey } from './features/app/app-config';
+type WorkspaceToolKind = 'version';
 // --- 主组件 ---
 const App: React.FC = () => {
   const appDialog = useAppDialog();
@@ -46,10 +42,7 @@ const App: React.FC = () => {
   const [searchAllTabOpen, setSearchAllTabOpen] = useState(false);
   const [settingsTabOpen, setSettingsTabOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('general');
-  const [showWorkspaceSetup, setShowWorkspaceSetup] = useState(false);
-  const [config, setConfig] = useState<AppConfig | null>(null); const [startupSdAutoStart, setStartupSdAutoStart] = useState(false);
-  const [startupBirthdays, setStartupBirthdays] = useState<Record<string, string> | null>(null);
-  const [configLoaded, setConfigLoaded] = useState(false);
+  const { config, setConfig, configLoaded, showWorkspaceSetup, setShowWorkspaceSetup, startupBirthdays, startupSdAutoStart } = useStartupConfig();
   const [privacyStateLoaded, setPrivacyStateLoaded] = useState(false);
   const [privacyConsentRequired, setPrivacyConsentRequired] = useState(true);
   const [updateInfo, setUpdateInfo] = useState<AppUpdateInfo | null>(null);
@@ -87,11 +80,13 @@ const App: React.FC = () => {
     window.addEventListener('photoflow:restore-panel-task', restorePanelTask);
     return () => window.removeEventListener('photoflow:restore-panel-task', restorePanelTask);
   }, [activatePage, projectPages]);
-  const [components, setComponents] = useState<ComponentStatus[]>(readCachedComponentStatuses);
-  const [componentInstallPath, setComponentInstallPath] = useState('');
-  const [componentsLoading, setComponentsLoading] = useState(true);
-  const [componentSettingsPages, setComponentSettingsPages] = useState<ComponentSettingsPageContribution[]>([]);
-  const componentCatalogKey = componentHostCatalogKey(components);
+  const handleComponentSettingsPagesChanged = useCallback((pages: ComponentSettingsPageContribution[]) => {
+    setSettingsSection(current => current.startsWith('component:') && !pages.some(page => componentSettingsSectionKey(page) === current) ? 'components' : current);
+  }, []);
+  const { components, componentInstallPath, componentsLoading, componentSettingsPages, refreshComponents, handleComponentsChanged } = useComponentCatalog({
+    onError: showNotice,
+    onSettingsPagesChanged: handleComponentSettingsPagesChanged,
+  });
   const selectedComponentSettingsPage = useMemo(() => componentSettingsPages.find(page => componentSettingsSectionKey(page) === settingsSection), [componentSettingsPages, settingsSection]);
   const reportComponentSettingsError = useCallback((message: string) => showNotice(`打开组件设置页失败：${message}`), [showNotice]);
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id)), [components]);
@@ -104,17 +99,6 @@ const App: React.FC = () => {
   useBackgroundTaskDrawerWidthPersistence(backgroundTaskDrawerWidth);
 
   useEffect(() => { if (activeTab !== 'component') void componentHost.deactivate(); }, [activeTab, componentHost.deactivate]);
-
-  useEffect(() => {
-    let active = true;
-    void window.electronAPI.getComponentSettingsPages().then(result => {
-      if (!active) return;
-      const pages = result.success ? result.pages || [] : [];
-      setComponentSettingsPages(pages);
-      setSettingsSection(current => current.startsWith('component:') && !pages.some(page => componentSettingsSectionKey(page) === current) ? 'components' : current);
-    }).catch(() => { if (active) setComponentSettingsPages([]); });
-    return () => { active = false; };
-  }, [componentCatalogKey]);
 
   useSidebarCollapsedPersistence(sidebarCollapsed);
   const previousInspirationRootRef = useRef<string>(); const previousInspirationPinnedRef = useRef<boolean>();
@@ -188,143 +172,8 @@ const App: React.FC = () => {
     return () => window.removeEventListener('copy', showTextCopyNotice);
   }, [showNotice]);
 
-  const refreshComponents = useCallback(async (force = false) => {
-    setComponentsLoading(true);
-    try {
-      const result = await window.electronAPI.getComponents(force);
-      if (!result.success) throw new Error(result.error || '无法读取组件状态');
-      setComponents(result.components || []);
-      window.localStorage.setItem('photoflow:components-cache', JSON.stringify(result.components || []));
-      setComponentInstallPath(result.installPath || '');
-    } catch (error) {
-      setComponents([]);
-      showNotice(`读取组件状态失败：${error instanceof Error ? error.message : String(error)}`);
-    } finally {
-      setComponentsLoading(false);
-    }
-  }, [showNotice]);
-
-  const handleComponentsChanged = useCallback(async () => {
-    await refreshComponents(true);
-    window.dispatchEvent(new Event('photoflow-components-changed'));
-  }, [refreshComponents]);
-
-  useEffect(() => { void refreshComponents(); }, [refreshComponents]);
-
-
-  useEffect(() => window.electronAPI.onComponentsStatusChanged(result => {
-    if (!result.success) return;
-    const nextComponents = result.components || [];
-    setComponents(nextComponents);
-    window.localStorage.setItem('photoflow:components-cache', JSON.stringify(nextComponents));
-    setComponentInstallPath(result.installPath || '');
-  }), []);
   useRendererErrorReporting(showNotice);
 
-  useEffect(() => {
-    const loadConfig = async () => {
-      try {
-        if (window.electronAPI?.loadConfig) {
-          const startupSnapshot = await window.electronAPI.loadStartupSnapshot?.();
-          const fileConfig = startupSnapshot ? startupSnapshot.config : await window.electronAPI.loadConfig();
-          if (startupSnapshot) setStartupBirthdays(startupSnapshot.birthdays || {});
-          if (fileConfig) {
-            const storedResearch = fileConfig.componentSettings?.['research-tools'] as AppConfig['research'] | undefined;
-            const legacyResearch = storedResearch || fileConfig.research;
-            const legacyInspiration = fileConfig.inspirationLibrary as AppConfig['inspirationLibrary'] & Partial<AppConfig['research']>;
-            const legacyThreshold = legacyResearch?.ssimThreshold;
-            const inspirationLibrary: AppConfig['inspirationLibrary'] = { rootPath: legacyInspiration?.rootPath || '' };
-            const researchSettings: AppConfig['research'] = {
-              sensitivity: legacyResearch?.sensitivity ?? legacyInspiration?.sensitivity ?? (legacyThreshold !== undefined && legacyThreshold >= 0.98 ? 'high' : legacyThreshold !== undefined && legacyThreshold <= 0.85 ? 'low' : 'standard'),
-              minDuration: legacyResearch?.minDuration ?? legacyInspiration?.minDuration ?? 0.2,
-            };
-            const legacyAdvancedVideo = fileConfig.componentSettings?.[LEGACY_VIDEO_PLAYBACK_SETTINGS_ID] as Partial<AppConfig['videoPlayback']> | undefined;
-            const videoPlayback: AppConfig['videoPlayback'] = {
-              arrowKeyAction: fileConfig.videoPlayback?.arrowKeyAction === 'navigate' ? 'navigate' : fileConfig.videoPlayback?.arrowKeyAction === 'seek' ? 'seek' : legacyAdvancedVideo?.arrowKeyAction === 'navigate' ? 'navigate' : 'seek',
-              subtitlesEnabled: fileConfig.videoPlayback?.subtitlesEnabled === true,
-              subtitlePreferredLanguages: Array.isArray(fileConfig.videoPlayback?.subtitlePreferredLanguages) ? fileConfig.videoPlayback.subtitlePreferredLanguages.map(value => String(value).trim().toLowerCase()).filter(Boolean).slice(0, 8) : ['zh', 'chi', 'zho'],
-              subtitleSize: normalizeSubtitleFontSize(fileConfig.videoPlayback?.subtitleSize),
-              subtitleStyle: fileConfig.videoPlayback?.subtitleStyle === 'high-contrast' ? 'high-contrast' : 'standard',
-              hdrMode: ['sdr', 'hdr-passthrough', 'tone-map'].includes(String(fileConfig.videoPlayback?.hdrMode)) ? fileConfig.videoPlayback!.hdrMode : 'auto',
-              toneMapping: ['bt2390', 'reinhard', 'mobius', 'hable'].includes(String(fileConfig.videoPlayback?.toneMapping)) ? fileConfig.videoPlayback!.toneMapping : 'auto', targetPeakNits: Math.max(100, Math.min(4000, Number(fileConfig.videoPlayback?.targetPeakNits) || 400)),
-              shortcuts: normalizeVideoShortcutBindings(fileConfig.videoPlayback?.shortcuts),
-            };
-            const configuredImageSource = fileConfig.smartMatch?.imageSourceFolderName;
-            const configuredVideoSource = fileConfig.smartMatch?.videoSourceFolderName;
-            const savedSdPaths = (Array.isArray(fileConfig.smartImport?.sdPaths) && fileConfig.smartImport.sdPaths.length ? fileConfig.smartImport.sdPaths : fileConfig.smartImport?.sdPath ? [fileConfig.smartImport.sdPath] : []).map((drive: string) => isMac ? drive : drive.replace(/\\/g, '/').replace(/\/DCIM\/?$/i, '/'));
-            const sdVideoActionDefaults = {
-              work: {
-                splitVideosOnImport: fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.smartImport?.splitLargeFiles ?? false,
-                transcodeVideosOnImport: fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false,
-              },
-              broll: {
-                splitVideosOnImport: fileConfig.brollImport?.splitVideosOnImport ?? fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.brollImport?.splitLargeFiles ?? false,
-                transcodeVideosOnImport: fileConfig.brollImport?.transcodeVideosOnImport ?? fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false,
-              },
-            };
-            const savedSdDevices = normalizeSavedSdDeviceRecords(
-              fileConfig.smartImport?.sdDevices,
-              savedSdPaths,
-              fileConfig.smartImport?.sdDeviceIds,
-              fileConfig.smartImport?.sdDriveTypes,
-              sdVideoActionDefaults,
-            );
-            const savedSdDriveVideoActions = normalizeSavedSdDriveVideoActions(fileConfig.smartImport?.sdDriveVideoActions, savedSdPaths, fileConfig.smartImport?.sdDriveTypes, sdVideoActionDefaults);
-            const componentSettings: AppConfig['componentSettings'] = { ...fileConfig.componentSettings };
-            delete componentSettings[LEGACY_VIDEO_PLAYBACK_SETTINGS_ID];
-            delete componentSettings['research-tools'];
-            delete componentSettings['office-media-extractor'];
-            const legacyConfig = { ...fileConfig } as AppConfig & { folderOpenMode?: 'single' | 'double'; fileImport?: { preserveOriginal?: boolean }; brollImport: AppConfig['brollImport'] & { clearSource?: boolean } };
-            const legacyFolderOpenMode = legacyConfig.folderOpenMode;
-            const legacyFileImport = legacyConfig.fileImport;
-            const legacyBrollClearSource = legacyConfig.brollImport?.clearSource;
-            delete legacyConfig.folderOpenMode;
-            delete legacyConfig.fileImport;
-            const customProjectCategories = normalizeProjectCategories(fileConfig.customProjectCategories);
-            const configuredWorkspacePaths = normalizeWorkspacePaths(fileConfig.workspacePath, fileConfig.workspacePaths);
-            let normalizedConfig = { ...legacyConfig, theme: fileConfig.theme ?? 'system', telemetry: { enabled: fileConfig.telemetry?.enabled === true, crashReports: fileConfig.telemetry?.crashReports === true }, workspacePath: fileConfig.workspacePath?.trim() ?? '', autoCleanupDeletedProjectData: fileConfig.autoCleanupDeletedProjectData ?? true, createPlanningFolder: fileConfig.createPlanningFolder ?? true, customProjectCategories, projectCategoryOrder: normalizeProjectCategoryOrder(fileConfig.projectCategoryOrder, customProjectCategories), defaultFolderSort: fileConfig.defaultFolderSort ?? 'date', itemOpenMode: fileConfig.itemOpenMode === 'double' || legacyFolderOpenMode === 'double' ? 'double' : 'single', favoriteDisplayMode: fileConfig.favoriteDisplayMode === 'stars' ? 'stars' : 'binary', usagePreferencesVersion: Number(fileConfig.usagePreferencesVersion) || 0, projectToolbar: normalizeProjectToolbar(fileConfig.projectToolbar), homeOrder: normalizeHomeOrder(fileConfig.homeOrder), birthdayEnabled: fileConfig.birthdayEnabled ?? true, pinInspirationLibrary: fileConfig.pinInspirationLibrary === true, componentSettings, videoPlayback, mediaCache: { maxSizeGB: normalizeMediaCacheSize(fileConfig.mediaCache?.maxSizeGB), directory: fileConfig.mediaCache?.directory ?? '', autoCleanup30Days: fileConfig.mediaCache?.autoCleanup30Days ?? false }, backup: { enabled: fileConfig.backup?.enabled === true, targetType: fileConfig.backup?.targetType === 'nas' || (fileConfig.backup?.targetType === undefined && fileConfig.backup?.targetPath?.startsWith('\\\\')) ? 'nas' : 'local', targetPath: fileConfig.backup?.targetPath ?? '', mode: fileConfig.backup?.mode === 'latest' ? 'latest' : 'history', automaticDaily: fileConfig.backup?.automaticDaily ?? true, afterImport: fileConfig.backup?.afterImport ?? true, retention: { daily: Math.max(1, Number(fileConfig.backup?.retention?.daily) || 7), weekly: Math.max(0, Number(fileConfig.backup?.retention?.weekly) || 4), monthly: Math.max(0, Number(fileConfig.backup?.retention?.monthly) || 12) }, nas: { credentialRef: fileConfig.backup?.nas?.credentialRef ?? '', limitEnabled: fileConfig.backup?.nas?.limitEnabled === true, bandwidthLimitMBps: Math.max(1, Number(fileConfig.backup?.nas?.bandwidthLimitMBps) || 20), limitStart: fileConfig.backup?.nas?.limitStart || '09:00', limitEnd: fileConfig.backup?.nas?.limitEnd || '18:00' } }, archive: { enabled: fileConfig.archive?.enabled === true, targetPath: fileConfig.archive?.targetPath ?? '' }, importDefaults: { deleteSourceAfterImport: fileConfig.importDefaults?.deleteSourceAfterImport ?? !(legacyFileImport?.preserveOriginal ?? false), generateJpgFromRaw: fileConfig.importDefaults?.generateJpgFromRaw ?? true, splitVideosOnImport: fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.smartImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, videoTools: { transcode: { container: fileConfig.videoTools?.transcode?.container ?? 'mp4', videoMode: fileConfig.videoTools?.transcode?.videoMode ?? 'h264', quality: fileConfig.videoTools?.transcode?.quality ?? 'balanced', resolution: fileConfig.videoTools?.transcode?.resolution ?? 'original', frameRate: fileConfig.videoTools?.transcode?.frameRate ?? 'original', audioMode: fileConfig.videoTools?.transcode?.audioMode ?? 'aac' } }, smartImport: { ...fileConfig.smartImport, sdPath: savedSdPaths[0] || '', sdPaths: savedSdPaths, sdDriveTypes: fileConfig.smartImport?.sdDriveTypes ?? {}, sdDriveVideoActions: savedSdDriveVideoActions, sdDeviceIds: fileConfig.smartImport?.sdDeviceIds ?? {}, sdDevices: savedSdDevices, backupEnabled: false, generateVideoPreview: false, videoPreviewQuality: normalizeVideoPreviewQuality(fileConfig.smartImport?.videoPreviewQuality), splitLargeFiles: false, dateFilter: fileConfig.smartImport?.dateFilter === 'today' || fileConfig.smartImport?.dateFilter === 'today_yesterday' ? fileConfig.smartImport.dateFilter : 'all' }, brollImport: { splitVideosOnImport: fileConfig.brollImport?.splitVideosOnImport ?? fileConfig.importDefaults?.splitVideosOnImport ?? fileConfig.brollImport?.splitLargeFiles ?? false, transcodeVideosOnImport: fileConfig.brollImport?.transcodeVideosOnImport ?? fileConfig.importDefaults?.transcodeVideosOnImport ?? fileConfig.smartImport?.generateVideoPreview ?? false }, inspirationLibrary, smartMatch: { imageDestFolderName: IMAGE_SELECTION_FOLDER_NAME, videoDestFolderName: VIDEO_SELECTION_FOLDER_NAME, imageSourceFolderName: configuredImageSource === undefined || configuredImageSource.toLowerCase() === 'raw' ? 'raw' : configuredImageSource, videoSourceFolderName: configuredVideoSource === undefined || configuredVideoSource.toLowerCase() === 'mov' ? 'mov' : configuredVideoSource }, research: researchSettings } as AppConfig;
-            normalizedConfig.videoTools.transcode = normalizeVideoTranscodeSettings(fileConfig.videoTools?.transcode);
-            normalizedConfig.componentSettingsRevisions = { ...(fileConfig.componentSettingsRevisions || {}) }; normalizedConfig.videoTools.trim = { exportMode: fileConfig.videoTools?.trim?.exportMode === 'exact' ? 'exact' : 'fast' };
-            normalizedConfig.folderAlphabetFilterEnabled = fileConfig.folderAlphabetFilterEnabled !== false;
-            normalizedConfig.versionTreeEnabled = fileConfig.versionTreeEnabled !== false;
-            normalizedConfig.progressNamePresets = normalizeProgressNamePresets(fileConfig.progressNamePresets);
-            normalizedConfig.smartImport.autoMoveProjectAfterSdImport = fileConfig.smartImport?.autoMoveProjectAfterSdImport ?? true;
-            normalizedConfig.smartMatch.sourceFolderRelativePath = fileConfig.smartMatch?.sourceFolderRelativePath;
-            normalizedConfig = { ...normalizedConfig, workspacePath: configuredWorkspacePaths[0] || '', workspacePaths: configuredWorkspacePaths };
-            if (!normalizedConfig.workspacePaths.length) setShowWorkspaceSetup(true);
-            setStartupSdAutoStart(normalizedConfig.smartImport.autoStart === true); setConfig(normalizedConfig);
-            if (fileConfig.videoTools?.trim?.exportMode !== normalizedConfig.videoTools.trim.exportMode && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
-            if ((JSON.stringify(fileConfig.workspacePaths) !== JSON.stringify(normalizedConfig.workspacePaths) || fileConfig.smartImport?.autoMoveProjectAfterSdImport === undefined || JSON.stringify(fileConfig.smartImport?.sdDevices) !== JSON.stringify(savedSdDevices) || JSON.stringify(fileConfig.smartImport?.sdDriveVideoActions) !== JSON.stringify(savedSdDriveVideoActions) || fileConfig.folderAlphabetFilterEnabled === undefined || fileConfig.versionTreeEnabled === undefined || JSON.stringify(fileConfig.progressNamePresets) !== JSON.stringify(normalizedConfig.progressNamePresets)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
-            if ((fileConfig.workspacePath !== normalizedConfig.workspacePath || fileConfig.autoCleanupDeletedProjectData === undefined || fileConfig.createPlanningFolder === undefined || JSON.stringify(fileConfig.customProjectCategories) !== JSON.stringify(normalizedConfig.customProjectCategories) || JSON.stringify(fileConfig.projectCategoryOrder) !== JSON.stringify(normalizedConfig.projectCategoryOrder) || fileConfig.defaultFolderSort === undefined || fileConfig.itemOpenMode !== normalizedConfig.itemOpenMode || fileConfig.favoriteDisplayMode !== normalizedConfig.favoriteDisplayMode || fileConfig.usagePreferencesVersion !== normalizedConfig.usagePreferencesVersion || legacyFolderOpenMode !== undefined || fileConfig.birthdayEnabled === undefined || fileConfig.pinInspirationLibrary === undefined || !fileConfig.backup || fileConfig.backup?.targetType === undefined || !fileConfig.backup?.nas || !fileConfig.archive || !fileConfig.importDefaults || fileConfig.importDefaults?.splitVideosOnImport === undefined || fileConfig.importDefaults?.transcodeVideosOnImport === undefined || !fileConfig.videoTools?.transcode || legacyFileImport !== undefined || legacyBrollClearSource !== undefined || !Array.isArray(fileConfig.smartImport?.sdPaths) || !fileConfig.smartImport?.sdDriveTypes || !fileConfig.smartImport?.sdDeviceIds || fileConfig.mediaCache?.maxSizeGB !== normalizedConfig.mediaCache.maxSizeGB || fileConfig.mediaCache?.autoCleanup30Days === undefined || fileConfig.smartImport.backupEnabled || fileConfig.smartImport?.videoPreviewQuality !== normalizedConfig.smartImport.videoPreviewQuality || fileConfig.smartImport?.splitLargeFiles === undefined || fileConfig.smartImport?.dateFilter !== normalizedConfig.smartImport.dateFilter || !fileConfig.brollImport || fileConfig.brollImport?.splitVideosOnImport === undefined || fileConfig.brollImport?.transcodeVideosOnImport === undefined || !fileConfig.inspirationLibrary || JSON.stringify(fileConfig.research) !== JSON.stringify(researchSettings) || fileConfig.smartMatch?.imageDestFolderName !== IMAGE_SELECTION_FOLDER_NAME || fileConfig.smartMatch?.videoDestFolderName !== VIDEO_SELECTION_FOLDER_NAME || configuredImageSource !== normalizedConfig.smartMatch.imageSourceFolderName || configuredVideoSource !== normalizedConfig.smartMatch.videoSourceFolderName || JSON.stringify(fileConfig.homeOrder) !== JSON.stringify(normalizedConfig.homeOrder) || JSON.stringify(fileConfig.projectToolbar) !== JSON.stringify(normalizedConfig.projectToolbar) || JSON.stringify(fileConfig.componentSettings) !== JSON.stringify(normalizedConfig.componentSettings)) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
-            if (JSON.stringify(fileConfig.videoTools?.transcode) !== JSON.stringify(normalizedConfig.videoTools.transcode) && window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(normalizedConfig);
-            console.log('📋 Configuration loaded from file');
-          } else {
-            if (window.electronAPI?.getUserPath) {
-              const userPath = await window.electronAPI.getUserPath();
-              if (userPath) {
-                const defaultConfig = DEFAULT_CONFIG(userPath);
-                setConfig(defaultConfig);
-                if (window.electronAPI?.saveConfig) await window.electronAPI.saveConfig(defaultConfig);
-                setShowWorkspaceSetup(true);
-                console.log('📋 Configuration created with user path:', userPath);
-              } else {
-                console.error('❌ Failed to get user path');
-              }
-            }
-          }
-        }
-      } catch (error) {
-        console.error('Failed to load config:', error);
-        const fallbackUserPath = await window.electronAPI?.getUserPath?.().catch(() => '') || '';
-        setConfig(DEFAULT_CONFIG(fallbackUserPath));
-        setShowWorkspaceSetup(true);
-      } finally {
-        setConfigLoaded(true);
-      }
-    };
-
-    loadConfig();
-  }, []);
 
   useEffect(() => {
     if (!configLoaded) return;
@@ -743,56 +592,45 @@ const App: React.FC = () => {
         />
       )}
 
-      <header className="app-titlebar relative z-50 flex h-10 shrink-0 items-stretch border-b border-slate-200 bg-white">
-        <div style={{ width: sidebarCollapsed ? 48 : renderedSidebarWidth + 1 }} className="app-titlebar-brand-region flex shrink-0 items-center border-r border-slate-200 px-2 transition-[width] duration-200">
-          <button type="button" onClick={() => setSidebarCollapsed(value => !value)} aria-label={sidebarCollapsed ? '展开项目栏' : '折叠项目栏'} title={sidebarCollapsed ? '展开项目栏' : '折叠项目栏'} className="app-titlebar-control mr-1 rounded-md p-1.5 text-slate-500 hover:bg-slate-100 hover:text-slate-900">
-            {sidebarCollapsed ? <PanelLeftOpen size={17}/> : <PanelLeftClose size={17}/>}
-          </button>
-          <div title="拖动窗口" className={`flex min-w-0 items-center gap-2 px-1.5 py-1 ${sidebarCollapsed || renderedSidebarWidth < 190 ? 'hidden' : ''}`}>
-            <img src="./app-logo.svg" className="brand-logo h-5 w-5 shrink-0" alt="" />
-            <span className="truncate text-sm font-bold text-slate-800">照片流</span>
-          </div>
-        </div>
-        <div {...folderTabDropProps} data-folder-tab-drop-zone={folderTabSourceDragActive ? 'true' : undefined} aria-label="标签栏" className={`relative flex min-w-0 flex-1 transition-colors ${folderTabSourceDragActive ? 'app-titlebar-control bg-blue-50/70 ring-1 ring-inset ring-blue-400/70' : ''}`}>
-          {titlebarTabScroll.overflow && <button type="button" aria-label="向左滚动标签" title="向左滚动标签" disabled={!titlebarTabScroll.canScrollLeft} onClick={() => scrollTitlebarTabs(-1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronLeft size={15}/></button>}
-          <div ref={titlebarTabsRef} onWheel={handleTitlebarTabWheel} aria-label="已打开的窗口" className="titlebar-tabs-scroll scrollbar-hide flex min-w-0 shrink items-end gap-0 overflow-x-auto px-2 pt-1.5">
-            <button type="button" {...titlebarTabDragProps('home')} title="主页" data-active-tab={activeTab === 'home'} onClick={showHomeTab} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[92px] max-w-[180px] items-center gap-2 rounded-t-lg border px-3 text-xs font-medium transition ${activeTab === 'home' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
-              <Home size={14} className="shrink-0"/><span className="truncate">主页</span>
-            </button>
-            {searchAllTabOpen && <div {...titlebarTabDragProps('search-all')} title="全局搜索" data-active-tab={activeTab === 'search-all'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[116px] max-w-[190px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'search-all' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
-              <button type="button" onClick={openSearchAllTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Search size={14} className="shrink-0"/><span className="truncate">全局搜索</span></button>
-              <button type="button" data-tab-drag-ignore="true" aria-label="关闭全局搜索" title="关闭全局搜索" onClick={closeSearchAllTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
-            </div>}
-            {projectPages.filter(page => page.kind === 'inspiration').map(page => { const folderName = page.currentRelativePath.split('/').filter(Boolean).pop(); const label = page.currentRelativePath ? `灵感库 · ${folderName || page.currentRelativePath}` : '灵感库'; const pinnedRoot = config.pinInspirationLibrary && page.initialRelativePath === ''; const isActive = activePageId === page.id && activeTab === 'inspiration'; return <div key={page.id} {...titlebarTabDragProps(inspirationTabId(page.id))} title={label} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[112px] max-w-[210px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={() => { activatePage(page.id); setSelectedProject(null); setActiveTab('inspiration'); }} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Lightbulb size={14} className="shrink-0"/><span className="truncate">{label}</span></button>{pinnedRoot ? <span aria-label="灵感库已固定" title="灵感库已固定" className="mr-2 text-blue-500"><Pin size={12}/></span> : <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${label}`} title={`关闭 ${label}`} onClick={() => closeInspirationTab(page.id)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>}</div>; })}
-            {projectPages.filter(page => page.project).map(page => { const project = page.project!; const folderName = page.currentRelativePath.split('/').filter(Boolean).pop(); const label = page.initialRelativePath ? `${project.name} · ${folderName || page.initialRelativePath}` : project.name; return <React.Fragment key={page.id}>
-              <div {...titlebarTabDragProps(projectTabId(page.id))} title={label} data-active-tab={activePageId === page.id && activeTab === 'project'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[120px] max-w-[220px] items-center rounded-t-lg border text-xs font-medium transition ${activePageId === page.id && activeTab === 'project' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
-                <button type="button" onClick={() => activateProjectPage(page.id)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Folder size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{label}</span></button>
-                <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${label}`} title={`关闭 ${label}`} onClick={() => void closeProjectTab(page.id)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
-              </div>
-              {workspaceToolTabs.filter(tab => tab.ownerPageId === page.id).map(tab => {
-                const tabType = 'project-version';
-                const isActive = activePageId === tab.ownerPageId && activeTab === tabType;
-                const Icon = GitBranch;
-                return <div key={`${tab.ownerPageId}:${tab.kind}`} {...titlebarTabDragProps(workspaceToolTabId(tab.ownerPageId, tab.kind))} title={tab.label} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[128px] max-w-[230px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
-                  <button type="button" onClick={() => activateWorkspaceToolTab(tab, project)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Icon size={14} className="shrink-0"/><span className="min-w-0 flex-1 truncate">{tab.label}</span></button>
-                  <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${tab.label}`} title={`关闭 ${tab.label}`} onClick={() => void closeWorkspaceToolTab(tab.ownerPageId, tab.kind)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
-                </div>;
-              })}
-            </React.Fragment>; })}
-            {componentPages.map(page => { const label = `${page.title} · ${page.projectName}`; const isActive = activeTab === 'component' && activeComponentPageIdentity === page.identity; return <div key={page.identity} {...titlebarTabDragProps(componentTabId(page.identity))} title={label} data-active-tab={isActive} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[128px] max-w-[230px] items-center rounded-t-lg border text-xs font-medium transition ${isActive ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}>
-              <button type="button" onClick={() => activateComponentPageTab(page)} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><ComponentIcon src={page.iconUrl} size={14}/><span className="min-w-0 flex-1 truncate">{label}</span></button>
-              <button type="button" data-tab-drag-ignore="true" aria-label={`关闭 ${page.title}`} title={`关闭 ${page.title}`} onClick={() => void closeComponentPageTab(page)} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button>
-            </div>; })}
-            {settingsTabOpen && <div {...titlebarTabDragProps('settings')} title="设置" data-active-tab={activeTab === 'settings'} className={`app-titlebar-control workspace-tab group flex h-[34px] min-w-[108px] max-w-[180px] items-center rounded-t-lg border text-xs font-medium transition ${activeTab === 'settings' ? 'is-active border-slate-200 bg-slate-50 text-slate-900' : 'border-transparent text-slate-500 hover:bg-slate-100 hover:text-slate-800'}`}><button type="button" onClick={openSettingsTab} className="flex min-w-0 flex-1 items-center gap-2 self-stretch pl-3 text-left"><Settings size={14} className="shrink-0"/><span className="truncate">设置</span></button><button type="button" data-tab-drag-ignore="true" aria-label="关闭设置" title="关闭设置" onClick={closeSettingsTab} className="mr-1.5 rounded p-1 text-slate-400 opacity-70 hover:bg-slate-200 hover:text-slate-800 group-hover:opacity-100"><X size={13}/></button></div>}
-          </div>
-          {titlebarTabScroll.overflow && <button type="button" aria-label="向右滚动标签" title="向右滚动标签" disabled={!titlebarTabScroll.canScrollRight} onClick={() => scrollTitlebarTabs(1)} className="app-titlebar-control titlebar-tab-scroll-button"><ChevronRight size={15}/></button>}
-          <div aria-label={folderTabSourceDragActive ? '标签栏空白区域' : '拖动窗口'} className={`${folderTabSourceDragActive ? 'app-titlebar-control' : 'app-window-drag-region'} min-w-8 flex-1`}/>
-        </div>
-        <DomainHealthBanner components={components}/>
-        <BackgroundTaskIndicator ownerPageIds={openPageIds} open={backgroundTaskDrawerOpen} onOpenChange={setBackgroundTaskDrawerOpen} drawerHostRef={backgroundTaskDrawerHostRef}/>
-        {componentContributions.some(item => item.type === 'application.command') && <div className="app-titlebar-control flex shrink-0 items-center px-2"><ComponentContributionDock contributions={componentContributions.filter(item => item.type === 'application.command')}/></div>}
-        <WindowControls/>
-      </header>
+      <AppTitlebar
+        activeTab={activeTab}
+        activePageId={activePageId}
+        activeComponentPageIdentity={activeComponentPageIdentity}
+        sidebarCollapsed={sidebarCollapsed}
+        renderedSidebarWidth={renderedSidebarWidth}
+        searchAllTabOpen={searchAllTabOpen}
+        settingsTabOpen={settingsTabOpen}
+        pinInspirationLibrary={config.pinInspirationLibrary}
+        projectPages={projectPages}
+        workspaceToolTabs={workspaceToolTabs}
+        componentPages={componentPages}
+        components={components}
+        titlebarTabsRef={titlebarTabsRef}
+        titlebarTabScroll={titlebarTabScroll}
+        titlebarTabDragProps={titlebarTabDragProps}
+        handleTitlebarTabWheel={handleTitlebarTabWheel}
+        folderTabDropProps={folderTabDropProps}
+        folderTabSourceDragActive={folderTabSourceDragActive}
+        onSidebarCollapsedChange={() => setSidebarCollapsed(value => !value)}
+        onScrollTabs={scrollTitlebarTabs}
+        onShowHome={showHomeTab}
+        onOpenSearch={openSearchAllTab}
+        onCloseSearch={closeSearchAllTab}
+        onActivateInspiration={pageId => { activatePage(pageId); setSelectedProject(null); setActiveTab('inspiration'); }}
+        onCloseInspiration={closeInspirationTab}
+        onActivateProject={activateProjectPage}
+        onCloseProject={pageId => void closeProjectTab(pageId)}
+        onActivateWorkspaceTool={activateWorkspaceToolTab}
+        onCloseWorkspaceTool={tab => void closeWorkspaceToolTab(tab.ownerPageId, tab.kind)}
+        onActivateComponent={activateComponentPageTab}
+        onCloseComponent={page => void closeComponentPageTab(page)}
+        onOpenSettings={() => void openSettingsTab()}
+        onCloseSettings={closeSettingsTab}
+        trailingContent={<>
+          <BackgroundTaskIndicator ownerPageIds={openPageIds} open={backgroundTaskDrawerOpen} onOpenChange={setBackgroundTaskDrawerOpen} drawerHostRef={backgroundTaskDrawerHostRef}/>
+          {componentContributions.some(item => item.type === 'application.command') && <div className="app-titlebar-control flex shrink-0 items-center px-2"><ComponentContributionDock contributions={componentContributions.filter(item => item.type === 'application.command')}/></div>}
+        </>}
+      />
 
       {showWorkspaceSetup ? <WorkspaceSetupPage config={config} onSave={handleWorkspaceSetup}/> : <div className="flex min-h-0 flex-1">
       {/* Sidebar */}
