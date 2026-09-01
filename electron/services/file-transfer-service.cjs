@@ -1143,7 +1143,8 @@ const deleteOwnedTreeEntries = async (entries, nativeService, rootEntry, private
       const outcome = { success: result.success === true || result.deleted === true, deleted: result.deleted === true, path: entry.candidate, relativePath: entry.relative, code: result.code, error: result.error, cleanupWarning: result.cleanupWarning, outcomeUnknown: result.outcomeUnknown, recoveryPath: result.recoveryPath, phase: result.phase };
       if (outcome.deleted) deletedCount += 1;
       if (!outcome.success) failedCount += 1;
-      if (outcome.deleted && (outcome.cleanupWarning || outcome.outcomeUnknown)) { deletedCleanupCount += 1; cleanupOutcomeUnknown ||= Boolean(outcome.outcomeUnknown); }
+      if (outcome.outcomeUnknown) cleanupOutcomeUnknown = true;
+      if (outcome.deleted && (outcome.cleanupWarning || outcome.outcomeUnknown)) deletedCleanupCount += 1;
       if (!outcome.success || outcome.cleanupWarning || outcome.outcomeUnknown || outcome.recoveryPath) { cleanupOutcomeCount += 1; if (outcomes.length < 64) outcomes.push(outcome); }
     }
     processed += batch.length;
@@ -1154,7 +1155,7 @@ const deleteOwnedTreeEntries = async (entries, nativeService, rootEntry, private
       let results;
       try { results = await invokeBatch(batch); }
       catch (error) {
-        results = batch.map(() => ({ success: error?.deleted === true, deleted: error?.deleted === true, code: error?.code || 'CLEANUP_BATCH_FAILED', cleanupWarning: error?.cleanupWarning, outcomeUnknown: error?.outcomeUnknown, recoveryPath: error?.recoveryPath, phase: error?.phase }));
+        results = batch.map(() => ({ success: false, deleted: error?.deleted === true, code: error?.code || 'CLEANUP_BATCH_FAILED', cleanupWarning: error?.cleanupWarning || '批量清理结果不确定', outcomeUnknown: true, recoveryPath: error?.recoveryPath, phase: error?.phase }));
         appendResults(batch, results); return false;
       }
       appendResults(batch, results);
@@ -1202,7 +1203,7 @@ const deleteOwnedTreeEntries = async (entries, nativeService, rootEntry, private
       await yieldCleanupTurn(options);
     }
   }
-  return { success: failedCount === 0, outcomes, cleanupOutcomeCount, cleanupOutcomesTruncated: cleanupOutcomeCount > outcomes.length, deletedCount, deletedCleanupCount, cleanupWarning: deletedCleanupCount ? `${deletedCleanupCount}项已删除但持久化确认不确定` : undefined, outcomeUnknown: cleanupOutcomeUnknown, recoveryPaths: outcomes.map(outcome => outcome.recoveryPath).filter(Boolean) };
+  return { success: failedCount === 0, outcomes, cleanupOutcomeCount, cleanupOutcomesTruncated: cleanupOutcomeCount > outcomes.length, deletedCount, deletedCleanupCount, cleanupWarning: deletedCleanupCount ? `${deletedCleanupCount}项已删除但持久化确认不确定` : cleanupOutcomeUnknown ? '批量清理结果不确定' : undefined, outcomeUnknown: cleanupOutcomeUnknown, recoveryPaths: outcomes.map(outcome => outcome.recoveryPath).filter(Boolean) };
 };
 
 const quarantineOwnedTreeRoot = async (rootItem, treeItems, options = {}) => {

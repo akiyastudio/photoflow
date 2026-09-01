@@ -21,12 +21,21 @@ internal static class FilePublicationService
     private const uint GENERIC_READ = 0x80000000;
     private const uint DELETE = 0x00010000;
     private const uint FILE_WRITE_ATTRIBUTES = 0x00000100;
+    private const uint FILE_TRAVERSE = 0x00000020;
+    private const uint FILE_READ_ATTRIBUTES = 0x00000080;
     private const uint FILE_SHARE_READ = 0x1;
     private const uint FILE_SHARE_WRITE = 0x2;
     private const uint FILE_SHARE_DELETE = 0x4;
     private const uint OPEN_EXISTING = 3;
     private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
+    private const uint SYNCHRONIZE = 0x00100000;
+    private const uint FILE_OPEN = 1;
+    private const uint FILE_DIRECTORY_FILE = 0x1;
+    private const uint FILE_SYNCHRONOUS_IO_NONALERT = 0x20;
+    private const uint FILE_NON_DIRECTORY_FILE = 0x40;
+    private const uint FILE_OPEN_REPARSE_POINT = 0x00200000;
+    private const uint OBJ_CASE_INSENSITIVE = 0x40;
     private const int FileDispositionInfo = 4;
     private const int FileBasicInfo = 0;
     private const uint FILE_ATTRIBUTE_DIRECTORY = 0x10;
@@ -37,6 +46,9 @@ internal static class FilePublicationService
     [StructLayout(LayoutKind.Sequential)] private struct FILE_DISPOSITION_INFO { [MarshalAs(UnmanagedType.Bool)] public bool DeleteFile; }
     [StructLayout(LayoutKind.Sequential)] private struct FILE_BASIC_INFO { public long CreationTime; public long LastAccessTime; public long LastWriteTime; public long ChangeTime; public uint FileAttributes; }
     [StructLayout(LayoutKind.Sequential)] private struct BY_HANDLE_FILE_INFORMATION { public uint FileAttributes; public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime; public System.Runtime.InteropServices.ComTypes.FILETIME LastAccessTime; public System.Runtime.InteropServices.ComTypes.FILETIME LastWriteTime; public uint VolumeSerialNumber; public uint FileSizeHigh; public uint FileSizeLow; public uint NumberOfLinks; public uint FileIndexHigh; public uint FileIndexLow; }
+    [StructLayout(LayoutKind.Sequential)] private struct UNICODE_STRING { public ushort Length; public ushort MaximumLength; public IntPtr Buffer; }
+    [StructLayout(LayoutKind.Sequential)] private struct OBJECT_ATTRIBUTES { public int Length; public IntPtr RootDirectory; public IntPtr ObjectName; public uint Attributes; public IntPtr SecurityDescriptor; public IntPtr SecurityQualityOfService; }
+    [StructLayout(LayoutKind.Sequential)] private struct IO_STATUS_BLOCK { public IntPtr Status; public IntPtr Information; }
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern bool MoveFileEx(string existingName, string newName, uint flags);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool SetFileInformationByHandle(SafeFileHandle handle, int infoClass, ref FILE_DISPOSITION_INFO info, uint size);
@@ -44,6 +56,8 @@ internal static class FilePublicationService
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetFileInformationByHandleEx(SafeFileHandle handle, int infoClass, out FILE_BASIC_INFO info, uint size);
     [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out BY_HANDLE_FILE_INFORMATION info);
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern uint GetFileAttributes(string name);
+    [DllImport("ntdll.dll")] private static extern uint NtCreateFile(out SafeFileHandle handle, uint access, ref OBJECT_ATTRIBUTES attributes, ref IO_STATUS_BLOCK ioStatus, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
+    [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(uint status);
 
     private static int Main(string[] args)
     {
@@ -56,8 +70,8 @@ internal static class FilePublicationService
             else if (args[0] == "move-no-replace-batch") result = MoveNoReplaceBatch(Required(options, "manifest"));
             else if (args[0] == "inspect-path-batch") result = InspectPathBatch(Required(options, "manifest"));
             else if (args[0] == "delete-paths-batch") result = DeletePathsBatch(Required(options, "manifest"));
-            else if (args[0] == "compare-delete-files-batch") result = CompareDeleteFilesBatch(Required(options, "manifest"));
-            else if (args[0] == "delete-directories-batch") result = DeleteDirectoriesBatch(Required(options, "manifest"));
+            else if (args[0] == "compare-delete-files-batch") result = CompareDeleteFilesBatch(Required(options, "manifest"), Required(options, "manifest-sha256"), long.Parse(Required(options, "manifest-size")));
+            else if (args[0] == "delete-directories-batch") result = DeleteDirectoriesBatch(Required(options, "manifest"), Required(options, "manifest-sha256"), long.Parse(Required(options, "manifest-size")));
             else if (args[0] == "commit-cross-volume-file") result = CommitCrossVolume(Required(options, "source"), Required(options, "staged"), Required(options, "target"), Required(options, "sha256"), long.Parse(Required(options, "size")), Required(options, "source-identity"));
             else if (args[0] == "compare-delete-file") result = CompareDelete(Required(options, "target"), Required(options, "sha256"), long.Parse(Required(options, "size")), Required(options, "identity"));
             else if (args[0] == "inspect-path") result = Inspect(Required(options, "path"));
@@ -166,9 +180,16 @@ internal static class FilePublicationService
         }
         return new Dictionary<string, object> { { "success", true }, { "results", results } };
     }
-    private static object CompareDeleteFilesBatch(string manifestValue)
+    private static string[] ReadBoundManifest(string manifestValue, string expectedHash, long expectedSize)
     {
-        Full(manifestValue); var manifest = Path.GetFullPath(manifestValue); var results = new List<Dictionary<string, object>>(); var utf8 = new UTF8Encoding(false, true); var lines = File.ReadAllLines(manifest, utf8); string root = null; var directories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var files = new List<string[]>();
+        if (expectedSize < 0 || expectedSize > 512 * 1024) throw new ArgumentException("批量清单大小无效"); byte[] bytes;
+        using (var stream = new FileStream(Path.GetFullPath(manifestValue), FileMode.Open, FileAccess.Read, FileShare.Read)) { if (stream.Length != expectedSize) throw new OwnershipConflictException("批量清单大小已变化"); bytes = new byte[(int)expectedSize]; var offset = 0; while (offset < bytes.Length) { var read = stream.Read(bytes, offset, bytes.Length - offset); if (read <= 0) throw new EndOfStreamException(); offset += read; } }
+        using (var sha = SHA256.Create()) { var actual = BitConverter.ToString(sha.ComputeHash(bytes)).Replace("-", "").ToLowerInvariant(); if (!String.Equals(actual, expectedHash, StringComparison.OrdinalIgnoreCase)) throw new OwnershipConflictException("批量清单摘要已变化"); }
+        return new UTF8Encoding(false, true).GetString(bytes).Split(new[] { "\r\n", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+    }
+    private static object CompareDeleteFilesBatch(string manifestValue, string manifestHash, long manifestSize)
+    {
+        Full(manifestValue); var results = new List<Dictionary<string, object>>(); var utf8 = new UTF8Encoding(false, true); var lines = ReadBoundManifest(manifestValue, manifestHash, manifestSize); string root = null; var directories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var files = new List<string[]>();
         foreach (var line in lines) { var parts = line.Split('\t'); if (parts.Length == 2 && parts[0] == "R") root = Full(utf8.GetString(Convert.FromBase64String(parts[1]))); else if (parts.Length == 3 && parts[0] == "D") directories[Full(utf8.GetString(Convert.FromBase64String(parts[1])))] = utf8.GetString(Convert.FromBase64String(parts[2])); else if (parts.Length == 6 && parts[0] == "F") files.Add(parts); else throw new ArgumentException("批量摘要清理清单格式无效"); }
         if (root == null || !directories.ContainsKey(root) || files.Count > 2048) throw new ArgumentException("批量摘要清理缺少根身份或项目过多");
         for (var expectedIndex = 0; expectedIndex < files.Count; expectedIndex++) {
@@ -176,7 +197,7 @@ internal static class FilePublicationService
             string value; string identity; try { value = utf8.GetString(Convert.FromBase64String(parts[2])); identity = utf8.GetString(Convert.FromBase64String(parts[3])); } catch (Exception error) { throw new ArgumentException("批量摘要清理路径编码无效", error); }
             try {
                 var target = Full(value); var heldParents = OpenVerifiedParentChain(root, target, directories);
-                try { FILE_BASIC_INFO attributes; bool changed; using (var handle = OpenVerifiedDelete(target, identity, parts[5], size, "批量补偿目标", out attributes, out changed)) { try { VerifyParentChainAgain(root, target, directories); MarkDelete(handle); } catch { RestoreAttributes(handle, attributes, changed); throw; } } }
+                try { FILE_BASIC_INFO attributes; bool changed; using (var handle = OpenVerifiedDeleteRelative(heldParents[heldParents.Count - 1], Path.GetFileName(target), identity, parts[5], size, "批量补偿目标", out attributes, out changed)) { try { MarkDelete(handle); } catch (Exception error) { RestoreAttributes(handle, attributes, changed); throw new IOException("相对文件标记删除失败", error); } } }
                 finally { foreach (var held in heldParents) held.Dispose(); }
                 results.Add(new Dictionary<string, object> { { "index", index }, { "success", true }, { "deleted", true } });
             } catch (Exception error) {
@@ -191,20 +212,19 @@ internal static class FilePublicationService
         var prefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar; if (!target.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("批量摘要清理目标超出隔离根"); var relative = target.Substring(prefix.Length); if (relative.Length == 0 || Path.IsPathRooted(relative)) throw new ArgumentException("批量摘要清理目标超出隔离根");
         var held = new List<SafeFileHandle>(); var current = root;
         try {
-            var rootHandle = OpenParentLocked(root); VerifyIdentity(rootHandle, directories[root], "批量清理根"); held.Add(rootHandle);
+            SafeFileHandle rootHandle; try { rootHandle = OpenLocked(root, GENERIC_READ, true, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE); } catch (Exception error) { throw new IOException("批量清理卷根打开失败：" + root, error); } VerifyIdentity(rootHandle, directories[root], "批量清理根"); held.Add(rootHandle);
             var segments = relative.Split(Path.DirectorySeparatorChar);
-            for (var index = 0; index < segments.Length - 1; index++) { current = Path.Combine(current, segments[index]); string expected; if (!directories.TryGetValue(current, out expected)) throw new OwnershipConflictException("批量清理父链未登记"); var handle = OpenParentLocked(current); VerifyIdentity(handle, expected, "批量清理父目录"); held.Add(handle); }
+            for (var index = 0; index < segments.Length - 1; index++) { current = Path.Combine(current, segments[index]); string expected; if (!directories.TryGetValue(current, out expected)) throw new OwnershipConflictException("批量清理父链未登记"); try { var handle = OpenRelative(held[held.Count - 1], segments[index], FILE_TRAVERSE | FILE_READ_ATTRIBUTES, true, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE); VerifyIdentity(handle, expected, "批量清理父目录"); held.Add(handle); } catch (Exception error) { throw new IOException("批量清理父段失败：" + segments[index] + "；" + error.Message, error); } }
             return held;
         } catch { foreach (var handle in held) handle.Dispose(); throw; }
     }
-    private static void VerifyParentChainAgain(string root, string target, Dictionary<string, string> directories) { var verified = OpenVerifiedParentChain(root, target, directories); foreach (var handle in verified) handle.Dispose(); }
-    private static object DeleteDirectoriesBatch(string manifestValue)
+    private static object DeleteDirectoriesBatch(string manifestValue, string manifestHash, long manifestSize)
     {
-        var utf8 = new UTF8Encoding(false, true); var lines = File.ReadAllLines(Path.GetFullPath(manifestValue), utf8); string root = null; var directories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var targets = new List<string[]>(); var results = new List<Dictionary<string, object>>();
+        var utf8 = new UTF8Encoding(false, true); var lines = ReadBoundManifest(manifestValue, manifestHash, manifestSize); string root = null; var directories = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase); var targets = new List<string[]>(); var results = new List<Dictionary<string, object>>();
         foreach (var line in lines) { var parts = line.Split('\t'); if (parts.Length == 2 && parts[0] == "R") root = Full(utf8.GetString(Convert.FromBase64String(parts[1]))); else if (parts.Length == 3 && parts[0] == "D") directories[Full(utf8.GetString(Convert.FromBase64String(parts[1])))] = utf8.GetString(Convert.FromBase64String(parts[2])); else if (parts.Length == 4 && parts[0] == "T") targets.Add(parts); else throw new ArgumentException("批量目录清理清单格式无效"); }
         if (root == null || !directories.ContainsKey(root) || targets.Count > 2048) throw new ArgumentException("批量目录清理缺少根身份或项目过多");
         for (var expectedIndex = 0; expectedIndex < targets.Count; expectedIndex++) { var parts = targets[expectedIndex]; int index; if (!Int32.TryParse(parts[1], out index) || index != expectedIndex) throw new ArgumentException("批量目录清理索引无效"); var target = Full(utf8.GetString(Convert.FromBase64String(parts[2]))); var identity = utf8.GetString(Convert.FromBase64String(parts[3]));
-            try { var held = String.Equals(target, root, StringComparison.OrdinalIgnoreCase) ? new List<SafeFileHandle>() : OpenVerifiedParentChain(root, target, directories); try { FILE_BASIC_INFO original; bool changed; using (var handle = OpenIdentityDelete(target, identity, true, "批量空目录", out original, out changed)) { if (!String.Equals(target, root, StringComparison.OrdinalIgnoreCase)) VerifyParentChainAgain(root, target, directories); MarkDelete(handle); } } finally { foreach (var handle in held) handle.Dispose(); } results.Add(new Dictionary<string, object> { { "index", index }, { "success", true }, { "deleted", true } }); }
+            try { var held = OpenVerifiedParentChain(root, target, directories); try { FILE_BASIC_INFO original; bool changed; using (var handle = OpenIdentityDeleteRelative(held[held.Count - 1], Path.GetFileName(target), identity, true, "批量空目录", out original, out changed)) MarkDelete(handle); } finally { foreach (var handle in held) handle.Dispose(); } results.Add(new Dictionary<string, object> { { "index", index }, { "success", true }, { "deleted", true } }); }
             catch (Exception error) { var native = error as Win32Exception; var code = error is OwnershipConflictException || error is InvalidDataException ? "PUBLISH_OWNERSHIP_CONFLICT" : native == null ? "FILE_PUBLICATION_FAILED" : NativeCode(native.NativeErrorCode); results.Add(new Dictionary<string, object> { { "index", index }, { "success", false }, { "deleted", false }, { "code", code }, { "error", error.Message } }); }
         }
         return new Dictionary<string, object> { { "success", true }, { "results", results } };
@@ -272,10 +292,30 @@ internal static class FilePublicationService
         if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
         return handle;
     }
-    private static SafeFileHandle OpenParentLocked(string filePath)
+    private static SafeFileHandle OpenRelative(SafeFileHandle parent, string name, uint access, bool directory, uint share)
     {
-        try { return OpenLocked(filePath, 0, true, FILE_SHARE_READ | FILE_SHARE_WRITE); }
-        catch (Win32Exception error) { if (error.NativeErrorCode != 5) throw; return OpenLocked(filePath, 0, true, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE); }
+        if (String.IsNullOrEmpty(name) || name == "." || name == ".." || name.IndexOfAny(new[] { '\\', '/' }) >= 0) throw new ArgumentException("相对路径组件无效");
+        var buffer = Marshal.StringToHGlobalUni(name); var unicodePointer = IntPtr.Zero;
+        try {
+            var unicode = new UNICODE_STRING { Length = checked((ushort)(name.Length * 2)), MaximumLength = checked((ushort)((name.Length + 1) * 2)), Buffer = buffer };
+            unicodePointer = Marshal.AllocHGlobal(Marshal.SizeOf(typeof(UNICODE_STRING))); Marshal.StructureToPtr(unicode, unicodePointer, false);
+            var attributes = new OBJECT_ATTRIBUTES { Length = Marshal.SizeOf(typeof(OBJECT_ATTRIBUTES)), RootDirectory = parent.DangerousGetHandle(), ObjectName = unicodePointer, Attributes = OBJ_CASE_INSENSITIVE };
+            var io = new IO_STATUS_BLOCK(); SafeFileHandle handle; var options = FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT | (directory ? FILE_DIRECTORY_FILE : FILE_NON_DIRECTORY_FILE);
+            var status = NtCreateFile(out handle, access | SYNCHRONIZE, ref attributes, ref io, IntPtr.Zero, 0, share, FILE_OPEN, options, IntPtr.Zero, 0);
+            if (status != 0) { if (handle != null) handle.Dispose(); throw new Win32Exception((int)RtlNtStatusToDosError(status), "相对打开失败：" + name + "（NTSTATUS 0x" + status.ToString("x8") + "）"); }
+            return handle;
+        } finally { if (unicodePointer != IntPtr.Zero) Marshal.FreeHGlobal(unicodePointer); Marshal.FreeHGlobal(buffer); }
+    }
+    private static SafeFileHandle OpenVerifiedDeleteRelative(SafeFileHandle parent, string name, string expectedIdentity, string expectedHash, long expectedSize, string label, out FILE_BASIC_INFO originalAttributes, out bool attributesChanged)
+    {
+        originalAttributes = new FILE_BASIC_INFO(); attributesChanged = false; var handle = OpenRelative(parent, name, GENERIC_READ | DELETE, false, FILE_SHARE_READ);
+        try { VerifyIdentity(handle, expectedIdentity, label); Verify(handle, expectedHash, expectedSize, label); ReadBasicInformation(handle, out originalAttributes); if ((originalAttributes.FileAttributes & FILE_ATTRIBUTE_READONLY) == 0) return handle; handle.Dispose(); handle = OpenRelative(parent, name, GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES, false, FILE_SHARE_READ); VerifyIdentity(handle, expectedIdentity, label); Verify(handle, expectedHash, expectedSize, label); attributesChanged = ClearReadOnly(handle, out originalAttributes); return handle; }
+        catch { RestoreAttributes(handle, originalAttributes, attributesChanged); handle.Dispose(); throw; }
+    }
+    private static SafeFileHandle OpenIdentityDeleteRelative(SafeFileHandle parent, string name, string expectedIdentity, bool directory, string label, out FILE_BASIC_INFO originalAttributes, out bool attributesChanged)
+    {
+        originalAttributes = new FILE_BASIC_INFO(); attributesChanged = false; var handle = OpenRelative(parent, name, GENERIC_READ | DELETE, directory, FILE_SHARE_READ);
+        try { VerifyIdentity(handle, expectedIdentity, label); return handle; } catch { handle.Dispose(); throw; }
     }
     private static SafeFileHandle OpenVerifiedDelete(string filePath, string expectedIdentity, string expectedHash, long expectedSize, string label, out FILE_BASIC_INFO originalAttributes, out bool attributesChanged)
     {

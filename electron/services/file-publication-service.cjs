@@ -163,7 +163,7 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
     let handle;
     try {
       handle = await fs.promises.open(manifest, 'wx', 0o600); await handle.writeFile(contents, 'utf8'); await handle.sync(); await handle.close(); handle = null;
-      const payload = await invoke('compare-delete-files-batch', { manifest }, batchTimeoutMs(requests.length));
+      const payload = await invoke('compare-delete-files-batch', { manifest, 'manifest-size': Buffer.byteLength(contents), 'manifest-sha256': crypto.createHash('sha256').update(contents).digest('hex') }, batchTimeoutMs(requests.length));
       const results = Array.isArray(payload?.results) ? payload.results : [];
       if (results.length !== requests.length || results.some((item, index) => Number(item?.index) !== index)) throw Object.assign(new Error('批量摘要清理服务返回了不完整结果'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
       for (let index = 0; index < results.length; index += 1) if (results[index]?.recoveryPathBase64) results[index].recoveryPath = decodeRecoveryPath(results[index].recoveryPathBase64, path.resolve(requests[index].path), 'photoflow-quarantine-');
@@ -183,7 +183,7 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
     const lines = [`R\t${Buffer.from(rootPath).toString('base64')}`, ...[...directories].map(([directory, identity]) => `D\t${Buffer.from(directory).toString('base64')}\t${Buffer.from(identity).toString('base64')}`), ...requests.map((request, index) => `T\t${index}\t${Buffer.from(path.resolve(request.path)).toString('base64')}\t${Buffer.from(request.identity).toString('base64')}`)];
     const contents = lines.join('\n'); if (Buffer.byteLength(contents) > MAX_BATCH_MANIFEST_BYTES) throw Object.assign(new Error('批量目录清理清单过大'), { code: 'EINVAL' });
     const manifest = path.join(os.tmpdir(), `photoflow-directory-cleanup-${process.pid}-${crypto.randomUUID()}.batch`); let handle;
-    try { handle = await fs.promises.open(manifest, 'wx', 0o600); await handle.writeFile(contents); await handle.sync(); await handle.close(); handle = null; const payload = await invoke('delete-directories-batch', { manifest }, batchTimeoutMs(requests.length)); const results = Array.isArray(payload?.results) ? payload.results : []; if (results.length !== requests.length || results.some((item, index) => Number(item?.index) !== index)) throw Object.assign(new Error('批量目录清理服务返回了不完整结果'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' }); return results; }
+    try { handle = await fs.promises.open(manifest, 'wx', 0o600); await handle.writeFile(contents); await handle.sync(); await handle.close(); handle = null; const payload = await invoke('delete-directories-batch', { manifest, 'manifest-size': Buffer.byteLength(contents), 'manifest-sha256': crypto.createHash('sha256').update(contents).digest('hex') }, batchTimeoutMs(requests.length)); const results = Array.isArray(payload?.results) ? payload.results : []; if (results.length !== requests.length || results.some((item, index) => Number(item?.index) !== index)) throw Object.assign(new Error('批量目录清理服务返回了不完整结果'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' }); return results; }
     finally { if (handle) await handle.close().catch(() => undefined); await fs.promises.rm(manifest, { force: true }).catch(() => undefined); }
   };
   const createPortableQuarantine = async candidate => {
