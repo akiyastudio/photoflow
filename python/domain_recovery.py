@@ -14,7 +14,7 @@ import tempfile
 import uuid
 from pathlib import Path
 
-from workspace_domain_storage import DOMAIN_TABLES
+from workspace_storage_ownership import DOMAIN_TABLES, STORAGE_OWNERSHIP
 from compatibility.registry import run_hooks as run_compatibility_hooks
 
 
@@ -83,7 +83,10 @@ LEGACY_REQUIRED_COLUMNS = {
                      "file_path_key", "created_at", "updated_at"},
     },
 }
-SUPPORTED_SCHEMA_VERSIONS = {"media": 1, "versioning": 1, "operations": 2}
+SUPPORTED_SCHEMA_VERSIONS = {
+    domain: int(STORAGE_OWNERSHIP[domain]["schemaVersion"])
+    for domain in ("media", "versioning", "operations")
+}
 for extension in run_compatibility_hooks("recovery_declaration"):
     PATH_COLUMNS.update(extension.get("pathColumns") or {})
 

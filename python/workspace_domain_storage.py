@@ -12,23 +12,9 @@ import sqlite3
 import time
 import uuid
 
+from workspace_storage_ownership import DOMAIN_TABLES
 
 SCHEMA_VERSION = 1
-DOMAIN_TABLES = {
-    "media": (
-        "photos", "file_records", "media_incremental_snapshots",
-        "media_incremental_snapshot_files", "media_incremental_snapshot_scopes",
-        "media_incremental_snapshot_baseline", "media_incremental_snapshot_batches",
-    ),
-    "versioning": (
-        "versions", "version_batches", "progress_folders", "batch_file_operations",
-        "batch_items", "version_compare_history", "tracking_sessions",
-        "tracking_session_items", "legacy_selection_relation_repairs",
-        "version_tree_layouts", "version_tree_node_positions", "version_graph_edges",
-        "media_import_graph_sessions", "media_import_artifact_slots", "progress_folder_relocations",
-        "progress_external_link_renames",
-    ),
-}
 _DOMAIN_READY_CACHE = {}
 
 

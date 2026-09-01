@@ -58,7 +58,7 @@
     "test:architecture": "node scripts/test-architecture.cjs && node scripts/test-toast-architecture.cjs && node scripts/test-user-facing-notice-model.cjs",
     "test:domain-contracts": "node scripts/test-domain-contracts.cjs",
     "test:operations-storage": "node scripts/test-operations-storage.cjs",
-    "test:domain-storage": ".venv\\Scripts\\python.exe scripts\\test-domain-storage-isolation.py && .venv\\Scripts\\python.exe scripts\\test-media-incremental-sync.py && node scripts/test-media-repository-incremental.cjs",
+    "test:domain-storage": ".venv\\Scripts\\python.exe scripts\\test-workspace-storage-ownership.py && .venv\\Scripts\\python.exe scripts\\test-domain-storage-isolation.py && .venv\\Scripts\\python.exe scripts\\test-media-incremental-sync.py && node scripts/test-media-repository-incremental.cjs",
     "test:domain-journal": "node scripts/test-domain-command-journal.cjs",
     "test:domain-health": "node scripts/test-domain-health.cjs",
     "test:domain-recovery": ".venv\\Scripts\\python.exe scripts\\test-domain-recovery.py",
