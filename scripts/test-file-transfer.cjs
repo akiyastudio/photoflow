@@ -1651,8 +1651,10 @@ const run = async () => {
     }
 
     const occupiedRestorePath = path.join(root, 'occupied-restore.txt');
+    const renamedRestorePath = path.join(root, 'occupied-restore (已恢复).txt');
     fs.writeFileSync(occupiedRestorePath, 'new occupant');
     const restoreHandlers = new Map();
+    const restoreCalls = [];
     const restoreHistory = [{
       kind: 'trash',
       items: [{ original: occupiedRestorePath, originalIdentity: { device: '-1', inode: '-1', size: '0', modifiedNs: '0', directory: false }, recyclePidl: 'restore-item' }],
@@ -1663,7 +1665,10 @@ const run = async () => {
       pathExists: async value => fs.existsSync(value), samePathIdentity,
       recycleBinService: {
         probe: async () => ({ exists: true }),
-        restore: async ({ originalPath }) => { fs.writeFileSync(originalPath, 'restored item'); },
+        restore: async ({ originalPath, targetPath = originalPath }) => {
+          restoreCalls.push({ originalPath, targetPath });
+          fs.writeFileSync(targetPath, 'restored item');
+        },
       },
     });
     const restoreDecision = await restoreHandlers.get('workspace-undo-rename')(null, '');
@@ -1673,7 +1678,8 @@ const run = async () => {
     const renamedRestore = await restoreHandlers.get('workspace-undo-rename')(null, '', { restoreConflictPolicy: 'rename' });
     assert.strictEqual(renamedRestore.success, true);
     assert.strictEqual(fs.readFileSync(occupiedRestorePath, 'utf8'), 'new occupant');
-    assert.strictEqual(fs.readFileSync(path.join(root, 'occupied-restore (已恢复).txt'), 'utf8'), 'restored item');
+    assert.deepStrictEqual(restoreCalls, [{ originalPath: occupiedRestorePath, targetPath: renamedRestorePath }], 'restore keeps immutable recycle evidence separate from the conflict-renamed target');
+    assert.strictEqual(fs.readFileSync(renamedRestorePath, 'utf8'), 'restored item');
 
     const projectRenameHandlers = new Map();
     const renameWorkspaceRoot = path.join(root, 'rename-workspace');

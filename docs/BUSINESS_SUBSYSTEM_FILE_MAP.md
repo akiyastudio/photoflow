@@ -34,6 +34,7 @@
 - `scripts/test-cloudbase-function-package.cjs`
 - `scripts/test-cloudbase-function-package.py`
 - `scripts/test-config-mutation-service.cjs`
+- `scripts/test-file-transfer.cjs`
 - `scripts/test-global-search.cjs`
 - `scripts/test-legal-release-evidence.cjs`
 - `scripts/test-panel-task-sessions.cjs`
@@ -260,6 +261,7 @@
 - `electron/native/RecycleBinService.cs`
 - `electron/native/RecycleBinService.manifest`
 - `scripts/build-recycle-bin-service.cjs`
+- `scripts/test-file-transfer.cjs`
 - `scripts/test-recycle-bin-service.cjs`
 
 ## 3. 媒体资产管理与预览系统
