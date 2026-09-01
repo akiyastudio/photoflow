@@ -24,7 +24,7 @@ npm run build:release
 输出文件：
 
 ```text
-dist/PhotoFlow-video-playback-mpv-26.8.28.3-win32-x64.zip
+dist/PhotoFlow-video-playback-mpv-26.8.31-win32-x64.zip
 ```
 
 ## 仅使用已有运行时打包

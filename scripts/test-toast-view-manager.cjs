@@ -152,15 +152,66 @@ assert(hostSource.includes('updateToastView({') && !hostSource.includes('innerHT
 assert(hostSource.includes('Math.max(320, contentWidth + 32)') && hostSource.includes('Math.ceil(rect.height) + 8'), 'short notices retain horizontal and vertical breathing room while task stacks keep a bounded height');
 assert(rendererSource.includes('Math.ceil(stack.scrollHeight)'), 'the child renderer must correct height after text wrapping');
 assert(rendererSource.includes('useToastStackReflow(stackRef, reflowKey)') && reflowSource.includes('[layoutKey, stackRef]') && reflowSource.includes('element.animate('), 'both Toast surfaces animate reflow only when card identity or layout state changes');
-assert(rendererSource.includes('key={task.id}') && rendererSource.includes('key={notice.id}'), 'stable IDs preserve mounted cards across updates');
 assert(managerSource.includes('suspendForNativeDrag()') && !managerSource.slice(managerSource.indexOf('suspendForNativeDrag()'), managerSource.indexOf('resumeAfterNativeDrag()')).includes('destroy'), 'drag suspension hides without destroying the renderer');
 assert(filesSource.includes('suspendToastViewForNativeDrag?.()') && filesSource.includes('resumeToastViewAfterNativeDrag?.()'), 'native drag brackets the Toast hit-test surface');
 
 const compile = relative => ts.transpileModule(fs.readFileSync(path.join(root, relative), 'utf8'), { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
 const evaluate = (compiled, requireModule) => { const module = { exports: {} }; new Function('module', 'exports', 'require', compiled)(module, module.exports, requireModule); return module.exports; };
 const icons = new Proxy({}, { get: (_target, name) => function Icon() { return name; } });
+const taskKeySentinel = 'task-instance-key:runtime-sentinel';
+const runtimeTask = { id: 'reused-task-id', state: 'running', progress: 20, message: 'copying', metadata: {}, capabilities: {} };
+const runtimeNotice = { id: 811, message: 'notice', persistent: false, count: 1, tone: 'info' };
+const runtimeSnapshot = { revision: 41, dark: false, top: 40, width: 480, height: 100, notices: [runtimeNotice], tasks: [runtimeTask], overflowCount: 0 };
+const taskKeyCalls = [];
+const jsxCalls = [];
+const jsx = (type, props, key) => { const element = { type, props, key }; jsxCalls.push(element); return element; };
+const StrictMode = Symbol('StrictMode');
+const reactStub = {
+  __esModule: true,
+  default: { StrictMode },
+  useEffect() {},
+  useLayoutEffect() {},
+  useRef: () => ({ current: { scrollHeight: 100 } }),
+  useState: () => [runtimeSnapshot, () => undefined],
+};
+const reactDomStub = { __esModule: true, default: { createRoot: () => ({ render() {} }) } };
+const jsxRuntimeStub = { Fragment: Symbol('Fragment'), jsx, jsxs: jsx };
+const FileTransferToastItem = function FileTransferToastItem() {};
+const originalDocument = global.document;
+const originalWindow = global.window;
+global.document = { documentElement: { classList: { toggle() {} } }, getElementById: () => ({}) };
+global.window = { toastViewAPI: { onSnapshot: () => undefined, reportLayout() {}, sendAction() {} }, matchMedia: () => ({ matches: false }) };
+let toastViewModule;
+try {
+  toastViewModule = evaluate(compile('src/toast-view.tsx'), request => {
+    if (request === 'react') return reactStub;
+    if (request === 'react/jsx-runtime') return jsxRuntimeStub;
+    if (request === 'react-dom/client') return reactDomStub;
+    if (request === 'lucide-react') return icons;
+    if (request === './features/background-tasks/FileTransferToast') return { FileTransferToastItem };
+    if (request === './features/background-tasks/task-toast-model') return { taskToastInstanceKey: value => { taskKeyCalls.push(value); return taskKeySentinel; } };
+    if (request === './features/app/top-toast-tone-model') return { topToastTonePresentation: () => ({ icon: 'info', tone: 'info', role: 'status', ariaLive: 'polite' }) };
+    if (request === './components/toast-stack-reflow') return { TOAST_STACK_REFLOW_MS: 200, useToastStackReflow() {} };
+    if (request === './index.css') return {};
+    throw new Error(`unexpected toast-view dependency: ${request}`);
+  });
+  jsxCalls.length = 0;
+  toastViewModule.ToastView();
+} finally {
+  if (originalDocument === undefined) delete global.document; else global.document = originalDocument;
+  if (originalWindow === undefined) delete global.window; else global.window = originalWindow;
+}
+assert.deepEqual(taskKeyCalls, [runtimeTask], 'the live ToastView render must call taskToastInstanceKey for the rendered task');
+const taskElement = jsxCalls.find(element => element.type === FileTransferToastItem);
+assert(taskElement, 'the live ToastView render must create a task card element');
+assert.strictEqual(taskElement.key, taskKeySentinel, 'task cards must use the helper result as their JSX key');
+const noticeElement = jsxCalls.find(element => element.props?.['data-top-toast-id'] === `notice:${runtimeNotice.id}`);
+assert(noticeElement, 'the live ToastView render must create an ordinary notice element');
+assert.strictEqual(noticeElement.key, runtimeNotice.id, 'ordinary notices must use notice.id itself as their JSX key');
+
 const taskModel = evaluate(compile('src/features/background-tasks/task-toast-model.ts'), require);
-const taskModule = evaluate(compile('src/features/background-tasks/FileTransferToast.tsx'), request => request === 'lucide-react' ? icons : request === './TaskCenter' ? { useTaskCenter: () => ({}) } : request === './task-toast-model' ? taskModel : request === '../../components/toast-stack-reflow' ? { useToastStackReflow: () => undefined } : require(request));
+const taskPresentation = evaluate(compile('src/components/useTaskPresentation.ts'), request => request === '../features/background-tasks/TaskCenter' ? { usePanelTaskIdentity: () => null } : require(request));
+const taskModule = evaluate(compile('src/features/background-tasks/FileTransferToast.tsx'), request => request === 'lucide-react' ? icons : request === './TaskCenter' ? { useTaskCenter: () => ({}) } : request === './task-toast-model' ? taskModel : request === '../../components/toast-stack-reflow' ? { useToastStackReflow: () => undefined } : request === '../../components/useTaskPresentation' ? taskPresentation : require(request));
 const actions = [];
 const task = { id: 'task-stable', type: 'project-file-operation', title: '导入', state: 'running', progress: 10, message: '正在导入', createdAt: 1, updatedAt: 2, cancellable: true, capabilities: { pausable: true }, metadata: {} };
 const tree = taskModule.FileTransferToastItem({ task, onMinimize: id => actions.push(['minimize', id]), onDismiss: id => actions.push(['dismiss', id]), onPause: id => actions.push(['pause', id]), onContinue: id => actions.push(['continue', id]), onCancel: value => actions.push(['cancel', value.id]) });

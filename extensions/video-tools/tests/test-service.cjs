@@ -15,7 +15,7 @@ const servicePath = path.join(root, 'service.cjs');
 const service = fs.readFileSync(servicePath, 'utf8');
 for (const marker of ['video-tools.transcode.v1', 'video-tools.split.v1', 'video-tools.sources.preview.v1', 'video.sources.preview', 'project.media.process', 'directoryToken: true', 'normalizePresets', 'transcodePresets']) assert(service.includes(marker));
 
-const ui = fs.readFileSync(path.join(root, 'ui', 'app.js'), 'utf8');
+const ui = fs.readFileSync(path.join(root, 'ui', 'app.js'), 'utf8').replace(/\r\n/g, '\n');
 for (const marker of ['另存为新视频', '替换原视频', '约 3.95 GB（固定）', 'video-tools.operation.progress.v1', 'source-row', 'source-children', 'data-toggle-source', '展开全部', '批量粘贴路径', 'authorizeFiles(files)', 'data-clear-sources', 'settingsReady', 'render();\n  void api.getContext()', 'pf-button-danger', 'pf-panel-section', '编码预设', 'H.264 通用兼容', 'HEVC Main10 · 跟随来源', 'Rec.709 SDR 输出', '最大 4K', '保存为用户预设', 'data-preset-save', 'data-preset-delete']) assert(ui.includes(marker));
 assert(!ui.includes('恢复当前选择'), 'plugin source picker must preserve the original clear/remove interaction');
 assert(!ui.includes('Promise.all([api.getContext()'), 'transcode first paint must not wait for settings or service startup');
