@@ -29,7 +29,12 @@ STORAGE_OWNERSHIP = {
         "filename": "<workspace-id>.sqlite3",
         "tables": WORKSPACE_TABLES,
         "schemaVersion": 34,
-        "migrationVersions": tuple(MIGRATION_OWNERS),
+        "migrationVersions": tuple(
+            version for version, owners in MIGRATION_OWNERS.items() if "workspace" in owners
+        ),
+        "workspaceMigrationVersions": tuple(
+            version for version, owners in MIGRATION_OWNERS.items() if "workspace" in owners
+        ),
         "recoveryActions": ("snapshot", "restore-workspace", "restore-project"),
         "retainedLegacyTables": ("undo_records", "progress_relation_repair_log"),
     },
@@ -38,6 +43,9 @@ STORAGE_OWNERSHIP = {
         "tables": ("meta", *DOMAIN_TABLES["media"]),
         "schemaVersion": 1,
         "migrationVersions": tuple(
+            version for version, owners in MIGRATION_OWNERS.items() if "media" in owners
+        ),
+        "workspaceMigrationVersions": tuple(
             version for version, owners in MIGRATION_OWNERS.items() if "media" in owners
         ),
         "recoveryActions": ("verify", "snapshot", "restore-workspace", "restore-project", "reset"),
@@ -50,6 +58,9 @@ STORAGE_OWNERSHIP = {
         "migrationVersions": tuple(
             version for version, owners in MIGRATION_OWNERS.items() if "versioning" in owners
         ),
+        "workspaceMigrationVersions": tuple(
+            version for version, owners in MIGRATION_OWNERS.items() if "versioning" in owners
+        ),
         "recoveryActions": ("verify", "snapshot", "restore-workspace", "restore-project", "reset"),
         "rebuildable": False,
     },
@@ -58,6 +69,9 @@ STORAGE_OWNERSHIP = {
         "tables": ("meta", "undo_records"),
         "schemaVersion": 2,
         "migrationVersions": (0, 1),
+        "workspaceMigrationVersions": tuple(
+            version for version, owners in MIGRATION_OWNERS.items() if "operations" in owners
+        ),
         "recoveryActions": ("verify", "snapshot", "restore-workspace", "reset", "sync-retired-shadow"),
         "rebuildable": False,
     },

@@ -5,8 +5,24 @@ changes live here so their ownership can be checked without parsing the worker.
 """
 
 
+CANONICAL_STORAGE_DOMAINS = frozenset(("workspace", "media", "versioning", "operations"))
+
 MIGRATION_OWNERS = {
-    **{version: ("legacy-shared",) for version in range(11, 26)},
+    11: ("workspace",),
+    12: ("workspace", "media", "versioning"),
+    13: ("workspace", "media", "versioning"),
+    14: ("versioning",),
+    15: ("workspace",),
+    16: ("versioning",),
+    17: ("workspace",),
+    18: ("workspace", "versioning"),
+    19: ("versioning",),
+    20: ("workspace", "versioning"),
+    21: ("versioning",),
+    22: ("versioning",),
+    23: ("versioning",),
+    24: ("versioning",),
+    25: ("versioning",),
     26: ("versioning",),
     27: ("versioning",),
     28: ("versioning",),
@@ -15,7 +31,40 @@ MIGRATION_OWNERS = {
     31: ("versioning",),
     32: ("versioning",),
     33: ("versioning",),
-    34: ("workspace", "operations-legacy-shadow"),
+    34: ("workspace", "operations"),
+}
+
+# Physical history and rollback details are descriptive metadata, not owners.
+# Versions 11-25 ran before domain extraction while all three stores shared the
+# workspace database. Versions 11, 15, 17 and 32 invoke compatibility hooks;
+# 15 and 17 are hook-only reservations in the core migration driver.
+MIGRATION_METADATA = {
+    **{
+        version: {"historicalPhysicalLayout": "shared-workspace-database"}
+        for version in range(11, 26)
+    },
+    **{
+        version: {
+            "historicalPhysicalLayout": "shared-workspace-database",
+            "compatibilityHook": True,
+        }
+        for version in (11, 15, 17)
+    },
+    15: {
+        "historicalPhysicalLayout": "shared-workspace-database",
+        "compatibilityHook": True,
+        "compatibilityHookReservation": True,
+    },
+    17: {
+        "historicalPhysicalLayout": "shared-workspace-database",
+        "compatibilityHook": True,
+        "compatibilityHookReservation": True,
+    },
+    32: {"compatibilityHook": True},
+    34: {
+        "retainedRollbackShadow": "workspace.undo_records",
+        "runtimeOwner": "operations",
+    },
 }
 
 
