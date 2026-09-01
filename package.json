@@ -66,7 +66,7 @@
     "test:metadata-pane": "node scripts/test-metadata-pane-model.cjs",
     "test:renderer-error-notice": "node scripts/test-renderer-error-notice-model.cjs",
     "test:user-facing-notices": "node scripts/test-user-facing-notice-model.cjs",
-    "test:electron-security": "node scripts/test-electron-security.cjs",
+    "test:electron-security": "node scripts/test-electron-security.cjs && node scripts/test-project-file-query-ipc.cjs",
     "test:electron-dev-contract": "node scripts/test-electron-dev-contract.cjs",
     "test:electron-smoke": "node scripts/test-electron-smoke.cjs",
     "test:component-electron-smoke": "node scripts/test-component-electron-smoke.cjs",
