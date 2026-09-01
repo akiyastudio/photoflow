@@ -1,6 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const vm = require('vm');
 const { pathToFileURL } = require('url');
 const {
   createSecureIpcMain,
@@ -125,7 +126,30 @@ Promise.resolve()
     const sourcePathPicker = await fs.promises.readFile(path.join(root, 'src/components/SourcePathPicker.tsx'), 'utf8');
     assert(projectWorkspace.includes('projectWorkspaceClient.getPathForFile(file)') && sourcePathPicker.includes('window.electronAPI.getPathForFile(file)'));
     assert(!projectWorkspace.includes('File & { path?: string }') && !toolViews.includes('File & { path?: string }'));
-    assert(preload.includes("ipcRenderer.invoke('inspect-source-paths', paths)"));
+    let exposedElectronApi;
+    const preloadInvocations = [];
+    vm.runInNewContext(preload, {
+      require: moduleName => {
+        assert.strictEqual(moduleName, 'electron');
+        return {
+          contextBridge: { exposeInMainWorld: (name, api) => { if (name === 'electronAPI') exposedElectronApi = api; } },
+          ipcRenderer: {
+            invoke: (...args) => { preloadInvocations.push(args); return Promise.resolve({ success: true }); },
+            on: () => undefined,
+            removeListener: () => undefined,
+            send: () => undefined,
+          },
+          webUtils: { getPathForFile: () => '' },
+        };
+      },
+      console,
+      setTimeout,
+      clearTimeout,
+    }, { filename: 'electron/preload.cjs' });
+    const inspectedPaths = ['C:\\media\\one.jpg'];
+    const inspectionOptions = { includeFolderFiles: true, extensions: ['.jpg'] };
+    await exposedElectronApi.inspectSourcePaths(inspectedPaths, inspectionOptions);
+    assert.deepStrictEqual(preloadInvocations.at(-1), ['inspect-source-paths', inspectedPaths, inspectionOptions], 'preload must forward source inspection paths and options unchanged');
     assert(systemIpc.includes("ipcMain.handle('inspect-source-paths'") && systemIpc.includes('.slice(0, 4096)') && systemIpc.includes('value.length <= 32768'), 'source-kind inspection must remain bounded');
     assert(systemIpc.includes('validateRendererPythonInvocation(scriptName, args, requestId)'));
     assert(html.includes('Content-Security-Policy'));

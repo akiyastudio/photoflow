@@ -53,6 +53,8 @@ const require = createRequire(import.meta.url);
 const ts = require('typescript');
 const sourcePath = path.join(path.dirname(new URL(import.meta.url).pathname.replace(/^\/(?:[A-Za-z]:)/, value => value.slice(1))), '..', 'src', 'features', 'search', 'SearchAllPage.tsx');
 const source = fs.readFileSync(sourcePath, 'utf8');
+assert.match(source, /import \{ MediaThumbnail \} from '\.\.\/\.\.\/components\/MediaThumbnail';/, 'global search must import the extracted shared thumbnail');
+assert.match(source, /<MediaThumbnail entry=\{entry\} cacheConfig=\{config\.mediaCache\} requestedSize=\{320\} queueOrder=\{queueOrder\}\/>/, 'global search must preserve the real thumbnail props contract');
 const compiled = ts.transpileModule(source, { compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true }, fileName: sourcePath }).outputText;
 const noopComponent = () => null;
 const projectWorkspaceClient = { listProjectFiles: async () => { throw new Error('test must inject fetchPage'); }, cancelListProjectFiles: async () => undefined };
@@ -62,7 +64,7 @@ const mockRequire = specifier => {
   if (specifier === 'lucide-react') return new Proxy({}, { get: () => noopComponent });
   if (specifier === '../../types') return { normalizeWorkspacePaths: () => [] };
   if (specifier === '../../platform/project-workspace-client') return { projectWorkspaceClient };
-  if (specifier === '../workspace/ProjectWorkspace') return { MediaThumbnail: noopComponent };
+  if (specifier === '../../components/MediaThumbnail') return { MediaThumbnail: noopComponent };
   throw new Error(`Unexpected module import: ${specifier}`);
 };
 const loadedModule = { exports: {} };

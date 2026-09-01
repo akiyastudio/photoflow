@@ -3,7 +3,7 @@ import { File, FileImage, FileVideo, Folder, Loader2, Search, X } from 'lucide-r
 import type { AppConfig, ProjectFileEntry, WorkspaceProject } from '../../types';
 import { normalizeWorkspacePaths } from '../../types';
 import { projectWorkspaceClient } from '../../platform/project-workspace-client';
-import { MediaThumbnail } from '../workspace/ProjectWorkspace';
+import { MediaThumbnail } from '../../components/MediaThumbnail';
 
 const INSPIRATION_PROJECT_NAME = '.__photoflow_inspiration__';
 const SEARCH_PAGE_SIZE = 200;
