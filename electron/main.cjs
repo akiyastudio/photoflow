@@ -44,7 +44,7 @@ const { createDomainCommandJournal } = require('./services/domain-command-journa
 const { createDomainHealthService } = require('./services/domain-health-service.cjs');
 const { createBackgroundTaskService } = require('./services/background-task-service.cjs');
 const { createProcessSupervisor } = require('./services/process-supervisor.cjs');
-const { createJsonCommandRunner } = require('./services/json-command-runner.cjs');
+const { createBundledPythonRuntime } = require('./services/bundled-python-runtime.cjs');
 const { createBackupService } = require('./services/backup-service.cjs');
 const { createArchiveService } = require('./services/archive-service.cjs');
 const { createCredentialService } = require('./services/credential-service.cjs');
@@ -58,12 +58,10 @@ const { createWorkspaceService } = require('./domains/workspace/public.cjs');
 const { createFileSystemService } = require('./services/file-system-service.cjs');
 const { createThumbnailService } = require('./services/thumbnail-service.cjs');
 const { createMediaService } = require('./services/media-service.cjs');
-const { findPythonJsonFailureMessage, parsePythonJsonMessages } = require('./services/python-json-protocol.cjs');
+const { parsePythonJsonMessages } = require('./services/python-json-protocol.cjs');
 const { createMediaRatingService } = require('./services/media-rating-service.cjs');
 const { createRawOrientationService } = require('./services/raw-orientation-service.cjs');
 const { createImageThumbnailRuntime } = require('./services/image-thumbnail-runtime.cjs');
-const { createDevelopmentPythonResolver } = require('./services/python-environment-service.cjs');
-const { renameNeedsFrameRuntime } = require('./services/rename-runtime-model.cjs');
 const { createVersionService } = require('./domains/versioning/public.cjs');
 const { createVersionStaleDetectionService } = require('./services/version-stale-detection-service.cjs');
 const { createMediaTrackingScanScheduler } = require('./services/media-tracking-scan-scheduler.cjs');
@@ -76,7 +74,7 @@ const { createProjectVirtualPathService } = require('./services/project-virtual-
 const { isInternalWorkspacePath } = require('./infrastructure/internal-workspace-path.cjs');
 const cloudConfig = require('./cloud-config.cjs');
 const { registerBackgroundTasksIpc } = require('./modules/background-tasks-ipc.cjs');
-const { createElectronSecurity, normalizeBundledPythonTool, normalizeDevelopmentRendererUrl, normalizeExternalUrl } = require('./security-policy.cjs');
+const { createElectronSecurity, normalizeDevelopmentRendererUrl, normalizeExternalUrl } = require('./security-policy.cjs');
 const smokeTestEnabled = process.env.PHOTOFLOW_SMOKE_TEST === '1';
 const smokeUserDataPath = String(process.env.PHOTOFLOW_USER_DATA_DIR || '').trim(); const smokeSessionDataPath = String(process.env.PHOTOFLOW_SMOKE_SESSION_DATA_DIR || '').trim();
 if (smokeTestEnabled) {
@@ -632,87 +630,14 @@ const loadMainWindowRenderer = () => {
   }
 };
 
-// 根据环境获取可执行文件和参数
-const MERGED_PYTHON_TOOLS = new Set(['classify', 'png_to_jpg', 'catch', 'raw_decoder', 'rename', 'thumbnail_db', 'thumbnail_image', 'workspace_db', 'operations_db', 'backup_db']);
-const INSPIRATION_PYTHON_TOOLS = new Set(['research', 'office_media_extract', 'screenshot_main_image']);
-const VIDEO_COMPONENT_TOOLS = new Set(['cut_video', 'ffmpeg_transcode', 'video_preview']);
-
-const getDevelopmentPython = createDevelopmentPythonResolver({ projectRoot });
 let pluginService;
-
-const getRunConfig = (scriptName, args) => {
-  // 移除 .py 后缀 (兼容前端传入 'classify.py' 或 'classify')
-  const normalizedScriptName = normalizeBundledPythonTool(scriptName);
-  const baseName = normalizedScriptName.slice(0, -3);
-  if (!MERGED_PYTHON_TOOLS.has(baseName) && !INSPIRATION_PYTHON_TOOLS.has(baseName) && !VIDEO_COMPONENT_TOOLS.has(baseName)) {
-    throw new Error(`Unknown bundled Python tool: ${normalizedScriptName}`);
-  }
-  if (!Array.isArray(args) || args.some(value => typeof value !== 'string' || /\0/.test(value))) {
-    throw new TypeError('Invalid bundled Python tool arguments');
-  }
-
-  const isWin = process.platform === 'win32';
-
-  if (VIDEO_COMPONENT_TOOLS.has(baseName)) {
-    if (!pluginService) {
-      const error = new Error('视频处理插件服务尚未初始化');
-      error.code = 'PLUGIN_MISSING';
-      throw error;
-    }
-    return pluginService.resolveRunConfig('video-tools', [baseName, ...args]);
-  }
-  if (baseName === 'rename' && renameNeedsFrameRuntime(args, { fs, path })) {
-    if (pluginService) {
-      try {
-        const videoRuntime = pluginService.resolveRunConfig('video-tools', []);
-        args = [...args, '--video_tools_command', videoRuntime.command, ...videoRuntime.args.map(value => `--video_tools_arg=${value}`)];
-      } catch (error) {
-        if (error?.code !== 'PLUGIN_MISSING') throw error;
-      }
-    }
-  }
-
-  if (app.isPackaged) {
-    // 生产环境：根据平台决定是否有 .exe 后缀
-    const exeSuffix = isWin ? '.exe' : '';
-    if (MERGED_PYTHON_TOOLS.has(baseName)) {
-      return {
-        command: path.join(process.resourcesPath, 'python', 'PhotoFlowImportWorker', `PhotoFlowImportWorker${exeSuffix}`),
-        args: [baseName, ...args]
-      };
-    }
-    if (INSPIRATION_PYTHON_TOOLS.has(baseName)) {
-      return {
-        command: path.join(process.resourcesPath, 'python', 'inspiration-tools', `inspiration-tools${exeSuffix}`),
-        args: [baseName, ...args]
-      };
-    }
-    throw new Error(`Bundled Python tool is missing a packaged runtime group: ${normalizedScriptName}`);
-  } else {
-    // 【开发环境】使用 python 解释器运行对应的 .py 脚本
-    // 脚本路径: python/classify.py
-    const scriptPath = path.join(projectRoot, 'python', `${baseName}.py`);
-
-    return {
-      command: getDevelopmentPython(),
-      args: ['-u', scriptPath, ...args] // -u 强制无缓冲输出
-    };
-  }
-};
-
-let supervisedJobSequence = 0;
-const spawnSupervisedJob = ({ prefix, kind, command, args, options }) => processSupervisor.launch({
-  id: `${prefix}:${++supervisedJobSequence}`,
-  kind,
-  command,
-  args,
-  options,
-  ephemeral: true,
-}).child;
-
-const runJsonCommand = createJsonCommandRunner({
-  spawnJob: run => spawnSupervisedJob({ prefix: 'python:json-job', kind: 'python-job', command: run.command, args: run.args, options: { stdio: ['ignore', 'pipe', 'pipe'] } }),
+const bundledPythonRuntime = createBundledPythonRuntime({
+  app,
+  projectRoot,
+  processSupervisor,
+  getPluginService: () => pluginService,
 });
+const { getRunConfig, runJsonCommand, runPythonEventAction, runPythonJsonAction } = bundledPythonRuntime;
 
 pluginService = createPluginService({ app, registry: componentRegistry, runJsonCommand });
 
@@ -731,68 +656,6 @@ const extractVideoTimelineFrames = async (filePath, times) => {
     await fs.promises.rm(requestRoot, { recursive: true, force: true }).catch(() => undefined);
   }
 };
-
-const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage, signal, deadlineAt) =>
-  runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs, onMessage, signal, deadlineAt);
-
-const runPythonEventAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, signal, onEvent) => new Promise((resolve, reject) => {
-  const run = getRunConfig(scriptName, args);
-  const child = spawnSupervisedJob({ prefix: 'python:event-job', kind: 'python-job', command: run.command, args: run.args, options: { stdio: ['ignore', 'pipe', 'pipe'] } });
-  let stdout = '';
-  let stderr = '';
-  let eventBuffer = '';
-  const events = [];
-  let finished = false;
-  let abortListener = null;
-  const settle = callback => value => {
-    if (finished) return;
-    finished = true;
-    clearTimeout(timer);
-    if (abortListener && signal) signal.removeEventListener('abort', abortListener);
-    callback(value);
-  };
-  const succeed = settle(resolve);
-  const fail = settle(reject);
-  child.stdout.setEncoding('utf8');
-  child.stderr.setEncoding('utf8');
-  child.stdout.on('data', data => {
-    stdout = (stdout + data).slice(-16 * 1024 * 1024);
-    const lines = (eventBuffer + data).split(/\r?\n/);
-    eventBuffer = lines.pop() || '';
-    for (const line of lines) {
-      try {
-        const event = JSON.parse(line);
-        events.push(event);
-        onEvent?.(event);
-      } catch { /* keep non-protocol output in stdout for final diagnostics */ }
-    }
-  });
-  child.stderr.on('data', data => { stderr = (stderr + data).slice(-16000); });
-  child.on('error', fail);
-  child.on('close', code => {
-    if (eventBuffer.trim()) {
-      try { const event = JSON.parse(eventBuffer); events.push(event); onEvent?.(event); } catch { /* ignore trailing non-protocol output */ }
-    }
-    const protocolFailure = findPythonJsonFailureMessage(events);
-    if (code !== 0) return fail(new Error(protocolFailure || stderr.trim() || `${scriptName} 处理失败（代码 ${code}）`));
-    if (protocolFailure) return fail(new Error(protocolFailure));
-    succeed(events);
-  });
-  const timer = setTimeout(() => {
-    if (!child.killed) child.kill();
-    fail(new Error(`${scriptName} 处理超时`));
-  }, timeoutMs);
-  if (signal) {
-    abortListener = () => {
-      if (!child.killed) child.kill();
-      const error = new Error('任务已取消');
-      error.code = 'TASK_CANCELLED';
-      fail(error);
-    };
-    if (signal.aborted) abortListener();
-    else signal.addEventListener('abort', abortListener, { once: true });
-  }
-});
 
 const checkForUpdates = async () => {
   if (!mainWindow) return { success: false, error: '主窗口尚未就绪' };
