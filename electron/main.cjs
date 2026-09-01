@@ -1735,7 +1735,7 @@ app.whenReady().then(async () => {
     IMAGE_EXTENSIONS,
     path, fs, crypto, getConfigPath, readSavedConfig, readConfig: configMutationService.read, mutateConfig: configMutationService.mutate,
     getProjectPath, dialog, mainWindow, mediaService, mediaRatingService, exiftool, shell, backgroundTasks,
-    uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths, fileSystemService, runPythonJsonAction, extractVideoTimelineFrames, safeStorage, secretsRoot: path.join(app.getPath('userData'), 'component-secrets'),
+    uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths, fileSystemService, runPythonJsonAction, extractVideoTimelineFrames, pluginService, safeStorage, secretsRoot: path.join(app.getPath('userData'), 'component-secrets'),
     getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
     RAW_EXTENSIONS, VIDEO_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS,
   });

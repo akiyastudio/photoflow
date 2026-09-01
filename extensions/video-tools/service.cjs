@@ -25,6 +25,8 @@ const transcodeArgs = (settings, extras = []) => {
   return ['--container', text('container', ['mp4', 'mov', 'mkv'], 'mp4'), '--video-mode', text('videoMode', ['h264', 'h265', 'av1', 'prores', 'copy'], 'h264'), '--quality', text('quality', ['high', 'balanced', 'small'], 'balanced'), '--resolution', text('resolution', ['original', '2160p', '1080p', '720p'], 'original'), '--frame-rate', text('frameRate', ['original', '24', '25', '30', '50', '60'], 'original'), '--audio-mode', text('audioMode', ['copy', 'aac', 'remove'], 'aac'), '--subtitle-mode', text('subtitleMode', ['copy', 'burn', 'remove'], 'copy'), '--color-mode', text('colorMode', ['auto', 'sdr', 'hdr10', 'hlg', 'hdr-to-sdr'], 'auto'), '--bit-depth', text('bitDepth', ['auto', '8', '10'], 'auto'), '--frame-rate-mode', text('frameRateMode', ['preserve', 'cfr', 'vfr'], 'preserve'), '--rotation', text('rotation', ['auto', '0', '90', '180', '270'], 'auto'), '--aspect-mode', text('aspectMode', ['preserve', 'square-pixels'], 'preserve'), '--audio-track', text('audioTrack', ['all', 'first'], 'all'), '--audio-bitrate-kbps', String([96, 128, 160, 192, 256, 320].includes(audioBitrate) ? audioBitrate : 192), '--encoder-preset', text('encoderPreset', ['fast', 'balanced', 'quality'], 'balanced'), '--retry-count', '1', ...(Number.isFinite(bitrate) && bitrate > 0 && bitrate <= 800 ? ['--video-bitrate-mbps', String(bitrate)] : []), ...extras];
 };
 const operationKey = (context, action) => `${context.projectId}:${action}`;
+const inputPolicy = Object.freeze({ extensions: ['.mp4','.mov','.m4v','.mkv','.avi','.webm','.crm','.mts','.m2ts','.ts','.mpeg','.mpg'], prefixArgumentCount: 1, directoryArgument: '--source-folder' });
+const runtimeRequest = (payload, argumentsList) => ({ action:'execute', runtimeCapability:'media.video.processing.cli', arguments:argumentsList, relativePaths:paths(payload), inputTokens:Array.isArray(payload.inputTokens)?payload.inputTokens.map(String).slice(0,120):[], input:inputPolicy });
 
 const handle = async frame => {
   const { id, method, payload = {}, context } = frame;
@@ -36,7 +38,7 @@ const handle = async frame => {
     const folder = payload.kind === 'folder'; const result = await callHost(id, 'dialogs', folder ? { kind: 'openDirectory', title: '追加视频文件夹', extensions: ['mp4','mov','m4v','mkv','avi','webm','crm','mts','m2ts','ts'], recursive: true, directoryToken: true } : { kind: 'openFiles', title: '追加视频', extensions: ['mp4','mov','m4v','mkv','avi','webm','crm','mts','m2ts','ts'], multiple: true });
     return { cancelled: result.cancelled === true, sources: (result.inputs || []).slice(0, 120).map(item => ({ token: item.token, name: item.relativeName || item.name, kind: item.kind === 'directory' ? 'folder' : 'file' })) };
   }
-  if (method === 'video-tools.sources.preview.v1') return callHost(id, 'project.media.process', { action: 'video.sources.preview', relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [] });
+  if (method === 'video-tools.sources.preview.v1') return callHost(id, 'component.runtime.execute', { action:'inputs.preview', relativePaths:paths(payload), inputTokens:Array.isArray(payload.inputTokens)?payload.inputTokens.map(String).slice(0,120):[], input:inputPolicy });
   if (method === 'video-tools.settings.update.v1') {
     const settings = normalizeSettings(payload.settings);
     const patch = { transcode: settings };
@@ -44,29 +46,28 @@ const handle = async frame => {
     const result = await callHost(id, 'component.settings', { action: 'merge', settings: patch });
     return { revision: result.revision, settings, presets: normalizePresets(result.settings?.transcodePresets) };
   }
-  if (method === 'video-tools.inspect.v1') return callHost(id, 'project.media.process', { action: 'video.transcode.inspect', relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [], runtimeArgs: transcodeArgs(payload.settings, ['--inspect-only', '--skip-capability-probe']) });
+  if (method === 'video-tools.inspect.v1') { const execution=await callHost(id,'component.runtime.execute',{...runtimeRequest(payload,['ffmpeg_transcode',...transcodeArgs(payload.settings,['--inspect-only','--skip-capability-probe'])]),timeoutMs:20*60*1000}); return execution.result||{}; }
   if (method === 'video-tools.transcode.v1' || method === 'video-tools.split.v1') {
     const processAction = method === 'video-tools.transcode.v1' ? 'video.transcode' : 'video.split';
     const idempotencyKey = String(payload.idempotencyKey || ''); const key = operationKey(context, processAction);
     activeOperations.set(key, { processAction, idempotencyKey, state: 'running' });
     try {
-      const result = await callHost(id, 'project.media.process', processAction === 'video.transcode'
-        ? { action: processAction, idempotencyKey, relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [], runtimeArgs: transcodeArgs(payload.settings, ['--output-mode', payload.outputMode === 'delete-original' ? 'delete-original' : 'new']) }
-        : { action: processAction, idempotencyKey, relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [], runtimeArgs: [] });
-      activeOperations.set(key, { processAction, idempotencyKey, state: 'completed', result }); return result;
+      const argumentsList=processAction==='video.transcode'?['ffmpeg_transcode',...transcodeArgs(payload.settings,['--output-mode',payload.outputMode==='delete-original'?'delete-original':'new'])]:['cut_video'];
+      const result = await callHost(id,'component.runtime.execute',{...runtimeRequest(payload,argumentsList),operationKey:processAction==='video.transcode'?'transcode':'split',idempotencyKey,eventName:'video-tools.operation.progress.v1',task:{background:true,title:processAction==='video.transcode'?'视频转码':'视频切割',runningMessage:processAction==='video.transcode'?'正在转码…':'正在切割…',completeMessage:processAction==='video.transcode'?'视频转码完成':'视频切割完成',concurrencyGroup:'heavy-media',concurrencyLimit:1,concurrencyWriteLimit:1},control:{cancelArgument:'--cancel_file',...(processAction==='video.transcode'?{pauseArgument:'--pause_file'}:{})},timeoutMs:4*60*60*1000});
+      const response={...(result.result||{}),operationId:result.operationId,task:result.task};activeOperations.set(key,{processAction,idempotencyKey,state:'completed',result:response});return response;
     } catch (error) { activeOperations.set(key, { processAction, idempotencyKey, state: 'failed', error: error.message }); throw error; }
   }
   if (method === 'video-tools.operation.current.v1') {
     const processAction = payload.processAction === 'video.split' ? 'video.split' : 'video.transcode'; const current = activeOperations.get(operationKey(context, processAction));
     if (!current) return { operation: null };
-    const status = await callHost(id, 'project.media.process', { action: 'status', processAction, idempotencyKey: current.idempotencyKey });
+    const status = await callHost(id, 'component.runtime.execute', { action: 'status', runtimeCapability:'media.video.processing.cli', operationKey:processAction==='video.transcode'?'transcode':'split', idempotencyKey: current.idempotencyKey });
     return { operation: { ...current, task: status.task } };
   }
   if (method === 'video-tools.operation.control.v1') {
     const processAction = payload.processAction === 'video.split' ? 'video.split' : 'video.transcode'; const current = activeOperations.get(operationKey(context, processAction));
     if (!current) return { operation: null };
     const action = ['cancel', 'pause', 'resume'].includes(payload.action) ? payload.action : 'status';
-    return callHost(id, 'project.media.process', { action, processAction, idempotencyKey: current.idempotencyKey });
+    return callHost(id, 'component.runtime.execute', { action, runtimeCapability:'media.video.processing.cli', operationKey:processAction==='video.transcode'?'transcode':'split', idempotencyKey: current.idempotencyKey });
   }
   throw new Error(`Unknown video tools method: ${method}`);
 };

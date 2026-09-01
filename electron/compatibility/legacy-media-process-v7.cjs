@@ -1,30 +1,20 @@
-// Host API v7 compatibility vocabulary. Delete with project.media.process v7 after
-// shipped components and legacy renderer/import callers move to descriptor-native
-// runtime execution. This module is data-only and must never execute plugin logic.
-const LEGACY_MEDIA_PROCESS = Object.freeze({
-  preview: 'video.sources.preview',
-  inspect: 'video.transcode.inspect',
-  trim: 'video.trim',
-  officeExtract: 'office.extractImages',
-  transcode: 'video.transcode',
-  split: 'video.split',
-  timelineFrames: 'video.timelineFrames',
-  transcodeScript: 'ffmpeg_transcode.py',
-  trimScript: 'cut_video.py',
-  progressEvent: 'video-tools.operation.progress.v1',
-  sourceFolderFlag: '--source-folder',
-  inspectArguments: Object.freeze(['--inspect-only', '--skip-capability-probe']),
-  outputModeFlag: '--output-mode',
-  trimArguments: Object.freeze({ start: '--trim-start', end: '--trim-end', output: '--output-path', mode: '--trim-mode', cancel: '--cancel_file' }),
-});
-
-// Protocol-only translation for Host API v7 callers that still send `settings`.
-// New component services send runtimeArgs themselves; remove this with API v7.
-const legacyTranscodeRuntimeArgs = settings => {
-  const value = settings && typeof settings === 'object' && !Array.isArray(settings) ? settings : {};
-  const text = (field, allowed, fallback) => allowed.includes(String(value[field] || '')) ? String(value[field]) : fallback;
-  const bitrate = Number(value.videoBitrateMbps); const audioBitrate = Number(value.audioBitrateKbps);
-  return ['--container', text('container', ['mp4', 'mov', 'mkv'], 'mp4'), '--video-mode', text('videoMode', ['h264', 'h265', 'av1', 'prores', 'copy'], 'h264'), '--quality', text('quality', ['high', 'balanced', 'small'], 'balanced'), '--resolution', text('resolution', ['original', '2160p', '1080p', '720p'], 'original'), '--frame-rate', text('frameRate', ['original', '24', '25', '30', '50', '60'], 'original'), '--audio-mode', text('audioMode', ['copy', 'aac', 'remove'], 'aac'), '--subtitle-mode', text('subtitleMode', ['copy', 'burn', 'remove'], 'copy'), '--color-mode', text('colorMode', ['auto', 'sdr', 'hdr10', 'hlg', 'hdr-to-sdr'], 'auto'), '--bit-depth', text('bitDepth', ['auto', '8', '10'], 'auto'), '--frame-rate-mode', text('frameRateMode', ['preserve', 'cfr', 'vfr'], 'preserve'), '--rotation', text('rotation', ['auto', '0', '90', '180', '270'], 'auto'), '--aspect-mode', text('aspectMode', ['preserve', 'square-pixels'], 'preserve'), '--audio-track', text('audioTrack', ['all', 'first'], 'all'), '--audio-bitrate-kbps', String([96, 128, 160, 192, 256, 320].includes(audioBitrate) ? audioBitrate : 192), '--encoder-preset', text('encoderPreset', ['fast', 'balanced', 'quality'], 'balanced'), '--retry-count', '1', ...(Number.isFinite(bitrate) && bitrate > 0 && bitrate <= 800 ? ['--video-bitrate-mbps', String(bitrate)] : [])];
+// Delete after Host API v7 components have migrated to component.runtime.execute.
+// This adapter only maps legacy envelope fields to the generic runtime descriptor;
+// it never interprets settings, builds tool arguments, runs a process, or translates
+// runtime progress. Missing opaque arguments are rejected instead of guessed.
+const ACTIONS = Object.freeze({ preview:'video.sources.preview', inspect:'video.transcode.inspect', transcode:'video.transcode', split:'video.split' });
+const VIDEO_EXTENSIONS = Object.freeze(['.mp4','.mov','.m4v','.mkv','.avi','.webm','.crm','.mts','.m2ts','.ts','.mpeg','.mpg']);
+const isLegacyAction = (action, processAction = '') => Object.values(ACTIONS).includes(String(action || '')) || ['status','cancel','pause','resume'].includes(String(action||'')) && [ACTIONS.transcode,ACTIONS.split].includes(String(processAction||''));
+const requireOpaqueArgs = payload => {
+  if (!Array.isArray(payload.runtimeArgs)) { const error = new Error('Legacy video component must be upgraded before this request can run'); error.code = 'COMPONENT_UPGRADE_REQUIRED'; throw error; }
+  return payload.runtimeArgs;
 };
-
-module.exports = { LEGACY_MEDIA_PROCESS, legacyTranscodeRuntimeArgs };
+const translateLegacyMediaProcessV7 = (payload, descriptor) => {
+  const action=String(payload?.action||'');if(!isLegacyAction(action,payload?.processAction))return null;
+  if(['status','cancel','pause','resume'].includes(action)){const operationKey=payload.processAction===ACTIONS.transcode?'transcode':'split';return{action,runtimeCapability:'media.video.processing.cli',operationKey,idempotencyKey:String(payload.idempotencyKey||'')};}
+  const base={relativePaths:Array.isArray(payload.relativePaths)?payload.relativePaths:[],inputTokens:Array.isArray(payload.inputTokens)?payload.inputTokens:[],input:{extensions:VIDEO_EXTENSIONS,prefixArgumentCount:1,directoryArgument:'--source-folder'}};
+  if(action===ACTIONS.preview)return{action:'inputs.preview',...base};
+  const inspect=action===ACTIONS.inspect;const operationKey=inspect?'inspect':action===ACTIONS.transcode?'transcode':'split';
+  return{action:'execute',runtimeCapability:'media.video.processing.cli',arguments:[action===ACTIONS.split?'cut_video':'ffmpeg_transcode',...requireOpaqueArgs(payload)],...base,...(!inspect?{operationKey,idempotencyKey:String(payload.idempotencyKey||''),task:{background:true,title:'Component runtime operation',runningMessage:'Component runtime is running',completeMessage:'Component runtime complete',concurrencyGroup:'heavy-media',concurrencyLimit:1,concurrencyWriteLimit:1},control:{cancelArgument:'--cancel_file',...(action===ACTIONS.transcode?{pauseArgument:'--pause_file'}:{})},eventName:(descriptor?.service?.events||[])[0]||''}:{timeoutMs:20*60*1000})};
+};
+module.exports={isLegacyAction,translateLegacyMediaProcessV7};

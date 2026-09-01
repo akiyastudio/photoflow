@@ -28,8 +28,8 @@
       "runtime": "node",
       "entrypoints": { "default": "service.cjs" },
       "rpcMethods": ["video-tools.sources.choose.v1", "video-tools.sources.preview.v1", "video-tools.settings.get.v1", "video-tools.settings.update.v1", "video-tools.inspect.v1", "video-tools.transcode.v1", "video-tools.split.v1", "video-tools.operation.current.v1", "video-tools.operation.control.v1"],
-      "capabilities": ["component.settings", "project.media.process", "dialogs", "component.events"],
-      "permissions": ["component.settings", "project.media.process", "dialogs", "events"],
+      "capabilities": ["component.settings", "component.runtime.execute", "dialogs", "component.events"],
+      "permissions": ["component.settings", "component.runtime.execute", "dialogs", "events"],
       "events": ["video-tools.operation.progress.v1"],
       "runtimeActions": []
     }

@@ -6,6 +6,9 @@ const LEGACY_RUNTIME_CAPABILITIES = Object.freeze({
   'video-playback-mpv': Object.freeze(['media.video.playback.advanced', 'media.video.timeline-frames']),
 });
 const LEGACY_RUNTIME_COMMAND_CAPABILITIES = Object.freeze({
+  'video-tools': Object.freeze({
+    'media.video.processing.cli': Object.freeze({ argsPrefix: Object.freeze([]) }),
+  }),
   'video-playback-mpv': Object.freeze({
     'media.video.timeline-frames': Object.freeze({ argsPrefix: Object.freeze(['--timeline-request']) }),
   }),

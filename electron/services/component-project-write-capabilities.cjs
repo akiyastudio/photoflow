@@ -1,6 +1,5 @@
 const { COMPONENT_HOST_ERROR_CODES: CODES, hostError } = require('../contracts/component-host-errors.cjs');
 const { getProtectedProjectFolderRegistry } = require('./protected-project-folder.cjs');
-const { LEGACY_MEDIA_PROCESS, legacyTranscodeRuntimeArgs } = require('../compatibility/legacy-media-process-v7.cjs');
 
 const ID = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const PLAN_TTL_MS = 5 * 60 * 1000;
@@ -13,7 +12,7 @@ const plans = new Map();
 const activeImports = new Map();
 const activeProcesses = new Map();
 const operations = new Map();
-const PHYSICAL_RECEIPT_KINDS = new Set(['import', 'files-mutate', 'files-undo', 'media-trim', 'office-extract']);
+const PHYSICAL_RECEIPT_KINDS = new Set(['import', 'files-mutate', 'files-undo', 'office-extract']);
 
 const insideOrEqual = (path, root, candidate) => { const relative = path.relative(path.resolve(root), path.resolve(candidate)); return !relative || !relative.startsWith('..') && !path.isAbsolute(relative); };
 const normalizeRelative = value => String(value || '').trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
@@ -73,7 +72,7 @@ const publicVersion = value => ({ id: String(value.id || ''), photoId: String(va
 
 const registerComponentProjectWriteCapabilities = ({
   broker, ensureWorkspace, getProjectPath, getWorkspaceDataRoot, getBoundProject, path, fs, crypto, versionService, mediaRatingService,
-  projectDomain: inputTokens, fileSystemService, runPythonJsonAction, extractVideoTimelineFrames, backgroundTasks, VIDEO_EXTENSIONS = new Set(), IMAGE_EXTENSIONS = new Set(), RAW_EXTENSIONS = new Set(),
+  projectDomain: inputTokens, fileSystemService, runPythonJsonAction, extractVideoTimelineFrames, backgroundTasks, legacyMediaProcess = null, VIDEO_EXTENSIONS = new Set(), IMAGE_EXTENSIONS = new Set(), RAW_EXTENSIONS = new Set(),
   writeFaultInjector = () => undefined,
 }) => {
   const bound = async (context, descriptor) => {
@@ -312,95 +311,13 @@ const registerComponentProjectWriteCapabilities = ({
   });
 
   broker.register('project.media.process', async (payload, context, descriptor) => {
+    const compatibility = await legacyMediaProcess?.(payload, context, descriptor); if (compatibility !== null && compatibility !== undefined) return compatibility;
     const action = String(payload?.action || ''); const scope = await bound(context, descriptor);
     const taskPresentation = context.surface === 'component.sidePanel' && context.sourcePageId && context.contributionId ? { presentationOwnerPageId: String(context.sourcePageId), presentationPanelKind: `component:${descriptor.componentId}:${context.contributionId}` } : {};
-    const videoToolProcess = [LEGACY_MEDIA_PROCESS.transcode, LEGACY_MEDIA_PROCESS.split].includes(action);
-    const resolveVideoToolSources = async (relativePaths, inputTokenValues = []) => {
-      if (!Array.isArray(relativePaths) || !Array.isArray(inputTokenValues) || relativePaths.length + inputTokenValues.length < 1 || relativePaths.length + inputTokenValues.length > 120) throw hostError(CODES.INVALID_REQUEST, 'Video tools require 1-120 sources');
-      const values = [];
-      for (const value of [...new Set(relativePaths.map(String))]) {
-        const relativePath = assertRelative(path, value); const candidate = path.resolve(scope.projectRoot, relativePath);
-        if (!insideOrEqual(path, scope.scopeRoot, candidate)) throw hostError(CODES.PERMISSION_DENIED, 'Video source is outside the bound scope');
-        const stat = await fs.promises.lstat(candidate).catch(() => null); const canonical = await fs.promises.realpath(candidate).catch(() => null);
-        if (!stat || stat.isSymbolicLink() || !canonical || !insideOrEqual(path, scope.canonicalScopeRoot, canonical) || !stat.isDirectory() && (!stat.isFile() || !VIDEO_EXTENSIONS.has(path.extname(candidate).toLowerCase()))) throw hostError(CODES.INVALID_REQUEST, 'Video source is missing or unsupported');
-        values.push({ relativePath, filePath: candidate, directory: stat.isDirectory() });
-      }
-      for (const token of [...new Set(inputTokenValues.map(String))]) {
-        const candidate = inputTokens.peekInput(token, descriptor, context); const stat = await fs.promises.lstat(candidate).catch(() => null); const canonical = await fs.promises.realpath(candidate).catch(() => null);
-        if (!stat || stat.isSymbolicLink() || !canonical || !stat.isDirectory() && (!stat.isFile() || !VIDEO_EXTENSIONS.has(path.extname(candidate).toLowerCase()))) throw hostError(CODES.INVALID_REQUEST, 'External video source is missing or unsupported');
-        values.push({ relativePath: '', filePath: candidate, directory: stat.isDirectory() });
-      }
-      return values;
-    };
-    const runtimeArgs = value => {
-      if (!Array.isArray(value) || value.length > 128 || value.some(item => typeof item !== 'string' || item.length > 2048 || /\0/.test(item))) throw hostError(CODES.INVALID_REQUEST, 'Invalid component runtime arguments');
-      return value;
-    };
-    if (action === LEGACY_MEDIA_PROCESS.preview) {
-      assertFields(payload, ['action', 'relativePaths', 'inputTokens'], ['action', 'relativePaths', 'inputTokens']);
-      const sources = await resolveVideoToolSources(payload.relativePaths, payload.inputTokens);
-      const sourcePreviews = [];
-      for (let sourceIndex = 0; sourceIndex < sources.length; sourceIndex += 1) {
-        const source = sources[sourceIndex];
-        if (!source.directory) { sourcePreviews.push({ sourceIndex, count: 1, files: [path.basename(source.filePath)], truncated: false }); continue; }
-        const pending = [source.filePath]; const files = []; let count = 0; let inspected = 0; let truncated = false;
-        while (pending.length && inspected < 20_000) {
-          const directory = pending.shift(); let handle;
-          try { handle = await fs.promises.opendir(directory); }
-          catch { truncated = true; continue; }
-          for await (const child of handle) {
-            inspected += 1;
-            if (inspected > 20_000) { truncated = true; break; }
-            if (child.isSymbolicLink()) { truncated = true; continue; }
-            const candidate = path.join(directory, child.name);
-            if (child.isDirectory()) { pending.push(candidate); continue; }
-            if (!child.isFile() || !VIDEO_EXTENSIONS.has(path.extname(child.name).toLowerCase())) continue;
-            count += 1;
-            if (files.length < 2_000) files.push(normalizeRelative(path.relative(source.filePath, candidate)));
-            else truncated = true;
-          }
-        }
-        if (pending.length) truncated = true;
-        sourcePreviews.push({ sourceIndex, count, files, truncated });
-      }
-      return { apiVersion: 7, action, sourcePreviews };
-    }
-    if (action === LEGACY_MEDIA_PROCESS.inspect) {
-      assertFields(payload, ['action', 'relativePaths', 'inputTokens', 'runtimeArgs', 'settings'], ['action', 'relativePaths', 'inputTokens']); const sources = await resolveVideoToolSources(payload.relativePaths, payload.inputTokens); let inspection = null; const invocationArgs = payload.runtimeArgs === undefined ? [...legacyTranscodeRuntimeArgs(payload.settings), ...LEGACY_MEDIA_PROCESS.inspectArguments] : runtimeArgs(payload.runtimeArgs);
-      await runPythonJsonAction(LEGACY_MEDIA_PROCESS.transcodeScript, [...sources.map(item => item.filePath), ...invocationArgs, ...sources.filter(item => item.directory).flatMap(item => [LEGACY_MEDIA_PROCESS.sourceFolderFlag, item.filePath])], 20 * 60 * 1000, message => { if (message?.mediaInfo || message?.capabilities) inspection = message; });
-      return { apiVersion: 7, action, mediaInfo: Array.isArray(inspection?.mediaInfo) ? inspection.mediaInfo : [], capabilities: inspection?.capabilities || null, estimatedOutputBytes: Number(inspection?.estimatedOutputBytes) || 0 };
-    }
-    if (['status', 'cancel', 'pause', 'resume'].includes(action)) {
-      assertFields(payload, ['action', 'idempotencyKey', 'processAction'], ['action', 'idempotencyKey', 'processAction']);
-      if (![LEGACY_MEDIA_PROCESS.trim, LEGACY_MEDIA_PROCESS.officeExtract, LEGACY_MEDIA_PROCESS.transcode, LEGACY_MEDIA_PROCESS.split].includes(payload.processAction)) throw hostError(CODES.INVALID_REQUEST, 'Invalid managed process action');
-      const key = assertIdempotencyKey(payload.idempotencyKey); const kind = payload.processAction === LEGACY_MEDIA_PROCESS.trim ? 'media-trim' : payload.processAction === LEGACY_MEDIA_PROCESS.officeExtract ? 'office-extract' : payload.processAction === LEGACY_MEDIA_PROCESS.transcode ? 'video-transcode' : 'video-split'; const operationId = stableUuid(crypto, `host-api-7\0${kind}\0${scope.key}\0${key}`); const committedReceipt = ['media-trim', 'office-extract'].includes(kind) ? await readJson(fs, receiptFile(scope, kind, operationId)) : null;
-      if (committedReceipt?.state === 'committed' && action === 'status') { if (kind === 'media-trim') await recoveryEntry(scope, committedReceipt.response.output.relativePath, { directory: false, sha256: committedReceipt.response.output.sha256 }); else { await recoveryEntry(scope, committedReceipt.processPublish.directoryRelativePath, { directory: true, directoryIdentity: committedReceipt.processPublish.directoryIdentity }); await Promise.all((committedReceipt.response.outputs || []).map(item => recoveryEntry(scope, item.relativePath, { directory: false, sha256: item.sha256 }))); } completeRecoveredTask(operationId, payload.processAction); }
-      const task = backgroundTasks?.get?.(operationId);
-      if (task && (task.metadata?.componentId !== descriptor.componentId || String(task.metadata?.projectId) !== String(context.projectId) || task.metadata?.action !== payload.processAction)) throw hostError(CODES.TOKEN_SCOPE, 'Media process task belongs to another scope');
-      if (action === 'cancel' && task && !['completed', 'failed', 'cancelled'].includes(task.state)) backgroundTasks.cancel(operationId);
-      if (action === 'pause' && task && !['completed', 'failed', 'cancelled'].includes(task.state)) { backgroundTasks.pause?.(operationId); if (activeProcesses.get(operationId)?.pauseFile) await fs.promises.writeFile(activeProcesses.get(operationId).pauseFile, 'pause', 'utf8').catch(() => undefined); }
-      if (action === 'resume' && task && !['completed', 'failed', 'cancelled'].includes(task.state)) { await fs.promises.rm(activeProcesses.get(operationId)?.pauseFile || '', { force: true }).catch(() => undefined); backgroundTasks.continuePaused?.(operationId); }
-      const snapshot = backgroundTasks?.get?.(operationId) || task || null;
-      return { apiVersion: 7, action, operationId, cancelled: action === 'cancel' && Boolean(snapshot), task: snapshot ? { id: String(snapshot.id), state: String(snapshot.state), progress: Number(snapshot.progress) || 0, message: String(snapshot.message || ''), checkpoint: snapshot.checkpoint || null } : null };
-    }
-    if (videoToolProcess) {
-      const allowed = ['action', 'idempotencyKey', 'relativePaths', 'inputTokens', 'runtimeArgs', 'settings', 'outputMode']; assertFields(payload, allowed, ['action', 'idempotencyKey', 'relativePaths', 'inputTokens']); if (payload.runtimeArgs === undefined && action === LEGACY_MEDIA_PROCESS.split) payload.runtimeArgs = []; if (payload.runtimeArgs === undefined) payload.runtimeArgs = [...legacyTranscodeRuntimeArgs(payload.settings), LEGACY_MEDIA_PROCESS.outputModeFlag, ['new', 'delete-original'].includes(payload.outputMode) ? payload.outputMode : 'new']; const sources = await resolveVideoToolSources(payload.relativePaths, payload.inputTokens); const key = assertIdempotencyKey(payload.idempotencyKey); const kind = action === LEGACY_MEDIA_PROCESS.transcode ? 'video-transcode' : 'video-split'; const operationId = stableUuid(crypto, `host-api-7\0${kind}\0${scope.key}\0${key}`); const existingTask = backgroundTasks?.get?.(operationId); if (existingTask && !['failed', 'cancelled'].includes(existingTask.state)) return { apiVersion: 7, action, operationId, task: existingTask };
-      const stageRoot = path.join(scope.componentRoot, 'stages', kind, operationId); const cancelFile = path.join(stageRoot, 'cancel'); const pauseFile = path.join(stageRoot, 'pause'); await fs.promises.mkdir(stageRoot, { recursive: true }); let success = null;
-      const execute = async task => { task?.setPausable?.(action === LEGACY_MEDIA_PROCESS.transcode); const cancel = () => void fs.promises.writeFile(cancelFile, 'cancel', 'utf8').catch(() => undefined); task?.signal?.addEventListener('abort', cancel, { once: true }); activeProcesses.set(operationId, { componentId: scope.componentId, cancelFile, pauseFile }); try { const args = [...sources.map(item => item.filePath), ...runtimeArgs(payload.runtimeArgs), ...(action === LEGACY_MEDIA_PROCESS.transcode ? sources.filter(item => item.directory).flatMap(item => [LEGACY_MEDIA_PROCESS.sourceFolderFlag, item.filePath]) : []), '--cancel_file', cancelFile, ...(action === LEGACY_MEDIA_PROCESS.transcode ? ['--pause_file', pauseFile] : [])]; await runPythonJsonAction(action === LEGACY_MEDIA_PROCESS.transcode ? LEGACY_MEDIA_PROCESS.transcodeScript : LEGACY_MEDIA_PROCESS.trimScript, args, 4 * 60 * 60 * 1000, message => { const progress = Math.max(0, Math.min(99, Number(message?.progress) || 0)); const text = String(message?.message || (action === LEGACY_MEDIA_PROCESS.transcode ? '正在转码…' : '正在切割…')).slice(0, 500); if (message?.type === 'success') success = message; if (message?.type === 'progress' || message?.type === 'status' || message?.type === 'log') { task?.report?.(progress, text, { componentId: descriptor.componentId, projectId: String(scope.project.id), action }); context.emitComponentEvent?.(LEGACY_MEDIA_PROCESS.progressEvent, { operationId, action, progress, message: text, eventType: String(message?.type || 'status') }); } }); task?.report?.(100, action === LEGACY_MEDIA_PROCESS.transcode ? '视频转码完成' : '视频切割完成', { action }); context.emitComponentEvent?.(LEGACY_MEDIA_PROCESS.progressEvent, { operationId, action, progress: 100, message: action === LEGACY_MEDIA_PROCESS.transcode ? '视频转码完成' : '视频切割完成', eventType: 'complete' }); return { apiVersion: 7, action, operationId, report: Array.isArray(success?.report) ? success.report : [], folderOutputs: Array.isArray(success?.folderOutputs) ? success.folderOutputs : [], failedCount: Number(success?.failedCount) || 0 }; } finally { task?.signal?.removeEventListener('abort', cancel); activeProcesses.delete(operationId); await fs.promises.rm(stageRoot, { recursive: true, force: true }).catch(() => undefined); } };
-      if (!backgroundTasks?.run) return execute(null); const execution = await backgroundTasks.run({ id: operationId, type: 'component-media-process', title: action === LEGACY_MEDIA_PROCESS.transcode ? '视频转码' : '视频切割', cancellable: true, resumePolicy: 'safe-restart', concurrencyGroup: 'heavy-media', concurrencyLimit: 1, concurrencyWriteLimit: 1, metadata: { componentId: descriptor.componentId, projectId: String(scope.project.id), action, ...taskPresentation } }, execute); return execution.result || execution;
-    }
-    if (action === LEGACY_MEDIA_PROCESS.timelineFrames) { assertFields(payload, ['action', 'relativePath', 'times'], ['action', 'relativePath', 'times']); const source = await resolveExisting(scope, payload.relativePath, { media: true }); if (!VIDEO_EXTENSIONS.has(path.extname(source.filePath).toLowerCase()) || !Array.isArray(payload.times) || !payload.times.length || payload.times.length > MAX_PROCESS_TIMES || payload.times.some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) throw hostError(CODES.INVALID_REQUEST, 'Invalid timeline request'); if (typeof extractVideoTimelineFrames !== 'function') throw hostError(CODES.INTERNAL, 'Video playback timeline provider is unavailable'); const frames = await extractVideoTimelineFrames(source.filePath, payload.times); return { apiVersion: 7, action, frames: frames.slice(0, MAX_PROCESS_TIMES) }; }
-    if (![LEGACY_MEDIA_PROCESS.trim, LEGACY_MEDIA_PROCESS.officeExtract].includes(action)) throw hostError(CODES.INVALID_REQUEST, 'Unsupported media process action');
-    const allowed = action === LEGACY_MEDIA_PROCESS.trim ? ['action', 'idempotencyKey', 'relativePath', 'outputRelativePath', 'start', 'end', 'mode'] : ['action', 'idempotencyKey', 'relativePath', 'outputDirectory']; assertFields(payload, allowed, allowed); const source = await resolveExisting(scope, payload.relativePath); const kind = action === LEGACY_MEDIA_PROCESS.trim ? 'media-trim' : 'office-extract';
+    if (action === 'video.timelineFrames') { assertFields(payload, ['action', 'relativePath', 'times'], ['action', 'relativePath', 'times']); const source = await resolveExisting(scope, payload.relativePath, { media: true }); if (!VIDEO_EXTENSIONS.has(path.extname(source.filePath).toLowerCase()) || !Array.isArray(payload.times) || !payload.times.length || payload.times.length > MAX_PROCESS_TIMES || payload.times.some(value => typeof value !== 'number' || !Number.isFinite(value) || value < 0)) throw hostError(CODES.INVALID_REQUEST, 'Invalid timeline request'); if (typeof extractVideoTimelineFrames !== 'function') throw hostError(CODES.INTERNAL, 'Video playback timeline provider is unavailable'); const frames = await extractVideoTimelineFrames(source.filePath, payload.times); return { apiVersion: 7, action, frames: frames.slice(0, MAX_PROCESS_TIMES) }; }
+    if (action !== 'office.extractImages') throw hostError(CODES.INVALID_REQUEST, 'Unsupported media process action');
+    const allowed = ['action', 'idempotencyKey', 'relativePath', 'outputDirectory']; assertFields(payload, allowed, allowed); const source = await resolveExisting(scope, payload.relativePath); const kind = 'office-extract';
     return runIdempotent(scope, kind, payload, async ({ operationId, receipt, filePath: receiptPath }) => {
-      if (action === LEGACY_MEDIA_PROCESS.trim) {
-        if (!VIDEO_EXTENSIONS.has(path.extname(source.filePath).toLowerCase()) || typeof payload.start !== 'number' || typeof payload.end !== 'number' || !Number.isFinite(payload.start) || !Number.isFinite(payload.end) || payload.start < 0 || payload.end <= payload.start || !['fast', 'exact'].includes(payload.mode)) throw hostError(CODES.INVALID_REQUEST, 'Invalid video trim request'); const target = resolveTarget(scope, payload.outputRelativePath); await assertSafeTargetAncestor(scope, target.filePath);
-        if (receipt.processOutput) { if (receipt.processOutput.relativePath !== target.relativePath) throw hostError(CODES.CONFLICT, 'Recovered video output does not match the idempotent request'); await recoveryEntry(scope, receipt.processOutput.relativePath, { directory: false, sha256: receipt.processOutput.sha256 }); completeRecoveredTask(operationId, action); return { apiVersion: 7, receiptId: operationId, action, operationId, output: receipt.processOutput }; }
-        if (receipt.processPublish?.state === 'prepared') { if (receipt.processPublish.relativePath !== target.relativePath) throw hostError(CODES.CONFLICT, 'Recovered video publication does not match the idempotent request'); await recoveryEntry(scope, receipt.processPublish.relativePath, { directory: false, sha256: receipt.processPublish.sha256 }); receipt.processOutput = { relativePath: target.relativePath, size: receipt.processPublish.size, sha256: receipt.processPublish.sha256 }; await atomicJson(fs, path, crypto, receiptPath, receipt); completeRecoveredTask(operationId, action); return { apiVersion: 7, receiptId: operationId, action, operationId, output: receipt.processOutput }; }
-        if (fs.existsSync(target.filePath)) throw hostError(CODES.CONFLICT, 'Process output exists'); const stageRoot = path.join(scope.componentRoot, 'stages', 'process-v1', operationId); const stagePath = path.join(stageRoot, `output${path.extname(source.filePath)}`); const cancelFile = path.join(stageRoot, 'cancel'); await fs.promises.mkdir(stageRoot, { recursive: true });
-        const execute = async task => { const cancel = () => void fs.promises.writeFile(cancelFile, 'cancel').catch(() => undefined); task?.signal?.addEventListener('abort', cancel, { once: true }); try { task?.saveCheckpoint?.({ action, relativePath: payload.relativePath, outputRelativePath: payload.outputRelativePath, start: payload.start, end: payload.end, mode: payload.mode }, 1, 'Preparing video', { phase: 'preparing' }); const result = await runPythonJsonAction(LEGACY_MEDIA_PROCESS.trimScript, [source.filePath, LEGACY_MEDIA_PROCESS.trimArguments.start, String(payload.start), LEGACY_MEDIA_PROCESS.trimArguments.end, String(payload.end), LEGACY_MEDIA_PROCESS.trimArguments.output, stagePath, LEGACY_MEDIA_PROCESS.trimArguments.mode, payload.mode, LEGACY_MEDIA_PROCESS.trimArguments.cancel, cancelFile], 60 * 60 * 1000, message => { const progress = Math.max(0, Math.min(99, Number(message?.progress) || 0)); task?.report?.(progress, String(message?.message || 'Processing video'), { phase: String(message?.phase || 'processing') }); task?.saveCheckpoint?.({ action, relativePath: payload.relativePath, outputRelativePath: payload.outputRelativePath, start: payload.start, end: payload.end, mode: payload.mode }, progress, String(message?.message || 'Processing video'), { phase: String(message?.phase || 'processing') }); }); if (!result?.success || !fs.existsSync(stagePath)) throw hostError(CODES.INTERNAL, 'Video trim failed'); task?.throwIfCancelled?.(); const stageStat = await fs.promises.stat(stagePath); const stageDigest = await hashFile(fs, crypto, stagePath); receipt.processPublish = { state: 'prepared', relativePath: target.relativePath, size: stageStat.size, sha256: stageDigest }; await atomicJson(fs, path, crypto, receiptPath, receipt); await fileSystemService.ensureDirectory(path.dirname(target.filePath)); await fileSystemService.move(stagePath, target.filePath); await writeFaultInjector('media.video.after-publish-before-receipt', { operationId, relativePath: target.relativePath }); try { task?.throwIfCancelled?.(); } catch (error) { await fileSystemService.removeCreated(target.filePath).catch(() => undefined); throw error; } task?.report?.(100, 'Video trim complete', { phase: 'complete' }); const output = { relativePath: target.relativePath, size: stageStat.size, sha256: stageDigest }; receipt.processOutput = output; receipt.processPublish.state = 'applied'; await atomicJson(fs, path, crypto, receiptPath, receipt); return { apiVersion: 7, receiptId: operationId, action, operationId, output }; } finally { task?.signal?.removeEventListener('abort', cancel); await fs.promises.rm(stageRoot, { recursive: true, force: true }).catch(() => undefined); } };
-        if (backgroundTasks?.run) { activeProcesses.set(operationId, { componentId: scope.componentId, cancelFile }); try { const execution = await backgroundTasks.run({ id: operationId, type: 'component-media-process', title: `Component video trim`, cancellable: true, resumePolicy: 'safe-restart', metadata: { componentId: scope.componentId, projectId: String(scope.project.id), action, ...taskPresentation } }, execute); return execution.result || execution; } finally { activeProcesses.delete(operationId); } } return execute(null);
-      }
       const officeExtensions = new Set(['.docx', '.docm', '.dotx', '.dotm', '.pptx', '.pptm', '.potx', '.potm', '.ppsx', '.ppsm', '.ppam', '.xlsx', '.xlsm', '.xltx', '.xltm', '.xlam', '.xlsb']);
       if (!officeExtensions.has(path.extname(source.filePath).toLowerCase())) throw hostError(CODES.INVALID_REQUEST, 'Unsupported Office document');
       const output = resolveTarget(scope, `${assertRelative(path, payload.outputDirectory, 'outputDirectory')}/placeholder`); const outputDirectory = path.dirname(output.filePath); await assertSafeTargetAncestor(scope, outputDirectory);

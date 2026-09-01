@@ -177,11 +177,12 @@ const runtimeSources = [
   'electron/services/component-project-capabilities.cjs',
   'electron/services/component-project-read-capabilities.cjs',
   'electron/services/component-project-write-capabilities.cjs',
+  'electron/services/component-runtime-execution-service.cjs',
   'electron/services/component-host-capability-runtime.cjs',
   'electron/modules/system-ipc.cjs',
 ].map(relative => fs.readFileSync(path.resolve(__dirname, '..', relative), 'utf8')).join('\n');
 const runtimeMethods = [...new Set([...runtimeSources.matchAll(/(?:\.register\(|\[)\s*'([a-z][a-z0-9.-]*)'/g)].map(match => match[1]).filter(method => HOST_CAPABILITIES.has(method)))].sort();
-assert.deepEqual(runtimeMethods, [...HOST_CAPABILITIES].sort(), 'runtime registrations must implement exactly the 29 Host API capabilities');
+assert.deepEqual(runtimeMethods, [...HOST_CAPABILITIES].sort(), 'runtime registrations must implement every Host API capability exactly once');
 const unexpectedApiRevisions = [];
 const inspectSchema = value => {
   if (!value || typeof value !== 'object') return;

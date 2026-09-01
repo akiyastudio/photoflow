@@ -13,7 +13,7 @@ assert(panels.every(item => item.rpcMethods.includes('video-tools.sources.previe
 
 const servicePath = path.join(root, 'service.cjs');
 const service = fs.readFileSync(servicePath, 'utf8');
-for (const marker of ['video-tools.transcode.v1', 'video-tools.split.v1', 'video-tools.sources.preview.v1', 'video.sources.preview', 'project.media.process', 'directoryToken: true', 'normalizePresets', 'transcodePresets']) assert(service.includes(marker));
+for (const marker of ['video-tools.transcode.v1', 'video-tools.split.v1', 'video-tools.sources.preview.v1', 'component.runtime.execute', 'runtimeRequest', 'directoryToken: true', 'normalizePresets', 'transcodePresets']) assert(service.includes(marker));
 
 const ui = fs.readFileSync(path.join(root, 'ui', 'app.js'), 'utf8').replace(/\r\n/g, '\n');
 for (const marker of ['另存为新视频', '替换原视频', '约 3.95 GB（固定）', 'video-tools.operation.progress.v1', 'source-row', 'source-children', 'data-toggle-source', '展开全部', '批量粘贴路径', 'authorizeFiles(files)', 'data-clear-sources', 'settingsReady', 'render();\n  void api.getContext()', 'pf-button-danger', 'pf-panel-section', '编码预设', 'H.264 通用兼容', 'HEVC Main10 · 跟随来源', 'Rec.709 SDR 输出', '最大 4K', '保存为用户预设', 'data-preset-save', 'data-preset-delete']) assert(ui.includes(marker));
@@ -35,6 +35,15 @@ lines.on('line', line => {
   const frame = JSON.parse(line);
   if (frame.type === 'ready') return sendRequest('get', undefined);
   if (frame.type === 'capability') {
+    if (frame.method === 'component.runtime.execute') {
+      assert.equal(frame.payload.action, 'execute');
+      assert.equal(frame.payload.runtimeCapability, 'media.video.processing.cli');
+      assert.equal(frame.payload.arguments[0], 'ffmpeg_transcode');
+      assert(frame.payload.arguments.includes('--video-mode') && frame.payload.arguments.includes('h265'));
+      assert.equal(frame.payload.eventName, 'video-tools.operation.progress.v1');
+      child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: true, result: { apiVersion: 7, operationId: 'runtime-operation', result: { type: 'success', report: [{ output: 'video.mp4' }], failedCount: 0 } } })}\n`);
+      return;
+    }
     assert.equal(frame.method, 'component.settings');
     if (frame.payload.action === 'merge') settingsState = { ...settingsState, ...frame.payload.settings };
     child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: true, result: { revision: 5, settings: settingsState } })}\n`);
@@ -53,6 +62,10 @@ lines.on('line', line => {
   } else if (frame.id === 'delete') {
     assert.deepEqual(settingsState.transcodePresets, []);
     assert.deepEqual(frame.result.presets, []);
+    child.stdin.write(`${JSON.stringify({ type: 'request', id: 'transcode', method: 'video-tools.transcode.v1', payload: { idempotencyKey: 'runtime-test', relativePaths: ['video.mp4'], inputTokens: [], settings: { videoMode: 'h265' }, outputMode: 'new' }, context: { componentId: 'video-tools', projectId: 'project-1' } })}\n`);
+  } else if (frame.id === 'transcode') {
+    assert.equal(frame.result.operationId, 'runtime-operation');
+    assert.equal(frame.result.report.length, 1);
     finished = true;
     clearTimeout(timeout);
     child.kill();

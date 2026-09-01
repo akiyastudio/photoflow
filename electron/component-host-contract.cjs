@@ -27,6 +27,7 @@ const HOST_CAPABILITIES = new Set([
   'project.media.ratings.write', 'project.version.update', 'project.version.delete',
   'project.progress.manage', 'project.import', 'project.files.mutate', 'project.media.process',
   'component.secrets', 'network.fetch',
+  'component.runtime.execute',
 ]);
 const HOST_PERMISSIONS = new Set([
   'project.media.read', 'project.input.read', 'project.output.write',
@@ -38,6 +39,7 @@ const HOST_PERMISSIONS = new Set([
   'project.media.ratings.write', 'project.version.write', 'project.version.delete',
   'project.progress.manage', 'project.import', 'project.files.write', 'project.media.process',
   'component.secrets', 'network.fetch',
+  'component.runtime.execute',
 ]);
 const CAPABILITY_PERMISSIONS = Object.freeze({
   'project.media.page': 'project.media.read',
@@ -69,6 +71,7 @@ const CAPABILITY_PERMISSIONS = Object.freeze({
   'project.media.process': 'project.media.process',
   'component.secrets': 'component.secrets',
   'network.fetch': 'network.fetch',
+  'component.runtime.execute': 'component.runtime.execute',
 });
 const COMPONENT_ICON_MIME_TYPES = new Map([['.png', 'image/png'], ['.svg', 'image/svg+xml']]);
 const MAX_COMPONENT_ICON_BYTES = 512 * 1024;

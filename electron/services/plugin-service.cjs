@@ -19,6 +19,15 @@ const createPluginService = ({ app, registry, runJsonCommand }) => {
     }
     return { component, declaration };
   };
+  const componentRuntimeCapability = (componentId, capability) => {
+    const component = registry.resolve(String(componentId || ''), { verifyIntegrity: app.isPackaged });
+    if (!component || !(component.capabilities || []).includes(String(capability))) {
+      const error = new Error(`组件未声明运行时能力：${capability}`); error.code = 'PLUGIN_MISSING'; throw error;
+    }
+    const declaration = component.manifest?.runtimeCommandCapabilities?.[capability] || legacyRuntimeCommandCapability(component.id, capability);
+    if (!declaration || !Array.isArray(declaration.argsPrefix) || declaration.argsPrefix.some(value => typeof value !== 'string' || /\0/.test(value))) throw new Error(`组件未声明有效的运行时命令能力：${capability}`);
+    return { component, declaration };
+  };
   const resolveRunConfig = (pluginId, args = []) => {
     const plugin = registry.resolve(pluginId, { verifyIntegrity: app.isPackaged });
     if (!plugin) {
@@ -71,6 +80,10 @@ const createPluginService = ({ app, registry, runJsonCommand }) => {
     runJsonForCapability: (capability, args, timeoutMs, onMessage, signal, requestedDeadlineAt) => {
       const { component, declaration } = runtimeCapability(capability);
       return runJsonCommand(resolveRunConfig(component.id, [...declaration.argsPrefix, ...(args || [])]), `Component capability ${capability}`, timeoutMs, onMessage, signal, requestedDeadlineAt);
+    },
+    runJsonForComponentCapability: (componentId, capability, args, timeoutMs, onMessage, signal, requestedDeadlineAt) => {
+      const { component, declaration } = componentRuntimeCapability(componentId, capability);
+      return runJsonCommand(resolveRunConfig(component.id, [...declaration.argsPrefix, ...(args || [])]), `Component runtime ${capability}`, timeoutMs, onMessage, signal, requestedDeadlineAt);
     },
     verifyComponentDirectory: (pluginId, componentRoot, force = true) => registry.verifyDirectory(pluginId, componentRoot, force),
     verifyComponentDirectoryAsync: (pluginId, componentRoot, force = true) => registry.verifyDirectoryAsync(pluginId, componentRoot, force),
