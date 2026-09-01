@@ -4,6 +4,54 @@
 
 统计与归类范围：`src/`、`electron/`、`python/`、`extensions/`、`component-sdk/`、`services/` 中受 Git 跟踪的产品源码。依赖目录、虚拟环境、模型、二进制、构建产物、普通文档和自动化测试不属于业务实现清单。
 
+## 本次应用外壳发布集成变更登记
+
+以稳定基线 `f3a0bf76d990ef98937243bd428376ba7f4893bb` 为比较起点，本次集成的全部变更文件如下（包括产品源码、测试、门禁、发布文档与本登记表）：
+
+- `.gitattributes`
+- `docs/BUSINESS_SUBSYSTEM_FILE_MAP.md`
+- `docs/CLOUDBASE_ANALYTICS_GUIDE.md`
+- `docs/legal/DATA_RETENTION_AND_RIGHTS_RUNBOOK_TEMPLATE.md`
+- `docs/legal/PIPIA_TEMPLATE.md`
+- `docs/legal/README.md`
+- `docs/legal/RELEASE_EVIDENCE_GUIDE.md`
+- `docs/legal/THIRD_PARTY_DISTRIBUTION_EVIDENCE.md`
+- `electron/modules/system-ipc.cjs`
+- `electron/modules/workspace-ipc.cjs`
+- `electron/native/RecycleBinService.cs`
+- `electron/native/RecycleBinService.manifest`
+- `electron/services/config-mutation-service.cjs`
+- `electron/services/recycle-bin-service.cjs`
+- `electron/services/telemetry-service.cjs`
+- `package.json`
+- `scripts/build-recycle-bin-service.cjs`
+- `scripts/check-project.cjs`
+- `scripts/package-cloudbase-function.py`
+- `scripts/source-boundary-policy.cjs`
+- `scripts/test-cloudbase-function-package.cjs`
+- `scripts/test-cloudbase-function-package.py`
+- `scripts/test-config-mutation-service.cjs`
+- `scripts/test-global-search.cjs`
+- `scripts/test-legal-release-evidence.cjs`
+- `scripts/test-panel-task-sessions.cjs`
+- `scripts/test-privacy-gate-contract.cjs`
+- `scripts/test-privacy-revoke-telemetry.cjs`
+- `scripts/test-recycle-bin-service.cjs`
+- `scripts/test-settings-restore-model.mjs`
+- `scripts/test-settings-ui-resilience.cjs`
+- `scripts/test-source-boundaries.cjs`
+- `scripts/test-telemetry-consent.cjs`
+- `scripts/test-video-player-subtitles.cjs`
+- `services/cloudbase/telemetry-function/README.md`
+- `services/cloudbase/telemetry-function/index.js`
+- `services/cloudbase/telemetry-function/package.json`
+- `services/cloudbase/telemetry-function/retention-policy.js`
+- `services/cloudbase/telemetry-function/test/privacy-database-integration.test.mjs`
+- `services/cloudbase/telemetry-function/test/privacy-operations.test.mjs`
+- `services/cloudbase/telemetry-function/test/release-blockers.test.mjs`
+- `src/features/settings/SettingsFeature.tsx`
+- `src/features/settings/restored-workspace-config.ts`
+
 ## 0. 横切基础层
 
 ### 应用入口与总装
