@@ -32,6 +32,7 @@ const createPlaybackToken = () => globalThis.crypto?.randomUUID?.() || `video_${
 
 type VideoDirectionalInputGroup = 'arrows' | 'forward-back';
 type VideoDirectionalAction = 'navigate' | 'seek';
+type VideoControlPanel = 'speed' | 'volume' | 'subtitles' | 'display' | 'basic-info' | 'info' | null;
 type AddedSubtitleRequest = { phase: 'choosing' | 'awaiting-track'; requestId: string; sessionId: string; previousMemoryRestored: boolean; knownStableIds: string[]; chosenPath?: string };
 const comparableSubtitlePath = (value: string | undefined) => String(value || '').trim().replace(/[\\/]+/g, '/').toLowerCase();
 const videoDirectionalAction = (arrowKeyAction: VideoPlaybackSettings['arrowKeyAction'], group: VideoDirectionalInputGroup): VideoDirectionalAction => {
@@ -44,6 +45,14 @@ const videoDirectionalKeyboardInput = (key: string): { direction: -1 | 1; group:
   if (key === 'ArrowRight') return { direction: 1, group: 'arrows' };
   return null;
 };
+
+const validVideoControlPanelForMode = (panel: VideoControlPanel, chromiumMode: boolean): VideoControlPanel => {
+  if (panel === 'basic-info' && !chromiumMode || panel === 'info' && chromiumMode) return null;
+  return panel;
+};
+
+const shouldRestoreVideoSurfaceFocus = (focusWasInRemovedControl: boolean, activeElementIsDocumentFallback: boolean, surfaceAlreadyFocused: boolean) =>
+  focusWasInRemovedControl && (activeElementIsDocumentFallback || surfaceAlreadyFocused);
 
 type VideoPlayerProps = {
   filePath: string;
@@ -95,6 +104,9 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const suppressPanelFocusOpenRef = useRef<'speed' | 'volume' | null>(null);
   const builtInControlsFocusedRef = useRef(false);
   const subtitlesControlFocusedRef = useRef(false);
+  const informationControlFocusedRef = useRef<'basic-info' | 'info' | null>(null);
+  const surfaceFocusFrameRef = useRef(0);
+  const invalidatedPanelEscapeGuardRef = useRef(false);
   const controlsOverlayRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<PlaybackSession | null>(null);
   const playerIdRef = useRef(createPlaybackToken());
@@ -128,7 +140,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const [starting, setStarting] = useState(true);
   const [capturing, setCapturing] = useState(false);
   const [captureNotice, setCaptureNotice] = useState<{ text: string; error?: boolean } | null>(null);
-  const [controlPanel, setControlPanel] = useState<'speed' | 'volume' | 'subtitles' | 'display' | 'basic-info' | 'info' | null>(null);
+  const [controlPanel, setControlPanel] = useState<VideoControlPanel>(null);
   const controlPanelIds = useMemo(() => ({
     speed: `${playerIdRef.current}-speed-panel`,
     subtitles: `${playerIdRef.current}-subtitles-panel`,
@@ -145,6 +157,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const activeBackend = availableBackends.find(item => item.backendId === activeBackendId);
   const capabilityPresentation = playbackCapabilityPresentation(activeBackend?.features, displayCapability.hdrAvailable);
   const hdrAvailability = hdrModeAvailability({ requested: keyboardSettings.hdrMode, hdrFeatures: activeBackend?.features.hdr, hdrDisplayAvailable: displayCapability.hdrAvailable, toneMapping: keyboardSettings.toneMapping });
+  const effectiveControlPanel = validVideoControlPanelForMode(controlPanel, chromiumMode);
   const [subtitleFontSize, setSubtitleFontSize] = useState(() => normalizeSubtitleFontSize(keyboardSettings.subtitleSize));
   const subtitleMemoryRestoredRef = useRef(false);
   const rememberAddedSubtitleRef = useRef<AddedSubtitleRequest | null>(null);
@@ -180,6 +193,19 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     sessionRef.current.control({ action: 'subtitle-visible', value: resolution.visible });
   };
   const shortcutBindings = useMemo(() => bindingsForArrowMode(normalizeVideoShortcutBindings(keyboardSettings.shortcuts), keyboardSettings.arrowKeyAction), [keyboardSettings.arrowKeyAction, keyboardSettings.shortcuts]);
+  const scheduleSurfaceFocusRestore = useCallback((focusWasInRemovedControl: boolean) => {
+    if (!focusWasInRemovedControl) return;
+    window.cancelAnimationFrame(surfaceFocusFrameRef.current);
+    surfaceFocusFrameRef.current = window.requestAnimationFrame(() => {
+      surfaceFocusFrameRef.current = 0;
+      const activeElement = document.activeElement;
+      const activeElementIsDocumentFallback = !activeElement || activeElement === document.body || activeElement === document.documentElement;
+      const surfaceAlreadyFocused = activeElement === surfaceRef.current;
+      if (shouldRestoreVideoSurfaceFocus(focusWasInRemovedControl, activeElementIsDocumentFallback, surfaceAlreadyFocused)) surfaceRef.current?.focus();
+    });
+  }, []);
+
+  useEffect(() => () => window.cancelAnimationFrame(surfaceFocusFrameRef.current), []);
 
   useEffect(() => setSubtitleFontSize(normalizeSubtitleFontSize(keyboardSettings.subtitleSize)), [keyboardSettings.subtitleSize]);
   useEffect(()=>{if(!sessionRef.current||chromiumMode)return;sessionRef.current.control({action:'hdr-mode',hdrMode:keyboardSettings.hdrMode});sessionRef.current.control({action:'tone-mapping',toneMapping:keyboardSettings.toneMapping,targetPeakNits:keyboardSettings.targetPeakNits});},[chromiumMode,keyboardSettings.hdrMode,keyboardSettings.toneMapping,keyboardSettings.targetPeakNits,sessionId]);
@@ -337,29 +363,38 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   useEffect(() => {
     if (controlsVisible) return;
     setControlPanel(null);
-    if (!builtInControlsFocusedRef.current) return;
+    const focusWasInRemovedControl = builtInControlsFocusedRef.current;
     builtInControlsFocusedRef.current = false;
     subtitlesControlFocusedRef.current = false;
-    const frame = window.requestAnimationFrame(() => surfaceRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
-  }, [controlsVisible]);
+    informationControlFocusedRef.current = null;
+    scheduleSurfaceFocusRestore(focusWasInRemovedControl);
+  }, [controlsVisible, scheduleSurfaceFocusRestore]);
 
   useEffect(() => {
     if (capabilityPresentation.subtitlesAvailable) return;
     setControlPanel(current => current === 'subtitles' ? null : current);
-    if (!subtitlesControlFocusedRef.current) return;
+    const focusWasInRemovedControl = subtitlesControlFocusedRef.current;
     subtitlesControlFocusedRef.current = false;
-    builtInControlsFocusedRef.current = false;
-    const frame = window.requestAnimationFrame(() => surfaceRef.current?.focus());
-    return () => window.cancelAnimationFrame(frame);
-  }, [capabilityPresentation.subtitlesAvailable]);
+    if (focusWasInRemovedControl) builtInControlsFocusedRef.current = false;
+    scheduleSurfaceFocusRestore(focusWasInRemovedControl);
+  }, [capabilityPresentation.subtitlesAvailable, scheduleSurfaceFocusRestore]);
+
+  useEffect(() => {
+    if (effectiveControlPanel === controlPanel) return;
+    const focusWasInRemovedControl = informationControlFocusedRef.current === controlPanel;
+    informationControlFocusedRef.current = null;
+    if (focusWasInRemovedControl) builtInControlsFocusedRef.current = false;
+    invalidatedPanelEscapeGuardRef.current = true;
+    setControlPanel(effectiveControlPanel);
+    scheduleSurfaceFocusRestore(focusWasInRemovedControl);
+  }, [controlPanel, effectiveControlPanel, scheduleSurfaceFocusRestore]);
 
   useEffect(() => {
     if (!sessionRef.current) return;
     const descriptor = sessionRef.current.availableBackends?.find(item => item.backendId === sessionRef.current?.backendId);
     const stats = descriptor?.features.statistics; const level = stats && (stats.decode || stats.hdr || stats.cache || stats.gpu) ? 'detailed' : 'basic';
-    sessionRef.current.control({ action: 'statistics-level', statisticsLevel: controlPanel === 'info' || controlPanel === 'basic-info' ? level : 'off' });
-  }, [activeBackendId, controlPanel, sessionId]);
+    sessionRef.current.control({ action: 'statistics-level', statisticsLevel: effectiveControlPanel === 'info' || effectiveControlPanel === 'basic-info' ? level : 'off' });
+  }, [activeBackendId, effectiveControlPanel, sessionId]);
 
   useEffect(() => {
     if (controlPanel !== 'display') return;
@@ -496,7 +531,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     if (muted) control('mute', false);
     control('volume', nextVolume);
   };
-  const closeControlPanelToTrigger = (panel: 'speed' | 'volume' | 'subtitles' | 'display' | 'basic-info' | 'info', trigger: HTMLButtonElement | null) => {
+  const closeControlPanelToTrigger = (panel: NonNullable<VideoControlPanel>, trigger: HTMLButtonElement | null) => {
     setControlPanel(current => current === panel ? null : current);
     window.requestAnimationFrame(() => {
       if (panel === 'speed' || panel === 'volume') suppressPanelFocusOpenRef.current = panel;
@@ -504,7 +539,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       suppressPanelFocusOpenRef.current = null;
     });
   };
-  const closeControlPanelOnEscape = (event: React.KeyboardEvent<HTMLDivElement>, panel: 'speed' | 'volume' | 'subtitles' | 'display' | 'basic-info' | 'info', trigger: HTMLButtonElement | null) => {
+  const closeControlPanelOnEscape = (event: React.KeyboardEvent<HTMLDivElement>, panel: NonNullable<VideoControlPanel>, trigger: HTMLButtonElement | null) => {
     if (event.key !== 'Escape' || controlPanel !== panel) return;
     event.preventDefault();
     event.stopPropagation();
@@ -530,7 +565,8 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
 
   useEffect(() => {
     let restoreTimer = 0;
-    const restoreAfterMenuAction = () => {
+    const restoreAfterMenuAction = (event: Event) => {
+      if (event.type === 'pointerdown' || event instanceof KeyboardEvent && event.key !== 'Escape') invalidatedPanelEscapeGuardRef.current = false;
       if (!nativeContextMenuOpenRef.current) return;
       window.clearTimeout(restoreTimer);
       restoreTimer = window.setTimeout(() => {
@@ -552,19 +588,27 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         .filter(player => player.getClientRects().length > 0);
       if (visiblePlayers.length > 1 && !playerRootRef.current?.contains(document.activeElement)) return;
       if (event.key === 'Escape') {
+        if (invalidatedPanelEscapeGuardRef.current) {
+          invalidatedPanelEscapeGuardRef.current = false;
+          event.preventDefault();
+          event.stopPropagation();
+          return;
+        }
         const openPanelTrigger = controlPanel === 'speed' ? speedTriggerRef.current
           : controlPanel === 'volume' ? volumeTriggerRef.current
             : controlPanel === 'subtitles' ? subtitlesTriggerRef.current
               : controlPanel === 'display' ? displayTriggerRef.current
                 : controlPanel === 'basic-info' ? basicInfoTriggerRef.current
                   : controlPanel === 'info' ? infoTriggerRef.current : null;
-        if (openPanelTrigger) {
+        if (controlPanel) {
           event.preventDefault();
           event.stopPropagation();
-          closeControlPanelToTrigger(controlPanel as 'speed' | 'volume' | 'subtitles' | 'display' | 'basic-info' | 'info', openPanelTrigger);
+          if (openPanelTrigger) closeControlPanelToTrigger(controlPanel, openPanelTrigger);
+          else setControlPanel(null);
           return;
         }
       }
+      invalidatedPanelEscapeGuardRef.current = false;
       const target = event.target as HTMLElement | null;
       const editable = Boolean(target?.closest('input, textarea, select, [contenteditable="true"]'));
       const focusedControl = target?.closest('button, a[href], [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]');
@@ -730,12 +774,14 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         </div>
         <button type="button" disabled={!sessionId || starting || capturing || !capabilityPresentation.captureAvailable} onClick={() => void captureFrame()} title="截取当前视频帧并保存到原视频目录" aria-label="截取当前视频帧" className="rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40">{capturing ? <Loader2 size={16} className="animate-spin"/> : <Camera size={16}/>}</button>
         {capabilityPresentation.subtitlesAvailable&&<div className="relative shrink-0" onFocusCapture={() => { subtitlesControlFocusedRef.current = true; }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget)) subtitlesControlFocusedRef.current = false; }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }} onKeyDown={event => closeControlPanelOnEscape(event, 'subtitles', subtitlesTriggerRef.current)}>
-          <button ref={subtitlesTriggerRef} type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'subtitles' ? null : 'subtitles')} title="字幕" aria-label="字幕菜单" aria-haspopup="menu" aria-expanded={controlPanel === 'subtitles'} aria-controls={controlPanelIds.subtitles} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'subtitles' ? 'bg-white/10' : ''}`}><Captions size={17}/></button>
+          <button ref={subtitlesTriggerRef} type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'subtitles' ? null : 'subtitles')} title="字幕" aria-label="字幕设置" aria-haspopup="dialog" aria-expanded={controlPanel === 'subtitles'} aria-controls={controlPanelIds.subtitles} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 focus-visible:ring-1 focus-visible:ring-blue-400 disabled:opacity-40 ${controlPanel === 'subtitles' ? 'bg-white/10' : ''}`}><Captions size={17}/></button>
           {controlPanel === 'subtitles' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-72 pb-2" onClick={event => event.stopPropagation()}>
-            <div id={controlPanelIds.subtitles} role="menu" aria-label="字幕" className="max-h-80 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-2 text-xs shadow-2xl shadow-black/70">
+            <div id={controlPanelIds.subtitles} role="dialog" aria-label="字幕设置" className="max-h-80 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-2 text-xs shadow-2xl shadow-black/70">
               <div className="mb-2 flex items-center justify-between px-1 text-slate-300"><span className="font-bold">字幕</span><button type="button" onClick={() => void addSubtitle()} className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-white/10"><Plus size={13}/>添加本地字幕</button></div>
-              <button role="menuitemradio" aria-checked={!selectedSubtitle} type="button" onClick={disableSubtitles} className={`block w-full rounded px-2 py-1.5 text-left ${!selectedSubtitle ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>关闭</button>
-              {subtitleTracks.map(track => <button key={track.stableId} role="menuitemradio" aria-checked={selectedSubtitle?.stableId === track.stableId} type="button" onClick={() => selectSubtitle(track.id)} className={`block w-full truncate rounded px-2 py-1.5 text-left ${selectedSubtitle?.stableId === track.stableId ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>{track.source === 'external' ? '外挂' : '内嵌'} · {track.title || track.language || track.format || `轨道 ${track.id}`}</button>)}
+              <div role="radiogroup" aria-label="字幕轨道">
+                <button role="radio" aria-checked={!selectedSubtitle} type="button" onClick={disableSubtitles} className={`block w-full rounded px-2 py-1.5 text-left ${!selectedSubtitle ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>关闭</button>
+                {subtitleTracks.map(track => <button key={track.stableId} role="radio" aria-checked={selectedSubtitle?.stableId === track.stableId} type="button" onClick={() => selectSubtitle(track.id)} className={`block w-full truncate rounded px-2 py-1.5 text-left ${selectedSubtitle?.stableId === track.stableId ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>{track.source === 'external' ? '外挂' : '内嵌'} · {track.title || track.language || track.format || `轨道 ${track.id}`}</button>)}
+              </div>
               <div className="mt-2 border-t border-white/10 pt-2">
                 <button type="button" disabled={!selectedSubtitle} onClick={() => { const visible = state.subtitleVisible === false; control('subtitle-visible', visible); rememberSubtitle(selectedSubtitle, subtitleDelay, visible); }} className="w-full rounded px-2 py-1.5 text-left text-slate-200 hover:bg-white/10 disabled:opacity-40">{state.subtitleVisible === false ? '显示字幕' : '隐藏字幕'}</button>
                 <div className="flex items-center gap-1 px-2 py-1 text-slate-300"><span className="mr-auto">同步 {subtitleDelay > 0 ? `+${subtitleDelay.toFixed(1)}` : subtitleDelay.toFixed(1)} 秒</span><button type="button" onClick={() => changeSubtitleDelay(subtitleDelay - 0.5)} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">提前</button><button type="button" onClick={() => changeSubtitleDelay(0)} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">归零</button><button type="button" onClick={() => changeSubtitleDelay(subtitleDelay + 0.5)} className="rounded bg-white/5 px-2 py-1 hover:bg-white/15">延后</button></div>
@@ -755,11 +801,11 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
             {!chromiumMode&&audioTracks.length>0&&<div className="mt-2 border-t border-white/10 pt-2"><span className="text-slate-400">音轨</span><div className="mt-1 space-y-1">{audioTracks.map(track=><button key={track.stableId} type="button" onClick={()=>sessionRef.current?.control({action:'audio-select',value:track.id})} className={`block w-full truncate rounded px-2 py-1 text-left ${track.id===String(state.audioTrackId??'')||track.selected?'bg-blue-500 text-white':'bg-white/5'}`}>{track.title||track.language||track.codec||`音轨 ${track.id}`}</button>)}</div></div>}
           </div></div>}
         </div>
-        {chromiumMode&&<div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }} onKeyDown={event => closeControlPanelOnEscape(event, 'basic-info', basicInfoTriggerRef.current)}>
+        {chromiumMode&&<div className="relative shrink-0" onFocusCapture={() => { informationControlFocusedRef.current = 'basic-info'; }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget) && informationControlFocusedRef.current === 'basic-info') informationControlFocusedRef.current = null; }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }} onKeyDown={event => closeControlPanelOnEscape(event, 'basic-info', basicInfoTriggerRef.current)}>
           <button ref={basicInfoTriggerRef} type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'basic-info' ? null : 'basic-info')} title="基础播放信息" aria-label="基础播放信息" aria-haspopup="dialog" aria-expanded={controlPanel === 'basic-info'} aria-controls={controlPanelIds.basicInfo} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40 ${controlPanel === 'basic-info' ? 'bg-white/10' : ''}`}><Info size={16}/></button>
           {controlPanel === 'basic-info' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-72 pb-2" onClick={event => event.stopPropagation()}><div id={controlPanelIds.basicInfo} role="dialog" aria-label="基础播放信息" className="rounded-lg border border-white/15 bg-[#101827] p-3 text-[11px] text-slate-200 shadow-2xl shadow-black/70"><div className="mb-2 font-bold">基础播放信息</div>{state.statistics?<dl className="grid grid-cols-[auto_1fr] gap-x-3 gap-y-1"><dt>容器</dt><dd>{state.statistics.container||'未知'}</dd><dt>画面尺寸</dt><dd>{state.width&&state.height?`${state.width} × ${state.height}`:'—'}</dd><dt>时长</dt><dd>{formatTime(duration)}</dd><dt>播放位置</dt><dd>{formatTime(time)}</dd><dt>源 / 显示 FPS</dt><dd>{state.statistics.sourceFps?.toFixed(2)||'—'} / {state.statistics.displayFps?.toFixed(2)||'—'}</dd><dt>丢帧</dt><dd>{state.statistics.droppedFrames??'—'}</dd><dt>渲染器</dt><dd>{state.statistics.renderer||'Chromium HTMLVideoElement'}</dd></dl>:<p className="text-slate-400">正在采集 Chromium 基础播放信息…</p>}</div></div>}
         </div>}
-        {!chromiumMode&&<div className="relative shrink-0" onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }} onKeyDown={event => closeControlPanelOnEscape(event, 'info', infoTriggerRef.current)}>
+        {!chromiumMode&&<div className="relative shrink-0" onFocusCapture={() => { informationControlFocusedRef.current = 'info'; }} onBlurCapture={event => { if (!event.currentTarget.contains(event.relatedTarget) && informationControlFocusedRef.current === 'info') informationControlFocusedRef.current = null; }} onBlur={event => { if (!event.currentTarget.contains(event.relatedTarget)) setControlPanel(null); }} onKeyDown={event => closeControlPanelOnEscape(event, 'info', infoTriggerRef.current)}>
           <button ref={infoTriggerRef} type="button" disabled={!sessionId} onClick={() => setControlPanel(current => current === 'info' ? null : 'info')} title="播放信息" aria-label="播放信息" aria-haspopup="dialog" aria-expanded={controlPanel === 'info'} aria-controls={controlPanelIds.info} className={`rounded p-1.5 text-slate-200 hover:bg-white/10 disabled:opacity-40 ${controlPanel === 'info' ? 'bg-white/10' : ''}`}><Info size={16}/></button>
           {controlPanel === 'info' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-72 pb-2" onClick={event => event.stopPropagation()}><div id={controlPanelIds.info} role="dialog" aria-label="播放信息" className="max-h-96 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-3 text-[11px] text-slate-200 shadow-2xl shadow-black/70"><div className="mb-2 font-bold">播放信息</div>{state.statistics ? <div className="space-y-2"><dl className="grid grid-cols-[auto_1fr] gap-x-3"><dt>容器</dt><dd>{state.statistics.container||'未知'}</dd><dt>视频 / 音频</dt><dd>{state.statistics.videoCodec||'—'} / {state.statistics.audioCodec||'—'}</dd></dl><dl className="grid grid-cols-[auto_1fr] gap-x-3 border-t border-white/10 pt-1"><dt>解码器</dt><dd>{state.statistics.decoder||'—'}</dd><dt>硬件解码</dt><dd>{state.statistics.hardwareDecoding?state.statistics.hardwareDecoder||'是':'否/未知'}</dd><dt>像素</dt><dd>{state.statistics.pixelFormat||'—'} {state.statistics.bitDepth?`${state.statistics.bitDepth}bit`:''}</dd></dl><dl className="grid grid-cols-[auto_1fr] gap-x-3 border-t border-white/10 pt-1"><dt>HDR</dt><dd>{state.statistics.hdrFormat||'—'}</dd><dt>Primaries</dt><dd>{state.statistics.colorPrimaries||'—'}</dd><dt>Transfer / Matrix</dt><dd>{state.statistics.transfer||'—'} / {state.statistics.colorMatrix||'—'}</dd><dt>Tone map</dt><dd>{state.statistics.toneMapping||'—'}</dd></dl><dl className="grid grid-cols-[auto_1fr] gap-x-3 border-t border-white/10 pt-1"><dt>源 / 显示 FPS</dt><dd>{state.statistics.sourceFps?.toFixed(2)||'—'} / {state.statistics.displayFps?.toFixed(2)||'—'}</dd><dt>丢帧 / 延迟</dt><dd>{state.statistics.droppedFrames??'—'} / {state.statistics.delayedFrames??'—'}</dd><dt>A/V 同步</dt><dd>{state.statistics.avSyncMs?.toFixed(1)||'—'} ms</dd></dl><dl className="grid grid-cols-[auto_1fr] gap-x-3 border-t border-white/10 pt-1"><dt>缓存</dt><dd>{state.statistics.cacheSeconds?.toFixed(1)||'—'} s / {state.statistics.cacheBytes??'—'} B</dd><dt>GPU</dt><dd>{state.statistics.gpuApi||'—'} · {state.statistics.gpuAdapter||'—'}</dd><dt>渲染器</dt><dd>{state.statistics.renderer||activeBackend?.displayName||'—'}</dd></dl></div> : <p className="text-slate-400">正在采集当前后端可提供的信息…</p>}</div></div>}
         </div>}
