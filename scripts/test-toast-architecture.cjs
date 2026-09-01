@@ -56,12 +56,20 @@ const appSource = read(path.join(root, 'src', 'App.tsx'));
 const workspaceSource = read(path.join(root, 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'));
 const settingsSource = read(path.join(root, 'src', 'features', 'settings', 'SettingsFeature.tsx'));
 const trackingSource = read(path.join(root, 'src', 'features', 'versioning', 'TrackingConfirmationPanel.tsx'));
+const trackingIpcSource = read(path.join(root, 'electron', 'modules', 'version-tracking-ipc.cjs'));
 for (const [source, pattern, label] of [
   [appSource, /手动备份已开始/, 'manual backup started'],
   [settingsSource, /备份(?:清理)?任务已开始|备份验证已开始/, 'backup task started'],
   [workspaceSource, /已开始后台比较|正在后台比较版本|视频剪辑失败：\$\{task\./, 'workspace BackgroundTask duplicate'],
   [trackingSource, /已转入后台提交|提交跟踪结果失败|跟踪结果已提交。/, 'tracking commit duplicate'],
 ]) assert.doesNotMatch(source, pattern, `${label} must be represented only by its BackgroundTask card`);
+
+const trackingCommitSource = trackingSource.slice(trackingSource.indexOf('const commit = () =>'), trackingSource.indexOf('const release = async'));
+const trackingCommitFailureStart = trackingCommitSource.indexOf('if (!result.success)');
+const trackingCommitReleaseStart = trackingCommitSource.indexOf('const released');
+assert(trackingCommitFailureStart >= 0 && trackingCommitReleaseStart > trackingCommitFailureStart, 'tracking commit failure and release boundaries must remain inspectable');
+assert.doesNotMatch(trackingCommitSource.slice(0, trackingCommitReleaseStart), /\bonNotice\s*\(|trackingCommitFailureMessage/, 'tracking commit failure must not emit a renderer notice under a renamed helper or catch path');
+assert.match(trackingIpcSource, /type:\s*'version-tracking-commit'[\s\S]*?notificationPolicy:\s*'progress-toast'/, 'tracking commit status and failures must be owned by the BackgroundTask progress-toast card');
 
 const domainHealthFile = path.join(root, 'src', 'features', 'app', 'DomainHealthBanner.tsx');
 if (fs.existsSync(domainHealthFile)) {

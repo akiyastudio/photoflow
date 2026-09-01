@@ -34,7 +34,6 @@ const statusLabel: Record<ProgressTrackingItem['status'], string> = {
 };
 const categoryLabel = { recognized: '识别匹配', accepted: '已接受', pending: '待确认新素材', missing: '旧版缺失' } as const;
 const TRACKING_PAGE_SIZE = TRACKING_CONFIRMATION_PAGE_SIZE;
-const trackingCommitFailureMessage = (error?: string) => `提交跟踪结果失败：${error || '未知错误'}`;
 
 export const TrackingConfirmationPanel = ({ active, sessionId, workspacePath, progressFolders, cacheConfig, onClose, onCommitted, onReleased, onNotice }: TrackingConfirmationPanelProps) => {
   useHostSurfaceSuspension(active);
@@ -130,7 +129,7 @@ export const TrackingConfirmationPanel = ({ active, sessionId, workspacePath, pr
       const result = await window.electronAPI.commitProgressTracking(workspacePath, { sessionId })
         .catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) }));
       if (generation !== actionGenerationRef.current) return;
-      if (!result.success) { onNotice(trackingCommitFailureMessage(result.error)); return; }
+      if (!result.success) return;
       const released = await window.electronAPI.releaseProgressTrackingSession(workspacePath, { sessionId })
         .catch(error => ({ success: false, released: false, error: error instanceof Error ? error.message : String(error) }));
       if (generation !== actionGenerationRef.current) return;

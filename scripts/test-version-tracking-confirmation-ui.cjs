@@ -88,7 +88,8 @@ const { pathToFileURL } = require('url');
     && panelSource.includes('if (!sessionActionsAvailable || actionInFlightRef.current) return;'), 'decide and release must fail closed while rendered view identity differs from the loaded session prop');
   assert(panelSource.includes('const commitUnavailable = !sessionActionsAvailable') && panelSource.includes('useLayoutEffect(() => {'), 'session mismatch must disable commit UI and reset identity before paint');
   const commitSource = panelSource.slice(panelSource.indexOf('const commit = () =>'), panelSource.indexOf('const release = async'));
-  assert(commitSource.includes('window.electronAPI.commitProgressTracking') && !commitSource.includes('已转入后台提交') && !commitSource.includes('提交跟踪结果失败') && !commitSource.includes('跟踪结果已提交。'), 'the BackgroundTask card must be the sole started, failed, and completed notification for detached commit');
+  assert(commitSource.includes('window.electronAPI.commitProgressTracking'), 'the confirmation panel must submit through the tracked commit IPC');
+  assert(!panelSource.includes('已转入后台提交') && !panelSource.includes('提交跟踪结果失败') && !panelSource.includes('跟踪结果已提交。'), 'the BackgroundTask card must be the sole started, failed, and completed notification for detached commit');
 
   const pagedState = {
     sessionId: 'paged',

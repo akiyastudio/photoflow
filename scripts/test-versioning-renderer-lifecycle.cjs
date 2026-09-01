@@ -223,12 +223,15 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
 
   await React.act(async () => { trackingRoot.render(React.createElement(trackingPanelModule.TrackingConfirmationPanel, trackingProps('C'))); await Promise.resolve(); await Promise.resolve(); });
   const firstSessionCCommitButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('提交结果'));
+  const noticesBeforeSessionCFailure = trackingCallbacks.notices.length;
+  const eventsBeforeSessionCFailure = [...trackingEvents];
   await React.act(async () => { dispatch(firstSessionCCommitButton, 'click'); await Promise.resolve(); await Promise.resolve(); });
   assert.deepStrictEqual(trackingCalls.commit, [{ sessionId: 'B' }, { sessionId: 'C' }], 'session C performs its first commit attempt');
   assert.deepStrictEqual(trackingCalls.release, [{ sessionId: 'B' }], 'a failed commit must not release its session');
   assert.strictEqual(trackingCallbacks.close, 1, 'a failed commit must not close the panel');
   assert.strictEqual(trackingCallbacks.committed, 1, 'a failed commit must not report completion');
-  assert(trackingCallbacks.notices.some(message => message.includes('simulated commit failure')), 'commit failure remains visible to the user');
+  assert.strictEqual(trackingCallbacks.notices.length, noticesBeforeSessionCFailure, 'the BackgroundTask card is the sole commit-failure notification; the panel must not emit a duplicate notice');
+  assert.deepStrictEqual(trackingEvents, [...eventsBeforeSessionCFailure, 'commit:C'], 'a failed commit emits no renderer notice, release, close, or completion event');
   const retrySessionCCommitButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('提交结果'));
   assert(retrySessionCCommitButton && !retrySessionCCommitButton.attributes.has('disabled'), 'commit failure clears the in-flight gate so the user can retry');
   await React.act(async () => { dispatch(retrySessionCCommitButton, 'click'); await Promise.resolve(); await Promise.resolve(); });
@@ -236,6 +239,7 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
   assert.deepStrictEqual(trackingCalls.release, [{ sessionId: 'B' }, { sessionId: 'C' }], 'the successful retry releases session C');
   assert.strictEqual(trackingCallbacks.close, 2, 'the successful retry closes exactly once');
   assert.strictEqual(trackingCallbacks.committed, 2, 'the successful retry reports committed exactly once');
+  assert.deepStrictEqual(trackingEvents.slice(-4), ['commit:C', 'release:C', 'close', 'committed'], 'a successful retry keeps the commit, release, close, and completion order');
   await React.act(async () => trackingRoot.unmount());
 
   const updateResolvers = [];
