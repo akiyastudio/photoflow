@@ -29,7 +29,7 @@ const steps = [
   ['file entry interaction', ['run', 'test:file-entry-interaction']],
   ['file entry sort', ['run', 'test:file-entry-sort']],
   ['Electron security', ['run', 'test:electron-security']],
-  ['file publication prerequisite', ['run', 'build:file-publication-service']],
+  ['filesystem native prerequisites', ['run', 'build:filesystem-native-services']],
   ['filesystem safety', ['run', 'test:filesystem-safety:prepared']],
   ['file transfer rollback', ['run', 'test:file-transfer:prepared']],
   ['native file publication', ['run', 'test:file-publication-service:prepared']],

@@ -13,8 +13,6 @@ const frameworkRoots = [
 ];
 const frameworkRoot = frameworkRoots.find(candidate => fs.existsSync(path.join(candidate, 'csc.exe')));
 if (!frameworkRoot) throw new Error('找不到 Windows C# 编译器，无法构建回收站辅助程序。');
-if (fs.existsSync(target) && fs.statSync(target).mtimeMs >= fs.statSync(source).mtimeMs) process.exit(0);
-
 fs.mkdirSync(path.dirname(target), { recursive: true });
 const result = spawnSync(path.join(frameworkRoot, 'csc.exe'), [
   '/nologo', '/optimize+', '/target:exe', `/out:${target}`,
