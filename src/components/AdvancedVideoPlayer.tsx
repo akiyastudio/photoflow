@@ -106,7 +106,6 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
   const subtitlesControlFocusedRef = useRef(false);
   const informationControlFocusedRef = useRef<'basic-info' | 'info' | null>(null);
   const surfaceFocusFrameRef = useRef(0);
-  const invalidatedPanelEscapeGuardRef = useRef(false);
   const controlsOverlayRef = useRef<HTMLDivElement>(null);
   const sessionRef = useRef<PlaybackSession | null>(null);
   const playerIdRef = useRef(createPlaybackToken());
@@ -384,7 +383,6 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
     const focusWasInRemovedControl = informationControlFocusedRef.current === controlPanel;
     informationControlFocusedRef.current = null;
     if (focusWasInRemovedControl) builtInControlsFocusedRef.current = false;
-    invalidatedPanelEscapeGuardRef.current = true;
     setControlPanel(effectiveControlPanel);
     scheduleSurfaceFocusRestore(focusWasInRemovedControl);
   }, [controlPanel, effectiveControlPanel, scheduleSurfaceFocusRestore]);
@@ -565,8 +563,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
 
   useEffect(() => {
     let restoreTimer = 0;
-    const restoreAfterMenuAction = (event: Event) => {
-      if (event.type === 'pointerdown' || event instanceof KeyboardEvent && event.key !== 'Escape') invalidatedPanelEscapeGuardRef.current = false;
+    const restoreAfterMenuAction = () => {
       if (!nativeContextMenuOpenRef.current) return;
       window.clearTimeout(restoreTimer);
       restoreTimer = window.setTimeout(() => {
@@ -588,12 +585,6 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
         .filter(player => player.getClientRects().length > 0);
       if (visiblePlayers.length > 1 && !playerRootRef.current?.contains(document.activeElement)) return;
       if (event.key === 'Escape') {
-        if (invalidatedPanelEscapeGuardRef.current) {
-          invalidatedPanelEscapeGuardRef.current = false;
-          event.preventDefault();
-          event.stopPropagation();
-          return;
-        }
         const openPanelTrigger = controlPanel === 'speed' ? speedTriggerRef.current
           : controlPanel === 'volume' ? volumeTriggerRef.current
             : controlPanel === 'subtitles' ? subtitlesTriggerRef.current
@@ -608,7 +599,6 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
           return;
         }
       }
-      invalidatedPanelEscapeGuardRef.current = false;
       const target = event.target as HTMLElement | null;
       const editable = Boolean(target?.closest('input, textarea, select, [contenteditable="true"]'));
       const focusedControl = target?.closest('button, a[href], [role="button"], [role="menuitem"], [role="menuitemradio"], [role="menuitemcheckbox"]');
@@ -778,9 +768,9 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
           {controlPanel === 'subtitles' && <div ref={controlPanelRef} className="absolute bottom-full right-0 z-30 w-72 pb-2" onClick={event => event.stopPropagation()}>
             <div id={controlPanelIds.subtitles} role="dialog" aria-label="字幕设置" className="max-h-80 overflow-auto rounded-lg border border-white/15 bg-[#101827] p-2 text-xs shadow-2xl shadow-black/70">
               <div className="mb-2 flex items-center justify-between px-1 text-slate-300"><span className="font-bold">字幕</span><button type="button" onClick={() => void addSubtitle()} className="inline-flex items-center gap-1 rounded px-2 py-1 hover:bg-white/10"><Plus size={13}/>添加本地字幕</button></div>
-              <div role="radiogroup" aria-label="字幕轨道">
-                <button role="radio" aria-checked={!selectedSubtitle} type="button" onClick={disableSubtitles} className={`block w-full rounded px-2 py-1.5 text-left ${!selectedSubtitle ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>关闭</button>
-                {subtitleTracks.map(track => <button key={track.stableId} role="radio" aria-checked={selectedSubtitle?.stableId === track.stableId} type="button" onClick={() => selectSubtitle(track.id)} className={`block w-full truncate rounded px-2 py-1.5 text-left ${selectedSubtitle?.stableId === track.stableId ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>{track.source === 'external' ? '外挂' : '内嵌'} · {track.title || track.language || track.format || `轨道 ${track.id}`}</button>)}
+              <div role="group" aria-label="字幕轨道">
+                <button aria-pressed={!selectedSubtitle} type="button" onClick={disableSubtitles} className={`block w-full rounded px-2 py-1.5 text-left ${!selectedSubtitle ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>关闭</button>
+                {subtitleTracks.map(track => <button key={track.stableId} aria-pressed={selectedSubtitle?.stableId === track.stableId} type="button" onClick={() => selectSubtitle(track.id)} className={`block w-full truncate rounded px-2 py-1.5 text-left ${selectedSubtitle?.stableId === track.stableId ? 'bg-blue-500 text-white' : 'text-slate-200 hover:bg-white/10'}`}>{track.source === 'external' ? '外挂' : '内嵌'} · {track.title || track.language || track.format || `轨道 ${track.id}`}</button>)}
               </div>
               <div className="mt-2 border-t border-white/10 pt-2">
                 <button type="button" disabled={!selectedSubtitle} onClick={() => { const visible = state.subtitleVisible === false; control('subtitle-visible', visible); rememberSubtitle(selectedSubtitle, subtitleDelay, visible); }} className="w-full rounded px-2 py-1.5 text-left text-slate-200 hover:bg-white/10 disabled:opacity-40">{state.subtitleVisible === false ? '显示字幕' : '隐藏字幕'}</button>
