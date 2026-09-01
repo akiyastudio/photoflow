@@ -132,19 +132,20 @@ const createRecycleBinService = ({ app, shell, projectRoot, processSupervisor = 
     return trashManyIndividually(resolvedPaths, resolved => shell.trashItem(resolved));
   };
 
-  const restore = async ({ recyclePidl, originalPath }) => {
+  const restore = async ({ recyclePidl, originalPath, targetPath = originalPath }) => {
     if (!recyclePidl || !nativeAvailable()) {
       const error = new Error('当前系统无法从软件内精确恢复，请打开系统回收站手动还原');
       error.code = 'MANUAL_RESTORE_REQUIRED';
       throw error;
     }
-    const target = path.resolve(originalPath);
+    const evidenceOriginal = path.resolve(originalPath);
+    const target = path.resolve(targetPath);
     const occupied = await fs.promises.lstat(target).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
     if (occupied) throw Object.assign(new Error('恢复目标当前已被占用，未启动回收站恢复'), { code: 'RECYCLE_RESTORE_TARGET_OCCUPIED', phase: 'preflight', outcomeUnknown: false, published: false, publishedConfirmed: true, publicationState: 'not-started', targetExists: true, targetPreexisting: true, recoveryAvailable: false, staged: false });
     const staging = path.join(path.dirname(target), `.photoflow-restore-${crypto.randomUUID()}-${path.basename(target)}`);
     const targetPreexisting = false;
     if (fs.existsSync(staging)) throw Object.assign(new Error('恢复暂存路径在启动前已存在'), { code: 'RECYCLE_BIN_PROTOCOL_ERROR', attemptedStagingPath: staging, recoveryAvailable: false, staged: false });
-    try { return await runJson(executable(), ['restore', '--pidl', recyclePidl, '--target', target, '--staging', staging], restoreTimeoutMs, '', processSupervisor); }
+    try { return await runJson(executable(), ['restore', '--pidl', recyclePidl, '--original', evidenceOriginal, '--target', target, '--staging', staging], restoreTimeoutMs, '', processSupervisor); }
     catch (error) {
       if (error.recoveryPath && path.resolve(error.recoveryPath) !== staging) { const stagingExists = fs.existsSync(staging); throw Object.assign(new Error('回收站辅助程序返回了未获批准的恢复路径'), { code: 'RECYCLE_BIN_PROTOCOL_ERROR', recoveryPath: stagingExists ? staging : undefined, attemptedStagingPath: staging, recoveryAvailable: stagingExists, staged: stagingExists, originalMissing: !fs.existsSync(target), outcomeUnknown: true, cause: error }); }
       const stagingExists = fs.existsSync(staging);

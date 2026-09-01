@@ -1313,7 +1313,7 @@ const registerWorkspaceIpc = context => {
             restoredItems.push({ item, restoreTarget: item.original, restoredIdentity: await captureIdentity(item.original) });
             continue;
           }
-          await recycleBinService.restore({ recyclePidl: item.recyclePidl, originalPath: restoreTarget });
+          await recycleBinService.restore({ recyclePidl: item.recyclePidl, originalPath: item.original, targetPath: restoreTarget });
           const restoredIdentity = await captureIdentity(restoreTarget);
           if (!await identityMatches(restoreTarget, restoredIdentity)) throw new Error('恢复后的项目身份校验失败');
           restoredItems.push({ item, restoreTarget, restoredIdentity });

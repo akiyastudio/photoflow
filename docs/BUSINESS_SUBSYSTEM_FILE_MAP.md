@@ -203,6 +203,9 @@
 - `electron/native/FilePublicationService.cs`
 - `electron/native/FilePublicationServicePosix.c`
 - `electron/native/RecycleBinService.cs`
+- `electron/native/RecycleBinService.manifest`
+- `scripts/build-recycle-bin-service.cjs`
+- `scripts/test-recycle-bin-service.cjs`
 
 ## 3. 媒体资产管理与预览系统
 
