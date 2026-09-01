@@ -729,7 +729,7 @@ const VideoPlayer = ({ filePath, poster, onError, onMetadata, onNavigate, onCont
       }}
       onPointerMove={() => onPointerActivityRef.current?.()}
       onKeyDown={event => {
-        if (event.key === 'Enter') {
+        if (event.key === 'Enter' || event.key === ' ') {
           event.preventDefault();
           event.stopPropagation();
           dispatchShortcutRef.current('video.playPause', event.repeat);
