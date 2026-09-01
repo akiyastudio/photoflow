@@ -1385,9 +1385,10 @@ const registerWorkspaceIpc = context => {
       });
       throwIfCancelled(() => job.cancelled);
       const originalStagedPath = stagedPath;
-      await publishPathNoClobber(originalStagedPath, projectPath, { ownershipToken: operationId });
+      const publishedProjectRoot = await publishPathNoClobber(originalStagedPath, projectPath, { ownershipToken: operationId });
       stagedPath = '';
-      const rebased = await rebaseCleanupOwnership(operationId, originalStagedPath, projectPath);
+      const publishedRootIdentity = { ...publishedProjectRoot.identity, ...(publishedProjectRoot.nativeIdentity ? { nativeIdentity: publishedProjectRoot.nativeIdentity } : {}) };
+      const rebased = await rebaseCleanupOwnership(operationId, originalStagedPath, projectPath, { publishedRootIdentity });
       if (!rebased.success) throw Object.assign(new Error(`项目内容已发布，但 ownership ledger 无法完整映射；已保留恢复目录：${projectPath}`), { code: 'WORKSPACE_PUBLISH_OUTCOME_UNKNOWN', outcomeUnknown: true, catalogReconcilePending: true, recoveryPath: projectPath, cleanupCode: rebased.code });
       projectOwnershipRebased = true;
       const addPayload = { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath), extra: { importedAt: Date.now(), importedFrom: inspection.sourcePath } };

@@ -97,6 +97,40 @@ const run = async () => {
 
     const sharedOwnerSource = path.join(root, 'rebase-shared-owner-source'); const sharedOwnerStaged = path.join(root, 'rebase-shared-owner-staged'); const sharedOwnerProject = path.join(root, 'rebase-shared-owner-project'); fs.mkdirSync(sharedOwnerSource); fs.writeFileSync(path.join(sharedOwnerSource, 'owned.txt'), 'shared-owner'); const sharedOwnerPlan = []; await collectCopyPlan(sharedOwnerSource, sharedOwnerStaged, sharedOwnerPlan); await copyPlannedFiles(sharedOwnerPlan, { ownershipToken: 'rebase-shared-new' }); fs.renameSync(sharedOwnerStaged, sharedOwnerProject); await registerExistingOwner(path.join(sharedOwnerProject, 'owned.txt'), 'rebase-shared-existing');
     assert.strictEqual((await rebaseCleanupOwnership('rebase-shared-new', sharedOwnerStaged, sharedOwnerProject)).success, true); const sharedOwnerCleanup = await removeCreatedPasteTargets([sharedOwnerProject], { ownershipToken: 'rebase-shared-new' }); assert.strictEqual(sharedOwnerCleanup.success, false); assert.strictEqual(fs.existsSync(sharedOwnerProject), true, 'a real shared target owner remains indexed and forces cleanup to fail closed'); releaseCleanupOwnership('rebase-shared-existing');
+
+    const publishOwnedTree = async (label, token) => {
+      const source = path.join(root, `${label}-source`); const staged = path.join(root, `${label}-staged`); const project = path.join(root, `${label}-project`);
+      fs.mkdirSync(source); fs.mkdirSync(path.join(source, 'nested')); fs.writeFileSync(path.join(source, 'nested', 'owned.txt'), label);
+      const plan = []; await collectCopyPlan(source, staged, plan); await copyPlannedFiles(plan, { ownershipToken: token }); fs.renameSync(staged, project);
+      const publishedRootIdentity = await capturePathIdentity(project); assert.strictEqual((await rebaseCleanupOwnership(token, staged, project, { publishedRootIdentity })).success, true);
+      return { source, staged, project };
+    };
+    const completeTree = await publishOwnedTree('root-complete', 'root-complete-owner'); let completePrivateRoot = '';
+    const completeTreeCleanup = await removeCreatedPasteTargets([completeTree.project], { ownershipToken: 'root-complete-owner', afterRootQuarantineMove: async ({ privateRoot }) => { completePrivateRoot = privateRoot; assert.match(path.basename(privateRoot), /^\.photoflow-cleanup-tree-[0-9a-f-]{36}$/); if (process.platform !== 'win32') assert.strictEqual(fs.statSync(privateRoot).mode & 0o777, 0o700); } });
+    assert.strictEqual(completeTreeCleanup.success, true); assert.strictEqual(fs.existsSync(completeTree.project), false, 'a complete exclusively owned publication tree is deleted as one isolated root'); assert.strictEqual(fs.existsSync(completePrivateRoot), false, 'the private tree quarantine is removed after successful cleanup');
+
+    const escapedTree = await publishOwnedTree('root-link-escape', 'root-link-escape-owner'); const escapedRecovery = path.join(root, 'root-link-escape-outside'); fs.renameSync(escapedTree.project, escapedRecovery);
+    fs.symlinkSync(escapedRecovery, escapedTree.project, process.platform === 'win32' ? 'junction' : 'dir');
+    const escapedCleanup = await removeCreatedPasteTargets([escapedTree.project], { ownershipToken: 'root-link-escape-owner' });
+    assert.strictEqual(escapedCleanup.success, false); assert.strictEqual(fs.readFileSync(path.join(escapedRecovery, 'nested', 'owned.txt'), 'utf8'), 'root-link-escape', 'a moved publication tree reached through a replacement link must remain untouched outside the requested root'); fs.unlinkSync(escapedTree.project);
+
+    const extraTree = await publishOwnedTree('root-extra', 'root-extra-owner'); fs.writeFileSync(path.join(extraTree.project, 'unowned.txt'), 'extra');
+    const extraCleanup = await removeCreatedPasteTargets([extraTree.project], { ownershipToken: 'root-extra-owner' });
+    assert.strictEqual(extraCleanup.success, false); assert.strictEqual(fs.readFileSync(path.join(extraTree.project, 'unowned.txt'), 'utf8'), 'extra', 'an unowned extra entry retains the complete publication tree');
+
+    const replacedTree = await publishOwnedTree('root-replaced', 'root-replaced-owner'); const replacedOriginal = path.join(root, 'root-replaced-recovery'); fs.renameSync(replacedTree.project, replacedOriginal); fs.mkdirSync(replacedTree.project); fs.writeFileSync(path.join(replacedTree.project, 'occupant.txt'), 'replacement');
+    const replacedRootCleanup = await removeCreatedPasteTargets([replacedTree.project], { ownershipToken: 'root-replaced-owner' });
+    assert.strictEqual(replacedRootCleanup.success, false); assert.strictEqual(fs.readFileSync(path.join(replacedTree.project, 'occupant.txt'), 'utf8'), 'replacement'); assert.strictEqual(fs.readFileSync(path.join(replacedOriginal, 'nested', 'owned.txt'), 'utf8'), 'root-replaced', 'a publication-root replacement retains both the replacement and displaced owned tree');
+
+    const isolatedRaceTree = await publishOwnedTree('root-isolated-race', 'root-isolated-race-owner');
+    const isolatedRaceCleanup = await removeCreatedPasteTargets([isolatedRaceTree.project], { ownershipToken: 'root-isolated-race-owner', afterRootQuarantineMove: async ({ quarantine }) => { fs.writeFileSync(path.join(quarantine, 'nested', 'owned.txt'), 'replacement-after-isolation'); } });
+    assert.strictEqual(isolatedRaceCleanup.success, false); assert.strictEqual(fs.readFileSync(path.join(isolatedRaceTree.project, 'nested', 'owned.txt'), 'utf8'), 'replacement-after-isolation', 'a replacement after root isolation retains the complete quarantined tree instead of continuing deletion');
+
+    const occupiedIsolationTree = await publishOwnedTree('root-isolation-occupied', 'root-isolation-occupied-owner');
+    const occupiedIsolationCleanup = await removeCreatedPasteTargets([occupiedIsolationTree.project], { ownershipToken: 'root-isolation-occupied-owner', afterRootQuarantineMove: async ({ quarantine }) => { fs.mkdirSync(occupiedIsolationTree.project); fs.writeFileSync(path.join(occupiedIsolationTree.project, 'occupant.txt'), 'occupant'); fs.writeFileSync(path.join(quarantine, 'nested', 'owned.txt'), 'retained-tree'); } });
+    assert.strictEqual(occupiedIsolationCleanup.success, false); assert.strictEqual(fs.readFileSync(path.join(occupiedIsolationTree.project, 'occupant.txt'), 'utf8'), 'occupant'); assert.strictEqual(fs.existsSync(occupiedIsolationCleanup.recoveryPaths[0]), true, 'a failed proof with an occupied original path reports the complete private recovery root');
+    const retainedTreeName = fs.readdirSync(occupiedIsolationCleanup.recoveryPaths[0]).find(name => name.startsWith('tree-')); assert(retainedTreeName); assert.strictEqual(fs.readFileSync(path.join(occupiedIsolationCleanup.recoveryPaths[0], retainedTreeName, 'nested', 'owned.txt'), 'utf8'), 'retained-tree');
+
     const configuredInspirationRoot = path.join(root, 'configured-inspiration');
     const unconfiguredInspirationRoot = path.join(root, 'renderer-selected-root');
     fs.mkdirSync(configuredInspirationRoot);

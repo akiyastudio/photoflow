@@ -225,6 +225,9 @@ const rebaseCleanupOwnership = async (ownershipToken, fromRoot, toRoot, options 
   const sourceRoot = path.resolve(fromRoot);
   const targetRoot = path.resolve(toRoot);
   if (!snapshot?.paths.size || physicalPathKey(sourceRoot) === physicalPathKey(targetRoot)) return { success: false, code: 'CLEANUP_REBASE_INVALID' };
+  const sourceRootItem = snapshot.paths.get(physicalPathKey(sourceRoot));
+  if (!sourceRootItem || sourceRootItem.identity?.kind !== 'directory') return { success: false, code: 'CLEANUP_REBASE_ROOT_UNOWNED', path: sourceRoot };
+  if (options.publishedRootIdentity && !directoryOwnershipMatches(options.publishedRootIdentity, sourceRootItem.identity)) return { success: false, code: 'CLEANUP_REBASE_ROOT_IDENTITY_CONFLICT', path: targetRoot };
   const rebased = [];
   for (const item of snapshot.paths.values()) {
     const relative = path.relative(sourceRoot, item.path);
@@ -237,7 +240,10 @@ const rebaseCleanupOwnership = async (ownershipToken, fromRoot, toRoot, options 
       ? directoryOwnershipMatches(current, item.identity)
       : identitiesMatch(current, item.identity, { destructive: true });
     if (!matches) return { success: false, code: 'CLEANUP_REBASE_OWNERSHIP_CONFLICT', path: mappedPath };
-    rebased.push({ key: physicalPathKey(mappedPath), item: { path: mappedPath, identity: { ...item.identity, path: mappedPath }, ownershipToken: token } });
+    const mappedIdentity = relative === '' && options.publishedRootIdentity
+      ? { ...item.identity, ...options.publishedRootIdentity, path: mappedPath }
+      : { ...item.identity, path: mappedPath };
+    rebased.push({ key: physicalPathKey(mappedPath), item: { path: mappedPath, identity: mappedIdentity, ownershipToken: token } });
     await options.afterItemVerified?.({ source: item.path, target: mappedPath, identity: item.identity });
   }
   if (new Set(rebased.map(entry => entry.key)).size !== rebased.length) return { success: false, code: 'CLEANUP_REBASE_COLLISION' };
@@ -1040,51 +1046,136 @@ const quarantineOwnedPath = async (item, options = {}) => {
   }
 };
 
+const inspectOwnedTree = async (treeRoot, originalRoot, expectedItems) => {
+  const expected = new Map();
+  for (const item of expectedItems) {
+    const relative = path.relative(originalRoot, item.path);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return { success: false, code: 'CLEANUP_TREE_MAPPING_CONFLICT' };
+    if (expected.has(relative)) return { success: false, code: 'CLEANUP_TREE_MAPPING_COLLISION', path: item.path };
+    expected.set(relative, item);
+  }
+  for (const [relative] of expected) {
+    if (relative) {
+      let parent = path.dirname(relative);
+      while (parent && parent !== '.') {
+        const parentItem = expected.get(parent);
+        if (!parentItem || parentItem.identity?.kind !== 'directory') return { success: false, code: 'CLEANUP_TREE_PARENT_UNOWNED', path: path.join(originalRoot, parent) };
+        parent = path.dirname(parent);
+      }
+    }
+  }
+  const seen = new Set();
+  const visit = async (candidate, relative = '') => {
+    const item = expected.get(relative);
+    if (!item) return { success: false, code: 'CLEANUP_TREE_EXTRA_CONTENT', path: candidate };
+    const current = await capturePathIdentity(candidate, { digest: item.identity.kind === 'file' && Boolean(item.identity.sha256) }).catch(() => null);
+    const matches = item.identity.kind === 'directory'
+      ? directoryOwnershipMatches(current, item.identity)
+      : identitiesMatch(current, item.identity, { destructive: true });
+    if (!matches) return { success: false, code: 'CLEANUP_TREE_IDENTITY_CONFLICT', path: candidate };
+    seen.add(relative);
+    if (current.kind !== 'directory') return { success: true };
+    const entries = await fs.promises.readdir(candidate, { withFileTypes: true }).catch(() => null);
+    if (!entries) return { success: false, code: 'CLEANUP_TREE_READ_FAILED', path: candidate };
+    for (const entry of entries) {
+      const childRelative = relative ? path.join(relative, entry.name) : entry.name;
+      const outcome = await visit(path.join(candidate, entry.name), childRelative);
+      if (!outcome.success) return outcome;
+    }
+    return { success: true };
+  };
+  const walked = await visit(treeRoot);
+  if (!walked.success) return walked;
+  if (seen.size !== expected.size) return { success: false, code: 'CLEANUP_TREE_LEDGER_MISMATCH' };
+  return { success: true };
+};
+
+const quarantineOwnedTreeRoot = async (rootItem, treeItems, options = {}) => {
+  const originalRoot = path.resolve(rootItem.path);
+  const currentRoot = await capturePathIdentity(originalRoot).catch(() => null);
+  if (!directoryOwnershipMatches(currentRoot, rootItem.identity)) return { success: false, path: originalRoot, code: 'CLEANUP_ROOT_OWNERSHIP_CONFLICT' };
+  await options.beforeRootQuarantineMove?.({ ...rootItem, treeItems });
+  const privateRoot = path.join(path.dirname(originalRoot), `.photoflow-cleanup-tree-${crypto.randomUUID()}`);
+  try { await fs.promises.mkdir(privateRoot, { recursive: false, mode: 0o700 }); await fs.promises.chmod(privateRoot, 0o700).catch(() => undefined); }
+  catch (error) { return { success: false, path: originalRoot, code: error?.code || 'CLEANUP_QUARANTINE_FAILED' }; }
+  const privateIdentity = await capturePathIdentity(privateRoot);
+  const quarantine = path.join(privateRoot, `tree-${crypto.randomUUID()}`);
+  try {
+    const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+    if (!nativeService?.nativeAvailable?.() || typeof nativeService.inspectPath !== 'function') throw publicationServiceMissingError(originalRoot);
+    const inspected = await nativeService.inspectPath(originalRoot);
+    if (inspected?.success === false || typeof inspected?.identity !== 'string' || !inspected.identity) throw Object.assign(new Error('publication root native identity unavailable'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' });
+    const boundRoot = await verifyNativeOwnedPath(nativeService, originalRoot, inspected.identity);
+    if (!boundRoot || !directoryOwnershipMatches(boundRoot.physicalIdentity, rootItem.identity)) throw Object.assign(new Error('publication root identity changed before quarantine'), { code: 'PUBLISH_OWNERSHIP_CONFLICT' });
+    await publishPathNoClobber(originalRoot, quarantine, { ...options, nativePublicationService: nativeService });
+  } catch (error) {
+    const quarantineExists = await pathExistsObject(quarantine);
+    if (!quarantineExists && !error?.outcomeUnknown) await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => undefined);
+    return { success: false, path: originalRoot, code: error?.code || 'CLEANUP_QUARANTINE_FAILED', outcomeUnknown: Boolean(error?.outcomeUnknown), recoveryPath: quarantineExists || error?.outcomeUnknown ? privateRoot : undefined };
+  }
+  await options.afterRootQuarantineMove?.({ ...rootItem, quarantine, privateRoot, treeItems });
+  let proof = await inspectOwnedTree(quarantine, originalRoot, treeItems);
+  await options.beforeQuarantinedTreeDelete?.({ ...rootItem, quarantine, privateRoot, treeItems, proof });
+  if (proof.success) proof = await inspectOwnedTree(quarantine, originalRoot, treeItems);
+  if (!proof.success) {
+    const restored = await restoreQuarantine(quarantine, originalRoot, options);
+    if (restored) await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => undefined);
+    return { success: false, path: originalRoot, code: proof.code, conflictPath: proof.path, recoveryPath: restored ? undefined : privateRoot };
+  }
+  try {
+    await fs.promises.rm(quarantine, { recursive: true, force: false });
+    const rootRemoved = await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => false);
+    return { success: true, path: originalRoot, quarantined: true, ...(!rootRemoved ? { cleanupWarning: '隔离目录清理未完成' } : {}) };
+  } catch (error) {
+    return { success: false, path: originalRoot, code: error?.code || 'CLEANUP_DELETE_FAILED', recoveryPath: await pathExistsObject(privateRoot) ? privateRoot : undefined };
+  }
+};
+
 const removeCreatedPasteTargets = async (targets, options = {}) => {
   const requestedToken = String(options.ownershipToken || '');
-  const roots = targets.map(target => ({ path: path.resolve(typeof target === 'string' ? target : target.path), ownershipToken: String(typeof target === 'object' ? target.ownershipToken || requestedToken : requestedToken), identity: typeof target === 'object' ? target.identity : undefined }));
-  const owned = [];
-  const ambiguous = [];
-  const shared = [];
-  const missing = [];
-  const matchesByPath = new Map();
-  for (const snapshot of cleanupOwnershipLedger.values()) for (const item of snapshot.paths.values()) {
-    const root = roots.find(candidate => physicalPathKey(candidate.path) === physicalPathKey(item.path) || isInside(candidate.path, item.path));
-    if (!root) continue;
-    const key = physicalPathKey(item.path);
-    if (!matchesByPath.has(key)) matchesByPath.set(key, []);
-    matchesByPath.get(key).push(item);
-  }
-  for (const matches of matchesByPath.values()) {
-    const root = roots.find(candidate => physicalPathKey(candidate.path) === physicalPathKey(matches[0].path) || isInside(candidate.path, matches[0].path));
-    if (root.ownershipToken) {
-      const item = matches.find(candidate => candidate.ownershipToken === root.ownershipToken);
-      if (item && matches.length === 1) owned.push(item);
-      else if (item) shared.push(item.path);
-      else missing.push(matches[0].path);
-    } else if (matches.length === 1) owned.push(matches[0]);
-    else ambiguous.push(matches[0].path);
-  }
-  for (const root of roots.filter(candidate => candidate.identity)) {
-    if (!owned.some(item => physicalPathKey(item.path) === physicalPathKey(root.path) && item.ownershipToken === root.ownershipToken)) owned.push({ path: root.path, identity: root.identity, ownershipToken: root.ownershipToken || `snapshot-${crypto.randomUUID()}` });
-  }
-  owned.sort((left, right) => right.path.length - left.path.length);
+  const requestedRoots = targets.map(target => ({ path: path.resolve(typeof target === 'string' ? target : target.path), ownershipToken: String(typeof target === 'object' ? target.ownershipToken || requestedToken : requestedToken), identity: typeof target === 'object' ? target.identity : undefined }));
+  const roots = requestedRoots.filter((candidate, index) => !requestedRoots.some((other, otherIndex) => otherIndex !== index
+    && (isInside(other.path, candidate.path) || physicalPathKey(other.path) === physicalPathKey(candidate.path) && otherIndex < index)));
   const outcomes = [];
-  for (const item of owned.filter(entry => entry.identity.kind !== 'directory')) {
-    const outcome = await quarantineOwnedPath(item, options); outcomes.push(outcome);
-    if (outcome.success) forgetCleanupOwnership(item.path, item.ownershipToken);
+  const terminalTokens = new Set();
+  for (const root of roots) {
+    const matchesByPath = new Map();
+    for (const snapshot of cleanupOwnershipLedger.values()) for (const item of snapshot.paths.values()) {
+      if (physicalPathKey(root.path) !== physicalPathKey(item.path) && !isInside(root.path, item.path)) continue;
+      const key = physicalPathKey(item.path);
+      if (!matchesByPath.has(key)) matchesByPath.set(key, []);
+      matchesByPath.get(key).push(item);
+    }
+    let token = root.ownershipToken;
+    if (!token) {
+      const tokens = new Set([...matchesByPath.values()].flat().map(item => item.ownershipToken));
+      if (tokens.size !== 1) { outcomes.push({ success: false, path: root.path, code: tokens.size ? 'CLEANUP_OWNER_AMBIGUOUS' : 'CLEANUP_UNOWNED_PATH' }); continue; }
+      token = [...tokens][0];
+    }
+    terminalTokens.add(token);
+    const selected = [];
+    let conflict = null;
+    for (const matches of matchesByPath.values()) {
+      const item = matches.find(candidate => candidate.ownershipToken === token);
+      if (!item) { conflict = { success: false, path: matches[0].path, code: 'CLEANUP_OWNER_NOT_FOUND' }; break; }
+      if (matches.length !== 1) { conflict = { success: false, path: item.path, code: 'CLEANUP_SHARED_OWNER' }; break; }
+      selected.push(item);
+    }
+    let rootItem = selected.find(item => physicalPathKey(item.path) === physicalPathKey(root.path));
+    if (!rootItem && root.identity) rootItem = { path: root.path, identity: root.identity, ownershipToken: token || `snapshot-${crypto.randomUUID()}` };
+    if (!rootItem) conflict ||= { success: false, path: root.path, code: matchesByPath.size ? 'CLEANUP_OWNER_NOT_FOUND' : 'CLEANUP_UNOWNED_PATH' };
+    if (conflict) { outcomes.push(conflict); continue; }
+    let outcome;
+    if (rootItem.identity.kind === 'directory' && selected.some(item => physicalPathKey(item.path) === physicalPathKey(root.path))) {
+      outcome = await quarantineOwnedTreeRoot(rootItem, selected, options);
+      if (outcome.success) for (const item of selected) forgetCleanupOwnership(item.path, token);
+    } else {
+      outcome = await quarantineOwnedPath(rootItem, options);
+      if (outcome.success) forgetCleanupOwnership(rootItem.path, token);
+    }
+    outcomes.push(outcome);
   }
-  for (const item of owned.filter(entry => entry.identity.kind === 'directory')) {
-    const outcome = await quarantineOwnedPath(item, options); outcomes.push(outcome);
-    if (outcome.success) forgetCleanupOwnership(item.path, item.ownershipToken);
-  }
-  const hasOwnerForPath = candidate => [...cleanupOwnershipLedger.values()].some(snapshot => snapshot.paths.has(physicalPathKey(candidate)));
-  for (const root of roots) if (!owned.some(item => physicalPathKey(item.path) === physicalPathKey(root.path)) && !hasOwnerForPath(root.path)) outcomes.push({ success: false, path: root.path, code: 'CLEANUP_UNOWNED_PATH' });
-  for (const retained of ambiguous) outcomes.push({ success: false, path: retained, code: 'CLEANUP_OWNER_AMBIGUOUS' });
-  for (const retained of shared) outcomes.push({ success: false, path: retained, code: 'CLEANUP_SHARED_OWNER' });
-  for (const retained of missing) outcomes.push({ success: false, path: retained, code: 'CLEANUP_OWNER_NOT_FOUND' });
   const recoveryPaths = outcomes.map(item => item.recoveryPath).filter(Boolean);
-  const terminalTokens = new Set(owned.map(item => item.ownershipToken).filter(Boolean));
   if (requestedToken) terminalTokens.add(requestedToken);
   for (const token of terminalTokens) releaseCleanupOwnership(token);
   return { success: outcomes.every(item => item.success), outcomes, recoveryPaths, ownershipToken: requestedToken || undefined };
