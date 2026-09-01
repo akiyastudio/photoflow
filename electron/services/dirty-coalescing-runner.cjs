@@ -12,6 +12,7 @@ const createDirtyCoalescingRunner = ({
 }) => {
   if (typeof merge !== 'function' || typeof worker !== 'function') throw new TypeError('dirty runner requires merge and worker');
   const states = new Map();
+  let stopped = false;
   const ticketCompletions = new WeakMap();
   const retentionTtl = Number.isFinite(Number(completedStateTtlMs)) && Number(completedStateTtlMs) >= 0
     ? Math.min(24 * 60 * 60 * 1000, Number(completedStateTtlMs)) : 60 * 1000;
@@ -204,6 +205,7 @@ const createDirtyCoalescingRunner = ({
   const enqueue = (key, delta, options = {}) => {
     const normalizedKey = String(key || '');
     if (!normalizedKey) throw new TypeError('dirty runner key is required');
+    if (stopped) throw Object.assign(new Error('dirty runner has stopped'), { code: 'DIRTY_RUNNER_STOPPED' });
     if (options.signal?.aborted) throw cancelledError(normalizedKey);
     let state = states.get(normalizedKey);
     if (!state || state.cancelled) {
@@ -290,6 +292,7 @@ const createDirtyCoalescingRunner = ({
   };
 
   const stop = () => {
+    stopped = true;
     for (const key of [...states.keys()]) cancel(key);
   };
 

@@ -2,16 +2,15 @@ const registerStorageUsageIpc = ({ ipcMain, storageUsageService, getMainWindow, 
   const channel = 'storage-usage-overview';
   ipcMain.handle(channel, async (event, force = false) => {
     const mainWindow = getMainWindow?.();
-    const url = event?.senderFrame?.url || '';
-    const fallbackTopLevelRenderer = event?.senderFrame === event?.sender?.mainFrame
-      && event?.sender?.getType?.() === 'window'
-      && (url.startsWith('file:') || /^http:\/\/localhost:\d+\//.test(url));
-    const trusted = typeof assertTrustedSender === 'function' ? assertTrustedSender(event)
-      : mainWindow ? !mainWindow.isDestroyed() && event?.sender === mainWindow.webContents
-        // Compatibility fallback for the existing main.cjs registration. This is origin/top-level validation,
-        // not a substitute for injecting the main-window identity.
-        : fallbackTopLevelRenderer;
+    const exactMainWindowSender = Boolean(mainWindow && !mainWindow.isDestroyed?.()
+      && event?.sender === mainWindow.webContents && !event.sender.isDestroyed?.()
+      && event.senderFrame === event.sender.mainFrame);
+    const trusted = exactMainWindowSender
+      && (typeof assertTrustedSender !== 'function' || assertTrustedSender(event) === true);
     if (!trusted) throw new Error('Unauthorized IPC sender');
+    if (!storageUsageService || typeof storageUsageService.overview !== 'function') {
+      return { success: false, updatedAt: 0, scanning: false, stale: true, volumes: [], code: 'STORAGE_USAGE_UNAVAILABLE', error: '存储用量服务不可用' };
+    }
     if (force !== false && force !== true) return { success: false, updatedAt: 0, scanning: false, stale: true, volumes: [], code: 'INVALID_ARGUMENT', error: 'force 只接受 true' };
     try { return await storageUsageService.overview(force === true); }
     catch (error) { return { success: false, updatedAt: 0, scanning: false, stale: true, volumes: [], code: typeof error?.code === 'string' ? error.code : 'STORAGE_USAGE_FAILED', error: error.message || String(error) }; }

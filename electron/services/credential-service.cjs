@@ -10,6 +10,8 @@ const uncShareRoot = value => {
 const normalizedShare = value => uncShareRoot(value).replace(/[\\/]+$/, '').toLowerCase();
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const CREDENTIAL_TIMEOUT_MS = 30 * 1000;
+const CREDENTIAL_REF_PATTERN = /^PhotoFlow\/NAS\/[a-f0-9]{24}$/;
+const validCredentialRef = value => CREDENTIAL_REF_PATTERN.test(String(value || ''));
 
 const createCredentialService = ({ writeLog }) => {
   const scriptPath = path.join(__dirname, '..', 'scripts', 'windows-credential.ps1');
@@ -97,20 +99,21 @@ const createCredentialService = ({ writeLog }) => {
     const share = uncShareRoot(remotePath);
     if (!share) return { connected: true };
     if (!credentialRef) throw new Error('NAS 尚未保存登录凭据');
+    if (!validCredentialRef(credentialRef)) throw new Error('NAS 凭据引用无效');
     if (credentialRef !== credentialRefFor(share)) throw new Error('NAS 凭据与当前共享路径不匹配');
     return invokeWindowsCredential({ operation: 'connect', target: credentialRef, remotePath: share }, options);
   };
   const readNasCredential = async (credentialRef, options = {}) => {
-    if (!String(credentialRef || '').startsWith('PhotoFlow/NAS/')) return null;
+    if (!validCredentialRef(credentialRef)) return null;
     const result = await invokeWindowsCredential({ operation: 'inspect', target: credentialRef }, options);
     return { username: result.username || '' };
   };
   const deleteNasCredential = async (credentialRef, options = {}) => {
-    if (!String(credentialRef || '').startsWith('PhotoFlow/NAS/')) return;
+    if (!validCredentialRef(credentialRef)) return;
     await invokeWindowsCredential({ operation: 'delete', target: credentialRef }, options);
   };
 
   return { isUncPath, uncShareRoot, saveNasCredential, connectNas, readNasCredential, deleteNasCredential };
 };
 
-module.exports = { createCredentialService, isUncPath, uncShareRoot, normalizedShare };
+module.exports = { createCredentialService, isUncPath, uncShareRoot, normalizedShare, validCredentialRef };

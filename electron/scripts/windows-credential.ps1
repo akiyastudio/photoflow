@@ -68,7 +68,7 @@ if ($requestText.Length -gt 1048576) { throw 'Credential request is too large' }
 $request = $requestText | ConvertFrom-Json
 $operation = [string]$request.operation
 $target = [string]$request.target
-if (-not $target.StartsWith('PhotoFlow/NAS/')) { throw 'Invalid credential reference' }
+if ($target -notmatch '^PhotoFlow/NAS/[a-f0-9]{24}$') { throw 'Invalid credential reference' }
 function Get-PhotoFlowCredentialTarget([string]$remotePath) {
   if ($remotePath -notmatch '^\\\\[^\\]+\\[^\\]+') { throw 'Invalid NAS share path' }
   $share = $Matches[0].TrimEnd('\').ToLowerInvariant()

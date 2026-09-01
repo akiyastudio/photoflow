@@ -1,18 +1,45 @@
 const { MAX_CHANGED_PATHS } = require('../contracts/media-sync-limits.cjs');
+const crypto = require('crypto');
 
 const MEDIA_SYNC_BATCH_SIZE = 64;
 
 const createMediaRepository = client => {
-  const prepareMediaSync = (root, projectName, externalRoots = []) => client.call(root, 'media_sync_prepare', { projectName, externalRoots }, 30 * 60 * 1000);
+  const prepareMediaSync = (root, projectName, externalRoots = [], options = {}) => client.call(root, 'media_sync_prepare', { projectName, externalRoots, ...options }, 30 * 60 * 1000);
   const applyMediaSyncBatch = (root, payload) => client.call(root, 'media_sync_apply_batch', payload, 2 * 60 * 1000);
   const finalizeMediaSync = (root, payload) => client.call(root, 'media_sync_finalize', payload, 2 * 60 * 1000);
   const prepareChangedPaths = (root, payload) => client.call(root, 'media_sync_paths_prepare', payload, 30 * 60 * 1000);
   const applyChangedPathsBatch = (root, payload) => client.call(root, 'media_sync_paths_apply_batch', payload, 2 * 60 * 1000);
   const finalizeChangedPaths = (root, payload) => client.call(root, 'media_sync_paths_finalize', payload, 2 * 60 * 1000);
   const syncProject = async (root, projectName, externalRoots = []) => {
-    const prepared = await prepareMediaSync(root, projectName, externalRoots);
+    let prepared = await prepareMediaSync(root, projectName, externalRoots, {
+      paged: true, snapshotId: crypto.randomUUID(), pageToken: '0', pageSize: MEDIA_SYNC_BATCH_SIZE,
+    });
     if (prepared.projectUnavailable) return prepared;
     let count = 0;
+    if (prepared.paged === true) {
+      while (true) {
+        const batchIndex = Number(prepared.pageOffset || 0) / MEDIA_SYNC_BATCH_SIZE;
+        if (!Number.isSafeInteger(batchIndex) || !Array.isArray(prepared.files) || prepared.files.length > MEDIA_SYNC_BATCH_SIZE) {
+          throw new Error('media_sync_page_invalid: 数据库返回了无效分页');
+        }
+        if (prepared.files.length) {
+          const applied = await applyChangedPathsBatch(root, {
+            projectName, snapshotId: prepared.snapshotId, batchIndex, files: prepared.files,
+          });
+          count += Number(applied.count) || 0;
+          await new Promise(resolve => setImmediate(resolve));
+        }
+        if (!prepared.nextPageToken) break;
+        prepared = await prepareMediaSync(root, projectName, externalRoots, {
+          paged: true, snapshotId: prepared.snapshotId, pageToken: prepared.nextPageToken,
+          pageSize: MEDIA_SYNC_BATCH_SIZE,
+        });
+      }
+      const finalized = await finalizeChangedPaths(root, { projectName, snapshotId: prepared.snapshotId });
+      return { ...finalized, count };
+    }
+    // Older workers ignore the pagination request and return the legacy full
+    // manifest. Preserve that wire contract during rolling upgrades.
     for (let offset = 0, batchIndex = 0; offset < prepared.files.length; offset += MEDIA_SYNC_BATCH_SIZE, batchIndex += 1) {
       const applied = await applyMediaSyncBatch(root, {
         projectName,

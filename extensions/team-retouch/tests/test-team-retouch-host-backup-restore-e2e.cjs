@@ -3,6 +3,7 @@ const crypto = require('node:crypto');
 const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
+const { spawnSync } = require('node:child_process');
 const { EventEmitter } = require('node:events');
 const { DatabaseSync } = require('node:sqlite');
 const { createBackupService, STORE_DIRECTORY } = require('../../../electron/services/backup-service.cjs');
@@ -10,6 +11,37 @@ const { createBackgroundTaskService } = require('../../../electron/services/back
 const { ComponentServiceManager } = require('../../../electron/services/component-service-manager.cjs');
 const { createProcessSupervisor } = require('../../../electron/services/process-supervisor.cjs');
 const { ensureSchema } = require('../service.cjs');
+
+const repositoryRoot = path.resolve(__dirname, '..', '..', '..');
+const bundledPython = path.join(repositoryRoot, '.venv', 'Scripts', 'python.exe');
+const testPython = fs.existsSync(bundledPython) ? bundledPython : process.env.PYTHON || 'python';
+
+const runWorkspaceDatabase = (action, root, database, payload = undefined) => {
+  const args = [path.join(repositoryRoot, 'python', 'workspace_db.py'), action, '--root', root, '--database', database];
+  if (payload !== undefined) args.push('--payload', JSON.stringify(payload));
+  const child = spawnSync(testPython, args, { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true });
+  assert.equal(child.error, undefined, `workspace database fixture failed to start: ${child.error?.message || ''}`);
+  assert.equal(child.status, 0, `workspace database fixture failed: ${child.stderr || child.stdout}`);
+  assert.doesNotThrow(() => JSON.parse(child.stdout.trim()), 'workspace database initializer returns JSON');
+};
+
+const assertCoreDatabaseFixture = (database, expectedProjectId = undefined) => {
+  assert.equal(fs.statSync(database).isFile(), true, 'core database fixture is a regular file');
+  const db = new DatabaseSync(database, { readOnly: true });
+  try {
+    assert.equal(db.prepare('PRAGMA quick_check').get().quick_check, 'ok', 'core database fixture passes SQLite quick_check');
+    assert.equal(Number(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value), 33, 'core database fixture uses the current workspace schema');
+    if (expectedProjectId) assert.equal(db.prepare('SELECT id FROM projects WHERE id=?').get(expectedProjectId)?.id, expectedProjectId, 'source core fixture contains the restored project');
+  } finally { db.close(); }
+};
+
+const seedCoreProjectFixture = (database, project) => {
+  const db = new DatabaseSync(database);
+  try {
+    db.prepare('INSERT INTO projects(id,name,status,relative_path,created_at,updated_at) VALUES(?,?,?,?,?,?)')
+      .run(project.id, project.name, project.status, project.relativePath, 1, 1);
+  } finally { db.close(); }
+};
 
 const digest = filePath => {
   const hash = crypto.createHash('sha256'); const descriptor = fs.openSync(filePath, 'r'); const buffer = Buffer.allocUnsafe(1024 * 1024);
@@ -25,6 +57,13 @@ const main = async () => {
   const sourceStage = path.join(sandbox, 'source'); const liveComponentRoot = path.join(dataRoot, 'components', 'team-retouch');
   fs.mkdirSync(sourceStage, { recursive: true }); fs.mkdirSync(liveComponentRoot, { recursive: true }); fs.mkdirSync(workspace, { recursive: true });
   fs.writeFileSync(path.join(workspace, '.photoflow-workspace-id'), 'target-workspace\n');
+  fs.mkdirSync(path.join(sourceRoot, '待处理', 'A'), { recursive: true });
+  const core = path.join(sourceStage, 'workspace.sqlite3');
+  runWorkspaceDatabase('init', sourceRoot, core);
+  seedCoreProjectFixture(core, { id: 'project-a', name: 'A', status: 'active', relativePath: '待处理/A' });
+  runWorkspaceDatabase('init', workspace, path.join(dataRoot, 'workspace.sqlite3'));
+  assertCoreDatabaseFixture(core, 'project-a');
+  assertCoreDatabaseFixture(path.join(dataRoot, 'workspace.sqlite3'));
   const sourceDatabasePath = path.join(sourceStage, 'storage.sqlite3');
   const sourceDb = ensureSchema(sourceDatabasePath);
   sourceDb.exec('PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0;');
@@ -37,7 +76,6 @@ const main = async () => {
   fs.mkdirSync(path.join(liveComponentRoot, 'media', 'photo-b', 'version-b', 'analysis'), { recursive: true });
   const targetB = path.join(liveComponentRoot, 'media', 'photo-b', 'version-b', 'analysis', 'mask.bin'); fs.writeFileSync(targetB, 'target-b-unchanged');
   const privateA = path.join(sourceStage, 'a.bin'); const privateB = path.join(sourceStage, 'b.bin'); fs.writeFileSync(privateA, 'source-a'); fs.writeFileSync(privateB, 'source-b');
-  const core = path.join(sourceStage, 'workspace.sqlite3'); fs.writeFileSync(core, 'opaque-core-fixture');
   const storeObject = filePath => {
     const hash = digest(filePath); const destination = path.join(target, STORE_DIRECTORY, 'objects', hash.slice(0, 2), hash.slice(2));
     fs.mkdirSync(path.dirname(destination), { recursive: true }); if (!fs.existsSync(destination)) fs.copyFileSync(filePath, destination);

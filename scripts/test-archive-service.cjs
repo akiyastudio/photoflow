@@ -65,7 +65,11 @@ const main = async () => {
       writeLog: () => undefined,
     });
 
-    const archived = await service.archiveProject(workspaceRoot, row.name);
+    row.relative_path = '.';
+    await assert.rejects(service.archiveProject(workspaceRoot, row.name), /项目文件夹当前不可用/, 'archive must never accept the workspace root as a project source');
+    row.relative_path = '示例项目';
+
+    const archived = await service.archiveProject(workspaceRoot, { id: row.id, name: '旧名称仅回退' });
     assert.strictEqual(archived.task.state, 'completed');
     const archivePath = JSON.parse(row.extra_json).archive.path;
     assert.ok((await fs.promises.lstat(projectRoot)).isSymbolicLink(), 'workspace entry must become a directory link');

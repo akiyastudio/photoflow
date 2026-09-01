@@ -83,7 +83,10 @@ export const taskToastExpiresAt = (task: BackgroundTask, firstVisibleAt?: number
     ? (firstVisibleAt ?? task.updatedAt) + RESULT_TOAST_MS
     : 0;
 
-export const taskToastInstanceKey = (task: Pick<BackgroundTask, 'id' | 'createdAt'>) => `${task.id.length}:${task.id}:${task.createdAt}`;
+export const taskToastInstanceKey = (task: Pick<BackgroundTask, 'id' | 'createdAt'> & { instanceId?: unknown }) => {
+  const generation = typeof task.instanceId === 'string' && task.instanceId ? task.instanceId : String(task.createdAt);
+  return `${task.id.length}:${task.id}:${generation.length}:${generation}`;
+};
 
 export const taskToastLiveRole = (state: BackgroundTask['state']): 'alert' | 'status' | undefined => state === 'failed' ? 'alert' : state === 'completed' ? 'status' : undefined;
 

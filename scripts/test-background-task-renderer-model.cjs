@@ -86,6 +86,11 @@ assert.equal(toastModel.isBackgroundTaskCenterVisible(task('manual-running', 'ru
 
 const moveRunning = task('move-toast', 'running', 100, { type: 'project-file-operation', notificationPolicy: 'progress-and-result' });
 const moveCompleted = task('move-toast', 'completed', 110, { type: 'project-file-operation', notificationPolicy: 'progress-and-result', message: '文件移动完成' });
+assert.notEqual(
+  toastModel.taskToastInstanceKey({ ...moveRunning, instanceId: 'generation-a' }),
+  toastModel.taskToastInstanceKey({ ...moveRunning, instanceId: 'generation-b' }),
+  'fixed task IDs must retain generation-unique toast identities even when timestamps collide',
+);
 assert.equal(toastModel.isActiveProjectFileTask(moveRunning, 100), true, 'combined project-file notification must show progress while running');
 assert.equal(toastModel.taskToastExpiresAt(moveCompleted), 6110, 'combined project-file completion must remain visible for the result interval');
 assert.equal(toastModel.isActiveProjectFileTask(moveCompleted, 6109), true, 'combined project-file completion remains visible before expiry');

@@ -80,6 +80,61 @@ const main = async () => {
   assert.strictEqual(exhausted.status().state, 'failed');
   assert.ok(logs.some(entry => entry.message === 'Managed process restart limit reached'));
 
+  let synchronousRestartSpawns = 0;
+  const synchronousRestartLogs = [];
+  const synchronousRestartSupervisor = createProcessSupervisor({
+    spawnImpl: () => {
+      synchronousRestartSpawns += 1;
+      if (synchronousRestartSpawns > 1) throw new Error(`sync spawn failure ${synchronousRestartSpawns}`);
+      return new FakeChild(3000);
+    },
+    writeLog: (level, message, details) => synchronousRestartLogs.push({ level, message, details }),
+  });
+  const synchronousRestartWorker = synchronousRestartSupervisor.launch({
+    id: 'sync-restart-failure', command: 'worker.exe',
+    restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [0] },
+  });
+  synchronousRestartWorker.child.emit('exit', 7, null);
+  await delay(20);
+  assert.equal(synchronousRestartSpawns, 3, 'the initial process plus exactly two restart attempts must consume the explicit budget');
+  assert.equal(synchronousRestartWorker.status().state, 'failed');
+  assert.equal(synchronousRestartWorker.status().restartCount, 2);
+  assert.equal(synchronousRestartLogs.filter(entry => entry.message === 'Managed process restart limit reached').length, 1, 'synchronous restart failures must exhaust once without duplicate timers');
+
+  const healthTimeoutChildren = [];
+  const healthTimeoutLogs = [];
+  const healthTimeoutSupervisor = createProcessSupervisor({
+    spawnImpl: () => {
+      const child = new FakeChild(4000 + healthTimeoutChildren.length);
+      healthTimeoutChildren.push(child);
+      return child;
+    },
+    writeLog: (level, message, details) => healthTimeoutLogs.push({ level, message, details }),
+  });
+  const unhealthyWorker = healthTimeoutSupervisor.launch({
+    id: 'startup-health-budget', command: 'worker.exe',
+    health: { startupTimeoutMs: 5 },
+    restart: { enabled: true, maxRestarts: 1, windowMs: 60000, backoffMs: [0] },
+  });
+  await delay(150);
+  assert.equal(healthTimeoutChildren.length, 2, 'startup health timeouts must not bypass the one-restart budget');
+  assert.equal(unhealthyWorker.status().restartCount, 1);
+  assert.equal(unhealthyWorker.status().state, 'failed');
+  assert.equal(healthTimeoutLogs.filter(entry => entry.message === 'Managed process restart limit reached').length, 1);
+
+  const manualRecycleChildren = [];
+  const manualRecycleSupervisor = createProcessSupervisor({
+    spawnImpl: () => {
+      const child = new FakeChild(5000 + manualRecycleChildren.length);
+      manualRecycleChildren.push(child);
+      return child;
+    },
+  });
+  const manuallyRecycledWorker = manualRecycleSupervisor.launch({ id: 'manual-recycle', command: 'worker.exe' });
+  await manuallyRecycledWorker.recycle('manual-test', { rollbackSettleMs: 0 });
+  assert.equal(manualRecycleChildren.length, 2, 'manual recycle must retain its immediate replacement semantics');
+  assert.equal(manuallyRecycledWorker.status().restartCount, 0, 'manual recycle must not consume the crash restart budget');
+
   const oneShot = supervisor.launch({
     id: 'csharp:test-job', kind: 'csharp-helper', command: 'helper.exe', ephemeral: true,
   });
@@ -190,6 +245,9 @@ const main = async () => {
   await delay(5); assert.equal(playbackCleanup, 1, 'owner-scoped stop must run playback cleanup exactly once');
 
   await supervisor.stopAll();
+  await synchronousRestartSupervisor.stopAll();
+  await healthTimeoutSupervisor.stopAll();
+  await manualRecycleSupervisor.stopAll();
   assert.deepStrictEqual(supervisor.list(), []);
   const pythonRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-python-resolver-'));
   try {

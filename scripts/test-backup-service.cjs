@@ -14,6 +14,7 @@ const { createOperationsRepository } = require('../electron/repositories/operati
 const { createBackupService, safeDestination, STORE_DIRECTORY } = require('../electron/services/backup-service.cjs');
 const { createConfigMutationService } = require('../electron/services/config-mutation-service.cjs');
 const { defaultComponentDataAdoptionPolicy } = require('../electron/compatibility/component-data-adoption-policy.cjs');
+const { cleanupRetiredCaptureTimeCache } = require('../electron/services/retired-cache-service.cjs');
 const VENV_PYTHON = path.join(__dirname, '..', '.venv', 'Scripts', 'python.exe');
 const TEST_PYTHON = fs.existsSync(VENV_PYTHON) ? VENV_PYTHON : process.env.PYTHON || 'python';
 const sha256FileForTest = filePath => crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
@@ -104,6 +105,15 @@ const prepareWorkspace = async (temporaryRoot, name, id) => {
 const main = async () => {
   const temporaryRoot = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-backup-service-'));
   try {
+    const retiredCacheRoot = path.join(temporaryRoot, 'retired-cache');
+    await fs.promises.mkdir(retiredCacheRoot, { recursive: true });
+    const retiredCachePath = path.join(retiredCacheRoot, 'capture-time-cache.sqlite3');
+    await Promise.all([retiredCachePath, `${retiredCachePath}-wal`, `${retiredCachePath}-journal`].map(filePath => fs.promises.writeFile(filePath, 'retired')));
+    await fs.promises.mkdir(`${retiredCachePath}-shm`);
+    const retiredCount = await cleanupRetiredCaptureTimeCache({ app: { getPath: () => retiredCacheRoot }, fs, path, onError: () => { throw new Error('logger failure'); } });
+    assert.equal(retiredCount, 3, 'retired cache cleanup includes the SQLite rollback journal and isolates onError failures');
+    assert.equal(fs.existsSync(`${retiredCachePath}-journal`), false);
+    await fs.promises.rm(`${retiredCachePath}-shm`, { recursive: true, force: true });
     assert.throws(() => safeDestination(path.join(temporaryRoot, 'component-restore'), '../escaped.bin'), /无效路径|越界/);
     assert.throws(() => safeDestination(path.join(temporaryRoot, 'component-restore'), 'sample/../../escaped.bin'), /无效路径|越界/);
     const target = path.join(temporaryRoot, 'backup-target');
@@ -361,6 +371,14 @@ const main = async () => {
     assert.strictEqual(fs.existsSync(backedProjectRoot), false);
     const replacementManifestPath = path.join(target, STORE_DIRECTORY, 'snapshots', replacementRun.result.id, 'manifest.json');
     const replacementManifest = JSON.parse(await fs.promises.readFile(replacementManifestPath, 'utf8'));
+    const mediaEntryIndex = replacementManifest.files.findIndex(entry => entry.scope === 'domain-database' && entry.path === 'media.sqlite3');
+    const mediaEntryForVersioningPreflight = replacementManifest.files.splice(mediaEntryIndex, 1)[0];
+    replacementManifest.totals.files -= 1; replacementManifest.totals.bytes -= mediaEntryForVersioningPreflight.size;
+    await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    await assert.rejects(service.restoreProject(first.root, replacementRun.result.id, backedProject.id), error => error?.code === 'PROJECT_RESTORE_VERSIONING_REQUIRES_MEDIA', 'versioning-only v1 project restore must fail during preflight');
+    replacementManifest.files.splice(mediaEntryIndex, 0, mediaEntryForVersioningPreflight);
+    replacementManifest.totals.files += 1; replacementManifest.totals.bytes += mediaEntryForVersioningPreflight.size;
+    await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
     const orphanFixture = { ...replacementManifest.files.find(entry => entry.scope === 'domain-database'), path: 'uninstalled-private.sqlite3' };
     replacementManifest.files.push(orphanFixture); await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
     const rejectedWorkspaceRoot = path.join(temporaryRoot, 'rejected-uninstalled-workspace');
@@ -390,8 +408,26 @@ const main = async () => {
     legacyDomainFixture.path = defaultComponentDataAdoptionPolicy.legacyDomainDatabaseOwners[0].paths[0]; await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
     assert.equal((await service.verify(first.root, replacementRun.result.id)).task.state, 'completed', 'old manifests retain statically Host-owned legacy database verification');
     replacementManifest.files.pop(); replacementManifest.componentBackups = savedComponentMetadata; await fs.promises.writeFile(replacementManifestPath, JSON.stringify(replacementManifest), 'utf8');
+    const checkpointSessionId = 'checkpoint-content-validation';
+    const checkpointMarkerKey = crypto.createHash('sha256').update([replacementRun.result.id, backedProject.id, checkpointSessionId].join('\0')).digest('hex').slice(0, 32);
+    const checkpointMarker = path.join(first.root, `.photoflow-project-restore-${checkpointMarkerKey}.incomplete`);
+    await fs.promises.writeFile(checkpointMarker, JSON.stringify({ schemaVersion: 1, snapshotId: replacementRun.result.id, projectId: backedProject.id, restoreSessionId: checkpointSessionId, taskId: 'checkpoint-content-validation-task' }), 'utf8');
+    const checkpointProjectEntries = replacementManifest.files.filter(entry => entry.scope === 'workspace' && entry.projectIds?.includes(backedProject.id)).slice(0, 2);
+    const checkpointDataEntry = replacementManifest.files.find(entry => entry.scope === 'workspace-data' && entry.projectIds?.includes(backedProject.id));
+    const corruptCheckpointEntry = checkpointProjectEntries[0];
+    const corruptCheckpointPath = path.join(first.root, corruptCheckpointEntry.path);
+    await fs.promises.mkdir(path.dirname(corruptCheckpointPath), { recursive: true });
+    await fs.promises.writeFile(corruptCheckpointPath, Buffer.alloc(Number(corruptCheckpointEntry.size), 0x7f));
+    if (checkpointDataEntry) {
+      const corruptDataPath = path.join(first.dataRoot, checkpointDataEntry.path);
+      await fs.promises.mkdir(path.dirname(corruptDataPath), { recursive: true });
+      await fs.promises.writeFile(corruptDataPath, Buffer.alloc(Number(checkpointDataEntry.size), 0x6e));
+    }
     const projectBarrier = armRecoveryBarrier();
-    const restoredProjectPromise = service.restoreProject(first.root, replacementRun.result.id, backedProject.id);
+    const restoredProjectPromise = service.restoreProject(first.root, replacementRun.result.id, backedProject.id, {
+      id: 'checkpoint-content-validation-task', metadata: { restoreSessionId: checkpointSessionId },
+      checkpoint: { version: 1, restoreSessionId: checkpointSessionId, completedProject: checkpointProjectEntries.map(entry => entry.path), completedData: checkpointDataEntry ? [checkpointDataEntry.path] : [] }, progress: 20,
+    });
     await projectBarrier.admitted;
     const queuedMaintenance = maintenanceRepository.runMaintenance(first.root);
     const queuedWriter = writerRepository.syncCatalog(first.root);
@@ -402,6 +438,8 @@ const main = async () => {
     projectBarrier.release();
     const [restoredProject] = await Promise.all([restoredProjectPromise, queuedMaintenance, queuedWriter]);
     assert.strictEqual(restoredProject.task.state, 'completed');
+    for (const entry of checkpointProjectEntries) assert.equal(sha256FileForTest(path.join(first.root, entry.path)), entry.hash, 'missing/corrupt completedProject checkpoint entries are rematerialized');
+    if (checkpointDataEntry) assert.equal(sha256FileForTest(path.join(first.dataRoot, checkpointDataEntry.path)), checkpointDataEntry.hash, 'corrupt completedData checkpoint entry is rematerialized');
     assert.equal(componentRestoreCalls.length, 2, 'project restore must invoke every component-owned import hook');
     const sampleRestore = componentRestoreCalls.find(call => call.componentId === 'sample-component');
     assert.equal(sampleRestore.mode, 'project');
@@ -477,6 +515,15 @@ const main = async () => {
     assert(recoveryPythonSources.every(source => !`${path.resolve(source)}${path.sep}`.toLocaleLowerCase().startsWith(backupObjectsRoot)), 'Python recovery only receives verified portable copies, never object-store paths');
     assert(recoveryLeases.at(-1).databases.every(database => database.mode === 'exclusive'));
     assert(recoveryActionOptions.some(options => options.signal && Number.isFinite(options.deadlineAt) && options.timeoutMs <= options.deadlineAt - Date.now() + 1000), 'recovery tools must receive the active AbortSignal and remaining deadline');
+    await fs.promises.rm(backedProjectRoot, { recursive: true, force: true });
+    const validRegistryBeforeFailure = await fs.promises.readFile(externalLinksPath, 'utf8');
+    await fs.promises.writeFile(externalLinksPath, '{broken registry', 'utf8');
+    const finalizeBeforeRegistryFailure = componentRestorePhaseCalls.filter(call => call.payload.phase === 'finalize').length;
+    await assert.rejects(service.restoreProject(first.root, replacementRun.result.id, backedProject.id), /注册表|JSON|Unexpected/, 'registry parse failure must surface after the durable database commit');
+    assert.equal(fs.existsSync(path.join(sampleComponentRoot, 'restore-hook-marker.txt')), true, 'post-commit registry failure must not roll component data back');
+    assert(componentRestorePhaseCalls.filter(call => call.payload.phase === 'finalize').length > finalizeBeforeRegistryFailure, 'post-commit failure immediately attempts component token finalize');
+    assert((await fs.promises.readdir(path.join(first.dataRoot, '.component-restore-transactions'))).length > 0, 'committed component journal remains available for replay after registry failure');
+    await fs.promises.writeFile(externalLinksPath, validRegistryBeforeFailure, 'utf8');
     const mediaBarrier = armRecoveryBarrier();
     const mediaRestore = service.restoreDomain(first.root, replacementRun.result.id, 'media');
     await mediaBarrier.admitted;
@@ -535,7 +582,7 @@ const main = async () => {
     const expiredManifestPath = path.join(expiredSnapshotPath, 'manifest.json');
     const expiredManifest = JSON.parse(await fs.promises.readFile(expiredManifestPath, 'utf8'));
     expiredManifest.id = 'expired-preview-test';
-    expiredManifest.createdAt = 1;
+    expiredManifest.createdAt = Date.now() - 400 * 24 * 60 * 60 * 1000;
     await fs.promises.writeFile(expiredManifestPath, JSON.stringify(expiredManifest, null, 2), 'utf8');
     const cleanupPreview = await service.spaceStatus(first.root);
     assert.strictEqual(cleanupPreview.expiredSnapshotCount, 1, 'cleanup preview must count snapshots outside the retention policy');
@@ -545,6 +592,20 @@ const main = async () => {
     assert.strictEqual(cleaned.task.state, 'completed');
     assert.strictEqual(fs.existsSync(orphanPath), false, 'cleanup must remove only unreferenced objects');
     assert.strictEqual(fs.existsSync(expiredSnapshotPath), false, 'cleanup must remove snapshots shown in the preview');
+    for (const fixture of [
+      { id: 'unsafe-future-created-at', mutate: manifest => { manifest.createdAt = Date.now() + 2 * 24 * 60 * 60 * 1000; } },
+      { id: 'unsafe-duplicate-path', mutate: manifest => { manifest.files.push(structuredClone(manifest.files[0])); } },
+    ]) {
+      const unsafePath = path.join(target, STORE_DIRECTORY, 'snapshots', fixture.id);
+      await fs.promises.cp(currentSnapshotPath, unsafePath, { recursive: true });
+      const unsafeManifestPath = path.join(unsafePath, 'manifest.json');
+      const unsafeManifest = JSON.parse(await fs.promises.readFile(unsafeManifestPath, 'utf8'));
+      unsafeManifest.id = fixture.id; fixture.mutate(unsafeManifest);
+      await fs.promises.writeFile(unsafeManifestPath, JSON.stringify(unsafeManifest), 'utf8');
+      await assert.rejects(service.cleanup(first.root), /库存|清单语义无效/, `${fixture.id} must make GC fail closed`);
+      assert.strictEqual(fs.existsSync(currentSnapshotPath), true, 'fail-closed GC must preserve the healthy snapshot');
+      await fs.promises.rm(unsafePath, { recursive: true, force: true });
+    }
 
     currentWorkspace = second;
     config.workspacePath = second.root;

@@ -4,6 +4,8 @@ const path = require('path');
 const CACHE_VERSION = 1;
 const DIRTY_STATE_VERSION = 1;
 const CACHE_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+const OFFLINE_RETRY_MIN_MS = 30 * 1000;
+const OFFLINE_RETRY_MAX_MS = 15 * 60 * 1000;
 const BACKUP_STORE_DIRECTORY = '.photoflow-backup';
 
 const exists = filePath => fs.promises.access(filePath).then(() => true, error => {
@@ -59,6 +61,8 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
   let dirtyLoadPromise = null;
   let dirtyUpdatePromise = Promise.resolve();
   let dirtyCorrupt = false;
+  let offlineNextRetryAt = 0;
+  let offlineRetryDelayMs = OFFLINE_RETRY_MIN_MS;
   const dirtyTaskStates = new Map();
   const loadDirtyGeneration = async () => {
     if (!dirtyLoadPromise) dirtyLoadPromise = fs.promises.readFile(dirtyPath, 'utf8').then(text => {
@@ -145,11 +149,12 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
       : String(config.mediaCache?.directory || '').trim() || path.join(app.getPath('userData'), 'media-cache');
     add('cache', cacheRoot);
     const canonical = await Promise.all(sources.map(async source => {
+      let online = true;
       const physical = await fs.promises.realpath(source.path).catch(async error => {
-        if (await offlinePathError(error, source.path)) return path.resolve(source.path);
+        if (await offlinePathError(error, source.path)) { online = false; return path.resolve(source.path); }
         throw error;
       });
-      return { ...source, physicalKey: comparable(physical) };
+      return { ...source, physicalKey: comparable(physical), online };
     }));
     return canonical.sort((left, right) => left.key.localeCompare(right.key));
   };
@@ -160,6 +165,14 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     try {
       const parsed = JSON.parse(await fs.promises.readFile(cachePath, 'utf8'));
       if (parsed?.version !== CACHE_VERSION || parsed.signature !== signature || !Array.isArray(parsed.sources)) return null;
+      const updatedAt = Number(parsed.updatedAt);
+      if (!Number.isSafeInteger(updatedAt) || updatedAt < 0 || updatedAt > Date.now() + 5 * 60 * 1000
+        || !Number.isSafeInteger(parsed.generation) || parsed.generation < 0
+        || parsed.sources.some(source => !source || typeof source !== 'object'
+          || typeof source.key !== 'string' || typeof source.kind !== 'string' || typeof source.path !== 'string'
+          || !Number.isSafeInteger(Number(source.bytes)) || Number(source.bytes) < 0
+          || !Number.isSafeInteger(Number(source.files)) || Number(source.files) < 0
+          || typeof source.online !== 'boolean')) return null;
       return parsed;
     } catch (error) { if (error?.code === 'ENOENT' || error instanceof SyntaxError) return null; throw error; }
   };
@@ -184,14 +197,16 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     while (pending.length) {
       task.throwIfCancelled();
       const directory = pending.pop();
-      const entries = await fs.promises.readdir(directory, { withFileTypes: true });
-      for (const entry of entries) {
+      const handle = await fs.promises.opendir(directory);
+      try { for await (const entry of handle) {
+        task.throwIfCancelled();
         if (entry.isSymbolicLink()) continue;
         const absolute = path.join(directory, entry.name);
         if (excludedPaths.has(comparable(absolute))) continue;
         if (entry.isDirectory()) pending.push(absolute);
         else if (entry.isFile()) {
           const stat = await fs.promises.stat(absolute);
+          task.throwIfCancelled();
           bytes += stat.size; files += 1;
         }
         state.processed += 1;
@@ -199,7 +214,7 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
           task.report(Math.min(95, 5 + state.processed / 2000), `正在统计文件，占用 ${Math.round(bytes / 1024 / 1024)} MB`, { processedEntries: state.processed });
           await new Promise(resolve => setImmediate(resolve));
         }
-      }
+      } } finally { await handle.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') throw error; }); }
     }
     return { bytes, files, online: true };
   };
@@ -264,9 +279,21 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
     let cache = await readCache(signature);
     const active = backgroundTasks.list().some(task => task.type === 'storage-usage-scan' && ['queued', 'running'].includes(task.state));
     const mutationActive = activeMutationTasks().length > 0;
-    const stale = !cache || Number(cache.generation ?? 0) !== dirtyGeneration || Number(cache.updatedAt || 0) < invalidatedAt || Date.now() - Number(cache.updatedAt || 0) >= CACHE_MAX_AGE_MS;
-    const shouldStart = (force || stale) && !active && !mutationActive;
+    const cachedByKeyForFreshness = new Map((cache?.sources || []).map(item => [item.key, item]));
+    const connectivityChanged = sources.some(source => Boolean(cachedByKeyForFreshness.get(source.key)?.online) !== Boolean(source.online));
+    const offlineResult = sources.some(source => !source.online) || (cache?.sources || []).some(source => source.online === false);
+    const stale = !cache || Number(cache.generation ?? 0) !== dirtyGeneration || Number(cache.updatedAt || 0) < invalidatedAt
+      || Date.now() - Number(cache.updatedAt || 0) >= CACHE_MAX_AGE_MS || connectivityChanged || offlineResult;
+    const now = Date.now();
+    const allSourcesOnline = sources.every(source => source.online);
+    if (allSourcesOnline) { offlineNextRetryAt = 0; offlineRetryDelayMs = OFFLINE_RETRY_MIN_MS; }
+    const retryAllowed = force || connectivityChanged || !offlineResult || now >= offlineNextRetryAt;
+    const shouldStart = (force || stale) && retryAllowed && !active && !mutationActive;
     if (shouldStart) {
+      if (offlineResult) {
+        offlineNextRetryAt = now + offlineRetryDelayMs;
+        offlineRetryDelayMs = Math.min(OFFLINE_RETRY_MAX_MS, offlineRetryDelayMs * 2);
+      }
       void runScan(sources, signature).catch(error => writeLog?.('warn', 'Storage usage scan failed', { error: error.message || String(error) }));
     }
     if (!cache) cache = { updatedAt: 0, sources: [] };
@@ -281,6 +308,7 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
         volumes.set(id, { id, label: root.replace(/[\\/]$/, '') || root, root, online: capacity.online, totalBytes: capacity.totalBytes, freeBytes: capacity.freeBytes, photoflowBytes: 0, items: [] });
       }
       const volume = volumes.get(id);
+      if (!source.online) volume.online = false;
       const cached = cachedByKey.get(source.key);
       const bytes = Number(cached?.bytes || 0);
       const physicalKey = source.physicalKey;
@@ -300,7 +328,8 @@ const createStorageUsageService = ({ app, backgroundTasks, eventBus, getWorkspac
       return priority(left) - priority(right)
         || String(left.label || left.root).localeCompare(String(right.label || right.root), undefined, { numeric: true, sensitivity: 'base' });
     });
-    return { success: true, updatedAt: Number(cache.updatedAt || 0), scanning: nowActive || shouldStart, stale, blockedByMutation: mutationActive, volumes: orderedVolumes };
+    return { success: true, updatedAt: Number(cache.updatedAt || 0), scanning: nowActive || shouldStart, stale, blockedByMutation: mutationActive,
+      ...(offlineResult && offlineNextRetryAt > now ? { nextRetryAt: offlineNextRetryAt } : {}), volumes: orderedVolumes };
   };
 
   backgroundTasks.registerTypeRestartFactory?.('storage-usage-scan', async task => {

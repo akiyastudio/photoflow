@@ -93,7 +93,7 @@ class ManagedProcess extends EventEmitter {
       this.healthTimer = setTimeout(() => {
         if (this.lifecycle !== lifecycle || lifecycle.settled || lifecycle.lastHealthyAt >= this.startedAt) return;
         this._safeLog('warn', 'Managed process health check timed out', this.details({ generation, startupTimeoutMs }));
-        void this.recycle('startup-health-timeout').catch(error => this._safeLog('error', 'Managed process recycle failed', this.details({ generation, error: safeError(error) })));
+        void this.recycle('startup-health-timeout', { restartPolicy: true }).catch(error => this._safeLog('error', 'Managed process recycle failed', this.details({ generation, error: safeError(error) })));
       }, startupTimeoutMs);
       this.healthTimer.unref?.();
     }
@@ -116,7 +116,7 @@ class ManagedProcess extends EventEmitter {
     return true;
   }
 
-  async recycle(reason = 'recycle-requested', { timeoutMs = 2000, rollbackSettleMs = 25 } = {}) {
+  async recycle(reason = 'recycle-requested', { timeoutMs = 2000, rollbackSettleMs = 25, restartPolicy = false } = {}) {
     const lifecycle = this.lifecycle;
     if (!lifecycle || lifecycle.settled) return this.start();
     this._safeLog('warn', 'Managed process recycled', this.details({ reason, generation: lifecycle.generation }));
@@ -127,6 +127,10 @@ class ManagedProcess extends EventEmitter {
     }
     await this._waitForLifecycle(lifecycle, timeoutMs);
     if (this.released || this.stopping || this.supervisor.stopping) return null;
+    if (restartPolicy) {
+      this._scheduleRestart(reason);
+      return null;
+    }
     return this.start();
   }
 
@@ -372,7 +376,13 @@ class ManagedProcess extends EventEmitter {
     this._safeEmit('restarting', { reason, attempt: attempt + 1, delayMs });
     this.restartTimer = setTimeout(() => {
       this.restartTimer = null;
-      if (!this.stopping && !this.released) Promise.resolve(this.start()).catch(error => this._safeLog('error', 'Managed process restart failed', this.details({ error: safeError(error) })));
+      if (this.stopping || this.released || this.supervisor.stopping) return;
+      try {
+        this.start();
+      } catch (error) {
+        this._safeLog('error', 'Managed process restart failed', this.details({ error: safeError(error) }));
+        this._scheduleRestart('restart-start-failed');
+      }
     }, delayMs);
     this.restartTimer.unref?.();
     return true;

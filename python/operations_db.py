@@ -1,6 +1,8 @@
 """File-operations journal database with one-time legacy undo import."""
 
 import argparse
+import base64
+import errno
 import json
 import os
 import sqlite3
@@ -27,6 +29,35 @@ UNDO_ACTIONS = (
 )
 ALL_ACTIONS = ("init", *UNDO_ACTIONS)
 _READY_CACHE = {}
+
+
+def _fsync_parent_directory(path: str) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    try:
+        descriptor = os.open(parent, os.O_RDONLY)
+    except OSError as error:
+        if os.name == "nt" and (getattr(error, "winerror", None) in (5, 6, 87)
+                                or error.errno in (errno.EACCES, errno.EINVAL, errno.EBADF)):
+            return
+        raise
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        if not (os.name == "nt" and (getattr(error, "winerror", None) in (5, 6, 87)
+                                     or error.errno in (errno.EACCES, errno.EINVAL, errno.EBADF))):
+            raise
+    finally:
+        os.close(descriptor)
+
+
+def _durable_replace(source: str, destination: str) -> None:
+    descriptor = os.open(source, os.O_RDWR)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(source, destination)
+    _fsync_parent_directory(destination)
 
 
 def _file_identity(path: str):
@@ -311,7 +342,7 @@ def snapshot(source: str, destination: str):
         result = {"success": True, "schemaVersion": int(schema[0] if schema else 0)}
         target_db.close()
         target_db = None
-        os.replace(staged, destination_path)
+        _durable_replace(staged, destination_path)
         return result
     finally:
         if target_db is not None:
@@ -336,7 +367,18 @@ def run_server():
             response = {"id": request_id, "success": True, "result": result}
         except Exception as error:
             response = error_response(request_id, error)
-        print(json.dumps(response, ensure_ascii=False), flush=True)
+        encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        chunk_size = 128 * 1024
+        if len(encoded) <= chunk_size:
+            print(encoded.decode("utf-8"), flush=True)
+            continue
+        total = (len(encoded) + chunk_size - 1) // chunk_size
+        for index in range(total):
+            chunk = encoded[index * chunk_size:(index + 1) * chunk_size]
+            print(json.dumps({
+                "id": request_id, "protocol": "json-chunk-v1", "index": index,
+                "total": total, "data": base64.b64encode(chunk).decode("ascii"),
+            }, separators=(",", ":")), flush=True)
 
 
 def run(args_list=None):

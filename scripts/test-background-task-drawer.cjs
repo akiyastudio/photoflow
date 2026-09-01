@@ -35,7 +35,8 @@ for (const attribute of ['aria-valuenow', 'aria-valuemin', 'aria-valuemax', 'ari
 
 assert(indicator.includes('aria-expanded={open}') && indicator.includes('aria-label="关闭后台任务抽屉"') && indicator.includes('triggerRef.current?.focus()'), 'drawer open state, close action, Escape, and focus restoration must remain accessible');
 for (const action of ['pauseBackgroundTask', 'continueBackgroundTask', 'cancelBackgroundTask', 'retryBackgroundTask', 'resumeBackgroundTask', 'restartBackgroundTask', 'dismissBackgroundTask']) assert(indicator.includes(action), `task drawer action missing: ${action}`);
-assert(taskToast.includes('visibleTasks.map(task => <FileTransferToastItem key={task.id}'), 'stable task IDs must continue updating the existing toast card in place');
+assert(taskToast.includes('visibleTasks.map(task => <FileTransferToastItem key={taskToastInstanceKey(task)}'), 'task cards must use generation-unique identities when a fixed task ID is reused');
+assert(toastView.includes("import { taskToastInstanceKey } from './features/background-tasks/task-toast-model'") && toastView.includes('snapshot.tasks.map(task => <FileTransferToastItem key={taskToastInstanceKey(task)}'), 'the native Toast view must use the same generation-unique task identity');
 assert(toast.includes('top-toast-stack--model') && toastView.includes('data-global-overlay-layer="toast"') && /\.top-toast-stack\s*\{[\s\S]*?z-index:var\(--app-layer-toast\);/.test(styles), 'the host model must be hidden while the native Toast view remains the global top layer');
 assert(!indicator.includes('BrowserWindow') && !indicator.includes('window.open(') && !vite.includes('backgroundTask') && !vite.includes('background-task'), 'the drawer must not add a renderer entry or top-level window');
 assert(!/background[ -]?task[\s\S]{0,160}new BrowserWindow/i.test(electronMain), 'the main process must not create a background-task BrowserWindow');

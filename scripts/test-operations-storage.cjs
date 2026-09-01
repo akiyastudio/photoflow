@@ -67,6 +67,31 @@ try {
     '--payload', '{}',
   ]).record.id, 'owned-undo');
 
+  const replaceFailureDestination = path.join(temporary, 'snapshots', 'replace-failure.sqlite3');
+  fs.copyFileSync(snapshot, replaceFailureDestination);
+  const beforeReplaceFailure = fs.readFileSync(replaceFailureDestination);
+  const durabilityProbe = spawnSync(python, ['-c', [
+    'import os,sys',
+    `sys.path.insert(0, ${JSON.stringify(path.join(root, 'python'))})`,
+    'import operations_db',
+    'calls=[]',
+    'original_fsync=operations_db.os.fsync',
+    'operations_db.os.fsync=lambda fd: calls.append(fd)',
+    "operations_db.os.replace=lambda *_args: (_ for _ in ()).throw(OSError('injected replace failure'))",
+    'try:',
+    '  operations_db.snapshot(sys.argv[1],sys.argv[2])',
+    "  raise AssertionError('replace failure ignored')",
+    'except OSError as error:',
+    "  assert 'injected replace failure' in str(error)",
+    'finally:',
+    '  operations_db.os.fsync=original_fsync',
+    'assert calls',
+    "print('operations snapshot durable replace failure test passed')",
+  ].join('\n'), operationsDatabase, replaceFailureDestination], { encoding: 'utf8' });
+  if (durabilityProbe.status !== 0) throw new Error(durabilityProbe.stderr || durabilityProbe.stdout);
+  assert.match(durabilityProbe.stdout, /durable replace failure test passed/);
+  assert.deepStrictEqual(fs.readFileSync(replaceFailureDestination), beforeReplaceFailure, 'replace failure preserves the old snapshot');
+
   console.log('Operations storage isolation tests passed.');
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });

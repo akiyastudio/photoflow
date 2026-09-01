@@ -42,7 +42,7 @@ UNDO_ACTIONS = ("undo_record_add", "undo_record_latest", "undo_record_remove", "
 ALL_ACTIONS = ("init", *CATALOG_ACTIONS, *MEDIA_ACTIONS, *PROGRESS_ACTIONS, *TRACKING_ACTIONS, *compatibility_action_names(), *UNDO_ACTIONS)
 READ_ONLY_ACTIONS = frozenset((
     "progress_snapshot", "media_versions_snapshot", "tracking_session_get", "tracking_commit_resources", "version_tree_layout_get",
-    "media_sync_prepare", "progress_stale_prepare",
+    "media_sync_prepare", "progress_stale_prepare", "media_version_delete_scope",
 ))
 
 if len(ALL_ACTIONS) != len(set(ALL_ACTIONS)):

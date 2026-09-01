@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import json
 import os
 import shutil
@@ -43,6 +44,45 @@ REQUIRED_TABLES = {
     "versioning": {"meta", "versions"},
     "operations": {"meta", "undo_records"},
 }
+REQUIRED_COLUMNS = {
+    "media": {
+        "meta": {"key", "value"}, "photos": {"id", "original_file_path"},
+        "file_records": {"id", "owner_type", "owner_id", "current_path"},
+        "media_incremental_snapshots": {"snapshot_id", "project_id", "state"},
+        "media_incremental_snapshot_files": {"snapshot_id", "file_path_key"},
+        "media_incremental_snapshot_scopes": {"snapshot_id"},
+        "media_incremental_snapshot_baseline": {"snapshot_id", "version_id"},
+        "media_incremental_snapshot_batches": {"snapshot_id", "batch_index"},
+    },
+    "versioning": {
+        "meta": {"key", "value"}, "versions": {"id", "photo_id", "file_path", "file_path_key"},
+        "version_batches": {"id", "project_id"}, "progress_folders": {"id", "project_id", "folder_path"},
+        "batch_file_operations": {"id", "batch_id"}, "batch_items": {"id", "batch_id", "photo_id", "version_id"},
+        "version_compare_history": {"id", "photo_id", "left_version_id", "right_version_id"},
+        "tracking_sessions": {"id", "project_id"}, "tracking_session_items": {"id", "session_id"},
+        "legacy_selection_relation_repairs": {"progress_id", "project_id"},
+        "version_tree_layouts": {"project_id", "scope_key"},
+        "version_tree_node_positions": {"project_id", "scope_key", "node_key"},
+        "version_graph_edges": {"id", "project_id", "source_progress_id", "target_progress_id"},
+        "media_import_graph_sessions": {"project_id", "import_session_id"},
+        "media_import_artifact_slots": {"project_id", "progress_id", "import_slot"},
+        "progress_folder_relocations": {"id", "project_id", "progress_id"},
+        "progress_external_link_renames": {"id", "project_id", "progress_id"},
+    },
+    "operations": {"meta": {"key", "value"}, "undo_records": {"id", "kind", "payload_json", "state"}},
+}
+LEGACY_REQUIRED_COLUMNS = {
+    "media": {
+        "meta": {"key", "value"},
+        "photos": {"id", "project_id", "media_type", "original_name", "display_name",
+                   "original_file_path", "created_at", "updated_at"},
+    },
+    "versioning": {
+        "meta": {"key", "value"},
+        "versions": {"id", "photo_id", "version_number", "version_name", "file_path",
+                     "file_path_key", "created_at", "updated_at"},
+    },
+}
 SUPPORTED_SCHEMA_VERSIONS = {"media": 1, "versioning": 1, "operations": 1}
 for extension in run_compatibility_hooks("recovery_declaration"):
     PATH_COLUMNS.update(extension.get("pathColumns") or {})
@@ -70,6 +110,35 @@ def _same_file(left: str, right: str) -> bool:
         return False
 
 
+def _fsync_parent_directory(path: str) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    try:
+        descriptor = os.open(parent, os.O_RDONLY)
+    except OSError as error:
+        if os.name == "nt" and (getattr(error, "winerror", None) in (5, 6, 87)
+                                or error.errno in (errno.EACCES, errno.EINVAL, errno.EBADF)):
+            return
+        raise
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        if not (os.name == "nt" and (getattr(error, "winerror", None) in (5, 6, 87)
+                                     or error.errno in (errno.EACCES, errno.EINVAL, errno.EBADF))):
+            raise
+    finally:
+        os.close(descriptor)
+
+
+def _durable_replace(source: str, destination: str) -> None:
+    descriptor = os.open(source, os.O_RDWR)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(source, destination)
+    _fsync_parent_directory(destination)
+
+
 def verify(path: str, domain: str | None = None) -> dict:
     absolute = os.path.abspath(path)
     if not os.path.isfile(absolute):
@@ -84,8 +153,28 @@ def verify(path: str, domain: str | None = None) -> dict:
             foreign_keys = db.execute("PRAGMA foreign_key_check").fetchall()
             schema_version = int(schema[0]) if schema else 0
             errors = []
+            legacy_compatible = False
             if domain:
-                missing = REQUIRED_TABLES.get(domain, {"meta"}) - set(tables)
+                # Identity-bearing schema-1 stores use the complete extracted
+                # domain contract. Identity-less stores are accepted as legacy
+                # snapshots, but still need their historic anchor tables and
+                # key columns so a random SQLite file cannot be restored.
+                anchor_tables = set(REQUIRED_TABLES.get(domain, {"meta"}))
+                current_tables = anchor_tables | set(DOMAIN_TABLES.get(domain, ()))
+                actual_tables = set(tables)
+                legacy_columns_valid = True
+                for table, required_columns in LEGACY_REQUIRED_COLUMNS.get(domain, {}).items():
+                    available = ({row[1] for row in db.execute(f'PRAGMA table_info("{table}")').fetchall()}
+                                 if table in actual_tables else set())
+                    legacy_columns_valid = legacy_columns_valid and required_columns <= available
+                legacy_compatible = bool(
+                    domain in DOMAIN_TABLES and identity is None
+                    and schema_version == SUPPORTED_SCHEMA_VERSIONS.get(domain)
+                    and anchor_tables <= actual_tables and actual_tables <= current_tables
+                    and not current_tables <= actual_tables and legacy_columns_valid
+                )
+                required_tables = anchor_tables if legacy_compatible else current_tables
+                missing = required_tables - set(tables)
                 if missing:
                     errors.append(f"missing required tables: {sorted(missing)}")
                 if identity is not None and identity[0] != domain:
@@ -101,11 +190,19 @@ def verify(path: str, domain: str | None = None) -> dict:
                     errors.append("invalid schema version")
                 if schema_version > SUPPORTED_SCHEMA_VERSIONS.get(domain, schema_version):
                     errors.append(f"future schema version: {schema_version}")
+                column_contract = LEGACY_REQUIRED_COLUMNS.get(domain, {}) if legacy_compatible else REQUIRED_COLUMNS.get(domain, {})
+                for table, required_columns in column_contract.items():
+                    if table not in tables or table not in required_tables:
+                        continue
+                    available = {row[1] for row in db.execute(f'PRAGMA table_info("{table}")').fetchall()}
+                    missing_columns = required_columns - available
+                    if missing_columns:
+                        errors.append(f"missing required columns in {table}: {sorted(missing_columns)}")
             if foreign_keys:
                 errors.append(f"foreign key violations: {len(foreign_keys)}")
             success = quick == ["ok"] and not errors
             return {
-                "success": success, "state": "healthy" if success else "incompatible" if errors else "corrupt",
+                "success": success, "state": "legacy-compatible" if success and legacy_compatible else "healthy" if success else "incompatible" if errors else "corrupt",
                 "path": absolute, "quickCheck": quick[:10], "schemaVersion": schema_version,
                 "domainIdentity": identity[0] if identity else "", "tables": tables, "errors": errors,
                 "foreignKeyErrors": len(foreign_keys),
@@ -136,7 +233,7 @@ def snapshot(source: str, destination: str, domain: str | None = None) -> dict:
         result = verify(staged, domain)
         if not result["success"]:
             raise RuntimeError(f"domain snapshot verification failed: {result}")
-        os.replace(staged, destination_path)
+        _durable_replace(staged, destination_path)
     finally:
         if target_db is not None:
             target_db.close()
@@ -249,8 +346,77 @@ def _rebase(db: sqlite3.Connection, domain: str, replacements, *, project_id: st
                 db.execute(f'DELETE FROM "{journal}"{clause}', values)
 
 
+def _upgrade_identityless_legacy_domain(path: str, domain: str) -> None:
+    """Rebuild a validated legacy subset into the current complete schema."""
+    if domain not in DOMAIN_TABLES:
+        raise RuntimeError(f"no legacy domain migration registry for {domain}")
+    source_path = os.path.abspath(path)
+    rebuilt = f"{source_path}.legacy-upgrade-{uuid.uuid4().hex}.tmp"
+    try:
+        import workspace_db
+        from workspace_domain_storage import attach_and_migrate, database_path_for_workspace_database
+        with tempfile.TemporaryDirectory(prefix="photoflow-domain-legacy-schema-") as temporary:
+            root = os.path.join(temporary, "workspace")
+            os.makedirs(root, exist_ok=True)
+            core = os.path.join(temporary, "workspace-data", "template.sqlite3")
+            template = workspace_db.connect(root, core, include_domains=False)
+            try:
+                attach_and_migrate(template, core)
+            finally:
+                template.close()
+            generated = database_path_for_workspace_database(core, domain)
+            snapshot(generated, rebuilt, domain)
+
+        target = _connect(rebuilt)
+        try:
+            target.execute("PRAGMA foreign_keys=OFF")
+            target.execute("ATTACH DATABASE ? AS legacy_domain", (source_path,))
+            source_tables = {row[0] for row in target.execute(
+                "SELECT name FROM legacy_domain.sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            ).fetchall()}
+            target.execute("BEGIN IMMEDIATE")
+            for table in DOMAIN_TABLES[domain]:
+                if table not in source_tables:
+                    continue
+                source_columns = _columns(target, "legacy_domain", table)
+                target_columns = _columns(target, "main", table)
+                columns = [column for column in source_columns if column in target_columns]
+                if not columns:
+                    continue
+                projection = ",".join(f'"{column}"' for column in columns)
+                target.execute(
+                    f'INSERT INTO main."{table}"({projection}) SELECT {projection} FROM legacy_domain."{table}"'
+                )
+            if "meta" in source_tables:
+                target.execute(
+                    """INSERT OR REPLACE INTO main.meta(key,value)
+                       SELECT key,value FROM legacy_domain.meta
+                       WHERE key NOT IN ('schema_version','domain_identity')"""
+                )
+            target.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('schema_version',?)", (str(SUPPORTED_SCHEMA_VERSIONS[domain]),))
+            target.execute("INSERT OR REPLACE INTO meta(key,value) VALUES('domain_identity',?)", (domain,))
+            target.commit()
+            target.execute("DETACH DATABASE legacy_domain")
+        except Exception:
+            if target.in_transaction: target.rollback()
+            raise
+        finally:
+            target.close()
+        upgraded = verify(rebuilt, domain)
+        if not upgraded["success"] or upgraded["state"] != "healthy":
+            raise RuntimeError(f"legacy {domain} migration did not produce a current store: {upgraded}")
+        _durable_replace(rebuilt, source_path)
+    finally:
+        for suffix in ("", "-wal", "-shm"):
+            try: os.remove(rebuilt + suffix)
+            except FileNotFoundError: pass
+
+
 def _prepare_staged_domain(path: str, domain: str) -> dict:
     initial = verify(path, domain)
+    if initial.get("state") == "legacy-compatible":
+        _upgrade_identityless_legacy_domain(path, domain)
+        initial = verify(path, domain)
     if initial.get("schemaVersion", 0) < SUPPORTED_SCHEMA_VERSIONS.get(domain, 0):
         if domain == "operations":
             from operations_db import _connect as migrate_operations
@@ -264,7 +430,10 @@ def _prepare_staged_domain(path: str, domain: str) -> dict:
     db = _connect(path)
     try:
         db.execute("BEGIN IMMEDIATE")
-        db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('domain_identity',?)", (domain,))
+        existing = {row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'").fetchall()}
+        complete_contract = domain == "operations" or (domain in DOMAIN_TABLES and set(DOMAIN_TABLES[domain]) <= existing)
+        if complete_contract:
+            db.execute("INSERT OR IGNORE INTO meta(key,value) VALUES('domain_identity',?)", (domain,))
         schema = int(db.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()[0])
         supported = SUPPORTED_SCHEMA_VERSIONS.get(domain, schema)
         if schema > supported:
@@ -316,13 +485,13 @@ def _publish_staged(staged: str, destination: str, domain: str, backup_prefix: s
             sidecars = [suffix for suffix in ("-wal", "-shm") if os.path.exists(destination_path + suffix)]
             if sidecars:
                 raise RuntimeError(f"cannot safely publish over unavailable database with sidecars: {sidecars}")
-    os.replace(staged, destination_path)
+    _durable_replace(staged, destination_path)
     result = verify(destination_path, domain)
     if not result["success"]:
         if backup and verify(backup, domain)["success"]:
             rescue = f"{destination_path}.rollback-{uuid.uuid4().hex}.tmp"
             snapshot(backup, rescue, domain)
-            os.replace(rescue, destination_path)
+            _durable_replace(rescue, destination_path)
         raise RuntimeError(f"published domain store is not healthy: {result}")
     return backup
 
@@ -595,9 +764,9 @@ def main(argv=None):
     args = parser.parse_args(argv)
     replacements = [(args.old_root, args.new_root), (args.old_data_root, args.new_data_root)]
     if args.action == "verify":
-        result = verify(args.destination)
+        result = verify(args.destination, args.domain)
     elif args.action == "snapshot":
-        result = snapshot(args.source, args.destination)
+        result = snapshot(args.source, args.destination, args.domain)
     elif args.action == "restore-workspace":
         result = restore_workspace(args.source, args.destination, args.domain, replacements)
     elif args.action == "restore-project":

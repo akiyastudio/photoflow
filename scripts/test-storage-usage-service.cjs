@@ -5,9 +5,37 @@ const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
 const { createStorageUsageService } = require('../electron/services/storage-usage-service.cjs');
+const { registerStorageUsageIpc } = require('../electron/modules/storage-usage-ipc.cjs');
 const { loadOrCreateInstallationId, resolveMediaCacheNamespace } = require('../electron/services/media-cache-namespace.cjs');
 
 const run = async () => {
+  const ipcHandlers = new Map();
+  const ipcMain = { handle: (channel, handler) => ipcHandlers.set(channel, handler), removeHandler: channel => ipcHandlers.delete(channel) };
+  const trustedWebContents = { mainFrame: {}, isDestroyed: () => false };
+  const mainWindow = { isDestroyed: () => false, webContents: trustedWebContents };
+  const disposeIpc = registerStorageUsageIpc({
+    ipcMain,
+    storageUsageService: { overview: async force => ({ success: true, force }) },
+    getMainWindow: () => mainWindow,
+  });
+  const overviewHandler = ipcHandlers.get('storage-usage-overview');
+  assert.deepEqual(await overviewHandler({ sender: trustedWebContents, senderFrame: trustedWebContents.mainFrame }, true), { success: true, force: true });
+  await assert.rejects(overviewHandler({ sender: { mainFrame: {}, isDestroyed: () => false } }, false), /Unauthorized IPC sender/);
+  disposeIpc();
+  const missingDependencyHandlers = new Map();
+  registerStorageUsageIpc({
+    ipcMain: { handle: (channel, handler) => missingDependencyHandlers.set(channel, handler), removeHandler() {} },
+    storageUsageService: null,
+    getMainWindow: () => mainWindow,
+  });
+  const unavailable = await missingDependencyHandlers.get('storage-usage-overview')({ sender: trustedWebContents, senderFrame: trustedWebContents.mainFrame }, false);
+  assert.equal(unavailable.code, 'STORAGE_USAGE_UNAVAILABLE', 'missing storage service dependencies must fail closed');
+  const missingWindowHandlers = new Map();
+  registerStorageUsageIpc({
+    ipcMain: { handle: (channel, handler) => missingWindowHandlers.set(channel, handler), removeHandler() {} },
+    storageUsageService: { overview: async () => ({ success: true }) },
+  });
+  await assert.rejects(missingWindowHandlers.get('storage-usage-overview')({ sender: trustedWebContents }, false), /Unauthorized IPC sender/, 'missing main-window identity must fail closed');
   const root = await fs.promises.mkdtemp(path.join(os.tmpdir(), 'photoflow-storage-usage-'));
   try {
     const workspace = path.join(root, 'workspace');
@@ -41,9 +69,11 @@ const run = async () => {
     await fs.promises.writeFile(path.join(foreignCacheNamespace, 'foreign-thumb.jpg'), 'x'.repeat(101));
     const tasks = [];
     let pending;
+    let scanRuns = 0;
     const backgroundTasks = {
       list: () => tasks,
       run: (definition, worker) => {
+        scanRuns += 1;
         const task = { id: 'scan', type: definition.type, state: 'running', createdAt: Date.now() };
         tasks.push(task);
         pending = (async () => {
@@ -99,6 +129,28 @@ const run = async () => {
     await pending;
     const refreshed = await service.overview(false);
     assert(refreshed.volumes.flatMap(volume => volume.items).reduce((sum, item) => sum + item.bytes, 0) > items.reduce((sum, item) => sum + item.bytes, 0));
+    const cachePath = path.join(userData, 'storage-usage-cache.json');
+    const malformedCache = JSON.parse(await fs.promises.readFile(cachePath, 'utf8'));
+    malformedCache.updatedAt = 'not-a-time';
+    await fs.promises.writeFile(cachePath, JSON.stringify(malformedCache), 'utf8');
+    const runsBeforeMalformedCache = scanRuns;
+    assert.equal((await service.overview(false)).scanning, true, 'invalid cache fields must be rejected and remeasured');
+    await pending;
+    assert.equal(scanRuns, runsBeforeMalformedCache + 1);
+    const offlineInspiration = `${inspiration}-offline`;
+    await fs.promises.rename(inspiration, offlineInspiration);
+    const runsBeforeOffline = scanRuns;
+    assert.equal((await service.overview(false)).scanning, true, 'offline transition triggers one immediate refresh');
+    await pending;
+    const offlineOverview = await service.overview(false);
+    assert.equal(offlineOverview.stale, true, 'offline measurements are never reported as fresh success');
+    assert.equal(offlineOverview.scanning, false, 'offline retry backoff prevents a hot scan loop');
+    await service.overview(false);
+    assert.equal(scanRuns, runsBeforeOffline + 1, 'consecutive overview calls start only one offline scan inside the backoff window');
+    await fs.promises.rename(offlineInspiration, inspiration);
+    assert.equal((await service.overview(false)).scanning, true, 'online transition bypasses offline backoff immediately');
+    assert.equal(scanRuns, runsBeforeOffline + 2);
+    await pending;
     console.log('Storage usage service integration tests passed.');
   } finally {
     await fs.promises.rm(root, { recursive: true, force: true });

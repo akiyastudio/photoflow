@@ -77,6 +77,7 @@ const run = async () => {
   assert.deepEqual(followups, [['first.jpg'], ['second.jpg']], 'changes received during success remain pending for a follow-up run');
   assert.equal(rerun.cancel('project'), true);
   runner.stop();
+  assert.throws(() => runner.enqueue('project', { paths: ['late.jpg'] }), error => error.code === 'DIRTY_RUNNER_STOPPED', 'stop must permanently reject late enqueue calls');
   console.log('dirty coalescing runner tests passed');
 };
 

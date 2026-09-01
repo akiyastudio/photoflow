@@ -1518,13 +1518,14 @@ def test_detached_reconcile_repairs_legacy_dangling_projections(root: Path) -> N
     )
     db.commit()
 
-    def clone_row(table: str, source_id: str, replacement: dict) -> None:
-        source = db.execute(f"SELECT * FROM {table} WHERE id=?", (source_id,)).fetchone()
+    def clone_row(table: str, source_id: str, replacement: dict, connection=None) -> None:
+        target = connection or db
+        source = target.execute(f"SELECT * FROM {table} WHERE id=?", (source_id,)).fetchone()
         assert source is not None
         values = dict(source)
         values.update(replacement)
         columns = list(values)
-        db.execute(
+        target.execute(
             f"INSERT INTO {table}({','.join(columns)}) VALUES({','.join('?' for _ in columns)})",
             tuple(values[column] for column in columns),
         )
@@ -1614,9 +1615,28 @@ def test_detached_reconcile_repairs_legacy_dangling_projections(root: Path) -> N
         clone_row("tracking_session_items", valid_item_id, {
             "id": "missing-committed-batch-item", "session_id": "missing-committed-batch-session",
         })
-        clone_row("tracking_session_items", valid_item_id, {
-            "id": "missing-session-item", "session_id": "missing-session",
-        })
+        db.commit()
+        # Historical detached versioning stores could contain an item whose
+        # owning session was already absent.  Build that legacy-only state via
+        # its physical database instead of weakening FK enforcement on the
+        # active workspace connection.
+        versioning_database = Path(workspace_db.database_path_for_workspace_database(str(database), "versioning"))
+        legacy = sqlite3.connect(versioning_database)
+        legacy.row_factory = sqlite3.Row
+        try:
+            legacy.execute("PRAGMA foreign_keys=OFF")
+            assert legacy.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+            clone_row("tracking_session_items", valid_item_id, {
+                "id": "missing-session-item", "session_id": "missing-session",
+            }, legacy)
+            legacy.commit()
+            assert legacy.execute(
+                """SELECT COUNT(*) FROM tracking_session_items item
+                   LEFT JOIN tracking_sessions session ON session.id=item.session_id
+                   WHERE item.id='missing-session-item' AND session.id IS NULL"""
+            ).fetchone()[0] == 1, "legacy fixture must contain the intended orphan tracking item"
+        finally:
+            legacy.close()
 
         valid_edge = workspace_db.version_graph_edge_create(db, {
             "projectId": "reconcile-project", "sourceProgressId": progress["id"],
@@ -1652,10 +1672,23 @@ def test_detached_reconcile_repairs_legacy_dangling_projections(root: Path) -> N
             "SELECT COUNT(*) FROM batch_items WHERE batch_id=?", (missing_batch_id,)
         ).fetchone()[0]
         assert missing_batch_item_count > 0
-        db.execute("DELETE FROM version_batches WHERE id=?", (missing_batch_id,))
-        db.execute("DELETE FROM progress_folders WHERE id=?", (disposable_progress["id"],))
-        db.execute("DELETE FROM progress_folders WHERE id=?", (disposable_original["id"],))
         db.commit()
+        legacy = sqlite3.connect(versioning_database)
+        try:
+            legacy.execute("PRAGMA foreign_keys=OFF")
+            assert legacy.execute("PRAGMA foreign_keys").fetchone()[0] == 0
+            legacy.execute("DELETE FROM version_batches WHERE id=?", (missing_batch_id,))
+            legacy.execute("DELETE FROM progress_folders WHERE id=?", (disposable_progress["id"],))
+            legacy.execute("DELETE FROM progress_folders WHERE id=?", (disposable_original["id"],))
+            legacy.commit()
+            assert legacy.execute(
+                """SELECT COUNT(*) FROM batch_items item
+                   LEFT JOIN version_batches batch ON batch.id=item.batch_id
+                   WHERE item.batch_id=? AND batch.id IS NULL""",
+                (missing_batch_id,),
+            ).fetchone()[0] == missing_batch_item_count, "legacy fixture must retain detached batch items"
+        finally:
+            legacy.close()
         try:
             workspace_db._check_integrity(db, force=True)
             raise AssertionError("integrity accepted historical detached-store dangling projections")

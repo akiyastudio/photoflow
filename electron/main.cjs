@@ -1947,7 +1947,7 @@ app.whenReady().then(async () => {
   const archiveService = createArchiveService({ backgroundTasks, movePathAtomic, readSavedConfig, workspaceRepository, writeLog });
   registerArchiveIpc({ archiveService, dialog, ipcMain, getMainWindow: () => mainWindow, shell, writeLog });
   const storageUsageService = createStorageUsageService({ app, backgroundTasks, eventBus, getWorkspaceDatabasePath, getWorkspaceDataRoot, readSavedConfig, resolveMediaCacheDirectory: resolveMediaCacheDir, writeLog });
-  registerStorageUsageIpc({ ipcMain, storageUsageService });
+  registerStorageUsageIpc({ ipcMain, storageUsageService, getMainWindow: () => mainWindow });
   thumbnailService.activateStartupRecovery();
   const startupRecovery = thumbnailService.ensureStartupRecovery(startupMediaCacheConfig);
   await startupRecovery.admitted.catch(error => {

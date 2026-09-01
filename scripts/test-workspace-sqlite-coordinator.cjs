@@ -55,6 +55,12 @@ const run = async () => {
   assert.deepEqual(new Set(progressLocations.databases.map(item => normalizeDatabasePath(item.path))), new Set([
     'C:/Data/workspace.sqlite3', domainDatabasePath('C:/Data/workspace.sqlite3', 'versioning'),
   ].map(normalizeDatabasePath)), 'location synchronization locks catalog and versioning only');
+  const deleteScope = policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'media_version_delete_scope' });
+  assert.equal(deleteScope.mode, 'read', 'version delete scope is a pure preflight query');
+  assert.equal(deleteScope.idempotent, false, 'pure queries do not need durable write-operation receipts');
+  assert(deleteScope.databases.every(database => database.mode === 'read'));
+  assert.equal(policy.classify({ database: 'C:/Data/workspace.sqlite3', action: 'batch_commit_compare' }).idempotent, false,
+    'batch compare timeout remains OUTCOME_UNKNOWN unless the caller supplies the same operationId');
   const mediaPath = domainDatabasePath('C:/Data/workspace.sqlite3', 'media');
   const mediaIsolationCoordinator = new WorkspaceSqliteCoordinator();
   const mediaWriterStarted = deferred(); const releaseMediaWriter = deferred();
@@ -147,6 +153,25 @@ const run = async () => {
   assert.equal(activeOptions.signal, activeSignal, 'AbortSignal must reach the active database request');
   assert(activeOptions.deadlineAt >= queuedAt + 150 && activeOptions.deadlineAt <= queuedAt + 250);
   assert(activeOptions.timeoutMs < 190, 'active request receives only the deadline remaining after coordinator queueing');
+
+  const expiredCoordinator = new WorkspaceSqliteCoordinator();
+  const expiredBlockerStarted = deferred(); const releaseExpiredBlocker = deferred();
+  const expiredBlocker = expiredCoordinator.run({ databases: [{ path: 'C:/Data/expired.sqlite3', mode: 'write' }] }, async () => {
+    expiredBlockerStarted.resolve(); await releaseExpiredBlocker.promise;
+  });
+  await expiredBlockerStarted.promise;
+  let expiredExecutions = 0;
+  const expiredClient = new CoordinatedDatabaseClient({
+    coordinator: expiredCoordinator, operationPolicy: policy,
+    getDatabasePath: () => 'C:/Data/expired.sqlite3', scriptName: 'workspace_db.py',
+    execute: async () => { expiredExecutions += 1; },
+  });
+  await assert.rejects(
+    expiredClient.call('root', 'legacy_action', {}, { timeoutMs: 15 }),
+    error => error.code === 'DATABASE_COORDINATOR_TIMEOUT',
+  );
+  assert.equal(expiredExecutions, 0, 'a request that expires in the single-flight/lease queue must never reach or terminate the worker');
+  releaseExpiredBlocker.resolve(); await expiredBlocker;
 
   const quarantineCoordinator = new WorkspaceSqliteCoordinator();
   quarantineCoordinator.quarantine([{ path: 'C:/Data/quarantined.sqlite3', mode: 'exclusive' }], new Error('termination failed'));

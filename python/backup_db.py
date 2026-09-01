@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
@@ -73,6 +74,35 @@ def _same_file(left: str, right: str) -> bool:
         return False
 
 
+def _fsync_parent_directory(path: str) -> None:
+    parent = os.path.dirname(os.path.abspath(path))
+    try:
+        descriptor = os.open(parent, os.O_RDONLY)
+    except OSError as error:
+        if os.name == "nt" and (getattr(error, "winerror", None) in (5, 6, 87)
+                                or error.errno in (errno.EACCES, errno.EINVAL, errno.EBADF)):
+            return
+        raise
+    try:
+        os.fsync(descriptor)
+    except OSError as error:
+        if not (os.name == "nt" and (getattr(error, "winerror", None) in (5, 6, 87)
+                                     or error.errno in (errno.EACCES, errno.EINVAL, errno.EBADF))):
+            raise
+    finally:
+        os.close(descriptor)
+
+
+def _durable_replace(source: str, destination: str) -> None:
+    descriptor = os.open(source, os.O_RDWR)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+    os.replace(source, destination)
+    _fsync_parent_directory(destination)
+
+
 def verify_database(path: str, *, maximum_schema_version: int | None = None, allow_foreign_key_errors: bool = False) -> dict:
     absolute = os.path.abspath(path)
     if not os.path.isfile(absolute):
@@ -92,6 +122,22 @@ def verify_database(path: str, *, maximum_schema_version: int | None = None, all
             if maximum_schema_version is not None and schema_version > maximum_schema_version:
                 errors.append(f"future schema version: {schema_version}")
             if foreign_keys and not allow_foreign_key_errors: errors.append(f"foreign key violations: {len(foreign_keys)}")
+            required_columns = {
+                "meta": {"key", "value"},
+                "projects": {"id", "name", "status", "relative_path", "is_deleted", "created_at", "updated_at"},
+            }
+            if maximum_schema_version is not None and schema_version == maximum_schema_version:
+                for required_table in ("project_properties", "project_tags"):
+                    if required_table not in tables:
+                        errors.append(f"missing required table for current schema: {required_table}")
+                required_columns["projects"].update({"availability", "missing_since", "extra_json"})
+            for table, columns in required_columns.items():
+                if table not in tables:
+                    continue
+                available = {row[1] for row in db.execute(f'PRAGMA table_info("{table}")').fetchall()}
+                absent = columns - available
+                if absent:
+                    errors.append(f"missing required columns in {table}: {sorted(absent)}")
             success = quick == ["ok"] and not errors
             return {"success": success, "path": absolute, "state": "healthy" if success else "incompatible",
                     "schemaVersion": schema_version, "quickCheck": quick[:10], "errors": errors,
@@ -121,7 +167,7 @@ def _consistent_copy(source: str, destination: str) -> dict:
         copied = verify_database(staged)
         if not copied["success"]:
             raise RuntimeError(f"database copy verification failed: {copied}")
-        os.replace(staged, destination_path)
+        _durable_replace(staged, destination_path)
         return copied
     finally:
         if target_db is not None: target_db.close()
@@ -178,7 +224,7 @@ def snapshot(source: str, destination: str, media: str = "") -> dict:
         staged_status = verify_database(staged)
         if not staged_status["success"]:
             raise RuntimeError(f"数据库快照验证失败：{staged_status}")
-        os.replace(staged, destination)
+        _durable_replace(staged, destination)
         return result
     finally:
         if target_db is not None:
@@ -335,14 +381,14 @@ def _publish_staged(staged: str, destination: str, workspace_root: str, backup_p
         backup = f"{destination}.{backup_prefix}.{uuid.uuid4().hex}.bak"
         _consistent_copy(destination, backup)
         _checkpoint_live(destination)
-    os.replace(staged, destination)
+    _durable_replace(staged, destination)
     try:
         _upgrade_and_verify_staged(destination, workspace_root)
     except Exception:
         if backup:
             rescue = f"{destination}.rollback-{uuid.uuid4().hex}.tmp"
             _consistent_copy(backup, rescue)
-            os.replace(rescue, destination)
+            _durable_replace(rescue, destination)
         raise
     return backup
 

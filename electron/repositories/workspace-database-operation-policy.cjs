@@ -3,13 +3,17 @@ const path = require('path');
 // One synchronous JSON-lines child serves this client. Until requests have a
 // started ACK or a worker pool, every action must retain the conservative
 // writer lease so queued work cannot perform recovery under a read lease.
-const CONFIRMED_READ_ACTIONS = new Set();
+const CONFIRMED_READ_ACTIONS = new Set(['media_version_delete_scope']);
 
 const IDEMPOTENT_ACTIONS = new Set([
   'progress_snapshot', 'progress_locations_snapshot', 'tracking_session_get', 'tracking_commit_resources', 'version_tree_layout_get',
   'media_sync_prepare', 'media_sync_paths_prepare', 'progress_stale_prepare',
   'maintenance_run', 'media_sync_apply_batch', 'media_sync_finalize',
   'media_sync_paths_apply_batch', 'media_sync_paths_finalize', 'progress_stale_apply',
+  'media_get', 'media_create_version', 'media_update_version', 'media_component_update_version',
+  'media_component_delete_version', 'media_refresh_metadata_fingerprint', 'media_set_thumbnail',
+  'media_relocate_version', 'media_delete_version', 'media_delete_project_missing_version',
+  'media_record_compare',
 ]);
 const VERSIONING_ONLY_ACTIONS = new Set(['batch_list', 'progress_snapshot', 'progress_locations_snapshot', 'version_graph_edge_list', 'version_tree_layout_get', 'version_tree_layout_save']);
 

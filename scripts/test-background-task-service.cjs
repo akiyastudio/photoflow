@@ -103,28 +103,42 @@ const main = async () => {
       if (ipcListeners.get(channel) === listener) ipcListeners.delete(channel);
     },
   };
-  const trustedWebContents = { isDestroyed: () => false, send: () => undefined };
+  const trustedWebContents = { mainFrame: {}, isDestroyed: () => false, send: () => undefined };
   const mainWindow = { isDestroyed: () => false, webContents: trustedWebContents };
+  let externalUpsertError = null;
+  const externalProgressLogs = [];
   const disposeBackgroundTasksIpc = registerBackgroundTasksIpc({
     ipcMain,
     eventBus: { on: () => () => { eventBusUnsubscribed = true; } },
     backgroundTasks: {
       snapshot: () => ({ revision: 0, tasks: [] }), list: () => [], get: () => null,
       cancel: () => false, pause: () => false, continuePaused: () => false, dismiss: () => false,
-      resume: async () => ({}), restart: async () => ({}), upsertExternal: () => undefined,
+      resume: async () => ({}), restart: async () => ({}), upsertExternal: () => { if (externalUpsertError) throw externalUpsertError; },
       retry: async () => ({
         accepted: true, sourceTaskId: 'source', replacementTaskId: 'replacement', deduplicated: false,
         task: { id: 'replacement' }, completion: Promise.resolve({}),
       }),
     },
     getMainWindow: () => mainWindow,
+    writeLog: (...args) => externalProgressLogs.push(args),
   });
   const retryHandler = ipcHandlers.get('background-task-retry');
-  const retryResponse = await retryHandler({ sender: trustedWebContents }, 'source');
+  const retryResponse = await retryHandler({ sender: trustedWebContents, senderFrame: trustedWebContents.mainFrame }, 'source');
   assert.equal(retryResponse.success, true);
   assert.equal(retryResponse.accepted, true);
   assert.equal(retryResponse.replacementTaskId, 'replacement');
   assert.equal('completion' in retryResponse, false, 'retry IPC must return acceptance immediately without serializing the completion promise');
+  externalUpsertError = new Error('injected external progress failure');
+  assert.doesNotThrow(() => ipcListeners.get('background-task-external-progress')(
+    { sender: trustedWebContents, senderFrame: trustedWebContents.mainFrame }, 'workspace-selection-progress',
+    { operationId: 'listener-isolation', phase: 'copying', progress: 10 },
+  ), 'external progress listeners must never throw into EventEmitter');
+  assert(externalProgressLogs.some(([, message]) => message === 'Background task external progress rejected'), 'isolated external progress failures must be reported');
+  await assert.rejects(
+    retryHandler({ sender: trustedWebContents, senderFrame: {} }, 'source'),
+    /Unauthorized IPC sender/,
+    'background-task IPC must reject a child frame even when it belongs to the main window webContents',
+  );
   await assert.rejects(retryHandler({ sender: { isDestroyed: () => false } }, 'source'), /Unauthorized IPC sender/, 'background-task IPC must reject a sender other than the main window webContents');
   disposeBackgroundTasksIpc();
   assert.equal(ipcHandlers.size, 0, 'background-task IPC disposer must remove every handler');
@@ -134,6 +148,9 @@ const main = async () => {
   assert.equal(normalizeExternalProgress('workspace-selection-progress', { operationId: 'folder-listing', phase: 'listing_source_folders' }), null, 'opening filename selection must not create a background task for folder discovery');
   assert.equal(normalizeExternalProgress('workspace-selection-progress', { operationId: 'preflight-scan', phase: 'scanning_source' }), null, 'filename preflight scans must not create duplicate 0% background tasks');
   assert.equal(normalizeExternalProgress('workspace-selection-progress', { phase: 'copying', progress: 50 }), null, 'selection progress without an operation id must not create a shared invalid task');
+  assert.equal(normalizeExternalProgress('workspace-selection-progress', { operationId: 'bad-progress', phase: 'copying', progress: '50' }), null, 'external progress must not coerce numeric strings');
+  assert.equal(normalizeExternalProgress('workspace-selection-progress', { operationId: 'bad-count', phase: 'copying', progress: 50, fileIndex: Infinity }), null, 'external progress metadata must contain finite scalar values');
+  assert.equal(normalizeExternalProgress('workspace-selection-progress', { operationId: 'bad-name', phase: 'copying', progress: 50, fileName: { value: 'not scalar' } }), null, 'external progress text fields must be bounded scalars');
   const selectionCopyTask = normalizeExternalProgress('workspace-selection-progress', { operationId: 'selection-copy', phase: 'copying', progress: 50, fileName: 'IMG_0001.CR3' });
   assert.equal(selectionCopyTask.id, 'external:selection:selection-copy');
   assert.equal(selectionCopyTask.state, 'running');
@@ -142,6 +159,25 @@ const main = async () => {
   assert.equal(selectionCompleteTask.state, 'completed', 'a real selection copy must still publish its terminal task state');
 
   const service = createBackgroundTaskService({ eventBus: new EventEmitter() });
+  const frozenResources = ['C:/projects/frozen-definition'];
+  let releaseFrozenWorker;
+  let frozenWorkerStarted;
+  const frozenWorkerGate = new Promise(resolve => { releaseFrozenWorker = resolve; });
+  const frozenWorkerReady = new Promise(resolve => { frozenWorkerStarted = resolve; });
+  const frozenRun = service.run({ id: 'frozen-definition', type: 'test', title: 'frozen', resources: frozenResources }, async () => {
+    frozenWorkerStarted();
+    await frozenWorkerGate;
+  });
+  frozenResources[0] = 'C:/projects/mutated-after-start';
+  frozenResources.push('C:/projects/extra-after-start');
+  await frozenWorkerReady;
+  const frozenConflict = service.create({ id: 'frozen-conflict', type: 'test', title: 'conflict', resources: ['C:/projects/frozen-definition/child'] });
+  const frozenConflictStart = frozenConflict.waitForStart();
+  assert.equal(await queued(frozenConflictStart), true, 'resource definitions must be snapshotted before the worker microtask can mutate caller arrays');
+  releaseFrozenWorker();
+  await frozenRun;
+  await frozenConflictStart;
+  frozenConflict.complete();
   const fileTask = createProjectFileTask({
     backgroundTasks: service,
     event: { sender: { isDestroyed: () => false, send: () => undefined } },
@@ -167,6 +203,41 @@ const main = async () => {
   assert.equal(service.get('monotonic').cancellable, false, 'a running task must be able to disable cancellation before its atomic commit phase');
   assert.equal(service.cancel('monotonic'), false, 'a task in its atomic commit phase must reject cancellation');
   monotonic.complete();
+  let staleRetryFactoryCalls = 0;
+  await assert.rejects(service.run(
+    { id: 'fixed-generation', type: 'test', title: 'old fixed generation' },
+    async () => { throw new Error('old generation failed'); },
+    () => { staleRetryFactoryCalls += 1; },
+  ));
+  const oldInstanceId = service.get('fixed-generation').instanceId;
+  await assert.rejects(service.run(
+    { id: 'fixed-generation', type: 'test', title: 'new fixed generation' },
+    async () => { throw new Error('new generation failed'); },
+  ));
+  assert.notEqual(service.get('fixed-generation').instanceId, oldInstanceId, 'a reused fixed ID must publish a distinct generation');
+  assert.equal(service.get('fixed-generation').retryable, false, 'a new fixed-ID generation must atomically discard the old retry factory');
+  assert.throws(() => service.retry('fixed-generation'), error => error.code === 'NOT_RETRYABLE');
+  assert.equal(staleRetryFactoryCalls, 0);
+  let releaseStaleGenerationFactory;
+  const staleGenerationFactoryGate = new Promise(resolve => { releaseStaleGenerationFactory = resolve; });
+  const delayedStaleFactory = async () => {
+    await staleGenerationFactoryGate;
+    return service.run({ type: 'test', title: 'must not start stale generation' }, async () => undefined);
+  };
+  await assert.rejects(service.run(
+    { id: 'fixed-generation-race', type: 'test', title: 'racing old generation' },
+    async () => { throw new Error('racing old generation failed'); },
+    delayedStaleFactory,
+  ));
+  const staleRetry = service.retry('fixed-generation-race');
+  await Promise.resolve();
+  await assert.rejects(service.run(
+    { id: 'fixed-generation-race', type: 'test', title: 'replacement fixed generation' },
+    async () => { throw new Error('replacement failed'); },
+  ));
+  releaseStaleGenerationFactory();
+  await assert.rejects(staleRetry, error => error.code === 'STALE_TASK_GENERATION');
+  assert.equal(service.list().some(item => item.title === 'must not start stale generation'), false, 'a delayed old retry factory must not create an orphan task after fixed-ID replacement');
   let retryRuns = 0;
   const runRetryReplacement = definition => service.run({
     ...(definition || {}),
@@ -612,6 +683,51 @@ const main = async () => {
     danglingService.stop();
   } finally {
     fs.rmSync(persistenceDirectory, { recursive: true, force: true });
+  }
+
+  const shutdownRaceDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-background-stop-race-'));
+  try {
+    const shutdownRacePath = path.join(shutdownRaceDirectory, 'tasks.json');
+    const shutdownRaceService = createBackgroundTaskService({ eventBus: new EventEmitter(), persistencePath: shutdownRacePath });
+    let signalLateWorkerStarted;
+    let releaseLateWorker;
+    const lateWorkerStarted = new Promise(resolve => { signalLateWorkerStarted = resolve; });
+    const lateWorkerGate = new Promise(resolve => { releaseLateWorker = resolve; });
+    const lateCompletion = shutdownRaceService.run(
+      { id: 'shutdown-race', type: 'workspace-backup', title: 'shutdown race' },
+      async () => { signalLateWorkerStarted(); await lateWorkerGate; },
+    );
+    await lateWorkerStarted;
+    shutdownRaceService.stop();
+    assert.equal(JSON.parse(fs.readFileSync(shutdownRacePath, 'utf8')).tasks[0].state, 'interrupted', 'shutdown must synchronously persist recoverable interrupted state');
+    releaseLateWorker();
+    await lateCompletion;
+    await new Promise(resolve => setTimeout(resolve, 250));
+    assert.equal(JSON.parse(fs.readFileSync(shutdownRacePath, 'utf8')).tasks[0].state, 'interrupted', 'late worker completion must not overwrite shutdown recovery state');
+  } finally {
+    fs.rmSync(shutdownRaceDirectory, { recursive: true, force: true });
+  }
+
+  const corruptTemporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-background-corrupt-tmp-'));
+  try {
+    const missingMainPath = path.join(corruptTemporaryDirectory, 'tasks.json');
+    const corruptTemporaryPath = `${missingMainPath}.tmp`;
+    const futurePayload = JSON.stringify({ version: 999, tasks: [] });
+    fs.writeFileSync(corruptTemporaryPath, futurePayload, 'utf8');
+    const persistenceErrors = [];
+    const failClosedService = createBackgroundTaskService({
+      eventBus: { emit: (event, payload) => { if (event === 'background-task:persistence-error') persistenceErrors.push(payload); } },
+      persistencePath: missingMainPath,
+    });
+    const task = failClosedService.create({ id: 'must-not-overwrite', type: 'test', title: 'read only' });
+    await task.waitForStart();
+    task.complete();
+    failClosedService.stop();
+    assert.equal(fs.existsSync(missingMainPath), false, 'invalid or future temporary history without a main file must keep persistence read-only');
+    assert.equal(fs.readFileSync(corruptTemporaryPath, 'utf8'), futurePayload, 'fail-closed recovery must preserve the forensic temporary payload');
+    assert.equal(persistenceErrors[0]?.readOnly, true);
+  } finally {
+    fs.rmSync(corruptTemporaryDirectory, { recursive: true, force: true });
   }
 
   console.log('background task scheduler tests passed');

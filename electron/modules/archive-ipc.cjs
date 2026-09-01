@@ -6,6 +6,13 @@ const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain: el
   const ipcMain = { handle(channel, listener) { channels.push(channel); electronIpcMain.handle(channel, async (event, ...args) => { if (!trusted(event)) throw new Error('Unauthorized IPC sender'); try { return await listener(event, ...args); } catch (error) { return { success: false, code: typeof error?.code === 'string' ? error.code : 'ARCHIVE_IPC_FAILED', error: error?.message || String(error) }; } }); } };
   const rootPath = value => { if (typeof value !== 'string' || !value.trim() || value.includes('\0')) throw new Error('无效的工作区路径'); return path.resolve(value); };
   const cleanProjectName = value => { if (typeof value !== 'string' || !value.trim() || value.length > 255 || /[\\/\0]/.test(value)) throw new Error('无效的项目名称'); return value.trim(); };
+  const cleanProjectReference = value => {
+    if (!value || typeof value !== 'object') return cleanProjectName(value);
+    const id = String(value.id || '').trim();
+    const name = String(value.name || '').trim();
+    if (!id || id.length > 255 || /[\\/\0]/.test(id)) throw new Error('无效的项目 ID');
+    return { id, ...(name ? { name: cleanProjectName(name) } : {}) };
+  };
   const acceptedTask = (result, logMessage, onComplete) => {
     if (!result?.success) return { success: false, ...(result?.code ? { code: result.code } : {}), error: result?.error || '后台任务未能登记' };
     if (typeof result.taskId !== 'string' || !result.taskId) return { success: false, code: 'INVALID_ACCEPTANCE', error: '后台任务登记结果无效' };
@@ -21,7 +28,7 @@ const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain: el
   ipcMain.handle('archive-project', async (_event, workspacePath, projectName) => {
     try {
       const root = rootPath(workspacePath);
-      const name = cleanProjectName(projectName);
+      const name = cleanProjectReference(projectName);
       if (typeof archiveService.enqueueArchiveProject === 'function') return acceptedTask(await archiveService.enqueueArchiveProject(root, name), 'Project archive failed', () => {
         const window = getMainWindow();
         if (window && !window.isDestroyed()) window.webContents.send('workspace-projects-changed', { root, reason: 'project-archived' });
@@ -36,7 +43,7 @@ const registerArchiveIpc = ({ archiveService, dialog, getMainWindow, ipcMain: el
   ipcMain.handle('archive-move-back', async (_event, workspacePath, projectName, statusAfter) => {
     try {
       const root = rootPath(workspacePath);
-      const name = cleanProjectName(projectName);
+      const name = cleanProjectReference(projectName);
       if (typeof archiveService.enqueueMoveBack === 'function') return acceptedTask(await archiveService.enqueueMoveBack(root, name, statusAfter), 'Project move-back failed', () => {
         const window = getMainWindow();
         if (window && !window.isDestroyed()) window.webContents.send('workspace-projects-changed', { root, reason: 'project-unarchived' });

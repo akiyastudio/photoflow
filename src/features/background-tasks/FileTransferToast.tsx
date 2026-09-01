@@ -71,6 +71,7 @@ export const useFileTransferToastPresentation = () => {
   useEffect(() => {
     if (!initializedRef.current && backgroundTaskSyncing) return;
     const currentKeys = new Set(backgroundTasks.map(taskToastInstanceKey));
+    for (const key of firstVisibleAtRef.current.keys()) if (!currentKeys.has(key)) firstVisibleAtRef.current.delete(key);
     if (!initializedRef.current) {
       initializedRef.current = true;
       seenStateRef.current = new Map(backgroundTasks.map(task => [taskToastInstanceKey(task), task.state]));
@@ -139,7 +140,7 @@ export const FileTransferToast = ({ stackRef, presentation, reflowKey }: { stack
 
   return <>
     {pendingAction && <span className="sr-only" role="status">正在执行任务操作</span>}
-    {visibleTasks.map(task => <FileTransferToastItem key={task.id} task={task} onMinimize={minimizeTaskToast} onDismiss={minimizeTaskToast} onPause={id => void runAction(`pause:${id}`, () => window.electronAPI.pauseBackgroundTask(id))} onContinue={id => void runAction(`continue:${id}`, () => window.electronAPI.continueBackgroundTask(id))} onCancel={task => void runAction(`cancel:${task.id}`, () => task.type === 'selection-operation' ? window.electronAPI.cancelSelectionOperation(String(task.metadata?.operationId || '')) : window.electronAPI.cancelBackgroundTask(task.id))}/>) }
+    {visibleTasks.map(task => <FileTransferToastItem key={taskToastInstanceKey(task)} task={task} onMinimize={minimizeTaskToast} onDismiss={minimizeTaskToast} onPause={id => void runAction(`pause:${id}`, () => window.electronAPI.pauseBackgroundTask(id))} onContinue={id => void runAction(`continue:${id}`, () => window.electronAPI.continueBackgroundTask(id))} onCancel={task => void runAction(`cancel:${task.id}`, () => task.type === 'selection-operation' ? window.electronAPI.cancelSelectionOperation(String(task.metadata?.operationId || '')) : window.electronAPI.cancelBackgroundTask(task.id))}/>) }
     {actionError && <div role="alert" className="file-transfer-toast border-red-200 bg-red-50 text-xs text-red-700">{actionError}</div>}
     {overflowCount > 0 && <div data-top-toast-id="task-overflow" className="file-transfer-toast-overflow">还有 {overflowCount} 个任务</div>}
   </>;

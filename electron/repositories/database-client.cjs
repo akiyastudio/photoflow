@@ -20,7 +20,7 @@ const markOutcomeUnknown = (error, request) => {
 };
 
 class PythonDatabaseClient {
-  constructor({ getRunConfig, getDatabasePath, writeLog, coordinator, operationPolicy = new WorkspaceDatabaseOperationPolicy(), defaultTimeoutMs = 30000, processStopTimeoutMs = 2000, rollbackSettleMs = 25, scriptName = 'workspace_db.py', processSupervisor = null, processId = '', domainId = '', onHealthChange = () => undefined, failureThreshold = 3, circuitCooldownMs = 5000, maximumPending = 100, maximumProtocolBuffer = 1024 * 1024 }) {
+  constructor({ getRunConfig, getDatabasePath, writeLog, coordinator, operationPolicy = new WorkspaceDatabaseOperationPolicy(), defaultTimeoutMs = 30000, processStopTimeoutMs = 2000, rollbackSettleMs = 25, scriptName = 'workspace_db.py', processSupervisor = null, processId = '', domainId = '', onHealthChange = () => undefined, failureThreshold = 3, circuitCooldownMs = 5000, maximumPending = 100, maximumProtocolBuffer = 1024 * 1024, maximumProtocolResponse = 16 * 1024 * 1024 }) {
     this.getRunConfig = getRunConfig;
     this.getDatabasePath = getDatabasePath;
     this.writeLog = writeLog;
@@ -34,6 +34,7 @@ class PythonDatabaseClient {
     this.circuitCooldownMs = circuitCooldownMs;
     this.maximumPending = maximumPending;
     this.maximumProtocolBuffer = maximumProtocolBuffer;
+    this.maximumProtocolResponse = maximumProtocolResponse;
     this.processStopTimeoutMs = processStopTimeoutMs;
     this.rollbackSettleMs = rollbackSettleMs;
     this.health = { domainId: this.domainId, state: 'healthy', failures: 0, circuitOpenedAt: 0, lastError: '', updatedAt: Date.now() };
@@ -144,7 +145,9 @@ class PythonDatabaseClient {
     child.stdout.setEncoding('utf8');
     child.stdout.on('data', data => {
       output += data;
-      if (output.length > this.maximumProtocolBuffer) {
+      const lines = output.split(/\r?\n/);
+      output = lines.pop() || '';
+      if (output.length > this.maximumProtocolBuffer || lines.some(line => line.length > this.maximumProtocolBuffer)) {
         if (protocolFailed) return;
         protocolFailed = true;
         const error = new Error('数据库服务协议响应超过允许上限');
@@ -154,15 +157,28 @@ class PythonDatabaseClient {
         );
         return;
       }
-      const lines = output.split(/\r?\n/);
-      output = lines.pop() || '';
       for (const line of lines) {
         if (!line.trim()) continue;
         try {
-          const response = JSON.parse(line);
+          let response = JSON.parse(line);
           managedProcess?.markHealthy({ protocol: 'json-lines' });
           const request = this.pending.get(response.id);
           if (!request || request.child !== child) continue;
+          if (response.protocol === 'json-chunk-v1') {
+            const index = Number(response.index);
+            const total = Number(response.total);
+            if (!Number.isSafeInteger(index) || !Number.isSafeInteger(total) || total < 1 || total > 1024 || index !== request.protocolChunks.length) {
+              throw new Error('数据库服务返回了无效的分块响应顺序');
+            }
+            const chunk = Buffer.from(String(response.data || ''), 'base64');
+            request.protocolBytes += chunk.length;
+            if (request.protocolBytes > this.maximumProtocolResponse) throw new Error('数据库服务完整响应超过允许上限');
+            request.protocolChunks.push(chunk);
+            if (index + 1 < total) continue;
+            if (request.protocolChunks.length !== total) throw new Error('数据库服务分块响应不完整');
+            response = JSON.parse(Buffer.concat(request.protocolChunks, request.protocolBytes).toString('utf8'));
+            if (response.id !== request.id) throw new Error('数据库服务分块响应 id 不匹配');
+          }
           this.pending.delete(response.id);
           clearTimeout(request.timer);
           request.signal?.removeEventListener?.('abort', request.onAbort);
@@ -280,7 +296,7 @@ class PythonDatabaseClient {
       };
       const request = { id, root, database, action, payload, operationId };
       const serialized = JSON.stringify(request);
-      this.pending.set(id, { resolve, reject, timer, child, serialized, onAbort, signal, operationId, idempotent });
+      this.pending.set(id, { id, resolve, reject, timer, child, serialized, onAbort, signal, operationId, idempotent, protocolChunks: [], protocolBytes: 0 });
       signal?.addEventListener?.('abort', onAbort, { once: true });
       try {
         child.stdin.write(`${serialized}\n`, error => {

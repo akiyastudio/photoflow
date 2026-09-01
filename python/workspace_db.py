@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import argparse
+import base64
+import gc
 import hashlib
 import json
 import math
@@ -54,6 +56,8 @@ LEGACY_PROGRESS_PARENT_REPAIR_REVISION = "1"
 TARGET_SCHEMA_VERSION = 33
 MEDIA_INCREMENTAL_BATCH_SIZE = 64
 MEDIA_INCREMENTAL_COMPLETED_RETENTION_MS = 7 * 24 * 60 * 60 * 1000
+MEDIA_INCREMENTAL_INCOMPLETE_RETENTION_MS = 24 * 60 * 60 * 1000
+MEDIA_INCREMENTAL_INCOMPLETE_SOFT_LIMIT = 32
 PROGRESS_NODE_ROLES = ("original", "progress", "selection", "artifact", "workflow", "broll")
 PROGRESS_RELATION_KINDS = ("main", "auxiliary")
 OPAQUE_ARTIFACT_KIND = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
@@ -3138,6 +3142,8 @@ def _media_path_is_authorized(file_path: str, roots: list[dict], require_online:
 def media_sync_prepare(root: str, db, payload: dict):
     """Build an immutable filesystem enumeration while holding only a read lease."""
     project = project_row(db, payload["projectName"])
+    if payload.get("paged") is True:
+        return _media_sync_prepare_paged(root, db, payload, project)
     if "availability" in project.keys() and project["availability"] == "missing":
         return {"success": True, "count": 0, "files": [], "baselineVersions": [],
                 "authorizedRoots": [], "thumbnailCandidates": [], "projectUnavailable": True}
@@ -3197,6 +3203,172 @@ def media_sync_prepare(root: str, db, payload: dict):
         "baselineVersions": [{"id": row["id"], "updatedAt": int(row["updated_at"])} for row in baseline],
         "authorizedRoots": authorized_roots,
     }
+
+
+def _full_sync_snapshot_page(db, snapshot, project, page_token=0) -> dict:
+    page_size = MEDIA_INCREMENTAL_BATCH_SIZE
+    try:
+        offset = int(page_token or 0)
+    except (TypeError, ValueError) as error:
+        raise ValueError("media_sync_page_invalid: 分页游标无效") from error
+    if offset < 0 or offset % page_size:
+        raise ValueError("media_sync_page_invalid: 分页游标无效")
+    total = int(db.execute(
+        "SELECT COUNT(*) FROM media_incremental_snapshot_files WHERE snapshot_id=?", (snapshot["snapshot_id"],)
+    ).fetchone()[0])
+    files = [
+        {"filePath": row["file_path"], "fileSize": int(row["file_size"]), "modifiedAt": int(row["modified_at"])}
+        for row in db.execute(
+            """SELECT file_path,file_size,modified_at FROM media_incremental_snapshot_files
+               WHERE snapshot_id=? AND ordinal>=? AND ordinal<? ORDER BY ordinal""",
+            (snapshot["snapshot_id"], offset, offset + page_size),
+        ).fetchall()
+    ]
+    next_offset = offset + len(files)
+    return {
+        "success": True, "paged": True, "projectName": project["name"],
+        "snapshotId": snapshot["snapshot_id"], "manifestHash": snapshot["manifest_hash"],
+        "files": files, "pageOffset": offset, "pageSize": page_size, "totalFiles": total,
+        "nextPageToken": str(next_offset) if next_offset < total else None,
+        # The persisted manifest, not capabilities echoed through Node, is the
+        # authority for paged apply/finalize.
+        "authorizedRoots": [], "baselineVersions": [],
+    }
+
+
+def _media_sync_prepare_paged(root: str, db, payload: dict, project) -> dict:
+    """Persist a full-scan manifest and return one bounded immutable page."""
+    if "availability" in project.keys() and project["availability"] == "missing":
+        return {"success": True, "paged": True, "count": 0, "files": [], "baselineVersions": [],
+                "authorizedRoots": [], "thumbnailCandidates": [], "projectUnavailable": True,
+                "nextPageToken": None, "totalFiles": 0}
+    snapshot_id = str(payload.get("snapshotId") or uuid.uuid4())
+    _media_sync_marker(snapshot_id, "full-paged-prepare")
+    _cleanup_incremental_snapshots(db, int(time.time() * 1000), snapshot_id, project["id"])
+    db.commit()
+    persisted = _incremental_snapshot_row(db, snapshot_id)
+    if persisted is not None and persisted["state"] == "prepared":
+        if persisted["project_id"] != project["id"]:
+            raise ValueError("media_sync_snapshot_project_mismatch: 扫描快照属于其他项目")
+        _touch_incremental_snapshot_lease(db, snapshot_id, project["id"]); db.commit()
+        return _full_sync_snapshot_page(db, persisted, project, payload.get("pageToken") or 0)
+    if persisted is not None and persisted["state"] == "preparing":
+        error = RuntimeError("media_sync_scan_busy: 扫描 manifest 正在生成")
+        error.code = "MEDIA_SYNC_SCAN_BUSY"
+        raise error
+    if payload.get("pageToken") not in (None, "", 0, "0"):
+        raise ValueError("media_sync_snapshot_missing: 分页 manifest 尚未完成")
+
+    authorized_roots, scan_roots = _validated_media_scan_roots(root, project, payload.get("externalRoots") or [])
+    now = int(time.time() * 1000)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        _assert_incremental_snapshot_capacity(db, project["id"], snapshot_id)
+        if persisted is not None:
+            for table in ("media_incremental_snapshot_batches", "media_incremental_snapshot_baseline",
+                          "media_incremental_snapshot_scopes", "media_incremental_snapshot_files"):
+                db.execute(f"DELETE FROM {table} WHERE snapshot_id=?", (snapshot_id,))
+            db.execute("DELETE FROM media_incremental_snapshots WHERE snapshot_id=?", (snapshot_id,))
+        _cleanup_incremental_snapshots(db, now, snapshot_id, project["id"])
+        db.execute(
+            """INSERT INTO media_incremental_snapshots(
+                 snapshot_id,project_id,state,manifest_hash,result_json,created_at,finalized_at)
+               VALUES(?,?,'preparing','',NULL,?,NULL)""", (snapshot_id, project["id"], now),
+        )
+        _touch_incremental_snapshot_lease(db, snapshot_id, project["id"], now)
+        db.executemany(
+            """INSERT INTO media_incremental_snapshot_scopes(
+                 snapshot_id,ordinal,path_key,scope_kind,like_prefix) VALUES(?,?,?,?,?)""",
+            [(snapshot_id, ordinal, canonical_path(entry["path"]).casefold(),
+              "directory" if entry["kind"] == "folder" else "file",
+              _incremental_like_prefix(canonical_path(entry["path"]).casefold()) if entry["kind"] == "folder" else None)
+             for ordinal, entry in enumerate(authorized_roots)],
+        )
+        # Freeze the reconciliation population before filesystem enumeration.
+        # Versions created after this commit are intentionally absent and can
+        # never be marked missing by this older snapshot.
+        db.execute(
+            """INSERT INTO media_incremental_snapshot_baseline(snapshot_id,version_id,updated_at)
+               SELECT ?,versions.id,versions.updated_at FROM versions
+               JOIN photos ON photos.id=versions.photo_id
+               WHERE photos.project_id=? AND versions.is_deleted=0""", (snapshot_id, project["id"]),
+        )
+        db.commit()
+    except Exception:
+        db.rollback(); raise
+
+    digest = hashlib.sha256()
+    ordinal = 0
+    last_heartbeat = now
+
+    def heartbeat_if_due(force=False):
+        nonlocal last_heartbeat
+        current = int(time.time() * 1000)
+        if force or current - last_heartbeat >= 30_000:
+            _touch_incremental_snapshot_lease(db, snapshot_id, project["id"], current)
+            db.commit()
+            last_heartbeat = current
+
+    def persist_file(file_path: str):
+        nonlocal ordinal
+        canonical = canonical_path(file_path)
+        if not media_type(canonical):
+            return
+        try:
+            stat = os.stat(canonical)
+        except (FileNotFoundError, PermissionError, OSError):
+            return
+        if not os.path.isfile(canonical):
+            return
+        entry = {"filePath": canonical, "fileSize": int(stat.st_size), "modifiedAt": int(stat.st_mtime_ns / 1_000_000)}
+        inserted = db.execute(
+            """INSERT INTO media_incremental_snapshot_files(
+                 snapshot_id,ordinal,file_path,file_path_key,file_size,modified_at)
+               SELECT ?,?,?,?,?,? WHERE NOT EXISTS(
+                 SELECT 1 FROM media_incremental_snapshot_files WHERE snapshot_id=? AND file_path_key=?)""",
+            (snapshot_id, ordinal, canonical, canonical.casefold(), entry["fileSize"], entry["modifiedAt"],
+             snapshot_id, canonical.casefold()),
+        ).rowcount
+        if inserted:
+            digest.update(json.dumps(entry, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8"))
+            ordinal += 1
+            if ordinal % 256 == 0:
+                heartbeat_if_due(True)
+
+    try:
+        for scan_root in scan_roots:
+            scan_path = scan_root["path"]
+            if scan_root["kind"] == "file":
+                persist_file(scan_path)
+                continue
+            real_scan_root = os.path.realpath(scan_path)
+            def inside_scan_root(candidate):
+                try:
+                    return os.path.commonpath((os.path.realpath(candidate), real_scan_root)).casefold() == real_scan_root.casefold()
+                except ValueError:
+                    return False
+            for directory, directory_names, file_names in os.walk(scan_path):
+                heartbeat_if_due()
+                directory_names[:] = [name for name in directory_names if inside_scan_root(os.path.join(directory, name))]
+                if inside_scan_root(directory):
+                    for name in file_names:
+                        persist_file(os.path.join(directory, name))
+        db.commit()
+        db.execute("BEGIN IMMEDIATE")
+        for row in db.execute(
+            "SELECT version_id,updated_at FROM media_incremental_snapshot_baseline WHERE snapshot_id=? ORDER BY version_id",
+            (snapshot_id,),
+        ):
+            digest.update(f"\0{row['version_id']}:{int(row['updated_at'])}".encode("utf-8"))
+        db.execute(
+            "UPDATE media_incremental_snapshots SET state='prepared',manifest_hash=? WHERE snapshot_id=?",
+            (digest.hexdigest(), snapshot_id),
+        )
+        db.commit()
+    except Exception:
+        if db.in_transaction: db.rollback()
+        raise
+    return _full_sync_snapshot_page(db, _incremental_snapshot_row(db, snapshot_id), project, 0)
 
 
 def _media_sync_marker(snapshot_id: str, suffix: str) -> str:
@@ -3311,9 +3483,11 @@ def media_sync_finalize(root: str, db, payload: dict):
         if batch_key in digests:
             completed_batches[batch_key] = {"payloadDigest": digests[batch_key], "result": json.loads(row["value"])}
     _set_meta(db, _media_sync_marker(snapshot_id, "completed-batches"), json.dumps(completed_batches, ensure_ascii=False, sort_keys=True))
+    _set_meta(db, _media_sync_marker(snapshot_id, "completed-at"), str(timestamp))
     db.execute("DELETE FROM meta WHERE key LIKE ?", (f"media_sync:{snapshot_id}:batch:%",))
     db.execute("DELETE FROM meta WHERE key LIKE ?", (f"media_sync:{snapshot_id}:batch-digest:%",))
     _set_meta(db, marker, json.dumps(result, ensure_ascii=False))
+    _prune_legacy_sync_completions(db, timestamp)
     db.commit()
     return result
 
@@ -3420,40 +3594,111 @@ def _incremental_snapshot_result(db, snapshot, project) -> dict:
     }
 
 
-def _cleanup_incremental_snapshots(db, now: int):
-    stale_ids = [
+def _cleanup_incremental_snapshots(db, now: int, active_snapshot_id: str | None = None,
+                                   project_id: str | None = None):
+    stale_ids = {
         row[0] for row in db.execute(
             """SELECT snapshot_id FROM media_incremental_snapshots
                WHERE state='finalized' AND finalized_at IS NOT NULL AND finalized_at<?""",
             (now - MEDIA_INCREMENTAL_COMPLETED_RETENTION_MS,),
         ).fetchall()
-    ]
+    }
+    values = (project_id,) if project_id else ()
+    clause = " AND project_id=?" if project_id else ""
+    incomplete = db.execute(
+        f"""SELECT snapshot_id,project_id,created_at FROM media_incremental_snapshots
+            WHERE state!='finalized'{clause} ORDER BY project_id,created_at DESC,snapshot_id DESC""", values,
+    ).fetchall()
+    for row in incomplete:
+        snapshot_id = str(row["snapshot_id"])
+        if snapshot_id == active_snapshot_id:
+            continue
+        lease_raw = _meta_value(db, f"media_sync_lease:{snapshot_id}")
+        try:
+            heartbeat = int(json.loads(lease_raw).get("heartbeatAt") or 0) if lease_raw else 0
+        except (TypeError, ValueError, json.JSONDecodeError):
+            heartbeat = 0
+        last_active = max(int(row["created_at"] or 0), heartbeat)
+        if last_active < now - MEDIA_INCREMENTAL_INCOMPLETE_RETENTION_MS:
+            stale_ids.add(snapshot_id)
     for snapshot_id in stale_ids:
         db.execute("DELETE FROM media_incremental_snapshot_batches WHERE snapshot_id=?", (snapshot_id,))
         db.execute("DELETE FROM media_incremental_snapshot_baseline WHERE snapshot_id=?", (snapshot_id,))
         db.execute("DELETE FROM media_incremental_snapshot_scopes WHERE snapshot_id=?", (snapshot_id,))
         db.execute("DELETE FROM media_incremental_snapshot_files WHERE snapshot_id=?", (snapshot_id,))
         db.execute("DELETE FROM media_incremental_snapshots WHERE snapshot_id=?", (snapshot_id,))
+        db.execute("DELETE FROM meta WHERE key=?", (f"media_sync_lease:{snapshot_id}",))
+
+
+def _touch_incremental_snapshot_lease(db, snapshot_id: str, project_id: str, now: int | None = None) -> None:
+    now = int(now or time.time() * 1000)
+    _set_meta(db, f"media_sync_lease:{snapshot_id}", json.dumps({
+        "projectId": project_id, "heartbeatAt": now,
+        "expiresAt": now + MEDIA_INCREMENTAL_INCOMPLETE_RETENTION_MS,
+    }, sort_keys=True))
+
+
+def _assert_incremental_snapshot_capacity(db, project_id: str, snapshot_id: str) -> None:
+    existing = db.execute(
+        "SELECT 1 FROM media_incremental_snapshots WHERE snapshot_id=? AND project_id=?",
+        (snapshot_id, project_id),
+    ).fetchone()
+    if existing:
+        return
+    count = int(db.execute(
+        "SELECT COUNT(*) FROM media_incremental_snapshots WHERE project_id=? AND state!='finalized'", (project_id,),
+    ).fetchone()[0])
+    if count >= MEDIA_INCREMENTAL_INCOMPLETE_SOFT_LIMIT:
+        error = RuntimeError("media_sync_scan_busy: 同一项目存在过多未完成扫描，请等待或稍后重试")
+        error.code = "MEDIA_SYNC_SCAN_BUSY"
+        raise error
 
 
 def media_sync_paths_prepare(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     snapshot_id = str(payload.get("snapshotId") or uuid.uuid4())
     _media_sync_marker(snapshot_id, "paths-prepare")
+    _cleanup_incremental_snapshots(db, int(time.time() * 1000), snapshot_id, project["id"])
+    db.commit()
     persisted = _incremental_snapshot_row(db, snapshot_id)
     if persisted is not None:
         if persisted["project_id"] != project["id"]:
             raise ValueError("media_sync_snapshot_project_mismatch: 增量快照属于其他项目")
-        # This branch must stay before validation/enumeration of changes and
-        # roots: retrying a snapshot is a pure database read.
-        return _incremental_snapshot_result(db, persisted, project)
+        if persisted["state"] == "prepared" or persisted["state"] == "finalized":
+            if persisted["state"] == "prepared":
+                _touch_incremental_snapshot_lease(db, snapshot_id, project["id"]); db.commit()
+            return _incremental_snapshot_result(db, persisted, project)
+        error = RuntimeError("media_sync_scan_busy: 增量扫描 manifest 正在生成")
+        error.code = "MEDIA_SYNC_SCAN_BUSY"
+        raise error
     changes = payload.get("changes") or []
     if not isinstance(changes, list) or len(changes) > 2048:
         raise ValueError("media_sync_paths_limit: 增量路径批次无效或超过 2048 条")
     authorized_roots, enumeration_roots = _validated_media_scan_roots(root, project, payload.get("externalRoots") or [])
+    started_at = int(time.time() * 1000)
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        _assert_incremental_snapshot_capacity(db, project["id"], snapshot_id)
+        db.execute(
+            """INSERT INTO media_incremental_snapshots(
+                 snapshot_id,project_id,state,manifest_hash,result_json,created_at,finalized_at)
+               VALUES(?,?,'preparing','',NULL,?,NULL)""", (snapshot_id, project["id"], started_at),
+        )
+        _touch_incremental_snapshot_lease(db, snapshot_id, project["id"], started_at)
+        db.commit()
+    except Exception:
+        db.rollback(); raise
     files = []
     scopes = []
     seen = set()
+    last_heartbeat = started_at
+
+    def heartbeat_if_due():
+        nonlocal last_heartbeat
+        current = int(time.time() * 1000)
+        if current - last_heartbeat >= 30_000:
+            _touch_incremental_snapshot_lease(db, snapshot_id, project["id"], current)
+            db.commit(); last_heartbeat = current
 
     def snapshot_file(file_path: str):
         canonical = canonical_path(file_path)
@@ -3491,6 +3736,7 @@ def media_sync_paths_prepare(root: str, db, payload: dict):
                     return True
                 return is_project_descendant(resolved, real_root)
             for directory, directory_names, file_names in os.walk(candidate):
+                heartbeat_if_due()
                 directory_names[:] = [name for name in directory_names if inside_incremental_root(os.path.join(directory, name))]
                 if not inside_incremental_root(directory):
                     continue
@@ -3505,21 +3751,10 @@ def media_sync_paths_prepare(root: str, db, payload: dict):
     now = int(time.time() * 1000)
     db.execute("BEGIN IMMEDIATE")
     try:
-        # A second worker may have prepared the same ID while this worker was
-        # enumerating. Its committed manifest wins; never rewrite it.
         persisted = _incremental_snapshot_row(db, snapshot_id)
-        if persisted is not None:
-            db.rollback()
-            if persisted["project_id"] != project["id"]:
-                raise ValueError("media_sync_snapshot_project_mismatch: 增量快照属于其他项目")
-            return _incremental_snapshot_result(db, persisted, project)
-        _cleanup_incremental_snapshots(db, now)
-        db.execute(
-            """INSERT INTO media_incremental_snapshots(
-                 snapshot_id,project_id,state,manifest_hash,result_json,created_at,finalized_at)
-               VALUES(?,?,'preparing','',NULL,?,NULL)""",
-            (snapshot_id, project["id"], now),
-        )
+        if persisted is None or persisted["project_id"] != project["id"] or persisted["state"] != "preparing":
+            raise RuntimeError("media_sync_snapshot_lease_lost: 增量扫描租约已丢失")
+        _cleanup_incremental_snapshots(db, now, snapshot_id, project["id"])
         db.executemany(
             """INSERT INTO media_incremental_snapshot_files(
                  snapshot_id,ordinal,file_path,file_path_key,file_size,modified_at)
@@ -3585,6 +3820,7 @@ def media_sync_paths_apply_batch(root: str, db, payload: dict):
     snapshot = _incremental_snapshot_row(db, snapshot_id)
     if snapshot is None or snapshot["project_id"] != project["id"]:
         raise ValueError("media_sync_snapshot_missing: 增量快照不存在或项目不匹配")
+    _touch_incremental_snapshot_lease(db, snapshot_id, project["id"]); db.commit()
     files = payload.get("files") or []
     if not isinstance(files, list) or len(files) > MEDIA_INCREMENTAL_BATCH_SIZE:
         raise ValueError("media_sync_batch_invalid: 扫描批次过大")
@@ -3656,6 +3892,7 @@ def media_sync_paths_finalize(root: str, db, payload: dict):
     if snapshot is None or snapshot["project_id"] != project["id"]:
         raise ValueError("media_sync_snapshot_missing: 增量快照不存在或项目不匹配")
     if snapshot["result_json"]:
+        db.execute("DELETE FROM meta WHERE key=?", (f"media_sync_lease:{snapshot_id}",)); db.commit()
         return json.loads(snapshot["result_json"])
     db.execute("BEGIN IMMEDIATE")
     try:
@@ -3724,6 +3961,8 @@ def media_sync_paths_finalize(root: str, db, payload: dict):
             persisted = _incremental_snapshot_row(db, snapshot_id)
             db.rollback()
             return json.loads(persisted["result_json"])
+        _prune_incremental_sync_completions(db, timestamp)
+        db.execute("DELETE FROM meta WHERE key=?", (f"media_sync_lease:{snapshot_id}",))
         db.commit()
         return result
     except Exception:
@@ -8794,7 +9033,7 @@ def plan_confirmed_batch_renames(db, batch_id: str, folder_path: str, matches: l
         )
 
 
-def apply_pending_batch_operations(db, batch_id: str):
+def apply_pending_batch_operations(db, batch_id: str, fault_after=None):
     batch = db.execute("SELECT * FROM version_batches WHERE id=?", (batch_id,)).fetchone()
     if batch is None:
         raise ValueError("版本批次不存在")
@@ -8829,6 +9068,8 @@ def apply_pending_batch_operations(db, batch_id: str):
                 if os.path.exists(target_path):
                     raise FileExistsError(f"目标文件已存在：{os.path.basename(target_path)}")
                 os.rename(source_path, target_path)
+                if fault_after:
+                    fault_after("filesystem_renamed", operation)
             elif not os.path.isfile(target_path):
                 raise FileNotFoundError(f"源文件和目标文件都不存在：{os.path.basename(source_path)}")
             stat = os.stat(target_path)
@@ -8912,11 +9153,21 @@ def batch_operation_list(db, payload: dict):
 
 def batch_retry_operations(db, payload: dict):
     batch_id = str(payload.get("batchId") or "")
+    if payload.get("_executionMode") == "staged" and not payload.get("_deferBatchFilesystem"):
+        raise RuntimeError("batch filesystem effects are forbidden in staged execution")
+    if payload.get("_deferBatchFilesystem"):
+        pending = db.execute(
+            "SELECT COUNT(*) FROM batch_file_operations WHERE batch_id=? AND status!='succeeded'", (batch_id,),
+        ).fetchone()[0]
+        return {"success": True, "deferredFilesystem": True, "batch": batch_summary(db, batch_id),
+                "renamedCount": 0, "renameErrors": [], "repairRequired": bool(pending), "operationCount": pending}
     result = apply_pending_batch_operations(db, batch_id)
     return {"success": not result["repairRequired"], "batch": batch_summary(db, batch_id), **result}
 
 
 def batch_commit_compare(root: str, db, payload: dict):
+    if payload.get("_executionMode") == "staged" and payload.get("renameSources") and not payload.get("_deferBatchFilesystem"):
+        raise RuntimeError("batch filesystem effects are forbidden in staged execution")
     project = project_row(db, payload["projectName"])
     folder_a = canonical_path(payload["folderA"])
     folder_b = canonical_path(payload["folderB"])
@@ -9015,7 +9266,14 @@ def batch_commit_compare(root: str, db, payload: dict):
             if not payload.get("renameSources"):
                 set_progress_tracking_state_for_folder(db, project["id"], folder_b, "ready")
             db.commit()
-            rename_result = apply_pending_batch_operations(db, batch["id"]) if payload.get("renameSources") else {"renamedCount": 0, "renameErrors": [], "repairRequired": False, "operationCount": 0}
+            rename_result = (
+                {"renamedCount": 0, "renameErrors": [], "repairRequired": True,
+                 "operationCount": db.execute("SELECT COUNT(*) FROM batch_file_operations WHERE batch_id=? AND status!='succeeded'", (batch["id"],)).fetchone()[0],
+                 "deferredFilesystem": True}
+                if payload.get("renameSources") and payload.get("_deferBatchFilesystem")
+                else apply_pending_batch_operations(db, batch["id"]) if payload.get("renameSources")
+                else {"renamedCount": 0, "renameErrors": [], "repairRequired": False, "operationCount": 0}
+            )
             return {
                 "success": True,
                 "reconciled": True,
@@ -9103,7 +9361,14 @@ def batch_commit_compare(root: str, db, payload: dict):
         if not payload.get("renameSources"):
             set_progress_tracking_state_for_folder(db, project["id"], folder_b, "ready")
         db.commit()
-        rename_result = apply_pending_batch_operations(db, batch["id"]) if payload.get("renameSources") else {"renamedCount": 0, "renameErrors": [], "repairRequired": False, "operationCount": 0}
+        rename_result = (
+            {"renamedCount": 0, "renameErrors": [], "repairRequired": True,
+             "operationCount": db.execute("SELECT COUNT(*) FROM batch_file_operations WHERE batch_id=? AND status!='succeeded'", (batch["id"],)).fetchone()[0],
+             "deferredFilesystem": True}
+            if payload.get("renameSources") and payload.get("_deferBatchFilesystem")
+            else apply_pending_batch_operations(db, batch["id"]) if payload.get("renameSources")
+            else {"renamedCount": 0, "renameErrors": [], "repairRequired": False, "operationCount": 0}
+        )
         return {
             "success": True,
             "referenceBatch": batch_summary(db, reference_batch["id"]),
@@ -9752,10 +10017,6 @@ def project_cleanup_plan(db, project, payload=None):
     source_paths = [row["original_file_path"] for row in photo_rows if row["original_file_path"]]
     source_paths.extend(row["file_path"] for row in version_rows if row["file_path"])
     artifact_paths = [row["thumbnail_path"] for row in version_rows if row["thumbnail_path"]]
-    if version_ids:
-        placeholders = ",".join("?" for _ in version_ids)
-        db.execute(f"DELETE FROM file_records WHERE owner_type='version' AND owner_id IN ({placeholders})", version_ids)
-
     removed_undo_ids = []
     for record in _operation_undo_records(db, payload):
         try:
@@ -9941,7 +10202,9 @@ def _resume_purge_journal(db):
         expected = "is_deleted=1" if journal.get("deleted") else "is_deleted=0 AND availability='missing'"
         if db.execute(f"DELETE FROM projects WHERE id=? AND {expected}", (project_id,)).rowcount != 1:
             raise RuntimeError("项目目录记录在 purge finalization 期间发生变化")
-        _set_meta(db, f"purge_receipt:{project_id}", json.dumps({"result": journal.get("result") or {}, "completedAt": int(time.time() * 1000)}, ensure_ascii=False, sort_keys=True))
+        completed_at = int(time.time() * 1000)
+        _set_meta(db, f"purge_receipt:{project_id}", json.dumps({"result": journal.get("result") or {}, "completedAt": completed_at}, ensure_ascii=False, sort_keys=True))
+        _prune_purge_receipts(db, completed_at)
         db.execute("DELETE FROM meta WHERE key='purge_journal_v1'")
         db.commit()
         return journal.get("result") or {}
@@ -10209,10 +10472,79 @@ def reconcile_cross_domain_references(db) -> dict:
 MEDIA_DURABLE_ACTIONS = frozenset((
     "media_sync_apply_batch", "media_sync_finalize",
     "media_sync_paths_apply_batch", "media_sync_paths_finalize",
+    "media_create_version", "media_update_version", "media_component_update_version",
+    "media_component_delete_version", "media_refresh_metadata_fingerprint",
+    "media_set_thumbnail", "media_relocate_version", "media_delete_version",
+    "media_delete_project_missing_version", "media_record_compare",
 ))
+BATCH_CROSS_DOMAIN_DURABLE_ACTIONS = frozenset((
+    "batch_register_baseline", "batch_commit_compare", "batch_retry_operations",
+))
+BATCH_FILESYSTEM_DURABLE_ACTIONS = frozenset(("batch_commit_compare", "batch_retry_operations"))
 MEDIA_RECEIPT_RETENTION_MS = 30 * 24 * 60 * 60 * 1000
 MEDIA_RECEIPT_RECENT_MS = 7 * 24 * 60 * 60 * 1000
 MEDIA_RECEIPT_SOFT_LIMIT = 512
+PURGE_RECEIPT_SOFT_LIMIT = 256
+SYNC_COMPLETION_SOFT_LIMIT = 128
+
+
+def _prune_purge_receipts(db, now: int | None = None) -> int:
+    now = int(now or time.time() * 1000)
+    rows = []
+    for row in db.execute("SELECT key,value FROM meta WHERE key LIKE 'purge_receipt:%'").fetchall():
+        try:
+            completed_at = int(json.loads(row[1]).get("completedAt") or 0)
+        except (TypeError, ValueError, json.JSONDecodeError):
+            continue
+        rows.append((str(row[0]), completed_at))
+    rows.sort(key=lambda item: (item[1], item[0]), reverse=True)
+    removed = 0
+    for index, (key, completed_at) in enumerate(rows):
+        expired = completed_at > 0 and now - completed_at > MEDIA_RECEIPT_RETENTION_MS
+        beyond_limit = index >= PURGE_RECEIPT_SOFT_LIMIT and completed_at > 0 and now - completed_at > MEDIA_RECEIPT_RECENT_MS
+        if expired or beyond_limit:
+            removed += db.execute("DELETE FROM meta WHERE key=?", (key,)).rowcount
+    return removed
+
+
+def _prune_legacy_sync_completions(db, now: int | None = None) -> int:
+    now = int(now or time.time() * 1000)
+    suffix = ":completed-at"
+    rows = []
+    for row in db.execute("SELECT key,value FROM meta WHERE key LIKE 'media_sync:%:completed-at'").fetchall():
+        key = str(row[0])
+        try:
+            completed_at = int(row[1])
+        except (TypeError, ValueError):
+            continue
+        snapshot_id = key[len("media_sync:"):-len(suffix)]
+        if re.fullmatch(r"[0-9a-fA-F-]{36}", snapshot_id):
+            rows.append((snapshot_id, completed_at))
+    rows.sort(key=lambda item: (item[1], item[0]), reverse=True)
+    removed = 0
+    for index, (snapshot_id, completed_at) in enumerate(rows):
+        expired = now - completed_at > MEDIA_RECEIPT_RETENTION_MS
+        beyond_limit = index >= SYNC_COMPLETION_SOFT_LIMIT and now - completed_at > MEDIA_RECEIPT_RECENT_MS
+        if expired or beyond_limit:
+            removed += db.execute("DELETE FROM meta WHERE key LIKE ?", (f"media_sync:{snapshot_id}:%",)).rowcount
+    return removed
+
+
+def _prune_incremental_sync_completions(db, now: int | None = None) -> int:
+    now = int(now or time.time() * 1000)
+    rows = db.execute(
+        """SELECT snapshot_id,finalized_at FROM media_incremental_snapshots
+           WHERE state='finalized' AND finalized_at IS NOT NULL
+           ORDER BY finalized_at DESC,snapshot_id DESC"""
+    ).fetchall()
+    removed = 0
+    for index, row in enumerate(rows):
+        completed_at = int(row["finalized_at"] or 0)
+        expired = completed_at > 0 and now - completed_at > MEDIA_RECEIPT_RETENTION_MS
+        beyond_limit = index >= SYNC_COMPLETION_SOFT_LIMIT and completed_at > 0 and now - completed_at > MEDIA_RECEIPT_RECENT_MS
+        if expired or beyond_limit:
+            removed += db.execute("DELETE FROM media_incremental_snapshots WHERE snapshot_id=?", (row["snapshot_id"],)).rowcount
+    return removed
 
 
 def _media_operation_digest(action: str, payload: dict) -> str:
@@ -10377,6 +10709,19 @@ def _cleanup_snapshot_apply_receipts(db, snapshot_id: str) -> int:
 
 
 def _clear_preparing_media_operation(database: str, journal: dict) -> None:
+    gc.collect()
+    cleanup_error = None
+    for attempt in range(5):
+        try:
+            shutil.rmtree(str(journal["stageRoot"]), ignore_errors=False)
+            cleanup_error = None
+            break
+        except PermissionError as error:
+            cleanup_error = error
+            if attempt < 4:
+                time.sleep(0.05 * (attempt + 1))
+    if cleanup_error:
+        raise cleanup_error
     db = sqlite3.connect(database, timeout=30)
     try:
         db.execute("PRAGMA synchronous=FULL")
@@ -10384,7 +10729,77 @@ def _clear_preparing_media_operation(database: str, journal: dict) -> None:
         db.commit()
     finally:
         db.close()
-    shutil.rmtree(str(journal["stageRoot"]), ignore_errors=False)
+
+
+def _replay_batch_filesystem_journal(database: str, journal: dict) -> dict:
+    completed = set(str(value) for value in journal.get("completedBatchOperationIds") or [])
+    for operation in journal.get("batchOperations") or []:
+        operation_id = str(operation["id"])
+        if operation_id in completed:
+            continue
+        source = canonical_path(operation["sourcePath"])
+        target = canonical_path(operation["targetPath"])
+        source_exists, target_exists = os.path.exists(source), os.path.exists(target)
+        if source_exists and target_exists:
+            raise FileExistsError(f"批次改名源和目标同时存在：{source} -> {target}")
+        candidate = source if source_exists else target if target_exists else ""
+        if candidate:
+            stat = os.stat(candidate)
+            if int(stat.st_size) != int(operation["sourceSize"]) or full_fingerprint(candidate) != operation["sourceDigest"]:
+                raise RuntimeError(f"批次改名文件证据不匹配，拒绝认领：{candidate}")
+        if source_exists:
+            os.rename(source, target)
+        elif not target_exists:
+            raise FileNotFoundError(f"批次改名源和目标都不存在：{source} -> {target}")
+        completed.add(operation_id)
+        journal = _set_media_operation_stage(
+            database, {**journal, "completedBatchOperationIds": sorted(completed)}, "filesystem",
+        )
+    return journal
+
+
+def _open_published_workspace_database(database: str):
+    db = sqlite3.connect(database, timeout=30)
+    db.row_factory = sqlite3.Row
+    db.execute("PRAGMA busy_timeout=30000")
+    db.execute("ATTACH DATABASE ? AS media", (database_path_for_workspace_database(database, "media"),))
+    db.execute("ATTACH DATABASE ? AS versioning", (database_path_for_workspace_database(database, "versioning"),))
+    return db
+
+
+def _finalize_staged_batch_operation(journal: dict) -> dict:
+    stage_core = str(journal["stageCore"])
+    db = _open_published_workspace_database(stage_core)
+    receipt_key = f"media_operation_receipt:{journal['operationId']}"
+    row = db.execute("SELECT value FROM main.meta WHERE key=?", (receipt_key,)).fetchone()
+    if row is None:
+        db.close()
+        raise RuntimeError("staged batch durable receipt is missing")
+    receipt = json.loads(row[0])
+    finalize = receipt.get("batchFinalize")
+    if not finalize:
+        db.close()
+        return {**journal, "result": receipt.get("result") or {"success": True}}
+    batch_id = str(finalize.get("batchId") or "")
+    if not batch_id:
+        db.close()
+        raise RuntimeError("batch durable receipt is missing batchId")
+    try:
+        rename_result = apply_pending_batch_operations(db, batch_id)
+        result = {**(receipt.get("result") or {}), **rename_result, "success": not rename_result["repairRequired"]}
+        result["batch"] = batch_summary(db, batch_id)
+        reference_id = str(finalize.get("referenceBatchId") or "")
+        if reference_id:
+            result["referenceBatch"] = batch_summary(db, reference_id)
+        updated = {**receipt, "result": result, "batchFinalize": None, "updatedAt": int(time.time() * 1000)}
+        db.execute(
+            "INSERT OR REPLACE INTO main.meta(key,value) VALUES(?,?)",
+            (receipt_key, json.dumps(updated, ensure_ascii=False, sort_keys=True)),
+        )
+        db.commit()
+        return {**journal, "result": result, "batchFinalize": None}
+    finally:
+        db.close()
 
 
 def _resume_media_operation_files(database: str):
@@ -10394,11 +10809,17 @@ def _resume_media_operation_files(database: str):
     if state == "preparing":
         _clear_preparing_media_operation(database, journal)
         return None
-    if state not in ("ready", "media", "versioning"):
+    if state not in ("filesystem", "stage_finalize", "ready", "media", "versioning"):
         raise RuntimeError(f"unknown media operation state: {state}")
     stage_core = str(journal["stageCore"])
     stage_media = str(journal["stageMedia"])
     stage_versioning = str(journal["stageVersioning"])
+    if state == "filesystem":
+        journal = _replay_batch_filesystem_journal(database, journal)
+        journal = _set_media_operation_stage(database, journal, "stage_finalize"); state = "stage_finalize"
+    if state == "stage_finalize":
+        journal = _finalize_staged_batch_operation(journal)
+        journal = _set_media_operation_stage(database, journal, "ready"); state = "ready"
     if state == "ready":
         _publish_sqlite_stage(stage_media, database_path_for_workspace_database(database, "media"))
         journal = _set_media_operation_stage(database, journal, "media"); state = "media"
@@ -10407,8 +10828,9 @@ def _resume_media_operation_files(database: str):
         journal = _set_media_operation_stage(database, journal, "versioning"); state = "versioning"
     if state == "versioning":
         _publish_sqlite_stage(stage_core, database)
+        result = journal.get("result")
         _cleanup_committed_media_stage(database, str(journal["operationId"]), str(journal["stageRoot"]))
-        return journal.get("result")
+        return result
     return None
 
 
@@ -10429,6 +10851,10 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
             _cleanup_committed_media_stage(
                 database, operation_id, _deterministic_media_stage_root(database, operation_id),
             )
+            if decoded.get("error"):
+                replay_error = RuntimeError(str(decoded["error"]))
+                if decoded.get("errorCode"): replay_error.code = decoded["errorCode"]
+                raise replay_error
             return decoded.get("result") or {"success": True}
         stage_root = _deterministic_media_stage_root(database, operation_id)
         stage_core = os.path.join(stage_root, "workspace.sqlite3")
@@ -10458,8 +10884,51 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
         staged_owner.commit()
     finally:
         staged_owner.close()
-    result = _mutate_impl(root, stage_core, action, payload)
+    staged_payload = ({**payload, "_executionMode": "staged", "_deferBatchFilesystem": True}
+                      if action in BATCH_FILESYSTEM_DURABLE_ACTIONS else payload)
+    operation_error = None
+    try:
+        result = _mutate_impl(root, stage_core, action, staged_payload)
+    except Exception as error:
+        if action != "batch_commit_compare":
+            raise
+        # batch_commit_compare deliberately persists a failed batch marker so
+        # the retry can reconcile the same importKey. Publish that failure
+        # state durably, then surface the original error to this caller.
+        operation_error = error
+        result = {"success": False, "error": str(error), "code": getattr(error, "code", "")}
     completed_at = int(time.time() * 1000)
+    batch_finalize = None
+    batch_operations = []
+    if action in BATCH_FILESYSTEM_DURABLE_ACTIONS:
+        batch_id = str(payload.get("batchId") or (result.get("batch") or {}).get("id") or "")
+        reference_batch_id = str((result.get("referenceBatch") or {}).get("id") or "")
+        if batch_id and (action == "batch_retry_operations" or payload.get("renameSources")):
+            batch_finalize = {"batchId": batch_id, "referenceBatchId": reference_batch_id}
+            staged_versioning_db = sqlite3.connect(stage_versioning, timeout=30)
+            staged_versioning_db.row_factory = sqlite3.Row
+            try:
+                batch_operations = []
+                for row in staged_versioning_db.execute(
+                    """SELECT id,source_path,target_path FROM batch_file_operations
+                       WHERE batch_id=? AND status!='succeeded' ORDER BY created_at,id""", (batch_id,),
+                ).fetchall():
+                    source_path, target_path = str(row["source_path"]), str(row["target_path"])
+                    source_exists, target_exists = os.path.isfile(source_path), os.path.isfile(target_path)
+                    # Preserve apply_pending_batch_operations' per-item repair
+                    # semantics for conflicts/missing files/already-moved
+                    # targets. The live FS phase owns only an unambiguous
+                    # source-present/target-absent rename.
+                    if not source_exists or target_exists:
+                        continue
+                    evidence_path = source_path
+                    evidence_stat = os.stat(evidence_path)
+                    batch_operations.append({
+                        "id": row["id"], "sourcePath": source_path, "targetPath": target_path,
+                        "sourceSize": int(evidence_stat.st_size), "sourceDigest": full_fingerprint(evidence_path),
+                    })
+            finally:
+                staged_versioning_db.close()
     staged_owner = sqlite3.connect(stage_core, timeout=30)
     try:
         staged_owner.row_factory = sqlite3.Row
@@ -10467,8 +10936,12 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
         staged_owner.execute(
             "INSERT OR REPLACE INTO meta(key,value) VALUES(?,?)",
             (f"media_operation_receipt:{operation_id}", json.dumps({
+                "operationId": operation_id,
                 "action": action, "snapshotId": str(payload.get("snapshotId") or ""),
                 "payloadDigest": digest, "result": result, "completedAt": completed_at, "updatedAt": completed_at,
+                "batchFinalize": batch_finalize,
+                "error": str(operation_error) if operation_error else "",
+                "errorCode": getattr(operation_error, "code", "") if operation_error else "",
             }, ensure_ascii=False, sort_keys=True)),
         )
         staged_owner.execute("DELETE FROM meta WHERE key='media_operation_journal_v1'")
@@ -10478,9 +10951,15 @@ def _run_durable_media_operation(root: str, database: str, action: str, payload:
         staged_owner.commit()
     finally:
         staged_owner.close()
-    journal = {**journal, "result": result, "completedAt": completed_at}
-    _set_media_operation_stage(database, journal, "ready")
-    return _resume_media_operation_files(database) or result
+    journal = {**journal, "result": result, "completedAt": completed_at,
+               "batchFinalize": batch_finalize, "batchOperations": batch_operations,
+               "completedBatchOperationIds": []}
+    initial_state = "filesystem" if batch_operations else "stage_finalize" if batch_finalize else "ready"
+    _set_media_operation_stage(database, journal, initial_state)
+    published_result = _resume_media_operation_files(database) or result
+    if operation_error:
+        raise operation_error
+    return published_result
 
 
 def _media_get_fast_path(root: str, database: str, payload: dict):
@@ -10509,8 +10988,9 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
     }
     needs_domains = ("versioning",) if action in VERSIONING_ONLY_ACTIONS else needs_compatibility or action in domain_actions
     db = None
-    if action in READ_ONLY_ACTIONS and not needs_compatibility:
-        read_domains = ("versioning",) if action not in {"media_versions_snapshot", "media_sync_prepare"} else ("media", "versioning")
+    paged_full_prepare = action == "media_sync_prepare" and payload.get("paged") is True
+    if action in READ_ONLY_ACTIONS and not needs_compatibility and not paged_full_prepare:
+        read_domains = ("versioning",) if action not in {"media_versions_snapshot", "media_sync_prepare", "media_version_delete_scope"} else ("media", "versioning")
         try:
             candidate = connect_read_only(database, read_domains)
             if _meta_value(candidate, "purge_journal_v1"):
@@ -10521,6 +11001,11 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
             db = None
     if db is None:
         db = connect(root, database, include_domains=needs_domains, include_compatibility=needs_compatibility)
+    def call_and_close(function, *arguments):
+        try:
+            return function(*arguments)
+        finally:
+            db.close()
     now = int(time.time() * 1000)
     if action == "catalog_sync":
         try:
@@ -10661,25 +11146,17 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
         db.close()
         return result
     elif action == "media_sync_apply_batch":
-        result = media_sync_apply_batch(root, db, payload)
-        db.close()
-        return result
+        return call_and_close(media_sync_apply_batch, root, db, payload)
     elif action == "media_sync_finalize":
-        result = media_sync_finalize(root, db, payload)
-        db.close()
-        return result
+        return call_and_close(media_sync_finalize, root, db, payload)
     elif action == "media_sync_paths_prepare":
         result = media_sync_paths_prepare(root, db, payload)
         db.close()
         return result
     elif action == "media_sync_paths_apply_batch":
-        result = media_sync_paths_apply_batch(root, db, payload)
-        db.close()
-        return result
+        return call_and_close(media_sync_paths_apply_batch, root, db, payload)
     elif action == "media_sync_paths_finalize":
-        result = media_sync_paths_finalize(root, db, payload)
-        db.close()
-        return result
+        return call_and_close(media_sync_paths_finalize, root, db, payload)
     elif action == "media_get":
         try:
             return media_get(root, db, payload)
@@ -10690,9 +11167,7 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
         db.close()
         return result
     elif action == "media_create_version":
-        result = media_create_version(db, payload)
-        db.close()
-        return result
+        return call_and_close(media_create_version, db, payload)
     elif action == "media_get_photo":
         result = media_get_photo(db, payload)
         db.close()
@@ -10876,69 +11351,45 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
         db.close()
         return result
     elif action == "batch_register_baseline":
-        result = batch_register_baseline(root, db, payload)
-        db.close()
-        return result
+        return call_and_close(batch_register_baseline, root, db, payload)
     elif action == "batch_commit_compare":
-        result = batch_commit_compare(root, db, payload)
-        db.close()
-        return result
+        return call_and_close(batch_commit_compare, root, db, payload)
     elif action == "batch_operation_list":
         result = batch_operation_list(db, payload)
         db.close()
         return result
     elif action == "batch_retry_operations":
-        result = batch_retry_operations(db, payload)
-        db.close()
-        return result
+        return call_and_close(batch_retry_operations, db, payload)
     elif action == "media_update_version":
-        result = media_update_version(db, payload)
-        db.close()
-        return result
+        return call_and_close(media_update_version, db, payload)
     elif action == "progress_component_manage":
         result = progress_component_manage(root, db, payload)
         db.close()
         return result
     elif action == "media_component_update_version":
-        result = media_component_update_version(db, payload)
-        db.close()
-        return result
+        return call_and_close(media_component_update_version, db, payload)
     elif action == "media_component_delete_version":
-        result = media_component_delete_version(db, payload)
-        db.close()
-        return result
+        return call_and_close(media_component_delete_version, db, payload)
     elif action == "media_refresh_metadata_fingerprint":
-        result = media_refresh_metadata_fingerprint(db, payload)
-        db.close()
-        return result
+        return call_and_close(media_refresh_metadata_fingerprint, db, payload)
     elif action == "final_version_list":
         result = final_version_list(db, payload)
         db.close()
         return result
     elif action == "media_set_thumbnail":
-        result = media_set_thumbnail(db, payload)
-        db.close()
-        return result
+        return call_and_close(media_set_thumbnail, db, payload)
     elif action == "media_relocate_version":
-        result = media_relocate_version(db, payload)
-        db.close()
-        return result
+        return call_and_close(media_relocate_version, db, payload)
     elif action == "media_delete_version":
-        result = media_delete_version(db, payload)
-        db.close()
-        return result
+        return call_and_close(media_delete_version, db, payload)
     elif action == "media_version_delete_scope":
         result = media_version_delete_scope(db, payload)
         db.close()
         return result
     elif action == "media_delete_project_missing_version":
-        result = media_delete_project_missing_version(db, payload)
-        db.close()
-        return result
+        return call_and_close(media_delete_project_missing_version, db, payload)
     elif action == "media_record_compare":
-        result = media_record_compare(db, payload)
-        db.close()
-        return result
+        return call_and_close(media_record_compare, db, payload)
     elif action in compatibility_action_names():
         result = dispatch_compatibility_action(action, root, db, payload)
         db.close()
@@ -10987,7 +11438,7 @@ def mutate(root: str, database: str, action: str, payload: dict, operation_id: s
         if existing is not None:
             return existing
         return _run_durable_media_operation(root, database, action, payload, operation_id)
-    if action in MEDIA_DURABLE_ACTIONS:
+    if action in MEDIA_DURABLE_ACTIONS or action in BATCH_CROSS_DOMAIN_DURABLE_ACTIONS:
         return _run_durable_media_operation(root, database, action, payload, operation_id)
     return _mutate_impl(root, database, action, payload)
 
@@ -11025,7 +11476,23 @@ def run_server():
             response = {"id": request_id, "success": True, "result": result}
         except Exception as error:
             response = error_response(request_id, error)
-        print(json.dumps(response, ensure_ascii=False), flush=True)
+        _emit_server_response(response)
+
+
+def _emit_server_response(response: dict) -> None:
+    encoded = json.dumps(response, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    chunk_size = 128 * 1024
+    if len(encoded) <= chunk_size:
+        print(encoded.decode("utf-8"), flush=True)
+        return
+    total = math.ceil(len(encoded) / chunk_size)
+    for index in range(total):
+        chunk = encoded[index * chunk_size:(index + 1) * chunk_size]
+        frame = {
+            "id": response.get("id"), "protocol": "json-chunk-v1", "index": index,
+            "total": total, "data": base64.b64encode(chunk).decode("ascii"),
+        }
+        print(json.dumps(frame, separators=(",", ":")), flush=True)
 
 
 if __name__ == "__main__":

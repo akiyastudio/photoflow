@@ -16,6 +16,8 @@ const SNAPSHOT_FORMAT_VERSION = 1;
 const STORE_DIRECTORY = '.photoflow-backup';
 const DAY_MS = 24 * 60 * 60 * 1000;
 const FIXED_RETENTION = Object.freeze({ daily: 7, weekly: 4, monthly: 12 });
+const FULL_SOURCE_SCRUB_INTERVAL_MS = 7 * DAY_MS;
+const SOURCE_FINGERPRINT_CHUNK_BYTES = 64 * 1024;
 
 const exists = filePath => fs.promises.access(filePath).then(() => true, () => false);
 const normalizeKey = value => String(value || '').replaceAll('\\', '/').replace(/^\/+/, '');
@@ -39,9 +41,32 @@ const safeDestination = (root, relative) => {
   if (!inside(root, destination) || destination === path.resolve(root)) throw new Error('备份清单包含越界路径');
   return destination;
 };
-const sha256File = async filePath => {
+const sha256File = async (filePath, signal) => {
   const hash = crypto.createHash('sha256');
-  for await (const chunk of fs.createReadStream(filePath)) hash.update(chunk);
+  const stream = fs.createReadStream(filePath);
+  const onAbort = () => stream.destroy(Object.assign(new Error('任务已取消'), { code: 'TASK_CANCELLED' }));
+  signal?.addEventListener('abort', onAbort, { once: true });
+  try { for await (const chunk of stream) hash.update(chunk); }
+  finally { signal?.removeEventListener('abort', onAbort); }
+  return hash.digest('hex');
+};
+const fileChangeToken = stat => crypto.createHash('sha256').update(JSON.stringify([
+  Number(stat.dev || 0), Number(stat.ino || 0), Number(stat.size), Number(stat.mtimeMs), Number(stat.ctimeMs), Number(stat.birthtimeMs), Number(stat.mode || 0),
+])).digest('hex');
+const sampledSourceFingerprint = async (filePath, stat, signal) => {
+  const size = Number(stat.size);
+  const offsets = [...new Set([0, Math.max(0, Math.floor(size / 2) - Math.floor(SOURCE_FINGERPRINT_CHUNK_BYTES / 2)), Math.max(0, size - SOURCE_FINGERPRINT_CHUNK_BYTES)])];
+  const hash = crypto.createHash('sha256').update(`sample-v1\0${size}\0`);
+  const handle = await fs.promises.open(filePath, 'r');
+  try {
+    for (const offset of offsets) {
+      if (signal?.aborted) throw Object.assign(new Error('任务已取消'), { code: 'TASK_CANCELLED' });
+      const length = Math.min(SOURCE_FINGERPRINT_CHUNK_BYTES, Math.max(0, size - offset));
+      const buffer = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, offset);
+      hash.update(String(offset)).update('\0').update(buffer.subarray(0, bytesRead));
+    }
+  } finally { await handle.close(); }
   return hash.digest('hex');
 };
 const durableSync = async filePath => {
@@ -330,10 +355,10 @@ const createBackupService = context => {
   approveTarget(readSavedConfig()?.backup?.targetPath);
 
   const isNasTarget = target => Boolean(credentialService?.isUncPath?.(target));
-  const ensureTargetConnection = async (target, backupConfig = readSavedConfig()?.backup || {}) => {
+  const ensureTargetConnection = async (target, backupConfig = readSavedConfig()?.backup || {}, signal) => {
     if (!isNasTarget(target)) return;
     const credentialRef = backupConfig.nas?.credentialRef || '';
-    if (credentialRef) await credentialService.connectNas(target, credentialRef);
+    if (credentialRef) await credentialService.connectNas(target, credentialRef, { signal });
   };
   const diskCapacity = async target => {
     if (typeof fs.promises.statfs !== 'function') return {};
@@ -443,7 +468,7 @@ const createBackupService = context => {
     return output;
   };
 
-  const snapshotComponentStorage = async (workspaceDataRoot, stage) => {
+  const snapshotComponentStorage = async (workspaceDataRoot, stage, task) => {
     const sourceRoot = path.join(workspaceDataRoot, 'components');
     if (!await exists(sourceRoot)) return { files: [], componentBackups: [] };
     if (!componentServiceManager?.quiesceForStorageSnapshot) throw new Error('组件数据包快照缺少通用 service quiesce 边界');
@@ -462,13 +487,14 @@ const createBackupService = context => {
         return Boolean(privateRelative) && isComponentHostControlStoragePath(relative);
       });
       for (const file of liveFiles) {
+        task?.throwIfCancelled?.();
         const destination = safeDestination(snapshotRoot, file.relative);
         await fs.promises.mkdir(path.dirname(destination), { recursive: true });
         const before = await fs.promises.stat(file.absolute);
-        await fs.promises.copyFile(file.absolute, destination, fs.constants.COPYFILE_EXCL);
+        await pipeline(fs.createReadStream(file.absolute), fs.createWriteStream(destination, { flags: 'wx' }), { signal: task?.signal });
         const after = await fs.promises.stat(file.absolute);
         if (before.size !== after.size || before.mtimeMs !== after.mtimeMs
-          || await sha256File(file.absolute) !== await sha256File(destination)) throw new Error('组件数据包在 quiesce 快照期间发生变化');
+          || await sha256File(file.absolute, task?.signal) !== await sha256File(destination, task?.signal)) throw new Error('组件数据包在 quiesce 快照期间发生变化');
       }
       const files = await collectFiles(snapshotRoot, 'component-storage');
       const currentDescriptors = componentServiceManager.backupSnapshotDescriptors?.() || componentRestoreDescriptors();
@@ -714,6 +740,7 @@ const createBackupService = context => {
       manifestId: String(manifest.id || manifest.createdAt),
       sourceWorkspace: { root: path.resolve(sourceWorkspace.root), dataRoot: path.resolve(sourceWorkspace.dataRoot || sourceWorkspace.root) },
       targetWorkspace: { root: path.resolve(targetWorkspace.root), dataRoot: path.resolve(targetWorkspace.dataRoot) },
+      descriptors: descriptors.map(descriptor => ({ componentId: descriptor.componentId, componentVersion: String(descriptor.componentVersion || 'unversioned'), descriptorToken: componentRestoreDescriptorToken(descriptor) })),
       ...(project ? { project: { ...project, id: String(project.id) } } : {}),
       phaseContext,
     };
@@ -744,22 +771,6 @@ const createBackupService = context => {
       }
       return { pending: prepared.length > 0, error: stopFailures.length ? new AggregateError(stopFailures, `组件恢复 ${phase} token 无法释放`) : lastError };
     };
-    try {
-      for (const descriptor of descriptors) {
-        const operationId = operationIds.get(descriptor.componentId);
-        const result = await invokeBackupRestore(descriptor.componentId, mode, {
-          schemaVersion: 1, phase: 'prepare', operationId, mode, sourceWorkspace, targetWorkspace,
-          sourceVersion: snapshotComponentRecord(manifest, descriptor.componentId)?.componentVersion || 'unversioned',
-          targetVersion: String(descriptor.componentVersion || 'unversioned'), ...(project ? { project } : {}),
-        }, phaseContext);
-        if (!result || result.operationId !== operationId || result.status !== 'prepared' || typeof result.quiesceToken !== 'string' || !result.quiesceToken) throw new Error(`组件 ${descriptor.componentId} 返回了无效的 prepare 回执`);
-        prepared.push({ descriptor, operationId, quiesceToken: result.quiesceToken });
-      }
-    } catch (error) {
-      const release = await settlePrepared('finalize');
-      if (release.pending) throw new AggregateError([error, release.error], '组件恢复 prepare 失败且已准备组件已隔离');
-      throw error;
-    }
     let transactionCommitted = false;
     let activeTransactionRoot = null;
     try {
@@ -888,7 +899,11 @@ const createBackupService = context => {
         const failures = [];
         for (const item of pending) {
           const descriptor = currentDescriptors.find(value => value.componentId === item?.componentId);
-          if (!descriptor || typeof item?.operationId !== 'string' || typeof item?.quiesceToken !== 'string') { failures.push(new Error('组件恢复待释放日志无效')); continue; }
+          const binding = Array.isArray(saved.descriptors) ? saved.descriptors.find(value => value?.componentId === item?.componentId) : null;
+          if (!descriptor || typeof item?.operationId !== 'string' || typeof item?.quiesceToken !== 'string'
+            || item.descriptorToken && item.descriptorToken !== componentRestoreDescriptorToken(descriptor)
+            || item.componentVersion && item.componentVersion !== String(descriptor.componentVersion || 'unversioned')
+            || binding && (binding.descriptorToken !== componentRestoreDescriptorToken(descriptor) || binding.componentVersion !== String(descriptor.componentVersion || 'unversioned'))) { failures.push(new Error('组件恢复待释放日志与当前 descriptor 不匹配')); continue; }
           try {
             const result = await invokeBackupRestore(item.componentId, saved.mode, {
               schemaVersion: 1, phase, operationId: item.operationId, mode: saved.mode, quiesceToken: item.quiesceToken,
@@ -908,6 +923,25 @@ const createBackupService = context => {
         const transactionRoot = path.join(transactionsRoot, entry.name);
         if (!await recoverPendingRelease(transactionRoot)) await rollbackTransaction(transactionRoot);
       }
+    }
+    // Replay every durable token before asking any component for a new one.
+    // This keeps old v1 journals compatible while preventing overlapping
+    // prepare leases after a crash.
+    try {
+      for (const descriptor of descriptors) {
+        const operationId = operationIds.get(descriptor.componentId);
+        const result = await invokeBackupRestore(descriptor.componentId, mode, {
+          schemaVersion: 1, phase: 'prepare', operationId, mode, sourceWorkspace, targetWorkspace,
+          sourceVersion: snapshotComponentRecord(manifest, descriptor.componentId)?.componentVersion || 'unversioned',
+          targetVersion: String(descriptor.componentVersion || 'unversioned'), ...(project ? { project } : {}),
+        }, phaseContext);
+        if (!result || result.operationId !== operationId || result.status !== 'prepared' || typeof result.quiesceToken !== 'string' || !result.quiesceToken) throw new Error(`组件 ${descriptor.componentId} 返回了无效的 prepare 回执`);
+        prepared.push({ descriptor, operationId, quiesceToken: result.quiesceToken });
+      }
+    } catch (error) {
+      const release = await settlePrepared('finalize');
+      if (release.pending) throw new AggregateError([error, release.error], '组件恢复 prepare 失败且已准备组件已隔离');
+      throw error;
     }
     const transactionId = componentRestoreOperationId(task.id, manifest.id || manifest.createdAt, mode, project?.id || targetWorkspace.root);
     const transactionRoot = safeDestination(transactionsRoot, transactionId);
@@ -1126,10 +1160,14 @@ const createBackupService = context => {
         } : { componentId: descriptor.componentId, ...result, hostPreservedPaths });
       }
       const componentRestore = { results, handled };
-      const continuationResult = continuation ? await continuation(componentRestore) : componentRestore;
-      await writeTransactionJournal(transactionRoot, { schemaVersion: 1, state: 'committed', context: transactionContext, components: transactionComponents,
-        finalizePending: prepared.map(item => ({ componentId: item.descriptor.componentId, operationId: item.operationId, quiesceToken: item.quiesceToken })) });
-      transactionCommitted = true;
+      const commitDurably = async () => {
+        if (transactionCommitted) return;
+        await writeTransactionJournal(transactionRoot, { schemaVersion: 1, state: 'committed', context: transactionContext, components: transactionComponents,
+          finalizePending: prepared.map(item => ({ componentId: item.descriptor.componentId, componentVersion: String(item.descriptor.componentVersion || 'unversioned'), descriptorToken: componentRestoreDescriptorToken(item.descriptor), operationId: item.operationId, quiesceToken: item.quiesceToken })) });
+        transactionCommitted = true;
+      };
+      const continuationResult = continuation ? await continuation(componentRestore, { commitDurably }) : componentRestore;
+      await commitDurably();
       let finalizeWarning = null;
       let cleanupPending = false;
       for (let attempt = 0; attempt < 2 && prepared.length; attempt += 1) {
@@ -1155,11 +1193,18 @@ const createBackupService = context => {
       return finalizeWarning && continuationResult && typeof continuationResult === 'object'
         ? { ...continuationResult, componentRestoreWarnings: [cleanupPending ? '组件恢复已提交；组件服务已隔离并等待 finalize 清理' : '组件恢复已提交；finalize 失败后已隔离组件服务'], cleanupPending } : continuationResult;
     } catch (error) {
-      if (transactionCommitted) throw error;
+      if (transactionCommitted) {
+        const finalize = await settlePrepared('finalize');
+        if (finalize.pending) {
+          for (const item of prepared) componentServiceManager.quarantine?.(item.descriptor.componentId, 'component-restore-finalize-pending');
+          throw new AggregateError([error, finalize.error].filter(Boolean), `项目恢复已提交，但后续发布失败且组件 finalize 等待重放：${error.message || String(error)}`);
+        }
+        throw error;
+      }
       try {
         await rollbackTransaction(transactionRoot, { preserve: true });
         await writeTransactionJournal(transactionRoot, { schemaVersion: 1, state: 'rolled-back', context: transactionContext, components: transactionComponents,
-          releasePending: prepared.map(item => ({ componentId: item.descriptor.componentId, operationId: item.operationId, quiesceToken: item.quiesceToken })) });
+          releasePending: prepared.map(item => ({ componentId: item.descriptor.componentId, componentVersion: String(item.descriptor.componentVersion || 'unversioned'), descriptorToken: componentRestoreDescriptorToken(item.descriptor), operationId: item.operationId, quiesceToken: item.quiesceToken })) });
       }
       catch (rollbackError) { throw new AggregateError([error, rollbackError], '组件恢复失败且事务回滚未完成'); }
       throw error;
@@ -1209,7 +1254,7 @@ const createBackupService = context => {
         },
       });
       try {
-        await pipeline(fs.createReadStream(sourcePath), meter, fs.createWriteStream(temporary, { flags: 'wx' }));
+        await pipeline(fs.createReadStream(sourcePath), meter, fs.createWriteStream(temporary, { flags: 'wx' }), { signal: task.signal });
         const after = await fs.promises.lstat(sourcePath);
         if (!after.isFile() || after.isSymbolicLink()) throw new Error(`备份输入在读取期间不再是普通文件：${sourcePath}`);
         if (before.size !== after.size || before.mtimeMs !== after.mtimeMs) {
@@ -1221,7 +1266,7 @@ const createBackupService = context => {
         const digest = hash.digest('hex');
         const stableSource = await fs.promises.lstat(sourcePath);
         if (!stableSource.isFile() || stableSource.isSymbolicLink() || stableSource.size !== after.size || stableSource.mtimeMs !== after.mtimeMs
-          || await sha256File(sourcePath) !== digest) {
+          || await sha256File(sourcePath, task.signal) !== digest) {
           await fs.promises.rm(temporary, { force: true });
           if (copied && progress) progress(-copied);
           if (sourceMutationRetries++ === 0) continue;
@@ -1238,12 +1283,13 @@ const createBackupService = context => {
           }
         } else await fs.promises.rm(temporary, { force: true });
         const storedStat = await fs.promises.lstat(destination);
-        if (!storedStat.isFile() || storedStat.isSymbolicLink() || storedStat.size !== after.size || await sha256File(destination) !== digest) {
+        if (!storedStat.isFile() || storedStat.isSymbolicLink() || storedStat.size !== after.size || await sha256File(destination, task.signal) !== digest) {
           throw Object.assign(new Error(`备份对象发生碰撞或已损坏：${digest}`), { code: 'BACKUP_OBJECT_COLLISION' });
         }
         await durableSync(destination);
         await durableSyncDirectory(path.dirname(destination));
-        return { hash: digest, size: after.size, mtimeMs: after.mtimeMs };
+        return { hash: digest, size: after.size, mtimeMs: after.mtimeMs, changeToken: fileChangeToken(after),
+          sourceFingerprint: await sampledSourceFingerprint(sourcePath, after, task.signal), sourceVerifiedAt: Date.now(), objectVerifiedAt: Date.now() };
       } catch (error) {
         await fs.promises.rm(temporary, { force: true }).catch(() => undefined);
         if (copied && progress) progress(-copied);
@@ -1256,13 +1302,81 @@ const createBackupService = context => {
             const timer = setTimeout(() => { task.signal.removeEventListener('abort', onAbort); resolve(); }, waitMs);
             task.signal.addEventListener('abort', onAbort, { once: true });
           });
-          await ensureTargetConnection(target, backupConfig).catch(() => undefined);
+          await ensureTargetConnection(target, backupConfig, task.signal).catch(error => { if (error?.code === 'TASK_CANCELLED') throw error; });
           continue;
         }
         throw error;
       }
     }
     throw new Error(`无法获得稳定的文件快照：${sourcePath}`);
+  };
+
+  const validateV1Manifest = (manifest, expectedId = '') => {
+    const fail = message => { throw inventoryUnsafe(`备份清单语义无效：${message}`); };
+    if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest) || manifest.complete !== true || manifest.formatVersion !== SNAPSHOT_FORMAT_VERSION) fail('版本或完成标记');
+    if (!/^[A-Za-z0-9_-]+$/.test(String(manifest.id || '')) || expectedId && manifest.id !== expectedId) fail('快照标识');
+    const createdAt = Number(manifest.createdAt);
+    // Early v1 fixtures and imported stores may use a small positive epoch;
+    // preserve them, but reject zero/negative/non-integer and future-dated
+    // manifests that could pin retention buckets indefinitely.
+    if (!Number.isSafeInteger(createdAt) || createdAt <= 0 || createdAt > Date.now() + DAY_MS) fail('创建时间超出合理时窗');
+    const workspace = manifest.workspace;
+    if (!workspace || typeof workspace !== 'object' || !String(workspace.id || '') || String(workspace.id).length > 256
+      || /[\\/\0]/.test(String(workspace.id)) || ['.', '..'].includes(String(workspace.id))
+      || !path.isAbsolute(String(workspace.root || '')) || workspace.dataRoot != null && workspace.dataRoot !== '' && !path.isAbsolute(String(workspace.dataRoot))) fail('工作区元数据');
+    const validateObject = (entry, label) => {
+      if (!entry || typeof entry !== 'object' || Array.isArray(entry) || !validObjectHash(entry.hash)
+        || !Number.isSafeInteger(Number(entry.size)) || Number(entry.size) < 0
+        || entry.mtimeMs != null && (!Number.isFinite(Number(entry.mtimeMs)) || Number(entry.mtimeMs) < 0)
+        || entry.changeToken != null && !validObjectHash(entry.changeToken)
+        || entry.sourceFingerprint != null && !validObjectHash(entry.sourceFingerprint)
+        || [entry.sourceVerifiedAt, entry.objectVerifiedAt].some(value => value != null
+          && (!Number.isSafeInteger(Number(value)) || Number(value) < 0 || Number(value) > Date.now() + DAY_MS))) fail(`${label}对象元数据`);
+    };
+    validateObject(manifest.database, '主数据库');
+    if (manifest.database.schemaVersion != null && (!Number.isSafeInteger(Number(manifest.database.schemaVersion)) || Number(manifest.database.schemaVersion) < 0)) fail('主数据库 schemaVersion');
+    if (!Array.isArray(manifest.files) || !Array.isArray(manifest.projects)) fail('文件或项目列表');
+    const projectIds = new Set();
+    const projectPaths = new Set();
+    for (const project of manifest.projects) {
+      const projectId = String(project?.id || '');
+      const projectName = String(project?.name || '');
+      const unsafeComponent = value => !value || value.length > 255 || value.includes('\0') || value.includes('/') || value.includes('\\')
+        || ['.', '..'].includes(value) || path.basename(value) !== value;
+      if (!project || typeof project !== 'object' || unsafeComponent(projectId) || projectIds.has(projectId)
+        || unsafeComponent(projectName) || typeof project.relativePath !== 'string' || !project.relativePath || project.relativePath.length > 4096
+        || path.isAbsolute(project.relativePath) || project.relativePath.includes('\0')) fail('项目元数据或项目 ID 重复');
+      try { safeDestination(workspace.root, project.relativePath); } catch { fail(`项目路径 ${project.relativePath}`); }
+      const projectPathKey = process.platform === 'win32' ? path.resolve(workspace.root, project.relativePath).toLocaleLowerCase() : path.resolve(workspace.root, project.relativePath);
+      if (projectPaths.has(projectPathKey)) fail(`重复项目路径 ${project.relativePath}`);
+      projectPaths.add(projectPathKey);
+      projectIds.add(projectId);
+    }
+    const allowedScopes = new Set(['workspace', 'workspace-data', 'component-storage', 'app-config', 'domain-database']);
+    const uniquePaths = new Set();
+    for (const entry of manifest.files) {
+      validateObject(entry, '文件');
+      if (!allowedScopes.has(entry.scope) || typeof entry.path !== 'string' || path.isAbsolute(entry.path) || entry.path.includes('\0')) fail('文件 scope/path');
+      try { safeDestination(workspace.root, entry.path); } catch { fail(`文件路径 ${entry.path}`); }
+      const resolvedEntryPath = path.resolve(workspace.root, ...normalizeKey(entry.path).split('/').filter(Boolean));
+      const key = `${entry.scope}\0${process.platform === 'win32' ? resolvedEntryPath.toLocaleLowerCase() : resolvedEntryPath}`;
+      if (uniquePaths.has(key)) fail(`重复文件路径 ${entry.scope}:${entry.path}`);
+      uniquePaths.add(key);
+      const entryProjectIds = entry.projectIds == null ? [] : entry.projectIds;
+      if (!Array.isArray(entryProjectIds) || new Set(entryProjectIds.map(String)).size !== entryProjectIds.length
+        || entryProjectIds.some(id => !projectIds.has(String(id)))) fail(`文件项目关联 ${entry.path}`);
+      if (entry.scope === 'domain-database' && (path.basename(entry.path) !== entry.path || !entry.path.endsWith('.sqlite3')
+        || ['.', '..'].includes(entry.path) || entry.schemaVersion != null
+          && (!Number.isSafeInteger(Number(entry.schemaVersion)) || Number(entry.schemaVersion) < 0))) fail(`域数据库元数据 ${entry.path}`);
+    }
+    if (manifest.materializedArchiveProjectIds != null && (!Array.isArray(manifest.materializedArchiveProjectIds)
+      || new Set(manifest.materializedArchiveProjectIds.map(String)).size !== manifest.materializedArchiveProjectIds.length
+      || manifest.materializedArchiveProjectIds.some(id => !projectIds.has(String(id))))) fail('实体化归档项目列表');
+    if (manifest.totals != null) {
+      if (!Number.isSafeInteger(Number(manifest.totals.files)) || Number(manifest.totals.files) < 0
+        || !Number.isSafeInteger(Number(manifest.totals.bytes)) || Number(manifest.totals.bytes) < 0) fail('汇总元数据');
+    }
+    return manifest;
   };
 
   const inventoryManifests = async target => {
@@ -1275,11 +1389,7 @@ const createBackupService = context => {
       if (!directory.isDirectory() || directory.isSymbolicLink() || !/^[A-Za-z0-9_-]+$/.test(directory.name)) { unsafe.push(directory.name); continue; }
       try {
         const manifest = JSON.parse(await fs.promises.readFile(path.join(root, directory.name, 'manifest.json'), 'utf8'));
-        if (manifest?.complete !== true || manifest.formatVersion !== SNAPSHOT_FORMAT_VERSION || manifest.id !== directory.name
-          || !validObjectHash(manifest.database?.hash) || !Array.isArray(manifest.files)
-          || !Number.isSafeInteger(Number(manifest.database?.size)) || Number(manifest.database.size) < 0
-          || manifest.files.some(entry => !validObjectHash(entry?.hash) || !Number.isSafeInteger(Number(entry?.size)) || Number(entry.size) < 0)) { unsafe.push(directory.name); continue; }
-        for (const entry of manifest.files) safeDestination(root, entry.path);
+        validateV1Manifest(manifest, directory.name);
         manifests.push(manifest);
       } catch { unsafe.push(directory.name); }
     }
@@ -1296,11 +1406,7 @@ const createBackupService = context => {
     await assertStoreLayoutPhysical(target);
     await assertStoreSupported(target);
     const manifest = JSON.parse(await fs.promises.readFile(path.join(snapshotsRoot(target), String(id), 'manifest.json'), 'utf8'));
-    if (!manifest?.complete || manifest.formatVersion !== SNAPSHOT_FORMAT_VERSION) throw new Error('备份快照无效或尚未完成');
-    if (manifest.id !== String(id)) throw new Error('备份清单标识与物理目录不一致');
-    if (!validObjectHash(manifest.database?.hash) || !Array.isArray(manifest.files)
-      || manifest.files.some(entry => !validObjectHash(entry?.hash))) throw new Error('备份清单包含无效对象');
-    return manifest;
+    return validateV1Manifest(manifest, String(id));
   };
 
   const retainedSnapshotIds = (manifests, backupConfig) => {
@@ -1495,7 +1601,7 @@ const createBackupService = context => {
       resources: [target],
       metadata: { workspacePath: root, targetPath: target },
     }, async task => {
-      await ensureTargetConnection(target, backupConfig);
+      await ensureTargetConnection(target, backupConfig, task.signal);
       task.report(10, '正在应用快照保留策略');
       const result = await cleanupRetention(target, backupConfig, workspaceId, task);
       task.throwIfCancelled();
@@ -1506,7 +1612,7 @@ const createBackupService = context => {
       const sample = referenced.filter((_hash, index) => index % Math.max(1, Math.floor(referenced.length / 20)) === 0).slice(0, 20);
       for (const [index, hash] of sample.entries()) {
         task.throwIfCancelled();
-        if (await sha256File(objectPath(target, hash)) !== hash) throw new Error(`清理后抽检失败：${hash.slice(0, 12)}`);
+        if (await sha256File(objectPath(target, hash), task.signal) !== hash) throw new Error(`清理后抽检失败：${hash.slice(0, 12)}`);
         task.report(70 + (index + 1) / Math.max(1, sample.length) * 30, `正在抽检剩余对象 ${index + 1}/${sample.length}`);
       }
       return { ...result, sampledObjects: sample.length };
@@ -1531,21 +1637,21 @@ const createBackupService = context => {
       let mediaSnapshot = null; let mediaDatabaseInfo = null;
       if (domains.includes('media')) {
         mediaSnapshot = path.join(stage, 'media.sqlite3');
-        mediaDatabaseInfo = await runPythonJsonAction('domain_recovery.py', ['snapshot', '--domain', 'media', '--source', liveMediaDatabasePath, '--destination', mediaSnapshot], 30 * 60 * 1000);
+        mediaDatabaseInfo = await runPythonJsonAction('domain_recovery.py', ['snapshot', '--domain', 'media', '--source', liveMediaDatabasePath, '--destination', mediaSnapshot], 30 * 60 * 1000, undefined, task.signal);
       }
       let versioningSnapshot = null; let versioningDatabaseInfo = null;
       if (domains.includes('versioning')) {
         versioningSnapshot = path.join(stage, 'versioning.sqlite3');
-        versioningDatabaseInfo = await runPythonJsonAction('domain_recovery.py', ['snapshot', '--domain', 'versioning', '--source', liveVersioningDatabasePath, '--destination', versioningSnapshot], 30 * 60 * 1000);
+        versioningDatabaseInfo = await runPythonJsonAction('domain_recovery.py', ['snapshot', '--domain', 'versioning', '--source', liveVersioningDatabasePath, '--destination', versioningSnapshot], 30 * 60 * 1000, undefined, task.signal);
       }
       const databaseInfo = await runPythonJsonAction('backup_db.py', [
         'snapshot', '--source', liveDatabasePath, '--destination', databaseSnapshot,
         ...(domains.includes('media') ? ['--media', liveMediaDatabasePath] : []),
-      ], 30 * 60 * 1000);
+      ], 30 * 60 * 1000, undefined, task.signal);
       let operationsSnapshot = null; let operationsDatabaseInfo = null;
       if (domains.includes('operations')) {
         operationsSnapshot = path.join(stage, 'operations.sqlite3');
-        operationsDatabaseInfo = await runPythonJsonAction('operations_db.py', ['snapshot', '--source', liveOperationsDatabasePath, '--destination', operationsSnapshot], 30 * 60 * 1000);
+        operationsDatabaseInfo = await runPythonJsonAction('operations_db.py', ['snapshot', '--source', liveOperationsDatabasePath, '--destination', operationsSnapshot], 30 * 60 * 1000, undefined, task.signal);
       }
       return { databaseSnapshot, databaseInfo, liveDatabasePath, liveOperationsDatabasePath, liveMediaDatabasePath, liveVersioningDatabasePath,
         mediaSnapshot, mediaDatabaseInfo, versioningSnapshot, versioningDatabaseInfo, operationsSnapshot, operationsDatabaseInfo };
@@ -1575,7 +1681,7 @@ const createBackupService = context => {
       metadata: { workspacePath: root, targetPath: target, reason },
       resumeFactory: snapshot => runBackup(root, reason, snapshot),
     }, async task => {
-      await ensureTargetConnection(target, backupConfig);
+      await ensureTargetConnection(target, backupConfig, task.signal);
       await assertStoreLayoutPhysical(target);
       await ensureStore(target);
       await assertStoreLayoutPhysical(target);
@@ -1629,7 +1735,7 @@ const createBackupService = context => {
       // Component Host V2 owns this complete tree. The host treats it as an
       // opaque, hash-addressed data package and never opens a component file
       // or assumes a database/schema layout.
-      const componentStorageSnapshot = await snapshotComponentStorage(workspaceDataRoot, stage);
+      const componentStorageSnapshot = await snapshotComponentStorage(workspaceDataRoot, stage, task);
       const componentStorageFiles = componentStorageSnapshot.files;
       const appFiles = [];
       const linearizedConfigPath = path.join(stage, 'photoflow-config-snapshot.json');
@@ -1717,19 +1823,32 @@ const createBackupService = context => {
         let canReuse = previous
           && validObjectHash(previous.hash)
           && Number(previous.size) === sourceStat.size
-          && Math.abs(Number(previous.mtimeMs) - sourceStat.mtimeMs) < 1
+          && typeof previous.changeToken === 'string'
+          && previous.changeToken === fileChangeToken(sourceStat)
+          && validObjectHash(previous.sourceFingerprint)
           && await exists(objectPath(target, previous.hash));
         if (canReuse) {
           const objectStat = await fs.promises.lstat(objectPath(target, previous.hash));
-          const sourceHash = objectStat.isFile() && !objectStat.isSymbolicLink() && objectStat.size === sourceStat.size ? await sha256File(input.absolute) : '';
+          const currentFingerprint = objectStat.isFile() && !objectStat.isSymbolicLink() && objectStat.size === sourceStat.size
+            ? await sampledSourceFingerprint(input.absolute, sourceStat, task.signal) : '';
           const stableStat = await fs.promises.lstat(input.absolute);
           canReuse = objectStat.isFile() && !objectStat.isSymbolicLink() && objectStat.size === sourceStat.size
-            && stableStat.isFile() && !stableStat.isSymbolicLink() && stableStat.size === sourceStat.size && stableStat.mtimeMs === sourceStat.mtimeMs
-            && sourceHash === previous.hash && await sha256File(objectPath(target, previous.hash)) === previous.hash;
+            && stableStat.isFile() && !stableStat.isSymbolicLink() && fileChangeToken(stableStat) === previous.changeToken
+            && currentFingerprint === previous.sourceFingerprint;
+          if (canReuse && Date.now() - Math.min(Number(previous.sourceVerifiedAt || 0), Number(previous.objectVerifiedAt || 0)) >= FULL_SOURCE_SCRUB_INTERVAL_MS) {
+            const [sourceHash, objectHash] = await Promise.all([
+              sha256File(input.absolute, task.signal), sha256File(objectPath(target, previous.hash), task.signal),
+            ]);
+            const afterScrub = await fs.promises.lstat(input.absolute);
+            canReuse = fileChangeToken(afterScrub) === previous.changeToken && sourceHash === previous.hash && objectHash === previous.hash;
+            if (canReuse) { previous.sourceVerifiedAt = Date.now(); previous.objectVerifiedAt = Date.now(); }
+          }
         }
         let result;
         if (canReuse) {
-          result = { hash: previous.hash, size: sourceStat.size, mtimeMs: sourceStat.mtimeMs };
+          result = { hash: previous.hash, size: sourceStat.size, mtimeMs: sourceStat.mtimeMs, changeToken: previous.changeToken,
+            sourceFingerprint: previous.sourceFingerprint, sourceVerifiedAt: Number(previous.sourceVerifiedAt || Date.now()),
+            objectVerifiedAt: Number(previous.objectVerifiedAt || Date.now()) };
           copiedBytes += sourceStat.size;
           reusedBytes += sourceStat.size;
           reusedFiles += 1;
@@ -1855,13 +1974,12 @@ const createBackupService = context => {
     if (!await exists(source)) throw new Error(`备份对象缺失：${entry.hash}`);
     await fs.promises.mkdir(path.dirname(destination), { recursive: true });
     const temporary = `${destination}.${crypto.randomUUID()}.photoflow-restore`;
-    await fs.promises.copyFile(source, temporary, fs.constants.COPYFILE_EXCL);
-    const digest = await sha256File(temporary);
-    if (digest !== entry.hash) {
-      await fs.promises.rm(temporary, { force: true });
-      throw new Error(`备份对象校验失败：${entry.path}`);
-    }
-    await fs.promises.rename(temporary, destination);
+    try {
+      await pipeline(fs.createReadStream(source), fs.createWriteStream(temporary, { flags: 'wx' }), { signal: task?.signal });
+      const digest = await sha256File(temporary, task?.signal);
+      if (digest !== entry.hash) throw new Error(`备份对象校验失败：${entry.path}`);
+      await fs.promises.rename(temporary, destination);
+    } finally { await fs.promises.rm(temporary, { force: true }).catch(() => undefined); }
   };
   const materializeRestoreEntry = async (target, entry, destination, task) => {
     await assertNoReparseAncestorsBeforeCreate(path.dirname(destination));
@@ -1875,6 +1993,27 @@ const createBackupService = context => {
     await materialize(target, entry, destination, task);
     if (await sha256File(destination) !== entry.hash) throw new Error(`恢复对象发布后哈希校验失败：${entry.path}`);
     return { adopted: false };
+  };
+  const validateCheckpointEntry = async (entry, destination, task, hashCache) => {
+    task?.throwIfCancelled?.();
+    const stat = await fs.promises.lstat(destination).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+    if (!stat || !stat.isFile() || stat.isSymbolicLink() || stat.size !== Number(entry.size)) return false;
+    const token = fileChangeToken(stat);
+    const cached = hashCache.get(destination);
+    if (cached?.token === token) return cached.hash === entry.hash;
+    const hash = await sha256File(destination, task?.signal);
+    const after = await fs.promises.lstat(destination);
+    if (!after.isFile() || after.isSymbolicLink() || fileChangeToken(after) !== token) return false;
+    hashCache.set(destination, { token, hash });
+    return hash === entry.hash;
+  };
+  const repairInvalidCheckpointEntry = async (entry, destination, completedSet, task, hashCache) => {
+    if (!completedSet.has(entry.path)) return false;
+    if (await validateCheckpointEntry(entry, destination, task, hashCache)) return true;
+    completedSet.delete(entry.path);
+    const current = await fs.promises.lstat(destination).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+    if (current?.isFile() && !current.isSymbolicLink()) await fs.promises.rm(destination, { force: true });
+    return false;
   };
 
   const externalTargetKey = value => {
@@ -1915,28 +2054,13 @@ const createBackupService = context => {
     await materialize(target, externalLinksEntry, temporaryRegistry, task);
     try {
       const restored = JSON.parse(await fs.promises.readFile(temporaryRegistry, 'utf8'));
-      const current = await fs.promises.readFile(registryPath, 'utf8').then(value => {
-        try { return JSON.parse(value); }
-        catch { return { version: 1, links: {} }; }
-      }, () => ({ version: 1, links: {} }));
+      if (!restored || restored.version !== 1 || !restored.links || typeof restored.links !== 'object' || Array.isArray(restored.links)) throw new Error('备份中的外部链接注册表无效');
+      const current = await readRecoverableJson(registryPath);
+      if (current && (current.version !== 1 || !current.links || typeof current.links !== 'object' || Array.isArray(current.links))) throw new Error('当前外部链接注册表无效，拒绝覆盖');
       const restoredLinks = restoredExternalLinkEntries(restored, shortcutPaths);
       if (!Object.keys(restoredLinks).length) return false;
       const merged = { version: 1, links: { ...restoredLinks, ...(current?.links || {}) } };
-      await fs.promises.mkdir(path.dirname(registryPath), { recursive: true });
-      const nextPath = `${registryPath}.restore-${crypto.randomUUID()}.tmp`;
-      const backupPath = `${registryPath}.restore-${crypto.randomUUID()}.backup`;
-      await fs.promises.writeFile(nextPath, JSON.stringify(merged), { encoding: 'utf8', flag: 'wx' });
-      try {
-        if (await exists(registryPath)) await fs.promises.rename(registryPath, backupPath);
-        await fs.promises.rename(nextPath, registryPath);
-        await fs.promises.rm(backupPath, { force: true });
-      } catch (error) {
-        if (!await exists(registryPath) && await exists(backupPath)) await fs.promises.rename(backupPath, registryPath);
-        throw error;
-      } finally {
-        await fs.promises.rm(nextPath, { force: true });
-        await fs.promises.rm(backupPath, { force: true });
-      }
+      await writeDurableJsonReplace(registryPath, merged);
       return true;
     } finally {
       await fs.promises.rm(temporaryRegistry, { force: true });
@@ -2017,15 +2141,17 @@ const createBackupService = context => {
       const completedWorkspace = new Set(Array.isArray(savedCheckpoint.completedWorkspace) ? savedCheckpoint.completedWorkspace : []);
       const completedData = new Set(Array.isArray(savedCheckpoint.completedData) ? savedCheckpoint.completedData : []);
       const completedComponents = new Set(Array.isArray(savedCheckpoint.completedComponents) ? savedCheckpoint.completedComponents : []);
+      const checkpointHashCache = new Map();
       return restoreOwnedComponentData({
         target, manifest, mode: 'workspace', task, plan: componentRestorePlan,
         sourceWorkspace: { root: manifest.workspace.root, dataRoot: manifest.workspace.dataRoot || '' },
         targetWorkspace: { root: destination, dataRoot: newDataRoot },
         beforeTargetWrite: async () => undefined,
-        continuation: async componentRestore => {
+        continuation: async (componentRestore, restoreTransaction) => {
       for (const entry of componentEntries) {
         if (componentRestore.handled.has(`${entry.scope}\0${entry.path}`)) continue;
         const entryDestination = safeDestination(componentStorageRoot, entry.path);
+        if (await repairInvalidCheckpointEntry(entry, entryDestination, completedComponents, task, checkpointHashCache)) continue;
         await materializeRestoreEntry(target, entry, entryDestination, task);
         completedComponents.add(entry.path);
         task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'component-data', newWorkspaceId: newId, completedWorkspace: [...completedWorkspace], completedData: [...completedData], completedComponents: [...completedComponents] }, 3, `正在恢复组件数据 ${completedComponents.size}/${componentEntries.length}`);
@@ -2035,6 +2161,7 @@ const createBackupService = context => {
       let completed = 0;
       for (const entry of workspaceEntries) {
         const entryDestination = safeDestination(destination, entry.path);
+        if (await repairInvalidCheckpointEntry(entry, entryDestination, completedWorkspace, task, checkpointHashCache)) { completed += 1; continue; }
         await materializeRestoreEntry(target, entry, entryDestination, task);
         completedWorkspace.add(entry.path);
         completed += 1;
@@ -2053,6 +2180,7 @@ const createBackupService = context => {
       const dataEntries = manifest.files.filter(item => item.scope === 'workspace-data');
       for (const [index, entry] of dataEntries.entries()) {
         const entryDestination = safeDestination(newDataRoot, entry.path);
+        if (await repairInvalidCheckpointEntry(entry, entryDestination, completedData, task, checkpointHashCache)) continue;
         await materializeRestoreEntry(target, entry, entryDestination, task);
         completedData.add(entry.path);
         const progress = 75 + (index + 1) / Math.max(1, dataEntries.length) * 10;
@@ -2131,6 +2259,13 @@ const createBackupService = context => {
     if (!isApprovedTarget(target)) throw new Error('备份位置未经授权');
     const root = path.resolve(workspaceRoot);
     const manifest = await manifestFor(target, snapshot);
+    const hasProjectMediaDomain = manifest.files.some(item => item.scope === 'domain-database' && item.path === 'media.sqlite3');
+    const hasProjectVersioningDomain = manifest.files.some(item => item.scope === 'domain-database' && item.path === 'versioning.sqlite3');
+    if (hasProjectVersioningDomain && !hasProjectMediaDomain) {
+      const error = new Error('该 v1 快照仅包含版本域，无法保证项目级恢复的一致性');
+      error.code = 'PROJECT_RESTORE_VERSIONING_REQUIRES_MEDIA';
+      throw error;
+    }
     const componentRestorePlan = preflightComponentRestore(manifest, 'project');
     const project = (manifest.projects || []).find(item => item.id === projectId);
     if (!project) throw new Error('备份快照中找不到该项目');
@@ -2159,6 +2294,7 @@ const createBackupService = context => {
       const savedCheckpoint = task.getCheckpoint() || {};
       const completedProject = new Set(Array.isArray(savedCheckpoint.completedProject) ? savedCheckpoint.completedProject : []);
       const completedData = new Set(Array.isArray(savedCheckpoint.completedData) ? savedCheckpoint.completedData : []);
+      const checkpointHashCache = new Map();
       const newDataRoot = getWorkspaceDataRoot(root);
       return restoreOwnedComponentData({
         target, manifest, mode: 'project', task, plan: componentRestorePlan,
@@ -2181,12 +2317,13 @@ const createBackupService = context => {
             await durableSyncDirectory(root);
           }
         },
-        continuation: async componentRestore => {
+        continuation: async (componentRestore, restoreTransaction) => {
       const prefix = normalizeKey(project.relativePath).replace(/\/$/, '') + '/';
       const projectEntries = manifest.files.filter(item => item.scope === 'workspace' && item.projectIds?.includes(project.id) && (item.path === prefix.slice(0, -1) || item.path.startsWith(prefix)));
       for (const [index, entry] of projectEntries.entries()) {
         const relative = entry.path.slice(prefix.length);
         const entryDestination = safeDestination(projectRoot, relative);
+        if (await repairInvalidCheckpointEntry(entry, entryDestination, completedProject, task, checkpointHashCache)) continue;
         await materializeRestoreEntry(target, entry, entryDestination, task);
         completedProject.add(entry.path);
         const progress = 5 + (index + 1) / Math.max(1, projectEntries.length) * 70;
@@ -2201,6 +2338,7 @@ const createBackupService = context => {
       const dataEntries = manifest.files.filter(item => item.scope === 'workspace-data' && item.projectIds?.includes(project.id));
       for (const [index, entry] of dataEntries.entries()) {
         const entryDestination = safeDestination(newDataRoot, entry.path);
+        if (await repairInvalidCheckpointEntry(entry, entryDestination, completedData, task, checkpointHashCache)) continue;
         await materializeRestoreEntry(target, entry, entryDestination, task);
         completedData.add(entry.path);
         const progress = 76 + (index + 1) / Math.max(1, dataEntries.length) * 9;
@@ -2315,6 +2453,12 @@ const createBackupService = context => {
       });
       }
       } finally { if (!preservePortableDomainRoot) await fs.promises.rm(portableDomainRoot, { recursive: true, force: true }); }
+      // The database transaction is the durable commit point for project
+      // restore.  Registry publication and token finalization are replayable;
+      // failures after this point must never roll components back underneath
+      // already-committed core/media/versioning rows.
+      await restoreTransaction.commitDurably();
+      task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'database-committed', completedProject: [...completedProject], completedData: [...completedData], restoreSessionId }, 96, '项目数据库与组件恢复已提交');
       await mergeExternalLinkRegistry(
         target,
         manifest,
@@ -2322,6 +2466,7 @@ const createBackupService = context => {
         projectEntries.filter(entry => path.extname(entry.path).toLowerCase() === '.lnk').map(entry => safeDestination(projectRoot, entry.path.slice(prefix.length))),
         task,
       );
+      task.saveCheckpoint({ ...savedCheckpoint, version: 1, phase: 'registry-committed', completedProject: [...completedProject], completedData: [...completedData], restoreSessionId }, 99, '项目外部链接注册表已提交');
       await fs.promises.rm(recoveryJournal, { force: true });
       task.report(100, '项目恢复完成');
       return { project, componentRestore: componentRestore.results };
@@ -2361,7 +2506,7 @@ const createBackupService = context => {
         const source = objectPath(target, entry.hash);
         const stat = await fs.promises.lstat(source).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
         if (!stat || !stat.isFile() || stat.isSymbolicLink() || (entry.size != null && stat.size !== Number(entry.size))) throw new Error(`备份对象缺失或大小无效：${entry.path}`);
-        if (await sha256File(source) !== entry.hash) throw new Error(`备份对象校验失败：${entry.path}`);
+        if (await sha256File(source, task.signal) !== entry.hash) throw new Error(`备份对象校验失败：${entry.path}`);
         const progress = (index + 1) / entries.length * 100;
         task.saveCheckpoint({ version: 1, phase: 'verifying', nextIndex: index + 1 }, progress, `正在验证 ${index + 1}/${entries.length} 个文件`);
       }

@@ -71,6 +71,41 @@ def apply_changes(workspace: Path, db, project_name: str, changes: list[dict], e
     return prepared, {**finalized, "count": count}
 
 
+def apply_full_paged(workspace: Path, db, project_name: str):
+    legacy = workspace_db.media_sync_prepare(str(workspace), db, {
+        "projectName": project_name, "externalRoots": [],
+    })
+    snapshot_id = str(uuid.uuid4())
+    token = "0"
+    pages = 0
+    count = 0
+    paged_total = None
+    while True:
+        prepared = workspace_db.media_sync_prepare(str(workspace), db, {
+            "projectName": project_name, "externalRoots": [], "paged": True,
+            "snapshotId": snapshot_id, "pageToken": token, "pageSize": 64,
+        })
+        assert prepared["paged"] and len(prepared["files"]) <= 64
+        assert prepared["baselineVersions"] == [], "paged wire results must not aggregate the baseline"
+        paged_total = prepared["totalFiles"] if paged_total is None else paged_total
+        assert prepared["totalFiles"] == paged_total
+        pages += 1
+        if prepared["files"]:
+            applied = workspace_db.media_sync_paths_apply_batch(str(workspace), db, {
+                "projectName": project_name, "snapshotId": snapshot_id,
+                "batchIndex": prepared["pageOffset"] // 64, "files": prepared["files"],
+            })
+            count += int(applied.get("count") or 0)
+        token = prepared.get("nextPageToken")
+        if not token:
+            break
+    finalized = workspace_db.media_sync_paths_finalize(str(workspace), db, {
+        "projectName": project_name, "snapshotId": snapshot_id,
+    })
+    assert paged_total == len(legacy["files"]), "paged and legacy prepare must enumerate the same files"
+    return pages, {**finalized, "count": count}
+
+
 def change(path: Path, event_type="rename", kind="file"):
     return {"path": str(path.resolve()), "eventType": event_type, "kind": kind}
 
@@ -397,6 +432,12 @@ def main():
             assert checked.execute(f"PRAGMA {schema}.quick_check").fetchone()[0] == "ok"
         scope_indexes = {row[1] for row in checked.execute("PRAGMA media.index_list(media_incremental_snapshot_scopes)").fetchall()}
         assert "media_incremental_snapshot_scopes_path" in scope_indexes
+        paged_directory = project / "PagedFull"
+        paged_directory.mkdir()
+        for index in range(1537):
+            (paged_directory / f"{index:04d}.jpg").write_bytes(b"paged")
+        full_pages, full_result = apply_full_paged(workspace, checked, "Project")
+        assert full_pages > 24 and full_result["count"] >= 1537, "full sync must consume a bounded persisted manifest"
         checked.close()
         print("incremental media synchronization tests passed")
     finally:
