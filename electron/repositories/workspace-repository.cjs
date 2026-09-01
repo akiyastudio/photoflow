@@ -61,6 +61,7 @@ const createWorkspaceRepository = (client, operationsRepository = null) => {
   claimUndoRecordExecution: (root, id, claimToken) => operationsRepository
     ? operationsRepository.claimUndoRecordExecution(root, id, claimToken)
     : client.call(root, 'undo_record_claim_execute', { id, claimToken }),
+  shadowRetireUndoRecord: (root, id) => client.call(root, 'undo_record_shadow_retire', { id }),
   latestUndoRecord: root => operationsRepository
     ? operationsRepository.latestUndoRecord(root)
     : client.call(root, 'undo_record_latest', {}),

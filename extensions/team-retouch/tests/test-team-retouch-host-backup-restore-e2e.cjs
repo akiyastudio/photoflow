@@ -30,7 +30,7 @@ const assertCoreDatabaseFixture = (database, expectedProjectId = undefined) => {
   const db = new DatabaseSync(database, { readOnly: true });
   try {
     assert.equal(db.prepare('PRAGMA quick_check').get().quick_check, 'ok', 'core database fixture passes SQLite quick_check');
-    assert.equal(Number(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value), 33, 'core database fixture uses the current workspace schema');
+    assert.equal(Number(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value), 34, 'core database fixture uses the current workspace schema');
     if (expectedProjectId) assert.equal(db.prepare('SELECT id FROM projects WHERE id=?').get(expectedProjectId)?.id, expectedProjectId, 'source core fixture contains the restored project');
   } finally { db.close(); }
 };

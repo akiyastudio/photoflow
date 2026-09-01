@@ -11499,6 +11499,27 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
             raise
         finally:
             db.close()
+    elif action == "undo_record_shadow_retire":
+        record_id = str(payload.get("id") or "")
+        if not record_id:
+            db.close()
+            raise ValueError("undo record id is required")
+        try:
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at)
+                   VALUES(?, 'claim-retired', '{}', 'retired', ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     kind='claim-retired',payload_json='{}',state='retired',updated_at=excluded.updated_at""",
+                (record_id, now, now),
+            )
+            db.commit()
+            return {"success": True, "retired": True}
+        except Exception:
+            if db.in_transaction: db.rollback()
+            raise
+        finally:
+            db.close()
     elif action == "undo_record_latest":
         row = db.execute(
             "SELECT * FROM undo_records WHERE state='ready' AND kind='trash' ORDER BY created_at DESC LIMIT 1"

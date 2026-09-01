@@ -2204,6 +2204,7 @@ const createBackupService = context => {
             await materialize(target, entry, portable, task);
             await runRecoveryPythonAction('domain_recovery.py', [
               'restore-workspace', '--domain', domain, '--source', portable, '--destination', getter(destination),
+              ...(domain === 'operations' ? ['--retired-source', getWorkspaceDatabasePath(destination)] : []),
               '--old-root', manifest.workspace.root, '--new-root', destination,
               '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', newDataRoot,
             ], 30 * 60 * 1000);
@@ -2568,6 +2569,7 @@ const createBackupService = context => {
         try {
           return await runRecoveryPythonAction('domain_recovery.py', [
             'restore-workspace', '--domain', domain, '--source', portable, '--destination', database,
+            ...(domain === 'operations' ? ['--retired-source', getWorkspaceDatabasePath(root)] : []),
             '--old-root', manifest.workspace.root, '--new-root', root,
             '--old-data-root', manifest.workspace.dataRoot || '', '--new-data-root', getWorkspaceDataRoot(root),
           ], 30 * 60 * 1000);
@@ -2588,7 +2590,8 @@ const createBackupService = context => {
       workspaceRoot,
       domains: [domain],
       deadlineAt: Date.now() + 30 * 60 * 1000,
-    }, () => runRecoveryPythonAction('domain_recovery.py', ['reset', '--domain', domain, '--destination', database], 30 * 60 * 1000));
+    }, () => runRecoveryPythonAction('domain_recovery.py', ['reset', '--domain', domain, '--destination', database,
+      ...(domain === 'operations' ? ['--retired-source', getWorkspaceDatabasePath(workspaceRoot)] : [])], 30 * 60 * 1000));
   };
 
   const accepted = async starter => {

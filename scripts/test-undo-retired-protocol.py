@@ -274,6 +274,38 @@ def run():
         workspace_db.mutate(workspace_root, core, "undo_record_remove_many", {"ids": ["fallback-ready", "fallback-other", "ready", "absent", "execute"]})
         assert raw(core, "fallback-ready") is None
         assert raw(core, "ready")[3] == raw(core, "absent")[3] == raw(core, "execute")[3] == "retired"
+        workspace_db.mutate(workspace_root, core, "undo_record_shadow_retire", {"id": "shadow-only"})
+        assert raw(core, "shadow-only")[1:4] == ("claim-retired", "{}", "retired")
+
+        broken_operations = str(temporary_path / "broken-operations.sqlite3")
+        broken = sqlite3.connect(broken_operations); broken.execute("CREATE TABLE unrelated(value TEXT)"); broken.execute("INSERT INTO unrelated VALUES('preserve')"); broken.commit(); broken.close()
+        domain_recovery.reset_store(broken_operations, "operations", core)
+        assert raw(broken_operations, "shadow-only")[3] == "retired"
+        try:
+            operations_db.execute(broken_operations, "undo_record_add", {"id": "shadow-only", "kind": "trash", "payload": {}})
+            raise AssertionError("reset over corrupt operations lost the core shadow")
+        except Exception as error:
+            assert getattr(error, "code", "") == "UNDO_RECORD_RETIRED"
+
+        os.remove(broken_operations)
+        broken = sqlite3.connect(broken_operations); broken.execute("CREATE TABLE unrelated(value TEXT)"); broken.commit(); broken.close()
+        domain_recovery.restore_workspace(old, broken_operations, "operations", [], core)
+        assert raw(broken_operations, "shadow-only")[3] == "retired"
+
+        doubly_broken = str(temporary_path / "doubly-broken-operations.sqlite3"); broken_core = str(temporary_path / "broken-core.sqlite3")
+        for broken_path in (doubly_broken, broken_core):
+            broken_db = sqlite3.connect(broken_path)
+            try:
+                broken_db.execute("CREATE TABLE unrelated(value TEXT)"); broken_db.commit()
+            finally:
+                broken_db.close()
+        before_doubly_broken = Path(doubly_broken).read_bytes()
+        try:
+            domain_recovery.reset_store(doubly_broken, "operations", broken_core)
+            raise AssertionError("reset proceeded without any verifiable retired-ID source")
+        except RuntimeError as error:
+            assert "cannot verify any retired-ID source" in str(error)
+        assert Path(doubly_broken).read_bytes() == before_doubly_broken
         db = sqlite3.connect(core)
         db.row_factory = sqlite3.Row
         try:

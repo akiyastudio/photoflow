@@ -188,6 +188,13 @@ const registerWorkspaceIpc = context => {
   const persistentUndoPendingCleanups = new Map();
   const persistentUndoPendingCleanupCapacity = Math.max(1, Number(context.persistentUndoPendingCleanupCapacity) || 128);
   const persistentUndoPendingCleanupTimers = new Map();
+  const persistentUndoPendingCleanupRetryRunning = new Set();
+  const persistentUndoPendingCleanupAttempts = new Map();
+  const persistentUndoPendingCleanupRescanNeeded = new Set();
+  const persistentUndoPendingCleanupMaxAttempts = Math.max(1, Number(context.persistentUndoPendingCleanupMaxAttempts) || 4);
+  const persistentUndoPendingCleanupBaseDelayMs = Math.max(10, Number(context.persistentUndoPendingCleanupBaseDelayMs) || 50);
+  const persistentUndoGcScheduled = new Set();
+  const persistentUndoGcRunning = new Set();
   const persistentUndoInteractiveLegacyScans = new Map();
   const persistentUndoInteractiveAdmissionTimers = new Map();
   const persistentUndoInteractiveBudgetMs = Math.max(1, Number(context.persistentUndoInteractiveBudgetMs) || 10);
@@ -329,8 +336,15 @@ const registerWorkspaceIpc = context => {
   const legacyPersistentUndoClaimStatus = async (descriptor, continuation = false) => {
     const key = legacyInteractiveKey(descriptor);
     await pruneInteractiveLegacyScans(key);
-    const identity = await rootDirectoryIdentity(descriptor.workspaceRoot);
     let state = persistentUndoInteractiveLegacyScans.get(key);
+    let identity;
+    try { identity = await rootDirectoryIdentity(descriptor.workspaceRoot); }
+    catch (cause) {
+      if (state) await closeInteractiveLegacyState(key, state).catch(() => undefined);
+      const admission = persistentUndoInteractiveAdmissionTimers.get(key); if (admission) clearTimeout(admission);
+      persistentUndoInteractiveAdmissionTimers.delete(key);
+      throw claimFailure(`旧版 claim 扫描期间工作区身份不可用，已停止后台续扫：${cause?.message || String(cause)}`, cause);
+    }
     if (state && state.rootIdentity !== identity) { await closeInteractiveLegacyState(key, state); state = null; }
     if (state?.complete) return { exists: state.exists, complete: true };
     if (!state) {
@@ -431,6 +445,11 @@ const registerWorkspaceIpc = context => {
     try { executionClaim = await workspaceRepository.claimUndoRecordExecution(operation.workspaceRoot, operation.persistentId, boundRecord.claimToken); }
     catch (cause) { throw pendingPersistentUndoError(`持久撤销 claim 已建立，但无法原子隔离执行权；不会执行恢复：${cause?.message || String(cause)}`, cause); }
     if (executionClaim?.claimed !== true) throw pendingPersistentUndoError('持久撤销记录版本已变化或执行权已被其他进程取得；当前 tombstone 保留且不会执行恢复');
+    try {
+      const shadow = await workspaceRepository.shadowRetireUndoRecord(operation.workspaceRoot, operation.persistentId);
+      if (shadow?.retired !== true) throw new Error('core shadow did not acknowledge retired=true');
+    }
+    catch (cause) { throw pendingPersistentUndoError(`执行权已隔离，但 core retired shadow 持久化失败；不会执行恢复：${cause?.message || String(cause)}`, cause); }
     await context.afterPersistentUndoExecutionClaim?.({ operation, descriptor });
     return descriptor;
   };
@@ -476,21 +495,31 @@ const registerWorkspaceIpc = context => {
       let claim;
       try { claim = await workspaceRepository.retireUndoRecordClaim(root, marker.id); }
       catch (error) { result.skipped += 1; result.warnings.push(`journal-retire-failed:${entryName}:${error?.message || String(error)}`); return; }
+      if (claim?.retired !== true) { result.skipped += 1; result.warnings.push(`journal-cas-retained:${entryName}`); return; }
+      try {
+        const shadow = await workspaceRepository.shadowRetireUndoRecord(root, marker.id);
+        if (shadow?.retired !== true) throw new Error('core shadow did not acknowledge retired=true');
+      }
+      catch (error) { result.skipped += 1; result.warnings.push(`shadow-retire-failed:${entryName}:${error?.message || String(error)}`); return; }
       if (Date.now() >= deadline) {
-        if (claim?.retired === true) {
-          enqueuePersistentUndoPendingCleanup({ root, markerPath, entryName, expectedIdentity });
-        }
+        enqueuePersistentUndoPendingCleanup({ root, markerPath, entryName, expectedIdentity });
         result.skipped += 1; result.truncated = true; result.warnings.push(`deadline-after-retire:${entryName}`); return;
       }
-      if (claim?.retired !== true) { result.skipped += 1; result.warnings.push(`journal-cas-retained:${entryName}`); return; }
       let deleteDeadlineExpired = false;
-      const removed = await removeOwnedPathIdentityBound(markerPath, expectedIdentity, { beforeQuarantineMove: async item => {
-        await context.beforePersistentUndoClaimGcDelete?.(item);
-        if (Date.now() >= deadline) {
-          deleteDeadlineExpired = true;
-          throw Object.assign(new Error('claim GC deadline expired before deletion'), { code: 'GC_DEADLINE_EXPIRED' });
-        }
-      } });
+      let removed;
+      try {
+        removed = await removeOwnedPathIdentityBound(markerPath, expectedIdentity, { beforeQuarantineMove: async item => {
+          await context.beforePersistentUndoClaimGcDelete?.(item);
+          if (Date.now() >= deadline) {
+            deleteDeadlineExpired = true;
+            throw Object.assign(new Error('claim GC deadline expired before deletion'), { code: 'GC_DEADLINE_EXPIRED' });
+          }
+        } });
+      } catch (error) {
+        if (!deleteDeadlineExpired) throw error;
+        enqueuePersistentUndoPendingCleanup({ root, markerPath, entryName, expectedIdentity });
+        result.skipped += 1; result.truncated = true; result.warnings.push(`delete-deadline:${entryName}`); return;
+      }
       if (deleteDeadlineExpired) result.truncated = true;
       if (removed.success) result.removed += 1;
       else { result.skipped += 1; result.warnings.push(`${removed.code || 'cleanup-failed'}:${entryName}`); }
@@ -498,22 +527,42 @@ const registerWorkspaceIpc = context => {
       result.skipped += 1; result.warnings.push(`${error?.code || 'invalid-marker'}:${entryName}`);
     } finally { await handle?.close().catch(() => undefined); }
   };
-  const schedulePersistentUndoPendingCleanupRetry = (root, delayMs = 50) => {
+  const schedulePersistentUndoPendingCleanupRetry = root => {
     const rootKey = comparablePath(root);
-    if (persistentUndoPendingCleanupTimers.has(rootKey)) return;
+    if (persistentUndoPendingCleanupTimers.has(rootKey) || persistentUndoPendingCleanupRetryRunning.has(rootKey)) return;
+    const attempt = (persistentUndoPendingCleanupAttempts.get(rootKey) || 0) + 1;
+    if (attempt > persistentUndoPendingCleanupMaxAttempts) { persistentUndoPendingCleanupRescanNeeded.add(rootKey); return; }
+    persistentUndoPendingCleanupAttempts.set(rootKey, attempt);
+    context.onPersistentUndoPendingCleanupSchedule?.({ root, attempt });
+    const delayMs = persistentUndoPendingCleanupBaseDelayMs * (2 ** (attempt - 1));
     const timer = setTimeout(async () => {
       persistentUndoPendingCleanupTimers.delete(rootKey);
-      for (const cursorMap of [persistentUndoV2Cursors, persistentUndoLegacyCursors]) {
-        const state = cursorMap.get(rootKey);
-        if (state?.running) { schedulePersistentUndoPendingCleanupRetry(root, delayMs); return; }
-        if (state) { cursorMap.delete(rootKey); await state.directory?.close().catch(() => undefined); }
+      persistentUndoPendingCleanupRetryRunning.add(rootKey);
+      try {
+        for (const cursorMap of [persistentUndoV2Cursors, persistentUndoLegacyCursors]) {
+          const state = cursorMap.get(rootKey);
+          if (state?.running) return;
+          if (state) { cursorMap.delete(rootKey); await state.directory?.close().catch(() => undefined); }
+        }
+        try { await runPersistentUndoClaimGc(root, { continuation: true, pendingRetry: true }); }
+        catch (error) { writeLog('warn', 'Persistent undo pending cleanup retry failed', { workspaceRoot: root, error: error?.message || String(error) }); }
+      } finally {
+        persistentUndoPendingCleanupRetryRunning.delete(rootKey);
       }
-      runPersistentUndoClaimGc(root, { continuation: true }).catch(error => writeLog('warn', 'Persistent undo pending cleanup retry failed', { workspaceRoot: root, error: error?.message || String(error) }));
+      if ([...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === rootKey)
+          && !persistentUndoPendingCleanupTimers.has(rootKey) && !persistentUndoPendingCleanupRescanNeeded.has(rootKey)) schedulePersistentUndoPendingCleanupRetry(root);
     }, delayMs);
     persistentUndoPendingCleanupTimers.set(rootKey, timer);
   };
   const enqueuePersistentUndoPendingCleanup = pending => {
     const key = comparablePath(pending.markerPath);
+    const rootKey = comparablePath(pending.root);
+    for (const cursorMap of [persistentUndoV2Cursors, persistentUndoLegacyCursors]) {
+      const state = cursorMap.get(rootKey);
+      if (!state) continue;
+      cursorMap.delete(rootKey); state.cancelled = true;
+      if (!state.running) state.directory?.close().catch(() => undefined);
+    }
     if (!persistentUndoPendingCleanups.has(key) && persistentUndoPendingCleanups.size >= persistentUndoPendingCleanupCapacity) {
       const [evictedKey, evicted] = persistentUndoPendingCleanups.entries().next().value;
       persistentUndoPendingCleanups.delete(evictedKey);
@@ -529,13 +578,22 @@ const registerWorkspaceIpc = context => {
       persistentUndoPendingCleanups.delete(key);
       result.checked += 1;
       let deadlineExpired = false;
-      const removed = await removeOwnedPathIdentityBound(pending.markerPath, pending.expectedIdentity, { beforeQuarantineMove: async item => {
-        await context.beforePersistentUndoClaimGcDelete?.(item);
-        if (Date.now() >= deadline) { deadlineExpired = true; throw Object.assign(new Error('claim GC deadline expired before pending deletion'), { code: 'GC_DEADLINE_EXPIRED' }); }
-      } });
+      let removed;
+      try {
+        removed = await removeOwnedPathIdentityBound(pending.markerPath, pending.expectedIdentity, { beforeQuarantineMove: async item => {
+          await context.beforePersistentUndoClaimGcDelete?.(item);
+          if (Date.now() >= deadline) { deadlineExpired = true; throw Object.assign(new Error('claim GC deadline expired before pending deletion'), { code: 'GC_DEADLINE_EXPIRED' }); }
+        } });
+      } catch (error) {
+        if (!deadlineExpired) { result.skipped += 1; result.warnings.push(`${error?.code || 'pending-cleanup-failed'}:${pending.entryName}`); continue; }
+      }
       if (deadlineExpired) { enqueuePersistentUndoPendingCleanup(pending); result.truncated = true; result.skipped += 1; result.warnings.push(`pending-deadline:${pending.entryName}`); continue; }
       if (removed.success) result.removed += 1;
       else { result.skipped += 1; result.warnings.push(`${removed.code || 'pending-cleanup-failed'}:${pending.entryName}`); }
+    }
+    if (![...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === comparablePath(root))) {
+      persistentUndoPendingCleanupAttempts.delete(comparablePath(root));
+      persistentUndoPendingCleanupRescanNeeded.delete(comparablePath(root));
     }
   };
   const scheduleLegacyPersistentUndoClaimGcContinuation = root => {
@@ -544,6 +602,7 @@ const registerWorkspaceIpc = context => {
     state.scheduled = true;
     setTimeout(() => {
       state.scheduled = false;
+      if ([...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === key)) return;
       runPersistentUndoClaimGc(root, { continuation: true, skipV2: true }).then(result => {
         if (result.removed || result.warnings.length) writeLog(result.warnings.length ? 'warn' : 'info', 'Legacy persistent undo claim GC continued', { workspaceRoot: root, ...result });
       }).catch(error => writeLog('warn', 'Legacy persistent undo claim GC continuation failed', { workspaceRoot: root, error: error?.message || String(error) }));
@@ -555,6 +614,7 @@ const registerWorkspaceIpc = context => {
     state.scheduled = true;
     setTimeout(() => {
       state.scheduled = false;
+      if ([...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === key)) return;
       runPersistentUndoClaimGc(root, { continuation: true }).then(result => {
         if (result.removed || result.warnings.length) writeLog(result.warnings.length ? 'warn' : 'info', 'Persistent undo claim GC continued', { workspaceRoot: root, ...result });
       }).catch(error => writeLog('warn', 'Persistent undo claim GC continuation failed', { workspaceRoot: root, error: error?.message || String(error) }));
@@ -582,7 +642,7 @@ const registerWorkspaceIpc = context => {
     } catch (error) { failed = true; throw error; }
     finally {
       state.running = false;
-      if (eof || failed) {
+      if (eof || failed || state.cancelled) {
         persistentUndoV2Cursors.delete(key);
         await state.directory.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') result.warnings.push(`scan-close-failed:${error?.message || String(error)}`); });
       } else {
@@ -613,7 +673,7 @@ const registerWorkspaceIpc = context => {
     } catch (error) { failed = true; throw error; }
     finally {
       state.running = false;
-      if (eof || failed) {
+      if (eof || failed || state.cancelled) {
         persistentUndoLegacyCursors.delete(key);
         await state.directory.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') result.warnings.push(`scan-close-failed:${error?.message || String(error)}`); });
       } else {
@@ -622,27 +682,43 @@ const registerWorkspaceIpc = context => {
       }
     }
   };
+  const cleanupPersistentUndoGcRoot = async rootKey => {
+    for (const cursorMap of [persistentUndoV2Cursors, persistentUndoLegacyCursors]) {
+      const state = cursorMap.get(rootKey);
+      if (!state) continue;
+      cursorMap.delete(rootKey); state.cancelled = true;
+      if (!state.running) await state.directory?.close().catch(() => undefined);
+    }
+    for (const [key, pending] of persistentUndoPendingCleanups) if (comparablePath(pending.root) === rootKey) persistentUndoPendingCleanups.delete(key);
+    const timer = persistentUndoPendingCleanupTimers.get(rootKey); if (timer) clearTimeout(timer);
+    persistentUndoPendingCleanupTimers.delete(rootKey); persistentUndoPendingCleanupRetryRunning.delete(rootKey); persistentUndoPendingCleanupAttempts.delete(rootKey);
+    persistentUndoClaimLastScans.delete(rootKey); persistentUndoPendingCleanupRescanNeeded.add(rootKey);
+  };
   const runPersistentUndoClaimGc = async (workspaceRoot, options = {}) => {
     const result = { checked: 0, removed: 0, skipped: 0, warnings: [], visited: 0 };
     const startedAt = Date.now();
     const deadline = startedAt + persistentUndoClaimScanBudgetMs;
+    const requestedRootKey = comparablePath(path.resolve(String(workspaceRoot || '')));
     let root;
     try { root = await fs.promises.realpath(path.resolve(String(workspaceRoot || ''))); }
-    catch (error) { result.warnings.push(`workspace-unavailable:${error?.code || error?.message || String(error)}`); return result; }
+    catch (error) { await cleanupPersistentUndoGcRoot(requestedRootKey); result.warnings.push(`workspace-unavailable:${error?.code || error?.message || String(error)}`); return result; }
     const throttleKey = comparablePath(root);
     const now = Number(context.persistentUndoClaimNowMs?.() ?? Date.now());
-    if (!options.continuation && now - (persistentUndoClaimLastScans.get(throttleKey) || 0) < persistentUndoClaimThrottleMs) {
+    const hasPendingCleanup = [...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === throttleKey);
+    if (options.continuation && !options.pendingRetry && (hasPendingCleanup || persistentUndoPendingCleanupRescanNeeded.has(throttleKey) || persistentUndoPendingCleanupTimers.has(throttleKey))) { result.deferred = true; return result; }
+    const forceRescan = !options.continuation && persistentUndoPendingCleanupRescanNeeded.delete(throttleKey);
+    if (!options.continuation && !forceRescan && now - (persistentUndoClaimLastScans.get(throttleKey) || 0) < persistentUndoClaimThrottleMs) {
       result.skipped += 1; result.throttled = true; return result;
     }
     if (!options.continuation) persistentUndoClaimLastScans.set(throttleKey, now);
     let workspaceId;
     try { workspaceId = await readPersistentUndoWorkspaceId(root); }
-    catch (error) { result.warnings.push(`workspace-id-unavailable:${error?.message || String(error)}`); return result; }
+    catch (error) { await cleanupPersistentUndoGcRoot(throttleKey); result.warnings.push(`workspace-id-unavailable:${error?.message || String(error)}`); return result; }
     await processPersistentUndoPendingCleanups({ root, result, deadline });
     if (!options.skipV2 && Date.now() < deadline) {
       let claimDirectory;
       try { claimDirectory = await persistentUndoClaimDirectory(root, false); }
-      catch (error) { result.warnings.push(`claim-directory-unsafe:${error?.message || String(error)}`); return result; }
+      catch (error) { await cleanupPersistentUndoGcRoot(throttleKey); result.warnings.push(`claim-directory-unsafe:${error?.message || String(error)}`); return result; }
       if (claimDirectory) {
         try {
           await scanV2PersistentUndoClaims({ root, workspaceId, claimDirectory, result, deadline, now });
@@ -653,12 +729,20 @@ const registerWorkspaceIpc = context => {
       try { await scanLegacyPersistentUndoClaims({ root, workspaceId, result, deadline, now }); }
       catch (error) { result.warnings.push(`scan-legacy-failed:${error?.message || String(error)}`); }
     }
+    if (![...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === throttleKey)) persistentUndoPendingCleanupAttempts.delete(throttleKey);
     return result;
   };
   const schedulePersistentUndoClaimGc = workspaceRoot => {
-    setTimeout(() => runPersistentUndoClaimGc(workspaceRoot).then(result => {
-      if (result.removed || result.warnings.length) writeLog(result.warnings.length ? 'warn' : 'info', 'Persistent undo claim GC completed', { workspaceRoot, ...result });
-    }).catch(error => writeLog('warn', 'Persistent undo claim GC failed', { workspaceRoot, error: error?.message || String(error) })), 0);
+    const key = comparablePath(path.resolve(String(workspaceRoot || '')));
+    if (persistentUndoGcScheduled.has(key) || persistentUndoGcRunning.has(key)) return;
+    persistentUndoGcScheduled.add(key);
+    setTimeout(() => {
+      persistentUndoGcScheduled.delete(key); persistentUndoGcRunning.add(key);
+      runPersistentUndoClaimGc(workspaceRoot).then(result => {
+        if (result.removed || result.warnings.length) writeLog(result.warnings.length ? 'warn' : 'info', 'Persistent undo claim GC completed', { workspaceRoot, ...result });
+      }).catch(error => writeLog('warn', 'Persistent undo claim GC failed', { workspaceRoot, error: error?.message || String(error) }))
+        .finally(() => persistentUndoGcRunning.delete(key));
+    }, 0);
   };
   const pruneBlockedPersistentUndos = () => {
     const now = Date.now();
@@ -1510,6 +1594,7 @@ const registerWorkspaceIpc = context => {
     let loadedFromJournal = false;
     let persistentClaimDescriptor;
     let persistentBoundRecord;
+    let selectedDecisionOperation;
     try {
       pruneBlockedPersistentUndos();
       const requestedDecisionToken = String(options?.decisionToken || '');
@@ -1520,6 +1605,7 @@ const registerWorkspaceIpc = context => {
         const queuedIndex = renameHistory.lastIndexOf(operation);
         if (queuedIndex >= 0) renameHistory.splice(queuedIndex, 1);
       } else operation = renameHistory.pop();
+      selectedDecisionOperation = operation;
       if (!operation && workspacePath) {
         const workspaceRoot = resolveWorkspaceRoot(workspacePath);
         schedulePersistentUndoClaimGc(workspaceRoot);
@@ -1552,6 +1638,13 @@ const registerWorkspaceIpc = context => {
           if (!persistentBoundRecord || persistentBoundRecord.id !== operation.persistentId
               || persistentBoundRecord.kind !== 'trash' || !/^[0-9a-f]{64}$/u.test(String(persistentBoundRecord.claimToken || ''))) {
             return serializeUndoRecoveryError(pendingPersistentUndoError('无法将持久撤销操作绑定到当前 ready journal 版本；不会执行恢复'));
+          }
+          if (requestedDecisionToken && pendingDecision
+              && (pendingDecision.persistentId !== persistentBoundRecord.id
+                || pendingDecision.claimToken !== persistentBoundRecord.claimToken
+                || pendingDecision.workspaceKey !== comparablePath(persistentClaimDescriptor.workspaceRoot)
+                || (workspacePath && pendingDecision.workspaceKey !== comparablePath(await fs.promises.realpath(resolveWorkspaceRoot(workspacePath)))))) {
+            return serializeUndoRecoveryError(pendingPersistentUndoError('撤销决定绑定的 journal 版本或工作区已变化；旧决定不会被消费，当前不会执行恢复'));
           }
           operation = { kind: persistentBoundRecord.kind, ...persistentBoundRecord.payload, persistentId: persistentBoundRecord.id, workspaceRoot: operation.workspaceRoot };
         }
@@ -1651,6 +1744,8 @@ const registerWorkspaceIpc = context => {
         const snapshotMatches = async expected => Boolean(expected
           && expected.expiresAt > Date.now()
           && expected.persistentId === (operation.persistentId || '')
+          && (!operation.persistentId || (expected.claimToken === persistentBoundRecord?.claimToken
+            && expected.workspaceKey === comparablePath(persistentClaimDescriptor.workspaceRoot)))
           && expected.sources.length === operation.items.length
           && expected.sources.every((source, index) => source.recyclePidl === (operation.items[index].recyclePidl || '')
             && JSON.stringify(source.originalIdentity) === JSON.stringify(operation.items[index].originalIdentity || null))
@@ -1658,11 +1753,16 @@ const registerWorkspaceIpc = context => {
           && (await Promise.all(expected.conflicts.map(conflict => identityMatches(conflict.path, conflict.identity)))).every(Boolean));
         let decisionValid = false;
         if (restoreConflictPolicy) {
-          if (requestedDecisionToken) decisionValid = pendingDecision?.operation === operation && await snapshotMatches(pendingDecision);
+          if (requestedDecisionToken) {
+            const sameOperation = operation.persistentId ? Boolean(pendingDecision) : pendingDecision?.operation === selectedDecisionOperation;
+            decisionValid = sameOperation && await snapshotMatches(pendingDecision);
+          }
           else {
             const legacyDecision = legacyRestoreDecisions.get(operation) || {
               operation,
               persistentId: operation.persistentId || '',
+              claimToken: persistentBoundRecord?.claimToken || '',
+              workspaceKey: persistentClaimDescriptor ? comparablePath(persistentClaimDescriptor.workspaceRoot) : '',
               sources: operation.items.map(item => ({ recyclePidl: item.recyclePidl || '', originalIdentity: item.originalIdentity || null })),
               conflicts: conflictSnapshot,
               expiresAt: Date.now() + decisionTtlMs,
@@ -1676,6 +1776,8 @@ const registerWorkspaceIpc = context => {
           const decision = {
             operation,
             persistentId: operation.persistentId || '',
+            claimToken: persistentBoundRecord?.claimToken || '',
+            workspaceKey: persistentClaimDescriptor ? comparablePath(persistentClaimDescriptor.workspaceRoot) : '',
             sources: operation.items.map(item => ({ recyclePidl: item.recyclePidl || '', originalIdentity: item.originalIdentity || null })),
             conflicts: conflictSnapshot,
             expiresAt: Date.now() + decisionTtlMs,

@@ -508,6 +508,43 @@ def _live_retired_records(path: str):
         live.close()
 
 
+def _core_shadow_retired_records(path: str):
+    import workspace_db
+    core = _connect(path, readonly=True)
+    try:
+        if core.execute("PRAGMA quick_check").fetchone()[0] != "ok":
+            raise RuntimeError("core retired shadow failed integrity validation")
+        schema = core.execute("SELECT value FROM meta WHERE key='schema_version'").fetchone()
+        if schema is None or int(schema[0]) != workspace_db.TARGET_SCHEMA_VERSION:
+            raise RuntimeError("core retired shadow schema fence is unavailable")
+        columns = {row[1] for row in core.execute("PRAGMA table_info(undo_records)").fetchall()}
+        if not {"id", "state", "created_at", "updated_at"} <= columns:
+            raise RuntimeError("core retired shadow table is unavailable")
+        return [tuple(row) for row in core.execute(
+            "SELECT id,created_at,updated_at FROM undo_records WHERE state='retired'"
+        ).fetchall()]
+    finally:
+        core.close()
+
+
+def _collect_retired_records(destination: str, retired_source: str = ""):
+    records = {}
+    errors = []
+    sources = []
+    if os.path.isfile(destination): sources.append(("live operations", destination, _live_retired_records))
+    if retired_source and os.path.isfile(retired_source): sources.append(("core shadow", retired_source, _core_shadow_retired_records))
+    for label, source, reader in sources:
+        try:
+            for record_id, created_at, updated_at in reader(source):
+                previous = records.get(record_id)
+                records[record_id] = (record_id, created_at if previous is None else min(int(previous[1] or created_at or 0), int(created_at or previous[1] or 0)), updated_at if previous is None else max(int(previous[2] or 0), int(updated_at or 0)))
+        except Exception as error:
+            errors.append(f"{label}: {error}")
+    if sources and len(errors) == len(sources):
+        raise RuntimeError(f"cannot verify any retired-ID source: {'; '.join(errors)}")
+    return list(records.values())
+
+
 def _merge_retired_records(db: sqlite3.Connection, records) -> None:
     now = int(time.time() * 1000)
     for record_id, created_at, updated_at in records:
@@ -520,7 +557,7 @@ def _merge_retired_records(db: sqlite3.Connection, records) -> None:
         )
 
 
-def restore_workspace(source: str, destination: str, domain: str, replacements) -> dict:
+def restore_workspace(source: str, destination: str, domain: str, replacements, retired_source: str = "") -> dict:
     if domain not in REQUIRED_TABLES:
         raise ValueError(f"unknown domain: {domain}")
     if _same_file(source, destination):
@@ -532,7 +569,7 @@ def restore_workspace(source: str, destination: str, domain: str, replacements) 
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
     staged = f"{destination_path}.restore-{uuid.uuid4().hex}.tmp"
     backup = ""
-    retired_records = _live_retired_records(destination_path) if domain == "operations" else []
+    retired_records = _collect_retired_records(destination_path, retired_source) if domain == "operations" else []
     try:
         snapshot(source, staged, domain)
         db = _connect(staged)
@@ -732,13 +769,13 @@ def restore_project(source: str, destination: str, domain: str, project_id: str,
                 pass
 
 
-def reset_store(destination: str, domain: str) -> dict:
+def reset_store(destination: str, domain: str, retired_source: str = "") -> dict:
     """Quarantine one store and recreate only its empty owned schema."""
     destination_path = os.path.abspath(destination)
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
     staged = f"{destination_path}.reset-{uuid.uuid4().hex}.tmp"
     quarantine = ""
-    retired_records = _live_retired_records(destination_path) if domain == "operations" else []
+    retired_records = _collect_retired_records(destination_path, retired_source) if domain == "operations" else []
     try:
         if domain == "operations":
             from operations_db import _connect as connect_operations
@@ -792,6 +829,7 @@ def main(argv=None):
     parser.add_argument("--domain", required=True, choices=tuple(PATH_COLUMNS))
     parser.add_argument("--source")
     parser.add_argument("--destination", required=True)
+    parser.add_argument("--retired-source", default="")
     parser.add_argument("--project-id")
     parser.add_argument("--peer-source", default="")
     parser.add_argument("--old-root", default="")
@@ -805,11 +843,11 @@ def main(argv=None):
     elif args.action == "snapshot":
         result = snapshot(args.source, args.destination, args.domain)
     elif args.action == "restore-workspace":
-        result = restore_workspace(args.source, args.destination, args.domain, replacements)
+        result = restore_workspace(args.source, args.destination, args.domain, replacements, args.retired_source)
     elif args.action == "restore-project":
         result = restore_project(args.source, args.destination, args.domain, args.project_id, args.peer_source, replacements)
     else:
-        result = reset_store(args.destination, args.domain)
+        result = reset_store(args.destination, args.domain, args.retired_source)
     print(json.dumps(result, ensure_ascii=False), flush=True)
 
 
