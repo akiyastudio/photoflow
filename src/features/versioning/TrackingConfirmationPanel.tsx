@@ -127,9 +127,12 @@ export const TrackingConfirmationPanel = ({ active, sessionId, workspacePath, pr
     // onClose(); intentionally deferred until the commit succeeds.
     void (async () => { try {
       const result = await window.electronAPI.commitProgressTracking(workspacePath, { sessionId })
-        .catch(error => ({ success: false, error: error instanceof Error ? error.message : String(error) }));
+        .catch(error => ({ success: false, taskNotificationOwned: false, error: error instanceof Error ? error.message : String(error) }));
       if (generation !== actionGenerationRef.current) return;
-      if (!result.success) return;
+      if (!result.success) {
+        if (!result.taskNotificationOwned) onNotice(`提交版本跟踪失败：${result.error || '未知错误'}`);
+        return;
+      }
       const released = await window.electronAPI.releaseProgressTrackingSession(workspacePath, { sessionId })
         .catch(error => ({ success: false, released: false, error: error instanceof Error ? error.message : String(error) }));
       if (generation !== actionGenerationRef.current) return;

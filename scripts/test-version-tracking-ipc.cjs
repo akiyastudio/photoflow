@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 
 const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
+const { registerVersionTrackingIpc } = require('../electron/modules/version-tracking-ipc.cjs');
 const { createMediaRepository } = require('../electron/repositories/media-repository.cjs');
 const { createProjectVirtualPathService } = require('../electron/services/project-virtual-path-service.cjs');
 
@@ -129,7 +130,17 @@ registerVersionIpc({
     list: () => calls.useCreatedTaskRegistry ? calls.createdTaskRegistry || [] : calls.activeTasks || [],
     run: async (definition, worker) => {
       (calls.commitTaskDefinitions ||= []).push(definition);
-      return { result: await worker({ signal: new AbortController().signal, report: () => undefined, throwIfCancelled: () => undefined }) };
+      const task = { id: `commit-task-${calls.commitTaskDefinitions.length}`, type: definition.type, state: 'running', error: '', notificationPolicy: definition.notificationPolicy };
+      (calls.commitTasks ||= []).push(task);
+      try {
+        const result = await worker({ signal: new AbortController().signal, report: () => undefined, throwIfCancelled: () => undefined });
+        task.state = 'completed';
+        return { task, result };
+      } catch (error) {
+        task.state = 'failed';
+        task.error = error.message || String(error);
+        throw error;
+      }
     },
   },
   buildVersionBatchImportKey: async () => 'test-version-batch-import-key',
@@ -137,6 +148,7 @@ registerVersionIpc({
   copyFileAtomic: async (sourcePath, destinationPath) => fs.promises.copyFile(sourcePath, destinationPath),
   crypto,
   ensureWorkspace: value => {
+    if (calls.ensureWorkspaceError) throw new Error(calls.ensureWorkspaceError);
     assert.strictEqual(value, workspaceRoot);
     return workspaceRoot;
   },
@@ -310,6 +322,7 @@ async function main() {
   const releaseDuringDecision = await release({}, workspaceRoot, { sessionId: decisionSessionId });
   assert.strictEqual(commitDuringDecision.success, false, 'commit must not bypass an in-flight decision');
   assert.match(commitDuringDecision.error, /其他操作/);
+  assert.strictEqual(commitDuringDecision.taskNotificationOwned, false, 'session-busy failure occurs before a BackgroundTask can own its notification');
   assert.strictEqual(releaseDuringDecision.success, false, 'release must not delete a session with an in-flight decision');
   releaseDecision();
   assert.strictEqual((await decisionPromise).success, true);
@@ -368,6 +381,48 @@ async function main() {
   versionService.prepareTracking = originalPrepareTracking;
   versionService.failTrackingCommit = originalFailTrackingCommit;
 
+  const invalidSessionCommit = await commit({}, workspaceRoot, { sessionId: 'invalid-session' });
+  assert.strictEqual(invalidSessionCommit.success, false);
+  assert.strictEqual(invalidSessionCommit.taskNotificationOwned, false, 'invalid session failure occurs before a BackgroundTask can own its notification');
+  assert.match(invalidSessionCommit.error, /sessionId/);
+
+  calls.ensureWorkspaceError = 'injected invalid workspace';
+  const invalidWorkspaceCommit = await commit({}, workspaceRoot, { sessionId: '11111111-1111-4111-8111-111111111111' });
+  delete calls.ensureWorkspaceError;
+  assert.strictEqual(invalidWorkspaceCommit.success, false);
+  assert.strictEqual(invalidWorkspaceCommit.taskNotificationOwned, false, 'workspace validation failure occurs before a BackgroundTask can own its notification');
+  assert.match(invalidWorkspaceCommit.error, /invalid workspace/);
+
+  const originalGetTrackingCommitResources = versionService.getTrackingCommitResources;
+  versionService.getTrackingCommitResources = async () => ({ success: false, error: 'injected resource lookup failure' });
+  const resourceFailure = await commit({}, workspaceRoot, { sessionId: '11111111-1111-4111-8111-111111111111' });
+  versionService.getTrackingCommitResources = originalGetTrackingCommitResources;
+  assert.strictEqual(resourceFailure.success, false);
+  assert.strictEqual(resourceFailure.taskNotificationOwned, false, 'resource lookup failure occurs before BackgroundTask.run');
+  assert.match(resourceFailure.error, /resource lookup failure/);
+
+  const noBackgroundHandlers = new Map();
+  registerVersionTrackingIpc({
+    crypto,
+    ensureWorkspace: value => value,
+    fs,
+    getWorkspaceDataRoot: root => path.join(root, '.photoflow-test-data'),
+    ipcMain: { handle: (channel, listener) => noBackgroundHandlers.set(channel, listener) },
+    path,
+    refreshWorkspaceCatalog: async () => undefined,
+    runPythonEventAction: async () => [],
+    trackingScanService: mediaScanService,
+    versionService: {
+      ...versionService,
+      getTrackingCommitPlan: async () => { throw new Error('injected foreground execute failure'); },
+    },
+    workspaceCatalogs: new Map(),
+  });
+  const foregroundFailure = await noBackgroundHandlers.get('workspace-progress-tracking-commit')({}, workspaceRoot, { sessionId: '11111111-1111-4111-8111-111111111111' });
+  assert.strictEqual(foregroundFailure.success, false);
+  assert.strictEqual(foregroundFailure.taskNotificationOwned, false, 'execute failure without BackgroundTask support remains renderer-owned');
+  assert.match(foregroundFailure.error, /foreground execute failure/);
+
   const committed = await commit({}, workspaceRoot, {
     sessionId: '11111111-1111-4111-8111-111111111111',
     folderA: maliciousPath,
@@ -375,6 +430,7 @@ async function main() {
     matches: [{ reference: '..\\attack.jpg', source: 'attack.jpg' }],
   });
   assert.strictEqual(committed.success, true);
+  assert.strictEqual(committed.taskNotificationOwned, true, 'a successful background commit reports the same explicit ownership contract');
   assert.strictEqual(calls.commit.request.folderA, trustedParent);
   assert.strictEqual(calls.commit.request.folderB, trustedProgress);
   assert.deepStrictEqual(calls.commit.request.matches, [
@@ -468,6 +524,10 @@ async function main() {
   const failed = await commit({}, workspaceRoot, { sessionId: '22222222-2222-4222-8222-222222222222' });
   assert.strictEqual(failed.success, false);
   assert.strictEqual(failed.retryable, true);
+  assert.strictEqual(failed.taskNotificationOwned, true, 'execute failure is owned by the progress-toast BackgroundTask');
+  const failedCommitTask = calls.commitTasks.at(-1);
+  assert.strictEqual(failedCommitTask.state, 'failed');
+  assert.match(failedCommitTask.error, /simulated atomic commit failure/, 'the owning task card exposes the execute error');
   assert.strictEqual(failureRecorded, 1);
   const retried = await commit({}, workspaceRoot, { sessionId: '22222222-2222-4222-8222-222222222222' });
   assert.strictEqual(retried.success, true);

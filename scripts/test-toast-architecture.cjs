@@ -68,8 +68,10 @@ const trackingCommitSource = trackingSource.slice(trackingSource.indexOf('const 
 const trackingCommitFailureStart = trackingCommitSource.indexOf('if (!result.success)');
 const trackingCommitReleaseStart = trackingCommitSource.indexOf('const released');
 assert(trackingCommitFailureStart >= 0 && trackingCommitReleaseStart > trackingCommitFailureStart, 'tracking commit failure and release boundaries must remain inspectable');
-assert.doesNotMatch(trackingCommitSource.slice(0, trackingCommitReleaseStart), /\bonNotice\s*\(|trackingCommitFailureMessage/, 'tracking commit failure must not emit a renderer notice under a renamed helper or catch path');
+assert.match(trackingCommitSource.slice(0, trackingCommitReleaseStart), /if\s*\(!result\.success\)\s*\{[\s\S]*?if\s*\(!result\.taskNotificationOwned\)\s*onNotice\s*\(`提交版本跟踪失败：\$\{result\.error/, 'tracking commit failure must emit a renderer notice exactly when no task owns it');
 assert.match(trackingIpcSource, /type:\s*'version-tracking-commit'[\s\S]*?notificationPolicy:\s*'progress-toast'/, 'tracking commit status and failures must be owned by the BackgroundTask progress-toast card');
+assert.match(trackingIpcSource, /executionPromise\s*=\s*backgroundTasks\.run\([\s\S]*?notificationPolicy:\s*'progress-toast'[\s\S]*?taskNotificationOwned\s*=\s*true/, 'tracking IPC may transfer notification ownership only after invoking the progress-toast BackgroundTask');
+assert.match(trackingIpcSource, /trackingCompareSessions\.has\(key\)[\s\S]*?taskNotificationOwned:\s*false/, 'pre-task session-busy failures must explicitly retain renderer notification ownership');
 
 const domainHealthFile = path.join(root, 'src', 'features', 'app', 'DomainHealthBanner.tsx');
 if (fs.existsSync(domainHealthFile)) {

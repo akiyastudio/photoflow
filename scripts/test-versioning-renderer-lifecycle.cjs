@@ -157,22 +157,26 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
   const trackingCalls = { decide: [], commit: [], release: [] };
   const trackingCallbacks = { close: 0, committed: 0, released: 0, notices: [] };
   const trackingEvents = [];
-  let failNextSessionCCommit = true;
+  const commitFailures = new Map([['C', false], ['D', true]]);
   let resolveSessionB;
   const trackingSession = id => ({ id, progressId: `progress-${id}`, parentProgressId: `parent-${id}`, mode: 'refresh', status: 'pending_confirm', renameFromParent: false, copyMissingFromParent: false, error: '', total: 1, unresolvedCount: 1 });
   const trackingItem = { id: 'item-a', kind: 'new', sourceName: 'current.jpg', referenceName: 'reference.jpg', targetName: 'current.jpg', status: 'pending_confirmation' };
   testWindow.electronAPI = {
     async getProgressTrackingSession(_workspacePath, request) {
       if (request.sessionId === 'A') return { success: true, session: trackingSession('A'), items: [trackingItem], nextCursor: null };
-      if (request.sessionId === 'C') return { success: true, session: { ...trackingSession('C'), unresolvedCount: 0 }, items: [{ ...trackingItem, id: 'item-c', status: 'accepted' }], nextCursor: null };
+      if (request.sessionId === 'C' || request.sessionId === 'D') return { success: true, session: { ...trackingSession(request.sessionId), unresolvedCount: 0 }, items: [{ ...trackingItem, id: `item-${request.sessionId.toLowerCase()}`, status: 'accepted' }], nextCursor: null };
       return new Promise(resolve => { resolveSessionB = resolve; });
     },
     async decideProgressTrackingItem(_workspacePath, request) { trackingCalls.decide.push(request); return { success: true }; },
     async commitProgressTracking(_workspacePath, request) {
       trackingCalls.commit.push(request);
       trackingEvents.push(`commit:${request.sessionId}`);
-      if (request.sessionId === 'C' && failNextSessionCCommit) { failNextSessionCCommit = false; return { success: false, error: 'simulated commit failure' }; }
-      return { success: true };
+      if (commitFailures.has(request.sessionId)) {
+        const taskNotificationOwned = commitFailures.get(request.sessionId);
+        commitFailures.delete(request.sessionId);
+        return { success: false, taskNotificationOwned, error: `simulated ${request.sessionId} commit failure` };
+      }
+      return { success: true, taskNotificationOwned: true };
     },
     async releaseProgressTrackingSession(_workspacePath, request) { trackingCalls.release.push(request); trackingEvents.push(`release:${request.sessionId}`); return { success: true, released: true }; },
   };
@@ -230,8 +234,9 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
   assert.deepStrictEqual(trackingCalls.release, [{ sessionId: 'B' }], 'a failed commit must not release its session');
   assert.strictEqual(trackingCallbacks.close, 1, 'a failed commit must not close the panel');
   assert.strictEqual(trackingCallbacks.committed, 1, 'a failed commit must not report completion');
-  assert.strictEqual(trackingCallbacks.notices.length, noticesBeforeSessionCFailure, 'the BackgroundTask card is the sole commit-failure notification; the panel must not emit a duplicate notice');
-  assert.deepStrictEqual(trackingEvents, [...eventsBeforeSessionCFailure, 'commit:C'], 'a failed commit emits no renderer notice, release, close, or completion event');
+  assert.strictEqual(trackingCallbacks.notices.length, noticesBeforeSessionCFailure + 1, 'a pre-task commit failure emits one renderer notice');
+  assert.match(trackingCallbacks.notices.at(-1), /simulated C commit failure/);
+  assert.deepStrictEqual(trackingEvents, [...eventsBeforeSessionCFailure, 'commit:C', 'notice'], 'an unowned failure emits one renderer notice but no release, close, or completion event');
   const retrySessionCCommitButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('提交结果'));
   assert(retrySessionCCommitButton && !retrySessionCCommitButton.attributes.has('disabled'), 'commit failure clears the in-flight gate so the user can retry');
   await React.act(async () => { dispatch(retrySessionCCommitButton, 'click'); await Promise.resolve(); await Promise.resolve(); });
@@ -240,6 +245,18 @@ const versioningModel = loadCommonJs(compile('src/features/versioning/versioning
   assert.strictEqual(trackingCallbacks.close, 2, 'the successful retry closes exactly once');
   assert.strictEqual(trackingCallbacks.committed, 2, 'the successful retry reports committed exactly once');
   assert.deepStrictEqual(trackingEvents.slice(-4), ['commit:C', 'release:C', 'close', 'committed'], 'a successful retry keeps the commit, release, close, and completion order');
+
+  await React.act(async () => { trackingRoot.render(React.createElement(trackingPanelModule.TrackingConfirmationPanel, trackingProps('D'))); await Promise.resolve(); await Promise.resolve(); });
+  const firstSessionDCommitButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('提交结果'));
+  const noticesBeforeSessionDFailure = trackingCallbacks.notices.length;
+  await React.act(async () => { dispatch(firstSessionDCommitButton, 'click'); await Promise.resolve(); await Promise.resolve(); });
+  assert.strictEqual(trackingCallbacks.notices.length, noticesBeforeSessionDFailure, 'a progress-toast-owned commit failure must not emit a duplicate renderer notice');
+  assert.deepStrictEqual(trackingEvents.slice(-1), ['commit:D'], 'an owned failure emits no renderer notice, release, close, or completion event');
+  const retrySessionDCommitButton = allNodes(trackingContainer).find(node => node.nodeName === 'BUTTON' && node.textContent.includes('提交结果'));
+  assert(retrySessionDCommitButton && !retrySessionDCommitButton.attributes.has('disabled'), 'an owned commit failure also clears the in-flight gate for retry');
+  await React.act(async () => { dispatch(retrySessionDCommitButton, 'click'); await Promise.resolve(); await Promise.resolve(); });
+  assert.deepStrictEqual(trackingCalls.commit.slice(-2), [{ sessionId: 'D' }, { sessionId: 'D' }], 'the owned failure can be retried against the same session');
+  assert.deepStrictEqual(trackingEvents.slice(-4), ['commit:D', 'release:D', 'close', 'committed'], 'the owned-failure retry preserves success ordering');
   await React.act(async () => trackingRoot.unmount());
 
   const updateResolvers = [];

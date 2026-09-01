@@ -463,6 +463,7 @@ const registerVersionTrackingIpc = context => {
   };
 
   ipcMain.handle('workspace-progress-tracking-commit', async (_event, workspacePath, request = {}) => {
+    let taskNotificationOwned = false;
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       const sessionId = String(request.sessionId || '');
@@ -471,7 +472,7 @@ const registerVersionTrackingIpc = context => {
       const running = trackingCommitJobs.get(key);
       if (running) return await running;
       if (trackingCompareSessions.has(key) || trackingSessionOperations.has(key)) {
-        return { success: false, sessionId, retryable: true, items: [], error: '版本跟踪会话正在执行其他操作，暂时不能提交' };
+        return { success: false, sessionId, retryable: true, items: [], taskNotificationOwned: false, error: '版本跟踪会话正在执行其他操作，暂时不能提交' };
       }
       const operationToken = acquireTrackingSessionOperation(key, 'commit');
       const job = Promise.resolve().then(async () => {
@@ -487,8 +488,8 @@ const registerVersionTrackingIpc = context => {
           }
           return result;
         };
-        return backgroundTasks?.run
-          ? backgroundTasks.run({
+        if (backgroundTasks?.run) {
+          const executionPromise = backgroundTasks.run({
             type: 'version-tracking-commit',
             title: '提交版本跟踪',
             message: '等待其他文件操作完成',
@@ -505,8 +506,16 @@ const registerVersionTrackingIpc = context => {
             resourceAccess: 'write',
             dedupeKey: `version-tracking-commit:${platformKey(path.resolve(workspaceRoot))}:${sessionId}`,
             metadata: { workspaceRoot, sessionId },
-          }, execute).then(execution => execution.result || { success: false, sessionId, error: '版本跟踪提交没有返回结果' })
-          : execute();
+          }, execute);
+          taskNotificationOwned = true;
+          try {
+            const execution = await executionPromise;
+            return { ...(execution.result || { success: false, sessionId, error: '版本跟踪提交没有返回结果' }), taskNotificationOwned: true };
+          } catch (error) {
+            return { ...(error.trackingResult || { success: false, sessionId, retryable: true, items: [], error: error.message || String(error) }), taskNotificationOwned: true };
+          }
+        }
+        return { ...(await execute()), taskNotificationOwned: false };
       });
       trackingCommitJobs.set(key, job);
       try {
@@ -516,7 +525,7 @@ const registerVersionTrackingIpc = context => {
         releaseTrackingSessionOperation(key, operationToken);
       }
     } catch (error) {
-      return error.trackingResult || { success: false, sessionId: String(request.sessionId || ''), retryable: true, items: [], error: error.message || String(error) };
+      return { ...(error.trackingResult || { success: false, sessionId: String(request.sessionId || ''), retryable: true, items: [], error: error.message || String(error) }), taskNotificationOwned };
     }
   });
 
