@@ -147,4 +147,4 @@ const InteractiveCropEditor = ({ previewUrl, imageSize, crop, onChange, large = 
   </svg></div>;
 };
 
-export { InteractiveCropEditor, adjustCropRectangleFromKeyboard };
+export { InteractiveCropEditor };
