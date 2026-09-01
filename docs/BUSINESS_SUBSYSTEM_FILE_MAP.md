@@ -87,6 +87,19 @@
 - `electron/services/toast-view-manager.cjs`
 - `electron/services/electron-smoke-probe.cjs`
 
+### 法律发布材料与发布验收
+
+- `docs/legal/DATA_RETENTION_AND_RIGHTS_RUNBOOK_TEMPLATE.md`
+- `docs/legal/PIPIA_TEMPLATE.md`
+- `docs/legal/RELEASE_EVIDENCE_GUIDE.md`
+- `docs/legal/THIRD_PARTY_DISTRIBUTION_EVIDENCE.md`
+- `scripts/test-legal-release-evidence.cjs`
+
+### 隐私行为验收
+
+- `scripts/test-privacy-gate-contract.cjs`
+- `scripts/test-privacy-revoke-telemetry.cjs`
+
 ### 云端遥测
 
 - `services/cloudbase/telemetry-function/index.js`
