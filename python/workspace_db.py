@@ -10837,7 +10837,11 @@ def _resume_media_operation_files(database: str):
 def _run_durable_media_operation(root: str, database: str, action: str, payload: dict, operation_id: str | None):
     database = os.path.abspath(database)
     digest = _media_operation_digest(action, payload)
-    operation_id = str(operation_id or f"{action}:{digest}")
+    # Server callers supply a stable request operationId so transport retries
+    # can claim the same receipt. A direct/CLI invocation is a new business
+    # request each time; deriving its ID only from the payload would make two
+    # legitimate refreshes with identical arguments return a stale receipt.
+    operation_id = str(operation_id or uuid.uuid4())
     if not operation_id or len(operation_id) > 160:
         raise ValueError("media operationId is invalid")
     live = connect(root, database, include_domains=True)
