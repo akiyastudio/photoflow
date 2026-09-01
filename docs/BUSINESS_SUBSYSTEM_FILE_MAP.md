@@ -36,6 +36,7 @@
 - `scripts/test-config-mutation-service.cjs`
 - `scripts/test-file-transfer.cjs`
 - `scripts/test-global-search.cjs`
+- `scripts/test-global-search-stress.mjs`
 - `scripts/test-legal-release-evidence.cjs`
 - `scripts/test-panel-task-sessions.cjs`
 - `scripts/test-privacy-gate-contract.cjs`
@@ -263,6 +264,11 @@
 - `scripts/build-recycle-bin-service.cjs`
 - `scripts/test-file-transfer.cjs`
 - `scripts/test-recycle-bin-service.cjs`
+
+### 搜索与工作区验收
+
+- `scripts/test-global-search.cjs`
+- `scripts/test-global-search-stress.mjs`
 
 ## 3. 媒体资产管理与预览系统
 

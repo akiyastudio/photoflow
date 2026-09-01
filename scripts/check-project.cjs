@@ -29,6 +29,7 @@ const steps = [
   ['domain health', ['run', 'test:domain-health']],
   ['domain recovery', ['run', 'test:domain-recovery']],
   ['source boundaries', ['run', 'test:source-boundaries']],
+  ['global search 100k', ['run', 'test:global-search']],
   ['SD startup import', ['run', 'test:sd-startup-import']],
   ['startup catalog hydration', ['run', 'test:startup-catalog']],
   ['file entry interaction', ['run', 'test:file-entry-interaction']],

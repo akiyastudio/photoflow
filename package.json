@@ -69,6 +69,7 @@
     "test:electron-dev-contract": "node scripts/test-electron-dev-contract.cjs",
     "test:electron-smoke": "node scripts/test-electron-smoke.cjs",
     "test:component-electron-smoke": "node scripts/test-component-electron-smoke.cjs",
+    "test:global-search": "node scripts/test-global-search.cjs && node scripts/test-global-search-stress.mjs",
     "test:privacy": "node scripts/test-privacy-gate-contract.cjs && node scripts/test-privacy-service.cjs && node scripts/test-telemetry-consent.cjs && node scripts/test-privacy-revoke-telemetry.cjs",
     "test:cloudbase-telemetry": "npm --prefix services/cloudbase/telemetry-function run check && node scripts/test-cloudbase-function-package.cjs",
     "test:legal-release-evidence": "node scripts/test-legal-release-evidence.cjs",
