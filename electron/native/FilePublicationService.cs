@@ -214,13 +214,17 @@ internal static class FilePublicationService
             SafeFileHandle rootHandle; try { rootHandle = OpenLocked(volumeRoot, GENERIC_READ, true, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE); } catch (Exception error) { throw new IOException("批量清理卷根打开失败：" + volumeRoot, error); } string volumeIdentity; if (!directories.TryGetValue(volumeRoot, out volumeIdentity)) { rootHandle.Dispose(); throw new OwnershipConflictException("批量清理卷根未登记"); } VerifyIdentity(rootHandle, volumeIdentity, "批量清理卷根"); held.Add(rootHandle); heldPaths.Add(volumeRoot);
             var parent = Path.GetDirectoryName(target); var chainRelative = parent.Substring(volumeRoot.Length); var segments = chainRelative.Split(new[] { Path.DirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
             for (var index = 0; index < segments.Length; index++) {
-                current = Path.Combine(current, segments[index]);
+                current = Path.Combine(current, segments[index]); SafeFileHandle handle = null;
                 try {
-                    var handle = OpenRelative(held[held.Count - 1], segments[index], FILE_TRAVERSE | FILE_READ_ATTRIBUTES, true, FILE_SHARE_READ | FILE_SHARE_WRITE);
-                    string expected; if (!directories.TryGetValue(current, out expected)) { handle.Dispose(); throw new OwnershipConflictException("批量清理父链未登记"); } VerifyIdentity(handle, expected, "批量清理父目录");
-                    held.Add(handle); heldPaths.Add(current);
-                } catch (OwnershipConflictException) { throw; }
-                catch (Exception error) { throw new IOException("批量清理父段失败：" + segments[index] + "；" + error.Message, error); }
+                    handle = OpenRelative(held[held.Count - 1], segments[index], FILE_TRAVERSE | FILE_READ_ATTRIBUTES, true, FILE_SHARE_READ | FILE_SHARE_WRITE);
+                    string expected; if (!directories.TryGetValue(current, out expected)) throw new OwnershipConflictException("批量清理父链未登记"); VerifyIdentity(handle, expected, "批量清理父目录");
+                    held.Add(handle); heldPaths.Add(current); handle = null;
+                } catch (OwnershipConflictException) { if (handle != null) handle.Dispose();
+#if PHOTOFLOW_TEST_FAULTS
+                    TestRenameReleasedParent(current);
+#endif
+                    throw; }
+                catch (Exception error) { if (handle != null) handle.Dispose(); throw new IOException("批量清理父段失败：" + segments[index] + "；" + error.Message, error); }
             }
 #if PHOTOFLOW_TEST_FAULTS
             TestRenameHeldParent(heldPaths);
@@ -268,6 +272,12 @@ internal static class FilePublicationService
         var sourceValue = Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_RENAME_HELD_PARENT"); if (String.IsNullOrEmpty(sourceValue)) return; var source = Full(sourceValue); if (!heldPaths.Any(value => String.Equals(value, source, StringComparison.OrdinalIgnoreCase))) throw new InvalidOperationException("测试父目录未被持有"); var destination = Full(Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_RENAME_HELD_PARENT_TO")); var marker = Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_RENAME_HELD_PARENT_RESULT"); bool moved = false; int error = 0;
         var thread = new Thread(() => { moved = MoveFileEx(source, destination, 0); if (!moved) error = Marshal.GetLastWin32Error(); }); thread.Start(); thread.Join();
         if (!String.IsNullOrEmpty(marker)) File.WriteAllText(marker, moved ? "renamed" : "blocked:" + error);
+    }
+    private static void TestRenameReleasedParent(string current)
+    {
+        var sourceValue = Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_RENAME_RELEASED_PARENT"); if (String.IsNullOrEmpty(sourceValue)) return; var source = Full(sourceValue); if (!String.Equals(source, current, StringComparison.OrdinalIgnoreCase)) return; var destination = Full(Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_RENAME_RELEASED_PARENT_TO")); var marker = Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_RENAME_RELEASED_PARENT_RESULT"); bool moved = false; int error = 0;
+        var thread = new Thread(() => { moved = MoveFileEx(source, destination, 0); if (moved) { if (!MoveFileEx(destination, source, 0)) { moved = false; error = Marshal.GetLastWin32Error(); } } else error = Marshal.GetLastWin32Error(); }); thread.Start(); thread.Join();
+        if (!String.IsNullOrEmpty(marker)) File.WriteAllText(marker, moved ? "released" : "blocked:" + error);
     }
 #endif
     private static void MoveNoReplaceCore(string source, string target)
