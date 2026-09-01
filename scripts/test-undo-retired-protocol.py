@@ -266,9 +266,12 @@ def run():
             core,
         )
         workspace_db.mutate(workspace_root, core, "undo_record_add", {"id": "fallback-ready", "kind": "trash", "payload": {"visible": True}})
-        fallback_list = workspace_db.mutate(workspace_root, core, "undo_record_list", {})["records"]
+        workspace_db.mutate(workspace_root, core, "undo_record_add", {"id": "fallback-other", "kind": "future-kind", "payload": {"visible": False}})
+        fallback_list = workspace_db.mutate(workspace_root, core, "undo_record_list", {"kinds": ["trash", "project-cleanup"]})["records"]
         assert [record["id"] for record in fallback_list] == ["fallback-ready"]
-        workspace_db.mutate(workspace_root, core, "undo_record_remove_many", {"ids": ["fallback-ready", "ready", "absent", "execute"]})
+        all_fallback_records = workspace_db.mutate(workspace_root, core, "undo_record_list", {"kinds": []})["records"]
+        assert {record["id"] for record in all_fallback_records} == {"fallback-ready", "fallback-other"}
+        workspace_db.mutate(workspace_root, core, "undo_record_remove_many", {"ids": ["fallback-ready", "fallback-other", "ready", "absent", "execute"]})
         assert raw(core, "fallback-ready") is None
         assert raw(core, "ready")[3] == raw(core, "absent")[3] == raw(core, "execute")[3] == "retired"
         db = sqlite3.connect(core)

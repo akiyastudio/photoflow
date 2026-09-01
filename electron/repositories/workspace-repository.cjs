@@ -64,9 +64,9 @@ const createWorkspaceRepository = (client, operationsRepository = null) => {
   latestUndoRecord: root => operationsRepository
     ? operationsRepository.latestUndoRecord(root)
     : client.call(root, 'undo_record_latest', {}),
-  listUndoRecords: root => operationsRepository
-    ? operationsRepository.listUndoRecords(root)
-    : client.call(root, 'undo_record_list', {}),
+  listUndoRecords: (root, kinds = ['trash', 'project-cleanup']) => operationsRepository
+    ? operationsRepository.listUndoRecords(root, kinds)
+    : client.call(root, 'undo_record_list', { kinds }),
   removeUndoRecords: (root, ids) => operationsRepository
     ? operationsRepository.removeUndoRecords(root, ids)
     : client.call(root, 'undo_record_remove_many', { ids }),

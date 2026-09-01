@@ -26,8 +26,12 @@ try {
 
   const fallbackCalls = [];
   const fallbackRepository = createWorkspaceRepository({ call: (_root, action, payload) => { fallbackCalls.push({ action, payload }); return action === 'undo_record_list' ? { records: [] } : { success: true }; }, stop: () => undefined });
-  fallbackRepository.listUndoRecords(workspace); fallbackRepository.removeUndoRecords(workspace, ['a', 'b']);
-  assert.deepStrictEqual(fallbackCalls, [{ action: 'undo_record_list', payload: {} }, { action: 'undo_record_remove_many', payload: { ids: ['a', 'b'] } }]);
+  fallbackRepository.listUndoRecords(workspace); fallbackRepository.listUndoRecords(workspace, []); fallbackRepository.removeUndoRecords(workspace, ['a', 'b']);
+  assert.deepStrictEqual(fallbackCalls, [
+    { action: 'undo_record_list', payload: { kinds: ['trash', 'project-cleanup'] } },
+    { action: 'undo_record_list', payload: { kinds: [] } },
+    { action: 'undo_record_remove_many', payload: { ids: ['a', 'b'] } },
+  ]);
 
   run('workspace_db.py', 'init', ['--root', workspace, '--database', legacyDatabase]);
   run('workspace_db.py', 'undo_record_add', [

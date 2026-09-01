@@ -11506,7 +11506,15 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
         db.close()
         return {"success": True, "record": _undo_record_response(row)}
     elif action == "undo_record_list":
-        rows = db.execute("SELECT * FROM undo_records WHERE state <> 'retired' ORDER BY created_at DESC").fetchall()
+        kinds = [str(value) for value in payload.get("kinds") or [] if str(value)]
+        if kinds:
+            placeholders = ",".join("?" for _ in kinds)
+            rows = db.execute(
+                f"SELECT * FROM undo_records WHERE state <> 'retired' AND kind IN ({placeholders}) ORDER BY created_at DESC",
+                kinds,
+            ).fetchall()
+        else:
+            rows = db.execute("SELECT * FROM undo_records WHERE state <> 'retired' ORDER BY created_at DESC").fetchall()
         db.close()
         return {"success": True, "records": [_undo_record_response(row) for row in rows]}
     elif action == "undo_record_remove":
