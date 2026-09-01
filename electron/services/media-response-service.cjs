@@ -1,6 +1,6 @@
 const fs = require('fs');
 const path = require('path');
-const { takeVerifiedMediaHandle } = require('./media-access-service.cjs');
+const { discardVerifiedMediaHandle, takeVerifiedMediaHandle } = require('./media-access-service.cjs');
 
 const CONTENT_TYPES = new Map([
   ['.avi', 'video/x-msvideo'],
@@ -84,25 +84,38 @@ const createFileWebStream = (handle, { start = 0, end }) => {
   });
 };
 
-const mediaTokenFromRequest = request => {
+const inspectMediaRequestTarget = request => {
   try {
     const url = new URL(request.url);
-    if (url.protocol !== 'photoflow-media:' || url.hostname !== 'file') return null;
-    const token = url.pathname.replace(/^\//, '');
-    return /^[A-Za-z0-9_-]{32}$/.test(token) ? token : null;
-  } catch { return null; }
+    if (url.protocol !== 'photoflow-media:') return { mode: 'path', token: null };
+    const candidateToken = /^\/([A-Za-z0-9_-]{32})(?:\/|$)/.exec(url.pathname)?.[1] || null;
+    const exactToken = /^\/([A-Za-z0-9_-]{32})$/.exec(url.pathname)?.[1] || null;
+    const valid = url.hostname === 'file'
+      && !url.username
+      && !url.password
+      && !url.port
+      && !url.hash
+      && Boolean(exactToken);
+    return valid
+      ? { mode: 'verified', token: exactToken }
+      : { mode: 'invalid', token: candidateToken };
+  } catch { return { mode: 'invalid', token: null }; }
 };
 
 const createMediaFileResponse = async (filePath, request) => {
-  const requestToken = mediaTokenFromRequest(request);
-  const verifiedHandle = requestToken ? takeVerifiedMediaHandle(requestToken, filePath) : null;
+  const target = inspectMediaRequestTarget(request);
+  if (target.mode === 'invalid') {
+    if (target.token) await discardVerifiedMediaHandle(target.token, filePath);
+    return new Response('Not found', { status: 404 });
+  }
+  const verifiedHandle = target.mode === 'verified' ? takeVerifiedMediaHandle(target.token, filePath) : null;
   const method = String(request.method || 'GET').toUpperCase();
   if (method !== 'GET' && method !== 'HEAD') {
     try { return new Response('Method not allowed', { status: 405, headers: { Allow: 'GET, HEAD' } }); }
     finally { await verifiedHandle?.close().catch(() => undefined); }
   }
 
-  const handle = verifiedHandle || (requestToken ? null : await fs.promises.open(filePath, 'r').catch(() => null));
+  const handle = verifiedHandle || (target.mode === 'path' ? await fs.promises.open(filePath, 'r').catch(() => null) : null);
   if (!handle) return new Response('Not found', { status: 404 });
   let streamOwnsHandle = false;
   try {

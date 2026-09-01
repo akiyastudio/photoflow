@@ -3,6 +3,7 @@ const fs = require('fs');
 const path = require('path');
 
 const verifiedHandleTickets = new Map();
+const VERIFIED_HANDLE_TOKEN_PATTERN = /^[A-Za-z0-9_-]{32}$/;
 const verifiedHandleKey = value => process.platform === 'win32' ? path.resolve(value).toLocaleLowerCase() : path.resolve(value);
 const createDescriptorHandle = descriptor => {
   let closed = false;
@@ -30,20 +31,33 @@ const registerVerifiedHandle = (token, filePath, identity, handle) => {
   ticket.timer.unref?.();
   verifiedHandleTickets.set(token, ticket);
 };
-const takeVerifiedMediaHandle = (token, filePath) => {
-  if (typeof token !== 'string' || !/^[A-Za-z0-9_-]{32}$/.test(token) || typeof filePath !== 'string' || !filePath) return null;
+const detachVerifiedHandleTicket = (token, filePath) => {
+  if (typeof token !== 'string' || !VERIFIED_HANDLE_TOKEN_PATTERN.test(token)) return null;
   const ticket = verifiedHandleTickets.get(token);
-  if (!ticket || ticket.expectedPath !== verifiedHandleKey(filePath)) return null;
+  if (!ticket) return null;
   verifiedHandleTickets.delete(token);
   clearTimeout(ticket.timer);
-  return ticket.handle;
+  if (filePath !== undefined) {
+    let matchesExpectedPath = false;
+    try {
+      matchesExpectedPath = typeof filePath === 'string' && Boolean(filePath) && ticket.expectedPath === verifiedHandleKey(filePath);
+    } catch { /* invalid paths consume and close the bearer ticket */ }
+    if (!matchesExpectedPath) {
+      void ticket.handle.close();
+      return null;
+    }
+  }
+  return ticket;
 };
-const discardVerifiedHandle = token => {
-  const ticket = verifiedHandleTickets.get(token);
-  if (!ticket) return;
-  verifiedHandleTickets.delete(token);
-  clearTimeout(ticket.timer);
-  void ticket.handle.close();
+const takeVerifiedMediaHandle = (token, filePath) => {
+  const ticket = detachVerifiedHandleTicket(token, filePath);
+  return ticket?.handle || null;
+};
+const discardVerifiedMediaHandle = async (token, filePath) => {
+  const ticket = detachVerifiedHandleTicket(token, filePath);
+  if (!ticket) return false;
+  await ticket.handle.close().catch(() => undefined);
+  return true;
 };
 
 const createMediaAccessService = ({ getWorkspaceRoots, getAdditionalRoots = () => [] }) => {
@@ -167,13 +181,13 @@ const createMediaAccessService = ({ getWorkspaceRoots, getAdditionalRoots = () =
     const grant = grants.get(token);
     if (!grant || grant.expiresAt < Date.now()) {
       grants.delete(token);
-      discardVerifiedHandle(token);
+      void discardVerifiedMediaHandle(token);
       return null;
     }
     const handle = openVerifiedGrant(grant);
     if (!handle) {
       grants.delete(token);
-      discardVerifiedHandle(token);
+      void discardVerifiedMediaHandle(token);
       return null;
     }
     grant.expiresAt = Date.now() + TOKEN_TTL_MS;
@@ -184,4 +198,4 @@ const createMediaAccessService = ({ getWorkspaceRoots, getAdditionalRoots = () =
   return { authorizeInput, authorizeWorkspaceInput, grantRoot, grantPath, resolveToken };
 };
 
-module.exports = { createMediaAccessService, takeVerifiedMediaHandle };
+module.exports = { createMediaAccessService, discardVerifiedMediaHandle, takeVerifiedMediaHandle };
