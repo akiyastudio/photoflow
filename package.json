@@ -50,6 +50,7 @@
     "test:catch": ".venv\\Scripts\\python.exe scripts\\test-catch.py",
     "test:media-formats": ".venv\\Scripts\\python.exe scripts\\test-media-formats.py",
     "test:media-rating": "node scripts/test-media-rating-service.cjs",
+    "test:media-preview": "node scripts/test-media-preview-model.cjs",
     "test:deleted-project-cleanup": "node scripts/test-deleted-project-cleanup.cjs",
     "test:data-maintenance": ".venv\\Scripts\\python.exe scripts\\test-data-maintenance.py",
     "test:database-migrations": ".venv\\Scripts\\python.exe scripts\\test-workspace-db-migrations.py && .venv\\Scripts\\python.exe scripts\\test-progress-locations-domain-routing.py && .venv\\Scripts\\python.exe scripts\\test-thumbnail-legacy-migration-scale.py",
