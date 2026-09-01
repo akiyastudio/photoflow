@@ -10,7 +10,7 @@ import { INSPIRATION_FILE_BROWSER_CONTEXT } from '../file-browser/browser-contex
 import type { AppConfig, ComponentStatus, WorkspaceProject } from '../../types';
 import { useUserFacingToast } from '../app/useUserFacingToast';
 import { mayCommitAsyncOperationResult } from '../file-operation-identity-model';
-import { componentRuntimeIsAvailable } from '../components/component-availability-model';
+import { componentCapabilityIsAvailable } from '../components/component-availability-model';
 
 export const INSPIRATION_PROJECT_NAME = '.__photoflow_inspiration__';
 const inspirationCollapsedPathsStorageKey = (rootPath: string) => {
@@ -514,8 +514,8 @@ export const InspirationLibraryPage = ({
     updatedAt: Date.now(),
   };
   const installedComponentIds = new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id));
-  const videoToolsAvailable = componentRuntimeIsAvailable(components, 'video-tools');
-  const advancedVideoPlaybackAvailable = componentRuntimeIsAvailable(components, 'video-playback-mpv');
+  const videoToolsAvailable = componentCapabilityIsAvailable(components, 'media.video.processing');
+  const advancedVideoPlaybackAvailable = componentCapabilityIsAvailable(components, 'media.video.playback.advanced');
   return <FileBrowserWorkspace
     pageId={pageId}
     active={active}

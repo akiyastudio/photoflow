@@ -649,7 +649,7 @@ const extractVideoTimelineFrames = async (filePath, times) => {
   await fs.promises.mkdir(outputDirectory, { recursive: true });
   await fs.promises.writeFile(requestPath, JSON.stringify({ filePath: path.resolve(filePath), times, outputDirectory }), 'utf8');
   try {
-    const result = await pluginService.runJson('video-playback-mpv', ['--timeline-request', requestPath], 2 * 60 * 1000);
+    const result = await pluginService.runJsonForCapability('media.video.timeline-frames', [requestPath], 2 * 60 * 1000);
     if (!result?.success || !Array.isArray(result.frames)) throw new Error(result?.error || '播放器组件未返回时间线帧');
     return result.frames;
   } finally {

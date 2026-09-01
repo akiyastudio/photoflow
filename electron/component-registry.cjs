@@ -6,6 +6,7 @@ const { PLUGIN_API_VERSION, PLUGIN_DEFINITIONS } = require('./plugins/plugin-cat
 const { COMPONENT_HOST_API_VERSION, COMPONENT_HOST_CONTRACT_VERSION, parseComponentHostManifest } = require('./component-host-contract.cjs');
 const { listIntegrityFiles, readPinnedComponentIntegrity, validateComponentIntegrity, validateComponentIntegrityAsync } = require('./component-integrity.cjs');
 const { developmentComponentMetadataToken, discoverDevelopmentComponents, safeFile } = require('./component-development.cjs');
+const { legacyRuntimeCapabilities } = require('./compatibility/legacy-runtime-capabilities.cjs');
 
 const COMPONENT_API_VERSION = PLUGIN_API_VERSION;
 const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PLUGIN_DEFINITIONS).map(([id, definition]) => [id, { ...definition, capability: definition.capabilities[0] }])));
@@ -108,7 +109,7 @@ const manifestIdentity = (manifest, fallback = {}) => ({
   id: String(manifest?.id || fallback.id || '').trim(),
   name: String(manifest?.displayName || manifest?.name || fallback.name || manifest?.id || fallback.id || '').trim(),
   description: String(manifest?.description || fallback.description || '').trim(),
-  capabilities: Array.isArray(manifest?.capabilities) ? manifest.capabilities.map(String) : (fallback.capabilities || []),
+  capabilities: Array.isArray(manifest?.capabilities) ? manifest.capabilities.map(String) : (fallback.capabilities?.length ? fallback.capabilities : legacyRuntimeCapabilities(manifest?.id || fallback.id)),
 });
 const manifestCompatibilityError = (manifest, platform, arch) => {
   if (!COMPONENT_ID.test(String(manifest?.id || ''))) return '组件 ID 缺失或格式无效';

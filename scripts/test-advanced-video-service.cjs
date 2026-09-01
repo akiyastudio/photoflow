@@ -193,7 +193,7 @@ const run = async () => {
   const compatibilitySource = require('fs').readFileSync(path.join(__dirname, '..', 'src', 'compatibility', 'legacy-video-playback-settings.ts'), 'utf8');
   assert(!require('fs').existsSync(path.join(__dirname, '..', 'src', 'features', 'plugins', 'plugin-contributions.ts'))
     && settingsSource.includes("{ id: 'video', label: '视频'")
-    && appSource.includes('delete componentSettings[LEGACY_VIDEO_PLAYBACK_SETTINGS_ID]')
+    && appSource.includes("componentCapabilityIsAvailable(components, 'media.video.playback.advanced')")
     && compatibilitySource.includes("'video-playback-mpv'"),
   'advanced video UI and settings must ship with the app instead of the optional runtime');
   assert(playerSource.includes('onClick={togglePlayback}') && !playerSource.includes("key === 'BrowserBack'") && !playerSource.includes("key === 'MediaTrackPrevious'"), 'application player must own click semantics without repurposing browser/media keys');

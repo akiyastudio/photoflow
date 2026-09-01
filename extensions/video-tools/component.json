@@ -4,6 +4,10 @@
   "version": "26.8.31",
   "displayName": "视频处理",
   "description": "视频转码与无损切割工具",
+  "capabilities": ["media.video.processing", "media.video.processing.cli"],
+  "runtimeCommandCapabilities": {
+    "media.video.processing.cli": { "argsPrefix": [] }
+  },
   "icon": "ui/icon.svg",
   "platforms": ["win32"],
   "architectures": ["x64"],

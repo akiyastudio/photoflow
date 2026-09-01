@@ -19,7 +19,7 @@ import { useRendererErrorReporting } from './features/app/useRendererErrorReport
 import { ComponentPageSurface } from './features/components/ComponentPageSurface'; import { ComponentSettingsPageSurface } from './features/components/ComponentSettingsPageSurface';
 import { ComponentDeclarativeSettingsSurface } from './features/components/ComponentDeclarativeSettingsSurface';
 import { ComponentContributionDock } from './features/components/ComponentContributionDock';
-import { componentRuntimeIsAvailable } from './features/components/component-availability-model';
+import { componentCapabilityIsAvailable } from './features/components/component-availability-model';
 import { useComponentPages } from './features/components/useComponentPages';
 import { useComponentCatalog } from './features/components/useComponentCatalog';
 import { PrivacyConsentPage, SettingsNavigator, SettingsPage, WorkspaceSetupPage } from './features/settings/SettingsFeature'; import { componentSettingsSectionKey } from './features/settings/component-settings-page-model';
@@ -90,8 +90,8 @@ const App: React.FC = () => {
   const selectedComponentSettingsPage = useMemo(() => componentSettingsPages.find(page => componentSettingsSectionKey(page) === settingsSection), [componentSettingsPages, settingsSection]);
   const reportComponentSettingsError = useCallback((message: string) => showNotice(`打开组件设置页失败：${message}`), [showNotice]);
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id)), [components]);
-  const videoToolsAvailable = useMemo(() => componentRuntimeIsAvailable(components, 'video-tools'), [components]);
-  const advancedVideoPlaybackAvailable = useMemo(() => componentRuntimeIsAvailable(components, 'video-playback-mpv'), [components]);
+  const videoToolsAvailable = useMemo(() => componentCapabilityIsAvailable(components, 'media.video.processing'), [components]);
+  const advancedVideoPlaybackAvailable = useMemo(() => componentCapabilityIsAvailable(components, 'media.video.playback.advanced'), [components]);
   const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); } });
   const { actions: componentHostActions, contributions: componentContributions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
 

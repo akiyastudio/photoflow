@@ -19,6 +19,11 @@ const normalizePresets = value => (Array.isArray(value) ? value : []).slice(0, 3
     : [];
 });
 const paths = payload => [...new Set((Array.isArray(payload?.relativePaths) ? payload.relativePaths : []).map(value => String(value || '').trim()).filter(Boolean))].slice(0, 120);
+const transcodeArgs = (settings, extras = []) => {
+  const value = normalizeSettings(settings); const text = (field, allowed, fallback) => allowed.includes(String(value[field] || '')) ? String(value[field]) : fallback;
+  const bitrate = Number(value.videoBitrateMbps); const audioBitrate = Number(value.audioBitrateKbps);
+  return ['--container', text('container', ['mp4', 'mov', 'mkv'], 'mp4'), '--video-mode', text('videoMode', ['h264', 'h265', 'av1', 'prores', 'copy'], 'h264'), '--quality', text('quality', ['high', 'balanced', 'small'], 'balanced'), '--resolution', text('resolution', ['original', '2160p', '1080p', '720p'], 'original'), '--frame-rate', text('frameRate', ['original', '24', '25', '30', '50', '60'], 'original'), '--audio-mode', text('audioMode', ['copy', 'aac', 'remove'], 'aac'), '--subtitle-mode', text('subtitleMode', ['copy', 'burn', 'remove'], 'copy'), '--color-mode', text('colorMode', ['auto', 'sdr', 'hdr10', 'hlg', 'hdr-to-sdr'], 'auto'), '--bit-depth', text('bitDepth', ['auto', '8', '10'], 'auto'), '--frame-rate-mode', text('frameRateMode', ['preserve', 'cfr', 'vfr'], 'preserve'), '--rotation', text('rotation', ['auto', '0', '90', '180', '270'], 'auto'), '--aspect-mode', text('aspectMode', ['preserve', 'square-pixels'], 'preserve'), '--audio-track', text('audioTrack', ['all', 'first'], 'all'), '--audio-bitrate-kbps', String([96, 128, 160, 192, 256, 320].includes(audioBitrate) ? audioBitrate : 192), '--encoder-preset', text('encoderPreset', ['fast', 'balanced', 'quality'], 'balanced'), '--retry-count', '1', ...(Number.isFinite(bitrate) && bitrate > 0 && bitrate <= 800 ? ['--video-bitrate-mbps', String(bitrate)] : []), ...extras];
+};
 const operationKey = (context, action) => `${context.projectId}:${action}`;
 
 const handle = async frame => {
@@ -39,15 +44,15 @@ const handle = async frame => {
     const result = await callHost(id, 'component.settings', { action: 'merge', settings: patch });
     return { revision: result.revision, settings, presets: normalizePresets(result.settings?.transcodePresets) };
   }
-  if (method === 'video-tools.inspect.v1') return callHost(id, 'project.media.process', { action: 'video.transcode.inspect', relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [], settings: normalizeSettings(payload.settings) });
+  if (method === 'video-tools.inspect.v1') return callHost(id, 'project.media.process', { action: 'video.transcode.inspect', relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [], runtimeArgs: transcodeArgs(payload.settings, ['--inspect-only', '--skip-capability-probe']) });
   if (method === 'video-tools.transcode.v1' || method === 'video-tools.split.v1') {
     const processAction = method === 'video-tools.transcode.v1' ? 'video.transcode' : 'video.split';
     const idempotencyKey = String(payload.idempotencyKey || ''); const key = operationKey(context, processAction);
     activeOperations.set(key, { processAction, idempotencyKey, state: 'running' });
     try {
       const result = await callHost(id, 'project.media.process', processAction === 'video.transcode'
-        ? { action: processAction, idempotencyKey, relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [], settings: normalizeSettings(payload.settings), outputMode: payload.outputMode === 'delete-original' ? 'delete-original' : 'new' }
-        : { action: processAction, idempotencyKey, relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [] });
+        ? { action: processAction, idempotencyKey, relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [], runtimeArgs: transcodeArgs(payload.settings, ['--output-mode', payload.outputMode === 'delete-original' ? 'delete-original' : 'new']) }
+        : { action: processAction, idempotencyKey, relativePaths: paths(payload), inputTokens: Array.isArray(payload.inputTokens) ? payload.inputTokens.map(String).slice(0,120) : [], runtimeArgs: [] });
       activeOperations.set(key, { processAction, idempotencyKey, state: 'completed', result }); return result;
     } catch (error) { activeOperations.set(key, { processAction, idempotencyKey, state: 'failed', error: error.message }); throw error; }
   }

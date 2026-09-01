@@ -11,6 +11,15 @@ export const componentRuntimeIsAvailable = (components: readonly ComponentStatus
     && !unusableStatuses.has(String(component.status || '')));
 };
 
+export const componentCapabilityIsAvailable = (components: readonly ComponentStatus[], capability: string) =>
+  components.some(component => (component.capabilities || [component.capability]).includes(capability)
+    && componentRuntimeIsAvailable(components, component.id));
+
+export const componentCapabilityUnavailableMessage = (components: readonly ComponentStatus[], capability: string, displayName: string) => {
+  const component = components.find(item => (item.capabilities || [item.capability]).includes(capability));
+  return component ? componentUnavailableMessage(components, component.id, displayName) : `需要安装${displayName}`;
+};
+
 export const availableComponentIds = (components: readonly ComponentStatus[]) => new Set(
   components.filter(component => componentRuntimeIsAvailable(components, component.id)).map(component => component.id),
 );

@@ -1,6 +1,24 @@
 const { PLUGIN_DEFINITIONS, findPluginByCapability } = require('../plugins/plugin-catalog.cjs');
+const { legacyRuntimeCommandCapability } = require('../compatibility/legacy-runtime-capabilities.cjs');
 
 const createPluginService = ({ app, registry, runJsonCommand }) => {
+  const componentForCapability = capability => registry.list().find(component => component?.installed
+    && component.enabled !== false
+    && component.compatible
+    && (component.capabilities || []).includes(String(capability))) || null;
+  const runtimeCapability = capability => {
+    const component = componentForCapability(capability);
+    if (!component) {
+      const error = new Error(`未安装提供该运行时能力的组件：${capability}`);
+      error.code = 'PLUGIN_MISSING';
+      throw error;
+    }
+    const declaration = component.manifest?.runtimeCommandCapabilities?.[capability] || legacyRuntimeCommandCapability(component.id, capability);
+    if (!declaration || !Array.isArray(declaration.argsPrefix) || declaration.argsPrefix.some(value => typeof value !== 'string' || /\0/.test(value))) {
+      throw new Error(`组件未声明有效的运行时命令能力：${capability}`);
+    }
+    return { component, declaration };
+  };
   const resolveRunConfig = (pluginId, args = []) => {
     const plugin = registry.resolve(pluginId, { verifyIntegrity: app.isPackaged });
     if (!plugin) {
@@ -46,6 +64,14 @@ const createPluginService = ({ app, registry, runJsonCommand }) => {
     resolvePackage: pluginId => registry.resolvePackage(pluginId),
     resolveRunConfig,
     resolveRunConfigAsync,
+    resolveRunConfigForCapability: (capability, args = []) => {
+      const { component, declaration } = runtimeCapability(capability);
+      return resolveRunConfig(component.id, [...declaration.argsPrefix, ...args]);
+    },
+    runJsonForCapability: (capability, args, timeoutMs, onMessage, signal, requestedDeadlineAt) => {
+      const { component, declaration } = runtimeCapability(capability);
+      return runJsonCommand(resolveRunConfig(component.id, [...declaration.argsPrefix, ...(args || [])]), `Component capability ${capability}`, timeoutMs, onMessage, signal, requestedDeadlineAt);
+    },
     verifyComponentDirectory: (pluginId, componentRoot, force = true) => registry.verifyDirectory(pluginId, componentRoot, force),
     verifyComponentDirectoryAsync: (pluginId, componentRoot, force = true) => registry.verifyDirectoryAsync(pluginId, componentRoot, force),
     componentIntegrityToken: (pluginId, componentRoot) => registry.componentIntegrityToken(pluginId, componentRoot),

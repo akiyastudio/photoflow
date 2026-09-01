@@ -344,7 +344,7 @@ class ComponentServiceManager {
         const invocation = this.capabilityBroker.invoke(session.descriptor, frame.method, frame.payload, parent.context);
         if (((frame.method === 'component.lifecycle' && ['preflight', 'install', 'repair', 'uninstall'].includes(String(frame.payload?.action || '')))
           || frame.method === 'tasks'
-          || frame.method === 'project.media.process' && ['video.trim', 'office.extractImages', 'video.transcode', 'video.split'].includes(String(frame.payload?.action || ''))) && !parent.longTimeoutArmed) {
+          || frame.method === 'project.media.process') && !parent.longTimeoutArmed) {
           clearTimeout(parent.timer);
           parent.longTimeoutArmed = true;
           parent.timer = setTimeout(parent.onTimeout, this.longRequestTimeoutMs);

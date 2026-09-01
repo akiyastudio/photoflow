@@ -723,6 +723,8 @@ export interface ComponentStatus {
   name: string;
   description: string;
   capability: string;
+  /** Manifest-declared runtime capabilities; component identity is not a feature contract. */
+  capabilities?: string[];
   installed: boolean;
   /** False when the installed component is intentionally disabled by the user. */
   enabled?: boolean;

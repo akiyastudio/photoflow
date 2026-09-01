@@ -461,7 +461,7 @@ const settingsSource = readFileSync(new URL('../src/features/settings/SettingsFe
 const toolsSource = readFileSync(new URL('../src/features/tools/ToolViews.tsx', import.meta.url), 'utf8');
 const appSource = readFileSync(new URL('../src/App.tsx', import.meta.url), 'utf8');
 const workspaceSource = readFileSync(new URL('../src/features/workspace/ProjectWorkspace.tsx', import.meta.url), 'utf8');
-assert(settingsSource.includes('需要安装视频处理组件') || settingsSource.includes("componentUnavailableMessage(components, 'video-tools', '视频处理组件')"));
+assert(settingsSource.includes('需要安装视频处理组件') || settingsSource.includes("componentCapabilityUnavailableMessage(components, 'media.video.processing', '视频处理组件')"));
 assert(settingsSource.includes('disabled={!videoToolsAvailable}') && settingsSource.includes('视频切割、转码及参数入口已停用'), 'missing video-tools disables per-device actions and explains why');
 assert(toolsSource.includes("if (!videoToolsAvailable) return { splitVideosOnImport: false, transcodeVideosOnImport: false }"), 'saved legacy flags must not reach the import worker when video-tools is unavailable');
 assert(/const runCmd = \(stage: string, args: string\[\] = \[\]\) => \{\s*const requestId = crypto\.randomUUID\(\);\s*importProtocolStateRef\.current = createImportProtocolState\(\);\s*importRequestIdRef\.current = requestId;/s.test(toolsSource), 'every plan/import/broll invocation must begin with a fresh request ID and protocol state');

@@ -4,6 +4,10 @@
   "version": "26.8.31",
   "name": "高级视频解码",
   "description": "使用独立 libmpv 进程、硬件解码和预读缓存播放相机原始视频。",
+  "capabilities": ["media.video.playback.advanced", "media.video.timeline-frames"],
+  "runtimeCommandCapabilities": {
+    "media.video.timeline-frames": { "argsPrefix": ["--timeline-request"] }
+  },
   "platforms": ["win32"],
   "architectures": ["x64"],
   "entrypoints": {
