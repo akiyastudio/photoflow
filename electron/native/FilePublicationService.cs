@@ -59,6 +59,10 @@ internal static class FilePublicationService
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true)] private static extern uint GetFileAttributes(string name);
     [DllImport("ntdll.dll")] private static extern uint NtCreateFile(out SafeFileHandle handle, uint access, ref OBJECT_ATTRIBUTES attributes, ref IO_STATUS_BLOCK ioStatus, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
     [DllImport("ntdll.dll")] private static extern uint RtlNtStatusToDosError(uint status);
+#if PHOTOFLOW_TEST_FAULTS
+    [DllImport("kernel32.dll")] private static extern IntPtr GetCurrentProcess();
+    [DllImport("kernel32.dll", SetLastError = true)] private static extern bool GetProcessHandleCount(IntPtr process, out uint handleCount);
+#endif
 
     private static int Main(string[] args)
     {
@@ -211,7 +215,18 @@ internal static class FilePublicationService
         var prefix = root.TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar; if (!target.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) throw new ArgumentException("批量摘要清理目标超出隔离根"); var relative = target.Substring(prefix.Length); if (relative.Length == 0 || Path.IsPathRooted(relative)) throw new ArgumentException("批量摘要清理目标超出隔离根");
         var held = new List<SafeFileHandle>(); var heldPaths = new List<string>(); var volumeRoot = VolumeRoot(root); var current = volumeRoot;
         try {
-            SafeFileHandle rootHandle; try { rootHandle = OpenLocked(volumeRoot, GENERIC_READ, true, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE); } catch (Exception error) { throw new IOException("批量清理卷根打开失败：" + volumeRoot, error); } string volumeIdentity; if (!directories.TryGetValue(volumeRoot, out volumeIdentity)) { rootHandle.Dispose(); throw new OwnershipConflictException("批量清理卷根未登记"); } VerifyIdentity(rootHandle, volumeIdentity, "批量清理卷根"); held.Add(rootHandle); heldPaths.Add(volumeRoot);
+            SafeFileHandle rootHandle = null;
+#if PHOTOFLOW_TEST_FAULTS
+            TestBeginRootHandleAudit();
+#endif
+            try { rootHandle = OpenLocked(volumeRoot, GENERIC_READ, true, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE); } catch (Exception error) { throw new IOException("批量清理卷根打开失败：" + volumeRoot, error); }
+            try { string volumeIdentity; if (!directories.TryGetValue(volumeRoot, out volumeIdentity)) throw new OwnershipConflictException("批量清理卷根未登记"); VerifyIdentity(rootHandle, volumeIdentity, "批量清理卷根"); heldPaths.Add(volumeRoot); held.Add(rootHandle); rootHandle = null; }
+            catch (OwnershipConflictException) { if (rootHandle != null) { rootHandle.Dispose(); rootHandle = null; }
+#if PHOTOFLOW_TEST_FAULTS
+                TestEndRootHandleAudit();
+#endif
+                throw; }
+            finally { if (rootHandle != null) rootHandle.Dispose(); }
             var parent = Path.GetDirectoryName(target); var chainRelative = parent.Substring(volumeRoot.Length); var segments = chainRelative.Split(new[] { Path.DirectorySeparatorChar }, StringSplitOptions.RemoveEmptyEntries);
             for (var index = 0; index < segments.Length; index++) {
                 current = Path.Combine(current, segments[index]); SafeFileHandle handle = null;
@@ -278,6 +293,16 @@ internal static class FilePublicationService
         var sourceValue = Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_RENAME_RELEASED_PARENT"); if (String.IsNullOrEmpty(sourceValue)) return; var source = Full(sourceValue); if (!String.Equals(source, current, StringComparison.OrdinalIgnoreCase)) return; var destination = Full(Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_RENAME_RELEASED_PARENT_TO")); var marker = Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_RENAME_RELEASED_PARENT_RESULT"); bool moved = false; int error = 0;
         var thread = new Thread(() => { moved = MoveFileEx(source, destination, 0); if (moved) { if (!MoveFileEx(destination, source, 0)) { moved = false; error = Marshal.GetLastWin32Error(); } } else error = Marshal.GetLastWin32Error(); }); thread.Start(); thread.Join();
         if (!String.IsNullOrEmpty(marker)) File.WriteAllText(marker, moved ? "released" : "blocked:" + error);
+    }
+    private static uint testRootHandleBaseline;
+    private static bool testRootHandleAuditActive;
+    private static void TestBeginRootHandleAudit()
+    {
+        if (testRootHandleAuditActive || String.IsNullOrEmpty(Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_ROOT_HANDLE_AUDIT"))) return; if (!GetProcessHandleCount(GetCurrentProcess(), out testRootHandleBaseline)) throw new Win32Exception(Marshal.GetLastWin32Error()); testRootHandleAuditActive = true;
+    }
+    private static void TestEndRootHandleAudit()
+    {
+        if (!testRootHandleAuditActive) return; uint current; if (!GetProcessHandleCount(GetCurrentProcess(), out current)) throw new Win32Exception(Marshal.GetLastWin32Error()); var marker = Environment.GetEnvironmentVariable("PHOTOFLOW_TEST_ROOT_HANDLE_AUDIT"); File.WriteAllText(marker, current <= testRootHandleBaseline ? "stable:" + current : "leaked:" + testRootHandleBaseline + ":" + current);
     }
 #endif
     private static void MoveNoReplaceCore(string source, string target)
