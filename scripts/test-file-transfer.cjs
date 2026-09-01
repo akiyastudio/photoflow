@@ -20,6 +20,7 @@ const {
   assertDiskSpace,
   assertExistingInside,
   assertInside,
+  buildOwnedTreeManifest,
   collectCopyPlan,
   commitTemporaryFile,
   configureNativePublicationService,
@@ -130,6 +131,17 @@ const run = async () => {
     const occupiedIsolationCleanup = await removeCreatedPasteTargets([occupiedIsolationTree.project], { ownershipToken: 'root-isolation-occupied-owner', afterRootQuarantineMove: async ({ quarantine }) => { fs.mkdirSync(occupiedIsolationTree.project); fs.writeFileSync(path.join(occupiedIsolationTree.project, 'occupant.txt'), 'occupant'); fs.writeFileSync(path.join(quarantine, 'nested', 'owned.txt'), 'retained-tree'); } });
     assert.strictEqual(occupiedIsolationCleanup.success, false); assert.strictEqual(fs.readFileSync(path.join(occupiedIsolationTree.project, 'occupant.txt'), 'utf8'), 'occupant'); assert.strictEqual(fs.existsSync(occupiedIsolationCleanup.recoveryPaths[0]), true, 'a failed proof with an occupied original path reports the complete private recovery root');
     const retainedTreeName = fs.readdirSync(occupiedIsolationCleanup.recoveryPaths[0]).find(name => name.startsWith('tree-')); assert(retainedTreeName); assert.strictEqual(fs.readFileSync(path.join(occupiedIsolationCleanup.recoveryPaths[0], retainedTreeName, 'nested', 'owned.txt'), 'utf8'), 'retained-tree');
+
+    const lateFileTree = await publishOwnedTree('root-late-file', 'root-late-file-owner');
+    const lateFileCleanup = await removeCreatedPasteTargets([lateFileTree.project], { ownershipToken: 'root-late-file-owner', beforeQuarantinedRootDelete: async ({ quarantine }) => { fs.writeFileSync(path.join(quarantine, 'concurrent-user.txt'), 'late-user-content'); } });
+    assert.strictEqual(lateFileCleanup.success, false); assert.strictEqual(lateFileCleanup.outcomes[0].partial, true, 'owned leaves may already be deleted before a late extra makes root deletion fail closed');
+    const lateRecoveryRoot = lateFileCleanup.recoveryPaths[0]; const lateTreeName = fs.readdirSync(lateRecoveryRoot).find(name => name.startsWith('tree-')); assert(lateTreeName); assert.strictEqual(fs.readFileSync(path.join(lateRecoveryRoot, lateTreeName, 'concurrent-user.txt'), 'utf8'), 'late-user-content', 'a file arriving at the final root-delete boundary must survive and retain the root');
+
+    const manifestRoot = path.join(root, 'synthetic-10k-root'); const manifestItems = [{ path: manifestRoot, identity: { kind: 'directory' } }];
+    for (let index = 0; index < 5000; index += 1) { const directory = path.join(manifestRoot, `d-${index}`); manifestItems.push({ path: directory, identity: { kind: 'directory' } }, { path: path.join(directory, 'f'), identity: { kind: 'file' } }); }
+    const manifestBatches = []; let manifestYields = 0; const manifestStarted = Date.now();
+    const largeManifest = await buildOwnedTreeManifest(manifestRoot, manifestItems, { onTreeManifestBatch: state => manifestBatches.push(state), yieldTreeCleanup: async () => { manifestYields += 1; } });
+    assert.strictEqual(largeManifest.success, true); assert.strictEqual(largeManifest.expected.size, 10001); assert(manifestBatches.length > 75 && manifestBatches.every(batch => batch.batchSize <= 128)); assert(manifestYields >= manifestBatches.length * 2, 'both manifest construction and parent validation must yield in bounded batches'); assert(Date.now() - manifestStarted < 3000, '10k nested manifest construction must remain map-based rather than regress to quadratic parent scans');
 
     const configuredInspirationRoot = path.join(root, 'configured-inspiration');
     const unconfiguredInspirationRoot = path.join(root, 'renderer-selected-root');

@@ -18,6 +18,7 @@ const DEFAULT_SMALL_FILE_THRESHOLD = 2 * 1024 * 1024;
 const DEFAULT_SMALL_FILE_CONCURRENCY = 8;
 const LINK_COPY_FALLBACK_ERRORS = new Set(['EXDEV']);
 const MAX_BATCH_MANIFEST_BYTES = 480 * 1024;
+const CLEANUP_TREE_BATCH_SIZE = 128;
 const CLEANUP_OWNERSHIP_TTL_MS = 6 * 60 * 60 * 1000;
 const IMPLICIT_CLEANUP_OWNERSHIP_TTL_MS = 250;
 const MAX_CLEANUP_OWNERSHIP_OPERATIONS = 2048;
@@ -1046,48 +1047,108 @@ const quarantineOwnedPath = async (item, options = {}) => {
   }
 };
 
-const inspectOwnedTree = async (treeRoot, originalRoot, expectedItems) => {
+const yieldCleanupTurn = options => options.yieldTreeCleanup?.() || new Promise(resolve => setImmediate(resolve));
+
+const buildOwnedTreeManifest = async (originalRoot, expectedItems, options = {}) => {
   const expected = new Map();
-  for (const item of expectedItems) {
-    const relative = path.relative(originalRoot, item.path);
-    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return { success: false, code: 'CLEANUP_TREE_MAPPING_CONFLICT' };
-    if (expected.has(relative)) return { success: false, code: 'CLEANUP_TREE_MAPPING_COLLISION', path: item.path };
-    expected.set(relative, item);
+  for (let offset = 0; offset < expectedItems.length; offset += CLEANUP_TREE_BATCH_SIZE) {
+    const batch = expectedItems.slice(offset, offset + CLEANUP_TREE_BATCH_SIZE);
+    for (const item of batch) {
+      const relative = path.relative(originalRoot, item.path);
+      if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return { success: false, code: 'CLEANUP_TREE_MAPPING_CONFLICT' };
+      if (expected.has(relative)) return { success: false, code: 'CLEANUP_TREE_MAPPING_COLLISION', path: item.path };
+      expected.set(relative, item);
+    }
+    await options.onTreeManifestBatch?.({ batchSize: batch.length, processed: Math.min(offset + batch.length, expectedItems.length), total: expectedItems.length });
+    await yieldCleanupTurn(options);
   }
-  for (const [relative] of expected) {
-    if (relative) {
-      let parent = path.dirname(relative);
-      while (parent && parent !== '.') {
+  const manifest = [...expected.entries()];
+  for (let offset = 0; offset < manifest.length; offset += CLEANUP_TREE_BATCH_SIZE) {
+    const batch = manifest.slice(offset, offset + CLEANUP_TREE_BATCH_SIZE);
+    for (const [relative] of batch) if (relative) {
+      for (let parent = path.dirname(relative); parent && parent !== '.'; parent = path.dirname(parent)) {
         const parentItem = expected.get(parent);
         if (!parentItem || parentItem.identity?.kind !== 'directory') return { success: false, code: 'CLEANUP_TREE_PARENT_UNOWNED', path: path.join(originalRoot, parent) };
-        parent = path.dirname(parent);
       }
     }
+    await yieldCleanupTurn(options);
   }
+  return { success: true, expected, manifest };
+};
+
+const inspectOwnedTree = async (treeRoot, originalRoot, expectedItems, nativeService, options = {}) => {
+  const built = await buildOwnedTreeManifest(originalRoot, expectedItems, options);
+  if (!built.success) return built;
+  const { expected } = built;
   const seen = new Set();
-  const visit = async (candidate, relative = '') => {
-    const item = expected.get(relative);
-    if (!item) return { success: false, code: 'CLEANUP_TREE_EXTRA_CONTENT', path: candidate };
-    const current = await capturePathIdentity(candidate, { digest: item.identity.kind === 'file' && Boolean(item.identity.sha256) }).catch(() => null);
-    const matches = item.identity.kind === 'directory'
-      ? directoryOwnershipMatches(current, item.identity)
-      : identitiesMatch(current, item.identity, { destructive: true });
-    if (!matches) return { success: false, code: 'CLEANUP_TREE_IDENTITY_CONFLICT', path: candidate };
-    seen.add(relative);
-    if (current.kind !== 'directory') return { success: true };
-    const entries = await fs.promises.readdir(candidate, { withFileTypes: true }).catch(() => null);
-    if (!entries) return { success: false, code: 'CLEANUP_TREE_READ_FAILED', path: candidate };
-    for (const entry of entries) {
-      const childRelative = relative ? path.join(relative, entry.name) : entry.name;
-      const outcome = await visit(path.join(candidate, entry.name), childRelative);
-      if (!outcome.success) return outcome;
+  const deletionEntries = [];
+  const pending = [{ candidate: treeRoot, relative: '' }];
+  let processed = 0;
+  while (pending.length) {
+    const batch = pending.splice(0, CLEANUP_TREE_BATCH_SIZE);
+    const inspected = await Promise.all(batch.map(async entry => {
+      const item = expected.get(entry.relative);
+      if (!item) return { ...entry, failure: { success: false, code: 'CLEANUP_TREE_EXTRA_CONTENT', path: entry.candidate } };
+      const current = await capturePathIdentity(entry.candidate).catch(() => null);
+      const comparableExpected = item.identity.kind === 'file' ? { ...item.identity, sha256: undefined } : item.identity;
+      const matches = item.identity.kind === 'directory'
+        ? directoryOwnershipMatches(current, item.identity)
+        : identitiesMatch(current, comparableExpected, { destructive: true });
+      if (!matches) return { ...entry, failure: { success: false, code: 'CLEANUP_TREE_IDENTITY_CONFLICT', path: entry.candidate } };
+      const children = current.kind === 'directory' ? await fs.promises.readdir(entry.candidate).catch(() => null) : [];
+      if (children === null) return { ...entry, failure: { success: false, code: 'CLEANUP_TREE_READ_FAILED', path: entry.candidate } };
+      return { ...entry, item, current, children };
+    }));
+    const failure = inspected.find(entry => entry.failure)?.failure;
+    if (failure) return failure;
+    const nativeStates = await nativeService.inspectPathsBatch(inspected.map(entry => entry.candidate)).catch(() => null);
+    if (!nativeStates || nativeStates.length !== inspected.length) return { success: false, code: 'CLEANUP_TREE_NATIVE_INSPECTION_FAILED' };
+    for (let index = 0; index < inspected.length; index += 1) {
+      const entry = inspected[index]; const nativeState = nativeStates[index];
+      if (nativeState?.success === false || typeof nativeState?.identity !== 'string' || !nativeState.identity) return { success: false, code: 'CLEANUP_TREE_NATIVE_IDENTITY_MISSING', path: entry.candidate };
+      if (entry.item.identity.nativeIdentity && entry.item.identity.nativeIdentity !== nativeState.identity) return { success: false, code: 'CLEANUP_TREE_NATIVE_IDENTITY_CONFLICT', path: entry.candidate };
+      seen.add(entry.relative);
+      deletionEntries.push({ ...entry, nativeIdentity: nativeState.identity });
+      for (const name of entry.children) pending.push({ candidate: path.join(entry.candidate, name), relative: entry.relative ? path.join(entry.relative, name) : name });
     }
-    return { success: true };
-  };
-  const walked = await visit(treeRoot);
-  if (!walked.success) return walked;
+    processed += inspected.length;
+    await options.onTreePreflightBatch?.({ batchSize: inspected.length, processed, totalExpected: expected.size });
+    await yieldCleanupTurn(options);
+  }
   if (seen.size !== expected.size) return { success: false, code: 'CLEANUP_TREE_LEDGER_MISMATCH' };
-  return { success: true };
+  return { success: true, deletionEntries };
+};
+
+const deleteOwnedTreeEntries = async (entries, nativeService, rootEntry, privateRoot, options = {}) => {
+  const ordered = [...entries].sort((left, right) => {
+    const depth = value => value.relative ? value.relative.split(path.sep).length : 0;
+    const kindOrder = value => value.item.identity.kind === 'directory' ? 1 : 0;
+    return depth(right) - depth(left) || kindOrder(left) - kindOrder(right);
+  });
+  const outcomes = [];
+  for (let offset = 0; offset < ordered.length; offset += CLEANUP_TREE_BATCH_SIZE) {
+    const batch = ordered.slice(offset, offset + CLEANUP_TREE_BATCH_SIZE);
+    for (const entry of batch) {
+      if (entry === rootEntry) await options.beforeQuarantinedRootDelete?.({ quarantine: entry.candidate, privateRoot, entries, outcomes });
+      try {
+        let result;
+        if (entry.item.identity.kind === 'file') {
+          if (!entry.item.identity.sha256 || typeof nativeService.compareDeleteFile !== 'function') throw Object.assign(new Error('owned file digest delete unavailable'), { code: 'CLEANUP_FILE_IDENTITY_MISSING' });
+          result = await nativeService.compareDeleteFile({ target: entry.candidate, sha256: entry.item.identity.sha256, size: Number(entry.item.identity.size), identity: entry.item.identity.nativeIdentity || entry.nativeIdentity });
+        } else {
+          if (typeof nativeService.deleteEmptyDirectory !== 'function') throw Object.assign(new Error('owned directory identity delete unavailable'), { code: 'FILE_PUBLICATION_SERVICE_MISSING' });
+          result = await nativeService.deleteEmptyDirectory({ source: entry.candidate, identity: entry.item.identity.nativeIdentity || entry.nativeIdentity });
+        }
+        outcomes.push({ success: result?.success !== false, deleted: result?.deleted !== false, path: entry.candidate, relativePath: entry.relative, cleanupWarning: result?.cleanupWarning, outcomeUnknown: result?.outcomeUnknown });
+      } catch (error) {
+        outcomes.push({ success: error?.deleted === true, deleted: error?.deleted === true, path: entry.candidate, relativePath: entry.relative, code: error?.code || 'CLEANUP_DELETE_FAILED', cleanupWarning: error?.cleanupWarning, outcomeUnknown: error?.outcomeUnknown, recoveryPath: error?.recoveryPath });
+      }
+    }
+    await options.onTreeDeleteBatch?.({ batchSize: batch.length, processed: Math.min(offset + batch.length, ordered.length), total: ordered.length, outcomes });
+    await yieldCleanupTurn(options);
+  }
+  const failed = outcomes.filter(outcome => !outcome.success);
+  return { success: failed.length === 0, outcomes, deletedCount: outcomes.filter(outcome => outcome.deleted).length };
 };
 
 const quarantineOwnedTreeRoot = async (rootItem, treeItems, options = {}) => {
@@ -1114,21 +1175,21 @@ const quarantineOwnedTreeRoot = async (rootItem, treeItems, options = {}) => {
     return { success: false, path: originalRoot, code: error?.code || 'CLEANUP_QUARANTINE_FAILED', outcomeUnknown: Boolean(error?.outcomeUnknown), recoveryPath: quarantineExists || error?.outcomeUnknown ? privateRoot : undefined };
   }
   await options.afterRootQuarantineMove?.({ ...rootItem, quarantine, privateRoot, treeItems });
-  let proof = await inspectOwnedTree(quarantine, originalRoot, treeItems);
-  await options.beforeQuarantinedTreeDelete?.({ ...rootItem, quarantine, privateRoot, treeItems, proof });
-  if (proof.success) proof = await inspectOwnedTree(quarantine, originalRoot, treeItems);
+  const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+  const proof = await inspectOwnedTree(quarantine, originalRoot, treeItems, nativeService, options);
   if (!proof.success) {
     const restored = await restoreQuarantine(quarantine, originalRoot, options);
     if (restored) await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => undefined);
     return { success: false, path: originalRoot, code: proof.code, conflictPath: proof.path, recoveryPath: restored ? undefined : privateRoot };
   }
-  try {
-    await fs.promises.rm(quarantine, { recursive: true, force: false });
-    const rootRemoved = await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => false);
-    return { success: true, path: originalRoot, quarantined: true, ...(!rootRemoved ? { cleanupWarning: '隔离目录清理未完成' } : {}) };
-  } catch (error) {
-    return { success: false, path: originalRoot, code: error?.code || 'CLEANUP_DELETE_FAILED', recoveryPath: await pathExistsObject(privateRoot) ? privateRoot : undefined };
-  }
+  await options.beforeQuarantinedTreeDelete?.({ ...rootItem, quarantine, privateRoot, treeItems, proof });
+  const rootEntry = proof.deletionEntries.find(entry => entry.relative === '');
+  const deletion = await deleteOwnedTreeEntries(proof.deletionEntries, nativeService, rootEntry, privateRoot, options);
+  const quarantineRetained = await pathExistsObject(quarantine);
+  if (!deletion.success || quarantineRetained) return { success: false, path: originalRoot, code: 'CLEANUP_TREE_PARTIAL', recoveryPath: privateRoot, partial: deletion.deletedCount > 0, deletedCount: deletion.deletedCount, cleanupOutcomes: deletion.outcomes };
+  const rootRemoved = await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => false);
+  if (!rootRemoved) return { success: false, path: originalRoot, code: 'CLEANUP_PRIVATE_ROOT_RETAINED', recoveryPath: privateRoot, partial: deletion.deletedCount > 0, deletedCount: deletion.deletedCount, cleanupOutcomes: deletion.outcomes };
+  return { success: true, path: originalRoot, quarantined: true, deletedCount: deletion.deletedCount, cleanupOutcomes: deletion.outcomes };
 };
 
 const removeCreatedPasteTargets = async (targets, options = {}) => {
@@ -1380,6 +1441,7 @@ module.exports = {
   assertExistingInside,
   assertInside,
   assertRegularFile,
+  buildOwnedTreeManifest,
   collectCopyPlan,
   commitTemporaryFile,
   configureNativePublicationService,
