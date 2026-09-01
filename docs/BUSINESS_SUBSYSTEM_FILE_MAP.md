@@ -90,9 +90,24 @@
 ### 云端遥测
 
 - `services/cloudbase/telemetry-function/index.js`
+- `services/cloudbase/telemetry-function/retention-policy.js`
 - `services/cloudbase/telemetry-function/admin/app.js`
 - `services/cloudbase/telemetry-function/admin/index.html`
 - `services/cloudbase/telemetry-function/admin/styles.css`
+
+### 云端遥测发布与行为验收
+
+- `package.json`（根级 CloudBase 验收命令）
+- `scripts/check-project.cjs`（默认门禁接入）
+- `scripts/package-cloudbase-function.py`
+- `scripts/test-cloudbase-function-package.cjs`
+- `scripts/test-cloudbase-function-package.py`
+- `services/cloudbase/telemetry-function/package.json`
+- `docs/CLOUDBASE_ANALYTICS_GUIDE.md`
+- `services/cloudbase/telemetry-function/test/logic.test.mjs`
+- `services/cloudbase/telemetry-function/test/privacy-database-integration.test.mjs`
+- `services/cloudbase/telemetry-function/test/privacy-operations.test.mjs`
+- `services/cloudbase/telemetry-function/test/release-blockers.test.mjs`
 
 ## 2. 工作区与项目管理系统
 
