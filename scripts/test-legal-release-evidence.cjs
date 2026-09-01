@@ -1,4 +1,5 @@
 const assert = require('assert');
+const { spawnSync } = require('child_process');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
@@ -12,14 +13,36 @@ const documentNames = [
   'DATA_RETENTION_AND_RIGHTS_RUNBOOK_TEMPLATE.md',
   'THIRD_PARTY_DISTRIBUTION_EVIDENCE.md',
 ];
+
+const assertNotIgnored = repositoryPath => {
+  const result = spawnSync('git', ['check-ignore', '--no-index', '--quiet', '--', repositoryPath], {
+    cwd: root,
+    encoding: 'utf8',
+    windowsHide: true,
+  });
+  if (result.error) throw result.error;
+  if (result.status === 0) assert.fail(`release-critical legal path must not be ignored: ${repositoryPath}`);
+  assert.strictEqual(result.status, 1, `git check-ignore failed for ${repositoryPath} (status ${result.status}): ${String(result.stderr || '').trim()}`);
+};
+
+assert(fs.existsSync(legalRoot), 'missing legal document directory: docs/legal/');
 const documents = new Map(documentNames.map(name => {
   const file = path.join(legalRoot, name);
   assert(fs.existsSync(file), `missing legal evidence document: ${name}`);
+  assertNotIgnored(`docs/legal/${name}`);
   return [name, fs.readFileSync(file, 'utf8')];
 }));
 
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
 assert(documents.get('README.md').includes(`适用版本：照片流 ${packageJson.version} 公测版`), 'legal README version must match package.json');
+
+const publicDocumentSection = (documents.get('README.md').split('## 对外文件')[1] || '').split(/^## /m)[0];
+const publicDocumentNames = [...publicDocumentSection.matchAll(/`([^`]+\.(?:html|txt))`/gi)].map(match => match[1]);
+assert(publicDocumentNames.length > 0, 'legal README must list public HTML/TXT documents');
+for (const name of publicDocumentNames) {
+  assert(fs.existsSync(path.join(legalRoot, name)), `missing public legal document: ${name}`);
+  assertNotIgnored(`docs/legal/${name}`);
+}
 
 const blockerSection = documents.get('README.md').split('## 发布阻断项')[1] || '';
 const blockerItems = blockerSection.match(/^\d+\. /gm) || [];

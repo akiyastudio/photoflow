@@ -11,6 +11,7 @@ const steps = [
     ['typecheck', ['run', 'typecheck']],
   ] : []),
   ['privacy consent and telemetry', ['run', 'test:privacy']],
+  ['legal release evidence', ['run', 'test:legal-release-evidence']],
   ['architecture', ['run', 'test:architecture']],
   ['domain contracts', ['run', 'test:domain-contracts']],
   ['operations storage', ['run', 'test:operations-storage']],
