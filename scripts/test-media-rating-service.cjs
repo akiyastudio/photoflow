@@ -39,8 +39,8 @@ const waitFor = async predicate => {
   throw new Error('timed out waiting for media rating state');
 };
 
-const ratingService = ({ root, outbox, readRaw, write, refresh = async () => undefined, links = () => [] }) => createMediaRatingService({
-  exiftool: { readRaw, write }, fs, path,
+const ratingService = ({ root, outbox, readRaw, write, refresh = async () => undefined, links = () => [], fileSystem = fs }) => createMediaRatingService({
+  exiftool: { readRaw, write }, fs: fileSystem, path,
   imageExtensions: new Set(['.jpg']), rawExtensions: new Set(),
   releaseWorkspaceWatchPath: () => undefined, suppressWorkspaceWatchPath: () => undefined,
   versionService: { refreshMetadataFingerprint: refresh, listProgress: async () => ({ progressFolders: [] }) },
@@ -182,6 +182,22 @@ const run = async () => {
     assert.strictEqual(recoveredFingerprints, 1);
     assert.strictEqual(fs.readdirSync(recoveryRoot).filter(name => name.startsWith('.photoflow-rating-')).length, 0, 'recovered writes must remove the proven extra hardlink');
 
+    const terminalRoot = path.join(temporaryRoot, 'terminal-crash'); fs.mkdirSync(terminalRoot);
+    const terminalFile = path.join(terminalRoot, 'terminal.jpg'); const terminalOutbox = path.join(terminalRoot, 'outbox.json'); fs.writeFileSync(terminalFile, 'rating=0');
+    const terminalFs = Object.create(fs); let rejectedCleanupSaves = 0; let terminalWrites = 0;
+    terminalFs.writeFileSync = (target, data, ...args) => {
+      let document;
+      try { document = JSON.parse(String(data)); } catch { document = null; }
+      if (document?.items?.some(item => item.stage === 'failed' && !item.bindingNonce)) { rejectedCleanupSaves += 1; throw new Error('simulated crash before cleaned terminal receipt'); }
+      return fs.writeFileSync(target, data, ...args);
+    };
+    const terminalService = ratingService({ root: terminalRoot, outbox: terminalOutbox, fileSystem: terminalFs, readRaw: async target => parseRating(target), write: async target => { terminalWrites += 1; await fs.promises.appendFile(target, '|rating=3'); const error = new Error('permanent failure after physical write'); error.code = 'MEDIA_RATING_IDENTITY_CHANGED'; throw error; } });
+    await terminalService.write(terminalRoot, terminalFile, 3);
+    await waitFor(() => { const item = JSON.parse(fs.readFileSync(terminalOutbox, 'utf8')).items[0]; return rejectedCleanupSaves > 0 && item?.stage === 'failed' && item.bindingNonce && item.physicalStarted === true; });
+    ratingService({ root: terminalRoot, outbox: terminalOutbox, readRaw: async target => parseRating(target), write: async () => { terminalWrites += 1; } });
+    await waitFor(() => { const item = JSON.parse(fs.readFileSync(terminalOutbox, 'utf8')).items[0]; return item?.stage === 'failed' && !item.bindingNonce && !item.physicalStarted; });
+    assert.strictEqual(terminalWrites, 1, 'a crash between durable failure and binding cleanup must never re-run the physical write');
+
     const legacyRoot = path.join(temporaryRoot, 'legacy-outbox'); fs.mkdirSync(legacyRoot);
     const legacyMetadata = path.join(legacyRoot, 'metadata.jpg'); const legacyWriting = path.join(legacyRoot, 'writing.jpg'); const legacyProven = path.join(legacyRoot, 'proven.jpg'); const legacyOutbox = path.join(legacyRoot, 'outbox.json');
     fs.writeFileSync(legacyMetadata, 'rating=1'); fs.writeFileSync(legacyWriting, 'rating=2'); fs.writeFileSync(legacyProven, 'rating=5');
@@ -201,6 +217,12 @@ const run = async () => {
     const deniedService = ratingService({ root: provenanceRoot, outbox: path.join(provenanceRoot, 'denied.json'), readRaw: async target => parseRating(target), write: async () => undefined });
     await assert.rejects(deniedService.write(provenanceRoot, externalFile, 2), error => error?.code === 'MEDIA_RATING_WORKSPACE_PROVENANCE_REQUIRED');
     const shortcutPath = path.join(provenanceRoot, 'project', 'external.lnk'); fs.mkdirSync(path.dirname(shortcutPath));
+    const linkedAlias = path.join(externalRoot, `.photoflow-rating-${'a'.repeat(32)}.jpg`); fs.writeFileSync(linkedAlias, 'rating=5');
+    const aliasLink = [{ shortcutPath, externalTargetRoot: linkedAlias, externalTargetKind: 'file', offline: false }];
+    const linkedAliasService = ratingService({ root: provenanceRoot, outbox: path.join(provenanceRoot, 'linked-alias.json'), readRaw: async target => parseRating(target), write: async () => undefined, links: () => aliasLink });
+    assert.deepStrictEqual(await linkedAliasService.listProject(provenanceRoot), [], 'a managed file link must not expose an internal rating alias');
+    assert.strictEqual((await linkedAliasService.summarizeProject(provenanceRoot)).count, 0, 'a managed file link must not count an internal rating alias');
+    fs.rmSync(linkedAlias);
     const managedService = ratingService({ root: provenanceRoot, outbox: path.join(provenanceRoot, 'managed.json'), readRaw: async target => parseRating(target), write: async target => fs.promises.appendFile(target, '|rating=2'), links: root => root === fs.realpathSync(provenanceRoot) ? [{ shortcutPath, externalTargetRoot: externalFile, externalTargetKind: 'file', offline: false }] : [] });
     const managedResult = await managedService.writeChecked(provenanceRoot, externalFile, 2, fs.statSync(externalFile).mtimeMs);
     assert.strictEqual(managedResult.rating, 2, 'a workspace-managed external file must remain writable');

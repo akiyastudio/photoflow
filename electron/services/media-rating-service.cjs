@@ -316,8 +316,8 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     await fs.promises.unlink(bindingPath);
     syncDirectory(path.dirname(bindingPath));
   };
-  const clearSafeBindingForTerminal = async item => {
-    if (!item.bindingNonce) return;
+  const cleanupFailedIntentBinding = async item => {
+    if (item.stage !== 'failed' || !item.bindingNonce) return;
     try { await cleanupIntentBinding(item); }
     catch (error) {
       // Preserve a binding that may be the verified file's final link. The
@@ -647,6 +647,10 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
     if (fileDrains.has(key)) return fileDrains.get(key);
     const drain = (async () => {
       while (true) {
+        for (const failed of sortPending(key).filter(candidate => candidate.stage === 'failed' && candidate.bindingNonce)) {
+          try { await cleanupFailedIntentBinding(failed); }
+          catch (error) { writeLog('warn', 'Unable to clean failed media rating binding', { filePath: failed.filePath, error: error.message || String(error) }); }
+        }
         const item = sortPending(key).find(candidate => candidate.stage !== 'failed');
         if (!item) return;
         const boundedChecked = item.type === 'checked' && ['metadata', 'writing'].includes(item.stage);
@@ -676,12 +680,7 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
         const terminal = terminalStates.get(item.token);
         if (terminal) {
           try {
-            await clearSafeBindingForTerminal(item);
-            if (terminal.mode === 'remove') removePendingDurably(key, item);
-            else markIntentFailedDurably(key, item, terminal.error);
-            settleCompletion(item, 'reject', terminal.error);
-            terminalStates.delete(item.token);
-            continue;
+            markIntentFailedDurably(key, item, terminal.error);
           } catch (persistError) {
             if (boundedChecked && now() >= Number(item.deadlineAt)) {
               isolateUnknownIntent(key, item, persistError);
@@ -693,6 +692,15 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
             await retryDelay(item, item.failureCount, hasCompletion);
             continue;
           }
+          settleCompletion(item, 'reject', terminal.error);
+          terminalStates.delete(item.token);
+          try {
+            await cleanupFailedIntentBinding(item);
+            if (terminal.mode === 'remove' && !item.bindingNonce) removePendingDurably(key, item);
+          } catch (cleanupError) {
+            writeLog('warn', 'Unable to clean terminal media rating binding', { filePath: item.filePath, error: cleanupError.message || String(cleanupError) });
+          }
+          continue;
         }
         try { await processPendingHead(key, item); }
         catch (error) {
@@ -809,6 +817,7 @@ const createMediaRatingService = ({ exiftool, fs, path, imageExtensions, rawExte
       }
     };
     const queueCandidate = async candidate => {
+      if (path.basename(candidate.filePath).startsWith('.photoflow-')) return;
       if (collectEntries) { candidates.push(candidate); return; }
       const inspection = inspectCandidate(candidate).finally(() => summaryInspections.delete(inspection));
       summaryInspections.add(inspection);
