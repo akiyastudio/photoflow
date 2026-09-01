@@ -1,6 +1,7 @@
 const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
+const { Linter } = require('eslint');
 const {
   ALLOWED_COMPONENT_FEATURE_EDGES,
   ALLOWED_IPC_REGISTRAR_EDGES,
@@ -93,5 +94,45 @@ for (const [relativeFile, maximumLines] of Object.entries(ENTRY_FILE_BUDGETS)) {
   const lineCount = fs.readFileSync(path.join(root, relativeFile), 'utf8').split(/\r?\n/).length;
   assert(lineCount <= maximumLines, `${relativeFile} exceeded its ${maximumLines}-line composition budget (${lineCount})`);
 }
+
+const workspaceIpcSource = fs.readFileSync(path.join(root, 'electron', 'modules', 'workspace-ipc.cjs'), 'utf8');
+const workspaceImportIpcSource = fs.readFileSync(path.join(root, 'electron', 'modules', 'workspace', 'import-ipc.cjs'), 'utf8');
+assert.match(workspaceIpcSource, /registerWorkspaceImportIpc\(\{/,
+  'workspace IPC composition root must register the extracted import/progress handlers');
+assert(!workspaceImportIpcSource.includes("require('../workspace-ipc.cjs')"),
+  'workspace import/progress registrar must not create a cycle back to its composition root');
+
+// The extracted registrar is a dependency-closed unit: no JavaScript built-in is
+// implicitly allowed. `module` is the sole free host binding because this file must
+// publish its CommonJS API; every executable dependency, including built-ins, is
+// declared in the registrar's dependency object and supplied by the composition root.
+const workspaceImportAllowedFreeGlobals = Object.freeze({ module: 'readonly' });
+const workspaceImportFreeIdentifierErrors = new Linter().verify(workspaceImportIpcSource, {
+  parserOptions: { ecmaVersion: 2022, sourceType: 'script' },
+  globals: workspaceImportAllowedFreeGlobals,
+  rules: { 'no-undef': 'error' },
+}).filter(message => message.ruleId === 'no-undef');
+assert.deepStrictEqual(workspaceImportFreeIdentifierErrors, [],
+  `workspace import/progress registrar has undeclared free identifiers: ${workspaceImportFreeIdentifierErrors.map(message => `${message.message} (${message.line}:${message.column})`).join(', ')}`);
+
+const { registerWorkspaceImportIpc } = require('../electron/modules/workspace/import-ipc.cjs');
+const registeredWorkspaceImportChannels = [];
+registerWorkspaceImportIpc({
+  ipcMain: { handle: channel => registeredWorkspaceImportChannels.push(channel) },
+});
+assert.deepStrictEqual(registeredWorkspaceImportChannels, [
+  'workspace-create-progress-folder',
+  'workspace-media-workflow-import-commit',
+  'workspace-media-workflow-import-recover',
+  'workspace-open-version',
+  'workspace-open-project',
+  'workspace-open-entry',
+  'workspace-extract-office-images',
+  'workspace-extract-screenshot-main-images',
+  'workspace-trim-video',
+  'workspace-cancel-video-trim',
+  'workspace-import-files',
+  'workspace-import-progress-files',
+], 'workspace import/progress registrar changed its IPC channel contract or registration order');
 
 console.log('Source package boundary tests passed.');

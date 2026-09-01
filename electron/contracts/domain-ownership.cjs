@@ -68,6 +68,7 @@ const LEGACY_PROJECT_CONTENT_WRITERS = Object.freeze([
   'electron/modules/version-tracking-ipc.cjs',
   'electron/modules/versions-ipc.cjs',
   'electron/modules/workspace-ipc.cjs',
+  'electron/modules/workspace/import-ipc.cjs',
   'electron/services/archive-service.cjs',
   'electron/services/selection-service.cjs',
   'electron/services/video-trim-commit-service.cjs',
