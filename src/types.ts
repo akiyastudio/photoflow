@@ -1000,7 +1000,7 @@ export interface WorkspaceRecoveryDescriptor {
   published?: boolean;
   originalMissing?: boolean;
   sourceRetained?: boolean;
-  cleanupWarning?: string;
+  cleanupWarning?: string | boolean;
   recoveryRequired?: boolean;
   partial?: boolean;
   identityVerified?: boolean;
@@ -1026,15 +1026,13 @@ export interface UndoLastRenameResult extends WorkspaceRecoveryDescriptor {
   rollbackRecovery?: WorkspaceRecoveryDescriptor;
 }
 
-export interface MaterializeProjectExternalLinksResult {
+export interface MaterializeProjectExternalLinksResult extends WorkspaceRecoveryDescriptor {
   success: boolean;
   count: number;
   items?: Array<{ shortcutPath: string; source: string; destination: string }>;
-  partial?: boolean;
   truncated?: boolean;
   warning?: string;
   skippedCount?: number;
-  error?: string;
 }
 
 export interface IElectronAPI {
