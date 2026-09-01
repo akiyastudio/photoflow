@@ -80,6 +80,7 @@ const run = async () => {
   const claimImplementation = workspaceIpcSource.slice(workspaceIpcSource.indexOf("const persistentUndoClaimPrefix"), workspaceIpcSource.indexOf('const pruneBlockedPersistentUndos'));
   assert.doesNotMatch(claimImplementation, /fs\.promises\.(?:unlink|rm|rename)\s*\(|publishPathNoClobber/, 'persistent claim GC must delegate deletion to the identity-bound file-transfer primitive');
   assert.doesNotMatch(claimImplementation, /listUndoRecords|runPersistentUndoClaimGcLegacyImplementation/, 'claim GC must contain only the atomic retire-CAS implementation');
+  assert.match(claimImplementation, /state\.retryPending = true; cursorBusy = true/); assert.match(claimImplementation, /if \(retryPending && .*schedulePersistentUndoPendingCleanupRetry/u, 'a running cursor owns exactly one deferred pending retry instead of timer polling');
 
   const gcRoot = path.join(temporaryRoot, 'claim-gc'); fs.mkdirSync(gcRoot);
   const readyMarker = writeClaimMarker(gcRoot, 'ready-old');

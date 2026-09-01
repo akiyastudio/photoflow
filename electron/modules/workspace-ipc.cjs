@@ -548,7 +548,7 @@ const registerWorkspaceIpc = context => {
       try {
         for (const cursorMap of [persistentUndoV2Cursors, persistentUndoLegacyCursors]) {
           const state = cursorMap.get(rootKey);
-          if (state?.running) { cursorBusy = true; break; }
+          if (state?.running) { state.retryPending = true; cursorBusy = true; break; }
           if (state) { cursorMap.delete(rootKey); await state.directory?.close().catch(() => undefined); }
         }
         if (!cursorBusy) {
@@ -559,7 +559,7 @@ const registerWorkspaceIpc = context => {
         persistentUndoPendingCleanupRetryRunning.delete(rootKey);
         if (cursorBusy) persistentUndoPendingCleanupAttempts.set(rootKey, Math.max(0, attempt - 1));
       }
-      if ([...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === rootKey)
+      if (!cursorBusy && [...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === rootKey)
           && !persistentUndoPendingCleanupTimers.has(rootKey) && !persistentUndoPendingCleanupRescanNeeded.has(rootKey)) schedulePersistentUndoPendingCleanupRetry(root);
     }, delayMs);
     persistentUndoPendingCleanupTimers.set(rootKey, timer);
@@ -652,6 +652,7 @@ const registerWorkspaceIpc = context => {
     } catch (error) { failed = true; throw error; }
     finally {
       state.running = false;
+      const retryPending = state.retryPending === true; state.retryPending = false;
       if (eof || failed || state.cancelled) {
         persistentUndoV2Cursors.delete(key);
         await state.directory.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') result.warnings.push(`scan-close-failed:${error?.message || String(error)}`); });
@@ -659,6 +660,7 @@ const registerWorkspaceIpc = context => {
         result.truncated = true;
         scheduleV2PersistentUndoClaimGcContinuation(root);
       }
+      if (retryPending && [...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === key)) schedulePersistentUndoPendingCleanupRetry(root);
     }
   };
   const scanLegacyPersistentUndoClaims = async ({ root, workspaceId, result, deadline, now }) => {
@@ -683,6 +685,7 @@ const registerWorkspaceIpc = context => {
     } catch (error) { failed = true; throw error; }
     finally {
       state.running = false;
+      const retryPending = state.retryPending === true; state.retryPending = false;
       if (eof || failed || state.cancelled) {
         persistentUndoLegacyCursors.delete(key);
         await state.directory.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') result.warnings.push(`scan-close-failed:${error?.message || String(error)}`); });
@@ -690,6 +693,7 @@ const registerWorkspaceIpc = context => {
         result.truncated = true;
         scheduleLegacyPersistentUndoClaimGcContinuation(root);
       }
+      if (retryPending && [...persistentUndoPendingCleanups.values()].some(pending => comparablePath(pending.root) === key)) schedulePersistentUndoPendingCleanupRetry(root);
     }
   };
   const cleanupPersistentUndoGcRoot = async rootKey => {
