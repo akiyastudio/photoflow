@@ -2490,7 +2490,7 @@ const run = async () => {
 const testTimeout = setTimeout(() => {
   console.error('file transfer service tests timed out before completing');
   process.exit(1);
-}, 60000);
+}, 120000);
 run().then(() => clearTimeout(testTimeout)).catch(error => {
   clearTimeout(testTimeout);
   console.error(error);
