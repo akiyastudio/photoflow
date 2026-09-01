@@ -461,9 +461,42 @@ def _verify_entry_copy_chunks(entry, candidate, checkpoint_throttle=None):
         'mtimeNs': int(info.st_mtime_ns),
     }
     verification = entry.get('copyVerification') if isinstance(entry.get('copyVerification'), dict) else {}
-    completed = int(verification.get('verifiedChunks') or 0) if verification.get('targetSignature') == signature else 0
+    previous_signature = verification.get('targetSignature') if isinstance(verification.get('targetSignature'), dict) else {}
+    identity_fields = ('device', 'fileId')
+    reliable_identity = all(
+        isinstance(previous_signature.get(field), int)
+        and not isinstance(previous_signature.get(field), bool)
+        and previous_signature[field] > 0
+        and isinstance(signature.get(field), int)
+        and not isinstance(signature.get(field), bool)
+        and signature[field] > 0
+        for field in identity_fields
+    )
+    same_identity = reliable_identity and all(
+        previous_signature.get(field) == signature.get(field)
+        for field in identity_fields
+    )
+    stable_metadata = all(
+        isinstance(previous_signature.get(field), int)
+        and not isinstance(previous_signature.get(field), bool)
+        and isinstance(signature.get(field), int)
+        and not isinstance(signature.get(field), bool)
+        and previous_signature.get(field) == signature.get(field)
+        for field in ('size', 'mtimeNs')
+    )
+    unchanged_file = same_identity and stable_metadata
+    # An atomic same-volume promotion changes only the canonical path. Reuse
+    # completed chunks only when the filesystem provides a reliable identity
+    # proving that this is still the exact same file. Cross-volume copies,
+    # synthetic/unknown identities and metadata changes always restart at byte 0.
+    completed = int(verification.get('verifiedChunks') or 0) if unchanged_file else 0
     if completed < 0 or completed > len(hashes):
         completed = 0
+    elif completed and previous_signature != signature:
+        verification = {**verification, 'targetSignature': signature}
+        entry['copyVerification'] = verification
+        if checkpoint_throttle:
+            checkpoint_throttle.mark_dirty()
     try:
         with open(candidate, 'rb') as copied:
             copied.seek(completed * chunk_size)
@@ -2805,10 +2838,7 @@ def stage_import_and_organize(sd_path, dest_path, split_threshold_hours=2.0, sho
                         continue
                 if project_paths:
                     imported_paths_by_project[os.path.basename(target_absolute)] = sorted(set(project_paths))
-            public_import_manifests = [
-                {key: value for key, value in manifest.items() if key != 'manifestId'}
-                for manifest in import_manifests
-            ]
+            public_import_manifests = [dict(manifest) for manifest in import_manifests]
             success_payload = {"projectNames": created_projects, "importedCount": success_imported_count, "sourceFilesDeleted": should_delete_sources, "generatedJpgCount": generated_jpg_count, "importedPaths": sorted(imported_output_paths), "importedPathsByProject": imported_paths_by_project, "importSessionId": import_session, "importManifests": public_import_manifests, "receiptPending": True}
             if post_process_failed:
                 success_payload['partialFailure'] = True

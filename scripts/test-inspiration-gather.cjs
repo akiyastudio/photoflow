@@ -29,6 +29,7 @@ const watchedRoots = [];
 const releasedRoots = [];
 const grantedRoots = [];
 const inspectedToolSources = [];
+let pendingOfflineRead = null;
 let inspirationTrackingReconciliations = 0;
 const shortcutDescriptions = new Map();
 const shortcutDescriptionsByTarget = new Map();
@@ -51,7 +52,7 @@ const handlerFs = {
   promises: new Proxy(fs.promises, {
     get(target, property) {
       if (property === 'readdir') return async (...args) => {
-        if (path.resolve(args[0]) === path.resolve(offlinePreviewRoot)) return new Promise((_, reject) => {
+        if (path.resolve(args[0]) === path.resolve(offlinePreviewRoot)) return pendingOfflineRead = new Promise((_, reject) => {
           setTimeout(() => reject(Object.assign(new Error('network directory unavailable'), { code: 'EHOSTUNREACH' })), 2500);
         });
         readDirectories.push(path.resolve(args[0]));
@@ -209,9 +210,10 @@ registerWorkspaceIpc({
     fs.writeFileSync(ordinaryShortcutPath, ordinaryTarget);
     const ordinaryInspection = await inspectToolSources({}, temporaryRoot, '策划中', '项目', ['策划/普通目录.lnk/工具图-1.jpg'], false, false, true);
     assert.strictEqual(ordinaryInspection.success, false, 'an unmarked ordinary shortcut must not gain external tool access');
-    for (const imagePath of inspirationToolImages) fs.rmSync(imagePath, { force: true });
-    fs.rmSync(ordinaryShortcutPath, { force: true });
-    fs.rmSync(ordinaryTarget, { recursive: true, force: true });
+    for (const imagePath of inspirationToolImages) fs.unlinkSync(imagePath);
+    fs.unlinkSync(ordinaryShortcutPath);
+    fs.unlinkSync(path.join(ordinaryTarget, '工具图-1.jpg'));
+    fs.rmdirSync(ordinaryTarget);
     if (process.platform === 'win32') {
       const resolveShortcut = handlers.get('workspace-resolve-shortcut');
       assert(resolveShortcut, 'shortcut resolution IPC handler was not registered');
@@ -222,7 +224,6 @@ registerWorkspaceIpc({
       const previewShortcut = handlers.get('workspace-browse-shortcut-preview');
       assert(previewShortcut, 'shortcut preview IPC handler was not registered');
       const shortcutTargetPath = path.join(sourceRoot, '参考目录');
-      const shortcutTargetTimes = fs.statSync(shortcutTargetPath);
       const shortcutMediaPaths = Array.from({ length: 13 }, (_, index) => path.join(shortcutTargetPath, `cover-${index}.jpg`));
       for (const mediaPath of shortcutMediaPaths) fs.writeFileSync(mediaPath, 'preview image');
       grantedRoots.length = 0;
@@ -295,9 +296,9 @@ registerWorkspaceIpc({
       assert.strictEqual(latePreview.entries[0].kind, 'image');
       assert.strictEqual(grantedRoots.at(-1), path.resolve(latePreviewRoot));
       fs.rmSync(latePreviewRoot, { recursive: true, force: true });
-      fs.rmSync(lateShortcutPath, { force: true });
+      fs.unlinkSync(lateShortcutPath);
       for (const mediaPath of shortcutMediaPaths) fs.unlinkSync(mediaPath);
-      fs.utimesSync(shortcutTargetPath, shortcutTargetTimes.atime, shortcutTargetTimes.mtime);
+      fs.utimesSync(shortcutTargetPath, referenceDirectoryTimes.atime, referenceDirectoryTimes.mtime);
     }
     assert.strictEqual(undoOperations.length, 1);
     assert.strictEqual(undoOperations[0].kind, 'remove-created');
@@ -368,6 +369,7 @@ registerWorkspaceIpc({
     assert.strictEqual(cancelledPage.errorCode, 'FILE_LIST_CANCELLED');
     console.log('Inspiration gather workflow passed.');
   } finally {
+    await pendingOfflineRead?.catch(() => undefined);
     const resolvedTemporaryRoot = path.resolve(temporaryRoot);
     assert(resolvedTemporaryRoot.startsWith(path.resolve(os.tmpdir()) + path.sep));
     fs.rmSync(resolvedTemporaryRoot, { recursive: true, force: true });

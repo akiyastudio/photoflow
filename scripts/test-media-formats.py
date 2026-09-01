@@ -235,6 +235,48 @@ def assert_image_converter(root: Path) -> None:
     assert any(event.get("type") == "warning" and event.get("data", {}).get("code") == "timestamp_preservation_failed" for event in timestamp_events)
     assert timestamp_events[-1]["type"] == "success", timestamp_events
 
+    # Batch completion has exactly one terminal outcome. A failed source is
+    # retained while successfully published inputs follow the requested cleanup.
+    mixed_root = converter_root / "mixed"
+    mixed_root.mkdir()
+    valid_source = mixed_root / "valid.png"
+    damaged_source = mixed_root / "damaged.png"
+    create_source(valid_source, "PNG")
+    damaged_source.write_bytes(b"\x89PNG\r\n\x1a\ntruncated")
+    trashed_sources = []
+    original_send2trash = module.send2trash
+
+    def record_trash(path):
+        trashed_sources.append(Path(path).resolve())
+        Path(path).unlink()
+
+    module.send2trash = record_trash
+    mixed_output = io.StringIO()
+    try:
+        with redirect_stdout(mixed_output):
+            run_image_converter([str(valid_source), str(damaged_source)])
+    finally:
+        module.send2trash = original_send2trash
+    mixed_events = [json.loads(line) for line in mixed_output.getvalue().splitlines()]
+    assert [event["type"] for event in mixed_events] == ["log", "progress", "warning", "partial"], mixed_events
+    assert mixed_events[-1]["data"] == {
+        "successCount": 1,
+        "failedCount": 1,
+        "totalCount": 2,
+        "failedSources": [str(damaged_source.resolve())],
+    }
+    assert trashed_sources == [valid_source.resolve()]
+    assert not valid_source.exists() and damaged_source.exists(), "only the successfully converted source may be removed"
+
+    failed_output = io.StringIO()
+    with redirect_stdout(failed_output):
+        run_image_converter([str(damaged_source)])
+    failed_events = [json.loads(line) for line in failed_output.getvalue().splitlines()]
+    assert [event["type"] for event in failed_events] == ["log", "warning", "error"], failed_events
+    assert failed_events[-1]["data"]["successCount"] == 0
+    assert failed_events[-1]["data"]["failedCount"] == failed_events[-1]["data"]["totalCount"] == 1
+    assert damaged_source.exists(), "an all-failed batch must retain its source"
+
 
 def main() -> None:
     parser = argparse.ArgumentParser()

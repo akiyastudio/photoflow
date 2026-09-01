@@ -402,7 +402,10 @@ const registerWorkspaceIpc = context => {
   };
   const notifyComponentArtifactRelocation = async () => [];
   const { selectWorkspaceForWrite } = createWorkspaceStoragePolicy({ fs, path, ensureWorkspace });
-  const { acknowledgeImportReceipt, commitImportManifest, importStagingRoots, readImportReceipt, receiptLocationsForSession } = createImportReceiptService({ crypto, fs, path, pathExists, versionService });
+  const {
+    acknowledgeImportReceipt, canonicalImportManifestKey, commitImportManifest, importStagingRoots, inspectImportReceipt,
+    receiptLocationsForSession, validateImportReceiptManifest,
+  } = createImportReceiptService({ crypto, fs, path, pathExists, versionService });
   const isValidProjectStatus = value => typeof value === 'string' && value === value.trim() && value.length > 0 && value.length <= 24 && ![...value].some(character => character.charCodeAt(0) < 32 || character.charCodeAt(0) === 127);
   const availableProjectStatuses = catalog => {
     const values = [...WORKSPACE_STATUSES, ...((catalog?.projects || []).map(project => project.status))];
@@ -2828,13 +2831,26 @@ const registerWorkspaceIpc = context => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       const catalog = workspaceCatalogs.get(workspaceRoot) || await refreshWorkspaceCatalog(workspaceRoot);
-      const result = await commitImportManifest(workspaceRoot, manifest);
       const locations = await receiptLocationsForSession(workspaceRoot, catalog, manifest?.importSessionId);
-      for (const location of locations) await acknowledgeImportReceipt(location, String(manifest?.manifestId || manifest?.projectName || ''));
+      if (!locations.length) throw Object.assign(new Error('未找到本次导入回执，已拒绝写入数据库'), { code: 'IMPORT_RECEIPT_ABSENT' });
+      const selector = String(manifest?.manifestId || manifest?.projectName || '');
+      const canonicalManifests = await Promise.all(locations.map(location => validateImportReceiptManifest(location, selector, manifest)));
+      const canonicalKey = canonicalImportManifestKey(canonicalManifests[0]);
+      if (canonicalManifests.some(candidate => canonicalImportManifestKey(candidate) !== canonicalKey)) throw Object.assign(
+        new Error('多个导入回执内容不一致，已拒绝写入数据库并保留暂存文件'),
+        { code: 'IMPORT_RECEIPT_LOCATION_MISMATCH', recoveryRequired: true },
+      );
+      const canonicalManifest = canonicalManifests[0];
+      const result = await commitImportManifest(workspaceRoot, canonicalManifest, locations.length);
+      for (const location of locations) await acknowledgeImportReceipt(location, canonicalManifest.manifestId, canonicalManifest);
       return { success: true, ...result };
     } catch (error) {
       writeLog('error', 'Unable to commit imported media workflow graph', { error: error.message || String(error) });
-      return { success: false, retryable: true, error: error.message || String(error) };
+      return {
+        success: false, retryable: true, error: error.message || String(error),
+        ...(error?.code ? { code: error.code } : {}),
+        ...(error?.recoveryRequired ? { recoveryRequired: true } : {}),
+      };
     }
   });
 
@@ -2846,19 +2862,38 @@ const registerWorkspaceIpc = context => {
       const failures = [];
       for (const stagingRoot of importStagingRoots(workspaceRoot, catalog)) {
         let sessions = [];
-        try { sessions = await fs.promises.readdir(stagingRoot, { withFileTypes: true }); } catch { continue; }
+        try { sessions = await fs.promises.readdir(stagingRoot, { withFileTypes: true }); } catch (error) {
+          if (error?.code !== 'ENOENT') failures.push({
+            stage: 'scan-staging-root', stagingRoot, code: error?.code || 'IMPORT_STAGING_READ_FAILED',
+            error: error.message || String(error), recoveryRequired: true,
+            recovery: '暂存目录未被修改；请检查目录权限或磁盘状态后重试恢复。',
+          });
+          continue;
+        }
         for (const entry of sessions) {
           if (!entry.isDirectory() || !validImportSessionId(entry.name)) continue;
           const location = { sessionDir: path.join(stagingRoot, entry.name), receiptPath: path.join(stagingRoot, entry.name, IMPORT_GRAPH_RECEIPT_NAME) };
-          const receipt = await readImportReceipt(location.receiptPath);
-          if (!receipt || receipt.importSessionId !== entry.name) continue;
+          const inspected = await inspectImportReceipt(location.receiptPath);
+          const receipt = inspected.receipt;
+          if (!receipt || receipt.importSessionId !== entry.name) {
+            failures.push({
+              stage: 'read-receipt', importSessionId: entry.name, receiptPath: location.receiptPath,
+              code: inspected.status === 'io-error' ? (inspected.error?.code || 'IMPORT_RECEIPT_IO_ERROR') : `IMPORT_RECEIPT_${String(inspected.status).toUpperCase()}`,
+              error: inspected.status === 'corrupt' ? '导入回执已损坏，无法安全自动恢复。'
+                : inspected.status === 'absent' ? '导入暂存目录缺少回执，无法确认文件归属。'
+                  : inspected.error?.message || '导入回执不可读取。',
+              recoveryRequired: true,
+              recovery: '所有暂存文件均已保留；请修复磁盘或权限问题后重试，或联系支持人员检查回执。',
+            });
+            continue;
+          }
           for (const manifest of receipt.manifests) {
             const projectName = String(manifest?.projectName || '');
             if ((receipt.acknowledgedManifestIds || []).includes(manifest.manifestId)) continue;
             try {
               await commitImportManifest(workspaceRoot, manifest);
               recovered.push({ importSessionId: entry.name, projectName });
-              await acknowledgeImportReceipt(location, manifest.manifestId);
+              await acknowledgeImportReceipt(location, manifest.manifestId, manifest);
             } catch (error) {
               failures.push({ importSessionId: entry.name, projectName, error: error.message || String(error) });
             }

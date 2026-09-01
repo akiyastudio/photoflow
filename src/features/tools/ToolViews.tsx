@@ -11,7 +11,7 @@ import { ImportSourceControls, type ImportMaterialKind } from '../../components/
 import { SourcePathPicker } from '../../components/SourcePathPicker';
 import { mergeSourcePaths, sourcePathIdentity } from '../../components/source-path-picker-model';
 import { PanelSwitch } from '../../components/PanelSwitch';
-import { appendImportSuccess, describeImportCompletion, resolveImportOutcome, shouldForgetImportSession, type ImportCompletion } from './import-completion-model';
+import { appendImportSuccess, createImportProtocolState, describeImportCompletion, importEventIsPartial, pendingImportGraphKey, reduceImportProtocolEvent, resolveImportOutcome, shouldForgetImportSession, type ImportCompletion } from './import-completion-model';
 import { createFilenameSelectionTaskOwnership, filenameSelectionOutputName, resolveFilenameSelectionSource } from './filename-selection-model';
 import { configuredSdDriveTypes, configuredSdDriveVideoActions, configuredSdSelectionPaths, isTrustedSdImportDevice, normalizeConfiguredSdDeviceRecords, reconcileConfiguredSdDevices, resolveConfiguredSdDevices, storageDeviceMatchesId, syncLegacySdMirrors, upsertConfiguredSdDevice } from './sd-startup-import-model';
 import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, shouldDeleteSourceForImportBatch, type StartupSdAutoImportRequest } from './startup-sd-auto-import-model';
@@ -21,6 +21,8 @@ import { getWorkspaceCatalog, readWorkspaceCatalogSnapshot, workspaceCatalogEven
 import { BUILTIN_VIDEO_TRANSCODE_PRESETS, formatMediaBytes, normalizeVideoTranscodeSettings, readCustomVideoTranscodePresets, videoTranscodeBlockingErrors, videoTranscodeWarnings, writeCustomVideoTranscodePresets, type VideoTranscodeCapabilities, type VideoTranscodeMediaInfo, type VideoTranscodePreset } from './video-transcode-model';
 
 export type { ImportCompletion } from './import-completion-model';
+
+type RendererMediaWorkflowImportManifest = MediaWorkflowImportManifest & { manifestId?: string };
 
 const VIDEO_SOURCE_PREVIEW_EXTENSIONS = ['mp4', 'mov', 'm4v', 'mkv', 'avi', 'webm', 'crm', 'mts', 'm2ts', 'ts'];
 const IMAGE_SOURCE_PREVIEW_EXTENSIONS = ['png', 'webp', 'heic', 'heif', 'avif', 'tif', 'tiff', 'bmp', 'gif'];
@@ -109,14 +111,15 @@ const usePythonTask = (scriptName: string, initialStatus: string) => {
       if (event.scriptName !== scriptName) return;
       if (!requestIdRef.current || event.requestId !== requestIdRef.current) return;
       if (event.type === 'log' || event.type === 'error' || event.type === 'warning' || event.type === 'success' || event.type === 'partial') {
-        const type: LogEntry['type'] = event.type === 'log' ? 'info' : event.type === 'partial' ? 'warning' : event.type;
+        const partialTerminal = (event.type === 'success' || event.type === 'partial') && importEventIsPartial(event);
+        const type: LogEntry['type'] = event.type === 'log' ? 'info' : partialTerminal || event.type === 'partial' ? 'warning' : event.type;
         appendLog(event.message, type);
-        if (event.type === 'success') {
+        if (event.type === 'success' && !partialTerminal) {
           taskHadSuccessRef.current = true;
           successEventRef.current = event;
           setProgress(100);
           setStatusMsg('正在结束任务…');
-        } else if (event.type === 'partial') {
+        } else if (partialTerminal) {
           taskHadPartialRef.current = true;
           successEventRef.current = event;
           setStatusMsg('部分处理完成，正在结束任务…');
@@ -281,6 +284,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   const importBatchModeRef = React.useRef<'manual' | 'startup'>('manual');
   const drivePickerRef = React.useRef<HTMLDivElement>(null);
   const currentImportSessionRef = React.useRef('');
+  const importProtocolStateRef = React.useRef(createImportProtocolState());
   const continueAfterDriveFailureRef = React.useRef<(drive: string, message: string, requestId?: string) => void>(() => undefined);
   const continueRoutedImportRef = React.useRef<(routes: Record<string, string>, routingDecision?: any) => void | Promise<void>>(() => undefined);
   const startImportRef = React.useRef<(sdPath?: string, type?: 'work' | 'broll') => void>(() => undefined);
@@ -289,23 +293,23 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   const onBusyChangeRef = React.useRef(onBusyChange);
   onBusyChangeRef.current = onBusyChange;
   const pendingImportGraphsStorageKey = 'photoflow:pending-import-graphs:v1';
-  const commitImportGraphs = React.useCallback(async (manifests: MediaWorkflowImportManifest[]) => {
+  const commitImportGraphs = React.useCallback(async (manifests: RendererMediaWorkflowImportManifest[]) => {
     if (!manifests.length) return;
     if (!workspacePath) throw new Error('缺少工作区路径，无法保存媒体关系');
     const readPending = () => {
-      try { return JSON.parse(window.localStorage.getItem(pendingImportGraphsStorageKey) || '{}') as Record<string, { workspacePath: string; manifest: MediaWorkflowImportManifest }>; }
+      try { return JSON.parse(window.localStorage.getItem(pendingImportGraphsStorageKey) || '{}') as Record<string, { workspacePath: string; manifest: RendererMediaWorkflowImportManifest }>; }
       catch { return {}; }
     };
     const pending = readPending();
     for (const manifest of manifests) {
-      const key = `${workspacePath}\u0000${manifest.projectName}\u0000${manifest.importSessionId}`;
+      const key = pendingImportGraphKey(workspacePath, manifest);
       pending[key] = { workspacePath, manifest };
     }
     window.localStorage.setItem(pendingImportGraphsStorageKey, JSON.stringify(pending));
     for (const manifest of manifests) {
       const result = await window.electronAPI.commitMediaWorkflowImport(workspacePath, manifest);
       if (!result.success) throw new Error(result.error || '媒体关系保存失败');
-      const key = `${workspacePath}\u0000${manifest.projectName}\u0000${manifest.importSessionId}`;
+      const key = pendingImportGraphKey(workspacePath, manifest);
       delete pending[key];
       window.localStorage.setItem(pendingImportGraphsStorageKey, JSON.stringify(pending));
     }
@@ -315,7 +319,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     if (!active || !workspacePath) return;
     void window.electronAPI.recoverMediaWorkflowImports(workspacePath).then(result => {
       if (result.failures.length) setStatusMsg('媒体已导入，关系待恢复；将自动继续重试。');
-      let pending: Record<string, { workspacePath: string; manifest: MediaWorkflowImportManifest }> = {};
+      let pending: Record<string, { workspacePath: string; manifest: RendererMediaWorkflowImportManifest }> = {};
       try { pending = JSON.parse(window.localStorage.getItem(pendingImportGraphsStorageKey) || '{}'); } catch { return; }
       const manifests = Object.values(pending).filter(item => item.workspacePath === workspacePath).map(item => item.manifest);
       if (manifests.length) void commitImportGraphs(manifests).catch(() => undefined);
@@ -360,6 +364,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     stagingCompleteRef.current = false;
     cancelRequestedRef.current = false;
     isBusyRef.current = false;
+    importProtocolStateRef.current = createImportProtocolState();
     setDecisionData(null);
     setIsCancellingImport(false);
   };
@@ -514,13 +519,16 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
   };
 
   const runCmd = (stage: string, args: string[] = []) => {
+    const requestId = crypto.randomUUID();
+    importProtocolStateRef.current = createImportProtocolState();
+    importRequestIdRef.current = requestId;
     currentStageRef.current = stage;
-    const sessionArgs = ['plan', 'import', 'broll'].includes(stage) ? ['--import_session', currentImportSessionRef.current || importRequestIdRef.current] : [];
+    const sessionArgs = ['plan', 'import', 'broll'].includes(stage) ? ['--import_session', currentImportSessionRef.current] : [];
     const dateFilterArgs = !directSource && ['plan', 'import', 'broll'].includes(stage) && config?.dateFilter && config.dateFilter !== 'all'
       ? ['--date_filter', config.dateFilter]
       : [];
     const deleteSource = shouldDeleteSourceForImportBatch(shouldDeleteSourceAfterImport, importBatchModeRef.current);
-    if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args, ...sessionArgs, ...dateFilterArgs, ...(directSource ? ['--direct_source', '--source_paths', JSON.stringify(selectedDrives)] : []), ...(deleteSource ? ['--delete_source'] : []), ...(generateJpgFromRaw ? ['--generate_jpg_from_raw'] : [])], importRequestIdRef.current);
+    if(window.electronAPI) window.electronAPI.runScript('classify.py', ['--stage', stage, ...args, ...sessionArgs, ...dateFilterArgs, ...(directSource ? ['--direct_source', '--source_paths', JSON.stringify(selectedDrives)] : []), ...(deleteSource ? ['--delete_source'] : []), ...(generateJpgFromRaw ? ['--generate_jpg_from_raw'] : [])], requestId);
   };
 
   const cancelImport = async () => {
@@ -592,6 +600,8 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
       if (event.scriptName !== 'classify.py') return;
       if (!event.requestId || event.requestId !== importRequestIdRef.current) return;
       if (cancelRequestedRef.current && event.type !== 'cancelled') return;
+      const protocolState = reduceImportProtocolEvent(importProtocolStateRef.current, event);
+      importProtocolStateRef.current = protocolState;
       // 1. 记录日志
       if (event.message) {
         setLogs(prev => {
@@ -676,8 +686,9 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
           break;
 
         case 'success':
+        case 'partial':
           {
-            const importManifests = Array.isArray(event.data?.importManifests) ? event.data.importManifests as MediaWorkflowImportManifest[] : [];
+            const importManifests = Array.isArray(event.data?.importManifests) ? event.data.importManifests as RendererMediaWorkflowImportManifest[] : [];
             if (importManifests.length) {
               try {
                 setStatusMsg('正在保存媒体工作流关系…');
@@ -689,6 +700,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
                   importedCount: event.data?.importedCount,
                   skipped: event.data?.skipped === true,
                   failedCount: event.data?.failedCount,
+                  partialFailure: event.type === 'partial' || event.data?.partialFailure === true,
                   relationPending: true,
                   sourceType: currentDriveTypeRef.current,
                 });
@@ -720,6 +732,7 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
               importedCount: event.data?.importedCount,
               skipped,
               failedCount: event.data?.failedCount,
+              partialFailure: event.type === 'partial' || event.data?.partialFailure === true,
               sourceType: currentDriveTypeRef.current,
             });
             importedProjectNamesRef.current = completion.projectNames;
@@ -782,10 +795,10 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
           }
           break;
 
-        case 'error':
-          // 如果是普通的 warning 不打断流程
-          if (event.message.includes("警告")) return;
+        case 'warning':
+          break;
 
+        case 'error':
           if (event.message.includes('旧暂存不会用于当前卡') || event.message.includes('检测到源文件已变化')) {
             forgetCurrentImportSession('session-invalid');
             currentImportSessionRef.current = '';
@@ -801,7 +814,13 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
           currentDriveRef.current = '';
           importRequestIdRef.current = '';
           currentStageRef.current = '';
+          currentImportSessionRef.current = '';
+          currentImportSessionKeyRef.current = '';
+          stagingCompleteRef.current = false;
           isBusyRef.current = false; // 【解锁】
+          cancelRequestedRef.current = false;
+          setDecisionData(null);
+          setTransferStats(null);
           setIsCancellingImport(false);
           break;
 
@@ -812,9 +831,31 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
           currentDriveRef.current = '';
           importRequestIdRef.current = '';
           currentStageRef.current = '';
+          currentImportSessionRef.current = '';
+          currentImportSessionKeyRef.current = '';
+          stagingCompleteRef.current = false;
           isBusyRef.current = false;
+          setDecisionData(null);
+          setTransferStats(null);
           setIsCancellingImport(false);
           cancelRequestedRef.current = false;
+          break;
+
+        case 'complete':
+          if (protocolState.terminal !== 'failed') break;
+          setStatusMsg(`Error: ${protocolState.failureMessage}`);
+          setStatus('idle');
+          importQueueRef.current = [];
+          currentDriveRef.current = '';
+          importRequestIdRef.current = '';
+          currentStageRef.current = '';
+          currentImportSessionRef.current = '';
+          currentImportSessionKeyRef.current = '';
+          stagingCompleteRef.current = false;
+          isBusyRef.current = false;
+          setDecisionData(null);
+          setTransferStats(null);
+          setIsCancellingImport(false);
           break;
       }
     });
@@ -885,7 +926,6 @@ const ImportCard = ({ config, drives = [], storageDevices = [], destinationPath,
     }
 
     isBusyRef.current = true; // 【上锁】
-    importRequestIdRef.current = crypto.randomUUID();
     const sessionKey = importSessionKeyFor(sdPath, type);
     const persistedSession = readPersistedImportSessions()[sessionKey];
     const resumableSession = driveImportSessionsRef.current.get(sessionKey) || persistedSession?.session || crypto.randomUUID();

@@ -320,12 +320,23 @@ class ClassifyImportTests(unittest.TestCase):
             'ffmpeg', 'clip.mov', 'clip.mp4',
             container='mp4', video_mode='h264', quality='high',
             resolution='1080p', frame_rate='30', audio_mode='aac',
+            frame_rate_mode='cfr',
         )
         self.assertIn('libx264', command)
         self.assertEqual(command[command.index('-crf') + 1], '18')
         self.assertIn('fps=30', command[command.index('-vf') + 1])
         self.assertIn('min(1920,iw)', command[command.index('-vf') + 1])
         self.assertIn('+faststart', command)
+        self.assertEqual(command[command.index('-fps_mode') + 1], 'cfr')
+
+        preserve_frame_rate = ffmpeg_transcode.build_general_transcode_command(
+            'ffmpeg', 'clip.mov', 'clip.mp4',
+            container='mp4', video_mode='h264', quality='high',
+            resolution='1080p', frame_rate='30', audio_mode='aac',
+            frame_rate_mode='preserve',
+        )
+        self.assertNotIn('fps=30', preserve_frame_rate[preserve_frame_rate.index('-vf') + 1])
+        self.assertEqual(preserve_frame_rate[preserve_frame_rate.index('-fps_mode') + 1], 'passthrough')
 
         nvenc = ffmpeg_transcode.build_general_transcode_command(
             'ffmpeg', 'clip.mov', 'clip.mp4',
@@ -1188,6 +1199,9 @@ class ClassifyImportTests(unittest.TestCase):
             success = next(event for event in events if event.get('type') == 'success')
             self.assertTrue(success['data']['importSessionId'])
             self.assertEqual(success['data']['importManifests'][0]['importSessionId'], success['data']['importSessionId'])
+            receipt = classify.load_import_graph_receipt(classify.get_import_staging_dir(str(project), success['data']['importSessionId']))
+            self.assertTrue(success['data']['importManifests'][0]['manifestId'])
+            self.assertEqual(success['data']['importManifests'][0]['manifestId'], receipt['manifests'][0]['manifestId'])
 
     def test_work_import_recovers_pending_commit_without_duplicate(self):
         with tempfile.TemporaryDirectory() as temporary:
@@ -1489,7 +1503,9 @@ class ClassifyImportTests(unittest.TestCase):
                     ('project-id', project.name, '后期中', project.name, now, now),
                 )
                 db.commit()
-                workspace_db.media_workflow_import_commit(str(root), db, manifest)
+                workspace_db.media_workflow_import_commit(
+                    str(root), db, {key: value for key, value in manifest.items() if key != 'manifestId'},
+                )
                 edge = db.execute(
                     "SELECT edge_kind FROM version_graph_edges WHERE project_id=? AND edge_kind='derived_transcode'",
                     ('project-id',),
@@ -1962,6 +1978,96 @@ class ClassifyImportTests(unittest.TestCase):
             self.assertFalse(classify._verify_entry_copy_chunks(entry, str(committed)))
             self.assertNotIn('copyVerification', entry)
 
+    def test_copy_verification_reuses_completed_chunks_after_same_file_atomic_promotion(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            staged = root / 'staged.bin'
+            committed = root / 'committed.bin'
+            content = b'A' * 4 + b'B' * 4 + b'C' * 4
+            staged.write_bytes(content)
+            entry = {
+                'size': len(content),
+                'copyDigest': {'algorithm': 'sha256', 'chunkSize': 4, 'chunks': [
+                    hashlib.sha256(content[index:index + 4]).hexdigest() for index in range(0, len(content), 4)
+                ]},
+            }
+            self.assertTrue(classify._verify_entry_copy_chunks(entry, str(staged)))
+            classify._move_file_no_replace(str(staged), str(committed))
+
+            with mock.patch.object(classify.hashlib, 'sha256', wraps=hashlib.sha256) as sha256:
+                self.assertTrue(classify._verify_entry_copy_chunks(entry, str(committed)))
+
+            sha256.assert_not_called()
+            self.assertEqual(entry['copyVerification']['targetSignature']['canonicalPath'], os.path.normcase(os.path.realpath(str(committed))))
+
+    def test_copy_verification_restarts_for_cross_volume_or_unreliable_identity(self):
+        content = b'A' * 4 + b'B' * 4 + b'C' * 4
+        hashes = [hashlib.sha256(content[index:index + 4]).hexdigest() for index in range(0, len(content), 4)]
+
+        for label, previous_device, previous_file_id, current_device, current_file_id in (
+            ('cross-volume', 7, 11, 8, 11),
+            ('zero-device', 0, 11, 0, 11),
+            ('zero-file-id', 7, 0, 7, 0),
+        ):
+            with self.subTest(label=label):
+                entry = {
+                    'size': len(content),
+                    'copyDigest': {'algorithm': 'sha256', 'chunkSize': 4, 'chunks': hashes},
+                    'copyVerification': {
+                        'targetSignature': {
+                            'canonicalPath': 'before.bin',
+                            'device': previous_device, 'fileId': previous_file_id,
+                            'size': len(content), 'mtimeNs': 123,
+                        },
+                        'verifiedChunks': 3,
+                        'complete': True,
+                    },
+                }
+                reader = mock.mock_open(read_data=content)
+                fake_stat = mock.Mock(
+                    st_size=len(content), st_mtime_ns=123,
+                    st_dev=current_device, st_ino=current_file_id,
+                )
+                with mock.patch.object(classify, '_regular_file_without_links', return_value=True), \
+                        mock.patch.object(classify.os, 'lstat', return_value=fake_stat), \
+                        mock.patch.object(classify, 'open', reader), \
+                        mock.patch.object(classify.hashlib, 'sha256', wraps=hashlib.sha256) as sha256:
+                    self.assertTrue(classify._verify_entry_copy_chunks(entry, 'after.bin'))
+
+                reader().seek.assert_called_once_with(0)
+                self.assertEqual(sha256.call_count, 3)
+
+    def test_copy_verification_restarts_when_size_or_mtime_changes(self):
+        content = b'A' * 4 + b'B' * 4 + b'C' * 4
+        hashes = [hashlib.sha256(content[index:index + 4]).hexdigest() for index in range(0, len(content), 4)]
+        for label, previous_size, previous_mtime in (
+            ('size', len(content) + 1, 123),
+            ('mtime', len(content), 122),
+        ):
+            with self.subTest(label=label):
+                entry = {
+                    'size': len(content),
+                    'copyDigest': {'algorithm': 'sha256', 'chunkSize': 4, 'chunks': hashes},
+                    'copyVerification': {
+                        'targetSignature': {
+                            'canonicalPath': 'before.bin', 'device': 7, 'fileId': 11,
+                            'size': previous_size, 'mtimeNs': previous_mtime,
+                        },
+                        'verifiedChunks': 3,
+                        'complete': True,
+                    },
+                }
+                reader = mock.mock_open(read_data=content)
+                fake_stat = mock.Mock(st_size=len(content), st_mtime_ns=123, st_dev=7, st_ino=11)
+                with mock.patch.object(classify, '_regular_file_without_links', return_value=True), \
+                        mock.patch.object(classify.os, 'lstat', return_value=fake_stat), \
+                        mock.patch.object(classify, 'open', reader), \
+                        mock.patch.object(classify.hashlib, 'sha256', wraps=hashlib.sha256) as sha256:
+                    self.assertTrue(classify._verify_entry_copy_chunks(entry, 'after.bin'))
+
+                reader().seek.assert_called_once_with(0)
+                self.assertEqual(sha256.call_count, 3)
+
     def test_hundred_gib_verification_throttles_25600_chunks_to_bounded_checkpoints(self):
         chunk_size = 4 * 1024 * 1024
         chunk_count = 25_600
@@ -2175,6 +2281,7 @@ class ClassifyImportTests(unittest.TestCase):
             ids = [manifest['manifestId'] for manifest in receipt['manifests']]
             self.assertEqual(len(set(ids)), 2)
             self.assertEqual(receipt['manifestIdentities'], ids)
+            self.assertEqual([dict(manifest)['manifestId'] for manifest in manifests], ids)
 
             second_dir = root / 'receipt-again'
             second = [

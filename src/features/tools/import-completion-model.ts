@@ -21,8 +21,66 @@ export type ImportSuccessEvent = {
   importedCount?: unknown;
   skipped?: boolean;
   failedCount?: unknown;
+  partialFailure?: unknown;
   relationPending?: boolean;
   sourceType: 'work' | 'broll';
+};
+
+export type ImportProtocolEvent = {
+  type: string;
+  message?: unknown;
+  data?: {
+    exitCode?: unknown;
+    failedCount?: unknown;
+    partialFailure?: unknown;
+  } | null;
+};
+
+export type ImportProtocolState = {
+  terminal: 'pending' | 'awaiting-input' | 'success' | 'partial' | 'cancelled' | 'failed';
+  failureMessage: string;
+};
+
+export const createImportProtocolState = (): ImportProtocolState => ({ terminal: 'pending', failureMessage: '' });
+
+export const pendingImportGraphKey = (workspacePath: string, manifest: {
+  projectName: string;
+  importSessionId: string;
+  manifestId?: string;
+}) => {
+  const manifestId = String(manifest.manifestId || '').trim();
+  return `${workspacePath}\u0000${manifestId ? `id:${manifestId}` : `legacy:${manifest.projectName}\u0000${manifest.importSessionId}`}`;
+};
+
+export const importEventIsPartial = (event: Pick<ImportProtocolEvent, 'type' | 'data'>) => event.type === 'partial'
+  || event.data?.partialFailure === true
+  || (Number.isFinite(Number(event.data?.failedCount)) && Number(event.data?.failedCount) > 0);
+
+export const reduceImportProtocolEvent = (current: ImportProtocolState, event: ImportProtocolEvent): ImportProtocolState => {
+  if (event.type === 'complete') {
+    const exitCode = Number(event.data?.exitCode);
+    if (current.terminal === 'awaiting-input') {
+      return Number.isFinite(exitCode) && exitCode !== 0
+        ? { terminal: 'failed', failureMessage: `导入进程异常退出（代码 ${exitCode}）` }
+        : current;
+    }
+    if (current.terminal !== 'pending') return current;
+    if (Number.isFinite(exitCode) && exitCode !== 0) {
+      return { terminal: 'failed', failureMessage: `导入进程异常退出（代码 ${exitCode}）` };
+    }
+    return { terminal: 'failed', failureMessage: '导入进程已结束，但未返回成功、部分完成、等待输入或取消结果。' };
+  }
+  if (current.terminal !== 'pending') return current;
+  if (event.type === 'warning') return current;
+  if (event.type === 'ask_user') return { terminal: 'awaiting-input', failureMessage: '' };
+  if (event.type === 'success' || event.type === 'partial') {
+    return { terminal: importEventIsPartial(event) ? 'partial' : 'success', failureMessage: '' };
+  }
+  if (event.type === 'cancelled') return { terminal: 'cancelled', failureMessage: '' };
+  if (event.type === 'error') {
+    return { terminal: 'failed', failureMessage: String(event.message || '导入失败') };
+  }
+  return current;
 };
 
 export const createImportCompletion = (): ImportCompletion => ({
@@ -68,12 +126,15 @@ const normalizedImportedPaths = (value: unknown): Record<string, string[]> => {
 
 export const appendImportSuccess = (current: ImportCompletion, event: ImportSuccessEvent): ImportCompletion => {
   const count = Number(event.importedCount);
+  const numericFailedCount = Number(event.failedCount);
+  const explicitFailedCount = Number.isFinite(numericFailedCount) ? Math.max(0, numericFailedCount) : 0;
+  const eventFailedCount = explicitFailedCount > 0 ? explicitFailedCount : event.partialFailure === true ? 1 : 0;
   const successful = event.skipped !== true && Number.isFinite(count) && count > 0;
   if (!successful) {
     const next = {
       ...current,
       skipped: current.importedCount === 0 && (current.skipped || event.skipped === true),
-      failedCount: current.failedCount + (Number.isFinite(Number(event.failedCount)) ? Math.max(0, Number(event.failedCount)) : 0),
+      failedCount: current.failedCount + eventFailedCount,
       relationPending: current.relationPending || event.relationPending === true,
     };
     return { ...next, outcome: resolveImportOutcome(next) };
@@ -98,7 +159,7 @@ export const appendImportSuccess = (current: ImportCompletion, event: ImportSucc
     importedPathsByProject,
     importedCount: current.importedCount + count,
     skipped: false,
-    failedCount: current.failedCount + (Number.isFinite(Number(event.failedCount)) ? Math.max(0, Number(event.failedCount)) : 0),
+    failedCount: current.failedCount + eventFailedCount,
     relationPending: current.relationPending || event.relationPending === true,
   };
   return { ...next, outcome: resolveImportOutcome(next) };

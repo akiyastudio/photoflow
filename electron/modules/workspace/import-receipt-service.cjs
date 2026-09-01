@@ -30,6 +30,35 @@ const createImportReceiptService = ({ crypto, fs, path, pathExists, versionServi
     return `m-${hashingCrypto.createHash('sha256').update(stablePayload).digest('hex')}`;
   };
 
+  const manifestContentIdentity = manifest => {
+    const stablePayload = JSON.stringify({
+      schemaVersion: manifest?.schemaVersion,
+      projectName: String(manifest?.projectName || ''),
+      importSessionId: String(manifest?.importSessionId || ''),
+      artifacts: Array.isArray(manifest?.artifacts) ? manifest.artifacts.map(item => ({
+        relativePath: item?.relativePath, mediaKind: item?.mediaKind, importSlot: item?.importSlot, displayName: item?.displayName,
+      })) : [],
+    });
+    return hashingCrypto.createHash('sha256').update(stablePayload).digest('hex');
+  };
+
+  const trustedImportManifest = manifest => ({
+    schemaVersion: manifest?.schemaVersion,
+    projectName: manifest?.projectName,
+    importSessionId: manifest?.importSessionId,
+    artifacts: Array.isArray(manifest?.artifacts) ? manifest.artifacts.map(item => ({
+      relativePath: item?.relativePath,
+      mediaKind: item?.mediaKind,
+      importSlot: item?.importSlot,
+      displayName: item?.displayName,
+    })) : [],
+  });
+
+  const canonicalImportManifestKey = manifest => JSON.stringify({
+    manifestId: manifestIdentity(manifest),
+    contentId: manifestContentIdentity(trustedImportManifest(manifest)),
+  });
+
   const inspectImportReceipt = async receiptPath => {
     try {
       const payload = JSON.parse(await fs.promises.readFile(receiptPath, 'utf8'));
@@ -41,7 +70,10 @@ const createImportReceiptService = ({ crypto, fs, path, pathExists, versionServi
         return { status: 'corrupt', receipt: null };
       }
       const manifests = payload.manifests.map(manifest => ({ ...manifest, manifestId: manifestIdentity(manifest) }));
+      const manifestIds = manifests.map(manifest => manifest.manifestId);
+      if (new Set(manifestIds).size !== manifestIds.length) return { status: 'corrupt', receipt: null };
       const acknowledgedManifestIds = new Set((Array.isArray(payload.acknowledgedManifestIds) ? payload.acknowledgedManifestIds : []).map(String));
+      if ([...acknowledgedManifestIds].some(manifestId => !manifestIds.includes(manifestId))) return { status: 'corrupt', receipt: null };
       const legacyProjects = new Set((Array.isArray(payload.acknowledgedProjects) ? payload.acknowledgedProjects : [])
         .map(value => String(value).toLocaleLowerCase()));
       const projectCounts = manifests.reduce((counts, manifest) => {
@@ -74,11 +106,35 @@ const createImportReceiptService = ({ crypto, fs, path, pathExists, versionServi
     return results;
   };
 
-  const acknowledgeImportReceipt = (location, manifestIdOrProjectName) => {
+  const validateImportReceiptManifest = async (location, manifestIdOrProjectName, submittedManifest) => {
+    const inspected = await inspectImportReceipt(location.receiptPath);
+    if (!inspected.receipt) throw Object.assign(new Error(
+      inspected.status === 'corrupt' ? '导入回执已损坏，已拒绝写入数据库并保留暂存文件'
+        : inspected.status === 'absent' ? '导入回执不存在，已拒绝写入数据库'
+          : inspected.error?.message || '导入回执不可读取，已拒绝写入数据库并保留暂存文件',
+    ), { code: `IMPORT_RECEIPT_${String(inspected.status).toUpperCase()}`, recoveryRequired: inspected.status !== 'absent' });
+    const receipt = inspected.receipt;
+    const selector = String(manifestIdOrProjectName || '');
+    const explicit = receipt.manifests.filter(manifest => manifest.manifestId === selector);
+    const named = receipt.manifests.filter(manifest => String(manifest.projectName).toLocaleLowerCase() === selector.toLocaleLowerCase());
+    if (!explicit.length && named.length > 1) throw Object.assign(new Error(
+      '无 manifestId 的旧版导入回执存在同名歧义，已拒绝写入数据库',
+    ), { code: 'IMPORT_RECEIPT_MANIFEST_AMBIGUOUS', recoveryRequired: true });
+    const candidates = explicit.length ? explicit : named;
+    const submittedContentId = manifestContentIdentity(trustedImportManifest(submittedManifest));
+    const matching = candidates.filter(manifest => manifestContentIdentity(trustedImportManifest(manifest)) === submittedContentId);
+    if (matching.length !== 1) throw Object.assign(new Error(
+      candidates.length > 1 ? '导入回执 selector 存在歧义或内容不一致，已拒绝写入数据库'
+        : '提交内容与导入回执 manifest 不一致，已拒绝写入数据库并保留暂存文件',
+    ), { code: candidates.length > 1 ? 'IMPORT_RECEIPT_MANIFEST_AMBIGUOUS' : 'IMPORT_RECEIPT_MANIFEST_MISMATCH', recoveryRequired: true });
+    return matching[0];
+  };
+
+  const acknowledgeImportReceipt = (location, manifestIdOrProjectName, committedManifest) => {
     const previous = receiptLocks.get(location.receiptPath) || Promise.resolve();
     const operation = previous.catch(() => undefined).then(async () => {
       const receipt = await readImportReceipt(location.receiptPath);
-      if (!receipt) return false;
+      if (!receipt) throw Object.assign(new Error('导入回执不可读取，已保留暂存文件以便恢复'), { code: 'IMPORT_RECEIPT_UNREADABLE', recoveryRequired: true });
       const selector = String(manifestIdOrProjectName || '');
       const selectorName = selector.toLocaleLowerCase();
       const explicitManifest = receipt.manifests.find(manifest => manifest.manifestId === selector);
@@ -86,15 +142,24 @@ const createImportReceiptService = ({ crypto, fs, path, pathExists, versionServi
       const queueName = explicitManifestId ? String(explicitManifest.projectName).toLocaleLowerCase() : selectorName;
       const queueKey = `${receipt.importSessionId}\0${queueName}`;
       const queue = committedManifestIds.get(queueKey) || [];
-      const queuedId = explicitManifestId ? undefined : queue.find(id => receipt.manifests.some(manifest => manifest.manifestId === id));
-      const consumedId = explicitManifestId ? selector : queuedId;
-      if (consumedId && queue.includes(consumedId)) {
-        queue.splice(queue.indexOf(consumedId), 1);
+      const expectedContentId = committedManifest ? manifestContentIdentity(committedManifest) : undefined;
+      const queuedCommit = queue.find(item => (!expectedContentId || item.contentId === expectedContentId)
+        && (!explicitManifestId || item.manifestId === selector));
+      const candidate = explicitManifestId
+        ? explicitManifest
+        : receipt.manifests.find(manifest => manifest.manifestId === queuedCommit?.manifestId
+          && String(manifest.projectName).toLocaleLowerCase() === selectorName);
+      if (!queuedCommit || !candidate || queuedCommit.contentId !== manifestContentIdentity(candidate)
+        || (expectedContentId && expectedContentId !== manifestContentIdentity(candidate))) {
+        throw Object.assign(new Error('已提交内容与导入回执 manifest 不一致，已拒绝确认并保留暂存文件'), {
+          code: 'IMPORT_RECEIPT_MANIFEST_MISMATCH', recoveryRequired: true,
+        });
+      }
+      if (queue.includes(queuedCommit)) {
+        queue.splice(queue.indexOf(queuedCommit), 1);
         if (!queue.length) committedManifestIds.delete(queueKey);
       }
-      const sameName = receipt.manifests.filter(manifest => String(manifest.projectName).toLocaleLowerCase() === selectorName);
-      const fallback = sameName.length === 1 ? sameName[0] : null;
-      const selected = explicitManifestId ? [selector] : [queuedId || fallback?.manifestId].filter(Boolean);
+      const selected = [candidate.manifestId];
       const acknowledgedManifestIds = [...new Set([...(receipt.acknowledgedManifestIds || []), ...selected])];
       const acknowledgedProjects = [...new Set(receipt.manifests.flatMap(manifest => {
         const sameName = receipt.manifests.filter(other => String(other.projectName).toLocaleLowerCase() === String(manifest.projectName).toLocaleLowerCase());
@@ -103,7 +168,6 @@ const createImportReceiptService = ({ crypto, fs, path, pathExists, versionServi
       const expected = receipt.manifests.map(manifest => manifest.manifestId);
       if (expected.every(value => acknowledgedManifestIds.includes(value))) {
         await fs.promises.rm(location.sessionDir, { recursive: true, force: true });
-        clearCommittedSession(receipt.importSessionId);
         return true;
       }
       const temporaryPath = `${location.receiptPath}.tmp-${crypto.randomUUID()}`;
@@ -117,27 +181,25 @@ const createImportReceiptService = ({ crypto, fs, path, pathExists, versionServi
     return operation.finally(() => { if (receiptLocks.get(location.receiptPath) === operation) receiptLocks.delete(location.receiptPath); });
   };
 
-  const commitImportManifest = async (workspaceRoot, manifest) => {
-    const trustedManifest = {
-      schemaVersion: manifest?.schemaVersion,
-      projectName: manifest?.projectName,
-      importSessionId: manifest?.importSessionId,
-      artifacts: Array.isArray(manifest?.artifacts) ? manifest.artifacts.map(item => ({
-      relativePath: item?.relativePath,
-      mediaKind: item?.mediaKind,
-      importSlot: item?.importSlot,
-      displayName: item?.displayName,
-      })) : [],
-    };
+  const commitImportManifest = async (workspaceRoot, manifest, acknowledgmentCount = 1) => {
+    const trustedManifest = trustedImportManifest(manifest);
     const result = await versionService.commitImportGraph(workspaceRoot, trustedManifest);
     const key = `${String(trustedManifest.importSessionId || '')}\0${String(trustedManifest.projectName || '').toLocaleLowerCase()}`;
     const queue = committedManifestIds.get(key) || [];
-    queue.push(manifestIdentity(manifest));
+    const credential = { manifestId: manifestIdentity(manifest), contentId: manifestContentIdentity(trustedManifest) };
+    const required = Math.max(1, Number(acknowledgmentCount) || 1);
+    const pending = queue.filter(item => item.manifestId === credential.manifestId && item.contentId === credential.contentId).length;
+    for (let index = pending; index < required; index += 1) {
+      queue.push(credential);
+    }
     committedManifestIds.set(key, queue);
     return result;
   };
 
-  return { acknowledgeImportReceipt, commitImportManifest, importStagingRoots, inspectImportReceipt, readImportReceipt, receiptLocationsForSession };
+  return {
+    acknowledgeImportReceipt, canonicalImportManifestKey, commitImportManifest, importStagingRoots, inspectImportReceipt,
+    readImportReceipt, receiptLocationsForSession, validateImportReceiptManifest,
+  };
 };
 
 module.exports = { IMPORT_GRAPH_RECEIPT_NAME, IMPORT_STAGING_ROOT_NAME, createImportReceiptService, validImportSessionId };

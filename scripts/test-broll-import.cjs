@@ -115,6 +115,9 @@ const main = async () => {
   assert(smallCopyEstimate.requiredBytes < 70 * mb, 'a normal small copy must pay one bounded safety allowance, not one allowance per phase');
   assert.strictEqual(_test.estimateBrollDiskRequirements({ sources: [diskSource(mb, '.jpg', 1)], preserveOriginal: false, destinationDev: 1 }).moveBytes, 0, 'same-volume move needs no copy-space reservation');
   assert.strictEqual(_test.estimateBrollDiskRequirements({ sources: [diskSource(mb, '.jpg', 2)], preserveOriginal: false, destinationDev: 1 }).moveBytes, mb, 'cross-volume move reserves its copy bytes');
+  assert.strictEqual(_test.isReliableSameDevice(1, 1), true, 'reliable matching devices may use the no-digest atomic move path');
+  assert.strictEqual(_test.isReliableSameDevice(1, 2), false, 'cross-device moves must retain the safe copy-and-digest path');
+  assert.strictEqual(_test.isReliableSameDevice(0, 0), false, 'missing device identities must not select the no-digest path');
   const splitEstimate = _test.estimateBrollDiskRequirements({ sources: [diskSource(5 * 1024 ** 3)], preserveOriginal: true, splitLargeFiles: true, destinationDev: 1 });
   assert.strictEqual(splitEstimate.copyBytes, 0);
   assert.strictEqual(splitEstimate.splitBytes, 5 * 1024 ** 3);
@@ -346,11 +349,21 @@ const main = async () => {
       waitForStart: async () => undefined, complete() {}, fail() {}, cancelled() {}, isFinished: () => false,
     }) },
   });
-  const committed = await handlers.get('workspace-import-broll')(
-    { sender: { isDestroyed: () => false, send() {} } }, root, 'status', 'project',
-    { sourcePaths: [transactionSource], deleteSourceAfterImport: true },
-  );
+  const originalCreateReadStream = fs.createReadStream;
+  let unexpectedSameDeviceDigest = false;
+  fs.createReadStream = (...args) => {
+    unexpectedSameDeviceDigest = true;
+    return originalCreateReadStream(...args);
+  };
+  let committed;
+  try {
+    committed = await handlers.get('workspace-import-broll')(
+      { sender: { isDestroyed: () => false, send() {} } }, root, 'status', 'project',
+      { sourcePaths: [transactionSource], deleteSourceAfterImport: true },
+    );
+  } finally { fs.createReadStream = originalCreateReadStream; }
   assert.strictEqual(committed.success, true, committed.error);
+  assert.strictEqual(unexpectedSameDeviceDigest, false, 'a proven same-device B-roll move must not stream the target for SHA-256');
   assert.strictEqual(trashed, false, 'ordinary delete-source imports retain atomic move/undo behavior instead of using the recycle bin');
   assert.strictEqual(fs.existsSync(transactionSource), false);
   assert.strictEqual(fs.readFileSync(path.join(transactionRoot, '花絮', 'transaction.jpg'), 'utf8'), 'transaction source', 'a completion notification failure after commit must retain the imported target');
@@ -405,9 +418,48 @@ const main = async () => {
   } finally { fs.promises.lstat = originalLstat; }
   assert.strictEqual(moveClaimFailure.success, false);
   assert.strictEqual(claimFaultInjected, true);
-  assert.strictEqual(fs.existsSync(moveClaimSource), true, JSON.stringify(moveClaimFailure));
-  assert.strictEqual(fs.readFileSync(moveClaimSource, 'utf8'), 'move claim source', 'a post-move claim failure must use the pending move identity to restore the source');
-  assert.strictEqual(fs.existsSync(moveClaimTarget), false);
+  assert.strictEqual(fs.existsSync(moveClaimSource), false, JSON.stringify(moveClaimFailure));
+  assert.strictEqual(fs.existsSync(moveClaimTarget), true);
+  assert.strictEqual(fs.readFileSync(moveClaimTarget, 'utf8'), 'move claim source', 'an unowned post-move target must be preserved for recovery');
+  assert.strictEqual(moveClaimFailure.recoveryRequired, true);
+  assert(moveClaimFailure.recoveryPaths.includes(path.resolve(moveClaimSource)));
+  assert(moveClaimFailure.recoveryPaths.includes(path.resolve(moveClaimTarget)));
+
+  const claimedMoveRoot = path.join(root, 'claimed-move-project');
+  const claimedMoveSource = path.join(root, 'claimed-move.jpg');
+  const claimedMoveTarget = path.join(claimedMoveRoot, '花絮', 'claimed-move.jpg');
+  fs.mkdirSync(claimedMoveRoot);
+  fs.writeFileSync(claimedMoveSource, 'claimed move source');
+  const claimedMoveHandlers = new Map();
+  registerBrollImportIpc({
+    ipcMain: { handle: (name, handler) => claimedMoveHandlers.set(name, handler) }, dialog: {}, shell: {}, projectVirtualPaths: {},
+    recycleBinService: {}, getMainWindow: () => null, getProjectPath: () => claimedMoveRoot, getRunConfig: runConfig,
+    processSupervisor: null, backgroundTasks: null, writeLog: () => undefined, activeOperations: new Map(), getTelemetry: () => null,
+    pushUndoOperation: async () => { throw new Error('undo must not be reached after B-roll claim fault'); },
+  });
+  let targetLstatAfterMove = 0;
+  let brollClaimFaultInjected = false;
+  fs.promises.lstat = async (candidate, ...args) => {
+    if (path.resolve(candidate) === path.resolve(claimedMoveTarget) && !fs.existsSync(claimedMoveSource)) {
+      targetLstatAfterMove += 1;
+      if (targetLstatAfterMove === 3) {
+        brollClaimFaultInjected = true;
+        throw new Error('injected B-roll claim fault after move returned');
+      }
+    }
+    return originalLstat.call(fs.promises, candidate, ...args);
+  };
+  let claimedMoveFailure;
+  try {
+    claimedMoveFailure = await claimedMoveHandlers.get('workspace-import-broll')(
+      { sender: { isDestroyed: () => false, send() {} } }, root, 'status', 'project',
+      { sourcePaths: [claimedMoveSource], deleteSourceAfterImport: true },
+    );
+  } finally { fs.promises.lstat = originalLstat; }
+  assert.strictEqual(claimedMoveFailure.success, false);
+  assert.strictEqual(brollClaimFaultInjected, true);
+  assert.strictEqual(fs.readFileSync(claimedMoveSource, 'utf8'), 'claimed move source', 'a B-roll claim failure after a verified move return must restore the source');
+  assert.strictEqual(fs.existsSync(claimedMoveTarget), false);
 
   const checkpointRoot = path.join(root, 'move-checkpoint-project');
   const checkpointSource = path.join(root, 'move-checkpoint.jpg');

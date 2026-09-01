@@ -5,7 +5,7 @@ import errno
 import uuid
 from io import BytesIO
 from pathlib import Path
-from event_protocol import log_error, log_info, log_progress, log_success, log_warning
+from event_protocol import emit, log_error, log_info, log_progress, log_success, log_warning
 from PIL import Image, ImageCms, ImageOps
 from send2trash import send2trash
 
@@ -227,6 +227,7 @@ def run(args_list):
     log_info(f"找到 {total_files} 个可转换图片，准备开始转换...")
     
     success_count = 0
+    failures = []
     
     for index, file_path in enumerate(image_files):
         filename = os.path.basename(file_path)
@@ -292,20 +293,37 @@ def run(args_list):
             log_progress(f"转换完成: {filename} -> {jpg_file_path.name}", percent)
                 
         except Exception as e:
+            failure_data = {
+                "input": str(Path(file_path).resolve()),
+                "detail": str(e),
+            }
             if isinstance(e, PublicationUnsupportedError):
-                from event_protocol import emit
-                emit("error", f"转换失败 '{filename}': {str(e)}", data={
+                failure_data.update({
                     "code": e.code,
                     "recoveryPath": e.recovery_path,
-                    "input": str(Path(file_path).resolve()),
                 })
             else:
-                log_error(f"转换失败 '{filename}': {str(e)}")
+                failure_data["code"] = "conversion_failed"
+            failures.append(failure_data)
+            emit("warning", f"转换失败 '{filename}': {str(e)}", data=failure_data)
 
-    if success_count:
-        log_success(f"处理完成！成功转换 {success_count}/{total_files} 个文件。")
+    terminal_data = {
+        "successCount": success_count,
+        "failedCount": len(failures),
+        "totalCount": total_files,
+    }
+    if success_count == total_files:
+        log_success(f"处理完成！成功转换 {success_count}/{total_files} 个文件。", terminal_data)
+    elif success_count:
+        emit("partial", f"部分处理完成：成功转换 {success_count}/{total_files} 个文件。", data={
+            **terminal_data,
+            "failedSources": [failure["input"] for failure in failures],
+        })
     else:
-        log_error(f"处理失败：成功转换 0/{total_files} 个文件。")
+        emit("error", f"处理失败：成功转换 0/{total_files} 个文件。", data={
+            **terminal_data,
+            "failedSources": [failure["input"] for failure in failures],
+        })
 
 if __name__ == "__main__":
     try:

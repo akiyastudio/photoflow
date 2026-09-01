@@ -5,7 +5,7 @@ import { configuredSdDriveVideoActions, migrateLegacySdDeviceRecords, normalizeS
 import { createStorageDeviceInventoryController, isFreshStorageDeviceInventory, shouldPollStorageDeviceInventory } from '../src/features/tools/storage-device-inventory-model.ts';
 import { decideStartupSdAutoImport, handledStartupRequestAfterBatchStart, shouldDeleteSourceForImportBatch } from '../src/features/tools/startup-sd-auto-import-model.ts';
 import { availableComponentIds, componentRuntimeIsAvailable, componentUnavailableMessage } from '../src/features/components/component-availability-model.ts';
-import { appendImportSuccess, createImportCompletion, describeImportCompletion, shouldForgetImportSession } from '../src/features/tools/import-completion-model.ts';
+import { appendImportSuccess, createImportCompletion, createImportProtocolState, describeImportCompletion, pendingImportGraphKey, reduceImportProtocolEvent, shouldForgetImportSession } from '../src/features/tools/import-completion-model.ts';
 
 const require = createRequire(import.meta.url);
 const { collectProcessOutput, listWindowsStorageDevices, normalizeMountPath, parseDiskutilInfoPlist, parseWindowsLogicalDisks, parseWindowsMountvolOutput, parseWindowsVolOutput, probeWindowsStorageDevice, summarizeDarwinStorageDeviceResults, summarizeWindowsStorageDeviceResults } = require('../electron/services/storage-device-service.cjs');
@@ -41,6 +41,14 @@ const device = (id, mountPath, overrides = {}) => ({
 
 assert.equal(appendImportSuccess(createImportCompletion(), { sourceType: 'work', importedCount: 0, skipped: true }).outcome, 'skipped');
 assert.equal(appendImportSuccess(createImportCompletion(), { sourceType: 'work', importedCount: 2, failedCount: 1 }).outcome, 'partial');
+const legacyPartialFailure = appendImportSuccess(createImportCompletion(), { sourceType: 'work', projectNames: ['A'], importedCount: 2, partialFailure: true });
+assert.equal(legacyPartialFailure.outcome, 'partial', 'legacy success payloads with partialFailure must retain their successful imports and render as partial');
+assert.equal(legacyPartialFailure.importedCount, 2);
+assert.deepEqual(legacyPartialFailure.projectNames, ['A']);
+const explicitZeroPartialFailure = appendImportSuccess(createImportCompletion(), { sourceType: 'work', importedCount: 2, failedCount: 0, partialFailure: true });
+assert.equal(explicitZeroPartialFailure.outcome, 'partial', 'an explicit zero failedCount must not erase partialFailure semantics');
+assert.equal(explicitZeroPartialFailure.failedCount, 1, 'partialFailure with zero failedCount must contribute exactly one fallback failure');
+assert.equal(appendImportSuccess(createImportCompletion(), { sourceType: 'work', importedCount: 2, failedCount: 2, partialFailure: true }).failedCount, 2, 'a positive failedCount and partialFailure must not be counted twice');
 assert.equal(appendImportSuccess(createImportCompletion(), { sourceType: 'work', importedCount: 2, relationPending: true }).outcome, 'relation-pending');
 const earlierPartialThenSuccess = appendImportSuccess(
   appendImportSuccess(createImportCompletion(), { sourceType: 'work', importedCount: 2, failedCount: 1 }),
@@ -48,6 +56,83 @@ const earlierPartialThenSuccess = appendImportSuccess(
 );
 assert.equal(earlierPartialThenSuccess.outcome, 'partial', 'a final successful card must not erase an earlier partial result');
 assert.equal(describeImportCompletion(earlierPartialThenSuccess), '本批次成功导入 5 个文件，1 项未完成。', 'completion detail must describe the aggregate batch, not the final event');
+const runImportEvents = events => events.reduce(reduceImportProtocolEvent, createImportProtocolState());
+const pngPartialEvent = {
+  type: 'partial',
+  message: '处理完成！成功转换 1/2 个文件，1 个文件失败。',
+  data: {
+    successCount: 1,
+    failedCount: 1,
+    totalCount: 2,
+    failedSources: ['damaged.png'],
+  },
+};
+assert.deepEqual(runImportEvents([
+  pngPartialEvent,
+  { type: 'complete', data: { exitCode: 0 } },
+]), { terminal: 'partial', failureMessage: '' }, 'the renderer must map the PNG converter partial payload to partial and keep it sticky through complete');
+assert.deepEqual(runImportEvents([
+  { type: 'error', message: '警告：导入数量不匹配' },
+  { type: 'complete', data: { exitCode: 0 } },
+]), { terminal: 'failed', failureMessage: '警告：导入数量不匹配' }, 'error severity must come from its structured type, not Chinese message text');
+assert.deepEqual(runImportEvents([
+  { type: 'warning', message: '警告：源文件会保留' },
+  { type: 'success', data: { importedCount: 2 } },
+  { type: 'complete', data: { exitCode: 0 } },
+]), { terminal: 'success', failureMessage: '' }, 'only a structured warning may remain non-fatal');
+assert.deepEqual(runImportEvents([
+  { type: 'complete', data: { exitCode: 0 } },
+]), { terminal: 'failed', failureMessage: '导入进程已结束，但未返回成功、部分完成、等待输入或取消结果。' }, 'complete-only is a protocol failure and must not be reported as success');
+assert.deepEqual(runImportEvents([
+  { type: 'ask_user', data: { kind: 'project_routing', requiresChoice: true } },
+  { type: 'complete', data: { exitCode: 0 } },
+]), { terminal: 'awaiting-input', failureMessage: '' }, 'a successful plan exit must preserve a required routing decision');
+assert.deepEqual(runImportEvents([
+  { type: 'ask_user', data: { need_split: true } },
+  { type: 'complete', data: { exitCode: 7 } },
+]), { terminal: 'failed', failureMessage: '导入进程异常退出（代码 7）' }, 'a nonzero exit while awaiting input must still fail');
+let activeInvocation = { requestId: 'plan-request', state: createImportProtocolState() };
+const acceptInvocationEvent = event => {
+  if (event.requestId !== activeInvocation.requestId) return;
+  activeInvocation.state = reduceImportProtocolEvent(activeInvocation.state, event);
+};
+acceptInvocationEvent({ requestId: 'plan-request', type: 'ask_user', data: { kind: 'project_routing', requiresChoice: false } });
+assert.equal(activeInvocation.state.terminal, 'awaiting-input');
+const planRequestId = activeInvocation.requestId;
+activeInvocation = { requestId: 'import-request', state: createImportProtocolState() };
+acceptInvocationEvent({ requestId: planRequestId, type: 'complete', data: { exitCode: 0 } });
+assert.equal(activeInvocation.state.terminal, 'pending', 'the old plan complete must be filtered after auto-routing starts a new invocation');
+acceptInvocationEvent({ requestId: 'import-request', type: 'success', data: { importedCount: 2 } });
+acceptInvocationEvent({ requestId: 'import-request', type: 'complete', data: { exitCode: 0 } });
+assert.equal(activeInvocation.state.terminal, 'success', 'the isolated import invocation must complete successfully');
+
+const sameNameManifest = { projectName: 'same', importSessionId: 'session', manifestId: 'manifest-a' };
+assert.notEqual(
+  pendingImportGraphKey('workspace', sameNameManifest),
+  pendingImportGraphKey('workspace', { ...sameNameManifest, manifestId: 'manifest-b' }),
+  'renderer pending graph keys must prioritize manifestId for same-name manifests in one session',
+);
+assert.equal(
+  pendingImportGraphKey('workspace', { projectName: 'same', importSessionId: 'session' }),
+  'workspace\0legacy:same\0session',
+  'legacy pending graph records without an ID must retain the project/session fallback key',
+);
+assert.deepEqual(runImportEvents([
+  { type: 'success', data: { importedCount: 2 } },
+  { type: 'complete', data: { exitCode: 7 } },
+]), { terminal: 'success', failureMessage: '' }, 'success must remain sticky when a later complete reports a nonzero exit code');
+assert.deepEqual(runImportEvents([
+  { type: 'partial', data: { importedCount: 2, failedCount: 1 } },
+  { type: 'complete', data: { exitCode: 7 } },
+]), { terminal: 'partial', failureMessage: '' }, 'partial must remain sticky when a later complete reports a nonzero exit code');
+assert.deepEqual(runImportEvents([
+  { type: 'error', message: '导入数量不匹配' },
+  { type: 'complete', data: { exitCode: 0 } },
+]), { terminal: 'failed', failureMessage: '导入数量不匹配' }, 'failed must remain sticky when a later complete reports success');
+assert.deepEqual(runImportEvents([
+  { type: 'cancelled', message: '用户取消' },
+  { type: 'complete', data: { exitCode: 7 } },
+]), { terminal: 'cancelled', failureMessage: '' }, 'cancelled must remain sticky when a later complete reports a nonzero exit code');
 const stagedSession = { persistedSession: { session: 'session-1', stagingComplete: true }, requestId: 'request-1', stage: 'routing', currentDrive: 'G:/', currentSession: 'session-1', currentSessionKey: 'dest\0G:/\0work', busy: true };
 const persistedSessions = new Map([['dest\0G:/\0work', stagedSession.persistedSession]]);
 if (shouldForgetImportSession('destination-missing')) persistedSessions.delete('dest\0G:/\0work');
@@ -379,6 +464,9 @@ const workspaceSource = readFileSync(new URL('../src/features/workspace/ProjectW
 assert(settingsSource.includes('需要安装视频处理组件') || settingsSource.includes("componentUnavailableMessage(components, 'video-tools', '视频处理组件')"));
 assert(settingsSource.includes('disabled={!videoToolsAvailable}') && settingsSource.includes('视频切割、转码及参数入口已停用'), 'missing video-tools disables per-device actions and explains why');
 assert(toolsSource.includes("if (!videoToolsAvailable) return { splitVideosOnImport: false, transcodeVideosOnImport: false }"), 'saved legacy flags must not reach the import worker when video-tools is unavailable');
+assert(/const runCmd = \(stage: string, args: string\[\] = \[\]\) => \{\s*const requestId = crypto\.randomUUID\(\);\s*importProtocolStateRef\.current = createImportProtocolState\(\);\s*importRequestIdRef\.current = requestId;/s.test(toolsSource), 'every plan/import/broll invocation must begin with a fresh request ID and protocol state');
+assert(toolsSource.includes("['--import_session', currentImportSessionRef.current]"), 'fresh invocation IDs must not replace the stable import session ID');
+assert(toolsSource.includes('], requestId);') && !toolsSource.includes('], importRequestIdRef.current);'), 'runCmd must pass its immutable local request ID to Electron');
 assert(appSource.includes('videoToolsAvailable={videoToolsAvailable}'));
 assert(workspaceSource.includes('videoToolsAvailable={videoToolsAvailable}'), 'project and direct-source imports must share the runtime availability gate');
 const availableVideoTools = { id: 'video-tools', installed: true, enabled: true, compatible: true, runtimeAvailable: true, status: 'installed' };

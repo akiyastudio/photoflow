@@ -9,6 +9,7 @@ const main = read('src/main.tsx');
 const app = read('src/App.tsx');
 const taskCenter = read('src/features/background-tasks/TaskCenter.tsx');
 const taskStatus = read('src/components/TaskStatus.tsx');
+const taskPresentationSource = read('src/components/useTaskPresentation.ts');
 const toolViews = read('src/features/tools/ToolViews.tsx');
 const indicator = read('src/features/background-tasks/BackgroundTaskIndicator.tsx');
 const fileTransferToast = read('src/features/background-tasks/FileTransferToast.tsx');
@@ -35,6 +36,13 @@ assert(toolViews.includes('storageInventoryFresh ? lastKnownStorageDevices : []'
 assert(toolViews.includes("event.type === 'partial'"), 'Python partial terminal events must be handled explicitly');
 
 const compiledFileTransferToast = ts.transpileModule(fileTransferToast, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX, esModuleInterop: true } }).outputText;
+
+const compiledTaskPresentation = ts.transpileModule(taskPresentationSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+const taskPresentationModule = { exports: {} };
+new Function('module', 'exports', 'require', compiledTaskPresentation)(taskPresentationModule, taskPresentationModule.exports, request => {
+  if (request === '../features/background-tasks/TaskCenter') return { usePanelTaskIdentity: () => null };
+  return require(request);
+});
 
 const compiledToastModel = ts.transpileModule(toastModelSource, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
 const toastModelModule = { exports: {} };
@@ -65,6 +73,7 @@ const fileTransferToastRequire = request => {
   if (request === './TaskCenter') return { useTaskCenter: () => { throw new Error('not used by FileTransferToastItem'); } };
   if (request === './task-toast-model') return toastModelModule.exports;
   if (request === '../../components/toast-stack-reflow') return { useToastStackReflow: () => undefined };
+  if (request === '../../components/useTaskPresentation') return taskPresentationModule.exports;
   return require(request);
 };
 new Function('module', 'exports', 'require', compiledFileTransferToast)(fileTransferToastModule, fileTransferToastModule.exports, fileTransferToastRequire);
@@ -223,7 +232,7 @@ assert(taskCenter.includes('onBackgroundTaskChanged') && taskCenter.includes('re
 assert(taskStatus.includes('usePanelTaskReporter') && taskStatus.includes("const state: TaskCenterProgressReport['state'] = isRunning ? 'running'"), 'the shared progress component must report panel task state without per-panel adapters');
 assert(indicator.includes('useTaskCenter()') && !indicator.includes('onBackgroundTaskChanged('), 'the background indicator must consume the shared provider instead of creating a duplicate subscription');
 assert(workspace.includes('mountedPanels.has') && workspace.includes("open={panel === 'research'}") && workspace.includes("open={panel === 'converter'}"), 'component panels must stay mounted while their modal is minimized');
-assert(projectToolModal.includes('isActivePresentedBackgroundTaskForPanel(candidate, ownerPageId, panelKind)') && projectToolModal.includes("aria-label={effectiveBusy ? '收起到后台' : '关闭'}") && projectToolModal.includes("window.addEventListener('pointerdown', interceptOutsidePointer, true)") && projectToolModal.includes('event.preventDefault()') && projectToolModal.includes('event.stopImmediatePropagation()') && projectToolModal.includes('if (!effectiveBusy) onClose()'), 'the capture-phase backdrop boundary must consume every outside pointer and close only idle panels');
+assert(projectToolModal.includes('isActivePresentedBackgroundTaskForPanel(candidate, ownerPageId, panelKind)') && projectToolModal.includes("aria-label={effectiveBusy ? '收起到后台' : '关闭'}") && projectToolModal.includes("window.addEventListener('pointerdown', interceptOutsidePointer, true)") && projectToolModal.includes('event.preventDefault()') && projectToolModal.includes('event.stopImmediatePropagation()') && projectToolModal.includes('if (!effectiveBusy) onCloseRef.current()'), 'the capture-phase backdrop boundary must consume every outside pointer and close only idle panels');
 assert(projectToolModal.includes('useBackgroundTaskBusyFallback && backgroundTaskActive') && !workspace.includes('busy={videoTranscodeBusy}') && videoToolsUi.includes("event.eventType!=='complete'") && videoToolsUi.includes('video-tools.operation.current.v1'), 'plugin video transcode must use live component events and recover the current Host task instead of a stale renderer snapshot');
 assert(componentToolPanel.includes('isActivePresentedBackgroundTaskForPanel') && componentToolPanel.includes("backgroundTaskActive ? '收起到后台' : '关闭插件面板'") && componentDock.includes('photoflow:restore-panel-task') && componentDock.includes('componentPanelTaskKind'), 'plugin side panels must inherit native panel minimize and task-center restore behavior');
 assert(toolViews.includes('const transcodeBusy = task.isRunning;') && toolViews.includes('onBusyChange?.(transcodeBusy)') && toolViews.includes('onBusyChange?.(true)'), 'only real encoding, not automatic output estimation, may put the video transcode panel in busy mode');

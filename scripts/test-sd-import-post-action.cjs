@@ -112,6 +112,9 @@ registerWorkspaceIpc({
   assert.deepStrictEqual(skippedCompletion.workProjectNames, []);
   const partialCompletion = completionModel.appendImportSuccess(completionModel.createImportCompletion(), { sourceType: 'work', projectNames: ['A'], importedCount: 2, failedCount: 1 });
   assert.strictEqual(partialCompletion.outcome, 'partial');
+  const legacyPartialFailure = completionModel.appendImportSuccess(completionModel.createImportCompletion(), { sourceType: 'work', projectNames: ['A'], importedCount: 2, partialFailure: true });
+  assert.strictEqual(legacyPartialFailure.outcome, 'partial');
+  assert.strictEqual(legacyPartialFailure.importedCount, 2, 'partialFailure must preserve successful imports');
   const relationPendingCompletion = completionModel.appendImportSuccess(completionModel.createImportCompletion(), { sourceType: 'work', projectNames: ['A'], importedCount: 2, relationPending: true });
   assert.strictEqual(relationPendingCompletion.outcome, 'relation-pending');
   const finalize = handlers.get('workspace-finalize-sd-imports');

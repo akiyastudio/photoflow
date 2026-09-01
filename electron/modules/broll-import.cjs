@@ -13,6 +13,7 @@ const {
   copyFileAtomic,
   moveFileAtomic,
   publishPathNoClobber,
+  releaseCleanupOwnership,
   uniqueDestination,
 } = require('../services/file-transfer-service.cjs');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
@@ -29,13 +30,17 @@ const DISK_SAFETY_RATIO = 1.1;
 const DISK_SAFETY_BYTES = 64 * 1024 * 1024;
 let brollProcessSequence = 0;
 
+const isReliableSameDevice = (sourceDev, destinationDev) => {
+  const source = String(sourceDev ?? '');
+  const destination = String(destinationDev ?? '');
+  return Boolean(source && source !== '0' && destination && destination !== '0' && source === destination);
+};
+
 const estimateBrollDiskRequirements = ({ sources, preserveOriginal, splitLargeFiles, transcodeVideos, transcodeSettings, destinationDev }) => {
   const shouldSplit = item => splitLargeFiles && BROLL_VIDEO_EXTENSIONS.has(item.extension) && item.stat.size > FOUR_GB;
   const copyBytes = sources.reduce((sum, item) => sum + (preserveOriginal && !shouldSplit(item) ? item.stat.size : 0), 0);
   const moveBytes = sources.reduce((sum, item) => {
-    const sourceDev = String(item.stat.dev ?? '');
-    const targetDev = String(destinationDev ?? '');
-    const provenSameDevice = sourceDev && sourceDev !== '0' && targetDev && targetDev !== '0' && sourceDev === targetDev;
+    const provenSameDevice = isReliableSameDevice(item.stat.dev, destinationDev);
     return sum + (!preserveOriginal && !shouldSplit(item) && !provenSameDevice ? item.stat.size : 0);
   }, 0);
   const splitBytes = sources.reduce((sum, item) => sum + (shouldSplit(item) ? item.stat.size : 0), 0);
@@ -708,6 +713,7 @@ const registerBrollImportIpc = ({
           if (!preserveOriginal) sourcesToTrash.push(item.path);
         } else if (preserveOriginal) {
           const copied = await copyFileAtomic(item.path, targetPath, {
+            ownershipToken: operationId,
             isCancelled: () => job.cancelled,
             waitIfPaused: task.waitIfPaused,
             durable: true,
@@ -727,13 +733,29 @@ const registerBrollImportIpc = ({
           const moveRecord = { source: item.path, destination: targetPath, sourceOwnership, destinationOwnership: null, state: 'pending' };
           moveRecords.push(moveRecord);
           await task.saveCheckpoint?.({ phase: 'executing', moves: checkpointMoves(moveRecords), createdPaths: [...createdPaths], destinationDir }, undefined, '已持久记录待移动花絮文件');
-          const moved = await moveFileAtomic(item.path, targetPath, {
-            isCancelled: () => job.cancelled,
-            waitIfPaused: task.waitIfPaused,
-            durable: true,
-            onProgress: progress => report(item, progress.bytesCopied),
+          throwIfCancelled(() => job.cancelled);
+          const moved = isReliableSameDevice(item.stat.dev, destinationStat.dev)
+            ? await publishPathNoClobber(item.path, targetPath, { ownershipToken: operationId }).then(published => ({
+              copied: false,
+              publishedIdentity: published.identity,
+              nativePublishedIdentity: published.nativeIdentity,
+            }))
+            : await moveFileAtomic(item.path, targetPath, {
+              ownershipToken: operationId,
+              isCancelled: () => job.cancelled,
+              waitIfPaused: task.waitIfPaused,
+              durable: true,
+              onProgress: progress => report(item, progress.bytesCopied),
           });
-          moveRecord.destinationOwnership = captureEntryIdentitySync(targetPath);
+          const capturedDestinationOwnership = captureEntryIdentitySync(targetPath);
+          const publishedPhysicalIdentity = { ...moved.publishedIdentity };
+          // The publication returned a complete physical identity. Validate it
+          // destructively here without requesting an additional large-file digest.
+          delete publishedPhysicalIdentity.sha256;
+          if (!await samePathIdentity(targetPath, publishedPhysicalIdentity, { destructive: true })) {
+            throw new Error(`花絮移动产物与发布身份不一致：${path.basename(targetPath)}`);
+          }
+          moveRecord.destinationOwnership = capturedDestinationOwnership;
           moveRecord.state = 'moved';
           await task.saveCheckpoint?.({ phase: 'executing', moves: checkpointMoves(moveRecords), createdPaths: [...createdPaths], destinationDir }, undefined, '已持久记录花絮移动结果');
           const owned = await claimRegularFile(targetPath, destinationDir);
@@ -854,21 +876,12 @@ const registerBrollImportIpc = ({
             requireRecovery(record.source, record.destination);
             continue;
           }
-          let destinationOwned = record.destinationOwnership && await pathStillOwned(record.destinationOwnership);
-          if (!destinationOwned) {
-            try {
-              const observed = await claimRegularFile(record.destination, destinationDir);
-              if (observed.identity === record.sourceOwnership.identity || sameStableFileId(observed.fileIdentity, record.sourceOwnership.fileIdentity)) {
-                record.destinationOwnership = observed;
-                destinationOwned = true;
-              }
-            } catch { /* identity remains unconfirmed */ }
-          }
+          const destinationOwned = record.destinationOwnership && await pathStillOwned(record.destinationOwnership);
           if (!destinationOwned) {
             requireRecovery(record.source, record.destination);
             continue;
           }
-          await moveFileAtomic(record.destination, record.source, { durable: true });
+          await moveFileAtomic(record.destination, record.source, { durable: true, ownershipToken: operationId });
         } catch (rollbackError) {
           requireRecovery(record.source, record.destination);
           logSafely('error', 'Unable to roll back B-roll move', { move: { source: record.source, destination: record.destination }, error: rollbackError.message || String(rollbackError) });
@@ -889,6 +902,7 @@ const registerBrollImportIpc = ({
         : { success: false, operationId, taskNotificationOwned, error: error.message || String(error), ...(error.recoveryRequired ? { recoveryRequired: true, recoveryPaths: error.recoveryPaths } : {}) };
     } finally {
       activeOperations.delete(operationId);
+      releaseCleanupOwnership(operationId);
     }
   });
 };
@@ -898,6 +912,7 @@ module.exports = {
   _test: {
     expandBrollSourcePaths,
     estimateBrollDiskRequirements,
+    isReliableSameDevice,
     identityKey,
     splitFamilyExists,
     uniqueSplitDestination,
