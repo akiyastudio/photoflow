@@ -731,7 +731,7 @@ const run = async () => {
   const volumeRetry = await volumeHandlers.get('workspace-undo-rename')(null, ''); assert.strictEqual(volumeRetry.code, 'RESTORE_VOLUME_UNAVAILABLE'); assert.strictEqual(claimMarkers(retryRoot).length, 0, 'volume preflight errors precede claim creation');
   const conflictPayload = { items: [{ original: retryConflict, originalIdentity: null, recyclePidl: 'conflict-pidl' }] };
   const conflictHandlers = new Map(); registerWorkspaceIpc(context(conflictHandlers, { renameHistory: [{ kind: 'trash', workspaceRoot: retryRoot, persistentId: 'conflict-id', ...conflictPayload }], workspaceRepository: { latestUndoRecord: async () => ({ record: { id: 'conflict-id', kind: 'trash', payload: conflictPayload } }) }, samePathIdentity: async () => false, capturePathIdentity: async candidate => { const stat = await fs.promises.stat(candidate, { bigint: true }); return { device: String(stat.dev), inode: String(stat.ino), directory: stat.isDirectory() }; }, recycleBinService: { probe: async () => ({ exists: true }) } }));
-  const conflictRetry = await conflictHandlers.get('workspace-undo-rename')(null, ''); assert.strictEqual(conflictRetry.requiresDecision.kind, 'restore-conflict'); assert.strictEqual(claimMarkers(retryRoot).length, 0, 'conflict decision precedes claim creation');
+  const conflictRetry = await conflictHandlers.get('workspace-undo-rename')(null, ''); assert.strictEqual(conflictRetry.requiresDecision.kind, 'restore-conflict'); assert.strictEqual(typeof conflictRetry.requiresDecision.decisionToken, 'string'); assert.strictEqual(claimMarkers(retryRoot).length, 0, 'conflict decision precedes claim creation');
 
   const waitForPersistentDecision = async (handler, root) => {
     let outcome;

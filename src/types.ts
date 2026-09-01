@@ -990,6 +990,53 @@ export interface OfficeImageExtractionResult {
   warning?: string;
 }
 
+export interface WorkspaceRecoveryDescriptor {
+  label?: string;
+  error?: string;
+  code?: string;
+  errorCode?: string;
+  recoveryPath?: string;
+  outcomeUnknown?: boolean;
+  published?: boolean;
+  originalMissing?: boolean;
+  sourceRetained?: boolean;
+  cleanupWarning?: string;
+  recoveryRequired?: boolean;
+  partial?: boolean;
+  identityVerified?: boolean;
+  deleted?: boolean;
+  rollbackPending?: boolean;
+  nativeError?: number | string;
+  transferStage?: string;
+  stagingExists?: boolean;
+  targetExists?: boolean;
+  recoveryAvailable?: boolean;
+  attemptedStagingPath?: string;
+  publicationState?: 'not-started' | 'not-published' | 'published' | 'unknown' | 'outcome-unknown';
+  publishedConfirmed?: boolean;
+  phase?: string;
+}
+
+export interface UndoLastRenameResult extends WorkspaceRecoveryDescriptor {
+  success: boolean;
+  message?: string;
+  project?: WorkspaceProject;
+  requiresDecision?: { kind: 'restore-conflict'; decisionToken: string; names: string[]; conflictCount: number; message: string; detail: string };
+  recoveries?: WorkspaceRecoveryDescriptor[];
+  rollbackRecovery?: WorkspaceRecoveryDescriptor;
+}
+
+export interface MaterializeProjectExternalLinksResult {
+  success: boolean;
+  count: number;
+  items?: Array<{ shortcutPath: string; source: string; destination: string }>;
+  partial?: boolean;
+  truncated?: boolean;
+  warning?: string;
+  skippedCount?: number;
+  error?: string;
+}
+
 export interface IElectronAPI {
   readonly apiContractVersion: number;
   onPythonEvent: any;
@@ -1065,7 +1112,7 @@ export interface IElectronAPI {
   createProjectFolder: (workspacePath: string, status: ProjectStatus, name: string, folderName: string, relativePath?: string, makeUnique?: boolean) => Promise<{ success: boolean; folder?: { name: string; path: string; relativePath?: string; updatedAt: number }; error?: string }> ;
   getShellNewFileTypes: (refresh?: boolean) => Promise<{ success: boolean; types: ShellNewFileType[]; error?: string }>;
   createProjectShellNewFile: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string, typeId: string) => Promise<{ success: boolean; file?: { name: string; path: string; relativePath: string; extension: string; updatedAt: number }; error?: string }>;
-  undoLastRename: (workspacePath?: string, options?: { restoreConflictPolicy?: 'rename' | 'overwrite' }) => Promise<{ success: boolean; message?: string; project?: WorkspaceProject; requiresDecision?: { kind: 'restore-conflict'; names: string[]; conflictCount: number; message: string; detail: string }; error?: string }> ;
+  undoLastRename: (workspacePath?: string, options?: { restoreConflictPolicy?: 'rename' | 'overwrite'; decisionToken?: string }) => Promise<UndoLastRenameResult>;
   moveWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string, nextStatus: ProjectStatus) => Promise<{ success: boolean; project?: WorkspaceProject; error?: string }> ;
   finalizeSdImportedProjects: (workspacePath: string, projectNames: string[], options: { moveProjectAfterImport: boolean; workProjectNames: string[]; importedPathsByProject: Record<string, string[]> }) => Promise<{ success: boolean; projects: WorkspaceProject[]; movedProjects: WorkspaceProject[]; unchangedProjects: WorkspaceProject[]; failures: Array<{ projectName: string; error: string }>; error?: string }>;
   trashWorkspaceProject: (workspacePath: string, status: ProjectStatus, name: string) => Promise<{ success: boolean; operationId?: string; permanent?: boolean; error?: string; errorCode?: string }>;
@@ -1077,7 +1124,7 @@ export interface IElectronAPI {
   browseProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, relativePath?: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; path?: string; entries: ProjectFileEntry[]; viaExternalLink?: boolean; externalLinkRootRelativePath?: string; externalLinkOffline?: boolean; missingDirectory?: boolean; error?: string }>;
   inspectProjectToolSources: (workspacePath: string, status: ProjectStatus, name: string, relativePaths: string[], collectVideos?: boolean, collectDirectConvertibleImages?: boolean, collectRecursiveConvertibleImages?: boolean) => Promise<{ success: boolean; indexed: boolean; hasVideo: boolean; hasConvertibleImage: boolean; videoPaths: string[]; convertibleImagePaths: string[]; folderPaths: string[]; sources: ProjectToolSource[]; error?: string }>;
   resolveProjectShortcut: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; target?: string; targetKind?: 'folder' | 'file'; error?: string }>;
-  materializeProjectExternalLinks: (workspacePath: string, status: ProjectStatus, name: string, relativePaths?: string[]) => Promise<{ success: boolean; count: number; items?: Array<{ shortcutPath: string; source: string; destination: string }>; error?: string }>;
+  materializeProjectExternalLinks: (workspacePath: string, status: ProjectStatus, name: string, relativePaths?: string[]) => Promise<MaterializeProjectExternalLinksResult>;
   relinkProjectExternalFolder: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; cancelled?: boolean; relativePath?: string; target?: string; updatedProgressCount?: number; error?: string }>;
   browseProjectShortcutPreview: (workspacePath: string, status: ProjectStatus, name: string, relativePath: string) => Promise<{ success: boolean; targetKind: 'folder' | 'file' | null; entries: ProjectFileEntry[]; truncated?: boolean; errorCode?: 'SHORTCUT_INVALID' | 'SHORTCUT_LOOP' | 'SHORTCUT_TARGET_MISSING' | 'SHORTCUT_TARGET_OFFLINE' | 'SHORTCUT_ACCESS_DENIED' | 'SHORTCUT_UNSUPPORTED'; error?: string }>;
   searchProjectFiles: (workspacePath: string, status: ProjectStatus, name: string, scopeRelativePath: string, query: string) => Promise<{ success: boolean; scope?: string; entries: ProjectFileEntry[]; error?: string }>;

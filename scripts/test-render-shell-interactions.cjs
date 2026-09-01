@@ -22,4 +22,8 @@ assert(progress.includes('role="progressbar"') && progress.includes('aria-valuem
 assert(progress.includes('aria-valuenow={determinate ? normalized : undefined}') && progress.includes("determinate ? '进度' : '正在处理'"), 'indeterminate progress must omit aria-valuenow and retain an accessible name');
 const workspaceTabs = fs.readFileSync(path.join(root, 'src', 'features', 'app', 'useWorkspaceTabs.ts'), 'utf8');
 assert(!/setState\(current =>[^\n]*createPageId\(\)/.test(workspaceTabs), 'page ids must never be generated inside React functional updaters');
+const app = fs.readFileSync(path.join(root, 'src', 'App.tsx'), 'utf8');
+assert(app.includes("{ restoreConflictPolicy: policy, decisionToken: decision.decisionToken }"), 'restore conflict decisions must bind the selected policy to the issued decision token');
+assert(app.includes("while (result.requiresDecision?.kind === 'restore-conflict')") && app.includes('restoreDecisionAttempts >= 3'), 'restore conflict confirmation must retry boundedly when runtime issues a fresh decision');
+assert(app.includes("if (result.requiresDecision) { showNotice('撤销仍需确认，请稍后重试', 'warning'); return; }"), 'responses still requiring a decision must never reach success notice or workspace dispatch');
 console.log('render shell interaction regression tests passed');

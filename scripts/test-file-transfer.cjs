@@ -1790,9 +1790,10 @@ const run = async () => {
     });
     const restoreDecision = await restoreHandlers.get('workspace-undo-rename')(null, '');
     assert.strictEqual(restoreDecision.requiresDecision.kind, 'restore-conflict');
+    assert.strictEqual(typeof restoreDecision.requiresDecision.decisionToken, 'string');
     assert.strictEqual(fs.readFileSync(occupiedRestorePath, 'utf8'), 'new occupant', 'restore decision preflight must not replace the occupied path');
     assert.strictEqual(restoreHistory.length, 1, 'a deferred restore must remain undoable after cancelling the dialog');
-    const renamedRestore = await restoreHandlers.get('workspace-undo-rename')(null, '', { restoreConflictPolicy: 'rename' });
+    const renamedRestore = await restoreHandlers.get('workspace-undo-rename')(null, '', { restoreConflictPolicy: 'rename', decisionToken: restoreDecision.requiresDecision.decisionToken });
     assert.strictEqual(renamedRestore.success, true);
     assert.strictEqual(fs.readFileSync(occupiedRestorePath, 'utf8'), 'new occupant');
     assert.deepStrictEqual(restoreCalls, [{ originalPath: occupiedRestorePath, targetPath: renamedRestorePath }], 'restore keeps immutable recycle evidence separate from the conflict-renamed target');

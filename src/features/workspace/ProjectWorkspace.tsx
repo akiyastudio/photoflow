@@ -4321,11 +4321,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const materializeExternalLinks = async (relativePaths?: string[]) => {
     const result = await projectWorkspaceClient.materializeProjectExternalLinks(workspacePath, project.status, project.name, relativePaths);
     if (!result.success) { onNotice(`移动外链到项目失败：${result.error || '未知错误'}`, 7000); return; }
-    const completion = result as typeof result & { partial?: boolean; warning?: string };
     directoryEntriesCacheRef.current.clear();
     await refresh(currentRelativePathRef.current);
-    if (!relativePaths?.length && !completion.partial) setHasExternalFolderLinks(false);
-    onNotice(completion.warning || (result.count ? `已将 ${result.count} 个外链文件夹移动到项目内` : '没有可移动的 PhotoFlow 外链文件夹'), completion.warning ? 8000 : undefined);
+    if (!relativePaths?.length && !result.partial) setHasExternalFolderLinks(false);
+    onNotice(result.warning || (result.count ? `已将 ${result.count} 个外链文件夹移动到项目内` : '没有可移动的 PhotoFlow 外链文件夹'), result.warning ? 8000 : undefined);
   };
   const relinkExternalFolder = async (relativePath: string) => {
     const result = await projectWorkspaceClient.relinkProjectExternalFolder(workspacePath, project.status, project.name, relativePath);

@@ -105,7 +105,7 @@ assert(versionTree.includes('if (event.deltaY > 0) onViewportScrollChange?.(true
 assert(workspace.includes("versionTreeOpen ? 'gap-0 overflow-hidden pb-0' : 'gap-3 overflow-auto pb-6'"), 'version-tree mode must not add the normal content gap below its breadcrumb');
 assert(workspace.includes('const safeStorageGet =') && workspace.includes('const safeStorageSet =') && workspace.includes('const safeStorageRemove ='), 'tracking session storage access must be guarded when localStorage is unavailable');
 assert(!workspace.includes('window.localStorage.getItem(sessionKey)') && !workspace.includes('window.localStorage.removeItem(sessionKey)'), 'tracking session recovery must use the safe storage wrappers');
-assert(workspace.includes('!relativePaths?.length && !completion.partial') && workspace.includes('completion.warning ||'), 'materialize partial/warning responses must retain the external-link affordance and show a non-destructive notice');
+assert(workspace.includes('!relativePaths?.length && !result.partial') && workspace.includes('result.warning ||'), 'materialize partial/warning responses must retain the external-link affordance and show a non-destructive notice');
 assert(workspaceLayout.includes('onMouseLeave={() => closeControllerRef.current?.scheduleClose()}') && workspaceLayout.includes('onMouseEnter: openNow') && workspaceLayout.includes('closeControllerRef.current?.dispose()'), 'ViewportSubmenu must cancel delayed close on wrapper/submenu entry and clear the timer on unmount');
 
 console.log('Project workspace layout model tests passed.');

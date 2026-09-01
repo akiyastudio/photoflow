@@ -406,7 +406,10 @@ const App: React.FC = () => {
       event.preventDefault();
       const undoWorkspacePath = activeTab === 'inspiration' ? config?.inspirationLibrary.rootPath : selectedProject?.workspacePath || config?.workspacePath;
       let result = await window.electronAPI.undoLastRename(undoWorkspacePath);
-      if (result.requiresDecision?.kind === 'restore-conflict') {
+      let restoreDecisionAttempts = 0;
+      while (result.requiresDecision?.kind === 'restore-conflict') {
+        if (restoreDecisionAttempts >= 3) { showNotice('原位置占用状态持续变化，请稍后重试撤销', 'warning'); return; }
+        restoreDecisionAttempts += 1;
         const decision = result.requiresDecision;
         const policy = await appDialog.choice({
           title: '原位置已有同名项目',
@@ -419,8 +422,9 @@ const App: React.FC = () => {
           defaultValue: 'rename',
         });
         if (policy !== 'rename' && policy !== 'overwrite') { showNotice('已取消撤销'); return; }
-        result = await window.electronAPI.undoLastRename(undoWorkspacePath, { restoreConflictPolicy: policy });
+        result = await window.electronAPI.undoLastRename(undoWorkspacePath, { restoreConflictPolicy: policy, decisionToken: decision.decisionToken });
       }
+      if (result.requiresDecision) { showNotice('撤销仍需确认，请稍后重试', 'warning'); return; }
       showNotice(result.success ? (result.message || '\u5df2\u64a4\u9500\u4e0a\u4e00\u6b21\u91cd\u547d\u540d') : (result.error || '\u6682\u65e0\u53ef\u64a4\u9500\u7684\u91cd\u547d\u540d'), result.success ? 'success' : 'error');
       if (result.success) {
         if (result.project) {
