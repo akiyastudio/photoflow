@@ -37,7 +37,7 @@ VERSIONING_ONLY_ACTIONS = frozenset((
     "batch_list", "progress_snapshot", "progress_locations_snapshot", "version_graph_edge_list",
     "version_tree_layout_get", "version_tree_layout_save",
 ))
-UNDO_ACTIONS = ("undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable")
+UNDO_ACTIONS = ("undo_record_add", "undo_record_latest", "undo_record_remove", "undo_record_mark_unavailable", "undo_record_retire_claim", "undo_record_claim_execute")
 
 ALL_ACTIONS = ("init", *CATALOG_ACTIONS, *MEDIA_ACTIONS, *PROGRESS_ACTIONS, *TRACKING_ACTIONS, *compatibility_action_names(), *UNDO_ACTIONS)
 READ_ONLY_ACTIONS = frozenset((

@@ -37,6 +37,11 @@ except ModuleNotFoundError:
     from workspace_domain_storage import DOMAIN_TABLES, attach_and_migrate as attach_workspace_domain_storage, database_path_for_workspace_database
     from workspace_db_migrations import migration_26, migration_27, migration_28
 
+
+class UndoRecordRetiredError(RuntimeError):
+    code = "UNDO_RECORD_RETIRED"
+
+
 STATUSES = ("未分类", "策划中", "待拍摄", "后期中", "已归档")
 IMAGE_EXTENSIONS = {
     ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff",
@@ -9947,13 +9952,15 @@ def _operation_undo_records(db, payload=None):
     external = (payload or {}).get("undoRecords")
     if external is None:
         return [dict(record) for record in db.execute(
-            "SELECT * FROM undo_records WHERE kind IN ('trash','project-cleanup') ORDER BY created_at DESC"
+            "SELECT * FROM undo_records WHERE state <> 'retired' AND kind IN ('trash','project-cleanup') ORDER BY created_at DESC"
         ).fetchall()]
     records = []
     for value in external if isinstance(external, list) else []:
         if not isinstance(value, dict):
             continue
         record = dict(value)
+        if str(record.get("state") or "ready") == "retired":
+            continue
         if "payload_json" not in record:
             record["payload_json"] = json.dumps(record.get("payload") or {}, ensure_ascii=False)
         records.append(record)
@@ -10198,7 +10205,10 @@ def _resume_purge_journal(db):
             pending = [] if not raw else [str(value) for value in json.loads(raw).get("removeUndoIds") or []]
             _set_meta(db, "operations_outbox_v1", json.dumps({"removeUndoIds": list(dict.fromkeys((*pending, *undo_ids))), "updatedAt": int(time.time() * 1000)}, sort_keys=True))
         elif undo_ids:
-            _delete_where_ids(db, "undo_records", "id", undo_ids, "main")
+            for offset in range(0, len(undo_ids), 400):
+                chunk = undo_ids[offset:offset + 400]
+                placeholders = ",".join("?" for _ in chunk)
+                db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders}) AND state <> 'retired'", chunk)
         expected = "is_deleted=1" if journal.get("deleted") else "is_deleted=0 AND availability='missing'"
         if db.execute(f"DELETE FROM projects WHERE id=? AND {expected}", (project_id,)).rowcount != 1:
             raise RuntimeError("项目目录记录在 purge finalization 期间发生变化")
@@ -11400,13 +11410,53 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
         return result
     elif action == "undo_record_add":
         record_id = str(payload.get("id") or uuid.uuid4())
-        db.execute(
-            "INSERT OR REPLACE INTO undo_records(id,kind,payload_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+        cursor = db.execute(
+            """INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)
+               ON CONFLICT(id) DO UPDATE SET
+                 kind=excluded.kind,payload_json=excluded.payload_json,state='ready',
+                 created_at=excluded.created_at,updated_at=excluded.updated_at
+               WHERE undo_records.state <> 'retired'""",
             (record_id, str(payload.get("kind") or "trash"), json.dumps(payload.get("payload") or {}, ensure_ascii=False), "ready", now, now),
         )
+        if cursor.rowcount != 1:
+            db.rollback()
+            raise UndoRecordRetiredError(f"undo record {record_id} is permanently retired")
         db.commit()
         db.close()
         return {"success": True, "id": record_id}
+    elif action == "undo_record_retire_claim":
+        record_id = str(payload.get("id") or "")
+        if not record_id:
+            raise ValueError("undo record id is required")
+        db.execute("BEGIN IMMEDIATE")
+        db.execute(
+            """INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at)
+               VALUES(?, 'claim-retired', '{}', 'retired', ?, ?)
+               ON CONFLICT(id) DO UPDATE SET
+                 kind='claim-retired',payload_json='{}',state='retired',updated_at=excluded.updated_at
+               WHERE undo_records.state IN ('unavailable','retired')""",
+            (record_id, now, now),
+        )
+        row = db.execute("SELECT state FROM undo_records WHERE id=?", (record_id,)).fetchone()
+        retired = row is not None and row["state"] == "retired"
+        db.commit()
+        db.close()
+        return {"success": True, "retired": retired}
+    elif action == "undo_record_claim_execute":
+        record_id = str(payload.get("id") or "")
+        if not record_id:
+            raise ValueError("undo record id is required")
+        db.execute("BEGIN IMMEDIATE")
+        cursor = db.execute(
+            """UPDATE undo_records SET
+                 kind='claim-retired',payload_json='{}',state='retired',updated_at=?
+               WHERE id=? AND state='ready' AND kind='trash'""",
+            (now, record_id),
+        )
+        claimed = cursor.rowcount == 1
+        db.commit()
+        db.close()
+        return {"success": True, "claimed": claimed}
     elif action == "undo_record_latest":
         row = db.execute(
             "SELECT * FROM undo_records WHERE state='ready' AND kind='trash' ORDER BY created_at DESC LIMIT 1"
@@ -11418,9 +11468,9 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
         record["payload"] = json.loads(record.pop("payload_json"))
         return {"success": True, "record": record}
     elif action == "undo_record_remove":
-        db.execute("DELETE FROM undo_records WHERE id=?", (str(payload.get("id") or ""),))
+        db.execute("DELETE FROM undo_records WHERE id=? AND state <> 'retired'", (str(payload.get("id") or ""),))
     elif action == "undo_record_mark_unavailable":
-        db.execute("UPDATE undo_records SET state='unavailable', updated_at=? WHERE id=?", (now, str(payload.get("id") or "")))
+        db.execute("UPDATE undo_records SET state='unavailable', updated_at=? WHERE id=? AND state <> 'retired'", (now, str(payload.get("id") or "")))
     else:
         raise ValueError(f"不支持的数据库操作：{action}")
     db.commit()

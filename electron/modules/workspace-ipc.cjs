@@ -12,18 +12,25 @@ const { scheduleSdImportedMedia } = require('./workspace/sd-import-media-scan.cj
 const { createDeletedProjectCleanup } = require('./workspace/deleted-project-cleanup.cjs');
 const { formatProjectDate, normalizeProjectDate, readProjectDate } = require('./workspace/project-date.cjs');
 const { runWorkspaceMaintenanceWithRetry, workspaceDatabaseTaskResource } = require('./workspace/workspace-maintenance.cjs');
-const { publishPathNoClobber: defaultPublishPathNoClobber, releaseCleanupOwnership: defaultReleaseCleanupOwnership } = require('../services/file-transfer-service.cjs');
+const {
+  publishPathNoClobber: defaultPublishPathNoClobber,
+  rebaseCleanupOwnership: defaultRebaseCleanupOwnership,
+  releaseCleanupOwnership: defaultReleaseCleanupOwnership,
+  removeCreatedPasteTargets: defaultRemoveCreatedPasteTargets,
+  removeOwnedPathIdentityBound: defaultRemoveOwnedPathIdentityBound,
+} = require('../services/file-transfer-service.cjs');
 const { registerVideoTimelineIpc } = require('./workspace/video-timeline-ipc.cjs');
 const { registerEntryUtilityIpc } = require('./workspace/entry-utility-ipc.cjs');
 const { registerWorkspaceImportIpc } = require('./workspace/import-ipc.cjs');
 const { isInternalWorkspacePathSegment } = require('../infrastructure/internal-workspace-path.cjs');
+const { capturePathIdentity: defaultCapturePathIdentity, identityFromStat: defaultIdentityFromStat, samePathIdentity: defaultSamePathIdentity } = require('../services/file-identity-service.cjs');
 
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
 const MAX_EXPLICIT_MATERIALIZE_PATHS = 512;
 const MAX_EXPLICIT_MATERIALIZE_PATH_BYTES = 64 * 1024;
 const registerWorkspaceIpc = context => {
-  const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Number: workspaceNumber = Number, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, releaseCleanupOwnership = defaultReleaseCleanupOwnership, removeUndoOperation = () => false, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
+  const { Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Number: workspaceNumber = Number, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, rebaseCleanupOwnership = defaultRebaseCleanupOwnership, releaseCleanupOwnership = defaultReleaseCleanupOwnership, removeCreatedPasteTargets = defaultRemoveCreatedPasteTargets, removeOwnedPathIdentityBound = defaultRemoveOwnedPathIdentityBound, removeUndoOperation = () => false, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const extractTimelineFrames = context.extractVideoTimelineFrames;
   registerVideoTimelineIpc({ ipcMain, extractVideoTimelineFrames: extractTimelineFrames, resolveProjectEntry, fs, path, VIDEO_EXTENSIONS, writeLog });
@@ -77,26 +84,17 @@ const registerWorkspaceIpc = context => {
     }
     return candidate;
   };
-  const captureIdentity = async candidate => {
-    if (typeof capturePathIdentity === 'function') return Promise.resolve(capturePathIdentity(candidate));
-    const stat = await fs.promises.stat(candidate, { bigint: true });
-    return { path: path.resolve(candidate), device: String(stat.dev), inode: String(stat.ino), directory: stat.isDirectory(), size: String(stat.size), modifiedNs: String(stat.mtimeNs) };
-  };
+  const captureIdentity = candidate => Promise.resolve((capturePathIdentity || defaultCapturePathIdentity)(candidate));
   const identityMatches = async (candidate, expected) => {
-    if (typeof samePathIdentity === 'function') return samePathIdentity(candidate, expected);
-    const current = await captureIdentity(candidate).catch(() => null);
-    return Boolean(current && expected && current.device === expected.device && current.inode === expected.inode && current.directory === expected.directory);
+    return (samePathIdentity || defaultSamePathIdentity)(candidate, expected);
   };
   const removeIfOwned = async (candidate, ownership) => {
     if (!candidate || !ownership?.created || !fs.existsSync(candidate)) return false;
-    if (!await identityMatches(candidate, ownership.identity)) return false;
-    const quarantine = path.join(path.dirname(candidate), `.photoflow-cleanup-${crypto.randomUUID()}`);
-    await publishPathNoClobber(candidate, quarantine);
-    if (!await identityMatches(quarantine, ownership.identity)) {
-      throw Object.assign(new Error('清理目标在隔离时已被替换，内容已保留等待恢复'), { code: 'CLEANUP_IDENTITY_MISMATCH', recoveryPath: quarantine });
-    }
-    await fs.promises.rm(quarantine, { recursive: true, force: true });
-    return true;
+    const outcome = await removeOwnedPathIdentityBound(candidate, ownership.identity);
+    if (outcome.success) return true;
+    throw Object.assign(new Error('无法证明失败回滚目标仍由当前操作完整拥有，内容已保留等待恢复'), {
+      code: outcome.code || 'CLEANUP_OWNERSHIP_CONFLICT', recoveryPath: outcome.recoveryPath, outcome,
+    });
   };
   const refreshAfterRepositoryCommit = async root => {
     try { return { catalog: await refreshWorkspaceCatalog(root), catalogRefreshPending: false }; }
@@ -174,13 +172,77 @@ const registerWorkspaceIpc = context => {
   const legacyRestoreDecisions = new WeakMap();
   const blockedPersistentUndos = new Map();
   const persistentUndoClaimPrefix = '.photoflow-undo-claim-';
-  const persistentUndoClaimSchema = 1;
+  const persistentUndoClaimDirectoryName = '.photoflow-undo-claims';
+  const persistentUndoClaimSchema = 2;
+  const validWorkspaceId = /^[a-f0-9]{24,64}$/u;
+  const persistentUndoClaimMaxBytes = Math.max(256, Number(context.persistentUndoClaimMaxBytes) || 4096);
+  const persistentUndoClaimScanLimit = Math.max(1, Number(context.persistentUndoClaimScanLimit) || 64);
+  const persistentUndoClaimMaxVisitedEntries = Math.max(1, Number(context.persistentUndoClaimMaxVisitedEntries) || 1024);
+  const persistentUndoClaimScanBudgetMs = Math.max(1, Number(context.persistentUndoClaimScanBudgetMs) || 25);
+  const persistentUndoClaimThrottleMs = Math.max(0, Number(context.persistentUndoClaimThrottleMs ?? (6 * 60 * 60 * 1000)));
+  const persistentUndoClaimRetentionMs = context.persistentUndoClaimRetentionMs === undefined
+    ? 7 * 24 * 60 * 60 * 1000 : Math.max(0, Number(context.persistentUndoClaimRetentionMs) || 0);
+  const persistentUndoClaimLastScans = new Map();
+  const persistentUndoLegacyCursors = new Map();
+  const persistentUndoV2Cursors = new Map();
   const blockedPersistentUndoTtlMs = Math.max(1, Number(context.persistentUndoQuarantineTtlMs) || 30 * 60 * 1000);
   const blockedPersistentUndoCapacity = Math.max(1, Number(context.persistentUndoQuarantineCapacity) || 256);
   const persistentUndoClaimPlatform = context.platform || process.platform;
   let persistentUndoQuarantineOverflow = false;
   const persistentUndoKey = (workspaceRoot, persistentId) => `${comparablePath(path.resolve(String(workspaceRoot || '')))}\0${String(persistentId || '')}`;
-  const persistentUndoClaimDescriptor = async operation => {
+  const claimFailure = (message, cause) => Object.assign(new Error(message), {
+    code: 'CLAIM_PERSIST_FAILED', recoveryRequired: true, rollbackPending: true, cause,
+  });
+  const readPersistentUndoWorkspaceId = async workspaceRoot => {
+    if (typeof context.persistentUndoWorkspaceId === 'function') {
+      const injected = String(await context.persistentUndoWorkspaceId(workspaceRoot)).trim().toLocaleLowerCase();
+      if (!validWorkspaceId.test(injected)) throw claimFailure('测试注入的稳定工作区 ID 无效');
+      return injected;
+    }
+    const markerPath = path.join(workspaceRoot, '.photoflow-workspace-id');
+    let handle;
+    try {
+      const markerStat = await fs.promises.lstat(markerPath, { bigint: true });
+      if (!markerStat.isFile() || markerStat.isSymbolicLink() || markerStat.nlink !== 1n || markerStat.size > 128n) throw new Error('workspace identity marker is unsafe');
+      const resolvedMarker = await fs.promises.realpath(markerPath);
+      if (comparablePath(resolvedMarker) !== comparablePath(markerPath)) throw new Error('workspace identity marker escaped its canonical path');
+      handle = await fs.promises.open(markerPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      const workspaceId = String(await handle.readFile({ encoding: 'utf8' })).trim().toLocaleLowerCase();
+      if (!validWorkspaceId.test(workspaceId)) throw new Error('workspace identity marker is invalid');
+      return workspaceId;
+    } catch (cause) {
+      throw claimFailure(`无法读取稳定工作区 ID，已拒绝执行：${cause?.message || String(cause)}`, cause);
+    } finally { await handle?.close().catch(() => undefined); }
+  };
+  const persistentUndoClaimDirectory = async (workspaceRoot, create = false) => {
+    const directoryPath = path.join(workspaceRoot, persistentUndoClaimDirectoryName);
+    try {
+      let directoryStat = await fs.promises.lstat(directoryPath, { bigint: true }).catch(error => {
+        if (error?.code === 'ENOENT') return null;
+        throw error;
+      });
+      if (!directoryStat && !create) return null;
+      if (!directoryStat) {
+        try { await fs.promises.mkdir(directoryPath, { mode: 0o700 }); }
+        catch (error) { if (error?.code !== 'EEXIST') throw error; }
+        directoryStat = await fs.promises.lstat(directoryPath, { bigint: true });
+      }
+      if (!directoryStat.isDirectory() || directoryStat.isSymbolicLink()) throw new Error('claim directory is not a real directory');
+      const resolvedDirectory = await fs.promises.realpath(directoryPath);
+      const relative = path.relative(workspaceRoot, resolvedDirectory);
+      if (comparablePath(resolvedDirectory) !== comparablePath(directoryPath) || relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('claim directory escapes the canonical workspace');
+      if (persistentUndoClaimPlatform !== 'win32') {
+        if (create) await fs.promises.chmod(directoryPath, 0o700);
+        const protectedStat = await fs.promises.lstat(directoryPath);
+        if ((protectedStat.mode & 0o077) !== 0) throw new Error('claim directory permissions are not 0700');
+      }
+      if (create) await syncPersistentUndoClaimDirectory(workspaceRoot);
+      return directoryPath;
+    } catch (cause) {
+      throw claimFailure(`持久撤销 claim 目录不安全，已拒绝执行：${cause?.message || String(cause)}`, cause);
+    }
+  };
+  const persistentUndoClaimDescriptor = async (operation, createDirectory = false) => {
     const persistentId = typeof operation?.persistentId === 'string' ? operation.persistentId : '';
     if (!persistentId || persistentId.length > 256 || persistentId.trim() !== persistentId || /[\0\r\n]/.test(persistentId)) {
       throw Object.assign(new Error('持久撤销记录 ID 无效，已拒绝执行'), { code: 'CLAIM_PERSIST_FAILED', recoveryRequired: true, rollbackPending: true });
@@ -192,16 +254,49 @@ const registerWorkspaceIpc = context => {
         code: 'CLAIM_PERSIST_FAILED', recoveryRequired: true, rollbackPending: true, cause,
       });
     }
-    const digest = crypto.createHash('sha256').update(`${comparablePath(workspaceRoot)}\0${persistentId}`).digest('hex');
-    return { workspaceRoot, persistentId, path: path.join(workspaceRoot, `${persistentUndoClaimPrefix}${digest}.json`) };
+    const workspaceId = await readPersistentUndoWorkspaceId(workspaceRoot);
+    const directory = await persistentUndoClaimDirectory(workspaceRoot, createDirectory);
+    const digest = crypto.createHash('sha256').update(`${workspaceId}\0${persistentId}`).digest('hex');
+    return { workspaceRoot, workspaceId, persistentId, directory, path: directory ? path.join(directory, `${digest}.json`) : null };
+  };
+  const legacyPersistentUndoClaimExists = async descriptor => {
+    let directory;
+    try {
+      directory = await fs.promises.opendir(descriptor.workspaceRoot);
+      for await (const entry of directory) {
+        if (!entry.name.startsWith(persistentUndoClaimPrefix)) continue;
+        if (!/^\.photoflow-undo-claim-[0-9a-f]{64}\.json$/u.test(entry.name) || !entry.isFile()) continue;
+        let handle;
+        try {
+          handle = await fs.promises.open(path.join(descriptor.workspaceRoot, entry.name), fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+          const stat = await handle.stat({ bigint: true });
+          if (!stat.isFile() || stat.isSymbolicLink() || stat.nlink !== 1n || stat.size > BigInt(persistentUndoClaimMaxBytes)) continue;
+          const bytes = await handle.readFile();
+          if (bytes.length !== Number(stat.size) || bytes.length > persistentUndoClaimMaxBytes) continue;
+          const marker = JSON.parse(bytes.toString('utf8'));
+          const createdAt = Date.parse(marker?.createdAt);
+          if (marker?.schema === 1 && marker?.kind === 'trash' && marker?.id === descriptor.persistentId
+              && typeof marker?.createdAt === 'string' && Number.isFinite(createdAt) && new Date(createdAt).toISOString() === marker.createdAt
+              && typeof marker?.nonce === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(marker.nonce)) return true;
+        } catch { /* Invalid legacy markers are retained for GC quarantine. */ }
+        finally { await handle?.close().catch(() => undefined); }
+      }
+      return false;
+    }
+    catch (cause) {
+      throw claimFailure(`无法完整检查旧版持久撤销 claim，已拒绝执行：${cause?.message || String(cause)}`, cause);
+    } finally { await directory?.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') throw error; }); }
   };
   const persistentUndoClaimExists = async descriptor => {
-    try { await fs.promises.lstat(descriptor.path); return true; }
-    catch (cause) {
-      if (cause?.code === 'ENOENT') return false;
-      throw Object.assign(new Error(`无法确认持久撤销 claim 状态，已拒绝执行：${cause?.message || String(cause)}`), {
-        code: 'CLAIM_PERSIST_FAILED', recoveryRequired: true, rollbackPending: true, cause,
-      });
+    try {
+      if (descriptor.path) {
+        const stat = await fs.promises.lstat(descriptor.path).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+        if (stat) return true;
+      }
+      return legacyPersistentUndoClaimExists(descriptor);
+    } catch (cause) {
+      if (cause?.code === 'CLAIM_PERSIST_FAILED') throw cause;
+      throw claimFailure(`无法确认持久撤销 claim 状态，已拒绝执行：${cause?.message || String(cause)}`, cause);
     }
   };
   const syncPersistentUndoClaimDirectory = async directory => {
@@ -211,8 +306,9 @@ const registerWorkspaceIpc = context => {
     finally { await handle?.close().catch(() => undefined); }
   };
   const createPersistentUndoClaim = async (operation, descriptor) => {
+    if (!descriptor.directory) descriptor = await persistentUndoClaimDescriptor(operation, true);
     const nonce = crypto.randomUUID();
-    const marker = { schema: persistentUndoClaimSchema, id: descriptor.persistentId, kind: operation.kind, createdAt: new Date().toISOString(), nonce };
+    const marker = { schema: persistentUndoClaimSchema, workspaceId: descriptor.workspaceId, id: descriptor.persistentId, kind: operation.kind, createdAt: new Date().toISOString(), nonce };
     let handle;
     let opened = false;
     try {
@@ -222,7 +318,7 @@ const registerWorkspaceIpc = context => {
       await handle.sync();
       await handle.close();
       handle = null;
-      await syncPersistentUndoClaimDirectory(descriptor.workspaceRoot);
+      await syncPersistentUndoClaimDirectory(descriptor.directory);
       return { ...descriptor, nonce };
     } catch (cause) {
       await handle?.close().catch(() => undefined);
@@ -235,6 +331,186 @@ const registerWorkspaceIpc = context => {
       });
       throw error;
     }
+  };
+  const processPersistentUndoClaimGcCandidate = async ({ root, workspaceId, markerPath, entryName, schema, result, deadline, now }) => {
+    if (result.checked >= persistentUndoClaimScanLimit || Date.now() >= deadline) { result.truncated = true; return; }
+    result.checked += 1;
+    let handle;
+    try {
+      const expectedName = schema === 2 ? /^([0-9a-f]{64})\.json$/u.exec(entryName) : /^\.photoflow-undo-claim-([0-9a-f]{64})\.json$/u.exec(entryName);
+      if (!expectedName) throw Object.assign(new Error('marker name is invalid'), { code: 'MARKER_INVALID' });
+      handle = await fs.promises.open(markerPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+      const beforeStat = await handle.stat({ bigint: true });
+      if (!beforeStat.isFile() || beforeStat.isSymbolicLink() || beforeStat.nlink !== 1n || beforeStat.size > BigInt(persistentUndoClaimMaxBytes)) throw Object.assign(new Error('marker is not a bounded single-link regular file'), { code: 'MARKER_INVALID' });
+      const buffer = Buffer.alloc(persistentUndoClaimMaxBytes + 1);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+      if (bytesRead > persistentUndoClaimMaxBytes || BigInt(bytesRead) !== beforeStat.size) throw Object.assign(new Error('marker exceeds or changed within the size limit'), { code: 'MARKER_TOO_LARGE' });
+      const markerBytes = buffer.subarray(0, bytesRead);
+      const marker = JSON.parse(markerBytes.toString('utf8'));
+      const createdAt = Date.parse(marker?.createdAt);
+      const validCreatedAt = typeof marker?.createdAt === 'string' && Number.isFinite(createdAt) && new Date(createdAt).toISOString() === marker.createdAt;
+      const validId = typeof marker?.id === 'string' && marker.id.length > 0 && marker.id.length <= 256 && marker.id.trim() === marker.id && !/[\0\r\n]/.test(marker.id);
+      const validNonce = typeof marker?.nonce === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(marker.nonce);
+      const validWorkspace = schema === 1 || marker?.workspaceId === workspaceId;
+      const digest = validId ? crypto.createHash('sha256').update(`${workspaceId}\0${marker.id}`).digest('hex') : '';
+      if (marker?.schema !== schema || !validId || !validNonce || marker?.kind !== 'trash' || !validWorkspace || !validCreatedAt
+          || createdAt > now + 5 * 60 * 1000 || (schema === 2 && digest !== expectedName[1])) {
+        throw Object.assign(new Error('marker schema or identity is invalid'), { code: 'MARKER_INVALID' });
+      }
+      const retentionCutoffNs = BigInt(Math.trunc(now - persistentUndoClaimRetentionMs)) * 1000000n;
+      if (createdAt > now - persistentUndoClaimRetentionMs || beforeStat.mtimeNs > retentionCutoffNs || beforeStat.ctimeNs > retentionCutoffNs) {
+        result.skipped += 1; result.warnings.push(`young-marker:${entryName}`); return;
+      }
+      await context.afterPersistentUndoClaimGcHandleRead?.({ markerPath, marker });
+      if (Date.now() >= deadline) { result.skipped += 1; result.truncated = true; return; }
+      const afterStat = await handle.stat({ bigint: true });
+      const stableHandle = afterStat.isFile() && !afterStat.isSymbolicLink() && afterStat.nlink === 1n
+        && String(afterStat.dev) === String(beforeStat.dev) && String(afterStat.ino) === String(beforeStat.ino)
+        && afterStat.size === beforeStat.size && afterStat.mtimeNs === beforeStat.mtimeNs && afterStat.ctimeNs === beforeStat.ctimeNs;
+      if (!stableHandle) throw Object.assign(new Error('marker handle identity changed while reading'), { code: 'MARKER_CHANGED' });
+      const expectedIdentity = { ...defaultIdentityFromStat(markerPath, afterStat), sha256: crypto.createHash('sha256').update(markerBytes).digest('hex') };
+      await handle.close(); handle = null;
+      if (Date.now() >= deadline) { result.skipped += 1; result.truncated = true; return; }
+      let claim;
+      try { claim = await workspaceRepository.retireUndoRecordClaim(root, marker.id); }
+      catch (error) { result.skipped += 1; result.warnings.push(`journal-retire-failed:${entryName}:${error?.message || String(error)}`); return; }
+      if (Date.now() >= deadline) { result.skipped += 1; result.truncated = true; result.warnings.push(`deadline-after-retire:${entryName}`); return; }
+      if (claim?.retired !== true) { result.skipped += 1; result.warnings.push(`journal-cas-retained:${entryName}`); return; }
+      let deleteDeadlineExpired = false;
+      const removed = await removeOwnedPathIdentityBound(markerPath, expectedIdentity, { beforeQuarantineMove: async item => {
+        await context.beforePersistentUndoClaimGcDelete?.(item);
+        if (Date.now() >= deadline) {
+          deleteDeadlineExpired = true;
+          throw Object.assign(new Error('claim GC deadline expired before deletion'), { code: 'GC_DEADLINE_EXPIRED' });
+        }
+      } });
+      if (deleteDeadlineExpired) result.truncated = true;
+      if (removed.success) result.removed += 1;
+      else { result.skipped += 1; result.warnings.push(`${removed.code || 'cleanup-failed'}:${entryName}`); }
+    } catch (error) {
+      result.skipped += 1; result.warnings.push(`${error?.code || 'invalid-marker'}:${entryName}`);
+    } finally { await handle?.close().catch(() => undefined); }
+  };
+  const scheduleLegacyPersistentUndoClaimGcContinuation = root => {
+    const key = comparablePath(root); const state = persistentUndoLegacyCursors.get(key);
+    if (!state || state.scheduled) return;
+    state.scheduled = true;
+    setTimeout(() => {
+      state.scheduled = false;
+      runPersistentUndoClaimGc(root, { continuation: true, skipV2: true }).then(result => {
+        if (result.removed || result.warnings.length) writeLog(result.warnings.length ? 'warn' : 'info', 'Legacy persistent undo claim GC continued', { workspaceRoot: root, ...result });
+      }).catch(error => writeLog('warn', 'Legacy persistent undo claim GC continuation failed', { workspaceRoot: root, error: error?.message || String(error) }));
+    }, 0);
+  };
+  const scheduleV2PersistentUndoClaimGcContinuation = root => {
+    const key = comparablePath(root); const state = persistentUndoV2Cursors.get(key);
+    if (!state || state.scheduled) return;
+    state.scheduled = true;
+    setTimeout(() => {
+      state.scheduled = false;
+      runPersistentUndoClaimGc(root, { continuation: true }).then(result => {
+        if (result.removed || result.warnings.length) writeLog(result.warnings.length ? 'warn' : 'info', 'Persistent undo claim GC continued', { workspaceRoot: root, ...result });
+      }).catch(error => writeLog('warn', 'Persistent undo claim GC continuation failed', { workspaceRoot: root, error: error?.message || String(error) }));
+    }, 0);
+  };
+  const scanV2PersistentUndoClaims = async ({ root, workspaceId, claimDirectory, result, deadline, now }) => {
+    const key = comparablePath(root);
+    let state = persistentUndoV2Cursors.get(key);
+    if (!state) {
+      state = { directory: await fs.promises.opendir(claimDirectory), directoryPath: claimDirectory, scheduled: false, running: false };
+      persistentUndoV2Cursors.set(key, state);
+    }
+    if (state.directoryPath !== claimDirectory) throw new Error('claim directory identity changed during continuation');
+    if (state.running) { result.truncated = true; return; }
+    state.running = true;
+    let eof = false;
+    let failed = false;
+    try {
+      while (result.visited < persistentUndoClaimMaxVisitedEntries && result.checked < persistentUndoClaimScanLimit && Date.now() < deadline) {
+        const entry = await state.directory.read();
+        if (!entry) { eof = true; break; }
+        result.visited += 1;
+        await processPersistentUndoClaimGcCandidate({ root, workspaceId, markerPath: path.join(claimDirectory, entry.name), entryName: entry.name, schema: 2, result, deadline, now });
+      }
+    } catch (error) { failed = true; throw error; }
+    finally {
+      state.running = false;
+      if (eof || failed) {
+        persistentUndoV2Cursors.delete(key);
+        await state.directory.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') result.warnings.push(`scan-close-failed:${error?.message || String(error)}`); });
+      } else {
+        result.truncated = true;
+        scheduleV2PersistentUndoClaimGcContinuation(root);
+      }
+    }
+  };
+  const scanLegacyPersistentUndoClaims = async ({ root, workspaceId, result, deadline, now }) => {
+    const key = comparablePath(root);
+    let state = persistentUndoLegacyCursors.get(key);
+    if (!state) {
+      state = { directory: await fs.promises.opendir(root), scheduled: false, running: false };
+      persistentUndoLegacyCursors.set(key, state);
+    }
+    if (state.running) { result.truncated = true; return; }
+    state.running = true;
+    let eof = false;
+    let failed = false;
+    try {
+      while (result.visited < persistentUndoClaimMaxVisitedEntries && result.checked < persistentUndoClaimScanLimit && Date.now() < deadline) {
+        const entry = await state.directory.read();
+        if (!entry) { eof = true; break; }
+        result.visited += 1;
+        if (!entry.name.startsWith(persistentUndoClaimPrefix)) continue;
+        await processPersistentUndoClaimGcCandidate({ root, workspaceId, markerPath: path.join(root, entry.name), entryName: entry.name, schema: 1, result, deadline, now });
+      }
+    } catch (error) { failed = true; throw error; }
+    finally {
+      state.running = false;
+      if (eof || failed) {
+        persistentUndoLegacyCursors.delete(key);
+        await state.directory.close().catch(error => { if (error?.code !== 'ERR_DIR_CLOSED') result.warnings.push(`scan-close-failed:${error?.message || String(error)}`); });
+      } else {
+        result.truncated = true;
+        scheduleLegacyPersistentUndoClaimGcContinuation(root);
+      }
+    }
+  };
+  const runPersistentUndoClaimGc = async (workspaceRoot, options = {}) => {
+    const result = { checked: 0, removed: 0, skipped: 0, warnings: [], visited: 0 };
+    const startedAt = Date.now();
+    const deadline = startedAt + persistentUndoClaimScanBudgetMs;
+    let root;
+    try { root = await fs.promises.realpath(path.resolve(String(workspaceRoot || ''))); }
+    catch (error) { result.warnings.push(`workspace-unavailable:${error?.code || error?.message || String(error)}`); return result; }
+    const throttleKey = comparablePath(root);
+    const now = Number(context.persistentUndoClaimNowMs?.() ?? Date.now());
+    if (!options.continuation && now - (persistentUndoClaimLastScans.get(throttleKey) || 0) < persistentUndoClaimThrottleMs) {
+      result.skipped += 1; result.throttled = true; return result;
+    }
+    if (!options.continuation) persistentUndoClaimLastScans.set(throttleKey, now);
+    let workspaceId;
+    try { workspaceId = await readPersistentUndoWorkspaceId(root); }
+    catch (error) { result.warnings.push(`workspace-id-unavailable:${error?.message || String(error)}`); return result; }
+    if (!options.skipV2 && Date.now() < deadline) {
+      let claimDirectory;
+      try { claimDirectory = await persistentUndoClaimDirectory(root, false); }
+      catch (error) { result.warnings.push(`claim-directory-unsafe:${error?.message || String(error)}`); return result; }
+      if (claimDirectory) {
+        try {
+          await scanV2PersistentUndoClaims({ root, workspaceId, claimDirectory, result, deadline, now });
+        } catch (error) { result.warnings.push(`scan-v2-failed:${error?.message || String(error)}`); }
+      }
+    }
+    if (!options.skipLegacy && Date.now() < deadline && result.checked < persistentUndoClaimScanLimit && result.visited < persistentUndoClaimMaxVisitedEntries) {
+      try { await scanLegacyPersistentUndoClaims({ root, workspaceId, result, deadline, now }); }
+      catch (error) { result.warnings.push(`scan-legacy-failed:${error?.message || String(error)}`); }
+    }
+    return result;
+  };
+  const schedulePersistentUndoClaimGc = workspaceRoot => {
+    setTimeout(() => runPersistentUndoClaimGc(workspaceRoot).then(result => {
+      if (result.removed || result.warnings.length) writeLog(result.warnings.length ? 'warn' : 'info', 'Persistent undo claim GC completed', { workspaceRoot, ...result });
+    }).catch(error => writeLog('warn', 'Persistent undo claim GC failed', { workspaceRoot, error: error?.message || String(error) })), 0);
   };
   const pruneBlockedPersistentUndos = () => {
     const now = Date.now();
@@ -624,6 +900,8 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-create-project', async (_event, workspacePath, date, name, options) => {
     let projectPath = '';
     let projectOwnership = null;
+    let planningPath = '';
+    let planningOwnership = null;
     let repositoryCommitted = false;
     try {
       const projectDate = normalizeProjectDate(date);
@@ -640,7 +918,14 @@ const registerWorkspaceIpc = context => {
       fs.mkdirSync(projectPath, { recursive: false });
       try { projectOwnership = { created: true, identity: await captureIdentity(projectPath) }; }
       catch (error) { throw Object.assign(new Error(`项目目录已创建但无法确认身份，请勿重试；恢复路径：${projectPath}`), { code: 'WORKSPACE_PUBLISH_OUTCOME_UNKNOWN', outcomeUnknown: true, catalogReconcilePending: true, recoveryPath: projectPath }); }
-      if (options?.createPlanningFolder !== false) fs.mkdirSync(path.join(projectPath, '策划'), { recursive: true });
+      if (options?.createPlanningFolder !== false) {
+        planningPath = path.join(projectPath, '策划');
+        fs.mkdirSync(planningPath, { recursive: false });
+        try { planningOwnership = { created: true, identity: await captureIdentity(planningPath) }; }
+        catch (error) { throw Object.assign(new Error(`策划目录已创建但无法确认身份，请勿重试；恢复路径：${projectPath}`), { code: 'WORKSPACE_PUBLISH_OUTCOME_UNKNOWN', outcomeUnknown: true, catalogReconcilePending: true, recoveryPath: projectPath }); }
+        try { projectOwnership = { created: true, identity: await captureIdentity(projectPath) }; }
+        catch (error) { throw Object.assign(new Error(`项目布局已创建但无法复核根目录身份，请勿重试；恢复路径：${projectPath}`), { code: 'WORKSPACE_PUBLISH_OUTCOME_UNKNOWN', outcomeUnknown: true, catalogReconcilePending: true, recoveryPath: projectPath }); }
+      }
       const addPayload = { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath), extra: projectDate ? { projectDate } : {} };
       let mutation;
       const repositoryMutationAvailable = typeof workspaceRepository?.addProject === 'function';
@@ -666,7 +951,19 @@ const registerWorkspaceIpc = context => {
       telemetryService?.track('project_created', { planning_folder: options?.createPlanningFolder !== false });
       return { success: true, workspacePath: root, storageSwitched: selectedWorkspace.switched, project: { id: projectId, name: projectName, path: projectPath, workspacePath: root, status: '策划中', updatedAt: Date.now(), projectDate: projectDate || undefined }, catalogRefreshPending: false };
     } catch (error) {
-      if (!repositoryCommitted) await removeIfOwned(projectPath, projectOwnership).catch(cleanupError => writeLog('warn', 'Unable to clean failed project creation', cleanupError));
+      if (!repositoryCommitted) {
+        let safeToRemoveCreatedLayout = Boolean(projectOwnership?.identity && await identityMatches(projectPath, projectOwnership.identity));
+        if (safeToRemoveCreatedLayout && planningOwnership?.identity) {
+          const [rootEntries, planningEntries, planningMatches] = await Promise.all([
+            fs.promises.readdir(projectPath).catch(() => null), fs.promises.readdir(planningPath).catch(() => null), identityMatches(planningPath, planningOwnership.identity),
+          ]);
+          safeToRemoveCreatedLayout = Boolean(planningMatches && rootEntries?.length === 1 && rootEntries[0] === path.basename(planningPath) && planningEntries?.length === 0);
+        } else if (safeToRemoveCreatedLayout) safeToRemoveCreatedLayout = (await fs.promises.readdir(projectPath).catch(() => ['unknown'])).length === 0;
+        if (safeToRemoveCreatedLayout) {
+          if (planningOwnership) await removeIfOwned(planningPath, planningOwnership).catch(cleanupError => writeLog('warn', 'Unable to clean failed planning folder creation', cleanupError));
+          await removeIfOwned(projectPath, projectOwnership).catch(cleanupError => writeLog('warn', 'Unable to clean failed project creation', cleanupError));
+        } else if (projectPath && fs.existsSync(projectPath)) writeLog('warn', 'Failed project creation layout gained unowned content; entire layout retained', { projectPath });
+      }
       return { success: false, error: error.message || String(error), errorCode: error?.code || undefined, outcomeUnknown: Boolean(error?.outcomeUnknown), catalogReconcilePending: Boolean(error?.catalogReconcilePending) };
     }
   });
@@ -760,9 +1057,7 @@ const registerWorkspaceIpc = context => {
     let stagedPath = '';
     let projectPath = '';
     let catalogAdded = false;
-    let stagedOwnership = null;
-    let stagedOwnershipPromise = null;
-    let projectOwnership = null;
+    let projectOwnershipRebased = false;
     const publish = payload => task?.publish(payload);
     try {
       const mode = String(options.mode || '');
@@ -809,18 +1104,16 @@ const registerWorkspaceIpc = context => {
       await copyPlannedFiles(plan, {
         destinationRoot: path.dirname(projectPath), diskSpaceChecked: true, durable: mode === 'move', isCancelled: () => job.cancelled,
         ownershipToken: operationId,
-        onCreated: target => {
-          if (!stagedOwnershipPromise && comparablePath(target) === comparablePath(stagedPath)) stagedOwnershipPromise = captureIdentity(target);
-        },
         onFileStart: entry => report(path.basename(entry.source)),
         onProgress: ({ entry, bytesDelta, fileCompleted }) => { bytesCopied += bytesDelta; if (fileCompleted) filesCopied += 1; report(path.basename(entry.source)); },
       });
-      if (stagedOwnershipPromise) stagedOwnership = { created: true, identity: await stagedOwnershipPromise };
       throwIfCancelled(() => job.cancelled);
-      const publication = await publishPathNoClobber(stagedPath, projectPath);
-      try { projectOwnership = { created: true, identity: publication?.identity || await captureIdentity(projectPath) }; }
-      catch (error) { throw Object.assign(new Error(`项目内容已发布，但无法确认身份，请勿重试；恢复路径：${projectPath}`), { code: 'WORKSPACE_PUBLISH_OUTCOME_UNKNOWN', outcomeUnknown: true, catalogReconcilePending: true, recoveryPath: projectPath }); }
+      const originalStagedPath = stagedPath;
+      await publishPathNoClobber(originalStagedPath, projectPath, { ownershipToken: operationId });
       stagedPath = '';
+      const rebased = await rebaseCleanupOwnership(operationId, originalStagedPath, projectPath);
+      if (!rebased.success) throw Object.assign(new Error(`项目内容已发布，但 ownership ledger 无法完整映射；已保留恢复目录：${projectPath}`), { code: 'WORKSPACE_PUBLISH_OUTCOME_UNKNOWN', outcomeUnknown: true, catalogReconcilePending: true, recoveryPath: projectPath, cleanupCode: rebased.code });
+      projectOwnershipRebased = true;
       const addPayload = { name: projectName, status: '策划中', relativePath: path.relative(root, projectPath), extra: { importedAt: Date.now(), importedFrom: inspection.sourcePath } };
       let mutation;
       const repositoryMutationAvailable = typeof workspaceRepository?.addProject === 'function';
@@ -862,9 +1155,14 @@ const registerWorkspaceIpc = context => {
       return { success: true, operationId, project, workspacePath: root, storageSwitched: selectedWorkspace.switched, sourceRetained, candidates: inspection.candidates, catalogRefreshPending: false };
     } catch (error) {
       const cancelled = error?.code === CANCELLED_CODE;
-      if (!stagedOwnership && stagedOwnershipPromise) stagedOwnership = { created: true, identity: await stagedOwnershipPromise.catch(() => null) };
-      if (stagedPath) await removeIfOwned(stagedPath, stagedOwnership).catch(() => undefined);
-      if (projectPath && !catalogAdded) await removeIfOwned(projectPath, projectOwnership).catch(() => undefined);
+      if (stagedPath) {
+        const cleanup = await removeCreatedPasteTargets([stagedPath], { ownershipToken: operationId }).catch(cleanupError => ({ success: false, outcomes: [{ path: stagedPath, code: cleanupError?.code || 'CLEANUP_FAILED' }] }));
+        if (!cleanup.success) writeLog('warn', 'Unable to prove complete ownership of failed import staging; recovery retained', { stagedPath, operationId, outcomes: cleanup.outcomes, recoveryPaths: cleanup.recoveryPaths });
+      }
+      if (projectPath && !catalogAdded && projectOwnershipRebased) {
+        const cleanup = await removeCreatedPasteTargets([projectPath], { ownershipToken: operationId }).catch(cleanupError => ({ success: false, outcomes: [{ path: projectPath, code: cleanupError?.code || 'CLEANUP_FAILED' }] }));
+        if (!cleanup.success) writeLog('warn', 'Published failed import tree retained after ownership rebase conflict', { projectPath, operationId, outcomes: cleanup.outcomes, recoveryPaths: cleanup.recoveryPaths });
+      } else if (projectPath && !catalogAdded && fs.existsSync(projectPath)) writeLog('warn', 'Published failed import tree retained because complete ownership is unproven', { projectPath, operationId });
       publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, currentName: '', error: error.message || String(error) });
       if (cancelled) task?.cancelled(); else task?.fail(error);
       return { success: false, cancelled, operationId, error: cancelled ? '项目接管已取消' : error.message || String(error), errorCode: error?.code || undefined, outcomeUnknown: Boolean(error?.outcomeUnknown), catalogReconcilePending: Boolean(error?.catalogReconcilePending) };
@@ -1074,6 +1372,7 @@ const registerWorkspaceIpc = context => {
       } else operation = renameHistory.pop();
       if (!operation && workspacePath) {
         const workspaceRoot = resolveWorkspaceRoot(workspacePath);
+        schedulePersistentUndoClaimGc(workspaceRoot);
         const latest = await workspaceRepository.latestUndoRecord(workspaceRoot);
         if (latest.record) {
           operation = { kind: latest.record.kind, ...latest.record.payload, persistentId: latest.record.id, workspaceRoot };
@@ -1274,11 +1573,23 @@ const registerWorkspaceIpc = context => {
             blockPersistentUndo(operation, staleError);
             return serializeUndoRecoveryError(staleError);
           }
-          const pendingError = Object.assign(new Error('持久撤销 claim 已建立，但数据库隔离尚未完成；不会执行恢复'), {
-            code: 'PERSISTENT_UNDO_RECOVERY_PENDING', recoveryRequired: true, rollbackPending: true,
-          });
-          const claimed = blockPersistentUndo(operation, pendingError);
-          if (!await retryMarkPersistentUndoUnavailable(claimed)) return serializeUndoRecoveryError(claimed.error);
+          let executionClaim;
+          try { executionClaim = await workspaceRepository.claimUndoRecordExecution(operation.workspaceRoot, operation.persistentId); }
+          catch (cause) {
+            const pendingError = Object.assign(new Error(`持久撤销 claim 已建立，但无法原子隔离执行权；不会执行恢复：${cause?.message || String(cause)}`), {
+              code: 'PERSISTENT_UNDO_RECOVERY_PENDING', recoveryRequired: true, rollbackPending: true, cause,
+            });
+            blockPersistentUndo(operation, pendingError);
+            return serializeUndoRecoveryError(pendingError);
+          }
+          if (executionClaim?.claimed !== true) {
+            const pendingError = Object.assign(new Error('持久撤销执行权已被其他进程取得或记录状态已变化；当前 tombstone 保留且不会执行恢复'), {
+              code: 'PERSISTENT_UNDO_RECOVERY_PENDING', recoveryRequired: true, rollbackPending: true,
+            });
+            blockPersistentUndo(operation, pendingError);
+            return serializeUndoRecoveryError(pendingError);
+          }
+          await context.afterPersistentUndoExecutionClaim?.({ operation, descriptor: persistentClaimDescriptor });
         }
         const restoredItems = [];
         for (const plan of restorePreflight) {
@@ -2867,6 +3178,7 @@ const registerWorkspaceIpc = context => {
   });
 
   return {
+    runPersistentUndoClaimGc,
     refreshManagedExternalWatchers: async (workspacePath, status, projectName) => {
       try { return await watchProjectFileRoot(workspacePath, status, projectName); }
       catch (error) {

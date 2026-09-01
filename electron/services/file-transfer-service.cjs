@@ -70,7 +70,8 @@ const throwIfCancelled = isCancelled => {
 
 const isInside = (root, candidate, allowRoot = false) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
-  return (allowRoot && relative === '') || (relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative));
+  const outside = relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative);
+  return (allowRoot && relative === '') || (relative !== '' && !outside);
 };
 
 const assertInside = (root, candidate, label = '路径', allowRoot = false) => {
@@ -216,6 +217,50 @@ const rememberCleanupOwnership = (target, publishedIdentity, ownershipToken) => 
   if (!cleanupOwnershipPathIndex.has(key)) cleanupOwnershipPathIndex.set(key, new Set());
   cleanupOwnershipPathIndex.get(key).add(token);
   return token;
+};
+
+const rebaseCleanupOwnership = async (ownershipToken, fromRoot, toRoot, options = {}) => {
+  const token = String(ownershipToken || '');
+  const snapshot = cleanupOwnershipLedger.get(token);
+  const sourceRoot = path.resolve(fromRoot);
+  const targetRoot = path.resolve(toRoot);
+  if (!snapshot?.paths.size || physicalPathKey(sourceRoot) === physicalPathKey(targetRoot)) return { success: false, code: 'CLEANUP_REBASE_INVALID' };
+  const rebased = [];
+  for (const item of snapshot.paths.values()) {
+    const relative = path.relative(sourceRoot, item.path);
+    if (relative === '..' || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) return { success: false, code: 'CLEANUP_REBASE_OUTSIDE_ROOT', path: item.path };
+    const mappedPath = path.resolve(targetRoot, relative);
+    const mappedRelative = path.relative(targetRoot, mappedPath);
+    if (mappedRelative === '..' || mappedRelative.startsWith(`..${path.sep}`) || path.isAbsolute(mappedRelative)) return { success: false, code: 'CLEANUP_REBASE_OUTSIDE_ROOT', path: mappedPath };
+    const current = await capturePathIdentity(mappedPath, { digest: item.identity.kind === 'file' && Boolean(item.identity.sha256) }).catch(() => null);
+    const matches = item.identity.kind === 'directory'
+      ? directoryOwnershipMatches(current, item.identity)
+      : identitiesMatch(current, item.identity, { destructive: true });
+    if (!matches) return { success: false, code: 'CLEANUP_REBASE_OWNERSHIP_CONFLICT', path: mappedPath };
+    rebased.push({ key: physicalPathKey(mappedPath), item: { path: mappedPath, identity: { ...item.identity, path: mappedPath }, ownershipToken: token } });
+    await options.afterItemVerified?.({ source: item.path, target: mappedPath, identity: item.identity });
+  }
+  if (new Set(rebased.map(entry => entry.key)).size !== rebased.length) return { success: false, code: 'CLEANUP_REBASE_COLLISION' };
+  if (cleanupOwnershipLedger.get(token) !== snapshot) return { success: false, code: 'CLEANUP_REBASE_STALE' };
+  for (const entry of rebased) for (const existingToken of [...(cleanupOwnershipPathIndex.get(entry.key) || [])]) {
+    if (existingToken === token) continue;
+    const existingSnapshot = cleanupOwnershipLedger.get(existingToken);
+    const existing = existingSnapshot?.paths.get(entry.key);
+    if (existing && currentOwnershipMatchesSync(existing)) continue;
+    existingSnapshot?.paths.delete(entry.key);
+    const owners = cleanupOwnershipPathIndex.get(entry.key); owners?.delete(existingToken); if (!owners?.size) cleanupOwnershipPathIndex.delete(entry.key);
+    if (existingSnapshot && !existingSnapshot.paths.size) cleanupOwnershipLedger.delete(existingToken);
+  }
+  if (cleanupOwnershipLedger.get(token) !== snapshot) return { success: false, code: 'CLEANUP_REBASE_STALE' };
+  for (const key of snapshot.paths.keys()) {
+    const owners = cleanupOwnershipPathIndex.get(key); owners?.delete(token); if (!owners?.size) cleanupOwnershipPathIndex.delete(key);
+  }
+  snapshot.paths = new Map(rebased.map(entry => [entry.key, entry.item]));
+  for (const entry of rebased) {
+    if (!cleanupOwnershipPathIndex.has(entry.key)) cleanupOwnershipPathIndex.set(entry.key, new Set());
+    cleanupOwnershipPathIndex.get(entry.key).add(token);
+  }
+  return { success: true, ownershipToken: token, paths: rebased.map(entry => entry.item) };
 };
 
 const forgetCleanupOwnership = (target, ownershipToken) => {
@@ -1045,6 +1090,12 @@ const removeCreatedPasteTargets = async (targets, options = {}) => {
   return { success: outcomes.every(item => item.success), outcomes, recoveryPaths, ownershipToken: requestedToken || undefined };
 };
 
+const removeOwnedPathIdentityBound = async (candidate, identity, options = {}) => {
+  const resolved = path.resolve(candidate);
+  if (!identity) return { success: false, path: resolved, code: 'CLEANUP_IDENTITY_MISSING' };
+  return quarantineOwnedPath({ path: resolved, identity, ownershipToken: String(options.ownershipToken || '') }, options);
+};
+
 const moveFileAtomic = async (source, destination, options = {}) => {
   const ownershipToken = ownershipTokenForOptions(options);
   const sourceInfo = await assertRegularFile(source);
@@ -1248,10 +1299,12 @@ module.exports = {
   moveFileAtomic,
   movePathAtomic,
   publishPathNoClobber,
+  rebaseCleanupOwnership,
   releaseCleanupOwnership,
   getCleanupOwnershipStats,
   removeCopiedSources,
   removeCreatedPasteTargets,
+  removeOwnedPathIdentityBound,
   throwIfCancelled,
   uniqueDestination,
 };

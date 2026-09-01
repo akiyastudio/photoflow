@@ -92,6 +92,10 @@ try {
   assert.match(durabilityProbe.stdout, /durable replace failure test passed/);
   assert.deepStrictEqual(fs.readFileSync(replaceFailureDestination), beforeReplaceFailure, 'replace failure preserves the old snapshot');
 
+  const retiredProtocol = spawnSync(python, [path.join(root, 'scripts', 'test-undo-retired-protocol.py')], { encoding: 'utf8' });
+  if (retiredProtocol.status !== 0) throw new Error(retiredProtocol.stderr || retiredProtocol.stdout);
+  assert.match(retiredProtocol.stdout, /Undo retired-ID protocol tests passed/);
+
   console.log('Operations storage isolation tests passed.');
 } finally {
   fs.rmSync(temporary, { recursive: true, force: true });

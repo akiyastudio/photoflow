@@ -21,6 +21,8 @@ except ModuleNotFoundError:
 SCHEMA_VERSION = 1
 UNDO_ACTIONS = (
     "undo_record_add",
+    "undo_record_retire_claim",
+    "undo_record_claim_execute",
     "undo_record_latest",
     "undo_record_list",
     "undo_record_remove",
@@ -29,6 +31,10 @@ UNDO_ACTIONS = (
 )
 ALL_ACTIONS = ("init", *UNDO_ACTIONS)
 _READY_CACHE = {}
+
+
+class UndoRecordRetiredError(RuntimeError):
+    code = "UNDO_RECORD_RETIRED"
 
 
 def _fsync_parent_directory(path: str) -> None:
@@ -165,6 +171,8 @@ def _import_legacy(db: sqlite3.Connection, legacy_database: str) -> int:
                     (row["id"],),
                 ).fetchone()
                 if current is not None:
+                    if current["state"] == "retired":
+                        continue
                     if tuple(current) != tuple(row):
                         raise RuntimeError(f"legacy undo import conflicts for record {row['id']}")
                     continue
@@ -210,7 +218,7 @@ def _drain_legacy_outbox(db: sqlite3.Connection, legacy_database: str) -> int:
                 for offset in range(0, len(ids), 400):
                     chunk = ids[offset:offset + 400]
                     placeholders = ",".join("?" for _ in chunk)
-                    db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", chunk)
+                    db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders}) AND state <> 'retired'", chunk)
             db.commit()
         except Exception:
             db.rollback()
@@ -253,12 +261,50 @@ def execute(database: str, action: str, payload: dict):
             return {"success": True, "database": os.path.abspath(database), "schemaVersion": SCHEMA_VERSION, "records": count, "imported": imported, "recovered": recovered}
         if action == "undo_record_add":
             record_id = str(payload.get("id") or uuid.uuid4())
-            db.execute(
-                "INSERT OR REPLACE INTO undo_records(id,kind,payload_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            cursor = db.execute(
+                """INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at) VALUES(?,?,?,?,?,?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     kind=excluded.kind,payload_json=excluded.payload_json,state='ready',
+                     created_at=excluded.created_at,updated_at=excluded.updated_at
+                   WHERE undo_records.state <> 'retired'""",
                 (record_id, str(payload.get("kind") or "trash"), json.dumps(payload.get("payload") or {}, ensure_ascii=False), "ready", now, now),
             )
+            if cursor.rowcount != 1:
+                db.rollback()
+                raise UndoRecordRetiredError(f"undo record {record_id} is permanently retired")
             db.commit()
             return {"success": True, "id": record_id}
+        if action == "undo_record_retire_claim":
+            record_id = str(payload.get("id") or "")
+            if not record_id:
+                raise ValueError("undo record id is required")
+            db.execute("BEGIN IMMEDIATE")
+            db.execute(
+                """INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at)
+                   VALUES(?, 'claim-retired', '{}', 'retired', ?, ?)
+                   ON CONFLICT(id) DO UPDATE SET
+                     kind='claim-retired',payload_json='{}',state='retired',updated_at=excluded.updated_at
+                   WHERE undo_records.state IN ('unavailable','retired')""",
+                (record_id, now, now),
+            )
+            row = db.execute("SELECT state FROM undo_records WHERE id=?", (record_id,)).fetchone()
+            retired = row is not None and row["state"] == "retired"
+            db.commit()
+            return {"success": True, "retired": retired}
+        if action == "undo_record_claim_execute":
+            record_id = str(payload.get("id") or "")
+            if not record_id:
+                raise ValueError("undo record id is required")
+            db.execute("BEGIN IMMEDIATE")
+            cursor = db.execute(
+                """UPDATE undo_records SET
+                     kind='claim-retired',payload_json='{}',state='retired',updated_at=?
+                   WHERE id=? AND state='ready' AND kind='trash'""",
+                (now, record_id),
+            )
+            claimed = cursor.rowcount == 1
+            db.commit()
+            return {"success": True, "claimed": claimed}
         if action == "undo_record_latest":
             row = db.execute(
                 "SELECT * FROM undo_records WHERE state='ready' AND kind='trash' ORDER BY created_at DESC LIMIT 1"
@@ -267,11 +313,11 @@ def execute(database: str, action: str, payload: dict):
         if action == "undo_record_list":
             kinds = [str(value) for value in payload.get("kinds") or [] if str(value)]
             if not kinds:
-                rows = db.execute("SELECT * FROM undo_records ORDER BY created_at DESC").fetchall()
+                rows = db.execute("SELECT * FROM undo_records WHERE state <> 'retired' ORDER BY created_at DESC").fetchall()
             else:
                 placeholders = ",".join("?" for _ in kinds)
                 rows = db.execute(
-                    f"SELECT * FROM undo_records WHERE kind IN ({placeholders}) ORDER BY created_at DESC", kinds
+                    f"SELECT * FROM undo_records WHERE state <> 'retired' AND kind IN ({placeholders}) ORDER BY created_at DESC", kinds
                 ).fetchall()
             return {"success": True, "records": [_record(row) for row in rows]}
         if action == "undo_record_remove":
@@ -280,7 +326,7 @@ def execute(database: str, action: str, payload: dict):
             ids = list(dict.fromkeys(str(value) for value in payload.get("ids") or [] if str(value)))
         elif action == "undo_record_mark_unavailable":
             db.execute(
-                "UPDATE undo_records SET state='unavailable',updated_at=? WHERE id=?",
+                "UPDATE undo_records SET state='unavailable',updated_at=? WHERE id=? AND state <> 'retired'",
                 (now, str(payload.get("id") or "")),
             )
             db.commit()
@@ -291,7 +337,7 @@ def execute(database: str, action: str, payload: dict):
             for offset in range(0, len(ids), 400):
                 chunk = ids[offset:offset + 400]
                 placeholders = ",".join("?" for _ in chunk)
-                db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders})", chunk)
+                db.execute(f"DELETE FROM undo_records WHERE id IN ({placeholders}) AND state <> 'retired'", chunk)
         db.commit()
         return {"success": True}
     finally:

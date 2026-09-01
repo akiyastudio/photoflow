@@ -7,6 +7,8 @@ const createOperationsRepository = (client, getLegacyDatabasePath) => {
   return {
     load: root => call(root, 'init'),
     addUndoRecord: (root, payload) => call(root, 'undo_record_add', payload),
+    retireUndoRecordClaim: (root, id) => call(root, 'undo_record_retire_claim', { id }),
+    claimUndoRecordExecution: (root, id) => call(root, 'undo_record_claim_execute', { id }),
     latestUndoRecord: root => call(root, 'undo_record_latest'),
     listUndoRecords: (root, kinds = ['trash', 'project-cleanup']) => call(root, 'undo_record_list', { kinds }),
     removeUndoRecord: (root, id) => call(root, 'undo_record_remove', { id }),

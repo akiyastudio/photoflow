@@ -508,12 +508,31 @@ def restore_workspace(source: str, destination: str, domain: str, replacements) 
     os.makedirs(os.path.dirname(destination_path), exist_ok=True)
     staged = f"{destination_path}.restore-{uuid.uuid4().hex}.tmp"
     backup = ""
+    retired_records = []
+    if domain == "operations" and os.path.isfile(destination_path):
+        live = _connect(destination_path, readonly=True)
+        try:
+            retired_records = [tuple(row) for row in live.execute(
+                "SELECT id,created_at,updated_at FROM undo_records WHERE state='retired'"
+            ).fetchall()]
+        finally:
+            live.close()
     try:
         snapshot(source, staged, domain)
         db = _connect(staged)
         try:
             db.execute("BEGIN IMMEDIATE")
             _rebase(db, domain, replacements)
+            if domain == "operations":
+                now = int(time.time() * 1000)
+                for record_id, created_at, updated_at in retired_records:
+                    db.execute(
+                        """INSERT INTO undo_records(id,kind,payload_json,state,created_at,updated_at)
+                           VALUES(?, 'claim-retired', '{}', 'retired', ?, ?)
+                           ON CONFLICT(id) DO UPDATE SET
+                             kind='claim-retired',payload_json='{}',state='retired',updated_at=excluded.updated_at""",
+                        (record_id, created_at or now, max(int(updated_at or 0), now)),
+                    )
             db.commit()
         except Exception:
             db.rollback()
