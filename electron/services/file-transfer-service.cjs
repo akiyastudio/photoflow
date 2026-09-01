@@ -1137,6 +1137,7 @@ const deleteOwnedTreeEntries = async (entries, nativeService, rootEntry, private
   let deletedCleanupCount = 0;
   let cleanupOutcomeCount = 0;
   let cleanupOutcomeUnknown = false;
+  let partialUnknown = false;
   const appendResults = (batch, results) => {
     for (let index = 0; index < batch.length; index += 1) {
       const entry = batch[index]; const result = results[index] || {};
@@ -1155,6 +1156,7 @@ const deleteOwnedTreeEntries = async (entries, nativeService, rootEntry, private
       let results;
       try { results = await invokeBatch(batch); }
       catch (error) {
+        partialUnknown = true;
         results = batch.map(() => ({ success: false, deleted: error?.deleted === true, code: error?.code || 'CLEANUP_BATCH_FAILED', cleanupWarning: error?.cleanupWarning || '批量清理结果不确定', outcomeUnknown: true, recoveryPath: error?.recoveryPath, phase: error?.phase }));
         appendResults(batch, results); return false;
       }
@@ -1203,7 +1205,7 @@ const deleteOwnedTreeEntries = async (entries, nativeService, rootEntry, private
       await yieldCleanupTurn(options);
     }
   }
-  return { success: failedCount === 0, outcomes, cleanupOutcomeCount, cleanupOutcomesTruncated: cleanupOutcomeCount > outcomes.length, deletedCount, deletedCleanupCount, cleanupWarning: deletedCleanupCount ? `${deletedCleanupCount}项已删除但持久化确认不确定` : cleanupOutcomeUnknown ? '批量清理结果不确定' : undefined, outcomeUnknown: cleanupOutcomeUnknown, recoveryPaths: outcomes.map(outcome => outcome.recoveryPath).filter(Boolean) };
+  return { success: failedCount === 0, outcomes, cleanupOutcomeCount, cleanupOutcomesTruncated: cleanupOutcomeCount > outcomes.length, deletedCount, deletedCleanupCount, cleanupWarning: deletedCleanupCount ? `${deletedCleanupCount}项已删除但持久化确认不确定` : cleanupOutcomeUnknown ? '批量清理结果不确定' : undefined, outcomeUnknown: cleanupOutcomeUnknown, partialUnknown, recoveryPaths: outcomes.map(outcome => outcome.recoveryPath).filter(Boolean) };
 };
 
 const quarantineOwnedTreeRoot = async (rootItem, treeItems, options = {}) => {
@@ -1254,7 +1256,7 @@ const quarantineOwnedTreeRoot = async (rootItem, treeItems, options = {}) => {
   if (!anchor.success) return { success: false, path: originalRoot, code: anchor.code, recoveryPath: privateRoot };
   const deletion = await deleteOwnedTreeEntries(proof.deletionEntries, nativeService, rootEntry, privateRoot, { ...options, cleanupAnchorRoot: anchor.anchorRoot, cleanupAnchorChain: anchor.chain });
   const quarantineRetained = await pathExistsObject(quarantine);
-  const deletionFields = { partial: !deletion.success && deletion.deletedCount > 0, deletedCount: deletion.deletedCount, deletedCleanupCount: deletion.deletedCleanupCount, cleanupWarning: deletion.cleanupWarning, outcomeUnknown: deletion.outcomeUnknown, cleanupOutcomes: deletion.outcomes, cleanupOutcomeCount: deletion.cleanupOutcomeCount, cleanupOutcomesTruncated: deletion.cleanupOutcomesTruncated };
+  const deletionFields = { partial: !deletion.success && (deletion.deletedCount > 0 || deletion.partialUnknown), partialUnknown: deletion.partialUnknown, deletedCount: deletion.deletedCount, deletedCleanupCount: deletion.deletedCleanupCount, cleanupWarning: deletion.cleanupWarning, outcomeUnknown: deletion.outcomeUnknown, cleanupOutcomes: deletion.outcomes, cleanupOutcomeCount: deletion.cleanupOutcomeCount, cleanupOutcomesTruncated: deletion.cleanupOutcomesTruncated, ...(deletion.partialUnknown ? { recoveryPartial: true, recoveryDescription: 'recoveryPath 仅表示仍可见的清理残留，不代表完整原树' } : {}) };
   if (!deletion.success || quarantineRetained) return { success: false, path: originalRoot, code: 'CLEANUP_TREE_PARTIAL', recoveryPath: privateRoot, recoveryPaths: [...new Set([privateRoot, ...(deletion.recoveryPaths || [])])], ...deletionFields };
   const rootRemoved = await removePrivateQuarantineRoot(privateRoot, privateIdentity).catch(() => false);
   if (!rootRemoved) return { success: false, path: originalRoot, code: 'CLEANUP_PRIVATE_ROOT_RETAINED', recoveryPath: privateRoot, recoveryPaths: [privateRoot], ...deletionFields };
