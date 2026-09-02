@@ -26,7 +26,6 @@ type Options = {
   setFolderMarkSetup: Dispatch<SetStateAction<FolderMarkDraft | null>>;
   setPendingProgressFolders: Dispatch<SetStateAction<Array<{ relativePath: string; name: string; mediaKind: 'image' | 'video' }>>>;
 };
-
 const normalizeProjectRelativePath = (value: string) => value.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
 
 export const useProgressFolderOnboarding = ({
@@ -142,4 +141,3 @@ export const useProgressFolderOnboarding = ({
     };
   }, [active, loadProgressFolders, mediaCacheConfig.directory, mediaCacheConfig.maxSizeGB, project.name, project.path, project.status, projectWorkflows, rootRelativeFileEvents, versionTreeEnabled, workspacePath]);
 };
-

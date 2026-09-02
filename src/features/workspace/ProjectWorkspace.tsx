@@ -34,6 +34,7 @@ import { useProgressFolderOnboarding } from './useProgressFolderOnboarding';
 import type { CompareMatch, ProgressCompareConfirmation, ProgressSetupDraft } from './project-progress-workflow-types';
 import { createProjectProgressWorkflow } from './createProjectProgressWorkflow';
 import { createProjectProgressSetup } from './createProjectProgressSetup';
+import { setProjectProgressTrackingState } from './project-progress-tracking-service';
 import { inspectProgressRelations } from './progress-tree-model';
 import { FolderMarkPanel, TrackingConfirmationPanel, ProgressPairPreview as SharedProgressPairPreview, type FolderMarkDraft, type ProgressPairPreviewMode, VersionProgressPanel, type VersionProgressDraft, defaultWorkflowInputIds, normalizeTrackingPolicy, progressTrackingAction, selectableVersionParents, trackingStateLabel, versionKindForParent, versionTreeNodeBadgeLabel, versionTreeTaskPanelProgress, workflowInputIdsForRelationChange } from '../versioning/public';
 import { previewMetadataFieldsForEntry } from '../metadata/metadata-pane-model';
@@ -2263,22 +2264,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
       ? normalizedPath.slice(normalizedRoot.length + 1)
       : normalizedPath.split('/').pop() || '';
   }, [project.path]);
-  const setProgressTrackingState = async (progressFolder: ProgressFolder, trackingState: ProgressFolder['trackingState']) => {
-    const mediaKind = progressNodeMediaKind(progressFolder);
-    if (!mediaKind) throw new Error('混合媒体节点不能启用版本跟踪');
-    const updated = await projectWorkspaceClient.registerProgressFolder(workspacePath, project.status, project.name, {
-      relativePath: progressFolderRelativePath(progressFolder),
-      mediaKind,
-      versionKey: progressFolder.versionKey,
-      parentProgressId: progressFolder.parentProgressId || undefined,
-      displayName: progressFolder.displayName,
-      trackingEnabled: trackingState === 'ready',
-      trackingState,
-      progressId: progressFolder.id,
-    });
-    if (!updated.success || !updated.progressFolder) throw new Error(updated.error || '无法更新版本跟踪状态');
-    return updated.progressFolder;
-  };
+  const setProgressTrackingState = (progressFolder: ProgressFolder, trackingState: ProgressFolder['trackingState']) => setProjectProgressTrackingState({ workspacePath, project, progressFolder, relativePath: progressFolderRelativePath(progressFolder), trackingState });
   const {
     submitProgressSetup, unregisterLegacyOrphanProgress, submitFolderMarkSetup,
     progressTrackingRefreshLabel, openProgressRepair,

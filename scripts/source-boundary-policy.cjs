@@ -34,7 +34,7 @@ const ALLOWED_COMPONENT_FEATURE_EDGES = Object.freeze([
 const ENTRY_FILE_BUDGETS = Object.freeze({
   'electron/main.cjs': 1500,
   'src/App.tsx': 950,
-  'src/features/workspace/ProjectWorkspace.tsx': 7680,
+  'src/features/workspace/ProjectWorkspace.tsx': 5200,
   'electron/modules/workspace-ipc.cjs': 3200,
 });
 
