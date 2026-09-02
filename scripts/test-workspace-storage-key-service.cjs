@@ -34,15 +34,15 @@ const main = async () => {
       const buffer = Buffer.from(body); const hash = crypto.createHash('sha256').update(buffer).digest('hex'); const destination = path.join(objectRoot, hash.slice(0, 2), hash.slice(2));
       fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.writeFileSync(destination, buffer); return { path: name, hash, size: buffer.length, mtimeMs: 1 };
     };
-    const core = store('workspace.sqlite3', 'core-k2'); const operations = store('operations.sqlite3', 'operations-k2'); const component = store('offline-fixture/storage.sqlite3', 'component-k2'); const componentExtra = store('offline-fixture/private/extra.bin', 'extra-k2'); const legacyComponent = store('offline-fixture.sqlite3', 'redundant-legacy');
+    const core = store('workspace.sqlite3', 'core-k2'); const operations = store('operations.sqlite3', 'operations-k2'); const media = store('media.sqlite3', 'media-k2'); const versioning = store('versioning.sqlite3', 'versioning-k2'); const component = store('offline-fixture/storage.sqlite3', 'component-k2'); const componentExtra = store('offline-fixture/private/extra.bin', 'extra-k2'); const legacyComponent = store('offline-fixture.sqlite3', 'redundant-legacy');
     const snapshotId = 'workspace-key-e2e'; const manifest = {
       formatVersion: 1, id: snapshotId, complete: true, createdAt: 1, appVersion: 'test', workspace: { id: restoredKey, root: 'C:/old', dataRoot: 'C:/old-data' }, database: core, projects: [],
-      files: [{ scope: 'domain-database', ...operations }, { scope: 'component-storage', ...component }, { scope: 'component-storage', ...componentExtra }, { scope: 'domain-database', ...legacyComponent }],
+      files: [{ scope: 'domain-database', ...operations }, { scope: 'domain-database', ...media }, { scope: 'domain-database', ...versioning }, { scope: 'component-storage', ...component }, { scope: 'component-storage', ...componentExtra }, { scope: 'domain-database', ...legacyComponent }],
       componentBackups: [{ componentId: 'offline-fixture', componentVersion: '1', sources: [{ scope: 'component-storage', path: component.path, format: 'component-storage-v1' }, { scope: 'domain-database', path: legacyComponent.path, format: 'legacy-domain-v1' }] }],
     };
     const snapshotRoot = path.join(backupTarget, STORE_DIRECTORY, 'snapshots', snapshotId); fs.mkdirSync(snapshotRoot, { recursive: true }); fs.writeFileSync(path.join(snapshotRoot, 'manifest.json'), JSON.stringify(manifest));
     const keyForRoot = candidate => restoreKeys.get(candidate); const dataForRoot = candidate => restoreKeys.getDataRootForKey(keyForRoot(candidate));
-    const backgroundTasks = createBackgroundTaskService({ eventBus: new EventEmitter() }); const config = { backup: { targetPath: backupTarget } }; let failBindOnce = false;
+    const backgroundTasks = createBackgroundTaskService({ eventBus: new EventEmitter() }); const config = { backup: { targetPath: backupTarget } }; let failBindOnce = false; const recoveryCalls = [];
     const componentDataAdoptionPolicy = createComponentDataAdoptionPolicy({ version: 1, legacyDomainDatabaseOwners: [{ componentId: 'offline-fixture', paths: ['offline-fixture.sqlite3'] }], legacySettingsAdoptions: [] });
     const backup = createBackupService({
       app: { getVersion: () => 'test' }, backgroundTasks, readSavedConfig: () => config,
@@ -52,19 +52,38 @@ const main = async () => {
       getWorkspaceDatabasePath: candidate => path.join(databaseDir, `${keyForRoot(candidate)}.sqlite3`),
       getWorkspaceOperationsDatabasePath: candidate => path.join(dataForRoot(candidate), 'databases', 'operations.sqlite3'), getWorkspaceMediaDatabasePath: candidate => path.join(dataForRoot(candidate), 'databases', 'media.sqlite3'), getWorkspaceVersioningDatabasePath: candidate => path.join(dataForRoot(candidate), 'databases', 'versioning.sqlite3'),
       workspaceSqliteCoordinator: { run: async (_options, worker) => worker() }, prepareDomainRecovery: async () => async () => undefined,
-      runPythonJsonAction: async (_script, args) => { const source = args[args.indexOf('--source') + 1]; const destination = args[args.indexOf('--destination') + 1]; fs.mkdirSync(path.dirname(destination), { recursive: true }); fs.copyFileSync(source, destination); return {}; }, shell: {}, credentialService: {}, writeLog: () => undefined,
+      runPythonJsonAction: async (script, args) => {
+        const action = args[0]; const domainIndex = args.indexOf('--domain'); const source = args[args.indexOf('--source') + 1]; const destination = args[args.indexOf('--destination') + 1];
+        recoveryCalls.push({ script, action, domain: domainIndex >= 0 ? args[domainIndex + 1] : 'core', source, destination, sourceBody: fs.readFileSync(source, 'utf8') });
+        fs.mkdirSync(path.dirname(destination), { recursive: true });
+        if (action === 'sync-retired-shadow') {
+          assert.equal(fs.readFileSync(destination, 'utf8'), 'core-k2', 'retired shadow sync merges records without replacing the core store');
+          return {};
+        }
+        fs.copyFileSync(source, destination); return {};
+      }, shell: {}, credentialService: {}, writeLog: () => undefined,
       componentServiceManager: { backupRestoreDescriptors: () => [], invokeBackupRestore: async () => { throw new Error('unexpected hook'); }, prepareBackupRestore: async () => true },
       componentDataAdoptionPolicy,
     });
     backup.approveTarget(backupTarget);
     const resumedWorkspaceId = 'c'.repeat(32); const resumedTaskId = 'workspace-key-planned-resume';
     fs.writeFileSync(path.join(path.dirname(restoreRoot), `.pfr-${crypto.randomUUID()}.next`), JSON.stringify({ schemaVersion: 1, state: 'planned', destinationRoot: restoreRoot, workspaceId: resumedWorkspaceId, snapshotId, restoreSessionId: resumedTaskId, taskId: resumedTaskId }));
+    const firstRecoveryCall = recoveryCalls.length;
     const restored = await backup.restoreWorkspace('', snapshotId, restoreRoot, { id: resumedTaskId, metadata: { restoreSessionId: resumedTaskId }, checkpoint: {}, progress: 0 }); assert.equal(restored.task.state, 'completed');
     const boundKey = fs.readFileSync(path.join(restoreRoot, '.photoflow-workspace-id'), 'utf8').trim(); assert.equal(boundKey, resumedWorkspaceId, 'resume claims the unique validated parent-directory planned marker identity'); assert.notEqual(prewarmedKey, boundKey);
     const restartedKeys = createWorkspaceStorageKeyService({ fs, path, crypto, databaseDir }); assert.equal(restartedKeys.get(restoreRoot), boundKey);
     const restartedDataRoot = restartedKeys.getDataRootForKey(boundKey);
+    assert.deepEqual(recoveryCalls.slice(firstRecoveryCall).map(call => [call.script, call.action, call.domain, call.sourceBody, call.destination]), [
+      ['domain_recovery.py', 'restore-workspace', 'operations', 'operations-k2', path.join(restartedDataRoot, 'databases', 'operations.sqlite3')],
+      ['domain_recovery.py', 'restore-workspace', 'media', 'media-k2', path.join(restartedDataRoot, 'databases', 'media.sqlite3')],
+      ['domain_recovery.py', 'restore-workspace', 'versioning', 'versioning-k2', path.join(restartedDataRoot, 'databases', 'versioning.sqlite3')],
+      ['backup_db.py', 'restore-workspace', 'core', 'core-k2', path.join(databaseDir, `${boundKey}.sqlite3`)],
+      ['domain_recovery.py', 'sync-retired-shadow', 'operations', 'operations-k2', path.join(databaseDir, `${boundKey}.sqlite3`)],
+    ], 'workspace restore keeps every database source bound to its own target and syncs the retired shadow last');
     assert.equal(fs.readFileSync(path.join(databaseDir, `${boundKey}.sqlite3`), 'utf8'), 'core-k2');
     assert.equal(fs.readFileSync(path.join(restartedDataRoot, 'databases', 'operations.sqlite3'), 'utf8'), 'operations-k2');
+    assert.equal(fs.readFileSync(path.join(restartedDataRoot, 'databases', 'media.sqlite3'), 'utf8'), 'media-k2');
+    assert.equal(fs.readFileSync(path.join(restartedDataRoot, 'databases', 'versioning.sqlite3'), 'utf8'), 'versioning-k2');
     assert.equal(fs.readFileSync(path.join(restartedDataRoot, 'components', 'offline-fixture', 'storage.sqlite3'), 'utf8'), 'component-k2');
     assert.equal(fs.readFileSync(path.join(restartedDataRoot, 'components', 'offline-fixture', 'private', 'extra.bin'), 'utf8'), 'extra-k2');
     assert.equal(restored.result.componentRestore[0].redundantLegacySourceCount, 1, 'uninstalled transition restore preserves current storage and skips its redundant legacy database');
