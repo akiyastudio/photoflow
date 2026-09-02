@@ -24,6 +24,7 @@ def main() -> None:
         node.name for node in core_tree.body if isinstance(node, (ast.FunctionDef, ast.ClassDef))
     }
     assert not declared & core_definitions, "domain actions must not retain duplicate core implementations"
+    assert workspace_db._component_version_row is workspace_media_actions._component_version_row
 
     media_source = (ROOT / "python" / "workspace_media_actions.py").read_text(encoding="utf-8")
     assert "\ufffd" not in media_source, "domain extraction must preserve UTF-8 error contracts"
