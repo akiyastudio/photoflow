@@ -31,9 +31,9 @@ assert.deepEqual([...accessedRecentDependencies].sort(), Object.keys(recentDepen
 
 const accessedInspirationDependencies = new Set();
 const inspirationDependencies = new Proxy({
-  Array, Error, Set, String, assertExistingInside: () => undefined, copyFileAtomic: () => undefined, fs: {},
+  Array, Error, Set, String, assertExistingInside: () => undefined, fileSystemService: {}, fs: {},
   getProjectPath: () => undefined, ipcMain, mainWindow: {}, path, pushUndoOperation: () => undefined,
-  resolveProjectEntry: () => undefined, shell: {}, uniqueDestination: () => undefined, writeLog: () => undefined,
+  resolveProjectEntry: () => undefined, uniqueDestination: () => undefined, writeLog: () => undefined,
 }, {
   get(target, property) {
     accessedInspirationDependencies.add(property);

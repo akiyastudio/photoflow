@@ -107,6 +107,16 @@ const directCallers = mutationRoots.flatMap(relative => walk(path.join(root, rel
 const unexpectedCallers = directCallers.filter(file => !LEGACY_PROJECT_CONTENT_WRITERS.includes(file));
 assert.deepStrictEqual(unexpectedCallers, [], `new project-content mutation caller must use the file-operations command boundary: ${unexpectedCallers.join(', ')}`);
 
+const inspirationWriter = 'electron/modules/workspace/inspiration-ipc.cjs';
+const inspirationSource = fs.readFileSync(path.join(root, inspirationWriter), 'utf8');
+assert(!LEGACY_PROJECT_CONTENT_WRITERS.includes(inspirationWriter), 'inspiration gather must not become migration debt');
+for (const forbidden of [/\bcopyFileAtomic\s*\(/, /\bfs\.promises\.(?:mkdir|rm)\s*\(/, /\bshell\.writeShortcutLink\s*\(/]) {
+  assert(!forbidden.test(inspirationSource), `inspiration gather must delegate project-content writes to file-operations: ${forbidden}`);
+}
+for (const ownerCall of ['fileSystemService.ensureDirectory(', 'fileSystemService.copy(', 'fileSystemService.createWindowsShortcut(', 'fileSystemService.rollbackCreated(']) {
+  assert(inspirationSource.includes(ownerCall), `inspiration gather must use the file-operations owner boundary: ${ownerCall}`);
+}
+
 const documentation = fs.readFileSync(path.join(root, 'docs', 'DOMAIN_BOUNDARIES.md'), 'utf8');
 assert(documentation.includes('Only `file-operations`') && documentation.includes('domain.entity.action.vN'));
 

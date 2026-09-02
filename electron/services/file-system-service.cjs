@@ -93,12 +93,20 @@ const writeJournal = async (fs, journalPath, value, faultInjector = () => undefi
   finally { if (!preserveRecovery) { await fs.promises.rm(temporary, { force: true }).catch(() => undefined); await fs.promises.rm(backup, { force: true }).catch(() => undefined); } }
 };
 
-const createFileSystemService = ({ recycleBinService, fs = require('fs'), journalFaultInjector = () => undefined, nativePublicationService = null }) => ({
+const createFileSystemService = ({ recycleBinService, fs = require('fs'), journalFaultInjector = () => undefined, nativePublicationService = null, shortcutAdapter = null }) => ({
   ...transfer,
   ...identity,
+  copy: (source, destination, options) => transfer.copyFileAtomic(source, destination, options),
   move: (source, destination, options) => transfer.movePathAtomic(source, destination, options),
   createDirectory: targetPath => fs.promises.mkdir(targetPath),
   ensureDirectory: targetPath => fs.promises.mkdir(targetPath, { recursive: true }),
+  createWindowsShortcut: (shortcutPath, details) => {
+    if (shortcutAdapter?.platform !== 'win32') throw new Error('文件夹快捷方式目前仅支持 Windows');
+    return shortcutAdapter.writeShortcutLink(shortcutPath, details);
+  },
+  rollbackCreated: async targetPaths => {
+    for (const targetPath of [...targetPaths].reverse()) await fs.promises.rm(targetPath, { force: true }).catch(() => undefined);
+  },
   removeEmptyDirectory: targetPath => fs.promises.rmdir(targetPath),
   removeCreated: (targetPath, options = {}) => fs.promises.rm(targetPath, { recursive: options.directory === true, force: false }),
   trash: targetPath => recycleBinService.trash(targetPath),

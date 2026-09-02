@@ -5,6 +5,7 @@ const os = require('os');
 const path = require('path');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
 const { createMediaAccessService } = require('../electron/services/media-access-service.cjs');
+const { createFileSystemService } = require('../electron/services/file-system-service.cjs');
 const { createProjectVirtualPathService } = require('../electron/services/project-virtual-path-service.cjs');
 const { copyFileAtomic, uniqueDestination } = require('../electron/services/file-transfer-service.cjs');
 
@@ -29,8 +30,11 @@ const watchedRoots = [];
 const releasedRoots = [];
 const grantedRoots = [];
 const inspectedToolSources = [];
+const fileOperationCalls = [];
+const workspaceChangeNotifications = [];
 let pendingOfflineRead = null;
 let inspirationTrackingReconciliations = 0;
+let rejectedCopyBasename = '';
 const shortcutDescriptions = new Map();
 const shortcutDescriptionsByTarget = new Map();
 const shortcutShell = {
@@ -82,11 +86,22 @@ const assertInside = (root, candidate) => {
   if (relative.startsWith('..') || path.isAbsolute(relative)) throw new Error('path escaped root');
   return resolvedCandidate;
 };
+const ownedFileSystemService = createFileSystemService({
+  fs: handlerFs,
+  recycleBinService: {},
+  shortcutAdapter: { platform: 'win32', writeShortcutLink: shortcutShell.writeShortcutLink },
+});
+const fileSystemService = {
+  ensureDirectory: async target => { fileOperationCalls.push({ action: 'ensure-directory', target }); return ownedFileSystemService.ensureDirectory(target); },
+  createWindowsShortcut: (target, details) => { fileOperationCalls.push({ action: 'create-shortcut', target, details }); return ownedFileSystemService.createWindowsShortcut(target, details); },
+  copy: async (source, target) => { fileOperationCalls.push({ action: 'copy', source, target }); if (path.basename(source) === rejectedCopyBasename) throw new Error('injected owner copy failure'); return ownedFileSystemService.copy(source, target); },
+  rollbackCreated: async targets => { fileOperationCalls.push({ action: 'rollback-created', targets: [...targets] }); return ownedFileSystemService.rollbackCreated(targets); },
+};
 
 registerWorkspaceIpc({
   Array, Boolean, Date, Error, Math, Object, Promise, Set, String,
   HIDDEN_SYSTEM_ENTRY_NAMES: new Set(['.photoflow-workspace-id']), IMAGE_EXTENSIONS: new Set(['.jpg']), RAW_EXTENSIONS: new Set(), VIDEO_EXTENSIONS: new Set(), WORKSPACE_STATUSES: ['未分类', '策划中'],
-  fs: handlerFs, path, crypto, copyFileAtomic, uniqueDestination, assertInside, assertExistingInside,
+  fs: handlerFs, path, crypto, copyFileAtomic, uniqueDestination, assertInside, assertExistingInside, fileSystemService,
   ipcMain: { handle: (channel, handler) => handlers.set(channel, handler) },
   acquireFileRootWatcher: root => { watchedRoots.push(path.resolve(root)); return { success: true, root: path.resolve(root) }; },
   releaseFileRootWatcher: root => releasedRoots.push(path.resolve(root)),
@@ -121,7 +136,7 @@ registerWorkspaceIpc({
   shell: shortcutShell,
   projectVirtualPaths,
   pushUndoOperation: async operation => undoOperations.push(operation),
-  mainWindow: { webContents: { send: () => undefined } },
+  mainWindow: { webContents: { send: (channel, payload) => workspaceChangeNotifications.push({ channel, payload }) } },
   writeLog: () => undefined,
 });
 
@@ -192,6 +207,27 @@ registerWorkspaceIpc({
     assert.strictEqual(result.fileCount, 1);
     assert.strictEqual(fs.readFileSync(path.join(targetRoot, '策划', '画面.jpg'), 'utf8'), 'image payload');
     assert.strictEqual(fs.readFileSync(path.join(targetRoot, '策划', '参考目录.lnk'), 'utf8'), path.join(sourceRoot, '参考目录'));
+    assert.deepStrictEqual(fileOperationCalls.slice(0, 3).map(call => call.action), ['ensure-directory', 'create-shortcut', 'copy'], 'the IPC command must delegate every project-content side effect to the file-operations owner service');
+    assert.deepStrictEqual(fileOperationCalls[1].details, { target: path.join(sourceRoot, '参考目录'), cwd: path.join(sourceRoot, '参考目录'), description: '灵感库：参考目录' }, 'ordinary shortcut target, cwd, and description must be preserved');
+    assert.deepStrictEqual(workspaceChangeNotifications, [{ channel: 'workspace-files-changed', payload: { root: targetRoot, fileName: '策划', eventType: 'rename' } }]);
+    assert.strictEqual(projectVirtualPaths.readManagedExternalLink(path.join(targetRoot, '策划', '参考目录.lnk')), null, 'an inspiration shortcut must remain an ordinary Windows shortcut, not a managed external link');
+    const duplicateResult = await gather({}, sourceRoot, temporaryRoot, '策划中', '项目', ['参考目录', '画面.jpg']);
+    assert.strictEqual(duplicateResult.success, true, duplicateResult.error);
+    assert.strictEqual(fs.readFileSync(path.join(targetRoot, '策划', '画面 (1).jpg'), 'utf8'), 'image payload', 'gathered files must retain unique destination naming');
+    assert.strictEqual(fs.readFileSync(path.join(targetRoot, '策划', '参考目录 (1).lnk'), 'utf8'), path.join(sourceRoot, '参考目录'), 'gathered shortcuts must retain unique destination naming');
+    fs.writeFileSync(path.join(sourceRoot, '回滚-已复制.jpg'), 'rollback first');
+    fs.writeFileSync(path.join(sourceRoot, '回滚-失败.jpg'), 'rollback fail');
+    rejectedCopyBasename = '回滚-失败.jpg';
+    const failedResult = await gather({}, sourceRoot, temporaryRoot, '策划中', '项目', ['回滚-已复制.jpg', '回滚-失败.jpg']);
+    rejectedCopyBasename = '';
+    assert.strictEqual(failedResult.success, false);
+    assert.strictEqual(failedResult.error, 'injected owner copy failure');
+    assert.strictEqual(fs.existsSync(path.join(targetRoot, '策划', '回滚-已复制.jpg')), false, 'the owner service must roll back already-created outputs after a later failure');
+    assert.deepStrictEqual(fileOperationCalls.at(-1), { action: 'rollback-created', targets: [path.join(targetRoot, '策划', '回滚-已复制.jpg')] });
+    assert.strictEqual(undoOperations.length, 2, 'failed commands must not add undo entries');
+    assert.strictEqual(workspaceChangeNotifications.length, 2, 'failed commands must not emit project change notifications');
+    fs.unlinkSync(path.join(sourceRoot, '回滚-已复制.jpg'));
+    fs.unlinkSync(path.join(sourceRoot, '回滚-失败.jpg'));
     const planningBrowse = await browseFiles({}, temporaryRoot, '策划中', '项目', '策划');
     assert.strictEqual(planningBrowse.entries.find(entry => entry.name === '参考目录.lnk')?.sourceChannel, 'inspiration', 'shortcuts gathered from the inspiration library must retain their display channel');
     const inspirationToolImages = ['工具图-1.jpg', '工具图-2.jpg', '工具图-3.jpg'].map(name => path.join(sourceRoot, '参考目录', name));
@@ -300,9 +336,8 @@ registerWorkspaceIpc({
       for (const mediaPath of shortcutMediaPaths) fs.unlinkSync(mediaPath);
       fs.utimesSync(shortcutTargetPath, referenceDirectoryTimes.atime, referenceDirectoryTimes.mtime);
     }
-    assert.strictEqual(undoOperations.length, 1);
-    assert.strictEqual(undoOperations[0].kind, 'remove-created');
-    assert.strictEqual(undoOperations[0].paths.length, 2);
+    assert.strictEqual(undoOperations.length, 2);
+    assert(undoOperations.every(operation => operation.kind === 'remove-created' && operation.paths.length === 2));
     const recentFiles = handlers.get('workspace-recent-files');
     assert(recentFiles, 'recent-files IPC handler was not registered');
     const expiredRecentResult = await recentFiles({}, sourceRoot, '未分类', '.__photoflow_inspiration__', '', 1, 'expired-cursor');
