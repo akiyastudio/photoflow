@@ -88,6 +88,7 @@
     "test:startup-catalog": "node scripts/test-startup-catalog-client.cjs",
     "test:marquee-model": "node scripts/test-marquee-selection-model.cjs",
     "test:project-workspace-layout": "node scripts/test-project-workspace-layout-model.cjs",
+    "test:project-file-query": "node scripts/test-project-file-query-model.cjs",
     "test:project-toolbar-overflow": "node scripts/test-project-toolbar-overflow-model.cjs",
     "test:file-entry-interaction": "node scripts/test-file-entry-interaction-model.cjs",
     "test:file-entry-sort": "node scripts/test-file-entry-sort-model.cjs",

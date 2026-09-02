@@ -8,7 +8,11 @@ const workspacePath = path.resolve(__dirname, '..', 'src', 'features', 'workspac
 const workspaceLayoutPath = path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspaceLayout.tsx');
 const versionTreePath = path.resolve(__dirname, '..', 'src', 'components', 'ProjectVersionTree.tsx');
 const source = fs.readFileSync(sourcePath, 'utf8');
-const workspace = fs.readFileSync(workspacePath, 'utf8');
+const workspace = [
+  workspacePath,
+  path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'useProjectFileQueries.ts'),
+  path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'useProjectVersionRelations.ts'),
+].map(filePath => fs.readFileSync(filePath, 'utf8')).join('\n');
 const workspaceLayout = fs.readFileSync(workspaceLayoutPath, 'utf8');
 const versionTree = fs.readFileSync(versionTreePath, 'utf8');
 const compiled = ts.transpileModule(source, {
