@@ -1,6 +1,7 @@
 """Machine-readable ownership contract for workspace SQLite stores."""
 
 from workspace_db_migrations import MIGRATION_OWNERS
+from workspace_db_domains import MEDIA_ACTIONS
 
 
 DOMAIN_TABLES = {
@@ -75,4 +76,13 @@ STORAGE_OWNERSHIP = {
         "recoveryActions": ("verify", "snapshot", "restore-workspace", "reset", "sync-retired-shadow"),
         "rebuildable": False,
     },
+}
+
+# Runtime implementation ownership is intentionally separate from physical
+# table ownership: media_workflow_import_commit coordinates progress graph
+# writes and therefore remains in the workspace composition root.
+ACTION_IMPLEMENTATION_OWNERS = {
+    "workspace_media_actions": tuple(
+        action for action in MEDIA_ACTIONS if action != "media_workflow_import_commit"
+    ),
 }

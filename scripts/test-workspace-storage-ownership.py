@@ -12,7 +12,7 @@ import domain_recovery  # noqa: E402
 import operations_db  # noqa: E402
 import workspace_db  # noqa: E402
 from workspace_db_migrations import CANONICAL_STORAGE_DOMAINS, MIGRATION_METADATA, MIGRATION_OWNERS  # noqa: E402
-from workspace_storage_ownership import DOMAIN_TABLES, STORAGE_OWNERSHIP  # noqa: E402
+from workspace_storage_ownership import ACTION_IMPLEMENTATION_OWNERS, DOMAIN_TABLES, STORAGE_OWNERSHIP  # noqa: E402
 
 
 def tables(db: sqlite3.Connection, schema: str = "main") -> set[str]:
@@ -56,6 +56,9 @@ def main() -> None:
     for domain in DOMAIN_TABLES:
         declared = STORAGE_OWNERSHIP[domain]
         assert set(declared["tables"]) == {"meta", *DOMAIN_TABLES[domain]}
+    assert set(ACTION_IMPLEMENTATION_OWNERS["workspace_media_actions"]) == {
+        action for action in workspace_db.MEDIA_ACTIONS if action != "media_workflow_import_commit"
+    }
 
     with tempfile.TemporaryDirectory(prefix="photoflow-storage-ownership-") as temporary:
         base = Path(temporary)
