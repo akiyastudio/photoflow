@@ -137,6 +137,9 @@ const canvasHookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/feat
 const projectWorkspaceSource = [
   'src/features/workspace/ProjectWorkspace.tsx',
   'src/features/workspace/useProjectVersionRelations.ts',
+  'src/features/workspace/createProjectProgressSetup.ts',
+  'src/features/workspace/createProjectProgressWorkflow.ts',
+  'src/features/workspace/useProgressFolderOnboarding.ts',
 ].map(relativePath => fs.readFileSync(path.resolve(__dirname, '..', relativePath), 'utf8')).join('\n');
 assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next)'), 'version-tree layout reconciliation must skip identical maps to prevent effect update loops');
 const initialLayoutLoadSource = canvasHookSource.slice(canvasHookSource.indexOf('const loadServerLayout'), canvasHookSource.indexOf('useEffect(() => {\n    disposedRef.current = false'));

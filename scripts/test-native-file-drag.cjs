@@ -149,12 +149,13 @@ const run = async () => {
   assert(workspaceSource.includes("new Event('photoflow:folder-tab-drag-start')") && workspaceSource.includes("new Event('photoflow:folder-tab-drag-end')") && dragEndSource.includes('[data-folder-tab-drop-zone="true"]') && dragEndSource.includes("reportNativeDragDecision('folder-tab-opened'"), 'single ordinary folders can open from a final titlebar hit without a parallel HTML payload');
 
   const appSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'App.tsx'), 'utf8');
+  const appTitlebarSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'app', 'AppTitlebar.tsx'), 'utf8');
   const folderTabNavigationSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'features', 'app', 'useFolderTabNavigation.ts'), 'utf8');
   const projectNavigatorSource = fs.readFileSync(path.join(__dirname, '..', 'src', 'components', 'ProjectNavigator.tsx'), 'utf8');
-  assert(appSource.includes("data-folder-tab-drop-zone={folderTabSourceDragActive ? 'true' : undefined}") && appSource.includes("folderTabSourceDragActive ? 'app-titlebar-control' : 'app-window-drag-region'"), 'the titlebar becomes a no-drag hit target only during an eligible folder gesture');
+  assert(appSource.includes('folderTabSourceDragActive={folderTabSourceDragActive}') && appTitlebarSource.includes("data-folder-tab-drop-zone={props.folderTabSourceDragActive ? 'true' : undefined}") && appTitlebarSource.includes("props.folderTabSourceDragActive ? 'app-titlebar-control' : 'app-window-drag-region'"), 'the titlebar becomes a no-drag hit target only during an eligible folder gesture');
   assert(folderTabNavigationSource.includes("addEventListener('photoflow:folder-tab-drag-start'") && folderTabNavigationSource.includes("addEventListener('photoflow:folder-tab-drag-end'"), 'folder-tab affordance follows the native session lifecycle');
   assert(projectNavigatorSource.includes("setData('application/x-photoflow-folder-tab'") && projectNavigatorSource.includes("effectAllowed = 'copyMove'") && projectNavigatorSource.includes('拖到标签栏可新建标签'), 'sidebar projects advertise both category moves and titlebar tab creation');
-  assert(appSource.includes('{...folderTabDropProps}') && folderTabNavigationSource.includes("getData('application/x-photoflow-folder-tab'") && folderTabNavigationSource.includes('openProjectInNewTab(payload.project)'), 'the titlebar accepts a sidebar project and opens it in a new tab');
+  assert(appSource.includes('folderTabDropProps={folderTabDropProps}') && appTitlebarSource.includes('{...props.folderTabDropProps}') && folderTabNavigationSource.includes("getData('application/x-photoflow-folder-tab'") && folderTabNavigationSource.includes('openProjectInNewTab(payload.project)'), 'the titlebar accepts a sidebar project and opens it in a new tab');
 
   const preloadSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'preload.cjs'), 'utf8');
   assert(!preloadSource.includes('workspace-prepare-file-drag') && !preloadSource.includes('workspace-file-drag-renderer-release') && !preloadSource.includes('workspace-file-drag-renderer-cancel'));
