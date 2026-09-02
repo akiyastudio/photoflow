@@ -108,7 +108,7 @@
     "test:backup-service": "node scripts/test-backup-service.cjs && node scripts/test-workspace-storage-key-service.cjs && node scripts/run-component-declared-tests.cjs backup-restore",
     "test:component-package-layout": "npm run setup:video-tools-python && npm run test:component-package-layout:prepared",
     "test:component-package-layout:prepared": "node scripts/test-component-declared-tests.cjs && node scripts/run-component-declared-tests.cjs package-layout",
-    "test:storage-usage": "node scripts/test-storage-usage-service.cjs && node scripts/test-media-cache-multi-process.cjs",
+    "test:storage-usage": "node scripts/test-storage-usage-service.cjs && node scripts/test-media-cache-runtime.cjs && node scripts/test-media-cache-multi-process.cjs",
     "test:archive-service": "node scripts/test-archive-service.cjs",
     "test:components": "npm run test:component-visual-contract && node scripts/test-component-catalog.cjs && node scripts/test-components.cjs && node scripts/test-component-development.cjs && node scripts/test-component-status-refresh-policy.cjs && node scripts/test-component-install-adoption.cjs && node scripts/test-component-host.cjs && node scripts/test-component-service.cjs && npm run test:component-package-layout",
     "test:component-development": "node scripts/test-component-development.cjs",

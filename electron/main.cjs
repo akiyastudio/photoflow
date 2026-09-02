@@ -52,6 +52,8 @@ const { createStorageUsageService } = require('./services/storage-usage-service.
 const { loadOrCreateInstallationId, resolveMediaCacheNamespace } = require('./services/media-cache-namespace.cjs');
 const { runElectronSmokeProbe } = require('./services/electron-smoke-probe.cjs');
 const { createWorkspaceReconcileTask } = require('./services/workspace-reconcile-task.cjs');
+const { createWorkspaceWatcherRuntime } = require('./services/workspace-watcher-runtime.cjs');
+const { createMediaCacheRuntime } = require('./services/media-cache-runtime.cjs');
 const { cleanupRetiredCaptureTimeCache } = require('./services/retired-cache-service.cjs');
 const { createPluginService } = require('./services/plugin-service.cjs');
 const { createWorkspaceService } = require('./domains/workspace/public.cjs');
@@ -191,10 +193,6 @@ const findLatestPhotoshop = () => {
 
 let mainWindow;
 let telemetryService;
-let workspaceWatcher = null;
-let watchedWorkspacePath = '';
-let workspaceWatchTimer = null;
-let workspaceReconciliationTimer = null;
 const fileOperationState = { projectFileClipboard: null };
 const activeProjectFileOperations = new Map();
 const mediaMetadataCache = new Map();
@@ -245,41 +243,8 @@ const normalizeMediaCacheSizeGB = (value, fallback = 50) => {
   const number = Number(value);
   return Number.isFinite(number) ? Math.max(0, number) : fallback;
 };
-const workspaceWatchChanges = new Map();
-const workspaceWatchKnownEntries = new Map();
-const workspaceWatchSuppressions = new Map();
 let mediaTrackingScanScheduler = null;
 const isInternalWorkspaceChange = isInternalWorkspacePath;
-const comparableWorkspacePath = value => {
-  const resolved = path.resolve(value);
-  return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved;
-};
-const pathIsInside = (parent, candidate) => {
-  const relative = path.relative(parent, candidate);
-  return !relative || (!relative.startsWith('..') && !path.isAbsolute(relative));
-};
-const isSuppressedWorkspaceChange = (root, fileName) => {
-  const candidate = comparableWorkspacePath(path.resolve(root, String(fileName || '')));
-  return [...workspaceWatchSuppressions.keys()].some(suppressed => pathIsInside(suppressed, candidate));
-};
-const suppressWorkspaceWatchPath = targetPath => {
-  const suppressed = comparableWorkspacePath(targetPath);
-  workspaceWatchSuppressions.set(suppressed, (workspaceWatchSuppressions.get(suppressed) || 0) + 1);
-  for (const changedName of workspaceWatchChanges.keys()) {
-    const candidate = comparableWorkspacePath(path.resolve(watchedWorkspacePath || path.dirname(targetPath), changedName));
-    if (pathIsInside(suppressed, candidate)) workspaceWatchChanges.delete(changedName);
-  }
-  fileRootWatcherService?.discardChangesInside(targetPath);
-};
-const releaseWorkspaceWatchPath = (targetPath, delayMs = 750) => {
-  const suppressed = comparableWorkspacePath(targetPath);
-  setTimeout(() => {
-    const count = workspaceWatchSuppressions.get(suppressed) || 0;
-    if (count <= 1) workspaceWatchSuppressions.delete(suppressed);
-    else workspaceWatchSuppressions.set(suppressed, count - 1);
-  }, Math.max(0, delayMs));
-};
-const trackedVersionThumbnailCopies = new Map();
 const nativeConsoleLog = console.log.bind(console);
 const nativeConsoleError = console.error.bind(console);
 const processSupervisor = createProcessSupervisor({ writeLog: (...args) => writeLog(...args) });
@@ -981,52 +946,9 @@ const resolveWorkspaceRoot = workspaceService.resolveRoot;
 const ensureWorkspace = workspaceService.ensureRoot;
 const refreshWorkspaceCatalog = workspaceService.refreshCatalog;
 const reconcileWorkspaceCatalogDirect = workspaceService.reconcileCatalog;
-const workspaceCatalogReconciliations = new Map();
-const stableCatalogValue = value => Array.isArray(value) ? value.map(stableCatalogValue)
-  : value && typeof value === 'object' ? Object.fromEntries(Object.keys(value).sort().map(key => [key, stableCatalogValue(value[key])])) : value;
-const stableCatalogExtra = value => { try { return stableCatalogValue(JSON.parse(value || '{}')); } catch { return value || ''; } };
-const workspaceCatalogSemanticSnapshot = catalog => JSON.stringify((catalog?.projects || []).map(project => ({
-  name: project.name, status: project.status, relative_path: project.relative_path,
-  filesystem_id: project.filesystem_id, availability: project.availability, missing_since: project.missing_since,
-  extra_json: stableCatalogExtra(project.extra_json),
-})).sort((left, right) => `${left.relative_path}\0${left.name}`.localeCompare(`${right.relative_path}\0${right.name}`)));
-const reconcileWorkspaceCatalog = root => {
-  const existing = workspaceCatalogReconciliations.get(root);
-  if (existing) return existing;
-  const previousSnapshot = workspaceCatalogSemanticSnapshot(workspaceCatalogs.get(root));
-  const operation = reconcileWorkspaceCatalogDirect(root).then(catalog => {
-    const changed = previousSnapshot !== workspaceCatalogSemanticSnapshot(catalog);
-    if (changed && mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send('workspace-projects-changed', { root, reconciled: true });
-    }
-    return catalog;
-  }).finally(() => workspaceCatalogReconciliations.delete(root));
-  workspaceCatalogReconciliations.set(root, operation);
-  return operation;
-};
 const mutateWorkspaceCatalog = workspaceService.mutateCatalog;
 const getProjectPath = workspaceService.getProjectPath;
 const cleanProjectName = workspaceService.cleanProjectName;
-
-const stopWorkspaceWatcher = (stopSchedulers = false) => {
-  const previousWorkspaceRoot = watchedWorkspacePath;
-  if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
-  workspaceWatchTimer = null;
-  if (workspaceWatcher) workspaceWatcher.close();
-  workspaceWatcher = null;
-  watchedWorkspacePath = '';
-  workspaceWatchChanges.clear();
-  workspaceWatchKnownEntries.clear();
-  workspaceWatchSuppressions.clear();
-  if (workspaceReconciliationTimer) clearInterval(workspaceReconciliationTimer);
-  workspaceReconciliationTimer = null;
-  workspaceReconcileTask.reset();
-  if (previousWorkspaceRoot) for (const project of workspaceCatalogs.get(previousWorkspaceRoot)?.projects || []) mediaTrackingScanScheduler?.cancel(previousWorkspaceRoot, project.name);
-  if (stopSchedulers) {
-    mediaTrackingScanScheduler?.stop();
-    versionStaleDetectionService.stop();
-  }
-};
 
 const stopFileRootWatchers = () => {
   fileRootWatcherService?.stop();
@@ -1040,126 +962,38 @@ const suspendFileRootWatcher = rootPath => fileRootWatcherService?.suspend(rootP
 const resumeFileRootWatcher = (rootPath, references) => fileRootWatcherService?.resume(rootPath, references)
   || { success: false, root: path.resolve(rootPath), error: '文件根目录监听服务尚未初始化' };
 
-const workspaceReconcileTask = createWorkspaceReconcileTask({ backgroundTasks, getWatchedWorkspacePath: () => watchedWorkspacePath, getProjects: root => workspaceCatalogs.get(root)?.projects, reconcileWorkspaceCatalog, writeLog });
-const reconcileWorkspaceState = workspaceReconcileTask.run;
-
-const startWorkspaceReconciliation = root => {
-  if (workspaceReconciliationTimer) clearInterval(workspaceReconciliationTimer);
-  workspaceReconciliationTimer = setInterval(() => { void reconcileWorkspaceState(root); }, 5 * 60 * 1000);
-};
-
-const scheduleMediaTrackingScan = (...args) => mediaTrackingScanScheduler?.schedule(...args);
-const cancelMediaTrackingScan = (...args) => mediaTrackingScanScheduler?.cancel(...args);
-
-const watchWorkspace = (root) => {
-  if (watchedWorkspacePath === root && workspaceWatcher) return;
-  stopWorkspaceWatcher();
-  try {
-    workspaceWatcher = fs.watch(root, { recursive: process.platform !== 'linux' }, (eventType, fileName) => {
-      // File operations are assembled in hidden staging paths and committed
-      // atomically. Watching those temporary writes caused thumbnail work and
-      // repeated renderer refreshes for every file in a large copy operation.
-      if (isInternalWorkspaceChange(fileName)) return;
-      if (!fileName) return;
-      if (isSuppressedWorkspaceChange(root, fileName)) return;
-      const changedName = String(fileName);
-      const normalizedEventType = eventType === 'rename' ? 'rename' : 'change';
-      recordActionableWatchEntry(workspaceWatchChanges, workspaceWatchKnownEntries, root, changedName, normalizedEventType, fs);
-      if (workspaceWatchTimer) clearTimeout(workspaceWatchTimer);
-      workspaceWatchTimer = setTimeout(() => {
-        const describedChanges = describeActionableWatchChanges(root, [...workspaceWatchChanges], fs);
-        workspaceWatchChanges.clear();
-        forgetMissingWatchChanges(workspaceWatchKnownEntries, root, describedChanges);
-        if (!describedChanges.length) return;
-        const changedEntries = describedChanges.map(change => [path.relative(root, change.path), change.eventType]);
-        const changedNames = changedEntries.map(([changedName]) => changedName);
-        const changedEventTypes = new Map(changedEntries);
-        if (thumbnailService) {
-          const changesByProject = new Map();
-          for (const change of describedChanges) {
-            const changedName = path.relative(root, change.path);
-            const segments = changedName.split(/[\\/]/).filter(Boolean);
-            if (segments.length < 2) continue;
-            const projectRoot = path.join(root, segments[0]);
-            if (!changesByProject.has(projectRoot)) changesByProject.set(projectRoot, []);
-            changesByProject.get(projectRoot).push(change.path);
-          }
-          for (const [projectRoot, changedPaths] of changesByProject) {
-            void thumbnailService.syncChangedPaths(projectRoot, changedPaths, mediaRuntimeState.activeMediaCacheConfig).catch(error => {
-              writeLog('warn', 'Unable to update thumbnail index from file watcher', { projectRoot, error: error.message || String(error) });
-            });
-          }
-        }
-        const catalog = workspaceCatalogs.get(root);
-        const knownProjectPaths = new Set((catalog?.projects || []).map(project => project.relative_path.toLocaleLowerCase()));
-        const changedSegments = changedNames.map(changedName => changedName.split(/[\\/]/).filter(Boolean));
-        const catalogRescanNames = new Set(changedEntries.flatMap(([changedName, changedEventType]) => {
-          const segments = changedName.split(/[\\/]/).filter(Boolean);
-          const firstSegment = segments[0];
-          if (!firstSegment) return [];
-          return (segments.length === 1 && changedEventType === 'rename'
-            || !knownProjectPaths.has(firstSegment.toLocaleLowerCase())) ? [firstSegment] : [];
-        }));
-        const catalogMayHaveChanged = !changedNames.length || changedSegments.some(segments => segments.length === 1 || !knownProjectPaths.has(String(segments[0] || '').toLocaleLowerCase()));
-        const changedProjects = new Set();
-        const changedPathsByProject = new Map();
-        for (const change of describedChanges) {
-          const changedName = path.relative(root, change.path);
-          const segments = changedName.split(/[\\/]/).filter(Boolean);
-          if (segments.length < 2) continue;
-          const firstSegment = segments[0];
-          const project = catalog?.projects.find(item => item.relative_path.toLocaleLowerCase() === String(firstSegment || '').toLocaleLowerCase());
-          if (project) {
-            changedProjects.add(project.name);
-            if (!changedPathsByProject.has(project.name)) changedPathsByProject.set(project.name, []);
-            changedPathsByProject.get(project.name).push(change);
-          }
-        }
-        if (!changedNames.length) for (const project of catalog?.projects || []) changedProjects.add(project.name);
-        for (const projectName of changedProjects) scheduleMediaTrackingScan(
-          root, projectName, changedPathsByProject.get(projectName) || [], !changedNames.length,
-        );
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          for (const changedName of changedNames) {
-            mainWindow.webContents.send('workspace-files-changed', { root, fileName: changedName, eventType: changedEventTypes.get(changedName) || 'rename' });
-          }
-        }
-        if (catalogMayHaveChanged) {
-          void reconcileWorkspaceCatalog(root).then(refreshedCatalog => {
-            for (const topLevelName of catalogRescanNames) {
-              const project = refreshedCatalog.projects.find(item => item.relative_path.toLocaleLowerCase() === String(topLevelName).toLocaleLowerCase());
-              if (project) scheduleMediaTrackingScan(root, project.name, [], true);
-            }
-          }).catch(error => {
-            writeLog('warn', 'Unable to reconcile workspace catalog after file change', { root, error: error.message || String(error) });
-          });
-        }
-      }, 200);
-    });
-    // Reconcile version state lazily when a project watcher is installed. A
-    // workspace with dozens of projects must not enqueue one database writer
-    // per project merely because its catalog was opened.
-    workspaceWatcher.on('error', error => {
-      writeLog('warn', 'Workspace file watcher stopped', { root, error: error.message || String(error) });
-      if (workspaceWatcher) workspaceWatcher.close();
-      workspaceWatcher = null;
-      watchedWorkspacePath = '';
-      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('workspace-projects-changed', { root });
-    });
-    watchedWorkspacePath = root;
-    startWorkspaceReconciliation(root);
-  } catch (error) {
-    writeLog('warn', 'Unable to watch workspace for file changes', error);
-    // A failed watcher makes periodic reconciliation more important, not less.
-    watchedWorkspacePath = root;
-    startWorkspaceReconciliation(root);
-  }
-};
-
 const IMAGE_EXTENSIONS = new Set(['.jpg', '.jpeg', '.png', '.gif', '.webp', '.bmp', '.tif', '.tiff', '.heic', '.heif', '.hif', '.avif']);
 const IMAGE_PREVIEW_CONVERSION_EXTENSIONS = new Set(['.tif', '.tiff', '.heic', '.heif', '.hif']);
 const VIDEO_EXTENSIONS = new Set(['.mp4', '.mov', '.m4v', '.webm', '.avi', '.mkv', '.mpeg', '.mpg', '.mts', '.m2ts', '.crm']);
 const RAW_EXTENSIONS = new Set(['.cr2', '.cr3', '.nef', '.arw', '.raf', '.orf', '.rw2', '.dng', '.rwl', '.3fr', '.fff', '.iiq', '.pef', '.srw']);
+const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store', '.photoflow-workspace-id']);
+const mediaCacheRuntime = createMediaCacheRuntime({
+  fs, path, crypto, platform: process.platform, resolveMediaCacheNamespace, userDataPath: getConfigDir(), installationId,
+  approvedDirectories: approvedMediaCacheDirectories, normalizeCacheSizeGB: normalizeMediaCacheSizeGB,
+  trackedVersionThumbnailPath: getTrackedVersionThumbnailPath, versionService, mediaRuntimeState,
+  imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS, videoExtensions: VIDEO_EXTENSIONS,
+  thumbnailVersion: THUMBNAIL_VERSION, defaultPriority: PRIORITY.nearby, writeLog,
+});
+const {
+  indexes: mediaCacheIndexes, resolveMediaCacheDir, getMediaCacheDir, refreshMediaCacheIndex, trimMediaCache,
+  rawPreviewPath, convertedImagePreviewPath, mediaThumbnailCacheFile, ensureTrackedVersionThumbnail,
+  handleThumbnailUpdate,
+} = mediaCacheRuntime;
+const workspaceWatcherRuntime = createWorkspaceWatcherRuntime({
+  fs, path, platform: process.platform, backgroundTasks, catalogs: workspaceCatalogs,
+  reconcileCatalogDirect: reconcileWorkspaceCatalogDirect, getMainWindow: () => mainWindow,
+  getThumbnailService: () => thumbnailService, getFileRootWatcherService: () => fileRootWatcherService,
+  getMediaCacheConfig: () => mediaRuntimeState.activeMediaCacheConfig,
+  getMediaTrackingScanScheduler: () => mediaTrackingScanScheduler, versionStaleDetectionService,
+  isInternalChange: isInternalWorkspaceChange, describeActionableChanges: describeActionableWatchChanges,
+  forgetMissingChanges: forgetMissingWatchChanges, recordActionableEntry: recordActionableWatchEntry,
+  createReconcileTask: createWorkspaceReconcileTask, writeLog,
+});
+const {
+  watch: watchWorkspace, stop: stopWorkspaceWatcher, reconcileWorkspaceState, reconcileWorkspaceCatalog,
+  scheduleMediaTrackingScan, cancelMediaTrackingScan, suppressWorkspaceWatchPath, releaseWorkspaceWatchPath,
+  isSuppressedWorkspaceChange,
+} = workspaceWatcherRuntime;
 const mediaRatingService = createMediaRatingService({
   exiftool, fs, path, imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS,
   releaseWorkspaceWatchPath, suppressWorkspaceWatchPath, versionService, projectVirtualPaths, writeLog,
@@ -1173,287 +1007,6 @@ selectionService = createSelectionService({
   fs, crypto, copyFileAtomic, versionService, projectVirtualPaths,
   imageExtensions: IMAGE_EXTENSIONS, rawExtensions: RAW_EXTENSIONS, videoExtensions: VIDEO_EXTENSIONS,
 });
-const RAW_DECODER_CACHE_VERSION = 'libraw-rawpy-v1';
-const HIDDEN_SYSTEM_ENTRY_NAMES = new Set(['desktop.ini', 'thumbs.db', '.ds_store', '.photoflow-workspace-id']);
-
-const resolveMediaCacheDir = (config = {}) => {
-  return resolveMediaCacheNamespace({ path, userDataPath: getConfigDir(), installationId, configuredDirectory: config.directory });
-};
-
-const getMediaCacheDir = (config = {}) => {
-  const requested = typeof config.directory === 'string' ? config.directory.trim() : '';
-  const selectedRoot = path.resolve(requested || path.join(getConfigDir(), 'media-cache'));
-  const cacheDir = resolveMediaCacheDir(config);
-  if (!approvedMediaCacheDirectories.has(selectedRoot)) throw new Error('媒体缓存目录未经授权');
-  if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
-  return cacheDir;
-};
-
-const mediaCacheIndexes = new Map();
-
-const refreshMediaCacheIndex = async cacheDir => {
-  const directory = path.resolve(cacheDir);
-  const entries = await fs.promises.readdir(directory, { withFileTypes: true });
-  const files = new Map();
-  let totalBytes = 0;
-  await Promise.all(entries.filter(entry => entry.isFile()).map(async entry => {
-    const filePath = path.join(directory, entry.name);
-    try {
-      const stat = await fs.promises.stat(filePath);
-      files.set(filePath, { size: stat.size, used: stat.atimeMs || stat.mtimeMs });
-      totalBytes += stat.size;
-    } catch { /* file changed while the cache snapshot was being built */ }
-  }));
-  const previous = mediaCacheIndexes.get(directory);
-  const state = previous || { pendingPaths: new Set(), timer: null, running: false, maxBytes: 50 * 1024 ** 3 };
-  state.files = files;
-  state.totalBytes = totalBytes;
-  state.initialized = true;
-  mediaCacheIndexes.set(directory, state);
-  return state;
-};
-
-const getMediaCacheIndex = async cacheDir => {
-  const directory = path.resolve(cacheDir);
-  const current = mediaCacheIndexes.get(directory);
-  if (current?.initialized) return current;
-  if (current?.initializing) return current.initializing;
-  const state = current || { pendingPaths: new Set(), timer: null, running: false, maxBytes: 50 * 1024 ** 3 };
-  state.initializing = refreshMediaCacheIndex(directory).finally(() => { state.initializing = null; });
-  mediaCacheIndexes.set(directory, state);
-  return state.initializing;
-};
-
-const updateMediaCacheIndex = async (state, changedPaths) => {
-  for (const filePath of changedPaths) {
-    const resolved = path.resolve(filePath);
-    const previous = state.files.get(resolved);
-    try {
-      const stat = await fs.promises.stat(resolved);
-      state.files.set(resolved, { size: stat.size, used: stat.atimeMs || stat.mtimeMs });
-      state.totalBytes += stat.size - (previous?.size || 0);
-    } catch {
-      if (previous) state.totalBytes -= previous.size;
-      state.files.delete(resolved);
-    }
-  }
-};
-
-const runMediaCacheMaintenance = async cacheDir => {
-  const deadlineAt = Date.now() + 10 * 60 * 1000;
-  const directory = path.resolve(cacheDir);
-  const state = await getMediaCacheIndex(directory);
-  if (state.running) return;
-  state.running = true;
-  try {
-    const changedPaths = [...state.pendingPaths];
-    state.pendingPaths.clear();
-    await updateMediaCacheIndex(state, changedPaths);
-    if (state.totalBytes <= state.maxBytes) return;
-    // Access times only need a full refresh when eviction is actually needed.
-    const refreshed = await refreshMediaCacheIndex(directory);
-    const protectedCachePaths = new Set([...trackedVersionThumbnailCopies.values()].map(pending => {
-      const resolved = path.resolve(pending.cachePath);
-      return process.platform === 'win32' ? resolved.toLocaleLowerCase() : resolved;
-    }));
-    await thumbnailService.evictCache({
-      cacheRoot: directory,
-      bytesToFree: Math.max(0, refreshed.totalBytes - refreshed.maxBytes),
-      excludePaths: [...protectedCachePaths],
-      recoverOrphans: true,
-      deadlineAt,
-    });
-    await refreshMediaCacheIndex(directory);
-  } finally {
-    state.running = false;
-    if (state.pendingPaths.size) trimMediaCache(directory, state.maxBytes / 1024 ** 3, []);
-  }
-};
-
-const trimMediaCache = (cacheDir, maxSizeGB, changedPaths = []) => {
-  const directory = path.resolve(cacheDir);
-  const state = mediaCacheIndexes.get(directory) || { pendingPaths: new Set(), timer: null, running: false, maxBytes: 50 * 1024 ** 3 };
-  state.maxBytes = normalizeMediaCacheSizeGB(maxSizeGB) * 1024 ** 3;
-  for (const filePath of changedPaths) state.pendingPaths.add(path.resolve(filePath));
-  if (state.timer) clearTimeout(state.timer);
-  state.timer = setTimeout(() => {
-    state.timer = null;
-    void runMediaCacheMaintenance(directory).catch(error => writeLog('warn', 'Media cache maintenance failed', { directory, error: error.message || String(error) }));
-  }, 500);
-  mediaCacheIndexes.set(directory, state);
-};
-
-const isCompleteJpegFile = filePath => {
-  try {
-    const fileStat = fs.statSync(filePath);
-    if (!fileStat.isFile() || fileStat.size < 128) return false;
-    const handle = fs.openSync(filePath, 'r');
-    try {
-      const markers = Buffer.alloc(4);
-      fs.readSync(handle, markers, 0, 2, 0);
-      fs.readSync(handle, markers, 2, 2, fileStat.size - 2);
-      return markers[0] === 0xff && markers[1] === 0xd8 && markers[2] === 0xff && markers[3] === 0xd9;
-    } finally {
-      fs.closeSync(handle);
-    }
-  } catch {
-    return false;
-  }
-};
-
-const decodedImagePreviewPath = async (sourcePath, stat, cacheConfig, kind) => {
-  const cacheDir = getMediaCacheDir(cacheConfig);
-  const target = decodedImagePreviewCacheFile(sourcePath, stat, cacheDir, kind);
-  if (isCompleteJpegFile(target)) return target;
-  if (fs.existsSync(target)) await thumbnailService?.evictCache({ thumbnailPaths: [target] }).catch(() => undefined);
-  try {
-    await imageThumbnailRuntime.generateOriginalImagePreviewFile(sourcePath, kind, [{ sizeLabel: `${kind}-preview`, pixels: 0, path: target }]);
-    if (!isCompleteJpegFile(target)) return null;
-    trimMediaCache(cacheDir, cacheConfig?.maxSizeGB, [target]);
-    return target;
-  } catch (error) {
-    writeLog('warn', 'Browser-compatible image preview generation failed', { sourcePath, kind, error: error.message || String(error) });
-    return null;
-  }
-};
-
-const rawPreviewPath = (sourcePath, stat, cacheConfig) => decodedImagePreviewPath(sourcePath, stat, cacheConfig, 'raw');
-const convertedImagePreviewPath = (sourcePath, stat, cacheConfig) => decodedImagePreviewPath(sourcePath, stat, cacheConfig, 'image');
-
-const mediaSourceCacheKey = sourcePath => process.platform === 'win32' ? path.resolve(sourcePath).toLowerCase() : path.resolve(sourcePath);
-const decodedImagePreviewCacheFile = (sourcePath, stat, cacheDir, kind) => path.join(cacheDir, crypto.createHash('sha256').update(`decoded-preview|v2|${kind}|${kind === 'raw' ? RAW_DECODER_CACHE_VERSION : 'builtin'}|${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
-const mediaThumbnailCacheFile = (sourcePath, stat, cacheDir, requestedSize, version = THUMBNAIL_VERSION) => path.join(cacheDir, crypto.createHash('sha256').update(`thumbnail|v${version}|${RAW_EXTENSIONS.has(path.extname(sourcePath).toLowerCase()) ? RAW_DECODER_CACHE_VERSION : 'builtin'}|${requestedSize}|${mediaSourceCacheKey(sourcePath)}|${stat.size}|${stat.mtimeMs}`).digest('hex') + '.jpg');
-
-const isCompleteJpegBuffer = buffer => buffer.length >= 128
-  && buffer[0] === 0xff && buffer[1] === 0xd8
-  && buffer[buffer.length - 2] === 0xff && buffer[buffer.length - 1] === 0xd9;
-
-const readCompleteJpegBuffer = async filePath => {
-  let handle;
-  try {
-    // Keep the handle open until the complete payload is in memory. On Windows
-    // this also prevents a concurrent cache cleanup from deleting the source.
-    handle = await fs.promises.open(filePath, 'r');
-    const buffer = await handle.readFile();
-    return isCompleteJpegBuffer(buffer) ? buffer : null;
-  } catch (error) {
-    if (error?.code === 'ENOENT') return null;
-    throw error;
-  } finally {
-    await handle?.close().catch(() => undefined);
-  }
-};
-
-const writeVersionThumbnailAtomically = async (targetPath, buffer) => {
-  if (isCompleteJpegFile(targetPath)) return;
-  const temporaryPath = `${targetPath}.tmp-${crypto.randomUUID()}`;
-  try {
-    await fs.promises.writeFile(temporaryPath, buffer, { flag: 'wx' });
-    try {
-      await fs.promises.rename(temporaryPath, targetPath);
-    } catch (error) {
-      // Another finalizer may have won the race. Keep its complete thumbnail;
-      // replace only an incomplete leftover.
-      if (isCompleteJpegFile(targetPath)) return;
-      if (!['EEXIST', 'EPERM', 'EACCES'].includes(error?.code)) throw error;
-      await fs.promises.unlink(targetPath).catch(unlinkError => {
-        if (unlinkError?.code !== 'ENOENT') throw unlinkError;
-      });
-      await fs.promises.rename(temporaryPath, targetPath);
-    }
-  } finally {
-    await fs.promises.rm(temporaryPath, { force: true }).catch(() => undefined);
-  }
-};
-
-const finalizeTrackedVersionThumbnail = async pending => {
-  await fs.promises.mkdir(path.dirname(pending.targetPath), { recursive: true });
-  if (!isCompleteJpegFile(pending.targetPath)) {
-    const buffer = await readCompleteJpegBuffer(pending.cachePath);
-    if (!buffer) return false;
-    await writeVersionThumbnailAtomically(pending.targetPath, buffer);
-  }
-  await versionService.setThumbnail(pending.workspaceRoot, {
-    versionId: pending.versionId,
-    thumbnailPath: pending.targetPath,
-  });
-  return true;
-};
-
-const persistTrackedVersionThumbnail = async pending => {
-  if (pending.finalizing) return;
-  pending.finalizing = true;
-  const sourceKey = mediaSourceCacheKey(pending.filePath);
-  try {
-    if (trackedVersionThumbnailCopies.get(sourceKey) !== pending) return;
-    if (await finalizeTrackedVersionThumbnail(pending)) {
-      if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
-      return;
-    }
-    if (pending.retryCount >= 1) {
-      if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
-      writeLog('warn', 'Unable to finalize ID-based version thumbnail after retry', { versionId: pending.versionId, filePath: pending.filePath });
-      return;
-    }
-    pending.retryCount += 1;
-    const result = await thumbnailService.request({
-      filePath: pending.filePath,
-      kind: pending.kind,
-      cacheConfig: pending.cacheConfig,
-      requestedSize: 640,
-      priority: pending.priority,
-      requireDisk: true,
-      forceRegenerate: true,
-    });
-    if (result.state === 'READY') {
-      if (await finalizeTrackedVersionThumbnail(pending)) {
-        if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
-      } else {
-        if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
-        writeLog('warn', 'Unable to finalize ID-based version thumbnail after retry', { versionId: pending.versionId, filePath: pending.filePath });
-      }
-    } else if (result.state === 'FAILED' || result.state === 'MISSING') {
-      if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
-    }
-  } catch (error) {
-    if (trackedVersionThumbnailCopies.get(sourceKey) === pending) trackedVersionThumbnailCopies.delete(sourceKey);
-    writeLog('warn', 'Unable to finalize ID-based version thumbnail', { versionId: pending.versionId, filePath: pending.filePath, error: error.message || String(error) });
-  } finally {
-    pending.finalizing = false;
-  }
-};
-
-const ensureTrackedVersionThumbnail = async ({ workspaceRoot, photoId, versionId, filePath, priority = PRIORITY.nearby }) => {
-  try {
-    if (!thumbnailService || !fs.existsSync(filePath)) return;
-    const stat = await fs.promises.stat(filePath);
-    const extension = path.extname(filePath).toLowerCase();
-    const kind = RAW_EXTENSIONS.has(extension) ? 'raw' : VIDEO_EXTENSIONS.has(extension) ? 'video' : IMAGE_EXTENSIONS.has(extension) ? 'image' : '';
-    if (!kind) return;
-    const cacheConfig = { ...mediaRuntimeState.activeMediaCacheConfig };
-    const pending = {
-      workspaceRoot,
-      versionId,
-      filePath,
-      kind,
-      cacheConfig,
-      priority,
-      retryCount: 0,
-      finalizing: false,
-      cachePath: mediaThumbnailCacheFile(filePath, stat, getMediaCacheDir(cacheConfig), 640, THUMBNAIL_VERSION),
-      targetPath: getTrackedVersionThumbnailPath(workspaceRoot, photoId, versionId),
-    };
-    if (await finalizeTrackedVersionThumbnail(pending)) return;
-    trackedVersionThumbnailCopies.set(mediaSourceCacheKey(filePath), pending);
-    const result = await thumbnailService.request({ filePath, kind, cacheConfig, requestedSize: 640, priority, requireDisk: true });
-    if (result.state === 'READY') await persistTrackedVersionThumbnail(pending);
-    else if (result.state === 'FAILED' || result.state === 'MISSING') trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(filePath));
-  } catch (error) {
-    trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(filePath));
-    writeLog('warn', 'Unable to persist ID-based version thumbnail', { versionId, filePath, error: error.message || String(error) });
-  }
-};
-
 mediaTrackingScanScheduler = createMediaTrackingScanScheduler({
   backgroundTasks,
   mediaScanService,
@@ -1482,12 +1035,7 @@ thumbnailPipeline = new ThumbnailPipeline({
   toPreviewUrl: toMediaUrl,
   trimCache: trimMediaCache,
   notify: update => {
-    const trackedThumbnail = trackedVersionThumbnailCopies.get(mediaSourceCacheKey(update.filePath));
-    if (trackedThumbnail && update.state === 'READY') {
-      void persistTrackedVersionThumbnail(trackedThumbnail);
-    } else if (trackedThumbnail && (update.state === 'FAILED' || update.state === 'MISSING')) {
-      trackedVersionThumbnailCopies.delete(mediaSourceCacheKey(update.filePath));
-    }
+    handleThumbnailUpdate(update);
     if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('thumbnail-state-changed', update);
   },
   log: writeLog,
@@ -1495,6 +1043,7 @@ thumbnailPipeline = new ThumbnailPipeline({
   maxBackgroundTasks: 1000,
 });
 thumbnailService = createThumbnailService({ pipeline: thumbnailPipeline, backgroundTasks, writeLog });
+mediaCacheRuntime.attach({ thumbnailService, imageThumbnailRuntime });
 fileRootWatcherService = createFileRootWatcherService({
   getMainWindow: () => mainWindow,
   getThumbnailService: () => thumbnailService,

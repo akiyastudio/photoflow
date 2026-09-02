@@ -64,6 +64,7 @@ if (!process.env.PHOTOFLOW_WATCH_TEST_CHILD) {
     'test-watch-file-root-watcher-service.cjs',
     'test-watch-managed-external-watcher.cjs',
     'test-workspace-reconcile-task.cjs',
+    'test-workspace-watcher-runtime.cjs',
   ]) {
     const result = spawnSync(process.execPath, [path.join(__dirname, testFile)], {
       stdio: 'inherit',

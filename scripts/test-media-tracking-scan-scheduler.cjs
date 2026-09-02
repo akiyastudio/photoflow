@@ -348,10 +348,9 @@ const run = async () => {
   assert.equal(candidates.length, 2, 'manual retry must use the same candidate-processing wrapper');
   retryScheduler.stop();
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8').replace(/\r\n?/g, '\n');
-  const watcherStop = mainSource.slice(mainSource.indexOf('const stopWorkspaceWatcher'), mainSource.indexOf('const stopFileRootWatchers'));
-  const watcherStart = mainSource.slice(mainSource.indexOf('const watchWorkspace'), mainSource.indexOf('const buildWorkspaceCatalog'));
-  assert.match(watcherStop, /if \(previousWorkspaceRoot\) for \(const project of [^\n]+\) mediaTrackingScanScheduler\?\.cancel\(previousWorkspaceRoot, project\.name\);\n  if \(stopSchedulers\) \{\n    mediaTrackingScanScheduler\?\.stop\(\);/, 'workspace watcher teardown must always cancel scans for the previous workspace, while scheduler stop remains conditional');
-  assert.match(watcherStart, /const watchWorkspace = \(root\) => \{\n  if \(watchedWorkspacePath === root && workspaceWatcher\) return;\n  stopWorkspaceWatcher\(\);/, 'switching workspaces must use non-terminal watcher teardown');
+  const watcherSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'workspace-watcher-runtime.cjs'), 'utf8').replace(/\r\n?/g, '\n');
+  assert.match(watcherSource, /if \(previousRoot\) for \(const project of [^\n]+\) cancelTrackingScan\(previousRoot, project\.name\);\n    if \(stopSchedulers\) \{\n      getMediaTrackingScanScheduler\(\)\?\.stop\(\);/, 'workspace watcher teardown must always cancel scans for the previous workspace, while scheduler stop remains conditional');
+  assert.match(watcherSource, /const watch = root => \{\n    if \(watchedRoot === root && watcher\) return;\n    stop\(\);/, 'switching workspaces must use non-terminal watcher teardown');
   assert.match(mainSource, /onQuit: \(\) => \{[\s\S]*?stopWorkspaceWatcher\(true\);/, 'final application shutdown must perform terminal scheduler teardown');
   console.log('media tracking scan scheduler tests passed');
 };
