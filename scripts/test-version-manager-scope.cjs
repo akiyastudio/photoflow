@@ -6,6 +6,7 @@ const { pathToFileURL } = require('url');
 (async () => {
   const source = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'components', 'VersionManager.tsx'), 'utf8');
   const workspaceSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'ProjectWorkspace.tsx'), 'utf8');
+  const progressWorkflowSource = fs.readFileSync(path.resolve(__dirname, '..', 'src', 'features', 'workspace', 'createProjectProgressWorkflow.ts'), 'utf8');
   const mediaIpcSource = fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'modules', 'media-ipc.cjs'), 'utf8');
   assert(/kind === 'raw'\s*\? window\.electronAPI\.getMediaOriginal/.test(source), 'RAW version previews must obtain the rendered source and orientation from the same IPC result');
   assert(source.includes('aria-expanded={open}') && source.includes('openMetadataGroups'), 'version metadata groups must use explicit controlled buttons');
@@ -26,7 +27,9 @@ const { pathToFileURL } = require('url');
   assert(source.includes('orientation="horizontal" label="调整主分支图片列表高度"') && source.includes("document.body.style.cursor = orientation === 'vertical' ? 'col-resize' : 'row-resize'") && source.includes("window.addEventListener('pointermove', move)"), 'version-manager splitters must support robust horizontal and vertical window-level dragging');
   assert(source.includes('onSaveNote={note => updateVersion') && source.includes('保存说明') && !source.includes('编辑版本说明'), 'the selected version note must be editable directly in the details pane');
   assert(!source.includes('版本管理不保存文件副本。被覆盖或永久删除的内容无法恢复。'), 'the redundant version-copy warning must not occupy the branch panel');
-  assert(workspaceSource.includes("const [versionProgressId, setVersionProgressId] = useState('')") && workspaceSource.includes('entry={renderedVersionEntry}') && workspaceSource.includes('progressId={versionProgressFolder?.id || versionProgressId}') && workspaceSource.includes('versionProgressId === existingProgress.id'), 'an open version page must retain its stable progress identity and render the media path remapped to the current folder');
+  assert(workspaceSource.includes("const [versionProgressId, setVersionProgressId] = useState('')") && progressWorkflowSource.includes('versionProgressId === existingProgress.id') && progressWorkflowSource.includes('setVersionProgressId(updated.progressFolder.id)'), 'an open version page must retain its stable progress identity when progress metadata changes');
+  assert(workspaceSource.includes('remapEntryAfterProgressFolderMove(versionEntry, versionProgressLocationRef.current, versionProgressLocation)') && workspaceSource.includes('entry={renderedVersionEntry}'), 'an open version page must render the media path remapped to the current progress folder');
+  assert(workspaceSource.includes('progressId={versionProgressFolder?.id || versionProgressId}') && workspaceSource.includes('progressVersionKey={versionProgressFolder?.versionKey}'), 'VersionManager must receive the stable progress identity and current version key');
   assert(source.includes('className="absolute inset-0 z-0 cursor-pointer rounded-xl'), 'each version card must expose a real full-card preview button');
   assert(mediaIpcSource.includes('const orientation = await rawOrientationCorrection(sourcePath, previewPath, stat);') && !mediaIpcSource.includes('orientationTimer = setTimeout'), 'slow RAW orientation reads must not silently fall back to an incorrect identity transform');
   const model = await import(pathToFileURL(path.resolve(__dirname, '..', 'src', 'features', 'versioning', 'version-manager-model.ts')).href);

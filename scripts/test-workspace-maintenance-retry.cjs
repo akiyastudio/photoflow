@@ -4,11 +4,11 @@ const path = require('path');
 const { runWorkspaceMaintenanceWithRetry, workspaceDatabaseTaskResource } = require('../electron/modules/workspace-ipc.cjs');
 
 const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8');
+const watcherRuntimeSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'workspace-watcher-runtime.cjs'), 'utf8');
 const mediaTrackingSchedulerSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'media-tracking-scan-scheduler.cjs'), 'utf8');
 const dirtyRunnerSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'dirty-coalescing-runner.cjs'), 'utf8');
-const scheduledScanStart = mainSource.indexOf('const scheduleMediaTrackingScan');
-const scheduledScanBlock = mainSource.slice(scheduledScanStart, mainSource.indexOf('const cancelMediaTrackingScan', scheduledScanStart));
-assert(scheduledScanBlock.includes('mediaTrackingScanScheduler?.schedule') && mainSource.includes('mediaTrackingScanScheduler?.cancel'), 'main must delegate automatic media scan lifecycle to the isolated scheduler');
+assert(mainSource.includes("require('./services/workspace-watcher-runtime.cjs')") && mainSource.includes('createWorkspaceWatcherRuntime({') && mainSource.includes('getMediaTrackingScanScheduler: () => mediaTrackingScanScheduler'), 'main must create the workspace watcher runtime with access to the isolated media scan scheduler');
+assert(watcherRuntimeSource.includes('getMediaTrackingScanScheduler()?.schedule(...args)') && watcherRuntimeSource.includes('getMediaTrackingScanScheduler()?.cancel(...args)'), 'the workspace watcher runtime must delegate automatic media scan lifecycle to the isolated scheduler');
 assert(mediaTrackingSchedulerSource.includes('backgroundTasks.run({') && mediaTrackingSchedulerSource.includes('photoflow-workspace-database/'), 'automatic media scans must reserve the shared workspace database writer');
 assert(mediaTrackingSchedulerSource.includes('createDirtyCoalescingRunner') && dirtyRunnerSource.includes('state.pendingBatch = merge(state.inFlightBatch, state.pendingBatch)') && dirtyRunnerSource.includes('state.completedGeneration'), 'automatic media scans must use the shared failure-safe dirty runner');
 
