@@ -3,6 +3,7 @@ const { createProjectFileTask } = require('../services/project-file-task-service
 const { createFallbackDragIcon, usableDragIcon } = require('../services/native-file-drag-service.cjs');
 const { PUBLISH_PARTIAL_CODE, publishPathNoClobber: defaultPublishPathNoClobber, releaseCleanupOwnership: defaultReleaseCleanupOwnership } = require('../services/file-transfer-service.cjs');
 const { physicalPathKey } = require('../services/file-identity-service.cjs');
+const { downloadRemoteImages, stageDroppedImageFiles } = require('../services/remote-image-download-service.cjs');
 
 const INSPIRATION_VIRTUAL_PROJECT_NAME = '.__photoflow_inspiration__';
 const isInspirationVirtualProject = projectName => projectName === INSPIRATION_VIRTUAL_PROJECT_NAME;
@@ -84,7 +85,7 @@ const provenPublishedOwnership = async (error, identityMatches, resolvePath) => 
 };
 
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseCleanupOwnership = defaultReleaseCleanupOwnership, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resumeToastViewAfterNativeDrag, samePathIdentity, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, canUseNativeFastCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, movePlannedFilesFast, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseCleanupOwnership = defaultReleaseCleanupOwnership, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resumeToastViewAfterNativeDrag, samePathIdentity, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const nativeFileDragFallbackIcon = nativeImage ? createFallbackDragIcon(nativeImage) : null;
   const pasteDecisionTokens = new Map();
@@ -507,17 +508,38 @@ const registerFileOperationsIpc = context => {
   
   ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, projectName, operation, relativePaths = [], targetRelativePath = '', nextName = '', options = {}) => {
     let suppressedProjectRoot = '';
+    let remoteImportTempRoot = '';
     const responseContext = { operationId: '', taskNotificationOwned: false, affectedDirectories: [], count: 0 };
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
       const projectLinkHints = projectVirtualPaths?.listManagedExternalLinks(root) || [];
+      const resolveSource = relativePath => resolveVirtual(root, relativePath, { externalRootMode: 'link' });
+      const resolveDestination = relativePath => resolveVirtual(root, relativePath, { externalRootMode: 'target' });
+      if (operation === 'import-url' || operation === 'import-data') {
+        const destinationDir = resolveDestination(targetRelativePath).physicalPath;
+        if (!fs.existsSync(destinationDir) || !fs.statSync(destinationDir).isDirectory()) throw new Error('目标文件夹不存在');
+        const temporaryRoot = context.remoteImageTemporaryRoot || app?.getPath?.('temp');
+        if (!temporaryRoot) throw new Error('无法创建网页图片临时目录');
+        remoteImportTempRoot = await fs.promises.mkdtemp(path.join(temporaryRoot, 'photoflow-web-image-'));
+        if (operation === 'import-data') {
+          relativePaths = await stageDroppedImageFiles(options?.droppedImageFiles, remoteImportTempRoot, { fs, path });
+        } else {
+          const lookup = context.resolveRemoteHost || (context.dns?.promises?.lookup ? context.dns.promises.lookup.bind(context.dns.promises) : undefined);
+          relativePaths = await downloadRemoteImages(relativePaths, remoteImportTempRoot, {
+            fetch: context.fetch || globalThis.fetch,
+            fs,
+            path,
+            lookup,
+            net: context.net,
+          });
+        }
+        operation = 'import';
+      }
       if (new Set(['import', 'move', 'paste', 'trash', 'select', 'rename']).has(operation)) {
         cancelMediaTrackingScan?.(ensureWorkspace(workspacePath), projectName);
         suppressWorkspaceWatchPath?.(root);
         suppressedProjectRoot = root;
       }
-      const resolveSource = relativePath => resolveVirtual(root, relativePath, { externalRootMode: 'link' });
-      const resolveDestination = relativePath => resolveVirtual(root, relativePath, { externalRootMode: 'target' });
       if (operation === 'import') {
         const operationId = crypto.randomUUID();
         let job = { cancelled: false, finishing: false };
@@ -1052,11 +1074,14 @@ const registerFileOperationsIpc = context => {
             topLevelTargets.map(item => sourceStatsByPath.get(pathKey(item.source))),
             destinationStat,
           );
+          const nativeFastCut = !sameVolumeCut && clipboardSnapshot.operation === 'cut'
+            && typeof canUseNativeFastCut === 'function' && canUseNativeFastCut()
+            && typeof movePlannedFilesFast === 'function';
           const plan = [];
           if (!sameVolumeCut) {
-            incomingRoot = path.join(destinationDir, `.photoflow-paste-${operationId}`);
+            incomingRoot = nativeFastCut ? '' : path.join(destinationDir, `.photoflow-paste-${operationId}`);
             for (const [index, target] of topLevelTargets.entries()) {
-              target.stagedDestination = path.join(incomingRoot, `${index}-${path.basename(target.destination)}`);
+              target.stagedDestination = nativeFastCut ? target.destination : path.join(incomingRoot, `${index}-${path.basename(target.destination)}`);
               await collectCopyPlan(target.source, target.stagedDestination, plan, { isCancelled: () => job.cancelled });
             }
             await assertDiskSpace(destinationDir, plan.reduce((sum, entry) => sum + entry.size, 0));
@@ -1185,12 +1210,39 @@ const registerFileOperationsIpc = context => {
               : Math.min(99, Math.round(filesCopied / Math.max(1, totalFiles) * 100));
             publish({ phase: 'copying', progress, currentName, bytesCopied, totalBytes, filesCopied, totalFiles });
           };
-          await fs.promises.mkdir(incomingRoot, { recursive: false });
-          createdTargets.push(incomingRoot);
           const topLevelTargetPaths = new Set(topLevelTargets.map(item => item.stagedDestination));
           const markCreatedTarget = destination => {
             if (topLevelTargetPaths.has(destination) && !createdTargets.includes(destination)) createdTargets.push(destination);
           };
+          if (nativeFastCut) {
+            await stageReplacements();
+            job.finishing = true;
+            task.setPausable(false);
+            reportCopyProgress('', true);
+            const transferStats = await movePlannedFilesFast(plan, {
+              ownershipToken: operationId,
+              isCancelled: () => job.cancelled,
+              onCreated: markCreatedTarget,
+              onProgress: ({ entry, bytesDelta, fileCompleted }) => {
+                bytesCopied += bytesDelta;
+                if (fileCompleted) filesCopied += 1;
+                reportCopyProgress(path.basename(entry.source));
+              },
+              onCleanupProgress: ({ processed, total }) => publish({ phase: 'finishing', progress: 99, currentName: `正在移除源文件夹 ${processed}/${total}`, bytesCopied, totalBytes, filesCopied, totalFiles }),
+            });
+            fileOperationState.projectFileClipboard = null;
+            if (process.platform === 'win32') await clearClipboardIfSnapshotCurrent(clipboardSnapshot);
+            const count = topLevelTargets.length;
+            const replacements = await finalizeReplacements();
+            if (count) await pushUndoOperation(replacements.items.length ? { kind: 'paste-replace', mode: 'cut', moves: topLevelTargets, items: replacements.items, backupRoot: replacementRoot } : { kind: 'move', moves: topLevelTargets }).catch(error => writeLog('warn', 'Unable to record native fast paste undo history', error));
+            const warning = await refreshCutPasteWatchersAfterCommit();
+            publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
+            task.complete('文件移动完成');
+            writeLog('info', 'Project files moved by native single-pass cross-volume cut', { projectName, targetRelativePath, count, operationId, ...transferStats });
+            return { success: true, cancelled: false, errorCode: undefined, count, operationId, taskNotificationOwned: true, affectedDirectories, consumedCutClipboard: true, movedItems: topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })), replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount, warning };
+          }
+          await fs.promises.mkdir(incomingRoot, { recursive: false });
+          createdTargets.push(incomingRoot);
           reportCopyProgress('', true);
           const transferStats = await copyPlannedFiles(plan, {
             destinationRoot: destinationDir,
@@ -1230,7 +1282,10 @@ const registerFileOperationsIpc = context => {
           if (clipboardSnapshot.operation === 'cut') {
             job.finishing = true;
             publish({ phase: 'finishing', progress: 99, currentName: '正在移除源文件', bytesCopied, totalBytes, filesCopied, totalFiles });
-            sourceCleanupOutcome = await removeCopiedSources(plan, { ownershipToken: operationId });
+            sourceCleanupOutcome = await removeCopiedSources(plan, {
+              ownershipToken: operationId,
+              onCleanupProgress: ({ processed, total }) => publish({ phase: 'finishing', progress: 99, currentName: `正在移除源文件 ${processed}/${total}`, bytesCopied, totalBytes, filesCopied, totalFiles }),
+            });
             fileOperationState.projectFileClipboard = null;
             if (process.platform === 'win32') await clearClipboardIfSnapshotCurrent(clipboardSnapshot);
           }
@@ -1592,6 +1647,7 @@ const registerFileOperationsIpc = context => {
       writeLog('error', 'Project file operation failed', { projectName, operation, targetRelativePath, count: relativePaths.length, errorCode: errorCode || undefined, transferStage: transferStage || undefined, sourcePath: error?.sourcePath, destinationPath: error?.destinationPath, nativeError: error?.message || String(error), error: errorMessage });
       return { success: false, operationId: responseContext.operationId || undefined, taskNotificationOwned: responseContext.taskNotificationOwned || undefined, affectedDirectories: responseContext.affectedDirectories, count: responseContext.count || undefined, cancelled: errorCode === CANCELLED_CODE || undefined, error: errorMessage, ...transferRecoveryFields(error), errorCode: errorCode || undefined, transferStage: transferStage || undefined };
     } finally {
+      if (remoteImportTempRoot) await fs.promises.rm(remoteImportTempRoot, { recursive: true, force: true }).catch(error => writeLog('warn', 'Unable to clean remote image import staging directory', error));
       if (suppressedProjectRoot) releaseWorkspaceWatchPath?.(suppressedProjectRoot);
     }
   });

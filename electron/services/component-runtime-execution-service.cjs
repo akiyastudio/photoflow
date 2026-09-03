@@ -12,13 +12,14 @@ const fields=(value,allowed,required=[])=>{if(!value||typeof value!=='object'||A
 const boundedText=(value,label,maximum=128)=>{if(typeof value!=='string'||!value||value.length>maximum||/\0/.test(value))throw hostError(CODES.INVALID_REQUEST,`Invalid ${label}`);return value;};
 const taskSnapshot = task => task ? { id: String(task.id), state: String(task.state), progress: Number(task.progress) || 0, message: String(task.message || ''), checkpoint: task.checkpoint || null } : null;
 
-const createComponentRuntimeExecutionService = ({ broker, ensureWorkspace, getProjectPath, getWorkspaceDataRoot, getBoundProject, path, fs, crypto, inputTokens, pluginService, backgroundTasks }) => {
+const createComponentRuntimeExecutionService = ({ broker, ensureWorkspace, getProjectPath, getWorkspaceDataRoot, getBoundProject, path, fs, crypto, inputTokens, pluginService, backgroundTasks, resolveComponentContentBinding = null }) => {
   const active = new Map();
   const bound = async (context, descriptor) => {
     if (!context || !['project', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider'].includes(context.surface)) throw hostError(CODES.PERMISSION_DENIED, 'Runtime execution requires a bound project surface');
-    const workspaceRoot = ensureWorkspace(context.workspacePath); const project = getBoundProject?.(workspaceRoot, context.projectName);
+    const binding = resolveComponentContentBinding?.(context);
+    const workspaceRoot = binding?.workspaceRoot || ensureWorkspace(context.workspacePath); const project = binding?.project || getBoundProject?.(workspaceRoot, context.projectName);
     if (!project || String(project.id || '') !== String(context.projectId || '')) throw hostError(CODES.NOT_FOUND, 'Bound project is unavailable');
-    const projectRoot = path.resolve(getProjectPath(workspaceRoot, project.status || context.projectStatus, project.name || context.projectName));
+    const projectRoot = binding?.projectRoot || path.resolve(getProjectPath(workspaceRoot, project.status || context.projectStatus, project.name || context.projectName));
     const suppliedScope = String(context.scopeRelativePath || '').replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
     if (suppliedScope && (path.isAbsolute(suppliedScope) || suppliedScope.split('/').some(part => !part || part === '.' || part === '..'))) throw hostError(CODES.INVALID_REQUEST, 'Invalid runtime scope');
     const scopeRoot = path.resolve(projectRoot, suppliedScope); const canonicalProject = await fs.promises.realpath(projectRoot).catch(() => null); const canonicalScope = await fs.promises.realpath(scopeRoot).catch(() => null);

@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { ChevronDown, ChevronRight, Edit, Folder, FolderInput, FolderPlus, Lightbulb, Loader2, Settings, Trash2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, ChevronsDownUp, ChevronsUpDown, Edit, Folder, FolderInput, FolderPlus, Lightbulb, Loader2, Settings, Trash2 } from 'lucide-react';
 import { useAppDialog } from '../../components/AppDialogProvider';
 import { useEscapeLayer } from '../../components/LayerProvider';
 import { FileBrowserWorkspace } from '../workspace/ProjectWorkspace';
 import { renamedEntryDestinationPath } from '../workspace/file-entry-interaction-model';
 import { pageOwnsFileOperationNotification } from '../workspace/file-operation-notification-model';
 import { INSPIRATION_FILE_BROWSER_CONTEXT } from '../file-browser/browser-context';
-import type { AppConfig, ComponentStatus, WorkspaceProject } from '../../types';
+import type { AppConfig, ComponentContribution, ComponentHostAction, ComponentPageOpenScope, ComponentStatus, WorkspaceProject } from '../../types';
 import { useUserFacingToast } from '../app/useUserFacingToast';
 import { mayCommitAsyncOperationResult } from '../file-operation-identity-model';
 import { componentCapabilityIsAvailable } from '../components/component-availability-model';
@@ -96,6 +96,7 @@ export const InspirationLibraryNavigator = ({
   const renameSubmittingRef = useRef(false);
   const treeScrollRef = useRef<HTMLDivElement>(null);
   const selectedFolderRef = useRef<HTMLDivElement>(null);
+  const revealedSelectedFolderKeyRef = useRef<string | null>(null);
   const pendingTreeScrollTopRef = useRef<number | null>(null);
   const navigationContextRef = useRef({ rootPath, currentRelativePath });
   navigationContextRef.current = { rootPath, currentRelativePath };
@@ -167,7 +168,12 @@ export const InspirationLibraryNavigator = ({
             && folder.parentRelativePath === result.folders[index]?.parentRelativePath
             && folder.depth === result.folders[index]?.depth)
           ? current : result.folders);
-        setTreeError(result.truncated ? '目录过多，仅显示前 20000 个。' : '');
+        const treeWarnings = [
+          result.truncated ? '目录超过 20000 个，仅显示前 20000 个。' : '',
+          result.externalLinkScanTruncated ? '素材较多，外链扫描达到安全上限，部分外链可能未显示。' : '',
+          result.skippedCount ? `有 ${result.skippedCount} 个目录或链接无法读取。` : '',
+        ].filter(Boolean);
+        setTreeError(treeWarnings.join(' '));
         folderTreeDirtyRef.current = false;
         lastFolderLoadAtRef.current = Date.now();
       } else {
@@ -243,6 +249,7 @@ export const InspirationLibraryNavigator = ({
   }, [folders, pendingFolderMutation]);
   const folderByPath = useMemo(() => new Map(presentedFolders.map(folder => [folder.relativePath, folder])), [presentedFolders]);
   const parentPaths = useMemo(() => new Set(presentedFolders.map(folder => folder.parentRelativePath)), [presentedFolders]);
+  const collapsibleFolderPaths = useMemo(() => [...parentPaths].filter(Boolean), [parentPaths]);
   const visibleFolders = useMemo(() => presentedFolders.filter(folder => {
     if (collapsedPaths.has('')) return false;
     let parentPath = folder.parentRelativePath;
@@ -252,6 +259,7 @@ export const InspirationLibraryNavigator = ({
     }
     return true;
   }), [collapsedPaths, folderByPath, presentedFolders]);
+  const selectedFolderRevealKey = `${rootPath}\u0000${currentRelativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '')}`;
   useLayoutEffect(() => {
     const container = treeScrollRef.current;
     if (!container) return;
@@ -265,6 +273,7 @@ export const InspirationLibraryNavigator = ({
     if (savedScrollTop > 0) container.scrollTop = savedScrollTop;
   }, [folders, rootPath]);
   useLayoutEffect(() => {
+    if (revealedSelectedFolderKeyRef.current === selectedFolderRevealKey) return;
     const container = treeScrollRef.current;
     const selectedFolder = selectedFolderRef.current;
     if (!container || !selectedFolder) return;
@@ -273,7 +282,8 @@ export const InspirationLibraryNavigator = ({
     if (selectedBounds.top < containerBounds.top || selectedBounds.bottom > containerBounds.bottom) {
       selectedFolder.scrollIntoView({ block: 'nearest' });
     }
-  }, [currentRelativePath, visibleFolders]);
+    revealedSelectedFolderKeyRef.current = selectedFolderRevealKey;
+  }, [selectedFolderRevealKey, visibleFolders]);
   useEffect(() => {
     const normalizedPath = currentRelativePath.replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
     if (!normalizedPath) return;
@@ -291,6 +301,12 @@ export const InspirationLibraryNavigator = ({
     const next = new Set(current);
     if (next.has(relativePath)) next.delete(relativePath);
     else next.add(relativePath);
+    writeInspirationCollapsedPaths(rootPath, next);
+    return next;
+  });
+  const allFoldersCollapsed = collapsedPaths.has('') || (collapsibleFolderPaths.length > 0 && collapsibleFolderPaths.every(path => collapsedPaths.has(path)));
+  const toggleAllFolders = () => setCollapsedPaths(() => {
+    const next = allFoldersCollapsed ? new Set<string>() : new Set(collapsibleFolderPaths);
     writeInspirationCollapsedPaths(rootPath, next);
     return next;
   });
@@ -444,7 +460,7 @@ export const InspirationLibraryNavigator = ({
   };
   return <nav aria-label="灵感库导航" className="flex min-h-0 flex-1 flex-col bg-white">
     {folderMenu && createPortal(<div className="fixed inset-0 z-[420]" onPointerDown={() => setFolderMenu(null)} onContextMenu={event => { event.preventDefault(); setFolderMenu(null); }}><div role="menu" aria-label={`${folderMenu.folder.name} 文件夹菜单`} onPointerDown={event => event.stopPropagation()} className="project-context-menu fixed w-60 rounded-lg border border-slate-200 bg-white p-1.5 shadow-2xl" style={{ left: Math.min(folderMenu.x, Math.max(8, window.innerWidth - 248)), top: Math.min(folderMenu.y, Math.max(8, window.innerHeight - 250)) }}><button type="button" className="project-menu-item" onClick={() => { const path = folderMenu.folder.relativePath; setFolderMenu(null); onOpenInNewTab(path); }}><FolderPlus size={14}/>在新标签页打开</button><div className="my-1 border-t border-slate-100"/><button type="button" className="project-menu-item" onClick={() => void createChildFolder(folderMenu.folder)}><FolderPlus size={14}/>新建文件夹</button><div className="my-1 border-t border-slate-100"/><button type="button" className="project-menu-item" onClick={() => startRename(folderMenu.folder)}><Edit size={14}/>重命名</button><button type="button" disabled={!targetProjectsAvailable} className="project-menu-item" onClick={() => addFolderToProject(folderMenu.folder)}><FolderInput size={14}/>添加到项目{targetProject ? `“${targetProject.name}”` : '…'}</button>{targetProject && <button type="button" className="project-menu-item" onClick={() => addFolderToProject(folderMenu.folder, true)}><ChevronDown size={14}/>选择其他项目…</button>}<div className="my-1 border-t border-slate-100"/><button type="button" className="project-menu-item project-menu-danger" onClick={() => void deleteFolder(folderMenu.folder)}><Trash2 size={14}/>删除文件夹</button></div></div>, document.body)}
-    <div className="flex items-center gap-2 px-4 pb-3 pt-5 text-sm font-bold text-slate-800"><Lightbulb size={18} className="text-amber-500"/><span className="min-w-0 flex-1 truncate">灵感库</span></div>
+    <div className="flex items-center gap-2 px-4 pb-3 pt-5 text-sm font-bold text-slate-800"><Lightbulb size={18} className="text-amber-500"/><span className="min-w-0 flex-1 truncate">灵感库</span><button type="button" disabled={!collapsibleFolderPaths.length} onClick={toggleAllFolders} aria-label={allFoldersCollapsed ? '展开全部文件夹' : '折叠全部文件夹'} title={allFoldersCollapsed ? '展开全部文件夹' : '折叠全部文件夹'} className="flex h-7 w-7 shrink-0 items-center justify-center rounded-md text-slate-400 transition-colors hover:bg-slate-100 hover:text-slate-700 disabled:cursor-default disabled:opacity-30">{allFoldersCollapsed ? <ChevronsUpDown size={16}/> : <ChevronsDownUp size={16}/>}</button></div>
     <div ref={treeScrollRef} onScroll={event => writeInspirationNavigatorScroll(rootPath, event.currentTarget.scrollTop)} className="inspiration-navigator-scroll min-h-0 flex-1 space-y-1 overflow-y-auto px-3">
       {rootPath ? <div className="space-y-0.5">{treeRow('灵感库文件夹', '', 0, folders.length > 0)}{loading && !folders.length ? <p className="flex items-center gap-2 px-3 py-3 text-xs text-slate-400"><Loader2 size={14} className="animate-spin"/>正在读取目录…</p> : visibleFolders.map(folder => treeRow(folder.name, folder.relativePath, folder.depth + 1, parentPaths.has(folder.relativePath))) }{treeError && <p className="px-3 py-2 text-xs leading-5 text-amber-600">{treeError}</p>}</div> : <p className="px-3 py-4 text-xs leading-5 text-slate-400">首次进入灵感库时请选择文件夹。</p>}
     </div>
@@ -458,6 +474,9 @@ export const InspirationLibraryPage = ({
   initialRelativePath,
   config,
   components,
+  componentHostActions,
+  componentContributions,
+  onOpenComponentPage,
   onUpdateConfig,
   onDirectoryChange,
   navigationRequest,
@@ -468,6 +487,9 @@ export const InspirationLibraryPage = ({
   initialRelativePath: string;
   config: AppConfig;
   components: ComponentStatus[];
+  componentHostActions: ComponentHostAction[];
+  componentContributions: ComponentContribution[];
+  onOpenComponentPage: (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string, scope: ComponentPageOpenScope) => void;
   onUpdateConfig: (config: AppConfig) => void | boolean | Promise<void | boolean>;
   onDirectoryChange: (pageId: string, relativePath: string) => void;
   navigationRequest?: { path: string; id: number };
@@ -527,10 +549,14 @@ export const InspirationLibraryPage = ({
     onOpenDirectoryPage={onOpenDirectoryPage}
     project={project}
     workspacePath={rootPath}
+    componentWorkspacePath={config.workspacePath}
     inspirationTargetWorkspacePath={config.workspacePath}
     installedComponentIds={installedComponentIds}
     videoToolsAvailable={videoToolsAvailable}
     advancedVideoPlaybackAvailable={advancedVideoPlaybackAvailable}
+    componentHostActions={componentHostActions}
+    componentContributions={componentContributions}
+    onOpenComponentPage={(action, scope) => onOpenComponentPage(action, project, config.workspacePath, { ...scope, contentKind: 'inspiration' })}
     videoPlaybackSettings={config.videoPlayback}
     initialPanel={null}
     importConfig={config.smartImport}

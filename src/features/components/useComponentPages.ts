@@ -3,7 +3,7 @@ import type { ComponentContribution, ComponentHostAction, ComponentPageInstance,
 import { bindComponentPageInstance, closeComponentPage, closeProjectComponentPages, componentPageActivationSucceeded, componentPageIsAvailable, ensureComponentPage } from './component-page-model';
 import { useUserFacingToast } from '../app/useUserFacingToast';
 
-type ComponentHostBrowserPage = { id: string; projectId: string; project?: WorkspaceProject | null };
+type ComponentHostBrowserPage = { id: string; projectId: string; kind: 'project' | 'inspiration'; project?: WorkspaceProject | null };
 
 export const componentHostCatalogKey = (components: ComponentStatus[]) => components
   .map(component => [component.id, component.version, component.installed ? 1 : 0, component.enabled === false ? 0 : 1, component.compatible ? 1 : 0, component.status || ''].join(':'))
@@ -48,8 +48,8 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     const activeUnavailable = unavailablePages.find(page => page.identity === activeIdentity);
     if (activeUnavailable) {
       setActiveIdentity('');
-      const projectPage = browserPages.find(candidate => candidate.projectId === activeUnavailable.projectId && candidate.project);
-      if (projectPage) onProjectFallback(projectPage); else onHomeFallback();
+      const browserPage = browserPages.find(candidate => candidate.projectId === activeUnavailable.projectId);
+      if (browserPage) onProjectFallback(browserPage); else onHomeFallback();
     }
   }, [activeIdentity, browserPages, components, onHomeFallback, onProjectFallback, pages]);
 
@@ -60,8 +60,8 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     setPages(current => closeComponentPage(current, page.identity));
     setActiveIdentity(current => current === page.identity ? '' : current);
     toast.show('组件页已失效，请重新打开', { tone: 'warning', dedupeKey: 'component-page-stale' });
-    const projectPage = browserPages.find(candidate => candidate.projectId === page.projectId && candidate.project);
-    if (projectPage) onProjectFallback(projectPage); else onHomeFallback();
+    const browserPage = browserPages.find(candidate => candidate.projectId === page.projectId);
+    if (browserPage) onProjectFallback(browserPage); else onHomeFallback();
     return false;
   }, [browserPages, onHomeFallback, onProjectFallback, toast]);
   const open = useCallback(async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string, insertAfterTabId = 'home', scope?: ComponentPageOpenScope) => {
@@ -82,8 +82,8 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     setPages(current => closeComponentPage(current, page.identity));
     if (activeIdentity !== page.identity) return;
     setActiveIdentity('');
-    const projectPage = browserPages.find(candidate => candidate.projectId === page.projectId && candidate.project);
-    if (projectPage) onProjectFallback(projectPage); else onHomeFallback();
+    const browserPage = browserPages.find(candidate => candidate.projectId === page.projectId);
+    if (browserPage) onProjectFallback(browserPage); else onHomeFallback();
   }, [activeIdentity, browserPages, onHomeFallback, onProjectFallback]);
   const disposeProject = useCallback((workspacePath: string, projectId: string) => {
     void window.electronAPI.closeProjectComponentPages(workspacePath, projectId);

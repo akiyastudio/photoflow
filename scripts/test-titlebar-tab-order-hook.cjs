@@ -4,8 +4,23 @@ const path = require('path');
 const { pathToFileURL } = require('url');
 
 class TestEventTarget {
-  addEventListener() {}
-  removeEventListener() {}
+  constructor() {
+    this.listeners = new Map();
+  }
+
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) || new Set();
+    listeners.add(listener);
+    this.listeners.set(type, listeners);
+  }
+
+  removeEventListener(type, listener) {
+    this.listeners.get(type)?.delete(listener);
+  }
+
+  dispatchEvent(event) {
+    for (const listener of this.listeners.get(event.type) || []) listener(event);
+  }
 }
 
 class TestNode extends TestEventTarget {
@@ -109,6 +124,7 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 
   let renderCount = 0;
   let migratedOrder = -1;
+  let projectTabProps;
   const Harness = ({ projectPath }) => {
     renderCount += 1;
     const getTabProps = useTitlebarTabOrder({
@@ -117,7 +133,8 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
       toolTabs: [],
       settingsOpen: false,
     });
-    migratedOrder = getTabProps(migratedId).style.order;
+    projectTabProps = getTabProps(migratedId);
+    migratedOrder = projectTabProps.style.order;
     return null;
   };
 
@@ -138,6 +155,49 @@ global.IS_REACT_ACT_ENVIRONMENT = true;
 
   assert.strictEqual(renderCount, rendersAfterMigration + 1, 'a semantic-equivalent rerender must not schedule another state render');
   assert.strictEqual(migratedWrites(), 1, 'a semantic-equivalent rerender must not persist the same migrated state again');
+
+  let pointerCaptured = false;
+  let pointerCaptureCount = 0;
+  let pointerReleaseCount = 0;
+  const sourceElement = {
+    parentElement: {
+      scrollLeft: 0,
+      getBoundingClientRect: () => ({ left: 0, right: 500 }),
+      querySelectorAll: () => [],
+    },
+    setPointerCapture: () => {
+      pointerCaptured = true;
+      pointerCaptureCount += 1;
+    },
+    hasPointerCapture: () => pointerCaptured,
+    releasePointerCapture: () => {
+      pointerCaptured = false;
+      pointerReleaseCount += 1;
+    },
+  };
+  const pointerDown = clientX => projectTabProps.onPointerDown({
+    button: 0,
+    pointerId: 7,
+    clientX,
+    currentTarget: sourceElement,
+    target: { closest: () => null },
+  });
+
+  pointerDown(100);
+  windowTarget.dispatchEvent({ type: 'pointermove', pointerId: 7, clientX: 107, preventDefault() {} });
+  assert.strictEqual(pointerCaptureCount, 0, 'small pointer movement must not capture the pointer before dragging starts');
+  windowTarget.dispatchEvent({ type: 'pointerup', pointerId: 7 });
+  assert.strictEqual(pointerReleaseCount, 0, 'a normal tab click must not need pointer-capture cleanup');
+
+  pointerDown(100);
+  await React.act(async () => {
+    windowTarget.dispatchEvent({ type: 'pointermove', pointerId: 7, clientX: 108, preventDefault() {} });
+  });
+  assert.strictEqual(pointerCaptureCount, 1, 'crossing the drag threshold must capture the initiating pointer');
+  await React.act(async () => {
+    windowTarget.dispatchEvent({ type: 'pointerup', pointerId: 7 });
+  });
+  assert.strictEqual(pointerReleaseCount, 1, 'finishing a real tab drag must release pointer capture');
 
   await React.act(async () => root.unmount());
   console.log('titlebar tab order hook tests passed');

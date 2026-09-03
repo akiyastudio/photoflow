@@ -6,13 +6,14 @@ const code = transformSync(fs.readFileSync('src/features/components/component-co
 const module = { exports: {} }; vm.runInNewContext(code, { module, exports: module.exports });
 const { componentHostSelectedRelativePaths, mediaContributionScope, placedFullPageActions, projectContributionScope, resolvePlacedFullPageAction, visibleComponentToolbarActions } = module.exports;
 const image = { kind: 'image', relativePath: 'folder/a.jpg' }, video = { kind: 'video', relativePath: 'folder/b.mp4' }, file = { kind: 'file', relativePath: 'folder/x.txt' }, folder = { kind: 'folder', relativePath: 'folder/sub' }, raw = { kind: 'raw', relativePath: 'folder/c.raw' };
-assert.equal(JSON.stringify(mediaContributionScope([image, video], image, 'page')), JSON.stringify({ scopeRelativePath: 'folder', selectedRelativePaths: ['folder/a.jpg', 'folder/b.mp4'], sourcePageId: 'page' }));
+assert.equal(JSON.stringify(mediaContributionScope([image, video], image, 'page')), JSON.stringify({ scopeRelativePath: 'folder', selectedRelativePaths: ['folder/a.jpg', 'folder/b.mp4'], sourcePageId: 'page', contentKind: 'project' }));
 const cross = { kind: 'raw', relativePath: 'other/deep/c.raw' };
-assert.equal(JSON.stringify(mediaContributionScope([image, cross], image, 'page')), JSON.stringify({ scopeRelativePath: '', selectedRelativePaths: ['folder/a.jpg', 'other/deep/c.raw'], sourcePageId: 'page' }), 'cross-directory selection binds to its common ancestor');
+assert.equal(JSON.stringify(mediaContributionScope([image, cross], image, 'page')), JSON.stringify({ scopeRelativePath: '', selectedRelativePaths: ['folder/a.jpg', 'other/deep/c.raw'], sourcePageId: 'page', contentKind: 'project' }), 'cross-directory selection binds to its common ancestor');
 assert.equal(mediaContributionScope([image, file], image, 'page'), null);
-assert.equal(JSON.stringify(projectContributionScope('nested', 'page')), JSON.stringify({ scopeRelativePath: 'nested', selectedRelativePaths: [], sourcePageId: 'page' }));
-assert.equal(JSON.stringify(projectContributionScope('', 'page', ['folder\\selected-folder', 'folder/a.jpg'])), JSON.stringify({ scopeRelativePath: 'folder', selectedRelativePaths: ['folder/selected-folder', 'folder/a.jpg'], sourcePageId: 'page' }), 'project actions retain the complete selection and bind it to the common parent scope');
-assert.equal(JSON.stringify(projectContributionScope('Library', 'page', ['Library\\Selected Folder'])), JSON.stringify({ scopeRelativePath: 'Library', selectedRelativePaths: ['Library/Selected Folder'], sourcePageId: 'page' }), 'a folder-only context action forwards the folder path and its page scope unchanged');
+assert.equal(JSON.stringify(projectContributionScope('nested', 'page')), JSON.stringify({ scopeRelativePath: 'nested', selectedRelativePaths: [], sourcePageId: 'page', contentKind: 'project' }));
+assert.equal(JSON.stringify(projectContributionScope('', 'page', ['folder\\selected-folder', 'folder/a.jpg'])), JSON.stringify({ scopeRelativePath: 'folder', selectedRelativePaths: ['folder/selected-folder', 'folder/a.jpg'], sourcePageId: 'page', contentKind: 'project' }), 'project actions retain the complete selection and bind it to the common parent scope');
+assert.equal(JSON.stringify(projectContributionScope('Library', 'page', ['Library\\Selected Folder'])), JSON.stringify({ scopeRelativePath: 'Library', selectedRelativePaths: ['Library/Selected Folder'], sourcePageId: 'page', contentKind: 'project' }), 'a folder-only context action forwards the folder path and its page scope unchanged');
+assert.equal(projectContributionScope('Library', 'inspiration-page', [], 'inspiration').contentKind, 'inspiration', 'inspiration actions retain their host-validated content boundary');
 const unsafeShortcut = { kind: 'shortcut', relativePath: 'legacy.lnk', viaShortcut: true }, managedExternal = { kind: 'folder', relativePath: 'External', viaShortcut: true, viaExternalLink: true };
 assert.equal(JSON.stringify(componentHostSelectedRelativePaths([image, raw, video, file, folder, unsafeShortcut, managedExternal])), JSON.stringify(['folder/a.jpg', 'folder/c.raw', 'folder/b.mp4', 'folder/x.txt', 'folder/sub', 'External']), 'toolbar Host context carries every safe selected kind and excludes unsupported shortcuts');
 const actions = [{ componentId: 'video-transcription', actionId: 'open', pageId: 'main' }, { componentId: 'other', actionId: 'open', pageId: 'main' }];
@@ -21,6 +22,7 @@ assert.equal(resolvePlacedFullPageAction(placed, actions), actions[0], 'placed c
 assert.equal(placedFullPageActions([placed], actions)[0].action, actions[0]);
 assert.deepEqual(visibleComponentToolbarActions(actions, [placed]), [actions[1]], 'matching toolbar action is hidden from the independent toolbar');
 const dock = fs.readFileSync('src/features/components/ComponentContributionDock.tsx', 'utf8'), workspace = fs.readFileSync('src/features/workspace/ProjectWorkspace.tsx', 'utf8');
+const app = fs.readFileSync('src/App.tsx', 'utf8'), inspiration = fs.readFileSync('src/features/inspiration/InspirationLibrary.tsx', 'utf8');
 assert(dock.includes('&& !item.placement'), 'Dock excludes every placed project entry');
 assert(dock.includes('if (!projectEntries.length && !commands.length && !opened) return null'), 'a Dock containing only placed entries renders no empty toolbar chrome');
 const toolbar = fs.readFileSync('src/features/workspace/ProjectWorkspaceLayout.tsx', 'utf8');
@@ -32,4 +34,8 @@ assert(workspace.includes('safeComponentHostSelectedRelativePaths(selectedEntrie
 assert(workspace.includes('placedVideoToolPageActions.map(({ contribution, action })'), 'the toolbar video-tools menu renders placed full-page actions');
 assert(workspace.includes('onOpenComponentPage(action, scope)'), 'placed file-menu actions open a component full page instead of a Dock aside');
 assert(workspace.includes('actions={visibleComponentHostActions}'), 'placed full-page actions are removed from the independent component toolbar');
+assert(workspace.includes('inspirationMode ? componentHostActions : visibleComponentToolbarActions'), 'inspiration keeps the component icon available even when the project browser groups the same action');
+assert(!workspace.includes('projectWorkflows && <ComponentToolbarActions actions={visibleComponentHostActions}'), 'component toolbar actions are visible in project and inspiration browsers');
+assert(inspiration.includes('componentHostActions={componentHostActions}') && inspiration.includes('contentKind: \'inspiration\''), 'the inspiration browser receives component entries with an inspiration scope');
+assert(app.includes('componentContributions={componentContributions}') && app.includes('onOpenComponentPage={openComponentPage}'), 'the application wires component contributions into inspiration pages');
 console.log('Component contribution trigger scope model tests passed');

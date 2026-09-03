@@ -3,6 +3,7 @@ import type { ProgressFolder, ProjectFileEntry, VersionBatchFileOperation, Versi
 import type { useAppDialog } from '../../components/AppDialogProvider';
 import { projectWorkspaceClient } from '../../platform/project-workspace-client';
 import { defaultWorkflowInputIds, isUserVersionKey, normalizeProgressSetupTrackingPolicy, normalizeTrackingPolicy, progressTrackingAction, progressTrackingActionLabel, selectableVersionParents, versionKindForParent, type FolderMarkDraft } from '../versioning/public';
+import { remapEntryAfterProgressFolderMove } from './file-entry-interaction-model';
 import { pageOwnsFileOperationNotification } from './file-operation-notification-model';
 import type { ProgressFolderEntryLocation } from './file-entry-interaction-model';
 import type { ProgressCompareConfirmation, ProgressSetupDraft } from './project-progress-workflow-types';
@@ -132,9 +133,26 @@ export const createProjectProgressWorkflow = ({
       }
 
       if (draft.mode === 'mark' && draft.existingProgressId) {
-        const existingProgress = progressFolders.find(folder => folder.id === draft.existingProgressId);
+        let existingProgress = progressFolders.find(folder => folder.id === draft.existingProgressId);
         if (!existingProgress) throw new Error('没有找到要修改的版本节点');
-        const relativePath = progressFolderRelativePath(existingProgress);
+        let relativePath = progressFolderRelativePath(existingProgress);
+        const previousVersionLocation = versionProgressLocationRef.current;
+        let folderRenamed = false;
+        const generatedName = resolvedProgressFolderName(draft);
+        const currentFolderName = relativePath.split('/').pop() || existingProgress.displayName;
+        if (!draft.preserveFolderName && generatedName !== currentFolderName) {
+          const renamed = await projectWorkspaceClient.renameProgressFolder(workspacePath, project.status, project.name, {
+            progressId: existingProgress.id,
+            expectedFolderId: existingProgress.folderId,
+            expectedRelativePath: relativePath,
+            newName: generatedName,
+          });
+          if (!renamed.success || !renamed.progressFolder) throw new Error(renamed.error || '无法修改版本文件夹名称');
+          existingProgress = renamed.progressFolder;
+          relativePath = renamed.newRelativePath || progressFolderRelativePath(renamed.progressFolder);
+          folderRenamed = true;
+          directoryEntriesCacheRef.current.clear();
+        }
         const policy = normalizeProgressSetupTrackingPolicy(draft.relationKind, draft);
         const policyChanged = existingProgress.trackingEnabled !== policy.trackingEnabled
           || existingProgress.renameFromParent !== policy.renameFromParent
@@ -153,16 +171,19 @@ export const createProjectProgressWorkflow = ({
         if (!updated.success || !updated.progressFolder) throw new Error(updated.error || '无法更新版本信息或跟踪策略');
         setProgressSetup(null);
         if (versionProgressId === existingProgress.id) {
-          versionProgressLocationRef.current = {
+          const nextVersionLocation = {
             progressId: updated.progressFolder.id,
             folderPath: updated.progressFolder.folderPath,
             relativePath: progressFolderRelativePath(updated.progressFolder),
           };
+          if (folderRenamed && previousVersionLocation) setVersionEntry(current => current ? remapEntryAfterProgressFolderMove(current, previousVersionLocation, nextVersionLocation) : current);
+          versionProgressLocationRef.current = nextVersionLocation;
           setVersionProgressId(updated.progressFolder.id);
         }
         progressFoldersRef.current = progressFoldersRef.current.map(folder => folder.id === updated.progressFolder!.id ? updated.progressFolder! : folder);
         setProgressFolders(current => current.map(folder => folder.id === updated.progressFolder!.id ? updated.progressFolder! : folder));
         setSelectedPaths([relativePath]);
+        if (folderRenamed) await refresh('');
         if (policy.trackingEnabled && draft.relationKind === 'main' && draft.parentProgressId && policyChanged) {
           const started = await projectWorkspaceClient.startProgressTracking(workspacePath, project.name, { progressId: updated.progressFolder.id, mode: existingProgress.trackingEnabled ? 'refresh' : 'compare' });
           if (!started.success || !started.sessionId) {
@@ -185,6 +206,16 @@ export const createProjectProgressWorkflow = ({
         const generatedName = resolvedProgressFolderName(draft);
         if (!draft.targetRelativePath) throw new Error('没有找到要标记的文件夹');
         let targetRelativePath = draft.targetRelativePath;
+        const currentFolderName = targetRelativePath.split('/').pop() || generatedName;
+        if (!draft.preserveFolderName && generatedName !== currentFolderName) {
+          const parentRelativePath = targetRelativePath.split('/').slice(0, -1).join('/');
+          const renamed = await projectWorkspaceClient.projectFileOperation(
+            workspacePath, project.status, project.name, 'rename', [targetRelativePath], parentRelativePath, generatedName,
+          );
+          if (!renamed.success) throw new Error(renamed.error || '无法修改待标记文件夹名称');
+          targetRelativePath = [parentRelativePath, generatedName].filter(Boolean).join('/');
+          directoryEntriesCacheRef.current.clear();
+        }
         const moveToRoot = draft.relationKind === 'main' && targetRelativePath.includes('/');
         if (moveToRoot) setWorkspaceActivityMessage('正在安全移动文件夹到项目根目录…');
         setWorkspaceActivityMessage(`正在标记${draft.mediaKind === 'image' ? '图片' : '视频'}进度…`);
@@ -420,7 +451,7 @@ export const createProjectProgressWorkflow = ({
         relationKind: 'main',
         parentProgressId: parent.id,
         versionKey: panelDraft.versionKey || '',
-        progressName: draft.folderName,
+        progressName: panelDraft.displayName,
         trackingEnabled: policy.trackingEnabled,
         deleteSourceAfterImport: false,
         linkOnly: false,
@@ -429,7 +460,7 @@ export const createProjectProgressWorkflow = ({
         copyMissingFromParent: policy.copyMissingFromParent,
         workflowInputProgressIds: defaultWorkflowInputIds(progressFolders, versionGraphEdges, parent.id),
         targetRelativePath: draft.relativePath,
-        preserveFolderName: true,
+        preserveFolderName: Boolean(panelDraft.targetFolderLocked),
       };
       setFolderMarkSetup(null);
       setPendingProgressFolders(current => current.filter(folder => folder.relativePath !== draft.relativePath));

@@ -72,21 +72,22 @@ const publicVersion = value => ({ id: String(value.id || ''), photoId: String(va
 
 const registerComponentProjectWriteCapabilities = ({
   broker, ensureWorkspace, getProjectPath, getWorkspaceDataRoot, getBoundProject, path, fs, crypto, versionService, mediaRatingService,
-  projectDomain: inputTokens, fileSystemService, runPythonJsonAction, extractVideoTimelineFrames, backgroundTasks, legacyMediaProcess = null, VIDEO_EXTENSIONS = new Set(), IMAGE_EXTENSIONS = new Set(), RAW_EXTENSIONS = new Set(),
+  projectDomain: inputTokens, fileSystemService, runPythonJsonAction, extractVideoTimelineFrames, backgroundTasks, legacyMediaProcess = null, VIDEO_EXTENSIONS = new Set(), IMAGE_EXTENSIONS = new Set(), RAW_EXTENSIONS = new Set(), resolveComponentContentBinding = null,
   writeFaultInjector = () => undefined,
 }) => {
   const bound = async (context, descriptor) => {
     if (!context || !['project', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider'].includes(context.surface)) throw hostError(CODES.PERMISSION_DENIED, 'Capability requires a bound project surface');
-    const workspaceRoot = ensureWorkspace(context.workspacePath); const project = getBoundProject?.(workspaceRoot, context.projectName);
+    const binding = resolveComponentContentBinding?.(context);
+    const workspaceRoot = binding?.workspaceRoot || ensureWorkspace(context.workspacePath); const project = binding?.project || getBoundProject?.(workspaceRoot, context.projectName);
     if (!project || String(project.id || '') !== String(context.projectId || '')) throw hostError(CODES.NOT_FOUND, 'Bound project is unavailable');
-    const projectRoot = path.resolve(getProjectPath(workspaceRoot, project.status || context.projectStatus, project.name || context.projectName));
+    const projectRoot = binding?.projectRoot || path.resolve(getProjectPath(workspaceRoot, project.status || context.projectStatus, project.name || context.projectName));
     const scopeRelativePath = context.scopeRelativePath ? assertRelative(path, context.scopeRelativePath, 'scopeRelativePath') : ''; const scopeRoot = path.resolve(projectRoot, scopeRelativePath);
     const projectStat = await fs.promises.lstat(projectRoot).catch(() => null); const scopeStat = await fs.promises.lstat(scopeRoot).catch(() => null);
     const canonicalProjectRoot = await fs.promises.realpath(projectRoot).catch(() => null); const canonicalScopeRoot = await fs.promises.realpath(scopeRoot).catch(() => null);
     if (!projectStat?.isDirectory() || projectStat.isSymbolicLink() || !scopeStat?.isDirectory() || scopeStat.isSymbolicLink() || !canonicalProjectRoot || !canonicalScopeRoot || !insideOrEqual(path, canonicalProjectRoot, canonicalScopeRoot)) throw hostError(CODES.PERMISSION_DENIED, 'Project scope is unsafe');
     const componentRoot = path.join(getWorkspaceDataRoot(workspaceRoot), 'components', descriptor.componentId);
     const key = `${descriptor.componentId}\0${workspaceRoot}\0${project.id}\0${scopeRelativePath}`;
-    return { workspaceRoot, project, projectRoot, scopeRoot, canonicalProjectRoot, canonicalScopeRoot, componentRoot, componentId: descriptor.componentId, key };
+    return { workspaceRoot, project, projectRoot, scopeRoot, canonicalProjectRoot, canonicalScopeRoot, componentRoot, componentId: descriptor.componentId, contentKind: binding?.contentKind || 'project', key };
   };
   const resolveExisting = async (scope, relativePath, { directory = false, media = false } = {}) => {
     const relative = assertRelative(path, relativePath); const candidate = path.resolve(scope.projectRoot, relative);
@@ -162,6 +163,7 @@ const registerComponentProjectWriteCapabilities = ({
     if (!deleting && !updateFields.some(field => Object.prototype.hasOwnProperty.call(payload, field))) throw hostError(CODES.INVALID_REQUEST, 'Version update requires at least one field');
     if (payload.versionName !== undefined && (typeof payload.versionName !== 'string' || !payload.versionName.trim() || payload.versionName.length > 160) || payload.note !== undefined && (typeof payload.note !== 'string' || payload.note.length > 2000) || payload.status !== undefined && (typeof payload.status !== 'string' || !payload.status.trim() || payload.status.length > 80) || payload.isFinal !== undefined && typeof payload.isFinal !== 'boolean' || payload.makeCurrent !== undefined && payload.makeCurrent !== true) throw hostError(CODES.INVALID_REQUEST, 'Invalid version update field');
     const scope = await bound(context, descriptor);
+    if (scope.contentKind === 'inspiration') throw hostError(CODES.PERMISSION_DENIED, 'Project version changes are unavailable in the inspiration library');
     return runIdempotent(scope, deleting ? 'version-delete' : 'version-update', payload, async ({ operationId, recovering, receipt, filePath: receiptPath }) => {
       try {
         const snapshot = await versionService.snapshotProjectVersions(scope.workspaceRoot, { projectName: scope.project.name, projectPath: scope.projectRoot, scopePath: scope.scopeRoot, limit: 5000 }); const current = (snapshot.versions || []).find(item => String(item.id) === payload.versionId);
@@ -180,6 +182,7 @@ const registerComponentProjectWriteCapabilities = ({
     const common = ['action', 'idempotencyKey', 'expectedUpdatedAt']; const action = String(payload?.action || ''); const actionFields = { update: ['progressId', 'displayName', 'trackingEnabled'], unregister: ['progressId'], edgeCreate: ['sourceProgressId', 'targetProgressId', 'edgeKind'], edgeDelete: ['sourceProgressId', 'targetProgressId', 'edgeKind'], edgeReplaceSource: ['sourceProgressId', 'targetProgressId', 'newSourceProgressId', 'edgeKind'] }[action];
     if (!actionFields) throw hostError(CODES.INVALID_REQUEST, 'Unknown progress action'); assertFields(payload, [...common, ...actionFields], ['action', 'idempotencyKey', 'expectedUpdatedAt']); if (!Number.isInteger(payload.expectedUpdatedAt) || payload.expectedUpdatedAt < 0) throw hostError(CODES.INVALID_REQUEST, 'expectedUpdatedAt is required');
     const scope = await bound(context, descriptor);
+    if (scope.contentKind === 'inspiration') throw hostError(CODES.PERMISSION_DENIED, 'Project progress changes are unavailable in the inspiration library');
     if (action === 'update' && payload.displayName === undefined && payload.trackingEnabled === undefined) throw hostError(CODES.INVALID_REQUEST, 'Progress update requires a field');
     return runIdempotent(scope, 'progress-manage', payload, async ({ operationId, recovering, receipt, filePath: receiptPath }) => { try { const visible = await visibleProgress(scope); const ids = actionFields.filter(field => /progressId$/i.test(field)).map(field => String(payload[field] || '')); if (ids.some(id => !id || !visible.nodes.has(id))) { if (recovering && receipt.authorized === true && action === 'unregister' && !visible.nodes.has(String(payload.progressId || ''))) return { apiVersion: 7, receiptId: operationId, action, progressId: String(payload.progressId) }; throw hostError(CODES.PERMISSION_DENIED, 'Progress node is outside the bound scope'); }
       if (receipt.authorized !== true) { receipt.authorized = true; await atomicJson(fs, path, crypto, receiptPath, receipt); }
@@ -190,7 +193,7 @@ const registerComponentProjectWriteCapabilities = ({
   const prunePlans = () => { const now = Date.now(); for (const [id, plan] of plans) if (plan.expiresAt <= now) plans.delete(id); };
   const identity = stat => ({ dev: String(stat.dev), ino: String(stat.ino), size: stat.size, mtimeMs: stat.mtimeMs, directory: stat.isDirectory() });
   const sameIdentity = (stat, expected) => String(stat.dev) === expected.dev && String(stat.ino) === expected.ino && stat.size === expected.size && stat.mtimeMs === expected.mtimeMs && stat.isDirectory() === expected.directory;
-  const protectedProgressPaths = async scope => { const snapshot = await versionService.snapshotProgress(scope.workspaceRoot, scope.project.name, false); return (snapshot.progressFolders || []).filter(item => item.nodeRole === 'progress' && !item.externalLinkRelativePath && typeof item.folderPath === 'string').map(item => path.resolve(item.folderPath)).filter(item => insideOrEqual(path, scope.projectRoot, item)); };
+  const protectedProgressPaths = async scope => { if (scope.contentKind === 'inspiration') return []; const snapshot = await versionService.snapshotProgress(scope.workspaceRoot, scope.project.name, false); return (snapshot.progressFolders || []).filter(item => item.nodeRole === 'progress' && !item.externalLinkRelativePath && typeof item.folderPath === 'string').map(item => path.resolve(item.folderPath)).filter(item => insideOrEqual(path, scope.projectRoot, item)); };
   const assertNotProtected = (scope, candidate, protectedPaths) => {
     const relativePath = normalizeRelative(path.relative(scope.projectRoot, path.resolve(candidate))); const rootName = relativePath.split('/')[0];
     if (path.resolve(candidate) === path.resolve(scope.projectRoot) || getProtectedProjectFolderRegistry().isProtectedProjectFolderName(rootName) || protectedPaths.some(protectedPath => insideOrEqual(path, candidate, protectedPath) || insideOrEqual(path, protectedPath, candidate))) throw hostError(CODES.PERMISSION_DENIED, 'System, workflow, or progress directories are protected');

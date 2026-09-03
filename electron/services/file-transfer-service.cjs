@@ -530,14 +530,15 @@ const collectCopyPlan = async (source, destination, plan, options = {}) => {
   return plan;
 };
 
-const assertCopyPlanSourcesUnchanged = async plan => {
+const assertCopyPlanSourcesUnchanged = async (plan, options = {}) => {
+  const verifyDigests = options.verifyDigests !== false;
   for (const entry of plan) {
     let stat;
     try { stat = await fs.promises.lstat(entry.source, { bigint: true }); }
     catch { throw new Error(`剪切源已不存在：${path.basename(entry.source)}`); }
-    const expected = entry.sourceIdentity;
+    const expected = verifyDigests ? entry.sourceIdentity : { ...entry.sourceIdentity, sha256: undefined };
     const current = identityFromStat(entry.source, stat);
-    if (expected?.sha256 && current.kind === 'file') current.sha256 = await fileDigest(entry.source);
+    if (verifyDigests && expected?.sha256 && current.kind === 'file') current.sha256 = await fileDigest(entry.source);
     if (!identitiesMatch(current, expected)) throw new Error(`剪切源在复制期间发生变化：${path.basename(entry.source)}`);
     if (entry.kind === 'file') {
       if (!stat.isFile()) throw new Error(`剪切源在复制期间发生变化：${path.basename(entry.source)}`);
@@ -549,7 +550,7 @@ const assertCopyPlanSourcesUnchanged = async plan => {
   }
 };
 
-const removeCopiedSources = async (plan, options = {}) => {
+const removeCopiedSourcesIndividually = async (plan, options = {}) => {
   await assertCopyPlanSourcesUnchanged(plan);
   const files = plan.filter(entry => entry.kind === 'file');
   const directories = plan.filter(entry => entry.kind === 'directory').sort((left, right) => right.source.length - left.source.length);
@@ -581,6 +582,240 @@ const removeCopiedSources = async (plan, options = {}) => {
     outcomeUnknown: warnings.some(outcome => outcome.outcomeUnknown === true) || undefined,
     phase: warnings.find(outcome => outcome.phase)?.phase,
   };
+};
+
+const cleanupAncestorPaths = candidate => {
+  const resolved = path.resolve(candidate);
+  const root = path.parse(resolved).root;
+  const paths = [root];
+  let current = root;
+  for (const segment of path.relative(root, path.dirname(resolved)).split(path.sep).filter(Boolean)) {
+    current = path.join(current, segment);
+    paths.push(current);
+  }
+  return paths;
+};
+
+const inspectCleanupPaths = async (paths, nativeService) => {
+  const unique = [...new Map(paths.map(candidate => [physicalPathKey(candidate), path.resolve(candidate)])).values()];
+  const states = new Map();
+  for (let offset = 0; offset < unique.length;) {
+    const batch = takeBoundedBatch(unique, offset, 512, candidate => Math.ceil(Buffer.byteLength(candidate) / 3) * 4 + 32);
+    const inspected = await nativeService.inspectPathsBatch(batch);
+    if (!Array.isArray(inspected) || inspected.length !== batch.length) throw Object.assign(new Error('批量源文件身份检查返回了不完整结果'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
+    for (let index = 0; index < batch.length; index += 1) {
+      const state = inspected[index];
+      if (state?.success === false || typeof state?.identity !== 'string' || !state.identity) throw Object.assign(new Error(`无法确认剪切源身份：${path.basename(batch[index])}`), { code: state?.code || 'PUBLISH_OWNERSHIP_CONFLICT' });
+      states.set(physicalPathKey(batch[index]), state);
+    }
+    offset += batch.length;
+  }
+  return states;
+};
+
+const removeCopiedSourcesBatched = async (plan, options, nativeService) => {
+  // The copy path already records a verified SHA-256 on every source identity.
+  // This metadata-only pass detects replaced paths and new directory entries;
+  // the native delete below performs the one authoritative digest read while
+  // holding an identity-bound delete handle.
+  await assertCopyPlanSourcesUnchanged(plan, { verifyDigests: false });
+  const files = plan.filter(entry => entry.kind === 'file');
+  const directories = plan.filter(entry => entry.kind === 'directory').sort((left, right) => right.source.length - left.source.length);
+  for (const entry of files) {
+    if (entry.sourceIdentity.sha256) continue;
+    const before = await capturePathIdentity(entry.source);
+    const sha256 = await fileDigest(entry.source);
+    const after = await capturePathIdentity(entry.source);
+    if (!identitiesMatch(before, entry.sourceIdentity) || !identitiesMatch(after, entry.sourceIdentity)) throw sourceChangedError(entry.source);
+    entry.sourceIdentity.sha256 = sha256;
+  }
+
+  const inspectionPaths = [];
+  for (const entry of plan) inspectionPaths.push(entry.source, ...cleanupAncestorPaths(entry.source));
+  const nativeStates = await inspectCleanupPaths(inspectionPaths, nativeService);
+  await assertCopyPlanSourcesUnchanged(plan, { verifyDigests: false });
+  for (const entry of plan) {
+    const state = nativeStates.get(physicalPathKey(entry.source));
+    if (!state || Boolean(state.directory) !== (entry.kind === 'directory')) throw Object.assign(new Error(`剪切源类型发生变化：${path.basename(entry.source)}`), { code: 'PUBLISH_OWNERSHIP_CONFLICT' });
+    entry.sourceIdentity.nativeIdentity = state.identity;
+  }
+
+  const parentChainFor = candidate => cleanupAncestorPaths(candidate).map(directory => {
+    const state = nativeStates.get(physicalPathKey(directory));
+    if (!state || state.directory !== true) throw Object.assign(new Error(`剪切源父目录身份不可用：${path.basename(directory)}`), { code: 'PUBLISH_OWNERSHIP_CONFLICT' });
+    return { path: directory, identity: state.identity };
+  });
+  const outcomes = [];
+  let processed = 0;
+  const total = plan.length;
+  const appendResults = (batch, results) => {
+    if (!Array.isArray(results) || results.length !== batch.length) throw Object.assign(new Error('批量源文件清理返回了不完整结果'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR' });
+    let failure;
+    for (let index = 0; index < batch.length; index += 1) {
+      const entry = batch[index];
+      const result = results[index] || {};
+      const outcome = { success: result.success === true || result.deleted === true, deleted: result.deleted === true, path: entry.source, code: result.code, error: result.error, cleanupWarning: result.cleanupWarning, outcomeUnknown: result.outcomeUnknown, phase: result.phase };
+      outcomes.push(outcome);
+      if (!outcome.success && !failure) failure = outcome;
+    }
+    processed += batch.length;
+    options.onCleanupProgress?.({ processed, total, filesDeleted: Math.min(processed, files.length), totalFiles: files.length, currentName: path.basename(batch.at(-1).source) });
+    if (failure) throw Object.assign(new Error(`剪切源无法安全清理：${path.basename(failure.path)}`), failure);
+  };
+  const runBatches = async (entries, invoke, measure) => {
+    const byRoot = new Map();
+    for (const entry of entries) {
+      const root = path.parse(path.resolve(entry.source)).root;
+      if (!byRoot.has(root)) byRoot.set(root, []);
+      byRoot.get(root).push(entry);
+    }
+    for (const [rootPath, rooted] of byRoot) for (let offset = 0; offset < rooted.length;) {
+      const batch = takeBoundedBatch(rooted, offset, CLEANUP_TREE_BATCH_SIZE, entry => measure(entry, parentChainFor(entry.source)));
+      appendResults(batch, await invoke(rootPath, batch));
+      await yieldCleanupTurn(options);
+      offset += batch.length;
+    }
+  };
+
+  await runBatches(files, (rootPath, batch) => nativeService.compareDeleteFilesBatch(batch.map(entry => ({
+    path: entry.source,
+    rootPath,
+    parentChain: parentChainFor(entry.source),
+    sha256: entry.sourceIdentity.sha256,
+    size: entry.sourceIdentity.size,
+    identity: entry.sourceIdentity.nativeIdentity,
+  }))), (entry, chain) => Math.ceil(Buffer.byteLength(entry.source) / 3) * 4 + Math.ceil(Buffer.byteLength(entry.sourceIdentity.nativeIdentity) / 3) * 4 + chain.reduce((sum, directory) => sum + Math.ceil(Buffer.byteLength(directory.path) / 3) * 4 + Math.ceil(Buffer.byteLength(directory.identity) / 3) * 4, 0) + 96);
+
+  const directoryLayers = new Map();
+  for (const entry of directories) {
+    const depth = path.resolve(entry.source).split(path.sep).length;
+    if (!directoryLayers.has(depth)) directoryLayers.set(depth, []);
+    directoryLayers.get(depth).push(entry);
+  }
+  for (const depth of [...directoryLayers.keys()].sort((left, right) => right - left)) {
+    await runBatches(directoryLayers.get(depth), (rootPath, batch) => nativeService.deleteDirectoriesBatch(batch.map(entry => ({
+      path: entry.source,
+      rootPath,
+      parentChain: parentChainFor(entry.source),
+      identity: entry.sourceIdentity.nativeIdentity,
+    }))), (entry, chain) => Math.ceil(Buffer.byteLength(entry.source) / 3) * 4 + Math.ceil(Buffer.byteLength(entry.sourceIdentity.nativeIdentity) / 3) * 4 + chain.reduce((sum, directory) => sum + Buffer.byteLength(directory.path) + Buffer.byteLength(directory.identity), 0) + 64);
+  }
+  const warnings = outcomes.filter(outcome => outcome.cleanupWarning || outcome.outcomeUnknown);
+  return {
+    success: true,
+    outcomes,
+    recoveryPaths: [],
+    cleanupWarning: warnings.map(outcome => outcome.cleanupWarning === true ? '原生删除已完成，但持久化确认失败' : outcome.cleanupWarning).filter(Boolean).join('；') || undefined,
+    outcomeUnknown: warnings.some(outcome => outcome.outcomeUnknown === true) || undefined,
+    phase: warnings.find(outcome => outcome.phase)?.phase,
+  };
+};
+
+const removeCopiedSources = async (plan, options = {}) => {
+  const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+  const canBatch = nativeService?.nativeAvailable?.()
+    && typeof nativeService.inspectPathsBatch === 'function'
+    && typeof nativeService.compareDeleteFilesBatch === 'function'
+    && typeof nativeService.deleteDirectoriesBatch === 'function';
+  return canBatch
+    ? removeCopiedSourcesBatched(plan, options, nativeService)
+    : removeCopiedSourcesIndividually(plan, options);
+};
+
+const canUseNativeFastCut = () => {
+  const nativeService = configuredNativePublicationService || bundledNativePublicationService;
+  return process.platform === 'win32' && nativeService?.nativeAvailable?.()
+    && typeof nativeService.inspectPathsBatch === 'function'
+    && typeof nativeService.copyCutFilesBatch === 'function'
+    && typeof nativeService.deleteDirectoriesBatch === 'function';
+};
+
+const movePlannedFilesFast = async (plan, options = {}) => {
+  const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+  if (process.platform !== 'win32' || !nativeService?.nativeAvailable?.() || typeof nativeService.copyCutFilesBatch !== 'function') throw Object.assign(new Error('单遍原生跨盘剪切不可用'), { code: 'ENOTSUP' });
+  const ownershipToken = ownershipTokenForOptions(options);
+  await assertCopyPlanSourcesUnchanged(plan, { verifyDigests: false });
+  const files = plan.filter(entry => entry.kind === 'file');
+  const directories = plan.filter(entry => entry.kind === 'directory');
+  const inspectionPaths = [];
+  for (const entry of plan) inspectionPaths.push(entry.source, ...cleanupAncestorPaths(entry.source));
+  const nativeStates = await inspectCleanupPaths(inspectionPaths, nativeService);
+  await assertCopyPlanSourcesUnchanged(plan, { verifyDigests: false });
+  for (const entry of plan) {
+    const state = nativeStates.get(physicalPathKey(entry.source));
+    if (!state || Boolean(state.directory) !== (entry.kind === 'directory')) throw Object.assign(new Error(`剪切源类型发生变化：${path.basename(entry.source)}`), { code: 'PUBLISH_OWNERSHIP_CONFLICT' });
+    if (entry.kind === 'file' && (String(state.size) !== String(entry.sourceIdentity.size) || !/^-?\d+$/.test(String(state.lastWriteTime)) || !/^-?\d+$/.test(String(state.changeTime)))) throw sourceChangedError(entry.source);
+    entry.sourceIdentity.nativeIdentity = state.identity;
+    if (entry.kind === 'file') entry.nativeSnapshot = { size: String(state.size), lastWriteTime: String(state.lastWriteTime), changeTime: String(state.changeTime) };
+  }
+  for (const entry of plan) if (fs.existsSync(entry.destination)) throw Object.assign(new Error(`目标文件已存在：${path.basename(entry.destination)}`), { code: 'EEXIST' });
+  for (const entry of directories) {
+    throwIfCancelled(options.isCancelled);
+    await fs.promises.mkdir(entry.destination, { recursive: false }).catch(error => { throw attachTransferContext(error, 'prepare-target', entry.source, entry.destination); });
+    rememberCleanupOwnership(entry.destination, await capturePathIdentity(entry.destination), ownershipToken);
+    options.onCreated?.(entry.destination);
+  }
+
+  let filesMoved = 0;
+  let bytesMoved = 0;
+  const acceptCompleted = async (batch, results) => {
+    for (const result of results) {
+      const entry = batch[result.index];
+      const publishedIdentity = { ...await capturePublishedIdentity(entry.destination), sha256: result.sha256, nativeIdentity: result.identity };
+      rememberCleanupOwnership(entry.destination, publishedIdentity, ownershipToken);
+      entry.sourceIdentity.sha256 = result.sha256;
+      filesMoved += 1; bytesMoved += Number(entry.size);
+      options.onCreated?.(entry.destination);
+      options.onProgress?.({ entry, bytesDelta: Number(entry.size), fileCompleted: true, filesMoved, totalFiles: files.length });
+    }
+  };
+  try {
+    for (let offset = 0; offset < files.length;) {
+      throwIfCancelled(options.isCancelled);
+      const batch = takeBoundedBatch(files, offset, CLEANUP_TREE_BATCH_SIZE, entry => Math.ceil(Buffer.byteLength(entry.source) / 3) * 4 + Math.ceil(Buffer.byteLength(entry.destination) / 3) * 4 + 160);
+      try {
+        const results = await nativeService.copyCutFilesBatch(batch.map(entry => ({ source: entry.source, target: entry.destination, identity: entry.sourceIdentity.nativeIdentity, ...entry.nativeSnapshot })));
+        await acceptCompleted(batch, results);
+      } catch (error) {
+        if (Array.isArray(error.completed) && error.completed.length) await acceptCompleted(batch, error.completed);
+        error.message = `${error.message || String(error)}；已安全移动 ${filesMoved}/${files.length} 个文件`;
+        throw error;
+      }
+      offset += batch.length;
+      await yieldCleanupTurn(options);
+    }
+
+    const parentChainFor = candidate => cleanupAncestorPaths(candidate).map(directory => {
+      const state = nativeStates.get(physicalPathKey(directory));
+      if (!state || state.directory !== true) throw Object.assign(new Error(`剪切源父目录身份不可用：${path.basename(directory)}`), { code: 'PUBLISH_OWNERSHIP_CONFLICT' });
+      return { path: directory, identity: state.identity };
+    });
+    const directoryLayers = new Map();
+    for (const entry of directories) {
+      const depth = path.resolve(entry.source).split(path.sep).length;
+      if (!directoryLayers.has(depth)) directoryLayers.set(depth, []);
+      directoryLayers.get(depth).push(entry);
+    }
+    let directoriesRemoved = 0;
+    for (const depth of [...directoryLayers.keys()].sort((left, right) => right - left)) {
+      const layer = directoryLayers.get(depth);
+      const byRoot = new Map();
+      for (const entry of layer) { const root = path.parse(path.resolve(entry.source)).root; if (!byRoot.has(root)) byRoot.set(root, []); byRoot.get(root).push(entry); }
+      for (const [rootPath, rooted] of byRoot) for (let offset = 0; offset < rooted.length;) {
+        const batch = takeBoundedBatch(rooted, offset, CLEANUP_TREE_BATCH_SIZE, entry => Buffer.byteLength(entry.source) + parentChainFor(entry.source).reduce((sum, directory) => sum + Buffer.byteLength(directory.path) + Buffer.byteLength(directory.identity), 0) + 96);
+        const results = await nativeService.deleteDirectoriesBatch(batch.map(entry => ({ path: entry.source, rootPath, parentChain: parentChainFor(entry.source), identity: entry.sourceIdentity.nativeIdentity })));
+        const failedIndex = results.findIndex(result => result?.success !== true && result?.deleted !== true);
+        directoriesRemoved += results.filter(result => result?.success === true || result?.deleted === true).length;
+        options.onCleanupProgress?.({ processed: filesMoved + directoriesRemoved, total: plan.length, filesDeleted: filesMoved, totalFiles: files.length });
+        if (failedIndex >= 0) throw Object.assign(new Error(`剪切源文件夹无法安全清理：${path.basename(batch[failedIndex].source)}`), results[failedIndex]);
+        offset += batch.length;
+      }
+    }
+    releaseCleanupOwnership(ownershipToken);
+    return { success: true, filesMoved, bytesMoved, directoriesRemoved, strategy: 'win32-native-single-pass-cut' };
+  } catch (error) {
+    throw attachOwnershipToError(error, ownershipToken);
+  }
 };
 
 const stageSmallFileAtomic = async (entry, options = {}) => {
@@ -1515,6 +1750,7 @@ module.exports = {
   assertInside,
   assertRegularFile,
   buildOwnedTreeManifest,
+  canUseNativeFastCut,
   collectCopyPlan,
   commitTemporaryFile,
   configureNativePublicationService,
@@ -1524,6 +1760,7 @@ module.exports = {
   deleteOwnedTreeEntries,
   isInside,
   moveFileAtomic,
+  movePlannedFilesFast,
   movePathAtomic,
   publishPathNoClobber,
   rebaseCleanupOwnership,

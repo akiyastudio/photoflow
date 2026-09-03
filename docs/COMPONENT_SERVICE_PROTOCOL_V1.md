@@ -1,38 +1,91 @@
 # Component Service Protocol V1
 
-组件渲染代码继续运行在宿主管理的沙箱 `WebContentsView` 中。组件还可以在 `componentHost.service` 声明受监管服务；Electron 主进程把入口作为子进程启动，绝不 `require` 或导入组件代码。
+Component Service Protocol V1 is the current process transport used by
+Component Host V2. The protocol version describes the JSON Lines envelope; it
+is independent from the current Host API result version (`apiVersion: 7`) and
+from component-owned RPC method versions such as `.v1` or `.v2`.
 
-## 清单边界
+Component renderers run in host-managed sandbox `WebContentsView` instances.
+A component service is launched as a supervised `node` or `executable` child
+process. Electron never imports or `require`s component business code.
 
-服务声明包含协议版本、运行时、平台入口、版本化 RPC 白名单和请求的 Host 能力白名单。入口必须解析为已安装组件根目录内的普通非符号链接文件。发现阶段会拒绝未知能力、无版本方法、路径穿越、外部绝对路径和不支持的运行时。
+## Manifest boundary
 
-V1 支持的 Host 能力词汇有意保持很小：
+`componentHost.service` declares:
 
-- `project.media.list.v1`
-- `project.media.read.v1`
-- `project.output.authorize.v1`
-- `version.register.v1`
-- `tasks.report.v1`
-- `component.settings.v1`
-- `component.storage.v1`
-- `dialogs.open.v1`
+- `protocolVersion: 1`;
+- runtime and platform entrypoints;
+- a bounded, versioned component RPC allowlist;
+- exact Host API capability and permission allowlists;
+- emitted events and optional runtime/lifecycle actions;
+- network origins and secret bindings when those capabilities are requested.
 
-声明能力不会自动使其可用。Electron 主进程必须注册通用实现；每次调用前，代理同时检查已安装清单授权和绑定组件页面请求。
+Entrypoints and lifecycle files must resolve to regular, non-symbolic-link files
+inside the installed component root. Discovery rejects unknown fields,
+undeclared files, duplicate or unversioned component RPC methods, path traversal,
+external absolute paths, unknown capabilities and missing permissions.
 
-## 进程协议
+## Current Host API capabilities
 
-传输使用私有 stdin/stdout 管道上的按行 JSON。服务先发送 `ready`，再接收 `request` 帧。服务只能在处理已知父请求时发送 `capability` 帧；宿主回复 `capability-response`；服务最后以 `response` 完成渲染层调用。
+The authoritative vocabulary is `HostCapabilityMap` in
+`component-sdk/index.d.ts` and the enum in
+`electron/contracts/schemas/component-manifest-v2.schema.json`:
 
-原始工作区路径保留在宿主绑定上下文中，不会发送给服务。服务只接收稳定项目身份，并且必须通过显式授权的 Host 能力访问媒体、输出、版本、任务、设置、存储、选择器或生命周期。该协议没有任意渲染 IPC 通道。
+- media and inputs: `project.media.page`, `project.media.variants`,
+  `project.input.tokens`, `project.media.metadata`, `project.media.ratings`,
+  `project.media.ratings.write`, `project.media.process`;
+- project files and versions: `project.files.page`, `project.files.search`,
+  `project.files.mutate`, `project.versions.page`, `project.version.graph`,
+  `project.version.update`, `project.version.delete`, `project.progress`,
+  `project.progress.manage`, `project.import`, `project.output`, `version.create`;
+- component services: `component.storage`, `component.settings`,
+  `component.events`, `component.lifecycle`, `component.media`,
+  `component.runtime.execute`, `component.secrets`, `network.fetch`;
+- host interaction: `tasks`, `dialogs`, `notifications`.
 
-帧和载荷上限 2 MiB。启动进程只得到最小 OS 环境，而非宿主完整环境，避免继承无关凭据。意外、无效或超限帧会触发进程回收。进程退出时，进行中的请求失败而不会自动重放，从而保持变更最多一次语义；定义组件领域幂等键后，调用方必须通过操作专属幂等键重试。
+Capability names are stable Host API method names and do not carry `.vN`.
+Component-owned RPC methods and emitted component events remain explicitly
+versioned. Declaring a capability does not grant it: every invocation checks the
+installed manifest, permission allowlist and bound component/project context.
 
-## 数据与迁移规则
+## Process protocol
 
-把业务抽取到服务并不授权移动或删除组件数据。迁移期可以保留旧物理数据库位置，但同时只能有一个服务代际拥有写入权。卸载组件只移除代码。快照、恢复、健康检查和旧数据库采用在通用领域生命周期合约完成前仍是显式 Host 生命周期能力。
+Transport uses bounded JSON objects, one frame per line on private stdin/stdout:
 
-## 当前迁移状态
+1. The service sends `ready` with the negotiated protocol version.
+2. The host sends a `request` containing an ID, versioned component RPC method,
+   payload and bounded context.
+3. While processing that request, the service may send a `capability` frame tied
+   to the parent request.
+4. The host returns `capability-response` after authorization and validation.
+5. The service completes the parent call with a success or failure `response`.
 
-协议、清单验证、能力代理、服务启动器、渲染路由回退、监管和边界测试已经实现。组件工作区声明 Node 服务，并拥有项目快照/登记/删除、身份保存/分配/分组确认/删除、人物排除、检测、patch 增删改查/上传和合并。对应路由不再有主进程兼容处理器或映射。
+Frames and payloads are bounded to 2 MiB. Unknown, malformed or oversized frames
+are rejected. A service receives a minimal environment rather than the complete
+host environment. Raw workspace paths remain in the host unless a specific
+capability returns a bounded token or authorized project-relative reference.
 
-检测与合并只通过组件自有算法运行时执行；文件变更使用授权、暂存/补偿和组件命令日志，合并版本通过通用 Host 能力登记。身份建议/完成、工作流、回传和高级运行时路由仍走兼容处理器，不能描述为已经抽取。
+Unexpected process exit fails in-flight requests. Component services have a
+bounded supervised restart policy, but requests are never silently replayed.
+Callers retry mutations only with operation-specific idempotency keys.
+
+## Data, output and migration
+
+`component.storage` returns component-private locations and may report an
+asynchronous adoption state. A pending adoption is read-only and does not expose
+the destination paths. Project content is written only through transactional
+Host API capabilities such as `project.output`, `version.create`,
+`project.files.mutate` or the bounded import/progress capabilities.
+
+Legacy data is accepted only through explicit adoption grants and compatibility
+adapters. New component business tables, routes and fields must not be added to
+the host database or general Electron modules.
+
+## Sources of truth
+
+- manifest: `electron/contracts/schemas/component-manifest-v2.schema.json`;
+- wire envelope: `electron/contracts/schemas/component-service-protocol-v1.schema.json`;
+- Host API request/results: `electron/contracts/schemas/component-host-api.schema.json`;
+- public TypeScript API: `component-sdk/index.d.ts`;
+- runtime validation and supervision: `electron/component-host-contract.cjs` and
+  `electron/services/component-service-manager.cjs`.

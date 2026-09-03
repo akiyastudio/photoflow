@@ -62,7 +62,7 @@ const publicProgress = progress => ({
 });
 
 const registerComponentProjectReadCapabilities = ({
-  broker, ensureWorkspace, getProjectPath, getBoundProject, path, fs, crypto, versionService, mediaRatingService, exiftool,
+  broker, ensureWorkspace, getProjectPath, getBoundProject, path, fs, crypto, versionService, mediaRatingService, exiftool, resolveComponentContentBinding = null,
   IMAGE_EXTENSIONS, RAW_EXTENSIONS = new Set(), VIDEO_EXTENSIONS = new Set(),
 }) => {
   const kindFor = filePath => {
@@ -71,10 +71,11 @@ const registerComponentProjectReadCapabilities = ({
   };
   const bound = async (context, descriptor) => {
     if (!context || !['project', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider'].includes(context.surface)) throw hostError(CODES.PERMISSION_DENIED, 'Capability requires a bound project surface');
-    const workspaceRoot = ensureWorkspace(context.workspacePath);
-    const project = getBoundProject?.(workspaceRoot, context.projectName);
+    const binding = resolveComponentContentBinding?.(context);
+    const workspaceRoot = binding?.workspaceRoot || ensureWorkspace(context.workspacePath);
+    const project = binding?.project || getBoundProject?.(workspaceRoot, context.projectName);
     if (!project || String(project.id || '') !== String(context.projectId || '')) throw hostError(CODES.NOT_FOUND, 'Bound project is unavailable');
-    const projectRoot = path.resolve(getProjectPath(workspaceRoot, project.status || context.projectStatus, project.name || context.projectName));
+    const projectRoot = binding?.projectRoot || path.resolve(getProjectPath(workspaceRoot, project.status || context.projectStatus, project.name || context.projectName));
     const scopeRelativePath = assertRelative(path, context.scopeRelativePath, { optional: true, label: 'scopeRelativePath' });
     const scopeRoot = path.resolve(projectRoot, scopeRelativePath);
     if (!insideOrEqual(path, projectRoot, scopeRoot)) throw hostError(CODES.PERMISSION_DENIED, 'Component scope escapes the bound project');
@@ -83,7 +84,7 @@ const registerComponentProjectReadCapabilities = ({
     const canonicalProjectRoot = await fs.promises.realpath(projectRoot).catch(() => null); const canonicalScopeRoot = await fs.promises.realpath(scopeRoot).catch(() => null);
     if (!canonicalProjectRoot || !canonicalScopeRoot || !insideOrEqual(path, canonicalProjectRoot, canonicalScopeRoot)) throw hostError(CODES.PERMISSION_DENIED, 'Project scope escapes its physical project boundary');
     const key = `${descriptor.componentId}\0${workspaceRoot}\0${context.projectId}\0${scopeRelativePath}`;
-    return { workspaceRoot, project, projectRoot, scopeRoot, canonicalProjectRoot, canonicalScopeRoot, scopeRelativePath, key };
+    return { workspaceRoot, project, projectRoot, scopeRoot, canonicalProjectRoot, canonicalScopeRoot, scopeRelativePath, contentKind: binding?.contentKind || 'project', key };
   };
   const resolveFile = async (scope, relativePath, { mediaOnly = false } = {}) => {
     const relative = assertRelative(path, relativePath);
@@ -203,6 +204,7 @@ const registerComponentProjectReadCapabilities = ({
   broker.register('project.versions.page', async (payload, context, descriptor) => {
     assertObjectFields(payload, ['pageSize', 'cursor']);
     const scope = await bound(context, descriptor); const pageSize = pageSizeFor(payload);
+    if (scope.contentKind === 'inspiration') throw hostError(CODES.PERMISSION_DENIED, 'Project versions are unavailable in the inspiration library');
     let cursor = pageCursor(payload, scope, 'versions-page'); let truncated = false;
     if (!cursor) { const snapshot = await versionSnapshot(scope); cursor = { items: snapshot.items, offset: 0, truncated: snapshot.truncated, pageSize }; truncated = snapshot.truncated; }
     else if (cursor.pageSize !== pageSize) throw hostError(CODES.INVALID_REQUEST, 'Continuation payload does not match the original request');
@@ -214,7 +216,9 @@ const registerComponentProjectReadCapabilities = ({
   });
   broker.register('project.version.graph', async (payload, context, descriptor) => {
     assertObjectFields(payload, ['includeMissing']); if (payload.includeMissing !== undefined && typeof payload.includeMissing !== 'boolean') throw hostError(CODES.INVALID_REQUEST, 'includeMissing must be boolean');
-    const scope = await bound(context, descriptor); const versions = await versionSnapshot(scope);
+    const scope = await bound(context, descriptor);
+    if (scope.contentKind === 'inspiration') throw hostError(CODES.PERMISSION_DENIED, 'Project version graph is unavailable in the inspiration library');
+    const versions = await versionSnapshot(scope);
     const listed = await versionService.snapshotProgress(scope.workspaceRoot, scope.project.name, payload.includeMissing === true);
     const allProgress = Array.isArray(listed.progressFolders) ? listed.progressFolders : [];
     const scannedProgress = allProgress.slice(0, MAX_PROGRESS_SCAN); const visibleProgress = [];

@@ -7,10 +7,12 @@ kind, PID, generation, start/health timestamps, restart count, and last exit.
 | Runtime | Policy |
 | --- | --- |
 | Python database and thumbnail protocol workers | restart unexpected exits up to three times with bounded backoff |
-| Python import, conversion, backup and media jobs | supervised one-shot process; cancellation and timeout never restart the job |
+| Python import, conversion, backup, RAW, preview and media jobs | supervised one-shot process; cancellation and timeout never restart the job |
 | C# Shell thumbnail helper | restart unexpected exits; protocol timeouts recycle the process |
-| C# recycle-bin and file-clipboard helpers | supervised one-shot process with caller timeout |
-| Optional video component | startup health deadline, supervised session, no automatic restart because playback context is not replayable |
+| C# recycle-bin, file-clipboard and file-publication helpers | supervised one-shot process with caller timeout and unknown-outcome reporting |
+| Component service | startup health deadline and at most two bounded restarts; in-flight requests are never replayed |
+| Component algorithm runtime | supervised one-shot execution with Host-controlled timeout, cancellation and background-task policy |
+| Media playback backend and native video surface | startup health deadline, supervised session, no automatic restart because playback context is not replayable |
 
 Protocol workers mark themselves healthy after receiving a valid protocol
 response. Optional components mark healthy after their versioned `ready`
@@ -28,3 +30,9 @@ Shutdown remains owner-aware: services first reject or finish their pending
 requests, then stop their managed process. The application finally invokes
 `stopAll` as a safety net. Intentional stops, cancellation, and application
 shutdown never consume the restart budget.
+
+Process supervision and background-task recovery are separate responsibilities.
+`ProcessSupervisor` owns OS process lifetime; `BackgroundTaskService` persists
+user-visible task history, checkpoints and resume policy. Restarting a worker
+does not imply replaying a task, and resuming a task does not bypass process
+health or capability checks.

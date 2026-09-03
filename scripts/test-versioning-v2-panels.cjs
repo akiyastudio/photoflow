@@ -408,6 +408,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     assert(!content.includes('高级跟踪设置') && !allNodes(container).some(node => node.nodeName === 'DETAILS'), 'tracking policy options must stay visible without a redundant disclosure section');
     assert(content.includes('原始素材 → V1') && !content.includes('import-'), 'internal original-node version keys must never leak into the version creation UI');
     assert(!content.includes('节点用途') && !content.includes('工作流输入'), `${mode} settings must not expose relation types or collaboration inputs`);
+    assert(allNodes(container).some(node => node.nodeName === 'INPUT' && node.attributes.get('aria-label') === '文件夹名称'), `${mode} must expose the folder-name input`);
     if (mode === 'create') assert(content.includes('将创建') && content.includes('图片') && content.includes('视频') && content.includes('项目根目录'), `${mode} must show the derived version/name summary`);
   }
   const importChanges = [];
@@ -421,6 +422,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('import'), sourcePaths: ['C:/source'] }, folders, importStep: 'settings', onImportStepChange(step) { importChanges.push(step); }, onChange() {}, onSubmit() {}, onClose() {}, onChooseFolder() {} })));
   const importSettingsContent = textContent(container);
   assert(importSettingsContent.includes('版本跟踪') && importSettingsContent.includes('创建版本') && importSettingsContent.includes('返回重新选择'), 'the second import step must show version settings and a route back to source selection');
+  assert(allNodes(container).some(node => node.nodeName === 'INPUT' && node.attributes.get('aria-label') === '文件夹名称'), 'import settings must expose the folder-name input');
   assert(!importSettingsContent.includes('选择或拖入进度文件/文件夹'), 'the source picker must not remain embedded in the version settings panel');
   const v2Parent = { ...folders[0], id: 'v2', nodeRole: 'progress', versionKey: '2', parentProgressId: 'raw' };
   const createNextChanges = [];
@@ -432,10 +434,16 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(createNextChanges.at(-1).versionKey, '2_1', 'branch choice must generate the next child number instead of asking the user to type underscore syntax');
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: createNextChanges.at(-1), folders: [...folders, v2Parent], onChange(next) { createNextChanges.push(next); }, onSubmit() {}, onClose() {} })));
   assert(textContent(container).includes('V2 → V2_1') && textContent(container).includes('V2_1 ·'), 'generated version must be presented as a derived summary rather than an editable field');
-  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('create-next'), parentProgressId: 'v2', versionKey: '3', versionKind: 'main', contextLocked: true, targetFolderLocked: true }, folders: [...folders, v2Parent], onChange() {}, onSubmit() {}, onClose() {} })));
+  const lockedNameChanges = [];
+  await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('create-next'), parentProgressId: 'v2', versionKey: '3', versionKind: 'main', contextLocked: true, targetFolderLocked: true }, folders: [...folders, v2Parent], namePresets: ['精修'], onChange(next) { lockedNameChanges.push(next); }, onSubmit() {}, onClose() {} })));
   const lockedContent = textContent(container);
   assert(lockedContent.includes('从版本树发起，媒体类型和父版本已锁定') && lockedContent.includes('使用现有文件夹“RAW”'), 'version-tree entry must lock its context and describe the existing target folder');
+  assert(allNodes(container).some(node => node.nodeName === 'INPUT' && node.attributes.get('aria-label') === '文件夹名称'), 'a locked existing-target panel must still expose the folder-name input');
   assert(!allNodes(container).some(node => node.nodeName === 'SELECT') && !allNodes(container).some(node => node.nodeName === 'BUTTON' && (node.textContent === '图片' || node.textContent === '视频')), 'locked version-tree entry must not allow changing parent or media type');
+  const lockedNamePreset = allNodes(container).find(node => node.nodeName === 'BUTTON' && node.textContent === '精修');
+  await React.act(async () => dispatch(lockedNamePreset, 'click'));
+  assert.strictEqual(lockedNameChanges.at(-1).displayName, '精修');
+  assert.strictEqual(lockedNameChanges.at(-1).targetFolderLocked, false, 'editing the folder name must opt the existing target into the protected rename path');
   const v1BranchParent = { ...v2Parent, id: 'v1-1', versionKey: '1_1' };
   const branchMainChanges = [];
   await React.act(async () => root.render(React.createElement(panel.VersionProgressPanel, { draft: { ...draft('create-next'), parentProgressId: 'v1-1', versionKey: '1_2', versionKind: 'main' }, folders: [...folders, v2Parent, v1BranchParent], onChange(next) { branchMainChanges.push(next); }, onSubmit() {}, onClose() {} })));

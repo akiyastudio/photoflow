@@ -456,7 +456,26 @@ const run = async () => {
   const boundedHandlers = new Map(); let boundedReads = 0;
   registerWorkspaceIpc(context(boundedHandlers, { getProjectPath: () => boundedRoot, projectVirtualPaths: { readManagedExternalLink: candidate => { boundedReads += 1; return { target: `${candidate}.missing`, targetKindHint: 'file', linkId: path.basename(candidate) }; }, listManagedExternalLinks: () => { throw new Error('unbounded API must not be called'); } } }));
   const boundedTree = await boundedHandlers.get('workspace-folder-tree')(null, temporaryRoot, '策划中', 'Bounded');
-  assert.strictEqual(boundedTree.success, true); assert.strictEqual(boundedTree.truncated, true, 'managed-link prescan reports its hard cap'); assert.strictEqual(boundedReads, 512, 'bounded link enumeration stops exactly at its result cap');
+  assert.strictEqual(boundedTree.success, true); assert.strictEqual(boundedTree.truncated, false, 'managed-link truncation must not masquerade as folder truncation'); assert.strictEqual(boundedTree.externalLinkScanTruncated, true, 'managed-link prescan reports its hard cap separately'); assert.strictEqual(boundedReads, 512, 'bounded link enumeration stops exactly at its result cap');
+
+  const largeLibraryRoot = path.join(temporaryRoot, 'virtual-large-library');
+  const largeLibraryFolder = path.join(largeLibraryRoot, 'folder');
+  let largeLibraryRootReads = 0;
+  const regularFileEntries = Array.from({ length: 30000 }, (_value, index) => ({ name: `${index}.jpg`, isDirectory: () => false, isFile: () => true, isSymbolicLink: () => false }));
+  const folderEntry = { name: 'folder', isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false };
+  const directoryStat = inode => ({ dev: 1n, ino: BigInt(inode), isDirectory: () => true, isFile: () => false, isSymbolicLink: () => false });
+  const largeLibraryFs = { ...fs, promises: { ...fs.promises,
+    realpath: async candidate => path.resolve(candidate),
+    lstat: async candidate => path.resolve(candidate) === path.resolve(largeLibraryRoot) ? directoryStat(1) : directoryStat(2),
+    readdir: async candidate => { if (path.resolve(candidate) !== path.resolve(largeLibraryRoot)) return []; largeLibraryRootReads += 1; return [...regularFileEntries, folderEntry]; },
+  } };
+  const largeLibraryHandlers = new Map();
+  registerWorkspaceIpc(context(largeLibraryHandlers, { fs: largeLibraryFs, getProjectPath: () => largeLibraryRoot, projectVirtualPaths: { readManagedExternalLink: () => null } }));
+  const largeLibraryTree = await largeLibraryHandlers.get('workspace-folder-tree')(null, temporaryRoot, '策划中', 'Large library');
+  assert.strictEqual(largeLibraryTree.success, true); assert.strictEqual(largeLibraryTree.folders.length, 1); assert.strictEqual(largeLibraryTree.truncated, false, 'ordinary media files must not consume the managed-link inspection budget'); assert.strictEqual(largeLibraryTree.externalLinkScanTruncated, false); assert.strictEqual(largeLibraryRootReads, 2, 'ordinary projects retain managed-link discovery before folder enumeration');
+  largeLibraryRootReads = 0;
+  const inspirationLibraryTree = await largeLibraryHandlers.get('workspace-folder-tree')(null, temporaryRoot, '未分类', '.__photoflow_inspiration__');
+  assert.strictEqual(inspirationLibraryTree.success, true); assert.strictEqual(inspirationLibraryTree.folders.length, 1); assert.strictEqual(inspirationLibraryTree.externalLinkScanTruncated, false); assert.strictEqual(largeLibraryRootReads, 1, 'the inspiration library skips managed-link discovery entirely');
 
   const truncatedLinks = []; truncatedLinks.truncated = true; const watchHandlers = new Map();
   registerWorkspaceIpc(context(watchHandlers, { getProjectPath: () => boundedRoot, ensureWorkspace: () => temporaryRoot, projectVirtualPaths: { listManagedExternalLinks: () => truncatedLinks }, mediaService: { grantRoot: () => undefined }, acquireFileRootWatcher: () => ({ success: true }), releaseFileRootWatcher: () => undefined, versionService: { detectProgressStale: async () => ({ success: true }) } }));

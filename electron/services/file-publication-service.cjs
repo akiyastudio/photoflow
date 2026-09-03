@@ -173,6 +173,36 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
       await fs.promises.rm(manifest, { force: true }).catch(() => undefined);
     }
   };
+  const copyCutFilesBatch = async requests => {
+    if (!Array.isArray(requests) || requests.length === 0) return [];
+    if (platform !== 'win32') throw Object.assign(new Error('当前平台不支持单遍原生跨盘剪切'), { code: 'ENOTSUP' });
+    if (requests.length > MAX_BATCH_ITEMS) throw Object.assign(new Error(`单次原生剪切不得超过 ${MAX_BATCH_ITEMS} 项`), { code: 'EINVAL' });
+    const manifest = path.join(os.tmpdir(), `photoflow-fast-cut-${process.pid}-${crypto.randomUUID()}.batch`);
+    const contents = requests.map((request, index) => {
+      if (typeof request.identity !== 'string' || !request.identity || !/^\d+$/.test(String(request.size)) || !/^-?\d+$/.test(String(request.lastWriteTime)) || !/^-?\d+$/.test(String(request.changeTime))) throw Object.assign(new Error('原生剪切缺少有效源快照'), { code: 'EINVAL' });
+      return `F\t${index}\t${Buffer.from(path.resolve(request.source), 'utf8').toString('base64')}\t${Buffer.from(path.resolve(request.target), 'utf8').toString('base64')}\t${Buffer.from(request.identity, 'utf8').toString('base64')}\t${request.size}\t${request.lastWriteTime}\t${request.changeTime}`;
+    }).join('\n');
+    if (Buffer.byteLength(contents) > MAX_BATCH_MANIFEST_BYTES) throw Object.assign(new Error('原生剪切清单过大'), { code: 'EINVAL' });
+    let handle;
+    try {
+      handle = await fs.promises.open(manifest, 'wx', 0o600); await handle.writeFile(contents, 'utf8'); await handle.sync(); await handle.close(); handle = null;
+      const payload = await invoke('copy-cut-files-batch', { manifest, 'manifest-size': Buffer.byteLength(contents), 'manifest-sha256': crypto.createHash('sha256').update(contents).digest('hex') }, 30 * 60 * 1000);
+      const results = Array.isArray(payload?.results) ? payload.results : [];
+      const completed = [];
+      for (const item of results) {
+        const index = Number(item?.index);
+        if (!Number.isInteger(index) || index !== completed.length || index >= requests.length) throw Object.assign(new Error('原生剪切服务返回了无效结果'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR', completed });
+        if (!item.success) throw Object.assign(new Error(item.error || '原生剪切失败'), { code: item.code || 'FILE_PUBLICATION_FAILED', failedIndex: index, completed, published: item.published === true, sourceDeleted: item.sourceDeleted === true, destinationPath: requests[index].target, sourcePath: requests[index].source, identity: item.identity, sha256: item.sha256 });
+        if (item.sourceDeleted !== true || typeof item.identity !== 'string' || !/^[a-f0-9]{64}$/i.test(String(item.sha256 || ''))) throw Object.assign(new Error('原生剪切服务未返回完整提交凭据'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR', completed });
+        completed.push({ index, identity: item.identity, sha256: item.sha256, sourceDeleted: true, published: true });
+      }
+      if (completed.length !== requests.length) throw Object.assign(new Error('原生剪切服务返回了不完整结果'), { code: 'FILE_PUBLICATION_PROTOCOL_ERROR', completed });
+      return completed;
+    } finally {
+      if (handle) await handle.close().catch(() => undefined);
+      await fs.promises.rm(manifest, { force: true }).catch(() => undefined);
+    }
+  };
   const deleteDirectoriesBatch = async requests => {
     if (!Array.isArray(requests) || requests.length === 0) return [];
     if (requests.length > MAX_BATCH_ITEMS) throw Object.assign(new Error(`单次目录清理不得超过 ${MAX_BATCH_ITEMS} 项`), { code: 'EINVAL' });
@@ -213,6 +243,7 @@ const createFilePublicationService = ({ app, projectRoot, processSupervisor = nu
     inspectPathsBatch,
     deletePathsBatch,
     compareDeleteFilesBatch,
+    copyCutFilesBatch,
     deleteDirectoriesBatch,
     commitCrossVolumeFile: async request => {
       return invoke('commit-cross-volume-file', { source: path.resolve(request.source), staged: path.resolve(request.staged), target: path.resolve(request.target), sha256: request.sha256, size: request.size, 'source-identity': request.sourceIdentity }, 30 * 60 * 1000);

@@ -48,7 +48,7 @@ const componentSurfaceCss = (theme, surface) => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, resolveOpenContext = request => request, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
@@ -60,6 +60,7 @@ class ComponentViewManager {
     this.capabilityBroker = capabilityBroker;
     this.inputGrantService = inputGrantService;
     this.notificationService = notificationService;
+    this.resolveOpenContext = resolveOpenContext;
     this.onViewStackChanged = onViewStackChanged;
     this.settingsCloseGraceMs = Math.max(0, Number(settingsCloseGraceMs) || 0);
     this.instances = new Map();
@@ -214,7 +215,9 @@ class ComponentViewManager {
     return true;
   }
 
-  async openSurface(request, surface) {
+  async openSurface(rawRequest, surface) {
+    const applicationLevel = surface === 'application.settings' || surface === 'application.command';
+    const request = applicationLevel ? rawRequest : this.resolveOpenContext(rawRequest, surface);
     const settingsKey = surface === 'application.settings' ? componentSettingsPageKey(request) : '';
     const leaseId = surface === 'application.settings' ? String(request.leaseId || '') : '';
     if (surface === 'application.settings' && !/^[a-z0-9._:-]{8,160}$/i.test(leaseId)) throw new Error('Invalid component settings page lease');
@@ -236,7 +239,7 @@ class ComponentViewManager {
     const settingsPage = declaredSettingsPage || (settingsFormCustomPage ? { ...settingsFormCustomPage, id: String(request.pageId) } : null); const contribution = request.contribution || null;
     const page = surface === 'application.settings' ? settingsPage : contribution ? descriptor?.pages?.find(item => item.id === contribution.pageId) : descriptor?.fullPage;
     if (!descriptor || !page || page.id !== request.pageId) throw new Error('Unknown component page');
-    const applicationLevel = surface === 'application.settings' || surface === 'application.command'; const key = settingsKey || (contribution ? componentContributionKey(request, surface) : componentPageKey(request));
+    const key = settingsKey || (contribution ? componentContributionKey(request, surface) : componentPageKey(request));
     this.writeLog('info', 'Component page context bound', { componentId: request.componentId, surface, contributionId: contribution?.id || '', projectId: applicationLevel ? '' : String(request.projectId || ''), projectName: applicationLevel ? '' : String(request.projectName || ''), projectStatus: applicationLevel ? '' : String(request.projectStatus || ''), sourcePageId: applicationLevel ? '' : String(request.sourcePageId || '') });
     let existing = this.instances.get(key);
     if (existing && (existing.descriptor.componentVersion !== descriptor.componentVersion || existing.page.entry !== page.entry)) {
@@ -253,6 +256,7 @@ class ComponentViewManager {
         componentVersion: descriptor.componentVersion,
         projectName: !applicationLevel ? String(request.projectName || '') : '',
         projectStatus: !applicationLevel ? String(request.projectStatus || '') : '',
+        ...(!applicationLevel ? { contentKind: request.contentKind === 'inspiration' ? 'inspiration' : 'project', contentRootPath: String(request.contentRootPath || '') } : {}),
         ...(!applicationLevel ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }), contributionId: contribution?.id || '',
       });
       if (!existing.view.webContents.isDestroyed()) existing.view.webContents.send('component-sdk:context-changed', this.publicContext(existing));
@@ -352,7 +356,7 @@ class ComponentViewManager {
   }
 
   publicContext(instance) {
-    const { workspacePath: _privateWorkspacePath, eventSender: _privateEventSender, emitComponentEvent: _privateEmit, ...publicContext } = instance.context;
+    const { workspacePath: _privateWorkspacePath, contentRootPath: _privateContentRootPath, eventSender: _privateEventSender, emitComponentEvent: _privateEmit, ...publicContext } = instance.context;
     const applicationSettings = instance.context.surface === 'application.settings'; const applicationCommand = instance.context.surface === 'application.command'; const applicationSurface = applicationSettings || applicationCommand;
     const permissions = applicationSurface
       ? (instance.descriptor.service?.permissions || []).filter(permission => ['component.settings', 'component.secrets', 'network.fetch', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs', 'notifications'].includes(permission))

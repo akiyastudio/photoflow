@@ -22,6 +22,7 @@ const publicContext = (context, componentBackupRestore = false) => Object.freeze
   componentId: context.componentId,
   componentVersion: context.componentVersion,
   surface: context.surface || 'project',
+  ...(context.contentKind ? { contentKind: context.contentKind } : {}),
   componentBackupRestore: componentBackupRestore === true,
   projectId: context.projectId,
   projectName: context.projectName,

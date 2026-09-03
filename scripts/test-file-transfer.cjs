@@ -21,6 +21,7 @@ const {
   assertExistingInside,
   assertInside,
   buildOwnedTreeManifest,
+  canUseNativeFastCut,
   collectCopyPlan,
   commitTemporaryFile,
   configureNativePublicationService,
@@ -29,6 +30,7 @@ const {
   copyPlannedFiles,
   deleteOwnedTreeEntries,
   moveFileAtomic,
+  movePlannedFilesFast,
   movePathAtomic,
   publishPathNoClobber,
   rebaseCleanupOwnership,
@@ -48,8 +50,9 @@ const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.
 
 assert(mainSource.includes('createFileClipboardService') && !mainSource.includes('runWindowsClipboardScript'), 'file clipboard access must use the native service instead of inline PowerShell');
 assert(filesIpcSource.includes('const clearClipboardIfSnapshotCurrent') && filesIpcSource.includes('clearSystemFileClipboardIfCurrent(snapshot)'), 'cut clipboard clearing must delegate sequence and path validation to the native helper');
-assert.strictEqual((filesIpcSource.match(/await clearClipboardIfSnapshotCurrent\(clipboardSnapshot\)/g) || []).length, 2, 'both paste completion branches must verify clipboard ownership before clearing');
+assert.strictEqual((filesIpcSource.match(/await clearClipboardIfSnapshotCurrent\(clipboardSnapshot\)/g) || []).length, 3, 'all paste completion branches must verify clipboard ownership before clearing');
 assert(filesIpcSource.includes('sourceCleanupOutcome = await removeCopiedSources') && filesIpcSource.includes('cleanupWarning: sourceCleanupOutcome?.cleanupWarning'), 'cut IPC success responses must expose terminal native cleanup warnings without retaining the source');
+assert(filesIpcSource.includes('const nativeFastCut =') && filesIpcSource.includes('await movePlannedFilesFast(plan') && mainSource.includes('canUseNativeFastCut') && mainSource.includes('movePlannedFilesFast'), 'Windows cross-volume cut-paste must route through the native single-pass move pipeline');
 assert(filesIpcSource.includes('missingCutSources') && filesIpcSource.includes('剪切源已被其他粘贴任务移动或删除'), 'a later paste sharing an already-consumed cut snapshot must return a clear source error');
 assert(filesIpcSource.includes('if (moves.length === 1 && sources.length === 1)') && filesIpcSource.includes('await fs.promises.rename(moves[0].source, moves[0].destination)'), 'single rename must have a one-call direct fast path');
 assert(filesIpcSource.includes('if (!sameVolumeCut) {') && filesIpcSource.indexOf('await collectCopyPlan(target.source') > filesIpcSource.indexOf('if (!sameVolumeCut) {'), 'same-volume cut-paste must bypass recursive copy planning');
@@ -864,14 +867,34 @@ const run = async () => {
     await assert.rejects(removeCopiedSources(growingPlan), /发生变化/);
     assert.strictEqual(fs.readFileSync(path.join(growingSource, 'new.txt'), 'utf8'), 'new during copy');
 
+    if (process.platform === 'win32') {
+    const fastCutSource = path.join(root, 'fast-batched-cut-source'); const fastCutTarget = path.join(root, 'fast-batched-cut-target'); fs.mkdirSync(fastCutSource);
+    for (let index = 0; index < 187; index += 1) fs.writeFileSync(path.join(fastCutSource, `media-${String(index).padStart(3, '0')}.bin`), Buffer.alloc(440 * 1024, index));
+    const fastCutPlan = []; await collectCopyPlan(fastCutSource, fastCutTarget, fastCutPlan);
+    let fastCutInspectCalls = 0; let fastCutCopyCalls = 0; let fastCutSingleDeleteCalls = 0; const fastCutProgress = [];
+    const fastCutNative = {
+      ...nativePublication,
+      inspectPathsBatch: async paths => { fastCutInspectCalls += 1; return nativePublication.inspectPathsBatch(paths); },
+      copyCutFilesBatch: async requests => { fastCutCopyCalls += 1; return nativePublication.copyCutFilesBatch(requests); },
+      compareDeleteFile: async request => { fastCutSingleDeleteCalls += 1; return nativePublication.compareDeleteFile(request); },
+    };
+    const fastCutStarted = Date.now();
+    const fastCutCleanup = await movePlannedFilesFast(fastCutPlan, { ownershipToken: 'fast-batched-cut-move', nativePublicationService: fastCutNative, onProgress: state => fastCutProgress.push(state) });
+    const fastCutElapsed = Date.now() - fastCutStarted;
+    assert.strictEqual(fastCutCleanup.success, true); assert.strictEqual(fs.existsSync(fastCutSource), false); assert.strictEqual(fs.readdirSync(fastCutTarget).length, 187); assert.strictEqual(fastCutSingleDeleteCalls, 0, 'single-pass cross-volume cut must never fall back to one delete helper per source file');
+    assert(fastCutCopyCalls <= 2, `187 source files must be copied, hashed, published, and deleted in at most two native batches, got ${fastCutCopyCalls}`); assert(fastCutInspectCalls <= 2, `source identities must be inspected in bounded batches, got ${fastCutInspectCalls}`);
+    assert(fastCutElapsed < 12000, `78.5 MiB / 187-file single-pass move must finish in seconds, got ${fastCutElapsed} ms`); assert.strictEqual(fastCutProgress.length, 187, 'single-pass native cut reports every committed file'); assert.strictEqual(canUseNativeFastCut(), true);
+    console.log(`single-pass cut performance: ${fastCutElapsed}ms (78.5 MiB / 187 files, ${fastCutCopyCalls} copy batches)`);
+    }
+
     const cleanupRootsBeforePostUnlink = new Set(fs.readdirSync(root).filter(name => name.startsWith('.photoflow-cleanup-'))); const postUnlinkSource = path.join(root, 'post-unlink-cut-source.txt'); fs.writeFileSync(postUnlinkSource, 'post-unlink-cut'); const postUnlinkPlan = []; await collectCopyPlan(postUnlinkSource, path.join(root, 'post-unlink-cut-target.txt'), postUnlinkPlan); let postUnlinkDeletes = 0;
-    const postUnlinkNative = { ...nativePublication, compareDeleteFile: async ({ target }) => { postUnlinkDeletes += 1; fs.unlinkSync(target); throw Object.assign(new Error('post-unlink fsync failed'), { code: 'EIO', deleted: true, cleanupWarning: true, outcomeUnknown: true, phase: 'post-unlink-cleanup', originalMissing: true }); } };
+    const postUnlinkNative = { ...nativePublication, compareDeleteFilesBatch: async requests => requests.map(({ path: target }, index) => { postUnlinkDeletes += 1; fs.unlinkSync(target); return { index, success: false, code: 'EIO', deleted: true, cleanupWarning: '原生删除已完成，但持久化确认失败', outcomeUnknown: true, phase: 'post-unlink-cleanup', originalMissing: true }; }) };
     const postUnlinkOutcome = await removeCopiedSources(postUnlinkPlan, { ownershipToken: 'post-unlink-cut', nativePublicationService: postUnlinkNative });
     assert.strictEqual(postUnlinkOutcome.success, true); assert.strictEqual(postUnlinkOutcome.outcomeUnknown, true); assert.match(postUnlinkOutcome.cleanupWarning, /持久化确认失败/); assert.strictEqual(postUnlinkOutcome.phase, 'post-unlink-cleanup'); assert.deepStrictEqual(postUnlinkOutcome.recoveryPaths, []); assert.strictEqual(fs.existsSync(postUnlinkSource), false); assert.deepStrictEqual(new Set(fs.readdirSync(root).filter(name => name.startsWith('.photoflow-cleanup-'))), cleanupRootsBeforePostUnlink, 'empty owned outer quarantine is removed after terminal post-unlink success');
     fs.writeFileSync(postUnlinkSource, 'replacement after terminal delete'); await assert.rejects(removeCopiedSources(postUnlinkPlan, { ownershipToken: 'post-unlink-cut-retry', nativePublicationService: postUnlinkNative }), /发生变化/); assert.strictEqual(postUnlinkDeletes, 1, 'retry must stop before deleting a replacement at the original source path'); assert.strictEqual(fs.readFileSync(postUnlinkSource, 'utf8'), 'replacement after terminal delete');
 
     const batchDeletedSource = path.join(root, 'batch-deleted-cut-source.txt'); fs.writeFileSync(batchDeletedSource, 'batch-deleted-cut'); const batchDeletedPlan = []; await collectCopyPlan(batchDeletedSource, path.join(root, 'batch-deleted-cut-target.txt'), batchDeletedPlan);
-    const batchDeletedNative = { ...nativePublication, compareDeleteFile: undefined, deletePathsBatch: async requests => requests.map(({ path: target }) => { fs.unlinkSync(target); return { success: false, code: 'EIO', deleted: true, cleanupWarning: 'batch post-unlink warning', outcomeUnknown: true, phase: 'batch-post-unlink', originalMissing: true }; }) };
+    const batchDeletedNative = { ...nativePublication, compareDeleteFilesBatch: async requests => requests.map(({ path: target }, index) => { fs.unlinkSync(target); return { index, success: false, code: 'EIO', deleted: true, cleanupWarning: 'batch post-unlink warning', outcomeUnknown: true, phase: 'batch-post-unlink', originalMissing: true }; }) };
     const batchDeletedOutcome = await removeCopiedSources(batchDeletedPlan, { ownershipToken: 'batch-deleted-cut', nativePublicationService: batchDeletedNative });
     assert.strictEqual(batchDeletedOutcome.success, true); assert.match(batchDeletedOutcome.cleanupWarning, /batch post-unlink warning/); assert.strictEqual(batchDeletedOutcome.outcomeUnknown, true); assert.strictEqual(batchDeletedOutcome.phase, 'batch-post-unlink'); assert.deepStrictEqual(batchDeletedOutcome.recoveryPaths, []); assert.strictEqual(fs.existsSync(batchDeletedSource), false);
 

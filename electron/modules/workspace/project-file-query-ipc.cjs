@@ -1,3 +1,5 @@
+const INSPIRATION_VIRTUAL_PROJECT_NAME = '.__photoflow_inspiration__';
+
 const registerRecentProjectFileIpc = context => {
   const { Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Number, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, assertExistingInside, assertInside, crypto, fs, getProjectPath, ipcMain, isInternalFileOperationEntry, listManagedExternalLinksBounded, mediaService, path, resolveManagedExternalScope, shell, shortcutSourceChannel, virtualPaths, writeLog } = context;
   const recentFilesSessionExpiredCode = 'RECENT_FILES_SESSION_EXPIRED';
@@ -23,7 +25,7 @@ const registerRecentProjectFileIpc = context => {
     try {
       releaseCursor = await acquireCursorLock(recentCursorLocks, String(requestedCursor || ''));
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const externalScope = await resolveManagedExternalScope(root, scopeRelativePath);
+      const externalScope = projectName === INSPIRATION_VIRTUAL_PROJECT_NAME ? null : await resolveManagedExternalScope(root, scopeRelativePath);
       const requestedScope = externalScope ? externalScope.currentPath : assertInside(root, path.resolve(root, scopeRelativePath || '.'), '最近文件范围', true);
       const scope = externalScope ? requestedScope : assertExistingInside(root, requestedScope, '最近文件范围', true);
       const scopeStat = await fs.promises.stat(scope);
@@ -199,7 +201,10 @@ const registerRecentProjectFileIpc = context => {
       const maximumFolders = 20000;
       const maximumDepth = 64;
       const visited = new Set();
-      const managedLinkScan = await listManagedExternalLinksBounded(root);
+      const managedLinkScan = projectName === INSPIRATION_VIRTUAL_PROJECT_NAME
+        ? { links: [], truncated: false, skippedCount: 0 }
+        : await listManagedExternalLinksBounded(root);
+      let folderLimitReached = false;
       let skippedCount = managedLinkScan.skippedCount;
       for (const link of managedLinkScan.links) {
         if (link.externalTargetKind === 'file') continue;
@@ -235,12 +240,11 @@ const registerRecentProjectFileIpc = context => {
           else skippedCount += 1;
         }
         for (const child of directories) {
-          const childPath = path.join(current.directory, child.name);
+          if (folders.length >= maximumFolders) { folderLimitReached = true; break; }
           const relativePath = [current.relativePath, child.name].filter(Boolean).join('/');
           folders.push({ name: child.name, relativePath, parentRelativePath: current.relativePath, depth: current.depth, ...(current.viaExternalLink ? { viaExternalLink: true } : {}) });
-          if (folders.length >= maximumFolders) break;
         }
-        if (folders.length >= maximumFolders) break;
+        if (folderLimitReached) break;
         for (let index = directories.length - 1; index >= 0; index -= 1) {
           const child = directories[index];
           const childPath = path.join(current.directory, child.name);
@@ -248,7 +252,7 @@ const registerRecentProjectFileIpc = context => {
         }
       }
       folders.sort((left, right) => left.relativePath.localeCompare(right.relativePath, 'zh-CN', { numeric: true, sensitivity: 'base' }));
-      return { success: true, folders, truncated: managedLinkScan.truncated || folders.length >= maximumFolders || skippedCount > 0, skippedCount };
+      return { success: true, folders, truncated: folderLimitReached, externalLinkScanTruncated: managedLinkScan.truncated, skippedCount };
     } catch (error) {
       return { success: false, folders: [], error: error.message || String(error) };
     }
@@ -260,7 +264,7 @@ const registerEntryDetailsIpc = context => {
   ipcMain.handle('workspace-entry-details', async (_event, workspacePath, status, projectName, relativePath) => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const externalEntry = await resolveManagedExternalScope(root, relativePath);
+      const externalEntry = projectName === INSPIRATION_VIRTUAL_PROJECT_NAME ? null : await resolveManagedExternalScope(root, relativePath);
       const target = externalEntry?.currentPath || assertExistingInside(root, assertInside(root, path.resolve(root, relativePath), '文件路径', true), '文件路径', true);
       const stat = await fs.promises.stat(target);
       let size = stat.isFile() ? stat.size : 0;

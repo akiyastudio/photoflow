@@ -29,6 +29,7 @@ const { capturePathIdentity: defaultCapturePathIdentity, identityFromStat: defau
 
 const MANAGED_EXTERNAL_FOLDER_PREFIX = 'PhotoFlow 外链文件夹：';
 const MANAGED_EXTERNAL_FILE_PREFIX = 'PhotoFlow 外链文件：';
+const INSPIRATION_VIRTUAL_PROJECT_NAME = '.__photoflow_inspiration__';
 const MAX_EXPLICIT_MATERIALIZE_PATHS = 512;
 const MAX_EXPLICIT_MATERIALIZE_PATH_BYTES = 64 * 1024;
 const registerWorkspaceIpc = context => {
@@ -45,10 +46,13 @@ const registerWorkspaceIpc = context => {
     const links = [];
     const pending = [{ directory: root, virtualDirectory: '', depth: 0 }];
     const visited = new Set();
+    const maximumEnumeratedEntries = 100000;
+    const maximumInspectedEntries = 20000;
+    let enumerated = 0;
     let inspected = 0;
     let skippedCount = 0;
     let truncated = false;
-    while (pending.length && inspected < 20000 && links.length < maximumLinks) {
+    while (pending.length && enumerated < maximumEnumeratedEntries && inspected < maximumInspectedEntries && links.length < maximumLinks) {
       const current = pending.pop();
       if (current.depth > 64) { truncated = true; skippedCount += 1; continue; }
       const directoryStat = await fs.promises.lstat(current.directory, { bigint: true }).catch(() => null);
@@ -59,7 +63,12 @@ const registerWorkspaceIpc = context => {
       const entries = await fs.promises.readdir(current.directory, { withFileTypes: true }).catch(() => []);
       for (const entry of entries) {
         if (links.length >= maximumLinks) { truncated = true; break; }
-        if (inspected++ >= 20000) { truncated = true; break; }
+        if (enumerated++ >= maximumEnumeratedEntries) { truncated = true; break; }
+        if (entry.isSymbolicLink()) { skippedCount += 1; continue; }
+        const isDirectory = entry.isDirectory();
+        const isShortcutCandidate = entry.isFile() && path.extname(entry.name).toLowerCase() === '.lnk';
+        if (!isDirectory && !isShortcutCandidate) continue;
+        if (inspected++ >= maximumInspectedEntries) { truncated = true; break; }
         const entryPath = path.join(current.directory, entry.name);
         const stat = await fs.promises.lstat(entryPath).catch(() => null);
         if (!stat || stat.isSymbolicLink()) { skippedCount += 1; continue; }
@@ -1413,7 +1422,12 @@ const registerWorkspaceIpc = context => {
       if (mode === 'move') {
         job.finishing = true;
         publish({ phase: 'finishing', progress: 99, currentName: '正在移除已安全复制的源文件', bytesCopied, totalBytes, filesCopied, totalFiles });
-        try { await removeCopiedSources(plan, { ownershipToken: operationId }); }
+        try {
+          await removeCopiedSources(plan, {
+            ownershipToken: operationId,
+            onCleanupProgress: ({ processed, total }) => publish({ phase: 'finishing', progress: 99, currentName: `正在移除已安全复制的源文件 ${processed}/${total}`, bytesCopied, totalBytes, filesCopied, totalFiles }),
+          });
+        }
         catch (error) { sourceRetained = true; writeLog('warn', 'Imported project source retained after safe copy', { sourcePath: inspection.sourcePath, error: error.message || String(error) }); }
       }
       const project = { id: projectId, name: projectName, path: projectPath, workspacePath: root, status: '策划中', updatedAt: Date.now() };
@@ -2303,7 +2317,7 @@ const registerWorkspaceIpc = context => {
     const mainWatched = acquired.includes(bindings[0]);
     let degraded = !mainWatched || failedRoots.length > 0 || offlineLinks > 0 || managedLinksTruncated;
     let reconciliationFailed = false;
-    const supportsTrackingReconciliation = projectName !== '.__photoflow_inspiration__';
+    const supportsTrackingReconciliation = projectName !== INSPIRATION_VIRTUAL_PROJECT_NAME;
     let reconciled = false;
     const shouldReconcile = options.reconcile !== false || previousHealth?.degraded && !degraded;
     if (supportsTrackingReconciliation && shouldReconcile && mainWatched) {
@@ -2821,7 +2835,8 @@ const registerWorkspaceIpc = context => {
   ipcMain.handle('workspace-search-files', async (_event, workspacePath, status, projectName, scopeRelativePath = '', query = '') => {
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const externalScope = await resolveManagedExternalScope(root, scopeRelativePath);
+      const supportsManagedExternalLinks = projectName !== INSPIRATION_VIRTUAL_PROJECT_NAME;
+      const externalScope = supportsManagedExternalLinks ? await resolveManagedExternalScope(root, scopeRelativePath) : null;
       const requestedScope = externalScope ? externalScope.currentPath : assertInside(root, path.resolve(root, scopeRelativePath || '.'), '搜索范围', true);
       const scope = externalScope ? requestedScope : assertExistingInside(root, requestedScope, '搜索范围', true);
       const scopeStat = await fs.promises.stat(scope);
@@ -2840,7 +2855,7 @@ const registerWorkspaceIpc = context => {
       let skippedCount = 0;
       let truncated = false;
       const managedShortcutPaths = new Set();
-      const managedLinkScan = externalScope ? { links: [], truncated: false, skippedCount: 0 } : await listManagedExternalLinksBounded(root);
+      const managedLinkScan = !supportsManagedExternalLinks || externalScope ? { links: [], truncated: false, skippedCount: 0 } : await listManagedExternalLinksBounded(root);
       truncated ||= managedLinkScan.truncated;
       skippedCount += managedLinkScan.skippedCount;
       if (!externalScope) for (const link of managedLinkScan.links) {
@@ -2913,7 +2928,8 @@ const registerWorkspaceIpc = context => {
     try {
       releaseCursor = await acquireCursorLock(fileListCursorLocks, String(requestedCursor || ''));
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
-      const externalScope = await resolveManagedExternalScope(root, scopeRelativePath);
+      const supportsManagedExternalLinks = projectName !== INSPIRATION_VIRTUAL_PROJECT_NAME;
+      const externalScope = supportsManagedExternalLinks ? await resolveManagedExternalScope(root, scopeRelativePath) : null;
       const requestedScope = externalScope ? externalScope.currentPath : assertInside(root, path.resolve(root, scopeRelativePath || '.'), '文件枚举范围', true);
       const scope = externalScope ? requestedScope : assertExistingInside(root, requestedScope, '文件枚举范围', true);
       const scopeStat = await fs.promises.stat(scope);
@@ -2948,7 +2964,7 @@ const registerWorkspaceIpc = context => {
           inspectedEntries: 0,
           touchedAt: Date.now(),
         };
-        const managedLinkScan = externalScope ? { links: [], truncated: false, skippedCount: 0 } : await listManagedExternalLinksBounded(root);
+        const managedLinkScan = !supportsManagedExternalLinks || externalScope ? { links: [], truncated: false, skippedCount: 0 } : await listManagedExternalLinksBounded(root);
         session.managedLinksTruncated = managedLinkScan.truncated;
         session.managedLinksSkippedCount = managedLinkScan.skippedCount;
         if (!externalScope) for (const link of managedLinkScan.links) {

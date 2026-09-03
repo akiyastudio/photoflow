@@ -7,6 +7,8 @@ const root = path.resolve(__dirname, '..');
 const development = inspectDevelopmentComponent(root);
 const descriptor = parseComponentHostManifest(development.manifest, root, { componentRoot: root, files: development.files });
 assert.equal(development.id, 'team-retouch');
+assert.equal(development.prepare, 'prepare:dev');
+assert.match(development.packageManifest.scripts['prepare:dev'], /setup-python\.cjs/);
 assert.equal(descriptor.contractVersion, 2);
 assert.equal(descriptor.fullPage.entry, path.join(root, 'dist', 'ui', 'index.html'));
 assert.equal(descriptor.settingsForms.length, 0);

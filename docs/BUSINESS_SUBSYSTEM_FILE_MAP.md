@@ -4,58 +4,7 @@
 
 统计与归类范围：`src/`、`electron/`、`python/`、`extensions/`、`component-sdk/`、`services/` 中受 Git 跟踪的产品源码。依赖目录、虚拟环境、模型、二进制、构建产物、普通文档和自动化测试不属于业务实现清单。
 
-## 本次应用外壳发布集成变更登记
-
-以稳定基线 `f3a0bf76d990ef98937243bd428376ba7f4893bb` 为比较起点，本次集成的全部变更文件如下（包括产品源码、测试、门禁、发布文档与本登记表）：
-
-- `.gitattributes`
-- `docs/BUSINESS_SUBSYSTEM_FILE_MAP.md`
-- `docs/CLOUDBASE_ANALYTICS_GUIDE.md`
-- `docs/legal/DATA_RETENTION_AND_RIGHTS_RUNBOOK_TEMPLATE.md`
-- `docs/legal/PIPIA_TEMPLATE.md`
-- `docs/legal/README.md`
-- `docs/legal/RELEASE_APPROVAL_TEMPLATE.json`
-- `docs/legal/RELEASE_EVIDENCE_GUIDE.md`
-- `docs/legal/THIRD_PARTY_DISTRIBUTION_EVIDENCE.md`
-- `electron/modules/system-ipc.cjs`
-- `electron/modules/workspace-ipc.cjs`
-- `electron/native/RecycleBinService.cs`
-- `electron/native/RecycleBinService.manifest`
-- `electron/services/config-mutation-service.cjs`
-- `electron/services/recycle-bin-service.cjs`
-- `electron/services/telemetry-service.cjs`
-- `package.json`
-- `scripts/build-recycle-bin-service.cjs`
-- `scripts/check-project.cjs`
-- `scripts/generate-release-json.cjs`
-- `scripts/package-cloudbase-function.py`
-- `scripts/publish-release.cjs`
-- `scripts/source-boundary-policy.cjs`
-- `scripts/test-cloudbase-function-package.cjs`
-- `scripts/test-cloudbase-function-package.py`
-- `scripts/test-config-mutation-service.cjs`
-- `scripts/test-file-transfer.cjs`
-- `scripts/test-global-search.cjs`
-- `scripts/test-global-search-stress.mjs`
-- `scripts/test-legal-release-evidence.cjs`
-- `scripts/test-panel-task-sessions.cjs`
-- `scripts/test-privacy-gate-contract.cjs`
-- `scripts/test-privacy-revoke-telemetry.cjs`
-- `scripts/test-recycle-bin-service.cjs`
-- `scripts/test-settings-restore-model.mjs`
-- `scripts/test-settings-ui-resilience.cjs`
-- `scripts/test-source-boundaries.cjs`
-- `scripts/test-telemetry-consent.cjs`
-- `scripts/test-video-player-subtitles.cjs`
-- `services/cloudbase/telemetry-function/README.md`
-- `services/cloudbase/telemetry-function/index.js`
-- `services/cloudbase/telemetry-function/package.json`
-- `services/cloudbase/telemetry-function/retention-policy.js`
-- `services/cloudbase/telemetry-function/test/privacy-database-integration.test.mjs`
-- `services/cloudbase/telemetry-function/test/privacy-operations.test.mjs`
-- `services/cloudbase/telemetry-function/test/release-blockers.test.mjs`
-- `src/features/settings/SettingsFeature.tsx`
-- `src/features/settings/restored-workspace-config.ts`
+最后核对：2026-09-02。一次性发布变更记录不属于业务归属清单，应由 Git 历史和发布证据保存。
 
 ## 0. 横切基础层
 
@@ -95,6 +44,7 @@
 ### 渲染层
 
 - `src/features/app/AppChrome.tsx`
+- `src/features/app/AppTitlebar.tsx`
 - `src/features/app/AppErrorBoundary.tsx`
 - `src/features/app/AppShellLayout.tsx`
 - `src/features/app/DomainHealthBanner.tsx`
@@ -104,10 +54,13 @@
 - `src/features/app/toast-view-contract.ts`
 - `src/features/app/top-toast-notice-model.ts`
 - `src/features/app/top-toast-tone-model.ts`
+- `src/features/app/titlebar-tab-scroll-model.ts`
 - `src/features/app/user-facing-notice-model.ts`
 - `src/features/app/useFolderTabNavigation.ts`
 - `src/features/app/useRendererErrorReporting.ts`
 - `src/features/app/useTitlebarTabOrder.ts`
+- `src/features/app/useTitlebarTabScroll.ts`
+- `src/features/app/useAppShellLayoutState.ts`
 - `src/features/app/useTopToastStack.tsx`
 - `src/features/app/useUserFacingToast.ts`
 - `src/features/app/useWorkspaceTabs.ts`
@@ -116,6 +69,7 @@
 - `src/features/settings/SettingsFeature.tsx`
 - `src/features/settings/UsagePreferencesOnboarding.tsx`
 - `src/features/settings/restored-workspace-config.ts`
+- `src/features/settings/startup-config.ts`
 - `src/features/settings/component-settings-page-model.ts`
 - `src/components/AppDialogProvider.tsx`
 - `src/components/LayerProvider.tsx`
@@ -194,6 +148,7 @@
 - `src/features/workspace/ProjectWorkspaceLayout.tsx`
 - `src/features/workspace/ProjectToolModal.tsx`
 - `src/features/workspace/FileMetadataPane.tsx`
+- `src/features/workspace/FileEntryVisuals.tsx`
 - `src/features/workspace/PhotoshopIcon.tsx`
 - `src/features/workspace/directory-preview-cache-model.ts`
 - `src/features/workspace/file-entry-interaction-model.ts`
@@ -207,12 +162,14 @@
 - `src/features/workspace/multi-selection-metadata-model.ts`
 - `src/features/workspace/native-file-drag-session-model.ts`
 - `src/features/workspace/project-panel-lifecycle.ts`
+- `src/features/workspace/project-file-query-model.ts`
 - `src/features/workspace/project-toolbar-overflow-model.ts`
 - `src/features/workspace/project-workspace-layout-model.ts`
 - `src/features/workspace/project-workspace-lifecycle.ts`
 - `src/features/workspace/project-workspace-media-metadata.ts`
 - `src/features/workspace/shortcut-preview-state-model.ts`
 - `src/features/workspace/useProjectFileSelection.ts`
+- `src/features/workspace/useProjectFileQueries.ts`
 - `src/features/workspace/useProjectThumbnail.ts`
 - `src/features/workspace/useRecentFilesAutoLoad.ts`
 - `src/platform/project-workspace-client.ts`
@@ -223,6 +180,7 @@
 ### Electron IPC 与领域入口
 
 - `electron/modules/workspace-ipc.cjs`
+- `electron/modules/workspace/project-file-query-ipc.cjs`
 - `electron/modules/files-ipc.cjs`
 - `electron/modules/selection-ipc.cjs`
 - `electron/modules/workspace/deleted-project-cleanup.cjs`
@@ -240,6 +198,7 @@
 - `electron/repositories/workspace-repository.cjs`
 - `electron/services/workspace-service.cjs`
 - `electron/services/workspace-reconcile-task.cjs`
+- `electron/services/workspace-watcher-runtime.cjs`
 - `electron/services/file-system-service.cjs`
 - `electron/services/file-transfer-service.cjs`
 - `electron/services/file-clipboard-service.cjs`
@@ -277,6 +236,8 @@
 ### 渲染层与播放契约
 
 - `src/components/AdvancedVideoPlayer.tsx`
+- `src/features/workspace/MediaPreviewPane.tsx`
+- `src/features/workspace/media-preview-model.ts`
 - `src/components/InteractiveCropEditor.tsx`
 - `src/components/MediaThumbnail.tsx`
 - `src/components/VideoHoverThumbnail.tsx`
@@ -309,6 +270,7 @@
 - `electron/services/media-response-service.cjs`
 - `electron/services/media-input-session-service.cjs`
 - `electron/services/media-cache-namespace.cjs`
+- `electron/services/media-cache-runtime.cjs`
 - `electron/services/media-rating-service.cjs`
 - `electron/services/media-tracking-scan-scheduler.cjs`
 - `electron/services/thumbnail-service.cjs`
@@ -332,6 +294,7 @@
 - `python/thumbnail_db.py`
 - `python/thumbnail_image.py`
 - `python/raw_decoder.py`
+- `python/workspace_media_actions.py`
 
 ## 4. 导入、整理与媒体工具系统
 
@@ -358,6 +321,8 @@
 ### Electron 导入与任务编排
 
 - `electron/modules/broll-import.cjs`
+- `electron/modules/workspace/import-ipc.cjs`
+- `electron/modules/workspace/inspiration-ipc.cjs`
 - `electron/modules/workspace/import-receipt-service.cjs`
 - `electron/modules/workspace/import-recovery.cjs`
 - `electron/modules/workspace/sd-import-media-scan.cjs`
@@ -389,6 +354,12 @@
 - `src/components/ProjectVersionTree.tsx`
 - `src/components/ImageComparisonView.tsx`
 - `src/features/workspace/progress-tree-model.ts`
+- `src/features/workspace/createProjectProgressSetup.ts`
+- `src/features/workspace/createProjectProgressWorkflow.ts`
+- `src/features/workspace/project-progress-tracking-service.ts`
+- `src/features/workspace/project-progress-workflow-types.ts`
+- `src/features/workspace/useProgressFolderOnboarding.ts`
+- `src/features/workspace/useProjectVersionRelations.ts`
 - `src/features/versioning/public.ts`
 - `src/features/versioning/FolderMarkPanel.tsx`
 - `src/features/versioning/LegacySelectionRepairNotice.tsx`
@@ -459,6 +430,7 @@
 - `electron/services/keyed-admission-queue.cjs`
 - `electron/services/sliced-maintenance-runner.cjs`
 - `electron/services/process-supervisor.cjs`
+- `electron/services/bundled-python-runtime.cjs`
 - `electron/services/credential-service.cjs`
 - `electron/services/retired-cache-service.cjs`
 - `electron/scripts/windows-credential.ps1`
@@ -466,9 +438,11 @@
 ### Python 数据层
 
 - `python/workspace_db.py`
+- `python/workspace_db_support.py`
 - `python/workspace_db_domains.py`
 - `python/workspace_db_migrations.py`
 - `python/workspace_domain_storage.py`
+- `python/workspace_storage_ownership.py`
 - `python/operations_db.py`
 - `python/backup_db.py`
 - `python/domain_recovery.py`
@@ -489,6 +463,8 @@
 - `src/features/components/component-command-palette-model.ts`
 - `src/features/components/component-contribution-scope-model.ts`
 - `src/features/components/component-page-model.ts`
+- `src/features/components/component-cache.ts`
+- `src/features/components/useComponentCatalog.ts`
 - `src/features/components/useComponentPages.ts`
 
 ### Electron 组件宿主与契约
@@ -511,6 +487,7 @@
 - `electron/services/plugin-service.cjs`
 - `electron/services/component-capability-broker.cjs`
 - `electron/services/component-host-capability-runtime.cjs`
+- `electron/services/component-runtime-execution-service.cjs`
 - `electron/services/component-lifecycle-service.cjs`
 - `electron/services/component-network-service.cjs`
 - `electron/services/component-notification-service.cjs`
@@ -525,6 +502,9 @@
 - `electron/compatibility/component-cache-paths.cjs`
 - `electron/compatibility/component-data-adoption-policy.cjs`
 - `electron/compatibility/component-output-v1-adoption.cjs`
+- `electron/compatibility/legacy-component-runtime-tools.cjs`
+- `electron/compatibility/legacy-media-process-v7.cjs`
+- `electron/compatibility/legacy-runtime-capabilities.cjs`
 
 ### 对外 Component SDK
 

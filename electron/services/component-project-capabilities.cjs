@@ -132,16 +132,17 @@ const registerComponentProjectCapabilities = ({
   broker, ensureWorkspace, getWorkspaceDataRoot, resolveProjectEntry, versionService,
   IMAGE_EXTENSIONS, VIDEO_EXTENSIONS = new Set(), RAW_EXTENSIONS = new Set(),
   path, fs, crypto, getConfigPath, readSavedConfig, getProjectPath, dialog, mainWindow, shell,
-  mediaService, backgroundTasks, ensureTrackedVersionThumbnail, getBoundProject = null, projectVirtualPaths = null,
+  mediaService, backgroundTasks, ensureTrackedVersionThumbnail, getBoundProject = null, projectVirtualPaths = null, resolveComponentContentBinding = null,
   replaceJson = replaceJsonAtomic, readConfig = null, mutateConfig = null, now = Date.now, adoptionInteractiveBudgetMs = 25, adoptionFaultInjector = () => undefined,
 }) => {
   const bound = (context, descriptor) => {
-    const workspaceRoot = ensureWorkspace(context.workspacePath);
-    const project = getBoundProject?.(workspaceRoot, context.projectName) || { id: context.projectId, name: context.projectName, status: context.projectStatus };
+    const binding = resolveComponentContentBinding?.(context);
+    const workspaceRoot = binding?.workspaceRoot || ensureWorkspace(context.workspacePath);
+    const project = binding?.project || getBoundProject?.(workspaceRoot, context.projectName) || { id: context.projectId, name: context.projectName, status: context.projectStatus };
     if (!project || String(project.id || '') !== String(context.projectId || '')) throw hostError(CODES.NOT_FOUND, 'Bound project is unavailable');
-    const projectRoot = path.resolve(getProjectPath(workspaceRoot, project.status || context.projectStatus, project.name || context.projectName));
+    const projectRoot = binding?.projectRoot || path.resolve(getProjectPath(workspaceRoot, project.status || context.projectStatus, project.name || context.projectName));
     const componentRoot = path.join(getWorkspaceDataRoot(workspaceRoot), 'components', descriptor.componentId);
-    return { workspaceRoot, project, projectRoot, componentRoot, key: scopeKey(descriptor, context) };
+    return { workspaceRoot, project, projectRoot, componentRoot, contentKind: binding?.contentKind || 'project', key: scopeKey(descriptor, context) };
   };
   const kindFor = filePath => {
     const extension = path.extname(filePath).toLowerCase();
@@ -172,6 +173,17 @@ const registerComponentProjectCapabilities = ({
   };
   const resolveSafeMedia = async (payload, context, descriptor) => {
     const scope = bound(context, descriptor);
+    if (scope.contentKind === 'inspiration') {
+      if (payload.photoId) throw hostError(CODES.INVALID_REQUEST, 'Inspiration media must be addressed by relativePath');
+      const relativePath = assertRelativePath(path, payload.relativePath, 'media relativePath');
+      const filePath = path.resolve(scope.projectRoot, relativePath);
+      if (!inside(path, scope.projectRoot, filePath)) throw hostError(CODES.PERMISSION_DENIED, 'Media escapes the inspiration library');
+      const stat = await fs.promises.lstat(filePath).catch(() => null);
+      const canonicalRoot = await fs.promises.realpath(scope.projectRoot).catch(() => null);
+      const canonicalFile = await fs.promises.realpath(filePath).catch(() => null);
+      if (!stat?.isFile() || stat.isSymbolicLink() || !canonicalRoot || !canonicalFile || !inside(path, canonicalRoot, canonicalFile)) throw hostError(CODES.NOT_FOUND, 'Inspiration media is missing or unsafe');
+      return { ...scope, bundle: null, version: null, filePath, relativePath, viaExternalLink: false };
+    }
     if (payload.photoId) {
       const bundle = await versionService.getPhoto(scope.workspaceRoot, String(payload.photoId));
       if (String(bundle?.photo?.projectId || '') !== String(scope.project.id)) throw hostError(CODES.TOKEN_SCOPE, 'Media is outside the bound project');
@@ -741,6 +753,7 @@ const registerComponentProjectCapabilities = ({
   };
   broker.register('version.create', async (payload, context, descriptor) => {
     const scope = { ...bound(context, descriptor), componentId: descriptor.componentId };
+    if (scope.contentKind === 'inspiration') throw hostError(CODES.PERMISSION_DENIED, 'Version creation is unavailable in the inspiration library');
     const idempotencyKey = String(payload.idempotencyKey || '');
     if (!ID.test(idempotencyKey)) throw hostError(CODES.INVALID_REQUEST, 'A stable idempotencyKey is required');
     return withOperation(versionOperations, `${scope.key}\0${idempotencyKey}`, () => createVersion(payload, scope));
@@ -800,6 +813,7 @@ const registerComponentProjectCapabilities = ({
   };
   broker.register('project.progress', async (payload, context, descriptor) => {
     const scope = bound(context, descriptor);
+    if (scope.contentKind === 'inspiration') throw hostError(CODES.PERMISSION_DENIED, 'Project progress is unavailable in the inspiration library');
     if (payload.action === 'list') {
       const listed = await versionService.listProgress(scope.workspaceRoot, context.projectName, payload.includeMissing === true);
       return { apiVersion: 7, progress: (listed.progressFolders || []).map(item => publicProgress(scope, item)), edges: (listed.edges || listed.graphEdges || []).map(stripProgressPaths) };

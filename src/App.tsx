@@ -92,7 +92,7 @@ const App: React.FC = () => {
   const installedComponentIds = useMemo(() => new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id)), [components]);
   const videoToolsAvailable = useMemo(() => componentCapabilityIsAvailable(components, 'media.video.processing'), [components]);
   const advancedVideoPlaybackAvailable = useMemo(() => componentCapabilityIsAvailable(components, 'media.video.playback.advanced'), [components]);
-  const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { if (page.project) { activatePage(page.id); setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); } });
+  const componentHost = useComponentPages({ browserPages: projectPages, components, onProjectFallback: page => { activatePage(page.id); if (page.project) { setSelectedProject(page.project); setProjectDestination(page.project.path); setActiveTab('project'); } else if (page.kind === 'inspiration') { setSelectedProject(null); setProjectDestination(null); setActiveTab('inspiration'); } }, onHomeFallback: () => { setSelectedProject(null); setProjectDestination(null); setActiveTab('home'); } });
   const { actions: componentHostActions, contributions: componentContributions, pages: componentPages, activeIdentity: activeComponentPageIdentity } = componentHost;
 
   useSidebarWidthPersistence(sidebarWidth);
@@ -105,6 +105,7 @@ const App: React.FC = () => {
   useEffect(() => {
     if (!configLoaded || !config) return;
     const rootPath = config.inspirationLibrary.rootPath.trim();
+    const previousRootPath = previousInspirationRootRef.current;
     const rootChanged = previousInspirationRootRef.current !== rootPath;
     const pinChanged = previousInspirationPinnedRef.current !== config.pinInspirationLibrary;
     previousInspirationRootRef.current = rootPath;
@@ -113,10 +114,13 @@ const App: React.FC = () => {
       if (pinChanged && config.pinInspirationLibrary) ensureInspirationRoot(rootPath);
       return;
     }
-    const activeWasInspiration = projectPages.some(page => page.id === activePageId && page.kind === 'inspiration');
+    const previousInspirationProjectId = previousRootPath ? `inspiration:${previousRootPath}` : '';
+    const activeWasInspiration = projectPages.some(page => page.id === activePageId && page.kind === 'inspiration')
+      || componentPages.some(page => page.identity === activeComponentPageIdentity && page.projectId === previousInspirationProjectId);
+    if (previousInspirationProjectId) componentHost.disposeProject(config.workspacePath, previousInspirationProjectId);
     resetInspirationPages(rootPath, config.pinInspirationLibrary);
     if (activeWasInspiration) { setSelectedProject(null); setActiveTab(config.pinInspirationLibrary ? 'inspiration' : 'home'); }
-  }, [activePageId, config, configLoaded, ensureInspirationRoot, projectPages, resetInspirationPages]);
+  }, [activeComponentPageIdentity, activePageId, componentHost.disposeProject, componentPages, config, configLoaded, ensureInspirationRoot, projectPages, resetInspirationPages]);
 
   const { titlebarTabScroll, titlebarTabDragProps, scrollTitlebarTabs, handleTitlebarTabWheel } = useTitlebarTabScroll({
     tabsRef: titlebarTabsRef,
@@ -421,8 +425,9 @@ const App: React.FC = () => {
     setActiveTab('project-version');
   };
   const activateComponentPageTab = (page: typeof componentPages[number]) => {
-    const projectPage = projectPages.find(candidate => candidate.projectId === page.projectId && candidate.project);
-    if (projectPage?.project) { setSelectedProject(projectPage.project); setProjectDestination(projectPage.project.path); }
+    const browserPage = projectPages.find(candidate => candidate.projectId === page.projectId);
+    if (browserPage?.project) { setSelectedProject(browserPage.project); setProjectDestination(browserPage.project.path); }
+    else if (browserPage?.kind === 'inspiration') { setSelectedProject(null); setProjectDestination(null); }
     componentHost.activate(page); setActiveTab('component');
   };
   const openComponentPage = async (action: ComponentHostAction, project: WorkspaceProject, workspacePath: string, scope?: ComponentPageOpenScope) => {
@@ -432,8 +437,10 @@ const App: React.FC = () => {
           : activeTab === 'project-version' && activePageId ? workspaceToolTabId(activePageId, 'version')
             : activeTab === 'inspiration' && activePageId ? inspirationTabId(activePageId)
               : activePageId ? projectTabId(activePageId) : 'home';
-    setSelectedProject(project); setProjectDestination(project.path); setActiveTab('component');
-    if (!await componentHost.open(action, project, workspacePath, insertAfterTabId, scope)) setActiveTab('project');
+    if (scope?.contentKind === 'inspiration') { setSelectedProject(null); setProjectDestination(null); }
+    else { setSelectedProject(project); setProjectDestination(project.path); }
+    setActiveTab('component');
+    if (!await componentHost.open(action, project, workspacePath, insertAfterTabId, scope)) setActiveTab(scope?.contentKind === 'inspiration' ? 'inspiration' : 'project');
   };
   const closeComponentPageTab = (page: typeof componentPages[number]) => componentHost.close(page);
   const disposeProjectComponentPages = componentHost.disposeProject;
@@ -483,7 +490,9 @@ const App: React.FC = () => {
     if (config?.pinInspirationLibrary && page.currentRelativePath === '' && !projectPages.some(candidate => candidate.kind === 'inspiration' && candidate.id !== pageId && candidate.currentRelativePath === '')) return;
     const closingIndex = projectPages.findIndex(candidate => candidate.id === pageId);
     const remaining = projectPages.filter(candidate => candidate.id !== pageId);
+    const closingLastInspirationPage = !remaining.some(candidate => candidate.projectId === page.projectId);
     disposePageOwnedUi([pageId]);
+    if (closingLastInspirationPage) disposeProjectComponentPages(config?.workspacePath || '', page.projectId);
     closePage(pageId);
     if (activePageId !== pageId) return;
     const nextPage = remaining[Math.min(Math.max(closingIndex, 0), remaining.length - 1)];
@@ -696,7 +705,7 @@ const App: React.FC = () => {
           return <div key={card} className={draggedHomeCard === card ? 'opacity-40' : undefined}>{content}</div>;
         })}</div>
         {searchAllTabOpen && <div className={activeTab === 'search-all' ? 'h-full w-full' : 'hidden'}><SearchAllPage active={activeTab === 'search-all'} config={config} onOpenFolder={openGlobalSearchFolder} onNotice={showNotice}/></div>}
-        {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} navigationRequest={browserNavigationRequests[page.id]} config={config} components={components} onUpdateConfig={handleConfigUpdate} onDirectoryChange={updatePagePath} onOpenDirectoryPage={openInspirationDirectoryPage}/></div>; })}
+        {projectPages.filter(page => page.kind === 'inspiration').map(page => { const active = activeTab === 'inspiration' && activePageId === page.id; return <div key={page.id} className={active ? 'h-full w-full' : 'hidden'}><InspirationLibraryPage pageId={page.id} active={active} initialRelativePath={page.initialRelativePath} navigationRequest={browserNavigationRequests[page.id]} config={config} components={components} componentHostActions={componentHostActions} componentContributions={componentContributions} onOpenComponentPage={openComponentPage} onUpdateConfig={handleConfigUpdate} onDirectoryChange={updatePagePath} onOpenDirectoryPage={openInspirationDirectoryPage}/></div>; })}
         {activeTab === 'settings' && !selectedComponentSettingsPage && <SettingsPage activeSection={settingsSection as BuiltInSettingsSection} backupProjectFocus={backupProjectFocus} onClearBackupProjectFocus={() => setBackupProjectFocus(null)} config={config} components={components} componentInstallPath={componentInstallPath} componentsLoading={componentsLoading} onRefreshComponents={() => refreshComponents(true)} onComponentsChanged={handleComponentsChanged} onSave={handleConfigUpdate} onConfigRestored={setConfig} getDefaultSettings={getDefaultSettings}/>}
         {activeTab === 'settings' && selectedComponentSettingsPage?.renderMode === 'custom' && <ComponentSettingsPageSurface key={`${selectedComponentSettingsPage.componentId}:${selectedComponentSettingsPage.pageId}:${selectedComponentSettingsPage.componentVersion}`} page={selectedComponentSettingsPage} onError={reportComponentSettingsError}/>}
         {activeTab === 'settings' && ['declarative', 'hybrid'].includes(selectedComponentSettingsPage?.renderMode || '') && <ComponentDeclarativeSettingsSurface key={`${selectedComponentSettingsPage!.componentId}:${selectedComponentSettingsPage!.pageId}:${selectedComponentSettingsPage!.componentVersion}`} page={selectedComponentSettingsPage as Extract<ComponentSettingsPageContribution, { renderMode: 'declarative' | 'hybrid' }>}/>}

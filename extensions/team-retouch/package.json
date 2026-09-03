@@ -6,7 +6,7 @@
   "photoflowComponent": {
     "manifest": "component.template.json",
     "development": {
-      "prepare": "build",
+      "prepare": "prepare:dev",
       "runtime": {
         "command": { "win32": ".venv/Scripts/python.exe", "default": ".venv/bin/python" },
         "entry": "team_retouch.py",
@@ -29,6 +29,7 @@
     }
   },
   "scripts": {
+    "prepare:dev": "node scripts/setup-python.cjs && vite build --config renderer/vite.config.ts",
     "build": "vite build --config renderer/vite.config.ts",
     "typecheck": "tsc -p renderer/tsconfig.json --pretty false",
     "lint": "eslint renderer/src --report-unused-disable-directives --max-warnings 0",

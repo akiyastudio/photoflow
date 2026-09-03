@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type MouseEvent as ReactMouseEvent, type PointerEvent as ReactPointerEvent } from 'react';
 
 const TITLEBAR_TAB_ORDER_KEY = 'photoflow:titlebar-tab-order';
-const TAB_DRAG_THRESHOLD_PX = 5;
+const TAB_DRAG_THRESHOLD_PX = 8;
 const TAB_EDGE_SCROLL_ZONE_PX = 36;
 
 export const projectTabId = (pageId: string) => `project-page:${pageId}`;
@@ -166,7 +166,6 @@ export const useTitlebarTabOrder = ({
         let started = false;
         const previousUserSelect = document.body.style.userSelect;
         const previousCursor = document.body.style.cursor;
-        sourceElement.setPointerCapture(pointerId);
 
         const finish = () => {
           window.removeEventListener('pointermove', move);
@@ -194,6 +193,7 @@ export const useTitlebarTabOrder = ({
           if (!started) {
             if (Math.abs(pointerEvent.clientX - startX) < TAB_DRAG_THRESHOLD_PX) return;
             started = true;
+            sourceElement.setPointerCapture(pointerId);
             document.body.style.userSelect = 'none';
             document.body.style.cursor = 'grabbing';
             setDraggedId(id);

@@ -21,13 +21,14 @@ export const visibleComponentToolbarActions = (actions: ComponentHostAction[], c
   const placedKeys = new Set(placedFullPageActions(contributions, actions).map(({ action }) => `${action.componentId}\u0000${action.pageId}`));
   return actions.filter(action => !placedKeys.has(`${action.componentId}\u0000${action.pageId}`));
 };
-export const mediaContributionScope = (entries: ProjectFileEntry[], _clicked: ProjectFileEntry, sourcePageId: string): ComponentPageOpenScope | null => {
+export const mediaContributionScope = (entries: ProjectFileEntry[], _clicked: ProjectFileEntry, sourcePageId: string, contentKind: ComponentPageOpenScope['contentKind'] = 'project'): ComponentPageOpenScope | null => {
   if (!entries.length || entries.some(entry => !['image', 'raw', 'video'].includes(entry.kind))) return null;
   const selectedRelativePaths = normalizedRelativePaths(entries.map(entry => entry.relativePath));
-  return { scopeRelativePath: commonParentScope(selectedRelativePaths, ''), selectedRelativePaths, sourcePageId };
+  return { scopeRelativePath: commonParentScope(selectedRelativePaths, ''), selectedRelativePaths, sourcePageId, contentKind };
 };
-export const projectContributionScope = (scopeRelativePath: string, sourcePageId: string, relativePaths: string[] = []): ComponentPageOpenScope => ({
+export const projectContributionScope = (scopeRelativePath: string, sourcePageId: string, relativePaths: string[] = [], contentKind: ComponentPageOpenScope['contentKind'] = 'project'): ComponentPageOpenScope => ({
   scopeRelativePath: commonParentScope(relativePaths, scopeRelativePath),
   selectedRelativePaths: normalizedRelativePaths(relativePaths),
   sourcePageId,
+  contentKind,
 });

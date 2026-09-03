@@ -28,10 +28,12 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   the broader version module.
 - `electron/services`: application workflows and reusable infrastructure.
   `WorkspaceService`, `FileSystemService`, `ThumbnailService`, `MediaService`,
-  `MediaRatingService`, and `VersionService` form the core domain boundary. The event bus and
-  background task service provide task IDs, progress, cancellation and retry.
-  File-transfer planning and the bounded small/large copy scheduler live in the
-  filesystem service rather than the Electron composition root. Image worker
+  `MediaRatingService`, and `VersionService` form the core domain boundary. The
+  event bus and persistent background task service provide task IDs, progress,
+  cancellation, checkpoints, restart recovery and retry. File-transfer planning
+  and the bounded small/large copy scheduler live in
+  `electron/services/file-transfer-service.cjs`; recoverable replacement and
+  publication orchestration lives in `FileSystemService`. Image worker
   pools, RAW fallback, video-cover generation, EXIF orientation and rating
   writes are also owned by services rather than `main.cjs` or IPC handlers.
   `ProcessSupervisor` owns child-process lifecycle, health state, bounded
@@ -48,18 +50,17 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   for verified recycle, exact-item restore, and recycle capability probing.
 - `electron/thumbnail-pipeline.cjs`: thumbnail scheduling and cache domain.
 - `electron/component-registry.cjs`: optional packaged component discovery.
-- `python/workspace_db.py`: the catalog/media/version worker. Stable action
-  groups live in `workspace_db_domains.py` and schema migrations live in
-  `workspace_db_migrations.py`. Deprecated domains attach through the generic
-  `python/compatibility/registry.py`; the main database no longer contains
-  component-owned tables or action dispatch.
+- `python/workspace_db.py`: the workspace catalog and versioning worker.
+  Media synchronization and durable media actions live in
+  `python/workspace_media_actions.py`; shared database helpers, storage
+  ownership and migrations live in `workspace_db_support.py`,
+  `workspace_storage_ownership.py`, `workspace_db_domains.py` and
+  `workspace_db_migrations.py`. Deprecated formats attach only through the
+  generic `python/compatibility/registry.py`; the main database does not own
+  component business tables.
 - `python/operations_db.py`: the file-operations journal worker. It owns the
   persistent undo journal and imports legacy `undo_records` once. Deleted media
   bytes are never stored in SQLite.
-- `python/compatibility/sample_component_v1/`: the deprecated V1 physical schema,
-  legacy extraction, attached-store adapter, workspace actions, and snapshot /
-  restore CLI. Development and packaged runtimes discover it through generic
-  compatibility metadata and registries.
 - `python/tools.py`: source entry point for the shared packaged runtime,
   published as `PhotoFlowImportWorker` (`PhotoFlowImportWorker.exe` on Windows),
   for lightweight Python commands, the thumbnail image server, the built-in
@@ -80,11 +81,12 @@ Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_A
   `src/App.tsx` is the application shell rather than the previous 4,000-line
   feature container. Component actions are discovered only from `componentHost`
   manifests; component settings live inside component pages.
-- `extensions/sample-component/renderer`: independent sample-component application UI.
-  It builds separately, ships in the component `ui/` directory, and calls only
-  the owner-bound, versioned `photoFlowComponent` RPC allowlist. Existing team
-  repositories and version IPC implementations remain a compatibility backend
-  during the next extraction stage; they are not exposed to the main renderer.
+- `extensions`: independently built optional components. `team-retouch` owns its
+  collaboration UI, service, algorithms and compatibility data; `video-tools`
+  owns transcode/split workflows; `video-transcription` owns local speech
+  recognition; `video-playback-mpv` contributes only a playback backend. Each
+  component calls the owner-bound `photoFlowComponent` API and cannot import the
+  application React tree, preload bridge or Electron implementation.
 - Advanced video UI is built into the application: `AdvancedVideoPlayer`,
   Chromium playback, trimming, screenshots, keyboard controls and the
   `videoPlayback` preference all ship in the main renderer. `PlaybackSession`
@@ -157,12 +159,14 @@ Child-process ownership and recovery policy are documented in
    of the two application entry files without changing public API names.
 3. Core workflows now cross explicit workspace, filesystem, thumbnail, media,
    version, repository and plugin service boundaries.
-4. Workspace reconciliation, thumbnail generation and cache cleanup publish
-   observable task state through an in-process event bus. The renderer can list,
-   cancel and retry supported tasks.
+4. Workspace reconciliation, thumbnail generation, cache cleanup, file
+   operations, backup and archive workflows publish observable task state. Task
+   history and checkpoints are persisted; supported interrupted work can be
+   resumed or safely restarted after application launch.
 5. Optional capability-based plugins are discovered through manifests and run
-   behind versioned host contracts. Bundled visual tools remain core
-   capabilities and use a dedicated visual-tools worker.
+   behind versioned Host API contracts. Component services and algorithm
+   runtimes are supervised processes; component business code remains outside
+   the core renderer and Electron modules.
 
 `npm run check` is the supported local and Windows-CI gate: lint, TypeScript,
 architecture, Electron security, filesystem safety, background tasks, database
