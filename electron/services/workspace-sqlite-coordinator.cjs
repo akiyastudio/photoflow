@@ -45,6 +45,7 @@ class WorkspaceSqliteCoordinator {
     this.active = new Map();
     this.queue = [];
     this.quarantined = new Map();
+    this.preemptRequested = new Set();
     this.sequence = 0;
   }
 
@@ -71,7 +72,7 @@ class WorkspaceSqliteCoordinator {
     return error;
   }
 
-  run({ databases, signal, deadlineAt, label = '' } = {}, worker) {
+  run({ databases, signal, deadlineAt, label = '', priority = 0, preemptible = false, onPreempt = null } = {}, worker) {
     if (typeof worker !== 'function') return Promise.reject(new TypeError('数据库协调 worker 必须是函数'));
     let normalized;
     try { normalized = normalizeRequest(databases); } catch (error) { return Promise.reject(error); }
@@ -82,7 +83,12 @@ class WorkspaceSqliteCoordinator {
     if (Number.isFinite(deadlineAt) && deadlineAt <= Date.now()) return Promise.reject(timeoutError(label));
 
     return new Promise((resolve, reject) => {
-      const entry = { id: ++this.sequence, databases: normalized, signal, deadlineAt, label, worker, resolve, reject, timer: null, onAbort: null, settled: false };
+      const entry = {
+        id: ++this.sequence, databases: normalized, signal, deadlineAt, label, worker, resolve, reject,
+        priority: Number.isFinite(Number(priority)) ? Number(priority) : 0,
+        preemptible: preemptible === true && typeof onPreempt === 'function', onPreempt,
+        preemptRequested: false, timer: null, onAbort: null, settled: false,
+      };
       entry.onAbort = () => this.cancel(entry, abortError(signal.reason));
       signal?.addEventListener?.('abort', entry.onAbort, { once: true });
       if (Number.isFinite(deadlineAt)) {
@@ -90,8 +96,29 @@ class WorkspaceSqliteCoordinator {
         entry.timer.unref?.();
       }
       this.queue.push(entry);
+      this.preemptLowerPriority(entry);
       this.drain();
     });
+  }
+
+  preemptLowerPriority(entry) {
+    const active = new Map();
+    for (const database of entry.databases) {
+      for (const reservation of this.active.get(database.path) || []) {
+        if (conflicts(database, reservation)) active.set(reservation.id, reservation);
+      }
+    }
+    for (const reservation of active.values()) {
+      if (!reservation.preemptible || this.preemptRequested.has(reservation.id) || reservation.priority >= entry.priority) continue;
+      this.preemptRequested.add(reservation.id);
+      try {
+        reservation.onPreempt(Object.assign(new Error(`数据库后台操作正在让路：${reservation.label || reservation.id}`), {
+          code: 'DATABASE_PREEMPTED',
+        }));
+      } catch {
+        this.preemptRequested.delete(reservation.id);
+      }
+    }
   }
 
   cancel(entry, error) {
@@ -115,7 +142,8 @@ class WorkspaceSqliteCoordinator {
     // requests may still proceed, avoiding global head-of-line blocking.
     for (let index = 0; index < queueIndex; index += 1) {
       const older = this.queue[index];
-      if (older.databases.some(left => entry.databases.some(right => conflicts(left, right)))) return false;
+      if (older.priority >= entry.priority
+          && older.databases.some(left => entry.databases.some(right => conflicts(left, right)))) return false;
     }
     return true;
   }
@@ -124,6 +152,7 @@ class WorkspaceSqliteCoordinator {
     let granted = true;
     while (granted) {
       granted = false;
+      let selectedIndex = -1;
       for (let index = 0; index < this.queue.length; index += 1) {
         const entry = this.queue[index];
         const quarantinedError = this.quarantineError(entry);
@@ -136,11 +165,13 @@ class WorkspaceSqliteCoordinator {
           break;
         }
         if (!this.canGrant(entry, index)) continue;
-        this.queue.splice(index, 1);
-        this.grant(entry);
-        granted = true;
-        break;
+        if (selectedIndex < 0 || entry.priority > this.queue[selectedIndex].priority) selectedIndex = index;
       }
+      if (granted) continue;
+      if (selectedIndex < 0) continue;
+      const [entry] = this.queue.splice(selectedIndex, 1);
+      this.grant(entry);
+      granted = true;
     }
   }
 
@@ -149,13 +180,17 @@ class WorkspaceSqliteCoordinator {
     this.cleanup(entry);
     for (const database of entry.databases) {
       const active = this.active.get(database.path) || [];
-      active.push({ id: entry.id, path: database.path, mode: database.mode });
+      active.push({
+        id: entry.id, path: database.path, mode: database.mode, priority: entry.priority,
+        preemptible: entry.preemptible, onPreempt: entry.onPreempt, label: entry.label,
+      });
       this.active.set(database.path, active);
     }
     Promise.resolve()
       .then(() => entry.worker())
       .then(entry.resolve, entry.reject)
       .finally(() => {
+        this.preemptRequested.delete(entry.id);
         for (const database of entry.databases) {
           const remaining = (this.active.get(database.path) || []).filter(item => item.id !== entry.id);
           if (remaining.length) this.active.set(database.path, remaining);

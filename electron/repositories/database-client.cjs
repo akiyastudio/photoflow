@@ -211,10 +211,10 @@ class PythonDatabaseClient {
     child.stderr.setEncoding('utf8');
     child.stderr.on('data', data => { stderr = (stderr + data).slice(-4000); });
     child.stdin.on('error', () => undefined);
-    const finishRequests = error => {
+    const finishRequests = (error, expectedStop = false) => {
       if (finished) return;
       finished = true;
-      this.noteFailure(error);
+      if (!expectedStop) this.noteFailure(error);
       if (this.process === child) this.process = null;
       for (const [id, request] of this.pending.entries()) {
         if (request.child !== child) continue;
@@ -223,11 +223,11 @@ class PythonDatabaseClient {
         request.reject(markOutcomeUnknown(error, request));
         this.pending.delete(id);
       }
-      if (!this.stopping && !this.processSupervisor) this.writeLog('warn', 'Database service stopped', { scriptName: this.scriptName, error: error.message || String(error) });
+      if (!expectedStop && !this.stopping && !this.processSupervisor) this.writeLog('warn', 'Database service stopped', { scriptName: this.scriptName, error: error.message || String(error) });
     };
     const finish = error => {
       const barrier = this.processStops.get(child);
-      if (barrier) void barrier.then(() => finishRequests(error), stopError => finishRequests(stopError));
+      if (barrier) void barrier.then(() => finishRequests(error, true), stopError => finishRequests(stopError));
       else finishRequests(error);
     };
     child.on('error', finish);

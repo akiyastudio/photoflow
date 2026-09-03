@@ -9,10 +9,12 @@ using System.Web.Script.Serialization;
 using Microsoft.Win32.SafeHandles;
 using System.Linq;
 using System.Threading;
+using System.Threading.Tasks;
 
 internal static class FilePublicationService
 {
     private sealed class OwnershipConflictException : IOException { public OwnershipConflictException(string message) : base(message) {} }
+    private sealed class CopyBatchItem { internal int Index; internal string Source; internal string Target; internal string IdentityValue; internal long Size; internal long LastWriteTime; internal long ChangeTime; }
     private sealed class PostCommitException : IOException {
         internal readonly string PublishedPath;
         internal readonly string IdentityValue;
@@ -33,7 +35,6 @@ internal static class FilePublicationService
     private const uint FILE_FLAG_BACKUP_SEMANTICS = 0x02000000;
     private const uint FILE_FLAG_OPEN_REPARSE_POINT = 0x00200000;
     private const uint FILE_FLAG_SEQUENTIAL_SCAN = 0x08000000;
-    private const uint FILE_FLAG_WRITE_THROUGH = 0x80000000;
     private const uint SYNCHRONIZE = 0x00100000;
     private const uint FILE_OPEN = 1;
     private const uint FILE_DIRECTORY_FILE = 0x1;
@@ -81,7 +82,8 @@ internal static class FilePublicationService
             else if (args[0] == "inspect-path-batch") result = InspectPathBatch(Required(options, "manifest"));
             else if (args[0] == "delete-paths-batch") result = DeletePathsBatch(Required(options, "manifest"));
             else if (args[0] == "compare-delete-files-batch") result = CompareDeleteFilesBatch(Required(options, "manifest"), Required(options, "manifest-sha256"), long.Parse(Required(options, "manifest-size")));
-            else if (args[0] == "copy-cut-files-batch") result = CopyCutFilesBatch(Required(options, "manifest"), Required(options, "manifest-sha256"), long.Parse(Required(options, "manifest-size")));
+            else if (args[0] == "copy-files-batch") result = CopyFilesBatch(Required(options, "manifest"), Required(options, "manifest-sha256"), long.Parse(Required(options, "manifest-size")), false, options.ContainsKey("durable") && options["durable"] == "true");
+            else if (args[0] == "copy-cut-files-batch") result = CopyFilesBatch(Required(options, "manifest"), Required(options, "manifest-sha256"), long.Parse(Required(options, "manifest-size")), true, true);
             else if (args[0] == "delete-directories-batch") result = DeleteDirectoriesBatch(Required(options, "manifest"), Required(options, "manifest-sha256"), long.Parse(Required(options, "manifest-size")));
             else if (args[0] == "commit-cross-volume-file") result = CommitCrossVolume(Required(options, "source"), Required(options, "staged"), Required(options, "target"), Required(options, "sha256"), long.Parse(Required(options, "size")), Required(options, "source-identity"));
             else if (args[0] == "compare-delete-file") result = CompareDelete(Required(options, "target"), Required(options, "sha256"), long.Parse(Required(options, "size")), Required(options, "identity"));
@@ -221,61 +223,72 @@ internal static class FilePublicationService
         return new Dictionary<string, object> { { "success", true }, { "results", results } };
     }
 
-    private static object CopyCutFilesBatch(string manifestValue, string manifestHash, long manifestSize)
+    private static object CopyFilesBatch(string manifestValue, string manifestHash, long manifestSize, bool deleteSource, bool durable)
     {
-        var lines = ReadBoundManifest(manifestValue, manifestHash, manifestSize); var results = new List<Dictionary<string, object>>(); var utf8 = new UTF8Encoding(false, true);
+        var lines = ReadBoundManifest(manifestValue, manifestHash, manifestSize); var items = new List<CopyBatchItem>(); var utf8 = new UTF8Encoding(false, true);
         for (var expectedIndex = 0; expectedIndex < lines.Length; expectedIndex++) {
             var parts = lines[expectedIndex].Split('\t');
-            if (parts.Length != 8 || parts[0] != "F") throw new ArgumentException("原生剪切清单格式无效");
+            if (parts.Length != 8 || parts[0] != "F") throw new ArgumentException("原生复制清单格式无效");
             int index; long size; long lastWriteTime; long changeTime;
-            if (!Int32.TryParse(parts[1], out index) || index != expectedIndex || !Int64.TryParse(parts[5], out size) || size < 0 || !Int64.TryParse(parts[6], out lastWriteTime) || !Int64.TryParse(parts[7], out changeTime)) throw new ArgumentException("原生剪切清单快照无效");
+            if (!Int32.TryParse(parts[1], out index) || index != expectedIndex || !Int64.TryParse(parts[5], out size) || size < 0 || !Int64.TryParse(parts[6], out lastWriteTime) || !Int64.TryParse(parts[7], out changeTime)) throw new ArgumentException("原生复制清单快照无效");
             string sourceValue; string targetValue; string identity;
             try { sourceValue = utf8.GetString(Convert.FromBase64String(parts[2])); targetValue = utf8.GetString(Convert.FromBase64String(parts[3])); identity = utf8.GetString(Convert.FromBase64String(parts[4])); }
-            catch (Exception error) { throw new ArgumentException("原生剪切清单路径编码无效", error); }
+            catch (Exception error) { throw new ArgumentException("原生复制清单路径编码无效", error); }
+            items.Add(new CopyBatchItem { Index = index, Source = sourceValue, Target = targetValue, IdentityValue = identity, Size = size, LastWriteTime = lastWriteTime, ChangeTime = changeTime });
+        }
+        var results = new Dictionary<string, object>[items.Count]; var failed = 0;
+        var degree = items.Count > 1 && items.All(item => item.Size <= 2L * 1024 * 1024) ? Math.Min(8, items.Count) : 1;
+        Parallel.ForEach(items, new ParallelOptions { MaxDegreeOfParallelism = degree }, item => {
+            if (Volatile.Read(ref failed) != 0) return;
             try {
-                var result = CopyCutFile(sourceValue, targetValue, identity, size, lastWriteTime, changeTime); result["index"] = index; results.Add(result);
+                var result = CopyFileSinglePass(item.Source, item.Target, item.IdentityValue, item.Size, item.LastWriteTime, item.ChangeTime, deleteSource, durable); result["index"] = item.Index; results[item.Index] = result;
             } catch (Exception error) {
                 var native = error as Win32Exception; var committed = error as PostCommitException;
                 var code = error is OwnershipConflictException || error is InvalidDataException ? "PUBLISH_OWNERSHIP_CONFLICT" : error is PathTooLongException ? "ENAMETOOLONG" : error is ArgumentException ? "EINVAL" : native == null ? "FILE_PUBLICATION_FAILED" : NativeCode(native.NativeErrorCode);
-                var failed = new Dictionary<string, object> { { "index", index }, { "success", false }, { "error", committed != null && committed.InnerException != null ? error.Message + "：" + committed.InnerException.Message : error.Message }, { "code", code }, { "nativeError", native == null ? 0 : native.NativeErrorCode }, { "sourceDeleted", false } };
-                if (committed != null) { failed["published"] = true; failed["publishedPath"] = committed.PublishedPath; failed["identity"] = committed.IdentityValue; }
-                results.Add(failed); break;
+                var failure = new Dictionary<string, object> { { "index", item.Index }, { "success", false }, { "error", committed != null && committed.InnerException != null ? error.Message + "：" + committed.InnerException.Message : error.Message }, { "code", code }, { "nativeError", native == null ? 0 : native.NativeErrorCode }, { "sourceDeleted", false } };
+                if (committed != null) { failure["published"] = true; failure["publishedPath"] = committed.PublishedPath; failure["identity"] = committed.IdentityValue; }
+                results[item.Index] = failure; Interlocked.Exchange(ref failed, 1);
             }
-        }
-        return new Dictionary<string, object> { { "success", true }, { "results", results } };
+        });
+        return new Dictionary<string, object> { { "success", true }, { "results", results.Where(item => item != null).ToList() } };
     }
 
-    private static Dictionary<string, object> CopyCutFile(string sourceValue, string targetValue, string expectedIdentity, long expectedSize, long expectedLastWriteTime, long expectedChangeTime)
+    private static Dictionary<string, object> CopyFileSinglePass(string sourceValue, string targetValue, string expectedIdentity, long expectedSize, long expectedLastWriteTime, long expectedChangeTime, bool deleteSource, bool durable)
     {
         var source = Full(sourceValue); var target = Full(targetValue); EnsureDistinct(source, target);
         var separator = target.LastIndexOf('\\'); if (separator <= 0 || separator + 1 >= target.Length) throw new DirectoryNotFoundException("原生剪切目标目录不存在");
         var targetDirectory = target.Substring(0, separator); var targetName = target.Substring(separator + 1);
         var temporary = targetDirectory + "\\." + targetName + "." + Guid.NewGuid().ToString("N") + ".photoflow-fast-cut";
+        var bufferSize = (int)Math.Min(4L * 1024 * 1024, Math.Max(64L * 1024, expectedSize));
         var published = false; var targetIdentity = "";
         try {
-            using (var sourceHandle = OpenLocked(source, GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES, false, FILE_SHARE_READ))
-            using (var sourceStream = new FileStream(sourceHandle, FileAccess.Read, 4 * 1024 * 1024, false)) {
+            using (var sourceHandle = OpenLocked(source, deleteSource ? GENERIC_READ | DELETE | FILE_WRITE_ATTRIBUTES : GENERIC_READ, false, FILE_SHARE_READ))
+            using (var sourceStream = new FileStream(sourceHandle, FileAccess.Read, bufferSize, false)) {
                 VerifyIdentity(sourceHandle, expectedIdentity, "原生剪切源文件"); FILE_BASIC_INFO sourceBasic; ReadBasicInformation(sourceHandle, out sourceBasic);
                 if (sourceStream.Length != expectedSize || sourceBasic.LastWriteTime != expectedLastWriteTime || sourceBasic.ChangeTime != expectedChangeTime) throw new OwnershipConflictException("原生剪切源文件快照已变化");
                 string digest;
                 using (var targetHandle = CreateWritableNew(temporary))
-                using (var targetStream = new FileStream(targetHandle, FileAccess.ReadWrite, 4 * 1024 * 1024, false))
+                using (var targetStream = new FileStream(targetHandle, FileAccess.ReadWrite, bufferSize, false))
                 using (var sha = SHA256.Create()) {
-                    var buffer = new byte[4 * 1024 * 1024]; int read;
+                    var buffer = new byte[bufferSize]; int read;
                     while ((read = sourceStream.Read(buffer, 0, buffer.Length)) > 0) { targetStream.Write(buffer, 0, read); sha.TransformBlock(buffer, 0, read, buffer, 0); }
                     sha.TransformFinalBlock(new byte[0], 0, 0); digest = BitConverter.ToString(sha.Hash).Replace("-", "").ToLowerInvariant();
                     if (targetStream.Length != expectedSize) throw new EndOfStreamException("原生剪切写入长度不完整");
-                    targetStream.Flush(true); VerifyIdentity(sourceHandle, expectedIdentity, "原生剪切源文件"); FILE_BASIC_INFO stableSource; ReadBasicInformation(sourceHandle, out stableSource);
+                    targetStream.Flush(durable); VerifyIdentity(sourceHandle, expectedIdentity, "原生复制源文件"); FILE_BASIC_INFO stableSource; ReadBasicInformation(sourceHandle, out stableSource);
                     if (sourceStream.Length != expectedSize || stableSource.LastWriteTime != expectedLastWriteTime || stableSource.ChangeTime != expectedChangeTime) throw new OwnershipConflictException("原生剪切源文件在复制期间发生变化");
                     if (!SetBasicInformationByHandle(targetStream.SafeFileHandle, FileBasicInfo, ref sourceBasic, (uint)Marshal.SizeOf(typeof(FILE_BASIC_INFO)))) throw new Win32Exception(Marshal.GetLastWin32Error());
-                    targetIdentity = Identity(targetStream.SafeFileHandle); MoveNoReplaceCore(temporary, target); published = true;
-                    try { using (var verifyTargetHandle = OpenLocked(target, GENERIC_READ, false, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)) { VerifyIdentity(verifyTargetHandle, targetIdentity, "原生剪切目标文件"); BY_HANDLE_FILE_INFORMATION targetInfo; if (!GetFileInformationByHandle(verifyTargetHandle, out targetInfo)) throw new Win32Exception(Marshal.GetLastWin32Error()); var targetSize = ((long)targetInfo.FileSizeHigh << 32) | targetInfo.FileSizeLow; if (targetSize != expectedSize) throw new InvalidDataException("原生剪切目标文件大小不一致"); } }
-                    catch (Exception error) { throw new PostCommitException("目标已发布，但目标身份或大小复核失败", target, targetIdentity, error); }
-                    var sourceChanged = false; var originalSource = sourceBasic;
-                    try { if ((sourceBasic.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0) { var writable = sourceBasic; writable.FileAttributes &= ~FILE_ATTRIBUTE_READONLY; if (!SetBasicInformationByHandle(sourceHandle, FileBasicInfo, ref writable, (uint)Marshal.SizeOf(typeof(FILE_BASIC_INFO)))) throw new Win32Exception(Marshal.GetLastWin32Error()); sourceChanged = true; } MarkDelete(sourceHandle); }
-                    catch (Exception error) { RestoreAttributes(sourceHandle, originalSource, sourceChanged); throw new PostCommitException("目标已发布，但源文件无法删除", target, targetIdentity, error); }
+                    targetIdentity = Identity(targetStream.SafeFileHandle); MoveNoReplaceBuffered(temporary, target); published = true;
+                    if (deleteSource) {
+                        try { using (var verifyTargetHandle = OpenLocked(target, GENERIC_READ, false, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE)) { VerifyIdentity(verifyTargetHandle, targetIdentity, "原生剪切目标文件"); BY_HANDLE_FILE_INFORMATION targetInfo; if (!GetFileInformationByHandle(verifyTargetHandle, out targetInfo)) throw new Win32Exception(Marshal.GetLastWin32Error()); var targetSize = ((long)targetInfo.FileSizeHigh << 32) | targetInfo.FileSizeLow; if (targetSize != expectedSize) throw new InvalidDataException("原生剪切目标文件大小不一致"); } }
+                        catch (Exception error) { throw new PostCommitException("目标已发布，但目标身份或大小复核失败", target, targetIdentity, error); }
+                    }
+                    if (deleteSource) {
+                        var sourceChanged = false; var originalSource = sourceBasic;
+                        try { if ((sourceBasic.FileAttributes & FILE_ATTRIBUTE_READONLY) != 0) { var writable = sourceBasic; writable.FileAttributes &= ~FILE_ATTRIBUTE_READONLY; if (!SetBasicInformationByHandle(sourceHandle, FileBasicInfo, ref writable, (uint)Marshal.SizeOf(typeof(FILE_BASIC_INFO)))) throw new Win32Exception(Marshal.GetLastWin32Error()); sourceChanged = true; } MarkDelete(sourceHandle); }
+                        catch (Exception error) { RestoreAttributes(sourceHandle, originalSource, sourceChanged); throw new PostCommitException("目标已发布，但源文件无法删除", target, targetIdentity, error); }
+                    }
                 }
-                return new Dictionary<string, object> { { "success", true }, { "published", true }, { "sourceDeleted", true }, { "identity", targetIdentity }, { "sha256", digest }, { "size", expectedSize } };
+                return new Dictionary<string, object> { { "success", true }, { "published", true }, { "sourceDeleted", deleteSource }, { "identity", targetIdentity }, { "sha256", digest }, { "size", expectedSize } };
             }
         } finally {
             if (!published && GetFileAttributes(temporary) != INVALID_FILE_ATTRIBUTES) try { DeleteFile(temporary); } catch { }
@@ -380,6 +393,10 @@ internal static class FilePublicationService
     {
         if (!MoveFileEx(source, target, MOVEFILE_WRITE_THROUGH)) throw new Win32Exception(Marshal.GetLastWin32Error());
     }
+    private static void MoveNoReplaceBuffered(string source, string target)
+    {
+        if (!MoveFileEx(source, target, 0)) throw new Win32Exception(Marshal.GetLastWin32Error());
+    }
 
     private static object CommitCrossVolume(string sourceValue, string stagedValue, string targetValue, string expectedHash, long expectedSize, string expectedSourceIdentity)
     {
@@ -441,7 +458,7 @@ internal static class FilePublicationService
     }
     private static SafeFileHandle CreateWritableNew(string filePath)
     {
-        var handle = CreateFile(filePath, GENERIC_READ | GENERIC_WRITE | FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_DELETE, IntPtr.Zero, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN | FILE_FLAG_WRITE_THROUGH, IntPtr.Zero);
+        var handle = CreateFile(filePath, GENERIC_READ | GENERIC_WRITE | FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_DELETE, IntPtr.Zero, CREATE_NEW, FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_SEQUENTIAL_SCAN, IntPtr.Zero);
         if (handle.IsInvalid) throw new Win32Exception(Marshal.GetLastWin32Error());
         return handle;
     }

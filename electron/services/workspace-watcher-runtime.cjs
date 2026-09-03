@@ -62,11 +62,11 @@ const createWorkspaceWatcherRuntime = ({
     filesystem_id: project.filesystem_id, availability: project.availability, missing_since: project.missing_since,
     extra_json: stableCatalogExtra(project.extra_json),
   })).sort((left, right) => `${left.relative_path}\0${left.name}`.localeCompare(`${right.relative_path}\0${right.name}`)));
-  const reconcileCatalog = root => {
+  const reconcileCatalog = (root, options = {}) => {
     const existing = catalogReconciliations.get(root);
     if (existing) return existing;
     const previousSnapshot = catalogSnapshot(catalogs.get(root));
-    const operation = reconcileCatalogDirect(root).then(catalog => {
+    const operation = reconcileCatalogDirect(root, options).then(catalog => {
       const mainWindow = getMainWindow();
       if (previousSnapshot !== catalogSnapshot(catalog) && mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send('workspace-projects-changed', { root, reconciled: true });

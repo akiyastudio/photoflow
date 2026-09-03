@@ -195,6 +195,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   deleteProjectMissingMediaVersion: (workspacePath, versionId) => ipcRenderer.invoke('workspace-version-delete-project-missing', workspacePath, versionId),
   recordMediaVersionCompare: (workspacePath, request) => ipcRenderer.invoke('workspace-version-compare-record', workspacePath, request),
   openMediaVersion: (filePath) => ipcRenderer.invoke('workspace-open-version', filePath),
+  getProgressFoldersSnapshot: (workspacePath, projectName) => ipcRenderer.invoke('workspace-progress-folders-snapshot', workspacePath, projectName),
   getProgressFolders: (workspacePath, projectName) => ipcRenderer.invoke('workspace-progress-folders', workspacePath, projectName),
   getSelectionSourceFolders: (projectPath, request = {}) => ipcRenderer.invoke('workspace-selection-source-folders', projectPath, {
     cursor: request?.cursor,

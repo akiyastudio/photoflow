@@ -54,5 +54,42 @@ const { MAX_CHANGED_PATHS } = require('../electron/contracts/media-sync-limits.c
   assert(fullBatches.every(call => call.payload.files.length <= MEDIA_SYNC_BATCH_SIZE));
   assert.equal(Math.max(...fullBatches.map(call => call.payload.files.length)), MEDIA_SYNC_BATCH_SIZE);
   assert.equal(fullResult.count, fullFiles.length);
+
+  const cancellationController = new AbortController();
+  let cancellationBatches = 0;
+  const cancellableRepository = createMediaRepository({
+    call: async (_root, action, payload) => {
+      if (action === 'media_sync_paths_prepare') return { snapshotId: '22222222-2222-4222-8222-222222222222', files };
+      if (action === 'media_sync_paths_apply_batch') {
+        cancellationBatches += 1;
+        cancellationController.abort();
+        return { count: payload.files.length };
+      }
+      if (action === 'media_sync_paths_finalize') throw new Error('cancelled media sync must not finalize');
+      throw new Error(`unexpected cancellable sync action: ${action}`);
+    },
+  });
+  await assert.rejects(
+    cancellableRepository.syncChangedPaths('C:/workspace', 'Project', [{ path: 'C:/workspace/Project', eventType: 'rename', kind: 'directory' }], [], { signal: cancellationController.signal }),
+    error => error?.code === 'TASK_CANCELLED',
+  );
+  assert.equal(cancellationBatches, 1, 'a foreground mutation must stop an index at the next 64-file batch boundary');
+
+  const preemptionCalls = [];
+  const preemptibleRepository = createMediaRepository({
+    call: async (_root, action, payload, _timeout, options) => {
+      preemptionCalls.push({ action, payload, options });
+      if (action === 'media_sync_prepare') throw Object.assign(new Error('foreground entered'), { code: 'DATABASE_PREEMPTED' });
+      if (action === 'media_sync_abort') return { success: true, removed: true };
+      throw new Error(`unexpected preemption action: ${action}`);
+    },
+  });
+  await assert.rejects(
+    preemptibleRepository.syncProject('C:/workspace', 'Project', [], { background: true }),
+    error => error?.code === 'DATABASE_PREEMPTED',
+  );
+  assert.deepEqual(preemptionCalls.map(call => call.action), ['media_sync_prepare', 'media_sync_abort']);
+  assert.equal(preemptionCalls[0].options.preemptible, true);
+  assert.equal(preemptionCalls[0].options.priority, -10);
   console.log('incremental media repository tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

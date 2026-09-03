@@ -230,6 +230,7 @@ const removeUndoOperation = undoToken => {
 const workspaceCatalogs = new Map();
 let shellThumbnailProcess = null;
 let shellThumbnailManagedProcess = null;
+let shellThumbnailStopPromise = null;
 let shellThumbnailOutput = '';
 let shellThumbnailRequestId = 0;
 let shellThumbnailWorkChain = Promise.resolve();
@@ -401,13 +402,31 @@ const finishShellThumbnailRequests = () => {
 
 const stopShellThumbnailProcess = () => {
   const child = shellThumbnailProcess;
+  finishShellThumbnailRequests();
+  if (shellThumbnailStopPromise) return shellThumbnailStopPromise;
+  if (shellThumbnailManagedProcess) {
+    const managedProcess = shellThumbnailManagedProcess;
+    let stopOperation;
+    try { stopOperation = managedProcess.stop('shell-thumbnail-stop'); }
+    catch (error) { stopOperation = Promise.reject(error); }
+    const completion = Promise.resolve(stopOperation)
+      .catch(error => {
+        writeLog('warn', 'Windows Shell thumbnail cache helper failed to stop cleanly', { error: error.message || String(error) });
+        try { if (child && !child.killed) child.kill(); } catch { /* the supervisor retains ownership after a failed stop */ }
+      })
+      .finally(() => {
+        if (shellThumbnailProcess === child) shellThumbnailProcess = null;
+        shellThumbnailOutput = '';
+        if (managedProcess.released && shellThumbnailManagedProcess === managedProcess) shellThumbnailManagedProcess = null;
+        if (shellThumbnailStopPromise === completion) shellThumbnailStopPromise = null;
+      });
+    shellThumbnailStopPromise = completion;
+    return completion;
+  }
   shellThumbnailProcess = null;
   shellThumbnailOutput = '';
-  finishShellThumbnailRequests();
-  if (shellThumbnailManagedProcess) {
-    shellThumbnailManagedProcess.stop('shell-thumbnail-stop');
-    shellThumbnailManagedProcess = null;
-  } else if (child && !child.killed) child.kill();
+  if (child && !child.killed) child.kill();
+  return Promise.resolve();
 };
 
 const attachShellThumbnailProcess = (child, managedProcess = null) => {
@@ -454,13 +473,14 @@ const attachShellThumbnailProcess = (child, managedProcess = null) => {
   return child;
 };
 
-const ensureShellThumbnailProcess = () => {
+const ensureShellThumbnailProcess = async () => {
   if (process.platform !== 'win32') return null;
+  if (shellThumbnailStopPromise) await shellThumbnailStopPromise;
   if (shellThumbnailProcess && !shellThumbnailProcess.killed) return shellThumbnailProcess;
   if (shellThumbnailManagedProcess && !shellThumbnailManagedProcess.released) {
-    if (shellThumbnailManagedProcess.state === 'restarting') return shellThumbnailManagedProcess.start();
-    shellThumbnailManagedProcess.release();
-    shellThumbnailManagedProcess = null;
+    if (shellThumbnailManagedProcess.state === 'stopping') return null;
+    const child = shellThumbnailManagedProcess.start();
+    return child && !child.killed ? child : null;
   }
   const executable = getShellThumbnailExecutable();
   if (!fs.existsSync(executable)) {
@@ -485,35 +505,43 @@ const ensureShellThumbnailProcess = () => {
 
 // Query Explorer's cache first, then optionally ask the installed provider to
 // extract in the isolated helper process. Provider work never blocks Electron.
-const copyWindowsShellThumbnailNow = (sourcePath, targetPath, requestedSize, cacheOnly = true) => new Promise(resolve => {
-  const child = ensureShellThumbnailProcess();
-  if (!child?.stdin?.writable) return resolve(false);
-  const requestId = String(++shellThumbnailRequestId);
-  const timer = setTimeout(() => {
-    shellThumbnailRequests.delete(requestId);
-    resolve(false);
-    // A cache-only lookup should finish almost immediately. Restart the helper
-    // if a cloud/offline Shell provider stalls so later thumbnails are not
-    // trapped behind the same blocked COM request.
-    if (shellThumbnailProcess === child) stopShellThumbnailProcess();
-  }, cacheOnly ? 1500 : 10000);
-  shellThumbnailRequests.set(requestId, { resolve, timer, targetPath, requestedSize, sourcePath });
-  const encode = value => Buffer.from(value, 'utf8').toString('base64');
-  child.stdin.write(`${requestId}\t${requestedSize}\t${encode(sourcePath)}\t${encode(targetPath)}\t${cacheOnly ? 'cache' : 'generate'}\n`, error => {
-    if (!error) return;
-    const request = shellThumbnailRequests.get(requestId);
-    if (!request) return;
-    shellThumbnailRequests.delete(requestId);
-    clearTimeout(request.timer);
-    request.resolve(false);
+const copyWindowsShellThumbnailNow = async (sourcePath, targetPath, requestedSize, cacheOnly = true) => {
+  const child = await ensureShellThumbnailProcess();
+  if (!child?.stdin?.writable) return false;
+  return new Promise(resolve => {
+    const requestId = String(++shellThumbnailRequestId);
+    const timer = setTimeout(() => {
+      shellThumbnailRequests.delete(requestId);
+      resolve(false);
+      // A cache-only lookup should finish almost immediately. Restart the helper
+      // if a cloud/offline Shell provider stalls so later thumbnails are not
+      // trapped behind the same blocked COM request. The stop promise fences the
+      // next request until this managed process has fully released its ID.
+      if (shellThumbnailProcess === child) void stopShellThumbnailProcess();
+    }, cacheOnly ? 1500 : 10000);
+    shellThumbnailRequests.set(requestId, { resolve, timer, targetPath, requestedSize, sourcePath });
+    const encode = value => Buffer.from(value, 'utf8').toString('base64');
+    child.stdin.write(`${requestId}\t${requestedSize}\t${encode(sourcePath)}\t${encode(targetPath)}\t${cacheOnly ? 'cache' : 'generate'}\n`, error => {
+      if (!error) return;
+      const request = shellThumbnailRequests.get(requestId);
+      if (!request) return;
+      shellThumbnailRequests.delete(requestId);
+      clearTimeout(request.timer);
+      request.resolve(false);
+    });
   });
-});
+};
 
 const copyWindowsShellThumbnail = (sourcePath, targetPath, requestedSize, cacheOnly = true) => {
   // The COM helper is single-threaded. Serialize callers here so later requests
   // do not time out while an earlier provider is still decoding a large video.
-  const job = shellThumbnailWorkChain.then(() => copyWindowsShellThumbnailNow(sourcePath, targetPath, requestedSize, cacheOnly));
-  shellThumbnailWorkChain = job.catch(() => false);
+  const job = shellThumbnailWorkChain
+    .then(() => copyWindowsShellThumbnailNow(sourcePath, targetPath, requestedSize, cacheOnly))
+    .catch(error => {
+      writeLog('warn', 'Windows Shell thumbnail request failed; using decoder fallback', { error: error.message || String(error) });
+      return false;
+    });
+  shellThumbnailWorkChain = job;
   return job;
 };
 
@@ -874,7 +902,7 @@ const trustedExternalMediaRoots = (root, projectName) => {
 };
 const mediaRepository = {
   ...mediaBackgroundRepository,
-  syncProject: (root, projectName) => mediaBackgroundRepository.syncProject(root, projectName, trustedExternalMediaRoots(root, projectName)),
+  syncProject: (root, projectName, _externalRoots, options) => mediaBackgroundRepository.syncProject(root, projectName, trustedExternalMediaRoots(root, projectName), options),
   syncChangedPaths: (root, projectName, changes, _externalRoots, options) => mediaBackgroundRepository.syncChangedPaths(root, projectName, changes, trustedExternalMediaRoots(root, projectName), options),
   getPhoto: mediaInteractionRepository.getPhoto,
   createVersion: mediaInteractionRepository.createVersion,
@@ -902,10 +930,22 @@ const mediaRepository = {
   saveVersionTreeLayout: mediaInteractionRepository.saveVersionTreeLayout,
   unregisterProgress: mediaInteractionRepository.unregisterProgress,
   deleteMissingProgress: mediaInteractionRepository.deleteMissingProgress,
+  registerBatchBaseline: mediaInteractionRepository.registerBatchBaseline,
+  commitBatchCompare: mediaInteractionRepository.commitBatchCompare,
+  retryBatchOperations: mediaInteractionRepository.retryBatchOperations,
   listBatchOperations: mediaInteractionRepository.listBatchOperations,
+  createTrackingSession: mediaInteractionRepository.createTrackingSession,
+  prepareTracking: mediaInteractionRepository.prepareTracking,
+  storeTrackingPreview: mediaInteractionRepository.storeTrackingPreview,
   getTrackingSession: mediaInteractionRepository.getTrackingSession,
   releaseTrackingSession: mediaInteractionRepository.releaseTrackingSession,
   decideTrackingItem: mediaInteractionRepository.decideTrackingItem,
+  getTrackingCommitPlan: mediaInteractionRepository.getTrackingCommitPlan,
+  getTrackingCommitResources: mediaInteractionRepository.getTrackingCommitResources,
+  applyTrackingCopies: mediaInteractionRepository.applyTrackingCopies,
+  completeTrackingCommit: mediaInteractionRepository.completeTrackingCommit,
+  failTrackingCommit: mediaInteractionRepository.failTrackingCommit,
+  getMainBranchMedia: mediaInteractionRepository.getMainBranchMedia,
 };
 const versionService = createVersionService({ repository: mediaRepository });
 let selectionService = null;
@@ -926,7 +966,7 @@ const mediaScanDatabase = new PythonDatabaseClient({
 const mediaScanRepository = createMediaRepository(mediaScanDatabase);
 const mediaScanService = createVersionService({ repository: {
   ...mediaScanRepository,
-  syncProject: (root, projectName) => mediaScanRepository.syncProject(root, projectName, trustedExternalMediaRoots(root, projectName)),
+  syncProject: (root, projectName, _externalRoots, options) => mediaScanRepository.syncProject(root, projectName, trustedExternalMediaRoots(root, projectName), options),
   syncChangedPaths: (root, projectName, changes, _externalRoots, options) => mediaScanRepository.syncChangedPaths(root, projectName, changes, trustedExternalMediaRoots(root, projectName), options),
 } });
 // Version comparisons can run alongside a full media-index scan. Give them a
@@ -1325,7 +1365,7 @@ app.whenReady().then(async () => {
   registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
   for (const descriptor of componentHostRegistry.list()) componentCapabilityBroker.assertCapabilities(descriptor);
   const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Number, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, extractVideoTimelineFrames, fileSystemService, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
-  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, canUseNativeFastCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dns, ensureWorkspace, fetch: electronNet.fetch.bind(electronNet), fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, movePlannedFilesFast, publishPathNoClobber, nativeImage, net: nodeNet, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resolveRemoteHost: async hostname => (await electronNet.resolveHost(hostname)).endpoints, resumeToastViewAfterNativeDrag, samePathIdentity, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
+  registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, canUseNativeFastCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dns, ensureWorkspace, fetch: electronNet.fetch.bind(electronNet), fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, movePlannedFilesFast, publishPathNoClobber, nativeImage, net: nodeNet, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resolveRemoteHost: async hostname => (await electronNet.resolveHost(hostname)).endpoints, resumeToastViewAfterNativeDrag, samePathIdentity, scheduleMediaTrackingScan, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
   registerMediaIpc({ Buffer, Date, Error, IMAGE_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, Math, Number, Object, PRIORITY, Promise, RAW_EXTENSIONS, String, VIDEO_EXTENSIONS, approvedMediaCacheDirectories, backgroundTasks, clearTimeout, convertedImagePreviewPath, dialog, exiftool, findImportedVideoPreview, flattenMetadataValue, fs, getMediaCacheDir, ipcMain, mainWindow, mediaCacheIndexes, mediaMetadataCache, mediaRuntimeState, mediaService, normalizeMediaCacheSizeGB, path, rawOrientationCorrection, rawPreviewPath, refreshMediaCacheIndex, setTimeout, thumbnailService, trimMediaCache, undefined, writeLog });
   registerMediaRatingIpc({ IMAGE_EXTENSIONS, RAW_EXTENSIONS, ensureWorkspace, getProjectPath, ipcMain, mediaRatingService, mediaService, path, refreshWorkspaceCatalog, workspaceCatalogs, writeLog });
   registerVersionIpc({ Array, Boolean, Error, IMAGE_EXTENSIONS, JSON, Math, Number, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, backgroundTasks, buildVersionBatchImportKey, cleanVersionName, copyFileAtomic, crypto, dialog, ensureTrackedVersionThumbnail, ensureWorkspace, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRatingService, mediaScanService, mediaService, path, projectVirtualPaths, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, refreshWorkspaceCatalog, releaseWorkspaceWatchPath, resolveProjectEntry, runPythonEventAction, scheduleMediaTrackingScan, supportedVersionFileKind, suppressWorkspaceWatchPath, thumbnailService, trackingScanService, undefined, uniqueDestination, versionService, workspaceCatalogs, writeLog });

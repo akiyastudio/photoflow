@@ -39,6 +39,7 @@ const versionService = {
   },
   prepareTracking: async (root, request) => {
     calls.prepare = { root, request };
+    if (calls.prepareTrackingResponses?.length) return calls.prepareTrackingResponses.shift();
     return {
       sessionId: '11111111-1111-4111-8111-111111111111',
       progressId: request.progressId,
@@ -170,11 +171,13 @@ registerVersionIpc({
     return resolved;
   },
   runPythonEventAction: async (_script, args, _timeout, _signal, onEvent) => {
+    calls.pythonInvocationCount = (calls.pythonInvocationCount || 0) + 1;
     calls.pythonArgs = args;
     const progressEvent = { type: 'progress', progress: 50, message: 'matching' };
     onEvent?.(progressEvent);
     return [progressEvent, { type: 'preview', data: { matches: [], suggestions: [], unmatched: ['new.jpg'] } }];
   },
+  scheduleMediaTrackingScan: (...args) => (calls.scheduledMediaScans ||= []).push(args),
   shell: testShell,
   suppressWorkspaceWatchPath: value => (calls.suppressedWatchPaths ||= []).push(value),
   supportedVersionFileKind: filePath => path.extname(filePath).toLowerCase() === '.jpg',
@@ -221,6 +224,31 @@ async function main() {
   assert(taskReports.some(([progress, message, metadata]) => progress === 40 && message === 'matching' && metadata.processedCount === 1), 'streamed worker progress must update the background task before completion');
   assert(!calls.pythonArgs.includes(maliciousPath), 'renderer paths must never reach the compare tool');
   assert.strictEqual(calls.preview.request.items[0].status, 'pending_confirmation');
+
+  const historicalSessionId = '12121212-1212-4121-8121-121212121212';
+  const pythonInvocationsBeforeHistoricalReplay = calls.pythonInvocationCount;
+  calls.createTrackingResponses = [{
+    sessionId: historicalSessionId, progressId: 'historical-progress-node',
+    parentProgressId: 'parent-progress-id', mode: 'refresh', sessionStatus: 'comparing', reused: false,
+    parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+  }];
+  calls.prepareTrackingResponses = [{
+    success: true, sessionId: historicalSessionId, progressId: 'historical-progress-node',
+    parentProgressId: 'parent-progress-id', mode: 'refresh',
+    parentFolderPath: trustedParent, progressFolderPath: trustedProgress,
+    sourceNames: [], removedNames: [], copyCandidateNames: [],
+    historicalMatches: [{ sourceName: 'retouched.png', referenceName: 'base.jpg', targetName: 'base.png' }],
+  }];
+  const historicalReplay = await start({}, workspaceRoot, 'Project', {
+    progressId: 'historical-progress-node', mode: 'refresh',
+  });
+  assert.strictEqual(historicalReplay.success, true);
+  for (let attempt = 0; attempt < 50 && calls.preview?.request?.sessionId !== historicalSessionId; attempt += 1) await new Promise(resolve => setTimeout(resolve, 5));
+  assert.deepStrictEqual(calls.preview.request.items, [{
+    kind: 'recognized', status: 'recognized', sourceName: 'retouched.png',
+    referenceName: 'base.jpg', targetName: 'base.png', distance: 0, confidence: '既有关联',
+  }], 'confirmed historical relationships must become recognized confirmation items');
+  assert.strictEqual(calls.pythonInvocationCount, pythonInvocationsBeforeHistoricalReplay, 'unchanged historical relationships must not be guessed again by the image matcher');
 
   calls.createTrackingResponses = [{
     sessionId: '22222222-2222-4222-8222-222222222222', progressId: 'progress-node-id',
@@ -440,6 +468,8 @@ async function main() {
     root: workspaceRoot,
     request: { sessionId: '11111111-1111-4111-8111-111111111111', batchId: 'batch-id' },
   }, 'tracking snapshot finalization must use the isolated media-scan database worker');
+  assert.deepStrictEqual(calls.scheduledMediaScans.at(-1), [workspaceRoot, 'Project', [], true], 'tracking commit must reuse the canonical coalescing media scheduler instead of launching duplicate fingerprint maintenance');
+  assert.strictEqual((calls.commitTaskDefinitions || []).some(definition => definition.type === 'version-fingerprint-maintenance'), false);
   assert.strictEqual(calls.commitTaskDefinitions[0].resourceAccess, 'write', 'tracking commit must reserve both version folders for writes');
   assert.deepStrictEqual(calls.commitTaskDefinitions[0].resources, [
     { path: trustedParent, access: 'write' },

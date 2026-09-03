@@ -15,15 +15,16 @@ const BACKGROUND_TASK_POLICIES = Object.freeze({
   'project-restore': { resumePolicy: 'checkpoint', notificationPolicy: 'progress-toast', resumable: true },
   'video-trim': { resumePolicy: 'safe-restart', notificationPolicy: 'progress-toast' },
   'version-tracking': { resumePolicy: 'safe-restart', notificationPolicy: 'progress-toast' },
-  'version-media-rescan': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only', taskCenterPolicy: 'attention-only', interruptedPolicy: 'migrate', successHistory: 'clearable', migrateTask: task => (
+  'version-media-rescan': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only', taskCenterPolicy: 'attention-only', interruptedPolicy: 'migrate', successHistory: 'clearable', foregroundNonBlocking: true, migrateTask: task => (
     task.metadata?.fullScan === true || Number(task.metadata?.mediaRescanPolicyVersion || 0) >= MEDIA_RESCAN_POLICY_VERSION ? task : null
   ) },
-  'version-fingerprint-maintenance': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
+  'version-fingerprint-maintenance': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only', interruptedPolicy: 'discard', successHistory: 'auto-clear', foregroundNonBlocking: true },
+  'version-stale-detection': { resumePolicy: 'safe-restart', notificationPolicy: 'silent', historyPolicy: 'ephemeral', foregroundNonBlocking: true },
   'thumbnail-generate': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only', taskCenterPolicy: 'attention-only', interruptedPolicy: 'discard', successHistory: 'auto-clear' },
   'thumbnail-cache-recovery': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only', taskCenterPolicy: 'attention-only', interruptedPolicy: 'restart', successHistory: 'auto-clear' },
-  'workspace-database-maintenance': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only', taskCenterPolicy: 'attention-only', interruptedPolicy: 'discard', successHistory: 'clearable' },
+  'workspace-database-maintenance': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only', taskCenterPolicy: 'attention-only', interruptedPolicy: 'discard', successHistory: 'clearable', foregroundNonBlocking: true },
   'backup-verify': { resumePolicy: 'checkpoint', notificationPolicy: 'error-only', resumable: true },
-  'workspace-reconcile': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
+  'workspace-reconcile': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only', foregroundNonBlocking: true },
   'storage-usage-scan': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
   'deleted-project-cleanup': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },
   'backup-cleanup': { resumePolicy: 'safe-restart', notificationPolicy: 'error-only' },

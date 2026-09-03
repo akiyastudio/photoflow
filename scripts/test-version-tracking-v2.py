@@ -158,6 +158,84 @@ def test_tracking_engine(root: Path) -> None:
         db_api.tracking_commit_plan(str(workspace), db, {"sessionId": unchanged["sessionId"]})
         complete_with_snapshot_validation(db, workspace, unchanged["sessionId"])
 
+        # Enabling rename-from-parent after a batch was already confirmed must
+        # revisit historical name mismatches even when the files are unchanged.
+        retro_parent_folder = project / "Retro parent"
+        retro_progress_folder = project / "Retro progress"
+        retro_parent_folder.mkdir()
+        retro_progress_folder.mkdir()
+        write_media(retro_parent_folder / "base.jpg", b"retro-parent")
+        write_media(retro_progress_folder / "retouched.png", b"retro-child")
+        retro_parent = register(
+            db, workspace, retro_parent_folder, version_key="retro-source", node_role="original",
+        )
+        retro_progress = register(
+            db, workspace, retro_progress_folder, version_key="retro-edit", node_role="progress",
+            parent_id=retro_parent["id"], tracking=True, rename=False,
+        )
+        initial_batch = db_api.batch_commit_compare(str(workspace), db, {
+            "projectName": "Project", "folderA": str(retro_parent_folder),
+            "folderB": str(retro_progress_folder), "importKey": "retro-initial",
+            "displayName": retro_progress_folder.name, "renameSources": False,
+            "matches": [{
+                "reference": "base.jpg", "source": "retouched.png",
+                "target": "retouched.png", "distance": 0, "confidence": "confirmed",
+            }],
+        })
+        assert initial_batch["success"] and initial_batch["renamedCount"] == 0
+        db_api.progress_mark_ready(db, {
+            "progressId": retro_progress["id"],
+            "trackingSnapshot": {
+                "files": db_api.folder_media_snapshot(str(retro_progress_folder)),
+                "parent": db_api.folder_media_snapshot(str(retro_parent_folder)),
+            },
+        })
+        db_api.progress_policy_save(db, {
+            "progressId": retro_progress["id"], "trackingEnabled": True,
+            "trackingState": "pending_compare", "renameFromParent": True,
+            "copyMissingFromParent": False,
+        })
+        retro_refresh = db_api.tracking_prepare(str(workspace), db, {
+            "projectName": "Project", "progressId": retro_progress["id"], "mode": "refresh",
+        })
+        assert retro_refresh["sourceNames"] == []
+        assert retro_refresh["historicalMatches"] == [{
+            "sourceName": "retouched.png", "referenceName": "base.jpg", "targetName": "base.png",
+        }], "confirmed historical relationships must be reused after enabling rename-from-parent"
+        retro_preview = db_api.tracking_store_preview(db, {
+            "sessionId": retro_refresh["sessionId"],
+            "items": [{
+                "kind": "recognized", "status": "recognized",
+                "sourceName": "retouched.png", "referenceName": "base.jpg",
+                "targetName": "retouched.png", "distance": 0, "confidence": "confirmed",
+            }],
+        })
+        assert retro_preview["session"]["unresolvedCount"] == 0
+        retro_plan = db_api.tracking_commit_plan(str(workspace), db, {
+            "sessionId": retro_refresh["sessionId"],
+        })
+        assert retro_plan["matches"][0]["target"] == "base.png"
+        retro_commit = db_api.batch_commit_compare(str(workspace), db, {
+            "projectName": "Project", "folderA": str(retro_parent_folder),
+            "folderB": str(retro_progress_folder), "importKey": "retro-refresh",
+            "displayName": retro_progress_folder.name, "renameSources": True,
+            "reconcileExisting": True, "incrementalSources": retro_plan["incrementalSources"],
+            "matches": retro_plan["matches"],
+        })
+        assert retro_commit["success"] and retro_commit["renamedCount"] == 1
+        assert (retro_progress_folder / "base.png").is_file()
+        assert not (retro_progress_folder / "retouched.png").exists()
+        completed_retro = db_api.tracking_commit_complete(str(workspace), db, {
+            "sessionId": retro_refresh["sessionId"], "batchId": retro_commit["batch"]["id"],
+        })
+        assert completed_retro["success"]
+        settled_retro = db_api.tracking_prepare(str(workspace), db, {
+            "projectName": "Project", "progressId": retro_progress["id"], "mode": "refresh",
+        })
+        assert settled_retro["sourceNames"] == [] and settled_retro["historicalMatches"] == [], \
+            "a completed historical rename must not replay"
+        db_api.tracking_session_release(db, {"sessionId": settled_retro["sessionId"]})
+
         # Child changes and newly added parent media are the only next candidates.
         write_media(progress_folder / "delta.jpg", b"delta-v1")
         write_media(original_folder / "parent-added.jpg", b"new-parent")

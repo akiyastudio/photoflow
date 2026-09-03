@@ -56,9 +56,17 @@ const run = async () => {
 
   const policy = new WorkspaceDatabaseOperationPolicy();
   assert.equal(policy.classify({ database: 'C:/db.sqlite3', action: 'media_sync_prepare' }).mode, 'write', 'domain attachment still updates schema metadata, so prepare must retain the writer lease');
-  assert.equal(policy.classify({ database: 'C:/db.sqlite3', action: 'media_sync_apply_batch' }).mode, 'write');
-  assert.equal(policy.classify({ database: 'C:/db.sqlite3', action: 'progress_stale_prepare' }).mode, 'write');
+  assert.equal(policy.classify({ database: 'C:/db.sqlite3', action: 'media_sync_apply_batch' }).mode, 'exclusive', 'staged media publication must exclude readers only for its short publish batch');
+  assert.equal(policy.classify({ database: 'C:/db.sqlite3', action: 'progress_stale_prepare' }).mode, 'read', 'query-only stale preparation must not block foreground version-tree writers during a long filesystem scan');
   assert.equal(policy.classify({ database: 'C:/db.sqlite3', action: 'progress_stale_apply' }).idempotent, true);
+
+  const foregroundCalls = [];
+  const foregroundRepository = createMediaRepository({
+    call: async (...args) => { foregroundCalls.push(args); return { success: true, revision: 0, positions: [], progressFolders: [], graphEdges: [] }; },
+  });
+  await foregroundRepository.snapshotProgress('C:/Workspace', 'Project', true);
+  await foregroundRepository.getVersionTreeLayout('C:/Workspace', { projectName: 'Project', scopeKey: '' });
+  assert(foregroundCalls.every(call => call[4]?.priority === 10), 'progress and layout snapshots must enter the database coordinator at foreground priority');
   console.log('media sync batching tests passed');
 };
 

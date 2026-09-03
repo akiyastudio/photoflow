@@ -23,8 +23,8 @@ const createWorkspaceService = ({ repository, reconcileRepository = repository, 
     return catalog;
   };
 
-  const reconcileCatalog = async root => {
-    const response = await reconcileRepository.syncCatalog(root);
+  const reconcileCatalog = async (root, options = {}) => {
+    const response = await reconcileRepository.syncCatalog(root, options);
     const projects = Array.isArray(response.projects) ? response.projects : [];
     const catalog = { projects, byName: new Map(projects.map(project => [project.name.toLocaleLowerCase(), project])) };
     catalogs.set(root, catalog);

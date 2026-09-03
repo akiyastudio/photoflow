@@ -75,4 +75,61 @@ with tempfile.TemporaryDirectory() as temporary:
     holder.rollback()
     holder.close()
 
+    original_connect_read_only = workspace_db.connect_read_only
+    original_connect = workspace_db.connect
+
+    def require_writer(*_args, **_kwargs):
+        raise workspace_db.DatabaseWriteRequired("test initialization required")
+
+    def record_writable_fallback(*_args, **_kwargs):
+        nonlocal_marker[0] = True
+        raise RuntimeError("writable fallback reached")
+
+    nonlocal_marker = [False]
+    workspace_db.connect_read_only = require_writer
+    workspace_db.connect = record_writable_fallback
+    try:
+        try:
+            workspace_db.mutate(str(root), str(database), "version_tree_layout_get", {
+                "projectName": "Project", "scopeKey": "",
+            })
+            raise AssertionError("an audited read must not silently fall back to a writable connection")
+        except workspace_db.DatabaseWriteRequired:
+            pass
+        assert not nonlocal_marker[0], "the first read-lease attempt must not open a writable connection"
+        try:
+            workspace_db.mutate(str(root), str(database), "version_tree_layout_get", {
+                "projectName": "Project", "scopeKey": "", "_coordinatorWriteFallback": True,
+            })
+        except RuntimeError as error:
+            assert str(error) == "writable fallback reached"
+        else:
+            raise AssertionError("the promoted writer attempt did not reach writable initialization")
+        assert nonlocal_marker[0], "only the writer-lease retry may open a writable connection"
+    finally:
+        workspace_db.connect_read_only = original_connect_read_only
+        workspace_db.connect = original_connect
+
+    original_meta_value = workspace_db._meta_value
+
+    class ReadCandidate:
+        def close(self):
+            pass
+
+    nonlocal_marker[0] = False
+    workspace_db.connect_read_only = lambda *_args, **_kwargs: ReadCandidate()
+    workspace_db._meta_value = lambda *_args, **_kwargs: "pending-purge"
+    workspace_db.connect = record_writable_fallback
+    try:
+        try:
+            workspace_db.mutate(str(root), str(database), "progress_snapshot", {"projectName": "Project"})
+            raise AssertionError("a pending purge journal must promote an audited read before recovery")
+        except workspace_db.DatabaseWriteRequired:
+            pass
+        assert not nonlocal_marker[0], "purge recovery must not run while the coordinator still holds a read lease"
+    finally:
+        workspace_db.connect_read_only = original_connect_read_only
+        workspace_db._meta_value = original_meta_value
+        workspace_db.connect = original_connect
+
 print("database locking regression tests passed")

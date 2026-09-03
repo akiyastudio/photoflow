@@ -13,7 +13,7 @@ sys.path.insert(0, str(ROOT / "extensions" / "video-tools" / "runtime"))
 sys.path.insert(0, str(ROOT / "python"))
 
 import classify  # noqa: E402
-from classify import build_capture_groups, generate_missing_raw_jpgs, stage_import_and_organize, stage_import_broll, stage_plan_import  # noqa: E402
+from classify import build_capture_groups, generate_missing_raw_jpgs, generate_raw_jpg, stage_import_and_organize, stage_import_broll, stage_plan_import  # noqa: E402
 from ffmpeg_transcode import build_video_preview_command  # noqa: E402
 from PIL import Image  # noqa: E402
 
@@ -121,6 +121,28 @@ with tempfile.TemporaryDirectory(prefix="photoflow-raw-jpg-test-") as temporary:
         assert image.size == (640, 480)
 
 print("classify RAW-to-JPG generation tests passed")
+
+
+with tempfile.TemporaryDirectory(prefix="photoflow-raw-jpg-fallback-test-") as temporary:
+    root = Path(temporary)
+    source = root / "no-embedded-preview.CR3"
+    target = root / "generated.jpg"
+    source.write_bytes(b"RAW without an embedded JPEG")
+    decoder_calls = []
+
+    def fake_raw_decoder(source_path, outputs):
+        decoder_calls.append((source_path, outputs))
+        Image.new("RGB", (80, 60), "navy").save(outputs[0]["path"], format="JPEG")
+        return [{"sizeLabel": "generated-jpg", "pixelSize": 0, "path": outputs[0]["path"]}]
+
+    generate_raw_jpg(source, target, raw_decoder=fake_raw_decoder)
+
+    assert target.is_file(), "RAW files without embedded previews must fall back to LibRaw"
+    assert decoder_calls == [(source, [{"sizeLabel": "generated-jpg", "pixels": 0, "path": str(target.resolve())}])]
+    with Image.open(target) as image:
+        assert image.size == (80, 60)
+
+print("classify RAW-to-JPG LibRaw fallback tests passed")
 
 
 with tempfile.TemporaryDirectory(prefix="photoflow-raw-jpg-import-test-") as temporary:

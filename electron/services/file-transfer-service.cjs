@@ -596,6 +596,22 @@ const cleanupAncestorPaths = candidate => {
   return paths;
 };
 
+const WINDOWS_FILETIME_EPOCH = 116444736000000000n;
+const nativeWindowsFileSnapshot = identity => {
+  try {
+    const device = BigInt(identity?.device || '0'); const inode = BigInt(identity?.inode || '0');
+    const mtimeNs = BigInt(identity?.mtimeNs || ''); const ctimeNs = BigInt(identity?.ctimeNs || '');
+    if (device <= 0n || inode <= 0n || identity?.kind !== 'file') return null;
+    const hex = value => (value & 0xffffffffn).toString(16).padStart(8, '0');
+    return {
+      identity: `${hex(device)}:${hex(inode >> 32n)}:${hex(inode)}`,
+      size: String(identity.size),
+      lastWriteTime: String(mtimeNs / 100n + WINDOWS_FILETIME_EPOCH),
+      changeTime: String(ctimeNs / 100n + WINDOWS_FILETIME_EPOCH),
+    };
+  } catch { return null; }
+};
+
 const inspectCleanupPaths = async (paths, nativeService) => {
   const unique = [...new Map(paths.map(candidate => [physicalPathKey(candidate), path.resolve(candidate)])).values()];
   const states = new Map();
@@ -738,15 +754,14 @@ const movePlannedFilesFast = async (plan, options = {}) => {
   const files = plan.filter(entry => entry.kind === 'file');
   const directories = plan.filter(entry => entry.kind === 'directory');
   const inspectionPaths = [];
-  for (const entry of plan) inspectionPaths.push(entry.source, ...cleanupAncestorPaths(entry.source));
+  for (const entry of plan) inspectionPaths.push(...(entry.kind === 'directory' ? [entry.source] : []), ...cleanupAncestorPaths(entry.source));
   const nativeStates = await inspectCleanupPaths(inspectionPaths, nativeService);
   await assertCopyPlanSourcesUnchanged(plan, { verifyDigests: false });
   for (const entry of plan) {
-    const state = nativeStates.get(physicalPathKey(entry.source));
-    if (!state || Boolean(state.directory) !== (entry.kind === 'directory')) throw Object.assign(new Error(`剪切源类型发生变化：${path.basename(entry.source)}`), { code: 'PUBLISH_OWNERSHIP_CONFLICT' });
-    if (entry.kind === 'file' && (String(state.size) !== String(entry.sourceIdentity.size) || !/^-?\d+$/.test(String(state.lastWriteTime)) || !/^-?\d+$/.test(String(state.changeTime)))) throw sourceChangedError(entry.source);
+    const state = entry.kind === 'file' ? nativeWindowsFileSnapshot(entry.sourceIdentity) : nativeStates.get(physicalPathKey(entry.source));
+    if (!state || entry.kind === 'directory' && state.directory !== true) throw Object.assign(new Error(`剪切源类型发生变化：${path.basename(entry.source)}`), { code: 'PUBLISH_OWNERSHIP_CONFLICT' });
     entry.sourceIdentity.nativeIdentity = state.identity;
-    if (entry.kind === 'file') entry.nativeSnapshot = { size: String(state.size), lastWriteTime: String(state.lastWriteTime), changeTime: String(state.changeTime) };
+    if (entry.kind === 'file') entry.nativeSnapshot = state;
   }
   for (const entry of plan) if (fs.existsSync(entry.destination)) throw Object.assign(new Error(`目标文件已存在：${path.basename(entry.destination)}`), { code: 'EEXIST' });
   for (const entry of directories) {
@@ -772,7 +787,7 @@ const movePlannedFilesFast = async (plan, options = {}) => {
   try {
     for (let offset = 0; offset < files.length;) {
       throwIfCancelled(options.isCancelled);
-      const batch = takeBoundedBatch(files, offset, CLEANUP_TREE_BATCH_SIZE, entry => Math.ceil(Buffer.byteLength(entry.source) / 3) * 4 + Math.ceil(Buffer.byteLength(entry.destination) / 3) * 4 + 160);
+      const batch = takeBoundedBatch(files, offset, 2048, entry => Math.ceil(Buffer.byteLength(entry.source) / 3) * 4 + Math.ceil(Buffer.byteLength(entry.destination) / 3) * 4 + 160);
       try {
         const results = await nativeService.copyCutFilesBatch(batch.map(entry => ({ source: entry.source, target: entry.destination, identity: entry.sourceIdentity.nativeIdentity, ...entry.nativeSnapshot })));
         await acceptCompleted(batch, results);
@@ -976,6 +991,51 @@ const copyPlannedFiles = async (plan, options = {}) => {
 
   const smallPool = (async () => {
     const nativeService = options.nativePublicationService || configuredNativePublicationService || bundledNativePublicationService;
+    if (process.platform === 'win32' && typeof nativeService?.copyFilesBatch === 'function') {
+      const pending = [];
+      for (const entry of smallFiles) {
+        try { throwIfCancelled(isCancelled); await waitIfPaused(); } catch (error) { rememberError(error); break; }
+        if (await isEntryComplete(entry)) {
+          await rememberCompletedEntry(entry); resumedFiles += 1; onProgress({ entry, bytesDelta: entry.size, fileCompleted: true, resumed: true });
+        } else { onFileStart(entry); pending.push(entry); }
+      }
+      if (!pending.length || control.error) return;
+      const snapshots = new Map();
+      try {
+        for (let offset = 0; offset < pending.length;) {
+          const batch = takeBoundedBatch(pending, offset, 2048, entry => Math.ceil(Buffer.byteLength(entry.source) / 3) * 4 + 32);
+          for (let index = 0; index < batch.length; index += 1) {
+            const entry = batch[index];
+            entry.sourceIdentity ||= await capturePathIdentity(entry.source);
+            const state = nativeWindowsFileSnapshot(entry.sourceIdentity);
+            if (!state) throw sourceChangedError(entry.source);
+            snapshots.set(entry, state);
+          }
+          offset += batch.length;
+        }
+        peakSmallConcurrency = pending.length ? 1 : 0;
+        for (let offset = 0; offset < pending.length && !control.error;) {
+          throwIfCancelled(isCancelled); await waitIfPaused();
+          const batch = takeBoundedBatch(pending, offset, 2048, entry => Math.ceil(Buffer.byteLength(entry.source) / 3) * 4 + Math.ceil(Buffer.byteLength(entry.destination) / 3) * 4 + 160);
+          let completed;
+          let copyError;
+          try { completed = await nativeService.copyFilesBatch(batch.map(entry => ({ source: entry.source, target: entry.destination, ...snapshots.get(entry) })), { durable }); }
+          catch (error) { completed = Array.isArray(error.completed) ? error.completed : []; copyError = error; }
+          for (const result of completed) {
+            const entry = batch[result.index];
+            const publishedIdentity = { ...await capturePublishedIdentity(entry.destination), sha256: result.sha256, nativeIdentity: result.identity };
+            rememberCleanupOwnership(entry.destination, publishedIdentity, ownershipToken); entry.sourceIdentity.sha256 = result.sha256;
+            onCreated(entry.destination); smallFilesCopied += 1; onProgress({ entry, bytesDelta: entry.size, fileCompleted: true });
+            try { await onEntryComplete(entry, { source: entry.source, destination: entry.destination, bytes: entry.size, copied: true, commitStrategy: 'win32-native-single-pass-copy', publishedIdentity }); }
+            catch (error) { rememberError(error); break; }
+          }
+          if (copyError && !control.error) rememberError(attachTransferContext(copyError, 'copy-data', copyError.sourcePath, copyError.destinationPath));
+          offset += batch.length;
+          await yieldCleanupTurn(options);
+        }
+      } catch (error) { rememberError(error); }
+      return;
+    }
     if (typeof nativeService?.moveNoReplaceBatch !== 'function') {
       await runPool(smallFiles, smallFileConcurrency, async entry => {
         activeSmallCopies += 1;

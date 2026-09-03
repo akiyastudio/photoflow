@@ -43,7 +43,7 @@ try:
         media_create_version, media_delete_project_missing_version, media_delete_version,
         media_get, media_get_photo, media_record_compare, media_refresh_metadata_fingerprint,
         media_relocate_version, media_set_thumbnail, media_sync_apply_batch,
-        media_sync_finalize, media_sync_paths_apply_batch, media_sync_paths_finalize,
+        media_sync_abort, media_sync_finalize, media_sync_paths_apply_batch, media_sync_paths_finalize,
         media_sync_paths_prepare, media_sync_prepare, media_sync_project, media_update_version,
         media_version_delete_scope, media_versions_snapshot,
     )
@@ -81,7 +81,7 @@ except ModuleNotFoundError:
         media_create_version, media_delete_project_missing_version, media_delete_version,
         media_get, media_get_photo, media_record_compare, media_refresh_metadata_fingerprint,
         media_relocate_version, media_set_thumbnail, media_sync_apply_batch,
-        media_sync_finalize, media_sync_paths_apply_batch, media_sync_paths_finalize,
+        media_sync_abort, media_sync_finalize, media_sync_paths_apply_batch, media_sync_paths_finalize,
         media_sync_paths_prepare, media_sync_prepare, media_sync_project, media_update_version,
         media_version_delete_scope, media_versions_snapshot,
     )
@@ -139,6 +139,11 @@ _CONNECT_ATTEMPTS = []
 
 class DatabaseWriteRequired(RuntimeError):
     code = "DATABASE_WRITE_REQUIRED"
+
+
+COORDINATED_READ_ONLY_ACTIONS = frozenset((
+    "media_version_delete_scope", "progress_snapshot", "progress_stale_prepare", "version_tree_layout_get",
+))
 
 
 def __getattr__(name):
@@ -6040,6 +6045,59 @@ def _tracking_snapshot_parts(row):
     return files, parent
 
 
+def _tracking_pending_historical_renames(db, parent, progress, current_files: dict) -> list[dict]:
+    """Return confirmed relationships whose current file still needs its parent name."""
+    if not progress["rename_from_parent"] or not current_files:
+        return []
+    batch = db.execute(
+        """SELECT batches.id FROM version_batches AS batches
+           JOIN version_batches AS parent_batches ON parent_batches.id=batches.parent_batch_id
+           WHERE batches.project_id=? AND batches.status='ready' AND (
+             (? IS NOT NULL AND batches.source_folder_id IS NOT NULL
+              AND batches.source_folder_id=?)
+             OR ((? IS NULL OR batches.source_folder_id IS NULL)
+                 AND batches.source_folder_path_key=?)
+           ) AND (
+             (? IS NOT NULL AND parent_batches.source_folder_id IS NOT NULL
+              AND parent_batches.source_folder_id=?)
+             OR ((? IS NULL OR parent_batches.source_folder_id IS NULL)
+                 AND parent_batches.source_folder_path_key=?)
+           )
+           ORDER BY batches.sequence DESC LIMIT 1""",
+        (progress["project_id"], progress["folder_id"], progress["folder_id"],
+         progress["folder_id"], progress["folder_path_key"], parent["folder_id"],
+         parent["folder_id"], parent["folder_id"], parent["folder_path_key"]),
+    ).fetchone()
+    if batch is None:
+        return []
+    rows = db.execute(
+        """SELECT items.source_name,parent_versions.file_path AS parent_file_path
+           FROM batch_items AS items
+           JOIN versions AS child_versions ON child_versions.id=items.version_id
+           JOIN versions AS parent_versions ON parent_versions.id=child_versions.parent_version_id
+           WHERE items.batch_id=? AND items.match_method='visual-hash'
+             AND items.review_status='confirmed' AND child_versions.is_deleted=0
+             AND parent_versions.is_deleted=0""",
+        (batch["id"],),
+    ).fetchall()
+    pending = {}
+    for row in rows:
+        source_name = row["source_name"]
+        if not source_name or source_name not in current_files:
+            continue
+        reference_name = os.path.basename(str(row["parent_file_path"] or ""))
+        if not reference_name:
+            continue
+        target_name = _rename_target_preserving_source_extension(source_name, reference_name)
+        if target_name != source_name:
+            pending[source_name] = {
+                "sourceName": source_name,
+                "referenceName": reference_name,
+                "targetName": target_name,
+            }
+    return [pending[name] for name in sorted(pending, key=str.casefold)]
+
+
 def _validated_tracking_nodes(root: str, db, project_name: str, progress_id: str):
     project = project_row(db, project_name)
     progress = db.execute(
@@ -6174,11 +6232,17 @@ def tracking_prepare(root: str, db, payload: dict):
     # confirmation window. It must be captured even when copy-missing is off;
     # otherwise a changed parent can silently invalidate accepted matches.
     current_parent = folder_media_snapshot(parent_path)
+    historical_matches = []
     if mode == "refresh" and previous_files:
-        source_names = sorted(
+        changed_source_names = set(
             name for name, signature in current_files.items()
             if previous_files.get(name) != signature
         )
+        historical_matches = [
+            match for match in _tracking_pending_historical_renames(db, parent, progress, current_files)
+            if match["sourceName"] not in changed_source_names
+        ]
+        source_names = sorted(changed_source_names, key=str.casefold)
         removed_names = sorted(name for name in previous_files if name not in current_files)
     else:
         source_names = sorted(current_files)
@@ -6216,6 +6280,7 @@ def tracking_prepare(root: str, db, payload: dict):
         "parentFolderPath": parent_path,
         "progressFolderPath": progress_path,
         "sourceNames": source_names,
+        "historicalMatches": historical_matches,
         "removedNames": removed_names,
         "copyCandidateNames": copy_candidate_names,
         "renameFromParent": bool(progress["rename_from_parent"]),
@@ -8920,9 +8985,13 @@ def _mutate_impl(root: str, database: str, action: str, payload: dict):
             candidate = connect_read_only(database, read_domains)
             if _meta_value(candidate, "purge_journal_v1"):
                 candidate.close()
+                if action in COORDINATED_READ_ONLY_ACTIONS and payload.get("_coordinatorWriteFallback") is not True:
+                    raise DatabaseWriteRequired("数据库存在待恢复的清理事务")
             else:
                 db = candidate
         except DatabaseWriteRequired:
+            if action in COORDINATED_READ_ONLY_ACTIONS and payload.get("_coordinatorWriteFallback") is not True:
+                raise
             db = None
     if db is None:
         db = connect(root, database, include_domains=needs_domains, include_compatibility=needs_compatibility)

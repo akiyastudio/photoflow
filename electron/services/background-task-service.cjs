@@ -420,6 +420,17 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
     if (existing) deleteTaskInternal(requestedId);
     const createdAt = now();
     const policy = resolveBackgroundTaskPolicy(definition);
+    if (policy.foregroundNonBlocking && definition.resources?.length) {
+      throw Object.assign(new Error(`后台维护任务不能持有贯穿任务的资源锁：${definition.type}`), {
+        code: 'BACKGROUND_MAINTENANCE_RESOURCE_FORBIDDEN',
+      });
+    }
+    if (policy.foregroundNonBlocking && definition.concurrencyGroup
+        && !String(definition.concurrencyGroup).toLocaleLowerCase('en-US').startsWith('background-')) {
+      throw Object.assign(new Error(`后台维护任务不能占用前台并发组：${definition.type}`), {
+        code: 'BACKGROUND_MAINTENANCE_CAPACITY_FORBIDDEN',
+      });
+    }
     const resumeFactory = typeof definition.resumeFactory === 'function' ? definition.resumeFactory : null;
     const capabilities = projectBackgroundTaskCapabilities(policy, {
       cancellable: definition.cancellable !== false,
@@ -623,9 +634,11 @@ const createBackgroundTaskService = ({ eventBus, maxHistory = 200, now = () => D
         handle.complete();
         return { task: tasks.has(handle.task.id) ? publicTask(tasks.get(handle.task.id)) : handle.snapshot(), result };
       } catch (error) {
-        const cancelled = handle.context.signal.aborted || error?.code === 'TASK_CANCELLED';
+        const preempted = error?.code === 'DATABASE_PREEMPTED';
+        const cancelled = preempted || handle.context.signal.aborted || error?.code === 'TASK_CANCELLED';
         if (cancelled) handle.cancelled();
         else handle.fail(error);
+        if (preempted) throw error;
         if (!cancelled) throw error;
         return { task: tasks.has(handle.task.id) ? publicTask(tasks.get(handle.task.id)) : handle.snapshot(), cancelled: true };
       }

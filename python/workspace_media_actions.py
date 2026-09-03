@@ -1322,6 +1322,31 @@ def media_sync_paths_finalize(root: str, db, payload: dict):
             db.rollback()
         raise
 
+def media_sync_abort(root: str, db, payload: dict):
+    """Remove an unfinished immutable scan after cooperative foreground preemption."""
+    del root
+    project = project_row(db, payload["projectName"])
+    snapshot_id = str(payload.get("snapshotId") or "")
+    _media_sync_marker(snapshot_id, "abort")
+    snapshot = _incremental_snapshot_row(db, snapshot_id)
+    if snapshot is None or snapshot["project_id"] != project["id"]:
+        return {"success": True, "removed": False, "snapshotId": snapshot_id}
+    if snapshot["state"] == "finalized":
+        return {"success": True, "removed": False, "finalized": True, "snapshotId": snapshot_id}
+    db.execute("BEGIN IMMEDIATE")
+    try:
+        for table in ("media_incremental_snapshot_batches", "media_incremental_snapshot_baseline",
+                      "media_incremental_snapshot_scopes", "media_incremental_snapshot_files"):
+            db.execute(f"DELETE FROM {table} WHERE snapshot_id=?", (snapshot_id,))
+        db.execute("DELETE FROM media_incremental_snapshots WHERE snapshot_id=?", (snapshot_id,))
+        db.execute("DELETE FROM meta WHERE key LIKE ?", (f"media_sync:{snapshot_id}:%",))
+        db.execute("DELETE FROM meta WHERE key=?", (f"media_sync_lease:{snapshot_id}",))
+        db.commit()
+        return {"success": True, "removed": True, "snapshotId": snapshot_id}
+    except Exception:
+        db.rollback()
+        raise
+
 def _legacy_media_sync_project(root: str, db, payload: dict):
     project = project_row(db, payload["projectName"])
     if "availability" in project.keys() and project["availability"] == "missing":
@@ -1926,6 +1951,7 @@ def _media_operation_digest(action: str, payload: dict) -> str:
 ROOT_ACTIONS = frozenset((
     "media_sync_prepare", "media_sync_apply_batch", "media_sync_finalize",
     "media_sync_paths_prepare", "media_sync_paths_apply_batch", "media_sync_paths_finalize",
+    "media_sync_abort",
     "media_get",
 ))
 
@@ -1936,6 +1962,7 @@ ACTION_HANDLERS = {
     "media_sync_paths_prepare": media_sync_paths_prepare,
     "media_sync_paths_apply_batch": media_sync_paths_apply_batch,
     "media_sync_paths_finalize": media_sync_paths_finalize,
+    "media_sync_abort": media_sync_abort,
     "media_get": media_get,
     "media_get_photo": media_get_photo,
     "media_versions_snapshot": media_versions_snapshot,

@@ -11,7 +11,7 @@ const registries = [
   'electron/modules/broll-import.cjs',
   'src/features/versioning/ProgressPairPreview.tsx',
   'src/platform/video-playback/playback-session.ts',
-  'python/workspace_db.py',
+  'python/workspace_media_actions.py',
   'python/thumbnail_db.py',
   'python/classify.py',
   'python/rename.py',

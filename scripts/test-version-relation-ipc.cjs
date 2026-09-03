@@ -41,7 +41,7 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     versionService: {
       snapshotProgress: async (_root, projectName, includeMissing) => {
         assert.strictEqual(projectName, 'Trusted Project');
-        assert.strictEqual(includeMissing, undefined);
+        assert([undefined, true].includes(includeMissing));
         snapshotProgressCalls += 1;
         return { success: true, progressFolders: [child, parent], graphEdges: [] };
       },
@@ -96,12 +96,19 @@ const { registerVersionIpc } = require('../electron/modules/versions-ipc.cjs');
     path: failFilesystem,
   });
 
+  const progressFoldersSnapshotHandler = handlers.get('workspace-progress-folders-snapshot');
+  assert(progressFoldersSnapshotHandler, 'fast progress snapshots must be registered separately from location reconciliation');
+  const progressFoldersSnapshotResult = await progressFoldersSnapshotHandler(null, workspaceRoot, 'Trusted Project');
+  assert.strictEqual(progressFoldersSnapshotResult.success, true);
+  assert.strictEqual(snapshotProgressCalls, 1, 'the first version-tree paint must use the query-only progress snapshot');
+  assert.strictEqual(locationSnapshotCalls, 0, 'the fast snapshot must not perform filesystem location reconciliation');
+
   const progressFoldersHandler = handlers.get('workspace-progress-folders');
   assert(progressFoldersHandler, 'interactive progress reads must be registered');
   const progressFoldersResult = await progressFoldersHandler(null, workspaceRoot, 'Trusted Project');
   assert.strictEqual(progressFoldersResult.success, true);
-  assert.strictEqual(locationSnapshotCalls, 1, 'opening the version tree must use the locked location-refresh snapshot');
-  assert.strictEqual(snapshotProgressCalls, 0, 'the public tree must not use a stale query-only snapshot');
+  assert.strictEqual(locationSnapshotCalls, 1, 'background reconciliation must still refresh physical progress locations');
+  assert.strictEqual(snapshotProgressCalls, 1, 'the location refresh must not replace the separate fast-snapshot call');
 
   const unregisterHandler = handlers.get('workspace-progress-unregister');
   assert(unregisterHandler, 'progress unregister IPC must be registered');

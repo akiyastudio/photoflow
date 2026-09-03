@@ -19,6 +19,14 @@ const run = async () => {
     { path: 'C:/workspace/Project/Folder/child.jpg', eventType: 'rename', kind: 'file' },
   ]);
   assert.deepEqual(coalesced.map(change => [path.basename(change.path), change.eventType]), [['a.jpg', 'rename'], ['Folder', 'change']], 'rename must dominate change, ordinary files must drop, and a parent directory must cover descendants');
+  const caseOnly = coalesceMediaChanges([
+    { path: 'C:/workspace/Project/Photo.jpg', eventType: 'rename', kind: 'missing', previousKind: 'file', previousExtension: '.jpg' },
+    { path: 'C:/workspace/Project/photo.jpg', eventType: 'rename', kind: 'file' },
+  ]);
+  if (process.platform === 'win32') {
+    assert.equal(caseOnly.length, 1);
+    assert.equal(caseOnly[0].kind, 'file', 'a case-only rename must retain the final existing path instead of the old missing path');
+  }
   assert.equal(coalesceMediaChanges(Array.from({ length: 100 }, (_, index) => ({ path: `C:/workspace/Project-${index}/notes.txt`, eventType: 'change', kind: 'file' }))).length, 0, '100 projects of ordinary file noise must produce zero media sync changes');
   assert.equal(coalesceMediaChanges([{ path: 'C:/workspace/Project/notes.txt', eventType: 'rename', kind: 'missing', previousKind: 'file', previousExtension: '.txt' }]).length, 0, 'deleting notes.txt must create zero media tasks');
   const dismissedLegacyTasks = [];
@@ -251,6 +259,46 @@ const run = async () => {
   await wait(10);
   parallelScheduler.stop();
 
+  const foregroundTasks = createBackgroundTaskService({ eventBus: new EventEmitter() });
+  let releaseForegroundScan;
+  const foregroundScanGate = new Promise(resolve => { releaseForegroundScan = resolve; });
+  const foregroundScheduler = createMediaTrackingScanScheduler({
+    backgroundTasks: foregroundTasks,
+    delayMs: 0,
+    mediaScanService: {
+      syncProject: async () => { await foregroundScanGate; return { thumbnailCandidates: [] }; },
+      syncChangedPaths: async () => { await foregroundScanGate; return { thumbnailCandidates: [] }; },
+    },
+    versionStaleDetectionService: { schedule: () => undefined, cancel: () => undefined },
+    getProject: () => ({ relative_path: 'Project', availability: 'available' }),
+  });
+  foregroundScheduler.schedule('C:/foreground-workspace', 'Project', ['C:/foreground-workspace/Project/a.jpg']);
+  await wait(20);
+  const foregroundDelete = foregroundTasks.create({
+    id: 'foreground-delete', type: 'project-file-operation', title: 'delete',
+    concurrencyGroup: 'disk-io', concurrencyLimit: 3, concurrencyWriteLimit: 2,
+    resources: [{ path: 'C:/foreground-workspace/Project/a.jpg', access: 'write' }],
+  });
+  await foregroundDelete.waitForStart();
+  assert.equal(foregroundTasks.get('foreground-delete').state, 'running', 'foreground file writes must not wait for a project-wide media-index read lock');
+  foregroundDelete.complete();
+  const foregroundTracking = foregroundTasks.create({
+    id: 'foreground-version-tracking', type: 'version-tracking', title: '刷新版本跟踪',
+    concurrencyGroup: 'disk-io', concurrencyLimit: 3, concurrencyWriteLimit: 2,
+    resources: [
+      { path: 'C:/foreground-workspace/Project/progress', access: 'read' },
+      { path: 'photoflow-workspace-database/C:/foreground-workspace', access: 'write' },
+    ],
+  });
+  await foregroundTracking.waitForStart();
+  assert.equal(foregroundTasks.get('foreground-version-tracking').state, 'running', 'foreground version tracking must never display a wait on automatic media indexing');
+  foregroundTracking.complete();
+  foregroundScheduler.cancel('C:/foreground-workspace', 'Project');
+  releaseForegroundScan();
+  await wait(20);
+  foregroundScheduler.stop();
+  foregroundTasks.stop();
+
   const backgroundTasks = createBackgroundTaskService({ eventBus: new EventEmitter() });
   const blocker = backgroundTasks.create({
     id: 'workspace-writer', type: 'test', title: 'workspace writer',
@@ -286,10 +334,8 @@ const run = async () => {
 
   scheduler.schedule('C:/workspace', 'Project', ['C:/workspace/Project/first.jpg']);
   await wait(20);
-  assert.equal(scanCalls.length, 0, 'automatic scans must wait for the shared workspace writer');
+  assert.equal(scanCalls.length, 1, 'presentation-level database reservations must not block a complete automatic scan; repository calls coordinate each batch');
   blocker.complete();
-  await wait(20);
-  assert.equal(scanCalls.length, 1);
 
   scheduler.schedule('C:/workspace', 'Project', ['C:/workspace/Project/second.jpg']);
   releaseFirstScan();
@@ -347,6 +393,44 @@ const run = async () => {
   assert.equal(retryAttempts, 3);
   assert.equal(candidates.length, 2, 'manual retry must use the same candidate-processing wrapper');
   retryScheduler.stop();
+
+  const fanoutCandidates = Array.from({ length: 150 }, (_, index) => ({
+    photoId: `photo-${index}`, versionId: `version-${index}`, filePath: `C:/fanout-workspace/Project/${index}.CR3`,
+  }));
+  let releaseFirstCandidateWave;
+  const firstCandidateWave = new Promise(resolve => { releaseFirstCandidateWave = resolve; });
+  let candidateCalls = 0;
+  let runningCandidates = 0;
+  let maximumRunningCandidates = 0;
+  const fanoutScheduler = createMediaTrackingScanScheduler({
+    backgroundTasks: {
+      run: async (_definition, worker) => ({ result: await worker({ report: () => undefined }) }),
+      registerTypeRestartFactory: () => () => undefined,
+    },
+    delayMs: 0,
+    mediaScanService: {
+      syncProject: async () => ({ thumbnailCandidates: fanoutCandidates }),
+      syncChangedPaths: async () => { throw new Error('fan-out test uses a full scan'); },
+    },
+    versionStaleDetectionService: { schedule: () => undefined, cancel: () => undefined },
+    getProject: () => ({ relative_path: 'Project', availability: 'available' }),
+    onThumbnailCandidate: async () => {
+      candidateCalls += 1;
+      runningCandidates += 1;
+      maximumRunningCandidates = Math.max(maximumRunningCandidates, runningCandidates);
+      if (candidateCalls <= 8) await firstCandidateWave;
+      runningCandidates -= 1;
+    },
+  });
+  const fanoutTicket = fanoutScheduler.schedule('C:/fanout-workspace', 'Project', [], true);
+  await wait(20);
+  assert.equal(candidateCalls, 8, 'thumbnail persistence must apply backpressure instead of flooding the database queue');
+  releaseFirstCandidateWave();
+  await fanoutScheduler.flush(fanoutTicket);
+  assert.equal(candidateCalls, fanoutCandidates.length, 'bounded thumbnail persistence must not drop candidates above the database queue limit');
+  assert.equal(maximumRunningCandidates, 8, 'thumbnail persistence concurrency must remain bounded');
+  fanoutScheduler.stop();
+
   const mainSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'main.cjs'), 'utf8').replace(/\r\n?/g, '\n');
   const watcherSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'workspace-watcher-runtime.cjs'), 'utf8').replace(/\r\n?/g, '\n');
   assert.match(watcherSource, /if \(previousRoot\) for \(const project of [^\n]+\) cancelTrackingScan\(previousRoot, project\.name\);\n    if \(stopSchedulers\) \{\n      getMediaTrackingScanScheduler\(\)\?\.stop\(\);/, 'workspace watcher teardown must always cancel scans for the previous workspace, while scheduler stop remains conditional');

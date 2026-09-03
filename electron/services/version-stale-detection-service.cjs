@@ -26,7 +26,9 @@ const createVersionStaleDetectionService = ({ versionService, backgroundTasks = 
 
   const executeWrapper = async ({ key, batch }) => {
     const payload = { projectName: batch.projectName, changedPaths: batch.fullScan ? [] : [...batch.changedPaths] };
-    const executeDatabaseWork = () => versionService.detectProgressStale(batch.root, payload);
+    const executeDatabaseWork = task => versionService.detectProgressStale(batch.root, payload, {
+      signal: task?.signal, background: true,
+    });
     if (!backgroundTasks?.run) return executeDatabaseWork();
     const execution = await backgroundTasks.run({
       ...(batch.restartTask?.id ? { id: batch.restartTask.id } : {}),
@@ -34,7 +36,9 @@ const createVersionStaleDetectionService = ({ versionService, backgroundTasks = 
       title: `检查版本跟踪 · ${batch.projectName}`,
       notificationPolicy: 'silent',
       cancellable: false,
-      resources: [{ path: `photoflow-workspace-database/${batch.root}`, access: 'write' }],
+      // detectProgressStale acquires short database-coordinator leases itself.
+      // Do not turn this silent maintenance task into a workspace-wide blocker.
+      resources: [],
       metadata: {
         workspaceRoot: batch.root, projectName: batch.projectName,
         changedPaths: batch.fullScan ? [] : [...batch.changedPaths], fullScan: batch.fullScan,
@@ -50,10 +54,13 @@ const createVersionStaleDetectionService = ({ versionService, backgroundTasks = 
     worker: executeWrapper,
     delayMs,
     ...(runnerRetryDelays ? { retryDelays: runnerRetryDelays } : {}),
-    onError: (error, context) => writeLog('warn', 'Unable to detect stale version tracking nodes', {
-      projectName: context.batch?.projectName, retryAttempt: context.retryAttempt,
-      willRetry: context.willRetry, error: error.message || String(error),
-    }),
+    onError: (error, context) => {
+      if (error?.code === 'DATABASE_PREEMPTED' || error?.code === 'TASK_CANCELLED') return;
+      writeLog('warn', 'Unable to detect stale version tracking nodes', {
+        projectName: context.batch?.projectName, retryAttempt: context.retryAttempt,
+        willRetry: context.willRetry, error: error.message || String(error),
+      });
+    },
   });
 
   backgroundTasks?.registerTypeRestartFactory?.('version-stale-detection', task => enqueueRetry(

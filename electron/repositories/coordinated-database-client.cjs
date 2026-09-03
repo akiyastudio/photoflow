@@ -47,27 +47,46 @@ class CoordinatedDatabaseClient {
     return result;
   }
 
-  async callSingleFlight(root, action, payload, { timeoutMs, signal, label, deadlineAt: requestedDeadlineAt, operationId: requestedOperationId } = {}, classified = {}) {
+  async callSingleFlight(root, action, payload, { timeoutMs, signal, label, deadlineAt: requestedDeadlineAt, operationId: requestedOperationId, priority = 0, preemptible = false } = {}, classified = {}) {
     const database = classified.database || this.getDatabasePath(root);
-    const policy = classified.policy || this.operationPolicy.classify({ root, database, action, payload, scriptName: this.scriptName });
+    let requestPayload = payload;
+    let policy = classified.policy || this.operationPolicy.classify({ root, database, action, payload: requestPayload, scriptName: this.scriptName });
     const operationId = requestedOperationId || crypto.randomUUID();
+    const preemptionController = new AbortController();
+    const operationSignal = AbortSignal.any([signal, preemptionController.signal].filter(Boolean));
     let attempt = 0;
+    let promotedRead = false;
     while (true) {
       try {
         // The lease exists only for this attempt. A rejected attempt unwinds
         // coordinator.run before backoff, so retries always rejoin the queue.
-        return await this.coordinator.run({ databases: policy.databases, signal, deadlineAt: requestedDeadlineAt, label: label || action }, () => {
+        return await this.coordinator.run({
+          databases: policy.databases,
+          signal: operationSignal,
+          deadlineAt: requestedDeadlineAt,
+          label: label || action,
+          priority,
+          preemptible,
+          onPreempt: reason => preemptionController.abort(reason),
+        }, () => {
           const deadlineAt = requestedDeadlineAt;
           const remainingMs = Number.isFinite(deadlineAt) ? Math.max(0, deadlineAt - Date.now()) : timeoutMs;
-          return this.execute({ root, database, databases: policy.databases, action, payload, timeoutMs: remainingMs, signal, deadlineAt, operationId, idempotent: policy.idempotent });
+          return this.execute({ root, database, databases: policy.databases, action, payload: requestPayload, timeoutMs: remainingMs, signal: operationSignal, deadlineAt, operationId, idempotent: policy.idempotent });
         });
       } catch (error) {
+        if (error?.code === 'DATABASE_WRITE_REQUIRED' && policy.mode === 'read' && !promotedRead) {
+          promotedRead = true;
+          requestPayload = { ...payload, _coordinatorWriteFallback: true };
+          policy = this.operationPolicy.classify({ root, database, action, payload: requestPayload, scriptName: this.scriptName });
+          if (policy.mode === 'read') throw error;
+          continue;
+        }
         if (!policy.idempotent || !SQLITE_RETRYABLE_CODES.has(error?.code) || attempt >= this.retryDelays.length) throw error;
         const delay = this.retryDelays[attempt] + Math.floor(Math.random() * 60);
         attempt += 1;
         if (Number.isFinite(requestedDeadlineAt) && Date.now() + delay >= requestedDeadlineAt) throw error;
-        await this.waitForRetry(delay, signal);
-        if (signal?.aborted) throw signal.reason || Object.assign(new Error('数据库操作已取消'), { code: 'ABORT_ERR' });
+        await this.waitForRetry(delay, operationSignal);
+        if (operationSignal?.aborted) throw operationSignal.reason || Object.assign(new Error('数据库操作已取消'), { code: 'ABORT_ERR' });
       }
     }
   }

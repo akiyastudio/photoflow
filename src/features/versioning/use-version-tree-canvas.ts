@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import type { MutableRefObject, PointerEvent as ReactPointerEvent } from 'react';
 import { alignVersionTreeHistoryPositions, mappedVersionTreeServerNodeKeys, markVersionTreeCanvasPositionsPersisted, reconcileVersionTreeCanvasPositions, translateVersionTreeCanvasSelection, updateVersionTreeServerPositionMirror, type VersionTreeCanvasPosition } from './version-tree-canvas-model';
+import { loadVersionTreeLayout, peekVersionTreeLayout, rememberVersionTreeLayout } from './version-tree-layout-cache';
 
 export type VersionTreeCanvasItem = { id: string; nodeKey: string; fallbackNodeKeys?: readonly string[]; x: number; y: number };
 export type VersionTreeDragState =
@@ -78,6 +79,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
   const commandSequenceRef = useRef(0);
   const generationRef = useRef(0);
   const layoutReadyRef = useRef(false);
+  const [layoutReady, setLayoutReady] = useState(false);
   const loadPromiseRef = useRef<Promise<void>>(Promise.resolve());
   const localMutationSequenceRef = useRef(0);
   const localMutationByNodeRef = useRef(new Map<string, number>());
@@ -140,22 +142,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
     if (dragStateRef.current?.type === 'node' || dragStateRef.current?.type === 'pan') onDragStateChange(null);
   }, [applyPositions, dragStateRef, onDragStateChange]);
 
-  const loadServerLayout = useCallback(async (generation = generationRef.current) => {
-    if (disposedRef.current || generation !== generationRef.current) return;
-    const sequence = ++loadSequenceRef.current;
-    const localMutationAtStart = localMutationSequenceRef.current;
-    const result = await window.electronAPI.getVersionTreeLayout(workspacePath, projectName, scopeKey).catch(error => ({
-      success: false,
-      revision: 0,
-      positions: [],
-      error: error instanceof Error ? error.message : String(error),
-    }));
-    if (disposedRef.current || generation !== generationRef.current || sequence !== loadSequenceRef.current) return;
-    if (!result.success) {
-      layoutReadyRef.current = true;
-      onNoticeRef.current(`读取版本树布局失败：${result.error || '未知错误'}`, 5000);
-      return;
-    }
+  const positionsFromLayoutSnapshot = useCallback((result: { revision: number; positions: Array<{ nodeKey: string; x: number; y: number }> }) => {
     revisionRef.current = result.revision;
     serverPositionsRef.current = new Map(result.positions.map(position => [position.nodeKey, { x: position.x, y: position.y, manual: true }]));
     appliedServerNodeKeysRef.current = new Set();
@@ -170,7 +157,27 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       }
     });
     const dimensions = dimensionsRef.current;
-    const reconciled = reconcileVersionTreeCanvasPositions({ nodes: currentNodes, previous: saved, nodeWidth: dimensions.nodeWidth, nodeHeight: dimensions.nodeHeight, horizontalGap: dimensions.collisionHorizontalGap });
+    return reconcileVersionTreeCanvasPositions({ nodes: currentNodes, previous: saved, nodeWidth: dimensions.nodeWidth, nodeHeight: dimensions.nodeHeight, horizontalGap: dimensions.collisionHorizontalGap });
+  }, []);
+
+  const loadServerLayout = useCallback(async (generation = generationRef.current, forceFresh = false) => {
+    if (disposedRef.current || generation !== generationRef.current) return;
+    const sequence = ++loadSequenceRef.current;
+    const localMutationAtStart = localMutationSequenceRef.current;
+    const result = await loadVersionTreeLayout(workspacePath, projectName, scopeKey, forceFresh).catch(error => ({
+      success: false,
+      revision: 0,
+      positions: [],
+      error: error instanceof Error ? error.message : String(error),
+    }));
+    if (disposedRef.current || generation !== generationRef.current || sequence !== loadSequenceRef.current) return;
+    if (!result.success) {
+      layoutReadyRef.current = true;
+      setLayoutReady(true);
+      onNoticeRef.current(`读取版本树布局失败：${result.error || '未知错误'}`, 5000);
+      return;
+    }
+    const reconciled = positionsFromLayoutSnapshot(result);
     const drag = nodeDragRef.current;
     const draggedIds = new Set(drag?.ids || []);
     // A pointer move can happen while the initial IPC read is in flight. Such
@@ -196,11 +203,12 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       drag.before = new Map(reconciled);
     }
     layoutReadyRef.current = true;
+    setLayoutReady(true);
     applyPositions(displayed);
     // Loading persisted positions is asynchronous. The user may already have
     // panned or scrolled while the request was in flight, so keep the current
     // viewport instead of snapping it back to the canvas origin.
-  }, [applyPositions, projectName, scopeKey, workspacePath]);
+  }, [applyPositions, positionsFromLayoutSnapshot, projectName, scopeKey, workspacePath]);
 
   useEffect(() => {
     disposedRef.current = false;
@@ -222,6 +230,10 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
   }, [active, cancelCanvasInteraction]);
 
   useLayoutEffect(() => {
+    // React StrictMode recreates layout effects before passive effects. Reset
+    // the disposal marker here as well so the second development-only setup
+    // cannot mistake the still-mounted canvas for an unmounted one.
+    disposedRef.current = false;
     cancelCanvasInteraction();
     const generation = ++generationRef.current;
     revisionRef.current = 0;
@@ -230,6 +242,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
     commandSequenceRef.current += 1;
     saveQueueRef.current = Promise.resolve();
     layoutReadyRef.current = false;
+    setLayoutReady(false);
     localMutationSequenceRef.current = 0;
     localMutationByNodeRef.current = new Map();
     persistedMutationByNodeRef.current = new Map();
@@ -240,6 +253,12 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
     historyEpochRef.current += 1;
     setHistoryRevision(value => value + 1);
     applyPositions(defaultPositions());
+    const cachedLayout = peekVersionTreeLayout(workspacePath, projectName, scopeKey);
+    if (cachedLayout) {
+      applyPositions(positionsFromLayoutSnapshot(cachedLayout));
+      layoutReadyRef.current = true;
+      setLayoutReady(true);
+    }
     // A genuinely different project/scope starts at its origin. Do this before
     // the asynchronous read begins so a late response cannot override any
     // scrolling the user performs afterward.
@@ -259,7 +278,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
       redoStackRef.current = [];
       historyEpochRef.current += 1;
     };
-  }, [applyPositions, cancelCanvasInteraction, defaultPositions, loadServerLayout]);
+  }, [applyPositions, cancelCanvasInteraction, defaultPositions, loadServerLayout, positionsFromLayoutSnapshot, projectName, scopeKey, workspacePath]);
 
   useEffect(() => {
     // Automatic positions must follow a changed graph layout (for example,
@@ -382,6 +401,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         }));
         if (disposedRef.current || generation !== generationRef.current || saveEpoch !== saveEpochRef.current) return false;
         if (latest.success) {
+          rememberVersionTreeLayout(workspacePath, projectName, scopeKey, latest);
           revisionRef.current = latest.revision;
           const currentNodes = nodesRef.current;
           const idByNodeKey = new Map(currentNodes.flatMap(node => [node.nodeKey, ...(node.fallbackNodeKeys || [])].map(nodeKey => [nodeKey, node.id] as const)));
@@ -435,6 +455,13 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
           new Map(payload.map(position => [position.nodeKey, { x: position.x, y: position.y }])),
           mode,
         );
+        rememberVersionTreeLayout(workspacePath, projectName, scopeKey, {
+          success: true,
+          scopeKey,
+          revision: revisionRef.current,
+          updatedAt: Date.now(),
+          positions: [...serverPositionsRef.current].map(([nodeKey, position]) => ({ nodeKey, x: position.x, y: position.y })),
+        });
         const mountedNodeKeys = new Set(nodesRef.current.flatMap(node => [node.nodeKey, ...(node.fallbackNodeKeys || [])]));
         const savedMountedNodeKeys = mappedVersionTreeServerNodeKeys(payload.map(position => position.nodeKey), mountedNodeKeys);
         if (mode === 'replace') appliedServerNodeKeysRef.current = savedMountedNodeKeys;
@@ -479,7 +506,7 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
         horizontalGap: dimensionsRef.current.collisionHorizontalGap,
       }));
       onNoticeRef.current(`保存版本树布局失败：${result.error || '未知错误'}`, 5000);
-      if ((mode === 'patch' || staleLayout) && commandSequence === commandSequenceRef.current) await loadServerLayout(generation);
+      if ((mode === 'patch' || staleLayout) && commandSequence === commandSequenceRef.current) await loadServerLayout(generation, true);
       return false;
     });
     saveQueueRef.current = operation.then(() => undefined, () => undefined);
@@ -686,5 +713,5 @@ export const useVersionTreeCanvas = ({ active, nodes, workspacePath, projectName
   });
 
   void historyRevision;
-  return { positions, viewportRef, nodePointerHandlers, canvasPointerHandlers, refreshLayout, resetViewport, undoLayout, redoLayout, canUndo: undoStackRef.current.length > 0, canRedo: redoStackRef.current.length > 0, hasManualLayout };
+  return { positions, viewportRef, nodePointerHandlers, canvasPointerHandlers, refreshLayout, resetViewport, undoLayout, redoLayout, canUndo: undoStackRef.current.length > 0, canRedo: redoStackRef.current.length > 0, hasManualLayout, layoutReady };
 };

@@ -7,6 +7,7 @@ const { MEDIA_RESCAN_POLICY_VERSION } = require('./background-task-policy-versio
 const { MAX_CHANGED_PATHS } = require('../contracts/media-sync-limits.cjs');
 
 const CASE_INSENSITIVE_PATHS = process.platform === 'win32';
+const THUMBNAIL_CANDIDATE_CONCURRENCY = 8;
 const platformKey = value => CASE_INSENSITIVE_PATHS ? value.toLocaleLowerCase() : value;
 const comparablePath = value => platformKey(path.resolve(value));
 
@@ -25,7 +26,9 @@ const coalesceMediaChanges = values => {
     if (!change?.path || !isMediaRelevantChange(change)) continue;
     const key = comparablePath(change.path);
     const previous = byPath.get(key);
-    if (!previous || change.eventType === 'rename' || previous.eventType !== 'rename') byPath.set(key, previous && previous.eventType === 'rename' ? previous : change);
+    if (!previous
+        || previous.kind === 'missing' && change.kind !== 'missing'
+        || change.eventType === 'rename' && previous.eventType !== 'rename') byPath.set(key, change);
   }
   const ordered = [...byPath.values()].sort((left, right) => left.path.length - right.path.length);
   const collapsed = [];
@@ -113,7 +116,7 @@ const createMediaTrackingScanScheduler = ({
     return runner.flush(ticket);
   };
 
-  const executeWrapper = async ({ key, batch }) => {
+  const executeWrapper = async ({ key, batch, signal }) => {
     if (stopped) return { skipped: true, reason: 'scheduler-stopped' };
     const projectKey = keyFor(batch.root, batch.projectName);
     const epoch = cancellationEpoch(projectKey);
@@ -134,15 +137,15 @@ const createMediaTrackingScanScheduler = ({
       ...(batch.restartTask?.id ? { id: batch.restartTask.id } : {}),
       type: 'version-media-rescan',
       title: '更新版本媒体索引',
-      concurrencyGroup: 'disk-io',
-      concurrencyLimit: 3,
+      concurrencyGroup: 'background-disk-io',
+      concurrencyLimit: 2,
       concurrencyWriteLimit: 2,
       resourceAccess: 'read',
       cancellable: false,
-      resources: [
-        { path: projectPath, access: 'read' },
-        { path: `photoflow-workspace-database/${batch.root}`, access: 'write' },
-      ],
+      // The repository coordinator serializes each prepare/apply/finalize call.
+      // A task-wide database reservation would make unrelated foreground work
+      // wait for the complete project scan instead of only the current batch.
+      resources: [],
       metadata: {
         workspaceRoot: batch.root, projectName: batch.projectName, projectPath,
         changedPaths: batch.changes.map(change => change.path), changes: batch.changes, fullScan: batch.fullScan,
@@ -150,37 +153,44 @@ const createMediaTrackingScanScheduler = ({
         mediaRescanPolicyVersion: MEDIA_RESCAN_POLICY_VERSION,
       },
     }, async task => {
+      const operationSignal = AbortSignal.any([signal, task.signal].filter(Boolean));
       task.report(5, '正在扫描项目媒体文件');
       const result = batch.fullScan
-        ? await mediaScanService.syncProject(batch.root, batch.projectName)
-        : await mediaScanService.syncChangedPaths(batch.root, batch.projectName, batch.changes, [], { snapshotId: batch.snapshotId });
+        ? await mediaScanService.syncProject(batch.root, batch.projectName, [], { signal: operationSignal, background: true })
+        : await mediaScanService.syncChangedPaths(batch.root, batch.projectName, batch.changes, [], { snapshotId: batch.snapshotId, signal: operationSignal, background: true });
       task.report(95, '正在完成版本媒体索引');
       return result;
       }, () => enqueueRetry(key, batch));
       // Candidate fan-out is part of the wrapper. Manual and automatic retries
       // therefore cannot report success while skipping thumbnail scheduling.
       const thumbnailCandidates = (execution.result?.thumbnailCandidates || []).slice(0, 750);
-      for (let candidateIndex = 0; candidateIndex < thumbnailCandidates.length; candidateIndex += 1) {
-        const candidate = thumbnailCandidates[candidateIndex];
-        if (stopped || cancellationEpoch(projectKey) !== epoch) break;
-        try {
-          const scheduled = onThumbnailCandidate({
-            workspaceRoot: batch.root,
-            photoId: candidate.photoId,
-            versionId: candidate.versionId,
-            filePath: candidate.filePath,
-            priority: thumbnailPriority,
-          });
-          Promise.resolve(scheduled).catch(error => writeLog('warn', 'Unable to schedule media thumbnail candidate', {
-            projectName: batch.projectName, filePath: candidate.filePath, error: error.message || String(error),
-          }));
-        } catch (error) {
-          writeLog('warn', 'Unable to schedule media thumbnail candidate', {
-            projectName: batch.projectName, filePath: candidate.filePath, error: error.message || String(error),
-          });
+      let nextCandidateIndex = 0;
+      const scheduleCandidateWorker = async () => {
+        while (nextCandidateIndex < thumbnailCandidates.length) {
+          const candidateIndex = nextCandidateIndex;
+          nextCandidateIndex += 1;
+          const candidate = thumbnailCandidates[candidateIndex];
+          if (stopped || cancellationEpoch(projectKey) !== epoch) return;
+          try {
+            await Promise.resolve(onThumbnailCandidate({
+              workspaceRoot: batch.root,
+              photoId: candidate.photoId,
+              versionId: candidate.versionId,
+              filePath: candidate.filePath,
+              priority: thumbnailPriority,
+            }));
+          } catch (error) {
+            writeLog('warn', 'Unable to schedule media thumbnail candidate', {
+              projectName: batch.projectName, filePath: candidate.filePath, error: error.message || String(error),
+            });
+          }
+          if (candidateIndex % 32 === 31) await new Promise(resolve => setImmediate(resolve));
         }
-        if (candidateIndex % 32 === 31) await new Promise(resolve => setImmediate(resolve));
-      }
+      };
+      await Promise.all(Array.from(
+        { length: Math.min(THUMBNAIL_CANDIDATE_CONCURRENCY, thumbnailCandidates.length) },
+        () => scheduleCandidateWorker(),
+      ));
       return execution;
     } finally {
       if (admissionControllers.get(key) === controller) admissionControllers.delete(key);
@@ -194,10 +204,13 @@ const createMediaTrackingScanScheduler = ({
     worker: executeWrapper,
     delayMs,
     ...(runnerRetryDelays ? { retryDelays: runnerRetryDelays } : {}),
-    onError: (error, context) => writeLog('warn', 'Media version tracking scan deferred', {
-      projectName: context.batch?.projectName, retryAttempt: context.retryAttempt,
-      willRetry: context.willRetry, error: error.message || String(error),
-    }),
+    onError: (error, context) => {
+      if (error?.code === 'DATABASE_PREEMPTED' || error?.code === 'TASK_CANCELLED') return;
+      writeLog('warn', 'Media version tracking scan deferred', {
+        projectName: context.batch?.projectName, retryAttempt: context.retryAttempt,
+        willRetry: context.willRetry, error: error.message || String(error),
+      });
+    },
   });
 
   backgroundTasks?.registerTypeRestartFactory?.('version-media-rescan', async task => {

@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { EventEmitter } = require('events');
-const { canUseSameVolumeCut, canUseSingleRenameMove, registerFileOperationsIpc, sameFilesystemDevice } = require('../electron/modules/files-ipc.cjs');
+const { canUseSameVolumeCut, canUseSingleRenameMove, committedMediaChangesFor, registerFileOperationsIpc, sameFilesystemDevice } = require('../electron/modules/files-ipc.cjs');
 const { registerWorkspaceIpc } = require('../electron/modules/workspace-ipc.cjs');
 const { registerBrollImportIpc } = require('../electron/modules/broll-import.cjs');
 const { createProjectVirtualPathService } = require('../electron/services/project-virtual-path-service.cjs');
@@ -43,6 +43,21 @@ const {
 } = require('../electron/services/file-transfer-service.cjs');
 const { createFilePublicationService } = require('../electron/services/file-publication-service.cjs');
 
+assert.deepEqual(committedMediaChangesFor([
+  { source: 'C:/workspace/Project/old.jpg', destination: 'C:/workspace/Project/new.jpg', isDirectory: false },
+  { source: 'C:/workspace/Project/old-folder', destination: 'C:/workspace/Project/new-folder', isDirectory: true },
+], { removeSources: true }), [
+  { path: path.resolve('C:/workspace/Project/old.jpg'), eventType: 'rename', kind: 'missing', previousKind: 'file', previousExtension: '.jpg' },
+  { path: path.resolve('C:/workspace/Project/new.jpg'), eventType: 'rename', kind: 'file' },
+  { path: path.resolve('C:/workspace/Project/old-folder'), eventType: 'rename', kind: 'missing', previousKind: 'directory', previousExtension: '' },
+  { path: path.resolve('C:/workspace/Project/new-folder'), eventType: 'rename', kind: 'directory' },
+], 'committed file mutations must produce an exact old/new media-index delta');
+assert.deepEqual(committedMediaChangesFor([
+  { source: 'E:/external/old.jpg', destination: 'C:/workspace/Project/new.jpg', isDirectory: false },
+], { removeSources: true, includeSource: source => source.startsWith('C:/workspace/Project') }), [
+  { path: path.resolve('C:/workspace/Project/new.jpg'), eventType: 'rename', kind: 'file' },
+], 'cut-paste from outside the project must not poison the destination media sync with an unauthorized source path');
+
 const transferTestBase = process.platform === 'win32' && fs.existsSync('C:\\dev\\app2') ? 'C:\\dev\\app2' : os.tmpdir();
 const root = fs.mkdtempSync(path.join(transferTestBase, 'photoflow-transfer-test-'));
 const filesIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'files-ipc.cjs'), 'utf8');
@@ -80,6 +95,45 @@ assert.strictEqual(canUseSameVolumeCut('win32', 'cut', [{ dev: 401 }, {}], { dev
 
 const run = async () => {
   try {
+    const renameTestDirectory = async (source, destination) => {
+      for (const delay of [0, 25, 75, 150, 300, 600]) {
+        if (delay) await new Promise(resolve => setTimeout(resolve, delay));
+        try { fs.renameSync(source, destination); return; }
+        catch (error) {
+          if (!['EPERM', 'EBUSY', 'EACCES'].includes(error?.code) || delay === 600) throw error;
+        }
+      }
+    };
+    const selectionProject = path.join(root, 'selection-media-journal');
+    const selectionOutput = path.join(selectionProject, '图片选片');
+    fs.mkdirSync(selectionOutput, { recursive: true });
+    const selectionHandlers = new Map();
+    const scheduledSelectionChanges = [];
+    registerFileOperationsIpc({
+      Array, Boolean, CANCELLED_CODE, Date, Error, Math, Promise, Set, String, process, undefined,
+      crypto,
+      ipcMain: { handle: (name, handler) => selectionHandlers.set(name, handler), on: () => {} },
+      fs,
+      path,
+      getProjectPath: () => selectionProject,
+      ensureWorkspace: value => value,
+      activeProjectFileOperations: new Map(),
+      fileOperationState: { projectFileClipboard: null },
+      selectionService: {
+        preflightManual: async () => ({ signature: 'selection-signature' }),
+        executeManual: async () => ({ success: true, copiedCount: 1, selectionNode: { folderPath: selectionOutput } }),
+      },
+      cancelMediaTrackingScan: () => undefined,
+      suppressWorkspaceWatchPath: () => undefined,
+      releaseWorkspaceWatchPath: () => undefined,
+      scheduleMediaTrackingScan: (...args) => scheduledSelectionChanges.push(args),
+      writeLog: () => undefined,
+    });
+    const selectionResult = await selectionHandlers.get('workspace-file-operation')({}, root, 'active', 'Project', 'select', [], '', '', { sourceFolderRelativePath: 'raw' });
+    assert.strictEqual(selectionResult.success, true);
+    assert.strictEqual(scheduledSelectionChanges.length, 1, 'selection copies must explicitly refresh media state because their watcher notifications are suppressed');
+    assert.deepStrictEqual(scheduledSelectionChanges[0][2], [{ path: path.resolve(selectionOutput), eventType: 'rename', kind: 'directory' }]);
+
     const nativePublication = createFilePublicationService({ app: { isPackaged: false }, projectRoot: path.resolve(__dirname, '..') });
     configureNativePublicationService(nativePublication);
     const rebaseSourceRoot = path.join(root, 'rebase-source'); const rebaseStagedRoot = path.join(root, 'rebase-staged'); const rebaseProjectRoot = path.join(root, 'rebase-project'); fs.mkdirSync(rebaseSourceRoot); fs.writeFileSync(path.join(rebaseSourceRoot, 'owned.txt'), 'owned-rebase'); fs.writeFileSync(path.join(rebaseSourceRoot, '..legal.txt'), 'legal-dot-prefix');
@@ -98,16 +152,16 @@ const run = async () => {
 
     const registerExistingOwner = async (candidate, token) => { const stat = fs.statSync(candidate); await copyPlannedFiles([{ kind: 'file', source: candidate, destination: candidate, size: stat.size, sourceIdentity: await capturePathIdentity(candidate), mode: stat.mode, atime: stat.atime, mtime: stat.mtime }], { ownershipToken: token, isEntryComplete: async () => true }); };
     const staleOwnerProject = path.join(root, 'rebase-stale-owner-project'); fs.mkdirSync(staleOwnerProject); fs.writeFileSync(path.join(staleOwnerProject, 'owned.txt'), 'stale-owner'); await registerExistingOwner(path.join(staleOwnerProject, 'owned.txt'), 'rebase-old-stale-owner'); fs.rmSync(staleOwnerProject, { recursive: true });
-    const staleOwnerSource = path.join(root, 'rebase-stale-owner-source'); const staleOwnerStaged = path.join(root, 'rebase-stale-owner-staged'); fs.mkdirSync(staleOwnerSource); fs.writeFileSync(path.join(staleOwnerSource, 'owned.txt'), 'new-owner'); const staleOwnerPlan = []; await collectCopyPlan(staleOwnerSource, staleOwnerStaged, staleOwnerPlan); await copyPlannedFiles(staleOwnerPlan, { ownershipToken: 'rebase-new-owner' }); fs.renameSync(staleOwnerStaged, staleOwnerProject);
+    const staleOwnerSource = path.join(root, 'rebase-stale-owner-source'); const staleOwnerStaged = path.join(root, 'rebase-stale-owner-staged'); fs.mkdirSync(staleOwnerSource); fs.writeFileSync(path.join(staleOwnerSource, 'owned.txt'), 'new-owner'); const staleOwnerPlan = []; await collectCopyPlan(staleOwnerSource, staleOwnerStaged, staleOwnerPlan); await copyPlannedFiles(staleOwnerPlan, { ownershipToken: 'rebase-new-owner' }); await renameTestDirectory(staleOwnerStaged, staleOwnerProject);
     assert.strictEqual((await rebaseCleanupOwnership('rebase-new-owner', staleOwnerStaged, staleOwnerProject)).success, true); assert.strictEqual((await removeCreatedPasteTargets([staleOwnerProject], { ownershipToken: 'rebase-new-owner' })).success, true); assert.strictEqual(fs.existsSync(staleOwnerProject), false, 'a stale prior target owner is pruned before the rebased owner rolls back'); releaseCleanupOwnership('rebase-old-stale-owner');
 
-    const sharedOwnerSource = path.join(root, 'rebase-shared-owner-source'); const sharedOwnerStaged = path.join(root, 'rebase-shared-owner-staged'); const sharedOwnerProject = path.join(root, 'rebase-shared-owner-project'); fs.mkdirSync(sharedOwnerSource); fs.writeFileSync(path.join(sharedOwnerSource, 'owned.txt'), 'shared-owner'); const sharedOwnerPlan = []; await collectCopyPlan(sharedOwnerSource, sharedOwnerStaged, sharedOwnerPlan); await copyPlannedFiles(sharedOwnerPlan, { ownershipToken: 'rebase-shared-new' }); fs.renameSync(sharedOwnerStaged, sharedOwnerProject); await registerExistingOwner(path.join(sharedOwnerProject, 'owned.txt'), 'rebase-shared-existing');
+    const sharedOwnerSource = path.join(root, 'rebase-shared-owner-source'); const sharedOwnerStaged = path.join(root, 'rebase-shared-owner-staged'); const sharedOwnerProject = path.join(root, 'rebase-shared-owner-project'); fs.mkdirSync(sharedOwnerSource); fs.writeFileSync(path.join(sharedOwnerSource, 'owned.txt'), 'shared-owner'); const sharedOwnerPlan = []; await collectCopyPlan(sharedOwnerSource, sharedOwnerStaged, sharedOwnerPlan); await copyPlannedFiles(sharedOwnerPlan, { ownershipToken: 'rebase-shared-new' }); await renameTestDirectory(sharedOwnerStaged, sharedOwnerProject); await registerExistingOwner(path.join(sharedOwnerProject, 'owned.txt'), 'rebase-shared-existing');
     assert.strictEqual((await rebaseCleanupOwnership('rebase-shared-new', sharedOwnerStaged, sharedOwnerProject)).success, true); const sharedOwnerCleanup = await removeCreatedPasteTargets([sharedOwnerProject], { ownershipToken: 'rebase-shared-new' }); assert.strictEqual(sharedOwnerCleanup.success, false); assert.strictEqual(fs.existsSync(sharedOwnerProject), true, 'a real shared target owner remains indexed and forces cleanup to fail closed'); releaseCleanupOwnership('rebase-shared-existing');
 
     const publishOwnedTree = async (label, token) => {
       const source = path.join(root, `${label}-source`); const staged = path.join(root, `${label}-staged`); const project = path.join(root, `${label}-project`);
       fs.mkdirSync(source); fs.mkdirSync(path.join(source, 'nested')); fs.writeFileSync(path.join(source, 'nested', 'owned.txt'), label);
-      const plan = []; await collectCopyPlan(source, staged, plan); await copyPlannedFiles(plan, { ownershipToken: token }); fs.renameSync(staged, project);
+      const plan = []; await collectCopyPlan(source, staged, plan); await copyPlannedFiles(plan, { ownershipToken: token }); await renameTestDirectory(staged, project);
       const publishedRootIdentity = await capturePathIdentity(project); assert.strictEqual((await rebaseCleanupOwnership(token, staged, project, { publishedRootIdentity })).success, true);
       return { source, staged, project };
     };
@@ -118,7 +172,7 @@ const run = async () => {
     const publishManyOwnedFiles = async (label, token, count) => {
       const source = path.join(root, `${label}-source`); const staged = path.join(root, `${label}-staged`); const project = path.join(root, `${label}-project`); fs.mkdirSync(source);
       for (let index = 0; index < count; index += 1) fs.writeFileSync(path.join(source, `f-${index}.txt`), `v${index}`);
-      const plan = []; await collectCopyPlan(source, staged, plan); await copyPlannedFiles(plan, { ownershipToken: token }); fs.renameSync(staged, project); assert.strictEqual((await rebaseCleanupOwnership(token, staged, project, { publishedRootIdentity: await capturePathIdentity(project) })).success, true); return project;
+      const plan = []; await collectCopyPlan(source, staged, plan); await copyPlannedFiles(plan, { ownershipToken: token }); await renameTestDirectory(staged, project); assert.strictEqual((await rebaseCleanupOwnership(token, staged, project, { publishedRootIdentity: await capturePathIdentity(project) })).success, true); return project;
     };
     for (const count of [128, 512]) {
       const token = `root-batch-${count}-owner`; const project = await publishManyOwnedFiles(`root-batch-${count}`, token, count); let compareBatchCalls = 0; let maxCompareBatch = 0; const started = Date.now();
@@ -694,7 +748,7 @@ const run = async () => {
     });
     assert.strictEqual(batchStats.smallFilesCopied, 96);
     assert.strictEqual(batchStats.largeFilesCopied, 1);
-    assert.strictEqual(batchStats.peakSmallConcurrency, DEFAULT_SMALL_FILE_CONCURRENCY);
+    assert.strictEqual(batchStats.peakSmallConcurrency, process.platform === 'win32' ? 1 : DEFAULT_SMALL_FILE_CONCURRENCY);
     let replayWrites = 0;
     const replayStats = await copyPlannedFiles(batchPlan, {
       destinationRoot: root,
@@ -885,6 +939,21 @@ const run = async () => {
     assert(fastCutCopyCalls <= 2, `187 source files must be copied, hashed, published, and deleted in at most two native batches, got ${fastCutCopyCalls}`); assert(fastCutInspectCalls <= 2, `source identities must be inspected in bounded batches, got ${fastCutInspectCalls}`);
     assert(fastCutElapsed < 12000, `78.5 MiB / 187-file single-pass move must finish in seconds, got ${fastCutElapsed} ms`); assert.strictEqual(fastCutProgress.length, 187, 'single-pass native cut reports every committed file'); assert.strictEqual(canUseNativeFastCut(), true);
     console.log(`single-pass cut performance: ${fastCutElapsed}ms (78.5 MiB / 187 files, ${fastCutCopyCalls} copy batches)`);
+
+    const tinyCopySource = path.join(root, 'tiny-copy-source'); const tinyCopyTarget = path.join(root, 'tiny-copy-target'); fs.mkdirSync(tinyCopySource); const tinyBytes = Buffer.alloc(4 * 1024, 0x4a);
+    for (let index = 0; index < 1000; index += 1) fs.writeFileSync(path.join(tinyCopySource, `tiny-${String(index).padStart(4, '0')}.bin`), tinyBytes);
+    const tinyCopyPlan = []; await collectCopyPlan(tinyCopySource, tinyCopyTarget, tinyCopyPlan); let tinyCopyBatches = 0;
+    const tinyCopyNative = { ...nativePublication, copyFilesBatch: async (requests, options) => { tinyCopyBatches += 1; return nativePublication.copyFilesBatch(requests, options); } };
+    const tinyCopyStarted = Date.now(); await copyPlannedFiles(tinyCopyPlan, { nativePublicationService: tinyCopyNative }); const tinyCopyElapsed = Date.now() - tinyCopyStarted;
+    assert.strictEqual(fs.readdirSync(tinyCopyTarget).length, 1000); assert.strictEqual(tinyCopyBatches, 1); assert(tinyCopyElapsed < 5000, `1000 x 4 KiB native copy must finish below 5 seconds, got ${tinyCopyElapsed} ms`);
+
+    const tinyCutSource = path.join(root, 'tiny-cut-source'); const tinyCutTarget = path.join(root, 'tiny-cut-target'); fs.mkdirSync(tinyCutSource);
+    for (let index = 0; index < 1000; index += 1) fs.writeFileSync(path.join(tinyCutSource, `tiny-${String(index).padStart(4, '0')}.bin`), tinyBytes);
+    const tinyCutPlan = []; await collectCopyPlan(tinyCutSource, tinyCutTarget, tinyCutPlan); let tinyCutBatches = 0;
+    const tinyCutNative = { ...nativePublication, copyCutFilesBatch: async requests => { tinyCutBatches += 1; return nativePublication.copyCutFilesBatch(requests); } };
+    const tinyCutStarted = Date.now(); await movePlannedFilesFast(tinyCutPlan, { nativePublicationService: tinyCutNative }); const tinyCutElapsed = Date.now() - tinyCutStarted;
+    assert.strictEqual(fs.existsSync(tinyCutSource), false); assert.strictEqual(fs.readdirSync(tinyCutTarget).length, 1000); assert.strictEqual(tinyCutBatches, 1); assert(tinyCutElapsed < 5000, `1000 x 4 KiB native cut must finish below 5 seconds, got ${tinyCutElapsed} ms`);
+    console.log(`tiny-file performance: copy ${tinyCopyElapsed}ms, cut ${tinyCutElapsed}ms (1000 x 4 KiB, one process each)`);
     }
 
     const cleanupRootsBeforePostUnlink = new Set(fs.readdirSync(root).filter(name => name.startsWith('.photoflow-cleanup-'))); const postUnlinkSource = path.join(root, 'post-unlink-cut-source.txt'); fs.writeFileSync(postUnlinkSource, 'post-unlink-cut'); const postUnlinkPlan = []; await collectCopyPlan(postUnlinkSource, path.join(root, 'post-unlink-cut-target.txt'), postUnlinkPlan); let postUnlinkDeletes = 0;

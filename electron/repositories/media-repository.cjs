@@ -3,17 +3,27 @@ const crypto = require('crypto');
 
 const MEDIA_SYNC_BATCH_SIZE = 64;
 
+const cancelledError = () => Object.assign(new Error('媒体索引已让路给前台文件操作'), { code: 'TASK_CANCELLED' });
+const throwIfCancelled = signal => { if (signal?.aborted) throw cancelledError(); };
+
 const createMediaRepository = client => {
-  const prepareMediaSync = (root, projectName, externalRoots = [], options = {}) => client.call(root, 'media_sync_prepare', { projectName, externalRoots, ...options }, 30 * 60 * 1000);
-  const applyMediaSyncBatch = (root, payload) => client.call(root, 'media_sync_apply_batch', payload, 2 * 60 * 1000);
-  const finalizeMediaSync = (root, payload) => client.call(root, 'media_sync_finalize', payload, 2 * 60 * 1000);
-  const prepareChangedPaths = (root, payload) => client.call(root, 'media_sync_paths_prepare', payload, 30 * 60 * 1000);
-  const applyChangedPathsBatch = (root, payload) => client.call(root, 'media_sync_paths_apply_batch', payload, 2 * 60 * 1000);
-  const finalizeChangedPaths = (root, payload) => client.call(root, 'media_sync_paths_finalize', payload, 2 * 60 * 1000);
-  const syncProject = async (root, projectName, externalRoots = []) => {
+  const prepareMediaSync = (root, projectName, externalRoots = [], options = {}, callOptions = {}) => client.call(root, 'media_sync_prepare', { projectName, externalRoots, ...options }, 30 * 60 * 1000, callOptions);
+  const applyMediaSyncBatch = (root, payload, callOptions = {}) => client.call(root, 'media_sync_apply_batch', payload, 2 * 60 * 1000, callOptions);
+  const finalizeMediaSync = (root, payload, callOptions = {}) => client.call(root, 'media_sync_finalize', payload, 2 * 60 * 1000, callOptions);
+  const prepareChangedPaths = (root, payload, callOptions = {}) => client.call(root, 'media_sync_paths_prepare', payload, 30 * 60 * 1000, callOptions);
+  const applyChangedPathsBatch = (root, payload, callOptions = {}) => client.call(root, 'media_sync_paths_apply_batch', payload, 2 * 60 * 1000, callOptions);
+  const finalizeChangedPaths = (root, payload, callOptions = {}) => client.call(root, 'media_sync_paths_finalize', payload, 2 * 60 * 1000, callOptions);
+  const abortMediaSync = (root, projectName, snapshotId) => client.call(root, 'media_sync_abort', { projectName, snapshotId }, 2 * 60 * 1000);
+  const syncProject = async (root, projectName, externalRoots = [], options = {}) => {
+    const signal = options?.signal;
+    const callOptions = { signal, priority: options.background === true ? -10 : 0, preemptible: options.background === true };
+    const snapshotId = crypto.randomUUID();
+    try {
+    throwIfCancelled(signal);
     let prepared = await prepareMediaSync(root, projectName, externalRoots, {
-      paged: true, snapshotId: crypto.randomUUID(), pageToken: '0', pageSize: MEDIA_SYNC_BATCH_SIZE,
-    });
+      paged: true, snapshotId, pageToken: '0', pageSize: MEDIA_SYNC_BATCH_SIZE,
+    }, callOptions);
+    throwIfCancelled(signal);
     if (prepared.projectUnavailable) return prepared;
     let count = 0;
     if (prepared.paged === true) {
@@ -23,44 +33,55 @@ const createMediaRepository = client => {
           throw new Error('media_sync_page_invalid: 数据库返回了无效分页');
         }
         if (prepared.files.length) {
+          throwIfCancelled(signal);
           const applied = await applyChangedPathsBatch(root, {
             projectName, snapshotId: prepared.snapshotId, batchIndex, files: prepared.files,
-          });
+          }, callOptions);
           count += Number(applied.count) || 0;
           await new Promise(resolve => setImmediate(resolve));
         }
         if (!prepared.nextPageToken) break;
+        throwIfCancelled(signal);
         prepared = await prepareMediaSync(root, projectName, externalRoots, {
           paged: true, snapshotId: prepared.snapshotId, pageToken: prepared.nextPageToken,
           pageSize: MEDIA_SYNC_BATCH_SIZE,
-        });
+        }, callOptions);
       }
-      const finalized = await finalizeChangedPaths(root, { projectName, snapshotId: prepared.snapshotId });
+      throwIfCancelled(signal);
+      const finalized = await finalizeChangedPaths(root, { projectName, snapshotId: prepared.snapshotId }, callOptions);
       return { ...finalized, count };
     }
     // Older workers ignore the pagination request and return the legacy full
     // manifest. Preserve that wire contract during rolling upgrades.
     for (let offset = 0, batchIndex = 0; offset < prepared.files.length; offset += MEDIA_SYNC_BATCH_SIZE, batchIndex += 1) {
+      throwIfCancelled(signal);
       const applied = await applyMediaSyncBatch(root, {
         projectName,
         snapshotId: prepared.snapshotId,
         batchIndex,
         authorizedRoots: prepared.authorizedRoots,
         files: prepared.files.slice(offset, offset + MEDIA_SYNC_BATCH_SIZE),
-      });
+      }, callOptions);
       count += Number(applied.count) || 0;
       // The physical writer lease was released when the action returned. Yield
       // before rejoining the coordinator so queued interactive writes can run.
       await new Promise(resolve => setImmediate(resolve));
     }
+    throwIfCancelled(signal);
     const finalized = await finalizeMediaSync(root, {
       projectName,
       snapshotId: prepared.snapshotId,
       authorizedRoots: prepared.authorizedRoots,
       files: prepared.files,
       baselineVersions: prepared.baselineVersions,
-    });
+    }, callOptions);
     return { ...finalized, count };
+    } catch (error) {
+      if (!signal?.aborted && error?.code !== 'DATABASE_PREEMPTED') throw error;
+      await abortMediaSync(root, projectName, snapshotId).catch(() => undefined);
+      if (error?.code === 'DATABASE_PREEMPTED') throw error;
+      throw cancelledError();
+    }
   };
   const syncChangedPaths = async (root, projectName, changes, externalRoots = [], options = {}) => {
     if (!Array.isArray(changes) || changes.length > MAX_CHANGED_PATHS) throw new Error(`media_sync_paths_limit: 增量路径最多 ${MAX_CHANGED_PATHS} 条`);
@@ -71,30 +92,45 @@ const createMediaRepository = client => {
       if (input.kind !== undefined && !['file', 'directory', 'missing'].includes(input.kind)) throw new Error('media_sync_paths_invalid: 增量路径类型无效');
       return { ...input, path: input.path };
     });
+    const signal = options?.signal;
+    const callOptions = { signal, priority: options.background === true ? -10 : 0, preemptible: options.background === true };
+    const requestedSnapshotId = options.snapshotId || crypto.randomUUID();
+    try {
+    throwIfCancelled(signal);
     const prepared = await prepareChangedPaths(root, {
       projectName, changes: normalizedChanges, externalRoots,
-      ...(options.snapshotId ? { snapshotId: options.snapshotId } : {}),
-    });
+      snapshotId: requestedSnapshotId,
+    }, callOptions);
+    throwIfCancelled(signal);
     let count = 0;
     for (let offset = 0, batchIndex = 0; offset < prepared.files.length; offset += MEDIA_SYNC_BATCH_SIZE, batchIndex += 1) {
+      throwIfCancelled(signal);
       const applied = await applyChangedPathsBatch(root, {
         projectName, snapshotId: prepared.snapshotId, batchIndex,
         files: prepared.files.slice(offset, offset + MEDIA_SYNC_BATCH_SIZE),
-      });
+      }, callOptions);
       count += Number(applied.count) || 0;
       await new Promise(resolve => setImmediate(resolve));
     }
+    throwIfCancelled(signal);
     const finalized = await finalizeChangedPaths(root, {
       projectName, snapshotId: prepared.snapshotId,
-    });
+    }, callOptions);
     return { ...finalized, count };
+    } catch (error) {
+      if (!signal?.aborted && error?.code !== 'DATABASE_PREEMPTED') throw error;
+      await abortMediaSync(root, projectName, requestedSnapshotId).catch(() => undefined);
+      if (error?.code === 'DATABASE_PREEMPTED') throw error;
+      throw cancelledError();
+    }
   };
 
-  const prepareProgressStale = (root, payload) => client.call(root, 'progress_stale_prepare', payload, 30 * 60 * 1000);
-  const applyProgressStale = (root, payload) => client.call(root, 'progress_stale_apply', payload);
-  const detectProgressStale = async (root, payload) => {
+  const prepareProgressStale = (root, payload, callOptions = {}) => client.call(root, 'progress_stale_prepare', payload, 30 * 60 * 1000, callOptions);
+  const applyProgressStale = (root, payload, callOptions = {}) => client.call(root, 'progress_stale_apply', payload, undefined, callOptions);
+  const detectProgressStale = async (root, payload, options = {}) => {
+    const callOptions = { signal: options.signal, priority: options.background === true ? -10 : 0, preemptible: options.background === true };
     for (let revisionAttempt = 0; revisionAttempt < 5; revisionAttempt += 1) {
-      const prepared = await prepareProgressStale(root, payload);
+      const prepared = await prepareProgressStale(root, payload, callOptions);
       if (!prepared.candidates.length) return prepared;
       const applied = await applyProgressStale(root, {
         projectName: payload.projectName,
@@ -103,7 +139,7 @@ const createMediaRepository = client => {
         candidates: prepared.candidates,
         scannedProgressIds: prepared.scannedProgressIds,
         propagatedProgressIds: prepared.propagatedProgressIds,
-      });
+      }, callOptions);
       if (!applied.revisionExpired) return applied;
       await new Promise(resolve => setImmediate(resolve));
     }
@@ -121,6 +157,7 @@ const createMediaRepository = client => {
   prepareChangedPaths,
   applyChangedPathsBatch,
   finalizeChangedPaths,
+  abortMediaSync,
   setThumbnail: (root, payload) => client.call(root, 'media_set_thumbnail', payload),
   getMedia: (root, payload) => client.call(root, 'media_get', payload),
   snapshotProjectVersions: (root, payload) => client.call(root, 'media_versions_snapshot', payload),
@@ -137,7 +174,7 @@ const createMediaRepository = client => {
   deleteProjectMissingVersion: (root, versionId) => client.call(root, 'media_delete_project_missing_version', { versionId }),
   recordCompare: (root, payload) => client.call(root, 'media_record_compare', payload),
   listProgress: (root, projectName, includeMissing = false) => client.call(root, 'progress_list', { projectName, includeMissing }),
-  snapshotProgress: (root, projectName, includeMissing = false) => client.call(root, 'progress_snapshot', { projectName, includeMissing }),
+  snapshotProgress: (root, projectName, includeMissing = false) => client.call(root, 'progress_snapshot', { projectName, includeMissing }, undefined, { priority: 10 }),
   snapshotProgressLocations: (root, projectName, includeMissing = false) => client.call(root, 'progress_locations_snapshot', { projectName, includeMissing }),
   registerProgress: (root, payload) => client.call(root, 'progress_register', payload),
   registerProgressWithGraph: (root, payload) => client.call(root, 'progress_register_with_graph', payload),
@@ -154,7 +191,7 @@ const createMediaRepository = client => {
   createVersionGraphEdge: (root, payload) => client.call(root, 'version_graph_edge_create', payload),
   deleteVersionGraphEdge: (root, payload) => client.call(root, 'version_graph_edge_delete', payload),
   replaceVersionGraphEdgeSource: (root, payload) => client.call(root, 'version_graph_edge_replace_source', payload),
-  getVersionTreeLayout: (root, payload) => client.call(root, 'version_tree_layout_get', payload),
+  getVersionTreeLayout: (root, payload) => client.call(root, 'version_tree_layout_get', payload, undefined, { priority: 10 }),
   saveVersionTreeLayout: (root, payload) => client.call(root, 'version_tree_layout_save', payload),
   unregisterProgress: (root, payload) => client.call(root, 'progress_unregister', payload),
   componentManageProgress: (root, payload) => client.call(root, 'progress_component_manage', payload),

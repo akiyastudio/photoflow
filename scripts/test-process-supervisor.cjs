@@ -290,6 +290,11 @@ const main = async () => {
   assert.match(mainSource, /processId:\s*'python:workspace-catalog'/);
   assert.match(mainSource, /processId:\s*'python:media-interaction'/);
   assert.match(mainSource, /processSupervisor\.stopAll\(\)/);
+  assert.match(mainSource, /let shellThumbnailStopPromise = null;/, 'Shell thumbnail shutdown must expose a lifecycle fence');
+  assert.match(mainSource, /if \(shellThumbnailStopPromise\) await shellThumbnailStopPromise;/, 'a replacement Shell thumbnail helper must wait for the old managed ID to be released');
+  assert.match(mainSource, /failed; using decoder fallback[\s\S]*?return false;/, 'Shell thumbnail failures must fall through to the decoder/FFmpeg path');
+  assert.doesNotMatch(mainSource, /shellThumbnailManagedProcess\.stop\('shell-thumbnail-stop'\);\s*shellThumbnailManagedProcess = null;/, 'Shell thumbnail ownership must not be cleared before asynchronous stop completes');
+  assert.doesNotMatch(mainSource, /shellThumbnailManagedProcess\.release\(\)/, 'Shell thumbnail restarts must reuse the existing managed owner instead of unregistering a live lifecycle');
   for (const relative of [
     'electron/services/recycle-bin-service.cjs',
     'electron/services/file-clipboard-service.cjs',

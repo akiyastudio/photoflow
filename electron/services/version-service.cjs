@@ -1,5 +1,5 @@
 const createVersionService = ({ repository }) => ({
-  syncProject: (root, projectName, externalRoots = []) => repository.syncProject(root, projectName, externalRoots),
+  syncProject: (root, projectName, externalRoots = [], options = {}) => repository.syncProject(root, projectName, externalRoots, options),
   syncChangedPaths: (root, projectName, changes, externalRoots = [], options = {}) => repository.syncChangedPaths(root, projectName, changes, externalRoots, options),
   setThumbnail: (root, payload) => repository.setThumbnail(root, payload),
   getMedia: (root, payload) => repository.getMedia(root, payload),
@@ -43,7 +43,7 @@ const createVersionService = ({ repository }) => ({
   commitBatchCompare: (root, payload) => repository.commitBatchCompare(root, payload),
   listBatchOperations: (root, batchId) => repository.listBatchOperations(root, batchId),
   retryBatchOperations: (root, batchId) => repository.retryBatchOperations(root, batchId),
-  detectProgressStale: (root, payload) => repository.detectProgressStale(root, payload),
+  detectProgressStale: (root, payload, options = {}) => repository.detectProgressStale(root, payload, options),
   createTrackingSession: (root, payload) => repository.createTrackingSession(root, payload),
   prepareTracking: (root, payload) => repository.prepareTracking(root, payload),
   storeTrackingPreview: (root, payload) => repository.storeTrackingPreview(root, payload),

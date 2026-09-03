@@ -9,7 +9,7 @@ export type ProjectWorkspaceApiKey =
   | 'executeManualSelection' | 'exportFinalVersions' | 'extractOfficeImages' | 'extractScreenshotMainImages'
   | 'finalizeSdImportedProjects' | 'getCursorScreenPoint' | 'getFileIcon' | 'getFinalVersionSummary'
   | 'getDrives' | 'getMediaMetadata' | 'getMediaOriginal' | 'getMediaRating' | 'getMediaRatings' | 'getMediaThumbnail' | 'getProjectVideoTimelineFrames'
-  | 'getPathForFile' | 'getPhotoshopStatus' | 'getProgressFolders' | 'getProjectContents'
+  | 'getPathForFile' | 'getPhotoshopStatus' | 'getProgressFolders' | 'getProgressFoldersSnapshot' | 'getProjectContents'
   | 'getProjectEntryDetails' | 'getProjectFileClipboardStatus' | 'getProjectFileDetails' | 'getShellNewFileTypes'
   | 'getVersionBatchOperations' | 'getWorkspaceProjects' | 'importBroll'
   | 'importProgressFiles' | 'importProjectFiles' | 'inspectProjectToolSources' | 'listProjectFiles' | 'listWorkspaceFolders'

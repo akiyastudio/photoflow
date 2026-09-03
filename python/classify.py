@@ -2146,9 +2146,27 @@ def find_missing_raw_jpg_candidates(target_folder, imported_paths):
     return candidates
 
 
-def generate_raw_jpg(source_path, target_path):
-    """Create a full-size JPG from the best embedded preview in a RAW file."""
-    image = _embedded_jpeg(source_path)
+def generate_raw_jpg(source_path, target_path, raw_decoder=None):
+    """Create a JPG proxy from an embedded preview, with LibRaw as fallback."""
+    try:
+        image = _embedded_jpeg(source_path)
+    except Exception as embedded_error:
+        try:
+            if raw_decoder is None:
+                from raw_decoder import decode as raw_decoder
+            raw_decoder(source_path, [{
+                'sizeLabel': 'generated-jpg',
+                'pixels': 0,
+                'path': os.path.abspath(target_path),
+            }])
+            if not os.path.isfile(target_path):
+                raise RuntimeError('LibRaw 解码完成但没有生成 JPG 文件')
+            shutil.copystat(source_path, target_path)
+            return
+        except Exception as decoder_error:
+            raise RuntimeError(
+                f'无法读取内嵌预览（{embedded_error}），LibRaw 显影也失败（{decoder_error}）'
+            ) from decoder_error
     temporary = f"{target_path}.tmp-{os.getpid()}"
     try:
         rgb_image = image if image.mode == 'RGB' else image.convert('RGB')

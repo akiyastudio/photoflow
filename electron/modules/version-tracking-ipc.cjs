@@ -1,7 +1,5 @@
-const FINGERPRINT_MAINTENANCE_IDLE_DELAY_MS = 15_000;
-
 const registerVersionTrackingIpc = context => {
-  const { backgroundTasks, crypto, ensureWorkspace, fs, getWorkspaceDataRoot = root => root, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs, writeLog: unsafeWriteLog = () => undefined } = context;
+  const { backgroundTasks, crypto, ensureWorkspace, fs, getWorkspaceDataRoot = root => root, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, scheduleMediaTrackingScan, trackingScanService, versionService, workspaceCatalogs, writeLog: unsafeWriteLog = () => undefined } = context;
   const writeLog = (...args) => {
     try {
       const pending = unsafeWriteLog(...args);
@@ -59,6 +57,17 @@ const registerVersionTrackingIpc = context => {
   const trackingPreviewItems = (prepared, preview = {}) => {
     const pendingSources = new Set((prepared.sourceNames || []).map(String));
     const items = [];
+    const historicalSources = new Set();
+    for (const match of Array.isArray(prepared.historicalMatches) ? prepared.historicalMatches : []) {
+      const sourceName = String(match?.sourceName || '');
+      const referenceName = String(match?.referenceName || '');
+      if (!sourceName || !referenceName || historicalSources.has(sourceName)) continue;
+      historicalSources.add(sourceName);
+      items.push({
+        kind: 'recognized', status: 'recognized', sourceName, referenceName,
+        targetName: String(match?.targetName || sourceName), distance: 0, confidence: '既有关联',
+      });
+    }
     const append = item => {
       const sourceName = item.sourceName ? String(item.sourceName) : undefined;
       if (sourceName && !pendingSources.has(sourceName)) return;
@@ -94,7 +103,8 @@ const registerVersionTrackingIpc = context => {
 
   const executeTrackingCompare = async (workspaceRoot, prepared, task) => {
     task?.throwIfCancelled?.();
-    const totalCount = (prepared.sourceNames?.length || 0) + (prepared.copyCandidateNames?.length || 0) + (prepared.removedNames?.length || 0);
+    const totalCount = (prepared.sourceNames?.length || 0) + (prepared.historicalMatches?.length || 0)
+      + (prepared.copyCandidateNames?.length || 0) + (prepared.removedNames?.length || 0);
     task?.report(0, '正在读取版本媒体', {
       sessionId: prepared.sessionId, progressId: prepared.progressId,
       processedCount: 0, totalCount,
@@ -103,6 +113,7 @@ const registerVersionTrackingIpc = context => {
       sessionId: prepared.sessionId, progressId: prepared.progressId, mode: prepared.mode,
       parentFolderPath: prepared.parentFolderPath, progressFolderPath: prepared.progressFolderPath,
       sourceCount: prepared.sourceNames?.length || 0, removedCount: prepared.removedNames?.length || 0,
+      historicalMatchCount: prepared.historicalMatches?.length || 0,
       copyCandidateCount: prepared.copyCandidateNames?.length || 0,
     });
     let preview = { matches: [], suggestions: [], unmatched: [], unmatchedReference: [] };
@@ -159,35 +170,6 @@ const registerVersionTrackingIpc = context => {
     return stored;
   };
 
-  const runFingerprintMaintenance = (workspaceRoot, projectName, resourcePath, restartTask = null) => backgroundTasks.run({
-      ...(restartTask?.id ? { id: restartTask.id } : {}),
-      type: 'version-fingerprint-maintenance',
-      title: '完善版本文件校验信息',
-      dedupeKey: `version-fingerprint-maintenance:${workspaceRoot}:${projectName}`,
-      concurrencyGroup: 'disk-io',
-      concurrencyLimit: 3,
-      concurrencyWriteLimit: 2,
-      resourceAccess: 'read',
-      cancellable: false,
-      resources: [
-        ...(resourcePath ? [{ path: resourcePath, access: 'read' }] : []),
-        { path: `photoflow-workspace-database/${workspaceRoot}`, access: 'write' },
-      ],
-      metadata: { workspaceRoot, projectName, resourcePath },
-    }, () => trackingScanService.syncProject(workspaceRoot, projectName));
-  const queueFingerprintMaintenance = (workspaceRoot, projectName, resourcePath) => {
-    if (!backgroundTasks?.run || !trackingScanService?.syncProject) return;
-    // Full-file hashes are maintenance metadata, not part of the interactive
-    // commit. Give the user a short window to continue editing the version tree
-    // before this low-priority disk reader reserves the same project paths.
-    const timer = setTimeout(() => void runFingerprintMaintenance(workspaceRoot, projectName, resourcePath).catch(() => undefined), FINGERPRINT_MAINTENANCE_IDLE_DELAY_MS);
-    timer.unref?.();
-  };
-  backgroundTasks?.registerTypeRestartFactory?.('version-fingerprint-maintenance', task => runFingerprintMaintenance(task.metadata?.workspaceRoot, task.metadata?.projectName, task.metadata?.resourcePath, task), {
-    canRestart: task => Boolean(task.metadata?.workspaceRoot && task.metadata?.projectName),
-    autoRestart: true,
-  });
-
   const launchTracking = ({ workspaceRoot, projectName, progressId, mode, restartTask = null }) => singleFlight(
     trackingLaunchJobs,
     trackingLaunchKey(workspaceRoot, projectName, progressId, mode, restartTask),
@@ -243,7 +225,6 @@ const registerVersionTrackingIpc = context => {
         resources: [
           { path: created.parentFolderPath, access: 'read' },
           { path: created.progressFolderPath, access: 'read' },
-          { path: `photoflow-workspace-database/${workspaceRoot}`, access: 'write' },
         ],
         concurrencyGroup: 'disk-io',
         concurrencyLimit: 3,
@@ -452,7 +433,7 @@ const registerVersionTrackingIpc = context => {
       requireStageSuccess(result, '版本跟踪批次提交失败');
       const completed = await trackingScanService.completeTrackingCommit(workspaceRoot, { sessionId, batchId: result.batch?.id });
       requireStageSuccess(completed, '无法完成版本跟踪提交');
-      queueFingerprintMaintenance(workspaceRoot, plan.projectName, plan.progressFolderPath);
+      scheduleMediaTrackingScan?.(workspaceRoot, plan.projectName, [], true);
       return { ...completed, batch: result.batch, renamedCount: result.renamedCount || 0 };
     } catch (error) {
       if (workspaceRoot && sessionId) await versionService.failTrackingCommit(workspaceRoot, {
@@ -540,7 +521,6 @@ const registerVersionTrackingIpc = context => {
       return { success: false, entries: [], branchProgressIds: [], error: error.message || String(error) };
     }
   });
-  
 };
 
 module.exports = { registerVersionTrackingIpc };

@@ -12,7 +12,6 @@ type RelationProject = Pick<WorkspaceProject, 'name' | 'path' | 'status'>;
 type BackgroundTasks = ReturnType<typeof useTaskCenter>['backgroundTasks'];
 type RelationOptions = {
   active: boolean;
-  foregroundDirectoryReady: boolean;
   projectWorkflows: boolean;
   workspacePath: string;
   project: RelationProject;
@@ -37,7 +36,7 @@ const safeStorageRemove = (key: string) => { try { window.localStorage.removeIte
 const progressNodeMediaKind = (folder: Pick<ProgressFolder, 'mediaKind'>): 'image' | 'video' | null => folder.mediaKind === 'image' || folder.mediaKind === 'video' ? folder.mediaKind : null;
 
 export const useProjectVersionRelations = ({
-  active, foregroundDirectoryReady, projectWorkflows, workspacePath, project,
+  active, projectWorkflows, workspacePath, project,
   progressFolders, setProgressFolders, versionGraphEdges, setVersionGraphEdges,
   onNotice, appDialog, backgroundTasks, dismissBackgroundTask,
   trackingConfirmationProgressId, setTrackingConfirmationProgressId, setTrackingConfirmationSessionId,
@@ -58,7 +57,12 @@ export const useProjectVersionRelations = ({
   const [relationHistoryRevision, setRelationHistoryRevision] = useState(0);
   const [relationMutatingChildIds, setRelationMutatingChildIds] = useState<string[]>([]);
   const automaticProgressLoadKeyRef = useRef('');
+  const progressFoldersSnapshotRequestRef = useRef<Promise<ProgressFolder[]> | null>(null);
   const progressFoldersRequestRef = useRef<Promise<ProgressFolder[]> | null>(null);
+  const progressFolderLoadKey = `${workspacePath}\0${project.status}\0${project.name}\0${project.path}`;
+  const [progressFolderLoadState, setProgressFolderLoadState] = useState<{ key: string; status: 'idle' | 'loading' | 'ready' | 'error'; error: string }>({
+    key: '', status: 'idle', error: '',
+  });
   const cancelRelationEdit = useCallback(() => {
     setDraggingChildId('');
     setHoverParentId('');
@@ -69,35 +73,88 @@ export const useProjectVersionRelations = ({
     if (task) dismissBackgroundTask(task.id);
   };
 
+  const loadProgressFoldersSnapshot = useCallback(async () => {
+    if (progressFoldersSnapshotRequestRef.current) return progressFoldersSnapshotRequestRef.current;
+    const requestedProjectPath = project.path;
+    const requestedLoadKey = `${workspacePath}\0${project.status}\0${project.name}\0${project.path}`;
+    automaticProgressLoadKeyRef.current = requestedLoadKey;
+    setProgressFolderLoadState(current => current.key === requestedLoadKey && current.status === 'ready'
+      ? current
+      : { key: requestedLoadKey, status: 'loading', error: '' });
+    const request: Promise<ProgressFolder[]> = projectWorkspaceClient.getProgressFoldersSnapshot(workspacePath, project.name).then(result => {
+      if (projectPathRef.current !== requestedProjectPath) return [];
+      if (result.success) {
+        progressFoldersRef.current = result.progressFolders;
+        setProgressFolders(result.progressFolders);
+        setVersionGraphEdges(result.graphEdges || []);
+        setProgressFolderLoadState({ key: requestedLoadKey, status: 'ready', error: '' });
+        return result.progressFolders;
+      }
+      const error = result.error || '未知错误';
+      setProgressFolderLoadState({ key: requestedLoadKey, status: 'error', error });
+      onNotice(`读取版本进度快照失败：${error}`);
+      return [];
+    }).catch(error => {
+      if (projectPathRef.current !== requestedProjectPath) return [];
+      const message = error instanceof Error ? error.message : String(error);
+      setProgressFolderLoadState({ key: requestedLoadKey, status: 'error', error: message });
+      onNotice(`读取版本进度快照失败：${message}`);
+      return [];
+    }).finally(() => {
+      if (progressFoldersSnapshotRequestRef.current === request) progressFoldersSnapshotRequestRef.current = null;
+    });
+    progressFoldersSnapshotRequestRef.current = request;
+    return request;
+  }, [workspacePath, project.name, project.path, project.status, onNotice]);
+
   const loadProgressFolders = useCallback(async () => {
     if (progressFoldersRequestRef.current) return progressFoldersRequestRef.current;
     const requestedProjectPath = project.path;
+    const requestedLoadKey = `${workspacePath}\0${project.status}\0${project.name}\0${project.path}`;
+    setProgressFolderLoadState(current => current.key === requestedLoadKey && current.status === 'ready'
+      ? current
+      : { key: requestedLoadKey, status: 'loading', error: '' });
     const request: Promise<ProgressFolder[]> = projectWorkspaceClient.getProgressFolders(workspacePath, project.name).then(result => {
       if (projectPathRef.current !== requestedProjectPath) return [];
       if (result.success) {
         progressFoldersRef.current = result.progressFolders;
         setProgressFolders(result.progressFolders);
         setVersionGraphEdges(result.graphEdges || []);
+        setProgressFolderLoadState({ key: requestedLoadKey, status: 'ready', error: '' });
         return result.progressFolders;
       }
-      onNotice(`读取版本进度失败：${result.error || '未知错误'}`);
+      const error = result.error || '未知错误';
+      setProgressFolderLoadState(current => current.key === requestedLoadKey && current.status === 'ready'
+        ? current
+        : { key: requestedLoadKey, status: 'error', error });
+      onNotice(`读取版本进度失败：${error}`);
+      return [];
+    }).catch(error => {
+      if (projectPathRef.current !== requestedProjectPath) return [];
+      const message = error instanceof Error ? error.message : String(error);
+      setProgressFolderLoadState(current => current.key === requestedLoadKey && current.status === 'ready'
+        ? current
+        : { key: requestedLoadKey, status: 'error', error: message });
+      onNotice(`读取版本进度失败：${message}`);
       return [];
     }).finally(() => {
       if (progressFoldersRequestRef.current === request) progressFoldersRequestRef.current = null;
     });
     progressFoldersRequestRef.current = request;
     return request;
-  }, [workspacePath, project.name, project.path, onNotice]);
+  }, [workspacePath, project.name, project.path, project.status, onNotice]);
   useEffect(() => {
-    if (!active || !foregroundDirectoryReady || !projectWorkflows) return;
+    if (!active || !projectWorkflows) return;
     const loadKey = `${workspacePath}\0${project.status}\0${project.name}\0${project.path}`;
     if (automaticProgressLoadKeyRef.current === loadKey) return;
     return scheduleAfterProjectPaint(PROJECT_BACKGROUND_LOAD_DELAYS_MS.progress, () => {
-      if (!activeRef.current) return;
+      if (!activeRef.current || automaticProgressLoadKeyRef.current === loadKey) return;
       automaticProgressLoadKeyRef.current = loadKey;
-      void loadProgressFolders();
+      void loadProgressFoldersSnapshot().then(() => {
+        if (activeRef.current) void loadProgressFolders();
+      });
     });
-  }, [active, foregroundDirectoryReady, loadProgressFolders, project.name, project.path, project.status, projectWorkflows, workspacePath]);
+  }, [active, loadProgressFolders, loadProgressFoldersSnapshot, project.name, project.path, project.status, projectWorkflows, workspacePath]);
   const pushRelationHistory = (entry: VersionGraphHistoryEntry) => {
     relationUndoStackRef.current.push(entry);
     if (relationUndoStackRef.current.length > 80) relationUndoStackRef.current.shift();
@@ -475,12 +532,18 @@ export const useProjectVersionRelations = ({
   }, []);
 
   return {
-    progressFoldersRef, loadProgressFolders, dismissTrackingTaskForSession,
+    progressFoldersRef, loadProgressFolders, loadProgressFoldersSnapshot,
+    progressFoldersReady: progressFolderLoadState.key === progressFolderLoadKey && progressFolderLoadState.status === 'ready',
+    progressFoldersLoadError: progressFolderLoadState.key === progressFolderLoadKey && progressFolderLoadState.status === 'error'
+      ? progressFolderLoadState.error
+      : '',
+    dismissTrackingTaskForSession,
     draggingChildId, setDraggingChildId, hoverParentId, setHoverParentId,
     pendingRelationChange, relationMutatingChildIds, relationHistoryRevision,
     canUndoRelation: relationUndoStackRef.current.length > 0,
     canRedoRelation: relationRedoStackRef.current.length > 0,
     resetProgressFolderRequests: () => {
+      progressFoldersSnapshotRequestRef.current = null;
       progressFoldersRequestRef.current = null;
       automaticProgressLoadKeyRef.current = '';
     },

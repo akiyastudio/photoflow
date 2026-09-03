@@ -18,7 +18,7 @@ const runWorkspaceMaintenanceWithRetry = async ({
   for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
     task?.throwIfCancelled?.();
     try {
-      return await repository.runMaintenance(root);
+      return await repository.runMaintenance(root, { signal: task?.signal, priority: -10, preemptible: true });
     } catch (error) {
       if (!isDatabaseLockedError(error) || attempt >= retryDelays.length) throw error;
       const delay = retryDelays[attempt];

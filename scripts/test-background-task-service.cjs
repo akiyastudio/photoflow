@@ -24,7 +24,8 @@ assert(systemIpcSource.includes('const pendingWorkerResourceLeases = new Map()')
 assert(systemIpcSource.includes('}, controller.signal)') && pluginServiceSource.includes('onMessage, signal, requestedDeadlineAt'), 'video-tool cancellation must reach the supervised plugin process');
 const deferredMediaScanStart = mediaScanSchedulerSource.indexOf("type: 'version-media-rescan'");
 const deferredMediaScanBlock = mediaScanSchedulerSource.slice(deferredMediaScanStart, mediaScanSchedulerSource.indexOf('runner = createDirtyCoalescingRunner', deferredMediaScanStart));
-assert(deferredMediaScanBlock.includes("{ path: projectPath, access: 'read' }") && deferredMediaScanBlock.includes('photoflow-workspace-database/'), 'deferred media maintenance must read project files while reserving the shared workspace database writer');
+assert(!deferredMediaScanBlock.includes("{ path: projectPath, access: 'read' }") && !deferredMediaScanBlock.includes('photoflow-workspace-database/') && deferredMediaScanBlock.includes('resources: []'), 'deferred media maintenance must rely on short repository leases instead of blocking foreground work for the complete scan');
+assert(deferredMediaScanBlock.includes('AbortSignal.any([signal, task.signal].filter(Boolean))') && deferredMediaScanBlock.includes('snapshotId: batch.snapshotId, signal: operationSignal, background: true'), 'foreground work must be able to preempt media maintenance both at task and database-call boundaries');
 assert(deferredMediaScanBlock.includes("task.report(5, '正在扫描项目媒体文件')"), 'deferred media maintenance must leave 0% immediately after it starts');
 assert(versionsIpcSource.includes('scheduleMediaTrackingScan(workspaceRoot, projectName, [], true)') && !versionsIpcSource.includes('runVersionMediaRescan'), 'deferred rescan and retry must enter the shared scheduler wrapper');
 const resourcePathsFor = (scriptName, args) => pythonToolResourcePaths(scriptName, args, path.win32).map(resource => resource.path);
@@ -159,6 +160,18 @@ const main = async () => {
   assert.equal(selectionCompleteTask.state, 'completed', 'a real selection copy must still publish its terminal task state');
 
   const service = createBackgroundTaskService({ eventBus: new EventEmitter() });
+  for (const type of ['version-media-rescan', 'version-fingerprint-maintenance', 'version-stale-detection', 'workspace-reconcile', 'workspace-database-maintenance']) {
+    assert.throws(() => service.create({
+      type, title: 'invalid blocking maintenance', resources: ['C:/workspace/Project'],
+    }), error => error?.code === 'BACKGROUND_MAINTENANCE_RESOURCE_FORBIDDEN', `central policy must prevent ${type} from reintroducing task-wide foreground blockers`);
+  }
+  assert.throws(() => service.create({
+    type: 'version-media-rescan', title: 'invalid foreground capacity', concurrencyGroup: 'disk-io',
+  }), error => error?.code === 'BACKGROUND_MAINTENANCE_CAPACITY_FORBIDDEN', 'automatic maintenance must not consume foreground task capacity');
+  await assert.rejects(service.run({
+    id: 'database-preempted-maintenance', type: 'version-media-rescan', title: 'preempted maintenance',
+  }, async () => { throw Object.assign(new Error('foreground entered'), { code: 'DATABASE_PREEMPTED' }); }), error => error?.code === 'DATABASE_PREEMPTED');
+  assert.equal(service.get('database-preempted-maintenance').state, 'cancelled', 'expected database preemption must not surface as a failed maintenance task');
   const frozenResources = ['C:/projects/frozen-definition'];
   let releaseFrozenWorker;
   let frozenWorkerStarted;

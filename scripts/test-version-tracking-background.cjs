@@ -123,10 +123,8 @@ async function testWatcherDebounce() {
   });
   coordinated.schedule('C:/workspace', 'Project', [], true);
   await wait(20);
-  assert.strictEqual(coordinatedCalls.length, 0, 'stale detection must wait for the shared workspace database writer');
+  assert.strictEqual(coordinatedCalls.length, 1, 'silent stale detection must rely on its repository lease instead of becoming a task-wide foreground blocker');
   blocker.complete();
-  await wait(20);
-  assert.strictEqual(coordinatedCalls.length, 1);
   coordinated.stop();
 }
 

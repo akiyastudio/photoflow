@@ -118,13 +118,23 @@ const registerVersionIpc = context => {
     }
   });
 
+  ipcMain.handle('workspace-progress-folders-snapshot', async (_event, workspacePath, projectName) => {
+    try {
+      const workspaceRoot = ensureWorkspace(workspacePath);
+      if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
+      return await versionService.snapshotProgress(workspaceRoot, projectName, true);
+    } catch (error) {
+      return { success: false, error: error.message || String(error), progressFolders: [], graphEdges: [], legacySelectionRelationRepairs: [] };
+    }
+  });
+
   ipcMain.handle('workspace-progress-folders', async (_event, workspacePath, projectName) => {
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       return await versionService.snapshotProgressLocations(workspaceRoot, projectName, true);
     } catch (error) {
-      return { success: false, error: error.message || String(error), progressFolders: [], legacySelectionRelationRepairs: [] };
+      return { success: false, error: error.message || String(error), progressFolders: [], graphEdges: [], legacySelectionRelationRepairs: [] };
     }
   });
 
@@ -707,9 +717,8 @@ const registerVersionIpc = context => {
         }],
       });
       // The write reservation above ends with the tree mutation. The deferred
-      // project rescan is read-only, so its project-wide read reservation remains
-      // compatible with focused version comparisons while still excluding later
-      // filesystem writers.
+      // media scheduler coalesces repeated refreshes and never holds a task-wide
+      // project or workspace-database reservation.
       if (scheduleMediaTrackingScan) setTimeout(() => scheduleMediaTrackingScan(workspaceRoot, projectName, [], true), 250);
       mutationToken = '';
       mutationHandle?.complete?.('版本树已更新');
@@ -837,7 +846,7 @@ const registerVersionIpc = context => {
     }
   });
 
-  registerVersionTrackingIpc({ backgroundTasks, copyFileAtomic, crypto, ensureWorkspace, fs, getWorkspaceDataRoot, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, trackingScanService, versionService, workspaceCatalogs, writeLog });
+  registerVersionTrackingIpc({ backgroundTasks, copyFileAtomic, crypto, ensureWorkspace, fs, getWorkspaceDataRoot, ipcMain, path, refreshWorkspaceCatalog, runPythonEventAction, scheduleMediaTrackingScan, trackingScanService, versionService, workspaceCatalogs, writeLog });
   
   ipcMain.handle('workspace-version-compare-preview', async (_event, workspacePath, status, projectName, referenceRelativePath, sourceRelativePath, sourceNames) => {
     let sourceManifestPath = '';

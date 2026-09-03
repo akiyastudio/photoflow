@@ -1067,7 +1067,10 @@ const registerWorkspaceIpc = context => {
       title: '维护项目数据库',
       dedupeKey: `workspace-database-maintenance:${root}`,
       cancellable: false,
-      resources: [workspaceDatabaseTaskResource(root)],
+      // The maintenance repository owns the real exclusive SQLite lease. Do
+      // not reserve the presentation-level workspace resource while waiting or
+      // running, otherwise foreground tasks queue behind background upkeep.
+      resources: [],
       metadata: { root },
     }, async task => {
       task.report(10, '正在检查项目数据库');
@@ -1075,12 +1078,16 @@ const registerWorkspaceIpc = context => {
       task.report(100, '项目数据库维护完成');
       return result;
     }, run);
-    setTimeout(() => {
-      void run().catch(error => writeLog('warn', 'Workspace database maintenance deferred', {
-        root,
-        error: error.message || String(error),
-      }));
+    const startWhenIdle = () => setTimeout(() => {
+      void run().catch(error => {
+        if (error?.code === 'DATABASE_PREEMPTED' || error?.code === 'TASK_CANCELLED') {
+          startWhenIdle();
+          return;
+        }
+        writeLog('warn', 'Workspace database maintenance deferred', { root, error: error.message || String(error) });
+      });
     }, 15000);
+    startWhenIdle();
   };
 
   const existingProjectInspectionCache = new Map();

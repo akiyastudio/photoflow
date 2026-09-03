@@ -9,5 +9,6 @@ export * from './version-tree-layout-model';
 export * from './version-tree-canvas-model';
 export * from './version-tree-edge-model';
 export * from './project-version-tree-entry-model';
+export { prefetchVersionTreeLayout } from './version-tree-layout-cache';
 export * from './use-version-tree-canvas';
 export * from './version-manager-model';

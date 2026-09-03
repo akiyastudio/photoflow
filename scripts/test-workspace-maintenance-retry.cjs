@@ -9,7 +9,7 @@ const mediaTrackingSchedulerSource = fs.readFileSync(path.join(__dirname, '..', 
 const dirtyRunnerSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'services', 'dirty-coalescing-runner.cjs'), 'utf8');
 assert(mainSource.includes("require('./services/workspace-watcher-runtime.cjs')") && mainSource.includes('createWorkspaceWatcherRuntime({') && mainSource.includes('getMediaTrackingScanScheduler: () => mediaTrackingScanScheduler'), 'main must create the workspace watcher runtime with access to the isolated media scan scheduler');
 assert(watcherRuntimeSource.includes('getMediaTrackingScanScheduler()?.schedule(...args)') && watcherRuntimeSource.includes('getMediaTrackingScanScheduler()?.cancel(...args)'), 'the workspace watcher runtime must delegate automatic media scan lifecycle to the isolated scheduler');
-assert(mediaTrackingSchedulerSource.includes('backgroundTasks.run({') && mediaTrackingSchedulerSource.includes('photoflow-workspace-database/'), 'automatic media scans must reserve the shared workspace database writer');
+assert(mediaTrackingSchedulerSource.includes('backgroundTasks.run({') && mediaTrackingSchedulerSource.includes('resources: []') && !mediaTrackingSchedulerSource.includes("{ path: `photoflow-workspace-database/${batch.root}`, access: 'write' }"), 'automatic media scans must use short repository leases instead of a task-wide workspace writer');
 assert(mediaTrackingSchedulerSource.includes('createDirtyCoalescingRunner') && dirtyRunnerSource.includes('state.pendingBatch = merge(state.inFlightBatch, state.pendingBatch)') && dirtyRunnerSource.includes('state.completedGeneration'), 'automatic media scans must use the shared failure-safe dirty runner');
 
 const run = async () => {

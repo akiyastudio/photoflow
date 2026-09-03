@@ -13,6 +13,7 @@ const input = { version: 2, tasks: [
   record('auto-cleanup', 'cache-cleanup', 'interrupted', { origin: 'daily-auto', olderThanDays: 30 }),
   record('manual-cleanup', 'cache-cleanup', 'interrupted', { origin: 'manual', olderThanDays: 30 }),
   record('restart-recovery', 'thumbnail-cache-recovery'),
+  record('obsolete-fingerprint', 'version-fingerprint-maintenance'),
   record('retained-scan', 'storage-usage-scan'),
   record('legacy-incremental', 'version-media-rescan', 'interrupted', { fullScan: false }),
   record('explicit-full', 'version-media-rescan', 'interrupted', { fullScan: true }),

@@ -424,6 +424,9 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
     setZoom(1);
     afterVersionTreePaint(canvas.resetViewport);
   }, [canvas.resetViewport]);
+  useLayoutEffect(() => {
+    setZoom(1);
+  }, [activeRelativePath, projectName, workspacePath]);
   const focusNode = useCallback((nodeKey: string) => {
     const viewport = canvas.viewportRef.current;
     const item = layout.positioned.find(candidate => candidate.key === nodeKey);
@@ -465,24 +468,24 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
     viewport.addEventListener('wheel', updateHeaderForWheel, { passive: true });
     window.addEventListener('resize', updateBounds);
     return () => { viewport.removeEventListener('scroll', updateBounds); viewport.removeEventListener('wheel', updateHeaderForWheel); window.removeEventListener('resize', updateBounds); };
-  }, [canvas.viewportRef, onViewportScrollChange, zoom]);
-  const refreshAndFit = useCallback(async () => {
+  }, [canvas.layoutReady, canvas.viewportRef, onViewportScrollChange, zoom]);
+  const refreshStandardLayout = useCallback(async () => {
     const refreshed = await canvas.refreshLayout();
     if (refreshed) {
       setAreaBandSizes({});
-      afterVersionTreePaint(fitView);
+      resetZoom();
     }
     return refreshed;
-  }, [canvas.refreshLayout, fitView]);
+  }, [canvas.refreshLayout, resetZoom]);
   useEffect(() => {
     if (!onCanvasControllerChange) return;
     if (!active) {
       onCanvasControllerChange(null);
       return;
     }
-    onCanvasControllerChange({ hasManualLayout: canvas.hasManualLayout, refreshLayout: refreshAndFit, fitView, resetZoom, undoLayout: canvas.undoLayout, redoLayout: canvas.redoLayout });
+    onCanvasControllerChange({ hasManualLayout: canvas.hasManualLayout, refreshLayout: refreshStandardLayout, fitView, resetZoom, undoLayout: canvas.undoLayout, redoLayout: canvas.redoLayout });
     return () => onCanvasControllerChange(null);
-  }, [active, canvas.hasManualLayout, canvas.redoLayout, canvas.undoLayout, fitView, onCanvasControllerChange, refreshAndFit, resetZoom]);
+  }, [active, canvas.hasManualLayout, canvas.redoLayout, canvas.undoLayout, fitView, onCanvasControllerChange, refreshStandardLayout, resetZoom]);
 
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
@@ -792,6 +795,8 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
   const hasGraphItems = layout.positioned.length > 0;
   const renderedItems = layout.positioned.filter(item => item.folder || item.x + nodeWidth >= viewportBounds.left - 500 && item.x <= viewportBounds.left + viewportBounds.width + 500 && item.y + nodeHeight >= viewportBounds.top - 500 && item.y <= viewportBounds.top + viewportBounds.height + 500);
   return <div ref={nativeDragScopeRef} onPointerDownCapture={() => { scopeOwnsInteractionRef.current = active; }} onFocusCapture={() => { scopeOwnsInteractionRef.current = active; }} className="relative flex h-full min-h-0 min-w-0 flex-1 flex-col">
+    {!canvas.layoutReady && <div role="status" aria-live="polite" className="flex h-full min-h-[360px] flex-col items-center justify-center gap-3 border-y border-slate-200 text-sm text-slate-500"><span className="h-5 w-5 animate-spin rounded-full border-2 border-slate-300 border-t-blue-600"/><span>正在恢复版本树布局…</span></div>}
+    {canvas.layoutReady && <>
     {graph.cycleNodeIds.length > 0 && <div role="alert" className="mb-3 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700">版本关系需要修复：{graph.cycleNodeIds.join('、')}</div>}
     {relationChoice && <div role="dialog" aria-modal="true" aria-label="选择关系类型" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/45 p-4"><section className="w-full max-w-sm rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">选择关系类型</h3><p className="mt-1 text-xs text-slate-500">两端节点支持多种合法关系，请明确选择本次连线语义。</p><div className="mt-4 grid gap-2">{relationChoice.kinds.map(kind => <button key={kind} type="button" onClick={() => submitNewRelation(relationChoice.sourceId, relationChoice.targetId, kind)} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm hover:border-blue-400 hover:bg-blue-50">{versionTreeRelationLabel(kind)}</button>)}</div><button type="button" onClick={() => { relationEditActiveRef.current = false; setRelationChoice(null); onCancelRelationEdit?.(); }} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
     {blankOutputSourceId && <div role="dialog" aria-modal="true" aria-label="从输出端创建节点" className="fixed inset-0 z-[360] flex items-center justify-center bg-slate-950/40 p-4"><section className="w-full max-w-xs rounded-xl border border-slate-200 bg-white p-4 shadow-2xl"><h3 className="font-bold text-slate-800">从 V{visibleFolderById.get(blankOutputSourceId)?.versionKey} 创建</h3><p className="mt-1 text-xs text-slate-500">输出线放到空白处时，可直接新建兼容节点。</p><div className="mt-4 grid gap-2"><button type="button" onClick={() => { const source = visibleFolderById.get(blankOutputSourceId); setBlankOutputSourceId(''); if (source) onRequestCreateEmptyVersion?.(source, false); }} className="rounded-lg border border-blue-200 bg-blue-50 px-3 py-2 text-left text-sm font-semibold text-blue-700">新建下一版本</button><button type="button" onClick={() => { const source = visibleFolderById.get(blankOutputSourceId); setBlankOutputSourceId(''); if (source) onRequestCreateEmptyVersion?.(source, true); }} className="rounded-lg border border-slate-200 px-3 py-2 text-left text-sm text-slate-700">新建可跟踪版本分支</button></div><button type="button" onClick={() => setBlankOutputSourceId('')} className="mt-3 w-full rounded px-3 py-2 text-sm text-slate-500 hover:bg-slate-100">取消</button></section></div>}
@@ -873,5 +878,6 @@ export const ProjectVersionTree = ({ active, progressFolders, graphEdges = EMPTY
     </div>}
     {filterActive && !hasGraphItems && <p className="py-6 text-center text-xs text-slate-400">没有文件符合当前搜索或筛选条件。</p>}
     {!hasGraphItems && !ordinaryEntries.length && <p className="border-y border-slate-200 py-12 text-center text-sm text-slate-400">当前文件夹为空。</p>}
+    </>}
   </div>;
 };

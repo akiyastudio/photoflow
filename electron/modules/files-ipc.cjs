@@ -1,4 +1,5 @@
 const { getProtectedProjectFolderRegistry } = require('../services/protected-project-folder.cjs');
+const path = require('path');
 const { createProjectFileTask } = require('../services/project-file-task-service.cjs');
 const { createFallbackDragIcon, usableDragIcon } = require('../services/native-file-drag-service.cjs');
 const { PUBLISH_PARTIAL_CODE, publishPathNoClobber: defaultPublishPathNoClobber, releaseCleanupOwnership: defaultReleaseCleanupOwnership } = require('../services/file-transfer-service.cjs');
@@ -32,6 +33,19 @@ const canUseSameVolumeCut = (platform, clipboardOperation, sourceStats, destinat
   && platform === 'win32'
   && sourceStats.length > 0
   && sourceStats.every(sourceStat => sameFilesystemDevice(sourceStat, destinationStat));
+
+const committedMediaChangesFor = (items, { removeSources = false, removeOnly = false, includeSource = () => true, includeDestination = () => true } = {}) => (items || []).flatMap(item => {
+  const isDirectory = Boolean(item?.isDirectory);
+  const changes = [];
+  if ((removeSources || removeOnly) && item?.source && includeSource(item.source, item)) changes.push({
+    path: path.resolve(item.source), eventType: 'rename', kind: 'missing',
+    previousKind: isDirectory ? 'directory' : 'file', previousExtension: isDirectory ? '' : path.extname(item.source).toLocaleLowerCase(),
+  });
+  if (!removeOnly && item?.destination && includeDestination(item.destination, item)) changes.push({
+    path: path.resolve(item.destination), eventType: 'rename', kind: isDirectory ? 'directory' : 'file',
+  });
+  return changes;
+});
 
 const transferRecoveryFields = error => ({
   code: error?.code,
@@ -85,7 +99,7 @@ const provenPublishedOwnership = async (error, identityMatches, resolvePath) => 
 };
 
 const registerFileOperationsIpc = context => {
-  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, canUseNativeFastCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, movePlannedFilesFast, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseCleanupOwnership = defaultReleaseCleanupOwnership, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resumeToastViewAfterNativeDrag, samePathIdentity, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
+  const { Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, canUseNativeFastCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, ensureWorkspace, fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, movePlannedFilesFast, publishPathNoClobber = defaultPublishPathNoClobber, nativeImage, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers, releaseCleanupOwnership = defaultReleaseCleanupOwnership, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resumeToastViewAfterNativeDrag, samePathIdentity, scheduleMediaTrackingScan, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard } = context;
   const { isProtectedProjectFolderName, isProtectedProjectFolderPath } = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const nativeFileDragFallbackIcon = nativeImage ? createFallbackDragIcon(nativeImage) : null;
   const pasteDecisionTokens = new Map();
@@ -509,10 +523,17 @@ const registerFileOperationsIpc = context => {
   ipcMain.handle('workspace-file-operation', async (event, workspacePath, status, projectName, operation, relativePaths = [], targetRelativePath = '', nextName = '', options = {}) => {
     let suppressedProjectRoot = '';
     let remoteImportTempRoot = '';
+    const committedMediaChanges = [];
     const responseContext = { operationId: '', taskNotificationOwned: false, affectedDirectories: [], count: 0 };
     try {
       const root = path.resolve(getProjectPath(workspacePath, status, projectName));
       const projectLinkHints = projectVirtualPaths?.listManagedExternalLinks(root) || [];
+      const sourceBelongsToProject = candidate => pathInside(root, candidate) || projectLinkHints.some(hint => (
+        hint?.externalTargetRoot && pathInside(hint.externalTargetRoot, candidate)
+      ));
+      const recordCommittedMediaChanges = (items, changeOptions = {}) => committedMediaChanges.push(...committedMediaChangesFor(items, {
+        ...changeOptions, includeSource: sourceBelongsToProject, includeDestination: sourceBelongsToProject,
+      }));
       const resolveSource = relativePath => resolveVirtual(root, relativePath, { externalRootMode: 'link' });
       const resolveDestination = relativePath => resolveVirtual(root, relativePath, { externalRootMode: 'target' });
       if (operation === 'import-url' || operation === 'import-data') {
@@ -628,6 +649,7 @@ const registerFileOperationsIpc = context => {
           releaseCleanupOwnership(operationId);
           publish({ phase: 'complete', progress: 100, currentName: '文件导入完成', bytesCopied, totalBytes, filesCopied, totalFiles });
           task.complete('文件导入完成');
+          recordCommittedMediaChanges(importPlan.map(item => ({ destination: item.destination, isDirectory: item.isDirectory })));
           writeLog('info', 'External files imported by drag and drop', { projectName, targetRelativePath, count: importPlan.length, operationId, ...transferStats });
           return {
             success: true,
@@ -644,6 +666,9 @@ const registerFileOperationsIpc = context => {
           if (error?.code === PUBLISH_PARTIAL_CODE) {
             const publishedOwnership = await provenPublishedOwnership(error, decisionIdentityMatches, path.resolve);
             const publishedPaths = publishedOwnership.map(item => path.resolve(item.path));
+            recordCommittedMediaChanges(importPlan.filter(item => publishedPaths.some(candidate => (
+              path.resolve(candidate) === path.resolve(item.destination) && fs.existsSync(item.destination)
+            ))).map(item => ({ destination: item.destination, isDirectory: item.isDirectory })));
             const identities = Object.fromEntries(publishedOwnership.map(item => [path.resolve(item.path), item.identity]));
             let recoveryUndo = null;
             try { if (publishedPaths.length) {
@@ -754,6 +779,7 @@ const registerFileOperationsIpc = context => {
           });
           task.publish({ phase: 'complete', progress: 100, currentName: '', processedCount: moved.length, totalCount: movePlan.length });
           task.complete('文件移动完成');
+          recordCommittedMediaChanges(movePlan.map(item => ({ source: item.source, destination: item.destination, isDirectory: item.sourceStat.isDirectory() })), { removeSources: true });
           writeLog('info', 'Project files moved by internal drag', { projectName, targetRelativePath, count: moved.length, operationId });
           return {
             success: true,
@@ -775,6 +801,9 @@ const registerFileOperationsIpc = context => {
           if (singleSameVolumeMove && error?.code === PUBLISH_PARTIAL_CODE) {
             const publishedOwnership = await provenPublishedOwnership(error, decisionIdentityMatches, path.resolve);
             const provenMoves = movePlan.filter(item => publishedOwnership.some(owned => path.resolve(owned.path) === path.resolve(item.destination)));
+            recordCommittedMediaChanges(provenMoves.map(item => ({
+              source: item.source, destination: item.destination, isDirectory: item.sourceStat.isDirectory(),
+            })), { removeSources: true });
             const identities = Object.fromEntries(publishedOwnership.map(item => [path.resolve(item.path), item.identity]));
             let recoveryUndo = null;
             if (provenMoves.length) recoveryUndo = await pushUndoOperation({ kind: 'move', moves: provenMoves, identities, label: '恢复未完成移动' }).catch(undoError => { writeLog('error', 'Unable to record single-move recovery', { operationId, error: undoError.message || String(undoError) }); return null; });
@@ -791,6 +820,14 @@ const registerFileOperationsIpc = context => {
           }
           const cancelled = error?.code === CANCELLED_CODE;
           const reportedError = rollbackError ? new Error(`${error.message || String(error)}；回滚失败：${rollbackError.message || String(rollbackError)}`) : error;
+          if (rollbackError) {
+            recordCommittedMediaChanges(moved.filter(entry => fs.existsSync(entry.destination)).map(entry => ({
+              destination: entry.destination, isDirectory: movePlan.find(item => path.resolve(item.source) === path.resolve(entry.source))?.sourceStat?.isDirectory(),
+            })));
+            recordCommittedMediaChanges(moved.filter(entry => !fs.existsSync(entry.source)).map(entry => ({
+              source: entry.source, isDirectory: movePlan.find(item => path.resolve(item.source) === path.resolve(entry.source))?.sourceStat?.isDirectory(),
+            })), { removeOnly: true });
+          }
           task.publish({ phase: cancelled ? 'cancelled' : 'failed', progress: 0, currentName: '', processedCount: 0, totalCount: movePlan.length, error: reportedError.message || String(reportedError) });
           if (cancelled) task.cancelled(); else task.fail(reportedError);
           return { success: false, cancelled, count: 0, operationId, taskNotificationOwned: true, affectedDirectories, error: cancelled ? '移动已取消' : reportedError.message || String(reportedError), ...transferRecoveryFields(reportedError), errorCode: cancelled ? CANCELLED_CODE : reportedError.code };
@@ -894,6 +931,7 @@ const registerFileOperationsIpc = context => {
               await pushUndoOperation({ kind: 'remove-created', paths: [destination], label: '粘贴截图' }).catch(error => writeLog('warn', 'Unable to record screenshot paste undo history', error));
               publish({ phase: 'complete', progress: 100, currentName: screenshotName, bytesCopied: png.length, totalBytes: png.length, filesCopied: 1, totalFiles: 1, count: 1 });
               task.complete('截图已粘贴');
+              recordCommittedMediaChanges([{ destination, isDirectory: false }]);
               writeLog('info', 'Clipboard screenshot pasted into project', { projectName, targetRelativePath, destination, operationId });
               return {
                 success: true,
@@ -1191,6 +1229,7 @@ const registerFileOperationsIpc = context => {
             const warning = await refreshCutPasteWatchersAfterCommit();
             publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied: 0, totalBytes: 0, filesCopied: count, totalFiles: count, count });
             task.complete('文件移动完成');
+            recordCommittedMediaChanges(topLevelTargets, { removeSources: true });
             writeLog('info', 'Project files moved by same-volume rename', { projectName, targetRelativePath, count, operationId });
             return { success: true, cancelled: false, errorCode: undefined, count, operationId, taskNotificationOwned: true, affectedDirectories, consumedCutClipboard: true, movedItems: topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })), replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount, warning };
           }
@@ -1238,6 +1277,7 @@ const registerFileOperationsIpc = context => {
             const warning = await refreshCutPasteWatchersAfterCommit();
             publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
             task.complete('文件移动完成');
+            recordCommittedMediaChanges(topLevelTargets, { removeSources: true });
             writeLog('info', 'Project files moved by native single-pass cross-volume cut', { projectName, targetRelativePath, count, operationId, ...transferStats });
             return { success: true, cancelled: false, errorCode: undefined, count, operationId, taskNotificationOwned: true, affectedDirectories, consumedCutClipboard: true, movedItems: topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })), replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount, warning };
           }
@@ -1302,12 +1342,16 @@ const registerFileOperationsIpc = context => {
           const warning = [sourceCleanupOutcome?.cleanupWarning ? `文件已移动，但源清理返回提示：${sourceCleanupOutcome.cleanupWarning}` : '', watcherWarning].filter(Boolean).join('；') || undefined;
           publish({ phase: 'complete', progress: 100, currentName: '', bytesCopied, totalBytes, filesCopied, totalFiles, count });
           task.complete('文件粘贴完成');
+          recordCommittedMediaChanges(topLevelTargets, { removeSources: clipboardSnapshot.operation === 'cut' });
           writeLog('info', 'Project files pasted', { projectName, targetRelativePath, count, operationId, ...transferStats });
           return { success: true, cancelled: false, errorCode: undefined, count, operationId, taskNotificationOwned: true, affectedDirectories, consumedCutClipboard: clipboardSnapshot.operation === 'cut', createdItems: clipboardSnapshot.operation === 'copy' ? topLevelTargets.map(item => ({ name: path.basename(item.destination), relativePath: virtualPathFor(root, item.destination, [destinationResolution]), isDirectory: item.isDirectory })) : undefined, movedItems: clipboardSnapshot.operation === 'cut' ? topLevelTargets.map(item => ({ sourceRelativePath: virtualPathFor(root, item.source, projectLinkHints), destinationRelativePath: virtualPathFor(root, item.destination, [destinationResolution]) })) : undefined, replacedCount: replacements.items.length, replacedNames: replacements.items.map(item => path.basename(item.original)), replacedPermanentCount: replacements.permanentCount, replacedRetainedCount: replacements.retainedCount, warning, cleanupWarning: sourceCleanupOutcome?.cleanupWarning, outcomeUnknown: sourceCleanupOutcome?.outcomeUnknown, cleanupPhase: sourceCleanupOutcome?.phase };
         } catch (error) {
           if (error?.code === PUBLISH_PARTIAL_CODE) {
             const publishedOwnership = await provenPublishedOwnership(error, decisionIdentityMatches, path.resolve);
             const publishedPaths = publishedOwnership.map(item => path.resolve(item.path));
+            recordCommittedMediaChanges(topLevelTargets.filter(item => publishedPaths.some(candidate => path.resolve(candidate) === path.resolve(item.destination))), {
+              removeSources: job.finishing && pasteClipboardOperation === 'cut',
+            });
             const retainedSourceRoots = incomingRoot && physicalPathContains(incomingRoot, error.sourcePath || '') ? [incomingRoot] : [];
             const identities = Object.fromEntries(publishedOwnership.map(item => [path.resolve(item.path), item.identity]));
             let recoveryUndo = null;
@@ -1353,6 +1397,10 @@ const registerFileOperationsIpc = context => {
             if (replacementRoot && !retainedReplacementBackup) await fs.promises.rm(replacementRoot, { recursive: true, force: true }).catch(() => undefined);
             if (recoveryNames.length) error.message = `${error.message || String(error)}；原同名项目已恢复，已复制的新内容保留为 ${recoveryNames.join('、')}`;
             else if (retainedReplacementBackup) error.message = `${error.message || String(error)}；旧内容的恢复副本已安全保留，请不要继续修改目标文件并重试撤销`;
+            recordCommittedMediaChanges(topLevelTargets.filter(item => fs.existsSync(item.destination)));
+            recordCommittedMediaChanges(topLevelTargets.filter(item => !fs.existsSync(item.source)).map(item => ({
+              source: item.source, isDirectory: item.isDirectory,
+            })), { removeOnly: true });
           }
           if (error?.code === CANCELLED_CODE) {
             publish({ phase: 'cancelled', progress: 0, currentName: '' });
@@ -1378,6 +1426,7 @@ const registerFileOperationsIpc = context => {
           uniqueSourceResolutions.push(resolution);
         }
         const existingSources = uniqueSourceResolutions.map(resolution => resolution.physicalPath);
+        const removedMediaItems = existingSources.map(source => ({ source, isDirectory: fs.lstatSync(source).isDirectory() }));
         const operationId = crypto.randomUUID();
         const affectedDirectories = Array.from(new Set(existingSourceResolutions.map(resolution => {
           const virtual = String(resolution.virtualPath || virtualPathFor(root, resolution.physicalPath, [resolution, ...projectLinkHints])).replace(/\\/g, '/');
@@ -1436,6 +1485,7 @@ const registerFileOperationsIpc = context => {
                 if (recycled.permanent) permanentCount += 1;
                 processedCount += 1;
                 responseContext.count = processedCount;
+                recordCommittedMediaChanges([removedMediaItems[index]], { removeOnly: true });
               } else {
                 failures.push({ source, error: recycled?.error || '回收站批量操作未返回该项目的结果' });
               }
@@ -1456,6 +1506,7 @@ const registerFileOperationsIpc = context => {
               if (recycled.permanent) permanentCount += 1;
               processedCount += 1;
               responseContext.count = processedCount;
+              recordCommittedMediaChanges([removedMediaItems[processedCount - 1]], { removeOnly: true });
               publish({ phase: 'trashing', progress: Math.round(processedCount / Math.max(1, totalCount) * 100), currentName: path.basename(source), processedCount, totalCount });
             }
           }
@@ -1511,7 +1562,13 @@ const registerFileOperationsIpc = context => {
           sourceFolderRelativePath, relativePaths, operationId,
         };
         const preflight = await selectionService.preflightManual(request);
-        return selectionService.executeManual({ ...request, expectedSignature: preflight.signature });
+        const result = await selectionService.executeManual({ ...request, expectedSignature: preflight.signature });
+        if (result?.success && Number(result.copiedCount) > 0) {
+          const destination = result.selectionNode?.folderPath
+            || resolveDestination(result.targetFolderRelativePath || '').physicalPath;
+          if (destination && fs.existsSync(destination)) recordCommittedMediaChanges([{ destination, isDirectory: true }]);
+        }
+        return result;
       }
       if (operation === 'rename') {
         const operationId = crypto.randomUUID();
@@ -1549,6 +1606,7 @@ const registerFileOperationsIpc = context => {
           if (fs.existsSync(destination) && !normalizedSources.has(path.resolve(destination).toLocaleLowerCase())) throw new Error(`目标名称已被占用：${path.basename(destination)}`);
         }
         const moves = sources.map((source, index) => ({ source, destination: destinations[index] })).filter(move => path.resolve(move.source) !== path.resolve(move.destination));
+        const renamedMediaItems = moves.map(move => ({ ...move, isDirectory: fs.lstatSync(move.source).isDirectory() }));
         if (moves.length === 1 && sources.length === 1) {
           // A single filesystem rename is already atomic on the source volume.
           // Avoid the two-hop staging used to make multi-item swaps/cycles safe;
@@ -1582,6 +1640,10 @@ const registerFileOperationsIpc = context => {
                 if (fs.existsSync(move.temporary) && !fs.existsSync(move.source)) await publishPathNoClobber(move.temporary, move.source);
               } catch { /* best-effort rollback; original error is reported below */ }
             }
+            recordCommittedMediaChanges(renamedMediaItems.filter(item => fs.existsSync(item.destination)).map(item => ({
+              destination: item.destination, isDirectory: item.isDirectory,
+            })));
+            recordCommittedMediaChanges(renamedMediaItems.filter(item => !fs.existsSync(item.source)), { removeOnly: true });
             throw error;
           }
         }
@@ -1597,6 +1659,7 @@ const registerFileOperationsIpc = context => {
           warning = warning || '文件已重命名，但目录监听刷新失败';
           writeLog('warn', 'Unable to refresh watchers after committed file rename', error);
         });
+        recordCommittedMediaChanges(renamedMediaItems, { removeSources: true });
         return {
           success: true,
           cancelled: false,
@@ -1649,8 +1712,12 @@ const registerFileOperationsIpc = context => {
     } finally {
       if (remoteImportTempRoot) await fs.promises.rm(remoteImportTempRoot, { recursive: true, force: true }).catch(error => writeLog('warn', 'Unable to clean remote image import staging directory', error));
       if (suppressedProjectRoot) releaseWorkspaceWatchPath?.(suppressedProjectRoot);
+      if (committedMediaChanges.length) {
+        try { scheduleMediaTrackingScan?.(ensureWorkspace(workspacePath), projectName, committedMediaChanges, false); }
+        catch (error) { writeLog('warn', 'Unable to schedule precise media index update after file operation', { projectName, operation, error: error.message || String(error) }); }
+      }
     }
   });
 };
 
-module.exports = { canUseSameVolumeCut, canUseSingleRenameMove, registerFileOperationsIpc, sameFilesystemDevice };
+module.exports = { canUseSameVolumeCut, canUseSingleRenameMove, committedMediaChangesFor, registerFileOperationsIpc, sameFilesystemDevice };

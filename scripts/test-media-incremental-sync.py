@@ -416,6 +416,21 @@ def main():
         worker_two.call("media_sync_paths_finalize", {
             "projectName": "Project", "snapshotId": catch_up["snapshotId"],
         })
+        aborted_snapshot_id = str(uuid.uuid4())
+        worker_two.call("media_sync_paths_prepare", {
+            "projectName": "Project", "snapshotId": aborted_snapshot_id, "externalRoots": [],
+            "changes": [change(crash_directory, "rename", "directory")],
+        })
+        aborted = worker_two.call("media_sync_abort", {
+            "projectName": "Project", "snapshotId": aborted_snapshot_id,
+        })
+        assert aborted["removed"] is True
+        restarted_after_abort = worker_two.call("media_sync_paths_prepare", {
+            "projectName": "Project", "snapshotId": aborted_snapshot_id, "externalRoots": [],
+            "changes": [change(crash_directory, "rename", "directory")],
+        })
+        assert restarted_after_abort["snapshotId"] == aborted_snapshot_id
+        worker_two.call("media_sync_abort", {"projectName": "Project", "snapshotId": aborted_snapshot_id})
         worker_two.kill()
 
         checked = workspace_db.connect(str(workspace), str(database), include_domains=True)

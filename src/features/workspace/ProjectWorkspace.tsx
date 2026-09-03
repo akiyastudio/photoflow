@@ -37,7 +37,7 @@ import { createProjectProgressWorkflow } from './createProjectProgressWorkflow';
 import { createProjectProgressSetup } from './createProjectProgressSetup';
 import { setProjectProgressTrackingState } from './project-progress-tracking-service';
 import { inspectProgressRelations } from './progress-tree-model';
-import { FolderMarkPanel, TrackingConfirmationPanel, ProgressPairPreview as SharedProgressPairPreview, type FolderMarkDraft, type ProgressPairPreviewMode, VersionProgressPanel, type VersionProgressDraft, defaultWorkflowInputIds, normalizeTrackingPolicy, progressTrackingAction, selectableVersionParents, trackingStateLabel, versionKindForParent, versionTreeNodeBadgeLabel, versionTreeTaskPanelProgress, workflowInputIdsForRelationChange } from '../versioning/public';
+import { FolderMarkPanel, TrackingConfirmationPanel, type FolderMarkDraft, VersionProgressPanel, type VersionProgressDraft, defaultWorkflowInputIds, normalizeTrackingPolicy, prefetchVersionTreeLayout, progressTrackingAction, selectableVersionParents, trackingStateLabel, versionKindForParent, versionTreeNodeBadgeLabel, versionTreeTaskPanelProgress, workflowInputIdsForRelationChange } from '../versioning/public';
 import { previewMetadataFieldsForEntry } from '../metadata/metadata-pane-model';
 import { projectWorkspaceClient } from '../../platform/project-workspace-client';
 import { useProjectFileSelection } from './useProjectFileSelection';
@@ -59,6 +59,7 @@ import { componentHostSelectedRelativePaths as safeComponentHostSelectedRelative
 import { mayCommitAsyncOperationResult } from '../file-operation-identity-model';
 import type { SelectionEntryDetails } from './multi-selection-metadata-model';
 import { FileMetadataPane } from './FileMetadataPane';
+import { ProgressPairPreview } from './ProjectProgressPairPreview';
 type ProjectFileDragEndResult = Parameters<Parameters<typeof projectWorkspaceClient.onProjectFileDragEnd>[0]>[0];
 const FILE_VIRTUAL_OVERSCAN_ROWS = 10;
 const DIRECTORY_PREVIEW_RETRY_DELAYS_MS = [120, 480] as const;
@@ -155,30 +156,6 @@ const buildProgressCompareListItems = (compare: ProgressCompareConfirmation, fil
     const match = candidates.find(candidate => candidate.reference === reference && !acceptedSources.has(candidate.source));
     return { key: `reference:${reference}`, source: match?.source, reference, match, category: filter };
   });
-};
-const ProgressPairPreview = ({ match, parentFolder, progressFolder, cacheConfig }: {
-  match?: { source?: string; reference?: string };
-  parentFolder: ProgressFolder;
-  progressFolder: ProgressFolder;
-  cacheConfig: AppConfig['mediaCache'];
-}) => {
-  const [mode, setMode] = useState<ProgressPairPreviewMode>('side-by-side');
-  const [swapped, setSwapped] = useState(false);
-  const joinPath = (folderPath: string, name?: string) => name
-    ? `${folderPath.replace(/[\\/]+$/, '')}${folderPath.includes('\\') ? '\\' : '/'}${name}`
-    : '';
-  return <SharedProgressPairPreview
-    referencePath={joinPath(parentFolder.folderPath, match?.reference)}
-    sourcePath={joinPath(progressFolder.folderPath, match?.source)}
-    referenceLabel={match?.reference ? `上一版本 · ${match.reference}` : '上一版本'}
-    sourceLabel={match?.source ? `当前版本 · ${match.source}` : '当前版本'}
-    referenceMissing={!match?.reference}
-    mode={mode}
-    swapped={swapped}
-    cacheConfig={cacheConfig}
-    onModeChange={setMode}
-    onSwappedChange={setSwapped}
-  />;
 };
 const EMPTY_PREVIEW_TECHNICAL_METADATA: PreviewTechnicalMetadata = {};
 type ProjectEntryDetails = { size: number; createdAt: number; updatedAt: number; fileCount: number; folderCount: number };
@@ -635,7 +612,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   const [trackingConfirmationProgressId, setTrackingConfirmationProgressId] = useState('');
   const { projectWorkflows, gatherToProject, watchRootDirectly, rootRelativeFileEvents, previewOnlyOnMediaClick } = browserContext.capabilities;
   const {
-    progressFoldersRef, loadProgressFolders, dismissTrackingTaskForSession,
+    progressFoldersRef, loadProgressFolders, loadProgressFoldersSnapshot, progressFoldersReady, progressFoldersLoadError, dismissTrackingTaskForSession,
     draggingChildId, setDraggingChildId, hoverParentId, setHoverParentId,
     pendingRelationChange, relationMutatingChildIds, relationHistoryRevision, canUndoRelation, canRedoRelation,
     resetProgressFolderRequests,
@@ -644,7 +621,6 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     requestSupplementalEdgeReconnect, requestProgressRelationChange,
   } = useProjectVersionRelations({
     active,
-    foregroundDirectoryReady,
     projectWorkflows,
     workspacePath,
     project,
@@ -1409,6 +1385,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   useEffect(() => {
     setOperationDirectoryPath(currentRelativePath);
   }, [currentRelativePath, recursiveFlatOpen]);
+  useEffect(() => { if (active && projectWorkflows && versionTreeEnabled) prefetchVersionTreeLayout(workspacePath, project.name, ''); }, [active, project.name, projectWorkflows, versionTreeEnabled, workspacePath]);
   useEffect(() => {
     if (!active || !foregroundDirectoryReady) return;
     let disposed = false;
@@ -2727,7 +2704,11 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     setFileFilter('all');
     rememberFolderBrowseMode(currentRelativePath, 'version-tree');
     setBrowseMode('version-tree');
-    void loadProgressFolders();
+    if (!progressFoldersReady) {
+      void loadProgressFoldersSnapshot().then(() => {
+        if (activeRef.current) void loadProgressFolders();
+      });
+    }
   };
   useEffect(() => {
     if (!navigationRequest) return;
@@ -5113,7 +5094,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
 
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {versionTreeOpen ? <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={handleFileSurfacePointerDownCapture} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-0 flex-1 select-none overflow-hidden outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
-          {progressRelationInspection.needsRepair ? <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-5 text-amber-900"><div className="flex items-center gap-2 font-bold"><AlertTriangle size={18}/>版本关系需要修复</div><p className="mt-2 text-sm">检测到循环关系，已停止版本树遍历，避免应用崩溃。</p><p className="mt-2 break-all font-mono text-xs text-amber-700">节点 ID：{progressRelationInspection.cycleNodeIds.join('、')}</p></div> : <>{orphanedProgressFolders.length > 0 && <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900"><div className="flex items-center gap-2 font-bold"><AlertTriangle size={18}/>旧版游离进度已保留</div><p className="mt-2 text-sm">这些节点不会在刷新时自动删除，也不能作为新版本的父节点。请打开“修改进度”选择有效父版本，或显式取消版本登记；物理文件不会被删除。</p><p className="mt-2 text-xs text-amber-700">{orphanedProgressFolders.map(folder => folder.displayName).join('、')}</p></div>}<ProjectVersionTree
+          {!progressFoldersReady ? <div role={progressFoldersLoadError ? 'alert' : 'status'} aria-live="polite" className={`flex h-full min-h-[360px] flex-col items-center justify-center gap-3 border-y border-slate-200 text-sm ${progressFoldersLoadError ? 'text-red-600' : 'text-slate-500'}`}>
+            {progressFoldersLoadError ? <><AlertTriangle size={20}/><span>读取版本树失败：{progressFoldersLoadError}</span><button type="button" onClick={() => void loadProgressFoldersSnapshot().then(() => loadProgressFolders())} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-slate-700 hover:bg-slate-50">重新加载</button></> : <><Loader2 size={20} className="animate-spin"/><span>正在读取版本关系…</span></>}
+          </div> : progressRelationInspection.needsRepair ? <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-5 text-amber-900"><div className="flex items-center gap-2 font-bold"><AlertTriangle size={18}/>版本关系需要修复</div><p className="mt-2 text-sm">检测到循环关系，已停止版本树遍历，避免应用崩溃。</p><p className="mt-2 break-all font-mono text-xs text-amber-700">节点 ID：{progressRelationInspection.cycleNodeIds.join('、')}</p></div> : <>{orphanedProgressFolders.length > 0 && <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900"><div className="flex items-center gap-2 font-bold"><AlertTriangle size={18}/>旧版游离进度已保留</div><p className="mt-2 text-sm">这些节点不会在刷新时自动删除，也不能作为新版本的父节点。请打开“修改进度”选择有效父版本，或显式取消版本登记；物理文件不会被删除。</p><p className="mt-2 text-xs text-amber-700">{orphanedProgressFolders.map(folder => folder.displayName).join('、')}</p></div>}<ProjectVersionTree
             active={active && activeView === 'project'}
             progressFolders={progressFolders}
             graphEdges={versionGraphEdges}

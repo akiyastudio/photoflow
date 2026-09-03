@@ -48,7 +48,7 @@ class TestNode extends TestEventTarget {
     return null;
   }
 }
-const layoutRequests = { loads: 0, saves: [], failLoadBudget: 0, failAtLoad: 0, failNextSave: false, failAtSave: 0, staleNextSave: false, staleMutation: null, revision: 0, positions: [], holdSaves: false, saveReleases: [] };
+const layoutRequests = { loads: 0, saves: [], failLoadBudget: 0, failAtLoad: 0, failNextSave: false, failAtSave: 0, staleNextSave: false, staleMutation: null, revision: 0, positions: [], holdLoads: false, loadReleases: [], holdSaves: false, saveReleases: [] };
 const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode, HTMLIFrameElement: class {}, Node: TestNode, getSelection: () => null, electronAPI: {
   async inspectSourcePaths(paths) {
     return {
@@ -63,6 +63,7 @@ const testWindow = Object.assign(new TestEventTarget(), { HTMLElement: TestNode,
   },
   async getVersionTreeLayout() {
     layoutRequests.loads += 1;
+    if (layoutRequests.holdLoads) await new Promise(resolve => layoutRequests.loadReleases.push(resolve));
     if (layoutRequests.failAtLoad === layoutRequests.loads) {
       layoutRequests.failAtLoad = 0;
       return { success: false, error: 'simulated ordered layout load failure' };
@@ -132,7 +133,8 @@ const folderMarkPanel = { ...folderMarkModel, ...loadCommonJs(compile('src/featu
 const canvasModel = loadCommonJs(compile('src/features/versioning/version-tree-canvas-model.ts'));
 const edgeModel = loadCommonJs(compile('src/features/versioning/version-tree-edge-model.ts'));
 const layoutModel = loadCommonJs(compile('src/features/versioning/version-tree-layout-model.ts'), request => request === './version-tree-edge-model.ts' ? edgeModel : require(request));
-const canvasHook = loadCommonJs(compile('src/features/versioning/use-version-tree-canvas.ts'), request => request === './version-tree-canvas-model' ? canvasModel : require(request));
+const layoutCache = loadCommonJs(compile('src/features/versioning/version-tree-layout-cache.ts'));
+const canvasHook = loadCommonJs(compile('src/features/versioning/use-version-tree-canvas.ts'), request => request === './version-tree-canvas-model' ? canvasModel : request === './version-tree-layout-cache' ? layoutCache : require(request));
 const canvasHookSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/versioning/use-version-tree-canvas.ts'), 'utf8').replace(/\r\n?/g, '\n');
 const projectWorkspaceSource = [
   'src/features/workspace/ProjectWorkspace.tsx',
@@ -142,6 +144,11 @@ const projectWorkspaceSource = [
   'src/features/workspace/useProgressFolderOnboarding.ts',
 ].map(relativePath => fs.readFileSync(path.resolve(__dirname, '..', relativePath), 'utf8')).join('\n');
 assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next)'), 'version-tree layout reconciliation must skip identical maps to prevent effect update loops');
+assert(projectWorkspaceSource.includes("!progressFoldersReady ? <div role={progressFoldersLoadError ? 'alert' : 'status'}")
+  && projectWorkspaceSource.includes('正在读取版本关系…'), 'the version-tree route must not classify every entry as Other before progress metadata is hydrated');
+assert(projectWorkspaceSource.includes('projectWorkspaceClient.getProgressFoldersSnapshot(workspacePath, project.name)')
+  && projectWorkspaceSource.includes('loadProgressFoldersSnapshot().then(() =>'), 'version-tree metadata must hydrate from a fast snapshot before filesystem location reconciliation runs in the background');
+assert(projectWorkspaceSource.includes("prefetchVersionTreeLayout(workspacePath, project.name, '')"), 'the root version-tree layout must be prefetched before the user opens the tree');
 const initialLayoutLoadSource = canvasHookSource.slice(canvasHookSource.indexOf('const loadServerLayout'), canvasHookSource.indexOf('useEffect(() => {\n    disposedRef.current = false'));
 assert(!initialLayoutLoadSource.includes('scrollTop = 0') && !initialLayoutLoadSource.includes('scrollLeft = 0'), 'an asynchronous saved-layout load must preserve a viewport the user already scrolled');
 assert(projectWorkspaceSource.includes('setFolderMarkSetup(createFolderMarkDraft') && projectWorkspaceSource.includes('<FolderMarkPanel'), 'ordinary folders must open the unified purpose-marking panel');
@@ -610,6 +617,58 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
     onCanvasControllerChange(controller) { canvasController = controller; },
     onViewportScrollChange(scrolled) { viewportScrollStates.push(scrolled); },
   };
+  const loadingGateContainer = new TestNode(1, 'DIV', testDocument);
+  const loadingGateRoot = createRoot(loadingGateContainer);
+  let loadingGateController = null;
+  layoutRequests.holdLoads = true;
+  await React.act(async () => {
+    loadingGateRoot.render(React.createElement(React.StrictMode, null,
+      React.createElement(tree.ProjectVersionTree, { ...treeProps, projectName: 'Delayed layout probe', onCanvasControllerChange: controller => { loadingGateController = controller; } }),
+    ));
+    await Promise.resolve();
+  });
+  assert(textContent(loadingGateContainer).includes('正在恢复版本树布局'), 'the version tree must show a truthful loading state while persisted positions are pending');
+  assert(!allNodes(loadingGateContainer).some(node => node.attributes?.get('data-version-tree-node') === 'true'), 'default positions must stay hidden until the persisted layout is ready');
+  await React.act(async () => {
+    layoutRequests.holdLoads = false;
+    layoutRequests.loadReleases.splice(0).forEach(release => release());
+    await Promise.resolve(); await Promise.resolve();
+  });
+  assert(allNodes(loadingGateContainer).some(node => node.attributes?.get('data-version-tree-node') === 'true'), 'the final tree must appear after persisted positions are restored through the StrictMode effect replay');
+  const loadingGateViewport = allNodes(loadingGateContainer).find(node => node.attributes?.get('data-version-tree-viewport') === 'true');
+  loadingGateViewport.clientWidth = 320;
+  loadingGateViewport.clientHeight = 240;
+  await React.act(async () => loadingGateController.fitView());
+  const fittedLoadingGateCanvas = allNodes(loadingGateContainer).find(node => node.attributes?.has('data-version-tree-canvas'));
+  assert.notStrictEqual(fittedLoadingGateCanvas.style.transform, 'scale(1)', 'the regression setup must first create a fitted zoom');
+  await React.act(async () => {
+    loadingGateRoot.render(React.createElement(React.StrictMode, null,
+      React.createElement(tree.ProjectVersionTree, { ...treeProps, projectName: 'New hydrated layout probe', onCanvasControllerChange: controller => { loadingGateController = controller; } }),
+    ));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const rehydratedLoadingGateCanvas = allNodes(loadingGateContainer).find(node => node.attributes?.has('data-version-tree-canvas'));
+  assert.strictEqual(rehydratedLoadingGateCanvas.style.transform, 'scale(1)', 'a newly hydrated tree must discard stale fit-view zoom and start at the normal size');
+  await React.act(async () => loadingGateRoot.unmount());
+  layoutCache.clearVersionTreeLayoutCacheForTests();
+  const returnCacheProject = 'Return navigation cache probe';
+  const firstReturnContainer = new TestNode(1, 'DIV', testDocument);
+  const firstReturnRoot = createRoot(firstReturnContainer);
+  await React.act(async () => {
+    firstReturnRoot.render(React.createElement(tree.ProjectVersionTree, { ...treeProps, projectName: returnCacheProject }));
+    await Promise.resolve(); await Promise.resolve();
+  });
+  const loadsAfterFirstReturnVisit = layoutRequests.loads;
+  await React.act(async () => firstReturnRoot.unmount());
+  const cachedReturnContainer = new TestNode(1, 'DIV', testDocument);
+  const cachedReturnRoot = createRoot(cachedReturnContainer);
+  await React.act(async () => cachedReturnRoot.render(React.createElement(React.StrictMode, null,
+    React.createElement(tree.ProjectVersionTree, { ...treeProps, projectName: returnCacheProject }),
+  )));
+  assert(!textContent(cachedReturnContainer).includes('正在恢复版本树布局'), 'returning from a folder must render the cached root layout without a loading screen');
+  assert.strictEqual(layoutRequests.loads, loadsAfterFirstReturnVisit, 'returning from a folder must not issue a second layout IPC read');
+  await React.act(async () => cachedReturnRoot.unmount());
+  layoutCache.clearVersionTreeLayoutCacheForTests();
   let renameProbeMounts = 0;
   let renameProbeUnmounts = 0;
   const RenameMountProbe = ({ relativePath }) => {
@@ -1032,6 +1091,7 @@ const draft = mode => ({ mode, sourceRelativePath: '客户/RAW', displayName: mo
   assert.strictEqual(canvasViewport.scrollLeft, 0, 'successful refresh must move the viewport to the layout origin');
   assert.strictEqual(canvasViewport.scrollTop, 0, 'successful refresh must move the viewport to the layout origin vertically');
   assert.strictEqual(canvasController.hasManualLayout, false, 'the restored default coordinates must no longer count as manual layout');
+  assert.strictEqual(canvasNode.style.transform, 'scale(1)', 'restoring the standard layout must keep nodes at 100% instead of shrinking the whole tree to fit');
   const refreshRaceRawNode = allNodes(container).find(node => node.attributes.get('data-version-progress-id') === 'raw');
   const defaultBeforeRefreshRace = { left: refreshRaceRawNode.style.left, top: refreshRaceRawNode.style.top };
   await React.act(async () => {

@@ -19,8 +19,8 @@ const createWorkspaceRepository = (client, operationsRepository = null) => {
     const catalog = await client.call(root, 'init');
     return catalog;
   },
-  syncCatalog: root => client.call(root, 'catalog_sync', {}),
-  runMaintenance: root => client.call(root, 'maintenance_run', {}),
+  syncCatalog: (root, options = {}) => client.call(root, 'catalog_sync', {}, 30 * 60 * 1000, options),
+  runMaintenance: (root, options = {}) => client.call(root, 'maintenance_run', {}, 30 * 60 * 1000, options),
   addProject: (root, payload) => client.call(root, 'add', payload),
   renameProject: (root, payload) => client.call(root, 'rename', payload),
   setProjectStatus: (root, payload) => client.call(root, 'status', payload),

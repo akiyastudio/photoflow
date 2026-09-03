@@ -72,6 +72,8 @@ interface VersionNode {
 - `renameFromParent`：提交时是否沿用父版本文件名。
 - `copyMissingFromParent`：是否从父版本补齐当前版本缺失的媒体。
 
+在已完成跟踪的节点上从关闭改为开启 `renameFromParent` 时，随后启动的刷新必须重新纳入已有批次中“已确认关联但尚未沿用父版本文件名”的媒体。不得因为文件内容相对跟踪快照未变化而跳过这些历史关系；已经使用目标名称的媒体仍不得重复处理。
+
 `renameFromParent` 和 `copyMissingFromParent` 只有在 `trackingEnabled=true` 时可为 `true`。只有带合法 `main` 父节点的 `progress` 可以启用跟踪；`original`、`broll`、`artifact`、`workflow` 与 `auxiliary` 节点必须持久化为三个值全为 `false`。界面必须隐藏或禁用并解释不可用能力，后端也必须拒绝这些角色开启任意一个选项。
 
 内部状态到界面文案的唯一映射：
@@ -194,6 +196,9 @@ interface StartTrackingTaskResult {
 
 ## 9. 实现验收约束
 
+- 项目页激活后必须预取根版本树布局；从普通文件夹返回同一版本树时必须立即复用会话内最后一次成功布局，不得重新显示全屏布局加载态。
+- 首屏版本关系使用只读 `progress_snapshot`，目录身份、移动和缺失状态由 `progress_locations_snapshot` 在首屏之后协调；后台结果只能增量更新，不得先把已登记节点显示为“其他”。
+- 只读快照发现数据库尚未初始化或存在待恢复 journal 时，必须释放读租约并在写租约下重试，禁止以读租约静默进入迁移或恢复写路径。
 - 数据库迁移必须显式写入 `role`、`relationKind`、三个策略字段、`trackingState` 和 tombstone 字段。
 - 用途写入必须覆盖“选择用途 → 提交 → reload/effect → 同一节点仍持久存在”；同时覆盖三模式字段隔离、broll mixed/无边/无跟踪、无父 progress 拒绝以及旧游离 progress 不被刷新删除。
 - renderer 只能提交项目相对路径、受限用途命令和项目内节点 ID；不得提交 `nodeRole`、绝对路径或任意边类型。Electron/后端根据受限命令推导角色和关系。

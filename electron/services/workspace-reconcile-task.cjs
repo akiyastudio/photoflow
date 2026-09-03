@@ -22,19 +22,23 @@ const createWorkspaceReconcileTask = ({ backgroundTasks, getWatchedWorkspacePath
           title: '工作区文件与数据库对账',
           dedupeKey: `workspace-reconcile:${root}:${runGeneration}`,
           cancellable: false,
-          resources: [{ path: `photoflow-workspace-database/${root}`, access: 'write' }],
+          // Repository calls already coordinate their own database transactions;
+          // a task-wide writer would block every foreground project operation.
+          resources: [],
           metadata: { root, generation: runGeneration },
         }, async task => {
           task.report(5, '正在读取项目目录');
           const previousProjectsSnapshot = JSON.stringify(getProjects(root) || []);
-          const catalog = await reconcileWorkspaceCatalog(root);
+          const catalog = await reconcileWorkspaceCatalog(root, { signal: task.signal, priority: -10, preemptible: true });
           const catalogChanged = previousProjectsSnapshot !== JSON.stringify(catalog.projects || []);
           task.report(95, '项目目录核对完成');
           writeLog('info', 'Periodic workspace reconciliation completed', { root, projects: catalog.projects.length, catalogChanged });
           return catalog;
         });
       } catch (error) {
-        writeLog('warn', 'Periodic workspace reconciliation deferred', { root, error: error.message || String(error) });
+        if (error?.code !== 'DATABASE_PREEMPTED' && error?.code !== 'TASK_CANCELLED') {
+          writeLog('warn', 'Periodic workspace reconciliation deferred', { root, error: error.message || String(error) });
+        }
         if (restartTask?.id) throw error;
         return undefined;
       } finally {

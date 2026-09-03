@@ -19,6 +19,7 @@ const topToastNoticeModelSource = read('src/features/app/top-toast-notice-model.
 const projectPanelLifecycleSource = read('src/features/workspace/project-panel-lifecycle.ts');
 const panelTaskSessionModelSource = read('src/features/background-tasks/panel-task-session-model.ts');
 const workspace = read('src/features/workspace/ProjectWorkspace.tsx');
+const projectProgressWorkflow = read('src/features/workspace/createProjectProgressWorkflow.ts');
 const projectToolModal = read('src/features/workspace/ProjectToolModal.tsx');
 const componentToolPanel = read('src/features/components/ComponentToolPanelSurface.tsx');
 const componentDock = read('src/features/components/ComponentContributionDock.tsx');
@@ -255,7 +256,7 @@ assert(indicator.includes('aria-expanded={open}') && indicator.includes('onOpenC
 assert(indicator.includes('drawerHostRef.current') && indicator.includes('createPortal(') && app.includes('backgroundTaskDrawerHostRef') && app.includes('renderedBackgroundTaskDrawerWidth'), 'the task center must dock beside the host content with adjustable layout width');
 assert(!indicator.includes('useHostSurfaceSuspension') && !indicator.includes('useEscapeLayer(open, closeAndRestoreFocus, true, true)'), 'the docked task drawer must not suspend native plugin surfaces');
 assert(main.includes('<TaskCenterProvider>') && main.includes('<TopToastProvider>') && main.includes('<TopToastViewport />') && !main.includes('<FileTransferToast') && !app.includes('topToastStack') && topToastStack.includes('top-toast-stack--model') && topToastStack.includes('updateToastView({') && topToastStack.includes('presentation={presentation}'), 'ordinary notices and file task progress must publish from one hidden host model to the persistent Toast view');
-assert(projectToolModal.includes("const reportBusyAsPanelTask = !panelKind.startsWith('version-')") && workspace.includes('progressSubmittingRef.current'), 'version operations must not create a duplicate panel task and must synchronously reject repeated submissions');
+assert(projectToolModal.includes("const reportBusyAsPanelTask = !panelKind.startsWith('version-')") && projectProgressWorkflow.includes('progressSubmittingRef.current'), 'version operations must not create a duplicate panel task and must synchronously reject repeated submissions');
 const closeImageConverter = workspace.slice(workspace.indexOf('const closeImageConverterPanel'), workspace.indexOf('const openImageConverter'));
 assert(closeImageConverter.includes('conversionInspectionSequenceRef.current += 1') && closeImageConverter.includes('setConversionCollecting(false)') && closeImageConverter.includes('setPanel(null)'), 'closing an idle converter must invalidate source inspection and clear its collecting state');
 assert(workspace.includes("triggerAction === 'restore'") && workspace.includes("setPanel('converter')") && workspace.includes('onClose={closeImageConverterPanel}'), 'running converter triggers must restore the persistent panel while every real close uses the same cleanup path');
