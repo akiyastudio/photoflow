@@ -38,6 +38,7 @@ const { createMediaAccessService } = require('./services/media-access-service.cj
 const { createMediaFileResponse } = require('./services/media-response-service.cjs');
 const { configureProtectedProjectFolderRegistry } = require('./services/protected-project-folder.cjs');
 const { PythonDatabaseClient } = require('./repositories/database-client.cjs');
+const { createVersionTreeDatabaseWorkers } = require('./repositories/version-tree-database-workers.cjs');
 const { WorkspaceSqliteCoordinator } = require('./services/workspace-sqlite-coordinator.cjs');
 const { createWorkspaceRepository } = require('./domains/workspace/public.cjs');
 const { createOperationsRepository } = require('./domains/file-operations/public.cjs');
@@ -893,6 +894,11 @@ const mediaInteractionDatabase = new PythonDatabaseClient({
 });
 const mediaBackgroundRepository = createMediaRepository(mediaDatabase);
 const mediaInteractionRepository = createMediaRepository(mediaInteractionDatabase);
+// Isolate first-paint reads from slow filesystem reconciliation and mutations.
+const { readDatabase: versionReadDatabase, locationDatabase: versionLocationDatabase, readRepository: versionReadRepository, locationRepository: versionLocationRepository } = createVersionTreeDatabaseWorkers({
+  coordinator: workspaceSqliteCoordinator, getRunConfig, getDatabasePath: getWorkspaceDatabasePath,
+  writeLog, processSupervisor, databaseHealthOptions,
+});
 const trustedExternalMediaRoots = (root, projectName) => {
   const project = workspaceCatalogs.get(path.resolve(root))?.byName.get(String(projectName || '').toLocaleLowerCase());
   if (!project?.relative_path) return [];
@@ -914,8 +920,8 @@ const mediaRepository = {
   deleteProjectMissingVersion: mediaInteractionRepository.deleteProjectMissingVersion,
   recordCompare: mediaInteractionRepository.recordCompare,
   listProgress: mediaInteractionRepository.listProgress,
-  snapshotProgress: mediaInteractionRepository.snapshotProgress,
-  snapshotProgressLocations: mediaInteractionRepository.snapshotProgressLocations,
+  snapshotProgress: versionReadRepository.snapshotProgress,
+  snapshotProgressLocations: versionLocationRepository.snapshotProgressLocations,
   registerProgress: mediaInteractionRepository.registerProgress,
   registerProgressWithGraph: mediaInteractionRepository.registerProgressWithGraph,
   adoptMediaFolder: mediaInteractionRepository.adoptMediaFolder,
@@ -926,7 +932,7 @@ const mediaRepository = {
   createVersionGraphEdge: mediaInteractionRepository.createVersionGraphEdge,
   deleteVersionGraphEdge: mediaInteractionRepository.deleteVersionGraphEdge,
   replaceVersionGraphEdgeSource: mediaInteractionRepository.replaceVersionGraphEdgeSource,
-  getVersionTreeLayout: mediaInteractionRepository.getVersionTreeLayout,
+  getVersionTreeLayout: versionReadRepository.getVersionTreeLayout,
   saveVersionTreeLayout: mediaInteractionRepository.saveVersionTreeLayout,
   unregisterProgress: mediaInteractionRepository.unregisterProgress,
   deleteMissingProgress: mediaInteractionRepository.deleteMissingProgress,
@@ -1378,6 +1384,8 @@ app.whenReady().then(async () => {
     workspaceMaintenanceDatabase,
     mediaDatabase,
     mediaInteractionDatabase,
+    versionReadDatabase,
+    versionLocationDatabase,
     mediaScanDatabase,
     trackingScanDatabase,
   ];
@@ -1451,6 +1459,8 @@ registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutat
   workspaceMaintenanceDatabase.stop();
   mediaDatabase.stop();
   mediaInteractionDatabase.stop();
+  versionReadDatabase.stop();
+  versionLocationDatabase.stop();
   mediaScanDatabase.stop();
   trackingScanDatabase.stop();
   imageThumbnailRuntime.stop();

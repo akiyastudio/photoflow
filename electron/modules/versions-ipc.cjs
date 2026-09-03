@@ -9,6 +9,10 @@ const registerVersionIpc = context => {
       pending?.catch?.(() => undefined);
     } catch {}
   };
+  const logSlowVersionTreeRead = (operation, startedAt, projectName) => {
+    const elapsedMs = Date.now() - startedAt;
+    if (elapsedMs >= 250) writeLog('info', 'Slow version-tree read', { operation, elapsedMs, projectName });
+  };
   const protectedProjectFolders = context.protectedProjectFolders || getProtectedProjectFolderRegistry();
   const pendingRelocateDecisions = new Map();
   const RELOCATE_DECISION_TTL_MS = 5 * 60 * 1000;
@@ -119,22 +123,28 @@ const registerVersionIpc = context => {
   });
 
   ipcMain.handle('workspace-progress-folders-snapshot', async (_event, workspacePath, projectName) => {
+    const startedAt = Date.now();
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       return await versionService.snapshotProgress(workspaceRoot, projectName, true);
     } catch (error) {
       return { success: false, error: error.message || String(error), progressFolders: [], graphEdges: [], legacySelectionRelationRepairs: [] };
+    } finally {
+      logSlowVersionTreeRead('progress-snapshot', startedAt, projectName);
     }
   });
 
   ipcMain.handle('workspace-progress-folders', async (_event, workspacePath, projectName) => {
+    const startedAt = Date.now();
     try {
       const workspaceRoot = ensureWorkspace(workspacePath);
       if (!workspaceCatalogs.has(workspaceRoot)) await refreshWorkspaceCatalog(workspaceRoot);
       return await versionService.snapshotProgressLocations(workspaceRoot, projectName, true);
     } catch (error) {
       return { success: false, error: error.message || String(error), progressFolders: [], graphEdges: [], legacySelectionRelationRepairs: [] };
+    } finally {
+      logSlowVersionTreeRead('progress-locations', startedAt, projectName);
     }
   });
 

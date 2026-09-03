@@ -50,7 +50,10 @@ export const loadVersionTreeLayout = (workspacePath: string, projectName: string
 };
 
 export const prefetchVersionTreeLayout = (workspacePath: string, projectName: string, scopeKey = '') => {
-  void loadVersionTreeLayout(workspacePath, projectName, scopeKey, true).catch(() => undefined);
+  // Activation prefetch is cache-first. Explicit refresh still passes
+  // forceFresh through loadVersionTreeLayout, while ordinary tab switches must
+  // not enqueue a redundant database read ahead of the relationship snapshot.
+  void loadVersionTreeLayout(workspacePath, projectName, scopeKey).catch(() => undefined);
 };
 
 export const clearVersionTreeLayoutCacheForTests = () => {

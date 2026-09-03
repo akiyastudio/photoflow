@@ -101,7 +101,7 @@
     "test:sd-import-post-action": "node scripts/test-sd-import-post-action.cjs",
     "test:sd-startup-import": "node scripts/test-sd-startup-import.mjs",
     "test:version-tracking-confirmation-ui": "node scripts/test-version-tracking-confirmation-ui.cjs && node scripts/test-image-comparison-view.cjs",
-    "test:versioning-v2-ui": "node scripts/test-versioning-v2-model.cjs && node scripts/test-progress-relation-mutation-queue.cjs && node scripts/test-versioning-v2-panels.cjs",
+    "test:versioning-v2-ui": "node scripts/test-versioning-v2-model.cjs && node scripts/test-progress-relation-mutation-queue.cjs && node scripts/test-version-tree-snapshot-cache.cjs && node scripts/test-versioning-v2-panels.cjs",
     "test:versioning-v2-db": ".venv\\Scripts\\python.exe scripts\\test-versioning-v2-db.py",
     "test:version-manager-scope": "node scripts/test-metadata-labels.cjs && node scripts/test-version-manager-scope.cjs",
     "test:classify-import": ".venv\\Scripts\\python.exe scripts\\test-classify-import.py",

@@ -1,11 +1,9 @@
-import { useCallback, useEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
+import { useCallback, useEffect, useLayoutEffect, useRef, useState, type Dispatch, type MutableRefObject, type SetStateAction } from 'react';
 import type { ProgressFolder, VersionGraphEdge, WorkspaceProject } from '../../types';
 import type { useAppDialog } from '../../components/AppDialogProvider';
 import type { useTaskCenter } from '../background-tasks/TaskCenter';
 import { projectWorkspaceClient } from '../../platform/project-workspace-client';
-import { PROJECT_BACKGROUND_LOAD_DELAYS_MS } from './project-workspace-lifecycle';
-import { scheduleAfterProjectPaint } from './project-workspace-layout-model';
-import { ProgressRelationMutationQueue, progressRelationChangeError, trackingPolicyForRelationChange, workflowInputIdsForRelationChange } from '../versioning/public';
+import { ProgressRelationMutationQueue, peekVersionTreeSnapshot, progressRelationChangeError, rememberVersionTreeSnapshot, trackingPolicyForRelationChange, workflowInputIdsForRelationChange } from '../versioning/public';
 
 type VersionGraphHistoryEntry = { label: string; undo: () => Promise<void>; redo: () => Promise<void> };
 type RelationProject = Pick<WorkspaceProject, 'name' | 'path' | 'status'>;
@@ -59,10 +57,37 @@ export const useProjectVersionRelations = ({
   const automaticProgressLoadKeyRef = useRef('');
   const progressFoldersSnapshotRequestRef = useRef<Promise<ProgressFolder[]> | null>(null);
   const progressFoldersRequestRef = useRef<Promise<ProgressFolder[]> | null>(null);
+  const progressFolderRequestGenerationRef = useRef(0);
   const progressFolderLoadKey = `${workspacePath}\0${project.status}\0${project.name}\0${project.path}`;
-  const [progressFolderLoadState, setProgressFolderLoadState] = useState<{ key: string; status: 'idle' | 'loading' | 'ready' | 'error'; error: string }>({
-    key: '', status: 'idle', error: '',
-  });
+  const progressFolderLoadKeyRef = useRef(progressFolderLoadKey);
+  progressFolderLoadKeyRef.current = progressFolderLoadKey;
+  const [initialCachedSnapshot] = useState(() => peekVersionTreeSnapshot(workspacePath, project.name, project.path, project.status));
+  const [progressFolderLoadState, setProgressFolderLoadState] = useState<{ key: string; status: 'idle' | 'loading' | 'ready' | 'error'; error: string }>(() => ({
+    key: progressFolderLoadKey,
+    status: initialCachedSnapshot ? 'ready' : 'idle',
+    error: '',
+  }));
+  const hydratedProgressFolderLoadKeyRef = useRef(progressFolderLoadKey);
+  useLayoutEffect(() => {
+    if (hydratedProgressFolderLoadKeyRef.current === progressFolderLoadKey) return;
+    hydratedProgressFolderLoadKeyRef.current = progressFolderLoadKey;
+    progressFolderRequestGenerationRef.current += 1;
+    automaticProgressLoadKeyRef.current = '';
+    progressFoldersSnapshotRequestRef.current = null;
+    progressFoldersRequestRef.current = null;
+    const cached = peekVersionTreeSnapshot(workspacePath, project.name, project.path, project.status);
+    if (cached) {
+      progressFoldersRef.current = cached.progressFolders;
+      setProgressFolders(cached.progressFolders);
+      setVersionGraphEdges(cached.graphEdges);
+      setProgressFolderLoadState({ key: progressFolderLoadKey, status: 'ready', error: '' });
+      return;
+    }
+    progressFoldersRef.current = [];
+    setProgressFolders(current => current.length ? [] : current);
+    setVersionGraphEdges(current => current.length ? [] : current);
+    setProgressFolderLoadState({ key: progressFolderLoadKey, status: 'idle', error: '' });
+  }, [progressFolderLoadKey, project.name, project.path, project.status, setProgressFolders, setVersionGraphEdges, workspacePath]);
   const cancelRelationEdit = useCallback(() => {
     setDraggingChildId('');
     setHoverParentId('');
@@ -77,16 +102,19 @@ export const useProjectVersionRelations = ({
     if (progressFoldersSnapshotRequestRef.current) return progressFoldersSnapshotRequestRef.current;
     const requestedProjectPath = project.path;
     const requestedLoadKey = `${workspacePath}\0${project.status}\0${project.name}\0${project.path}`;
+    const requestedGeneration = progressFolderRequestGenerationRef.current;
     automaticProgressLoadKeyRef.current = requestedLoadKey;
     setProgressFolderLoadState(current => current.key === requestedLoadKey && current.status === 'ready'
       ? current
       : { key: requestedLoadKey, status: 'loading', error: '' });
     const request: Promise<ProgressFolder[]> = projectWorkspaceClient.getProgressFoldersSnapshot(workspacePath, project.name).then(result => {
-      if (projectPathRef.current !== requestedProjectPath) return [];
+      if (projectPathRef.current !== requestedProjectPath || progressFolderLoadKeyRef.current !== requestedLoadKey || progressFolderRequestGenerationRef.current !== requestedGeneration) return [];
       if (result.success) {
+        const graphEdges = result.graphEdges || [];
+        rememberVersionTreeSnapshot(workspacePath, project.name, project.path, project.status, result.progressFolders, graphEdges);
         progressFoldersRef.current = result.progressFolders;
         setProgressFolders(result.progressFolders);
-        setVersionGraphEdges(result.graphEdges || []);
+        setVersionGraphEdges(graphEdges);
         setProgressFolderLoadState({ key: requestedLoadKey, status: 'ready', error: '' });
         return result.progressFolders;
       }
@@ -95,7 +123,7 @@ export const useProjectVersionRelations = ({
       onNotice(`读取版本进度快照失败：${error}`);
       return [];
     }).catch(error => {
-      if (projectPathRef.current !== requestedProjectPath) return [];
+      if (projectPathRef.current !== requestedProjectPath || progressFolderLoadKeyRef.current !== requestedLoadKey || progressFolderRequestGenerationRef.current !== requestedGeneration) return [];
       const message = error instanceof Error ? error.message : String(error);
       setProgressFolderLoadState({ key: requestedLoadKey, status: 'error', error: message });
       onNotice(`读取版本进度快照失败：${message}`);
@@ -111,15 +139,18 @@ export const useProjectVersionRelations = ({
     if (progressFoldersRequestRef.current) return progressFoldersRequestRef.current;
     const requestedProjectPath = project.path;
     const requestedLoadKey = `${workspacePath}\0${project.status}\0${project.name}\0${project.path}`;
+    const requestedGeneration = progressFolderRequestGenerationRef.current;
     setProgressFolderLoadState(current => current.key === requestedLoadKey && current.status === 'ready'
       ? current
       : { key: requestedLoadKey, status: 'loading', error: '' });
     const request: Promise<ProgressFolder[]> = projectWorkspaceClient.getProgressFolders(workspacePath, project.name).then(result => {
-      if (projectPathRef.current !== requestedProjectPath) return [];
+      if (projectPathRef.current !== requestedProjectPath || progressFolderLoadKeyRef.current !== requestedLoadKey || progressFolderRequestGenerationRef.current !== requestedGeneration) return [];
       if (result.success) {
+        const graphEdges = result.graphEdges || [];
+        rememberVersionTreeSnapshot(workspacePath, project.name, project.path, project.status, result.progressFolders, graphEdges);
         progressFoldersRef.current = result.progressFolders;
         setProgressFolders(result.progressFolders);
-        setVersionGraphEdges(result.graphEdges || []);
+        setVersionGraphEdges(graphEdges);
         setProgressFolderLoadState({ key: requestedLoadKey, status: 'ready', error: '' });
         return result.progressFolders;
       }
@@ -130,7 +161,7 @@ export const useProjectVersionRelations = ({
       onNotice(`读取版本进度失败：${error}`);
       return [];
     }).catch(error => {
-      if (projectPathRef.current !== requestedProjectPath) return [];
+      if (projectPathRef.current !== requestedProjectPath || progressFolderLoadKeyRef.current !== requestedLoadKey || progressFolderRequestGenerationRef.current !== requestedGeneration) return [];
       const message = error instanceof Error ? error.message : String(error);
       setProgressFolderLoadState(current => current.key === requestedLoadKey && current.status === 'ready'
         ? current
@@ -147,12 +178,9 @@ export const useProjectVersionRelations = ({
     if (!active || !projectWorkflows) return;
     const loadKey = `${workspacePath}\0${project.status}\0${project.name}\0${project.path}`;
     if (automaticProgressLoadKeyRef.current === loadKey) return;
-    return scheduleAfterProjectPaint(PROJECT_BACKGROUND_LOAD_DELAYS_MS.progress, () => {
-      if (!activeRef.current || automaticProgressLoadKeyRef.current === loadKey) return;
-      automaticProgressLoadKeyRef.current = loadKey;
-      void loadProgressFoldersSnapshot().then(() => {
-        if (activeRef.current) void loadProgressFolders();
-      });
+    automaticProgressLoadKeyRef.current = loadKey;
+    void loadProgressFoldersSnapshot().then(() => {
+      if (activeRef.current && progressFolderLoadKeyRef.current === loadKey) void loadProgressFolders();
     });
   }, [active, loadProgressFolders, loadProgressFoldersSnapshot, project.name, project.path, project.status, projectWorkflows, workspacePath]);
   const pushRelationHistory = (entry: VersionGraphHistoryEntry) => {
@@ -543,6 +571,7 @@ export const useProjectVersionRelations = ({
     canUndoRelation: relationUndoStackRef.current.length > 0,
     canRedoRelation: relationRedoStackRef.current.length > 0,
     resetProgressFolderRequests: () => {
+      progressFolderRequestGenerationRef.current += 1;
       progressFoldersSnapshotRequestRef.current = null;
       progressFoldersRequestRef.current = null;
       automaticProgressLoadKeyRef.current = '';

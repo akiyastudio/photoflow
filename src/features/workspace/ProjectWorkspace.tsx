@@ -32,12 +32,13 @@ import { FOLDER_ALPHABET_FILTER_THRESHOLD, FOLDER_ALPHABET_KEYS, availableFolder
 import { useProjectFileQueries } from './useProjectFileQueries';
 import { useProjectVersionRelations } from './useProjectVersionRelations';
 import { useProgressFolderOnboarding } from './useProgressFolderOnboarding';
+import { useDelayedVisibility } from './use-delayed-visibility';
 import type { CompareMatch, ProgressCompareConfirmation, ProgressSetupDraft } from './project-progress-workflow-types';
 import { createProjectProgressWorkflow } from './createProjectProgressWorkflow';
 import { createProjectProgressSetup } from './createProjectProgressSetup';
 import { setProjectProgressTrackingState } from './project-progress-tracking-service';
 import { inspectProgressRelations } from './progress-tree-model';
-import { FolderMarkPanel, TrackingConfirmationPanel, type FolderMarkDraft, VersionProgressPanel, type VersionProgressDraft, defaultWorkflowInputIds, normalizeTrackingPolicy, prefetchVersionTreeLayout, progressTrackingAction, selectableVersionParents, trackingStateLabel, versionKindForParent, versionTreeNodeBadgeLabel, versionTreeTaskPanelProgress, workflowInputIdsForRelationChange } from '../versioning/public';
+import { FolderMarkPanel, TrackingConfirmationPanel, type FolderMarkDraft, VersionProgressPanel, type VersionProgressDraft, defaultWorkflowInputIds, normalizeTrackingPolicy, peekVersionTreeSnapshot, prefetchVersionTreeLayout, progressTrackingAction, selectableVersionParents, trackingStateLabel, versionKindForParent, versionTreeNodeBadgeLabel, versionTreeTaskPanelProgress, workflowInputIdsForRelationChange } from '../versioning/public';
 import { previewMetadataFieldsForEntry } from '../metadata/metadata-pane-model';
 import { projectWorkspaceClient } from '../../platform/project-workspace-client';
 import { useProjectFileSelection } from './useProjectFileSelection';
@@ -271,8 +272,9 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
   }, [customProjectCategories, project.status, projectCategoryOrder]);
   const { backgroundTasks, panelTasks, dismissBackgroundTask } = useTaskCenter();
   const [folders, setFolders] = useState<Array<{ name: string; path: string; updatedAt: number }>>([]);
-  const [progressFolders, setProgressFolders] = useState<ProgressFolder[]>([]);
-  const [versionGraphEdges, setVersionGraphEdges] = useState<VersionGraphEdge[]>([]);
+  const [initialVersionTreeSnapshot] = useState(() => peekVersionTreeSnapshot(workspacePath, project.name, project.path, project.status));
+  const [progressFolders, setProgressFolders] = useState<ProgressFolder[]>(() => initialVersionTreeSnapshot?.progressFolders || []);
+  const [versionGraphEdges, setVersionGraphEdges] = useState<VersionGraphEdge[]>(() => initialVersionTreeSnapshot?.graphEdges || []);
   const exportCandidateTimersRef = useRef(new Map<string, number>());
   const exportCandidateChangedAtRef = useRef(new Map<string, number>());
   const offeredExportFoldersRef = useRef(new Set<string>());
@@ -638,6 +640,7 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
     activeRef,
     projectPathRef,
   });
+  const versionTreeSlowLoadVisible = useDelayedVisibility(versionTreeOpen && !progressFoldersReady && !progressFoldersLoadError, 300);
   const [progressCompareFilter, setProgressCompareFilter] = useState<ProgressCompareFilter>('recognized');
   const [activeProgressCompareItemKey, setActiveProgressCompareItemKey] = useState('');
   const [workspaceActivityMessage, setWorkspaceActivityMessage] = useState('');
@@ -5091,11 +5094,10 @@ const FileBrowserWorkspace = ({ pageId, active, activeView, project, workspacePa
         <section className="mt-5 border-t border-slate-200 pt-5"><h4 className="mb-2 text-sm font-bold text-slate-700">预览</h4><div className="max-h-48 overflow-y-auto rounded-lg border border-slate-200 bg-slate-50">{batchRenameEntries.slice(0, 20).map((entry, index) => <div key={entry.path} className="grid grid-cols-[minmax(0,1fr)_auto_minmax(0,1fr)] items-center gap-3 border-b border-slate-200 px-3 py-2 text-xs last:border-0"><span className="truncate text-slate-500" title={entry.name}>{entry.name}</span><ArrowRight size={13} className="text-slate-300"/><span className="truncate font-medium text-slate-700" title={batchRenameNames[index]}>{batchRenameNames[index] || '（空文件名）'}</span></div>)}{batchRenameEntries.length > 20 && <p className="px-3 py-2 text-center text-xs text-slate-400">另有 {batchRenameEntries.length - 20} 个项目</p>}</div></section>
       </div><footer className="flex items-center justify-between border-t border-slate-200 bg-slate-50 px-5 py-4"><p className="text-xs text-slate-500">重命名使用临时文件过渡，不会因名称互换产生冲突。</p><div className="flex gap-2"><button onClick={() => setBatchRenameOpen(false)} className="dialog-secondary">取消</button><button onClick={commitBatchRename} disabled={!batchRenameNames.length || batchRenameNames.some(name => !name) || batchExtensionMode === 'replace' && !batchExtensionValue.trim() || new Set(batchRenameNames.map(name => name.toLocaleLowerCase())).size !== batchRenameNames.length || renameCommitRef.current} className="dialog-primary">批量重命名</button></div></footer></div></div>}
       {renderedVersionEntry && <div className={activeView === 'version' ? 'contents' : 'hidden'}><VersionManager active={active && activeView === 'version'} entry={renderedVersionEntry} workspacePath={workspacePath} project={project} cacheConfig={mediaCacheConfig} videoPlaybackSettings={videoPlaybackSettings} progressId={versionProgressFolder?.id || versionProgressId} progressVersionKey={versionProgressFolder?.versionKey} onNotice={onNotice} onVersionStateChanged={() => { if (finalViewOpen) void loadFinalViewEntries(); }} onClose={() => { setVersionEntry(null); setVersionProgressId(''); versionProgressLocationRef.current = null; onCloseToolTab('version'); if (finalViewOpen) void loadFinalViewEntries(); }}/></div>}
-
       <section className="flex min-h-0 min-w-0 flex-1 flex-col">
         {versionTreeOpen ? <div ref={filesSurfaceRef} data-photoflow-file-surface="true" tabIndex={0} onContextMenu={openSurfaceMenu} onPointerDownCapture={handleFileSurfacePointerDownCapture} onDragOver={handleSurfaceDragOver} onDragLeave={handleSurfaceDragLeave} onDrop={event => void handleSurfaceDrop(event)} style={{ marginInline: -FILE_SURFACE_HORIZONTAL_PADDING }} className={`relative min-h-0 flex-1 select-none overflow-hidden outline-none transition ${surfaceDropActive ? 'rounded-lg bg-blue-50 ring-2 ring-inset ring-blue-400' : ''}`}>
-          {!progressFoldersReady ? <div role={progressFoldersLoadError ? 'alert' : 'status'} aria-live="polite" className={`flex h-full min-h-[360px] flex-col items-center justify-center gap-3 border-y border-slate-200 text-sm ${progressFoldersLoadError ? 'text-red-600' : 'text-slate-500'}`}>
-            {progressFoldersLoadError ? <><AlertTriangle size={20}/><span>读取版本树失败：{progressFoldersLoadError}</span><button type="button" onClick={() => void loadProgressFoldersSnapshot().then(() => loadProgressFolders())} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-slate-700 hover:bg-slate-50">重新加载</button></> : <><Loader2 size={20} className="animate-spin"/><span>正在读取版本关系…</span></>}
+          {!progressFoldersReady ? <div role={progressFoldersLoadError ? 'alert' : versionTreeSlowLoadVisible ? 'status' : undefined} aria-live={progressFoldersLoadError || versionTreeSlowLoadVisible ? 'polite' : undefined} className={`flex h-full min-h-[360px] flex-col items-center justify-center gap-3 border-y border-slate-200 text-sm ${progressFoldersLoadError ? 'text-red-600' : 'text-slate-500'}`}>
+            {progressFoldersLoadError ? <><AlertTriangle size={20}/><span>读取版本树失败：{progressFoldersLoadError}</span><button type="button" onClick={() => void loadProgressFoldersSnapshot().then(() => loadProgressFolders())} className="rounded-md border border-slate-300 bg-white px-3 py-1.5 text-slate-700 hover:bg-slate-50">重新加载</button></> : versionTreeSlowLoadVisible ? <><Loader2 size={20} className="animate-spin"/><span>正在读取版本关系…</span></> : null}
           </div> : progressRelationInspection.needsRepair ? <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-5 text-amber-900"><div className="flex items-center gap-2 font-bold"><AlertTriangle size={18}/>版本关系需要修复</div><p className="mt-2 text-sm">检测到循环关系，已停止版本树遍历，避免应用崩溃。</p><p className="mt-2 break-all font-mono text-xs text-amber-700">节点 ID：{progressRelationInspection.cycleNodeIds.join('、')}</p></div> : <>{orphanedProgressFolders.length > 0 && <div role="alert" className="m-4 rounded-xl border border-amber-300 bg-amber-50 p-4 text-amber-900"><div className="flex items-center gap-2 font-bold"><AlertTriangle size={18}/>旧版游离进度已保留</div><p className="mt-2 text-sm">这些节点不会在刷新时自动删除，也不能作为新版本的父节点。请打开“修改进度”选择有效父版本，或显式取消版本登记；物理文件不会被删除。</p><p className="mt-2 text-xs text-amber-700">{orphanedProgressFolders.map(folder => folder.displayName).join('、')}</p></div>}<ProjectVersionTree
             active={active && activeView === 'project'}
             progressFolders={progressFolders}

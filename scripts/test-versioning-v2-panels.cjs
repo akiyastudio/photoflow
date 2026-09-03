@@ -143,11 +143,23 @@ const projectWorkspaceSource = [
   'src/features/workspace/createProjectProgressWorkflow.ts',
   'src/features/workspace/useProgressFolderOnboarding.ts',
 ].map(relativePath => fs.readFileSync(path.resolve(__dirname, '..', relativePath), 'utf8')).join('\n');
+const mainProcessSource = fs.readFileSync(path.resolve(__dirname, '..', 'electron/main.cjs'), 'utf8');
+const layoutCacheSource = fs.readFileSync(path.resolve(__dirname, '..', 'src/features/versioning/version-tree-layout-cache.ts'), 'utf8');
 assert(canvasHookSource.includes('sameCanvasPositions(positionsRef.current, next)'), 'version-tree layout reconciliation must skip identical maps to prevent effect update loops');
-assert(projectWorkspaceSource.includes("!progressFoldersReady ? <div role={progressFoldersLoadError ? 'alert' : 'status'}")
+assert(projectWorkspaceSource.includes("!progressFoldersReady ? <div role={progressFoldersLoadError ? 'alert' : versionTreeSlowLoadVisible ? 'status' : undefined}")
   && projectWorkspaceSource.includes('正在读取版本关系…'), 'the version-tree route must not classify every entry as Other before progress metadata is hydrated');
 assert(projectWorkspaceSource.includes('projectWorkspaceClient.getProgressFoldersSnapshot(workspacePath, project.name)')
   && projectWorkspaceSource.includes('loadProgressFoldersSnapshot().then(() =>'), 'version-tree metadata must hydrate from a fast snapshot before filesystem location reconciliation runs in the background');
+assert(projectWorkspaceSource.includes('peekVersionTreeSnapshot(workspacePath, project.name, project.path, project.status)')
+  && projectWorkspaceSource.includes('rememberVersionTreeSnapshot(workspacePath, project.name, project.path, project.status'), 'trusted session snapshots must make repeated version-tree mounts immediately renderable');
+assert(projectWorkspaceSource.includes('useDelayedVisibility(versionTreeOpen && !progressFoldersReady && !progressFoldersLoadError, 300)')
+  && !projectWorkspaceSource.includes('scheduleAfterProjectPaint(PROJECT_BACKGROUND_LOAD_DELAYS_MS.progress'), 'the first relationship snapshot must start immediately and avoid flashing a loading indicator for normal fast reads');
+assert(mainProcessSource.includes('snapshotProgress: versionReadRepository.snapshotProgress')
+  && mainProcessSource.includes('getVersionTreeLayout: versionReadRepository.getVersionTreeLayout')
+  && mainProcessSource.includes('snapshotProgressLocations: versionLocationRepository.snapshotProgressLocations'), 'first-paint reads and slow filesystem reconciliation must use isolated database workers');
+assert(mainProcessSource.includes('versionReadDatabase,') && mainProcessSource.includes('versionLocationDatabase,')
+  && mainProcessSource.includes('versionReadDatabase.stop();') && mainProcessSource.includes('versionLocationDatabase.stop();'), 'isolated version workers must participate in recovery suspension and shutdown');
+assert(!layoutCacheSource.includes('loadVersionTreeLayout(workspacePath, projectName, scopeKey, true)'), 'activation layout prefetch must reuse a successful session cache instead of forcing a redundant read ahead of metadata');
 assert(projectWorkspaceSource.includes("prefetchVersionTreeLayout(workspacePath, project.name, '')"), 'the root version-tree layout must be prefetched before the user opens the tree');
 const initialLayoutLoadSource = canvasHookSource.slice(canvasHookSource.indexOf('const loadServerLayout'), canvasHookSource.indexOf('useEffect(() => {\n    disposedRef.current = false'));
 assert(!initialLayoutLoadSource.includes('scrollTop = 0') && !initialLayoutLoadSource.includes('scrollLeft = 0'), 'an asynchronous saved-layout load must preserve a viewport the user already scrolled');
