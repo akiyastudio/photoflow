@@ -1,6 +1,6 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
 
-const notificationFailure = (code, message) => Object.freeze({ apiVersion: 7, accepted: false, error: Object.freeze({ code, message, retryable: false }) });
+const notificationFailure = (code, message) => Object.freeze({ accepted: false, error: Object.freeze({ code, message, retryable: false }) });
 const normalizeNotification = value => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return notificationFailure('NOTIFICATION_INVALID_PAYLOAD', 'Notification payload must be an object');
   const unknown = Object.keys(value).find(key => !['tone', 'message', 'dedupeKey'].includes(key));
@@ -46,7 +46,7 @@ const subscribe = (channel, callback) => {
 };
 
 contextBridge.exposeInMainWorld('photoFlowComponent', Object.freeze({
-  // Bridge ABI version; Host API negotiation is reported by getContext().
+  // Bridge ABI version; this is independent from the unversioned Host API.
   contractVersion: 1,
   getContext: () => ipcRenderer.invoke('component-sdk:get-context'),
   authorizeFiles: files => {

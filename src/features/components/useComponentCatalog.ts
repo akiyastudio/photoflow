@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ComponentSettingsPageContribution, ComponentStatus } from '../../types';
 import { readCachedComponentStatuses } from './component-cache';
 import { componentHostCatalogKey } from './useComponentPages';
@@ -9,7 +9,8 @@ type UseComponentCatalogOptions = {
 };
 
 const cacheComponents = (components: ComponentStatus[]) => {
-  window.localStorage.setItem('photoflow:components-cache', JSON.stringify(components));
+  try { window.localStorage.setItem('photoflow:components-cache', JSON.stringify(components.slice(0, 512))); }
+  catch { /* Cache quota or privacy mode must not turn a successful refresh into a failure. */ }
 };
 
 export const useComponentCatalog = ({ onError, onSettingsPagesChanged }: UseComponentCatalogOptions) => {
@@ -17,22 +18,25 @@ export const useComponentCatalog = ({ onError, onSettingsPagesChanged }: UseComp
   const [componentInstallPath, setComponentInstallPath] = useState('');
   const [componentsLoading, setComponentsLoading] = useState(true);
   const [componentSettingsPages, setComponentSettingsPages] = useState<ComponentSettingsPageContribution[]>([]);
+  const refreshGeneration = useRef(0);
   const catalogKey = componentHostCatalogKey(components);
 
   const refreshComponents = useCallback(async (force = false) => {
+    const generation = ++refreshGeneration.current;
     setComponentsLoading(true);
     try {
       const result = await window.electronAPI.getComponents(force);
+      if (generation !== refreshGeneration.current) return;
       if (!result.success) throw new Error(result.error || '无法读取组件状态');
       const nextComponents = result.components || [];
       setComponents(nextComponents);
       cacheComponents(nextComponents);
       setComponentInstallPath(result.installPath || '');
     } catch (error) {
-      setComponents([]);
+      if (generation !== refreshGeneration.current) return;
       onError(`读取组件状态失败：${error instanceof Error ? error.message : String(error)}`);
     } finally {
-      setComponentsLoading(false);
+      if (generation === refreshGeneration.current) setComponentsLoading(false);
     }
   }, [onError]);
 
@@ -51,6 +55,7 @@ export const useComponentCatalog = ({ onError, onSettingsPagesChanged }: UseComp
     }).catch(() => {
       if (!active) return;
       setComponentSettingsPages([]);
+      onSettingsPagesChanged([]);
     });
     return () => { active = false; };
   }, [catalogKey, onSettingsPagesChanged]);

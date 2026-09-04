@@ -1,7 +1,9 @@
-const readline = require('readline');
 const path = require('path');
 
 const MAX_LINE_BYTES = 2 * 1024 * 1024;
+const MAX_CAPABILITIES_PER_REQUEST = 128;
+const MAX_CONCURRENT_CAPABILITIES = 8;
+const MAX_PENDING_WRITE_BYTES = 4 * 1024 * 1024;
 const REQUEST_TIMEOUT_MS = 60 * 1000;
 const LONG_REQUEST_TIMEOUT_MS = 4 * 60 * 60 * 1000;
 const BACKUP_RESTORE_INVOCATION = Symbol('component-backup-restore-invocation');
@@ -57,6 +59,7 @@ class ComponentServiceManager {
     this.backupRestoreIdle = Promise.resolve();
     this.releaseBackupRestoreIdle = null;
     this.quarantinedComponents = new Map();
+    this.destroyed = false;
   }
 
   supports(componentId, method) {
@@ -170,6 +173,7 @@ class ComponentServiceManager {
   }
 
   async invoke(componentId, method, payload, boundContext) {
+    if (this.destroyed) throw new Error('Component service manager is destroyed');
     if (this.quarantinedComponents.has(String(componentId || ''))) { const error = new Error(`Component ${componentId} is quarantined`); error.code = 'COMPONENT_QUARANTINED'; throw error; }
     if (this.backupRestoreLeaseCount > 0) { await this.backupRestoreIdle; return this.invoke(componentId, method, payload, boundContext); }
     if (this.storageSnapshotBarrier) {
@@ -209,17 +213,17 @@ class ComponentServiceManager {
     const id = String(this.nextRequestId++);
     const message = { type: 'request', id, method, payload, context: {
       ...publicContext(boundContext, invocationIdentity === BACKUP_RESTORE_INVOCATION),
-      hostApiVersion: descriptor.hostApiVersion,
       permissions: ['application.settings', 'application.command'].includes(boundContext.surface)
         ? (descriptor.service.permissions || []).filter(permission => ['component.settings', 'component.secrets', 'network.fetch', 'component.lifecycle.read', 'component.lifecycle.manage', 'dialogs', 'notifications'].includes(permission))
         : descriptor.service.permissions || [],
     } };
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
-      const pending = { resolve, reject, timer: null, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0, longTimeoutArmed: forceLongTimeout, onTimeout: null };
+      const pending = { resolve, reject, timer: null, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0, activeCapabilities: 0, capabilityCount: 0, seenCapabilityIds: new Set(), deferredResponse: null, longTimeoutArmed: forceLongTimeout, onTimeout: null };
       pending.onTimeout = () => {
         if (session.pending.get(id) !== pending) return;
         session.pending.delete(id);
+        (session.completedParentIds ||= new Map()).set(id, Date.now());
         let cancelError = null;
         try { this.writeFrame(session, { type: 'cancel', id, reason: 'deadline-exceeded' }); }
         catch (error) { cancelError = error; }
@@ -242,6 +246,7 @@ class ComponentServiceManager {
   }
 
   async ensureSession(descriptor) {
+    if (this.destroyed) throw new Error('Component service manager is destroyed');
     this.assertNotQuarantined(descriptor?.componentId);
     if (this.storageSnapshotBarrier) {
       await this.storageSnapshotBarrier.released;
@@ -269,7 +274,7 @@ class ComponentServiceManager {
         stdio: ['pipe', 'pipe', 'pipe'],
       };
       const session = {
-        descriptor, version: descriptor.componentVersion, pending: new Map(), bufferBytes: 0,
+        descriptor, version: descriptor.componentVersion, pending: new Map(), completedParentIds: new Map(),
         ready: null, readyResolve: null, readyReject: null, readySettled: false, managed: null,
       };
       prepareReady(session);
@@ -293,18 +298,39 @@ class ComponentServiceManager {
 
   attach(session, child, managed) {
     if (session.readySettled) prepareReady(session);
-    const lines = readline.createInterface({ input: child.stdout, crlfDelay: Infinity });
-    lines.on('line', line => {
-      if (Buffer.byteLength(line) > MAX_LINE_BYTES) { managed.recycle('oversized-protocol-frame'); return; }
+    let fragments = []; let bufferedBytes = 0; let recycled = false;
+    const acceptLine = bytes => {
+      if (recycled) return;
+      const lineBytes = bytes.length && bytes[bytes.length - 1] === 13 ? bytes.subarray(0, -1) : bytes;
       let frame;
-      try { frame = JSON.parse(line); } catch { managed.recycle('invalid-protocol-frame'); return; }
+      try { frame = JSON.parse(lineBytes.toString('utf8')); } catch { recycled = true; managed.recycle('invalid-protocol-frame'); return; }
       void this.handleFrame(session, frame, managed).catch(error => {
+        recycled = true;
         this.writeLog('warn', 'Component service protocol handling failed', { componentId: session.descriptor.componentId, error: error.message || String(error) });
         managed.recycle('protocol-handler-failed');
       });
+    };
+    const onData = value => {
+      if (recycled) return;
+      const chunk = Buffer.isBuffer(value) ? value : Buffer.from(value);
+      let offset = 0;
+      while (offset < chunk.length) {
+        const newline = chunk.indexOf(10, offset);
+        const end = newline < 0 ? chunk.length : newline;
+        const segment = chunk.subarray(offset, end);
+        if (bufferedBytes + segment.length > MAX_LINE_BYTES) { recycled = true; fragments = []; bufferedBytes = 0; managed.recycle('oversized-protocol-frame'); return; }
+        if (segment.length) { fragments.push(segment); bufferedBytes += segment.length; }
+        if (newline < 0) return;
+        const line = fragments.length === 1 ? fragments[0] : Buffer.concat(fragments, bufferedBytes);
+        fragments = []; bufferedBytes = 0; acceptLine(line); offset = newline + 1;
+      }
+    };
+    child.stdout.on('data', onData);
+    child.stdout.on('end', () => {
+      if (!recycled && bufferedBytes) { recycled = true; managed.recycle('unterminated-protocol-frame'); }
     });
     child.once('exit', () => {
-      lines.close();
+      recycled = true; fragments = []; bufferedBytes = 0; child.stdout.removeListener('data', onData);
       for (const pending of session.pending.values()) {
         clearTimeout(pending.timer);
         const error = new Error(`Component service exited before completing ${session.descriptor.componentId}.${pending.method}`);
@@ -325,7 +351,15 @@ class ComponentServiceManager {
     if (frame?.type === 'response') {
       const pending = session.pending.get(String(frame.id || ''));
       if (!pending) return;
+      if (frame.ok !== true && frame.ok !== false) throw new Error('Component service response must declare a boolean ok result');
+      if (pending.activeCapabilities > 0) {
+        if (pending.deferredResponse) throw new Error('Component service sent duplicate parent responses');
+        pending.deferredResponse = frame;
+        return;
+      }
       session.pending.delete(String(frame.id));
+      (session.completedParentIds ||= new Map()).set(String(frame.id), Date.now());
+      while (session.completedParentIds.size > 256) session.completedParentIds.delete(session.completedParentIds.keys().next().value);
       clearTimeout(pending.timer);
       if (frame.ok === false) {
         const error = new Error(String(frame.error || 'Component service request failed'));
@@ -337,7 +371,11 @@ class ComponentServiceManager {
     }
     if (frame?.type === 'capability') {
       const parent = session.pending.get(String(frame.parentId || ''));
-      if (!parent) { this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: false, error: 'Unknown parent request' }); return; }
+      if (!parent) { if (session.completedParentIds?.has(String(frame.parentId || ''))) throw new Error('Component service sent a capability after its parent completed'); this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: false, error: 'Unknown parent request' }); return; }
+      const capabilityId = String(frame.id || '');
+      if (!capabilityId || parent.seenCapabilityIds.has(capabilityId)) throw new Error('Component service sent an invalid or duplicate capability id');
+      if (parent.activeCapabilities >= MAX_CONCURRENT_CAPABILITIES || parent.capabilityCount >= MAX_CAPABILITIES_PER_REQUEST) throw new Error('Component service exceeded nested capability limits');
+      parent.seenCapabilityIds.add(capabilityId); parent.capabilityCount += 1; parent.activeCapabilities += 1; this.activeInvocations += 1;
       parent.lastCapability = String(frame.method || '');
       const capabilityStartedAt = Date.now();
       parent.capabilityStartedAt = capabilityStartedAt;
@@ -357,9 +395,15 @@ class ComponentServiceManager {
       } catch (error) {
         this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: false, error: error.message || String(error), errorCode: error.code || 'COMPONENT_HOST_INTERNAL', retryable: error.retryable === true });
       } finally {
+        parent.activeCapabilities -= 1; this.activeInvocations -= 1;
+        if (this.activeInvocations === 0) { for (const notify of this.activityWaiters) notify(); this.activityWaiters.clear(); }
         if (session.pending.get(String(frame.parentId || '')) === parent && parent.capabilityStartedAt === capabilityStartedAt) {
           parent.lastCapability = '';
           parent.capabilityStartedAt = 0;
+        }
+        if (session.pending.get(String(frame.parentId || '')) === parent && parent.activeCapabilities === 0 && parent.deferredResponse) {
+          const deferred = parent.deferredResponse; parent.deferredResponse = null;
+          await this.handleFrame(session, deferred, managed);
         }
       }
       return;
@@ -379,7 +423,9 @@ class ComponentServiceManager {
   writeFrame(session, value) {
     const child = session.managed.child;
     if (!child?.stdin?.writable) throw new Error('Component service is unavailable');
-    child.stdin.write(`${JSON.stringify(value)}\n`);
+    const bytes = Buffer.from(`${JSON.stringify(value)}\n`);
+    if (bytes.length > MAX_LINE_BYTES || Number(child.stdin.writableLength || 0) + bytes.length > MAX_PENDING_WRITE_BYTES) throw new Error('Component service input backpressure limit exceeded');
+    child.stdin.write(bytes);
   }
 
   async stop(componentId, reason = 'component-service-stop') {
@@ -396,7 +442,7 @@ class ComponentServiceManager {
     if (this.backupRestoreLeaseCount > 0) { await this.backupRestoreIdle; return this.quiesceForStorageSnapshot({ timeoutMs }); }
     if (this.storageSnapshotBarrier) {
       await this.storageSnapshotBarrier.released;
-      return this.quiesceForStorageSnapshot();
+      return this.quiesceForStorageSnapshot({ timeoutMs });
     }
     let releaseBarrier;
     const barrier = { released: new Promise(resolve => { releaseBarrier = resolve; }), release: () => releaseBarrier() };
@@ -439,6 +485,8 @@ class ComponentServiceManager {
   }
 
   async destroy() {
+    if (this.destroyed) return;
+    this.destroyed = true;
     const barrier = this.storageSnapshotBarrier;
     this.storageSnapshotBarrier = null;
     barrier?.release();
@@ -449,4 +497,4 @@ class ComponentServiceManager {
   }
 }
 
-module.exports = { ComponentServiceManager, LONG_REQUEST_TIMEOUT_MS, MAX_LINE_BYTES, REQUEST_TIMEOUT_MS, cloneRequestPayload, prepareReady, publicContext, serviceEnvironment };
+module.exports = { ComponentServiceManager, LONG_REQUEST_TIMEOUT_MS, MAX_CAPABILITIES_PER_REQUEST, MAX_CONCURRENT_CAPABILITIES, MAX_LINE_BYTES, MAX_PENDING_WRITE_BYTES, REQUEST_TIMEOUT_MS, cloneRequestPayload, prepareReady, publicContext, serviceEnvironment };

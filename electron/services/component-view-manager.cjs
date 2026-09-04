@@ -1,4 +1,5 @@
 const path = require('path');
+const { fileURLToPath } = require('url');
 const { normalizeComponentSettingsFormValues, validateComponentSettingsFormPatch } = require('../contracts/component-settings-form-contract.cjs');
 
 const PAGE_KEY_SEPARATOR = '\u001f';
@@ -21,16 +22,17 @@ const normalizeOpenScope = request => {
   if (sourcePageId.length > 160) throw new Error('Invalid component source page');
   return { scopeRelativePath, selectedRelativePaths, sourcePageId };
 };
-const componentPageKey = ({ componentId, workspacePath, projectId }) => ['project', componentId, normalizeIdentity(workspacePath), String(projectId || '').trim()].join(PAGE_KEY_SEPARATOR);
+const componentPageKey = ({ componentId, pageId, workspacePath, projectId }) => ['project', componentId, String(pageId || '').trim(), normalizeIdentity(workspacePath), String(projectId || '').trim()].join(PAGE_KEY_SEPARATOR);
 const componentSettingsPageKey = ({ componentId, pageId }) => ['application.settings', componentId, String(pageId || '').trim()].join(PAGE_KEY_SEPARATOR);
-const componentContributionKey = ({ componentId, contributionId, workspacePath, projectId, sourcePageId }, surface) => [surface, componentId, contributionId, normalizeIdentity(workspacePath), String(projectId || ''), surface === 'component.sidePanel' ? String(sourcePageId || '').trim() : ''].join(PAGE_KEY_SEPARATOR);
+const componentContributionKey = ({ componentId, contributionId, workspacePath, projectId, sourcePageId }, surface) => surface === 'application.command'
+  ? [surface, componentId, contributionId].join(PAGE_KEY_SEPARATOR)
+  : [surface, componentId, contributionId, normalizeIdentity(workspacePath), String(projectId || ''), surface === 'component.sidePanel' ? String(sourcePageId || '').trim() : ''].join(PAGE_KEY_SEPARATOR);
 const validBounds = value => value && ['x', 'y', 'width', 'height'].every(key => Number.isFinite(value[key]))
   && value.width >= 0 && value.height >= 0 && value.width <= 20000 && value.height <= 20000;
 const selectComponentPreload = (descriptor, { core }) => {
   const contractVersion = Number(descriptor?.contractVersion);
-  const hostApiVersion = Number(descriptor?.hostApiVersion);
-  if (contractVersion === 2 && hostApiVersion === 7) return core;
-  throw new Error(`Unsupported component preload contract: contract=${contractVersion || 'unknown'} hostApi=${hostApiVersion || 'unknown'}`);
+  if (contractVersion === 2) return core;
+  throw new Error(`Unsupported component preload contract: contract=${contractVersion || 'unknown'}`);
 };
 const diagnosticToken = value => {
   const token = String(value || '').trim();
@@ -69,6 +71,7 @@ class ComponentViewManager {
     this.rpcMethods = new Map();
     this.resolvedTheme = 'light';
     this.activeInstanceId = '';
+    this.activationGeneration = 0;
     this.hostSurfaceState = { rendererToken: '', revision: -1, suspended: false };
     this.registerComponentSdkIpc();
   }
@@ -138,7 +141,6 @@ class ComponentViewManager {
       componentId: item.componentId,
       componentVersion: item.componentVersion,
       contractVersion: item.contractVersion,
-      hostApiVersion: item.hostApiVersion,
       actionId: item.toolbarAction.id,
       label: item.toolbarAction.label,
       pageId: item.fullPage.id,
@@ -151,12 +153,12 @@ class ComponentViewManager {
   listSettingsPages() {
     return this.registry.list().flatMap(item => [
       ...(item.settingsForms || []).map(form => ({
-        componentId: item.componentId, componentVersion: item.componentVersion, contractVersion: item.contractVersion, hostApiVersion: item.hostApiVersion,
+        componentId: item.componentId, componentVersion: item.componentVersion, contractVersion: item.contractVersion,
         pageId: form.id, label: form.label, pageTitle: form.title, renderMode: form.customPage ? 'hybrid' : 'declarative', form: form.form, ...(form.customPage ? { customPageTitle: form.customPage.title } : {}), development: item.development === true,
         ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
       })),
       ...(item.settingsPages || []).map(page => ({
-        componentId: item.componentId, componentVersion: item.componentVersion, contractVersion: item.contractVersion, hostApiVersion: item.hostApiVersion,
+        componentId: item.componentId, componentVersion: item.componentVersion, contractVersion: item.contractVersion,
         pageId: page.id, label: page.label, pageTitle: page.title, renderMode: 'custom', development: item.development === true,
         ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}),
       })),
@@ -189,7 +191,7 @@ class ComponentViewManager {
     const result = await this.capabilityBroker.invoke(descriptor, 'component.settings', { action: 'merge', settings: patch }, this.declarativeSettingsContext(descriptor));
     return { apiVersion: 1, revision: Number(result.revision) || 0, values: normalizeComponentSettingsFormValues(contribution.form, result.settings) };
   }
-  listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, hostApiVersion: item.hostApiVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, ...(contribution.description ? { description: contribution.description } : {}), pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(contribution.placement ? { placement: contribution.placement } : {}), ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
+  listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, ...(contribution.description ? { description: contribution.description } : {}), pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(contribution.placement ? { placement: contribution.placement } : {}), ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
 
   async open(request) {
     return this.openSurface(request, 'project');
@@ -216,29 +218,33 @@ class ComponentViewManager {
   }
 
   async openSurface(rawRequest, surface) {
+    const activationGeneration = ++this.activationGeneration;
     const applicationLevel = surface === 'application.settings' || surface === 'application.command';
     const request = applicationLevel ? rawRequest : this.resolveOpenContext(rawRequest, surface);
     const settingsKey = surface === 'application.settings' ? componentSettingsPageKey(request) : '';
     const leaseId = surface === 'application.settings' ? String(request.leaseId || '') : '';
     if (surface === 'application.settings' && !/^[a-z0-9._:-]{8,160}$/i.test(leaseId)) throw new Error('Invalid component settings page lease');
-    const retainedSettings = settingsKey ? this.instances.get(settingsKey) : null;
-    if (retainedSettings?.context.surface === 'application.settings') {
-      clearTimeout(retainedSettings.settingsCloseTimer);
-      retainedSettings.settingsCloseTimer = null;
-      retainedSettings.settingsLeases.add(leaseId);
-      retainedSettings.leaseGeneration += 1;
-      await retainedSettings.readyPromise;
-      if (this.instances.get(settingsKey) !== retainedSettings || retainedSettings.view.webContents.isDestroyed()) throw new Error('Component page open was superseded');
-      if (!retainedSettings.settingsLeases.has(leaseId)) throw new Error('Component settings page lease was released');
-      this.activate(retainedSettings.instanceId);
-      return this.publicInstance(retainedSettings, leaseId);
-    }
     const descriptor = this.registry.resolve(request.componentId);
     const settingsFormCustomPage = surface === 'application.settings' ? descriptor?.settingsForms?.find(form => form.id === request.pageId)?.customPage : null;
     const declaredSettingsPage = surface === 'application.settings' ? descriptor?.settingsPages?.find(page => page.id === request.pageId) : null;
     const settingsPage = declaredSettingsPage || (settingsFormCustomPage ? { ...settingsFormCustomPage, id: String(request.pageId) } : null); const contribution = request.contribution || null;
     const page = surface === 'application.settings' ? settingsPage : contribution ? descriptor?.pages?.find(item => item.id === contribution.pageId) : descriptor?.fullPage;
     if (!descriptor || !page || page.id !== request.pageId) throw new Error('Unknown component page');
+    const retainedSettings = settingsKey ? this.instances.get(settingsKey) : null;
+    if (retainedSettings?.context.surface === 'application.settings') {
+      if (retainedSettings.descriptor.componentVersion !== descriptor.componentVersion || retainedSettings.page.entry !== page.entry) this.close(retainedSettings.instanceId);
+      else {
+        clearTimeout(retainedSettings.settingsCloseTimer);
+        retainedSettings.settingsCloseTimer = null;
+        retainedSettings.settingsLeases.add(leaseId);
+        retainedSettings.leaseGeneration += 1;
+        await retainedSettings.readyPromise;
+        if (this.instances.get(settingsKey) !== retainedSettings || retainedSettings.view.webContents.isDestroyed()) throw new Error('Component page open was superseded');
+        if (!retainedSettings.settingsLeases.has(leaseId)) throw new Error('Component settings page lease was released');
+        if (!this.activate(retainedSettings.instanceId, activationGeneration)) { this.releaseSettings(request); throw new Error('Component page open was superseded'); }
+        return this.publicInstance(retainedSettings, leaseId);
+      }
+    }
     const key = settingsKey || (contribution ? componentContributionKey(request, surface) : componentPageKey(request));
     this.writeLog('info', 'Component page context bound', { componentId: request.componentId, surface, contributionId: contribution?.id || '', projectId: applicationLevel ? '' : String(request.projectId || ''), projectName: applicationLevel ? '' : String(request.projectName || ''), projectStatus: applicationLevel ? '' : String(request.projectStatus || ''), sourcePageId: applicationLevel ? '' : String(request.sourcePageId || '') });
     let existing = this.instances.get(key);
@@ -260,12 +266,14 @@ class ComponentViewManager {
         ...(!applicationLevel ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }), contributionId: contribution?.id || '',
       });
       if (!existing.view.webContents.isDestroyed()) existing.view.webContents.send('component-sdk:context-changed', this.publicContext(existing));
-      this.activate(existing.instanceId); return this.publicInstance(existing, leaseId);
+      if (!this.activate(existing.instanceId, activationGeneration)) { if (surface === 'application.settings') this.releaseSettings(request); throw new Error('Component page open was superseded'); }
+      return this.publicInstance(existing, leaseId);
     }
     const instanceId = `component-page-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const selectedPreloadPath = selectComponentPreload(descriptor, { core: this.preloadPath });
     const view = new this.WebContentsView({ webPreferences: {
       preload: selectedPreloadPath,
+      partition: `persist:component-host-${descriptor.componentId.toLowerCase()}`,
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
@@ -288,6 +296,7 @@ class ComponentViewManager {
         projectId: !applicationLevel ? String(request.projectId || '') : '',
         projectName: !applicationLevel ? String(request.projectName || '') : '',
         projectStatus: !applicationLevel ? String(request.projectStatus || '') : '',
+        ...(!applicationLevel ? { contentKind: request.contentKind === 'inspiration' ? 'inspiration' : 'project', contentRootPath: String(request.contentRootPath || '') } : {}),
         ...(!applicationLevel ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }), contributionId: contribution?.id || '',
         eventSender: view.webContents,
         emitComponentEvent: (topic, payload) => {
@@ -304,7 +313,6 @@ class ComponentViewManager {
     const diagnostic = (level, message, details = {}) => this.writeLog(level, message, {
       componentId: descriptor.componentId,
       contractVersion: descriptor.contractVersion,
-      hostApiVersion: descriptor.hostApiVersion,
       ...details,
     });
     view.webContents.on('preload-error', (_event, _preloadPath, error) => diagnostic('error', 'Component preload failed', {
@@ -331,6 +339,18 @@ class ComponentViewManager {
     view.webContents.on('will-attach-webview', event => event.preventDefault());
     view.webContents.session.setPermissionCheckHandler(() => false);
     view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
+    view.webContents.session.webRequest?.onBeforeRequest?.((details, callback) => {
+      let allowed = false;
+      try {
+        const requestUrl = new URL(details.url);
+        if (['data:', 'blob:'].includes(requestUrl.protocol)) allowed = true;
+        else if (requestUrl.protocol === 'file:') {
+          const candidate = path.resolve(fileURLToPath(requestUrl)); const root = path.resolve(descriptor.componentRoot);
+          const relative = path.relative(root, candidate); allowed = !relative.startsWith('..') && !path.isAbsolute(relative);
+        }
+      } catch { allowed = false; }
+      callback({ cancel: !allowed });
+    });
     view.webContents.once('destroyed', () => {
       this.senderBindings.delete(senderId);
       if (this.instances.get(key) === instance) this.instances.delete(key);
@@ -347,7 +367,7 @@ class ComponentViewManager {
     try { await instance.readyPromise; }
     catch (error) { if (this.instances.get(key) === instance) this.close(instanceId); throw error; }
     if (surface === 'application.settings' && !instance.settingsLeases.has(leaseId)) throw new Error('Component settings page lease was released');
-    this.activate(instanceId);
+    if (!this.activate(instanceId, activationGeneration)) { this.close(instanceId); throw new Error('Component page open was superseded'); }
     return this.publicInstance(instance, leaseId);
   }
 
@@ -363,7 +383,6 @@ class ComponentViewManager {
       : instance.descriptor.service?.permissions || [];
     return {
       ...publicContext,
-      hostApiVersion: instance.descriptor.hostApiVersion,
       permissions,
       events: applicationSurface ? [] : instance.descriptor.service?.events || [],
       themeContractVersion: 1,
@@ -397,7 +416,9 @@ class ComponentViewManager {
     return true;
   }
 
-  activate(instanceId) {
+  activate(instanceId, expectedGeneration = null) {
+    if (expectedGeneration === null) this.activationGeneration += 1;
+    else if (expectedGeneration !== this.activationGeneration) return false;
     const found = !instanceId || [...this.instances.values()].some(instance => instance.instanceId === instanceId);
     if (!found) return false;
     this.activeInstanceId = instanceId;
@@ -408,7 +429,6 @@ class ComponentViewManager {
         if (!instance.view.webContents.isDestroyed()) instance.view.webContents.send(active ? 'component-sdk:activate' : 'component-sdk:deactivate');
       }
       this.applyVisibility(instance);
-      this.applyBounds(instance);
     }
     this.onViewStackChanged();
     return Boolean(instanceId);
@@ -416,6 +436,7 @@ class ComponentViewManager {
 
   applyVisibility(instance) {
     instance.view.setVisible(instance.logicalActive && !this.hostSurfaceState.suspended);
+    this.applyBounds(instance);
   }
 
   setHostSurfaceSuspended(update) {
@@ -446,7 +467,9 @@ class ComponentViewManager {
   }
 
   applyBounds(instance) {
-    const bounds = instance.requestedBounds;
+    const bounds = instance.logicalActive && !this.hostSurfaceState.suspended
+      ? instance.requestedBounds
+      : { x: 0, y: 0, width: 0, height: 0 };
     instance.view.setBounds({ x: Math.round(bounds.x), y: Math.round(bounds.y), width: Math.round(bounds.width), height: Math.round(bounds.height) });
   }
 

@@ -28,15 +28,21 @@ export const ComponentDeclarativeSettingsSurface = ({ page }: { page: Declarativ
   const committedRef = useRef<Values>({});
   const pendingRef = useRef<Values>({});
   const queueRef = useRef<Promise<void>>(Promise.resolve());
+  const loadGeneration = useRef(0);
 
   const load = useCallback(async () => {
+    const generation = ++loadGeneration.current;
     setLoading(true); setLoadError(''); setSaveError('');
-    const result = await window.electronAPI.readComponentSettingsForm({ componentId: page.componentId, pageId: page.pageId });
-    if (!result.success || !result.values) { setLoadError(result.error || '无法读取组件设置'); setLoading(false); return; }
-    committedRef.current = result.values; pendingRef.current = {}; setValues(result.values); setLoading(false);
+    try {
+      const result = await window.electronAPI.readComponentSettingsForm({ componentId: page.componentId, pageId: page.pageId });
+      if (generation !== loadGeneration.current) return;
+      if (!result.success || !result.values) { setLoadError(result.error || '无法读取组件设置'); return; }
+      committedRef.current = result.values; pendingRef.current = {}; setValues(result.values);
+    } catch (error) { if (generation === loadGeneration.current) setLoadError(error instanceof Error ? error.message : String(error)); }
+    finally { if (generation === loadGeneration.current) setLoading(false); }
   }, [page.componentId, page.pageId]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => { void load(); return () => { loadGeneration.current += 1; }; }, [load]);
   const handleCustomReady = useCallback(() => { setCustomLoadError(''); setCustomReady(true); }, []);
   const handleCustomError = useCallback((message: string) => { setCustomReady(false); setCustomLoadError(message); }, []);
   const retryHybridLoad = () => {

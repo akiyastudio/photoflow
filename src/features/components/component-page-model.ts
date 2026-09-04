@@ -1,7 +1,7 @@
 import type { ComponentHostAction, ComponentPageInstance, WorkspaceProject } from '../../types';
 
-export const componentPageIdentity = (componentId: string, workspacePath: string, projectId: string) =>
-  `${componentId}\u001f${workspacePath.replace(/\\/g, '/').toLocaleLowerCase()}\u001f${projectId}`;
+export const componentPageIdentity = (componentId: string, pageId: string, workspacePath: string, projectId: string) =>
+  `${componentId}\u001f${pageId}\u001f${workspacePath.replace(/\\/g, '/').toLowerCase()}\u001f${projectId}`;
 
 export const ensureComponentPage = (
   pages: ComponentPageInstance[],
@@ -10,7 +10,7 @@ export const ensureComponentPage = (
   workspacePath: string,
   insertAfterTabId = 'home',
 ): { pages: ComponentPageInstance[]; page: ComponentPageInstance; created: boolean } => {
-  const identity = componentPageIdentity(action.componentId, workspacePath, project.id);
+  const identity = componentPageIdentity(action.componentId, action.pageId, workspacePath, project.id);
   const existing = pages.find(page => page.identity === identity);
   if (existing) return { pages, page: existing, created: false };
   const page: ComponentPageInstance = {
@@ -41,6 +41,6 @@ export const componentPageIsAvailable = (page: ComponentPageInstance, components
 export const componentPageActivationSucceeded = (result: { success?: boolean } | null | undefined) => result?.success === true;
 
 export const closeProjectComponentPages = (pages: ComponentPageInstance[], workspacePath: string, projectId: string) => {
-  const normalizedWorkspace = workspacePath.replace(/\\/g, '/').toLocaleLowerCase();
-  return pages.filter(page => page.projectId !== projectId || page.workspacePath.replace(/\\/g, '/').toLocaleLowerCase() !== normalizedWorkspace);
+  const normalizedWorkspace = workspacePath.replace(/\\/g, '/').toLowerCase();
+  return pages.filter(page => page.projectId !== projectId || page.workspacePath.replace(/\\/g, '/').toLowerCase() !== normalizedWorkspace);
 };

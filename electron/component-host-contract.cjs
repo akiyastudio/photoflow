@@ -9,9 +9,6 @@ const {
 const { parseComponentSettingsForm } = require('./contracts/component-settings-form-contract.cjs');
 
 const COMPONENT_HOST_CONTRACT_VERSION = 2;
-const COMPONENT_HOST_MIN_API_VERSION = 7;
-const COMPONENT_HOST_MAX_API_VERSION = 7;
-const COMPONENT_HOST_API_VERSION = COMPONENT_HOST_MAX_API_VERSION;
 const COMPONENT_SERVICE_PROTOCOL_VERSION = 1;
 const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage', 'application.settingsPage', 'application.settingsForm', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command']);
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
@@ -177,18 +174,13 @@ const parseComponentIcon = (value, componentRoot, developmentOverride = null) =>
 const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = null, adoptionPolicy = defaultComponentDataAdoptionPolicy) => {
   const host = manifest?.componentHost;
   if (host === undefined) return null;
-  if (Number(manifest.apiVersion) !== 1) throw new Error(`Unsupported component apiVersion: ${manifest.apiVersion}`);
   if (!host || typeof host !== 'object' || Array.isArray(host)) throw new Error('Invalid componentHost manifest');
   const contractVersion = Number(host.contractVersion);
   if (contractVersion !== COMPONENT_HOST_CONTRACT_VERSION) throw new Error(`Unsupported component host contractVersion: ${host.contractVersion}`);
   rejectUnknownFields(host, ['contractVersion', 'compatibility', 'contributions', 'service', 'adoptionGrants', 'legacySettingsAdoptions'], 'component host');
-  const compatibility = host.compatibility;
-  if (!compatibility || typeof compatibility !== 'object') throw new Error('Missing component host compatibility range');
-  rejectUnknownFields(compatibility, ['minHostApiVersion', 'maxHostApiVersion'], 'component compatibility');
-  const min = Number(compatibility.minHostApiVersion);
-  const max = Number(compatibility.maxHostApiVersion);
-  if (min !== COMPONENT_HOST_API_VERSION || max !== COMPONENT_HOST_API_VERSION) throw new Error(`Component Host supports only Host API ${COMPONENT_HOST_API_VERSION}; minHostApiVersion and maxHostApiVersion must both be ${COMPONENT_HOST_API_VERSION}`);
-  const negotiatedHostApiVersion = COMPONENT_HOST_API_VERSION;
+  // Early development manifests carried a Host API range. It is accepted only
+  // as inert compatibility metadata so existing local packages keep loading.
+  if (host.compatibility !== undefined && (!host.compatibility || typeof host.compatibility !== 'object' || Array.isArray(host.compatibility))) throw new Error('Invalid component host compatibility metadata');
   if (!Array.isArray(host.contributions) || host.contributions.length < 2 || host.contributions.length > 32) throw new Error('Component host contributions must be a bounded array');
 
   const componentId = requiredId(manifest.id, 'component id');
@@ -426,8 +418,6 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     componentId,
     componentVersion: requiredText(manifest.version, 'component version', 80),
     contractVersion,
-    hostApiVersion: negotiatedHostApiVersion,
-    compatibility: { minHostApiVersion: min, maxHostApiVersion: max },
     adoptionGrants: Object.freeze([...adoptionGrants]),
     legacySettingsAdoptions: Object.freeze(legacySettingsAdoptions),
     toolbarAction: actions[0] ? Object.freeze({ ...actions[0], pageTitle: page.title }) : null,
@@ -481,9 +471,6 @@ const createComponentHostRegistry = ({ roots = [], candidateProvider = null, adm
 };
 
 module.exports = {
-  COMPONENT_HOST_API_VERSION,
-  COMPONENT_HOST_MIN_API_VERSION,
-  COMPONENT_HOST_MAX_API_VERSION,
   COMPONENT_HOST_CONTRACT_VERSION,
   COMPONENT_SERVICE_PROTOCOL_VERSION,
   CONTRIBUTION_TYPES,

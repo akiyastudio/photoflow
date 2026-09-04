@@ -20,7 +20,8 @@ const copyTreeVerified = async ({ fs, path, crypto, source, destination, overwri
   metrics.byteCount += stat.size;
   return metrics;
 };
-const readReceipt = async (fs, filePath) => { try { return JSON.parse(await fs.promises.readFile(filePath, 'utf8')); } catch { return null; } };
+const readReceipt = async (fs, filePath) => { try { const value = JSON.parse(await fs.promises.readFile(filePath, 'utf8')); if (!value || typeof value !== 'object' || Array.isArray(value)) throw new Error('Invalid component storage receipt'); return value; } catch (error) { if (error?.code === 'ENOENT') return null; throw error; } };
+const validReceipt = (value, componentId, state = 'committed') => Boolean(value?.schemaVersion === 1 && value.kind === 'component-storage-adoption' && value.state === state && value.componentId === componentId);
 const transactionPaths = (path, componentRoot, componentId) => {
   const parent = path.dirname(componentRoot);
   return {
@@ -44,7 +45,7 @@ const recoverLegacyStorageV1 = async ({ fs, path, componentRoot, descriptor }) =
   }
   const journal = await readReceipt(fs, transaction.journal);
   const visibleReceipt = await readReceipt(fs, path.join(componentRoot, 'receipts', 'migrations', 'legacy-storage-v1.json'));
-  if (visibleReceipt?.state === 'committed' && visibleReceipt.componentId === descriptor.componentId) {
+  if (validReceipt(visibleReceipt, descriptor.componentId)) {
     await fs.promises.rm(transaction.pending, { recursive: true, force: true });
     await fs.promises.rm(transaction.previous, { recursive: true, force: true });
     await fs.promises.rm(transaction.journal, { force: true });
@@ -56,7 +57,7 @@ const recoverLegacyStorageV1 = async ({ fs, path, componentRoot, descriptor }) =
       const pendingStat = await fs.promises.lstat(transaction.pending);
       const pendingReceipt = pendingStat.isDirectory() && !pendingStat.isSymbolicLink()
         ? await readReceipt(fs, path.join(transaction.pending, 'receipts', 'migrations', 'legacy-storage-v1.json')) : null;
-      if (pendingReceipt?.state === 'committed' && pendingReceipt.componentId === descriptor.componentId) {
+      if (validReceipt(pendingReceipt, descriptor.componentId)) {
         await fs.promises.rename(transaction.pending, componentRoot);
         return pendingReceipt;
       }
@@ -65,21 +66,21 @@ const recoverLegacyStorageV1 = async ({ fs, path, componentRoot, descriptor }) =
     if (fs.existsSync(componentRoot)) await fs.promises.rm(transaction.previous, { recursive: true, force: true });
     return null;
   }
-  if (journal.componentId !== descriptor.componentId || journal.kind !== 'component-storage-adoption') throw new Error('Legacy component storage adoption journal has an invalid identity');
+  if (!validReceipt(journal, descriptor.componentId, 'prepared')) throw new Error('Legacy component storage adoption journal has an invalid identity');
   if (!fs.existsSync(componentRoot) && fs.existsSync(transaction.previous)) {
     await fs.promises.rename(transaction.previous, componentRoot);
   } else if (!fs.existsSync(componentRoot) && fs.existsSync(transaction.pending)) {
     const pendingStat = await fs.promises.lstat(transaction.pending);
     const pendingReceipt = pendingStat.isDirectory() && !pendingStat.isSymbolicLink()
       ? await readReceipt(fs, path.join(transaction.pending, 'receipts', 'migrations', 'legacy-storage-v1.json')) : null;
-    if (pendingReceipt?.state !== 'committed' || pendingReceipt.componentId !== descriptor.componentId) {
+    if (!validReceipt(pendingReceipt, descriptor.componentId)) {
       await fs.promises.rm(transaction.pending, { recursive: true, force: true });
       await fs.promises.rm(transaction.journal, { force: true });
       return null;
     }
     await fs.promises.rename(transaction.pending, componentRoot);
     const committed = await readReceipt(fs, path.join(componentRoot, 'receipts', 'migrations', 'legacy-storage-v1.json'));
-    if (committed?.state !== 'committed' || committed.componentId !== descriptor.componentId) throw new Error('Recovered component storage package has no committed receipt');
+    if (!validReceipt(committed, descriptor.componentId)) throw new Error('Recovered component storage package has no committed receipt');
     await fs.promises.rm(transaction.journal, { force: true });
     return committed;
   }
@@ -93,7 +94,7 @@ const adoptLegacyStorageV1 = async ({ fs, path, crypto, dataRoot, componentRoot,
   const recovered = await recoverLegacyStorageV1({ fs, path, componentRoot, descriptor });
   if (recovered) return recovered;
   const existing = await readReceipt(fs, path.join(componentRoot, receiptRelative));
-  if (existing?.state === 'committed' && existing?.componentId === descriptor.componentId) return existing;
+  if (validReceipt(existing, descriptor.componentId)) return existing;
   const legacyDataRoot = path.join(dataRoot, descriptor.componentId);
   const legacyDatabasePath = path.join(dataRoot, 'databases', `${descriptor.componentId}.sqlite3`);
   const legacyData = await fs.promises.lstat(legacyDataRoot).catch(() => null);
@@ -118,7 +119,7 @@ const adoptLegacyStorageV1 = async ({ fs, path, crypto, dataRoot, componentRoot,
       }
     }
     if (fs.existsSync(componentRoot)) await copyTreeVerified({ fs, path, crypto, source: componentRoot, destination: pending, overwrite: true, metrics: copied });
-    const receipt = { schemaVersion: 1, kind: 'component-storage-adoption', state: 'committed', componentId: descriptor.componentId, fromHostApiVersion: 1, toHostApiVersion: 2, adoptedDataRoot: Boolean(legacyData), adoptedDatabase: Boolean(legacyDatabase), legacyDataRoot: legacyData ? legacyDataRoot : '', legacyDatabasePath: legacyDatabase ? legacyDatabasePath : '', databaseSha256: legacyDatabase ? await digest(fs, crypto, legacyDatabasePath) : '', copiedFileCount: copied.fileCount, copiedByteCount: copied.byteCount, adoptedAt: Date.now() };
+    const receipt = { schemaVersion: 1, kind: 'component-storage-adoption', state: 'committed', componentId: descriptor.componentId, adoptedDataRoot: Boolean(legacyData), adoptedDatabase: Boolean(legacyDatabase), legacyDataRoot: legacyData ? legacyDataRoot : '', legacyDatabasePath: legacyDatabase ? legacyDatabasePath : '', databaseSha256: legacyDatabase ? await digest(fs, crypto, legacyDatabasePath) : '', copiedFileCount: copied.fileCount, copiedByteCount: copied.byteCount, adoptedAt: Date.now() };
     const receiptPath = path.join(pending, receiptRelative);
     await fs.promises.mkdir(path.dirname(receiptPath), { recursive: true });
     await fs.promises.writeFile(receiptPath, `${JSON.stringify(receipt, null, 2)}\n`, { encoding: 'utf8', flag: 'wx' });

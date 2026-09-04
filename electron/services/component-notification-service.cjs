@@ -1,5 +1,5 @@
-const NOTIFICATION_API_VERSION = 7;
 const NOTIFICATION_CAPABILITY = 'notifications';
+const RENDERER_EVENT_CONTRACT_VERSION = 7;
 const NOTIFICATION_PERMISSION = 'notifications';
 const NOTIFICATION_TONES = new Set(['info', 'success', 'warning', 'error']);
 const MESSAGE_MAX_LENGTH = 360;
@@ -14,7 +14,7 @@ const CONTENT_DEDUPE_WINDOW_MS = 1200;
 const BUFFER_LIMIT = 32;
 const BUFFER_TTL_MS = 15000;
 
-const failure = (code, message, retryable = false) => Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, accepted: false, error: Object.freeze({ code, message, retryable }) });
+const failure = (code, message, retryable = false) => Object.freeze({ accepted: false, error: Object.freeze({ code, message, retryable }) });
 
 const normalizeNotificationPayload = value => {
   if (!value || typeof value !== 'object' || Array.isArray(value)) return failure('NOTIFICATION_INVALID_PAYLOAD', 'Notification payload must be an object');
@@ -72,7 +72,6 @@ class ComponentNotificationService {
   }
 
   publish(descriptor, payload, context = {}) {
-    if (descriptor?.hostApiVersion !== 7) return failure('NOTIFICATION_HOST_API_REQUIRED', 'Notifications require Host API');
     if (!descriptor?.service?.capabilities?.includes(NOTIFICATION_CAPABILITY)) return failure('NOTIFICATION_CAPABILITY_NOT_GRANTED', 'Notification capability is not granted');
     if (!descriptor?.service?.permissions?.includes(NOTIFICATION_PERMISSION)) return failure('NOTIFICATION_PERMISSION_DENIED', 'Notification permission is not granted');
     if (!['project', 'application.settings', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command'].includes(context.surface)) return failure('NOTIFICATION_CONTEXT_INVALID', 'Notification surface is not bound');
@@ -98,7 +97,7 @@ class ComponentNotificationService {
     // must be delivered so the renderer can replace a persistent card.
     const dedupePrefix = normalized.dedupeKey ? `key:${normalized.dedupeKey}:` : '';
     const contentKey = dedupePrefix ? `${dedupePrefix}${normalized.tone}:${normalized.message}` : `content:${normalized.tone}:${normalized.message}`;
-    if (state.recent.has(contentKey)) { this.stateByComponent.set(componentId, state); return Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, accepted: false, deduplicated: true, code: 'NOTIFICATION_DEDUPLICATED' }); }
+    if (state.recent.has(contentKey)) { this.stateByComponent.set(componentId, state); return Object.freeze({ accepted: false, deduplicated: true, code: 'NOTIFICATION_DEDUPLICATED' }); }
     timestamps.push(now);
     const replacedRecent = [];
     if (dedupePrefix) for (const [key, timestamp] of state.recent) if (key.startsWith(dedupePrefix)) { replacedRecent.push([key, timestamp]); state.recent.delete(key); }
@@ -108,24 +107,24 @@ class ComponentNotificationService {
       for (const [key, timestamp] of replacedRecent) state.recent.set(key, timestamp);
     };
     const id = `${componentId}:${++this.sequence}`;
-    const event = Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, type: 'notification', id, componentId, surface: context.surface, notification: normalized });
+    const event = Object.freeze({ apiVersion: RENDERER_EVENT_CONTRACT_VERSION, type: 'notification', id, componentId, surface: context.surface, notification: normalized });
     if (this.rendererReady) {
       if (!this.deliver(event)) { timestamps.pop(); rollbackContentFingerprint(); return failure('NOTIFICATION_HOST_UNAVAILABLE', 'Main notification host is unavailable', true); }
     } else {
       if (this.buffer.length >= BUFFER_LIMIT) { timestamps.pop(); rollbackContentFingerprint(); return failure('NOTIFICATION_BUFFER_FULL', 'Notification renderer buffer is full', true); }
       this.buffer.push({ event, queuedAt: now });
     }
-    return Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, accepted: true, id });
+    return Object.freeze({ accepted: true, id });
   }
 
   clearComponent(componentId) {
     const id = String(componentId || '');
     const removed = this.stateByComponent.delete(id);
     this.buffer = this.buffer.filter(item => item.event.componentId !== id);
-    if (id && this.rendererReady) this.deliver(Object.freeze({ apiVersion: NOTIFICATION_API_VERSION, type: 'purge', componentId: id }));
+    if (id && this.rendererReady) this.deliver(Object.freeze({ apiVersion: RENDERER_EVENT_CONTRACT_VERSION, type: 'purge', componentId: id }));
     return removed;
   }
   destroy() { this.rendererWebContents?.removeListener?.('did-start-loading', this.handleRendererReload); this.rendererWebContents?.removeListener?.('render-process-gone', this.handleRendererReload); this.stateByComponent.clear(); this.buffer = []; this.rendererReady = false; this.rendererSession = { token: '', revision: -1 }; this.retiredRendererTokens.clear(); }
 }
 
-module.exports = { BUFFER_LIMIT, BUFFER_TTL_MS, BURST_LIMIT, BURST_WINDOW_MS, CONTENT_DEDUPE_WINDOW_MS, DEDUPE_KEY, ERROR_BURST_LIMIT, ERROR_RATE_LIMIT, MESSAGE_MAX_LENGTH, NOTIFICATION_API_VERSION, NOTIFICATION_CAPABILITY, NOTIFICATION_PERMISSION, RATE_LIMIT, RATE_WINDOW_MS, ComponentNotificationService, failure, normalizeNotificationPayload };
+module.exports = { BUFFER_LIMIT, BUFFER_TTL_MS, BURST_LIMIT, BURST_WINDOW_MS, CONTENT_DEDUPE_WINDOW_MS, DEDUPE_KEY, ERROR_BURST_LIMIT, ERROR_RATE_LIMIT, MESSAGE_MAX_LENGTH, NOTIFICATION_CAPABILITY, NOTIFICATION_PERMISSION, RATE_LIMIT, RATE_WINDOW_MS, ComponentNotificationService, failure, normalizeNotificationPayload };

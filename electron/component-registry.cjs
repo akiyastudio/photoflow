@@ -2,13 +2,12 @@ const fs = require('fs');
 const path = require('path');
 const { parseMediaPlaybackBackendContributions } = require('./contracts/media-playback-backend-contract.cjs');
 const zlib = require('zlib');
-const { PLUGIN_API_VERSION, PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
-const { COMPONENT_HOST_API_VERSION, COMPONENT_HOST_CONTRACT_VERSION, parseComponentHostManifest } = require('./component-host-contract.cjs');
+const { PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
+const { COMPONENT_HOST_CONTRACT_VERSION, parseComponentHostManifest } = require('./component-host-contract.cjs');
 const { listIntegrityFiles, readPinnedComponentIntegrity, validateComponentIntegrity, validateComponentIntegrityAsync } = require('./component-integrity.cjs');
 const { developmentComponentMetadataToken, discoverDevelopmentComponents, safeFile } = require('./component-development.cjs');
 const { legacyRuntimeCapabilities } = require('./compatibility/legacy-runtime-capabilities.cjs');
 
-const COMPONENT_API_VERSION = PLUGIN_API_VERSION;
 const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PLUGIN_DEFINITIONS).map(([id, definition]) => [id, { ...definition, capability: definition.capabilities[0] }])));
 const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
@@ -20,17 +19,22 @@ const isInside = (root, candidate) => {
 };
 const validArchivePath = value => {
   const normalized = normalizeRelativeFile(value);
-  return Boolean(normalized && !normalized.startsWith('/') && !/^[a-z]:/i.test(normalized) && !normalized.split('/').some(segment => segment === '..' || segment === ''));
+  const segments = normalized.split('/');
+  return Boolean(normalized && normalized.length <= 1024 && !/[\0-\x1f:]/.test(normalized) && !normalized.startsWith('/') && !/^[a-z]:/i.test(normalized)
+    && !segments.some(segment => segment === '..' || segment === '.' || segment === '' || /[. ]$/.test(segment)
+      || /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(segment)));
 };
 const compareVersions = (left, right) => {
-  const parse = value => String(value || '').split(/[.+-]/).map(part => /^\d+$/.test(part) ? Number(part) : part);
+  const parse = value => { const [withoutBuild] = String(value || '').split('+', 1); const separator = withoutBuild.indexOf('-'); const core = (separator < 0 ? withoutBuild : withoutBuild.slice(0, separator)).split('.').map(part => /^\d+$/.test(part) ? Number(part) : part); const prerelease = separator < 0 ? null : withoutBuild.slice(separator + 1).split('.').map(part => /^\d+$/.test(part) ? Number(part) : part); return { core, prerelease }; };
   const a = parse(left); const b = parse(right);
-  for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
-    const av = a[index] ?? 0; const bv = b[index] ?? 0;
+  for (let index = 0; index < Math.max(a.core.length, b.core.length); index += 1) {
+    const av = a.core[index] ?? 0; const bv = b.core[index] ?? 0;
     if (av === bv) continue;
     if (typeof av === 'number' && typeof bv === 'number') return av < bv ? -1 : 1;
     return String(av).localeCompare(String(bv), 'en');
   }
+  if (a.prerelease === null || b.prerelease === null) return a.prerelease === b.prerelease ? 0 : a.prerelease === null ? 1 : -1;
+  for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) { const av = a.prerelease[index]; const bv = b.prerelease[index]; if (av === undefined || bv === undefined) return av === bv ? 0 : av === undefined ? -1 : 1; if (av === bv) continue; if (typeof av === 'number' && typeof bv === 'number') return av < bv ? -1 : 1; if (typeof av === 'number') return -1; if (typeof bv === 'number') return 1; return String(av).localeCompare(String(bv), 'en'); }
   return 0;
 };
 const crcTable = Array.from({ length: 256 }, (_, value) => {
@@ -46,50 +50,48 @@ const crc32 = buffer => {
 
 // The catalog reads component.json directly from ZIP central-directory metadata.
 // This keeps discovery deterministic and testable without extracting untrusted files.
+const readExact = (fd, length, position) => { const buffer = Buffer.allocUnsafe(length); let offset = 0; while (offset < length) { const count = fs.readSync(fd, buffer, offset, length - offset, position + offset); if (!count) throw new Error('ZIP 文件意外结束'); offset += count; } return buffer; };
 const readZipEntries = archivePath => {
-  const archive = fs.readFileSync(archivePath);
-  const searchStart = Math.max(0, archive.length - 65_557);
+  const size = fs.statSync(archivePath).size;
+  if (!Number.isSafeInteger(size) || size < 22) throw new Error('ZIP 文件过小或大小无效');
+  const fd = fs.openSync(archivePath, 'r');
+  const tailLength = Math.min(size, 65_557); const tailStart = size - tailLength; const tail = readExact(fd, tailLength, tailStart);
   let eocd = -1;
-  for (let offset = archive.length - 22; offset >= searchStart; offset -= 1) {
-    if (archive.readUInt32LE(offset) === 0x06054b50) { eocd = offset; break; }
+  for (let offset = tail.length - 22; offset >= 0; offset -= 1) {
+    if (tail.readUInt32LE(offset) === 0x06054b50 && offset + 22 + tail.readUInt16LE(offset + 20) === tail.length) { eocd = offset; break; }
   }
-  if (eocd < 0) throw new Error('ZIP 中央目录缺失或包已损坏');
-  const count = archive.readUInt16LE(eocd + 10);
-  const directorySize = archive.readUInt32LE(eocd + 12);
-  const directoryOffset = archive.readUInt32LE(eocd + 16);
-  if (directoryOffset + directorySize > eocd) throw new Error('ZIP 中央目录越界或包已损坏');
+  if (eocd < 0) { fs.closeSync(fd); throw new Error('ZIP 中央目录缺失或包已损坏'); }
+  if (tail.readUInt16LE(eocd + 4) !== 0 || tail.readUInt16LE(eocd + 6) !== 0 || tail.readUInt16LE(eocd + 8) !== tail.readUInt16LE(eocd + 10)) { fs.closeSync(fd); throw new Error('不支持多卷 ZIP 组件包'); }
+  const count = tail.readUInt16LE(eocd + 10); const directorySize = tail.readUInt32LE(eocd + 12); const directoryOffset = tail.readUInt32LE(eocd + 16); const absoluteEocd = tailStart + eocd;
+  if (!count || count > 10000 || count === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff || directorySize > 64 * 1024 * 1024 || directoryOffset + directorySize !== absoluteEocd) { fs.closeSync(fd); throw new Error('ZIP 中央目录越界或包已损坏'); }
+  let directory;
+  try { directory = readExact(fd, directorySize, directoryOffset); } finally { fs.closeSync(fd); }
   const entries = [];
-  let offset = directoryOffset;
+  const names = new Set();
+  let offset = 0;
   for (let index = 0; index < count; index += 1) {
-    if (offset + 46 > archive.length || archive.readUInt32LE(offset) !== 0x02014b50) throw new Error('ZIP 条目目录损坏');
-    const flags = archive.readUInt16LE(offset + 8);
-    const method = archive.readUInt16LE(offset + 10);
-    const expectedCrc = archive.readUInt32LE(offset + 16);
-    const compressedSize = archive.readUInt32LE(offset + 20);
-    const uncompressedSize = archive.readUInt32LE(offset + 24);
-    const nameLength = archive.readUInt16LE(offset + 28);
-    const extraLength = archive.readUInt16LE(offset + 30);
-    const commentLength = archive.readUInt16LE(offset + 32);
-    const externalAttributes = archive.readUInt32LE(offset + 38);
-    const localOffset = archive.readUInt32LE(offset + 42);
-    const name = archive.subarray(offset + 46, offset + 46 + nameLength).toString('utf8');
+    if (offset + 46 > directory.length || directory.readUInt32LE(offset) !== 0x02014b50) throw new Error('ZIP 条目目录损坏');
+    const flags = directory.readUInt16LE(offset + 8); const method = directory.readUInt16LE(offset + 10); const expectedCrc = directory.readUInt32LE(offset + 16); const compressedSize = directory.readUInt32LE(offset + 20); const uncompressedSize = directory.readUInt32LE(offset + 24); const nameLength = directory.readUInt16LE(offset + 28); const extraLength = directory.readUInt16LE(offset + 30); const commentLength = directory.readUInt16LE(offset + 32); const externalAttributes = directory.readUInt32LE(offset + 38); const localOffset = directory.readUInt32LE(offset + 42);
+    const entryEnd = offset + 46 + nameLength + extraLength + commentLength;
+    if (!nameLength || entryEnd > directory.length) throw new Error('ZIP 条目目录越界');
+    const name = directory.subarray(offset + 46, offset + 46 + nameLength).toString('utf8');
     const pathWithoutSlash = name.replace(/[\\/]$/, '');
     if (!validArchivePath(pathWithoutSlash)) throw new Error(`安装包包含不安全路径：${name || '(空路径)'}`);
     if (((externalAttributes >>> 16) & 0xf000) === 0xa000) throw new Error(`安装包包含不安全的符号链接：${name}`);
-    entries.push({ name: normalizeRelativeFile(name), flags, method, expectedCrc, compressedSize, uncompressedSize, localOffset });
-    offset += 46 + nameLength + extraLength + commentLength;
+    const normalizedName = normalizeRelativeFile(name); const foldedName = normalizedName.toLowerCase();
+    if (names.has(foldedName)) throw new Error(`安装包包含重复或大小写冲突路径：${name}`);
+    names.add(foldedName);
+    entries.push({ name: normalizedName, flags, method, expectedCrc, compressedSize, uncompressedSize, localOffset });
+    offset = entryEnd;
   }
-  return { archive, entries };
+  if (offset !== directory.length) throw new Error('ZIP 中央目录条目数量不一致');
+  return { archive: Object.freeze({ archivePath, size }), entries };
 };
 const readZipEntry = (archive, entry) => {
   if (entry.flags & 1) throw new Error('不支持加密组件包');
-  if (entry.uncompressedSize > MAX_MANIFEST_BYTES) throw new Error('component.json 过大');
-  const offset = entry.localOffset;
-  if (offset + 30 > archive.length || archive.readUInt32LE(offset) !== 0x04034b50) throw new Error('ZIP 本地条目损坏');
-  const start = offset + 30 + archive.readUInt16LE(offset + 26) + archive.readUInt16LE(offset + 28);
-  const end = start + entry.compressedSize;
-  if (end > archive.length) throw new Error('ZIP 条目数据越界');
-  const source = archive.subarray(start, end);
+  if (entry.uncompressedSize > MAX_MANIFEST_BYTES || entry.compressedSize > MAX_MANIFEST_BYTES + 64 * 1024) throw new Error('component.json 过大');
+  const fd = fs.openSync(archive.archivePath, 'r'); let source;
+  try { const local = readExact(fd, 30, entry.localOffset); if (local.readUInt32LE(0) !== 0x04034b50) throw new Error('ZIP 本地条目损坏'); const localFlags = local.readUInt16LE(6); const localMethod = local.readUInt16LE(8); const localNameLength = local.readUInt16LE(26); const localExtraLength = local.readUInt16LE(28); const localName = readExact(fd, localNameLength, entry.localOffset + 30).toString('utf8'); if (normalizeRelativeFile(localName) !== entry.name || localFlags !== entry.flags || localMethod !== entry.method) throw new Error('ZIP 本地条目与中央目录不一致'); const start = entry.localOffset + 30 + localNameLength + localExtraLength; if (start + entry.compressedSize > archive.size) throw new Error('ZIP 条目数据越界'); source = readExact(fd, entry.compressedSize, start); } finally { fs.closeSync(fd); }
   const value = entry.method === 0 ? source : entry.method === 8 ? zlib.inflateRawSync(source, { maxOutputLength: MAX_MANIFEST_BYTES }) : null;
   if (!value) throw new Error(`component.json 使用了不支持的 ZIP 压缩方法：${entry.method}`);
   if (value.length !== entry.uncompressedSize || crc32(value) !== entry.expectedCrc) throw new Error('component.json 校验失败，安装包可能已损坏');
@@ -114,17 +116,13 @@ const manifestIdentity = (manifest, fallback = {}) => ({
 const manifestCompatibilityError = (manifest, platform, arch) => {
   if (!COMPONENT_ID.test(String(manifest?.id || ''))) return '组件 ID 缺失或格式无效';
   if (!String(manifest?.version || '').trim()) return '组件版本缺失';
-  if (Number(manifest.apiVersion) !== COMPONENT_API_VERSION) return `组件接口版本不兼容：${manifest.apiVersion || '未填写'}`;
   try { parseMediaPlaybackBackendContributions(manifest); }
   catch (error) { return error.message || String(error); }
   if (Array.isArray(manifest.platforms) && !manifest.platforms.includes(platform)) return `组件不支持 ${platform}`;
   if (Array.isArray(manifest.architectures) && !manifest.architectures.includes(arch)) return `组件不支持 ${arch}`;
   if (manifest.componentHost !== undefined) {
     const host = manifest.componentHost;
-    const compatibility = host?.compatibility;
-    const min = Number(compatibility?.minHostApiVersion); const max = Number(compatibility?.maxHostApiVersion);
     if (!host || Number(host.contractVersion) !== COMPONENT_HOST_CONTRACT_VERSION) return `组件 Host 协议不兼容：${host?.contractVersion || '未填写'}`;
-    if (min !== COMPONENT_HOST_API_VERSION || max !== COMPONENT_HOST_API_VERSION) return `组件 Host 仅支持 API ${COMPONENT_HOST_API_VERSION}，minHostApiVersion 与 maxHostApiVersion 必须均为 ${COMPONENT_HOST_API_VERSION}`;
     const contributions = Array.isArray(host.contributions) ? host.contributions : [];
     const toolbarCount = contributions.filter(item => item?.type === 'workspace.toolbarAction').length;
     const pageCount = contributions.filter(item => item?.type === 'component.fullPage').length;
@@ -183,18 +181,33 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
   const installRoot = path.resolve(userComponentRoot);
   const componentStatePath = path.join(installRoot, '.component-state.json');
   const disabledComponentIds = new Set();
+  let enablementStateTrusted = true;
   try {
-    const savedState = JSON.parse(fs.readFileSync(componentStatePath, 'utf8'));
-    if (Number(savedState?.version) === COMPONENT_STATE_VERSION && Array.isArray(savedState.disabledComponentIds)) {
-      for (const id of savedState.disabledComponentIds.slice(0, 1024)) if (COMPONENT_ID.test(String(id || ''))) disabledComponentIds.add(String(id));
+    let statePath = componentStatePath;
+    if (!fs.existsSync(statePath)) {
+      const base = path.basename(componentStatePath); const backups = fs.existsSync(installRoot) ? fs.readdirSync(installRoot, { withFileTypes: true }).filter(entry => entry.isFile() && entry.name.startsWith(`${base}.`) && entry.name.endsWith('.backup')) : [];
+      if (backups.length > 1) throw new Error('Ambiguous component enablement state backups');
+      if (backups.length === 1) statePath = path.join(installRoot, backups[0].name);
     }
-  } catch { /* Component enablement state is optional and defaults to enabled. */ }
+    if (fs.existsSync(statePath)) {
+      const savedState = JSON.parse(fs.readFileSync(statePath, 'utf8'));
+      if (Number(savedState?.version) !== COMPONENT_STATE_VERSION || !Array.isArray(savedState.disabledComponentIds) || savedState.disabledComponentIds.length > 1024 || savedState.disabledComponentIds.some(id => !COMPONENT_ID.test(String(id || '')))) throw new Error('Invalid component enablement state');
+      for (const id of savedState.disabledComponentIds) disabledComponentIds.add(String(id));
+      if (statePath !== componentStatePath) fs.renameSync(statePath, componentStatePath);
+    }
+  } catch { enablementStateTrusted = false; }
   const persistComponentState = () => {
     fs.mkdirSync(installRoot, { recursive: true });
-    fs.writeFileSync(componentStatePath, JSON.stringify({ version: COMPONENT_STATE_VERSION, disabledComponentIds: [...disabledComponentIds].sort() }), 'utf8');
+    const pending = `${componentStatePath}.${process.pid}.tmp`;
+    const backup = `${componentStatePath}.${process.pid}.backup`; let backedUp = false;
+    fs.writeFileSync(pending, JSON.stringify({ version: COMPONENT_STATE_VERSION, disabledComponentIds: [...disabledComponentIds].sort() }), { encoding: 'utf8', flag: 'w' });
+    try { if (fs.existsSync(componentStatePath)) { fs.renameSync(componentStatePath, backup); backedUp = true; } fs.renameSync(pending, componentStatePath); if (backedUp) { fs.rmSync(backup, { force: true }); backedUp = false; } }
+    catch (error) { if (backedUp && !fs.existsSync(componentStatePath)) { try { fs.renameSync(backup, componentStatePath); backedUp = false; } catch { /* Preserve backup for manual recovery. */ } } throw error; }
+    finally { fs.rmSync(pending, { force: true }); }
+    enablementStateTrusted = true;
   };
   const withEnablementState = component => component && component.installed
-    ? { ...component, enabled: !disabledComponentIds.has(component.id), ...(disabledComponentIds.has(component.id) ? { status: 'disabled' } : {}) }
+    ? { ...component, enabled: enablementStateTrusted && !disabledComponentIds.has(component.id), ...(!enablementStateTrusted || disabledComponentIds.has(component.id) ? { status: 'disabled' } : {}) }
     : component;
   const roots = [{ source: 'user', path: installRoot }];
   let developmentCache = { token: '', components: [] };
@@ -281,8 +294,8 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
       const compatibilityError = manifestCompatibilityError(manifest, platform, arch); if (compatibilityError) throw new Error(compatibilityError);
       const entrypoints = manifest.entrypoints || {};
       const relativeEntry = entrypoints[`${platform}-${arch}`] || entrypoints[platform] || entrypoints.default;
-      const command = path.resolve(componentRoot, relativeEntry);
-      if (!isInside(componentRoot, command) || !fs.statSync(command, { throwIfNoEntry: false })?.isFile()) throw new Error(`组件入口不存在或路径不安全：${relativeEntry}`);
+      const command = path.resolve(componentRoot, relativeEntry); const commandStat = fs.lstatSync(command, { throwIfNoEntry: false });
+      if (!isInside(componentRoot, command) || !commandStat?.isFile() || commandStat.isSymbolicLink() || !isInside(fs.realpathSync(componentRoot), fs.realpathSync(command))) throw new Error(`组件入口不存在或路径不安全：${relativeEntry}`);
       for (const relativeFile of Array.isArray(manifest.requiredFiles) ? manifest.requiredFiles : []) {
         const requiredFile = path.resolve(componentRoot, String(relativeFile)); const stat = fs.lstatSync(requiredFile, { throwIfNoEntry: false });
         if (!validArchivePath(relativeFile) || !isInside(componentRoot, requiredFile) || !stat?.isFile() || stat.isSymbolicLink()) throw new Error(`组件必需文件不存在或路径不安全：${relativeFile}`);
@@ -365,11 +378,11 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
           path: path.join(installRoot, identity.id, 'runtime'), source: 'package', packagePath: archivePath, packageSizeBytes: fs.statSync(archivePath).size, sizeBytes: 0, manifest, manifestEntry: packageManifest.manifestEntry,
           status: error ? 'incompatible' : 'pending-install', integrityStatus: definition.integrityManifest ? 'pinned-unverified' : 'unsigned',
           integrityMessage: definition.integrityManifest ? '安装时将按应用固定完整性清单校验' : '未提供可由应用验证的数字签名；安装前仅能校验包结构与路径', ...(error ? { error } : {}) };
-        const previous = byId.get(identity.id); if (!previous || compareVersions(previous.packageVersion, candidate.packageVersion) < 0) byId.set(identity.id, candidate);
+        const previous = byId.get(identity.id); if (!previous || candidate.compatible && !previous.compatible || candidate.compatible === previous.compatible && compareVersions(previous.packageVersion, candidate.packageVersion) < 0) byId.set(identity.id, candidate);
       } catch (error) {
         const inferred = String(manifest?.id || entry.name.replace(/\.zip$/i, '')).trim();
         const id = COMPONENT_ID.test(inferred) ? inferred : `invalid-package-${Buffer.from(entry.name).toString('hex').slice(0, 24)}`;
-        byId.set(id, { id, name: manifest?.displayName || manifest?.name || entry.name, description: '组件安装包无法读取', capability: '', installed: false, compatible: false, version: String(manifest?.version || ''),
+        if (!byId.get(id)?.compatible) byId.set(id, { id, name: manifest?.displayName || manifest?.name || entry.name, description: '组件安装包无法读取', capability: '', installed: false, compatible: false, version: String(manifest?.version || ''),
           path: path.join(installRoot, id, 'runtime'), source: 'package', packagePath: archivePath, packageSizeBytes: fs.statSync(archivePath).size, sizeBytes: 0,
           status: 'package-invalid', integrityStatus: 'invalid', error: error.message || String(error) });
       }
@@ -450,9 +463,11 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
   const clearComponentEnabledState = componentId => {
     const id = String(componentId || '').trim();
     if (!disabledComponentIds.delete(id)) return false;
-    persistComponentState(); return true;
+    try { persistComponentState(); }
+    catch (error) { disabledComponentIds.add(id); throw error; }
+    return true;
   };
   return { inspect, list, listWithSizes, resolve, resolveAsync, resolvePackage, verifyDirectory, verifyDirectoryAsync, componentIntegrityToken, seedIntegrityToken, ensureInstallRoot, installRoot, roots, hostCandidates, admitHostDescriptor, componentStatePath, setComponentEnabled, clearComponentEnabledState };
 };
 
-module.exports = { COMPONENT_API_VERSION, COMPONENT_DEFINITIONS, compareVersions, readComponentPackageManifest, readZipEntries, createComponentRegistry };
+module.exports = { COMPONENT_DEFINITIONS, compareVersions, readComponentPackageManifest, readZipEntries, createComponentRegistry };
