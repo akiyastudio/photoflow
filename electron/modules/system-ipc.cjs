@@ -685,6 +685,7 @@ const registerSystemIpc = context => {
       return { admitted: false, reason: 'persistence-unavailable', targets };
     }
     const dedupeKey = `system-filesystem-cleanup:${crypto.randomUUID()}`;
+    const taskMetadata = { targets, title, ...(restartTask?.metadata?.dataCleanupComplete === true ? { dataCleanupComplete: true } : {}) };
     const run = async () => {
       const completion = await backgroundTasks.run({
       ...(restartTask?.id ? { id: restartTask.id } : {}),
@@ -692,14 +693,14 @@ const registerSystemIpc = context => {
       title,
       dedupeKey,
       cancellable: false,
-      metadata: { targets, title },
+      metadata: taskMetadata,
       }, execute, run);
       if (completion?.task?.state === 'completed') {
         if (backgroundTasks.flush?.() !== true) throw Object.assign(new Error('组件清理任务完成状态无法同步持久化'), { cleanupPendingReceipts: targets });
       }
       return completion;
     };
-    const admission = createDurableCleanupAdmission({ start: worker => backgroundTasks.run({ ...(restartTask?.id ? { id: restartTask.id } : {}), type: 'system-filesystem-cleanup', title, dedupeKey, cancellable: false, metadata: { targets, title } }, worker, run), flush: () => backgroundTasks.flush?.(), worker: execute, receipts: targets });
+    const admission = createDurableCleanupAdmission({ start: worker => backgroundTasks.run({ ...(restartTask?.id ? { id: restartTask.id } : {}), type: 'system-filesystem-cleanup', title, dedupeKey, cancellable: false, metadata: taskMetadata }, worker, run), flush: () => backgroundTasks.flush?.(), worker: execute, receipts: targets });
     const launched = admission.completion;
     if (!admission.admitted) {
       void launched.catch(error => writeLog('warn', 'Rejected component cleanup admission', { error: error.message || String(error) }));
@@ -1010,6 +1011,7 @@ const registerSystemIpc = context => {
     let componentTreeIdentity = null;
     let capacityReservation = null;
     let installVolumeReservation = null;
+    let installResponse = null;
     const installAbortController = new AbortController();
     const abortInstall = () => installAbortController.abort();
     event.sender?.once?.('destroyed', abortInstall);
@@ -1042,8 +1044,8 @@ const registerSystemIpc = context => {
       installVolumeReservation = await reserveComponentInstallCapacity(pluginService.installRoot, snapshotPackage.totalUncompressedBytes + 128 * 1024 * 1024);
       const snapshotTrust = snapshotComponentTrust(componentId, snapshotPackage.manifest);
       const confirmed = await confirmComponentPackageInstall({ ...snapshotTrust, packageFileName: path.basename(archivePath), packageSizeBytes, packageSha256: sourceIdentity.sha256, dialog, mainWindow });
-      if (!confirmed) return { success: false, cancelled: true };
-      if (!await confirmComponentBackgroundStop({ componentId, action: 'install', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return { success: false, cancelled: true };
+      if (!confirmed) return installResponse = { success: false, cancelled: true };
+      if (!await confirmComponentBackgroundStop({ componentId, action: 'install', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return installResponse = { success: false, cancelled: true };
       capabilityBarrier = await enterComponentInstallTransition({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests, transitionLease: installTransitionLease });
       const extractedPackage = await extractComponentArchive(snapshotPackage, packageStagePath, operation);
       packageStageNodeIdentity = await readDirectoryNodeIdentity(fs, packageStagePath, '组件包展开暂存目录');
@@ -1103,13 +1105,13 @@ const registerSystemIpc = context => {
         packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeDigest: componentTreeIdentityDigest(packageStageTreeIdentity) } : null,
         packageSnapshotReceipt,
       ].filter(Boolean);
-      packageStagePath = '';
-      packageSnapshotPath = '';
       const cleanupAdmission = await queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
       await cleanupAdmission.completion;
+      packageStagePath = '';
+      packageSnapshotPath = '';
       invalidateComponentStatus();
       writeLog('info', 'Component installed', { componentId, destination });
-      return { success: true, packageSizeBytes, operationId: transactionResult.operationId, cleanupPending: false };
+      return installResponse = { success: true, installed: true, packageSizeBytes, operationId: transactionResult.operationId, cleanupPending: false };
     } catch (error) {
       const pendingCleanup = Array.isArray(error?.cleanupPendingReceipts) && error.cleanupPendingReceipts.length ? error.cleanupPendingReceipts : error?.cleanupPendingPaths;
       if (Array.isArray(pendingCleanup) && pendingCleanup.length) await queueSystemFilesystemCleanup(pendingCleanup, `清理“${componentId || '未知'}”组件失败暂存文件`).catch(cleanupError => { error.message = `${error.message || String(error)}；${cleanupError.message || String(cleanupError)}`; });
