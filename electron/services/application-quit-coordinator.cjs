@@ -1,5 +1,17 @@
 const activeProcess = status => !['idle', 'stopped', 'exited'].includes(status.state);
 
+const registerMainWindowQuitGuard = ({ window, app, getQuitState, platform = process.platform }) => {
+  if (platform === 'darwin') return () => undefined;
+  const onClose = event => {
+    const state = getQuitState();
+    if (state === 'ready') return;
+    event.preventDefault();
+    if (state === 'idle') app.quit();
+  };
+  window.on('close', onClose);
+  return () => window.removeListener?.('close', onClose);
+};
+
 const runApplicationQuit = async ({
   componentIds,
   processSupervisor,
@@ -49,4 +61,4 @@ const runApplicationQuit = async ({
   return { committed: true };
 };
 
-module.exports = { runApplicationQuit };
+module.exports = { registerMainWindowQuitGuard, runApplicationQuit };

@@ -1,5 +1,6 @@
 const assert = require('node:assert/strict');
-const { runApplicationQuit } = require('../electron/services/application-quit-coordinator.cjs');
+const { EventEmitter } = require('node:events');
+const { registerMainWindowQuitGuard, runApplicationQuit } = require('../electron/services/application-quit-coordinator.cjs');
 
 const fixture = ({ background = true, failStopOnce = false, confirm = true } = {}) => {
   const events = [];
@@ -34,6 +35,31 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
 };
 
 (async () => {
+  let quitState = 'idle'; let appQuitCalls = 0; let allowedCloseCalls = 0;
+  const mainWindow = new EventEmitter();
+  mainWindow.close = () => {
+    let prevented = false;
+    mainWindow.emit('close', { preventDefault: () => { prevented = true; } });
+    if (!prevented) allowedCloseCalls += 1;
+    return !prevented;
+  };
+  registerMainWindowQuitGuard({ window: mainWindow, app: { quit: () => { appQuitCalls += 1; quitState = 'draining'; } }, getQuitState: () => quitState, platform: 'win32' });
+  assert.equal(mainWindow.close(), false, 'window X/custom window-close cannot destroy the window before quit confirmation');
+  assert.equal(appQuitCalls, 1);
+  assert.equal(mainWindow.close(), false, 'repeated close while draining stays singleflight');
+  assert.equal(appQuitCalls, 1);
+  quitState = 'idle';
+  assert.equal(mainWindow.close(), false, 'cancel or termination failure keeps the original window and permits retry');
+  assert.equal(appQuitCalls, 2);
+  quitState = 'ready';
+  assert.equal(mainWindow.close(), true);
+  assert.equal(allowedCloseCalls, 1, 'the committed app.quit closes the original window exactly once');
+
+  const macWindow = new EventEmitter(); let macPrevented = false; let macQuitCalls = 0;
+  registerMainWindowQuitGuard({ window: macWindow, app: { quit: () => { macQuitCalls += 1; } }, getQuitState: () => 'idle', platform: 'darwin' });
+  macWindow.emit('close', { preventDefault: () => { macPrevented = true; } });
+  assert.equal(macPrevented, false); assert.equal(macQuitCalls, 0, 'macOS keeps close-without-quit behavior');
+
   const cancelled = fixture({ confirm: false });
   await assert.rejects(runApplicationQuit(cancelled.options), error => error.code === 'APP_QUIT_CANCELLED');
   assert.deepEqual(cancelled.events, ['prompt', 'cancel-gate']);

@@ -49,7 +49,7 @@ const { createDomainHealthService } = require('./services/domain-health-service.
 const { createBackgroundTaskService } = require('./services/background-task-service.cjs');
 const { createProcessSupervisor } = require('./services/process-supervisor.cjs');
 const { ComponentLifecycleCoordinator } = require('./services/component-lifecycle-coordinator.cjs');
-const { runApplicationQuit } = require('./services/application-quit-coordinator.cjs');
+const { registerMainWindowQuitGuard, runApplicationQuit } = require('./services/application-quit-coordinator.cjs');
 const { createBundledPythonRuntime } = require('./services/bundled-python-runtime.cjs');
 const { createBackupService } = require('./services/backup-service.cjs');
 const { createArchiveService } = require('./services/archive-service.cjs');
@@ -132,6 +132,7 @@ const componentHostRegistry = createComponentHostRegistry({
 });
 configureProtectedProjectFolderRegistry({ descriptorProvider: componentHostRegistry.list });
 let componentViewManager; let componentServiceManager; let configMutationService; let toastViewManager;
+let getApplicationQuitState = () => 'idle';
 const destroyToastViewManager = () => { const manager = toastViewManager; toastViewManager = null; manager?.destroy(); };
 const suspendToastViewForNativeDrag = () => toastViewManager?.suspendForNativeDrag();
 const resumeToastViewAfterNativeDrag = () => toastViewManager?.resumeAfterNativeDrag();
@@ -590,6 +591,7 @@ function createWindow(loadRenderer = true) {
     },
   });
   configureWindowSecurity(mainWindow);
+  registerMainWindowQuitGuard({ window: mainWindow, app, getQuitState: () => getApplicationQuitState(), platform: process.platform });
   toastViewManager = new ToastViewManager({ WebContentsView, mainWindow, ipcMain: electronIpcMain, preloadPath: path.join(__dirname, 'toast-view-preload.cjs'), rendererFile: toastViewRendererFile, developmentRendererUrl, writeLog });
   const sendMaximizedState = () => {
     if (!mainWindow?.isDestroyed()) mainWindow.webContents.send('window-maximized-change', mainWindow.isMaximized());
@@ -1456,7 +1458,7 @@ app.whenReady().then(async () => {
   });
 });
 
-registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutationService, writeLog, beforeDrain: () => {
+getApplicationQuitState = registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutationService, writeLog, beforeDrain: () => {
   if (!componentLifecycleCoordinator.beginApplicationQuit()) throw Object.assign(new Error('组件变更仍在进行，请稍后重试退出'), { code: 'APP_QUIT_BUSY' });
 }, onQuit: async () => {
   const componentIds = [...new Set(componentHostRegistry.list().map(item => item.componentId))];
