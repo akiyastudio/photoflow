@@ -11,8 +11,12 @@ const { ComponentLifecycleCoordinator } = require('../electron/services/componen
   install.release();
 
   const work = coordinator.acquireWork('b', 'lifecycle:repair');
+  assert.equal(coordinator.currentLease('b'), work, 'registered and returned work lease identity is stable');
   const intent = coordinator.acquire('b', 'uninstall', { stopOnly: true });
   assert.throws(() => coordinator.acquireWork('b', 'lifecycle:install'), error => error.code === 'COMPONENT_QUIESCING', 'intent blocks new work');
+  assert.doesNotThrow(() => coordinator.assertLaunchAllowed('b', work), 'existing work may launch while the user is deciding');
+  intent.requestStop();
+  assert.throws(() => coordinator.assertLaunchAllowed('b', work), error => error.code === 'COMPONENT_QUIESCING');
   let promoted = false;
   const promotion = intent.promote().then(() => { promoted = true; });
   await new Promise(resolve => setImmediate(resolve));
@@ -47,10 +51,20 @@ const { ComponentLifecycleCoordinator } = require('../electron/services/componen
   const quitWait = coordinator.waitForAllWork({ timeoutMs: 1000 }).then(() => { quitWorkSettled = true; });
   await new Promise(resolve => setImmediate(resolve));
   assert.equal(quitWorkSettled, false);
+  assert.doesNotThrow(() => coordinator.assertLaunchAllowed('quit-fixture', quitWork), 'quit intent does not disrupt existing work before confirmation');
+  coordinator.requestApplicationStop();
   assert.throws(() => coordinator.assertLaunchAllowed('quit-fixture', quitWork), error => error.code === 'COMPONENT_QUIESCING');
   quitWork.release();
   await quitWait;
   coordinator.cancelApplicationQuit();
+
+  const cancelledCoordinator = new ComponentLifecycleCoordinator();
+  const cancelledWork = cancelledCoordinator.acquireWork('cancel-fixture', 'runtime');
+  assert.equal(cancelledCoordinator.beginApplicationQuit(), true);
+  assert.doesNotThrow(() => cancelledCoordinator.assertLaunchAllowed('cancel-fixture', cancelledWork));
+  cancelledCoordinator.cancelApplicationQuit();
+  assert.doesNotThrow(() => cancelledCoordinator.assertLaunchAllowed('cancel-fixture', cancelledWork), 'cancel leaves existing work healthy');
+  cancelledWork.release();
 
   console.log('Component lifecycle coordinator tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

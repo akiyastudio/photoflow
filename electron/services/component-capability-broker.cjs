@@ -13,7 +13,7 @@ const clonePayload = payload => {
 };
 
 class ComponentCapabilityBroker {
-  constructor() { this.handlers = new Map(); this.activeByComponent = new Map(); this.blockedComponents = new Map(); this.drainWaiters = new Map(); }
+  constructor({ lifecycleCoordinator = null } = {}) { this.handlers = new Map(); this.activeByComponent = new Map(); this.blockedComponents = new Map(); this.drainWaiters = new Map(); this.lifecycleCoordinator = lifecycleCoordinator; }
 
   finishInvocation(componentId) {
     const active = Math.max(0, (this.activeByComponent.get(componentId) || 1) - 1);
@@ -75,14 +75,18 @@ class ComponentCapabilityBroker {
     if (permission && !descriptor.service.permissions?.includes(permission)) { const error = new Error(`Component capability permission is not granted: ${permission}`); error.code = 'COMPONENT_HOST_PERMISSION_DENIED'; throw error; }
     const handler = this.handlers.get(normalized);
     if (!handler) throw new Error(`Host capability is unavailable: ${normalized}`);
+    const lifecycleLease = this.lifecycleCoordinator?.acquireWork?.(componentId, `capability:${normalized}`);
+    const internalContext = lifecycleLease ? { ...(boundContext || {}), lifecycleLease } : boundContext;
     this.activeByComponent.set(componentId, (this.activeByComponent.get(componentId) || 0) + 1);
     try {
-      const result = handler(clonePayload(payload), boundContext, descriptor);
-      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => this.finishInvocation(componentId));
+      const result = handler(clonePayload(payload), internalContext, descriptor);
+      if (result && typeof result.then === 'function') return Promise.resolve(result).finally(() => { this.finishInvocation(componentId); lifecycleLease?.release(); });
       this.finishInvocation(componentId);
+      lifecycleLease?.release();
       return result;
     } catch (error) {
       this.finishInvocation(componentId);
+      lifecycleLease?.release();
       throw error;
     }
   }

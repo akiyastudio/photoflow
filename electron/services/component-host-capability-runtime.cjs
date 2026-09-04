@@ -8,7 +8,7 @@ const { createComponentNetworkService } = require('./component-network-service.c
 const { createComponentRuntimeExecutionService } = require('./component-runtime-execution-service.cjs');
 
 const createComponentHostCapabilityRuntime = dependencies => {
-  const componentCapabilityBroker = new ComponentCapabilityBroker();
+  const componentCapabilityBroker = new ComponentCapabilityBroker({ lifecycleCoordinator: dependencies.lifecycleCoordinator });
   const componentNotificationService = new ComponentNotificationService({ mainWindow: dependencies.mainWindow });
   componentCapabilityBroker.register('notifications', (payload, context, descriptor) => componentNotificationService.publish(descriptor, payload, context));
   const projectDomain = registerComponentProjectCapabilities({ ...dependencies, broker: componentCapabilityBroker });

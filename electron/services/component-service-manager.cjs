@@ -180,7 +180,6 @@ class ComponentServiceManager {
   }
 
   async invoke(componentId, method, payload, boundContext) {
-    this.lifecycleCoordinator?.assertAvailable?.(componentId);
     if (this.destroying || this.destroyed) throw new Error('Component service manager is destroying or destroyed');
     if (this.quarantinedComponents.has(String(componentId || ''))) { const error = new Error(`Component ${componentId} is quarantined`); error.code = 'COMPONENT_QUARANTINED'; throw error; }
     if (this.backupRestoreLeaseCount > 0) { await this.backupRestoreIdle; return this.invoke(componentId, method, payload, boundContext); }
@@ -188,6 +187,7 @@ class ComponentServiceManager {
       await this.storageSnapshotBarrier.released;
       return this.invoke(componentId, method, payload, boundContext);
     }
+    const lifecycleLease = this.lifecycleCoordinator?.acquireWork?.(componentId, `service-rpc:${String(method || '')}`);
     this.activeInvocations += 1;
     try {
     const descriptor = this.registry.resolve(componentId);
@@ -200,8 +200,9 @@ class ComponentServiceManager {
       throw error;
     }
     const normalizedPayload = cloneRequestPayload(payload);
-    return await this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext);
+    return await this.invokeOnce(descriptor, normalizedMethod, normalizedPayload, boundContext, null, false, null, lifecycleLease);
     } finally {
+      lifecycleLease?.release();
       this.activeInvocations -= 1;
       if (this.activeInvocations === 0) {
         for (const notify of this.activityWaiters) notify();
@@ -210,13 +211,13 @@ class ComponentServiceManager {
     }
   }
 
-  async invokeOnce(descriptor, method, payload, boundContext, preparedSession = null, forceLongTimeout = false, invocationIdentity = null) {
+  async invokeOnce(descriptor, method, payload, boundContext, preparedSession = null, forceLongTimeout = false, invocationIdentity = null, lifecycleLease = null) {
     if (this.isBackupRestoreMethod(descriptor, method) && invocationIdentity !== BACKUP_RESTORE_INVOCATION) {
       const error = new Error(`Component backup restore method is host-only: ${method}`);
       error.code = 'COMPONENT_HOST_ONLY_METHOD';
       throw error;
     }
-    const session = preparedSession || await this.ensureSession(descriptor);
+    const session = preparedSession || await this.ensureSession(descriptor, lifecycleLease);
     await session.ready;
     const id = String(this.nextRequestId++);
     const message = { type: 'request', id, method, payload, context: {
@@ -227,7 +228,7 @@ class ComponentServiceManager {
     } };
     return new Promise((resolve, reject) => {
       const startedAt = Date.now();
-      const pending = { resolve, reject, timer: null, context: boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0, activeCapabilities: 0, capabilityCount: 0, seenCapabilityIds: new Set(), deferredResponse: null, longTimeoutArmed: forceLongTimeout, onTimeout: null };
+      const pending = { resolve, reject, timer: null, context: lifecycleLease ? { ...(boundContext || {}), lifecycleLease } : boundContext, method, startedAt, lastCapability: '', capabilityStartedAt: 0, activeCapabilities: 0, capabilityCount: 0, seenCapabilityIds: new Set(), deferredResponse: null, longTimeoutArmed: forceLongTimeout, onTimeout: null };
       pending.onTimeout = () => {
         if (session.pending.get(id) !== pending) return;
         session.pending.delete(id);
@@ -253,19 +254,24 @@ class ComponentServiceManager {
     });
   }
 
-  async ensureSession(descriptor) {
+  async ensureSession(descriptor, lifecycleLease = null) {
+    const ownedLease = lifecycleLease ? null : this.lifecycleCoordinator?.acquireWork?.(descriptor?.componentId, 'service-session');
+    try { return await this.ensureSessionWithLease(descriptor, lifecycleLease || ownedLease); }
+    finally { ownedLease?.release(); }
+  }
+
+  async ensureSessionWithLease(descriptor, lifecycleLease) {
     if (this.destroying || this.destroyed) throw new Error('Component service manager is destroying or destroyed');
-    this.lifecycleCoordinator?.assertAvailable?.(descriptor?.componentId);
     this.assertNotQuarantined(descriptor?.componentId);
     if (this.storageSnapshotBarrier) {
       await this.storageSnapshotBarrier.released;
-      return this.ensureSession(descriptor);
+      return this.ensureSessionWithLease(descriptor, lifecycleLease);
     }
     const componentId = descriptor.componentId;
     const existing = this.sessions.get(componentId);
     if (existing && existing.version === descriptor.componentVersion && !existing.managed.released) return existing;
     const activeTransition = this.sessionTransitions.get(componentId);
-    if (activeTransition) { await activeTransition; return this.ensureSession(descriptor); }
+    if (activeTransition) { await activeTransition; return this.ensureSessionWithLease(descriptor, lifecycleLease); }
     const transition = (async () => {
       const current = this.sessions.get(componentId);
       if (current && current.version === descriptor.componentVersion && !current.managed.released) return current;
@@ -289,7 +295,7 @@ class ComponentServiceManager {
       prepareReady(session);
       session.managed = this.processSupervisor.launch({
         id: `component-service:${componentId}`,
-        kind: 'component-service', owner: { componentId }, command, args, options, windowsJob: true,
+        kind: 'component-service', command, args, options, owner: { componentId }, lifecycleLease, windowsJob: true,
         health: { startupTimeoutMs: 15000 },
         restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [100, 500] },
         onSpawn: (child, managed) => this.attach(session, child, managed),

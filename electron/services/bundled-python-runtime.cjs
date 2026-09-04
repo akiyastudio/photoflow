@@ -76,6 +76,7 @@ const createBundledPythonRuntime = ({
   const spawnSupervisedJob = ({ prefix, command, args, supervision = null }) => processSupervisor.launch({
     id: `${prefix}:${++supervisedJobSequence}`,
     kind: 'python-job',
+    ...(supervision?.componentId ? { owner: { componentId: supervision.componentId }, lifecycleLease: supervision.lifecycleLease } : {}),
     command,
     args,
     options: { stdio: ['ignore', 'pipe', 'pipe'] },
@@ -83,9 +84,12 @@ const createBundledPythonRuntime = ({
     ephemeral: true,
   }).child;
 
-  const runJsonCommand = createJsonCommandRunner({
+  const runJsonCommandInternal = createJsonCommandRunner({
     spawnJob: run => spawnSupervisedJob({ prefix: 'python:json-job', command: run.command, args: run.args, supervision: run.supervision }),
   });
+  const runJsonCommand = (run, label, timeoutMs, onMessage, signal, deadlineAt, supervision) => runJsonCommandInternal(
+    run, label, timeoutMs, onMessage, signal, deadlineAt, supervision,
+  );
 
   const runPythonJsonAction = (scriptName, args, timeoutMs = 20 * 60 * 1000, onMessage, signal, deadlineAt) =>
     runJsonCommand(getRunConfig(scriptName, args), scriptName, timeoutMs, onMessage, signal, deadlineAt);

@@ -8,6 +8,7 @@ const fixture = ({ background = true, failStopOnce = false, confirm = true } = {
   let processesPresent = background;
   const lifecycle = {
     cancelApplicationQuit: () => events.push('cancel-gate'),
+    requestApplicationStop: () => events.push('request-stop'),
     waitForAllWork: async () => events.push('work-drained'),
     commitApplicationQuit: () => events.push('commit'),
   };

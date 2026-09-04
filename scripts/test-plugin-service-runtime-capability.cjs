@@ -1,6 +1,4 @@
 const assert = require('node:assert/strict');
-const { EventEmitter } = require('node:events');
-const { PassThrough } = require('node:stream');
 const { createPluginService } = require('../electron/services/plugin-service.cjs');
 
 const component = {
@@ -21,23 +19,20 @@ const service = createPluginService({
   assert.match(calls[0].label, /fixture\.runtime\.cli/);
   assert.throws(() => service.runJsonForComponentCapability(component.id, 'undeclared.runtime', [], 1000), error => error.code === 'PLUGIN_MISSING');
 
-  const launches = [];
+  const supervisedCalls = [];
+  const lifecycleLease = { token: Symbol('lease') };
   const supervised = createPluginService({
     app: { isPackaged: false },
     registry: { list: () => [component], resolve: id => id === component.id ? component : null },
-    runJsonCommand: async () => { throw new Error('legacy runner must not receive supervised component work'); },
-    processSupervisor: { launch: specification => {
-      launches.push(specification);
-      const child = new EventEmitter();
-      child.stdout = new PassThrough(); child.stderr = new PassThrough();
-      queueMicrotask(() => { child.stdout.end(`${JSON.stringify({ success: true, value: 'ok' })}\n`); child.emit('close', 0); });
-      return { child };
-    } },
+    runJsonCommand: async (run, label, _timeout, _onMessage, _signal, _deadline, supervision) => { supervisedCalls.push({ run, label, supervision }); return 'ok'; },
   });
-  await supervised.runJsonForCapability('fixture.runtime.cli', [], 1000);
-  await supervised.runJsonForComponentCapability(component.id, 'fixture.runtime.cli', [], 1000);
-  await supervised.runJson(component.id, [], 1000);
-  assert.equal(launches.length, 3);
-  for (const launch of launches) assert.deepEqual(launch.owner, { componentId: component.id });
+  await supervised.runJsonForCapability('fixture.runtime.cli', [], 1000, undefined, undefined, undefined, { lifecycleLease });
+  await supervised.runJsonForComponentCapability(component.id, 'fixture.runtime.cli', [], 1000, undefined, undefined, undefined, { lifecycleLease });
+  await supervised.runJson(component.id, [], 1000, undefined, undefined, undefined, { lifecycleLease });
+  assert.equal(supervisedCalls.length, 3);
+  for (const call of supervisedCalls) {
+    assert.deepEqual(call.run.command, 'fixture-runtime.exe');
+    assert.deepEqual(call.supervision, { componentId: component.id, lifecycleLease });
+  }
   console.log('Plugin service manifest runtime capability resolution tests passed.');
 })().catch(error => { console.error(error); process.exitCode = 1; });

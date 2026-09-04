@@ -4,6 +4,7 @@ class ComponentLifecycleCoordinator {
     this.work = new Map();
     this.workWaiters = new Map();
     this.globalQuiescing = false;
+    this.applicationQuitPhase = 'idle';
     this.quitCommitted = false;
     this.startupRecovering = false;
     this.blocker = blocker;
@@ -36,17 +37,15 @@ class ComponentLifecycleCoordinator {
     const id = String(componentId || '').trim();
     if (!id) throw new Error('组件 ID 不能为空');
     this.assertAvailable(id);
-    const state = { componentId: id, operation, token: Symbol(id) };
-    const leases = this.work.get(id) || new Set();
-    leases.add(state);
-    this.work.set(id, leases);
     let released = false;
-    return {
-      ...state,
+    const lease = {
+      componentId: id,
+      operation,
+      token: Symbol(id),
       release: () => {
         if (released) return;
         released = true;
-        leases.delete(state);
+        leases.delete(lease);
         if (!leases.size) {
           this.work.delete(id);
           for (const resolve of this.workWaiters.get(id) || []) resolve();
@@ -54,6 +53,10 @@ class ComponentLifecycleCoordinator {
         }
       },
     };
+    const leases = this.work.get(id) || new Set();
+    leases.add(lease);
+    this.work.set(id, leases);
+    return lease;
   }
 
   acquire(componentId, operation, { stopOnly = false } = {}) {
@@ -91,16 +94,26 @@ class ComponentLifecycleCoordinator {
   beginApplicationQuit() {
     if (this.startupRecovering || this.globalQuiescing || this.transitions.size) return false;
     this.globalQuiescing = true;
+    this.applicationQuitPhase = 'intent';
     return true;
   }
 
+  requestApplicationStop() {
+    if (this.applicationQuitPhase !== 'intent') throw new Error('应用退出尚未进入 intent');
+    this.applicationQuitPhase = 'stop';
+  }
+
   commitApplicationQuit() {
-    if (!this.globalQuiescing) throw new Error('应用退出尚未进入 quiesce');
+    if (this.applicationQuitPhase !== 'stop') throw new Error('应用退出尚未确认停止后台工作');
     this.quitCommitted = true;
+    this.applicationQuitPhase = 'committed';
   }
 
   cancelApplicationQuit() {
-    if (!this.quitCommitted) this.globalQuiescing = false;
+    if (!this.quitCommitted) {
+      this.globalQuiescing = false;
+      this.applicationQuitPhase = 'idle';
+    }
   }
 
   isQuiescing(componentId) {
@@ -139,8 +152,9 @@ class ComponentLifecycleCoordinator {
 
   assertLaunchAllowed(componentId, lease) {
     const id = String(componentId || '');
+    const validWorkLease = lease?.componentId === id && this.work.get(id)?.has(lease);
+    if (validWorkLease && this.applicationQuitPhase !== 'stop' && this.applicationQuitPhase !== 'committed' && this.transitions.get(id)?.stopRequested !== true) return;
     if (this.globalQuiescing) throw Object.assign(new Error('应用正在退出，禁止启动新的组件进程'), { code: 'COMPONENT_QUIESCING' });
-    if (lease?.componentId === id && this.work.get(id)?.has(lease) && this.transitions.get(id)?.stopRequested !== true) return;
     if (lease?.componentId === id && this.transitions.get(id)?.token === lease.token) return;
     this.assertAvailable(id);
   }

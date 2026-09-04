@@ -32,6 +32,7 @@ const runApplicationQuit = async ({
     componentLifecycleCoordinator.cancelApplicationQuit();
     throw Object.assign(new Error('用户取消退出'), { code: 'APP_QUIT_CANCELLED' });
   }
+  componentLifecycleCoordinator.requestApplicationStop();
 
   const barriers = guardedComponentIds.map(componentId => componentCapabilityBroker.blockComponent(componentId));
   try {

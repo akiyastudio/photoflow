@@ -1356,6 +1356,7 @@ app.whenReady().then(async () => {
     path, fs, crypto, getConfigPath, readSavedConfig, readConfig: configMutationService.read, mutateConfig: configMutationService.mutate,
     getProjectPath, dialog, mainWindow, mediaService, mediaRatingService, exiftool, shell, backgroundTasks,
     uniqueDestination, ensureTrackedVersionThumbnail, projectVirtualPaths, fileSystemService, runPythonJsonAction, extractVideoTimelineFrames, pluginService, safeStorage, secretsRoot: path.join(app.getPath('userData'), 'component-secrets'),
+    lifecycleCoordinator: componentLifecycleCoordinator,
     getBoundProject: (workspaceRoot, projectName) => workspaceCatalogs.get(path.resolve(workspaceRoot))?.byName.get(String(projectName || '').toLocaleLowerCase()) || null,
     RAW_EXTENSIONS, VIDEO_EXTENSIONS, IMAGE_PREVIEW_CONVERSION_EXTENSIONS, resolveComponentContentBinding: componentContentBinding.resolve,
   });
