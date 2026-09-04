@@ -3,7 +3,7 @@ const { terminateAndWait } = require('../infrastructure/process-termination.cjs'
 
 const MAX_JSON_MESSAGE_BYTES = 32 * 1024 * 1024;
 
-const createJsonCommandRunner = ({ spawnJob, terminationTimeoutMs = 5000 }) => (
+const createJsonCommandRunner = ({ spawnJob, terminationTimeoutMs = 5000, terminationOptions = {} }) => (
   (run, label, timeoutMs = 20 * 60 * 1000, onMessage, signal, requestedDeadlineAt) => new Promise((resolve, reject) => {
     const timeoutDeadline = Date.now() + Math.max(0, timeoutMs);
     const deadlineAt = Number.isFinite(requestedDeadlineAt) ? Math.min(requestedDeadlineAt, timeoutDeadline) : timeoutDeadline;
@@ -92,7 +92,7 @@ const createJsonCommandRunner = ({ spawnJob, terminationTimeoutMs = 5000 }) => (
       terminating = true;
       clearTimeout(timer);
       if (abortListener) signal?.removeEventListener?.('abort', abortListener);
-      void terminateAndWait(child, Date.now() + terminationTimeoutMs).then(
+      void terminateAndWait(child, Date.now() + terminationTimeoutMs, terminationOptions).then(
         () => fail(error),
         terminationError => fail(terminationError),
       );

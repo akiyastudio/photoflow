@@ -2,7 +2,7 @@
 
 Component Service Protocol V1 is the current process transport used by
 Component Host V2. The protocol version describes the JSON Lines envelope; it
-is independent from the current Host API result version (`apiVersion: 7`) and
+is independent from the unversioned current Host API and
 from component-owned RPC method versions such as `.v1` or `.v2`.
 
 Component renderers run in host-managed sandbox `WebContentsView` instances.

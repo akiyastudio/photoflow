@@ -752,7 +752,6 @@ export interface ComponentHostAction {
   componentId: string;
   componentVersion: string;
   contractVersion: 1 | 2;
-  hostApiVersion: 1 | 2 | 3 | 4 | 5 | 6 | 7;
   actionId: string;
   label: string;
   pageId: string;
@@ -775,7 +774,6 @@ export type ComponentSettingsPageContribution = {
   componentId: string;
   componentVersion: string;
   contractVersion: 2;
-  hostApiVersion: 3 | 4 | 5 | 6 | 7;
   pageId: string;
   label: string;
   pageTitle: string;
@@ -794,7 +792,7 @@ export interface ComponentPageOpenScope {
   contentKind?: 'project' | 'inspiration';
 }
 export type ComponentContributionType = 'component.sidePanel' | 'media.contextAction' | 'project.contextAction' | 'project.importProvider' | 'project.exportProvider' | 'application.command';
-export interface ComponentContribution { componentId: string; componentVersion: string; hostApiVersion: 7; contributionId: string; type: ComponentContributionType; label: string; title: string; description?: string; pageId: string; rpcMethods: string[]; /** Only component.sidePanel and project.contextAction may use this grouped Host placement. */ placement?: 'workspace.videoTools'; iconUrl?: string }
+export interface ComponentContribution { componentId: string; componentVersion: string; contributionId: string; type: ComponentContributionType; label: string; title: string; description?: string; pageId: string; rpcMethods: string[]; /** Only component.sidePanel and project.contextAction may use this grouped Host placement. */ placement?: 'workspace.videoTools'; iconUrl?: string }
 
 export interface ComponentPageInstance {
   identity: string;
@@ -1062,8 +1060,8 @@ export interface IElectronAPI {
   getComponents: (force?: boolean) => Promise<{ success: boolean; components: ComponentStatus[]; installPath: string; error?: string }>;
   getComponentHostActions: () => Promise<{ success: boolean; actions: ComponentHostAction[]; error?: string }>;
   getComponentSettingsPages: () => Promise<{ success: boolean; pages: ComponentSettingsPageContribution[]; error?: string }>;
-  readComponentSettingsForm: (request: { componentId: string; pageId: string }) => Promise<{ success: boolean; apiVersion?: 1; revision?: number; values?: Record<string, ComponentSettingsValue>; error?: string }>;
-  updateComponentSettingsForm: (request: { componentId: string; pageId: string; patch: Record<string, ComponentSettingsValue> }) => Promise<{ success: boolean; apiVersion?: 1; revision?: number; values?: Record<string, ComponentSettingsValue>; error?: string }>;
+  readComponentSettingsForm: (request: { componentId: string; pageId: string }) => Promise<{ success: boolean; revision?: number; values?: Record<string, ComponentSettingsValue>; error?: string }>;
+  updateComponentSettingsForm: (request: { componentId: string; pageId: string; patch: Record<string, ComponentSettingsValue> }) => Promise<{ success: boolean; revision?: number; values?: Record<string, ComponentSettingsValue>; error?: string }>;
   getComponentContributions: () => Promise<{ success: boolean; contributions: ComponentContribution[]; error?: string }>;
   openComponentPage: (request: { componentId: string; pageId: string; workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus; scopeRelativePath?: string; selectedRelativePaths?: string[]; sourcePageId?: string; contentKind?: 'project' | 'inspiration' }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string }; error?: string }>;
   openComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean; page?: { instanceId: string; componentId: string; pageId: string; pageTitle: string; surface: 'application.settings'; leaseId: string }; error?: string }>;
@@ -1072,7 +1070,7 @@ export interface IElectronAPI {
   onComponentPanelContentSizeChanged: (callback: (value: { instanceId: string; width: number; height: number }) => void) => () => void;
   onComponentProjectDirectoryOpenRequested: (callback: (request: { workspacePath: string; projectId: string; projectName: string; projectStatus: ProjectStatus; relativePath: string }) => void) => () => void;
   releaseComponentSettingsPage: (request: { componentId: string; pageId: string; leaseId: string }) => Promise<{ success: boolean }>;
-  activateComponentPage: (instanceId: string) => Promise<{ success: boolean }>;
+  activateComponentPage: (request: { instanceId: string; deactivateIfActive?: true }) => Promise<{ success: boolean }>;
   setHostSurfaceSuspended: (update: { rendererToken: string; revision: number; suspended: boolean }) => Promise<{ success: boolean }>;
   updateToastView: (snapshot: ToastViewSnapshot) => Promise<{ success: boolean }>;
   onToastViewAction: (callback: (action: ToastViewAction) => void) => () => void;
@@ -1258,7 +1256,7 @@ export interface IElectronAPI {
   reportRendererInfo: (message: string, details?: string) => void;
   trackTelemetry: (eventName: string, properties?: Record<string, string | number | boolean>) => void;
   onAppError: (callback: (message: string) => void) => () => void;
-  onComponentNotification: (callback: (value: { apiVersion: 2; type: 'notification'; id: string; componentId: string; surface: 'project' | 'application.settings' | ComponentContributionType; notification: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; dedupeKey?: string } } | { apiVersion: 2; type: 'purge'; componentId: string }) => void) => () => void;
+  onComponentNotification: (callback: (value: { type: 'notification'; id: string; componentId: string; surface: 'project' | 'application.settings' | ComponentContributionType; notification: { tone: 'info' | 'success' | 'warning' | 'error'; message: string; dedupeKey?: string } } | { type: 'purge'; componentId: string }) => void) => () => void;
   getRawPreview: (filePath: string, cacheConfig?: AppConfig['mediaCache']) => Promise<{ success: boolean; previewUrl?: string; error?: string }>;
   projectFileOperation: (workspacePath: string, status: ProjectStatus, projectName: string, operation: 'trash' | 'copy' | 'cut' | 'paste' | 'rename' | 'select' | 'move' | 'import' | 'import-url' | 'import-data', paths: string[], targetRelativePath?: string, nextName?: string, options?: { sourceFolderRelativePath?: string; imageDestFolderName?: string; videoDestFolderName?: string; renameNames?: string[]; pasteConflictPolicy?: 'replace' | 'keep-both'; droppedImageFiles?: Array<{ name: string; type: string; bytes: ArrayBuffer }> }) => Promise<{ success: boolean; cancelled?: boolean; count?: number; permanentCount?: number; imageCount?: number; videoCount?: number; operationId?: string; taskNotificationOwned?: boolean; clipboardGeneration?: number; consumedCutClipboard?: boolean; affectedDirectories?: string[]; moves?: Array<{ sourceRelativePath: string; destinationRelativePath: string }>; movedItems?: Array<{ sourceRelativePath: string; destinationRelativePath: string; copied?: boolean }>; createdItems?: Array<{ name: string; relativePath: string; isDirectory: boolean }>; replacedCount?: number; replacedNames?: string[]; replacedPermanentCount?: number; replacedRetainedCount?: number; requiresDecision?: { kind: 'paste-conflict'; names: string[]; fileCount: number; folderCount: number; message: string; detail: string }; undoUnavailable?: boolean; warning?: string; error?: string; errorCode?: string }>;
   getProjectFileClipboardStatus: () => Promise<{ success: boolean; hasFiles: boolean; error?: string }>;

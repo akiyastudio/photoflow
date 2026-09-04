@@ -55,7 +55,7 @@ export const ComponentSettingsPageSurface = ({ page, onError, onReady, visible =
     observer.observe(surface);
     window.addEventListener('resize', schedule);
     window.addEventListener('scroll', schedule, true);
-    void window.electronAPI.activateComponentPage(instanceId).catch(() => undefined);
+    void window.electronAPI.activateComponentPage({instanceId}).catch(() => undefined);
     schedule();
     return () => {
       observer.disconnect();

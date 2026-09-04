@@ -39,6 +39,14 @@ const diagnosticToken = value => {
   return /^[a-z0-9_.:-]{1,80}$/i.test(token) ? token : 'unknown';
 };
 const componentPartition = componentId => `persist:component-host-${String(componentId || '').toLowerCase()}`;
+const waitForWebContentsDestroyed = (webContents, timeoutMs = 1000) => {
+  if (!webContents || webContents.isDestroyed?.()) return Promise.resolve();
+  return new Promise((resolve, reject) => {
+    const finish = () => { clearTimeout(timer); webContents.removeListener?.('destroyed', finish); resolve(); };
+    const timer = setTimeout(() => { webContents.removeListener?.('destroyed', finish); reject(new Error('Timed out waiting for component view destruction')); }, timeoutMs);
+    timer.unref?.(); webContents.once?.('destroyed', finish);
+  });
+};
 const filePathHasLink = async (fs, root, candidate) => {
   const relative = path.relative(root, candidate);
   if (relative.startsWith('..') || path.isAbsolute(relative)) return true;
@@ -62,7 +70,7 @@ const componentSurfaceCss = (theme, surface) => {
 };
 
 class ComponentViewManager {
-  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, resolveOpenContext = request => request, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
+  constructor({ WebContentsView, mainWindow, registry, preloadPath, ipcMain, serviceManager = null, capabilityBroker = null, inputGrantService = null, notificationService = null, clearComponentCapabilityState = null, partitionSessionProvider = null, resolveOpenContext = request => request, writeLog = () => undefined, onViewStackChanged = () => undefined, settingsCloseGraceMs = 750 }) {
     this.WebContentsView = WebContentsView;
     this.mainWindow = mainWindow;
     this.registry = registry;
@@ -74,6 +82,7 @@ class ComponentViewManager {
     this.capabilityBroker = capabilityBroker;
     this.inputGrantService = inputGrantService;
     this.notificationService = notificationService;
+    this.partitionSessionProvider = partitionSessionProvider;
     this.resolveOpenContext = resolveOpenContext;
     this.onViewStackChanged = onViewStackChanged;
     this.settingsCloseGraceMs = Math.max(0, Number(settingsCloseGraceMs) || 0);
@@ -194,7 +203,7 @@ class ComponentViewManager {
     if (!this.capabilityBroker) throw new Error('Declarative component settings are unavailable');
     const { descriptor, contribution } = this.settingsForm(request);
     const result = await this.capabilityBroker.invoke(descriptor, 'component.settings', { action: 'get' }, this.declarativeSettingsContext(descriptor));
-    return { apiVersion: 1, revision: Number(result.revision) || 0, values: normalizeComponentSettingsFormValues(contribution.form, result.settings) };
+    return { revision: Number(result.revision) || 0, values: normalizeComponentSettingsFormValues(contribution.form, result.settings) };
   }
 
   async updateSettingsForm(request) {
@@ -202,7 +211,7 @@ class ComponentViewManager {
     const { descriptor, contribution } = this.settingsForm(request);
     const patch = validateComponentSettingsFormPatch(contribution.form, request?.patch);
     const result = await this.capabilityBroker.invoke(descriptor, 'component.settings', { action: 'merge', settings: patch }, this.declarativeSettingsContext(descriptor));
-    return { apiVersion: 1, revision: Number(result.revision) || 0, values: normalizeComponentSettingsFormValues(contribution.form, result.settings) };
+    return { revision: Number(result.revision) || 0, values: normalizeComponentSettingsFormValues(contribution.form, result.settings) };
   }
   listContributions() { return this.registry.list().flatMap(item => (item.contributions || []).map(contribution => ({ componentId: item.componentId, componentVersion: item.componentVersion, contributionId: contribution.id, type: contribution.type, label: contribution.label, title: contribution.title, ...(contribution.description ? { description: contribution.description } : {}), pageId: contribution.pageId, rpcMethods: contribution.rpcMethods, ...(contribution.placement ? { placement: contribution.placement } : {}), ...(item.icon ? { iconUrl: `photoflow-component://icon/${encodeURIComponent(item.componentId)}?v=${encodeURIComponent(item.componentVersion)}` } : {}) }))); }
 
@@ -329,7 +338,7 @@ class ComponentViewManager {
     this.instancesById.set(instanceId, instance);
     const senderId = view.webContents.id;
     this.senderBindings.set(senderId, instance);
-    this.partitionSessions.set(descriptor.componentId, view.webContents.session);
+    this.partitionSessions.set(String(descriptor.componentId).toLowerCase(), view.webContents.session);
     const componentRoot = descriptor.componentRoot ? path.resolve(descriptor.componentRoot) : '';
     let canonicalComponentRoot='';
     if(componentRoot){const componentRootStat = await require('node:fs').promises.lstat(componentRoot);canonicalComponentRoot = await require('node:fs').promises.realpath(componentRoot);if (!componentRootStat.isDirectory() || componentRootStat.isSymbolicLink()) { this.close(instanceId); throw new Error('Component root is unsafe'); }}
@@ -529,9 +538,9 @@ class ComponentViewManager {
   }
 
   closeComponent(componentId) {
-    const normalizedId = String(componentId || '');
+    const normalizedId = String(componentId || '').toLowerCase();
     const ids = [...this.instances.values()]
-      .filter(instance => instance.descriptor.componentId === normalizedId)
+      .filter(instance => String(instance.descriptor.componentId || '').toLowerCase() === normalizedId)
       .map(instance => instance.instanceId);
     ids.forEach(id => this.close(id));
     this.notificationService?.clearComponent?.(normalizedId);
@@ -540,10 +549,12 @@ class ComponentViewManager {
   }
 
   async clearComponentPartitionStorage(componentId) {
-    const normalizedId = String(componentId || '');
+    const normalizedId = String(componentId || '').toLowerCase();
+    const closingContents = [...this.instances.values()].filter(instance => String(instance.descriptor.componentId || '').toLowerCase() === normalizedId).map(instance => instance.view.webContents);
     this.closeComponent(normalizedId);
-    const session = this.partitionSessions.get(normalizedId);
-    if (!session) return false;
+    await Promise.all(closingContents.map(webContents => waitForWebContentsDestroyed(webContents)));
+    const session = this.partitionSessions.get(normalizedId) || this.partitionSessionProvider?.(componentPartition(normalizedId));
+    if (!session) throw new Error(`Component partition session is unavailable: ${componentPartition(normalizedId)}`);
     const failures = [];
     for (const operation of [() => session.clearStorageData?.(), () => session.clearCache?.(), () => session.clearAuthCache?.()]) {
       try { await operation(); } catch (error) { failures.push(error); }
@@ -556,4 +567,4 @@ class ComponentViewManager {
   destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); this.notificationService?.destroy?.(); }
 }
 
-module.exports = { ComponentViewManager, componentPageKey, componentSettingsPageKey, componentSurfaceCss, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds };
+module.exports = { ComponentViewManager, componentPageKey, componentPartition, componentSettingsPageKey, componentSurfaceCss, normalizeOpenScope, normalizeResolvedTheme, selectComponentPreload, validBounds, waitForWebContentsDestroyed };

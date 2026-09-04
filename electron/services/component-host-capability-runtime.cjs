@@ -6,7 +6,6 @@ const { registerComponentProjectWriteCapabilities } = require('./component-proje
 const { createComponentSecretsService } = require('./component-secrets-service.cjs');
 const { createComponentNetworkService } = require('./component-network-service.cjs');
 const { createComponentRuntimeExecutionService } = require('./component-runtime-execution-service.cjs');
-const { translateLegacyMediaProcess } = require('../compatibility/legacy-media-process-v7.cjs');
 
 const createComponentHostCapabilityRuntime = dependencies => {
   const componentCapabilityBroker = new ComponentCapabilityBroker();
@@ -15,8 +14,7 @@ const createComponentHostCapabilityRuntime = dependencies => {
   const projectDomain = registerComponentProjectCapabilities({ ...dependencies, broker: componentCapabilityBroker });
   registerComponentProjectReadCapabilities({ ...dependencies, broker: componentCapabilityBroker });
   const runtimeExecution = createComponentRuntimeExecutionService({ ...dependencies, broker: componentCapabilityBroker, inputTokens: projectDomain });
-  const legacyMediaProcess = (payload, context, descriptor) => { const translated = translateLegacyMediaProcess(payload, descriptor); return translated ? runtimeExecution.invoke(translated, context, descriptor, { compatibility: true }) : null; };
-  const writeDomain = registerComponentProjectWriteCapabilities({ ...dependencies, broker: componentCapabilityBroker, projectDomain, legacyMediaProcess });
+  const writeDomain = registerComponentProjectWriteCapabilities({ ...dependencies, broker: componentCapabilityBroker, projectDomain });
   const secretsService = createComponentSecretsService(dependencies); const networkService = createComponentNetworkService({ ...dependencies, secretsService });
   componentCapabilityBroker.register('component.secrets', secretsService.invoke);
   componentCapabilityBroker.register('network.fetch', networkService.invoke);

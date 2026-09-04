@@ -34,7 +34,7 @@ class View {
 }
 
 const descriptor = {
-  componentId: 'settings-fixture', componentVersion: '1', contractVersion: 2, hostApiVersion: 7,
+  componentId: 'settings-fixture', componentVersion: '1', contractVersion: 2,
   settingsPages: [],
   settingsForms: [{ id: 'settings', title: 'Settings', form: { schemaVersion: 1, groups: [] }, customPage: { title: 'Advanced', entry: 'settings.html', rpcMethods: ['fixture.settings.v1'] } }],
   service: { permissions: [], events: [] },

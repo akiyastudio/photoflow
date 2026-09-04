@@ -1,7 +1,7 @@
 const { validateRendererPythonInvocation } = require('../security-policy.cjs');
 const { listStorageDevices } = require('../services/storage-device-service.cjs');
 const { decideComponentStatusRefresh, nextComponentProbeTimestamps } = require('../services/component-status-refresh-policy.cjs');
-const { createComponentLifecycleService } = require('../services/component-lifecycle-service.cjs');
+const { componentDataRoot, createComponentLifecycleService } = require('../services/component-lifecycle-service.cjs');
 const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
 
@@ -845,22 +845,42 @@ const registerSystemIpc = context => {
 
       const cleanupWarnings = [];
       if (clearUserData) {
-        const recycle = async target => {
-          const stat = await fs.promises.lstat(target).catch(() => null);
-          if (!stat) return;
-          try { await shell.trashItem(target); }
-          catch (error) { cleanupWarnings.push(`${path.basename(target)}：${error.message || String(error)}`); }
+        try { if (await componentViewManager?.clearComponentPartitionStorage?.(componentId) !== true) throw new Error('组件浏览器分区未执行清理'); }
+        catch (error) { cleanupWarnings.push(`组件浏览器分区：${error.message || String(error)}`); }
+        const recycle = async (root, target, label = path.basename(target)) => {
+          let stat;
+          try { stat = await fs.promises.lstat(target); }
+          catch (error) { if (error?.code === 'ENOENT') return; cleanupWarnings.push(`${label}：${error.message || String(error)}`); return; }
+          try {
+            const resolvedRoot = path.resolve(root); const resolvedTarget = path.resolve(target);
+            const relative = path.relative(resolvedRoot, resolvedTarget);
+            if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || stat.isSymbolicLink()) throw new Error('清理目标越过受管目录或包含链接');
+            const [canonicalRoot, canonicalTarget] = await Promise.all([fs.promises.realpath(resolvedRoot), fs.promises.realpath(resolvedTarget)]);
+            const canonicalRelative = path.relative(canonicalRoot, canonicalTarget);
+            if (!canonicalRelative || canonicalRelative.startsWith('..') || path.isAbsolute(canonicalRelative)) throw new Error('清理目标的真实路径越过受管目录');
+            await shell.trashItem(resolvedTarget);
+          } catch (error) { cleanupWarnings.push(`${label}：${error.message || String(error)}`); }
         };
         const workspaceDataRoot = path.join(app.getPath('userData'), 'workspace-data');
-        const workspaceEntries = await fs.promises.readdir(workspaceDataRoot, { withFileTypes: true }).catch(() => []);
+        let workspaceEntries = [];
+        try { workspaceEntries = await fs.promises.readdir(workspaceDataRoot, { withFileTypes: true }); }
+        catch (error) { if (error?.code !== 'ENOENT') cleanupWarnings.push(`工作区组件数据：${error.message || String(error)}`); }
         for (const entry of workspaceEntries) {
           if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
           const root = path.join(workspaceDataRoot, entry.name);
-          await recycle(path.join(root, 'components', componentId));
-          await recycle(path.join(root, componentId));
-          for (const suffix of ['', '-wal', '-shm']) await recycle(path.join(root, 'databases', `${componentId}.sqlite3${suffix}`));
+          try {
+            const [canonicalWorkspaceDataRoot, canonicalRoot] = await Promise.all([fs.promises.realpath(workspaceDataRoot), fs.promises.realpath(root)]);
+            const relativeRoot = path.relative(canonicalWorkspaceDataRoot, canonicalRoot);
+            if (!relativeRoot || relativeRoot.startsWith('..') || path.isAbsolute(relativeRoot)) throw new Error('工作区数据根越过受管目录');
+          } catch (error) { cleanupWarnings.push(`${entry.name}：${error.message || String(error)}`); continue; }
+          await recycle(root, path.join(root, 'components', componentId));
+          await recycle(root, path.join(root, componentId));
+          for (const suffix of ['', '-wal', '-shm']) await recycle(root, path.join(root, 'databases', `${componentId}.sqlite3${suffix}`));
         }
-        for (const temporaryDataPath of componentTemporaryDataPaths({ path, tempRoot: app.getPath('temp'), componentId })) await recycle(temporaryDataPath);
+        const tempRoot = app.getPath('temp');
+        for (const temporaryDataPath of componentTemporaryDataPaths({ path, tempRoot, componentId })) await recycle(tempRoot, temporaryDataPath);
+        const lifecycleDataPath = componentDataRoot(app, componentId, process.env);
+        await recycle(path.dirname(lifecycleDataPath), lifecycleDataPath, '组件 lifecycle 数据');
         try {
           await mutateConfig(config => {
             const componentSettings = { ...(config.componentSettings || {}) };

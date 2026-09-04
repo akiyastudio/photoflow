@@ -1,6 +1,7 @@
 const fs = require('node:fs');
 const path = require('node:path');
 const crypto = require('node:crypto');
+const { terminateAndWait } = require('../infrastructure/process-termination.cjs');
 
 const sha256File = filePath => new Promise((resolve, reject) => { const hash=crypto.createHash('sha256'); const input=fs.createReadStream(filePath); input.on('error',reject); input.on('data',chunk=>hash.update(chunk)); input.on('end',()=>resolve(hash.digest('hex'))); });
 const inside = (root,candidate) => { const relative=path.relative(path.resolve(root),path.resolve(candidate)); return Boolean(relative)&&!relative.startsWith('..')&&!path.isAbsolute(relative); };
@@ -10,7 +11,7 @@ const componentDataRoot = (app, componentId, environment = process.env) => {
     ? path.join(localAppData, 'PhotoFlow', 'components', String(componentId))
     : path.join(app.getPath('userData'), 'component-data', String(componentId));
 };
-const runProcess = ({spawn,command,args,cwd,report,env,timeoutMs=10*60*1000,killGraceMs=5000}) => new Promise((resolve,reject)=>{
+const runProcess = ({spawn,command,args,cwd,report,env,timeoutMs=10*60*1000,killGraceMs=5000,terminateProcess=terminateAndWait}) => new Promise((resolve,reject)=>{
   const child=spawn(command,args,{cwd,windowsHide:true,env});let output='',settled=false,timedOut=false,terminationUnconfirmed=false,spawnError=null,closeCode=null,closeSignal=null;
   const buffers={stdout:'',stderr:''};
   const consumeLine=line=>{const match=/^PHOTOFLOW_PROGRESS\|(\d{1,3})\|(.{1,240})$/.exec(line.replace(/\r$/,'').trim());if(match)report(Math.max(1,Math.min(99,Number(match[1]))),match[2],{phase:'running'});};
@@ -18,7 +19,7 @@ const runProcess = ({spawn,command,args,cwd,report,env,timeoutMs=10*60*1000,kill
   const flush=()=>{for(const stream of Object.keys(buffers)){if(buffers[stream])consumeLine(buffers[stream]);buffers[stream]='';}};
   const finish=()=>{if(settled)return;settled=true;clearTimeout(timer);clearTimeout(killTimer);clearTimeout(confirmTimer);flush();let error=spawnError||(closeCode===0&&!timedOut?null:new Error(terminationUnconfirmed?'组件 lifecycle 进程终止状态无法确认':timedOut?'组件 lifecycle 进程超时':output.trim()||`组件 lifecycle 进程失败（退出代码 ${closeCode??'unknown'}，信号 ${closeSignal||'none'}）`));if(error&&terminationUnconfirmed)error.code='COMPONENT_LIFECYCLE_TERMINATION_UNCONFIRMED';if(error)reject(error);else resolve(output);};
   let killTimer,confirmTimer;
-  const timer=setTimeout(()=>{timedOut=true;try{child.kill();}catch{/* best effort */}killTimer=setTimeout(()=>{try{child.kill('SIGKILL');}catch{/* best effort */}confirmTimer=setTimeout(()=>{terminationUnconfirmed=true;finish();},1000);confirmTimer.unref?.();},Math.max(100,Number(killGraceMs)||5000));killTimer.unref?.();},Math.max(1000,Math.min(30*60*1000,Number(timeoutMs)||10*60*1000)));timer.unref?.();
+  const timer=setTimeout(()=>{timedOut=true;void terminateProcess(child,Date.now()+Math.max(100,Number(killGraceMs)||5000)).catch(error=>{terminationUnconfirmed=true;spawnError=error;finish();});},Math.max(1000,Math.min(30*60*1000,Number(timeoutMs)||10*60*1000)));timer.unref?.();
   child.stdout.on('data',chunk=>consume('stdout',chunk));child.stderr.on('data',chunk=>consume('stderr',chunk));
   child.once('error',error=>{spawnError=error;finish();});
   child.once('close',(code,signal)=>{closeCode=code;closeSignal=signal;finish();});

@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const Ajv = require('ajv');
-const { parseComponentHostManifest, HOST_CAPABILITIES, CAPABILITY_PERMISSIONS, COMPONENT_HOST_MIN_API_VERSION, COMPONENT_HOST_MAX_API_VERSION } = require('../electron/component-host-contract.cjs');
+const { parseComponentHostManifest, HOST_CAPABILITIES, CAPABILITY_PERMISSIONS } = require('../electron/component-host-contract.cjs');
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
 const { registerComponentProjectCapabilities, resetComponentHostCapabilityStateForTest, stableUuid, STAGE_TTL_MS } = require('../electron/services/component-project-capabilities.cjs');
 const { createServiceHostClient } = require('../component-sdk/service.cjs');
@@ -13,8 +13,6 @@ const { createVersionService } = require('../electron/services/version-service.c
 const { registerHostCapabilities } = require('../electron/modules/system-ipc.cjs');
 
 const systemCapabilityRegistrations = [];
-assert.equal(COMPONENT_HOST_MIN_API_VERSION, 7);
-assert.equal(COMPONENT_HOST_MAX_API_VERSION, 7);
 registerHostCapabilities({ register: (method, handler) => systemCapabilityRegistrations.push([method, handler]) }, [
   ['component.lifecycle', () => undefined],
 ]);
@@ -78,7 +76,7 @@ const allPermissions = [...new Set(coreCapabilities.map(capability => CAPABILITY
 const manifest = {
   apiVersion: 1, id: 'fixture-component', version: '1.0.0',
   componentHost: {
-    contractVersion: 2, compatibility: { minHostApiVersion: 7, maxHostApiVersion: 7 },
+    contractVersion: 2,
     adoptionGrants: ['component.storage.previous.v1', 'project.output.existing.v1'],
     contributions: [
       { type: 'workspace.toolbarAction', id: 'open', label: 'Fixture', pageId: 'main' },
@@ -92,7 +90,9 @@ const manifest = {
   },
 };
 const descriptor = parseComponentHostManifest(manifest, manifestRoot);
-assert.equal(descriptor.hostApiVersion, 7);
+assert.throws(() => parseComponentHostManifest({ ...manifest, apiVersion: 2 }, manifestRoot), /manifest apiVersion/);
+const { apiVersion: _manifestApiVersion, ...missingManifestApiVersion } = manifest;
+assert.throws(() => parseComponentHostManifest(missingManifestApiVersion, manifestRoot), /manifest apiVersion/);
 const restoreManifest = structuredClone(manifest);
 restoreManifest.componentHost.service.rpcMethods.push('fixture.restore.workspace.v1');
 restoreManifest.componentHost.service.backupRestore = { transactionProtocolVersion: 1, sourceManifestProtocolVersion: 1, receiptProtocolVersion: 1, workspace: { method: 'fixture.restore.workspace.v1' }, sources: [{ scope: 'component-storage', path: 'fixture-component/storage.sqlite3', format: 'fixture-v1' }] };
@@ -114,7 +114,6 @@ assert.throws(() => parseComponentHostManifest(backslashRestoreManifest, manifes
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, capabilities: [...coreCapabilities, ' notifications'] } } }, manifestRoot), /exact and unique/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: [...allPermissions, allPermissions[0]] } } }, manifestRoot), /exact and unique/);
 for (let legacyVersion = 2; legacyVersion <= 6; legacyVersion += 1) {
-  assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: legacyVersion, maxHostApiVersion: legacyVersion } } }, manifestRoot), /only Host API/);
   const legacyMethod = `project.media.page.v${legacyVersion}`;
   assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, capabilities: [legacyMethod], permissions: ['project.media.read'] } } }, manifestRoot), /unknown host capability/);
 }
@@ -136,7 +135,7 @@ try {
   assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, contributions: manifest.componentHost.contributions.map(item => item.type === 'application.settingsPage' ? { ...item, entry: 'linked-settings/settings.html' } : item) } }, manifestRoot), /linked path/);
 } catch (error) { if (!['EPERM', 'EACCES'].includes(error?.code)) throw error; }
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: allPermissions.filter(value => value !== 'project.output.write') } } }, manifestRoot), /requires permission project\.output\.write/);
-assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: { minHostApiVersion: 8, maxHostApiVersion: 9 } } }, manifestRoot), /only Host API/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: {} } }, manifestRoot), /Unknown component host field/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, unsafeExtension: true } }, manifestRoot), /Unknown component host field/);
 for (const schema of ['component-manifest-v2.schema.json', 'component-host-api.schema.json', 'component-service-protocol-v1.schema.json']) JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', schema), 'utf8'));
 const componentManifestSchema2020 = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-manifest-v2.schema.json'), 'utf8'));
@@ -183,24 +182,17 @@ const runtimeSources = [
 ].map(relative => fs.readFileSync(path.resolve(__dirname, '..', relative), 'utf8')).join('\n');
 const runtimeMethods = [...new Set([...runtimeSources.matchAll(/(?:\.register\(|\[)\s*'([a-z][a-z0-9.-]*)'/g)].map(match => match[1]).filter(method => HOST_CAPABILITIES.has(method)))].sort();
 assert.deepEqual(runtimeMethods, [...HOST_CAPABILITIES].sort(), 'runtime registrations must implement every Host API capability exactly once');
-const unexpectedApiRevisions = [];
-const inspectSchema = value => {
-  if (!value || typeof value !== 'object') return;
-  if (value.properties?.apiVersion?.const !== undefined && value.properties.apiVersion.const !== 7) unexpectedApiRevisions.push(value.properties.apiVersion.const);
-  for (const child of Object.values(value)) inspectSchema(child);
-};
-inspectSchema(capabilitySchema);
-assert.deepEqual(unexpectedApiRevisions, [], 'every Host capability response schema uses the negotiated internal revision');
+assert(!JSON.stringify(capabilitySchema).includes('apiVersion'), 'Host capability response schemas are unversioned');
 const storageVariants = capabilitySchema.$defs.storage.properties.result.oneOf;
 const pendingStorageSchema = storageVariants.find(value => value.properties?.adoption?.properties?.state?.const === 'pending');
 const committedStorageSchema = storageVariants.find(value => value.properties?.adoption?.properties?.state?.const === 'committed');
 assert(pendingStorageSchema && !Object.hasOwn(pendingStorageSchema.properties, 'dataPath') && !Object.hasOwn(pendingStorageSchema.properties, 'databasePath'), 'pending storage schema grants no path');
-for (const field of ['schemaVersion', 'kind', 'state', 'componentId', 'fromHostApiVersion', 'toHostApiVersion', 'startedAt']) assert(pendingStorageSchema.properties.adoption.required.includes(field), `pending adoption requires ${field}`);
+for (const field of ['schemaVersion', 'kind', 'state', 'componentId', 'startedAt']) assert(pendingStorageSchema.properties.adoption.required.includes(field), `pending adoption requires ${field}`);
 for (const field of ['adoptedDataRoot', 'adoptedDatabase', 'legacyDataRoot', 'legacyDatabasePath', 'databaseSha256', 'copiedFileCount', 'copiedByteCount']) assert(committedStorageSchema.properties.adoption.required.includes(field), `committed adoption requires ${field}`);
 const writtenFrames = [];
 const typedHostClient = createServiceHostClient({ writeFrame: frame => writtenFrames.push(frame) });
 const typedCall = typedHostClient.callHost('parent-1', 'component.lifecycle', { action: 'describe' });
-assert(typedHostClient.acceptFrame({ type: 'capability-response', id: writtenFrames[0].id, ok: true, result: { apiVersion: 7, state: 'active' } }));
+assert(typedHostClient.acceptFrame({ type: 'capability-response', id: writtenFrames[0].id, ok: true, result: {  state: 'active' } }));
 
 const broker = new ComponentCapabilityBroker();
 const thumbnailRequests = [];
@@ -274,7 +266,7 @@ const registrationOptions = overrides => ({
   ...overrides,
 });
 const projectDomain = registerComponentProjectCapabilities(registrationOptions());
-broker.register('component.lifecycle', (payload, _context, ownedDescriptor) => ({ apiVersion: 7, componentId: ownedDescriptor.componentId, componentVersion: ownedDescriptor.componentVersion, negotiatedHostApiVersion: ownedDescriptor.hostApiVersion, permissions: ownedDescriptor.service.permissions, events: ownedDescriptor.service.events, lifecycleActions: [], state: payload.action === 'describe' ? 'active' : 'active' }));
+broker.register('component.lifecycle', (payload, _context, ownedDescriptor) => ({ componentId: ownedDescriptor.componentId, componentVersion: ownedDescriptor.componentVersion, permissions: ownedDescriptor.service.permissions, events: ownedDescriptor.service.events, lifecycleActions: [], state: payload.action === 'describe' ? 'active' : 'active' }));
 assert(broker.assertCapabilities(descriptor));
 const context = { componentId: descriptor.componentId, componentVersion: descriptor.componentVersion, workspacePath: workspaceRoot, projectId: 'project-1', projectName: 'Project', projectStatus: 'active', emitComponentEvent: (topic, event) => { context.lastEvent = { topic, event }; } };
 
@@ -293,12 +285,13 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   const realNow = Date.now; const issuedAt = realNow();
   try {
     Date.now = () => issuedAt + 9 * 60 * 1000;
-    const reserved = projectDomain.reserveInputs([reservationVariant.input.token], descriptor, context, 'reservation-expiry-test');
+    const reserved = await projectDomain.reserveInputs([reservationVariant.input.token], descriptor, context, 'reservation-expiry-test');
     Date.now = () => issuedAt + 11 * 60 * 1000;
-    assert.equal(reserved[0].filePath, imagePath, 'active reservation retains the original input without extending its authorization');
-    assert.throws(() => projectDomain.peekInput(reservationVariant.input.token, descriptor, context), error => error.code === 'COMPONENT_HOST_CONFLICT', 'active reservation is not pruned after original expiry');
+    assert.notEqual(reserved[0].filePath, imagePath, 'active reservation materializes a component-private input without extending its authorization');
+    assert(fs.existsSync(reserved[0].filePath));
+    await assert.rejects(projectDomain.peekInput(reservationVariant.input.token, descriptor, context), error => error.code === 'COMPONENT_HOST_CONFLICT', 'active reservation is not pruned after original expiry');
     projectDomain.releaseReservation('reservation-expiry-test');
-    assert.throws(() => projectDomain.peekInput(reservationVariant.input.token, descriptor, context), error => error.code === 'COMPONENT_HOST_TOKEN_EXPIRED', 'release deletes a token whose original expiry passed while reserved');
+    assert.equal(await projectDomain.peekInput(reservationVariant.input.token, descriptor, context), reserved[0].filePath, 'release restores only the bounded remaining lifetime of the private snapshot');
   } finally { Date.now = realNow; }
   const freshInputVariant = await broker.invoke(descriptor, 'project.media.variants', { photoId: 'photo-1', versionId: 'version-1', variants: ['original'] }, context);
   assert.notEqual(variants.variants.thumbnail.url, variants.variants.original.url, 'a JPEG thumbnail must be a generated derivative rather than its original URL');
@@ -442,7 +435,7 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
     if (options.value?.kind === 'component-output-commit' && options.value?.state === 'committed') throw new Error('simulated committed receipt failure');
     return atomicJson(options);
   } }));
-  failingBroker.register('component.lifecycle', () => ({ apiVersion: 7, state: 'active' }));
+  failingBroker.register('component.lifecycle', () => ({  state: 'active' }));
   const failingStage = await failingBroker.invoke(descriptor, 'project.output', { action: 'stage' }, context);
   await failingBroker.invoke(descriptor, 'project.output', { action: 'write', stageId: failingStage.stageId, name: 'failure.jpg', outputRelativePath: 'receipt-failure/failure.jpg', base64: Buffer.from('failure-output').toString('base64') }, context);
   await failingBroker.invoke(descriptor, 'project.output', { action: 'write', stageId: failingStage.stageId, name: 'failure-2.jpg', outputRelativePath: 'receipt-failure/failure-2.jpg', base64: Buffer.from('failure-output-2').toString('base64') }, context);
@@ -499,7 +492,7 @@ const context = { componentId: descriptor.componentId, componentVersion: descrip
   safeOpenDialogResult = { canceled: true, filePaths: [] };
   await broker.invoke(descriptor, 'component.events', { topic: 'fixture.progress.v1', event: { progress: 50 } }, context);
   assert.deepEqual(context.lastEvent, { topic: 'fixture.progress.v1', event: { progress: 50 } });
-  assert.equal((await broker.invoke(descriptor, 'component.lifecycle', { action: 'describe' }, context)).negotiatedHostApiVersion, 7);
+  assert.equal((await broker.invoke(descriptor, 'component.lifecycle', { action: 'describe' }, context)).state, 'active');
   const applicationSettingsContext = { ...context, surface: 'application.settings', workspacePath: '', projectId: '', projectName: '', projectStatus: '' };
   assert.equal((await broker.invoke(descriptor, 'component.settings', { action: 'get' }, applicationSettingsContext)).revision, 1, 'application settings surface may read owner settings');
   assert.equal((await broker.invoke(descriptor, 'component.lifecycle', { action: 'describe' }, applicationSettingsContext)).state, 'active', 'application settings surface may inspect declared lifecycle state');

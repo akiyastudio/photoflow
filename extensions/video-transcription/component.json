@@ -5,9 +5,18 @@
   "displayName": "视频转文字",
   "description": "本地批量语音识别、同目录 SRT 与字幕浏览",
   "icon": "ui/icon.svg",
-  "platforms": ["win32", "linux", "darwin"],
-  "architectures": ["x64", "arm64"],
-  "entrypoints": { "default": "service.cjs" },
+  "platforms": [
+    "win32",
+    "linux",
+    "darwin"
+  ],
+  "architectures": [
+    "x64",
+    "arm64"
+  ],
+  "entrypoints": {
+    "default": "service.cjs"
+  },
   "requiredFiles": [
     "service.cjs",
     "core.cjs",
@@ -29,31 +38,63 @@
   ],
   "componentHost": {
     "contractVersion": 2,
-    "compatibility": { "minHostApiVersion": 7, "maxHostApiVersion": 7 },
-    "adoptionGrants": ["project.output.existing.v1"],
+    "adoptionGrants": [
+      "project.output.existing.v1"
+    ],
     "contributions": [
-      { "type": "workspace.toolbarAction", "id": "open", "label": "视频转文字", "pageId": "main" },
-      { "type": "component.fullPage", "id": "main", "title": "视频转文字", "entry": "ui/index.html" },
-      { "type": "application.settingsPage", "id": "settings", "label": "视频转文字", "title": "视频转文字设置", "entry": "ui/settings.html", "rpcMethods": ["transcript.settings.get.v1", "transcript.settings.update.v1", "transcript.models.list.v1", "transcript.runtime.status.v1"] },
-      { "type": "project.contextAction", "id": "transcribe-selection", "label": "视频转文字", "pageId": "main", "placement": "workspace.videoTools", "rpcMethods": [
-        "transcript.selection.preview.v1",
-        "transcript.project.start.v1",
-        "transcript.operation.run.v1",
-        "transcript.operation.list.v1",
-        "transcript.operation.get.v1",
-        "transcript.operation.cancel.v1",
-        "transcript.operation.resume.v1",
-        "transcript.search.v1",
-        "transcript.file.get.v1",
-        "transcript.operation.transcript.page.v1",
-        "transcript.output.open.v1",
-        "transcript.runtime.status.v1"
-      ] }
+      {
+        "type": "workspace.toolbarAction",
+        "id": "open",
+        "label": "视频转文字",
+        "pageId": "main"
+      },
+      {
+        "type": "component.fullPage",
+        "id": "main",
+        "title": "视频转文字",
+        "entry": "ui/index.html"
+      },
+      {
+        "type": "application.settingsPage",
+        "id": "settings",
+        "label": "视频转文字",
+        "title": "视频转文字设置",
+        "entry": "ui/settings.html",
+        "rpcMethods": [
+          "transcript.settings.get.v1",
+          "transcript.settings.update.v1",
+          "transcript.models.list.v1",
+          "transcript.runtime.status.v1"
+        ]
+      },
+      {
+        "type": "project.contextAction",
+        "id": "transcribe-selection",
+        "label": "视频转文字",
+        "pageId": "main",
+        "placement": "workspace.videoTools",
+        "rpcMethods": [
+          "transcript.selection.preview.v1",
+          "transcript.project.start.v1",
+          "transcript.operation.run.v1",
+          "transcript.operation.list.v1",
+          "transcript.operation.get.v1",
+          "transcript.operation.cancel.v1",
+          "transcript.operation.resume.v1",
+          "transcript.search.v1",
+          "transcript.file.get.v1",
+          "transcript.operation.transcript.page.v1",
+          "transcript.output.open.v1",
+          "transcript.runtime.status.v1"
+        ]
+      }
     ],
     "service": {
       "protocolVersion": 1,
       "runtime": "node",
-      "entrypoints": { "default": "service.cjs" },
+      "entrypoints": {
+        "default": "service.cjs"
+      },
       "rpcMethods": [
         "transcript.selection.preview.v1",
         "transcript.project.start.v1",
@@ -92,7 +133,9 @@
         "component.settings",
         "events"
       ],
-      "events": ["transcript.operation.progress.v1"],
+      "events": [
+        "transcript.operation.progress.v1"
+      ],
       "runtimeActions": []
     }
   }

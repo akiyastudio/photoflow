@@ -56,13 +56,13 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     }
   }, [activeIdentity, browserPages, components, onHomeFallback, onProjectFallback, pages]);
 
-  const deactivate = useCallback(() => { activationGeneration.current += 1; activeIdentityRef.current = ''; return window.electronAPI.activateComponentPage('').catch(() => ({ success: false })); }, []);
+  const deactivate = useCallback(() => { activationGeneration.current += 1; activeIdentityRef.current = ''; return window.electronAPI.activateComponentPage({ instanceId: '' }).catch(() => ({ success: false })); }, []);
   const activate = useCallback(async (page: ComponentPageInstance) => {
     const identity=page.identity;const intent=++activationGeneration.current;let expectedGeneration=intent;activeIdentityRef.current=identity;setActiveIdentity(identity);const stillIntended=(generation=expectedGeneration)=>activationGeneration.current===generation&&activeIdentityRef.current===identity;
     let candidate=page;
     if(!candidate.instanceId){const inflight=inflightOpens.current.get(identity);if(inflight)await inflight;if(!stillIntended())return false;candidate=pagesRef.current.find(item=>item.identity===identity)||candidate;if(!candidate.instanceId){const retry=reopenRequests.current.get(identity);if(!retry)return false;const retryPromise=retry();const retryGeneration=activationGeneration.current;expectedGeneration=retryGeneration;if(!stillIntended(retryGeneration))return false;if(!await retryPromise||!stillIntended(retryGeneration))return false;candidate=pagesRef.current.find(item=>item.identity===identity)||candidate;if(!candidate.instanceId)return false;}}
     if(!stillIntended())return false;const generation = expectedGeneration;
-    const result = await window.electronAPI.activateComponentPage(candidate.instanceId).catch(() => ({ success: false }));
+    const result = await window.electronAPI.activateComponentPage({ instanceId: candidate.instanceId }).catch(() => ({ success: false }));
     if (generation !== activationGeneration.current) return false;
     if (componentPageActivationSucceeded(result)) { activeIdentityRef.current = page.identity; setActiveIdentity(page.identity); return true; }
     if (candidate.instanceId) void window.electronAPI.closeComponentPage(candidate.instanceId).catch(() => undefined);

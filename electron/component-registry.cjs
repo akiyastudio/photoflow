@@ -115,6 +115,7 @@ const manifestIdentity = (manifest, fallback = {}) => ({
   capabilities: Array.isArray(manifest?.capabilities) ? manifest.capabilities.map(String) : (fallback.capabilities?.length ? fallback.capabilities : legacyRuntimeCapabilities(manifest?.id || fallback.id)),
 });
 const manifestCompatibilityError = (manifest, platform, arch) => {
+  if (manifest?.apiVersion !== 1) return `组件清单格式不兼容：${manifest?.apiVersion ?? '未填写'}`;
   if (!COMPONENT_ID.test(String(manifest?.id || ''))) return '组件 ID 缺失或格式无效';
   if (!String(manifest?.version || '').trim()) return '组件版本缺失';
   try { parseMediaPlaybackBackendContributions(manifest); }
@@ -123,7 +124,9 @@ const manifestCompatibilityError = (manifest, platform, arch) => {
   if (Array.isArray(manifest.architectures) && !manifest.architectures.includes(arch)) return `组件不支持 ${arch}`;
   if (manifest.componentHost !== undefined) {
     const host = manifest.componentHost;
-    if (!host || Number(host.contractVersion) !== COMPONENT_HOST_CONTRACT_VERSION) return `组件 Host 协议不兼容：${host?.contractVersion || '未填写'}`;
+    if (!host || host.contractVersion !== COMPONENT_HOST_CONTRACT_VERSION) return `组件 Host 协议不兼容：${host?.contractVersion || '未填写'}`;
+    const unknownHostField = Object.keys(host).find(field => !['contractVersion', 'contributions', 'service', 'adoptionGrants', 'legacySettingsAdoptions'].includes(field));
+    if (unknownHostField) return `未知组件 Host 字段：${unknownHostField}`;
     const contributions = Array.isArray(host.contributions) ? host.contributions : [];
     const toolbarCount = contributions.filter(item => item?.type === 'workspace.toolbarAction').length;
     const pageCount = contributions.filter(item => item?.type === 'component.fullPage').length;

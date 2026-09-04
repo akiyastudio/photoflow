@@ -1,4 +1,4 @@
-const { app, BrowserWindow, WebContentsView, ipcMain: electronIpcMain, Menu, shell, dialog, protocol, nativeImage, clipboard, screen, safeStorage, net: electronNet } = require('electron');
+const { app, BrowserWindow, WebContentsView, ipcMain: electronIpcMain, Menu, shell, dialog, protocol, nativeImage, clipboard, screen, safeStorage, session, net: electronNet } = require('electron');
 const path = require('path');
 const { spawn } = require('child_process');
 const fs = require('fs');
@@ -1360,6 +1360,7 @@ app.whenReady().then(async () => {
     mainWindow,
     registry: componentHostRegistry,
     preloadPath: path.join(__dirname, 'component-preload.cjs'),
+    partitionSessionProvider: partitionName => session.fromPartition(partitionName),
     ipcMain: electronIpcMain,
     serviceManager: componentServiceManager, capabilityBroker: componentCapabilityBroker, inputGrantService: componentInputGrants, notificationService: componentNotificationService, clearComponentCapabilityState, resolveOpenContext: componentContentBinding.resolveOpenRequest,
     writeLog,

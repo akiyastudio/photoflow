@@ -17,7 +17,7 @@ export const ComponentPageSurface = ({ page, active }: { page: ComponentPageInst
     const observer = new ResizeObserver(schedule);
     observer.observe(surface);
     window.addEventListener('resize', schedule);
-    void window.electronAPI.activateComponentPage(page.instanceId);
+    void window.electronAPI.activateComponentPage({ instanceId: page.instanceId });
     schedule();
     return () => {
       observer.disconnect();

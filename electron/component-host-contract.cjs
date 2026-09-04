@@ -172,15 +172,13 @@ const parseComponentIcon = (value, componentRoot, developmentOverride = null) =>
 };
 
 const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = null, adoptionPolicy = defaultComponentDataAdoptionPolicy) => {
+  if (manifest?.apiVersion !== 1) throw new Error(`Unsupported component manifest apiVersion: ${manifest?.apiVersion ?? 'missing'}`);
   const host = manifest?.componentHost;
   if (host === undefined) return null;
   if (!host || typeof host !== 'object' || Array.isArray(host)) throw new Error('Invalid componentHost manifest');
   const contractVersion = Number(host.contractVersion);
   if (contractVersion !== COMPONENT_HOST_CONTRACT_VERSION) throw new Error(`Unsupported component host contractVersion: ${host.contractVersion}`);
-  rejectUnknownFields(host, ['contractVersion', 'compatibility', 'contributions', 'service', 'adoptionGrants', 'legacySettingsAdoptions'], 'component host');
-  // Early development manifests carried a Host API range. It is accepted only
-  // as inert compatibility metadata so existing local packages keep loading.
-  if (host.compatibility !== undefined && (!host.compatibility || typeof host.compatibility !== 'object' || Array.isArray(host.compatibility))) throw new Error('Invalid component host compatibility metadata');
+  rejectUnknownFields(host, ['contractVersion', 'contributions', 'service', 'adoptionGrants', 'legacySettingsAdoptions'], 'component host');
   if (!Array.isArray(host.contributions) || host.contributions.length < 2 || host.contributions.length > 32) throw new Error('Component host contributions must be a bounded array');
 
   const componentId = requiredId(manifest.id, 'component id');

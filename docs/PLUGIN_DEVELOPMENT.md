@@ -5,7 +5,7 @@ PhotoFlow 把可选扩展包称为 **组件（Component）**。文件名保留�
 ## 快速开始
 
 1. 把 `examples/hello-component` 复制到以组件 ID 命名的目录。
-2. 所有组件只使用 Host API `7`，并同时设置 `minHostApiVersion:7` 与 `maxHostApiVersion:7`；旧 Host 2–6 清单和能力名均会拒绝。
+2. 所有组件使用唯一、无版本协商的当前 Host API；不要声明 `componentHost.compatibility` 或任何 Host API 版本字段，未知字段和未知能力名均会拒绝。
 3. 添加一个 `workspace.toolbarAction` 或 `component.sidePanel`、一个与之相连的 `component.fullPage`、包内 UI 入口和服务入口。仅面板组件可以省略 toolbarAction；标准全局设置优先贡献 `application.settingsForm`，只有需要自定义交互时才使用 `application.settingsPage`。
 4. 声明全部服务 RPC、Host 能力、权限和发出的事件。未声明的访问会默认拒绝。升级历史数据时，可声明 `component.storage.previous.v1` 和/或 `project.output.existing.v1` adoption grant；不要把组件业务表或路径字段加入宿主代码。
 5. 运行 `node scripts/mock-component-service.cjs path/to/service.cjs`，不启动 Electron 也能验证按行分隔的服务协议。
@@ -123,10 +123,10 @@ stage 元数据与登记文件保留 24 小时，因此宿主重启后可以继�
 
 ## 测试与发布
 
-- `npm run test:component-host-api` 先检查 SDK 类型，再检查 Host API 一致性与旧 Host 2–6 拒绝、权限、读写 scope、stage/导入恢复、CAS、幂等、文件 undo、进度、任务、媒体处理、对话框、事件和服务模拟器。
+- `npm run test:component-host-api` 先检查 SDK 类型，再检查无版本 Host API 一致性、权限、读写 scope、stage/导入恢复、CAS、幂等、文件 undo、进度、任务、媒体处理、对话框、事件和服务模拟器。
 - `npm run test:component-host`、`npm run test:component-service`、`npm run test:electron-security` 和 `npm run test:architecture` 覆盖隔离与兼容性。
 - 打包前用 `electron/contracts/schemas/component-manifest-v2.schema.json` 校验清单。
 - 安装包只包含构建后的 UI、服务和运行资源；为清单声明的生命周期动作计算哈希；在干净用户配置中安装，测试取消、重启，再用真实 V1 数据测试升级与降级。
 - 每次发布提升组件业务版本。只有语义破坏性变化才提升 RPC/事件的 `.vN`；迁移期新增版本应与旧版本并存。
 
-旧宿主业务适配器已经移除。组件只能通过版本化 Host API 与 adoption grant 运行。
+旧宿主业务适配器已经移除。组件只能通过当前 Host API 与显式 adoption grant 运行。

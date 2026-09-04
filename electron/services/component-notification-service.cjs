@@ -1,5 +1,4 @@
 const NOTIFICATION_CAPABILITY = 'notifications';
-const RENDERER_EVENT_CONTRACT_VERSION = 7;
 const NOTIFICATION_PERMISSION = 'notifications';
 const NOTIFICATION_TONES = new Set(['info', 'success', 'warning', 'error']);
 const MESSAGE_MAX_LENGTH = 360;
@@ -107,7 +106,7 @@ class ComponentNotificationService {
       for (const [key, timestamp] of replacedRecent) state.recent.set(key, timestamp);
     };
     const id = `${componentId}:${++this.sequence}`;
-    const event = Object.freeze({ apiVersion: RENDERER_EVENT_CONTRACT_VERSION, type: 'notification', id, componentId, surface: context.surface, notification: normalized });
+    const event = Object.freeze({ type: 'notification', id, componentId, surface: context.surface, notification: normalized });
     if (this.rendererReady) {
       if (!this.deliver(event)) { timestamps.pop(); rollbackContentFingerprint(); return failure('NOTIFICATION_HOST_UNAVAILABLE', 'Main notification host is unavailable', true); }
     } else {
@@ -121,7 +120,7 @@ class ComponentNotificationService {
     const id = String(componentId || '');
     const removed = this.stateByComponent.delete(id);
     this.buffer = this.buffer.filter(item => item.event.componentId !== id);
-    if (id && this.rendererReady) this.deliver(Object.freeze({ apiVersion: RENDERER_EVENT_CONTRACT_VERSION, type: 'purge', componentId: id }));
+    if (id && this.rendererReady) this.deliver(Object.freeze({ type: 'purge', componentId: id }));
     return removed;
   }
   destroy() { this.rendererWebContents?.removeListener?.('did-start-loading', this.handleRendererReload); this.rendererWebContents?.removeListener?.('render-process-gone', this.handleRendererReload); this.stateByComponent.clear(); this.buffer = []; this.rendererReady = false; this.rendererSession = { token: '', revision: -1 }; this.retiredRendererTokens.clear(); }

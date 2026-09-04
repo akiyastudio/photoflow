@@ -34,6 +34,15 @@ const manifest = version => ({ apiVersion: 1, id: 'third-party-tool', version, d
 try {
   const registry = createComponentRegistry({ projectRoot: sandbox, userComponentRoot: componentRoot, isPackaged: true, platform: 'win32', arch: 'x64' });
   assert.deepStrictEqual(registry.list(), [], 'static definitions do not create rows');
+  const unsupportedManifestArchive = path.join(componentRoot, 'unsupported-manifest.zip');
+  writeZip(unsupportedManifestArchive, { 'component.json': JSON.stringify({ ...manifest('1.0.0'), apiVersion: 2 }), 'tool.exe': 'binary' });
+  assert.match(registry.list().find(item => item.id === 'third-party-tool').error, /清单格式不兼容/, 'catalog rejects an unsupported manifest format during discovery');
+  fs.unlinkSync(unsupportedManifestArchive);
+  const missingManifestArchive = path.join(componentRoot, 'missing-manifest-version.zip');
+  const { apiVersion: _apiVersion, ...withoutManifestVersion } = manifest('1.0.0');
+  writeZip(missingManifestArchive, { 'component.json': JSON.stringify(withoutManifestVersion), 'tool.exe': 'binary' });
+  assert.match(registry.list().find(item => item.id === 'third-party-tool').error, /清单格式不兼容/, 'catalog rejects a missing manifest format during discovery');
+  fs.unlinkSync(missingManifestArchive);
 
   const unsafeEntrypointDirectory = path.join(componentRoot, 'unsafe-entrypoint', 'runtime');
   fs.mkdirSync(unsafeEntrypointDirectory, { recursive: true });
@@ -76,7 +85,7 @@ try {
   fs.rmSync(path.join(componentRoot, 'third-party-tool'), { recursive: true, force: true });
   assert.strictEqual(registry.list().length, 0, 'entry disappears when package and installation are both absent');
 
-  const settingsManifest = { ...manifest('1.0.0'), id: 'settings-fixture', componentHost: { contractVersion: 2, compatibility: { minHostApiVersion: 7, maxHostApiVersion: 7 }, contributions: [{ type: 'workspace.toolbarAction', id: 'open', label: 'Fixture', pageId: 'main' }, { type: 'component.fullPage', id: 'main', title: 'Fixture', entry: 'ui/index.html' }, { type: 'application.settingsPage', id: 'settings', label: 'Fixture', entry: 'ui/settings.html', rpcMethods: ['fixture.settings.v1'] }], service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.settings.v1'], capabilities: [], permissions: [], events: [] } } };
+  const settingsManifest = { ...manifest('1.0.0'), id: 'settings-fixture', componentHost: { contractVersion: 2,  contributions: [{ type: 'workspace.toolbarAction', id: 'open', label: 'Fixture', pageId: 'main' }, { type: 'component.fullPage', id: 'main', title: 'Fixture', entry: 'ui/index.html' }, { type: 'application.settingsPage', id: 'settings', label: 'Fixture', entry: 'ui/settings.html', rpcMethods: ['fixture.settings.v1'] }], service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.settings.v1'], capabilities: [], permissions: [], events: [] } } };
   const missingSettingsArchive = path.join(componentRoot, 'settings-missing.zip');
   writeZip(missingSettingsArchive, { 'component.json': JSON.stringify(settingsManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>' });
   assert.match(registry.list().find(item => item.id === 'settings-fixture').error, /ui\/settings\.html/, 'final component ZIP validation requires the declared settings entry path');
@@ -105,22 +114,17 @@ try {
   assert.equal(registry.list().find(item => item.id === 'settings-form-fixture').status, 'pending-install');
   fs.unlinkSync(completeHybridArchive);
 
-  const legacyHostArchive = path.join(componentRoot, 'legacy-host-api.zip');
-  const legacyHostManifest = { ...settingsManifest, id: 'legacy-host-fixture', componentHost: { ...settingsManifest.componentHost, compatibility: { minHostApiVersion: 6, maxHostApiVersion: 6 } } };
-  writeZip(legacyHostArchive, { 'component.json': JSON.stringify(legacyHostManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>', 'ui/settings.html': '<!doctype html>' });
-  assert.match(registry.list().find(item => item.id === 'legacy-host-fixture').error, /仅支持 API/, 'catalog preflight rejects legacy Host API manifests before installation');
-  fs.unlinkSync(legacyHostArchive);
+  const versionedHostArchive = path.join(componentRoot, 'versioned-host-api.zip');
+  const versionedHostManifest = { ...settingsManifest, id: 'versioned-host-fixture', componentHost: { ...settingsManifest.componentHost, compatibility: {} } };
+  writeZip(versionedHostArchive, { 'component.json': JSON.stringify(versionedHostManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>', 'ui/settings.html': '<!doctype html>' });
+  assert.match(registry.list().find(item => item.id === 'versioned-host-fixture').error, /Host 字段/, 'catalog preflight rejects obsolete Host API negotiation metadata');
+  fs.unlinkSync(versionedHostArchive);
 
   const incompatible = path.join(componentRoot, 'incompatible.zip');
   writeZip(incompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), platforms: ['linux'] }) });
   assert.strictEqual(registry.list().find(item => item.id === 'third-party-tool').status, 'incompatible');
   assert.throws(() => registry.resolvePackage('third-party-tool'), /不支持 win32/);
   fs.unlinkSync(incompatible);
-
-  const hostIncompatible = path.join(componentRoot, 'host-incompatible.zip');
-  writeZip(hostIncompatible, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), componentHost: { contractVersion: 2, compatibility: { minHostApiVersion: 8, maxHostApiVersion: 9 }, contributions: [{ type: 'workspace.toolbarAction' }, { type: 'component.fullPage' }] } }), 'tool.exe': 'binary' });
-  assert.match(registry.list().find(item => item.id === 'third-party-tool').error, /仅支持 API/);
-  fs.unlinkSync(hostIncompatible);
 
   const unsafe = path.join(componentRoot, 'unsafe.zip');
   writeZip(unsafe, { '../component.json': JSON.stringify(manifest('3.0.0')) });

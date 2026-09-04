@@ -34,7 +34,4 @@ for (const file of compatibilityFiles) {
   const source = fs.readFileSync(file, 'utf8');
   if (forbidden.some(([, pattern]) => pattern.test(source))) assert.match(source, /Delete|删除|remove/i, `compatibility exception needs a deletion note: ${path.relative(root, file)}`);
 }
-const legacyMediaAdapter = fs.readFileSync(path.join(root, 'electron', 'compatibility', 'legacy-media-process-v7.cjs'), 'utf8');
-for (const forbidden of ['legacyTranscodeRuntimeArgs', 'ffmpeg_transcode.py', 'cut_video.py', 'video-tools.operation.progress.v1']) assert(!legacyMediaAdapter.includes(forbidden), `v7 compatibility adapter executes plugin business: ${forbidden}`);
-
 console.log('Plugin implementation boundary leak gate passed.');

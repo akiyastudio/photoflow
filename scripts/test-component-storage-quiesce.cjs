@@ -2,7 +2,7 @@ const assert = require('assert');
 const { ComponentServiceManager } = require('../electron/services/component-service-manager.cjs');
 
 (async () => {
-  const descriptor = { componentId: 'sample-component', componentVersion: '1', hostApiVersion: 7, service: { rpcMethods: ['sample.write.v1'], capabilities: [], permissions: [], protocolVersion: 1, runtime: 'node', entry: __filename } };
+  const descriptor = { componentId: 'sample-component', componentVersion: '1',  service: { rpcMethods: ['sample.write.v1'], capabilities: [], permissions: [], protocolVersion: 1, runtime: 'node', entry: __filename } };
   let stopped = 0;
   let writtenFrame;
   const managed = {

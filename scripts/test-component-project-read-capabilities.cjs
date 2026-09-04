@@ -4,7 +4,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { ComponentCapabilityBroker } = require('../electron/services/component-capability-broker.cjs');
-const { parseComponentHostManifest, COMPONENT_HOST_API_VERSION } = require('../electron/component-host-contract.cjs');
+const { parseComponentHostManifest } = require('../electron/component-host-contract.cjs');
 const { MAX_PROGRESS_ITEMS, MAX_PROGRESS_SCAN, registerComponentProjectReadCapabilities, resetComponentProjectReadCapabilityStateForTest } = require('../electron/services/component-project-read-capabilities.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-host-read-'));
@@ -18,13 +18,12 @@ fs.writeFileSync(path.join(projectRoot, 'missing-metadata.jpg'), 'image'); const
 const capabilities = ['project.files.page', 'project.files.search', 'project.media.metadata', 'project.versions.page', 'project.version.graph', 'project.media.ratings'];
 const permissions = ['project.files.read', 'project.media.read', 'project.versions.read', 'project.media.ratings.read'];
 const manifest = { apiVersion: 1, id: 'host-read-fixture', version: '1.0.0', componentHost: { contractVersion: 2,
-  compatibility: { minHostApiVersion: 7, maxHostApiVersion: 7 }, contributions: [
+   contributions: [
     { type: 'workspace.toolbarAction', id: 'open', label: 'Open', pageId: 'main' },
     { type: 'component.fullPage', id: 'main', title: 'Fixture', entry: 'ui/index.html' },
   ], service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.run.v1'], capabilities, permissions, events: [] } } };
 
 const descriptor = parseComponentHostManifest(manifest, componentRoot);
-assert.equal(COMPONENT_HOST_API_VERSION, 7); assert.equal(descriptor.hostApiVersion, 7);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: permissions.filter(item => item !== 'project.files.read') } } }, componentRoot), /requires permission project.files.read/);
 
 const photoBundle = { photo: { id: 'photo-1', projectId: 'project-1' }, versions: [

@@ -18,7 +18,7 @@ const manifest = {
   version: '1.0.0',
   componentHost: {
     contractVersion: 2,
-    compatibility: { minHostApiVersion: 7, maxHostApiVersion: 7 },
+
     contributions: [
       { type: 'component.fullPage', id: 'panel-ui', title: 'Fixture panel', entry: 'ui/panel.html' },
       { type: 'component.sidePanel', id: 'panel', label: 'Fixture', title: 'Fixture panel', description: 'Fixture panel description.', pageId: 'panel-ui', rpcMethods: ['fixture.run.v1'] },
@@ -81,7 +81,7 @@ class View {
       preloadPath: 'component-preload.cjs',
       ipcMain: { handle: (name, handler) => handlers.set(name, handler) },
       serviceManager: { supports: () => true, invoke: async () => ({ ok: true }) },
-      inputGrantService: { grantDroppedInputs: async paths => ({ apiVersion: 7, inputs: paths.map((name, index) => ({ name, token: `token-${index}` })) }) },
+      inputGrantService: { grantDroppedInputs: async paths => ({  inputs: paths.map((name, index) => ({ name, token: `token-${index}` })) }) },
     });
     assert.deepEqual(manager.listToolbarActions(), [], 'panel-only components must not create a new-page toolbar action');
     assert.equal(manager.listContributions()[0].description, 'Fixture panel description.', 'panel descriptions pass through the generic Host contribution contract');

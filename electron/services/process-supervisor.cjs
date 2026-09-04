@@ -121,7 +121,7 @@ class ManagedProcess extends EventEmitter {
     if (!lifecycle || lifecycle.settled) return this.start();
     this._safeLog('warn', 'Managed process recycled', this.details({ reason, generation: lifecycle.generation }));
     lifecycle.stopRequested = true;
-    await stopProcessAndWait(lifecycle.child, timeoutMs, { rollbackSettleMs });
+    await stopProcessAndWait(lifecycle.child, timeoutMs, { rollbackSettleMs, platform: this.supervisor.terminationPlatform });
     if (!lifecycle.exitObserved && (lifecycle.child.exitCode != null || lifecycle.child.signalCode != null)) {
       await this._onExit(lifecycle, lifecycle.child.exitCode, lifecycle.child.signalCode);
     }
@@ -145,7 +145,7 @@ class ManagedProcess extends EventEmitter {
     const child = this.child;
     const lifecycle = this.lifecycle;
     if (lifecycle) lifecycle.stopRequested = true;
-    await stopProcessAndWait(child, timeoutMs, { rollbackSettleMs });
+    await stopProcessAndWait(child, timeoutMs, { rollbackSettleMs, platform: this.supervisor.terminationPlatform });
     if (lifecycle && !lifecycle.exitObserved && (child?.exitCode != null || child?.signalCode != null)) {
       await this._onExit(lifecycle, child.exitCode, child.signalCode);
     }
@@ -217,7 +217,7 @@ class ManagedProcess extends EventEmitter {
     this.state = 'failed';
     let terminationFailed = false;
     try {
-      await stopProcessAndWait(lifecycle.child, Number(this.specification.errorExitTimeoutMs) || 2000);
+      await stopProcessAndWait(lifecycle.child, Number(this.specification.errorExitTimeoutMs) || 2000, { platform: this.supervisor.terminationPlatform });
     } catch (terminationError) {
       terminationFailed = true;
       this._safeLog('error', 'Managed process error termination failed', this.details({
@@ -390,10 +390,11 @@ class ManagedProcess extends EventEmitter {
 }
 
 class ProcessSupervisor {
-  constructor({ spawnImpl = defaultSpawn, writeLog = () => undefined, now = () => Date.now() } = {}) {
+  constructor({ spawnImpl = defaultSpawn, writeLog = () => undefined, now = () => Date.now(), terminationPlatform = process.platform } = {}) {
     this.spawnImpl = spawnImpl;
     this.writeLog = writeLog;
     this.now = now;
+    this.terminationPlatform = terminationPlatform;
     this.processes = new Map();
     this.stopping = false;
   }

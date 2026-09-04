@@ -9,7 +9,7 @@ const sandbox=fs.mkdtempSync(path.join(os.tmpdir(),'component-host-installed-'))
 try{
  const componentRoot=path.join(sandbox,'fixture-component');fs.mkdirSync(path.join(componentRoot,'ui'),{recursive:true});
  for(const file of ['index.html','settings.html'])fs.writeFileSync(path.join(componentRoot,'ui',file),'<!doctype html>');fs.writeFileSync(path.join(componentRoot,'service.cjs'),'');
- const manifest={apiVersion:1,id:'fixture-component',version:'1.0.0',componentHost:{contractVersion:2,compatibility:{minHostApiVersion:7,maxHostApiVersion:7},contributions:[{type:'workspace.toolbarAction',id:'open',label:'Fixture',pageId:'main'},{type:'component.fullPage',id:'main',title:'Fixture',entry:'ui/index.html'},{type:'application.settingsPage',id:'settings',label:'Settings',title:'Settings',entry:'ui/settings.html',rpcMethods:['fixture.settings.v1']}],service:{protocolVersion:1,runtime:'node',entrypoints:{default:'service.cjs'},rpcMethods:['fixture.settings.v1'],capabilities:['component.settings'],permissions:['component.settings'],events:[]}}};
+ const manifest={apiVersion:1,id:'fixture-component',version:'1.0.0',componentHost:{contractVersion:2,contributions:[{type:'workspace.toolbarAction',id:'open',label:'Fixture',pageId:'main'},{type:'component.fullPage',id:'main',title:'Fixture',entry:'ui/index.html'},{type:'application.settingsPage',id:'settings',label:'Settings',title:'Settings',entry:'ui/settings.html',rpcMethods:['fixture.settings.v1']}],service:{protocolVersion:1,runtime:'node',entrypoints:{default:'service.cjs'},rpcMethods:['fixture.settings.v1'],capabilities:['component.settings'],permissions:['component.settings'],events:[]}}};
  fs.writeFileSync(path.join(componentRoot,'component.json'),JSON.stringify(manifest));
  const adoptionPolicy=createComponentDataAdoptionPolicy({version:1,legacyDomainDatabaseOwners:[{componentId:'fixture-component',paths:['fixture.sqlite3']}],legacySettingsAdoptions:[{componentId:'fixture-component',topLevelKey:'legacyFixture'}]});
  const unauthorizedAdoption=structuredClone(manifest);unauthorizedAdoption.componentHost.legacySettingsAdoptions=[{topLevelKey:'legacyForeign'}];assert.throws(()=>parseComponentHostManifest(unauthorizedAdoption,componentRoot,null,adoptionPolicy),/not authorized by the host/);
@@ -22,6 +22,6 @@ try{
  assert.deepEqual(normalizeOpenScope({scopeRelativePath:'images',selectedRelativePaths:['images/a.jpg'],sourcePageId:'workspace'}),{scopeRelativePath:'images',selectedRelativePaths:['images/a.jpg'],sourcePageId:'workspace'});
  assert.throws(()=>normalizeOpenScope({scopeRelativePath:'images',selectedRelativePaths:['escape/a.jpg']}),/escapes/);
  assert.equal(selectComponentPreload(parsed,{core:'component-preload.cjs'}),'component-preload.cjs');
- assert.throws(()=>selectComponentPreload({contractVersion:1,hostApiVersion:1},{core:'component-preload.cjs'}),/Unsupported/);
+ assert.throws(()=>selectComponentPreload({contractVersion:1},{core:'component-preload.cjs'}),/Unsupported/);
  console.log('Installed Component Host view/registry tests passed');
 }finally{fs.rmSync(sandbox,{recursive:true,force:true});}

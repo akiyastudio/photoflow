@@ -63,7 +63,7 @@ export const ComponentToolPanelSurface = ({ contribution, instanceId, initialCon
 
   useEffect(() => {
     if (!instanceId) return;
-    if(!open){let cancelled=false;void (async()=>{await window.electronAPI.setComponentPageBounds(instanceId,{x:0,y:0,width:0,height:0}).catch(()=>undefined);if(!cancelled&&currentInstanceRef.current===instanceId&&!openRef.current)await window.electronAPI.activateComponentPage({instanceId,deactivateIfActive:true} as unknown as string).catch(()=>undefined);})();return()=>{cancelled=true;};}
+    if(!open){let cancelled=false;void (async()=>{await window.electronAPI.setComponentPageBounds(instanceId,{x:0,y:0,width:0,height:0}).catch(()=>undefined);if(!cancelled&&currentInstanceRef.current===instanceId&&!openRef.current)await window.electronAPI.activateComponentPage({instanceId,deactivateIfActive:true}).catch(()=>undefined);})();return()=>{cancelled=true;};}
     const surface = surfaceRef.current;
     if (!surface) return;
     let frame = 0;
@@ -81,7 +81,7 @@ export const ComponentToolPanelSurface = ({ contribution, instanceId, initialCon
     const observer = new ResizeObserver(schedule);
     observer.observe(surface);
     window.addEventListener('resize', schedule);
-    void window.electronAPI.activateComponentPage(instanceId).catch(() => undefined);
+    void window.electronAPI.activateComponentPage({instanceId}).catch(() => undefined);
     schedule();
     return () => {
       observer.disconnect();

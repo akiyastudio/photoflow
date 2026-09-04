@@ -5,7 +5,7 @@ const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 
 const { parseComponentHostManifest } = require(path.join(repo, 'electron', 'component-host-contract.cjs'));
 const { ComponentViewManager } = require(path.join(repo, 'electron', 'services', 'component-view-manager.cjs'));
 const descriptor = parseComponentHostManifest(manifest, root);
-assert.equal(manifest.componentHost.contractVersion, 2); assert.deepEqual(manifest.componentHost.compatibility, { minHostApiVersion: 7, maxHostApiVersion: 7 }); assert.equal(descriptor.hostApiVersion, 7);
+assert.equal(manifest.componentHost.contractVersion, 2); assert.equal(Object.hasOwn(manifest.componentHost, 'compatibility'), false);
 const projectAction = manifest.componentHost.contributions.find(item => item.type === 'project.contextAction'); assert(projectAction); assert.equal(projectAction.label, '视频转文字'); assert.equal(projectAction.placement, 'workspace.videoTools'); assert.equal(descriptor.contributions.find(item => item.id === projectAction.id).placement, 'workspace.videoTools');
 assert.equal(manifest.componentHost.contributions.filter(item => item.type === 'workspace.toolbarAction').length, 1, 'the original toolbar icon remains the only toolbar action');
 assert.equal(descriptor.settingsForms.length, 0); assert.equal(descriptor.settingsPages.length, 1); assert.equal(descriptor.settingsPages[0].id, 'settings'); assert.equal(descriptor.settingsPages[0].title, '视频转文字设置');

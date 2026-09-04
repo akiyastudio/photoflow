@@ -2,7 +2,8 @@ const assert = require('assert');
 const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
 const { createProcessSupervisor } = require('../electron/services/process-supervisor.cjs');
-const { createJsonCommandRunner } = require('../electron/services/json-command-runner.cjs');
+const { createJsonCommandRunner: createJsonCommandRunnerBase } = require('../electron/services/json-command-runner.cjs');
+const createJsonCommandRunner = options => createJsonCommandRunnerBase({ ...options, terminationOptions: { platform: 'test' } });
 const { createDevelopmentPythonResolver, developmentPythonPath } = require('../electron/services/python-environment-service.cjs');
 const fs = require('fs');
 const path = require('path');
@@ -32,6 +33,7 @@ const main = async () => {
   const children = [];
   const logs = [];
   const supervisor = createProcessSupervisor({
+    terminationPlatform: 'test',
     spawnImpl: () => {
       const child = new FakeChild(1000 + children.length);
       children.push(child);
@@ -83,6 +85,7 @@ const main = async () => {
   let synchronousRestartSpawns = 0;
   const synchronousRestartLogs = [];
   const synchronousRestartSupervisor = createProcessSupervisor({
+    terminationPlatform: 'test',
     spawnImpl: () => {
       synchronousRestartSpawns += 1;
       if (synchronousRestartSpawns > 1) throw new Error(`sync spawn failure ${synchronousRestartSpawns}`);
@@ -104,6 +107,7 @@ const main = async () => {
   const healthTimeoutChildren = [];
   const healthTimeoutLogs = [];
   const healthTimeoutSupervisor = createProcessSupervisor({
+    terminationPlatform: 'test',
     spawnImpl: () => {
       const child = new FakeChild(4000 + healthTimeoutChildren.length);
       healthTimeoutChildren.push(child);
@@ -124,6 +128,7 @@ const main = async () => {
 
   const manualRecycleChildren = [];
   const manualRecycleSupervisor = createProcessSupervisor({
+    terminationPlatform: 'test',
     spawnImpl: () => {
       const child = new FakeChild(5000 + manualRecycleChildren.length);
       manualRecycleChildren.push(child);

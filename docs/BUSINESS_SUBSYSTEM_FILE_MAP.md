@@ -503,7 +503,6 @@
 - `electron/compatibility/component-data-adoption-policy.cjs`
 - `electron/compatibility/component-output-v1-adoption.cjs`
 - `electron/compatibility/legacy-component-runtime-tools.cjs`
-- `electron/compatibility/legacy-media-process-v7.cjs`
 - `electron/compatibility/legacy-runtime-capabilities.cjs`
 
 ### 对外 Component SDK

@@ -445,8 +445,8 @@ class ComponentServiceManager {
     await this.sessionTransitions.get(id)?.catch(() => undefined);
     const session = this.sessions.get(id);
     if (!session) return false;
-    this.sessions.delete(id);
     await session.managed.stop(reason);
+    if (this.sessions.get(id) === session) this.sessions.delete(id);
     return true;
   }
 

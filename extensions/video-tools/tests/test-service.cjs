@@ -41,7 +41,7 @@ lines.on('line', line => {
       assert.equal(frame.payload.arguments[0], 'ffmpeg_transcode');
       assert(frame.payload.arguments.includes('--video-mode') && frame.payload.arguments.includes('h265'));
       assert.equal(frame.payload.eventName, 'video-tools.operation.progress.v1');
-      child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: true, result: { apiVersion: 7, operationId: 'runtime-operation', result: { type: 'success', report: [{ output: 'video.mp4' }], failedCount: 0 } } })}\n`);
+      child.stdin.write(`${JSON.stringify({ type: 'capability-response', id: frame.id, ok: true, result: {  operationId: 'runtime-operation', result: { type: 'success', report: [{ output: 'video.mp4' }], failedCount: 0 } } })}\n`);
       return;
     }
     assert.equal(frame.method, 'component.settings');

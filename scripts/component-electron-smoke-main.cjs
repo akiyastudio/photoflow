@@ -20,9 +20,9 @@ const run = async () => {
   </script>`);
   await fs.promises.writeFile(legacyPage, '<!doctype html><div id="root"></div>');
 
-  const host = { componentId: 'smoke-host', componentVersion: '1.0.0', contractVersion: 2, hostApiVersion: 7,
+  const host = { componentId: 'smoke-host', componentVersion: '1.0.0', contractVersion: 2,
     fullPage: { id: 'main', title: 'Host', entry: hostPage }, toolbarAction: { id: 'open', label: 'Host' }, service: { events: ['sample.changed.v2'], permissions: [] } };
-  const legacy = { componentId: 'smoke-legacy', componentVersion: '1.0.0', contractVersion: 1, hostApiVersion: 7,
+  const legacy = { componentId: 'smoke-legacy', componentVersion: '1.0.0', contractVersion: 1,
     fullPage: { id: 'main', title: 'Legacy', entry: legacyPage }, toolbarAction: { id: 'open', label: 'Legacy' }, service: { events: [], permissions: [] } };
   const descriptors = new Map([[host.componentId, host], [legacy.componentId, legacy]]);
   const logs = [];
