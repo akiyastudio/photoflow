@@ -506,6 +506,12 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
       const plan = result.continuationPlan;
       if (!plan || Number(plan.version) !== 1 || String(plan.projectId) !== String(context.projectId) || String(plan.kind) !== String(row.kind)) throw recoveryRequiredError(`outbox ${row.id} 缺少完整 continuation plan`);
       const record = { storage, projectId: String(context.projectId), fingerprint: row.fingerprint, row, files: targets.map((target, index) => ({ ...target, sourcePath: sources[index]?.sourcePath || '', digest: sources[index]?.digest || '' })) };
+      let receipt = parseJson(row.receipt_json, {});
+      if (row.state === 'restore_republish') {
+        const source = record.files[0]; if (!source?.sourcePath || !fs.existsSync(source.sourcePath) || await fileSha256(source.sourcePath) !== source.digest) throw recoveryRequiredError(`working restore outbox ${row.id} 私有副本缺失或摘要不匹配`);
+        const committed = await publishProjectFile(parentId, source.sourcePath, source.outputRelativePath, row.idempotency_key, null, row.kind, plan);
+        receipt = committed; record.row = committed[OUTPUT_OUTBOX].row; result = parseJson(record.row.result_json, {});
+      }
       if (row.state === 'host_staging') {
         if (!row.stage_id) throw recoveryRequiredError(`outbox ${row.id} host_staging 缺少 stageId`);
         let rollback;
@@ -515,7 +521,6 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
         if (plan.preHostLocalEffects !== 'none') throw recoveryRequiredError(`outbox ${row.id} Host stage 前存在未证明的本地副作`);
         await deleteUncommittedOutputOutbox(record, 'host_staging'); recovered += 1; continue;
       }
-      let receipt = parseJson(row.receipt_json, {});
       if (['host_staged','commit_inflight'].includes(row.state)) {
         await outboxState(record, 'commit_inflight');
         receipt = await callHost(parentId, 'project.output', { action: 'commit', stageId: row.stage_id, idempotencyKey: row.idempotency_key });

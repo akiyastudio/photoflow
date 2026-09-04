@@ -407,6 +407,9 @@ const restoreProjectStorage = ({ sourcePath, destinationPath, payload, ensureSch
       for (const table of DELETE_ORDER) db.prepare(`DELETE FROM ${quote(table)} WHERE project_id=?`).run(targetProjectId);
       if (fault === 'after-delete' || process.env.PHOTOFLOW_TEST_FAULT_COMPONENT_RESTORE === 'after-delete') throw new Error('injected team-retouch restore failure');
       for (const table of INSERT_ORDER) imported[table] = table === 'team_output_outbox' ? 0 : importRows(db, table, sourceProjectId, targetProjectId, replacements);
+      const insertOutbox = db.prepare(`INSERT INTO team_output_outbox(project_id,id,kind,fingerprint,idempotency_key,state,stage_id,source_json,target_json,receipt_json,result_json,last_error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+      for (const row of payload.safeWorkingOutboxes || []) insertOutbox.run(row.project_id,row.id,row.kind,row.fingerprint,row.idempotency_key,row.state,row.stage_id,row.source_json,row.target_json,row.receipt_json,row.result_json,row.last_error,row.created_at,row.updated_at);
+      imported.team_output_outbox = (payload.safeWorkingOutboxes || []).length;
       db.prepare('DELETE FROM team_workflow_state WHERE project_id=?').run(targetProjectId);
       const previousRevision = Number(db.prepare('SELECT revision FROM team_project_revisions WHERE project_id=?').get(targetProjectId)?.revision || 0);
       const sourceRevision = Number(db.prepare('SELECT revision FROM portable.team_project_revisions WHERE project_id=?').get(sourceProjectId)?.revision || 0);
@@ -517,13 +520,22 @@ const restoreProjectBundle = ({ source, sources, destinationPath, destinationDat
   try {
     const privatePlan = projectPrivateSources({ sources, payload });
     const sourceProjectId = String(payload.project?.sourceId || payload.project?.id || ''); const targetProjectId = String(payload.project?.id || ''); const targetHash = crypto.createHash('sha256').update(targetProjectId).digest('hex');
-    const referencedPaths = new Set(); const sourceDb = new DatabaseSync(source.path, { readOnly: true });
+    const referencedPaths = new Set(); const recoverableWorkingRows = []; const sourceDb = new DatabaseSync(source.path, { readOnly: true });
     try {
       for (const row of sourceDb.prepare('SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks WHERE project_id=?').all(sourceProjectId)) for (const value of Object.values(row)) if (value) referencedPaths.add(String(value));
       for (const row of sourceDb.prepare('SELECT edited_patch_path FROM team_person_assignments WHERE project_id=?').all(sourceProjectId)) if (row.edited_patch_path) referencedPaths.add(String(row.edited_patch_path));
       for (const row of sourceDb.prepare('SELECT artifact_path FROM team_task_artifacts WHERE project_id=? AND is_deleted=0').all(sourceProjectId)) if (row.artifact_path) referencedPaths.add(String(row.artifact_path));
+      for (const row of sourceDb.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed'").all(sourceProjectId)) {
+        const result = JSON.parse(row.result_json || '{}'); const plan = result.continuationPlan; const materialized = result.materialized;
+        if (!plan?.domain || String(plan.projectId) !== sourceProjectId || !materialized?.privatePath || !/^[0-9a-f]{64}$/i.test(String(materialized.sha256 || ''))) throw new Error(`团片项目恢复 working outbox ${row.id} continuation/materialized 无效`);
+        const normalized = String(materialized.privatePath).replace(/\\/g, '/').toLowerCase();
+        if (!normalized.includes('/imported-outputs/')) throw new Error(`团片项目恢复 working outbox ${row.id} materialized 超出 Host imported-outputs`);
+        referencedPaths.add(String(materialized.privatePath)); recoverableWorkingRows.push({ row, result, plan, materialized });
+      }
+      if (recoverableWorkingRows.length > 2000) throw new Error('团片项目恢复 working outbox 数量超出安全边界');
     } finally { sourceDb.close(); }
     payload.additionalPathReplacements = [];
+    const restoredPathBySource = new Map();
     for (const item of sources || []) {
       const relative = String(item.relativePath || '').replace(/\\/g, '/');
       if (!relative.startsWith('team-retouch/imported-outputs/')) continue;
@@ -532,8 +544,18 @@ const restoreProjectBundle = ({ source, sources, destinationPath, destinationDat
       if (item.sha256 && digestFile(item.path) !== String(item.sha256).toLowerCase()) throw new Error(`团片项目恢复 imported-output 摘要不匹配：${relative}`);
       const targetRelative = `team-retouch/projects/${targetHash}/restored-imported/${crypto.createHash('sha256').update(relative).digest('hex')}${path.extname(relative)}`;
       privatePlan.selected.push({ ...item, originalRelativePath: relative, relativePath: targetRelative });
-      payload.additionalPathReplacements.push({ from: reference, to: path.join(destinationDataPath, ...targetRelative.slice('team-retouch/'.length).split('/')) });
+      const restoredPath = path.join(destinationDataPath, ...targetRelative.slice('team-retouch/'.length).split('/'));
+      payload.additionalPathReplacements.push({ from: reference, to: restoredPath }); restoredPathBySource.set(reference, { path: restoredPath, digest: String(item.sha256 || '').toLowerCase() });
     }
+    payload.safeWorkingOutboxes = recoverableWorkingRows.map(({ row, result, plan, materialized }) => {
+      const mapped = restoredPathBySource.get(String(materialized.privatePath));
+      if (!mapped || mapped.digest !== String(materialized.sha256).toLowerCase()) throw new Error(`团片项目恢复 working outbox ${row.id} 缺少精确匹配的 imported-output source`);
+      const rewrittenPlan = JSON.parse(rewriteProjectIdentityJson(rewriteJson(JSON.stringify(plan), buildReplacements(payload)), payload));
+      const restoreGeneration = crypto.createHash('sha256').update(`${targetProjectId}\0${row.idempotency_key}`).digest('hex').slice(0, 20);
+      const logicalTarget = JSON.parse(row.target_json || '[]')[0]?.outputRelativePath || 'working/output'; const outputRelativePath = `团片协作/恢复-${restoreGeneration}/working/${path.posix.basename(String(logicalTarget).replace(/\\/g, '/'))}`;
+      rewrittenPlan.projectId = targetProjectId; rewrittenPlan.outputRelativePath = outputRelativePath; rewrittenPlan.ledgerPath = path.join(destinationDataPath, 'output-ownership', targetHash, 'working-images.json'); rewrittenPlan.preHostLocalEffects = 'none';
+      return { ...row, project_id: targetProjectId, id: crypto.randomUUID(), fingerprint: crypto.createHash('sha256').update(`${targetProjectId}\0${row.fingerprint}`).digest('hex'), idempotency_key: `restore-working-${restoreGeneration}`, state: 'restore_republish', stage_id: '', source_json: JSON.stringify([{ sourcePath: mapped.path, digest: mapped.digest }]), target_json: JSON.stringify([{ outputRelativePath, replacement: null }]), receipt_json: '{}', result_json: JSON.stringify({ continuationPlan: rewrittenPlan }), last_error: '', created_at: Date.now(), updated_at: Date.now() };
+    });
     const result = restoreProjectStorage({ sourcePath: source.path, destinationPath, payload, ensureSchema, fault });
     const consumedPaths = [String(source.relativePath || '')].filter(Boolean);
     for (const suffix of ['-wal', '-shm']) {
