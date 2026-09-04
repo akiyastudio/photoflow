@@ -123,6 +123,8 @@ const launchWindowsJobProcess = (command, args = [], options = {}, {
   let readyResolve; let readyReject;
   const readyPromise = new Promise((resolve, reject) => { readyResolve = resolve; readyReject = reject; });
   void readyPromise.catch(() => undefined);
+  let resolveHelperClosed; const helperClosed = new Promise(resolve => { resolveHelperClosed = resolve; });
+  const waitForHelperCloseAfterKill = () => new Promise(resolve => { const timer = setTimeout(() => resolve(false), 1000); timer.unref?.(); helperClosed.then(() => { clearTimeout(timer); resolve(true); }); });
   let managed = null; let proxy = null; let protocolFailure = null; let helperTerminalError = null; let helperSpawnFailed = false; let launchCancelled = false; let launchFrameWritten = false;
   const setup = (async () => {
     const control = await connectControlPipeImpl(pipePath, Date.now() + connectTimeoutMs, () => helperTerminalError);
@@ -175,7 +177,9 @@ const launchWindowsJobProcess = (command, args = [], options = {}, {
     });
     if (launchCancelled) { control.destroy(); throw Object.assign(new Error('Windows Job launch was cancelled before configuration'), { code: 'JOB_LAUNCH_CANCELLED' }); }
     launchFrameWritten = true;
-    await new Promise((resolve, reject) => control.write(frame({ protocolVersion: PROTOCOL_VERSION, command, args, cwd: options.cwd || '', env: options.env || process.env, windowsHide: options.windowsHide !== false, stdio: requestedStdio.slice(0, 3), pollOnlyForTest: options.__jobPollOnlyForTest === true }), error => error ? reject(error) : resolve()));
+    try {
+      control.write(frame({ protocolVersion: PROTOCOL_VERSION, command, args, cwd: options.cwd || '', env: options.env || process.env, windowsHide: options.windowsHide !== false, stdio: requestedStdio.slice(0, 3), pollOnlyForTest: options.__jobPollOnlyForTest === true }), error => { if (error) fail(error); });
+    } catch (error) { fail(error); throw error; }
     return managed;
   })().catch(error => { killHelperOnce(); readyReject(error); throw error; });
 
@@ -188,7 +192,7 @@ const launchWindowsJobProcess = (command, args = [], options = {}, {
   proxy.treeExit = setup.then(value => value.treeExit).then(result => { proxy.__photoFlowTreeExitConfirmed = true; return result; });
   void proxy.ready.catch(() => undefined); void proxy.treeExit.catch(() => undefined);
   proxy.kill = () => { void proxy.terminateJob(Date.now() + 2000).catch(() => undefined); return !proxy.killed; };
-  proxy.terminateJob = async deadlineAt => { launchCancelled = true; if (helperSpawnFailed || !launchFrameWritten) { killHelperOnce(); proxy.killed = true; proxy.__photoFlowTreeExitConfirmed = true; return { exited: true, activeProcessCount: 0, launchFailed: helperSpawnFailed, setupCancelled: !launchFrameWritten }; } const remaining = Math.max(1, Number(deadlineAt) - Date.now()); let setupTimer; let value; try { value = await Promise.race([setup, new Promise((_, reject) => { setupTimer = setTimeout(() => reject(Object.assign(new Error('Windows Job setup did not complete before the stop deadline'), { code: 'PROCESS_TREE_TERMINATION_UNCONFIRMED', pid: proxy.pid })), remaining); setupTimer.unref?.(); })]); } finally { clearTimeout(setupTimer); } proxy.killed = true; try { const result = await value.terminateJob(deadlineAt); proxy.__photoFlowTreeExitConfirmed = true; return result; } catch (error) { proxy.__photoFlowTreeTerminationUnconfirmed = true; throw error; } };
+  proxy.terminateJob = async deadlineAt => { launchCancelled = true; if (helperSpawnFailed || !launchFrameWritten) { killHelperOnce(); proxy.killed = true; proxy.__photoFlowTreeExitConfirmed = true; return { exited: true, activeProcessCount: 0, launchFailed: helperSpawnFailed, setupCancelled: !launchFrameWritten }; } const remaining = Math.max(1, Number(deadlineAt) - Date.now()); let setupTimer; let value; try { value = await Promise.race([setup, new Promise((_, reject) => { setupTimer = setTimeout(() => reject(Object.assign(new Error('Windows Job setup did not complete before the stop deadline'), { code: 'PROCESS_TREE_TERMINATION_UNCONFIRMED', pid: proxy.pid })), remaining); setupTimer.unref?.(); })]); } catch (error) { managed?.control?.destroy(); killHelperOnce(); proxy.killed = true; proxy.__photoFlowTreeTerminationUnconfirmed = true; await waitForHelperCloseAfterKill(); throw error; } finally { clearTimeout(setupTimer); } proxy.killed = true; try { const result = await value.terminateJob(deadlineAt); proxy.__photoFlowTreeExitConfirmed = true; return result; } catch (error) { value.control?.destroy(); killHelperOnce(); proxy.__photoFlowTreeTerminationUnconfirmed = true; await waitForHelperCloseAfterKill(); throw error; } };
   proxy._disconnectControlForTest = async () => { const value = await setup; value.control.destroy(); };
   proxy._writeControlForTest = async value => { const launched = await setup; launched.control.write(frame(value)); };
   helper.on('error', error => { helperTerminalError = error; helperSpawnFailed = !managed?.targetPid; if (helperSpawnFailed) proxy.__photoFlowTreeExitConfirmed = true; readyReject(error); proxy.emit('error', error); });
@@ -203,7 +207,7 @@ const launchWindowsJobProcess = (command, args = [], options = {}, {
     if (helperClose) { proxy.__photoFlowCloseObserved = true; proxy.emit('close', helperClose.code, helperClose.signal); }
   };
   helper.on('exit', (code, signal) => { helperExit = { code, signal, published: false }; void publishTerminal(); });
-  helper.on('close', (code, signal) => { helperTerminalError ||= Object.assign(new Error(`Windows Job launcher closed before control setup (${code ?? signal ?? 'unknown'})`), { code: 'JOB_LAUNCHER_EARLY_CLOSE' }); helperClose = { code, signal }; if (!helperExit) helperExit = { code, signal, published: false }; if (terminalPublished) { proxy.__photoFlowCloseObserved = true; proxy.emit('close', code, signal); } else void publishTerminal(); });
+  helper.on('close', (code, signal) => { resolveHelperClosed(); helperTerminalError ||= Object.assign(new Error(`Windows Job launcher closed before control setup (${code ?? signal ?? 'unknown'})`), { code: 'JOB_LAUNCHER_EARLY_CLOSE' }); helperClose = { code, signal }; if (!helperExit) helperExit = { code, signal, published: false }; if (terminalPublished) { proxy.__photoFlowCloseObserved = true; proxy.emit('close', code, signal); } else void publishTerminal(); });
   return proxy;
 };
 
