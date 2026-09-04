@@ -591,6 +591,16 @@ const componentCleanupIntentPaths = receipt => {
   const id = crypto.createHash('sha256').update(identityText).digest('hex').slice(0, 24);
   return { originalPath, isolatedPath: `${originalPath}.cleanup-${id}`, intentPath: `${originalPath}.cleanup-${id}.intent.json`, verifiedPath: `${originalPath}.cleanup-${id}.verified`, proofPath: `${originalPath}.cleanup-${id}.proof.json` };
 };
+const validatePreparedSidecarReceipts = (receipt, paths = componentCleanupIntentPaths(receipt)) => {
+  const diagnostics = [`${paths.verifiedPath}.tmp`, `${paths.verifiedPath}.invalid`, `${paths.verifiedPath}.tmp.invalid`, `${paths.intentPath}.tmp`, `${paths.intentPath}.invalid`, `${paths.intentPath}.tmp.invalid`, `${paths.proofPath}.tmp`, `${paths.proofPath}.tmp.invalid`];
+  const allowed = new Map([[paths.intentPath, { role: 'intent', max: MAX_CLEANUP_SIDECAR_BYTES }], [paths.proofPath, { role: 'proof', max: MAX_CLEANUP_PROOF_BYTES }], [paths.verifiedPath, { role: 'verified', max: MAX_CLEANUP_SIDECAR_BYTES }], ...diagnostics.map(candidate => [candidate, { role: 'diagnostic', max: candidate.includes('.proof.') ? MAX_CLEANUP_PROOF_BYTES : MAX_CLEANUP_SIDECAR_BYTES }])]);
+  const values = receipt?.sidecarReceipts;
+  if (!Array.isArray(values) || values.length < 3 || values.length > allowed.size) throw cleanupBoundaryError('COMPONENT_CLEANUP_PREPARED_INVALID', '组件清理 prepared sidecar 数量无效');
+  const seen = new Set();
+  for (const item of values) { const rule = allowed.get(item?.path); if (!rule || seen.has(item.path) || item.role !== rule.role || !Number.isSafeInteger(item.size) || item.size < 0 || item.size > rule.max || !/^[a-f0-9]{64}$/.test(item.sha256 || '') || typeof item.nativeIdentity !== 'string' || !item.nativeIdentity || item.nativeIdentity.length > 4096) throw cleanupBoundaryError('COMPONENT_CLEANUP_PREPARED_INVALID', '组件清理 prepared sidecar receipt 无效'); seen.add(item.path); }
+  if (![paths.intentPath, paths.proofPath, paths.verifiedPath].every(required => seen.has(required))) throw cleanupBoundaryError('COMPONENT_CLEANUP_PREPARED_INVALID', '组件清理 prepared sidecar 缺少必需证明');
+  return values;
+};
 const cleanupIntentPayload = receipt => ({ schemaVersion: 1, ...componentCleanupIntentPaths(receipt), kind: receipt.kind, nodeIdentity: receipt.nodeIdentity, treeDigest: receipt.treeDigest || '' });
 const preserveFixedSidecar = async (sourcePath, value) => {
   const stat = await fs.promises.lstat(sourcePath);
@@ -741,6 +751,7 @@ const cleanupOwnedComponentPath = async (receipt, { deleteOwned, captureNativePr
   }
   if (preparedSidecars.length !== expectedSidecarContents.size || preparedSidecars.some(item => { const expected = expectedSidecarContents.get(item.path); return !expected || item.role !== expected.role || item.size !== expected.value.length || item.sha256 !== crypto.createHash('sha256').update(expected.value).digest('hex') || !item.nativeIdentity; })) throw cleanupBoundaryError('COMPONENT_CLEANUP_SIDECAR_PROOF_MISMATCH', '组件清理 sidecar receipt 与 prepared 状态不一致');
   const preparedReceipt = { ...receipt, sidecarReceipts: preparedSidecars.map(item => ({ ...item })), cleanupPhase: 'prepared' };
+  validatePreparedSidecarReceipts(preparedReceipt, paths);
   if (typeof persistPrepared !== 'function' || await persistPrepared(preparedReceipt) !== true) throw Object.assign(new Error('组件清理 prepared receipt 未持久化'), { recoveryPath: paths.isolatedPath, preparedPersisted: false, cleanupPendingReceipts: [preparedReceipt] });
   if (typeof deleteOwned !== 'function') throw Object.assign(new Error('组件清理需要对象身份绑定的删除服务'), { recoveryPath: paths.isolatedPath, cleanupPendingPaths: [paths.isolatedPath], cleanupPendingReceipts: [receipt] });
   try {
@@ -761,6 +772,7 @@ const cleanupOwnedComponentPath = async (receipt, { deleteOwned, captureNativePr
 };
 const finalizeComponentCleanupProof = async (receipt, { dataCleanupCompletePersisted = false, deleteSidecar } = {}) => {
   const paths = componentCleanupIntentPaths(receipt);
+  validatePreparedSidecarReceipts(receipt, paths);
   const expectedIntent = `${JSON.stringify(cleanupIntentPayload(receipt))}\\n`;
   const [original, isolated] = await Promise.all([paths.originalPath, paths.isolatedPath].map(candidate => fs.promises.lstat(candidate).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error))));
   if (original || isolated) throw new Error('组件清理数据路径仍存在，拒绝回收完成证明');
