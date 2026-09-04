@@ -36,7 +36,13 @@ const createWorkflowManifestResolver = ({ crypto, fs, path, writeJsonAtomic }) =
   if (fs.existsSync(scope.manifestPath)) {
     let raw = null;
     try { raw = JSON.parse(await fs.promises.readFile(scope.manifestPath, 'utf8')); } catch { /* An existing canonical file always wins, even when damaged. */ }
-    return { ...scope, manifest: verifiedWorkflowManifest(raw, { projectId }), source: raw ? 'canonical' : 'invalid-canonical' };
+    const manifest = verifiedWorkflowManifest(raw, { projectId });
+    if (manifest && !manifest.projectId) {
+      const rebound = { ...manifest, projectId, restoredFrom: manifest.restoredFrom || { kind: 'canonical-project-binding', projectName: manifest.projectName || context?.projectName || '', status: manifest.status || context?.projectStatus || '' } };
+      await writeJsonAtomic(scope.manifestPath, rebound);
+      return { ...scope, manifest: rebound, source: 'canonical-project-binding' };
+    }
+    return { ...scope, manifest, source: raw ? 'canonical' : 'invalid-canonical' };
   }
 
   const projectName = String(context?.projectName || '');

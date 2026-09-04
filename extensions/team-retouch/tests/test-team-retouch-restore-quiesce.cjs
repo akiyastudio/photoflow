@@ -43,7 +43,7 @@ const { ensureSchema, withRestoreLease, withRestorePhase } = require('../service
   const rolledBackLegacy = new DatabaseSync(databasePath); rolledBackLegacy.exec("CREATE TABLE meta(key TEXT PRIMARY KEY,value TEXT NOT NULL); INSERT INTO meta VALUES('schema_version','1')"); rolledBackLegacy.close();
   assert.equal((await withRestorePhase(context, { ...base, phase: 'rollback', quiesceToken: prepared.quiesceToken }, 'project', async () => undefined)).status, 'rolled-back');
   const reopened = ensureSchema(databasePath);
-  assert.equal(reopened.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, '9', 'rollback invalidates the schema cache so restored old storage migrates on reopen'); reopened.close();
+  assert.equal(reopened.prepare("SELECT value FROM meta WHERE key='schema_version'").get().value, '10', 'rollback invalidates the schema cache so restored old storage migrates on reopen'); reopened.close();
   assert.equal((await withRestorePhase(context, { ...base, phase: 'rollback', quiesceToken: prepared.quiesceToken }, 'project', async () => undefined)).idempotent, true);
   fs.rmSync(phaseRoot, { recursive: true, force: true });
   console.log('Team-retouch component-owned restore quiesce tests passed');

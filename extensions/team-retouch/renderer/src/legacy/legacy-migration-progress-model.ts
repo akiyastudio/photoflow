@@ -7,6 +7,12 @@ export type LegacyMigrationProgress = {
 
 const count = (value: unknown) => Math.max(0, Number(value) || 0);
 
+export const isHostStorageAdoptionPending = (migration?: LegacyMigrationProgress) => migration?.phase === 'host-storage-adoption';
+
+export const hostStorageAdoptionJustCompleted = (previous?: LegacyMigrationProgress, current?: LegacyMigrationProgress) => (
+  isHostStorageAdoptionPending(previous) && !isHostStorageAdoptionPending(current)
+);
+
 export const legacyMigrationRemainingCount = (migration?: LegacyMigrationProgress) => (
   count(migration?.pendingCount) + count(migration?.maintenancePendingCount)
 );

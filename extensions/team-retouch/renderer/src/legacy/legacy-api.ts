@@ -1,5 +1,6 @@
 import { rpc, type ComponentContext } from '../sdk.ts';
 import { expireLegacyMedia, scheduleLegacyMedia } from './legacy-media-scheduler.ts';
+import { createTeamRevisionCoordinator, retryOnceAfterRevisionConflict } from './legacy-revision-model.ts';
 
 type Json = Record<string, any>;
 type MediaKind = 'original' | 'working' | 'returned' | 'review-return';
@@ -64,16 +65,9 @@ const hydrateReviewResult = (result: Json) => {
   return { ...result, matches };
 };
 const payload = (args: any[]) => { for (let index = args.length - 1; index >= 0; index -= 1) { const value = args[index]; if (value && typeof value === 'object' && !Array.isArray(value)) return value; } return {}; };
-const workspaceRevisions = new Map<string, string>();
-const currentRevisionScope = () => mediaAuthorizationScope || '__default__';
-const revisionMutations = new Set(['team.project.register.v1','team.project.remove-photo.v1','team.identity.save.v1','team.identity.assign.v1','team.identity.confirm-group.v1','team.identity.delete.v1','team.identity.suggest.v1','team.person.exclude.v1','team.patch.detect.v1','team.patch.detect-batch.v1','team.patch.update.v1','team.patch.delete.v1','team.patch.cleanup.v1','team.patch.upload.v1','team.patch.remove-upload.v1','team.patch.merge.v1','team.identity.complete.v1','team.workflow.settings.save.v1','team.workflow.generate.v1','team.workflow.return-batch.v1','team.workflow.return-confirm.v1','team.patch.return-batch.v1']);
-const ok = async (method: string, value?: Json) => {
-  const revisionScope = currentRevisionScope(); const workspaceRevision = workspaceRevisions.get(revisionScope) || '';
-  const request = revisionMutations.has(method) && workspaceRevision ? { ...(value || {}), expectedRevision: value?.expectedRevision || workspaceRevision } : value;
-  const result = await rpc<Json>(method, request);
-  if (result?.revision) workspaceRevisions.set(revisionScope, String(result.revision));
-  return result;
-};
+const revisionCoordinator = createTeamRevisionCoordinator();
+const ok = <T extends Json = Json>(method: string, value?: Json) => revisionCoordinator.run<T>(method, value, request => rpc<T>(method, request));
+export const teamProjectRpc = <T extends Json = Json>(method: string, value?: Json) => ok<T>(method, value);
 const durable = async (method: string, value: Json) => {
   const operationId = String(value.operationId || crypto.randomUUID());
   const accepted = await ok(method, { ...value, operationId, acceptOnly: true });
@@ -123,7 +117,7 @@ export const legacyApi = {
   setMediaAuthorizationScope: (scope: string) => {
     const next = String(scope || '');
     if (next === mediaAuthorizationScope) return;
-    mediaAuthorizationGeneration += 1; expireLegacyMedia(); mediaAliases.clear(); mediaAuthorizationScope = next;
+    mediaAuthorizationGeneration += 1; expireLegacyMedia(); mediaAliases.clear(); mediaAuthorizationScope = next; revisionCoordinator.setScope(next);
   },
   getMediaAuthorizationScope: () => mediaAuthorizationScope,
   getTeamPatches: async (...args: any[]) => hydrateLegacyBundle(await ok('team.patch.get.v1', { relativePath: String(args[3] || '') }), String(args[4] || '')),
@@ -156,8 +150,18 @@ export const legacyApi = {
   getTeamWorkflowReturnReview: async () => { const result = await ok('team.workflow.return-review.get.v1'); return { ...result, review: result.review ? hydrateReviewResult(result.review) : result.review }; },
   discardTeamWorkflowReturnReview: (...args: any[]) => ok('team.workflow.return-review.discard.v1', { reviewSessionId: String(args[2] || '') }),
   ignoreTeamWorkflowReturnReview: (...args: any[]) => ok('team.workflow.return-review.ignore.v1', { reviewSessionId: String(args[2] || ''), returnId: String(args[3] || '') }),
-  confirmTeamWorkflowReturn: (...args: any[]) => ok('team.workflow.return-confirm.v1', payload(args)),
-  drainTeamWorkflowReconciles: (maxItems = 20) => ok('team.workflow.reconcile-drain.v1', { maxItems }),
+  confirmTeamWorkflowReturn: (...args: any[]) => {
+    const request = payload(args);
+    const scope = revisionCoordinator.getScope();
+    return retryOnceAfterRevisionConflict(
+      () => ok('team.workflow.return-confirm.v1', request),
+      async () => {
+        await ok('team.project.get.v1');
+        if (revisionCoordinator.getScope() !== scope) throw new Error('项目已切换，已取消旧项目的返图确认');
+      },
+    );
+  },
+  drainTeamWorkflowReconciles: (maxItems = 20, taskIds: string[] = []) => ok('team.workflow.reconcile-drain.v1', { maxItems, ...(taskIds.length ? { taskIds } : {}) }),
   getProgressFolders: () => readProgressCached(),
   registerProgressWithGraph: async (...args: any[]) => {
     const result = await ok('team.progress.create.v1', payload(args));

@@ -4,6 +4,14 @@ export const historyLoadPresentation = (state: HistoryLoadView) => {
   if (state.loadError && !state.entriesLoaded) return { phase: 'error' as const, title: '团片协作 · 历史读取失败' };
   return { phase: 'ready' as const, title: `团片协作 · ${state.entryCount} 张图片` };
 };
+export const needsBlockingHistoryCalibration = (workspace: Record<string, any>, resolution: { historyPhotoCount?: number; resolvedHistoryCount?: number }) => (
+  Number(resolution.historyPhotoCount) > 0
+  && Number(resolution.resolvedHistoryCount) === 0
+  && Number(workspace?.calibration?.pendingCount) > 0
+);
+export const historyCalibrationMadeProgress = (previousPending: number, workspace: Record<string, any>, calibratedCount: number) => (
+  Number(calibratedCount) > 0 && Number(workspace?.calibration?.pendingCount) < Number(previousPending)
+);
 export const createLatestHistoryLoadGuard = () => { let current = 0; return { begin: () => ++current, isCurrent: (requestId: number) => requestId === current, invalidate: () => { current += 1; } }; };
 export const historyMigrationDelayMs = (phase: string, waitCount: number) => phase === 'host-storage-adoption' ? Math.min(5_000, 750 * (2 ** Math.min(Math.max(0, waitCount), 3))) : 100;
 export const createActivationRefreshGate = () => {

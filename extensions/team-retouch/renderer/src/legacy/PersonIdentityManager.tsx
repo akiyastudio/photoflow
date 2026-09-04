@@ -18,6 +18,7 @@ import { beginWorkflowReturnProgress, isPhotoMergeComplete, mergeAudit, relayCha
 import { createWorkspaceSeedGate, isUsableWorkspaceSeed, workspaceSeedScopeKey } from './legacy-workspace-seed-model';
 import { shouldEmitTerminalToast } from '../task-terminal-notice-model';
 import { IdentityPickerPanel } from './IdentityPickerPanel';
+import { prepareAndOpenWorkflowTaskFolder } from './legacy-task-folder-model';
 
 type Props = {
   componentActive?: boolean;
@@ -601,7 +602,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       const workImageAvailable = availableSubjects.has(`${item.photo.baseVersionId}:${item.personIndex}`) || available.has(item.key);
       return {
         ...item,
-        blockedBy: !workImageAvailable && item.blockedBy.length === 0 ? ['协作流程重新生成'] : item.blockedBy,
+        blockedBy: !workImageAvailable && item.blockedBy.length === 0 ? ['接力工作图恢复'] : item.blockedBy,
         ready: item.ready && workImageAvailable,
       };
     });
@@ -866,6 +867,21 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     event.preventDefault();
     void movePreferredIdentity(identityId, targetIdentity.id);
   };
+  const drainTaskChains = async (taskIds: string[]) => {
+    const uniqueTaskIds = [...new Set(taskIds.map(String).filter(Boolean))];
+    let recoveredCount = 0;
+    for (let index = 0; index < uniqueTaskIds.length; index += 50) {
+      const chunk = uniqueTaskIds.slice(index, index + 50);
+      try {
+        const result = await legacyApi.drainTeamWorkflowReconciles(chunk.length, chunk);
+        recoveredCount += Number(result.recoveredCount) || 0;
+        if (result.state !== 'ready') return { ...result, recoveredCount };
+      } catch (error) {
+        return { success: false, state: 'failed', recoveredCount, error: error instanceof Error ? error.message : String(error) };
+      }
+    }
+    return { success: true, state: 'ready', recoveredCount };
+  };
   const toggleComplete = async (item: WorkflowItem) => {
     const completed = !item.assignment?.completed;
     if (completed && !await appDialog.confirm({ title: '确认这个任务不用修？', message: '会将当前工作图原样交给接力链中的下一位，并把此人的修图任务标记为完成。', confirmLabel: '确认不用修' })) return;
@@ -873,7 +889,13 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     setResourcePending(item.key, true);
     try {
       const result = await legacyApi.completeTeamIdentity(workspacePath, { photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed, completionKind: completed ? 'no-retouch' : '', taskId: item.task.id, taskOrder: workflow.filter(candidate => candidate.photo.photoId === item.photo.photoId && candidate.photo.baseVersionId === item.photo.baseVersionId && candidate.task.id === item.task.id && candidate.identity).sort((left, right) => left.week - right.week || left.personIndex - right.personIndex).map(candidate => candidate.personIndex), projectName: project.name, status: project.status });
-      if (!result.success) onNotice(`更新完成状态失败：${result.error || '未知错误'}`, 'error'); else { if (result.warning) onNotice(result.warning, 'warning'); void load(false); }
+      if (!result.success) onNotice(`更新完成状态失败：${result.error || '未知错误'}`, 'error');
+      else {
+        const reconciliation = await drainTaskChains([item.task.id]);
+        await load(false);
+        if (reconciliation.state === 'ready') onNotice(completed ? '已标记不用修；下一位接力已就绪' : '已撤销不用修；当前接力工作图已恢复', 'success');
+        else onNotice(`状态已保存；接力工作图仍在恢复${reconciliation.error ? `：${reconciliation.error}` : ''}`, 'warning');
+      }
     } catch (error) { onNotice(`更新完成状态失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
     finally { setResourcePending(item.key, false); }
   };
@@ -890,6 +912,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     let completedCount = 0;
     let errorMessage = '';
     let warningMessage = '';
+    const completedTaskIds: string[] = [];
     try {
       let cursor = 0;
       const worker = async () => {
@@ -897,11 +920,15 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
           const item = pending[cursor++];
           const result = await legacyApi.completeTeamIdentity(workspacePath, { photoId: item.photo.photoId, baseVersionId: item.photo.baseVersionId, personIndex: item.personIndex, completed: true, completionKind: 'no-retouch', taskId: item.task.id, taskOrder: workflow.filter(candidate => candidate.photo.photoId === item.photo.photoId && candidate.photo.baseVersionId === item.photo.baseVersionId && candidate.task.id === item.task.id && candidate.identity).sort((left, right) => left.week - right.week || left.personIndex - right.personIndex).map(candidate => candidate.personIndex), projectName: project.name, status: project.status });
           if (!result.success) { errorMessage = result.error || '未知错误'; return; }
-          if (result.warning) warningMessage = result.warning;
+          completedTaskIds.push(item.task.id);
           completedCount += 1;
         }
       };
       await Promise.all(Array.from({ length: Math.min(4, pending.length) }, worker));
+      if (completedTaskIds.length) {
+        const reconciliation = await drainTaskChains(completedTaskIds);
+        if (reconciliation.state !== 'ready') warningMessage = `状态已保存；部分接力工作图仍在恢复${reconciliation.error ? `：${reconciliation.error}` : ''}`;
+      }
       await load(false);
       if (errorMessage) onNotice(`已标记 ${completedCount} 个任务，剩余任务处理失败：${errorMessage}`, 'error');
       else if (warningMessage) onNotice(warningMessage, 'warning');
@@ -914,7 +941,13 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     setResourcePending(item.key, true);
     try {
       const result = await legacyApi.uploadTeamPatch(workspacePath, { photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex, projectName: project.name, status: project.status });
-      if (!result.success) onNotice(`上传返图失败：${result.error || '未知错误'}`, 'error'); else if (!result.cancelled) { onNotice(result.warning || '返图已上传，下一位接力正在准备。', result.warning ? 'warning' : 'success'); void load(false); }
+      if (!result.success) onNotice(`上传返图失败：${result.error || '未知错误'}`, 'error');
+      else if (!result.cancelled) {
+        const reconciliation = await drainTaskChains([item.task.id]);
+        await load(false);
+        if (reconciliation.state === 'ready') onNotice('返图已上传，下一位接力已就绪', 'success');
+        else onNotice(`返图已上传；下一位接力仍在恢复${reconciliation.error ? `：${reconciliation.error}` : ''}`, 'warning');
+      }
     } catch (error) { onNotice(`上传返图失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
     finally { setResourcePending(item.key, false); }
   };
@@ -925,16 +958,28 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
     try {
       const result = await legacyApi.removeTeamPatchUpload(workspacePath, { photoId: item.photo.photoId, taskId: item.task.id, personIndex: item.personIndex, projectName: project.name, status: project.status });
       if (!result.success) onNotice(`删除返图失败：${result.error || '未知错误'}`, 'error');
-      else { await load(false); onNotice(result.warning || '返图已删除，并已撤销完成标记', result.warning ? 'warning' : 'success'); }
+      else {
+        const reconciliation = await drainTaskChains([item.task.id]);
+        await load(false);
+        if (reconciliation.state === 'ready') onNotice('返图已删除，完成标记已撤销，当前接力工作图已恢复', 'success');
+        else onNotice(`返图已删除并撤销完成标记；接力工作图仍在恢复${reconciliation.error ? `：${reconciliation.error}` : ''}`, 'warning');
+      }
     } catch (error) { onNotice(`删除返图失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
     finally { setResourcePending(item.key, false); }
   };
   const openTaskFolder = async (identity: TeamIdentity, week: number) => {
     setBusy(`open:${week}:${identity.id}`);
     try {
-      const result = await legacyApi.exportTeamIdentityTasks(workspacePath, project.status, project.name, { week, identityId: identity.id });
+      const open = () => legacyApi.exportTeamIdentityTasks(workspacePath, project.status, project.name, { week, identityId: identity.id });
+      const outcome = await prepareAndOpenWorkflowTaskFolder({
+        open,
+        drain: maxItems => legacyApi.drainTeamWorkflowReconciles(maxItems),
+        onPreparing: () => onNotice('任务文件夹正在重建，请稍候…', 'info'),
+      });
+      const { result, reconciliation } = outcome;
       if (!result.success) onNotice(`打开任务文件夹失败：${result.error || '未知错误'}`, 'error');
-      else if (result.state === 'preparing') onNotice(result.message || '任务文件夹正在后台准备', 'info');
+      else if (result.state === 'preparing') onNotice(reconciliation?.error ? `任务文件夹暂未准备完成：${reconciliation.error}` : '任务文件夹仍在准备，请稍后重试', 'warning');
+      else if (outcome.preparationAttempted) { onNotice('任务文件夹已准备并打开', 'success'); void load(false); }
       else if (result.path) void legacyApi.openTeamPatchFolder(result.path);
     } catch (error) { onNotice(`打开任务文件夹失败：${error instanceof Error ? error.message : String(error)}`, 'error'); }
     finally { setBusy(''); }
@@ -1024,7 +1069,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
       });
       onProjectChanged();
       onNotice(`返图已确认：${candidate.photoName || '任务图'} · ${candidate.personName || '人物'}；接力准备中`, 'success');
-      void legacyApi.drainTeamWorkflowReconciles(20).then(drain => {
+      void legacyApi.drainTeamWorkflowReconciles(1, [candidate.taskId]).then(drain => {
         const relayState = drain.state === 'ready' ? 'ready' : drain.state === 'failed' ? 'failed' : 'preparing';
         setWorkflowReturnResult(current => current ? { ...current, matches: current.matches.map(item => item.returnId === match.returnId ? { ...item, relayState, relayError: drain.error || '' } : item) } : current);
         if (relayState === 'ready') { onNotice('返图接力已就绪', 'success'); void load(false); }
@@ -1317,7 +1362,7 @@ export const PersonIdentityManager = ({ workspacePath, project, initialWorkspace
         <div className="space-y-5">{[...workspace.identities, { id: '__unassigned__', name: '未标注人物', color: '#64748b', createdAt: 0, updatedAt: 0 }].map(identity => { const items = grouped.get(identity.id) || []; if (!items.length && identity.id === '__unassigned__') return null; const visibleItems = items.slice(0, subjectPageSize); return <section key={identity.id} className="team-card pf-card overflow-hidden"><header className="flex items-center gap-3 border-b border-slate-100 px-4 py-3"><span className="h-3 w-3 rounded-full" style={{ background: identity.color }}/>{identity.id === '__unassigned__' ? <h3 className="font-bold text-slate-700">未标注人物</h3> : <input defaultValue={identity.name} onBlur={event => void renameIdentity(identity, event.target.value)} className="min-w-40 rounded border border-transparent px-1 py-1 font-bold text-slate-800 hover:border-slate-200 focus:border-blue-400 focus:outline-none"/>}<span className="text-xs text-slate-400">{items.length} 张人物实例 · {new Set(items.map(item => item.photo.photoId)).size} 张照片{items.length > visibleItems.length ? ` · 当前显示 ${visibleItems.length} 张` : ''}</span>{identity.id !== '__unassigned__' && <button onClick={() => void removeIdentity(identity)} title="删除人物身份" className="ml-auto rounded p-2 text-slate-400 hover:bg-red-50 hover:text-red-600"><Trash2 size={15}/></button>}</header><div className="grid gap-3 p-4 sm:grid-cols-2 lg:grid-cols-4 2xl:grid-cols-6">{visibleItems.map(subject => <div key={subject.key} data-team-person-key={subject.key} className="space-y-2"><SubjectThumb active={componentActive} subject={subject} cacheConfig={cacheConfig}/><select value={subject.identity?.id || ''} onChange={event => void assign(subject, event.target.value)} className="w-full rounded-md border border-slate-200 bg-white px-2 py-1.5 text-xs text-slate-700"><option value="">未标注</option>{workspace.identities.map(option => <option key={option.id} value={option.id}>{option.name}</option>)}</select>{subject.assignment?.source === 'suggested' && <p className="text-[10px] text-blue-600">自动采用 · {Math.round(subject.assignment.confidence * 100)}% · 识别错误可修改</p>}</div>)}</div></section>; })}</div></> : <>{!workspace.identities.length ? <div className="team-card pf-card border-dashed p-10 text-center text-sm text-slate-500">请先在“标记人物”中分配身份。</div> : <div className="space-y-7">{weeks.map(week => <section key={week}><h3 className="mb-3 text-sm font-bold text-slate-700">第 {week} 周</h3><div className="space-y-4">{[...workflowGroups.values()].filter(group => group.week === week).map(group => {
           const pending = group.items.filter(item => !item.assignment?.completed);
           const ready = workflowReady ? pending.filter(item => item.ready) : [];
-          return <article key={`${week}:${group.identity.id}`} className="workflow-person-lane team-card pf-card overflow-hidden"><header className="workflow-person-summary flex items-center gap-3 border-b border-slate-100 p-4"><span className="h-3 w-3 shrink-0 rounded-full" style={{ background: group.identity.color }}/><div className="min-w-0"><h4 className="truncate font-bold text-slate-800">{group.identity.name}</h4><p className="mt-1 text-xs leading-5 text-slate-400">本周 {group.items.length} 张<br/>可分发 {ready.length} 张 · 已完成 {group.items.length - pending.length} 张</p></div>{activeStep === 'relay' && <><button disabled={!workflowReady || Boolean(busy) || !ready.length} onClick={() => void markWeekNoRetouch(group.identity, week, group.items)} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : `将“${group.identity.name}”本周当前可分发的 ${ready.length} 个未上传任务标记为不用修`} className="dialog-secondary ml-auto inline-flex shrink-0 items-center gap-2">{busy === `skip:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}标记本周不用修</button><button disabled={!workflowReady || Boolean(busy) || !ready.length} title={!workspace.workflowGenerated ? '请先生成协作流程' : workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : !ready.length ? '等待上一位返图' : '打开当前可分发任务文件夹'} onClick={() => void openTaskFolder(group.identity, week)} className="dialog-secondary inline-flex shrink-0 items-center gap-2">{busy === `open:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <FolderOutput size={14}/>}打开任务文件夹</button></>}</header><div className="workflow-task-strip">{group.items.map(item => { const returnMissing = Boolean(item.assignment?.returnMissing); const returned = item.assignment?.completionKind === 'returned' && Boolean(item.assignment.editedPatchPath) && !returnMissing; return <div key={item.key} className="workflow-task-card p-3"><div className="workflow-task-thumbnail shrink-0"><SubjectThumb active={componentActive} subject={item} cacheConfig={cacheConfig} sourcePath={item.workflowImagePath} interactive={!item.assignment?.completed}/></div><div className="min-w-0"><p className="truncate text-sm font-bold text-slate-700">{item.photo.name} · 人物 {item.personIndex}</p><p className={`mt-1 truncate text-xs ${workspace.workflowNeedsRegeneration ? 'font-bold text-amber-600' : returnMissing ? 'font-bold text-red-600' : item.assignment?.completed ? 'text-emerald-600' : item.ready ? 'text-blue-600' : 'text-amber-600'}`} title={workspace.workflowNeedsRegeneration ? '排期已调整，请重新生成协作流程' : returnMissing ? '返图文件已被外部删除或移动；恢复原路径后会自动重新连接，也可以重新上传' : item.blockedBy.join('、')}>{workspace.workflowNeedsRegeneration ? '排期已调整，等待重新生成' : returnMissing ? '返图文件丢失' : item.assignment?.completed ? returned ? '已返图' : '不用修' : item.ready ? '可以分发' : `等待 ${item.blockedBy.join('、')} 完成`}</p></div>{activeStep === 'relay' && <><button disabled={!workflowReady || !item.ready || Boolean(busy)} onClick={() => void upload(item)} className="workflow-task-action dialog-secondary inline-flex items-center justify-center">{busy === `upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : <Upload size={12}/>}上传返图</button><button disabled={!workflowReady || !item.assignment || Boolean(busy) || !item.ready && !item.assignment.completed} onClick={() => void (item.assignment?.completed && returned ? removeUpload(item) : toggleComplete(item))} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : returnMissing ? '返图文件已丢失；可以重新上传，或明确标记为不用修' : item.assignment?.completed ? returned ? '删除返图并撤销完成标记' : '撤销不用修' : '该任务不用修，直接标记完成'} className={`workflow-task-action group inline-flex items-center justify-center rounded-md border font-bold transition ${returnMissing ? 'border-red-200 bg-red-50 text-red-700' : item.assignment?.completed ? returned ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600' : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-amber-200 hover:bg-amber-50 hover:text-amber-700' : 'border-slate-200 text-slate-600'}`}>{busy === `complete:${item.key}` || busy === `remove-upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : item.assignment?.completed ? <><CheckCircle2 size={12} className="group-hover:hidden"/>{returned ? <Trash2 size={12} className="hidden group-hover:block"/> : <X size={12} className="hidden group-hover:block"/>}</> : <AlertTriangle size={12}/>} {item.assignment?.completed ? <><span className="group-hover:hidden">{returned ? '已返图' : '不用修'}</span><span className="hidden group-hover:inline">{returned ? '删除返图' : '撤销不用修'}</span></> : returnMissing ? '返图丢失' : '不用修'}</button></>}</div>; })}</div></article>;
+          return <article key={`${week}:${group.identity.id}`} className="workflow-person-lane team-card pf-card overflow-hidden"><header className="workflow-person-summary flex items-center gap-3 border-b border-slate-100 p-4"><span className="h-3 w-3 shrink-0 rounded-full" style={{ background: group.identity.color }}/><div className="min-w-0"><h4 className="truncate font-bold text-slate-800">{group.identity.name}</h4><p className="mt-1 text-xs leading-5 text-slate-400">本周 {group.items.length} 张<br/>可分发 {ready.length} 张 · 已完成 {group.items.length - pending.length} 张</p></div>{activeStep === 'relay' && <><button disabled={!workflowReady || Boolean(busy) || !ready.length} onClick={() => void markWeekNoRetouch(group.identity, week, group.items)} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : `将“${group.identity.name}”本周当前可分发的 ${ready.length} 个未上传任务标记为不用修`} className="dialog-secondary ml-auto inline-flex shrink-0 items-center gap-2">{busy === `skip:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <CheckCircle2 size={14}/>}标记本周不用修</button><button disabled={!workflowReady || Boolean(busy) || !ready.length} title={!workspace.workflowGenerated ? '请先生成协作流程' : workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : !ready.length ? '等待上一位返图' : '打开当前可分发任务文件夹'} onClick={() => void openTaskFolder(group.identity, week)} className="dialog-secondary inline-flex shrink-0 items-center gap-2">{busy === `open:${week}:${group.identity.id}` ? <Loader2 size={14} className="animate-spin"/> : <FolderOutput size={14}/>}打开任务文件夹</button></>}</header><div className="workflow-task-strip">{group.items.map(item => { const returnMissing = Boolean(item.assignment?.returnMissing); const returned = item.assignment?.completionKind === 'returned' && Boolean(item.assignment.editedPatchPath) && !returnMissing; const relayRecovering = item.blockedBy.length === 1 && item.blockedBy[0] === '接力工作图恢复'; return <div key={item.key} className="workflow-task-card p-3"><div className="workflow-task-thumbnail shrink-0"><SubjectThumb active={componentActive} subject={item} cacheConfig={cacheConfig} sourcePath={item.workflowImagePath} interactive={!item.assignment?.completed}/></div><div className="min-w-0"><p className="truncate text-sm font-bold text-slate-700">{item.photo.name} · 人物 {item.personIndex}</p><p className={`mt-1 truncate text-xs ${workspace.workflowNeedsRegeneration ? 'font-bold text-amber-600' : returnMissing ? 'font-bold text-red-600' : item.assignment?.completed ? 'text-emerald-600' : item.ready ? 'text-blue-600' : 'text-amber-600'}`} title={workspace.workflowNeedsRegeneration ? '排期已调整，请重新生成协作流程' : returnMissing ? '返图文件已被外部删除或移动；恢复原路径后会自动重新连接，也可以重新上传' : relayRecovering ? '接力工作图正在恢复' : item.blockedBy.join('、')}>{workspace.workflowNeedsRegeneration ? '排期已调整，等待重新生成' : returnMissing ? '返图文件丢失' : item.assignment?.completed ? returned ? '已返图' : '不用修' : item.ready ? '可以分发' : relayRecovering ? '接力工作图正在恢复' : `等待 ${item.blockedBy.join('、')} 完成`}</p></div>{activeStep === 'relay' && <><button disabled={!workflowReady || !item.ready || Boolean(busy)} onClick={() => void upload(item)} className="workflow-task-action dialog-secondary inline-flex items-center justify-center">{busy === `upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : <Upload size={12}/>}上传返图</button><button disabled={!workflowReady || !item.assignment || Boolean(busy) || !item.ready && !item.assignment.completed} onClick={() => void (item.assignment?.completed && returned ? removeUpload(item) : toggleComplete(item))} title={workspace.workflowNeedsRegeneration ? '排期已调整，请先重新生成协作流程' : returnMissing ? '返图文件已丢失；可以重新上传，或明确标记为不用修' : item.assignment?.completed ? returned ? '删除返图并撤销完成标记' : '撤销不用修' : '该任务不用修，直接标记完成'} className={`workflow-task-action group inline-flex items-center justify-center rounded-md border font-bold transition ${returnMissing ? 'border-red-200 bg-red-50 text-red-700' : item.assignment?.completed ? returned ? 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-red-200 hover:bg-red-50 hover:text-red-600' : 'border-emerald-200 bg-emerald-50 text-emerald-700 hover:border-amber-200 hover:bg-amber-50 hover:text-amber-700' : 'border-slate-200 text-slate-600'}`}>{busy === `complete:${item.key}` || busy === `remove-upload:${item.key}` ? <Loader2 size={12} className="animate-spin"/> : item.assignment?.completed ? <><CheckCircle2 size={12} className="group-hover:hidden"/>{returned ? <Trash2 size={12} className="hidden group-hover:block"/> : <X size={12} className="hidden group-hover:block"/>}</> : <AlertTriangle size={12}/>} {item.assignment?.completed ? <><span className="group-hover:hidden">{returned ? '已返图' : '不用修'}</span><span className="hidden group-hover:inline">{returned ? '删除返图' : '撤销不用修'}</span></> : returnMissing ? '返图丢失' : '不用修'}</button></>}</div>; })}</div></article>;
         })}</div></section>)}</div>}</>}</>}{nextStep && <footer className="team-next-step mt-6 flex justify-center pt-5"><button type="button" disabled={Boolean(busy) || Boolean(nextBlockedReason)} onClick={() => onStepChange(nextStep)} className="dialog-primary inline-flex items-center gap-2" title={nextBlockedReason || `进入${nextStage?.label || '下一个任务'}`}>下一步：{nextStage?.label}<ArrowRight size={15}/></button></footer>}
     </div></div></main>}
     {workflowReturnResult && workflowReturnReviewOpen && createPortal(<WorkflowReturnReviewDialog componentActive={componentActive} result={workflowReturnResult} cacheConfig={cacheConfig} busy={busy} onClose={() => void requestCloseWorkflowReturnReview()} onConfirm={confirmWorkflowReturn} onIgnore={ignoreWorkflowReturn}/>, document.body)}

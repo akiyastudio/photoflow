@@ -9,11 +9,11 @@ import { TeamRetouchBrand } from './legacy/TeamRetouchBrand';
 import { LegacyDialogProvider } from './legacy/legacy-dialog';
 import type { TeamRetouchStep } from './legacy/TeamRetouchSteps';
 import { notify, rpc, type ComponentContext } from './sdk';
-import { hydrateLegacyWorkspace, legacyApi } from './legacy/legacy-api';
+import { hydrateLegacyWorkspace, legacyApi, teamProjectRpc } from './legacy/legacy-api';
 import type { TeamIdentityWorkspace } from './legacy/legacy-types';
 import { resolveTeamRetouchEntriesForOpen } from './legacy/legacy-entry-scope';
-import { createActivationRefreshGate, createHistoryContextLoadCoordinator, createLatestHistoryLoadGuard, historyLoadPresentation, historyMigrationDelayMs } from './legacy/legacy-history-load-model';
-import { legacyMigrationActivityLabel, legacyMigrationErrorMessage, legacyMigrationPausedMessage, legacyMigrationRunningMessage, nextLegacyMigrationNoProgressCount } from './legacy/legacy-migration-progress-model';
+import { createActivationRefreshGate, createHistoryContextLoadCoordinator, createLatestHistoryLoadGuard, historyCalibrationMadeProgress, historyLoadPresentation, historyMigrationDelayMs, needsBlockingHistoryCalibration } from './legacy/legacy-history-load-model';
+import { hostStorageAdoptionJustCompleted, isHostStorageAdoptionPending, legacyMigrationActivityLabel, legacyMigrationErrorMessage, legacyMigrationPausedMessage, legacyMigrationRunningMessage, nextLegacyMigrationNoProgressCount } from './legacy/legacy-migration-progress-model';
 import { workspaceSeedScopeKey } from './legacy/legacy-workspace-seed-model';
 import { canEnterWorkflowStage, latestWorkflowStage, normalizeWorkspace, workflowStageSummaries, type WorkflowStage } from './interaction-model';
 import { TeamSettingsContent } from './team-settings-content';
@@ -80,7 +80,7 @@ const App = () => {
   const loadGuardRef = useRef(createLatestHistoryLoadGuard());
   const loadCoordinatorRef = useRef<ReturnType<typeof createHistoryContextLoadCoordinator<ComponentContext>> | null>(null);
   const activationRefreshGateRef = useRef(createActivationRefreshGate());
-  const calibrationBusyRef = useRef(false);
+  const calibrationBusyRef = useRef(new Set<string>());
   const reconcileStartedRef = useRef('');
   const latestStageProjectRef = useRef('');
   const migrationToastRef = useRef<HistoryToastSnapshot>();
@@ -107,11 +107,15 @@ const App = () => {
     setLoadError(''); setHistoryPathWarning(''); setMigrationPaused(false);
     const selectedRelativePaths = hostContext.selectedRelativePaths || [];
     try {
-      let workspace = assertSuccess(await rpc<Json>('team.project.get.v1'), '无法读取团片协作历史');
+      let workspace = assertSuccess(await teamProjectRpc<Json>('team.project.get.v1'), '无法读取团片协作历史');
       if (!loadGuardRef.current.isCurrent(requestId)) return;
-      writeTrustedSnapshot(hostContext.projectId, workspace);
-      setWorkspaceSnapshot(normalizeWorkspace(workspace));
-      const waitingForHostStorage = workspace.migration?.phase === 'host-storage-adoption';
+      let waitingForHostStorage = isHostStorageAdoptionPending(workspace.migration);
+      const startedWithHostStorageAdoption = waitingForHostStorage;
+      let selectedPathsRegistered = false;
+      if (!waitingForHostStorage) {
+        writeTrustedSnapshot(hostContext.projectId, workspace);
+        setWorkspaceSnapshot(normalizeWorkspace(workspace));
+      }
       if (workspace.migration?.state !== 'committed') {
         const advanceMigration = async () => {
           let migration = workspace.migration;
@@ -127,8 +131,21 @@ const App = () => {
             const delayMs = historyMigrationDelayMs(String(migration?.phase || ''), storageWaitCount);
             await new Promise(resolve => window.setTimeout(resolve, delayMs));
             const previousMigration = migration;
-            migration = await rpc<Json>('team.project.migrate-step.v1');
+            migration = await teamProjectRpc<Json>('team.project.migrate-step.v1');
             manualMigrationRetry = false;
+            if (waitingForHostStorage && migration?.state !== 'committed' && hostStorageAdoptionJustCompleted(previousMigration, migration)) {
+              const adoptedWorkspace = assertSuccess(await teamProjectRpc<Json>('team.project.get.v1'), '无法读取迁移后的团片协作历史');
+              if (!loadGuardRef.current.isCurrent(requestId)) return;
+              workspace = adoptedWorkspace;
+              waitingForHostStorage = false;
+              writeTrustedSnapshot(hostContext.projectId, adoptedWorkspace);
+              setWorkspaceSnapshot(normalizeWorkspace(adoptedWorkspace));
+              const adoptedResolution = resolveTeamRetouchEntriesForOpen(adoptedWorkspace, entriesRef.current.map(entry => String(entry.relativePath || '')).filter(Boolean));
+              legacyApi.setProjectEntries(adoptedResolution.entries); entriesRef.current = adoptedResolution.entries; setEntries(adoptedResolution.entries);
+              setManagerWorkspaceSeed({ scopeKey: managerScopeKey, workspace: hydrateLegacyWorkspace(adoptedWorkspace) });
+              setHistoryRecordCount(adoptedResolution.historyPhotoCount); setHistoryOwnershipPendingCount(adoptedResolution.ownershipPendingCount);
+              entriesLoadedRef.current = true; setEntriesLoaded(true); setInitialLoading(false);
+            }
             if (migration?.lastError) { setMigrationPaused(true); setHistoryPathWarning(legacyMigrationErrorMessage(migration, String(migration.lastError))); return; }
             noProgressCount = nextLegacyMigrationNoProgressCount(previousMigration, migration, noProgressCount);
             storageWaitCount = migration?.phase === 'host-storage-adoption' ? storageWaitCount + 1 : 0;
@@ -137,11 +154,16 @@ const App = () => {
             }
           }
           if (loadGuardRef.current.isCurrent(requestId) && migration?.state === 'committed') {
-            let refreshed = assertSuccess(await rpc<Json>('team.project.get.v1'), '无法刷新团片协作历史');
+            let refreshed = assertSuccess(await teamProjectRpc<Json>('team.project.get.v1'), '无法刷新团片协作历史');
             if (!loadGuardRef.current.isCurrent(requestId)) return;
+            if (startedWithHostStorageAdoption && selectedRelativePaths.length) {
+              refreshed = assertSuccess(await teamProjectRpc<Json>('team.project.register.v1', { relativePaths: selectedRelativePaths }), '无法登记所选团片图片');
+              selectedPathsRegistered = true;
+            }
+            if (!loadGuardRef.current.isCurrent(requestId)) return;
+            workspace = refreshed;
+            waitingForHostStorage = false;
             writeTrustedSnapshot(hostContext.projectId, refreshed);
-            if (waitingForHostStorage && selectedRelativePaths.length) refreshed = assertSuccess(await rpc<Json>('team.project.register.v1', { relativePaths: selectedRelativePaths }), '无法登记所选团片图片');
-            if (!loadGuardRef.current.isCurrent(requestId)) return;
             setWorkspaceSnapshot(normalizeWorkspace(refreshed));
             const refreshedResolution = resolveTeamRetouchEntriesForOpen(refreshed, entriesRef.current.map(entry => String(entry.relativePath || '')).filter(Boolean));
             legacyApi.setProjectEntries(refreshedResolution.entries); entriesRef.current = refreshedResolution.entries; setEntries(refreshedResolution.entries);
@@ -160,11 +182,29 @@ const App = () => {
       }
       if (waitingForHostStorage) return;
       const currentRelativePaths = entriesRef.current.filter(entry => !entry.teamHistoryMissing).map(entry => String(entry.relativePath || '')).filter(Boolean);
-      const historyResolution = resolveTeamRetouchEntriesForOpen(workspace, currentRelativePaths);
+      let historyResolution = resolveTeamRetouchEntriesForOpen(workspace, currentRelativePaths);
+      let calibrationPass = 0;
+      while (needsBlockingHistoryCalibration(workspace, historyResolution) && calibrationPass < 8) {
+        calibrationPass += 1;
+        const previousPending = Number(workspace.calibration?.pendingCount) || 0;
+        const calibrated = await legacyApi.calibrateTeamProjectWorkspace(48);
+        if (!loadGuardRef.current.isCurrent(requestId)) return;
+        if (calibrated?.success === false) throw new Error(calibrated.error || '团片历史路径恢复失败');
+        const refreshed = assertSuccess(await teamProjectRpc<Json>('team.project.get.v1'), '无法读取路径恢复后的团片历史');
+        if (!loadGuardRef.current.isCurrent(requestId)) return;
+        workspace = refreshed;
+        writeTrustedSnapshot(hostContext.projectId, refreshed);
+        setWorkspaceSnapshot(normalizeWorkspace(refreshed));
+        historyResolution = resolveTeamRetouchEntriesForOpen(refreshed, currentRelativePaths);
+        if (!needsBlockingHistoryCalibration(workspace, historyResolution) || !historyCalibrationMadeProgress(previousPending, workspace, Number(calibrated.calibratedCount) || 0)) break;
+      }
       setHistoryRecordCount(historyResolution.historyPhotoCount); setHistoryOwnershipPendingCount(historyResolution.ownershipPendingCount);
       if (historyResolution.historyPhotoCount > 0 && historyResolution.resolvedHistoryCount === 0) {
         entriesRef.current = historyResolution.entries; setEntries(historyResolution.entries); setInitialLoading(false);
-        setLoadError(`团片历史路径恢复失败（Host 已找到 ${historyResolution.returnedPhotoCount}/${historyResolution.historyPhotoCount} 张，${historyResolution.ownershipPendingCount} 条历史归属待恢复；已读到 ${historyResolution.historyTaskCount} 个工作图任务），暂时无法关联项目文件。`);
+        const pendingCalibrationCount = Number(workspace.calibration?.pendingCount) || 0;
+        setLoadError(pendingCalibrationCount
+          ? `团片历史路径仍在分批恢复（尚余 ${pendingCalibrationCount} 张；已读到 ${historyResolution.historyTaskCount} 个工作图任务），请重新读取继续。`
+          : `团片历史路径恢复失败（已读取 ${historyResolution.returnedPhotoCount}/${historyResolution.historyPhotoCount} 条照片记录，其中 ${historyResolution.unresolvedPathCount} 条仍无可用项目路径；已读到 ${historyResolution.historyTaskCount} 个工作图任务），暂时无法关联项目文件。`);
         return;
       }
       const historyEntries = historyResolution.entries;
@@ -173,9 +213,9 @@ const App = () => {
       if (historyResolution.missingHistoryCount) historyWarnings.push(`${historyResolution.missingHistoryCount} 张图片缺少可用路径，已保留为“缺失 / 需重新关联”卡片`);
       if (historyWarnings.length) setHistoryPathWarning(historyWarnings.join('；'));
       legacyApi.setProjectEntries(historyEntries); entriesRef.current = historyEntries; setEntries(historyEntries);
-      if (selectedRelativePaths.length) {
+      if (selectedRelativePaths.length && !selectedPathsRegistered) {
         try {
-          const registered = assertSuccess(await rpc<Json>('team.project.register.v1', { relativePaths: selectedRelativePaths }), '无法登记所选团片图片');
+          const registered = assertSuccess(await teamProjectRpc<Json>('team.project.register.v1', { relativePaths: selectedRelativePaths }), '无法登记所选团片图片');
           if (!loadGuardRef.current.isCurrent(requestId)) return;
           if (registered.photos) workspace = registered;
           writeTrustedSnapshot(hostContext.projectId, workspace);
@@ -203,12 +243,13 @@ const App = () => {
   if (!loadCoordinatorRef.current) loadCoordinatorRef.current = createHistoryContextLoadCoordinator(performLoadEntries);
   const loadEntries = useCallback((hostContext: ComponentContext, options: { force?: boolean; manualMigrationRetry?: boolean } = {}) => loadCoordinatorRef.current!.request(hostContext, options), []);
   useEffect(() => {
-    if (!entriesLoaded || !context || calibrationBusyRef.current || !workspaceSnapshot?.calibration?.pendingCount) return;
-    calibrationBusyRef.current = true;
+    const calibrationProjectId = String(context?.projectId || '');
+    if (!entriesLoaded || !context || !calibrationProjectId || calibrationBusyRef.current.has(calibrationProjectId) || !workspaceSnapshot?.calibration?.pendingCount) return;
+    calibrationBusyRef.current.add(calibrationProjectId);
     let active = true;
     void legacyApi.calibrateTeamProjectWorkspace(24).then((result: Json) => {
       if (active && result.calibratedCount && contextRef.current) void loadEntries(contextRef.current, { force: true });
-    }).catch(() => undefined).finally(() => { calibrationBusyRef.current = false; });
+    }).catch(() => undefined).finally(() => { calibrationBusyRef.current.delete(calibrationProjectId); });
     return () => { active = false; };
   }, [entriesLoaded, context?.projectId, workspaceSnapshot?.revision, workspaceSnapshot?.calibration?.pendingCount, loadEntries]);
   useEffect(() => {
@@ -253,10 +294,10 @@ const App = () => {
   }, [loadEntries, settingsController]);
   useEffect(() => {
     const projectId = String(context?.projectId || '');
-    if (!projectId || !entriesLoaded || historyLoadInFlight || latestStageProjectRef.current === projectId) return;
+    if (!projectId || !entriesLoaded || isHostStorageAdoptionPending(workspaceSnapshot?.migration) || latestStageProjectRef.current === projectId) return;
     latestStageProjectRef.current = projectId;
     setStep(latestWorkflowStage(workspaceSnapshot));
-  }, [context?.projectId, entriesLoaded, historyLoadInFlight, workspaceSnapshot]);
+  }, [context?.projectId, entriesLoaded, workspaceSnapshot]);
   const project = { id: context?.projectId || '', name: context?.projectName || '', status: context?.projectStatus || '', path: '' };
   const currentManagerScopeKey = workspaceSeedScopeKey(context?.projectId || '', project);
   const stageSummaries = workflowStageSummaries(workspaceSnapshot, step);

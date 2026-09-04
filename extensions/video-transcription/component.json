@@ -1,7 +1,7 @@
 {
   "apiVersion": 1,
   "id": "video-transcription",
-  "version": "26.8.31",
+  "version": "26.9.4",
   "displayName": "视频转文字",
   "description": "本地批量语音识别、同目录 SRT 与字幕浏览",
   "icon": "ui/icon.svg",

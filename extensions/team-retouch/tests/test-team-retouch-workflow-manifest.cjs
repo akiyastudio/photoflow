@@ -71,6 +71,14 @@ const seedLegacy = async (project, value) => {
     await writeJsonAtomic(migrated[2].manifestPath, canonical);
     assert.equal((await resolve(priority.storage, priority.context)).manifest.marker, 'canonical-wins', 'canonical storage wins over a matching legacy file and survives project rename');
 
+    const unbound = { context: { projectId: 'unbound-target', projectName: 'unbound', projectStatus: 'active' }, storage: storage('unbound-target') };
+    const unboundPath = path.join(unbound.storage.dataPath, 'workflows', `${workflowManifestKey(crypto, unbound.context.projectId)}.json`);
+    await writeJsonAtomic(unboundPath, manifest('unbound', 'active', 2, 1));
+    const rebound = await resolve(unbound.storage, unbound.context);
+    assert.equal(rebound.source, 'canonical-project-binding');
+    assert.equal(rebound.manifest.projectId, unbound.context.projectId);
+    assert.equal(JSON.parse(await fs.promises.readFile(unboundPath, 'utf8')).projectId, unbound.context.projectId, 'a legacy canonical manifest is atomically rebound to its path-scoped project id');
+
     const wrong = { context: { projectId: 'wrong-target', projectName: 'same-name', projectStatus: 'active' }, storage: storage('wrong-target') };
     await seedLegacy(wrong, manifest('same-name', 'active', 2, 1));
     const wrongCanonical = path.join(wrong.storage.dataPath, 'workflows', `${workflowManifestKey(crypto, wrong.context.projectId)}.json`);

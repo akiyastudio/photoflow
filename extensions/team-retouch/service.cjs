@@ -157,7 +157,7 @@ const readHostMedia = async (parentId, payload) => {
     } catch (error) {
       if (payload.strict) throw error;
       const photoId = String(ref.photoId || ''); const versionId = String(ref.versionId || ''); const relativePath = String(ref.relativePath || '');
-      if (photoId && versionId) items.push({ photo: { id: photoId, currentVersionId: versionId, displayName: path.basename(relativePath) || photoId, originalName: path.basename(relativePath) || photoId }, versions: [{ id: versionId, photoId, relativePath, relativePathState: 'missing', fileMissing: true, isCurrent: true, mediaRef: { photoId, versionId, relativePath } }], relativePath });
+      if (photoId && versionId) items.push({ photo: { id: photoId, currentVersionId: versionId, displayName: path.basename(relativePath) || photoId, originalName: path.basename(relativePath) || photoId }, versions: [{ id: versionId, photoId, relativePath, relativePathState: 'missing', fileMissing: true, isCurrent: true, mediaRef: { photoId, versionId, relativePath } }], relativePath, metadataLookupFailed: true });
     }
   } });
   await Promise.all(workers);
@@ -288,7 +288,7 @@ const ensureSchema = databasePath => {
   db.exec('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)');
   const existingSchemaVersion = Number(db.prepare("SELECT value FROM meta WHERE key='schema_version'").get()?.value || 0);
   const hadLegacyDomainTables = Boolean(db.prepare("SELECT 1 FROM sqlite_master WHERE type='table' AND name='team_patch_tasks'").get());
-  if (existingSchemaVersion > 9) { db.close(); throw new Error(`团片数据库版本 ${existingSchemaVersion} 高于当前支持的 9；已拒绝降级打开`); }
+  if (existingSchemaVersion > 10) { db.close(); throw new Error(`团片数据库版本 ${existingSchemaVersion} 高于当前支持的 10；已拒绝降级打开`); }
   db.exec(`
     CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     CREATE TABLE IF NOT EXISTS team_project_revisions (project_id TEXT PRIMARY KEY, revision INTEGER NOT NULL DEFAULT 0);
@@ -434,7 +434,12 @@ const ensureSchema = databasePath => {
         CREATE TABLE v9_exclusions AS SELECT * FROM team_person_exclusions WHERE 0;
         CREATE TABLE v9_stages AS SELECT * FROM team_task_stages WHERE 0;
         CREATE TABLE v9_artifacts AS SELECT * FROM team_task_artifacts WHERE 0;
-        CREATE TABLE v9_pending AS SELECT * FROM team_workflow_reconcile_pending WHERE 0;
+        CREATE TABLE v9_pending (
+          project_id TEXT NOT NULL, task_id TEXT NOT NULL, photo_id TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
+          attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT NOT NULL DEFAULT '', history_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL,
+          PRIMARY KEY(project_id,task_id)
+        );
         CREATE TABLE v9_confirmations AS SELECT * FROM team_workflow_review_confirmations WHERE 0;
         CREATE TABLE v9_operations AS SELECT * FROM team_durable_operations WHERE 0;
         INSERT INTO v9_photos SELECT * FROM team_retouch_photos;
@@ -444,7 +449,8 @@ const ensureSchema = databasePath => {
         INSERT INTO v9_exclusions SELECT * FROM team_person_exclusions;
         INSERT INTO v9_stages SELECT * FROM team_task_stages;
         INSERT INTO v9_artifacts SELECT * FROM team_task_artifacts;
-        INSERT INTO v9_pending SELECT * FROM team_workflow_reconcile_pending;
+        INSERT INTO v9_pending(project_id,task_id,photo_id,error,attempt_count,next_attempt_at,last_error,history_json,updated_at)
+          SELECT project_id,task_id,photo_id,COALESCE(error,''),COALESCE(attempt_count,0),COALESCE(next_attempt_at,0),COALESCE(last_error,''),COALESCE(history_json,'[]'),updated_at FROM team_workflow_reconcile_pending;
         INSERT INTO v9_confirmations SELECT * FROM team_workflow_review_confirmations;
         INSERT INTO v9_operations SELECT * FROM team_durable_operations;
       `);
@@ -472,7 +478,32 @@ const ensureSchema = databasePath => {
       db.exec('PRAGMA foreign_keys=ON');
     } catch (error) { db.exec('ROLLBACK'); db.exec('PRAGMA foreign_keys=ON'); db.close(); throw error; }
   }
-  if (storedSchemaVersion < 9 && hadLegacyDomainTables) for (const table of ['team_retouch_photos','team_person_identities','team_person_assignments','team_person_exclusions','team_patch_tasks','team_task_stages','team_task_artifacts','team_workflow_reconcile_pending','team_workflow_review_confirmations']) for (const action of ['INSERT','UPDATE','DELETE']) db.exec(`
+  if (storedSchemaVersion === 9) {
+    db.exec('PRAGMA foreign_keys=OFF; BEGIN IMMEDIATE');
+    try {
+      const pendingCount = Number(db.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending').get().count);
+      db.exec(`
+        CREATE TABLE v10_pending (
+          project_id TEXT NOT NULL, task_id TEXT NOT NULL, photo_id TEXT NOT NULL, error TEXT NOT NULL DEFAULT '',
+          attempt_count INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL DEFAULT 0,
+          last_error TEXT NOT NULL DEFAULT '', history_json TEXT NOT NULL DEFAULT '[]', updated_at INTEGER NOT NULL,
+          PRIMARY KEY(project_id,task_id)
+        );
+        INSERT INTO v10_pending(project_id,task_id,photo_id,error,attempt_count,next_attempt_at,last_error,history_json,updated_at)
+          SELECT project_id,task_id,photo_id,COALESCE(error,''),COALESCE(attempt_count,0),COALESCE(next_attempt_at,0),COALESCE(last_error,''),COALESCE(history_json,'[]'),COALESCE(updated_at,0) FROM team_workflow_reconcile_pending;
+      `);
+      if (Number(db.prepare('SELECT COUNT(*) count FROM v10_pending').get().count) !== pendingCount) throw new Error('schema v10 pending queue copy count mismatch');
+      if (process.env.PHOTOFLOW_TEST_FAULT_SCHEMA_V10 === 'after-copy') throw new Error('injected schema v10 rebuild failure');
+      db.exec(`
+        DROP TABLE team_workflow_reconcile_pending;
+        ALTER TABLE v10_pending RENAME TO team_workflow_reconcile_pending;
+        CREATE UNIQUE INDEX team_pending_project_task ON team_workflow_reconcile_pending(project_id,task_id);
+        COMMIT;
+        PRAGMA foreign_keys=ON;
+      `);
+    } catch (error) { db.exec('ROLLBACK'); db.exec('PRAGMA foreign_keys=ON'); db.close(); throw error; }
+  }
+  for (const table of ['team_retouch_photos','team_person_identities','team_person_assignments','team_person_exclusions','team_patch_tasks','team_task_stages','team_task_artifacts','team_workflow_reconcile_pending','team_workflow_review_confirmations']) for (const action of ['INSERT','UPDATE','DELETE']) db.exec(`
     CREATE TRIGGER IF NOT EXISTS ${table}_revision_guard_${action.toLowerCase()} BEFORE ${action} ON ${table} BEGIN
       SELECT CASE WHEN EXISTS(SELECT 1 FROM team_revision_guards WHERE request_id=team_request_id() AND bumped=0) AND (SELECT expected_revision FROM team_revision_guards WHERE request_id=team_request_id())>=0 AND (SELECT expected_revision FROM team_revision_guards WHERE request_id=team_request_id())<>COALESCE((SELECT revision FROM team_project_revisions WHERE project_id=(SELECT project_id FROM team_revision_guards WHERE request_id=team_request_id())),0) THEN RAISE(ABORT,'TEAM_REVISION_CONFLICT') END;
     END;
@@ -530,7 +561,7 @@ const ensureSchema = databasePath => {
       db.exec('COMMIT');
     } catch (error) { db.exec('ROLLBACK'); throw error; }
   }
-  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','9') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
+  db.prepare(`INSERT INTO meta(key,value) VALUES('schema_version','10') ON CONFLICT(key) DO UPDATE SET value=excluded.value`).run();
   schemaReadyPaths.add(databasePath);
   return db;
 };
@@ -1805,28 +1836,37 @@ const workspaceSnapshot = async (parentId, context) => {
 
 const calibrateWorkspaceStep = async (parentId, payload, context) => {
   const storage = await hostStorage(parentId);
+  const projectId = String(storage.projectId || context.projectId || '');
+  if (!projectId || String(context.projectId || '') !== projectId) throw new Error('团片路径恢复的 Host 存储与当前项目不一致');
   const limit = Math.min(48, Math.max(1, Number(payload.maxItems) || 24));
   const db = ensureSchema(storage.databasePath);
   let pending;
-  try { pending = db.prepare(`SELECT photo_id,base_version_id FROM team_retouch_photos WHERE project_id=? AND (calibrated_at=0 OR calibrated_at<?) ORDER BY calibrated_at,created_at LIMIT ?`).all(String(context.projectId), Date.now() - 5 * 60_000, limit); }
+  try { pending = db.prepare(`SELECT photo_id,base_version_id FROM team_retouch_photos WHERE project_id=? AND (COALESCE(calibrated_at,0)=0 OR calibrated_at<?) ORDER BY COALESCE(calibrated_at,0),updated_at,created_at LIMIT ?`).all(projectId, Date.now() - 5 * 60_000, limit); }
   finally { db.close(); }
-  if (!pending.length) return { success: true, state: 'ready', calibratedCount: 0, pendingCount: 0 };
+  if (!pending.length) return { success: true, state: 'ready', attemptedCount: 0, calibratedCount: 0, resolvedCount: 0, failedCount: 0, pendingCount: 0 };
   const media = await readMedia(parentId, { mediaRefs: pending.map(row => ({ photoId: row.photo_id, versionId: row.base_version_id })) });
   const calibrated = new Map((media.items || []).map(bundle => [String(bundle.photo?.id || ''), bundle]));
   const updateDb = ensureSchema(storage.databasePath);
   try {
+    let calibratedCount = 0;
+    let resolvedCount = 0;
+    let failedCount = 0;
     updateDb.exec('BEGIN IMMEDIATE');
     try {
+      const touchFailed = updateDb.prepare('UPDATE team_retouch_photos SET updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=?');
       for (const row of pending) {
         const bundle = calibrated.get(String(row.photo_id));
+        if (bundle?.metadataLookupFailed) { touchFailed.run(Date.now(), projectId, row.photo_id, row.base_version_id); failedCount += 1; continue; }
         const base = (bundle?.versions || []).find(version => String(version.id) === String(row.base_version_id));
-        if (!bundle || !base) continue;
+        if (!bundle || !base) { touchFailed.run(Date.now(), projectId, row.photo_id, row.base_version_id); failedCount += 1; continue; }
         registerPhoto(updateDb, context, row.photo_id, row.base_version_id, { displayName: bundle.photo?.displayName || bundle.photo?.originalName, relativePath: base.relativePath, relativePathState: base.relativePathState, fileMissing: base.fileMissing, calibratedAt: Date.now() });
+        calibratedCount += 1;
+        if (base.relativePath && !base.fileMissing) resolvedCount += 1;
       }
       updateDb.exec('COMMIT');
     } catch (error) { updateDb.exec('ROLLBACK'); throw error; }
-    const pendingCount = Number(updateDb.prepare('SELECT COUNT(*) count FROM team_retouch_photos WHERE project_id=? AND calibrated_at=0').get(String(context.projectId))?.count) || 0;
-    return { success: true, state: pendingCount ? 'preparing' : 'ready', calibratedCount: calibrated.size, pendingCount };
+    const pendingCount = Number(updateDb.prepare('SELECT COUNT(*) count FROM team_retouch_photos WHERE project_id=? AND COALESCE(calibrated_at,0)=0').get(projectId)?.count) || 0;
+    return { success: true, state: pendingCount ? 'preparing' : 'ready', attemptedCount: pending.length, calibratedCount, resolvedCount, failedCount, pendingCount };
   } finally { updateDb.close(); }
 };
 
@@ -1935,7 +1975,12 @@ const generateWorkflowUnlocked = async (parentId, payload, context) => {
       await writeJsonAtomic(scope.manifestPath, manifest);
       await withDomain(parentId, db => {
         db.exec('BEGIN IMMEDIATE');
-        try { db.prepare('INSERT INTO team_workflow_state(project_id,generated_at,fingerprint,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET generated_at=excluded.generated_at,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at').run(String(context.projectId), Number(manifest.generatedAt), fingerprint, Date.now()); db.exec('COMMIT'); }
+        try {
+          db.prepare('INSERT INTO team_workflow_state(project_id,generated_at,fingerprint,updated_at) VALUES(?,?,?,?) ON CONFLICT(project_id) DO UPDATE SET generated_at=excluded.generated_at,fingerprint=excluded.fingerprint,updated_at=excluded.updated_at').run(String(context.projectId), Number(manifest.generatedAt), fingerprint, Date.now());
+          db.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(workflowReconcileV3Key(context.projectId), 'committed');
+          db.prepare('DELETE FROM meta WHERE key=?').run(workflowReconcileV3StateKey(context.projectId));
+          db.exec('COMMIT');
+        }
         catch (error) { db.exec('ROLLBACK'); throw error; }
       });
     }
@@ -1969,12 +2014,13 @@ const workflowStatus = async (parentId, _payload, context) => {
   const job = workflowJobs.get(key) || null;
   const reconciliation = await withDomain(parentId, db => {
     const row = db.prepare(`SELECT COUNT(*) pendingCount,MIN(pending.updated_at) oldestAt,MIN(CASE WHEN pending.next_attempt_at>0 THEN pending.next_attempt_at END) nextAttemptAt,MAX(pending.attempt_count) maxAttemptCount FROM team_workflow_reconcile_pending pending
-      JOIN team_patch_tasks task ON task.id=pending.task_id
-      JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
-      WHERE registered.project_id=?`).get(String(context.projectId));
+      JOIN team_patch_tasks task ON task.project_id=pending.project_id AND task.id=pending.task_id
+      JOIN team_retouch_photos registered ON registered.project_id=task.project_id AND registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+      WHERE pending.project_id=?`).get(String(context.projectId));
     const latest = db.prepare(`SELECT pending.last_error FROM team_workflow_reconcile_pending pending
-      JOIN team_patch_tasks task ON task.id=pending.task_id JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
-      WHERE registered.project_id=? ORDER BY pending.updated_at DESC LIMIT 1`).get(String(context.projectId));
+      JOIN team_patch_tasks task ON task.project_id=pending.project_id AND task.id=pending.task_id
+      JOIN team_retouch_photos registered ON registered.project_id=task.project_id AND registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+      WHERE pending.project_id=? ORDER BY pending.updated_at DESC LIMIT 1`).get(String(context.projectId));
     return { state: Number(row?.pendingCount) ? 'preparing' : 'ready', pendingCount: Number(row?.pendingCount) || 0, oldestAt: Number(row?.oldestAt) || 0, nextAttemptAt: Number(row?.nextAttemptAt) || 0, maxAttemptCount: Number(row?.maxAttemptCount) || 0, lastError: String(latest?.last_error || '') };
   });
   if (!job) {
@@ -2002,15 +2048,16 @@ const exportWorkflow = async (parentId, payload, context, open = false) => {
   const expectedAvailable = (group?.items || []).some(item => item.available);
   if (group?.relativePath && isInside(outputDirectory, directory) && (expectedAvailable && (!fs.existsSync(directory) || !availableCount()))) {
     if (open) {
-      const taskIds = uniqueText((group.items || []).map(item => item.taskId));
+      const taskIds = uniqueText((group.items || []).filter(item => item.available).map(item => item.taskId));
       await withDomain(parentId, db => {
-        const insert = db.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,updated_at) VALUES(?,?,?,?,?) ON CONFLICT(project_id,task_id) DO UPDATE SET error=excluded.error,updated_at=excluded.updated_at`);
+        const insert = db.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,attempt_count,next_attempt_at,last_error,history_json,updated_at) VALUES(?,?,?,?,0,0,'','[]',?)
+          ON CONFLICT(project_id,task_id) DO UPDATE SET photo_id=excluded.photo_id,error=excluded.error,attempt_count=0,next_attempt_at=0,last_error='',history_json='[]',updated_at=excluded.updated_at`);
         for (const taskId of taskIds) {
-          const task = db.prepare('SELECT photo_id FROM team_patch_tasks WHERE id=? AND is_deleted=0').get(taskId);
+          const task = db.prepare('SELECT photo_id FROM team_patch_tasks WHERE project_id=? AND id=? AND is_deleted=0').get(String(context.projectId), taskId);
           if (task) insert.run(String(context.projectId), taskId, task.photo_id, '用户打开任务文件夹，等待后台准备', Date.now());
         }
       });
-      return { success: true, state: 'preparing', count: 0, pendingCount: taskIds.length, message: '任务文件夹正在准备，可继续其他操作' };
+      return { success: true, state: 'preparing', count: 0, pendingCount: taskIds.length, message: '任务文件夹需要重建' };
     }
   }
   if (!group?.relativePath || !isInside(outputDirectory, directory) || !fs.existsSync(directory)) throw new Error('任务文件夹不存在，且无法从当前工作图与返图记录安全重建');
@@ -2283,10 +2330,12 @@ const reconcileWorkflowTaskChain = (parentId, context, taskId, existingDb = null
 
 const storeReturnedPatch = (parentId, sourcePath, payload, context) => withDomain(parentId, (db, storage) => storeReturnedPatchInDomain(db, storage, sourcePath, payload, context));
 
-const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1) => {
+const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1, taskIds = []) => {
+  const selectedTaskIds = uniqueText(Array.isArray(taskIds) ? taskIds : []).slice(0, 50);
+  const taskFilter = selectedTaskIds.length ? ` AND pending.task_id IN (${selectedTaskIds.map(() => '?').join(',')})` : '';
   const pending = await withDomain(parentId, db => db.prepare(`SELECT pending.* FROM team_workflow_reconcile_pending pending
     JOIN team_patch_tasks task ON task.project_id=pending.project_id AND task.id=pending.task_id
-    WHERE pending.project_id=? AND pending.next_attempt_at<=? ORDER BY pending.next_attempt_at,pending.updated_at LIMIT ?`).all(String(context.projectId), Date.now(), Math.max(1, Number(maxItems) || 1)));
+    WHERE pending.project_id=? AND COALESCE(pending.next_attempt_at,0)<=?${taskFilter} ORDER BY COALESCE(pending.next_attempt_at,0),pending.updated_at LIMIT ?`).all(String(context.projectId), Date.now(), ...selectedTaskIds, Math.max(1, Number(maxItems) || 1)));
   let recovered = 0;
   for (const item of pending) await withPhotoOperation(item.photo_id, async () => {
     try {
@@ -2303,10 +2352,10 @@ const retryPendingWorkflowReconciles = async (parentId, context, maxItems = 1) =
     }
   });
   const remaining = await withDomain(parentId, db => db.prepare(`SELECT pending.error,pending.last_error,pending.attempt_count,pending.next_attempt_at,pending.updated_at FROM team_workflow_reconcile_pending pending
-    WHERE pending.project_id=? ORDER BY pending.updated_at LIMIT 1`).get(String(context.projectId)));
+    WHERE pending.project_id=?${taskFilter} ORDER BY pending.updated_at DESC LIMIT 1`).get(String(context.projectId), ...selectedTaskIds));
   const pendingCount = await withDomain(parentId, db => Number(db.prepare(`SELECT COUNT(*) count FROM team_workflow_reconcile_pending pending
-    WHERE pending.project_id=?`).get(String(context.projectId))?.count) || 0);
-  return { success: true, state: pendingCount ? 'preparing' : 'ready', pendingCount, recoveredCount: recovered, attemptedCount: pending.length, deferredCount: Math.max(0, pendingCount - pending.length), attemptCount: Number(remaining?.attempt_count) || 0, nextAttemptAt: Number(remaining?.next_attempt_at) || 0, error: remaining?.last_error || remaining?.error || '' };
+    WHERE pending.project_id=?${taskFilter}`).get(String(context.projectId), ...selectedTaskIds)?.count) || 0);
+  return { success: true, state: pendingCount ? 'preparing' : 'ready', pendingCount, recoveredCount: recovered, attemptedCount: pending.length, deferredCount: Math.max(0, pendingCount - pending.length), attemptCount: Number(remaining?.attempt_count) || 0, nextAttemptAt: Number(remaining?.next_attempt_at) || 0, error: String(remaining?.last_error || '') };
 };
 
 const returnBatch = async (parentId, payload, context, workflowMode) => {
@@ -2473,6 +2522,8 @@ const reviewIgnore = (parentId, payload, context) => withReviewSessionOperation(
 const legacyProjectMigrationOperations = new Map();
 const projectMigrationMetaKey = projectId => `legacy_project_artifacts_v2_state:${sha256(String(projectId)).slice(0, 24)}`;
 const projectMigrationCommittedKey = projectId => `legacy_project_artifacts_v2:${sha256(String(projectId)).slice(0, 24)}`;
+const workflowReconcileV3Key = projectId => `workflow_reconcile_v3:${sha256(String(projectId)).slice(0, 24)}`;
+const workflowReconcileV3StateKey = projectId => `workflow_reconcile_v3_state:${sha256(String(projectId)).slice(0, 24)}`;
 const migrationStateFromDb = (db, projectId, fallback = {}) => {
   const stored = parseJson(db.prepare('SELECT value FROM meta WHERE key=?').get(projectMigrationMetaKey(projectId))?.value, {});
   const committed = db.prepare('SELECT value FROM meta WHERE key=?').get(projectMigrationCommittedKey(projectId))?.value === 'committed'
@@ -2500,7 +2551,40 @@ const pendingLegacyArtifactItems = (db, dataPath, projectId) => {
   }
   return items;
 };
-const legacyProjectMigrationStatus = async parentId => {
+const workflowReconcileV3TaskIds = manifest => uniqueText((manifest?.groups || []).flatMap(group => (group.items || []).map(item => item.taskId)));
+const ensureWorkflowReconcileV3Queued = async (parentId, context) => {
+  const storage = await hostStorage(parentId);
+  const scope = await workflowScopeForStorage(storage, context);
+  if (!scope.manifest) return { applicable: false, taskCount: 0 };
+  const projectId = String(storage.projectId || context.projectId);
+  const taskIds = workflowReconcileV3TaskIds(scope.manifest);
+  const db = ensureSchema(storage.databasePath);
+  try {
+    if (db.prepare('SELECT value FROM meta WHERE key=?').get(workflowReconcileV3Key(projectId))?.value === 'committed') return { applicable: true, taskCount: taskIds.length, committed: true };
+    const queued = parseJson(db.prepare('SELECT value FROM meta WHERE key=?').get(workflowReconcileV3StateKey(projectId))?.value, {}).state === 'queued';
+    if (!queued) {
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const task = db.prepare('SELECT photo_id FROM team_patch_tasks WHERE project_id=? AND id=? AND is_deleted=0');
+        const insert = db.prepare(`INSERT INTO team_workflow_reconcile_pending(project_id,task_id,photo_id,error,attempt_count,next_attempt_at,last_error,history_json,updated_at) VALUES(?,?,?,?,0,0,'','[]',?) ON CONFLICT(project_id,task_id) DO NOTHING`);
+        let queuedCount = 0;
+        for (const taskId of taskIds) { const row = task.get(projectId, taskId); if (row) { insert.run(projectId, taskId, row.photo_id, '正在升级到最新工作流存储格式', Date.now()); queuedCount += 1; } }
+        db.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(workflowReconcileV3StateKey(projectId), JSON.stringify({ state: 'queued', taskCount: queuedCount, updatedAt: Date.now() }));
+        db.exec('COMMIT');
+      } catch (error) { db.exec('ROLLBACK'); throw error; }
+    }
+    return { applicable: true, taskCount: taskIds.length, committed: false };
+  } finally { db.close(); }
+};
+const finalizeWorkflowReconcileV3 = async (parentId, context) => withDomain(parentId, db => {
+  const projectId = String(context.projectId);
+  const pendingCount = Number(db.prepare('SELECT COUNT(*) count FROM team_workflow_reconcile_pending WHERE project_id=?').get(projectId)?.count) || 0;
+  if (pendingCount) return false;
+  db.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(workflowReconcileV3Key(projectId), 'committed');
+  db.prepare('DELETE FROM meta WHERE key=?').run(workflowReconcileV3StateKey(projectId));
+  return true;
+});
+const legacyProjectMigrationStatus = async (parentId, context = {}) => {
   const storage = await rawHostStorage(parentId);
   if (storage.adoption?.state === 'pending') return { state: 'pending', phase: 'host-storage-adoption', processedCount: 0, pendingCount: 1, attemptCount: 0, lastError: '', retryable: true, updatedAt: Number(storage.adoption.startedAt) || 0 };
   const db = ensureSchema(storage.databasePath);
@@ -2509,10 +2593,15 @@ const legacyProjectMigrationStatus = async parentId => {
     const storedState = migrationStateFromDb(db, projectId);
     const hasStoredState = Boolean(storedState.updatedAt) || storedState.state === 'committed';
     const pendingCount = hasStoredState ? storedState.pendingCount : pendingLegacyArtifactItems(db, storage.dataPath, projectId).length;
-    const maintenancePendingCount = Number(db.prepare(`SELECT COUNT(*) count FROM team_workflow_reconcile_pending pending
-      JOIN team_patch_tasks task ON task.id=pending.task_id
-      JOIN team_retouch_photos registered ON registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
-      WHERE registered.project_id=?`).get(projectId)?.count) || 0;
+    const queuedMaintenanceCount = Number(db.prepare(`SELECT COUNT(*) count FROM team_workflow_reconcile_pending pending
+      JOIN team_patch_tasks task ON task.project_id=pending.project_id AND task.id=pending.task_id
+      JOIN team_retouch_photos registered ON registered.project_id=task.project_id AND registered.photo_id=task.photo_id AND registered.base_version_id=task.base_version_id
+      WHERE pending.project_id=?`).get(projectId)?.count) || 0;
+    const workflowScope = await workflowScopeForStorage(storage, context);
+    const workflowUpgradeCommitted = !workflowScope.manifest || db.prepare('SELECT value FROM meta WHERE key=?').get(workflowReconcileV3Key(projectId))?.value === 'committed';
+    const workflowUpgradeQueued = parseJson(db.prepare('SELECT value FROM meta WHERE key=?').get(workflowReconcileV3StateKey(projectId))?.value, {}).state === 'queued';
+    const workflowUpgradePendingCount = workflowUpgradeCommitted ? 0 : workflowUpgradeQueued ? Math.max(1, queuedMaintenanceCount) : workflowReconcileV3TaskIds(workflowScope.manifest).length;
+    const maintenancePendingCount = Math.max(queuedMaintenanceCount, workflowUpgradePendingCount);
     const state = migrationStateFromDb(db, projectId, { state: pendingCount ? 'pending' : 'committed', pendingCount });
     return { ...state, state: state.state === 'committed' && maintenancePendingCount ? 'pending' : state.state, phase: state.state === 'committed' && maintenancePendingCount ? 'workflow-reconcile' : state.phase, maintenancePendingCount };
   } finally { db.close(); }
@@ -2715,7 +2804,7 @@ const MUTATING_METHODS = new Set([
   'team.project.migrate-step.v1','team.project.calibrate-step.v1','team.workflow.reconcile-drain.v1',
   'team.project.register.v1','team.project.remove-photo.v1','team.identity.save.v1','team.identity.assign.v1','team.identity.confirm-group.v1','team.identity.delete.v1','team.identity.suggest.v1',
   'team.person.exclude.v1','team.patch.detect.v1','team.patch.detect-batch.v1','team.patch.update.v1','team.patch.delete.v1','team.patch.cleanup.v1','team.patch.upload.v1','team.patch.remove-upload.v1','team.patch.merge.v1',
-  'team.identity.complete.v1','team.workflow.settings.save.v1','team.workflow.generate.v1','team.workflow.return-batch.v1','team.workflow.return-confirm.v1','team.patch.return-batch.v1','team.operation.run.v1',
+  'team.identity.complete.v1','team.workflow.settings.save.v1','team.workflow.generate.v1','team.workflow.open-export.v1','team.workflow.return-batch.v1','team.workflow.return-confirm.v1','team.patch.return-batch.v1','team.operation.run.v1',
   'team.workflow.return-review.discard.v1','team.workflow.return-review.ignore.v1',
 ]);
 const readDomainRevision = (parentId, context) => withDomain(parentId, db => domainRevision(db, String(context.projectId)));
@@ -2831,7 +2920,7 @@ const handlers = {
   }),
   'team.project.get.v1': async (parentId, _payload, context) => {
     const startedAt = Date.now();
-    const migration = await legacyProjectMigrationStatus(parentId);
+    const migration = await legacyProjectMigrationStatus(parentId, context);
     if (migration.phase === 'host-storage-adoption') {
       migrationMetric('team-project-get-v1', 'storage-adoption-pending', startedAt, { itemCount: 0, state: migration.state, outcome: 'accepted', fallback: true });
       return { success: true, photos: [], identities: [], assignments: [], workflowGenerated: false, workflowNeedsRegeneration: false, workflowAvailableKeys: [], workflowAvailableSubjectKeys: [], workflowSettings: { preferredIdentityOrder: [], sameWeekIdentityIds: [] }, migration };
@@ -2842,11 +2931,15 @@ const handlers = {
   },
   'team.project.migrate-step.v1': async (parentId, _payload, context) => {
     const migration = await migrateLegacyProjectArtifacts(parentId, context, { signal: context.signal, deadlineAt: Date.now() + 1000 });
-    if (migration.state === 'committed' && !context.signal?.aborted) await retryPendingWorkflowReconciles(parentId, context, 1);
-    return legacyProjectMigrationStatus(parentId);
+    if (migration.state === 'committed' && !context.signal?.aborted) {
+      await ensureWorkflowReconcileV3Queued(parentId, context);
+      await retryPendingWorkflowReconciles(parentId, context, 1);
+      await finalizeWorkflowReconcileV3(parentId, context);
+    }
+    return legacyProjectMigrationStatus(parentId, context);
   },
   'team.project.calibrate-step.v1': calibrateWorkspaceStep,
-  'team.workflow.reconcile-drain.v1': (parentId, payload, context) => retryPendingWorkflowReconciles(parentId, context, Math.min(50, Math.max(1, Number(payload.maxItems) || 20))),
+  'team.workflow.reconcile-drain.v1': (parentId, payload, context) => retryPendingWorkflowReconciles(parentId, context, Math.min(50, Math.max(1, Number(payload.maxItems) || 20)), payload.taskIds),
   'team.project.register.v1': async (parentId, payload, context) => {
     const relativePaths = uniqueText(payload.relativePaths);
     if (relativePaths.length > MAX_ITEMS) throw new Error(`Too many project media items: ${relativePaths.length}`);

@@ -1,6 +1,6 @@
 {
   "name": "@photoflow/video-transcription",
-  "version": "26.8.31",
+  "version": "26.9.4",
   "private": true,
   "scripts": {
     "setup": "node scripts/setup-python.cjs",
