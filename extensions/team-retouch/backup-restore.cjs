@@ -414,6 +414,8 @@ const restoreProjectStorage = ({ sourcePath, destinationPath, payload, ensureSch
       const previousRevision = Number(db.prepare('SELECT revision FROM team_project_revisions WHERE project_id=?').get(targetProjectId)?.revision || 0);
       const sourceRevision = Number(db.prepare('SELECT revision FROM portable.team_project_revisions WHERE project_id=?').get(sourceProjectId)?.revision || 0);
       db.prepare('INSERT INTO team_project_revisions(project_id,revision) VALUES(?,?) ON CONFLICT(project_id) DO UPDATE SET revision=excluded.revision').run(targetProjectId, Math.max(previousRevision + 1, sourceRevision));
+      const restoreGeneration = crypto.createHash('sha256').update(`${operationId}\0${sourceProjectId}\0${targetProjectId}`).digest('hex').slice(0, 24);
+      db.prepare('INSERT INTO meta(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value').run(`restore_generation:${targetProjectId}`, restoreGeneration);
       db.prepare('INSERT INTO meta(key,value) VALUES(?,?)').run(marker, JSON.stringify({ projectId: targetProjectId, sourceProjectId, committedAt: Date.now() }));
       if (fault === 'before-commit' || process.env.PHOTOFLOW_TEST_FAULT_COMPONENT_RESTORE === 'before-commit') throw new Error('injected team-retouch restore failure');
       db.exec('COMMIT');
@@ -522,12 +524,13 @@ const restoreProjectBundle = ({ source, sources, destinationPath, destinationDat
     const sourceProjectId = String(payload.project?.sourceId || payload.project?.id || ''); const targetProjectId = String(payload.project?.id || ''); const targetHash = crypto.createHash('sha256').update(targetProjectId).digest('hex');
     const referencedPaths = new Set(); const recoverableWorkingRows = []; const sourceDb = new DatabaseSync(source.path, { readOnly: true });
     try {
-      for (const row of sourceDb.prepare('SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks WHERE project_id=?').all(sourceProjectId)) for (const value of Object.values(row)) if (value) referencedPaths.add(String(value));
+      for (const row of sourceDb.prepare('SELECT patch_path,mask_path,edited_patch_path FROM team_patch_tasks WHERE project_id=? AND is_deleted=0').all(sourceProjectId)) for (const value of Object.values(row)) if (value) referencedPaths.add(String(value));
       for (const row of sourceDb.prepare('SELECT edited_patch_path FROM team_person_assignments WHERE project_id=?').all(sourceProjectId)) if (row.edited_patch_path) referencedPaths.add(String(row.edited_patch_path));
       for (const row of sourceDb.prepare('SELECT artifact_path FROM team_task_artifacts WHERE project_id=? AND is_deleted=0').all(sourceProjectId)) if (row.artifact_path) referencedPaths.add(String(row.artifact_path));
       for (const row of sourceDb.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND kind='working-output'").all(sourceProjectId)) {
         const result = JSON.parse(row.result_json || '{}'); const plan = result.continuationPlan; const materialized = result.materialized;
         if (!plan?.domain || String(plan.projectId) !== sourceProjectId || !materialized?.privatePath || !/^[0-9a-f]{64}$/i.test(String(materialized.sha256 || ''))) { if (row.state === 'completed') continue; throw new Error(`团片项目恢复 working outbox ${row.id} continuation/materialized 无效`); }
+        if (row.state === 'completed' && !referencedPaths.has(String(materialized.privatePath))) continue;
         const normalized = String(materialized.privatePath).replace(/\\/g, '/').toLowerCase();
         if (!normalized.includes('/imported-outputs/')) throw new Error(`团片项目恢复 working outbox ${row.id} materialized 超出 Host imported-outputs`);
         referencedPaths.add(String(materialized.privatePath)); recoverableWorkingRows.push({ row, result, plan, materialized });

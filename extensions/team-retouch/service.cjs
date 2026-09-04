@@ -1582,7 +1582,8 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
     }
   }));
   const rebuildToken = String(payload.rebuildToken || '').trim().slice(0, 120);
-  const mergeFingerprintInput = { projectId: String(context.projectId), photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), outputProgressId: String(payload.outputProgressId), strategyVersion: 3, tasks: fingerprintTasks };
+  const restoreGeneration = String(db.prepare('SELECT value FROM meta WHERE key=?').get(`restore_generation:${String(context.projectId)}`)?.value || '');
+  const mergeFingerprintInput = { projectId: String(context.projectId), photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), outputProgressId: String(payload.outputProgressId), restoreGeneration, strategyVersion: 3, tasks: fingerprintTasks };
   if (rebuildToken) mergeFingerprintInput.rebuildToken = rebuildToken;
   const mergeFingerprint = sha256(JSON.stringify(mergeFingerprintInput));
   const operationId = `merge-${mergeFingerprint.slice(0, 32)}`;
@@ -1590,7 +1591,7 @@ const mergePatches = async (parentId, payload, context) => withDomain(parentId, 
   const manifestPath = path.join(mergeStage, 'manifest.json');
   const outputName = `${safeSegment(path.parse(bundle.photo?.originalName || bundle.photo?.displayName || payload.photoId).name, '素材')}_多人修图_${mergeFingerprint.slice(0, 12)}.tif`;
   const privateOutputPath = path.join(mergeStage, outputName);
-  const outputRelativePath = [relativeDirectory, outputName].filter(Boolean).join('/');
+  const outputRelativePath = [relativeDirectory, restoreGeneration ? `恢复-${restoreGeneration}` : '', outputName].filter(Boolean).join('/');
   await appendCommand(storage, { operationId, type: 'patch-merge', state: 'prepared', photoId: payload.photoId, outputRelativePath });
   try {
     await fs.promises.mkdir(path.dirname(mergeStage), { recursive: true });
