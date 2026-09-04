@@ -79,6 +79,33 @@ def _intersection_over_smaller(left, right):
     return intersection / smaller
 
 
+def select_onnx_providers(available, requested):
+    available = list(available)
+    if requested == "gpu" and "DmlExecutionProvider" not in available:
+        raise RuntimeError(f"DirectML GPU 不可用；当前运行库提供：{', '.join(available) or '无'}")
+    return ["DmlExecutionProvider", "CPUExecutionProvider"] if requested != "cpu" and "DmlExecutionProvider" in available else ["CPUExecutionProvider"]
+
+
+def create_identity_sessions(ort, body_path, face_path, requested):
+    available = ort.get_available_providers(); providers = select_onnx_providers(available, requested)
+    def options_for(values):
+        options = ort.SessionOptions()
+        if values[0] == "DmlExecutionProvider":
+            options.enable_mem_pattern = False; options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
+        return options
+    try:
+        options = options_for(providers)
+        return (ort.InferenceSession(str(body_path), sess_options=options, providers=providers),
+                ort.InferenceSession(str(face_path), sess_options=options, providers=providers), "")
+    except Exception as error:
+        if requested != "auto" or providers == ["CPUExecutionProvider"]:
+            raise
+        providers = ["CPUExecutionProvider"]; options = options_for(providers)
+        return (ort.InferenceSession(str(body_path), sess_options=options, providers=providers),
+                ort.InferenceSession(str(face_path), sess_options=options, providers=providers),
+                f"DirectML 初始化失败，已从原始输入切换 CPU：{error}")
+
+
 class IdentityRuntime:
     def __init__(self, model_directory, provider="auto"):
         model_directory = Path(model_directory)
@@ -97,27 +124,7 @@ class IdentityRuntime:
             import onnxruntime as ort
         except ImportError as error:
             raise RuntimeError("人物身份识别缺少 ONNX Runtime") from error
-        available = ort.get_available_providers()
-        if provider == "gpu" and "DmlExecutionProvider" not in available:
-            raise RuntimeError(f"DirectML GPU 不可用；当前运行库提供：{', '.join(available) or '无'}")
-        providers = ["CPUExecutionProvider"]
-        options = ort.SessionOptions()
-        if provider != "cpu" and "DmlExecutionProvider" in available:
-            options.enable_mem_pattern = False
-            options.execution_mode = ort.ExecutionMode.ORT_SEQUENTIAL
-            providers = ["DmlExecutionProvider", "CPUExecutionProvider"]
-        self.fallback_reason = ""
-        try:
-            self.body_session = ort.InferenceSession(str(body_reid_path), sess_options=options, providers=providers)
-            self.adaface_session = ort.InferenceSession(str(face_recognizer_path), sess_options=options, providers=providers)
-        except Exception as error:
-            if provider != "auto" or providers == ["CPUExecutionProvider"]:
-                raise
-            providers = ["CPUExecutionProvider"]
-            options = ort.SessionOptions()
-            self.body_session = ort.InferenceSession(str(body_reid_path), sess_options=options, providers=providers)
-            self.adaface_session = ort.InferenceSession(str(face_recognizer_path), sess_options=options, providers=providers)
-            self.fallback_reason = f"DirectML 初始化失败，已从原始输入切换 CPU：{error}"
+        self.body_session, self.adaface_session, self.fallback_reason = create_identity_sessions(ort, body_reid_path, face_recognizer_path, provider)
         self.body_input_name = self.body_session.get_inputs()[0].name
         self.adaface_input_name = self.adaface_session.get_inputs()[0].name
         self.adaface_output_count = len(self.adaface_session.get_outputs())

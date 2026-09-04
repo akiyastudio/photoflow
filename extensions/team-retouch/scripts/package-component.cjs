@@ -9,6 +9,9 @@ const dist = path.join(root, 'dist'); const packageRoot = path.join(dist, 'compo
 const outputOption = process.argv.indexOf('--output-dir'); const archiveRoot = outputOption >= 0 ? path.resolve(process.argv[outputOption + 1]) : dist;
 const withAdvanced = process.argv.includes('--with-advanced');
 const skipChecks = process.argv.includes('--skip-checks');
+const developmentPackage = process.argv.includes('--dev');
+if (withAdvanced && (skipChecks || developmentPackage)) throw new Error('Formal advanced packaging cannot skip checks or use development dependencies.');
+if (!developmentPackage && !fs.existsSync(path.join(root, 'requirements-build.lock'))) throw new Error('Formal packaging requires requirements-build.lock with hashes.');
 const python = process.platform === 'win32' ? path.join(root, '.venv', 'Scripts', 'python.exe') : path.join(root, '.venv', 'bin', 'python');
 const models = [
   ['rtmdet-ins_m_640x640.onnx',104857600,'6041dded9177d5bd0bca9e3aa264ceb99ec1ff7b0d53320d2433587704840fca'],
@@ -34,7 +37,7 @@ if (!skipChecks) {
 run(process.execPath,[viteBin,'build','--config',path.join(root,'renderer','vite.config.ts')]);
 fs.rmSync(packageRoot,{recursive:true,force:true}); fs.mkdirSync(path.dirname(packageRoot),{recursive:true});
 const sep=process.platform==='win32'?';':':';
-run(python,['-m','PyInstaller','--onedir','--clean','--noconfirm','--workpath',path.join(dist,'pyinstaller-work'),'--specpath',path.join(dist,'spec'),'--distpath',dist,'--name','component','--collect-binaries','onnxruntime','--paths',root,'--hidden-import','patch_merge','--hidden-import','advanced_bridge','--hidden-import','identity_engine','--hidden-import','image_safety','--exclude-module','scipy','--exclude-module','matplotlib','--exclude-module','torch','--exclude-module','torchvision','--exclude-module','torchaudio',...models.flatMap(([name])=>['--add-data',`${path.join(root,'models',name)}${sep}models`]),...['pairdetr_service.py','sam2_service.py','image_safety.py'].flatMap(name=>['--add-data',`${path.join(root,name === 'image_safety.py' ? name : path.join('advanced',name))}${sep}${name === 'image_safety.py' ? '.' : 'advanced'}`]),path.join(root,'team_retouch.py')]);
+run(python,['-m','PyInstaller','--onedir','--clean','--noconfirm','--workpath',path.join(dist,'pyinstaller-work'),'--specpath',path.join(dist,'spec'),'--distpath',dist,'--name','component','--collect-binaries','onnxruntime','--paths',root,'--hidden-import','patch_merge','--hidden-import','advanced_bridge','--hidden-import','identity_engine','--hidden-import','image_safety','--hidden-import','advanced_geometry','--hidden-import','checkpoint_lock','--exclude-module','scipy','--exclude-module','matplotlib','--exclude-module','torch','--exclude-module','torchvision','--exclude-module','torchaudio',...models.flatMap(([name])=>['--add-data',`${path.join(root,'models',name)}${sep}models`]),...['pairdetr_service.py','sam2_service.py','image_safety.py','advanced_geometry.py','checkpoint_lock.py'].flatMap(name=>['--add-data',`${path.join(root,['image_safety.py','advanced_geometry.py','checkpoint_lock.py'].includes(name) ? name : path.join('advanced',name))}${sep}${['image_safety.py','advanced_geometry.py','checkpoint_lock.py'].includes(name) ? '.' : 'advanced'}`]),path.join(root,'team_retouch.py')]);
 const packagedEntrypoint = manifest.entrypoints[`${process.platform}-${process.arch}`] || manifest.entrypoints[process.platform] || manifest.entrypoints.default;
 const generatedExecutable = path.join(packageRoot, process.platform === 'win32' ? 'component.exe' : 'component');
 const declaredExecutable = path.join(packageRoot, packagedEntrypoint);
@@ -53,10 +56,12 @@ if(withAdvanced){
   const advancedScriptsDirectory=path.join(packageRoot,'advanced'); fs.mkdirSync(advancedScriptsDirectory,{recursive:true});
   for(const name of ['pairdetr_service.py','sam2_service.py']) fs.copyFileSync(path.join(root,'advanced',name),path.join(advancedScriptsDirectory,name));
   fs.copyFileSync(path.join(root,'image_safety.py'),path.join(packageRoot,'image_safety.py'));
+  fs.copyFileSync(path.join(root,'advanced_geometry.py'),path.join(packageRoot,'advanced_geometry.py'));
+  fs.copyFileSync(path.join(root,'checkpoint_lock.py'),path.join(packageRoot,'checkpoint_lock.py'));
   fs.copyFileSync(advancedPackageSource,path.join(packageRoot,advancedPackageName));
   manifest.advancedRuntime.offlinePackage={path:advancedPackageName,sha256:sha256File(advancedPackageSource)};
   manifest.requiredFiles.push(advancedPackageName);
-  manifest.requiredFiles.push('advanced/pairdetr_service.py','advanced/sam2_service.py','image_safety.py');
+  manifest.requiredFiles.push('advanced/pairdetr_service.py','advanced/sam2_service.py','image_safety.py','advanced_geometry.py','checkpoint_lock.py');
 } else {
   delete manifest.componentHost.service.lifecycleActions;
   manifest.componentHost.service.capabilities = manifest.componentHost.service.capabilities.filter(value => value !== 'component.lifecycle');

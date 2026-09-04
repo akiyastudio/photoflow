@@ -2,20 +2,20 @@ const fs = require('fs');
 // Plugin-owned packaging entrypoint.
 const path = require('path');
 const { spawnSync } = require('child_process');
+const { validateInputLock } = require('./advanced-release-validator.cjs');
 
 if (process.platform !== 'win32') throw new Error('The prepared advanced engine package can only be exported on Windows with WSL 2.');
 const root = path.resolve(__dirname, '..');
-const releaseLock = path.join(root, 'advanced', 'release-lock.json');
-if (!fs.existsSync(releaseLock)) throw new Error('Reviewed advanced dependency/checkpoint lock is missing; refusing to export an advanced release package.');
-const lock = JSON.parse(fs.readFileSync(releaseLock, 'utf8'));
-if (lock.version !== 1 || !Array.isArray(lock.artifacts) || !lock.artifacts.length) throw new Error('Advanced release lock is incomplete.');
+const inputLock = path.join(root, 'advanced', 'build-input-lock.json');
 const componentManifest = JSON.parse(fs.readFileSync(path.join(root, 'component.template.json'), 'utf8'));
 const version = componentManifest.version;
 const advancedRuntimeApiVersion = Number(componentManifest.advancedRuntime?.apiVersion);
 if (!Number.isInteger(advancedRuntimeApiVersion) || advancedRuntimeApiVersion < 1) throw new Error('Team-retouch advanced runtime API version is missing');
+if (!fs.existsSync(inputLock)) throw new Error('Reviewed advanced build-input lock is missing; refusing to export an advanced candidate.');
+validateInputLock(root, inputLock, { componentVersion: version, advancedRuntimeApiVersion });
 const outputOption = process.argv.indexOf('--output-dir');
 const releaseRoot = outputOption >= 0 ? path.resolve(process.argv[outputOption + 1]) : path.join(root, 'dist');
-const outputPath = path.join(releaseRoot, `PhotoFlow-team-retouch-advanced-${version}-win32-x64.zip`);
+const outputPath = path.join(releaseRoot, 'candidates', `PhotoFlow-team-retouch-advanced-${version}-win32-x64.zip`);
 fs.mkdirSync(releaseRoot, { recursive: true });
 const result = spawnSync('powershell.exe', [
   '-NoProfile', '-ExecutionPolicy', 'Bypass',

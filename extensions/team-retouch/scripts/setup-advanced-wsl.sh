@@ -43,7 +43,6 @@ checkout_commit https://github.com/mts-ai/pairdetr.git "$PAIRDETR_COMMIT" "$REPO
 mkdir -p "$CHECKPOINT_ROOT/pairdetr"
 "$CONDA" run -n pairdetr hf download MTSAIR/PairDETR --local-dir "$CHECKPOINT_ROOT/pairdetr"
 test -s "$CHECKPOINT_ROOT/pairdetr/pytorch_model.bin"
-sha256sum --check --strict "$REVIEWED_LOCK_ROOT/checkpoints.sha256"
 PYTHONPATH="$CHECKPOINT_ROOT/pairdetr" "$CONDA" run -n pairdetr python -c \
     'import torch; from hf_utils import PairDetr, forward; assert torch.cuda.is_available(); print("PAIRDETR_CUDA_OK", torch.cuda.get_device_name(0))'
 
@@ -60,9 +59,20 @@ curl --fail --location --retry 5 --continue-at - \
     --output "$CHECKPOINT_ROOT/sam2/sam2.1_hiera_large.pt" \
     https://dl.fbaipublicfiles.com/segment_anything_2/092824/sam2.1_hiera_large.pt
 test -s "$CHECKPOINT_ROOT/sam2/sam2.1_hiera_large.pt"
-sha256sum --check --strict "$REVIEWED_LOCK_ROOT/checkpoints.sha256"
+(
+    cd "$LAB_ROOT"
+    sha256sum --check --strict "$RELEASE_LOCK_ROOT/checkpoints.sha256"
+)
 "$CONDA" run -n sam2 python -c \
     'import torch; from sam2.sam2_image_predictor import SAM2ImagePredictor; assert torch.cuda.is_available(); print("SAM2_CUDA_OK", torch.cuda.get_device_name(0))'
+
+log "Running release-gating model self-tests"
+timeout 180 "$HOME/miniforge3/envs/pairdetr/bin/python" "$SCRIPT_ROOT/../advanced/pairdetr_service.py" --self-test >/dev/null
+timeout 240 "$HOME/miniforge3/envs/sam2/bin/python" "$SCRIPT_ROOT/../advanced/sam2_service.py" --self-test >/dev/null
+receipt_tmp="$LOCK_ROOT/.self-test-receipt.json.tmp"
+printf '{"version":1,"pairDetr":true,"sam2":true,"completedAt":"%s"}\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" > "$receipt_tmp"
+chmod 0444 "$receipt_tmp"
+mv -f "$receipt_tmp" "$LOCK_ROOT/self-test-receipt.json"
 
 log "Recording reproducibility locks"
 "$CONDA" list -n pairdetr --explicit > "$LOCK_ROOT/pairdetr-conda-explicit.txt"

@@ -22,6 +22,15 @@ $root = Join-Path ([IO.Path]::GetTempPath()) ('team-retouch-archive-' + [Guid]::
 New-Item -ItemType Directory -Path $root | Out-Null
 $caught = $null
 try {
+    if ((Resolve-AdvancedInstallMode $false $false $false $false $true) -ne 'install') { throw 'fresh repair did not safely resolve to install' }
+    if ((Resolve-AdvancedInstallMode $true $true $true $true $true) -ne 'repair') { throw 'owned repair state was rejected' }
+    foreach ($state in @(@($true,$false,$false,$true,$true),@($false,$true,$false,$false,$false),@($true,$true,$true,$true,$false))) {
+        if ((Resolve-AdvancedInstallMode @state) -ne 'refuse') { throw 'foreign/incomplete state was not refused' }
+    }
+    Assert-AdvancedPreflight $true 8.0 ([IO.DriveType]::Fixed) 1000 900
+    foreach ($preflight in @(@($true,6.1,[IO.DriveType]::Fixed,1000,900),@($true,8.0,[IO.DriveType]::Network,1000,900),@($true,8.0,[IO.DriveType]::Fixed,800,900))) {
+        $rejected=$false; try { Assert-AdvancedPreflight @preflight } catch { $rejected=$true }; if(-not $rejected){ throw 'unsafe preflight fixture was accepted' }
+    }
     $vhdBytes = [byte[]]([Text.Encoding]::UTF8.GetPreamble() + [Text.Encoding]::UTF8.GetBytes('vhd'))
     $sha = [Security.Cryptography.SHA256]::Create()
     try { $vhdDigest = ([BitConverter]::ToString($sha.ComputeHash($vhdBytes))).Replace('-', '').ToLowerInvariant() } finally { $sha.Dispose() }
@@ -48,6 +57,13 @@ try {
         if (-not $lockedItem.PSIsContainer -or ($lockedItem.Attributes -band [IO.FileAttributes]::ReparsePoint)) { throw 'locked staging root was replaceable during extraction' }
         if (@(Get-ChildItem -LiteralPath $outsideRoot -Force).Count) { throw 'locked staging replacement wrote outside the component root' }
     } finally { Close-StagingDirectoryLock $lock }
+
+    $entityPath = Join-Path $root 'locked-entity.vhdx'; [IO.File]::WriteAllText($entityPath, 'entity')
+    $entityLock = Open-EntityIdentityLock $entityPath
+    try {
+        $renamed=$false; try { Move-Item -LiteralPath $entityPath -Destination (Join-Path $root 'renamed.vhdx') -ErrorAction Stop; $renamed=$true } catch { }
+        if ($renamed -or -not (Test-Path -LiteralPath $entityPath)) { throw 'entity identity lock allowed concurrent rename' }
+    } finally { $entityLock.Dispose() }
 
     $linkAttributes = -1577123840 # signed Int32 representation of Unix symlink mode 0120777
     $cases = @(

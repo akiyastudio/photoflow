@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import json
 import tempfile
 from pathlib import Path
@@ -16,6 +15,7 @@ import numpy as np
 import torch
 from PIL import Image, ImageDraw
 from image_safety import inspect_dimensions, open_validated
+from checkpoint_lock import verify_checkpoint
 from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 
@@ -53,7 +53,7 @@ def parse_args() -> argparse.Namespace:
 def load_runtime(args: argparse.Namespace):
     device = torch.device("cuda:0")
     precision = torch.bfloat16 if torch.cuda.is_bf16_supported() else torch.float16
-    verify_locked_checkpoint(args.checkpoint.resolve())
+    verify_checkpoint(args.checkpoint.resolve(), "checkpoints/sam2/sam2.1_hiera_large.pt")
     model = build_sam2(
         "configs/sam2.1/sam2.1_hiera_l.yaml",
         str(args.checkpoint.resolve()),
@@ -61,17 +61,6 @@ def load_runtime(args: argparse.Namespace):
         apply_postprocessing=False,
     )
     return SAM2ImagePredictor(model), device, precision
-
-
-def verify_locked_checkpoint(checkpoint_path: Path):
-    lock_path = Path.home() / "model-lab/release-locks/checkpoints.sha256"
-    if not lock_path.is_file(): raise RuntimeError("Reviewed checkpoint SHA-256 lock is missing")
-    expected = next((line.split()[0].lower() for line in lock_path.read_text(encoding="utf-8").splitlines() if line.strip() and line.split()[-1].lstrip("*").endswith(checkpoint_path.name)), "")
-    if len(expected) != 64: raise RuntimeError(f"Checkpoint SHA-256 is not locked: {checkpoint_path.name}")
-    digest = hashlib.sha256()
-    with checkpoint_path.open("rb") as source:
-        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""): digest.update(chunk)
-    if digest.hexdigest() != expected: raise RuntimeError(f"Checkpoint SHA-256 mismatch: {checkpoint_path.name}")
 
 
 def infer_image(runtime, image_path: Path, boxes_path: Path, max_image_edge: int):

@@ -49,6 +49,20 @@ function Write-JsonAtomic([string]$PathValue, $Value) {
     try { $stream.Write($bytes, 0, $bytes.Length); $stream.Flush($true) } finally { $stream.Dispose() }
     if (Test-Path -LiteralPath $target) { [IO.File]::Replace($temporary, $target, $null) } else { [IO.File]::Move($temporary, $target) }
 }
+function Resolve-AdvancedInstallMode([bool]$Registered, [bool]$HasState, [bool]$HasMarker, [bool]$HasVhd, [bool]$RepairRequested) {
+    if ($Registered) {
+        if ($HasState -and $HasMarker -and $HasVhd -and $RepairRequested) { return 'repair' }
+        return 'refuse'
+    }
+    if ($HasState -or $HasMarker -or $HasVhd) { return 'refuse' }
+    return 'install'
+}
+function Assert-AdvancedPreflight([bool]$Is64BitWindows, [double]$ComputeCapability, [IO.DriveType]$DriveType, [int64]$FreeBytes, [int64]$RequiredBytes) {
+    if (-not $Is64BitWindows) { throw 'Windows x64 is required.' }
+    if ($ComputeCapability -lt 7.0) { throw 'The NVIDIA GPU must support validated FP16 or BF16 CUDA inference.' }
+    if ($DriveType -ne [IO.DriveType]::Fixed) { throw 'The advanced environment must be installed on a fixed local volume.' }
+    if ($FreeBytes -lt $RequiredBytes) { throw "Insufficient disk space for the transactional install peak: $RequiredBytes bytes required." }
+}
 if (-not ('PhotoFlowAdvancedStagingLock' -as [type])) {
     Add-Type -TypeDefinition @'
 using System;
@@ -57,8 +71,19 @@ using Microsoft.Win32.SafeHandles;
 public static class PhotoFlowAdvancedStagingLock {
     [DllImport("kernel32.dll", CharSet=CharSet.Unicode, SetLastError=true)]
     public static extern SafeFileHandle CreateFile(string name, uint access, uint share, IntPtr security, uint creation, uint flags, IntPtr template);
+    [StructLayout(LayoutKind.Sequential)] public struct FileInfo { public uint attrs; public System.Runtime.InteropServices.ComTypes.FILETIME created; public System.Runtime.InteropServices.ComTypes.FILETIME accessed; public System.Runtime.InteropServices.ComTypes.FILETIME written; public uint volume; public uint sizeHigh; public uint sizeLow; public uint links; public uint indexHigh; public uint indexLow; }
+    [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileInfo info);
+    public static string GetFileId(string name) { using (var handle=CreateFile(name,0,3,IntPtr.Zero,3,0,IntPtr.Zero)) { if(handle.IsInvalid) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); FileInfo info; if(!GetFileInformationByHandle(handle,out info)) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error()); return info.volume.ToString("X8")+":"+info.indexHigh.ToString("X8")+info.indexLow.ToString("X8"); } }
 }
 '@
+}
+function Get-TrustedFileIdentity([string]$PathValue) {
+    Assert-SafeLocalPath $PathValue | Out-Null
+    [PhotoFlowAdvancedStagingLock]::GetFileId([IO.Path]::GetFullPath($PathValue))
+}
+function Open-EntityIdentityLock([string]$PathValue) {
+    Assert-SafeLocalPath $PathValue | Out-Null
+    [IO.FileStream]::new([IO.Path]::GetFullPath($PathValue), [IO.FileMode]::Open, [IO.FileAccess]::Read, [IO.FileShare]::ReadWrite)
 }
 
 function Get-DistroRegistration([string]$Name) {
@@ -312,22 +337,20 @@ if ([int]$manifest.formatVersion -ne 1 -or [string]$manifest.componentId -ne 'te
 if (-not $ExpectedComponentVersion -or [string]$manifest.componentVersion -ne $ExpectedComponentVersion) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Advanced package component version does not match exactly.' }
 if ($ExpectedAdvancedRuntimeApiVersion -le 0 -or [int]$manifest.advancedRuntimeApiVersion -ne $ExpectedAdvancedRuntimeApiVersion) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Advanced runtime API version does not match exactly.' }
 
-if (-not [Environment]::Is64BitOperatingSystem -or $env:PROCESSOR_ARCHITECTURE -notmatch 'AMD64|x86') { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Windows x64 is required.' }
 $nvidia = Get-Command nvidia-smi.exe -ErrorAction SilentlyContinue
 if (-not $nvidia) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'A CUDA-capable NVIDIA driver is required.' }
 $compute = @(& $nvidia.Source --query-gpu=compute_cap --format=csv,noheader 2>$null | Select-Object -First 1)
-if ($LASTEXITCODE -ne 0 -or -not $compute -or [double]$compute[0] -lt 7.0) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The NVIDIA GPU must support validated FP16 or BF16 CUDA inference.' }
+if ($LASTEXITCODE -ne 0 -or -not $compute) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The NVIDIA GPU capability could not be verified.' }
 $drive = [IO.DriveInfo]::new([IO.Path]::GetPathRoot($componentDataRoot))
-if ($drive.DriveType -ne [IO.DriveType]::Fixed) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'The advanced environment must be installed on a fixed local volume.' }
 $existingBytes = if ($registration -and (Test-Path -LiteralPath $stableVhd -PathType Leaf)) { (Get-Item -LiteralPath $stableVhd).Length } else { 0 }
 $peakBytes = [int64]([Math]::Ceiling(([int64]$manifest.installedSizeBytes * 2 + $existingBytes) * 1.15) + 2GB)
-if ($drive.AvailableFreeSpace -lt $peakBytes) { Close-ValidatedAdvancedArchive $validatedPackage; throw "Insufficient disk space for the transactional install peak: $peakBytes bytes required." }
+Assert-AdvancedPreflight ([Environment]::Is64BitOperatingSystem) ([double]$compute[0]) $drive.DriveType $drive.AvailableFreeSpace $peakBytes
 if ($CheckOnly) { Close-ValidatedAdvancedArchive $validatedPackage; Write-Host 'OFFLINE_PREFLIGHT_OK|trusted package, WSL 2, NVIDIA CUDA, precision and disk ready'; exit 0 }
 
 $priorState = $null; $priorMarker = $null
+$installMode = Resolve-AdvancedInstallMode ([bool]$registration) (Test-Path -LiteralPath $statePath -PathType Leaf) (Test-Path -LiteralPath $markerPath -PathType Leaf) (Test-Path -LiteralPath $stableVhd -PathType Leaf) ([bool]$Repair)
+if ($installMode -eq 'refuse') { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Install or repair refused: foreign or incomplete advanced ownership state exists.' }
 if ($registration) {
-    if (-not $Repair) { throw 'The advanced environment is already registered. Use Repair.' }
-    if (-not (Test-Path -LiteralPath $statePath -PathType Leaf) -or -not (Test-Path -LiteralPath $markerPath -PathType Leaf)) { throw 'Repair refused: component ownership state is incomplete.' }
     $priorState = Get-Content -LiteralPath $statePath -Raw -Encoding UTF8 | ConvertFrom-Json
     $priorMarker = Get-Content -LiteralPath $markerPath -Raw -Encoding UTF8 | ConvertFrom-Json
     Assert-ExactJsonFields $priorMarker @('componentId','distroName','installRoot','ownerToken','version') 'Ownership marker'
@@ -338,40 +361,54 @@ if ($registration) {
     if ([int]$priorState.version -ne 3 -or [int]$priorMarker.version -ne 1 -or [string]$priorState.componentId -ne 'team-retouch' -or [string]$priorMarker.componentId -ne 'team-retouch' -or [string]$priorState.distroName -ne $DistroName -or [string]$priorMarker.distroName -ne $DistroName -or -not $stateInstallRoot.Equals($InstallRoot, [StringComparison]::OrdinalIgnoreCase) -or [string]$priorMarker.installRoot -ne $InstallRoot -or [string]$priorState.ownerToken -notmatch '^[a-f0-9]{32}$' -or [string]$priorState.ownerToken -ne [string]$priorMarker.ownerToken -or -not $validInstalledAt -or [string]$priorState.componentVersion -notmatch '^\d+(?:\.\d+)+$' -or [int]$priorState.advancedRuntimeApiVersion -lt 1 -or [string]$priorState.packageSha256 -notmatch '^[a-f0-9]{64}$' -or [string]$priorState.vhdSha256 -notmatch '^[a-f0-9]{64}$' -or $priorState.offline -ne $true) { throw 'Repair refused: install-state and ownership marker do not bind this distribution.' }
     Assert-RegistrationBasePath $DistroName $InstallRoot | Out-Null
 } else {
-    $residualState = (Test-Path -LiteralPath $statePath) -or (Test-Path -LiteralPath $markerPath) -or (Test-Path -LiteralPath $stableVhd)
-    if ($residualState) { Close-ValidatedAdvancedArchive $validatedPackage; throw 'Install refused: incomplete or foreign advanced ownership state exists.' }
     $Repair = $false
 }
 
 if (-not (Get-Command tar.exe -ErrorAction SilentlyContinue)) { throw 'Windows tar.exe is required.' }
-$stagingRoot = Join-Path $stateRoot ('.offline-stage-' + [Guid]::NewGuid().ToString('N'))
 $candidateRoot = Join-Path $stateRoot ('.candidate-' + [Guid]::NewGuid().ToString('N'))
 $candidateName = "$DistroName-candidate-$([Guid]::NewGuid().ToString('N'))"
 $backupVhd = Join-Path $stateRoot ('.rollback-' + [Guid]::NewGuid().ToString('N') + '.vhdx')
-$candidateRegistered = $false; $oldUnregistered = $false; $finalRegistered = $false; $finalImportAttempted = $false; $preserveBackup = $false
+$candidateRegistered = $false; $oldUnregistered = $false; $finalRegistered = $false; $finalImportAttempted = $false; $preserveBackup = $false; $installCompleted = $false
+$candidateLock = $null; $installLock = $null; $candidateVhdLock = $null; $oldVhdLock = $null; $finalVhdLock = $null
 try {
-    Assert-SafeStagingPath $stagingRoot
     Assert-SafeStagingPath $candidateRoot
-    New-Item -ItemType Directory -Path $stagingRoot,$candidateRoot -Force | Out-Null
+    New-Item -ItemType Directory -Path $candidateRoot -Force | Out-Null
+    $candidateLock = Open-StagingDirectoryLock $candidateRoot
     $candidateVhd = Join-Path $candidateRoot 'ext4.vhdx'
     $vhdHash = Copy-ValidatedVhdEntry $validatedPackage $candidateVhd
     Invoke-TestFault 'candidate-copy'
     Assert-SafeStagingPath $candidateRoot $candidateVhd
+    Assert-StagingEntities $candidateRoot @('ext4.vhdx','.photoflow-extraction.lock')
+    $candidateFileId = Get-TrustedFileIdentity $candidateVhd
+    $candidateVhdLock = Open-EntityIdentityLock $candidateVhd
+    # The VHD file handle must be released for WSL to mount it. The directory
+    # and non-shareable sentinel remain locked across this minimal call window.
+    if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed before import.' }
     & wsl.exe --import-in-place $candidateName $candidateVhd
     Invoke-TestFault 'candidate-import'
     $candidateRegistered = [bool](Get-DistroRegistration $candidateName)
     if ($LASTEXITCODE -ne 0 -or -not $candidateRegistered) { throw 'Unable to register the staged advanced candidate.' }
     Assert-RegistrationBasePath $candidateName $candidateRoot | Out-Null
+    if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed during import.' }
+    Assert-StagingEntities $candidateRoot @('ext4.vhdx','.photoflow-extraction.lock')
     Test-Distro $candidateName $LinuxUser
+    if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed during self-test.' }
     Invoke-TestFault 'candidate-probe'
     Unregister-OwnedDistro $candidateName $candidateRoot
+    if ($candidateFileId -ne (Get-TrustedFileIdentity $candidateVhd)) { throw 'Candidate VHD identity changed during unregister.' }
     $candidateRegistered = $false
+    $candidateVhdLock.Dispose(); $candidateVhdLock = $null
     New-Item -ItemType Directory -Path $InstallRoot -Force | Out-Null
+    $installLock = Open-StagingDirectoryLock $InstallRoot
     if ($registration) {
+        $oldFileId = Get-TrustedFileIdentity $stableVhd
+        $oldVhdLock = Open-EntityIdentityLock $stableVhd
         & wsl.exe --terminate $DistroName 2>$null
         Copy-Item -LiteralPath $stableVhd -Destination $backupVhd
         Invoke-TestFault 'backup'
         Unregister-OwnedDistro $DistroName $InstallRoot
+        if ($oldFileId -ne (Get-TrustedFileIdentity $stableVhd)) { throw 'Owned VHD identity changed during unregister.' }
+        $oldVhdLock.Dispose(); $oldVhdLock = $null
         $oldUnregistered = $true
         Invoke-TestFault 'old-unregister'
     }
@@ -379,6 +416,11 @@ try {
     $finalVhdHash = Copy-ValidatedVhdEntry $validatedPackage $stableVhd
     Invoke-TestFault 'final-copy'
     Assert-SafeLocalPath $stableVhd | Out-Null
+    $finalFileId = Get-TrustedFileIdentity $stableVhd
+    $finalVhdLock = Open-EntityIdentityLock $stableVhd
+    $installEntities = @('ext4.vhdx','.photoflow-extraction.lock')
+    if (Test-Path -LiteralPath $markerPath -PathType Leaf) { $installEntities += '.photoflow-team-retouch-owner.json' }
+    Assert-StagingEntities $InstallRoot $installEntities
     if ($finalVhdHash -ne $vhdHash) { throw 'Candidate and final VHD digests differ.' }
     $finalImportAttempted = $true
     & wsl.exe --import-in-place $DistroName $stableVhd
@@ -386,14 +428,18 @@ try {
     $finalRegistered = [bool](Get-DistroRegistration $DistroName)
     if ($LASTEXITCODE -ne 0 -or -not $finalRegistered) { throw 'Unable to register the final advanced environment.' }
     Assert-RegistrationBasePath $DistroName $InstallRoot | Out-Null
+    if ($finalFileId -ne (Get-TrustedFileIdentity $stableVhd)) { throw 'Final VHD identity changed during import.' }
     foreach ($safePath in @($InstallRoot,$stableVhd,$markerPath,$statePath)) { Assert-SafeLocalPath $safePath | Out-Null }
     Test-Distro $DistroName $LinuxUser
+    if ($finalFileId -ne (Get-TrustedFileIdentity $stableVhd)) { throw 'Final VHD identity changed during self-test.' }
     Invoke-TestFault 'final-probe'
     $ownerToken = [Guid]::NewGuid().ToString('N')
     Write-JsonAtomic $markerPath @{ componentId='team-retouch'; distroName=$DistroName; installRoot=$InstallRoot; ownerToken=$ownerToken; version=1 }
+    Assert-StagingEntities $InstallRoot @('ext4.vhdx','.photoflow-extraction.lock','.photoflow-team-retouch-owner.json')
     New-Item -ItemType Directory -Path $stateRoot -Force | Out-Null
     Invoke-TestFault 'state-write'
     Write-JsonAtomic $statePath @{ componentId='team-retouch'; distroName=$DistroName; installRoot=$InstallRoot; ownerToken=$ownerToken; installedAt=[DateTime]::UtcNow.ToString('o'); version=3; componentVersion=[string]$manifest.componentVersion; advancedRuntimeApiVersion=[int]$manifest.advancedRuntimeApiVersion; packageSha256=$packageHash; vhdSha256=$vhdHash; offline=$true }
+    $installCompleted = $true
     Write-Host "PhotoFlow advanced offline environment is ready in $InstallRoot"
 } catch {
     $originalFailure = $_
@@ -420,6 +466,11 @@ try {
     throw $originalFailure
 } finally {
     Close-ValidatedAdvancedArchive $validatedPackage
-    foreach ($target in @($stagingRoot,$candidateRoot)) { if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force } }
+    foreach ($entityLock in @($candidateVhdLock,$oldVhdLock,$finalVhdLock)) { if ($entityLock) { $entityLock.Dispose() } }
+    if ($installLock) { Close-StagingDirectoryLock $installLock }
+    if ($candidateLock) { Close-StagingDirectoryLock $candidateLock }
+    foreach ($target in @($candidateRoot)) { if (Test-Path -LiteralPath $target) { Remove-Item -LiteralPath $target -Recurse -Force } }
+    if (-not $installCompleted -and -not $registration -and -not $preserveBackup) { foreach ($partial in @($statePath,$markerPath,$stableVhd)) { if (Test-Path -LiteralPath $partial -PathType Leaf) { Remove-Item -LiteralPath $partial -Force -ErrorAction SilentlyContinue } } }
+    if (-not $registration -and -not $preserveBackup -and (Test-Path -LiteralPath $InstallRoot) -and (Get-Item -LiteralPath $InstallRoot -Force).PSIsContainer -and -not @(Get-ChildItem -LiteralPath $InstallRoot -Force).Count) { Remove-Item -LiteralPath $InstallRoot -Force -ErrorAction SilentlyContinue }
     if (-not $preserveBackup -and (Test-Path -LiteralPath $backupVhd -PathType Leaf)) { Remove-Item -LiteralPath $backupVhd -Force }
 }

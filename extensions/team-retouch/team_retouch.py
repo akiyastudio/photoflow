@@ -26,7 +26,7 @@ if not _LIGHTWEIGHT_STARTUP:
     import cv2
     import numpy as np
     from PIL import Image
-    from image_safety import load_array, open_validated
+    from image_safety import MAX_WORK_PIXELS, inspect_oriented_dimensions, load_array
     from identity_engine import CompactPairMetrics, IdentityRuntime, add_occlusion_estimates, constrained_clusters, ranked_similarity_pairs
 
 RTMDET_INPUT_SIZE = 640
@@ -799,8 +799,13 @@ def plan_work_tiles(items, image_width, image_height, edge=WORK_TILE_EDGE, overs
                 # dangerous than a small edge sliver. The retoucher must never
                 # mistake them for members whose edits will be merged back.
                 bystander_cost = sum(bystander_crop_penalty(coverage) for coverage in bystander_coverages)
+                output_scale = min(1.0, math.sqrt(MAX_WORK_PIXELS / max(1, crop[2] * crop[3])))
+                output_size = [max(1, int(math.floor(crop[2] * output_scale))), max(1, int(math.floor(crop[3] * output_scale)))]
+                while output_size[0] * output_size[1] > MAX_WORK_PIXELS:
+                    output_size[1 if output_size[1] >= output_size[0] else 0] -= 1
                 candidate_cache[key] = {
                     "indices": list(key), "box": box, "crop": crop,
+                    "outputSize": output_size,
                     "requiresManualCrop": requires_manual_crop,
                     "cropReason": crop_reason,
                     "fullFrame": crop[0] == 0 and crop[1] == 0 and crop[2] == image_width and crop[3] == image_height,
@@ -930,10 +935,12 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
         mask_file = mask_directory / f"group-{index:02d}-{task_id}.png"
         save_mask(mask_file, final_mask)
         crop_x, crop_y, crop_width, crop_height = tile["crop"]
+        output_width, output_height = tile["outputSize"]
         patch_path = delivery_root / f"{delivery_name}_人物{index:02d}.png"
-        Image.fromarray(rgb[crop_y:crop_y + crop_height, crop_x:crop_x + crop_width], "RGB").save(
-            patch_path, format="PNG", compress_level=3
-        )
+        patch_image = Image.fromarray(rgb[crop_y:crop_y + crop_height, crop_x:crop_x + crop_width], "RGB")
+        if patch_image.size != (output_width, output_height):
+            patch_image = patch_image.resize((output_width, output_height), Image.Resampling.LANCZOS, reducing_gap=3.0)
+        patch_image.save(patch_path, format="PNG", compress_level=3)
         member_payload = []
         for person_index, member in zip(tile["indices"], members):
             member_payload.append({
@@ -950,7 +957,7 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
         ))
         if tile.get("requiresManualCrop"):
             reason = "；".join(filter(None, (reason, tile.get("cropReason"))))
-        patch_rgb = rgb[crop_y:crop_y + crop_height, crop_x:crop_x + crop_width]
+        patch_rgb = np.asarray(patch_image)
         tasks.append({
             "id": task_id,
             "personIndex": index,
@@ -967,7 +974,8 @@ def generate_work_tasks(rgb, people, output_root, delivery_root, delivery_name, 
             "generation": {
                 "version": 2, "strategy": oversize_crop_mode,
                 "sourceWidth": width, "sourceHeight": height,
-                "workWidth": crop_width, "workHeight": crop_height,
+                "workWidth": output_width, "workHeight": output_height,
+                "sourceCropWidth": crop_width, "sourceCropHeight": crop_height,
                 "workDigest": hashlib.sha256(patch_rgb.tobytes()).hexdigest(),
                 "fullFrame": bool(tile.get("fullFrame")),
                 "sourceCoverage": round(float(tile.get("sourceCoverage", 0)), 6),
@@ -1562,10 +1570,11 @@ def identify_people(manifest_path, runtime=None, provider="auto"):
     model_directory = asset_path("models", "face_detection_yunet_2023mar.onnx").parent
     runtime = runtime or IdentityRuntime(model_directory, provider)
     image_shapes, descriptors = {}, []
+    paths = {os.path.abspath(item["path"]) for item in subjects}
+    dimensions_by_path = {image_path: inspect_oriented_dimensions(image_path, role="original") for image_path in paths}
     for item in subjects:
-        image_path = os.path.abspath(item["path"])
-        with open_validated(image_path, role="original") as source:
-            image_shapes[str(item.get("photoId") or "")] = (source.height, source.width)
+        width, height = dimensions_by_path[os.path.abspath(item["path"])]
+        image_shapes[str(item.get("photoId") or "")] = (height, width)
     add_occlusion_estimates(subjects, image_shapes)
     subjects_by_image = {}
     for item in subjects:

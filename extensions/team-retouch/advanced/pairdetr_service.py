@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import base64
-import hashlib
 import json
 import sys
 import tempfile
@@ -14,7 +13,9 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import torch
 import numpy as np
-from image_safety import open_validated
+from advanced_geometry import normalized_cxcywh_to_original_xyxy
+from checkpoint_lock import verify_checkpoint
+from image_safety import inspect_dimensions, open_validated
 from torchvision.ops import nms
 
 from transformers import AutoImageProcessor, DeformableDetrConfig
@@ -58,7 +59,7 @@ def load_runtime(args: argparse.Namespace):
     model = PairDetr(DeformableDetrForObjectDetection(config), 1500, 3)
 
     checkpoint_path = checkpoint_dir / "pytorch_model.bin"
-    verify_locked_checkpoint(checkpoint_path)
+    verify_checkpoint(checkpoint_path, "checkpoints/pairdetr/pytorch_model.bin")
     checkpoint = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     incompatible = model.load_state_dict(checkpoint, strict=False)
 
@@ -72,22 +73,9 @@ def load_runtime(args: argparse.Namespace):
     return model, processor, device, incompatible, forward
 
 
-def verify_locked_checkpoint(checkpoint_path: Path):
-    lock_path = Path.home() / "model-lab/release-locks/checkpoints.sha256"
-    if not lock_path.is_file():
-        raise RuntimeError("Reviewed checkpoint SHA-256 lock is missing")
-    expected = next((line.split()[0].lower() for line in lock_path.read_text(encoding="utf-8").splitlines() if line.strip() and line.split()[-1].lstrip("*").endswith(checkpoint_path.name)), "")
-    if len(expected) != 64:
-        raise RuntimeError(f"Checkpoint SHA-256 is not locked: {checkpoint_path.name}")
-    digest = hashlib.sha256()
-    with checkpoint_path.open("rb") as source:
-        for chunk in iter(lambda: source.read(8 * 1024 * 1024), b""): digest.update(chunk)
-    if digest.hexdigest() != expected:
-        raise RuntimeError(f"Checkpoint SHA-256 mismatch: {checkpoint_path.name}")
-
-
 def infer_image(runtime, image_path: Path, args: argparse.Namespace):
     model, processor, device, incompatible, forward = runtime
+    original_width, original_height = inspect_dimensions(image_path, role="original")
     with open_validated(image_path, role="original", mode="RGB", max_edge=args.longest_edge) as opened:
         image = opened.copy()
     inputs = processor(images=image, return_tensors="pt")
@@ -128,38 +116,21 @@ def infer_image(runtime, image_path: Path, args: argparse.Namespace):
     xyxy = xyxy[keep]
     selected_faces = selected_faces[keep]
     selected_scores = selected_scores[keep]
-    scale = torch.tensor(
-        [image.width, image.height, image.width, image.height],
-        device=xyxy.device,
-    )
-    xyxy = (xyxy * scale).clamp_min(0)
-    xyxy[:, 0] = xyxy[:, 0].clamp_max(image.width - 1)
-    xyxy[:, 2] = xyxy[:, 2].clamp_max(image.width - 1)
-    xyxy[:, 1] = xyxy[:, 1].clamp_max(image.height - 1)
-    xyxy[:, 3] = xyxy[:, 3].clamp_max(image.height - 1)
-    face_xyxy = torch.empty_like(selected_faces)
-    face_xyxy[:, 0] = selected_faces[:, 0] - selected_faces[:, 2] / 2
-    face_xyxy[:, 1] = selected_faces[:, 1] - selected_faces[:, 3] / 2
-    face_xyxy[:, 2] = selected_faces[:, 0] + selected_faces[:, 2] / 2
-    face_xyxy[:, 3] = selected_faces[:, 1] + selected_faces[:, 3] / 2
-    face_xyxy = face_xyxy * scale
-    face_xyxy[:, 0] = face_xyxy[:, 0].clamp(0, image.width - 1)
-    face_xyxy[:, 2] = face_xyxy[:, 2].clamp(0, image.width - 1)
-    face_xyxy[:, 1] = face_xyxy[:, 1].clamp(0, image.height - 1)
-    face_xyxy[:, 3] = face_xyxy[:, 3].clamp(0, image.height - 1)
     prompt_boxes = [
         {
-            "box_xyxy": [round(float(value), 2) for value in box],
-            "face_box_xyxy": ([round(float(value), 2) for value in face]
+            "box_xyxy": [round(value, 2) for value in normalized_cxcywh_to_original_xyxy(box, original_width, original_height)],
+            "face_box_xyxy": ([round(value, 2) for value in normalized_cxcywh_to_original_xyxy(face, original_width, original_height)]
                               if bool(torch.isfinite(face).all()) else None),
             "pair_score": round(float(score), 6),
         }
-        for box, face, score in zip(xyxy.cpu(), face_xyxy.cpu(), selected_scores.cpu())
+        for box, face, score in zip(selected_boxes[keep].cpu(), selected_faces.cpu(), selected_scores.cpu())
     ]
     report = {
         "device": torch.cuda.get_device_name(device),
         "torch": torch.__version__,
         "input_shape": list(pixel_values.shape),
+        "original_image_size": [original_width, original_height],
+        "proxy_image_size": [image.width, image.height],
         "logits_shape": list(logits.shape),
         "boxes_shape": list(boxes.shape),
         "finite_logits": bool(torch.isfinite(logits).all().item()),
@@ -182,7 +153,7 @@ def infer_image(runtime, image_path: Path, args: argparse.Namespace):
         raise RuntimeError("PairDETR produced non-finite outputs")
     return report, {
         "image": str(image_path),
-        "image_size": [image.width, image.height],
+        "image_size": [original_width, original_height],
         "boxes": prompt_boxes,
     }
 

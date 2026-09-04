@@ -56,6 +56,13 @@ def inspect_dimensions(path, *, role="original", peak_bytes_per_pixel=DEFAULT_PE
         return validate_dimensions(source.width, source.height, role=role, peak_bytes_per_pixel=peak_bytes_per_pixel)
 
 
+def inspect_oriented_dimensions(path, *, role="original", peak_bytes_per_pixel=DEFAULT_PEAK_BYTES_PER_PIXEL):
+    with Image.open(Path(path)) as source:
+        width, height = validate_dimensions(source.width, source.height, role=role, peak_bytes_per_pixel=peak_bytes_per_pixel)
+        orientation = int(source.getexif().get(274, 1))
+        return (height, width) if orientation in (5, 6, 7, 8) else (width, height)
+
+
 @contextlib.contextmanager
 def open_validated(path, *, role="original", mode=None, max_edge=None, peak_bytes_per_pixel=DEFAULT_PEAK_BYTES_PER_PIXEL):
     with Image.open(Path(path)) as source:
