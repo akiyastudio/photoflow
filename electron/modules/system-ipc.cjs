@@ -437,17 +437,21 @@ const registerSystemIpc = context => {
     for (const batch of batchesByCleanupBudget(targets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) { const results = await componentCleanupPublicationService.inspectPathsBatch(batch); if (results.length !== batch.length || results.some(item => !item?.success || !item.identity)) throw new Error('原生批量身份检查结果不完整'); batch.forEach((target, index) => identities.set(target, results[index].identity)); }
     return { rootIdentity: identities.get(isolatedPath), entries: proof.entries.map(entry => ({ path: entry.path, identity: identities.get(path.join(isolatedPath, ...entry.path.split('/'))) })) };
   };
-  const deleteComponentCleanupSidecar = async ({ path: sidecarPath, expectedContent }) => {
+  const captureComponentCleanupSidecars = async items => Promise.all(items.map(async item => {
+    const expected = Buffer.from(item.expectedContent); const expectedSha256 = crypto.createHash('sha256').update(expected).digest('hex');
+    const handle = await fs.promises.open(item.path, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+    try { const stat = await handle.stat(); const native = await componentCleanupPublicationService.inspectPath(item.path); const hash = crypto.createHash('sha256'); for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk); const linked = await fs.promises.lstat(item.path); if (!native?.success || !native.identity || stat.size !== expected.length || hash.digest('hex') !== expectedSha256 || linked.dev !== stat.dev || linked.ino !== stat.ino) throw new Error('组件清理 sidecar prepared identity 捕获失败'); return { path: item.path, role: item.role, size: expected.length, sha256: expectedSha256, nativeIdentity: native.identity }; }
+    finally { await handle.close().catch(() => undefined); }
+  }));
+  const deleteComponentCleanupSidecar = async ({ path: sidecarPath, size, sha256, nativeIdentity }) => {
     if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定删除服务不可用');
-    const expected = Buffer.from(expectedContent, 'utf8'); const expectedSha256 = crypto.createHash('sha256').update(expected).digest('hex');
     const handle = await fs.promises.open(sidecarPath, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
     try {
-      const stat = await handle.stat(); if (!stat.isFile() || stat.size !== expected.length) throw new Error('组件清理 sidecar 大小与 immutable proof 不一致');
-      const native = await componentCleanupPublicationService.inspectPath(sidecarPath); if (!native?.success || !native.identity) throw new Error('组件清理 sidecar 原生身份检查不完整');
+      const stat = await handle.stat(); if (!stat.isFile() || stat.size !== size) throw new Error('组件清理 sidecar 大小与 immutable proof 不一致');
       const hash = crypto.createHash('sha256'); for await (const chunk of handle.createReadStream({ autoClose: false, start: 0 })) hash.update(chunk);
       const linked = await fs.promises.lstat(sidecarPath); const held = await handle.stat();
-      if (linked.isSymbolicLink() || linked.dev !== held.dev || linked.ino !== held.ino || linked.size !== held.size || hash.digest('hex') !== expectedSha256) throw new Error('组件清理 sidecar 与 immutable proof 不一致');
-      const deleted = await componentCleanupPublicationService.compareDeleteFile({ target: sidecarPath, sha256: expectedSha256, size: expected.length, identity: native.identity });
+      if (linked.isSymbolicLink() || linked.dev !== held.dev || linked.ino !== held.ino || linked.size !== held.size || hash.digest('hex') !== sha256) throw new Error('组件清理 sidecar 与 immutable proof 不一致');
+      const deleted = await componentCleanupPublicationService.compareDeleteFile({ target: sidecarPath, sha256, size, identity: nativeIdentity });
       if (!deleted?.success || deleted.deleted !== true || deleted.outcomeUnknown) throw new Error('组件清理 sidecar 对象身份绑定删除未完全提交');
     } finally { await handle.close().catch(() => undefined); }
   };
@@ -690,7 +694,7 @@ const registerSystemIpc = context => {
       const failures = [];
       const dataCleanupComplete = sourceTask?.metadata?.dataCleanupComplete === true;
       if (!dataCleanupComplete) {
-        for (const target of targets) try { await cleanupOwnedComponentPath(target, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation }); }
+        for (const target of targets) try { await cleanupOwnedComponentPath(target, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation, prepareSidecars: captureComponentCleanupSidecars, persistPrepared: async () => { task?.report(20, '组件清理 prepared receipt 已生成', { targets, cleanupPrepared: true }); return backgroundTasks?.flush?.() === true; } }); }
         catch (error) { const updated = error.cleanupPendingReceipts?.[0]; if (updated) Object.assign(target, updated); task?.report(10, updated ? '部分清理失败，已保存剩余内容收据' : '清理失败，已停止自动处理', { targets }); failures.push({ target, error }); writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) }); }
         if (failures.length) throw Object.assign(new Error(`仍有 ${failures.length} 个系统暂存路径等待清理`), { cleanupPendingPaths: failures.map(item => item.target.path), cleanupPendingReceipts: failures.map(item => item.target) });
         task?.report(99, '数据清理完成，正在持久化完成状态', { targets, dataCleanupComplete: true });
