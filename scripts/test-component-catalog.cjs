@@ -61,6 +61,13 @@ try {
   assert.strictEqual(status.status, 'pending-install');
   assert.strictEqual(status.integrityStatus, 'unsigned');
   assert.strictEqual(registry.resolvePackage('third-party-tool').packagePath, archive, 'unknown valid packages are installable without a static allowlist entry');
+  const olderArchive = path.join(componentRoot, 'older-version.zip');
+  writeZip(olderArchive, { 'component.json': JSON.stringify(manifest('1.0.0')), 'tool.exe': 'binary' });
+  assert.strictEqual(registry.resolvePackage('third-party-tool').packageVersion, '2.0.0', 'same-spelling package IDs retain highest-version selection instead of becoming a false collision');
+  const incompatibleNewerArchive = path.join(componentRoot, 'incompatible-newer-version.zip');
+  writeZip(incompatibleNewerArchive, { 'component.json': JSON.stringify({ ...manifest('3.0.0'), platforms: ['linux'] }), 'tool.exe': 'binary' });
+  assert.strictEqual(registry.resolvePackage('third-party-tool').packageVersion, '2.0.0', 'a compatible older package wins over an incompatible newer package with the same exact ID');
+  fs.unlinkSync(olderArchive); fs.unlinkSync(incompatibleNewerArchive);
 
   const installed = path.join(componentRoot, 'third-party-tool', 'runtime');
   fs.mkdirSync(installed, { recursive: true });

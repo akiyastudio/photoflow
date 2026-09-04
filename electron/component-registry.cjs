@@ -355,11 +355,11 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
   const inspectedDevelopmentComponents = () => {
     const components = developmentComponents();
     if (inspectedDevelopmentCache.components === components) return inspectedDevelopmentCache.inspected;
-    const foldCounts = new Map();
-    for (const component of components) { const folded = foldedComponentId(component.manifest?.id ?? component.id); if (folded) foldCounts.set(folded, (foldCounts.get(folded) || 0) + 1); }
+    const foldSpellings = new Map();
+    for (const component of components) { const rawId = component.manifest?.id ?? component.id; const folded = foldedComponentId(rawId); if (folded) { const spellings = foldSpellings.get(folded) || new Set(); spellings.add(rawId); foldSpellings.set(folded, spellings); } }
     const inspected = components.map(component => {
       const folded = foldedComponentId(component.manifest?.id ?? component.id);
-      return inspectDevelopment(folded && foldCounts.get(folded) > 1 ? { ...component, error: `开发组件 ID 存在大小写折叠冲突：${folded}` } : component);
+      return inspectDevelopment(folded && foldSpellings.get(folded)?.size > 1 ? { ...component, error: `开发组件 ID 存在大小写折叠冲突：${folded}` } : component);
     }).filter(Boolean);
     inspectedDevelopmentCache = { components, inspected };
     return inspected;
@@ -368,14 +368,14 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     const byId = new Map();
     for (const root of roots) {
       let entries = []; try { entries = fs.readdirSync(root.path, { withFileTypes: true }); } catch { continue; }
-      const foldCounts = new Map();
-      for (const entry of entries) { const folded = entry.isDirectory() ? foldedComponentId(entry.name) : ''; if (folded) foldCounts.set(folded, (foldCounts.get(folded) || 0) + 1); }
+      const foldSpellings = new Map();
+      for (const entry of entries) { const folded = entry.isDirectory() ? foldedComponentId(entry.name) : ''; if (folded) { const spellings = foldSpellings.get(folded) || new Set(); spellings.add(entry.name); foldSpellings.set(folded, spellings); } }
       for (const entry of entries) {
         if (!entry.isDirectory() || !CASE_INSENSITIVE_COMPONENT_ID.test(entry.name) || entry.name.startsWith('.')) continue;
         const container = path.join(root.path, entry.name); const runtime = path.join(container, 'runtime');
         const componentRoot = fs.existsSync(path.join(runtime, 'component.json')) ? runtime : container;
         const folded = foldedComponentId(entry.name);
-        if (foldCounts.get(folded) > 1) { const id = syntheticInvalidId(entry.name); byId.set(id, { id, name: entry.name, description: '', capability: '', capabilities: [], installed: true, compatible: false, enabled: false, version: '', path: componentRoot, source: root.source, sizeBytes: 0, status: 'invalid', integrityStatus: 'invalid', error: `组件目录 ID 存在大小写折叠冲突：${folded}` }); continue; }
+        if (foldSpellings.get(folded)?.size > 1) { const id = syntheticInvalidId(entry.name); byId.set(id, { id, name: entry.name, description: '', capability: '', capabilities: [], installed: true, compatible: false, enabled: false, version: '', path: componentRoot, source: root.source, sizeBytes: 0, status: 'invalid', integrityStatus: 'invalid', error: `组件目录 ID 存在大小写折叠冲突：${folded}` }); continue; }
         const inspected = inspectRoot(componentRoot, root.source, entry.name);
         if (inspected && !byId.has(inspected.id)) byId.set(inspected.id, withEnablementState(inspected));
       }
@@ -390,10 +390,10 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
   const packageComponents = () => {
     const byId = new Map(); let entries = [];
     try { entries = fs.readdirSync(installRoot, { withFileTypes: true }); } catch { return byId; }
-    const packageIdCounts = new Map();
+    const packageIdSpellings = new Map();
     for (const entry of entries) {
       if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.zip') continue;
-      try { const rawId = readComponentPackageManifest(path.join(installRoot, entry.name)).manifest?.id; const folded = foldedComponentId(rawId); if (folded) packageIdCounts.set(folded, (packageIdCounts.get(folded) || 0) + 1); } catch { /* Reported by the normal inspection pass. */ }
+      try { const rawId = readComponentPackageManifest(path.join(installRoot, entry.name)).manifest?.id; const folded = foldedComponentId(rawId); if (folded) { const spellings = packageIdSpellings.get(folded) || new Set(); spellings.add(rawId); packageIdSpellings.set(folded, spellings); } } catch { /* Reported by the normal inspection pass. */ }
     }
     for (const entry of entries) {
       if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.zip') continue;
@@ -401,7 +401,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
       try {
         const packageManifest = readComponentPackageManifest(archivePath);
         ({ manifest } = packageManifest);
-        const folded = foldedComponentId(manifest?.id); if (folded && packageIdCounts.get(folded) > 1) throw new Error(`组件包 ID 存在大小写折叠冲突：${folded}`);
+        const folded = foldedComponentId(manifest?.id); if (folded && packageIdSpellings.get(folded)?.size > 1) throw new Error(`组件包 ID 存在大小写折叠冲突：${folded}`);
         const identity = manifestIdentity(manifest, COMPONENT_DEFINITIONS[manifest.id]); if (!COMPONENT_ID.test(identity.id)) throw new Error('组件 ID 缺失或格式无效');
         const definition = definitionFor(identity.id, manifest);
         const pinnedVersionError = definition.integrityManifest && String(manifest.version) !== String(definition.version) ? `组件版本不兼容：需要 ${definition.version}，安装包为 ${manifest.version}` : '';

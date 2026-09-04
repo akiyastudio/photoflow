@@ -44,6 +44,12 @@ try {
   registry.setComponentEnabled('sample-dev', true);
   assert.equal(host.resolve('sample-dev').componentId, 'sample-dev', 're-enabling restores development Host discovery');
 
+  const duplicateDevelopmentRoot = path.join(sandbox, 'duplicate-components');
+  fs.mkdirSync(duplicateDevelopmentRoot); fs.cpSync(validRoot, path.join(duplicateDevelopmentRoot, 'sample-dev-copy'), { recursive: true });
+  const duplicateRegistry = createComponentRegistry({ projectRoot, userComponentRoot: path.join(sandbox, 'duplicate-installed'), isPackaged: false, environment: { PHOTOFLOW_COMPONENT_DEV_ROOTS: `${developmentRoot}${path.delimiter}${duplicateDevelopmentRoot}`, PHOTOFLOW_COMPONENT_DEV_DEFAULTS: '0' } });
+  assert.equal(duplicateRegistry.resolve('sample-dev').id, 'sample-dev', 'two development sources with the same exact ID preserve overlay semantics and are not a case-folding collision');
+  assert(!/大小写折叠冲突/.test(duplicateRegistry.inspect('sample-dev').error || ''));
+
   const directExecutableRoot = writeFixture('direct-executable', ({ packageManifest }) => {
     packageManifest.photoflowComponent.development.runtime = { command: 'runtime.bin' };
   });
