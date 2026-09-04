@@ -769,6 +769,12 @@ const finalizeComponentCleanupProof = async (receipt, { dataCleanupCompletePersi
   if (!intent) { if (dataCleanupCompletePersisted && !proofText && !verified) return true; throw new Error('组件清理完成证明缺失'); }
   if (intent !== expectedIntent) throw new Error('组件清理完成证明无效，拒绝回收 sidecar');
   if (typeof deleteSidecar !== 'function') throw cleanupBoundaryError('COMPONENT_CLEANUP_NATIVE_REQUIRED', '组件清理 sidecar 需要对象身份绑定删除服务');
+  const deletePreparedSidecar = async sidecar => {
+    const linked = await fs.promises.lstat(sidecar.path).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
+    if (!linked) { if (dataCleanupCompletePersisted) return false; throw new Error('组件清理 sidecar 在未持久化完成前缺失'); }
+    await deleteSidecar(sidecar);
+    return true;
+  };
   if (proofText) {
     const proofRecord = await readComponentCleanupProof(paths, receipt);
     const binding = proofRecord.binding;
@@ -778,14 +784,14 @@ const finalizeComponentCleanupProof = async (receipt, { dataCleanupCompletePersi
     const proofReceipt = receipt.sidecarReceipts.find(item => item.path === paths.proofPath);
     if (verified && (!verifiedReceipt || verifiedReceipt.size !== Buffer.byteLength(expectedVerified) || verifiedReceipt.sha256 !== crypto.createHash('sha256').update(expectedVerified).digest('hex'))) throw new Error('组件清理 verified identity receipt 缺失');
     if (proofText && (!proofReceipt || proofReceipt.size !== Buffer.byteLength(proofText) || proofReceipt.sha256 !== crypto.createHash('sha256').update(proofText).digest('hex'))) throw new Error('组件清理 proof identity receipt 缺失');
-    if (verified) await deleteSidecar(verifiedReceipt);
+    if (verified) await deletePreparedSidecar(verifiedReceipt);
     else if (!dataCleanupCompletePersisted) throw new Error('组件清理 verified marker 缺失且完成状态未持久化');
-    await deleteSidecar(proofReceipt);
+    await deletePreparedSidecar(proofReceipt);
   } else if (verified) throw new Error('组件清理 proof 缺失但 verified marker 仍存在');
-  for (const sidecar of receipt.sidecarReceipts.filter(item => ![paths.intentPath, paths.proofPath, paths.verifiedPath].includes(item.path))) await deleteSidecar(sidecar);
+  for (const sidecar of receipt.sidecarReceipts.filter(item => ![paths.intentPath, paths.proofPath, paths.verifiedPath].includes(item.path))) await deletePreparedSidecar(sidecar);
   const intentReceipt = receipt.sidecarReceipts.find(item => item.path === paths.intentPath);
   if (!intentReceipt || intentReceipt.size !== Buffer.byteLength(expectedIntent) || intentReceipt.sha256 !== crypto.createHash('sha256').update(expectedIntent).digest('hex')) throw new Error('组件清理 intent identity receipt 缺失');
-  await deleteSidecar(intentReceipt);
+  await deletePreparedSidecar(intentReceipt);
   return true;
 };
 const createComponentCleanupOrchestrator = ({ deleteOwned, deleteSidecar, captureNativeProof, prepareSidecars, persistPrepared, persistPhase = async () => true } = {}) => ({
