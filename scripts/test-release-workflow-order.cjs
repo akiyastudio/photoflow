@@ -19,6 +19,8 @@ const publishSource = fs.readFileSync(path.join(root, 'scripts', 'publish-releas
 assert(publishSource.indexOf('runLegalReleaseReadyGate(installerPath)') < publishSource.indexOf('generate-delivery-manifest.cjs'), 'publish must recheck approval before delivery metadata');
 assert(publishSource.indexOf('generate-delivery-manifest.cjs') < publishSource.indexOf('let token = String(process.env.PHOTOFLOW_ADMIN_TOKEN'), 'publish must validate all artifacts before reading a token or using the network');
 assert(publishSource.includes('assertSourceIdentity(installerPath, installerIdentity)') && publishSource.includes('setup.sha256') && publishSource.includes('approval.installerSha256'), 'publish must fence installer identity and equate approved and manifested hashes');
+const releaseJsonSource = fs.readFileSync(path.join(root, 'scripts', 'generate-release-json.cjs'), 'utf8');
+assert(releaseJsonSource.includes('captureArtifactIdentity(installerPath)') && releaseJsonSource.indexOf('assertSourceIdentity(installerPath, installerIdentity)') < releaseJsonSource.indexOf('await publishRelease(record)'), 'release record publishing must retain the approved installer identity fence through network publication');
 const deliverySource = fs.readFileSync(path.join(root, 'scripts', 'generate-delivery-manifest.cjs'), 'utf8');
 assert(deliverySource.indexOf('runQualityGate();') < deliverySource.indexOf('validateQualityReceipt('), 'an informational quality receipt must never skip the real quality gate');
 assert(deliverySource.indexOf('verifyComponentPackageReceipt(component.path') > deliverySource.indexOf('runQualityGate();'), 'component ZIPs must be fully verified after the real quality gate');

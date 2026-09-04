@@ -1,10 +1,10 @@
-const crypto = require('crypto');
 const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const readline = require('readline/promises');
 const { stdin, stdout } = require('process');
 const releaseConfig = require('./release-config.cjs');
+const { hashStableArtifact, captureArtifactIdentity, assertSourceIdentity } = require('./verify-component-packages.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const releaseRoot = path.join(repositoryRoot, 'artifacts', 'installers');
@@ -38,14 +38,6 @@ const runLegalReleaseReadyGate = installerPath => {
   if (result.error) throw result.error;
   if (result.status !== 0) throw new Error('法律发布批准严格门禁未通过，未生成发布记录且未执行网络操作');
 };
-
-const sha256File = filePath => new Promise((resolve, reject) => {
-  const hash = crypto.createHash('sha256');
-  const stream = fs.createReadStream(filePath);
-  stream.on('error', reject);
-  stream.on('data', chunk => hash.update(chunk));
-  stream.on('end', () => resolve(hash.digest('hex')));
-});
 
 const findInstaller = version => {
   if (!fs.existsSync(releaseRoot)) throw new Error(`安装包目录不存在：${releaseRoot}`);
@@ -103,7 +95,9 @@ const run = async () => {
   try {
     const installerPath = path.resolve(args.installer || findInstaller(version));
     if (!fs.statSync(installerPath).isFile()) throw new Error(`安装包不存在：${installerPath}`);
+    const installerIdentity = captureArtifactIdentity(installerPath);
     if (requiresReleaseApproval) runLegalReleaseReadyGate(installerPath);
+    assertSourceIdentity(installerPath, installerIdentity);
     const downloadUrl = String(args.url || releaseConfig.downloadUrl || '').trim();
     if (!downloadUrl) throw new Error('scripts/release-config.cjs 中没有配置固定下载链接');
     let parsedUrl;
@@ -116,7 +110,9 @@ const run = async () => {
     if (notes.length > 4000) throw new Error('更新说明不能超过 4000 个字符');
 
     const mandatory = booleanValue(args.mandatory, false);
-    const sha256 = await sha256File(installerPath);
+    const installerDigest = await hashStableArtifact(installerPath);
+    assertSourceIdentity(installerPath, installerIdentity);
+    const sha256 = installerDigest.sha256;
     const versionCode = versionParts[0] * 10_000 + versionParts[1] * 100 + versionParts[2];
     const record = {
       channel: 'stable',
@@ -138,7 +134,10 @@ const run = async () => {
     JSON.parse(fs.readFileSync(temporaryPath, 'utf8'));
     fs.renameSync(temporaryPath, outputPath);
 
-    if (shouldPublish) await publishRelease(record);
+    if (shouldPublish) {
+      assertSourceIdentity(installerPath, installerIdentity);
+      await publishRelease(record);
+    }
 
     console.log('\n发布 JSON 已生成：');
     console.log(outputPath);
