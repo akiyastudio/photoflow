@@ -6,7 +6,7 @@ import zlib from 'node:zlib';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, snapshotComponentTrust, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
+const { confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, prepareSafeComponentInstallContainer, rollbackComponentPublication, snapshotComponentTrust, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
 const { captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
 
 const crc32 = buffer => {
@@ -95,7 +95,7 @@ const preloadSource = fs.readFileSync(new URL('../electron/preload.cjs', import.
 const mainSource = fs.readFileSync(new URL('../electron/modules/system-ipc.cjs', import.meta.url), 'utf8');
 assert.match(preloadSource, /installComponent: request => ipcRenderer\.invoke\('components-install', request\)/);
 assert.match(mainSource, /snapshotComponentArchive\(archivePath, packageSnapshotPath\)[\s\S]*inspectComponentArchive\(packageSnapshotPath\)[\s\S]*confirmComponentPackageInstall[\s\S]*if \(!confirmed\)[\s\S]*extractComponentArchive\(snapshotPackage, packageStagePath\)/);
-assert.match(mainSource, /captureComponentTreeIdentity[\s\S]*verifyComponentTreeIdentity\(componentRoot[\s\S]*enterComponentInstallTransition[\s\S]*ensureInstallRoot/);
+assert.match(mainSource, /captureComponentTreeIdentity[\s\S]*verifyComponentTreeIdentity\(componentRoot[\s\S]*enterComponentInstallTransition[\s\S]*prepareSafeComponentInstallContainer/);
 assert.match(mainSource, /fs\.promises\.cp[\s\S]*verifyComponentTreeIdentity\(stagingPath[\s\S]*rename\(stagingPath, destination\)[\s\S]*verifyComponentTreeIdentity\(destination/);
 assert.match(mainSource, /if \(!confirmed\) return \{ success: false, cancelled: true \}/);
 assert.match(mainSource, /if \(packageSnapshotPath\) await fs\.promises\.rm\(packageSnapshotPath/);
@@ -157,6 +157,27 @@ try {
   const bytes = fs.readFileSync(corrupt); bytes[30 + Buffer.byteLength('component.json') + Buffer.byteLength(manifest('corrupt')) + 30 + Buffer.byteLength('worker.cjs')] ^= 0xff; fs.writeFileSync(corrupt, bytes);
   const corruptInspection = inspectComponentArchive(corrupt);
   await assert.rejects(extractComponentArchive(corruptInspection, path.join(temporaryRoot, 'corrupt-out')), /CRC-32/);
+
+  const raceRoot = path.join(temporaryRoot, 'race-install'); const raceContainer = path.join(raceRoot, 'third-party.tool');
+  const raceDestination = path.join(raceContainer, 'runtime'); const raceBackup = path.join(raceRoot, '.backup'); const raceStaging = path.join(raceRoot, '.staging');
+  fs.mkdirSync(raceContainer, { recursive: true });
+  const safeLocation = await prepareSafeComponentInstallContainer({ fs, path, installRoot: raceRoot, componentId: 'third-party.tool' });
+  assert.equal(safeLocation.container, raceContainer);
+  fs.mkdirSync(raceBackup); fs.writeFileSync(path.join(raceBackup, 'old.txt'), 'old runtime');
+  const backupStat = fs.lstatSync(raceBackup); const backupNodeIdentity = { dev: backupStat.dev, ino: backupStat.ino, birthtimeMs: backupStat.birthtimeMs };
+  const backupTreeIdentity = await captureComponentTreeIdentity(raceBackup);
+  fs.mkdirSync(raceStaging); fs.writeFileSync(path.join(raceStaging, 'new.txt'), 'new runtime');
+  fs.mkdirSync(raceDestination); fs.writeFileSync(path.join(raceDestination, 'competitor.txt'), 'do not delete');
+  await assert.rejects(fs.promises.rename(raceStaging, raceDestination));
+  await assert.rejects(rollbackComponentPublication({ fs, destination: raceDestination, publishedByThisOperation: false, publishedNodeIdentity: null, publishedTreeIdentity: [], backupPath: raceBackup, backupNodeIdentity, backupTreeIdentity }), /其他操作占用/);
+  assert.equal(fs.readFileSync(path.join(raceDestination, 'competitor.txt'), 'utf8'), 'do not delete', 'a destination created before rename is never deleted by rollback');
+  assert.equal(fs.readFileSync(path.join(raceBackup, 'old.txt'), 'utf8'), 'old runtime', 'the captured backup is preserved when a competitor owns destination');
+
+  const junctionRoot = path.join(temporaryRoot, 'junction-install'); const external = path.join(temporaryRoot, 'external-target');
+  fs.mkdirSync(junctionRoot); fs.mkdirSync(external); fs.writeFileSync(path.join(external, 'sentinel.txt'), 'outside');
+  fs.symlinkSync(external, path.join(junctionRoot, 'third-party.tool'), process.platform === 'win32' ? 'junction' : 'dir');
+  await assert.rejects(prepareSafeComponentInstallContainer({ fs, path, installRoot: junctionRoot, componentId: 'third-party.tool' }), /链接|真实路径/);
+  assert.equal(fs.readFileSync(path.join(external, 'sentinel.txt'), 'utf8'), 'outside', 'a junction container cannot redirect installation or cleanup outside the install root');
 } finally { fs.rmSync(temporaryRoot, { recursive: true, force: true }); }
 
 console.log('Component install trust-boundary tests passed');

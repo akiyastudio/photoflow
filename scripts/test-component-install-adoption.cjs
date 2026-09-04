@@ -4,6 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { finalizeComponentRuntimeInstall, transitionComponentEnabled } = require('../electron/modules/system-ipc.cjs');
+const { captureComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
 const { createConfigMutationService } = require('../electron/services/config-mutation-service.cjs');
 const { createComponentDataAdoptionPolicy } = require('../electron/compatibility/component-data-adoption-policy.cjs');
 
@@ -35,7 +36,11 @@ const configMutationService = createConfigMutationService({
     componentServiceManager: { stop: async (_id, reason) => { stops.push(reason); } },
     invalidateComponentStatus: () => { invalidations += 1; },
   };
-  await assert.rejects(finalizeComponentRuntimeInstall({ componentId, destination, backupPath, fs, configMutationService, ...lifecycle }), /injected adoption write failure/);
+  const nodeIdentity = target => { const stat = fs.lstatSync(target); return { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }; };
+  await assert.rejects(finalizeComponentRuntimeInstall({
+    componentId, destination, destinationNodeIdentity: nodeIdentity(destination), destinationTreeIdentity: await captureComponentTreeIdentity(destination),
+    backupPath, backupNodeIdentity: nodeIdentity(backupPath), backupTreeIdentity: await captureComponentTreeIdentity(backupPath), fs, configMutationService, ...lifecycle,
+  }), /injected adoption write failure/);
   assert.equal(fs.readFileSync(path.join(destination, 'runtime.txt'), 'utf8'), 'old-runtime', 'an adoption failure restores the prior runtime');
   assert.equal(fs.existsSync(backupPath), false, 'a successfully restored backup no longer remains in the staging location');
   assert.deepEqual(JSON.parse(fs.readFileSync(configPath, 'utf8')), legacyConfig, 'the failed config adoption rolls back atomically');
@@ -44,7 +49,9 @@ const configMutationService = createConfigMutationService({
 
   const firstInstallDestination = path.join(root, 'first-install', 'runtime');
   fs.mkdirSync(firstInstallDestination, { recursive: true }); fs.writeFileSync(path.join(firstInstallDestination, 'runtime.txt'), 'new-runtime');
-  await assert.rejects(finalizeComponentRuntimeInstall({ componentId, destination: firstInstallDestination, fs, configMutationService, ...lifecycle }), /injected adoption write failure/);
+  await assert.rejects(finalizeComponentRuntimeInstall({
+    componentId, destination: firstInstallDestination, destinationNodeIdentity: nodeIdentity(firstInstallDestination), destinationTreeIdentity: await captureComponentTreeIdentity(firstInstallDestination), fs, configMutationService, ...lifecycle,
+  }), /injected adoption write failure/);
   assert.equal(fs.existsSync(firstInstallDestination), false, 'a failed first install removes the uncommitted runtime');
 
   let enabled = true; const transitionCalls = [];
