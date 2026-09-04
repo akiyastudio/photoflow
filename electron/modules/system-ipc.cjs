@@ -417,14 +417,18 @@ const registerSystemIpc = context => {
   if (!configMutationService?.mutate) throw new Error('System IPC requires the shared config mutation service');
   const lifecycleCoordinator = processSupervisor?.lifecycleCoordinator;
   const componentCleanupPublicationService = filePublicationService;
-  const deleteOwnedComponentIsolation = async ({ receipt, isolatedPath }) => {
+  const batchesByCleanupBudget = (items, measure, maxItems) => { const batches = []; let batch = []; let bytes = 0; for (const item of items) { const itemBytes = measure(item); if (itemBytes > 400 * 1024) throw new Error('单个组件清理路径超过原生清单预算'); if (batch.length && (batch.length >= maxItems || bytes + itemBytes > 400 * 1024)) { batches.push(batch); batch = []; bytes = 0; } batch.push(item); bytes += itemBytes; } if (batch.length) batches.push(batch); return batches; };
+  const captureNativeComponentCleanupProof = async ({ isolatedPath, proof }) => {
+    if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定删除服务不可用');
+    if (proof.kind === 'file') { const inspected = await componentCleanupPublicationService.inspectPath(isolatedPath); if (!inspected?.success || !inspected.identity) throw new Error('原生文件身份检查不完整'); return { rootIdentity: inspected.identity }; }
+    const targets = [isolatedPath, ...proof.entries.map(entry => path.join(isolatedPath, ...entry.path.split('/')))]; const entryIdentities = {};
+    for (const batch of batchesByCleanupBudget(targets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) { const results = await componentCleanupPublicationService.inspectPathsBatch(batch); if (results.length !== batch.length || results.some(item => !item?.success || !item.identity)) throw new Error('原生批量身份检查结果不完整'); batch.forEach((target, index) => { if (target !== isolatedPath) entryIdentities[path.relative(isolatedPath, target).replace(/\\/g, '/')] = results[index].identity; }); if (batch.includes(isolatedPath)) entryIdentities[''] = results[batch.indexOf(isolatedPath)].identity; }
+    return { rootIdentity: entryIdentities[''], entryIdentities };
+  };
+  const deleteOwnedComponentIsolation = async ({ receipt, isolatedPath, proof }) => {
     if (!componentCleanupPublicationService.nativeAvailable()) throw new Error('对象身份绑定删除服务不可用');
-    const batchesByBudget = (items, measure, maxItems) => { const batches = []; let batch = []; let bytes = 0; for (const item of items) { const itemBytes = measure(item); if (itemBytes > 400 * 1024) throw new Error('单个组件清理路径超过原生清单预算'); if (batch.length && (batch.length >= maxItems || bytes + itemBytes > 400 * 1024)) { batches.push(batch); batch = []; bytes = 0; } batch.push(item); bytes += itemBytes; } if (batch.length) batches.push(batch); return batches; };
     if (receipt.kind === 'file') {
-      const stat = await fs.promises.lstat(isolatedPath); const hash = crypto.createHash('sha256');
-      for await (const chunk of fs.createReadStream(isolatedPath)) hash.update(chunk);
-      const inspected = await componentCleanupPublicationService.inspectPath(isolatedPath);
-      const deleted = await componentCleanupPublicationService.compareDeleteFile({ target: isolatedPath, sha256: hash.digest('hex'), size: stat.size, identity: inspected.identity });
+      const deleted = await componentCleanupPublicationService.compareDeleteFile({ target: isolatedPath, sha256: proof.sha256, size: proof.size, identity: proof.native.rootIdentity });
       if (!deleted?.success || deleted.deleted !== true || deleted.outcomeUnknown) throw Object.assign(new Error('原生文件清理未完全提交'), { outcomeUnknown: Boolean(deleted?.outcomeUnknown) });
       return;
     }
@@ -433,23 +437,23 @@ const registerSystemIpc = context => {
     const absoluteFor = entry => entry.path ? path.join(isolatedPath, ...entry.path.split('/')) : isolatedPath;
     const volumeRoot = path.parse(isolatedPath).root;
     const anchorPaths = []; for (let current = isolatedPath; ; current = path.dirname(current)) { anchorPaths.unshift(current); if (current === volumeRoot) break; }
-    const identityByPath = new Map();
-    const inspectTargets = [...new Set([...anchorPaths, ...entries.map(absoluteFor)])];
-    for (const batchPaths of batchesByBudget(inspectTargets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) {
+    const identityByPath = new Map([[isolatedPath, proof.native.rootIdentity], ...tree.map(entry => [absoluteFor(entry), proof.native.entryIdentities[entry.path]])]);
+    const inspectTargets = anchorPaths.filter(target => target !== isolatedPath);
+    for (const batchPaths of batchesByCleanupBudget(inspectTargets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) {
       const inspected = await componentCleanupPublicationService.inspectPathsBatch(batchPaths);
       if (inspected.length !== batchPaths.length || inspected.some(item => !item?.success || !item.identity)) throw new Error('原生批量身份检查结果不完整');
       batchPaths.forEach((target, index) => identityByPath.set(target, inspected[index].identity));
     }
     const parentChainFor = target => { const chain = []; for (let current = path.dirname(target); ; current = path.dirname(current)) { chain.unshift({ path: current, identity: identityByPath.get(current) }); if (current === volumeRoot) break; } return chain; };
     const files = tree.filter(entry => entry.kind === 'file').map(entry => { const target = absoluteFor(entry); return { path: target, rootPath: volumeRoot, parentChain: parentChainFor(target), identity: identityByPath.get(target), size: entry.size, sha256: entry.sha256 }; });
-    for (const batch of batchesByBudget(files, item => Buffer.byteLength(JSON.stringify(item), 'utf8') * 2 + 128, 512)) {
+    for (const batch of batchesByCleanupBudget(files, item => Buffer.byteLength(JSON.stringify(item), 'utf8') * 2 + 128, 512)) {
       const results = await componentCleanupPublicationService.compareDeleteFilesBatch(batch);
       if (results.some(item => !item?.success || item.deleted !== true || item.outcomeUnknown)) throw Object.assign(new Error('原生批量文件清理未完全提交'), { outcomeUnknown: results.some(item => item?.outcomeUnknown) });
     }
     const directories = entries.filter(entry => entry.kind === 'directory').sort((a, b) => b.path.split('/').length - a.path.split('/').length);
     for (const depth of [...new Set(directories.map(entry => entry.path ? entry.path.split('/').length : 0))].sort((a, b) => b - a)) {
       const layer = directories.filter(entry => (entry.path ? entry.path.split('/').length : 0) === depth).map(entry => { const target = absoluteFor(entry); return { path: target, rootPath: volumeRoot, parentChain: parentChainFor(target), identity: identityByPath.get(target) }; });
-      for (const batch of batchesByBudget(layer, item => Buffer.byteLength(JSON.stringify(item), 'utf8') * 2 + 128, 512)) {
+      for (const batch of batchesByCleanupBudget(layer, item => Buffer.byteLength(JSON.stringify(item), 'utf8') * 2 + 128, 512)) {
         const results = await componentCleanupPublicationService.deleteDirectoriesBatch(batch);
         if (results.some(item => !item?.success || item.deleted !== true || item.outcomeUnknown)) throw Object.assign(new Error('原生批量目录清理未完全提交'), { outcomeUnknown: results.some(item => item?.outcomeUnknown) });
       }
@@ -658,7 +662,7 @@ const registerSystemIpc = context => {
       task?.report(10, title);
       const failures = [];
       for (const target of targets) try {
-        await cleanupOwnedComponentPath(target, { deleteOwned: deleteOwnedComponentIsolation });
+        await cleanupOwnedComponentPath(target, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation });
       } catch (error) {
         const updated = error.cleanupPendingReceipts?.[0];
         if (updated) Object.assign(target, updated);
