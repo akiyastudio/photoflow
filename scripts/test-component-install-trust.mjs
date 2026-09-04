@@ -116,6 +116,13 @@ promptDialog.showMessageBox = async (_window, options) => {
 };
 assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), true);
 assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: { hasWhere: () => false, hasUnconfirmedOwner: () => true }, dialog: promptDialog, mainWindow: {} }), true);
+const preloadSource = fs.readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8');
+const mainSource = fs.readFileSync(new URL('../electron/modules/system-ipc.cjs', import.meta.url), 'utf8');
+assert.match(preloadSource, /installComponent: request => ipcRenderer\.invoke\('components-install', request\)/);
+assert.match(mainSource, /snapshotComponentArchive\(archivePath, packageSnapshotPath,[\s\S]*inspectComponentArchive\(packageSnapshotPath,[\s\S]*confirmComponentPackageInstall[\s\S]*if \(!confirmed\)[\s\S]*extractComponentArchive\(snapshotPackage, packageStagePath,/);
+assert.match(mainSource, /confirmComponentPackageInstall[\s\S]*confirmComponentBackgroundStop[\s\S]*enterComponentInstallTransition[\s\S]*extractComponentArchive[\s\S]*captureComponentTreeIdentity/);
+assert.match(mainSource, /fs\.promises\.cp[\s\S]*verifyComponentTreeIdentity\(stagingPath[\s\S]*rename\(stagingPath, destination\)[\s\S]*verifyComponentTreeIdentity\(destination/);
+assert.match(mainSource, /if \(!confirmed\) return \{ success: false, cancelled: true \}/);
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'component-install-trust-'));
 try {
@@ -159,7 +166,7 @@ try {
 
   const bomb = path.join(temporaryRoot, 'bomb.zip');
   writeZip(bomb, Array.from({ length: 5 }, (_, index) => [`bomb/${index}.bin`, '', { declaredSize: 0xffffffff, declaredCompressedSize: 0 }]));
-  assert.throws(() => inspectComponentArchive(bomb), /展开大小超过安全上限/);
+  assert.throws(() => inspectComponentArchive(bomb), /ZIP64|展开大小超过安全上限/);
 
   const mismatch = path.join(temporaryRoot, 'mismatch.zip');
   writeZip(mismatch, [['component.json', manifest('mismatch'), { localMethod: 8 }], ['worker.cjs', 'ok']]);

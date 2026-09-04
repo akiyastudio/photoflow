@@ -5,7 +5,7 @@ const { componentDataRoot, createComponentLifecycleService } = require('../servi
 const { createComponentTransactionService, nodeIdentity: componentPathIdentity } = require('../services/component-transaction-service.cjs');
 const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
-const { assertAvailableDiskSpace, captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
+const { captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, reserveComponentInstallCapacity, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
 const { PLUGIN_DEFINITIONS } = require('../plugins/plugin-catalog.cjs');
 
 const normalizeSdImportAutoMove = value => value !== false;
@@ -236,14 +236,14 @@ const validateComponentInstallRequest = request => {
   if (typeof request.componentId !== 'string' || !COMPONENT_INSTALL_ID.test(request.componentId)) throw new TypeError('组件 ID 无效');
   return { componentId: request.componentId };
 };
-const confirmComponentPackageInstall = async ({ componentId, componentVersion, integrityStatus, dialog, mainWindow }) => {
+const confirmComponentPackageInstall = async ({ componentId, componentVersion, integrityStatus, packageFileName = '', packageSizeBytes = 0, packageSha256 = '', dialog, mainWindow }) => {
   if (integrityStatus === 'verified' || integrityStatus === 'pinned-unverified') return true;
   if (integrityStatus !== 'unsigned') throw new Error('组件包完整性状态无效，请刷新组件状态后重试');
   const response = await dialog.showMessageBox(mainWindow, {
     type: 'warning',
     title: `安装未验证来源的组件“${componentId}”？`,
     message: '这个组件包没有可由 PhotoFlow 验证的来源签名。',
-    detail: `组件 ID：${componentId}\n版本：${componentVersion}\n\n安装后，它的服务、生命周期脚本或可执行程序将以你的当前用户权限运行，可能读取或修改你有权访问的文件、连接网络或启动其他进程。仅在你信任安装包来源时继续。此确认只适用于本次安装的这个组件包。`,
+    detail: `组件 ID：${componentId}\n版本：${componentVersion}\n文件：${packageFileName || '未知'}\n字节数：${packageSizeBytes}\nSHA-256：${packageSha256 || '未知'}\n\n安装后，它的服务、生命周期脚本或可执行程序将以你的当前用户权限运行，可能读取或修改你有权访问的文件、连接网络或启动其他进程。仅在你信任安装包来源时继续。此确认只适用于本次安装的这个组件包快照。`,
     buttons: ['取消安装', '我信任来源，继续安装'],
     defaultId: 0,
     cancelId: 0,
@@ -922,16 +922,24 @@ const registerSystemIpc = context => {
   });
 
   const acquireComponentInstall = createComponentInstallAdmission();
-  ipcMain.handle('components-install', async (_event, request) => {
+  ipcMain.handle('components-install', async (event, request) => {
     let stagingPath = '';
     let packageStagePath = '';
     let packageSnapshotPath = '';
+    let packageSnapshotNodeIdentity = null;
+    let packageStageNodeIdentity = null;
+    let packageStageTreeIdentity = null;
     let componentId = '';
     let releaseInstall = null;
     let installTransitionLease = null;
     let capabilityBarrier = null;
     let stagingNodeIdentity = null;
     let componentTreeIdentity = null;
+    let capacityReservation = null;
+    let installVolumeReservation = null;
+    const installAbortController = new AbortController();
+    const abortInstall = () => installAbortController.abort();
+    event.sender?.once?.('destroyed', abortInstall);
     try {
       await componentTransactionReady;
       ({ componentId } = validateComponentInstallRequest(request));
@@ -943,17 +951,26 @@ const registerSystemIpc = context => {
       else releaseInstall = acquireComponentInstall(componentId);
       const discoveredPackage = pluginService.resolvePackage(componentId);
       const archivePath = discoveredPackage.packagePath;
+      const archiveStat = await fs.promises.lstat(archivePath);
+      if (!archiveStat.isFile() || archiveStat.isSymbolicLink()) throw new Error('组件包必须是普通文件且不能是链接');
+      capacityReservation = await reserveComponentInstallCapacity(app.getPath('temp'), archiveStat.size + 128 * 1024 * 1024);
+      const operation = { signal: installAbortController.signal, deadlineAt: Date.now() + 5 * 60 * 1000 };
       packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
       packageSnapshotPath = `${packageStagePath}.zip`;
-      const sourceIdentity = await snapshotComponentArchive(archivePath, packageSnapshotPath);
+      const sourceIdentity = await snapshotComponentArchive(archivePath, packageSnapshotPath, operation);
+      packageSnapshotNodeIdentity = directoryNodeIdentity(await fs.promises.lstat(packageSnapshotPath));
       const packageSizeBytes = sourceIdentity.size;
-      const snapshotPackage = inspectComponentArchive(packageSnapshotPath);
+      const snapshotPackage = inspectComponentArchive(packageSnapshotPath, { ...operation, inspectionToken: sourceIdentity.inspectionToken });
+      await capacityReservation.resize(packageSizeBytes + snapshotPackage.totalUncompressedBytes + 64 * 1024 * 1024);
+      installVolumeReservation = await reserveComponentInstallCapacity(pluginService.installRoot, snapshotPackage.totalUncompressedBytes + 128 * 1024 * 1024);
       const snapshotTrust = snapshotComponentTrust(componentId, snapshotPackage.manifest);
-      const confirmed = await confirmComponentPackageInstall({ ...snapshotTrust, dialog, mainWindow });
+      const confirmed = await confirmComponentPackageInstall({ ...snapshotTrust, packageFileName: path.basename(archivePath), packageSizeBytes, packageSha256: sourceIdentity.sha256, dialog, mainWindow });
       if (!confirmed) return { success: false, cancelled: true };
       if (!await confirmComponentBackgroundStop({ componentId, action: 'install', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return { success: false, cancelled: true };
       capabilityBarrier = await enterComponentInstallTransition({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests, transitionLease: installTransitionLease });
-      const extractedPackage = await extractComponentArchive(snapshotPackage, packageStagePath);
+      const extractedPackage = await extractComponentArchive(snapshotPackage, packageStagePath, operation);
+      packageStageNodeIdentity = await readDirectoryNodeIdentity(fs, packageStagePath, '组件包展开暂存目录');
+      packageStageTreeIdentity = await captureComponentTreeIdentity(packageStagePath, operation);
       const manifestDirectory = path.dirname(extractedPackage.manifestEntry);
       const componentRoot = path.resolve(packageStagePath, manifestDirectory === '.' ? '' : manifestDirectory);
       const stagedRelative = path.relative(packageStagePath, componentRoot);
@@ -981,7 +998,7 @@ const registerSystemIpc = context => {
       componentTreeIdentity = await captureComponentTreeIdentity(componentRoot);
       await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity);
       const componentSizeBytes = componentTreeIdentity.reduce((total, entry) => total + (entry.kind === 'file' ? entry.size : 0), 0);
-      await assertAvailableDiskSpace(pluginService.installRoot, componentSizeBytes);
+      await installVolumeReservation.resize((componentSizeBytes * 2) + 128 * 1024 * 1024);
 
       await verifyComponentTreeIdentity(componentRoot, componentTreeIdentity);
 
@@ -1026,6 +1043,9 @@ const registerSystemIpc = context => {
       if (deferredCleanup.length) queueSystemFilesystemCleanup(deferredCleanup, `恢复“${componentId || '未知组件'}”安装临时文件`);
       capabilityBarrier?.release?.();
       releaseInstall?.();
+      await capacityReservation?.release?.();
+      await installVolumeReservation?.release?.();
+      event.sender?.removeListener?.('destroyed', abortInstall);
     }
   });
 

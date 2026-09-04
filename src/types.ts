@@ -746,6 +746,7 @@ export interface ComponentStatus {
   provider?: string;
   runtimeError?: string;
   packagePath?: string;
+  packageInspectionStatus?: 'manifest-bounded' | 'fully-verified' | string;
 }
 
 export interface ComponentInstallRequest {

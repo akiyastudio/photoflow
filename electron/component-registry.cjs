@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 const { parseMediaPlaybackBackendContributions } = require('./contracts/media-playback-backend-contract.cjs');
-const zlib = require('zlib');
+const { inspectComponentArchive } = require('./component-package-archive.cjs');
 const { PLUGIN_DEFINITIONS } = require('./plugins/plugin-catalog.cjs');
 const { COMPONENT_HOST_CONTRACT_VERSION, parseComponentHostManifest } = require('./component-host-contract.cjs');
 const { listIntegrityFiles, readPinnedComponentIntegrity, validateComponentIntegrity, validateComponentIntegrityAsync } = require('./component-integrity.cjs');
@@ -11,7 +11,6 @@ const { legacyRuntimeCapabilities } = require('./compatibility/legacy-runtime-ca
 const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PLUGIN_DEFINITIONS).map(([id, definition]) => [id, { ...definition, capability: definition.capabilities[0] }])));
 const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const CASE_INSENSITIVE_COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
-const MAX_MANIFEST_BYTES = 1024 * 1024;
 const COMPONENT_STATE_VERSION = 1;
 const normalizeRelativeFile = value => String(value || '').replace(/\\/g, '/');
 const syntheticInvalidId = value => `invalid-component-${Buffer.from(String(value || 'unknown')).toString('hex').slice(0, 40)}`;
@@ -40,75 +39,15 @@ const compareVersions = (left, right) => {
   for (let index = 0; index < Math.max(a.prerelease.length, b.prerelease.length); index += 1) { const av = a.prerelease[index]; const bv = b.prerelease[index]; if (av === undefined || bv === undefined) return av === bv ? 0 : av === undefined ? -1 : 1; if (av === bv) continue; if (typeof av === 'number' && typeof bv === 'number') return av < bv ? -1 : 1; if (typeof av === 'number') return -1; if (typeof bv === 'number') return 1; return String(av).localeCompare(String(bv), 'en'); }
   return 0;
 };
-const crcTable = Array.from({ length: 256 }, (_, value) => {
-  let crc = value;
-  for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) ? (0xedb88320 ^ (crc >>> 1)) : (crc >>> 1);
-  return crc >>> 0;
-});
-const crc32 = buffer => {
-  let crc = 0xffffffff;
-  for (const byte of buffer) crc = crcTable[(crc ^ byte) & 0xff] ^ (crc >>> 8);
-  return (crc ^ 0xffffffff) >>> 0;
-};
-
 // The catalog reads component.json directly from ZIP central-directory metadata.
 // This keeps discovery deterministic and testable without extracting untrusted files.
-const readExact = (fd, length, position) => { const buffer = Buffer.allocUnsafe(length); let offset = 0; while (offset < length) { const count = fs.readSync(fd, buffer, offset, length - offset, position + offset); if (!count) throw new Error('ZIP 文件意外结束'); offset += count; } return buffer; };
 const readZipEntries = archivePath => {
-  const size = fs.statSync(archivePath).size;
-  if (!Number.isSafeInteger(size) || size < 22) throw new Error('ZIP 文件过小或大小无效');
-  const fd = fs.openSync(archivePath, 'r');
-  try {
-  const tailLength = Math.min(size, 65_557); const tailStart = size - tailLength; const tail = readExact(fd, tailLength, tailStart);
-  let eocd = -1;
-  for (let offset = tail.length - 22; offset >= 0; offset -= 1) {
-    if (tail.readUInt32LE(offset) === 0x06054b50 && offset + 22 + tail.readUInt16LE(offset + 20) === tail.length) { eocd = offset; break; }
-  }
-  if (eocd < 0) throw new Error('ZIP 中央目录缺失或包已损坏');
-  if (tail.readUInt16LE(eocd + 4) !== 0 || tail.readUInt16LE(eocd + 6) !== 0 || tail.readUInt16LE(eocd + 8) !== tail.readUInt16LE(eocd + 10)) throw new Error('不支持多卷 ZIP 组件包');
-  const count = tail.readUInt16LE(eocd + 10); const directorySize = tail.readUInt32LE(eocd + 12); const directoryOffset = tail.readUInt32LE(eocd + 16); const absoluteEocd = tailStart + eocd;
-  if (!count || count > 10000 || count === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff || directorySize > 64 * 1024 * 1024 || directoryOffset + directorySize !== absoluteEocd) throw new Error('ZIP 中央目录越界或包已损坏');
-  const directory = readExact(fd, directorySize, directoryOffset);
-  const entries = [];
-  const names = new Set();
-  let offset = 0;
-  for (let index = 0; index < count; index += 1) {
-    if (offset + 46 > directory.length || directory.readUInt32LE(offset) !== 0x02014b50) throw new Error('ZIP 条目目录损坏');
-    const flags = directory.readUInt16LE(offset + 8); const method = directory.readUInt16LE(offset + 10); const expectedCrc = directory.readUInt32LE(offset + 16); const compressedSize = directory.readUInt32LE(offset + 20); const uncompressedSize = directory.readUInt32LE(offset + 24); const nameLength = directory.readUInt16LE(offset + 28); const extraLength = directory.readUInt16LE(offset + 30); const commentLength = directory.readUInt16LE(offset + 32); const externalAttributes = directory.readUInt32LE(offset + 38); const localOffset = directory.readUInt32LE(offset + 42);
-    const entryEnd = offset + 46 + nameLength + extraLength + commentLength;
-    if (!nameLength || entryEnd > directory.length) throw new Error('ZIP 条目目录越界');
-    const name = directory.subarray(offset + 46, offset + 46 + nameLength).toString('utf8');
-    const pathWithoutSlash = name.replace(/[\\/]$/, '');
-    if (!validArchivePath(pathWithoutSlash)) throw new Error(`安装包包含不安全路径：${name || '(空路径)'}`);
-    if (((externalAttributes >>> 16) & 0xf000) === 0xa000) throw new Error(`安装包包含不安全的符号链接：${name}`);
-    const normalizedName = normalizeRelativeFile(name); const foldedName = normalizedName.toLowerCase();
-    if (names.has(foldedName)) throw new Error(`安装包包含重复或大小写冲突路径：${name}`);
-    names.add(foldedName);
-    entries.push({ name: normalizedName, flags, method, expectedCrc, compressedSize, uncompressedSize, localOffset });
-    offset = entryEnd;
-  }
-  if (offset !== directory.length) throw new Error('ZIP 中央目录条目数量不一致');
-  return { archive: Object.freeze({ archivePath, size }), entries };
-  } finally { fs.closeSync(fd); }
-};
-const readZipEntry = (archive, entry) => {
-  if (entry.flags & 1) throw new Error('不支持加密组件包');
-  if (entry.uncompressedSize > MAX_MANIFEST_BYTES || entry.compressedSize > MAX_MANIFEST_BYTES + 64 * 1024) throw new Error('component.json 过大');
-  const fd = fs.openSync(archive.archivePath, 'r'); let source;
-  try { const local = readExact(fd, 30, entry.localOffset); if (local.readUInt32LE(0) !== 0x04034b50) throw new Error('ZIP 本地条目损坏'); const localFlags = local.readUInt16LE(6); const localMethod = local.readUInt16LE(8); const localNameLength = local.readUInt16LE(26); const localExtraLength = local.readUInt16LE(28); const localName = readExact(fd, localNameLength, entry.localOffset + 30).toString('utf8'); if (normalizeRelativeFile(localName) !== entry.name || localFlags !== entry.flags || localMethod !== entry.method) throw new Error('ZIP 本地条目与中央目录不一致'); const start = entry.localOffset + 30 + localNameLength + localExtraLength; if (start + entry.compressedSize > archive.size) throw new Error('ZIP 条目数据越界'); source = readExact(fd, entry.compressedSize, start); } finally { fs.closeSync(fd); }
-  const value = entry.method === 0 ? source : entry.method === 8 ? zlib.inflateRawSync(source, { maxOutputLength: MAX_MANIFEST_BYTES }) : null;
-  if (!value) throw new Error(`component.json 使用了不支持的 ZIP 压缩方法：${entry.method}`);
-  if (value.length !== entry.uncompressedSize || crc32(value) !== entry.expectedCrc) throw new Error('component.json 校验失败，安装包可能已损坏');
-  return value;
+  const inspection = inspectComponentArchive(archivePath);
+  return { archive: inspection.archive, entries: inspection.entries };
 };
 const readComponentPackageManifest = archivePath => {
-  const { archive, entries } = readZipEntries(archivePath);
-  const manifests = entries.filter(entry => /(^|\/)component\.json$/i.test(entry.name));
-  if (manifests.length !== 1) throw new Error(manifests.length ? '安装包包含多个 component.json' : '安装包中没有 component.json');
-  let manifest;
-  try { manifest = JSON.parse(readZipEntry(archive, manifests[0]).toString('utf8')); }
-  catch (error) { throw new Error(`component.json 无效：${error.message || String(error)}`); }
-  return { manifest, manifestEntry: manifests[0].name, entries: entries.map(entry => entry.name) };
+  const inspection = inspectComponentArchive(archivePath);
+  return { manifest: inspection.manifest, manifestEntry: inspection.manifestEntry, entries: inspection.entries.map(entry => entry.name) };
 };
 
 const identityText = (value, label, { optional = false } = {}) => {
@@ -391,15 +330,18 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     const byId = new Map(); let entries = [];
     try { entries = fs.readdirSync(installRoot, { withFileTypes: true }); } catch { return byId; }
     const packageIdSpellings = new Map();
+    const packageInspections = new Map();
     for (const entry of entries) {
       if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.zip') continue;
-      try { const rawId = readComponentPackageManifest(path.join(installRoot, entry.name)).manifest?.id; const folded = foldedComponentId(rawId); if (folded) { const spellings = packageIdSpellings.get(folded) || new Set(); spellings.add(rawId); packageIdSpellings.set(folded, spellings); } } catch { /* Reported by the normal inspection pass. */ }
+      try { const inspected = readComponentPackageManifest(path.join(installRoot, entry.name)); packageInspections.set(entry.name, { inspected }); const rawId = inspected.manifest?.id; const folded = foldedComponentId(rawId); if (folded) { const spellings = packageIdSpellings.get(folded) || new Set(); spellings.add(rawId); packageIdSpellings.set(folded, spellings); } } catch (error) { packageInspections.set(entry.name, { error }); }
     }
     for (const entry of entries) {
       if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.zip') continue;
       const archivePath = path.join(installRoot, entry.name); let manifest = null;
       try {
-        const packageManifest = readComponentPackageManifest(archivePath);
+        const cached = packageInspections.get(entry.name);
+        if (cached?.error) throw cached.error;
+        const packageManifest = cached.inspected;
         ({ manifest } = packageManifest);
         const folded = foldedComponentId(manifest?.id); if (folded && packageIdSpellings.get(folded)?.size > 1) throw new Error(`组件包 ID 存在大小写折叠冲突：${folded}`);
         const identity = manifestIdentity(manifest, COMPONENT_DEFINITIONS[manifest.id]); if (!COMPONENT_ID.test(identity.id)) throw new Error('组件 ID 缺失或格式无效');
@@ -408,7 +350,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
         const error = manifestCompatibilityError(manifest, platform, arch) || packageContentsError(packageManifest, platform, arch) || pinnedVersionError;
         const candidate = { ...definition, ...identity, capability: definition.capability || identity.capabilities[0] || '', installed: false, compatible: !error, version: String(manifest.version || ''), packageVersion: String(manifest.version || ''),
           path: path.join(installRoot, identity.id, 'runtime'), source: 'package', packagePath: archivePath, packageSizeBytes: fs.statSync(archivePath).size, sizeBytes: 0, manifest, manifestEntry: packageManifest.manifestEntry,
-          status: error ? 'incompatible' : 'pending-install', integrityStatus: definition.integrityManifest ? 'pinned-unverified' : 'unsigned',
+          status: error ? 'incompatible' : 'pending-install', packageInspectionStatus: 'manifest-bounded', integrityStatus: definition.integrityManifest ? 'pinned-unverified' : 'unsigned',
           integrityMessage: definition.integrityManifest ? '安装时将按应用固定完整性清单校验' : '未提供可由应用验证的数字签名；安装前仅能校验包结构与路径', ...(error ? { error } : {}) };
         const previous = byId.get(identity.id); if (!previous || candidate.compatible && !previous.compatible || candidate.compatible === previous.compatible && compareVersions(previous.packageVersion, candidate.packageVersion) < 0) byId.set(identity.id, candidate);
       } catch (error) {
@@ -430,7 +372,7 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
       if (!available) return { ...current, status: current.enabled === false ? 'disabled' : (current.compatible ? 'installed' : 'invalid') };
       const update = current.compatible && available.compatible && compareVersions(current.version, available.packageVersion) < 0;
       return { ...current, packagePath: available.packagePath, packageSizeBytes: available.packageSizeBytes, packageVersion: available.packageVersion, packageCompatible: available.compatible,
-        packageError: available.error, status: current.enabled === false ? 'disabled' : update ? 'update-available' : (current.compatible ? 'installed' : 'invalid'), updateAvailable: update };
+        packageError: available.error, packageInspectionStatus: available.packageInspectionStatus, status: current.enabled === false ? 'disabled' : update ? 'update-available' : (current.compatible ? 'installed' : 'invalid'), updateAvailable: update };
     }).sort((a, b) => String(a.name || a.id).localeCompare(String(b.name || b.id), 'zh-CN'));
   };
   const inspect = id => list().find(item => item.id === id) || null;

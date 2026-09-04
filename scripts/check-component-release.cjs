@@ -20,6 +20,7 @@ const steps = [
   ['component lifecycle coordination', process.execPath, ['scripts/test-component-lifecycle-coordinator.cjs']],
   ['application quit commit point', process.execPath, ['scripts/test-application-quit-coordinator.cjs']],
   ['component runtime compatibility', process.execPath, ['scripts/test-plugin-service-runtime-capability.cjs']],
+  ['component archive parser parity', process.execPath, ['scripts/test-component-archive-parity.cjs']],
   ['component status policy', process.execPath, ['scripts/test-component-status-refresh-policy.cjs']],
   ['architecture', process.execPath, [npmCli, 'run', 'test:architecture']],
   ['process supervisor', process.execPath, [npmCli, 'run', 'test:process-supervisor']],
