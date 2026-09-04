@@ -85,6 +85,14 @@ try {
   fs.rmSync(path.join(componentRoot, 'third-party-tool'), { recursive: true, force: true });
   assert.strictEqual(registry.list().length, 0, 'entry disappears when package and installation are both absent');
 
+  const upperCollisionArchive = path.join(componentRoot, 'upper-id.zip'); const lowerCollisionArchive = path.join(componentRoot, 'lower-id.zip');
+  writeZip(upperCollisionArchive, { 'component.json': JSON.stringify({ ...manifest('1.0.0'), id: 'Foo' }), 'tool.exe': 'binary' });
+  writeZip(lowerCollisionArchive, { 'component.json': JSON.stringify({ ...manifest('1.0.0'), id: 'foo' }), 'tool.exe': 'binary' });
+  const collisionRows = registry.list().filter(item => /大小写折叠冲突/.test(item.error || ''));
+  assert.equal(collisionRows.length, 2, 'Foo/foo packages are both rejected instead of sharing one catalog identity');
+  assert.throws(() => registry.resolvePackage('foo'), /大小写折叠冲突/, 'case-folding package collisions never resolve to an installable package');
+  fs.unlinkSync(upperCollisionArchive); fs.unlinkSync(lowerCollisionArchive);
+
   const settingsManifest = { ...manifest('1.0.0'), id: 'settings-fixture', componentHost: { contractVersion: 2,  contributions: [{ type: 'workspace.toolbarAction', id: 'open', label: 'Fixture', pageId: 'main' }, { type: 'component.fullPage', id: 'main', title: 'Fixture', entry: 'ui/index.html' }, { type: 'application.settingsPage', id: 'settings', label: 'Fixture', entry: 'ui/settings.html', rpcMethods: ['fixture.settings.v1'] }], service: { protocolVersion: 1, runtime: 'node', entrypoints: { default: 'service.cjs' }, rpcMethods: ['fixture.settings.v1'], capabilities: [], permissions: [], events: [] } } };
   const missingSettingsArchive = path.join(componentRoot, 'settings-missing.zip');
   writeZip(missingSettingsArchive, { 'component.json': JSON.stringify(settingsManifest), 'tool.exe': 'binary', 'service.cjs': '', 'ui/index.html': '<!doctype html>' });

@@ -54,8 +54,9 @@ const child = pid => Object.assign(new EventEmitter(), {
 
   const cleared = []; const persistentSession = { clearStorageData: async () => cleared.push('storage'), clearCache: async () => cleared.push('cache'), clearAuthCache: async () => cleared.push('auth') };
   const viewManager = new ComponentViewManager({ WebContentsView: function unused() {}, mainWindow: {}, registry: {}, preloadPath: '', ipcMain: { handle() {} }, partitionSessionProvider: name => { assert.equal(name, 'persist:component-host-fixture'); return persistentSession; } });
-  assert.equal(componentPartition('FiXtUrE'), 'persist:component-host-fixture');
-  assert.equal(await viewManager.clearComponentPartitionStorage('FiXtUrE'), true);
+  assert.equal(componentPartition('fixture'), 'persist:component-host-fixture');
+  assert.throws(() => componentPartition('FiXtUrE'), /Invalid component partition identifier/);
+  assert.equal(await viewManager.clearComponentPartitionStorage('fixture'), true);
   assert.deepEqual(cleared, ['storage', 'cache', 'auth'], 'persistent partition is cleared even when no page opened this process');
 
   const handlers = new Map(); const frame = {}; const webContents = { mainFrame: frame }; const activations = [];

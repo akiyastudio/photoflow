@@ -137,6 +137,22 @@ try {
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, service: { ...manifest.componentHost.service, permissions: allPermissions.filter(value => value !== 'project.output.write') } } }, manifestRoot), /requires permission project\.output\.write/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, compatibility: {} } }, manifestRoot), /Unknown component host field/);
 assert.throws(() => parseComponentHostManifest({ ...manifest, componentHost: { ...manifest.componentHost, unsafeExtension: true } }, manifestRoot), /Unknown component host field/);
+assert.throws(() => parseComponentHostManifest({ ...manifest, id: 'Fixture-Component' }, manifestRoot), /component id/);
+const camelCaseContribution = structuredClone(manifest); camelCaseContribution.componentHost.contributions[0].id = 'openPanel';
+assert.equal(parseComponentHostManifest(camelCaseContribution, manifestRoot).toolbarAction.id, 'openPanel', 'internal contribution identifiers retain their case and are not component identities');
+for (const field of ['hostApiVersion', 'minHostApiVersion', 'maxHostApiVersion', 'negotiatedHostApiVersion']) assert.throws(() => parseComponentHostManifest({ ...manifest, [field]: 1 }, manifestRoot), /Obsolete component manifest Host API version field/);
+const manifestWith = mutate => { const value = structuredClone(manifest); mutate(value); return value; };
+for (const mutate of [
+  value => { value.id = 7; },
+  value => { value.version = ['1']; },
+  value => { value.componentHost.contributions[0].label = { toString: () => 'Open' }; },
+  value => { value.componentHost.contributions[1].entry = ['ui/index.html']; },
+  value => { value.componentHost.service.entrypoints.default = 3; },
+  value => { value.componentHost.service.rpcMethods[0] = ['fixture.run.v1']; },
+  value => { value.componentHost.service.events = [3]; },
+  value => { value.componentHost.service.runtimeActions = [3]; },
+  value => { value.componentHost.service.lifecycleActions = []; },
+]) assert.throws(() => parseComponentHostManifest(manifestWith(mutate), manifestRoot), /Invalid|must be|bounded|exact/);
 for (const schema of ['component-manifest-v2.schema.json', 'component-host-api.schema.json', 'component-service-protocol-v1.schema.json']) JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', schema), 'utf8'));
 const componentManifestSchema2020 = JSON.parse(fs.readFileSync(path.resolve(__dirname, '..', 'electron', 'contracts', 'schemas', 'component-manifest-v2.schema.json'), 'utf8'));
 // The repository's installed Ajv 6 validates draft-07. Adapt only the test copy;
@@ -156,6 +172,8 @@ for (const invalidType of ['media.contextAction', 'project.importProvider', 'pro
   assert.equal(validateComponentManifest(invalidPlacedContribution), false, `schema rejects ${invalidType} in workspace.videoTools`);
 }
 const invalidManifest = mutate => { const value = structuredClone(schemaFixture); mutate(value); assert.equal(validateComponentManifest(value), false, 'strict component manifest schema must reject an invalid adoption/restore declaration'); };
+invalidManifest(value => { value.id = 'Fixture-Component'; });
+const camelCaseSchemaFixture = structuredClone(schemaFixture); camelCaseSchemaFixture.componentHost.contributions[0].id = 'openPanel'; assert.equal(validateComponentManifest(camelCaseSchemaFixture), true, JSON.stringify(validateComponentManifest.errors));
 invalidManifest(value => { value.componentHost.legacySettingsAdoptions[0].unknown = true; });
 invalidManifest(value => { value.componentHost.legacySettingsAdoptions.push(structuredClone(value.componentHost.legacySettingsAdoptions[0])); });
 invalidManifest(value => { value.componentHost.legacySettingsAdoptions = Array.from({ length: 9 }, (_unused, index) => ({ topLevelKey: `legacy${index}` })); });
@@ -183,6 +201,48 @@ const runtimeSources = [
 const runtimeMethods = [...new Set([...runtimeSources.matchAll(/(?:\.register\(|\[)\s*'([a-z][a-z0-9.-]*)'/g)].map(match => match[1]).filter(method => HOST_CAPABILITIES.has(method)))].sort();
 assert.deepEqual(runtimeMethods, [...HOST_CAPABILITIES].sort(), 'runtime registrations must implement every Host API capability exactly once');
 assert(!JSON.stringify(capabilitySchema).includes('apiVersion'), 'Host capability response schemas are unversioned');
+const draft7CapabilitySchema = JSON.parse(JSON.stringify(capabilitySchema).replaceAll('#/$defs/', '#/definitions/'));
+draft7CapabilitySchema.definitions = draft7CapabilitySchema.$defs; delete draft7CapabilitySchema.$defs; delete draft7CapabilitySchema.$schema; delete draft7CapabilitySchema.$id;
+const sampleFor = (schema, definitions = draft7CapabilitySchema.definitions) => {
+  if (schema.$ref) return sampleFor(definitions[schema.$ref.split('/').at(-1)], definitions);
+  if (schema.const !== undefined) return structuredClone(schema.const);
+  if (schema.enum) return structuredClone(schema.enum[0]);
+  if (schema.oneOf) return sampleFor(schema.oneOf[0], definitions);
+  if (schema.anyOf && !schema.type && !schema.properties) return sampleFor(schema.anyOf[0], definitions);
+  const type = Array.isArray(schema.type) ? schema.type[0] : schema.type;
+  if (type === 'object' || schema.properties) return Object.fromEntries((schema.required || []).map(key => [key, sampleFor(schema.properties[key], definitions)]));
+  if (type === 'array') return Array.from({ length: schema.minItems || 0 }, () => sampleFor(schema.items, definitions));
+  if (type === 'integer' || type === 'number') return schema.minimum || 0;
+  if (type === 'boolean') return true;
+  if (type === 'null') return null;
+  if (type === 'string') {
+    if (schema.pattern?.includes('36')) return '00000000-0000-4000-8000-000000000000';
+    if (schema.pattern?.startsWith('^secret:v1:')) return 'secret:v1:00000000-0000-4000-8000-000000000000';
+    if (schema.pattern?.startsWith('^component-input:')) return 'component-input:fixture';
+    if (schema.pattern?.startsWith('^data:image')) return 'data:image/jpeg;base64,AA==';
+    if (schema.pattern?.includes('64')) return 'a'.repeat(64);
+    return 'fixture';
+  }
+  return {};
+};
+const ajv = new Ajv({ allErrors: true, schemaId: 'auto' });
+for (const method of HOST_CAPABILITIES) {
+  const name = Object.keys(capabilitySchema.$defs).find(key => capabilitySchema.$defs[key]?.properties?.method?.const === method);
+  assert(name, `missing schema for ${method}`);
+  const resultSchema = JSON.parse(JSON.stringify(draft7CapabilitySchema.definitions[name].properties.result));
+  const validateResult = ajv.compile({ ...resultSchema, definitions: draft7CapabilitySchema.definitions });
+  const valid = sampleFor(resultSchema); assert.equal(validateResult(valid), true, `${method} minimum result must pass: ${JSON.stringify(validateResult.errors)}`);
+  assert.equal(validateResult({}), false, `${method} must reject an empty result`);
+  assert.equal(validateResult({ ...valid, apiVersion: 7 }), false, `${method} must reject legacy apiVersion`);
+  assert.equal(validateResult({ ...valid, unknownResultField: true }), false, `${method} must reject unknown result fields`);
+  const firstRequired = Object.keys(valid)[0]; assert(firstRequired, `${method} minimum result must have an identity field`);
+  const missing = { ...valid }; delete missing[firstRequired]; assert.equal(validateResult(missing), false, `${method} must reject a missing required result field`);
+}
+const lifecycleResultSchema = JSON.parse(JSON.stringify(draft7CapabilitySchema.definitions.lifecycle.properties.result));
+const validateLifecycleResult = ajv.compile({ ...lifecycleResultSchema, definitions: draft7CapabilitySchema.definitions });
+const lifecycleResult = sampleFor(lifecycleResultSchema);
+assert.equal(validateLifecycleResult({ ...lifecycleResult, componentId: 'Fixture' }), false, 'Host API component identity remains lowercase-only');
+assert.equal(validateLifecycleResult({ ...lifecycleResult, state: 'inactive' }), false, 'Host API lifecycle state rejects undeclared values');
 const storageVariants = capabilitySchema.$defs.storage.properties.result.oneOf;
 const pendingStorageSchema = storageVariants.find(value => value.properties?.adoption?.properties?.state?.const === 'pending');
 const committedStorageSchema = storageVariants.find(value => value.properties?.adoption?.properties?.state?.const === 'committed');

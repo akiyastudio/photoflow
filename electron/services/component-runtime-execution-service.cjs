@@ -37,8 +37,9 @@ const createComponentRuntimeExecutionService = ({ broker, ensureWorkspace, getPr
     return values;
   };
   const operationIdFor = (scope, descriptor, payload) => stableUuid(crypto, `component-runtime-v1\0${descriptor.componentId}\0${scope.key}\0${String(payload.runtimeCapability || '')}\0${String(payload.operationKey || '')}\0${String(payload.idempotencyKey || '')}`);
-  const invoke = async (payload, context, descriptor, { compatibility = false } = {}) => {
+  const invoke = async (payload, context, descriptor) => {
     fields(payload,['action','runtimeCapability','arguments','relativePaths','inputTokens','input','operationKey','idempotencyKey','eventName','timeoutMs','task','control'],['action']);const action = String(payload?.action || ''); const scope = await bound(context, descriptor);
+    if (!descriptor.service?.capabilities?.includes('component.runtime.execute')) throw hostError(CODES.PERMISSION_DENIED, 'Component runtime execution is not granted');
     if (action === 'status' || action === 'cancel' || action === 'pause' || action === 'resume') {
       fields(payload,['action','runtimeCapability','operationKey','idempotencyKey'],['action','runtimeCapability','operationKey','idempotencyKey']);
       if (!ID.test(String(payload.operationKey || '')) || !ID.test(String(payload.idempotencyKey || '')) || typeof payload.runtimeCapability !== 'string') throw hostError(CODES.INVALID_REQUEST, 'Invalid runtime operation identity');
@@ -58,7 +59,7 @@ const createComponentRuntimeExecutionService = ({ broker, ensureWorkspace, getPr
     }
     if (action !== 'execute') throw hostError(CODES.INVALID_REQUEST, 'Unknown component runtime action');
     fields(payload,['action','runtimeCapability','arguments','relativePaths','inputTokens','input','operationKey','idempotencyKey','eventName','timeoutMs','task','control'],['action','runtimeCapability','arguments']);if(payload.input!==undefined)fields(payload.input,['extensions','prefixArgumentCount','directoryArgument']);if(payload.task!==undefined)fields(payload.task,['background','title','runningMessage','completeMessage','concurrencyGroup','concurrencyLimit','concurrencyWriteLimit']);if(payload.control!==undefined)fields(payload.control,['cancelArgument','pauseArgument']);
-    const runtimeCapability = boundedText(payload.runtimeCapability,'runtime capability'); if (!compatibility && !descriptor.service?.capabilities?.includes('component.runtime.execute')) throw hostError(CODES.PERMISSION_DENIED, 'Component runtime execution is not granted');const eventName=payload.eventName===undefined?'':boundedText(payload.eventName,'runtime event');if(eventName&&!descriptor.service?.events?.includes(eventName))throw hostError(CODES.PERMISSION_DENIED,'Runtime event is not declared by the component');
+    const runtimeCapability = boundedText(payload.runtimeCapability,'runtime capability');const eventName=payload.eventName===undefined?'':boundedText(payload.eventName,'runtime event');if(eventName&&!descriptor.service?.events?.includes(eventName))throw hostError(CODES.PERMISSION_DENIED,'Runtime event is not declared by the component');
     const args = strings(payload.arguments || []); const prefixCount = Number(payload.input?.prefixArgumentCount || 0); if (!Number.isInteger(prefixCount) || prefixCount < 0 || prefixCount > args.length) throw hostError(CODES.INVALID_REQUEST, 'Invalid runtime input argument layout');
     const operationKey = String(payload.operationKey || ''); const key = String(payload.idempotencyKey || ''); const background = payload.task?.background === true;
     if (background && (!ID.test(operationKey) || !ID.test(key))) throw hostError(CODES.INVALID_REQUEST, 'Background runtime execution requires stable operation keys');

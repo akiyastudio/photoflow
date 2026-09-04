@@ -9,10 +9,13 @@ const { developmentComponentMetadataToken, discoverDevelopmentComponents, safeFi
 const { legacyRuntimeCapabilities } = require('./compatibility/legacy-runtime-capabilities.cjs');
 
 const COMPONENT_DEFINITIONS = Object.freeze(Object.fromEntries(Object.entries(PLUGIN_DEFINITIONS).map(([id, definition]) => [id, { ...definition, capability: definition.capabilities[0] }])));
-const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
+const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
+const CASE_INSENSITIVE_COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
 const MAX_MANIFEST_BYTES = 1024 * 1024;
 const COMPONENT_STATE_VERSION = 1;
 const normalizeRelativeFile = value => String(value || '').replace(/\\/g, '/');
+const syntheticInvalidId = value => `invalid-component-${Buffer.from(String(value || 'unknown')).toString('hex').slice(0, 40)}`;
+const foldedComponentId = value => typeof value === 'string' && CASE_INSENSITIVE_COMPONENT_ID.test(value) ? value.toLowerCase() : '';
 const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative === '' || (!relative.startsWith('..') && !path.isAbsolute(relative));
@@ -108,16 +111,25 @@ const readComponentPackageManifest = archivePath => {
   return { manifest, manifestEntry: manifests[0].name, entries: entries.map(entry => entry.name) };
 };
 
-const manifestIdentity = (manifest, fallback = {}) => ({
-  id: String(manifest?.id || fallback.id || '').trim(),
-  name: String(manifest?.displayName || manifest?.name || fallback.name || manifest?.id || fallback.id || '').trim(),
-  description: String(manifest?.description || fallback.description || '').trim(),
-  capabilities: Array.isArray(manifest?.capabilities) ? manifest.capabilities.map(String) : (fallback.capabilities?.length ? fallback.capabilities : legacyRuntimeCapabilities(manifest?.id || fallback.id)),
-});
+const identityText = (value, label, { optional = false } = {}) => {
+  if (value === undefined && optional) return '';
+  if (typeof value !== 'string' || (!optional && !value.trim())) throw new Error(`${label}必须为非空字符串`);
+  return value.trim();
+};
+const manifestIdentity = (manifest, fallback = {}) => {
+  const id = identityText(manifest?.id ?? fallback.id, '组件 ID');
+  if (!COMPONENT_ID.test(id)) throw new Error('组件 ID 缺失或格式无效（仅允许小写 ASCII）');
+  const name = identityText(manifest?.displayName ?? manifest?.name ?? fallback.name ?? id, '组件名称');
+  const descriptionValue = manifest?.description ?? fallback.description;
+  const description = descriptionValue === undefined ? '' : identityText(descriptionValue, '组件描述', { optional: true });
+  const rawCapabilities = manifest?.capabilities ?? (fallback.capabilities?.length ? fallback.capabilities : legacyRuntimeCapabilities(id));
+  if (!Array.isArray(rawCapabilities) || rawCapabilities.some(value => typeof value !== 'string' || !value.trim())) throw new Error('组件 capabilities 必须为字符串数组');
+  return { id, name, description, capabilities: rawCapabilities.map(value => value.trim()) };
+};
 const manifestCompatibilityError = (manifest, platform, arch) => {
   if (manifest?.apiVersion !== 1) return `组件清单格式不兼容：${manifest?.apiVersion ?? '未填写'}`;
-  if (!COMPONENT_ID.test(String(manifest?.id || ''))) return '组件 ID 缺失或格式无效';
-  if (!String(manifest?.version || '').trim()) return '组件版本缺失';
+  if (typeof manifest?.id !== 'string' || !COMPONENT_ID.test(manifest.id)) return '组件 ID 缺失或格式无效（仅允许小写 ASCII）';
+  if (typeof manifest?.version !== 'string' || !manifest.version.trim()) return '组件版本缺失';
   try { parseMediaPlaybackBackendContributions(manifest); }
   catch (error) { return error.message || String(error); }
   if (Array.isArray(manifest.platforms) && !manifest.platforms.includes(platform)) return `组件不支持 ${platform}`;
@@ -195,8 +207,8 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     }
     if (fs.existsSync(statePath)) {
       const savedState = JSON.parse(fs.readFileSync(statePath, 'utf8'));
-      if (Number(savedState?.version) !== COMPONENT_STATE_VERSION || !Array.isArray(savedState.disabledComponentIds) || savedState.disabledComponentIds.length > 1024 || savedState.disabledComponentIds.some(id => !COMPONENT_ID.test(String(id || '')))) throw new Error('Invalid component enablement state');
-      for (const id of savedState.disabledComponentIds) disabledComponentIds.add(String(id));
+      if (!savedState || typeof savedState !== 'object' || Array.isArray(savedState) || savedState.version !== COMPONENT_STATE_VERSION || !Array.isArray(savedState.disabledComponentIds) || savedState.disabledComponentIds.length > 1024 || savedState.disabledComponentIds.some(id => typeof id !== 'string' || !COMPONENT_ID.test(id)) || new Set(savedState.disabledComponentIds).size !== savedState.disabledComponentIds.length || Object.keys(savedState).some(key => !['version', 'disabledComponentIds'].includes(key))) throw new Error('Invalid component enablement state');
+      for (const id of savedState.disabledComponentIds) disabledComponentIds.add(id);
       if (statePath !== componentStatePath) fs.renameSync(statePath, componentStatePath);
     }
   } catch { enablementStateTrusted = false; }
@@ -311,17 +323,17 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
         integrityMessage: definition.integrityManifest ? '完整性将在运行或安装时按应用固定清单校验' : '未提供可由应用验证的数字签名；仅完成结构与路径校验' };
     } catch (error) {
       const containerName = path.basename(componentRoot) === 'runtime' ? path.basename(path.dirname(componentRoot)) : path.basename(componentRoot);
-      const id = String(manifest?.id || containerName || '').trim(); if (!COMPONENT_ID.test(id)) return null;
-      const definition = definitionFor(id, manifest);
-      return { ...definition, ...manifestIdentity(manifest, definition), id, capability: definition.capability || '', installed: true, compatible: false, version: String(manifest?.version || ''), path: componentRoot, source, sizeBytes: 0,
+      const rawId = typeof manifest?.id === 'string' ? manifest.id : containerName; const id = COMPONENT_ID.test(rawId) ? rawId : syntheticInvalidId(rawId);
+      const definition = COMPONENT_DEFINITIONS[rawId] || { id, name: typeof manifest?.displayName === 'string' ? manifest.displayName : rawId, description: '', capabilities: [] };
+      return { ...definition, id, capability: definition.capability || '', installed: true, compatible: false, version: typeof manifest?.version === 'string' ? manifest.version : '', path: componentRoot, source, sizeBytes: 0,
         manifest, status: 'invalid', integrityStatus: 'invalid', error: error.message || String(error) };
     }
   };
   const inspectDevelopment = development => {
-    const manifest = development.manifest || null; const id = String(manifest?.id || development.id || '').trim();
-    if (!COMPONENT_ID.test(id)) return null;
+    const manifest = development.manifest || null; const rawId = manifest?.id ?? development.id; const id = typeof rawId === 'string' ? rawId : '';
     try {
       if (development.error) throw new Error(development.error);
+      if (!COMPONENT_ID.test(id)) throw new Error('组件 ID 缺失或格式无效（仅允许小写 ASCII）');
       const compatibilityError = manifestCompatibilityError(manifest, platform, arch); if (compatibilityError) throw new Error(compatibilityError);
       for (const relative of Array.isArray(manifest.requiredFiles) ? manifest.requiredFiles : []) {
         const normalized = normalizeRelativeFile(relative);
@@ -334,15 +346,21 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
         source: 'development', sizeBytes: 0, command: development.command, argsPrefix: [...development.argsPrefix], manifest, manifestPath: development.manifestPath, developmentFiles: development.files,
         status: 'installed', integrityStatus: 'development', integrityMessage: '开发组件（源码/开发构建）；未经正式安装包完整性验证' };
     } catch (error) {
-      const definition = definitionFor(id, manifest);
-      return { ...definition, ...manifestIdentity(manifest, definition), id, capability: definition.capability || '', installed: false, compatible: false, version: String(manifest?.version || ''), path: development.componentRoot,
+      const invalidId = COMPONENT_ID.test(id) ? id : syntheticInvalidId(id || path.basename(development.componentRoot));
+      const definition = COMPONENT_DEFINITIONS[id] || { id: invalidId, name: typeof manifest?.displayName === 'string' ? manifest.displayName : id || path.basename(development.componentRoot), description: '', capabilities: [] };
+      return { ...definition, id: invalidId, capability: definition.capability || '', installed: false, compatible: false, version: typeof manifest?.version === 'string' ? manifest.version : '', path: development.componentRoot,
         source: 'development', sizeBytes: 0, manifest, status: 'invalid', integrityStatus: 'invalid', error: `开发组件不可用：${error.message || String(error)}。请在组件目录运行声明的 prepare/build 脚本。` };
     }
   };
   const inspectedDevelopmentComponents = () => {
     const components = developmentComponents();
     if (inspectedDevelopmentCache.components === components) return inspectedDevelopmentCache.inspected;
-    const inspected = components.map(inspectDevelopment).filter(Boolean);
+    const foldCounts = new Map();
+    for (const component of components) { const folded = foldedComponentId(component.manifest?.id ?? component.id); if (folded) foldCounts.set(folded, (foldCounts.get(folded) || 0) + 1); }
+    const inspected = components.map(component => {
+      const folded = foldedComponentId(component.manifest?.id ?? component.id);
+      return inspectDevelopment(folded && foldCounts.get(folded) > 1 ? { ...component, error: `开发组件 ID 存在大小写折叠冲突：${folded}` } : component);
+    }).filter(Boolean);
     inspectedDevelopmentCache = { components, inspected };
     return inspected;
   };
@@ -350,10 +368,14 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     const byId = new Map();
     for (const root of roots) {
       let entries = []; try { entries = fs.readdirSync(root.path, { withFileTypes: true }); } catch { continue; }
+      const foldCounts = new Map();
+      for (const entry of entries) { const folded = entry.isDirectory() ? foldedComponentId(entry.name) : ''; if (folded) foldCounts.set(folded, (foldCounts.get(folded) || 0) + 1); }
       for (const entry of entries) {
-        if (!entry.isDirectory() || !COMPONENT_ID.test(entry.name) || entry.name.startsWith('.')) continue;
+        if (!entry.isDirectory() || !CASE_INSENSITIVE_COMPONENT_ID.test(entry.name) || entry.name.startsWith('.')) continue;
         const container = path.join(root.path, entry.name); const runtime = path.join(container, 'runtime');
         const componentRoot = fs.existsSync(path.join(runtime, 'component.json')) ? runtime : container;
+        const folded = foldedComponentId(entry.name);
+        if (foldCounts.get(folded) > 1) { const id = syntheticInvalidId(entry.name); byId.set(id, { id, name: entry.name, description: '', capability: '', capabilities: [], installed: true, compatible: false, enabled: false, version: '', path: componentRoot, source: root.source, sizeBytes: 0, status: 'invalid', integrityStatus: 'invalid', error: `组件目录 ID 存在大小写折叠冲突：${folded}` }); continue; }
         const inspected = inspectRoot(componentRoot, root.source, entry.name);
         if (inspected && !byId.has(inspected.id)) byId.set(inspected.id, withEnablementState(inspected));
       }
@@ -368,12 +390,18 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
   const packageComponents = () => {
     const byId = new Map(); let entries = [];
     try { entries = fs.readdirSync(installRoot, { withFileTypes: true }); } catch { return byId; }
+    const packageIdCounts = new Map();
+    for (const entry of entries) {
+      if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.zip') continue;
+      try { const rawId = readComponentPackageManifest(path.join(installRoot, entry.name)).manifest?.id; const folded = foldedComponentId(rawId); if (folded) packageIdCounts.set(folded, (packageIdCounts.get(folded) || 0) + 1); } catch { /* Reported by the normal inspection pass. */ }
+    }
     for (const entry of entries) {
       if (!entry.isFile() || path.extname(entry.name).toLowerCase() !== '.zip') continue;
       const archivePath = path.join(installRoot, entry.name); let manifest = null;
       try {
         const packageManifest = readComponentPackageManifest(archivePath);
         ({ manifest } = packageManifest);
+        const folded = foldedComponentId(manifest?.id); if (folded && packageIdCounts.get(folded) > 1) throw new Error(`组件包 ID 存在大小写折叠冲突：${folded}`);
         const identity = manifestIdentity(manifest, COMPONENT_DEFINITIONS[manifest.id]); if (!COMPONENT_ID.test(identity.id)) throw new Error('组件 ID 缺失或格式无效');
         const definition = definitionFor(identity.id, manifest);
         const pinnedVersionError = definition.integrityManifest && String(manifest.version) !== String(definition.version) ? `组件版本不兼容：需要 ${definition.version}，安装包为 ${manifest.version}` : '';
@@ -384,9 +412,9 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
           integrityMessage: definition.integrityManifest ? '安装时将按应用固定完整性清单校验' : '未提供可由应用验证的数字签名；安装前仅能校验包结构与路径', ...(error ? { error } : {}) };
         const previous = byId.get(identity.id); if (!previous || candidate.compatible && !previous.compatible || candidate.compatible === previous.compatible && compareVersions(previous.packageVersion, candidate.packageVersion) < 0) byId.set(identity.id, candidate);
       } catch (error) {
-        const inferred = String(manifest?.id || entry.name.replace(/\.zip$/i, '')).trim();
+        const inferred = typeof manifest?.id === 'string' ? manifest.id : entry.name.replace(/\.zip$/i, '');
         const id = COMPONENT_ID.test(inferred) ? inferred : `invalid-package-${Buffer.from(entry.name).toString('hex').slice(0, 24)}`;
-        if (!byId.get(id)?.compatible) byId.set(id, { id, name: manifest?.displayName || manifest?.name || entry.name, description: '组件安装包无法读取', capability: '', installed: false, compatible: false, version: String(manifest?.version || ''),
+        if (!byId.get(id)?.compatible) byId.set(id, { id, name: typeof manifest?.displayName === 'string' && manifest.displayName.trim() ? manifest.displayName.trim() : typeof manifest?.name === 'string' && manifest.name.trim() ? manifest.name.trim() : entry.name, description: '组件安装包无法读取', capability: '', installed: false, compatible: false, version: typeof manifest?.version === 'string' ? manifest.version : '',
           path: path.join(installRoot, id, 'runtime'), source: 'package', packagePath: archivePath, packageSizeBytes: fs.statSync(archivePath).size, sizeBytes: 0,
           status: 'package-invalid', integrityStatus: 'invalid', error: error.message || String(error) });
       }
@@ -449,8 +477,8 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     return true;
   };
   const setComponentEnabled = (componentId, enabled) => {
-    const id = String(componentId || '').trim();
-    if (!COMPONENT_ID.test(id)) throw new Error('组件 ID 无效');
+    const id = componentId;
+    if (typeof id !== 'string' || !COMPONENT_ID.test(id)) throw new Error('组件 ID 无效');
     const component = installedComponents().get(id);
     if (!component?.installed) throw new Error('组件尚未安装或发现');
     const shouldEnable = enabled === true;
@@ -465,7 +493,8 @@ const createComponentRegistry = ({ projectRoot, userComponentRoot, isPackaged, p
     return { componentId: id, enabled: shouldEnable };
   };
   const clearComponentEnabledState = componentId => {
-    const id = String(componentId || '').trim();
+    const id = componentId;
+    if (typeof id !== 'string' || !COMPONENT_ID.test(id)) throw new Error('组件 ID 无效');
     if (!disabledComponentIds.delete(id)) return false;
     try { persistComponentState(); }
     catch (error) { disabledComponentIds.add(id); throw error; }

@@ -12,6 +12,7 @@ const COMPONENT_HOST_CONTRACT_VERSION = 2;
 const COMPONENT_SERVICE_PROTOCOL_VERSION = 1;
 const CONTRIBUTION_TYPES = new Set(['workspace.toolbarAction', 'component.fullPage', 'application.settingsPage', 'application.settingsForm', 'component.sidePanel', 'media.contextAction', 'project.contextAction', 'project.importProvider', 'project.exportProvider', 'application.command']);
 const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
+const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const VERSIONED_METHOD = /^[a-z][a-z0-9.-]{0,119}\.v[1-9][0-9]*$/;
 const HOST_CAPABILITIES = new Set([
   'project.media.page', 'project.media.variants', 'project.input.tokens',
@@ -78,7 +79,8 @@ const isInside = (root, candidate) => {
 };
 
 const requiredText = (value, field, maxLength = 160) => {
-  const text = String(value || '').trim();
+  if (typeof value !== 'string') throw new Error(`Invalid component host ${field}`);
+  const text = value.trim();
   if (!text || text.length > maxLength) throw new Error(`Invalid component host ${field}`);
   return text;
 };
@@ -99,6 +101,11 @@ const requiredExactId = (value, field) => {
 const requiredId = (value, field) => {
   const id = requiredText(value, field, 80);
   if (!IDENTIFIER.test(id)) throw new Error(`Invalid component host ${field}`);
+  return id;
+};
+const requiredComponentId = (value, field) => {
+  const id = requiredText(value, field, 80);
+  if (!COMPONENT_ID.test(id)) throw new Error(`Invalid component host ${field}`);
   return id;
 };
 const rejectUnknownFields = (value, allowed, label) => {
@@ -134,7 +141,7 @@ const resolvePackageFile = ({ relativeEntry, componentRoot, developmentOverride 
 };
 
 const developmentOverrideFor = (developmentFiles, relativeEntry) => {
-  const overrideEntry = developmentFiles?.files?.[String(relativeEntry || '').replace(/\\/g, '/')];
+  const overrideEntry = typeof relativeEntry === 'string' ? developmentFiles?.files?.[relativeEntry.replace(/\\/g, '/')] : undefined;
   return overrideEntry ? { overrideRoot: developmentFiles.componentRoot, overrideEntry } : null;
 };
 
@@ -173,15 +180,17 @@ const parseComponentIcon = (value, componentRoot, developmentOverride = null) =>
 
 const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = null, adoptionPolicy = defaultComponentDataAdoptionPolicy) => {
   if (manifest?.apiVersion !== 1) throw new Error(`Unsupported component manifest apiVersion: ${manifest?.apiVersion ?? 'missing'}`);
+  const obsoleteHostVersionField = ['hostApiVersion', 'minHostApiVersion', 'maxHostApiVersion', 'negotiatedHostApiVersion'].find(field => Object.hasOwn(manifest, field));
+  if (obsoleteHostVersionField) throw new Error(`Obsolete component manifest Host API version field: ${obsoleteHostVersionField}`);
   const host = manifest?.componentHost;
   if (host === undefined) return null;
   if (!host || typeof host !== 'object' || Array.isArray(host)) throw new Error('Invalid componentHost manifest');
-  const contractVersion = Number(host.contractVersion);
+  const contractVersion = host.contractVersion;
   if (contractVersion !== COMPONENT_HOST_CONTRACT_VERSION) throw new Error(`Unsupported component host contractVersion: ${host.contractVersion}`);
   rejectUnknownFields(host, ['contractVersion', 'contributions', 'service', 'adoptionGrants', 'legacySettingsAdoptions'], 'component host');
   if (!Array.isArray(host.contributions) || host.contributions.length < 2 || host.contributions.length > 32) throw new Error('Component host contributions must be a bounded array');
 
-  const componentId = requiredId(manifest.id, 'component id');
+  const componentId = requiredComponentId(manifest.id, 'component id');
   if (!Array.isArray(host.legacySettingsAdoptions) && host.legacySettingsAdoptions !== undefined) throw new Error('Legacy settings adoptions must be a bounded unique array');
   const legacySettingsAdoptions = (host.legacySettingsAdoptions || []).map(declaration => {
     if (!declaration || typeof declaration !== 'object' || Array.isArray(declaration)) throw new Error('Invalid legacy settings adoption declaration');
@@ -266,7 +275,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     const raw = host.service;
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid component service manifest');
     rejectUnknownFields(raw, ['protocolVersion', 'runtime', 'entrypoints', 'rpcMethods', 'capabilities', 'permissions', 'events', 'runtimeActions', 'lifecycleActions', 'projectFolders', 'networkOrigins', 'secretBindings', 'backupRestore'], 'component service');
-    if (Number(raw.protocolVersion) !== COMPONENT_SERVICE_PROTOCOL_VERSION) throw new Error(`Unsupported component service protocolVersion: ${raw.protocolVersion}`);
+    if (raw.protocolVersion !== COMPONENT_SERVICE_PROTOCOL_VERSION) throw new Error(`Unsupported component service protocolVersion: ${raw.protocolVersion}`);
     if (!['node', 'executable'].includes(raw.runtime)) throw new Error('Invalid component service runtime');
     const entries = raw.entrypoints;
     if (!entries || typeof entries !== 'object' || Array.isArray(entries)) throw new Error('Missing component service entrypoints');
@@ -295,8 +304,10 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
     for (const [bindingId, binding] of Object.entries(raw.secretBindings || {})) { const id = requiredExactId(bindingId, 'secret binding id'); if (!binding || typeof binding !== 'object' || Array.isArray(binding)) throw new Error('Invalid component secret binding'); rejectUnknownFields(binding, ['origin', 'header', 'prefix'], 'component secret binding'); const origin = requiredExactStringText(binding.origin, 'secret binding origin', 512); const header = requiredExactStringText(binding.header, 'secret binding header', 64); const prefix = binding.prefix === undefined ? '' : binding.prefix; if (typeof prefix !== 'string' || prefix.length > 128 || !networkOrigins.includes(origin) || header !== header.toLowerCase() || !/^[a-z0-9-]+$/.test(header) || dangerousSecretHeaders.test(header) || /[\r\n]/.test(prefix)) throw new Error('Invalid component secret binding policy'); secretBindings[id] = Object.freeze({ origin, header, prefix }); }
     if (Object.keys(secretBindings).length > 16) throw new Error('Component secret bindings must be bounded');
     if (capabilities.includes('network.fetch') && !networkOrigins.length) throw new Error('network.fetch requires declared networkOrigins');
+    if (raw.events !== undefined && !Array.isArray(raw.events)) throw new Error('Component service events must be a bounded versioned allowlist');
     const events = [...new Set((raw.events || []).map(value => requiredText(value, 'service event', 128)))];
     if (events.length > 32 || events.some(event => !VERSIONED_METHOD.test(event))) throw new Error('Component service events must be a bounded versioned allowlist');
+    if (raw.runtimeActions !== undefined && !Array.isArray(raw.runtimeActions)) throw new Error('Component runtime actions must be a bounded allowlist');
     const runtimeActions = [...new Set((raw.runtimeActions || []).map(value => requiredId(value, 'runtime action')))];
     if (runtimeActions.length > 32) throw new Error('Component runtime actions must be a bounded allowlist');
     if (raw.projectFolders !== undefined && !Array.isArray(raw.projectFolders)) throw new Error('Component project folders must be a bounded array');
@@ -319,6 +330,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
       if (legacyAdoptionGrant && !adoptionGrants.includes(legacyAdoptionGrant)) throw new Error('Component project folder legacy adoption grant is not granted');
       return Object.freeze({ name, protectFromGenericRename, reserveProgressRelocationName, legacyAdoptionGrant });
     });
+    if (raw.lifecycleActions !== undefined && (!raw.lifecycleActions || typeof raw.lifecycleActions !== 'object' || Array.isArray(raw.lifecycleActions))) throw new Error('Component lifecycle actions must be a bounded mapping');
     const lifecycleActions = {};
     for (const [action, declaration] of Object.entries(raw.lifecycleActions || {})) {
       const actionId = requiredId(action, 'lifecycle action');
@@ -404,8 +416,9 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   if (manifest.advancedRuntime !== undefined) {
     const raw = manifest.advancedRuntime;
     if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error('Invalid advanced runtime compatibility manifest');
-    const apiVersion = Number(raw.apiVersion);
+    const apiVersion = raw.apiVersion;
     if (!Number.isInteger(apiVersion) || apiVersion < 1) throw new Error('Invalid advanced runtime API version');
+    if (raw.compatibleLegacyComponentVersions !== undefined && !Array.isArray(raw.compatibleLegacyComponentVersions)) throw new Error('Invalid advanced runtime legacy compatibility list');
     const compatibleLegacyComponentVersions = [...new Set((raw.compatibleLegacyComponentVersions || []).map(value => requiredText(value, 'legacy component version', 80)))];
     if (compatibleLegacyComponentVersions.length > 16 || compatibleLegacyComponentVersions.some(version => !/^\d{2}\.\d{1,2}\.\d{1,2}\.\d+$/.test(version))) {
       throw new Error('Invalid advanced runtime legacy compatibility list');

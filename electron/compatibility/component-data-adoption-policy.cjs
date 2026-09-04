@@ -1,6 +1,6 @@
 const rawDefaultPolicy = require('./component-data-adoption-policy.json');
 
-const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
+const IDENTIFIER = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const TOP_LEVEL_KEY = /^[A-Za-z][A-Za-z0-9]*$/;
 const RESERVED_TOP_LEVEL_CONFIG_KEYS = new Set(['componentSettings', 'componentSettingsRevisions', 'workspacePath', 'backup']);
 const POLICY_INSTANCES = new WeakSet();

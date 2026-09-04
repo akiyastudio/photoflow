@@ -139,6 +139,7 @@ manager.applyBounds(projectInstance);
 assert.deepStrictEqual(projectBounds.at(-1), { x: 10, y: 40, width: 800, height: 600 }, 'toast activity has no bounds mutation path');
 
 assert.deepStrictEqual(normalizeComponentNotificationRendererEvent({  type: 'notification', id: 'alpha:1', componentId: 'alpha', surface: 'project', notification: { tone: 'success', message: 'saved' } }).notification, { tone: 'success', message: 'saved' });
+assert.equal(normalizeComponentNotificationRendererEvent({ type: 'notification', id: 'Alpha:1', componentId: 'Alpha', surface: 'project', notification: { tone: 'success', message: 'saved' } }), null, 'renderer notification boundary rejects non-canonical component IDs');
 assert.equal(normalizeComponentNotificationRendererEvent({  type: 'notification', id: 'x', componentId: 'alpha', surface: 'project', notification: { tone: 'info', message: 'padded', durationMs: 3500 } }), null, 'legacy durationMs is rejected at the renderer boundary');
 assert.deepStrictEqual(normalizeComponentNotificationRendererEvent({  type: 'purge', componentId: 'alpha' }), {  type: 'purge', componentId: 'alpha' });
 const rendererEvents = new EventEmitter(); const normalizedEvents = [];

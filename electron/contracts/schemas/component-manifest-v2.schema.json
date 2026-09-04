@@ -10,16 +10,37 @@
     "version"
   ],
   "anyOf": [
-    { "required": ["componentHost"] },
-    { "required": ["runtimeContributions"], "properties": { "runtimeContributions": { "minItems": 1 } } }
+    {
+      "required": [
+        "componentHost"
+      ]
+    },
+    {
+      "required": [
+        "runtimeContributions"
+      ],
+      "properties": {
+        "runtimeContributions": {
+          "minItems": 1
+        }
+      }
+    }
   ],
+  "not": {
+    "anyOf": [
+      { "required": ["hostApiVersion"] },
+      { "required": ["minHostApiVersion"] },
+      { "required": ["maxHostApiVersion"] },
+      { "required": ["negotiatedHostApiVersion"] }
+    ]
+  },
   "properties": {
     "apiVersion": {
       "const": 1
     },
     "id": {
       "type": "string",
-      "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"
     },
     "version": {
       "type": "string",

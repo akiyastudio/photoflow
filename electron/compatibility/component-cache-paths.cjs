@@ -1,4 +1,4 @@
-const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
+const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 
 const LEGACY_COMPONENT_TEMP_CACHE_PATHS = Object.freeze({
   'video-tools': Object.freeze([Object.freeze(['photoflow', 'ffmpeg'])]),
@@ -10,8 +10,8 @@ const inside = (path, root, candidate) => {
 };
 
 const componentTemporaryDataPaths = ({ path, tempRoot, componentId }) => {
-  const id = String(componentId || '').trim();
-  if (!COMPONENT_ID.test(id)) throw new Error('Invalid component temporary-data identifier');
+  const id = componentId;
+  if (typeof id !== 'string' || !COMPONENT_ID.test(id)) throw new Error('Invalid component temporary-data identifier');
   const requestedRoot = String(tempRoot || '').trim();
   if (!requestedRoot || !path.isAbsolute(requestedRoot)) throw new Error('Invalid component temporary-data root');
   const root = path.resolve(requestedRoot);

@@ -61,6 +61,11 @@ try {
   writeFixture('undeclared-map', ({ packageManifest }) => { packageManifest.photoflowComponent.development.files['private/secret.js'] = 'algorithm.js'; });
   writeFixture('permission-default-deny', ({ manifest }) => { delete manifest.componentHost.service.permissions; });
   writeFixture('batch-runtime', ({ root, packageManifest }) => { fs.writeFileSync(path.join(root, 'runtime.cmd'), '@echo off\r\n'); packageManifest.photoflowComponent.development.runtime.command = 'runtime.cmd'; });
+  writeFixture('upper-source', ({ manifest }) => { manifest.id = 'Foo'; }); writeFixture('lower-source', ({ manifest }) => { manifest.id = 'foo'; });
+  assert.equal(registry.resolve('foo'), null, 'case-folding development ID collisions never resolve');
+  assert.match(registry.inspect('foo').error, /大小写折叠冲突/, 'the lowercase collision source reports a clear error');
+  const upperCollision = registry.list().find(item => item.path === path.join(developmentRoot, 'upper-source'));
+  assert.equal(upperCollision.compatible, false); assert.match(upperCollision.error, /大小写折叠冲突|小写 ASCII/, 'the uppercase collision source is also retained as a clearly invalid row');
   for (const [id, pattern] of [['missing-build', /missing or unsafe/], ['path-escape', /component-local relative file/], ['unknown-field', /Unknown component development field/], ['unsafe-test', /component-local relative file/], ['undeclared-map', /undeclared component file/], ['permission-default-deny', /Host API permissions must be exact and unique/], ['batch-runtime', /directly spawnable executable/]]) {
     const invalid = registry.inspect(id); assert.equal(invalid.source, 'development'); assert.equal(invalid.compatible, false); assert.equal(invalid.name, `Fixture ${id}`, 'invalid development builds retain their safe manifest identity in Component Management'); assert.match(invalid.error, pattern);
   }

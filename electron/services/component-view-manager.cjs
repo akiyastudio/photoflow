@@ -38,7 +38,11 @@ const diagnosticToken = value => {
   const token = String(value || '').trim();
   return /^[a-z0-9_.:-]{1,80}$/i.test(token) ? token : 'unknown';
 };
-const componentPartition = componentId => `persist:component-host-${String(componentId || '').toLowerCase()}`;
+const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
+const componentPartition = componentId => {
+  if (typeof componentId !== 'string' || !COMPONENT_ID.test(componentId)) throw new Error('Invalid component partition identifier');
+  return `persist:component-host-${componentId}`;
+};
 const waitForWebContentsDestroyed = (webContents, timeoutMs = 1000) => {
   if (!webContents || webContents.isDestroyed?.()) return Promise.resolve();
   return new Promise((resolve, reject) => {
@@ -338,7 +342,7 @@ class ComponentViewManager {
     this.instancesById.set(instanceId, instance);
     const senderId = view.webContents.id;
     this.senderBindings.set(senderId, instance);
-    this.partitionSessions.set(String(descriptor.componentId).toLowerCase(), view.webContents.session);
+    this.partitionSessions.set(descriptor.componentId, view.webContents.session);
     const componentRoot = descriptor.componentRoot ? path.resolve(descriptor.componentRoot) : '';
     let canonicalComponentRoot='';
     if(componentRoot){const componentRootStat = await require('node:fs').promises.lstat(componentRoot);canonicalComponentRoot = await require('node:fs').promises.realpath(componentRoot);if (!componentRootStat.isDirectory() || componentRootStat.isSymbolicLink()) { this.close(instanceId); throw new Error('Component root is unsafe'); }}
@@ -538,9 +542,10 @@ class ComponentViewManager {
   }
 
   closeComponent(componentId) {
-    const normalizedId = String(componentId || '').toLowerCase();
+    const normalizedId = componentId;
+    componentPartition(normalizedId);
     const ids = [...this.instances.values()]
-      .filter(instance => String(instance.descriptor.componentId || '').toLowerCase() === normalizedId)
+      .filter(instance => instance.descriptor.componentId === normalizedId)
       .map(instance => instance.instanceId);
     ids.forEach(id => this.close(id));
     this.notificationService?.clearComponent?.(normalizedId);
@@ -549,8 +554,9 @@ class ComponentViewManager {
   }
 
   async clearComponentPartitionStorage(componentId) {
-    const normalizedId = String(componentId || '').toLowerCase();
-    const closingContents = [...this.instances.values()].filter(instance => String(instance.descriptor.componentId || '').toLowerCase() === normalizedId).map(instance => instance.view.webContents);
+    const normalizedId = componentId;
+    componentPartition(normalizedId);
+    const closingContents = [...this.instances.values()].filter(instance => instance.descriptor.componentId === normalizedId).map(instance => instance.view.webContents);
     this.closeComponent(normalizedId);
     await Promise.all(closingContents.map(webContents => waitForWebContentsDestroyed(webContents)));
     const session = this.partitionSessions.get(normalizedId) || this.partitionSessionProvider?.(componentPartition(normalizedId));

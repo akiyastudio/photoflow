@@ -1,7 +1,7 @@
 const fs = require('fs');
 const path = require('path');
 
-const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/i;
+const COMPONENT_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
 const MAX_METADATA_BYTES = 1024 * 1024;
 const ALLOWED_DEVELOPMENT_FIELDS = new Set(['prepare', 'runtime', 'files']);
 const ALLOWED_RUNTIME_FIELDS = new Set(['command', 'entry', 'argsPrefix']);
@@ -133,7 +133,7 @@ const inspectDevelopmentComponent = (componentRoot, { platform = process.platfor
   const manifestPath = safeFile(componentRoot, manifestRelative, 'component development manifest');
   if (fs.statSync(manifestPath).size > MAX_METADATA_BYTES) throw new Error('Component development manifest is too large');
   const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
-  if (!COMPONENT_ID.test(String(manifest.id || ''))) throw new Error('Invalid development component id');
+  if (typeof manifest.id !== 'string' || !COMPONENT_ID.test(manifest.id)) throw new Error('Invalid development component id');
   const files = development.files;
   if (!files || typeof files !== 'object' || Array.isArray(files)) throw new Error('Component development files must be an explicit mapping');
   const declared = declaredDevelopmentFiles(manifest); const resolvedFiles = {};

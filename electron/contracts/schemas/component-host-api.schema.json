@@ -100,6 +100,10 @@
       "type": "string",
       "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{0,79}$"
     },
+    "componentId": {
+      "type": "string",
+      "pattern": "^[a-z0-9][a-z0-9._-]{0,79}$"
+    },
     "uuid": {
       "type": "string",
       "pattern": "^[A-Fa-f0-9-]{36}$"
@@ -210,7 +214,7 @@
           "pattern": "^[^\\u0000-\\u001F\\u007F]+$"
         },
         "componentId": {
-          "$ref": "#/$defs/id"
+          "$ref": "#/$defs/componentId"
         },
         "parentCapability": {
           "enum": [
@@ -220,11 +224,6 @@
           ]
         }
       }
-    },
-    "apiResult": {
-      "type": "object",
-      "required": [],
-      "properties": {}
     },
     "componentRuntimeExecute": {
       "type": "object",
@@ -371,33 +370,82 @@
           ]
         },
         "result": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [],
-          "properties": {
-            "operationId": {
-              "$ref": "#/$defs/uuid"
-            },
-            "result": {
-              "$ref": "#/$defs/jsonObject"
-            },
-            "sourcePreviews": {
-              "type": "array",
-              "maxItems": 120,
-              "items": {
-                "$ref": "#/$defs/jsonObject"
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "sourcePreviews"
+              ],
+              "properties": {
+                "sourcePreviews": {
+                  "type": "array",
+                  "maxItems": 120,
+                  "items": {
+                    "$ref": "#/$defs/jsonObject"
+                  }
+                }
               }
             },
-            "cancelled": {
-              "type": "boolean"
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operationId",
+                "result"
+              ],
+              "properties": {
+                "operationId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "result": {
+                  "$ref": "#/$defs/jsonObject"
+                }
+              }
             },
-            "task": {
-              "type": [
-                "object",
-                "null"
-              ]
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operationId",
+                "task"
+              ],
+              "properties": {
+                "operationId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "task": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "operationId",
+                "cancelled",
+                "task"
+              ],
+              "properties": {
+                "operationId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "cancelled": {
+                  "type": "boolean"
+                },
+                "task": {
+                  "type": [
+                    "object",
+                    "null"
+                  ]
+                }
+              }
             }
-          }
+          ]
         }
       }
     },
@@ -442,26 +490,97 @@
           }
         },
         "result": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/apiResult"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "items",
+            "page"
+          ],
+          "properties": {
+            "items": {
+              "type": "array",
+              "maxItems": 200,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": [
+                  "mediaRef",
+                  "relativePath",
+                  "name",
+                  "kind",
+                  "extension",
+                  "size",
+                  "updatedAt"
+                ],
+                "properties": {
+                  "mediaRef": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "relativePath"
+                    ],
+                    "properties": {
+                      "relativePath": {
+                        "$ref": "#/$defs/relativePath"
+                      }
+                    }
+                  },
+                  "relativePath": {
+                    "$ref": "#/$defs/relativePath"
+                  },
+                  "name": {
+                    "type": "string"
+                  },
+                  "kind": {
+                    "enum": [
+                      "image",
+                      "raw",
+                      "video"
+                    ]
+                  },
+                  "extension": {
+                    "type": "string"
+                  },
+                  "size": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "updatedAt": {
+                    "type": "number",
+                    "minimum": 0
+                  },
+                  "viaExternalLink": {
+                    "const": true
+                  }
+                }
+              }
             },
-            {
+            "page": {
               "type": "object",
+              "additionalProperties": false,
               "required": [
-                "items",
-                "page"
+                "hasMore",
+                "cursor",
+                "pageSize"
               ],
               "properties": {
-                "items": {
-                  "type": "array"
+                "hasMore": {
+                  "type": "boolean"
                 },
-                "page": {
-                  "type": "object"
+                "cursor": {
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "pageSize": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 200
                 }
               }
             }
-          ]
+          }
         }
       }
     },
@@ -516,44 +635,90 @@
           ]
         },
         "result": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/apiResult"
-            },
-            {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "mediaRef",
+            "metadata",
+            "variants"
+          ],
+          "properties": {
+            "mediaRef": {
               "type": "object",
-              "required": [
-                "mediaRef",
-                "metadata",
-                "variants"
-              ],
+              "additionalProperties": false,
+              "required": [],
               "properties": {
-                "mediaRef": {
-                  "type": "object"
+                "photoId": {
+                  "type": "string"
                 },
-                "metadata": {
-                  "type": "object"
+                "versionId": {
+                  "type": "string"
                 },
-                "variants": {
-                  "type": "object",
-                  "properties": {
-                    "thumbnail": {
-                      "$ref": "#/$defs/derivedVariant"
-                    },
-                    "preview": {
-                      "$ref": "#/$defs/derivedVariant"
-                    },
-                    "original": {
-                      "$ref": "#/$defs/originalVariant"
-                    }
-                  }
-                },
-                "input": {
-                  "$ref": "#/$defs/inputGrant"
+                "relativePath": {
+                  "$ref": "#/$defs/relativePath"
                 }
               }
+            },
+            "metadata": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "photoId",
+                "versionId",
+                "currentVersionId",
+                "displayName",
+                "originalName",
+                "relativePath",
+                "isCurrent",
+                "fileMissing"
+              ],
+              "properties": {
+                "photoId": {
+                  "type": "string"
+                },
+                "versionId": {
+                  "type": "string"
+                },
+                "currentVersionId": {
+                  "type": "string"
+                },
+                "displayName": {
+                  "type": "string"
+                },
+                "originalName": {
+                  "type": "string"
+                },
+                "relativePath": {
+                  "$ref": "#/$defs/relativePath"
+                },
+                "isCurrent": {
+                  "type": "boolean"
+                },
+                "fileMissing": {
+                  "type": "boolean"
+                }
+              }
+            },
+            "variants": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [],
+              "properties": {
+                "thumbnail": {
+                  "$ref": "#/$defs/derivedVariant"
+                },
+                "preview": {
+                  "$ref": "#/$defs/derivedVariant"
+                },
+                "original": {
+                  "$ref": "#/$defs/originalVariant"
+                }
+              }
+            },
+            "input": {
+              "$ref": "#/$defs/inputGrant"
             }
-          ]
+          }
         }
       }
     },
@@ -647,31 +812,30 @@
           }
         },
         "result": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/apiResult"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "inputId",
+            "privatePath",
+            "byteLength",
+            "expiresAt"
+          ],
+          "properties": {
+            "inputId": {
+              "type": "string"
             },
-            {
-              "type": "object",
-              "required": [
-                "inputId",
-                "privatePath",
-                "byteLength"
-              ],
-              "properties": {
-                "inputId": {
-                  "type": "string"
-                },
-                "privatePath": {
-                  "type": "string"
-                },
-                "byteLength": {
-                  "type": "number",
-                  "minimum": 0
-                }
-              }
+            "privatePath": {
+              "type": "string"
+            },
+            "byteLength": {
+              "type": "number",
+              "minimum": 0
+            },
+            "expiresAt": {
+              "type": "number",
+              "minimum": 0
             }
-          ]
+          }
         }
       }
     },
@@ -726,7 +890,7 @@
                       "const": "component-storage-adoption"
                     },
                     "componentId": {
-                      "$ref": "#/$defs/id"
+                      "$ref": "#/$defs/componentId"
                     },
                     "state": {
                       "const": "pending"
@@ -810,7 +974,7 @@
                       "const": "component-storage-adoption"
                     },
                     "componentId": {
-                      "$ref": "#/$defs/id"
+                      "$ref": "#/$defs/componentId"
                     },
                     "state": {
                       "const": "committed"
@@ -894,27 +1058,21 @@
           ]
         },
         "result": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/apiResult"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "revision",
+            "settings"
+          ],
+          "properties": {
+            "revision": {
+              "type": "integer",
+              "minimum": 0
             },
-            {
-              "type": "object",
-              "required": [
-                "revision",
-                "settings"
-              ],
-              "properties": {
-                "revision": {
-                  "type": "integer",
-                  "minimum": 0
-                },
-                "settings": {
-                  "$ref": "#/$defs/jsonObject"
-                }
-              }
+            "settings": {
+              "$ref": "#/$defs/jsonObject"
             }
-          ]
+          }
         }
       }
     },
@@ -1131,65 +1289,202 @@
           ]
         },
         "result": {
-          "allOf": [
+          "oneOf": [
             {
-              "$ref": "#/$defs/apiResult"
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "stageId",
+                "privatePath",
+                "expiresAt"
+              ],
+              "properties": {
+                "stageId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "privatePath": {
+                  "type": "string"
+                },
+                "expiresAt": {
+                  "type": "number"
+                }
+              }
             },
             {
               "type": "object",
-              "anyOf": [
-                {
-                  "required": [
-                    "stageId",
-                    "privatePath",
-                    "expiresAt"
-                  ]
+              "additionalProperties": false,
+              "required": [
+                "stageId",
+                "artifactId",
+                "byteLength"
+              ],
+              "properties": {
+                "stageId": {
+                  "$ref": "#/$defs/uuid"
                 },
-                {
-                  "required": [
-                    "stageId",
-                    "artifactId",
-                    "byteLength"
-                  ]
+                "artifactId": {
+                  "$ref": "#/$defs/uuid"
                 },
-                {
-                  "required": [
-                    "stageId",
-                    "valid",
-                    "fileCount",
-                    "totalBytes"
-                  ]
+                "byteLength": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "stageId",
+                "valid",
+                "fileCount",
+                "totalBytes"
+              ],
+              "properties": {
+                "stageId": {
+                  "$ref": "#/$defs/uuid"
                 },
-                {
-                  "required": [
-                    "stageId",
-                    "rolledBack"
-                  ]
+                "valid": {
+                  "const": true
                 },
-                {
+                "fileCount": {
+                  "type": "integer",
+                  "minimum": 0
+                },
+                "totalBytes": {
+                  "type": "number",
+                  "minimum": 0
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "stageId",
+                "rolledBack"
+              ],
+              "properties": {
+                "stageId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "rolledBack": {
+                  "const": true
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "commitId",
+                "idempotencyKey",
+                "outputs"
+              ],
+              "properties": {
+                "commitId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "idempotencyKey": {
+                  "$ref": "#/$defs/id"
+                },
+                "outputs": {
+                  "type": "array",
+                  "maxItems": 2000,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "artifactId",
+                      "relativePath",
+                      "byteLength",
+                      "sha256"
+                    ],
+                    "properties": {
+                      "artifactId": {
+                        "$ref": "#/$defs/uuid"
+                      },
+                      "relativePath": {
+                        "$ref": "#/$defs/relativePath"
+                      },
+                      "filePath": {
+                        "type": "string"
+                      },
+                      "byteLength": {
+                        "type": "number",
+                        "minimum": 0
+                      },
+                      "sha256": {
+                        "type": "string",
+                        "pattern": "^[a-f0-9]{64}$"
+                      }
+                    }
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "deletionId",
+                "deleted",
+                "relativePath"
+              ],
+              "properties": {
+                "deletionId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "deleted": {
+                  "const": true
+                },
+                "relativePath": {
+                  "$ref": "#/$defs/relativePath"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "importId",
+                "privatePath",
+                "byteLength",
+                "sha256",
+                "outputRef"
+              ],
+              "properties": {
+                "importId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "privatePath": {
+                  "type": "string"
+                },
+                "byteLength": {
+                  "type": "number",
+                  "minimum": 0
+                },
+                "sha256": {
+                  "type": "string",
+                  "pattern": "^[a-f0-9]{64}$"
+                },
+                "outputRef": {
+                  "type": "object",
+                  "additionalProperties": false,
                   "required": [
                     "commitId",
-                    "idempotencyKey",
-                    "outputs"
-                  ]
-                },
-                {
-                  "required": [
-                    "deletionId",
-                    "deleted",
-                    "relativePath"
-                  ]
-                },
-                {
-                  "required": [
-                    "importId",
-                    "privatePath",
-                    "byteLength",
-                    "sha256",
-                    "outputRef"
-                  ]
+                    "artifactId"
+                  ],
+                  "properties": {
+                    "commitId": {
+                      "$ref": "#/$defs/uuid"
+                    },
+                    "artifactId": {
+                      "$ref": "#/$defs/uuid"
+                    }
+                  }
                 }
-              ]
+              }
             }
           ]
         }
@@ -1251,26 +1546,20 @@
           }
         },
         "result": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/apiResult"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "versionId",
+            "result"
+          ],
+          "properties": {
+            "versionId": {
+              "$ref": "#/$defs/uuid"
             },
-            {
-              "type": "object",
-              "required": [
-                "versionId",
-                "result"
-              ],
-              "properties": {
-                "versionId": {
-                  "$ref": "#/$defs/uuid"
-                },
-                "result": {
-                  "$ref": "#/$defs/jsonObject"
-                }
-              }
+            "result": {
+              "$ref": "#/$defs/jsonObject"
             }
-          ]
+          }
         }
       }
     },
@@ -1330,32 +1619,26 @@
           }
         },
         "result": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/apiResult"
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "task",
+            "cancelled"
+          ],
+          "properties": {
+            "task": {
+              "type": [
+                "object",
+                "null"
+              ]
             },
-            {
-              "type": "object",
-              "required": [
-                "task",
-                "cancelled"
-              ],
-              "properties": {
-                "task": {
-                  "type": [
-                    "object",
-                    "null"
-                  ]
-                },
-                "cancelled": {
-                  "type": "boolean"
-                },
-                "checkpoint": {
-                  "$ref": "#/$defs/jsonObject"
-                }
-              }
+            "cancelled": {
+              "type": "boolean"
+            },
+            "checkpoint": {
+              "$ref": "#/$defs/jsonObject"
             }
-          ]
+          }
         }
       }
     },
@@ -1642,22 +1925,16 @@
           }
         },
         "result": {
-          "allOf": [
-            {
-              "$ref": "#/$defs/apiResult"
-            },
-            {
-              "type": "object",
-              "required": [
-                "emitted"
-              ],
-              "properties": {
-                "emitted": {
-                  "const": true
-                }
-              }
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "emitted"
+          ],
+          "properties": {
+            "emitted": {
+              "const": true
             }
-          ]
+          }
         }
       }
     },
@@ -1692,31 +1969,82 @@
           }
         },
         "result": {
-          "allOf": [
+          "oneOf": [
             {
-              "$ref": "#/$defs/apiResult"
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "componentId",
+                "componentVersion",
+                "permissions",
+                "events",
+                "lifecycleActions",
+                "state"
+              ],
+              "properties": {
+                "componentId": {
+                  "$ref": "#/$defs/componentId"
+                },
+                "componentVersion": {
+                  "type": "string"
+                },
+                "permissions": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "events": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "type": "string"
+                  }
+                },
+                "lifecycleActions": {
+                  "type": "array",
+                  "uniqueItems": true,
+                  "items": {
+                    "$ref": "#/$defs/id"
+                  }
+                },
+                "state": {
+                  "enum": [
+                    "active",
+                    "termination-unconfirmed"
+                  ]
+                }
+              }
             },
             {
               "type": "object",
-              "anyOf": [
-                {
-                  "required": [
-                    "componentId",
-                    "componentVersion",
-                    "permissions",
-                    "events",
-                    "state"
+              "additionalProperties": false,
+              "required": [
+                "success",
+                "action",
+                "taskId",
+                "message"
+              ],
+              "properties": {
+                "success": {
+                  "const": true
+                },
+                "action": {
+                  "enum": [
+                    "preflight",
+                    "install",
+                    "repair",
+                    "uninstall"
                   ]
                 },
-                {
-                  "required": [
-                    "success",
-                    "action",
-                    "taskId",
-                    "message"
-                  ]
+                "taskId": {
+                  "type": "string"
+                },
+                "message": {
+                  "type": "string"
                 }
-              ]
+              }
             }
           ]
         }
@@ -1765,15 +2093,58 @@
           }
         },
         "result": {
-          "allOf": [
+          "oneOf": [
             {
-              "$ref": "#/$defs/apiResult"
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "opaqueRef",
+                "variants"
+              ],
+              "properties": {
+                "opaqueRef": {
+                  "type": "string"
+                },
+                "variants": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [],
+                  "properties": {
+                    "thumbnail": {
+                      "$ref": "#/$defs/derivedVariant"
+                    },
+                    "preview": {
+                      "$ref": "#/$defs/derivedVariant"
+                    },
+                    "original": {
+                      "$ref": "#/$defs/originalVariant"
+                    }
+                  }
+                }
+              }
             },
             {
               "type": "object",
+              "additionalProperties": false,
               "required": [
-                "opaqueRef"
-              ]
+                "opaqueRef",
+                "action",
+                "opened"
+              ],
+              "properties": {
+                "opaqueRef": {
+                  "type": "string"
+                },
+                "action": {
+                  "enum": [
+                    "open",
+                    "reveal"
+                  ]
+                },
+                "opened": {
+                  "const": true
+                }
+              }
             }
           ]
         }
@@ -1819,15 +2190,77 @@
           }
         },
         "result": {
-          "type": "object",
-          "required": [
-            "accepted"
-          ],
-          "properties": {
-            "accepted": {
-              "type": "boolean"
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "accepted",
+                "id"
+              ],
+              "properties": {
+                "accepted": {
+                  "const": true
+                },
+                "id": {
+                  "type": "string"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "accepted",
+                "deduplicated",
+                "code"
+              ],
+              "properties": {
+                "accepted": {
+                  "const": false
+                },
+                "deduplicated": {
+                  "const": true
+                },
+                "code": {
+                  "const": "NOTIFICATION_DEDUPLICATED"
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "accepted",
+                "error"
+              ],
+              "properties": {
+                "accepted": {
+                  "const": false
+                },
+                "error": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "required": [
+                    "code",
+                    "message",
+                    "retryable"
+                  ],
+                  "properties": {
+                    "code": {
+                      "type": "string"
+                    },
+                    "message": {
+                      "type": "string"
+                    },
+                    "retryable": {
+                      "type": "boolean"
+                    }
+                  }
+                }
+              }
             }
-          }
+          ]
         }
       }
     },
@@ -3409,55 +3842,95 @@
           ]
         },
         "result": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [],
-          "properties": {
-            "planToken": {
-              "$ref": "#/$defs/uuid"
-            },
-            "expiresAt": {
-              "type": "number"
-            },
-            "receiptId": {
-              "$ref": "#/$defs/uuid"
-            },
-            "undoneReceiptId": {
-              "$ref": "#/$defs/uuid"
-            },
-            "action": {
-              "type": "string"
-            },
-            "undoCapability": {
-              "enum": [
-                "available",
-                "requires-precise-recycle"
-              ]
-            },
-            "undoAvailable": {
-              "type": "boolean"
-            },
-            "items": {
-              "type": "array",
-              "maxItems": 100,
-              "items": {
-                "$ref": "#/$defs/filePlanItem"
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "planToken",
+                "expiresAt",
+                "action",
+                "undoCapability",
+                "items"
+              ],
+              "properties": {
+                "planToken": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "expiresAt": {
+                  "type": "number"
+                },
+                "action": {
+                  "type": "string"
+                },
+                "undoCapability": {
+                  "enum": [
+                    "available",
+                    "requires-precise-recycle"
+                  ]
+                },
+                "items": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "$ref": "#/$defs/filePlanItem"
+                  }
+                }
               }
             },
-            "committed": {
-              "const": true
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receiptId",
+                "committed",
+                "action",
+                "undoAvailable",
+                "undo"
+              ],
+              "properties": {
+                "receiptId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "committed": {
+                  "const": true
+                },
+                "action": {
+                  "type": "string"
+                },
+                "undoAvailable": {
+                  "type": "boolean"
+                },
+                "undo": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": {
+                    "$ref": "#/$defs/fileUndoItem"
+                  }
+                }
+              }
             },
-            "undone": {
-              "const": true
-            },
-            "undo": {
-              "type": "array",
-              "maxItems": 100,
-              "items": {
-                "$ref": "#/$defs/fileUndoItem"
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "receiptId",
+                "undoneReceiptId",
+                "undone"
+              ],
+              "properties": {
+                "receiptId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "undoneReceiptId": {
+                  "$ref": "#/$defs/uuid"
+                },
+                "undone": {
+                  "const": true
+                }
               }
             }
-          }
+          ]
         }
       }
     },
@@ -3645,34 +4118,96 @@
           ]
         },
         "result": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [],
-          "properties": {
-            "secretRef": {
-              "type": "string",
-              "pattern": "^secret:v1:"
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "secretRef",
+                "name",
+                "metadata",
+                "createdAt",
+                "updatedAt"
+              ],
+              "properties": {
+                "secretRef": {
+                  "type": "string",
+                  "pattern": "^secret:v1:"
+                },
+                "name": {
+                  "type": "string"
+                },
+                "metadata": {
+                  "$ref": "#/$defs/jsonObject"
+                },
+                "createdAt": {
+                  "type": "number"
+                },
+                "updatedAt": {
+                  "type": "number"
+                }
+              }
             },
-            "name": {
-              "type": "string"
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "items"
+              ],
+              "properties": {
+                "items": {
+                  "type": "array",
+                  "maxItems": 128,
+                  "items": {
+                    "type": "object",
+                    "additionalProperties": false,
+                    "required": [
+                      "secretRef",
+                      "name",
+                      "metadata",
+                      "createdAt",
+                      "updatedAt"
+                    ],
+                    "properties": {
+                      "secretRef": {
+                        "type": "string",
+                        "pattern": "^secret:v1:"
+                      },
+                      "name": {
+                        "type": "string"
+                      },
+                      "metadata": {
+                        "$ref": "#/$defs/jsonObject"
+                      },
+                      "createdAt": {
+                        "type": "number"
+                      },
+                      "updatedAt": {
+                        "type": "number"
+                      }
+                    }
+                  }
+                }
+              }
             },
-            "metadata": {
-              "$ref": "#/$defs/jsonObject"
-            },
-            "createdAt": {
-              "type": "number"
-            },
-            "updatedAt": {
-              "type": "number"
-            },
-            "items": {
-              "type": "array",
-              "maxItems": 128
-            },
-            "deleted": {
-              "const": true
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "secretRef",
+                "deleted"
+              ],
+              "properties": {
+                "secretRef": {
+                  "type": "string",
+                  "pattern": "^secret:v1:"
+                },
+                "deleted": {
+                  "const": true
+                }
+              }
             }
-          }
+          ]
         }
       }
     },
@@ -3946,12 +4481,59 @@
           ]
         },
         "result": {
-          "allOf": [
+          "oneOf": [
             {
-              "$ref": "#/$defs/apiResult"
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "progress",
+                "edges"
+              ],
+              "properties": {
+                "progress": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/jsonObject"
+                  }
+                },
+                "edges": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/jsonObject"
+                  }
+                }
+              }
             },
             {
-              "type": "object"
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "progress",
+                "edges"
+              ],
+              "properties": {
+                "progress": {
+                  "$ref": "#/$defs/jsonObject"
+                },
+                "edges": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/jsonObject"
+                  }
+                }
+              }
+            },
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": [
+                "result"
+              ],
+              "properties": {
+                "result": {
+                  "$ref": "#/$defs/jsonObject"
+                }
+              }
             }
           ]
         }
