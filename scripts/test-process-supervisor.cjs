@@ -1,7 +1,7 @@
 const assert = require('assert');
 const { EventEmitter } = require('events');
 const { PassThrough } = require('stream');
-const { createProcessSupervisor } = require('../electron/services/process-supervisor.cjs');
+const { createProcessSupervisor, terminateAndWait } = require('../electron/services/process-supervisor.cjs');
 const { createJsonCommandRunner: createJsonCommandRunnerBase } = require('../electron/services/json-command-runner.cjs');
 const createJsonCommandRunner = options => createJsonCommandRunnerBase({ ...options, terminationOptions: { platform: 'test' } });
 const { createDevelopmentPythonResolver, developmentPythonPath } = require('../electron/services/python-environment-service.cjs');
@@ -27,9 +27,20 @@ class FakeChild extends EventEmitter {
   }
 }
 
-const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const delay = ms => new Promise(resolve => setTimeout(resolve, ms));
 
 const main = async () => {
+  const rawWindowsChild = pid => { const child = new EventEmitter(); child.pid = pid; child.exitCode = null; child.signalCode = null; child.stdin = new PassThrough(); return child; };
+  const invalidPidChild = rawWindowsChild(0); let invalidPidSettled = false;
+  const invalidPidTermination = terminateAndWait(invalidPidChild, Date.now() + 200, { platform: 'win32' }).finally(() => { invalidPidSettled = true; });
+  const invalidPidRejected = assert.rejects(invalidPidTermination, error => error.code === 'PROCESS_TREE_TERMINATION_FAILED' && error.cause?.code === 'PROCESS_TERMINATION_INVALID_PID');
+  await delay(30); assert.equal(invalidPidSettled, false, 'taskkill failure must still wait for raw helper exit+close');
+  invalidPidChild.exitCode = 1; invalidPidChild.emit('exit', 1, null); await delay(5); assert.equal(invalidPidSettled, false, 'raw helper exit without close must retain the fence'); invalidPidChild.emit('close', 1, null); await invalidPidRejected;
+
+  const neverClosedChild = rawWindowsChild(0); const neverClosedStartedAt = Date.now();
+  await assert.rejects(terminateAndWait(neverClosedChild, Date.now() + 40, { platform: 'win32' }), error => error.code === 'PROCESS_TERMINATION_FAILED' && error.cause?.code === 'PROCESS_TERMINATION_INVALID_PID');
+  assert(Date.now() - neverClosedStartedAt >= 30, 'raw helper termination failure must remain fenced until its total deadline');
+
   const children = [];
   const logs = [];
   const supervisor = createProcessSupervisor({

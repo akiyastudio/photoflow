@@ -75,8 +75,16 @@ const terminateAndWait = async (child, deadlineAt, { rollbackSettleMs = 25, plat
     try { child.kill(); } catch { /* exit may already be in flight */ }
   }
   if (treeTerminationError) {
-    const error = new Error('Windows 组件服务进程树终止失败');
-    error.code = 'PROCESS_TREE_TERMINATION_FAILED'; error.pid = child.pid || null; error.cause = treeTerminationError;
+    // The PID/tree operation failed, but signalling the ChildProcess handle is
+    // still useful for fencing its streams. This never upgrades the result to
+    // tree-confirmed success: descendants may remain unknown.
+    try { child.kill?.('SIGKILL'); } catch { /* preserve the original tree failure */ }
+    const helperClosed = await waitForChildExit(child, terminationDeadline, { requireClose: true });
+    const error = new Error(helperClosed
+      ? 'Windows 组件服务进程树终止失败，且无法确认完整进程树已经清空'
+      : 'Windows 组件服务进程树终止失败，且辅助进程未在截止时间前关闭');
+    error.code = helperClosed ? 'PROCESS_TREE_TERMINATION_FAILED' : 'PROCESS_TERMINATION_FAILED';
+    error.pid = child.pid || null; error.cause = treeTerminationError;
     throw error;
   }
   let exited = childHasExited(child);
