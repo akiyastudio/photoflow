@@ -18,6 +18,11 @@ const createDurableCleanupAdmission = ({ start, flush, worker, receipts }) => {
   state = 'admitted';
   return { admitted: true, completion };
 };
+const awaitDurableCleanupRestart = async admissionPromise => {
+  const admission = await admissionPromise;
+  if (!admission?.admitted) throw Object.assign(new Error('组件清理重启未获得持久 admission'), { cleanupPendingReceipts: admission?.targets || [] });
+  return admission.completion;
+};
 
 const registerHostCapabilities = (componentCapabilityBroker, registrations) => {
   for (const [method, handler] of registrations) {
@@ -707,9 +712,14 @@ const registerSystemIpc = context => {
       throw Object.assign(new Error('组件清理 receipt 无法同步持久化，已保留恢复对象'), { cleanupPendingReceipts: targets });
     }
     void launched.catch(error => writeLog('warn', 'Deferred system cleanup failed', { error: error.message || String(error) }));
-    return { admitted: true, completion: launched };
+    const durableCompletion = launched.then(completion => {
+      if (completion?.task?.state === 'completed' && backgroundTasks.flush?.() !== true) throw Object.assign(new Error('组件清理任务完成状态无法同步持久化'), { cleanupPendingReceipts: targets });
+      return completion;
+    });
+    void durableCompletion.catch(() => undefined);
+    return { admitted: true, completion: durableCompletion };
   };
-  backgroundTasks?.registerTypeRestartFactory?.('system-filesystem-cleanup', task => queueSystemFilesystemCleanup(task.metadata?.targets || [], task.metadata?.title || task.title, task));
+  backgroundTasks?.registerTypeRestartFactory?.('system-filesystem-cleanup', task => awaitDurableCleanupRestart(queueSystemFilesystemCleanup(task.metadata?.targets || [], task.metadata?.title || task.title, task)));
 
   const recycleManaged = async (root, target, label = path.basename(target)) => {
     let stat;
@@ -2009,4 +2019,4 @@ const registerSystemIpc = context => {
   return { componentTransactionReady };
 };
 
-module.exports = { confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, prepareSafeComponentInstallContainer, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, rollbackComponentPublication, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };
+module.exports = { awaitDurableCleanupRestart, confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, prepareSafeComponentInstallContainer, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, rollbackComponentPublication, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };

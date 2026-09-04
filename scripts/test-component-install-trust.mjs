@@ -6,7 +6,7 @@ import zlib from 'node:zlib';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, prepareSafeComponentInstallContainer, rollbackComponentPublication, snapshotComponentTrust, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
+const { awaitDurableCleanupRestart, confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, prepareSafeComponentInstallContainer, rollbackComponentPublication, snapshotComponentTrust, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
 const { captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
 
 const crc32 = buffer => {
@@ -41,6 +41,8 @@ const rejectedAdmission = createDurableCleanupAdmission({ start: worker => Promi
 assert.equal(rejectedAdmission.admitted, false); await assert.rejects(rejectedAdmission.completion, /尚未完成持久 admission/); assert.equal(cleanupWorkerCalls, 0, 'flush failure never starts destructive cleanup');
 const acceptedAdmission = createDurableCleanupAdmission({ start: worker => Promise.resolve().then(() => worker({})), flush: () => true, worker: async () => { cleanupWorkerCalls += 1; return true; }, receipts: [] });
 assert.equal(acceptedAdmission.admitted, true); await acceptedAdmission.completion; assert.equal(cleanupWorkerCalls, 1);
+let settleRestart; const restartWork = new Promise(resolve => { settleRestart = resolve; }); let restartSettled = false; const restarted = awaitDurableCleanupRestart(Promise.resolve({ admitted: true, completion: restartWork })).then(() => { restartSettled = true; }); await Promise.resolve(); assert.equal(restartSettled, false, 'restart factory remains pending until replacement cleanup completes'); settleRestart({ task: { state: 'completed' } }); await restarted; assert.equal(restartSettled, true);
+await assert.rejects(awaitDurableCleanupRestart(Promise.resolve({ admitted: true, completion: Promise.reject(new Error('replacement cleanup failed')) })), /replacement cleanup failed/);
 const releaseFirstInstall = acquireInstall('third-party.tool');
 assert.throws(() => acquireInstall('third-party.tool'), /正在安装/);
 const releaseOtherInstall = acquireInstall('other.tool');
