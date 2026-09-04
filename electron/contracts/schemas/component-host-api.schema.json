@@ -3595,35 +3595,47 @@
           }
         },
         "result": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "receiptId",
-            "action"
-          ],
-          "properties": {
-            "receiptId": {
-              "$ref": "#/$defs/mutationReceipt"
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["receiptId", "action", "progress"],
+              "properties": {
+                "receiptId": { "$ref": "#/$defs/mutationReceipt" },
+                "action": { "const": "update" },
+                "progress": { "$ref": "#/$defs/mutationProgress" }
+              }
             },
-            "action": {
-              "enum": [
-                "update",
-                "unregister",
-                "edgeCreate",
-                "edgeDelete",
-                "edgeReplaceSource"
-              ]
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["receiptId", "action", "progressId"],
+              "properties": {
+                "receiptId": { "$ref": "#/$defs/mutationReceipt" },
+                "action": { "const": "unregister" },
+                "progressId": { "type": "string" }
+              }
             },
-            "progress": {
-              "$ref": "#/$defs/mutationProgress"
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["receiptId", "action", "edge"],
+              "properties": {
+                "receiptId": { "$ref": "#/$defs/mutationReceipt" },
+                "action": { "enum": ["edgeCreate", "edgeReplaceSource"] },
+                "edge": { "$ref": "#/$defs/mutationEdge" }
+              }
             },
-            "edge": {
-              "$ref": "#/$defs/mutationEdge"
-            },
-            "progressId": {
-              "type": "string"
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["receiptId", "action"],
+              "properties": {
+                "receiptId": { "$ref": "#/$defs/mutationReceipt" },
+                "action": { "const": "edgeDelete" }
+              }
             }
-          }
+          ]
         }
       }
     },
@@ -4002,40 +4014,36 @@
           ]
         },
         "result": {
-          "type": "object",
-          "additionalProperties": false,
-          "required": [
-            "action"
-          ],
-          "properties": {
-            "action": {
-              "enum": [
-                "video.timelineFrames",
-                "office.extractImages"
-              ]
-            },
-            "receiptId": {
-              "$ref": "#/$defs/uuid"
-            },
-            "operationId": {
-              "$ref": "#/$defs/uuid"
-            },
-            "frames": {
-              "type": "array",
-              "maxItems": 16,
-              "items": {
-                "type": "string",
-                "pattern": "^data:image/jpeg;base64,"
+          "oneOf": [
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["action", "frames"],
+              "properties": {
+                "action": { "const": "video.timelineFrames" },
+                "frames": {
+                  "type": "array",
+                  "maxItems": 16,
+                  "items": { "type": "string", "pattern": "^data:image/(?:jpeg|png);base64," }
+                }
               }
             },
-            "outputs": {
-              "type": "array",
-              "maxItems": 100,
-              "items": {
-                "$ref": "#/$defs/mutationArtifact"
+            {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["action", "receiptId", "operationId", "outputs"],
+              "properties": {
+                "action": { "const": "office.extractImages" },
+                "receiptId": { "$ref": "#/$defs/uuid" },
+                "operationId": { "$ref": "#/$defs/uuid" },
+                "outputs": {
+                  "type": "array",
+                  "maxItems": 100,
+                  "items": { "$ref": "#/$defs/mutationArtifact" }
+                }
               }
             }
-          }
+          ]
         }
       }
     },

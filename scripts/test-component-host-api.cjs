@@ -231,13 +231,27 @@ for (const method of HOST_CAPABILITIES) {
   assert(name, `missing schema for ${method}`);
   const resultSchema = JSON.parse(JSON.stringify(draft7CapabilitySchema.definitions[name].properties.result));
   const validateResult = ajv.compile({ ...resultSchema, definitions: draft7CapabilitySchema.definitions });
-  const valid = sampleFor(resultSchema); assert.equal(validateResult(valid), true, `${method} minimum result must pass: ${JSON.stringify(validateResult.errors)}`);
   assert.equal(validateResult({}), false, `${method} must reject an empty result`);
-  assert.equal(validateResult({ ...valid, apiVersion: 7 }), false, `${method} must reject legacy apiVersion`);
-  assert.equal(validateResult({ ...valid, unknownResultField: true }), false, `${method} must reject unknown result fields`);
-  const firstRequired = Object.keys(valid)[0]; assert(firstRequired, `${method} minimum result must have an identity field`);
-  const missing = { ...valid }; delete missing[firstRequired]; assert.equal(validateResult(missing), false, `${method} must reject a missing required result field`);
+  for (const [branchIndex, branch] of (resultSchema.oneOf || [resultSchema]).entries()) {
+    const valid = sampleFor(branch); assert.equal(validateResult(valid), true, `${method} result branch ${branchIndex} must pass: ${JSON.stringify(validateResult.errors)}`);
+    assert.equal(validateResult({ ...valid, apiVersion: 7 }), false, `${method} result branch ${branchIndex} must reject legacy apiVersion`);
+    assert.equal(validateResult({ ...valid, unknownResultField: true }), false, `${method} result branch ${branchIndex} must reject unknown fields`);
+    const firstRequired = Object.keys(valid)[0]; assert(firstRequired, `${method} result branch ${branchIndex} must have an identity field`);
+    const missing = { ...valid }; delete missing[firstRequired]; assert.equal(validateResult(missing), false, `${method} result branch ${branchIndex} must reject a missing required field`);
+  }
 }
+const mediaProcessResultSchema = JSON.parse(JSON.stringify(draft7CapabilitySchema.definitions.projectMediaProcess.properties.result));
+const validateMediaProcessResult = ajv.compile({ ...mediaProcessResultSchema, definitions: draft7CapabilitySchema.definitions });
+assert.equal(validateMediaProcessResult({ action: 'video.timelineFrames' }), false, 'timeline results require frames');
+assert.equal(validateMediaProcessResult({ action: 'video.timelineFrames', frames: [], outputs: [] }), false, 'timeline results cannot claim office outputs');
+assert.equal(validateMediaProcessResult({ action: 'office.extractImages', receiptId: '00000000-0000-4000-8000-000000000000', operationId: '00000000-0000-4000-8000-000000000000', outputs: [], frames: [] }), false, 'office results cannot claim timeline frames');
+const progressManageResultSchema = JSON.parse(JSON.stringify(draft7CapabilitySchema.definitions.projectProgressManage.properties.result));
+const validateProgressManageResult = ajv.compile({ ...progressManageResultSchema, definitions: draft7CapabilitySchema.definitions });
+const receiptId = '00000000-0000-4000-8000-000000000000';
+assert.equal(validateProgressManageResult({ receiptId, action: 'update' }), false, 'progress update results require progress');
+assert.equal(validateProgressManageResult({ receiptId, action: 'unregister' }), false, 'progress unregister results require progressId');
+assert.equal(validateProgressManageResult({ receiptId, action: 'edgeCreate' }), false, 'edge creation results require edge');
+assert.equal(validateProgressManageResult({ receiptId, action: 'edgeDelete', edge: {} }), false, 'edge deletion results cannot claim a created edge');
 const lifecycleResultSchema = JSON.parse(JSON.stringify(draft7CapabilitySchema.definitions.lifecycle.properties.result));
 const validateLifecycleResult = ajv.compile({ ...lifecycleResultSchema, definitions: draft7CapabilitySchema.definitions });
 const lifecycleResult = sampleFor(lifecycleResultSchema);
