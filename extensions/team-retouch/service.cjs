@@ -352,8 +352,8 @@ const outputOutboxFingerprint = ({ idempotencyKey, files }) => sha256(JSON.strin
 const readOutputOutbox = (db, projectId, fingerprint) => db.prepare('SELECT * FROM team_output_outbox WHERE project_id=? AND fingerprint=?').get(String(projectId), String(fingerprint));
 const readOutputOutboxByKey = (db, projectId, idempotencyKey) => db.prepare('SELECT * FROM team_output_outbox WHERE project_id=? AND idempotency_key=?').get(String(projectId), String(idempotencyKey));
 const updateOutputOutbox = (db, projectId, fingerprint, state, values = {}) => {
-  db.prepare(`UPDATE team_output_outbox SET state=?,stage_id=COALESCE(?,stage_id),receipt_json=COALESCE(?,receipt_json),result_json=COALESCE(?,result_json),last_error=?,updated_at=? WHERE project_id=? AND fingerprint=?`)
-    .run(state, values.stageId === undefined ? null : String(values.stageId), values.receipt === undefined ? null : JSON.stringify(values.receipt), values.result === undefined ? null : JSON.stringify(values.result), String(values.error || ''), Date.now(), String(projectId), String(fingerprint));
+  db.prepare(`UPDATE team_output_outbox SET state=?,stage_id=COALESCE(?,stage_id),receipt_json=COALESCE(?,receipt_json),result_json=COALESCE(?,result_json),last_error=?,updated_at=? WHERE project_id=? AND fingerprint=? AND (?='completed' OR state<>'completed')`)
+    .run(state, values.stageId === undefined ? null : String(values.stageId), values.receipt === undefined ? null : JSON.stringify(values.receipt), values.result === undefined ? null : JSON.stringify(values.result), String(values.error || ''), Date.now(), String(projectId), String(fingerprint), state);
 };
 const prepareOutputOutbox = async (parentId, files, idempotencyKey, kind = 'project-output', continuationPlan = null) => {
   const storage = await hostStorage(parentId); const projectId = String(storage.projectId || activeProjectId());
@@ -509,11 +509,11 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
       let receipt = parseJson(row.receipt_json, {});
       if (row.state === 'planned' && row.kind === 'working-output' && plan.domain?.generationId) {
         const source = record.files[0]; if (!source?.sourcePath || !fs.existsSync(source.sourcePath) || await fileSha256(source.sourcePath) !== source.digest) throw recoveryRequiredError(`working generation ${plan.domain.generationId} 缺少待发布 source`);
-        await publishProjectFile(parentId, source.sourcePath, source.outputRelativePath, row.idempotency_key, null, row.kind, plan); continue;
+        await publishProjectFile(parentId, source.sourcePath, source.outputRelativePath, row.idempotency_key, source.replacement || null, row.kind, plan); continue;
       }
       if (row.state === 'restore_republish') {
         const source = record.files[0]; if (!source?.sourcePath || !fs.existsSync(source.sourcePath) || await fileSha256(source.sourcePath) !== source.digest) throw recoveryRequiredError(`working restore outbox ${row.id} 私有副本缺失或摘要不匹配`);
-        const committed = await publishProjectFile(parentId, source.sourcePath, source.outputRelativePath, row.idempotency_key, null, row.kind, plan);
+        const committed = await publishProjectFile(parentId, source.sourcePath, source.outputRelativePath, row.idempotency_key, source.replacement || null, row.kind, plan);
         receipt = committed; record.row = committed[OUTPUT_OUTBOX].row; result = parseJson(record.row.result_json, {});
       }
       if (row.state === 'host_staging') {
@@ -526,7 +526,7 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
         await deleteUncommittedOutputOutbox(record, 'host_staging');
         if (row.kind === 'working-output' && plan.domain?.generationId) {
           const source = record.files[0]; if (!source?.sourcePath || !fs.existsSync(source.sourcePath) || await fileSha256(source.sourcePath) !== source.digest) throw recoveryRequiredError(`working generation ${plan.domain.generationId} rollback 后 source 缺失`);
-          await publishProjectFile(parentId, source.sourcePath, source.outputRelativePath, row.idempotency_key, null, row.kind, plan); continue;
+          await publishProjectFile(parentId, source.sourcePath, source.outputRelativePath, row.idempotency_key, source.replacement || null, row.kind, plan); continue;
         }
         recovered += 1; continue;
       }
@@ -550,6 +550,21 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
         await replaceJsonAtomic(plan.ledgerPath, ledger);
         if (plan.domain?.generationId) {
           await outboxState(record, 'domain_ready'); result = parseJson(record.row.result_json, {});
+          if (record.row.state === 'completed') continue;
+          if (plan.domain.rebindOnly === true) {
+            const domainDb = ensureSchema(storage.databasePath); let changes = 0;
+            try {
+              domainDb.exec('BEGIN IMMEDIATE');
+              changes += domainDb.prepare('UPDATE team_patch_tasks SET patch_path=?,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND patch_path=? AND is_deleted=0').run(materialized.privatePath, Date.now(), String(context.projectId), String(plan.domain.photoId), String(plan.domain.baseVersionId), String(plan.domain.oldPrivatePath)).changes;
+              changes += domainDb.prepare('UPDATE team_person_assignments SET edited_patch_path=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND edited_patch_path=?').run(materialized.privatePath, String(context.projectId), String(plan.domain.photoId), String(plan.domain.baseVersionId), String(plan.domain.oldPrivatePath)).changes;
+              changes += domainDb.prepare('UPDATE team_task_artifacts SET artifact_path=? WHERE project_id=? AND artifact_path=? AND is_deleted=0').run(materialized.privatePath, String(context.projectId), String(plan.domain.oldPrivatePath)).changes;
+              if (!changes) throw recoveryRequiredError(`working rebind ${row.id} 没有与恢复副本匹配的当前 domain 引用`);
+              domainDb.prepare("UPDATE team_output_outbox SET state='completed',updated_at=? WHERE project_id=? AND id=? AND state<>'completed'").run(Date.now(), String(context.projectId), row.id);
+              domainDb.exec('COMMIT'); recovered += 1;
+            } catch (error) { try { domainDb.exec('ROLLBACK'); } catch {} throw error; }
+            finally { domainDb.close(); }
+            continue;
+          }
           const groupDb = ensureSchema(storage.databasePath); let candidates;
           try { candidates = groupDb.prepare("SELECT * FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed'").all(String(context.projectId)); }
           finally { groupDb.close(); }
@@ -1131,7 +1146,7 @@ const replacePatches = (db, context, photoId, baseVersionId, tasks) => {
 const restoreWorkingTaskDomain = (db, context, plan, materializedPath) => {
   const task = plan?.task;
   if (!task?.id || !Array.isArray(task.members) || !task.members.length || Number(task.generation?.version) !== 2) throw recoveryRequiredError('working continuation task 不完整');
-  if (task.maskPath && !fs.existsSync(task.maskPath)) throw recoveryRequiredError(`working task ${task.id} mask 缺失`);
+  if (task.maskPath && (!fs.existsSync(task.maskPath) || !task.maskDigest || crypto.createHash('sha256').update(fs.readFileSync(task.maskPath)).digest('hex') !== task.maskDigest)) throw recoveryRequiredError(`working task ${task.id} mask 缺失或摘要不匹配`);
   const ids = uniqueText(plan.allTaskIds); if (!ids.includes(String(task.id))) throw recoveryRequiredError(`working task ${task.id} 不在 generation 集合`);
   if (ids.length) db.prepare(`UPDATE team_patch_tasks SET is_deleted=1,updated_at=? WHERE project_id=? AND photo_id=? AND base_version_id=? AND id NOT IN (${ids.map(() => '?').join(',')})`).run(Date.now(), String(context.projectId), String(plan.photoId), String(plan.baseVersionId), ...ids);
   db.prepare(`INSERT INTO team_patch_tasks(project_id,id,photo_id,base_version_id,person_index,person_name,assignee,detector,bbox_json,crop_json,patch_path,mask_path,mask_json,members_json,needs_review,review_reason,edited_patch_path,status,merge_metrics_json,merged_version_id,generation_json,created_at,updated_at,is_deleted)
@@ -1254,7 +1269,7 @@ const detectPhoto = async (parentId, payload, context) => {
     for (const task of detected.tasks || []) {
       let maskTarget = null;
       if (task.maskPath) { maskTarget = path.join(authorized.analysisDirectory, path.basename(task.maskPath)); published.push(await publishStagedFile(task.maskPath, maskTarget, operationId)); }
-      const domainPlan = { version: 1, generationId: workingGenerationId, photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), allTaskIds: (detected.tasks || []).map(item => String(item.id)), task: { ...task, maskPath: maskTarget }, photo: { displayName: bundle.photo?.displayName || bundle.photo?.originalName || '', relativePath: metadataBase.relativePath || '', relativePathState: metadataBase.relativePathState || 'ready', fileMissing: Boolean(metadataBase.fileMissing) } };
+      const domainPlan = { version: 1, generationId: workingGenerationId, photoId: String(payload.photoId), baseVersionId: String(payload.baseVersionId), allTaskIds: (detected.tasks || []).map(item => String(item.id)), task: { ...task, maskPath: maskTarget, maskDigest: maskTarget ? await fileSha256(maskTarget) : '' }, photo: { displayName: bundle.photo?.displayName || bundle.photo?.originalName || '', relativePath: metadataBase.relativePath || '', relativePathState: metadataBase.relativePathState || 'ready', fileMissing: Boolean(metadataBase.fileMissing) } };
       const working = await publishWorkingImage(parentId, storage, task.patchPath, metadataBase.relativePath, domainPlan);
       workingPublications.push(working.publication);
       const patchTarget = working.privatePath;
@@ -1276,7 +1291,8 @@ const detectPhoto = async (parentId, payload, context) => {
     await removeArtifacts(replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
     return { success: true, ...publicBundle(bundle), tasks: replaced.tasks.map(publicTask), excludedPersonCount: exclusions.length, detection: { detector: detected.detector, backend: detected.backend || 'cpu', provider: detected.provider || '', requestedMode: detected.requestedMode || 'auto', advancedBackend: Boolean(detected.advancedBackend), width: detected.width, height: detected.height, personCount: detected.personCount ?? replaced.tasks.length, workTileEdge: detected.workTileEdge || 4000, needsReviewCount: detected.needsReviewCount || 0, fallbackReason: detected.fallbackReason || '' } };
   } catch (error) {
-    await rollbackPublished(published);
+    const pendingGeneration = Boolean(db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed' LIMIT 1").get(String(context.projectId)));
+    if (!pendingGeneration) await rollbackPublished(published);
     await appendCommand(storage, { operationId, type: 'detect', state: 'rolled-back', error: error.message || String(error) }).catch(() => undefined);
     throw error;
   } finally { const preserveStage = Boolean(db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND state<>'completed' AND source_json LIKE ? LIMIT 1").get(String(context.projectId), `%${stagingRoot.replace(/\\/g, '\\\\')}%`)); if (!preserveStage) await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); await materialized.cleanup(); db.close(); }
@@ -1642,7 +1658,7 @@ const detectBatch = async (parentId, payload, context) => {
           for (const task of detected.tasks || []) {
             let maskTarget = null;
             if (task.maskPath) { maskTarget = path.join(item.authorized.analysisDirectory, path.basename(task.maskPath)); published.push(await publishStagedFile(task.maskPath, maskTarget, operationId)); }
-            const domainPlan = { version: 1, generationId: workingGenerationId, photoId: String(item.bundle.photo.id), baseVersionId: String(item.base.id), allTaskIds: (detected.tasks || []).map(value => String(value.id)), task: { ...task, maskPath: maskTarget }, photo: { displayName: item.bundle.photo?.displayName || item.bundle.photo?.originalName || '', relativePath: item.base.relativePath || '', relativePathState: item.base.relativePathState || 'ready', fileMissing: Boolean(item.base.fileMissing) } };
+            const domainPlan = { version: 1, generationId: workingGenerationId, photoId: String(item.bundle.photo.id), baseVersionId: String(item.base.id), allTaskIds: (detected.tasks || []).map(value => String(value.id)), task: { ...task, maskPath: maskTarget, maskDigest: maskTarget ? await fileSha256(maskTarget) : '' }, photo: { displayName: item.bundle.photo?.displayName || item.bundle.photo?.originalName || '', relativePath: item.base.relativePath || '', relativePathState: item.base.relativePathState || 'ready', fileMissing: Boolean(item.base.fileMissing) } };
             const working = await publishWorkingImage(parentId, storage, task.patchPath, item.base.relativePath, domainPlan);
             workingPublications.push(working.publication);
             const patchTarget = working.privatePath;
@@ -1662,7 +1678,7 @@ const detectBatch = async (parentId, payload, context) => {
           await commitPublished(published);
           await removeArtifacts(replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
           results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: true, photoId: item.bundle.photo.id, baseVersionId: item.base.id, personCount: detected.personCount, workTileCount: publishedTasks.length, detector: detected.detector, advancedBackend: detected.advancedBackend, fallbackReason: detected.fallbackReason });
-        } catch (error) { await rollbackPublished(published); results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: false, error: error.message || String(error) }); }
+        } catch (error) { const pendingGeneration = Boolean(db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed' LIMIT 1").get(String(context.projectId))); if (!pendingGeneration) await rollbackPublished(published); results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: false, error: error.message || String(error) }); }
       }
       return { success: results.some(item => item.success), results, persistentBackend: Boolean(detectedBatch.persistentBackend), requestedMode: detectedBatch.requestedMode || 'auto', advancedUsedCount: results.filter(item => item.advancedBackend).length, fallbackCount: results.filter(item => item.fallbackReason).length, error: results.some(item => item.success) ? undefined : '批量识别全部失败' };
     } finally { const preserveStage = Boolean(db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND state<>'completed' AND source_json LIKE ? LIMIT 1").get(String(context.projectId), `%${stagingRoot.replace(/\\/g, '\\\\')}%`)); db.close(); if (!preserveStage) await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); await materialized.cleanup(); }
