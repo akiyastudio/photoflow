@@ -7,8 +7,11 @@
   "required": [
     "apiVersion",
     "id",
-    "version",
-    "componentHost"
+    "version"
+  ],
+  "anyOf": [
+    { "required": ["componentHost"] },
+    { "required": ["runtimeContributions"], "properties": { "runtimeContributions": { "minItems": 1 } } }
   ],
   "properties": {
     "apiVersion": {

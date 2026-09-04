@@ -6,13 +6,13 @@
 
 PhotoFlow 只提供唯一、无版本协商的当前 Host API。组件必须声明 `componentHost.contractVersion:2`，并显式列出权限、能力、RPC 与事件；`componentHost.compatibility` 等 Host API 版本字段会作为未知字段拒绝。
 
-RPC 方法、能力和事件都以 `.vN` 结尾。已发布语义不可修改；可以增加兼容字段，消费者必须忽略未知字段。破坏性变化使用新的方法/事件版本。弃用版本至少保留一个正常组件迁移窗口，并在移除前记录。`electron/compatibility/` 下的 V1 业务适配器已经弃用，不属于公开 API，也不再增加方法。
+组件自有 RPC 和事件以 `.vN` 结尾；Host capability 使用无版本的稳定名称。已发布的组件 RPC/event 语义不可修改；破坏性变化使用新的方法或事件版本。`electron/compatibility/` 下的业务适配器不属于公开 API，也不再增加方法。
 
 渲染桥接 `window.photoFlowComponent.contractVersion` 仍为 `1`；这是独立的小型 preload ABI，不是 Host API 版本，也不参与协商。Host 上下文不包含 Host API 版本字段。
 
 ## 清单与权限
 
-Component Host contractVersion 2 必须声明合约版本、兼容范围、贡献项、服务协议/运行时/入口、版本化 RPC 白名单、Host 能力白名单和权限白名单；无事件时也要显式写空数组。能力需要匹配权限：
+带 UI 或组件服务的清单使用 Component Host contractVersion 2，并声明贡献项、服务协议/运行时/入口、版本化组件 RPC 白名单、无版本 Host 能力白名单和权限白名单；不声明 Host API compatibility。无事件时也要显式写空数组。能力需要匹配权限：
 
 | 能力 | 权限 | 用途 |
 | --- | --- | --- |
@@ -26,7 +26,7 @@ Component Host contractVersion 2 必须声明合约版本、兼容范围、贡�
 | `tasks` | `tasks` | 进度、检查点、取消与恢复握手 |
 | `dialogs` | `dialogs` | 宿主管理的确认和有界文件选择 |
 | `component.events` | `events` | 已声明的版本化组件事件 |
-| `component.lifecycle` | `component.lifecycle.read` | 协商版本、授权和生命周期状态 |
+| `component.lifecycle` | `component.lifecycle.read` | 授权、声明动作和生命周期状态 |
 | `component.media` | `component.media` | 私有存储下的媒体变体/打开/显示 |
 | `project.progress` | `project.progress` | 列出/创建进度节点并登记来源关系 |
 | `notifications` | `notifications` | 向主程序顶部 Toast 提交短暂纯文本状态 |

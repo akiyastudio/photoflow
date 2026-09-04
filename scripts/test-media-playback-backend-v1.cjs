@@ -1,6 +1,7 @@
 const assert = require('node:assert/strict');
 const fs = require('node:fs');
 const path = require('node:path');
+const Ajv = require('ajv');
 const { parseMediaPlaybackBackendContributions } = require('../electron/contracts/media-playback-backend-contract.cjs');
 const { MAX_FRAME_BYTES, PROTOCOL, createPlaybackEnvelopeWriter, validatePlaybackEnvelope } = require('../electron/contracts/media-playback-backend-v1.cjs');
 const { createMediaPlaybackProcessAdapter } = require('../electron/services/media-playback-process-adapter.cjs');
@@ -16,6 +17,22 @@ assert(contribution.features.transforms.rotation && contribution.features.hdr.pa
 assert.equal(contribution.features.statistics.maxUpdateHz, 4);assert.equal(contribution.features.statistics.gpu,true);
 assert.equal(contribution.features.capture.displayedFrame, true);
 for (const schema of ['component-manifest-v2.schema.json', 'media-playback-backend-v1.schema.json', 'media-playback-backend-wire-v1.schema.json']) JSON.parse(fs.readFileSync(path.join(root, 'electron/contracts/schemas', schema), 'utf8'));
+const compileManifestSchema = file => {
+  const source = JSON.parse(JSON.stringify(JSON.parse(fs.readFileSync(file, 'utf8'))).replaceAll('#/$defs/', '#/definitions/'));
+  source.definitions = source.$defs; delete source.$defs; delete source.$schema; delete source.$id;
+  return new Ajv({ allErrors: true }).compile(source);
+};
+const runtimeOnlyManifest = JSON.parse(fs.readFileSync(path.join(root, 'extensions', 'video-playback-mpv', 'component.template.json'), 'utf8'));
+const canonicalManifestSchemaPath = path.join(root, 'electron', 'contracts', 'schemas', 'component-manifest-v2.schema.json');
+const vendoredManifestSchemaPath = path.join(root, 'extensions', 'video-playback-mpv', 'protocol', 'component-manifest-v2.schema.json');
+assert.deepEqual(JSON.parse(fs.readFileSync(vendoredManifestSchemaPath, 'utf8')), JSON.parse(fs.readFileSync(canonicalManifestSchemaPath, 'utf8')), 'vendored component manifest schema must remain structurally identical to the canonical contract');
+const manifestSchemas = [canonicalManifestSchemaPath, vendoredManifestSchemaPath].map(compileManifestSchema);
+for (const validate of manifestSchemas) {
+  assert.equal(validate(runtimeOnlyManifest), true, JSON.stringify(validate.errors));
+  const missingRuntime = structuredClone(runtimeOnlyManifest); delete missingRuntime.runtimeContributions;
+  assert.equal(validate(missingRuntime), false, 'manifest requires componentHost or runtimeContributions');
+  assert.equal(validate({ ...runtimeOnlyManifest, runtimeContributions: [] }), false, 'runtime-only manifest requires at least one runtime contribution');
+}
 assert.throws(()=>parseMediaPlaybackBackendContributions({runtimeContributions:[{...manifest.runtimeContributions[0],unknown:true}]}),/Unknown/);assert.throws(()=>parseMediaPlaybackBackendContributions({runtimeContributions:[{...manifest.runtimeContributions[0],backendVersion:'latest'}]}),/backendVersion/);
 assert.equal(contribution.features.capture.sourceFrame,false);assert.equal(contribution.features.capture.displayedFrame,true);assert.equal(contribution.features.transforms.crop,false);assert.equal(contribution.features.hardwareDecoding.selectable,false);assert.throws(()=>parseMediaPlaybackBackendContributions({runtimeContributions:[{...manifest.runtimeContributions[0],features:{...manifest.runtimeContributions[0].features,statistics:{...manifest.runtimeContributions[0].features.statistics,maxUpdateHz:5}}}]}),/maxUpdateHz/);
 
