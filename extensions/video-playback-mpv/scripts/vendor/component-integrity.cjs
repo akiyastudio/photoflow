@@ -9,7 +9,11 @@ const isInside = (root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
   return relative !== '' && !relative.startsWith('..') && !path.isAbsolute(relative);
 };
+
 const normalizeRelativeFile = value => String(value || '').replace(/\\/g, '/');
+const integrityFileKey = value => process.platform === 'win32'
+  ? normalizeRelativeFile(value).toLowerCase()
+  : normalizeRelativeFile(value);
 
 const sha256File = filePath => crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex');
 
@@ -86,16 +90,18 @@ const validateComponentIntegrity = (root, expectedManifest, { requireLocalManife
     if (!entry.file || !/^[a-f0-9]{64}$/.test(entry.sha256) || !Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0) {
       throw new Error(`组件完整性条目无效：${entry.file || '未命名文件'}`);
     }
+    const key = integrityFileKey(entry.file);
+    if (declared.has(key)) throw new Error(`组件完整性清单包含重复或大小写冲突路径：${entry.file}`);
     const absolute = path.resolve(resolvedRoot, entry.file);
     if (!isInside(resolvedRoot, absolute)) throw new Error(`组件完整性路径越界：${entry.file}`);
     const stat = fs.lstatSync(absolute, { throwIfNoEntry: false });
     if (!stat?.isFile() || stat.isSymbolicLink()) throw new Error(`组件文件不存在或类型不安全：${entry.file}`);
     if (stat.size !== entry.sizeBytes) throw new Error(`组件文件大小不匹配：${entry.file}`);
     if (sha256File(absolute).toLowerCase() !== entry.sha256) throw new Error(`组件文件 SHA-256 不匹配：${entry.file}`);
-    declared.add(entry.file.toLowerCase());
+    declared.add(key);
   }
   for (const file of listIntegrityFiles(resolvedRoot)) {
-    if (!declared.has(file.toLowerCase())) throw new Error(`组件包含未声明的可执行文件：${file}`);
+    if (!declared.has(integrityFileKey(file))) throw new Error(`组件包含未声明的可执行文件：${file}`);
   }
   return true;
 };
@@ -121,16 +127,18 @@ const validateComponentIntegrityAsync = async (root, expectedManifest, { require
     if (!entry.file || !/^[a-f0-9]{64}$/.test(entry.sha256) || !Number.isSafeInteger(entry.sizeBytes) || entry.sizeBytes < 0) {
       throw new Error(`组件完整性条目无效：${entry.file || '未命名文件'}`);
     }
+    const key = integrityFileKey(entry.file);
+    if (declared.has(key)) throw new Error(`组件完整性清单包含重复或大小写冲突路径：${entry.file}`);
     const absolute = path.resolve(resolvedRoot, entry.file);
     if (!isInside(resolvedRoot, absolute)) throw new Error(`组件完整性路径越界：${entry.file}`);
     const stat = await fs.promises.lstat(absolute).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
     if (!stat?.isFile() || stat.isSymbolicLink()) throw new Error(`组件文件不存在或类型不安全：${entry.file}`);
     if (stat.size !== entry.sizeBytes) throw new Error(`组件文件大小不匹配：${entry.file}`);
     if ((await sha256FileAsync(absolute)).toLowerCase() !== entry.sha256) throw new Error(`组件文件 SHA-256 不匹配：${entry.file}`);
-    declared.add(entry.file.toLowerCase());
+    declared.add(key);
   }
   for (const file of listIntegrityFiles(resolvedRoot)) {
-    if (!declared.has(file.toLowerCase())) throw new Error(`组件包包含未声明的可执行文件：${file}`);
+    if (!declared.has(integrityFileKey(file))) throw new Error(`组件包包含未声明的可执行文件：${file}`);
   }
   return true;
 };

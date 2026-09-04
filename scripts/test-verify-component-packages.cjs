@@ -5,25 +5,14 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { verifyComponentPackage } = require('./verify-component-packages.cjs');
+const { writeZip } = require('./test-helpers/zip-fixture.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-component-verifier-test-'));
 const source = path.join(root, 'sample');
 const archive = path.join(root, `PhotoFlow-verifier-fixture-1.2.3-${process.platform}-${process.arch}.zip`);
 const manifest = { apiVersion: 1, id: 'verifier-fixture', version: '1.2.3', platforms: [process.platform], architectures: [process.arch], entrypoints: { default: 'worker.cjs' }, requiredFiles: ['worker.cjs'] };
 
-const zip = (target, entries) => {
-  const script = [
-    'import sys,zipfile',
-    'target=sys.argv[1]',
-    'entries=sys.argv[2:]',
-    'with zipfile.ZipFile(target,"w",zipfile.ZIP_DEFLATED) as z:',
-    ' for pair in entries:',
-    '  name,value=pair.split("=",1)',
-    '  z.writestr(name,value)',
-  ].join('\n');
-  const result = spawnSync('python', ['-c', script, target, ...entries.map(([name, value]) => `${name}=${value}`)], { encoding: 'utf8' });
-  assert.equal(result.status, 0, result.stderr);
-};
+const zip = writeZip;
 const expectFailure = async (target, pattern) => assert.rejects(verifyComponentPackage(target), pattern);
 
 (async () => {
@@ -57,9 +46,18 @@ const expectFailure = async (target, pattern) => assert.rejects(verifyComponentP
     zip(archive, [...goodEntries, ['sample/worker.cjs', 'duplicate']]);
     await expectFailure(archive, /重复|冲突/);
 
+    zip(archive, [['sample/child/file.txt', 'child'], ['sample/child', 'file collision'], ...goodEntries]);
+    await expectFailure(archive, /文件\/目录碰撞/);
+
     const wrongName = path.join(root, `PhotoFlow-wrong-id-1.2.3-${process.platform}-${process.arch}.zip`);
     zip(wrongName, goodEntries);
     await expectFailure(wrongName, /文件名身份不匹配/);
+
+    const emptyRoot = path.join(root, 'empty');
+    fs.mkdirSync(emptyRoot);
+    const cli = spawnSync(process.execPath, [path.join(__dirname, 'verify-component-packages.cjs'), '--package-root', emptyRoot], { encoding: 'utf8' });
+    assert.notEqual(cli.status, 0);
+    assert.match(`${cli.stdout}\n${cli.stderr}`, /组件包缺失/);
     console.log('Component package verifier tests passed.');
   } finally { fs.rmSync(root, { recursive: true, force: true }); }
 })().catch(error => { console.error(error); process.exitCode = 1; });

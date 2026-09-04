@@ -3,7 +3,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { pipeline } = require('node:stream/promises');
 const { Transform } = require('node:stream');
-const { verifyComponentPackage } = require('./verify-component-packages.cjs');
+const { verifyComponentPackage, expectedComponentPackages } = require('./verify-component-packages.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const installerRoot = path.join(repositoryRoot, 'artifacts', 'installers');
@@ -14,17 +14,6 @@ const digestFile = async filePath => {
   await pipeline(fs.createReadStream(filePath), new Transform({ transform(chunk, encoding, callback) { hash.update(chunk); callback(); } }));
   return hash.digest('hex');
 };
-
-const discoverComponents = () => fs.readdirSync(path.join(repositoryRoot, 'extensions'), { withFileTypes: true }).flatMap(entry => {
-  if (!entry.isDirectory()) return [];
-  const packagePath = path.join(repositoryRoot, 'extensions', entry.name, 'package.json');
-  if (!fs.existsSync(packagePath)) return [];
-  const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
-  if (!packageJson.photoflowComponent || !packageJson.scripts?.['package:host']) return [];
-  const componentPath = path.join(path.dirname(packagePath), packageJson.photoflowComponent.manifest);
-  const component = JSON.parse(fs.readFileSync(componentPath, 'utf8'));
-  return [{ id: component.id, version: component.version }];
-}).sort((left, right) => left.id.localeCompare(right.id, 'en'));
 
 const findInstaller = version => {
   const explicitIndex = process.argv.indexOf('--installer');
@@ -42,13 +31,11 @@ const generateDeliveryManifest = async () => {
   const installerStat = fs.statSync(installerPath, { throwIfNoEntry: false });
   if (!installerStat?.isFile()) throw new Error(`Setup EXE 不存在：${installerPath}`);
   const artifacts = [{ type: 'setup', fileName: path.basename(installerPath), size: installerStat.size, sha256: await digestFile(installerPath) }];
-  for (const component of discoverComponents()) {
+  for (const component of expectedComponentPackages(installerRoot)) {
     if (String(component.version) !== version) throw new Error(`组件版本与应用不一致：${component.id} ${component.version} != ${version}`);
-    const fileName = `PhotoFlow-${component.id}-${component.version}-${process.platform}-${process.arch}.zip`;
-    const componentPath = path.join(installerRoot, fileName);
-    if (!fs.statSync(componentPath, { throwIfNoEntry: false })?.isFile()) throw new Error(`组件交付物缺失：${fileName}`);
-    const verified = await verifyComponentPackage(componentPath);
-    artifacts.push({ type: 'component', fileName, size: verified.size, sha256: verified.sha256, componentId: verified.componentId, version: verified.version, platform: verified.platform, arch: verified.arch });
+    if (!fs.statSync(component.path, { throwIfNoEntry: false })?.isFile()) throw new Error(`组件交付物缺失：${component.fileName}`);
+    const verified = await verifyComponentPackage(component.path);
+    artifacts.push({ type: 'component', fileName: component.fileName, size: verified.size, sha256: verified.sha256, componentId: verified.componentId, version: verified.version, platform: verified.platform, arch: verified.arch });
   }
   const manifest = { schemaVersion: 1, product: packageJson.productName || packageJson.name, version, artifacts };
   fs.mkdirSync(installerRoot, { recursive: true });

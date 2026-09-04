@@ -14,7 +14,7 @@ const defaultPackageRoot = path.join(repositoryRoot, 'artifacts', 'installers');
 const MAX_ENTRY_BYTES = 4 * 1024 * 1024 * 1024;
 const MAX_PACKAGE_BYTES = 16 * 1024 * 1024 * 1024;
 const MAX_INTEGRITY_BYTES = 4 * 1024 * 1024;
-const COMPONENT_ARCHIVE = /^PhotoFlow-(.+)-(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)-(win32|darwin|linux)-(x64|arm64|ia32)\.zip$/;
+const COMPONENT_ARCHIVE = /^PhotoFlow-(.+)-(win32|darwin|linux)-(x64|arm64|ia32)\.zip$/;
 const CRC_TABLE = Array.from({ length: 256 }, (_, value) => {
   let crc = value;
   for (let bit = 0; bit < 8; bit += 1) crc = (crc & 1) ? (0xedb88320 ^ (crc >>> 1)) : (crc >>> 1);
@@ -72,10 +72,49 @@ const assertEntrySet = entries => {
       if (files.has(name)) throw new Error(`安装包包含文件/目录碰撞：${entry.name}`);
       directories.add(name);
     } else {
+      if (files.has(name)) throw new Error(`安装包包含重复或大小写冲突路径：${entry.name}`);
       if (directories.has(name)) throw new Error(`安装包包含文件/目录碰撞：${entry.name}`);
       files.add(name);
     }
   }
+};
+
+const identityFor = stat => ({ dev: stat.dev, ino: stat.ino, size: stat.size, mtimeMs: stat.mtimeMs, ctimeMs: stat.ctimeMs });
+const sameIdentity = (left, right) => left && right && Object.keys(left).every(key => left[key] === right[key]);
+const assertSourceIdentity = (archivePath, expected) => {
+  const current = fs.statSync(archivePath, { throwIfNoEntry: false });
+  if (!current?.isFile() || !sameIdentity(expected, identityFor(current))) throw new Error(`组件包在验证期间被替换或修改：${archivePath}`);
+};
+const snapshotArchive = async (archivePath, target) => {
+  const handle = await fs.promises.open(archivePath, 'r');
+  try {
+    const before = await handle.stat();
+    if (!before.isFile()) throw new Error(`组件包不是普通文件：${archivePath}`);
+    const identity = identityFor(before);
+    assertSourceIdentity(archivePath, identity);
+    await pipeline(handle.createReadStream({ autoClose: false }), fs.createWriteStream(target, { flags: 'wx' }));
+    if (!sameIdentity(identity, identityFor(await handle.stat()))) throw new Error(`组件包在快照期间被修改：${archivePath}`);
+    assertSourceIdentity(archivePath, identity);
+    return identity;
+  } finally { await handle.close(); }
+};
+
+const expectedComponentPackages = (packageRoot, platform = process.platform, arch = process.arch) => {
+  const seenIds = new Set();
+  return fs.readdirSync(path.join(repositoryRoot, 'extensions'), { withFileTypes: true }).flatMap(entry => {
+    if (!entry.isDirectory()) return [];
+    const packagePath = path.join(repositoryRoot, 'extensions', entry.name, 'package.json');
+    if (!fs.existsSync(packagePath)) return [];
+    const packageJson = JSON.parse(fs.readFileSync(packagePath, 'utf8'));
+    if (!packageJson.photoflowComponent || !packageJson.scripts?.['package:host']) return [];
+    const manifestPath = path.join(path.dirname(packagePath), String(packageJson.photoflowComponent.manifest || ''));
+    const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8'));
+    const id = String(manifest.id || '');
+    if (!id || seenIds.has(id)) throw new Error(`组件发布集合包含重复或无效 ID：${id || entry.name}`);
+    seenIds.add(id);
+    const fileName = `PhotoFlow-${id}-${manifest.version}-${platform}-${arch}.zip`;
+    return [{ id, version: String(manifest.version || ''), fileName, path: path.join(packageRoot, fileName) }];
+  }).sort((left, right) => left.id.localeCompare(right.id, 'en'));
 };
 
 const extractEntry = async (archive, entry, target) => {
@@ -108,27 +147,27 @@ const verifyComponentPackage = async archivePath => {
   const fileName = path.basename(absoluteArchive);
   const nameMatch = COMPONENT_ARCHIVE.exec(fileName);
   if (!nameMatch) throw new Error(`组件包文件名无效：${fileName}`);
-  const packageManifest = readComponentPackageManifest(absoluteArchive);
-  const { archive, entries } = readZipEntries(absoluteArchive);
-  assertEntrySet(entries);
-  const manifest = packageManifest.manifest;
-  const expectedName = `PhotoFlow-${manifest.id}-${manifest.version}-${nameMatch[3]}-${nameMatch[4]}.zip`;
-  if (fileName !== expectedName) throw new Error(`组件包文件名身份不匹配：需要 ${expectedName}`);
-  if (!Array.isArray(manifest.platforms) || !manifest.platforms.includes(nameMatch[3])) throw new Error(`组件清单平台与文件名不匹配：${nameMatch[3]}`);
-  if (!Array.isArray(manifest.architectures) || !manifest.architectures.includes(nameMatch[4])) throw new Error(`组件清单架构与文件名不匹配：${nameMatch[4]}`);
-
   const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-component-verify-'));
   try {
+    const isolatedPackageRoot = path.join(temporaryRoot, 'packages');
+    fs.mkdirSync(isolatedPackageRoot);
+    const isolatedArchive = path.join(isolatedPackageRoot, fileName);
+    const sourceIdentity = await snapshotArchive(absoluteArchive, isolatedArchive);
+    const packageManifest = readComponentPackageManifest(isolatedArchive);
+    const { archive, entries } = readZipEntries(isolatedArchive);
+    assertEntrySet(entries);
+    const manifest = packageManifest.manifest;
+    const platform = nameMatch[2];
+    const arch = nameMatch[3];
+    const expectedName = `PhotoFlow-${manifest.id}-${manifest.version}-${platform}-${arch}.zip`;
+    if (fileName !== expectedName) throw new Error(`组件包文件名身份不匹配：需要 ${expectedName}`);
+    if (!Array.isArray(manifest.platforms) || !manifest.platforms.includes(platform)) throw new Error(`组件清单平台与文件名不匹配：${platform}`);
+    if (!Array.isArray(manifest.architectures) || !manifest.architectures.includes(arch)) throw new Error(`组件清单架构与文件名不匹配：${arch}`);
     const extractedRoot = path.join(temporaryRoot, 'extracted');
     for (const entry of entries) await extractEntry(archive, entry, path.join(extractedRoot, ...entry.name.split('/')));
     const manifestRoot = path.dirname(path.join(extractedRoot, ...packageManifest.manifestEntry.split('/')));
     parseComponentHostManifest(manifest, manifestRoot);
-    const isolatedPackageRoot = path.join(temporaryRoot, 'packages');
-    fs.mkdirSync(isolatedPackageRoot);
-    const isolatedArchive = path.join(isolatedPackageRoot, fileName);
-    try { fs.linkSync(absoluteArchive, isolatedArchive); }
-    catch { fs.copyFileSync(absoluteArchive, isolatedArchive); }
-    const registry = createComponentRegistry({ projectRoot: repositoryRoot, userComponentRoot: isolatedPackageRoot, isPackaged: true, platform: nameMatch[3], arch: nameMatch[4] });
+    const registry = createComponentRegistry({ projectRoot: repositoryRoot, userComponentRoot: isolatedPackageRoot, isPackaged: true, platform, arch });
     const resolved = registry.resolvePackage(manifest.id);
     if (path.resolve(resolved.packagePath) !== isolatedArchive) throw new Error(`组件注册表未接受当前包：${fileName}`);
     if (manifest.integrity !== undefined) {
@@ -141,21 +180,37 @@ const verifyComponentPackage = async archivePath => {
       validateComponentIntegrity(manifestRoot, integrity);
     }
     const packageHash = crypto.createHash('sha256');
-    await pipeline(fs.createReadStream(absoluteArchive), new Transform({ transform(chunk, encoding, callback) { packageHash.update(chunk); callback(); } }));
-    return { fileName, size: archive.size, sha256: packageHash.digest('hex'), componentId: manifest.id, version: manifest.version, platform: nameMatch[3], arch: nameMatch[4] };
+    await pipeline(fs.createReadStream(isolatedArchive), new Transform({ transform(chunk, encoding, callback) { packageHash.update(chunk); callback(); } }));
+    assertSourceIdentity(absoluteArchive, sourceIdentity);
+    return { fileName, size: archive.size, sha256: packageHash.digest('hex'), componentId: manifest.id, version: manifest.version, platform, arch };
   } finally { fs.rmSync(temporaryRoot, { recursive: true, force: true }); }
 };
 
-const discoverPackages = packageRoot => fs.readdirSync(packageRoot, { withFileTypes: true })
-  .filter(entry => entry.isFile() && /^PhotoFlow-.*\.zip$/i.test(entry.name))
-  .map(entry => path.join(packageRoot, entry.name)).sort();
+const parseArguments = values => {
+  const result = { packageRoot: defaultPackageRoot, paths: [] };
+  for (let index = 0; index < values.length; index += 1) {
+    const value = values[index];
+    if (value === '--package-root') {
+      const directory = values[++index];
+      if (!directory || directory.startsWith('--')) throw new Error('--package-root 需要目录参数');
+      result.packageRoot = path.resolve(directory);
+    } else if (value.startsWith('--package-root=')) {
+      const directory = value.slice('--package-root='.length);
+      if (!directory) throw new Error('--package-root 需要目录参数');
+      result.packageRoot = path.resolve(directory);
+    } else if (value.startsWith('--')) throw new Error(`未知参数：${value}`);
+    else result.paths.push(path.resolve(value));
+  }
+  return result;
+};
 
 const run = async () => {
-  const paths = process.argv.slice(2).filter(value => !value.startsWith('--'));
-  const packageRootIndex = process.argv.indexOf('--package-root');
-  const packageRoot = packageRootIndex >= 0 ? path.resolve(process.argv[packageRootIndex + 1]) : defaultPackageRoot;
-  const packages = paths.length ? paths.map(value => path.resolve(value)) : discoverPackages(packageRoot);
-  if (!packages.length) throw new Error(`没有找到组件 ZIP：${packageRoot}`);
+  const { packageRoot, paths } = parseArguments(process.argv.slice(2));
+  const expected = paths.length ? [] : expectedComponentPackages(packageRoot);
+  const packages = paths.length ? paths : expected.map(component => {
+    if (!fs.statSync(component.path, { throwIfNoEntry: false })?.isFile()) throw new Error(`组件包缺失：${component.fileName}`);
+    return component.path;
+  });
   const results = [];
   for (const packagePath of packages) {
     const verified = await verifyComponentPackage(packagePath);
@@ -167,4 +222,4 @@ const run = async () => {
 
 if (require.main === module) run().catch(error => { console.error(`Component package verification failed: ${error.message || error}`); process.exitCode = 1; });
 
-module.exports = { verifyComponentPackage, discoverPackages };
+module.exports = { verifyComponentPackage, expectedComponentPackages, parseArguments };
