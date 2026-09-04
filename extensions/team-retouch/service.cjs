@@ -572,6 +572,12 @@ const recoverProjectOutputOutbox = async (parentId, context, batchSize = 20) => 
           const expectedIds = new Set(plan.domain.allTaskIds || []); const byTask = new Map(group.map(value => [String(value.plan.domain.task?.id || ''), value]));
           const ready = group.length === expectedIds.size && [...expectedIds].every(id => byTask.get(id)?.result?.materialized?.privatePath && fs.existsSync(byTask.get(id).result.materialized.privatePath));
           if (!ready) continue;
+          for (const value of group) {
+            const materializedPath = value.result.materialized.privatePath; const expectedPatchDigest = parseJson(value.row.source_json, [])[0]?.digest;
+            if (!expectedPatchDigest || await fileSha256(materializedPath) !== expectedPatchDigest) throw recoveryRequiredError(`working generation ${plan.domain.generationId} patch 摘要不匹配`);
+            const taskPlan = value.plan.domain.task;
+            if (taskPlan.maskPath && (!fs.existsSync(taskPlan.maskPath) || !taskPlan.maskDigest || await fileSha256(taskPlan.maskPath) !== taskPlan.maskDigest)) throw recoveryRequiredError(`working generation ${plan.domain.generationId} mask 缺失或被篡改`);
+          }
           const domainDb = ensureSchema(storage.databasePath);
           try {
             domainDb.exec('BEGIN IMMEDIATE');
@@ -1254,6 +1260,7 @@ const detectPhoto = async (parentId, payload, context) => {
   const stagingAnalysis = path.join(stagingRoot, 'analysis');
   const stagingDelivery = path.join(stagingRoot, 'delivery');
   const published = [];
+  let workingGenerationId = '';
   try {
     await assertAuthorizedArtifacts(parentId, taskRows(db, payload.photoId, payload.baseVersionId));
     await appendCommand(storage, { operationId, type: 'detect', state: 'prepared', photoId: payload.photoId, baseVersionId: payload.baseVersionId });
@@ -1265,7 +1272,7 @@ const detectPhoto = async (parentId, payload, context) => {
     if (missing.length) throw new Error(`切好的图片没有成功保存（缺少 ${missing.length} 个文件）`);
     const publishedTasks = [];
     const workingPublications = [];
-    const workingGenerationId = sha256(JSON.stringify({ projectId: context.projectId, photoId: payload.photoId, baseVersionId: payload.baseVersionId, tasks: await Promise.all((detected.tasks || []).map(async item => ({ id: String(item.id), digest: await fileSha256(item.patchPath) }))) }));
+    workingGenerationId = sha256(JSON.stringify({ projectId: context.projectId, photoId: payload.photoId, baseVersionId: payload.baseVersionId, tasks: await Promise.all((detected.tasks || []).map(async item => ({ id: String(item.id), digest: await fileSha256(item.patchPath) }))) }));
     for (const task of detected.tasks || []) {
       let maskTarget = null;
       if (task.maskPath) { maskTarget = path.join(authorized.analysisDirectory, path.basename(task.maskPath)); published.push(await publishStagedFile(task.maskPath, maskTarget, operationId)); }
@@ -1291,7 +1298,7 @@ const detectPhoto = async (parentId, payload, context) => {
     await removeArtifacts(replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
     return { success: true, ...publicBundle(bundle), tasks: replaced.tasks.map(publicTask), excludedPersonCount: exclusions.length, detection: { detector: detected.detector, backend: detected.backend || 'cpu', provider: detected.provider || '', requestedMode: detected.requestedMode || 'auto', advancedBackend: Boolean(detected.advancedBackend), width: detected.width, height: detected.height, personCount: detected.personCount ?? replaced.tasks.length, workTileEdge: detected.workTileEdge || 4000, needsReviewCount: detected.needsReviewCount || 0, fallbackReason: detected.fallbackReason || '' } };
   } catch (error) {
-    const pendingGeneration = Boolean(db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed' LIMIT 1").get(String(context.projectId)));
+    const pendingGeneration = Boolean(workingGenerationId && db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed' AND result_json LIKE ? LIMIT 1").get(String(context.projectId), `%${workingGenerationId}%`));
     if (!pendingGeneration) await rollbackPublished(published);
     await appendCommand(storage, { operationId, type: 'detect', state: 'rolled-back', error: error.message || String(error) }).catch(() => undefined);
     throw error;
@@ -1651,10 +1658,11 @@ const detectBatch = async (parentId, payload, context) => {
         const detected = byKey.get(item.key);
         if (!detected?.success) { results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: false, error: detected?.error || '批量算法没有返回这一项' }); continue; }
         const published = [];
+        let workingGenerationId = '';
         try {
           const publishedTasks = [];
           const workingPublications = [];
-          const workingGenerationId = sha256(JSON.stringify({ projectId: context.projectId, photoId: item.bundle.photo.id, baseVersionId: item.base.id, tasks: await Promise.all((detected.tasks || []).map(async value => ({ id: String(value.id), digest: await fileSha256(value.patchPath) }))) }));
+          workingGenerationId = sha256(JSON.stringify({ projectId: context.projectId, photoId: item.bundle.photo.id, baseVersionId: item.base.id, tasks: await Promise.all((detected.tasks || []).map(async value => ({ id: String(value.id), digest: await fileSha256(value.patchPath) }))) }));
           for (const task of detected.tasks || []) {
             let maskTarget = null;
             if (task.maskPath) { maskTarget = path.join(item.authorized.analysisDirectory, path.basename(task.maskPath)); published.push(await publishStagedFile(task.maskPath, maskTarget, operationId)); }
@@ -1678,7 +1686,7 @@ const detectBatch = async (parentId, payload, context) => {
           await commitPublished(published);
           await removeArtifacts(replaced.old.flatMap(task => [task.patchPath, task.maskPath, task.editedPatchPath]).filter(filePath => filePath && !publishedTasks.some(task => task.patchPath === filePath || task.maskPath === filePath)));
           results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: true, photoId: item.bundle.photo.id, baseVersionId: item.base.id, personCount: detected.personCount, workTileCount: publishedTasks.length, detector: detected.detector, advancedBackend: detected.advancedBackend, fallbackReason: detected.fallbackReason });
-        } catch (error) { const pendingGeneration = Boolean(db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed' LIMIT 1").get(String(context.projectId))); if (!pendingGeneration) await rollbackPublished(published); results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: false, error: error.message || String(error) }); }
+        } catch (error) { const pendingGeneration = Boolean(workingGenerationId && db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND kind='working-output' AND state<>'completed' AND result_json LIKE ? LIMIT 1").get(String(context.projectId), `%${workingGenerationId}%`)); if (!pendingGeneration) await rollbackPublished(published); results.push({ relativePath: item.relativePath, name: item.bundle.photo?.displayName || '', success: false, error: error.message || String(error) }); }
       }
       return { success: results.some(item => item.success), results, persistentBackend: Boolean(detectedBatch.persistentBackend), requestedMode: detectedBatch.requestedMode || 'auto', advancedUsedCount: results.filter(item => item.advancedBackend).length, fallbackCount: results.filter(item => item.fallbackReason).length, error: results.some(item => item.success) ? undefined : '批量识别全部失败' };
     } finally { const preserveStage = Boolean(db.prepare("SELECT 1 ok FROM team_output_outbox WHERE project_id=? AND state<>'completed' AND source_json LIKE ? LIMIT 1").get(String(context.projectId), `%${stagingRoot.replace(/\\/g, '\\\\')}%`)); db.close(); if (!preserveStage) await fs.promises.rm(stagingRoot, { recursive: true, force: true }).catch(() => undefined); await materialized.cleanup(); }
