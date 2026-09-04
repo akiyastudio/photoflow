@@ -11,6 +11,13 @@ const { validateComponentPackageInspection } = require('../component-registry.cj
 
 const normalizeSdImportAutoMove = value => value !== false;
 const relativePathEscapes = (pathApi, relative) => pathApi.isAbsolute(relative) || relative === '..' || relative.startsWith(`..${pathApi.sep}`);
+const createDurableCleanupAdmission = ({ start, flush, worker, receipts }) => {
+  let state = 'pending';
+  const completion = start(async task => { if (state !== 'admitted') throw Object.assign(new Error('组件清理尚未完成持久 admission'), { cleanupPendingReceipts: receipts }); return worker(task); });
+  if (flush() !== true) { state = 'rejected'; return { admitted: false, completion }; }
+  state = 'admitted';
+  return { admitted: true, completion };
+};
 
 const registerHostCapabilities = (componentCapabilityBroker, registrations) => {
   for (const [method, handler] of registrations) {
@@ -421,9 +428,9 @@ const registerSystemIpc = context => {
   const captureNativeComponentCleanupProof = async ({ isolatedPath, proof }) => {
     if (!componentCleanupPublicationService?.nativeAvailable?.()) throw new Error('对象身份绑定删除服务不可用');
     if (proof.kind === 'file') { const inspected = await componentCleanupPublicationService.inspectPath(isolatedPath); if (!inspected?.success || !inspected.identity) throw new Error('原生文件身份检查不完整'); return { rootIdentity: inspected.identity }; }
-    const targets = [isolatedPath, ...proof.entries.map(entry => path.join(isolatedPath, ...entry.path.split('/')))]; const entryIdentities = {};
-    for (const batch of batchesByCleanupBudget(targets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) { const results = await componentCleanupPublicationService.inspectPathsBatch(batch); if (results.length !== batch.length || results.some(item => !item?.success || !item.identity)) throw new Error('原生批量身份检查结果不完整'); batch.forEach((target, index) => { if (target !== isolatedPath) entryIdentities[path.relative(isolatedPath, target).replace(/\\/g, '/')] = results[index].identity; }); if (batch.includes(isolatedPath)) entryIdentities[''] = results[batch.indexOf(isolatedPath)].identity; }
-    return { rootIdentity: entryIdentities[''], entryIdentities };
+    const targets = [isolatedPath, ...proof.entries.map(entry => path.join(isolatedPath, ...entry.path.split('/')))]; const identities = new Map();
+    for (const batch of batchesByCleanupBudget(targets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) { const results = await componentCleanupPublicationService.inspectPathsBatch(batch); if (results.length !== batch.length || results.some(item => !item?.success || !item.identity)) throw new Error('原生批量身份检查结果不完整'); batch.forEach((target, index) => identities.set(target, results[index].identity)); }
+    return { rootIdentity: identities.get(isolatedPath), entries: proof.entries.map(entry => ({ path: entry.path, identity: identities.get(path.join(isolatedPath, ...entry.path.split('/'))) })) };
   };
   const deleteOwnedComponentIsolation = async ({ receipt, isolatedPath, proof }) => {
     if (!componentCleanupPublicationService.nativeAvailable()) throw new Error('对象身份绑定删除服务不可用');
@@ -437,7 +444,8 @@ const registerSystemIpc = context => {
     const absoluteFor = entry => entry.path ? path.join(isolatedPath, ...entry.path.split('/')) : isolatedPath;
     const volumeRoot = path.parse(isolatedPath).root;
     const anchorPaths = []; for (let current = isolatedPath; ; current = path.dirname(current)) { anchorPaths.unshift(current); if (current === volumeRoot) break; }
-    const identityByPath = new Map([[isolatedPath, proof.native.rootIdentity], ...tree.map(entry => [absoluteFor(entry), proof.native.entryIdentities[entry.path]])]);
+    const nativeEntries = new Map(proof.native.entries.map(entry => [entry.path, entry.identity]));
+    const identityByPath = new Map([[isolatedPath, proof.native.rootIdentity], ...tree.map(entry => [absoluteFor(entry), nativeEntries.get(entry.path)])]);
     const inspectTargets = anchorPaths.filter(target => target !== isolatedPath);
     for (const batchPaths of batchesByCleanupBudget(inspectTargets, target => Math.ceil(Buffer.byteLength(target, 'utf8') / 3) * 4 + 32, 2048)) {
       const inspected = await componentCleanupPublicationService.inspectPathsBatch(batchPaths);
@@ -650,34 +658,31 @@ const registerSystemIpc = context => {
     }, execute);
   }, { autoRestart: true });
 
-  const queueSystemFilesystemCleanup = (paths, title, restartTask = null) => {
+  const queueSystemFilesystemCleanup = async (paths, title, restartTask = null) => {
     const allowedRoots = [app.getPath('temp'), app.getPath('userData'), pluginService.installRoot].filter(Boolean).map(candidate => path.resolve(candidate));
     const seenTargets = new Set();
     const targets = (paths || []).filter(candidate => candidate && typeof candidate === 'object' && !candidate.manualRecovery && candidate.nodeIdentity && ['file', 'directory'].includes(candidate.kind)).map(candidate => ({ ...candidate, path: path.resolve(candidate.path) })).filter(target => !seenTargets.has(target.path) && allowedRoots.some(root => {
       const relative = path.relative(root, target.path);
       return relative && !relativePathEscapes(path, relative);
     }) && (seenTargets.add(target.path) || true));
-    if (!targets.length) return;
+    if (!targets.length) return { admitted: false, reason: 'no-valid-receipts' };
     const execute = async task => {
       task?.report(10, title);
       const failures = [];
-      for (const target of targets) try {
-        await cleanupOwnedComponentPath(target, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation });
-      } catch (error) {
-        const updated = error.cleanupPendingReceipts?.[0];
-        if (updated) Object.assign(target, updated);
-        task?.report(10, updated ? '部分清理失败，已保存剩余内容收据' : '清理失败，已停止自动处理', { targets });
-        failures.push({ target, error });
-        writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) });
+      const dataCleanupComplete = restartTask?.metadata?.dataCleanupComplete === true;
+      if (!dataCleanupComplete) {
+        for (const target of targets) try { await cleanupOwnedComponentPath(target, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation }); }
+        catch (error) { const updated = error.cleanupPendingReceipts?.[0]; if (updated) Object.assign(target, updated); task?.report(10, updated ? '部分清理失败，已保存剩余内容收据' : '清理失败，已停止自动处理', { targets }); failures.push({ target, error }); writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) }); }
+        if (failures.length) throw Object.assign(new Error(`仍有 ${failures.length} 个系统暂存路径等待清理`), { cleanupPendingPaths: failures.map(item => item.target.path), cleanupPendingReceipts: failures.map(item => item.target) });
+        task?.report(99, '数据清理完成，正在持久化完成状态', { targets, dataCleanupComplete: true });
+        if (backgroundTasks?.flush?.() !== true) throw Object.assign(new Error('无法同步持久化组件清理完成前状态'), { cleanupPendingReceipts: targets });
       }
-      if (failures.length) throw Object.assign(new Error(`仍有 ${failures.length} 个系统暂存路径等待清理`), { cleanupPendingPaths: failures.map(item => item.target.path), cleanupPendingReceipts: failures.map(item => item.target) });
-      task?.report(99, '数据清理完成，正在持久化完成状态', { targets, dataCleanupComplete: true });
-      if (backgroundTasks?.flush?.() !== true) throw Object.assign(new Error('无法同步持久化组件清理完成前状态'), { cleanupPendingReceipts: targets });
+      for (const target of targets) await finalizeComponentCleanupProof(target, { dataCleanupCompletePersisted: true });
       return { removedCount: targets.length };
     };
     if (!backgroundTasks?.run) {
       writeLog('warn', 'Persistent background task service unavailable; component cleanup retained for manual recovery', { targets: targets.map(target => target.path) });
-      return;
+      return { admitted: false, reason: 'persistence-unavailable', targets };
     }
     const dedupeKey = `system-filesystem-cleanup:${crypto.randomUUID()}`;
     const run = async () => {
@@ -691,12 +696,17 @@ const registerSystemIpc = context => {
       }, execute, run);
       if (completion?.task?.state === 'completed') {
         if (backgroundTasks.flush?.() !== true) throw Object.assign(new Error('组件清理任务完成状态无法同步持久化'), { cleanupPendingReceipts: targets });
-        for (const target of targets) await finalizeComponentCleanupProof(target);
       }
       return completion;
     };
-    if (restartTask?.id) return run();
-    setTimeout(() => void run().catch(error => writeLog('warn', 'Deferred system cleanup failed', { error: error.message || String(error) })), 250);
+    const admission = createDurableCleanupAdmission({ start: worker => backgroundTasks.run({ ...(restartTask?.id ? { id: restartTask.id } : {}), type: 'system-filesystem-cleanup', title, dedupeKey, cancellable: false, metadata: { targets, title } }, worker, run), flush: () => backgroundTasks.flush?.(), worker: execute, receipts: targets });
+    const launched = admission.completion;
+    if (!admission.admitted) {
+      void launched.catch(error => writeLog('warn', 'Rejected component cleanup admission', { error: error.message || String(error) }));
+      throw Object.assign(new Error('组件清理 receipt 无法同步持久化，已保留恢复对象'), { cleanupPendingReceipts: targets });
+    }
+    void launched.catch(error => writeLog('warn', 'Deferred system cleanup failed', { error: error.message || String(error) }));
+    return { admitted: true, completion: launched };
   };
   backgroundTasks?.registerTypeRestartFactory?.('system-filesystem-cleanup', task => queueSystemFilesystemCleanup(task.metadata?.targets || [], task.metadata?.title || task.title, task));
 
@@ -1095,13 +1105,14 @@ const registerSystemIpc = context => {
       ].filter(Boolean);
       packageStagePath = '';
       packageSnapshotPath = '';
-      queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
+      const cleanupAdmission = await queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
+      await cleanupAdmission.completion;
       invalidateComponentStatus();
       writeLog('info', 'Component installed', { componentId, destination });
-      return { success: true, packageSizeBytes, operationId: transactionResult.operationId };
+      return { success: true, packageSizeBytes, operationId: transactionResult.operationId, cleanupPending: false };
     } catch (error) {
       const pendingCleanup = Array.isArray(error?.cleanupPendingReceipts) && error.cleanupPendingReceipts.length ? error.cleanupPendingReceipts : error?.cleanupPendingPaths;
-      if (Array.isArray(pendingCleanup) && pendingCleanup.length) queueSystemFilesystemCleanup(pendingCleanup, `清理“${componentId || '未知'}”组件失败暂存文件`);
+      if (Array.isArray(pendingCleanup) && pendingCleanup.length) await queueSystemFilesystemCleanup(pendingCleanup, `清理“${componentId || '未知'}”组件失败暂存文件`).catch(cleanupError => { error.message = `${error.message || String(error)}；${cleanupError.message || String(cleanupError)}`; });
       return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId, cleanupPending: Boolean(error?.journal) || Boolean(pendingCleanup?.length), outcomeUnknown: Boolean(error?.outcomeUnknown), ...(error?.recoveryPath ? { recoveryPath: error.recoveryPath } : {}) };
     } finally {
       const deferredCleanup = [
@@ -1109,7 +1120,7 @@ const registerSystemIpc = context => {
         packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeDigest: componentTreeIdentityDigest(packageStageTreeIdentity) } : null,
         packageSnapshotPath && packageSnapshotReceipt,
       ].filter(Boolean);
-      if (deferredCleanup.length) queueSystemFilesystemCleanup(deferredCleanup, `恢复“${componentId || '未知组件'}”安装临时文件`);
+      if (deferredCleanup.length) await queueSystemFilesystemCleanup(deferredCleanup, `恢复“${componentId || '未知组件'}”安装临时文件`).catch(cleanupError => writeLog('warn', 'Deferred component cleanup admission failed', { componentId, error: cleanupError.message || String(cleanupError) }));
       capabilityBarrier?.release?.();
       releaseInstall?.();
       await capacityReservation?.release?.();
@@ -1996,4 +2007,4 @@ const registerSystemIpc = context => {
   return { componentTransactionReady };
 };
 
-module.exports = { confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, prepareSafeComponentInstallContainer, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, rollbackComponentPublication, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };
+module.exports = { confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, createDurableCleanupAdmission, enterComponentInstallTransition, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, prepareSafeComponentInstallContainer, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, rollbackComponentPublication, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };

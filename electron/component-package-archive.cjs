@@ -642,7 +642,7 @@ const persistComponentCleanupProof = async (receipt, paths, captureNativeProof) 
   if (receipt.kind === 'file' && (proof.size !== receipt.size || proof.sha256 !== receipt.sha256 || proof.mode !== receipt.mode || !sameNodeIdentity(proof.node, receipt.nodeIdentity))) throw new Error('组件清理完整证明与原始文件收据不一致');
   if (typeof captureNativeProof !== 'function') throw new Error('组件清理缺少首次 native identity proof provider');
   proof.native = await captureNativeProof({ receipt, isolatedPath: paths.isolatedPath, proof });
-  if (!proof.native || typeof proof.native.rootIdentity !== 'string' || !proof.native.rootIdentity || proof.kind === 'directory' && (!proof.native.entryIdentities || proof.entries.some(entry => typeof proof.native.entryIdentities[entry.path] !== 'string'))) throw new Error('组件清理 native identity proof 不完整');
+  if (!proof.native || typeof proof.native.rootIdentity !== 'string' || !proof.native.rootIdentity || proof.kind === 'directory' && (!Array.isArray(proof.native.entries) || proof.native.entries.length !== proof.entries.length || proof.native.entries.some((entry, index) => entry?.path !== proof.entries[index].path || typeof entry.identity !== 'string' || !entry.identity))) throw new Error('组件清理 native identity proof 不完整');
   const serialized = `${JSON.stringify(proof)}\n`;
   if (Buffer.byteLength(serialized) > MAX_CLEANUP_PROOF_BYTES || proof.entries?.length > MAX_TREE_ENTRIES) throw new Error('组件清理完整证明超过安全上限');
   const existing = await readBoundedSidecar(paths.proofPath, { maxBytes: MAX_CLEANUP_PROOF_BYTES });
@@ -662,7 +662,7 @@ const readComponentCleanupProof = async (paths, receipt) => {
   if (!text) return null;
   let proof; try { proof = JSON.parse(text); } catch { throw new Error('组件清理完整证明损坏'); }
   if (proof?.schemaVersion !== 1 || !['file', 'directory'].includes(proof.kind) || proof.kind === 'directory' && (!Array.isArray(proof.entries) || proof.entries.length > MAX_TREE_ENTRIES)) throw new Error('组件清理完整证明结构无效');
-  if (!proof.native || typeof proof.native.rootIdentity !== 'string' || !proof.native.rootIdentity || proof.kind === 'directory' && (!proof.native.entryIdentities || proof.entries.some(entry => typeof proof.native.entryIdentities[entry.path] !== 'string'))) throw new Error('组件清理完整证明缺少 native identity');
+  if (!proof.native || typeof proof.native.rootIdentity !== 'string' || !proof.native.rootIdentity || proof.kind === 'directory' && (!Array.isArray(proof.native.entries) || proof.native.entries.length !== proof.entries.length || proof.native.entries.some((entry, index) => entry?.path !== proof.entries[index].path || typeof entry.identity !== 'string' || !entry.identity))) throw new Error('组件清理完整证明缺少 native identity');
   if (proof.kind !== receipt.kind || proof.kind === 'directory' && componentTreeIdentityDigest(proof.entries) !== receipt.treeDigest) throw new Error('组件清理完整证明未绑定原始收据');
   if (proof.kind === 'file' && (proof.size !== receipt.size || proof.sha256 !== receipt.sha256 || proof.mode !== receipt.mode || !sameNodeIdentity(proof.node, receipt.nodeIdentity))) throw new Error('组件清理文件证明未绑定原始收据');
   return { proof, text, binding: { schemaVersion: 1, bytes: Buffer.byteLength(text), sha256: crypto.createHash('sha256').update(text).digest('hex') } };
@@ -740,13 +740,14 @@ const cleanupOwnedComponentPath = async (receipt, { deleteOwned, captureNativePr
   }
   return { cleaned: true, intentPath: paths.intentPath };
 };
-const finalizeComponentCleanupProof = async receipt => {
+const finalizeComponentCleanupProof = async (receipt, { dataCleanupCompletePersisted = false } = {}) => {
   const paths = componentCleanupIntentPaths(receipt);
   const intent = await readBoundedSidecar(paths.intentPath);
-  if (intent !== `${JSON.stringify(cleanupIntentPayload(receipt))}\\n`) throw new Error('组件清理完成证明无效，拒绝回收 sidecar');
   const [original, isolated] = await Promise.all([paths.originalPath, paths.isolatedPath].map(candidate => fs.promises.lstat(candidate).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error))));
   if (original || isolated) throw new Error('组件清理数据路径仍存在，拒绝回收完成证明');
   const fixedSidecars = [paths.verifiedPath, `${paths.verifiedPath}.tmp`, `${paths.verifiedPath}.invalid`, `${paths.verifiedPath}.tmp.invalid`, `${paths.intentPath}.tmp`, `${paths.intentPath}.invalid`, `${paths.intentPath}.tmp.invalid`, paths.proofPath, `${paths.proofPath}.tmp`, `${paths.proofPath}.tmp.invalid`];
+  if (!intent) { if (dataCleanupCompletePersisted && !(await Promise.all(fixedSidecars.map(candidate => fs.promises.lstat(candidate).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error))))).some(Boolean)) return true; throw new Error('组件清理完成证明缺失'); }
+  if (intent !== `${JSON.stringify(cleanupIntentPayload(receipt))}\\n`) throw new Error('组件清理完成证明无效，拒绝回收 sidecar');
   for (const candidate of fixedSidecars) await fs.promises.unlink(candidate).catch(error => { if (error?.code !== 'ENOENT') throw error; });
   await fs.promises.unlink(paths.intentPath);
   return true;

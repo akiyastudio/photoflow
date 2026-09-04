@@ -15,7 +15,7 @@ const archive = path.join(root, `PhotoFlow-archive-parity-1.0.0-${process.platfo
 const base = () => [['pkg/component.json', manifest], ['pkg/worker.cjs', 'module.exports = true;']];
 const rejection = fn => { try { fn(); return false; } catch { return true; } };
 const testDeleteOwned = async ({ receipt, isolatedPath }) => { const stat = fs.lstatSync(isolatedPath); assert.equal(stat.dev, receipt.nodeIdentity.dev); assert.equal(stat.ino, receipt.nodeIdentity.ino); if (receipt.kind === 'directory') await fs.promises.rm(isolatedPath, { recursive: true, force: false }); else await fs.promises.unlink(isolatedPath); };
-const testCaptureNativeProof = async ({ receipt, proof }) => ({ rootIdentity: `${receipt.nodeIdentity.dev}:${receipt.nodeIdentity.ino}`, ...(proof.kind === 'directory' ? { entryIdentities: Object.fromEntries(proof.entries.map(entry => [entry.path, `${entry.node.dev}:${entry.node.ino}`])) } : {}) });
+const testCaptureNativeProof = async ({ receipt, proof }) => ({ rootIdentity: `${receipt.nodeIdentity.dev}:${receipt.nodeIdentity.ino}`, ...(proof.kind === 'directory' ? { entries: proof.entries.map(entry => ({ path: entry.path, identity: `${entry.node.dev}:${entry.node.ino}` })) } : {}) });
 const cleanupOwnedComponentPath = receipt => cleanupOwnedComponentPathRaw(receipt, { captureNativeProof: testCaptureNativeProof, deleteOwned: testDeleteOwned });
 const receiptForFile = filePath => { const stat = fs.lstatSync(filePath); return { path: filePath, kind: 'file', nodeIdentity: { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }, size: stat.size, sha256: crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex'), mode: stat.mode & 0o777 }; };
 
@@ -39,8 +39,9 @@ const receiptForFile = filePath => { const stat = fs.lstatSync(filePath); return
     assert.equal((await verifyComponentPackage(archive)).componentId, 'archive-parity');
     writeZip(archive, base().map(([name, value]) => [name, value, { dataDescriptor: true, descriptorSignature: name.endsWith('worker.cjs') }]));
     assert.equal(inspectComponentArchive(archive).manifest.id, 'archive-parity', 'signed and unsigned data descriptors are accepted when they match the central directory');
-    writeZip(archive, [...base(), ['pkg/..foo', 'legal sibling name']]);
+    writeZip(archive, [...base(), ['pkg/..foo', 'legal sibling name'], ['pkg/__proto__', 'prototype-safe'], ['pkg/constructor', 'constructor-safe']]);
     assert.equal(inspectComponentArchive(archive).entries.some(entry => entry.name === 'pkg/..foo'), true, 'a legal ..foo segment is not confused with parent traversal');
+    assert.equal(inspectComponentArchive(archive).entries.some(entry => entry.name === 'pkg/__proto__'), true, 'prototype-like path names remain ordinary proof entries');
 
     const outputRaceInspection = inspectComponentArchive(archive);
     const outputRaceRoot = path.join(root, 'output-race');
@@ -240,9 +241,9 @@ const receiptForFile = filePath => { const stat = fs.lstatSync(filePath); return
     assert.match(systemIpcSource, /error\?\.cleanupPendingReceipts[\s\S]*pendingCleanup[\s\S]*queueSystemFilesystemCleanup\(pendingCleanup/);
     assert.match(systemIpcSource, /filter\(candidate => candidate && typeof candidate === 'object'[\s\S]*candidate\.nodeIdentity/);
     assert.doesNotMatch(systemIpcSource, /typeof candidate === 'string' \? \{ path:/, 'automatic cleanup has no raw-path fallback');
-    assert.match(systemIpcSource, /setTimeout\([\s\S]*run\(\)\.catch/, 'timer-launched cleanup routes failures into a promise rejection handler');
+    assert.doesNotMatch(systemIpcSource, /setTimeout\(\(\) => void run\(/, 'cleanup admission is never delayed behind an unpersisted timer');
     assert.match(systemIpcSource, /assertInstallActive\(\);[\s\S]*fs\.promises\.cp[\s\S]*captureVerifiedComponentTreeIdentity[\s\S]*assertInstallActive\(\)/, 'deadline checks bracket copy and receipt verification');
-    assert.match(systemIpcSource, /dataCleanupComplete[\s\S]*backgroundTasks\?\.flush[\s\S]*state === 'completed'[\s\S]*backgroundTasks\.flush[\s\S]*finalizeComponentCleanupProof/);
+    assert.match(systemIpcSource, /dataCleanupComplete[\s\S]*backgroundTasks\?\.flush[\s\S]*finalizeComponentCleanupProof[\s\S]*state === 'completed'[\s\S]*backgroundTasks\.flush/);
     assert.match(systemIpcSource, /inspectPathsBatch[\s\S]*compareDeleteFilesBatch[\s\S]*deleteDirectoriesBatch/, 'large-tree native cleanup uses bounded batches rather than one helper per node');
 
     const originalStatfs = fs.promises.statfs;
