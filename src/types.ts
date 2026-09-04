@@ -748,6 +748,10 @@ export interface ComponentStatus {
   packagePath?: string;
 }
 
+export interface ComponentInstallRequest {
+  componentId: string;
+}
+
 export interface ComponentHostAction {
   componentId: string;
   componentVersion: string;
@@ -1085,7 +1089,7 @@ export interface IElectronAPI {
   clearLogs: () => Promise<{ success: boolean; deletedCount?: number; error?: string }>;
   clearInterfaceCache: () => Promise<{ success: boolean; clearedBytes?: number; error?: string }>;
   getCursorScreenPoint: () => Promise<{ x: number; y: number }>;
-  installComponent: (componentId: string) => Promise<{ success: boolean; cancelled?: boolean; packageSizeBytes?: number; error?: string }>;
+  installComponent: (request: ComponentInstallRequest) => Promise<{ success: boolean; cancelled?: boolean; packageSizeBytes?: number; error?: string }>;
   setComponentEnabled: (componentId: string, enabled: boolean) => Promise<{ success: boolean; enabled?: boolean; error?: string }>;
   deleteComponentPackage: (kind: 'component' | 'advanced', componentId?: string) => Promise<{ success: boolean; deletedBytes?: number; error?: string }>;
   uninstallComponent: (componentId: string, options: { clearUserData: boolean }) => Promise<{ success: boolean; dataCleared?: boolean; cleanupWarnings?: string[]; error?: string }>;

@@ -214,6 +214,30 @@ const validatePrivacyConsentRequest = request => {
   return request;
 };
 
+const COMPONENT_INSTALL_ID = /^[a-z0-9][a-z0-9._-]{0,79}$/;
+const validateComponentInstallRequest = request => {
+  if (!request || typeof request !== 'object' || Array.isArray(request) || ![Object.prototype, null].includes(Object.getPrototypeOf(request))) throw new TypeError('组件安装请求必须是普通对象');
+  const keys = Object.keys(request);
+  if (keys.length !== 1 || keys[0] !== 'componentId') throw new TypeError('组件安装请求字段无效');
+  if (typeof request.componentId !== 'string' || !COMPONENT_INSTALL_ID.test(request.componentId)) throw new TypeError('组件 ID 无效');
+  return { componentId: request.componentId };
+};
+const confirmComponentPackageInstall = async ({ componentId, integrityStatus, dialog, mainWindow }) => {
+  if (integrityStatus === 'verified' || integrityStatus === 'pinned-unverified') return true;
+  if (integrityStatus !== 'unsigned') throw new Error('组件包完整性状态无效，请刷新组件状态后重试');
+  const response = await dialog.showMessageBox(mainWindow, {
+    type: 'warning',
+    title: `安装未验证来源的组件“${componentId}”？`,
+    message: '这个组件包没有可由 PhotoFlow 验证的来源签名。',
+    detail: '安装后，它的服务、生命周期脚本或可执行程序将以你的当前用户权限运行，可能读取或修改你有权访问的文件、连接网络或启动其他进程。仅在你信任安装包来源时继续。此确认只适用于本次安装的这个组件包。',
+    buttons: ['取消安装', '我信任来源，继续安装'],
+    defaultId: 0,
+    cancelId: 0,
+    noLink: true,
+  });
+  return response.response === 1;
+};
+
 const savePrivacyConsentWithConfig = async ({ request, privacyService, configMutationService, telemetryService }) => {
   let validatedRequest;
   try { validatedRequest = validatePrivacyConsentRequest(request); }
@@ -731,18 +755,22 @@ const registerSystemIpc = context => {
     }
   });
 
-  ipcMain.handle('components-install', async (_event, componentId) => {
+  ipcMain.handle('components-install', async (_event, request) => {
     let stagingPath = '';
     let backupPath = '';
     let packageStagePath = '';
+    let packageSnapshotPath = '';
     let preserveBackupPath = false;
     try {
+      const { componentId } = validateComponentInstallRequest(request);
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
       const discoveredPackage = pluginService.resolvePackage(componentId);
       const archivePath = discoveredPackage.packagePath;
-      const packageSizeBytes = (await fs.promises.stat(archivePath)).size;
-      packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}`);
-      await extractPreparedPackage(archivePath, packageStagePath);
+      packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
+      packageSnapshotPath = `${packageStagePath}.zip`;
+      await fs.promises.copyFile(archivePath, packageSnapshotPath);
+      const packageSizeBytes = (await fs.promises.stat(packageSnapshotPath)).size;
+      await extractPreparedPackage(packageSnapshotPath, packageStagePath);
       const manifestDirectory = path.dirname(String(discoveredPackage.manifestEntry || 'component.json'));
       const componentRoot = path.resolve(packageStagePath, manifestDirectory === '.' ? '' : manifestDirectory);
       const stagedRelative = path.relative(packageStagePath, componentRoot);
@@ -751,7 +779,7 @@ const registerSystemIpc = context => {
       if (!fs.existsSync(manifestPath)) throw new Error('所选文件夹中没有 component.json');
       const manifest = JSON.parse(await fs.promises.readFile(manifestPath, 'utf8'));
       if (manifest.id !== componentId) throw new Error(`组件 ID 不匹配：需要 ${componentId}，实际为 ${manifest.id || '未填写'}`);
-      if (Number(manifest.apiVersion) !== 1) throw new Error(`组件接口版本不兼容：${manifest.apiVersion || '未填写'}`);
+      if (manifest.apiVersion !== 1) throw new Error(`组件接口版本不兼容：${manifest.apiVersion || '未填写'}`);
       const entrypoints = manifest.entrypoints || {};
       const relativeEntry = entrypoints[`${process.platform}-${process.arch}`] || entrypoints[process.platform] || entrypoints.default;
       if (typeof relativeEntry !== 'string' || !relativeEntry.trim()) throw new Error('组件没有适用于当前系统的入口文件');
@@ -767,6 +795,8 @@ const registerSystemIpc = context => {
         if (!(await fs.promises.stat(sourceFile).catch(() => null))?.isFile()) throw new Error(`组件必需文件不存在：${relativeFile}`);
       }
       await pluginService.verifyComponentDirectoryAsync(componentId, componentRoot, true);
+      const confirmed = await confirmComponentPackageInstall({ componentId, integrityStatus: discoveredPackage.integrityStatus, dialog, mainWindow });
+      if (!confirmed) return { success: false, cancelled: true };
 
       const installRoot = pluginService.ensureInstallRoot();
       const container = path.join(installRoot, String(componentId));
@@ -792,9 +822,10 @@ const registerSystemIpc = context => {
         preserveBackupPath = Boolean(error.preserveComponentBackupPath);
         throw error;
       }
-      const cleanupPaths = [backupPath, packageStagePath].filter(Boolean);
+      const cleanupPaths = [backupPath, packageStagePath, packageSnapshotPath].filter(Boolean);
       backupPath = '';
       packageStagePath = '';
+      packageSnapshotPath = '';
       queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
       invalidateComponentStatus();
       writeLog('info', 'Component installed', { componentId, destination });
@@ -805,6 +836,7 @@ const registerSystemIpc = context => {
       if (stagingPath) await fs.promises.rm(stagingPath, { recursive: true, force: true }).catch(() => undefined);
       if (backupPath && !preserveBackupPath) await fs.promises.rm(backupPath, { recursive: true, force: true }).catch(() => undefined);
       if (packageStagePath) await fs.promises.rm(packageStagePath, { recursive: true, force: true }).catch(() => undefined);
+      if (packageSnapshotPath) await fs.promises.rm(packageSnapshotPath, { force: true }).catch(() => undefined);
     }
   });
 
@@ -1711,4 +1743,4 @@ const registerSystemIpc = context => {
   });
 };
 
-module.exports = { finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, transitionComponentEnabled, validatePrivacyConsentRequest };
+module.exports = { confirmComponentPackageInstall, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };

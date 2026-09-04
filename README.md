@@ -9,9 +9,9 @@
   </p>
 </div>
 
-照片流把可选扩展包称为“组件（Component）”，在面向使用者的页面中也称为“插件”。新插件统一使用 **Component Host V2**：界面运行在独立沙箱页面中，业务后端作为受监管子进程运行，项目媒体、输出、版本、任务和设置只能通过显式授权的 Host API 访问。
+照片流把可选扩展包称为“组件（Component）”，在面向使用者的页面中也称为“插件”。新插件统一使用 **Component Host V2**：界面运行在独立沙箱页面中，业务后端作为受监管子进程运行。Host API 的能力与权限是正常组件访问宿主资源的契约和最小授权机制。
 
-插件不能导入照片流 React 渲染层或 Electron 主进程代码，也不能取得任意 IPC、任意文件系统路径或宿主环境中的凭据。所有未在清单中声明的 RPC、能力、权限和事件都会默认拒绝。
+组件 UI 不能导入照片流 React 渲染层或 Electron 主进程代码，也不能取得任意 IPC；所有未在清单中声明的 RPC、能力、权限和事件都会默认拒绝。这个沙箱只保护 UI `WebContents`。组件 service、生命周期动作和 executable 是用户主动安装的受信本机代码，以当前用户权限运行，能够绕过 Host API 直接使用用户可访问的文件、网络和进程能力；“受监管”表示宿主负责启动、协议、超时和停止，不是针对恶意进程的 OS 沙箱。本项目当前不承诺安全运行不受信第三方市场插件。
 
 > [!IMPORTANT]
 > 所有组件通过当前 Host API 的稳定能力名称访问宿主资源。旧数据只能通过显式 adoption grant 迁入组件私有存储。
@@ -97,6 +97,8 @@ hello-component/
 PhotoFlow 项目 / 媒体 / 输出 / 版本 / 任务
 ```
 
+图中的沙箱边界只覆盖插件 UI。服务进程是受信本机代码；Host capability 是组件互操作契约，不是限制恶意服务进程的安全边界。
+
 ### 插件界面
 
 界面只使用 `window.photoFlowComponent`：
@@ -154,7 +156,7 @@ window.addEventListener('pagehide', stop, { once: true });
 | `project.version.update` / `project.version.delete` | 独立版本写/删权限 | 原子版本 CAS 更新或高风险删除 |
 | `project.import` | `project.import` | 一次性令牌的多文件事务导入 |
 | `project.files.mutate` | `project.files.write` | 文件变更计划、提交、收据与撤销 |
-| `project.media.process` | `project.media.process` | 视频处理、时间线帧和 Office 图片提取 |
+| `project.media.process` | `project.media.process` | 视频时间线帧和 Office 图片提取 |
 | `component.secrets` | `component.secrets` | safeStorage 加密的组件隔离秘密 |
 | `network.fetch` | `network.fetch` | origin 白名单与秘密绑定的 HTTPS 请求 |
 | `notifications` | `notifications` | 宿主管理的短暂纯文本状态 |

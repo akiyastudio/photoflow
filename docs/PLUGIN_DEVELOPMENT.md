@@ -42,6 +42,8 @@ window.addEventListener('pagehide', stop, { once: true });
 
 UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航、新窗口和浏览器权限都被关闭。使用上下文中解析后的明暗主题，并监听主题/上下文变化。控件应支持键盘操作、显示可见焦点、为表单提供标签、尊重“减少动态效果”，并且不能假设宿主页面始终激活。页面停用或销毁时释放计时器和订阅。
 
+这里的沙箱只隔离 UI `WebContents`，不隔离组件后端。service、生命周期动作和 executable 是用户主动安装的受信本机代码，以当前用户权限运行，可以读取或修改用户可访问的文件、联网并启动进程。Host API capability/permission 是正常组件的互操作契约与最小授权，不是针对恶意本机进程的安全边界；受监管子进程也不等于 OS 沙箱。当前不要把 PhotoFlow 的离线安装描述为可安全运行不受信第三方市场插件。
+
 ### 文件页面板
 
 `component.sidePanel` 使用与内置工具相同的面板外框。宿主负责标题、组件图标、遮罩、关闭按钮和内容 View 的尺寸；插件 UI 负责内容区域，不要自行再绘制一层模态窗口。面板上下文的 `surface` 为 `component.sidePanel`，`scopeRelativePath`、`selectedRelativePaths` 和 `sourcePageId` 绑定打开它的文件页。不同文件页使用不同实例，关闭文件页、卸载或升级组件会关闭所属面板。
@@ -65,7 +67,7 @@ UI 运行在沙箱 `WebContentsView` 中，Node 集成、WebView、任意导航�
 
 需要保留宿主工具分组时，`component.sidePanel` 或 `project.contextAction` 可以声明 `"placement":"workspace.videoTools"`。宿主只负责把入口放入文件页“视频工具”菜单；placed project action 不会再出现在统一工具栏或右键根菜单，并且只在文件选择右键菜单中接收完整安全 selection。面板页面、RPC 与权限仍完全属于组件。其他 contribution type 声明该 placement 会被拒绝。`extensions/video-tools` 展示了同一组件贡献“视频转码”和“视频切割”两个分组面板入口。
 
-渲染层通常调用组件自有 RPC，而不是直接调用 Host 能力。唯一的受控 UI 快捷桥是 Host API `notify`：它只接受严格的纯文本结构，不能携带 HTML、回调、URL、路径或任意 channel。组件服务是后端协议端点，只能请求清单授权的 Host 能力；只有后端自身产生短状态时才使用 `notifications`。长任务和确认仍分别使用 `tasks` 与 `dialogs`。
+渲染层通常调用组件自有 RPC，而不是直接调用 Host 能力。唯一的受控 UI 快捷桥是 Host API `notify`：它只接受严格的纯文本结构，不能携带 HTML、回调、URL、路径或任意 channel。组件服务是后端协议端点，按契约只能请求清单授权的 Host 能力；这不阻止受信服务代码直接调用其 OS 用户权限。只有后端自身产生短状态时才使用 `notifications`。长任务和确认仍分别使用 `tasks` 与 `dialogs`。
 
 ### 可选的应用设置
 

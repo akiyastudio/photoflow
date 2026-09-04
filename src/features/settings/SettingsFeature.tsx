@@ -285,7 +285,7 @@ const ComponentSettings = ({ components, installPath, loading, onRefresh, onComp
     setBusyId(component.id);
     setBusyAction('install');
     try {
-      const result = await window.electronAPI.installComponent(component.id);
+      const result = await window.electronAPI.installComponent({ componentId: component.id });
       if (result.cancelled) return;
       if (!result.success) { onNotice(`安装“${component.name}”失败：${result.error || '未知错误'}`, 5000); return; }
       onNotice(`已安装“${component.name}”`);

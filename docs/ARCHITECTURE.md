@@ -14,7 +14,7 @@ file workflows.
 4. Repositories are the only code allowed to know SQLite table structure.
 5. Python and packaged component processes are workers, not sources of UI state.
 
-Optional UI components follow the versioned [Component Host API](./PLUGIN_HOST_API.md): the application owns the project-toolbar button and tab chrome, while an isolated, host-preloaded `WebContentsView` owns the component page. No component UI is injected into the main React DOM.
+Optional UI components follow the current, unversioned Host capabilities documented in [Component Host API](./PLUGIN_HOST_API.md): the application owns the project-toolbar button and tab chrome, while an isolated, host-preloaded `WebContentsView` owns the component page. No component UI is injected into the main React DOM. The sandbox boundary covers that UI view only; component services and executables are trusted local code running with the user's OS permissions.
 
 ## Current module boundaries
 
@@ -163,8 +163,8 @@ Child-process ownership and recovery policy are documented in
    operations, backup and archive workflows publish observable task state. Task
    history and checkpoints are persisted; supported interrupted work can be
    resumed or safely restarted after application launch.
-5. Optional capability-based plugins are discovered through manifests and run
-   behind versioned Host API contracts. Component services and algorithm
+5. Optional capability-based plugins are discovered through manifests and use
+   the current unversioned Host capability contracts. Component services and algorithm
    runtimes are supervised processes; component business code remains outside
    the core renderer and Electron modules.
 

@@ -13,6 +13,17 @@ validates the package in a temporary directory before copying the runtime into
 its component-specific subdirectory. After installation, the user may choose
 whether to delete or retain the source ZIP.
 
+Offline installation is a trusted-local-code workflow. A component's UI is
+sandboxed, but its service, lifecycle actions, and executable run with the
+current user's OS permissions and may access user-readable files, the network,
+or other processes without going through the Host API. Host capabilities are a
+least-authority contract for well-behaved components, not an OS sandbox for a
+malicious backend. Install an unsigned package only when its source is trusted;
+the current product does not claim to safely run untrusted marketplace plugins.
+An app-pinned integrity hash checks that a known package has the expected bytes,
+but a hash shipped inside a package is not a digital signature or proof of its
+publisher.
+
 Each component has one application-data directory:
 
 ```text

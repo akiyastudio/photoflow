@@ -6,6 +6,8 @@
 
 PhotoFlow 只提供唯一、无版本协商的当前 Host API。组件必须声明 `componentHost.contractVersion:2`，并显式列出权限、能力、RPC 与事件；`componentHost.compatibility` 等 Host API 版本字段会作为未知字段拒绝。
 
+安全边界需要区分 UI 与后端：sandbox、禁用 Node、导航和浏览器权限只保护组件 UI 的 `WebContents`。组件 service、生命周期动作和 executable 是用户主动安装的受信本机代码，以当前用户的 OS 权限运行，可以直接访问该用户可访问的文件、网络和进程能力。Host API capability/permission 是正常组件的契约与最小授权，不是约束恶意进程的 OS 安全边界；“受监管进程”也只表示宿主控制启动、协议、超时和停止。当前模型不承诺安全执行不受信第三方市场插件。
+
 组件自有 RPC 和事件以 `.vN` 结尾；Host capability 使用无版本的稳定名称。已发布的组件 RPC/event 语义不可修改；破坏性变化使用新的方法或事件版本。`electron/compatibility/` 下的业务适配器不属于公开 API，也不再增加方法。
 
 渲染桥接 `window.photoFlowComponent.contractVersion` 仍为 `1`；这是独立的小型 preload ABI，不是 Host API 版本，也不参与协商。Host 上下文不包含 Host API 版本字段。
@@ -121,9 +123,7 @@ Host API 的七项写能力各自声明上表中的最小权限。评分批量�
 
 undo 本身同样使用逐项 intent/applied 日志。move undo 复核原 mutation 的摘要/目录 identity；mkdir undo 只移除仍属于原 mkdir 且为空的目录；recycle restore 在 originalPath 不存在时先 probe PIDL，probe 不确定或项目目标身份不匹配会返回人工恢复错误，绝不重复 restore。
 
-`project.media.process` 当前完整处理动作是 `video.timelineFrames`、`video.trim` 和 `office.extractImages`；长处理还支持用相同幂等键及 `processAction` 调用 `status`/`cancel`。当前调用采用 await 语义：处理调用在宿主长请求租约内等待完成，同时后台任务提供进度、checkpoint 和协作式取消；发布前持久化确定性 target、owner 与摘要。Office 即使没有图片也先在组件私有 stage 创建空目录和 operation owner marker，再原子 move 到输出位置，消除 createDirectory 与 marker 之间的恢复空窗；同名目录被其他主体抢占时拒绝。receipt 恢复成功时会把对应后台 task 终态纠正为 `completed`，使 status 与收据一致。组件卸载会取消该组件仍活动的 import/process，in-flight 幂等锁会保留至实际 settle，阻止同 ID 重装后并发重放。renderer 没有这些 IPC 通道，只能由受监管服务调用领域能力。
-
-视频处理组件还通过同一能力使用 `video.transcode.inspect`、`video.transcode` 和 `video.split`。来源为当前项目 scope 内的相对路径，或用户通过 `dialogs` 明确选择后获得的短时 input token；Host 解析真实路径并调用 `video-tools` 自带的受监管 FFmpeg 运行时，不向 renderer 暴露绝对路径。转码和切割使用相同幂等键执行 `status`/`cancel`，转码额外支持 `pause`/`resume`，进度同时进入任务中心并通过组件声明事件返回面板。裁剪、导入视频后处理和视频缩略图也解析到该组件运行时；时间线帧由 `video-playback-mpv` 的 libmpv 批处理接口提供。主程序安装包不再携带编码 FFmpeg archive。
+`project.media.process` 当前只公开 `video.timelineFrames` 和 `office.extractImages`，请求与响应形状以 `component-sdk/index.d.ts` 为准。时间线帧来源必须是当前项目 scope 内的相对视频路径，由宿主解析并交给可用的播放后端；renderer 没有这个 IPC 通道。Office 提取使用稳定幂等键，在宿主长请求租约内等待完成，并通过后台任务提供进度和协作式取消；即使没有图片也会先在组件私有 stage 创建 owner marker，再原子发布空输出目录。未列入 SDK 的旧 `video.sources.preview`、`video.trim`、`video.transcode.inspect`、`video.transcode` 和 `video.split` 动作不属于当前 Host API。
 
 `project.output` 动作：
 

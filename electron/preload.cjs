@@ -134,7 +134,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
   clearLogs: () => ipcRenderer.invoke('logs-clear'),
   clearInterfaceCache: () => ipcRenderer.invoke('interface-cache-clear'),
   getCursorScreenPoint: () => ipcRenderer.invoke('cursor-screen-point'),
-  installComponent: (componentId) => ipcRenderer.invoke('components-install', componentId),
+  installComponent: request => ipcRenderer.invoke('components-install', request),
   setComponentEnabled: (componentId, enabled) => ipcRenderer.invoke('components-set-enabled', componentId, enabled),
   deleteComponentPackage: (kind, componentId) => ipcRenderer.invoke('components-delete-package', kind, componentId),
   uninstallComponent: (componentId, options) => ipcRenderer.invoke('components-uninstall', componentId, options),
