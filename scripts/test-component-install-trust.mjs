@@ -6,7 +6,7 @@ import zlib from 'node:zlib';
 import { createRequire } from 'node:module';
 
 const require = createRequire(import.meta.url);
-const { confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, prepareSafeComponentInstallContainer, rollbackComponentPublication, snapshotComponentTrust, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
+const { confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, prepareSafeComponentInstallContainer, rollbackComponentPublication, snapshotComponentTrust, validateComponentInstallRequest } = require('../electron/modules/system-ipc.cjs');
 const { captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../electron/component-package-archive.cjs');
 
 const crc32 = buffer => {
@@ -53,7 +53,7 @@ const enteredBarrier = await enterComponentInstallTransition({
   abortComponentNetworkRequests: () => transitionEvents.push('abort-network'),
 });
 assert.equal(enteredBarrier, transitionBarrier);
-assert.deepEqual(transitionEvents, ['block', 'close-view', 'stop-tree', 'stop-service', 'abort-network', 'drain']);
+assert.deepEqual(transitionEvents, ['block', 'stop-tree', 'stop-service', 'close-view', 'abort-network', 'drain']);
 enteredBarrier.release();
 let failedBarrierReleased = false;
 await assert.rejects(enterComponentInstallTransition({
@@ -91,14 +91,30 @@ dialog.showMessageBox = async () => ({ response: 1 });
 assert.equal(await confirmation('unsigned'), true, 'the explicit dangerous action authorizes this invocation');
 await assert.rejects(confirmation('invalid'), /完整性状态无效/);
 
-const preloadSource = fs.readFileSync(new URL('../electron/preload.cjs', import.meta.url), 'utf8');
-const mainSource = fs.readFileSync(new URL('../electron/modules/system-ipc.cjs', import.meta.url), 'utf8');
-assert.match(preloadSource, /installComponent: request => ipcRenderer\.invoke\('components-install', request\)/);
-assert.match(mainSource, /snapshotComponentArchive\(archivePath, packageSnapshotPath\)[\s\S]*inspectComponentArchive\(packageSnapshotPath\)[\s\S]*confirmComponentPackageInstall[\s\S]*if \(!confirmed\)[\s\S]*extractComponentArchive\(snapshotPackage, packageStagePath\)/);
-assert.match(mainSource, /captureComponentTreeIdentity[\s\S]*verifyComponentTreeIdentity\(componentRoot[\s\S]*enterComponentInstallTransition[\s\S]*prepareSafeComponentInstallContainer/);
-assert.match(mainSource, /fs\.promises\.cp[\s\S]*verifyComponentTreeIdentity\(stagingPath[\s\S]*rename\(stagingPath, destination\)[\s\S]*verifyComponentTreeIdentity\(destination/);
-assert.match(mainSource, /if \(!confirmed\) return \{ success: false, cancelled: true \}/);
-assert.match(mainSource, /if \(packageSnapshotPath\) await fs\.promises\.rm\(packageSnapshotPath/);
+let backgroundPrompts = 0;
+const promptDialog = { showMessageBox: async (_window, options) => {
+  backgroundPrompts += 1;
+  assert.equal(options.defaultId, 1);
+  assert.equal(options.cancelId, 1);
+  assert.deepEqual(options.buttons, ['关闭后台进程并继续禁用', '取消']);
+  return { response: 1 };
+} };
+const inactiveSupervisor = { hasWhere: () => false };
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'install', processSupervisor: inactiveSupervisor, dialog: promptDialog, mainWindow: {} }), true);
+assert.equal(backgroundPrompts, 0, 'no process means no prompt');
+const activeSupervisor = { hasWhere: () => true };
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'disable', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), false);
+assert.equal(backgroundPrompts, 1);
+promptDialog.showMessageBox = async (_window, options) => {
+  assert.deepEqual(options.buttons, ['关闭后台进程并继续安装或更新', '取消']);
+  return { response: 0 };
+};
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', action: 'install', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), true);
+promptDialog.showMessageBox = async (_window, options) => {
+  assert.deepEqual(options.buttons, ['关闭后台进程并继续退出', '取消']);
+  return { response: 0 };
+};
+assert.equal(await confirmComponentBackgroundStop({ componentId: 'third-party.tool', componentName: 'Fixture', action: 'uninstall', processSupervisor: activeSupervisor, dialog: promptDialog, mainWindow: {} }), true);
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'component-install-trust-'));
 try {

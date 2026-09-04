@@ -180,5 +180,21 @@ const service = createConfigMutationService({ fs, crypto, getConfigPath: () => c
   assert(prevented); assert.equal(quitState(), 'draining'); assert.equal(cleanupCalls, 0, 're-entrant quit events cannot bypass the pending config drain');
   releaseQuit(); await quitMutation; await new Promise(resolve => setImmediate(resolve));
   assert.equal(quitCalls, 1); assert.equal(cleanupCalls, 1); assert.equal(quitState(), 'ready');
+
+  const retryEvents = new EventEmitter(); let attempts = 0; let retryQuitCalls = 0; let failedCalls = 0;
+  const retryApp = { on: (...args) => retryEvents.on(...args), quit: () => { retryQuitCalls += 1; retryEvents.emit('before-quit', { preventDefault() {} }); } };
+  const retryState = registerConfigDrainBeforeQuit({
+    app: retryApp,
+    getConfigMutationService: () => service,
+    beforeDrain: () => { attempts += 1; if (attempts === 1) throw Object.assign(new Error('termination failed'), { code: 'COMPONENT_TERMINATION_UNCONFIRMED' }); },
+    onQuit: () => undefined,
+    onQuitFailed: () => { failedCalls += 1; },
+  });
+  retryEvents.emit('before-quit', { preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(retryState(), 'idle'); assert.equal(failedCalls, 1); assert.equal(retryQuitCalls, 0);
+  retryEvents.emit('before-quit', { preventDefault() {} });
+  await new Promise(resolve => setImmediate(resolve));
+  assert.equal(retryState(), 'ready'); assert.equal(retryQuitCalls, 1, 'a failed stop must allow a second quit attempt to succeed');
   console.log('Config mutation concurrency tests passed');
 })().finally(() => fs.rmSync(root, { recursive: true, force: true })).catch(error => { console.error(error); process.exitCode = 1; });

@@ -1,25 +1,169 @@
 class ComponentLifecycleCoordinator {
-  constructor({ blocker = () => false } = {}) { this.states = new Map(); this.globalQuiescing = false; this.blocker = blocker; }
+  constructor({ blocker = () => false } = {}) {
+    this.transitions = new Map();
+    this.work = new Map();
+    this.workWaiters = new Map();
+    this.globalQuiescing = false;
+    this.quitCommitted = false;
+    this.startupRecovering = false;
+    this.blocker = blocker;
+    this.persistentBlocks = new Map();
+    this.corruptTransactionState = false;
+  }
+
+  unavailableError(componentId) {
+    const id = String(componentId || '');
+    if (this.startupRecovering) return Object.assign(new Error('组件持久事务仍在启动恢复中'), { code: 'COMPONENT_RECOVERY_PENDING' });
+    if (this.corruptTransactionState || this.persistentBlocks.has(id)) {
+      return Object.assign(new Error(`组件 ${id} 有未完成的持久事务，恢复前禁止启动`), { code: 'COMPONENT_TRANSACTION_BLOCKED' });
+    }
+    if (this.blocker(id)) {
+      return Object.assign(new Error(`组件 ${id} 的旧进程树尚未确认清空，请重试关闭后台进程`), { code: 'COMPONENT_TERMINATION_UNCONFIRMED' });
+    }
+    const transition = this.transitions.get(id);
+    if (this.globalQuiescing || transition) {
+      return Object.assign(new Error(`组件 ${id} 正在${transition?.operation || '退出协调'}，暂不接受新工作`), { code: 'COMPONENT_QUIESCING' });
+    }
+    return null;
+  }
+
   assertAvailable(componentId) {
-    const id = String(componentId || ''); const state = this.states.get(id);
-    if (this.blocker(id)) { const error = new Error(`组件 ${id} 的旧进程树尚未确认清空，请重试关闭后台进程`); error.code = 'COMPONENT_TERMINATION_UNCONFIRMED'; throw error; }
-    if (this.globalQuiescing || state) { const error = new Error(`组件 ${id} 正在${state?.operation || '退出协调'}，暂不接受新工作`); error.code = 'COMPONENT_QUIESCING'; throw error; }
+    const error = this.unavailableError(componentId);
+    if (error) throw error;
   }
+
+  acquireWork(componentId, operation = 'component-work') {
+    const id = String(componentId || '').trim();
+    if (!id) throw new Error('组件 ID 不能为空');
+    this.assertAvailable(id);
+    const state = { componentId: id, operation, token: Symbol(id) };
+    const leases = this.work.get(id) || new Set();
+    leases.add(state);
+    this.work.set(id, leases);
+    let released = false;
+    return {
+      ...state,
+      release: () => {
+        if (released) return;
+        released = true;
+        leases.delete(state);
+        if (!leases.size) {
+          this.work.delete(id);
+          for (const resolve of this.workWaiters.get(id) || []) resolve();
+          this.workWaiters.delete(id);
+        }
+      },
+    };
+  }
+
   acquire(componentId, operation, { stopOnly = false } = {}) {
-    const id = String(componentId || '').trim(); if (!id) throw new Error('组件 ID 不能为空');
-    if (!(stopOnly && this.blocker(id))) this.assertAvailable(id); else if (this.globalQuiescing || this.states.has(id)) { const error=new Error('组件终止重试正在进行');error.code='COMPONENT_QUIESCING';throw error; }
-    const state = { operation: String(operation || 'transition'), token: Symbol(id) }; this.states.set(id, state);
-    let released = false; const lease = { componentId: id, operation: state.operation, token: state.token, release: () => { if (!released && this.states.get(id)?.token === state.token) this.states.delete(id); released = true; } }; return lease;
+    const id = String(componentId || '').trim();
+    if (!id) throw new Error('组件 ID 不能为空');
+    if (this.globalQuiescing || this.transitions.has(id) || this.persistentBlocks.has(id) || this.corruptTransactionState) throw this.unavailableError(id) || Object.assign(new Error('组件 transition 正在进行'), { code: 'COMPONENT_QUIESCING' });
+    if (this.blocker(id) && !stopOnly) throw this.unavailableError(id);
+    const state = { componentId: id, operation: String(operation || 'transition'), phase: 'intent', token: Symbol(id) };
+    this.transitions.set(id, state);
+    let released = false;
+    const settled = () => {
+      if (!this.work.get(id)?.size) return Promise.resolve();
+      return new Promise(resolve => {
+        const waiters = this.workWaiters.get(id) || new Set();
+        waiters.add(resolve);
+        this.workWaiters.set(id, waiters);
+      });
+    };
+    return {
+      ...state,
+      settled,
+      requestStop: () => { state.stopRequested = true; },
+      promote: async () => {
+        await settled();
+        if (released || this.transitions.get(id)?.token !== state.token) throw Object.assign(new Error('组件 transition intent 已失效'), { code: 'COMPONENT_QUIESCING' });
+        state.phase = 'exclusive';
+      },
+      release: () => {
+        if (!released && this.transitions.get(id)?.token === state.token) this.transitions.delete(id);
+        released = true;
+      },
+    };
   }
-  beginApplicationQuit() { if (this.globalQuiescing || this.states.size) return false; this.globalQuiescing = true; return true; }
-  cancelApplicationQuit() { this.globalQuiescing = false; }
-  isQuiescing(componentId) { return this.globalQuiescing || this.states.has(String(componentId || '')); }
-  currentLease(componentId) { const state=this.states.get(String(componentId||''));return state?{componentId:String(componentId),token:state.token}:null; }
+
+  beginApplicationQuit() {
+    if (this.startupRecovering || this.globalQuiescing || this.transitions.size) return false;
+    this.globalQuiescing = true;
+    return true;
+  }
+
+  commitApplicationQuit() {
+    if (!this.globalQuiescing) throw new Error('应用退出尚未进入 quiesce');
+    this.quitCommitted = true;
+  }
+
+  cancelApplicationQuit() {
+    if (!this.quitCommitted) this.globalQuiescing = false;
+  }
+
+  isQuiescing(componentId) {
+    return this.globalQuiescing || this.transitions.has(String(componentId || ''));
+  }
+
+  currentLease(componentId) {
+    const leases = this.work.get(String(componentId || ''));
+    return leases?.size ? [...leases][leases.size - 1] : null;
+  }
+
+  hasWork(componentId) {
+    return Boolean(this.work.get(String(componentId || ''))?.size);
+  }
+
+  async waitForAllWork({ timeoutMs = 7500 } = {}) {
+    const pending = [...this.work.keys()].map(componentId => new Promise(resolve => {
+      const waiters = this.workWaiters.get(componentId) || new Set();
+      waiters.add(resolve);
+      this.workWaiters.set(componentId, waiters);
+    }));
+    if (!pending.length) return;
+    let timer;
+    try {
+      await Promise.race([
+        Promise.all(pending),
+        new Promise((_, reject) => {
+          timer = setTimeout(() => reject(Object.assign(new Error('组件后台工作未在退出期限内停止'), { code: 'APP_QUIT_BUSY' })), timeoutMs);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   assertLaunchAllowed(componentId, lease) {
-    const id=String(componentId||'');const state=this.states.get(id);
-    if(this.globalQuiescing){const error=new Error('应用正在退出，禁止启动新的组件进程');error.code='COMPONENT_QUIESCING';throw error;}
-    if(state&&lease?.componentId===id&&lease?.token===state.token)return;
+    const id = String(componentId || '');
+    if (this.globalQuiescing) throw Object.assign(new Error('应用正在退出，禁止启动新的组件进程'), { code: 'COMPONENT_QUIESCING' });
+    if (lease?.componentId === id && this.work.get(id)?.has(lease) && this.transitions.get(id)?.stopRequested !== true) return;
+    if (lease?.componentId === id && this.transitions.get(id)?.token === lease.token) return;
     this.assertAvailable(id);
   }
+
+  blockPersistent(componentId, error) {
+    this.persistentBlocks.set(String(componentId || ''), error?.message || String(error || 'blocked'));
+  }
+
+  unblockPersistent(componentId) {
+    this.persistentBlocks.delete(String(componentId || ''));
+  }
+
+  blockForCorruptTransaction() {
+    this.corruptTransactionState = true;
+  }
+
+  beginStartupRecovery() {
+    this.startupRecovering = true;
+  }
+
+  completeStartupRecovery() {
+    this.startupRecovering = false;
+  }
 }
+
 module.exports = { ComponentLifecycleCoordinator };

@@ -2,6 +2,7 @@ const { validateRendererPythonInvocation } = require('../security-policy.cjs');
 const { listStorageDevices } = require('../services/storage-device-service.cjs');
 const { decideComponentStatusRefresh, nextComponentProbeTimestamps } = require('../services/component-status-refresh-policy.cjs');
 const { componentDataRoot, createComponentLifecycleService } = require('../services/component-lifecycle-service.cjs');
+const { createComponentTransactionService, nodeIdentity: componentPathIdentity } = require('../services/component-transaction-service.cjs');
 const { HOST_CAPABILITIES } = require('../component-host-contract.cjs');
 const { componentTemporaryDataPaths } = require('../compatibility/component-cache-paths.cjs');
 const { assertAvailableDiskSpace, captureComponentTreeIdentity, extractComponentArchive, inspectComponentArchive, snapshotComponentArchive, verifyComponentTreeIdentity } = require('../component-package-archive.cjs');
@@ -48,7 +49,7 @@ const finalizeComponentRuntimeInstall = async ({ componentId, destination, desti
   }
 };
 
-const transitionComponentEnabled = async ({ componentId, enabled, pluginService, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests }) => {
+const transitionComponentEnabled = async ({ componentId, enabled, pluginService, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests, transitionLease }) => {
   const id = String(componentId || '').trim();
   if (typeof enabled !== 'boolean') throw new TypeError('组件启用状态必须是布尔值');
   const component = pluginService.list().find(item => item.id === id);
@@ -60,11 +61,13 @@ const transitionComponentEnabled = async ({ componentId, enabled, pluginService,
   const capabilityBarrier = componentCapabilityBroker.blockComponent(id);
   let stateChanged = false;
   try {
+    transitionLease?.requestStop?.();
     await processSupervisor?.stopWhere?.(status => status.owner?.componentId === id, 'component-disabled');
     await componentServiceManager?.stop?.(id, 'component-disabled');
     await (componentViewManager?.closeComponentAndWait?.(id) ?? componentViewManager?.closeComponent?.(id));
     abortComponentNetworkRequests?.(id);
     await capabilityBarrier.drain({ timeoutMs: 7500 });
+    await transitionLease?.promote?.();
     pluginService.setComponentEnabled(id, false); stateChanged = true;
     return { componentId: id, enabled: false };
   } catch (error) {
@@ -248,6 +251,23 @@ const confirmComponentPackageInstall = async ({ componentId, componentVersion, i
   });
   return response.response === 1;
 };
+const confirmComponentBackgroundStop = async ({ componentId, componentName = componentId, action, processSupervisor, lifecycleCoordinator, dialog, mainWindow }) => {
+  const active = processSupervisor?.hasWhere?.(status => status.owner?.componentId === componentId) === true
+    || lifecycleCoordinator?.hasWork?.(componentId) === true;
+  if (!active) return true;
+  const messages = {
+    disable: { title: '插件仍在后台运行', message: '禁用此插件需要先关闭它的全部后台进程。', detail: '', continueLabel: '关闭后台进程并继续禁用' },
+    install: { title: '更新需要关闭插件后台进程', message: '安装或更新此插件前，需要关闭它的全部后台进程。', detail: '', continueLabel: '关闭后台进程并继续安装或更新' },
+    uninstall: { title: '插件仍在后台运行', message: `“${componentName}”仍有后台进程。`, detail: '继续卸载需要先关闭该插件的全部后台进程。', continueLabel: '关闭后台进程并继续退出' },
+  };
+  const presentation = messages[action];
+  if (!presentation) throw new Error('组件后台停止确认动作无效');
+  const response = await dialog.showMessageBox(mainWindow, {
+    type: 'warning', title: presentation.title, message: presentation.message, detail: presentation.detail,
+    buttons: [presentation.continueLabel, '取消'], defaultId: 1, cancelId: 1, noLink: true,
+  });
+  return response.response === 0;
+};
 const snapshotComponentTrust = (componentId, manifest) => {
   if (!manifest || typeof manifest !== 'object' || Array.isArray(manifest)) throw new Error('组件快照清单无效');
   if (manifest.id !== componentId) throw new Error(`组件 ID 不匹配：需要 ${componentId}，实际为 ${manifest.id || '未填写'}`);
@@ -320,15 +340,17 @@ const createComponentInstallAdmission = () => {
     return () => { if (!released) { released = true; active.delete(componentId); } };
   };
 };
-const enterComponentInstallTransition = async ({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests }) => {
+const enterComponentInstallTransition = async ({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests, transitionLease }) => {
   if (typeof componentCapabilityBroker?.blockComponent !== 'function' || typeof componentViewManager?.closeComponent !== 'function' || typeof componentServiceManager?.stop !== 'function' || typeof processSupervisor?.stopWhere !== 'function' || typeof abortComponentNetworkRequests !== 'function') throw new Error('组件安装 transition gate 不完整');
   const barrier = componentCapabilityBroker.blockComponent(componentId);
   try {
+    transitionLease?.requestStop?.();
     await processSupervisor.stopWhere(status => status.owner?.componentId === componentId, 'component-install');
     await componentServiceManager.stop(componentId, 'component-install');
     await (componentViewManager.closeComponentAndWait?.(componentId) ?? componentViewManager.closeComponent(componentId));
     abortComponentNetworkRequests(componentId);
     await barrier.drain({ timeoutMs: 7500 });
+    await transitionLease?.promote?.();
     return barrier;
   } catch (error) {
     barrier.release();
@@ -388,7 +410,7 @@ const savePrivacyConsentWithConfig = async ({ request, privacyService, configMut
 };
 
 const registerSystemIpc = context => {
-  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
+  const { Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, fileSystemService, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog } = context;
   if (!configMutationService?.mutate) throw new Error('System IPC requires the shared config mutation service');
   const lifecycleCoordinator = processSupervisor?.lifecycleCoordinator;
   const mutateConfig = configMutationService.mutate;
@@ -559,15 +581,7 @@ const registerSystemIpc = context => {
     queueComponentStatusRefresh(true);
   };
   const componentLifecycleService = createComponentLifecycleService({
-    app, backgroundTasks, pluginService,
-    spawn: (command, args, options = {}) => processSupervisor.launch({
-      id: `component-lifecycle:${String(options.env?.PHOTOFLOW_COMPONENT_ID || 'unknown')}:${crypto.randomUUID()}`,
-      kind: 'component-lifecycle', owner: { componentId: String(options.env?.PHOTOFLOW_COMPONENT_ID || '') },
-      command: String(command).toLowerCase() === 'powershell.exe'
-        ? path.join(process.env.SystemRoot || process.env.WINDIR || 'C:\\Windows', 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe')
-        : command,
-      args, options, windowsJob: true, ephemeral: true,
-    }).child,
+    app, backgroundTasks, pluginService, spawn, processSupervisor,
     developmentActionRoot: path.resolve(__dirname, '..', '..', 'scripts'),
     invalidateComponentStatus, writeLog,
   });
@@ -622,6 +636,77 @@ const registerSystemIpc = context => {
     setTimeout(() => void run().catch(error => writeLog('warn', 'Deferred system cleanup failed', { error: error.message || String(error) })), 250);
   };
   backgroundTasks?.registerTypeRestartFactory?.('system-filesystem-cleanup', task => queueSystemFilesystemCleanup(task.metadata?.targets || [], task.metadata?.title || task.title, task));
+
+  const recycleManaged = async (root, target, label = path.basename(target)) => {
+    let stat;
+    try { stat = await fs.promises.lstat(target); }
+    catch (error) { if (error?.code === 'ENOENT') return; throw error; }
+    const resolvedRoot = path.resolve(root); const resolvedTarget = path.resolve(target);
+    const relative = path.relative(resolvedRoot, resolvedTarget);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || stat.isSymbolicLink()) throw new Error(`${label}越过受管目录或包含链接`);
+    const [canonicalRoot, canonicalTarget] = await Promise.all([fs.promises.realpath(resolvedRoot), fs.promises.realpath(resolvedTarget)]);
+    const canonicalRelative = path.relative(canonicalRoot, canonicalTarget);
+    if (!canonicalRelative || canonicalRelative.startsWith('..') || path.isAbsolute(canonicalRelative)) throw new Error(`${label}的真实路径越过受管目录`);
+    await shell.trashItem(resolvedTarget);
+  };
+  const componentCleanupSteps = (componentId, clearUserData) => {
+    const steps = [];
+    if (clearUserData) {
+      steps.push({ name: 'partition', run: async () => { if (await componentViewManager?.clearComponentPartitionStorage?.(componentId) !== true) throw new Error('组件浏览器分区未执行清理'); } });
+      steps.push({ name: 'workspace', run: async () => {
+        const workspaceDataRoot = path.join(app.getPath('userData'), 'workspace-data');
+        const entries = await fs.promises.readdir(workspaceDataRoot, { withFileTypes: true }).catch(error => error?.code === 'ENOENT' ? [] : Promise.reject(error));
+        for (const entry of entries) {
+          if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
+          const workspaceRoot = path.join(workspaceDataRoot, entry.name);
+          await recycleManaged(workspaceRoot, path.join(workspaceRoot, 'components', componentId));
+          await recycleManaged(workspaceRoot, path.join(workspaceRoot, componentId));
+          for (const suffix of ['', '-wal', '-shm']) await recycleManaged(workspaceRoot, path.join(workspaceRoot, 'databases', `${componentId}.sqlite3${suffix}`));
+        }
+      } });
+      steps.push({ name: 'temporary', run: async () => {
+        const tempRoot = app.getPath('temp');
+        for (const target of componentTemporaryDataPaths({ path, tempRoot, componentId })) await recycleManaged(tempRoot, target);
+      } });
+      steps.push({ name: 'lifecycle', run: async () => {
+        const target = componentDataRoot(app, componentId, process.env);
+        await recycleManaged(path.dirname(target), target, '组件 lifecycle 数据');
+      } });
+      steps.push({ name: 'settings', run: () => mutateConfig(config => {
+        const componentSettings = { ...(config.componentSettings || {}) };
+        const componentSettingsRevisions = { ...(config.componentSettingsRevisions || {}) };
+        if (!Object.prototype.hasOwnProperty.call(componentSettings, componentId)) return config;
+        delete componentSettings[componentId];
+        componentSettingsRevisions[componentId] = configMutationService.nextRevision(componentSettingsRevisions[componentId]);
+        return { ...config, componentSettings, componentSettingsRevisions };
+      }) });
+      steps.push({ name: 'secrets', run: () => clearComponentSecretData?.(componentId) });
+    }
+    steps.push({ name: 'runtime-trash', run: async (target, transaction) => {
+      if (!transaction?.operationId) throw new Error('组件 runtime 回收缺少事务 identity');
+      const journalPath = path.join(pluginService.installRoot, '.transactions', '.trash-journals', `${componentId}-${transaction.operationId}.json`);
+      const result = await fileSystemService.trashManyJournaled({ targetPaths: [target], journalPath });
+      if (!result?.success || result?.outcomeUnknown || result.items?.some(item => item.success !== true)) throw Object.assign(new Error('组件 runtime 回收结果未确认'), { code: result?.code || 'COMPONENT_RUNTIME_TRASH_PENDING', outcomeUnknown: Boolean(result?.outcomeUnknown) });
+    } });
+    return steps;
+  };
+  const componentTransactions = createComponentTransactionService({
+    fs, path, crypto, installRoot: pluginService.installRoot, captureTreeIdentity: captureComponentTreeIdentity, verifyTreeIdentity: verifyComponentTreeIdentity,
+    getComponentEnabled: componentId => pluginService.list().find(item => item.id === componentId)?.enabled !== false,
+    setComponentEnabled: (componentId, enabled) => pluginService.setComponentEnabled(componentId, enabled),
+    clearComponentEnabledState: componentId => pluginService.clearComponentEnabledState(componentId),
+    recoverInstallHostState: async componentId => { await componentServiceManager?.stop?.(componentId, 'component-transaction-recovery'); await configMutationService.adoptLegacySettings(); },
+    cleanupProvider: componentCleanupSteps,
+    onBlocked: (componentId, error) => lifecycleCoordinator?.blockPersistent?.(componentId, error),
+    onUnblocked: componentId => lifecycleCoordinator?.unblockPersistent?.(componentId),
+    onCorrupt: () => lifecycleCoordinator?.blockForCorruptTransaction?.(),
+  });
+  lifecycleCoordinator?.beginStartupRecovery?.();
+  const componentTransactionReady = componentTransactions.recover().catch(error => {
+    writeLog('error', 'Component transaction startup recovery failed', { error: error.message || String(error), code: error.code });
+    lifecycleCoordinator?.blockForCorruptTransaction?.();
+    throw error;
+  }).finally(() => lifecycleCoordinator?.completeStartupRecovery?.());
 
   const resolvePreparedPackage = async (packageRoot, pattern, description) => {
     await fs.promises.mkdir(packageRoot, { recursive: true });
@@ -784,11 +869,8 @@ const registerSystemIpc = context => {
     let transitionLease;
     try {
       transitionLease = lifecycleCoordinator?.acquire?.(componentId, enabled ? '启用' : '禁用', { stopOnly: enabled === false });
-      if (enabled === false && processSupervisor?.hasWhere?.(status => status.owner?.componentId === componentId)) {
-        const response=await dialog.showMessageBox(mainWindow,{type:'warning',title:'插件仍在后台运行',message:'禁用此插件需要先关闭它的全部后台进程。',buttons:['关闭后台进程并继续退出','取消'],defaultId:1,cancelId:1,noLink:true});
-        if(response.response!==0)return {success:false,cancelled:true};
-      }
-      const result = await transitionComponentEnabled({ componentId, enabled, pluginService, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests });
+      if (enabled === false && !await confirmComponentBackgroundStop({ componentId, action: 'disable', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return { success: false, cancelled: true };
+      const result = await transitionComponentEnabled({ componentId, enabled, pluginService, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests, transitionLease });
       invalidateComponentStatus();
       writeLog('info', result.enabled ? 'Component enabled' : 'Component disabled', { componentId: result.componentId });
       return { success: true, enabled: result.enabled };
@@ -841,21 +923,22 @@ const registerSystemIpc = context => {
   const acquireComponentInstall = createComponentInstallAdmission();
   ipcMain.handle('components-install', async (_event, request) => {
     let stagingPath = '';
-    let backupPath = '';
     let packageStagePath = '';
     let packageSnapshotPath = '';
-    let preserveBackupPath = false;
     let componentId = '';
     let releaseInstall = null;
+    let installTransitionLease = null;
     let capabilityBarrier = null;
-    let backupNodeIdentity = null;
-    let backupTreeIdentity = null;
     let stagingNodeIdentity = null;
     let componentTreeIdentity = null;
     try {
+      await componentTransactionReady;
       ({ componentId } = validateComponentInstallRequest(request));
+      const recoveredTransactions = await componentTransactions.recover(componentId);
+      const recoveredInstall = recoveredTransactions.find(result => result.kind === 'install' && result.status === 'committed');
+      if (recoveredInstall) return { success: true, recovered: true, operationId: recoveredInstall.operationId };
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，请在打包版本中测试安装');
-      if (lifecycleCoordinator) { const lease = lifecycleCoordinator.acquire(componentId, '安装或更新'); releaseInstall = () => lease.release(); }
+      if (lifecycleCoordinator) { installTransitionLease = lifecycleCoordinator.acquire(componentId, '安装或更新'); releaseInstall = () => installTransitionLease.release(); }
       else releaseInstall = acquireComponentInstall(componentId);
       const discoveredPackage = pluginService.resolvePackage(componentId);
       const archivePath = discoveredPackage.packagePath;
@@ -867,11 +950,8 @@ const registerSystemIpc = context => {
       const snapshotTrust = snapshotComponentTrust(componentId, snapshotPackage.manifest);
       const confirmed = await confirmComponentPackageInstall({ ...snapshotTrust, dialog, mainWindow });
       if (!confirmed) return { success: false, cancelled: true };
-      if (processSupervisor?.hasWhere?.(status => status.owner?.componentId === componentId)) {
-        const response = await dialog.showMessageBox(mainWindow, { type: 'warning', title: '更新需要关闭插件后台进程', message: '安装或更新此插件前，需要关闭它的全部后台进程。', buttons: ['关闭后台进程并继续退出', '取消'], defaultId: 1, cancelId: 1, noLink: true });
-        if (response.response !== 0) return { success: false, cancelled: true };
-      }
-      capabilityBarrier = await enterComponentInstallTransition({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests });
+      if (!await confirmComponentBackgroundStop({ componentId, action: 'install', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return { success: false, cancelled: true };
+      capabilityBarrier = await enterComponentInstallTransition({ componentId, componentCapabilityBroker, componentViewManager, componentServiceManager, processSupervisor, abortComponentNetworkRequests, transitionLease: installTransitionLease });
       const extractedPackage = await extractComponentArchive(snapshotPackage, packageStagePath);
       const manifestDirectory = path.dirname(extractedPackage.manifestEntry);
       const componentRoot = path.resolve(packageStagePath, manifestDirectory === '.' ? '' : manifestDirectory);
@@ -913,82 +993,36 @@ const registerSystemIpc = context => {
       await verifyComponentTreeIdentity(stagingPath, componentTreeIdentity);
       await assertDirectoryNodeIdentity(fs, installRoot, installLocation.rootIdentity, '组件安装根目录');
       await assertDirectoryNodeIdentity(fs, container, installLocation.containerIdentity, '组件容器');
-      const destinationStat = await fs.promises.lstat(destination).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
-      if (destinationStat) {
-        if (!destinationStat.isDirectory() || destinationStat.isSymbolicLink()) throw new Error('现有组件 runtime 不是安全的普通目录');
-        backupNodeIdentity = directoryNodeIdentity(destinationStat);
-        backupTreeIdentity = await captureComponentTreeIdentity(destination);
-        backupPath = path.join(installRoot, `.${componentId}-backup-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
-        await fs.promises.rename(destination, backupPath);
-        preserveBackupPath = true;
-        await assertDirectoryNodeIdentity(fs, backupPath, backupNodeIdentity, '组件备份目录');
-        await verifyComponentTreeIdentity(backupPath, backupTreeIdentity);
-      }
-      let publishedByThisOperation = false;
-      let publishedNodeIdentity = null;
-      try {
-        await assertDirectoryNodeIdentity(fs, installRoot, installLocation.rootIdentity, '组件安装根目录');
-        await assertDirectoryNodeIdentity(fs, container, installLocation.containerIdentity, '组件容器');
-        await fs.promises.rename(stagingPath, destination);
-        publishedByThisOperation = true;
-        stagingPath = ''; stagingNodeIdentity = null;
-        publishedNodeIdentity = await readDirectoryNodeIdentity(fs, destination, '新组件 runtime');
-        await verifyComponentTreeIdentity(destination, componentTreeIdentity);
-        await pluginService.verifyComponentDirectoryAsync(componentId, destination, true);
-      } catch (error) {
-        try {
-          const rollback = await rollbackComponentPublication({ fs, destination, publishedByThisOperation, publishedNodeIdentity, publishedTreeIdentity: componentTreeIdentity, backupPath, backupNodeIdentity, backupTreeIdentity });
-          if (rollback.backupRestored) { backupPath = ''; backupNodeIdentity = null; backupTreeIdentity = null; }
-        } catch (rollbackError) {
-          preserveBackupPath = Boolean(backupPath);
-          error.message = `${error.message || String(error)}；组件运行时回滚失败：${rollbackError.message || String(rollbackError)}`;
-        }
-        throw error;
-      }
-      try {
-        await finalizeComponentRuntimeInstall({ componentId, destination, destinationNodeIdentity: publishedNodeIdentity, destinationTreeIdentity: componentTreeIdentity, backupPath, backupNodeIdentity, backupTreeIdentity, fs, configMutationService, componentViewManager, componentServiceManager, invalidateComponentStatus });
-      } catch (error) {
-        preserveBackupPath = Boolean(error.preserveComponentBackupPath);
-        throw error;
-      }
-      preserveBackupPath = false;
-      if (backupPath && backupNodeIdentity && backupTreeIdentity) {
-        try {
-          await assertDirectoryNodeIdentity(fs, backupPath, backupNodeIdentity, '组件备份目录');
-          await verifyComponentTreeIdentity(backupPath, backupTreeIdentity);
-          await fs.promises.rm(backupPath, { recursive: true, force: false });
-          backupPath = ''; backupNodeIdentity = null; backupTreeIdentity = null;
-        } catch (cleanupError) {
-          preserveBackupPath = true;
-          writeLog('warn', 'Component backup changed before cleanup; preserving it', { componentId, backupPath, error: cleanupError.message || String(cleanupError) });
-        }
-      }
+      const previous = pluginService.list().find(item => item.id === componentId);
+      const transactionStagingPath = stagingPath; const transactionStagingIdentity = stagingNodeIdentity;
+      const transactionResult = await componentTransactions.install({
+        componentId, container, destination, stagingPath: transactionStagingPath, stagingIdentity: transactionStagingIdentity,
+        stagingTreeIdentity: componentTreeIdentity, previousInstalled: Boolean(previous?.installed), previousEnabled: previous ? previous.enabled !== false : false, desiredEnabled: true,
+        validatePublished: target => pluginService.verifyComponentDirectoryAsync(componentId, target, true),
+        commitHostState: async () => { await componentServiceManager?.stop?.(componentId, 'component-upgrade'); await configMutationService.adoptLegacySettings(); },
+        onAdmitted: () => { stagingPath = ''; stagingNodeIdentity = null; },
+      });
       const cleanupPaths = [packageStagePath, packageSnapshotPath].filter(Boolean);
       packageStagePath = '';
       packageSnapshotPath = '';
       queueSystemFilesystemCleanup(cleanupPaths, `清理“${componentId}”组件旧文件`);
       invalidateComponentStatus();
       writeLog('info', 'Component installed', { componentId, destination });
-      return { success: true, packageSizeBytes };
+      return { success: true, packageSizeBytes, operationId: transactionResult.operationId };
     } catch (error) {
-      return { success: false, error: error.message || String(error) };
+      return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId, cleanupPending: Boolean(error?.journal), outcomeUnknown: Boolean(error?.outcomeUnknown) };
     } finally {
       if (stagingPath && stagingNodeIdentity) {
         try {
           await assertDirectoryNodeIdentity(fs, stagingPath, stagingNodeIdentity, '组件发布暂存目录');
           await verifyComponentTreeIdentity(stagingPath, componentTreeIdentity);
           await fs.promises.rm(stagingPath, { recursive: true, force: false });
-        } catch { /* Preserve an unowned or changed path for manual inspection. */ }
+        } catch (error) {
+          writeLog('warn', 'Component staging cleanup preserved a path for manual inspection', { componentId, stagingPath, error: error.message || String(error) });
+        }
       }
-      if (backupPath && !preserveBackupPath && backupNodeIdentity && backupTreeIdentity) {
-        try {
-          await assertDirectoryNodeIdentity(fs, backupPath, backupNodeIdentity, '组件备份目录');
-          await verifyComponentTreeIdentity(backupPath, backupTreeIdentity);
-          await fs.promises.rm(backupPath, { recursive: true, force: false });
-        } catch { preserveBackupPath = true; }
-      }
-      if (packageStagePath) await fs.promises.rm(packageStagePath, { recursive: true, force: true }).catch(() => undefined);
-      if (packageSnapshotPath) await fs.promises.rm(packageSnapshotPath, { force: true }).catch(() => undefined);
+      const deferredCleanup = [packageStagePath, packageSnapshotPath].filter(Boolean);
+      if (deferredCleanup.length) queueSystemFilesystemCleanup(deferredCleanup, `恢复“${componentId || '未知组件'}”安装临时文件`);
       capabilityBarrier?.release?.();
       releaseInstall?.();
     }
@@ -1010,22 +1044,17 @@ const registerSystemIpc = context => {
   ipcMain.handle('components-uninstall', async (_event, componentId, options = {}) => {
     let transitionLease;
     try {
+      await componentTransactionReady;
+      const recoveredTransactions = await componentTransactions.recover(String(componentId || ''));
+      const recoveredUninstall = recoveredTransactions.find(result => result.kind === 'uninstall' && result.status === 'committed');
+      if (recoveredUninstall) return { success: true, recovered: true, dataCleared: recoveredUninstall.clearUserData, cleanupWarnings: [], operationId: recoveredUninstall.operationId };
       if (!app.isPackaged) throw new Error('开发环境组件由源码提供，不能在应用内卸载');
       const clearUserData = options?.clearUserData === true;
       const component = pluginService.list().find(item => item.id === componentId);
       if (!component?.installed) throw new Error('组件尚未安装');
       if (component.source !== 'user') throw new Error('此组件不在用户组件目录中，不能通过组件管理卸载');
       transitionLease = lifecycleCoordinator?.acquire?.(componentId, '卸载', { stopOnly: true });
-      const hasBackgroundTree = processSupervisor?.hasWhere?.(status => status.owner?.componentId === componentId) === true;
-      if (hasBackgroundTree) {
-        const response = await dialog.showMessageBox(mainWindow, {
-          type: 'warning', title: '插件仍在后台运行',
-          message: `“${component.name || componentId}”仍有后台进程。`,
-          detail: '继续卸载需要先关闭该插件的全部后台进程。',
-          buttons: ['关闭后台进程并继续退出', '取消'], defaultId: 1, cancelId: 1, noLink: true,
-        });
-        if (response.response !== 0) return { success: false, cancelled: true };
-      }
+      if (!await confirmComponentBackgroundStop({ componentId, componentName: component.name || componentId, action: 'uninstall', processSupervisor, lifecycleCoordinator, dialog, mainWindow })) return { success: false, cancelled: true };
       const installRoot = path.resolve(pluginService.installRoot);
       const componentPath = path.resolve(component.path);
       const containerPath = path.basename(componentPath) === 'runtime' ? path.dirname(componentPath) : componentPath;
@@ -1033,76 +1062,27 @@ const registerSystemIpc = context => {
       if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || path.basename(containerPath) !== componentId) throw new Error('组件目录校验失败');
       const capabilityBarrier = componentCapabilityBroker.blockComponent(componentId);
       try {
+      transitionLease?.requestStop?.();
       await processSupervisor?.stopWhere?.(status => status.owner?.componentId === componentId, 'component-uninstall');
       await componentServiceManager?.stop?.(componentId, 'component-uninstall');
       await componentViewManager?.closeComponentAndWait?.(componentId);
       abortComponentNetworkRequests?.(componentId);
       await capabilityBarrier.drain({ timeoutMs: 7500 });
+      await transitionLease?.promote?.();
       const uninstallPath = clearUserData || componentPath === containerPath ? containerPath : componentPath;
-
-      const cleanupWarnings = [];
-      if (clearUserData) {
-        try { if (await componentViewManager?.clearComponentPartitionStorage?.(componentId) !== true) throw new Error('组件浏览器分区未执行清理'); }
-        catch (error) { cleanupWarnings.push(`组件浏览器分区：${error.message || String(error)}`); }
-        const recycle = async (root, target, label = path.basename(target)) => {
-          let stat;
-          try { stat = await fs.promises.lstat(target); }
-          catch (error) { if (error?.code === 'ENOENT') return; cleanupWarnings.push(`${label}：${error.message || String(error)}`); return; }
-          try {
-            const resolvedRoot = path.resolve(root); const resolvedTarget = path.resolve(target);
-            const relative = path.relative(resolvedRoot, resolvedTarget);
-            if (!relative || relative.startsWith('..') || path.isAbsolute(relative) || stat.isSymbolicLink()) throw new Error('清理目标越过受管目录或包含链接');
-            const [canonicalRoot, canonicalTarget] = await Promise.all([fs.promises.realpath(resolvedRoot), fs.promises.realpath(resolvedTarget)]);
-            const canonicalRelative = path.relative(canonicalRoot, canonicalTarget);
-            if (!canonicalRelative || canonicalRelative.startsWith('..') || path.isAbsolute(canonicalRelative)) throw new Error('清理目标的真实路径越过受管目录');
-            await shell.trashItem(resolvedTarget);
-          } catch (error) { cleanupWarnings.push(`${label}：${error.message || String(error)}`); }
-        };
-        const workspaceDataRoot = path.join(app.getPath('userData'), 'workspace-data');
-        let workspaceEntries = [];
-        try { workspaceEntries = await fs.promises.readdir(workspaceDataRoot, { withFileTypes: true }); }
-        catch (error) { if (error?.code !== 'ENOENT') cleanupWarnings.push(`工作区组件数据：${error.message || String(error)}`); }
-        for (const entry of workspaceEntries) {
-          if (!entry.isDirectory() || entry.isSymbolicLink()) continue;
-          const root = path.join(workspaceDataRoot, entry.name);
-          try {
-            const [canonicalWorkspaceDataRoot, canonicalRoot] = await Promise.all([fs.promises.realpath(workspaceDataRoot), fs.promises.realpath(root)]);
-            const relativeRoot = path.relative(canonicalWorkspaceDataRoot, canonicalRoot);
-            if (!relativeRoot || relativeRoot.startsWith('..') || path.isAbsolute(relativeRoot)) throw new Error('工作区数据根越过受管目录');
-          } catch (error) { cleanupWarnings.push(`${entry.name}：${error.message || String(error)}`); continue; }
-          await recycle(root, path.join(root, 'components', componentId));
-          await recycle(root, path.join(root, componentId));
-          for (const suffix of ['', '-wal', '-shm']) await recycle(root, path.join(root, 'databases', `${componentId}.sqlite3${suffix}`));
-        }
-        const tempRoot = app.getPath('temp');
-        for (const temporaryDataPath of componentTemporaryDataPaths({ path, tempRoot, componentId })) await recycle(tempRoot, temporaryDataPath);
-        const lifecycleDataPath = componentDataRoot(app, componentId, process.env);
-        await recycle(path.dirname(lifecycleDataPath), lifecycleDataPath, '组件 lifecycle 数据');
-        try {
-          await mutateConfig(config => {
-            const componentSettings = { ...(config.componentSettings || {}) };
-            const componentSettingsRevisions = { ...(config.componentSettingsRevisions || {}) };
-            delete componentSettings[componentId];
-            componentSettingsRevisions[componentId] = configMutationService.nextRevision(componentSettingsRevisions[componentId]);
-            return { ...config, componentSettings, componentSettingsRevisions };
-          });
-        } catch (error) {
-          cleanupWarnings.push(`组件设置：${error.message || String(error)}`);
-        }
-        try { await clearComponentSecretData?.(componentId); } catch (error) { cleanupWarnings.push(`组件秘密：${error.message || String(error)}`); }
-      }
-      if (cleanupWarnings.length) {
-        const error = new Error(`组件数据清理未完成：${cleanupWarnings.join('；')}`); error.code = 'COMPONENT_DATA_CLEANUP_FAILED'; throw error;
-      }
-      await shell.trashItem(uninstallPath);
-      try { pluginService.clearComponentEnabledState(componentId); }
-      catch (error) { cleanupWarnings.push(`组件启用状态：${error.message || String(error)}`); }
+      const uninstallStat = await fs.promises.lstat(uninstallPath);
+      if (!uninstallStat.isDirectory() || uninstallStat.isSymbolicLink()) throw new Error('组件卸载目标不是安全的普通目录');
+      const result = await componentTransactions.uninstall({
+        componentId, container: containerPath, destination: componentPath, targetPath: uninstallPath,
+        targetIdentity: componentPathIdentity(uninstallStat), targetTreeIdentity: await captureComponentTreeIdentity(uninstallPath),
+        clearUserData, previousEnabled: component.enabled !== false,
+      });
       invalidateComponentStatus();
-      writeLog('info', 'Component uninstalled', { componentId, componentPath: uninstallPath, clearUserData, cleanupWarnings });
-      return { success: true, dataCleared: clearUserData && cleanupWarnings.length === 0, cleanupWarnings };
+      writeLog('info', 'Component uninstalled', { componentId, componentPath: uninstallPath, clearUserData, operationId: result.operationId });
+      return { success: true, dataCleared: clearUserData, cleanupWarnings: [], operationId: result.operationId };
       } finally { capabilityBarrier.release(); }
     } catch (error) {
-      return { success: false, error: error.message || String(error) };
+      return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId, cleanupPending: Boolean(error?.journal), outcomeUnknown: Boolean(error?.outcomeUnknown) };
     } finally { transitionLease?.release?.(); }
   });
 
@@ -1910,6 +1890,7 @@ const registerSystemIpc = context => {
     const executable = await findLatestPhotoshop();
     return { available: Boolean(executable) };
   });
+  return { componentTransactionReady };
 };
 
-module.exports = { confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, prepareSafeComponentInstallContainer, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, rollbackComponentPublication, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };
+module.exports = { confirmComponentBackgroundStop, confirmComponentPackageInstall, createComponentInstallAdmission, enterComponentInstallTransition, finalizeComponentRuntimeInstall, normalizeSdImportAutoMove, prepareSafeComponentInstallContainer, pythonToolResourcePaths, registerHostCapabilities, registerSystemIpc, resolvePythonWorkerResourceLease, rollbackComponentPublication, savePrivacyConsentWithConfig, shouldTrackPythonToolAsBackgroundTask, snapshotComponentTrust, transitionComponentEnabled, validateComponentInstallRequest, validatePrivacyConsentRequest };

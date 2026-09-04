@@ -453,6 +453,12 @@ class ComponentServiceManager {
     return true;
   }
 
+  async stopAll(reason = 'component-services-stop') {
+    const ids = [...this.sessions.keys()];
+    await Promise.all(ids.map(componentId => this.stop(componentId, reason)));
+    return ids.length;
+  }
+
   async quiesceForStorageSnapshot({ timeoutMs = 5000 } = {}) {
     if (this.destroying || this.destroyed) throw new Error('Component service manager is destroying or destroyed');
     const deadline = Date.now() + Math.max(1, Number(timeoutMs) || 5000);

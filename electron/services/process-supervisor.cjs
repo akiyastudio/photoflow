@@ -40,6 +40,7 @@ class ManagedProcess extends EventEmitter {
       this.lifecycle.startAfterSettle = true;
       return this.lifecycle.child;
     }
+    if (this.owner?.componentId) this.supervisor.lifecycleCoordinator?.assertLaunchAllowed?.(this.owner.componentId, this.specification.lifecycleLease);
     clearTimeout(this.restartTimer);
     this.restartTimer = null;
     this.stopping = false;
@@ -441,7 +442,8 @@ class ManagedProcess extends EventEmitter {
         this.start();
       } catch (error) {
         this._safeLog('error', 'Managed process restart failed', this.details({ error: safeError(error) }));
-        this._scheduleRestart('restart-start-failed');
+        if (['COMPONENT_QUIESCING', 'COMPONENT_TRANSACTION_BLOCKED', 'COMPONENT_RECOVERY_PENDING'].includes(error?.code)) this.state = 'failed';
+        else this._scheduleRestart('restart-start-failed');
       }
     }, delayMs);
     this.restartTimer.unref?.();

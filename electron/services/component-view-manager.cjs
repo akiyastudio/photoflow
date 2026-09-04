@@ -583,6 +583,12 @@ class ComponentViewManager {
   }
 
   destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); this.notificationService?.destroy?.(); }
+  async closeAllAndWait(timeoutMs = 2000) {
+    const instances = [...this.instances.values()];
+    const contents = instances.map(instance => instance.view.webContents);
+    for (const instance of instances) this.close(instance.instanceId);
+    await Promise.all(contents.map(webContents => waitForWebContentsDestroyed(webContents, timeoutMs)));
+  }
   async destroyAndWait(timeoutMs = 2000) {
     const contents = [...this.instances.values()].map(instance => instance.view.webContents);
     this.destroy();

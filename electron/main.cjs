@@ -1376,7 +1376,8 @@ app.whenReady().then(async () => {
   registerComponentHostIpc({ ipcMain, manager: componentViewManager, mainWindow });
   const componentRpcIpcMain = createComponentRpcIpcProxy({ ipcMain, manager: componentViewManager });
 
-  registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
+  const { componentTransactionReady } = registerSystemIpc({ Array, Boolean, BrowserWindow, Date, Error, JSON, Object, String, abortComponentNetworkRequests, app, approvedMediaCacheDirectories, backgroundTasks, checkForUpdates, clearComponentSecretData, componentCapabilityBroker, componentServiceManager, componentViewManager, configMutationService, console, crypto, dialog, domainCommandJournal, domainHealthService, exiftoolPath, fileSystemService, findLatestPhotoshop, fs, getConfigPath, getLogDir, getResourceBirthdaysPath, getRunConfig, getUserBirthdaysPath, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, openAllowedExternalUrl, path, pluginService, privacyService, process, processSupervisor, readSavedConfig, releaseWorkspaceWatchPath, screen, shell, spawn, suppressWorkspaceWatchPath, telemetryService, thumbnailService, undefined, writeLog });
+  await componentTransactionReady;
   for (const descriptor of componentHostRegistry.list()) componentCapabilityBroker.assertCapabilities(descriptor);
   const workspaceIpcController = registerWorkspaceIpc({ Array, Boolean, CANCELLED_CODE, Date, Error, HIDDEN_SYSTEM_ENTRY_NAMES, IMAGE_EXTENSIONS, Math, Number, Object, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, WORKSPACE_STATUSES, activeProjectFileOperations, acquireFileRootWatcher, app, assertDiskSpace, assertExistingInside, assertInside, assertRegularFile, assertUndoIdentity, backgroundTasks, cancelMediaTrackingScan, capturePathIdentity, cleanProjectName, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, componentServiceManager, crypto, dialog, ensureWorkspace, extractVideoTimelineFrames, fileSystemService, findLatestPhotoshop, fs, getProjectPath, getWorkspaceDataRoot, ipcMain: componentRpcIpcMain, mainWindow, mediaRuntimeState, mediaService, moveFileAtomic, movePathAtomic, publishPathNoClobber, mutateWorkspaceCatalog, normalizeMediaCacheSizeGB, path, pathExists, pluginService, projectVirtualPaths, pushUndoOperation, removeUndoOperation, reconcileWorkspaceCatalog, recycleBinService, refreshWorkspaceCatalog, releaseFileRootWatcher, releaseWorkspaceWatchPath, removeCopiedSources, renameHistory, resolveProjectEntry, resolveWorkspaceRoot, resumeFileRootWatcher, runPythonJsonAction, samePathIdentity, scheduleMediaTrackingScan, shell, shellNewService, spawn, suspendFileRootWatcher, suppressWorkspaceWatchPath, telemetryService, thumbnailService, throwIfCancelled, undefined, uniqueDestination, versionService, watchWorkspace, workspaceCatalogs, workspaceMaintenanceRepository, workspaceRepository, writeLog });
   registerFileOperationsIpc({ Array, Boolean, BrowserWindow, CANCELLED_CODE, Date, Error, IMAGE_EXTENSIONS, Math, Promise, RAW_EXTENSIONS, Set, String, VIDEO_EXTENSIONS, activeProjectFileOperations, app, assertDiskSpace, assertExistingInside, assertInside, backgroundTasks, cancelMediaTrackingScan, cancelSystemFileCut, canUseNativeFastCut, capturePathIdentity, clearSystemFileClipboardIfCurrent, clipboard, collectCopyPlan, copyFileAtomic, copyPlannedFiles, crypto, dns, ensureWorkspace, fetch: electronNet.fetch.bind(electronNet), fileOperationState, fs, getProjectPath, ipcMain, movePathAtomic, movePlannedFilesFast, publishPathNoClobber, nativeImage, net: nodeNet, path, process, projectVirtualPaths, pushUndoOperation, readSystemFileClipboard, recycleBinService, refreshManagedExternalWatchers: workspaceIpcController.refreshManagedExternalWatchers, releaseWorkspaceWatchPath, removeCopiedSources, removeCreatedPasteTargets, resolveRemoteHost: async hostname => (await electronNet.resolveHost(hostname)).endpoints, resumeToastViewAfterNativeDrag, samePathIdentity, scheduleMediaTrackingScan, screen, selectionService, suspendToastViewForNativeDrag, suppressWorkspaceWatchPath, throwIfCancelled, uniqueDestination, versionService, workspaceRepository, writeLog, writeSystemFileClipboard });
@@ -1466,23 +1467,28 @@ registerConfigDrainBeforeQuit({ app, getConfigMutationService: () => configMutat
   const barriers = componentIds.map(componentId => componentCapabilityBroker.blockComponent(componentId));
   try {
     await processSupervisor.stopWhere(status => Boolean(status.owner?.componentId), 'application-quit');
-    await componentViewManager?.destroyAndWait();
+    await componentServiceManager?.stopAll('application-quit');
+    await componentViewManager?.closeAllAndWait();
     componentIds.forEach(componentId => abortComponentNetworkRequests?.(componentId));
     await Promise.all(barriers.map(barrier => barrier.drain({ timeoutMs: 7500 })));
-    await componentServiceManager?.destroy();
+    await componentLifecycleCoordinator.waitForAllWork({ timeoutMs: 7500 });
     await processSupervisor.stopAll('application-quit');
-    await exiftool.end().catch(() => undefined);
-    destroyToastViewManager();
-    telemetryService?.stop(); pluginService?.stop?.(); stopWorkspaceWatcher(true); stopFileRootWatchers(); stopShellThumbnailProcess();
-    imageThumbnailRuntime.stop(); thumbnailService?.stop(); backgroundTasks.stop(); domainCommandJournal.stop(); eventBus.clear();
-    workspaceDatabase.stop(); operationsDatabase.stop(); workspaceMaintenanceDatabase.stop(); mediaDatabase.stop(); mediaInteractionDatabase.stop();
-    versionReadDatabase.stop(); versionLocationDatabase.stop(); mediaScanDatabase.stop(); trackingScanDatabase.stop();
   } catch (error) { barriers.forEach(barrier => barrier.release()); componentLifecycleCoordinator.cancelApplicationQuit(); throw error; }
+  componentLifecycleCoordinator.commitApplicationQuit();
+  const teardown = [
+    () => componentServiceManager?.destroy(), () => componentViewManager?.destroy(), () => exiftool.end(), () => destroyToastViewManager(), () => telemetryService?.stop(), () => pluginService?.stop?.(),
+    () => stopWorkspaceWatcher(true), () => stopFileRootWatchers(), () => stopShellThumbnailProcess(), () => imageThumbnailRuntime.stop(),
+    () => thumbnailService?.stop(), () => backgroundTasks.stop(), () => domainCommandJournal.stop(), () => eventBus.clear(),
+    () => workspaceDatabase.stop(), () => operationsDatabase.stop(), () => workspaceMaintenanceDatabase.stop(), () => mediaDatabase.stop(),
+    () => mediaInteractionDatabase.stop(), () => versionReadDatabase.stop(), () => versionLocationDatabase.stop(), () => mediaScanDatabase.stop(), () => trackingScanDatabase.stop(),
+  ];
+  for (const operation of teardown) try { await operation(); } catch (error) { writeLog('warn', 'Post-commit application teardown warning', { error: error.message || String(error) }); }
 }, onQuitFailed: async error => {
   componentLifecycleCoordinator.cancelApplicationQuit();
   if (BrowserWindow.getAllWindows().length === 0) { createWindow(); loadMainWindowRenderer(); }
   if (error?.code !== 'APP_QUIT_CANCELLED') {
-    const options = { type: 'error', title: '无法安全退出', message: '部分插件后台进程未能确认退出，应用将继续运行。', detail: `${error?.message || String(error)}\n请稍后重试。`, buttons: ['确定'], defaultId: 0, noLink: true };
+    const busy = error?.code === 'APP_QUIT_BUSY';
+    const options = { type: 'error', title: '无法安全退出', message: busy ? '组件安装、卸载或生命周期操作仍在进行。' : '后台进程未能确认退出，应用将继续运行。', detail: `${error?.message || String(error)}\n请稍后重试。`, buttons: ['确定'], defaultId: 0, noLink: true };
     if (mainWindow && !mainWindow.isDestroyed()) await dialog.showMessageBox(mainWindow, options); else await dialog.showMessageBox(options);
   }
 } });

@@ -279,6 +279,27 @@ const main = async () => {
   await healthTimeoutSupervisor.stopAll();
   await manualRecycleSupervisor.stopAll();
   assert.deepStrictEqual(supervisor.list(), []);
+  const retrySupervisor = createProcessSupervisor({ terminationPlatform: 'test', spawnImpl: () => new FakeChild(9900) });
+  let rejectStop = true;
+  retrySupervisor.processes.set('retry-fixture', {
+    status: () => ({ id: 'retry-fixture', state: 'running' }),
+    stop: async () => { if (rejectStop) throw new Error('termination failed'); },
+  });
+  await assert.rejects(retrySupervisor.stopAll('first-quit'), /termination failed/);
+  assert.equal(retrySupervisor.stopping, false, 'failed stopAll must reopen admission for a safe retry');
+  rejectStop = false;
+  await retrySupervisor.stopAll('second-quit');
+  assert.deepStrictEqual(retrySupervisor.list(), []);
+  let restartGate = false; let gatedSpawnCount = 0;
+  const gatedRestartSupervisor = createProcessSupervisor({ terminationPlatform: 'test', spawnImpl: () => { gatedSpawnCount += 1; return new FakeChild(9950 + gatedSpawnCount); } });
+  gatedRestartSupervisor.lifecycleCoordinator = { assertLaunchAllowed: () => { if (restartGate) throw Object.assign(new Error('transition active'), { code: 'COMPONENT_QUIESCING' }); } };
+  const gatedRestart = gatedRestartSupervisor.launch({ id: 'component:gated-restart', kind: 'component-service', owner: { componentId: 'fixture-component' }, command: 'fixture.exe', restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [20] } });
+  gatedRestart.child.emit('exit', 1, null);
+  restartGate = true;
+  await delay(40);
+  assert.equal(gatedSpawnCount, 1, 'component restart cannot cross a transition gate');
+  assert.equal(gatedRestart.status().state, 'failed');
+  await gatedRestartSupervisor.stopAll();
   const pythonRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-python-resolver-'));
   try {
     const pythonPath = developmentPythonPath(pythonRoot);
