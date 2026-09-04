@@ -245,6 +245,8 @@ const receiptForFile = filePath => { const stat = fs.lstatSync(filePath); return
     assert.match(systemIpcSource, /assertInstallActive\(\);[\s\S]*fs\.promises\.cp[\s\S]*captureVerifiedComponentTreeIdentity[\s\S]*assertInstallActive\(\)/, 'deadline checks bracket copy and receipt verification');
     assert.match(systemIpcSource, /dataCleanupComplete[\s\S]*backgroundTasks\?\.flush[\s\S]*finalizeComponentCleanupProof[\s\S]*state === 'completed'[\s\S]*backgroundTasks\.flush/);
     assert.match(systemIpcSource, /inspectPathsBatch[\s\S]*compareDeleteFilesBatch[\s\S]*deleteDirectoriesBatch/, 'large-tree native cleanup uses bounded batches rather than one helper per node');
+    assert.match(systemIpcSource, /retryFactory = failedTask =>[\s\S]*admit\(failedTask\)/, 'manual retry passes the latest failed task into durable admission');
+    assert.match(systemIpcSource, /dataCleanupComplete = sourceTask\?\.metadata\?\.dataCleanupComplete/, 'cleanup execution derives phase from the supplied task snapshot');
 
     const originalStatfs = fs.promises.statfs;
     fs.promises.statfs = async () => ({ bavail: 1_000n, bsize: 1n });

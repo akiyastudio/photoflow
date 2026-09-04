@@ -671,10 +671,10 @@ const registerSystemIpc = context => {
       return relative && !relativePathEscapes(path, relative);
     }) && (seenTargets.add(target.path) || true));
     if (!targets.length) return { admitted: false, reason: 'no-valid-receipts' };
-    const execute = async task => {
+    const execute = async (task, sourceTask = restartTask) => {
       task?.report(10, title);
       const failures = [];
-      const dataCleanupComplete = restartTask?.metadata?.dataCleanupComplete === true;
+      const dataCleanupComplete = sourceTask?.metadata?.dataCleanupComplete === true;
       if (!dataCleanupComplete) {
         for (const target of targets) try { await cleanupOwnedComponentPath(target, { captureNativeProof: captureNativeComponentCleanupProof, deleteOwned: deleteOwnedComponentIsolation }); }
         catch (error) { const updated = error.cleanupPendingReceipts?.[0]; if (updated) Object.assign(target, updated); task?.report(10, updated ? '部分清理失败，已保存剩余内容收据' : '清理失败，已停止自动处理', { targets }); failures.push({ target, error }); writeLog('warn', 'Deferred system cleanup failed', { path: target.path, error: error.message || String(error) }); }
@@ -690,12 +690,13 @@ const registerSystemIpc = context => {
       return { admitted: false, reason: 'persistence-unavailable', targets };
     }
     const dedupeKey = `system-filesystem-cleanup:${crypto.randomUUID()}`;
-    const taskMetadata = { targets, title, ...(restartTask?.metadata?.dataCleanupComplete === true ? { dataCleanupComplete: true } : {}) };
-    const definition = worker => ({ ...(restartTask?.id ? { id: restartTask.id } : {}), type: 'system-filesystem-cleanup', title, dedupeKey, cancellable: false, metadata: taskMetadata, worker });
     let retryFactory;
-    const admit = () => createDurableCleanupAdmission({ start: worker => { const task = definition(worker); return backgroundTasks.run(task, task.worker, retryFactory); }, flush: () => backgroundTasks.flush?.(), worker: execute, receipts: targets });
-    retryFactory = () => awaitDurableCleanupRestart(Promise.resolve(admit()));
-    const admission = admit();
+    const admit = (sourceTask = restartTask, { reuseId = false } = {}) => {
+      const taskMetadata = { targets, title, ...(sourceTask?.metadata?.dataCleanupComplete === true ? { dataCleanupComplete: true } : {}) };
+      return createDurableCleanupAdmission({ start: worker => backgroundTasks.run({ ...(reuseId && sourceTask?.id ? { id: sourceTask.id } : {}), type: 'system-filesystem-cleanup', title, dedupeKey, cancellable: false, metadata: taskMetadata }, worker, retryFactory), flush: () => backgroundTasks.flush?.(), worker: task => execute(task, sourceTask), receipts: targets });
+    };
+    retryFactory = failedTask => awaitDurableCleanupRestart(Promise.resolve(admit(failedTask)));
+    const admission = admit(restartTask, { reuseId: Boolean(restartTask?.id) });
     const launched = admission.completion;
     if (!admission.admitted) {
       void launched.catch(error => writeLog('warn', 'Rejected component cleanup admission', { error: error.message || String(error) }));
