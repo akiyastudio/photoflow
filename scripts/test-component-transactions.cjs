@@ -34,7 +34,7 @@ const fixture = async () => {
     cleanupProvider: (_id, clearUserData) => [
       ...(clearUserData ? [{ name: 'settings', run: async () => undefined }, { name: 'secrets', run: async () => undefined }] : []),
       { name: 'runtime-trash', run: async target => {
-        onTrash();
+        await onTrash();
         if (trashFault?.current) { const error = trashFault.current; trashFault.current = null; throw error; }
         const stat = await fs.promises.lstat(target).catch(error => error.code === 'ENOENT' ? null : Promise.reject(error));
         if (stat) await fs.promises.rename(target, path.join(recycle, crypto.randomUUID()));
@@ -279,6 +279,90 @@ const activeTransactionRejectsRecovery = async () => {
   } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
 };
 
+const makePendingUninstall = async state => {
+  await writeTree(state.destination, 'installed');
+  const trashFault = { current: Object.assign(new Error('retry later'), { code: 'EIO' }) };
+  await assert.rejects(state.makeService({ trashFault }).uninstall({
+    componentId: state.componentId, container: state.container, destination: state.destination,
+    targetPath: state.destination, targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)),
+    targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false, previousEnabled: true,
+  }));
+};
+
+const crossScopeRecoveryIsExclusive = async () => {
+  for (const order of ['full-first', 'filtered-first']) {
+    const state = await fixture();
+    try {
+      await makePendingUninstall(state);
+      let releaseTrash;
+      const trashGate = new Promise(resolve => { releaseTrash = resolve; });
+      let signalTrash;
+      const trashStarted = new Promise(resolve => { signalTrash = resolve; });
+      let calls = 0;
+      const service = state.makeService({ onTrash: async () => { calls += 1; signalTrash(); await trashGate; } });
+      const first = order === 'full-first' ? service.recover() : service.recover(state.componentId);
+      await trashStarted;
+      const second = order === 'full-first' ? service.recover(state.componentId) : service.recover();
+      releaseTrash();
+      await Promise.all([first, second]);
+      assert.equal(calls, 1, `${order} must replay cleanup once`);
+    } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+  }
+};
+
+const fullRecoveryWaitsForActiveInstall = async () => {
+  const state = await fixture();
+  try {
+    await writeTree(state.destination, 'old');
+    const staged = await state.stage('new');
+    let signalValidation;
+    const validationStarted = new Promise(resolve => { signalValidation = resolve; });
+    let releaseValidation;
+    const validationGate = new Promise(resolve => { releaseValidation = resolve; });
+    const service = state.makeService();
+    const install = service.install({
+      componentId: state.componentId, container: state.container, destination: state.destination,
+      stagingPath: staged.target, stagingIdentity: staged.identity, stagingTreeIdentity: staged.tree,
+      validatePublished: async () => { signalValidation(); await validationGate; }, commitHostState: async () => undefined,
+    });
+    await validationStarted;
+    let recoverySettled = false;
+    const recovery = service.recover().then(result => { recoverySettled = true; return result; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(recoverySettled, false, 'global recovery waits for active install');
+    releaseValidation();
+    await Promise.all([install, recovery]);
+    assert.equal(await readValue(state.destination), 'new');
+  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+};
+
+const recoveryDoesNotCrossActiveUninstall = async () => {
+  const state = await fixture();
+  try {
+    await writeTree(state.destination, 'installed');
+    let signalTrash;
+    const trashStarted = new Promise(resolve => { signalTrash = resolve; });
+    let releaseTrash;
+    const trashGate = new Promise(resolve => { releaseTrash = resolve; });
+    let calls = 0;
+    const service = state.makeService({ onTrash: async () => { calls += 1; signalTrash(); await trashGate; } });
+    const uninstall = service.uninstall({
+      componentId: state.componentId, container: state.container, destination: state.destination,
+      targetPath: state.destination, targetIdentity: nodeIdentity(await fs.promises.lstat(state.destination)),
+      targetTreeIdentity: await captureComponentTreeIdentity(state.destination), clearUserData: false, previousEnabled: true,
+    });
+    await trashStarted;
+    await assert.rejects(service.recover(state.componentId), error => error.code === 'COMPONENT_LIFECYCLE_BUSY');
+    let globalSettled = false;
+    const globalRecovery = service.recover().then(result => { globalSettled = true; return result; });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(globalSettled, false, 'global recovery waits for active uninstall');
+    releaseTrash();
+    await Promise.all([uninstall, globalRecovery]);
+    assert.equal(calls, 1, 'active uninstall and recovery cannot duplicate trash');
+  } finally { await fs.promises.rm(state.sandbox, { recursive: true, force: true }); }
+};
+
 (async () => {
   await installCrashRecovery();
   await committedCleanupRecovery();
@@ -291,5 +375,8 @@ const activeTransactionRejectsRecovery = async () => {
   await partialCleanupRecovery();
   await concurrentRecoveryIsSingleFlight();
   await activeTransactionRejectsRecovery();
+  await crossScopeRecoveryIsExclusive();
+  await fullRecoveryWaitsForActiveInstall();
+  await recoveryDoesNotCrossActiveUninstall();
   console.log('Component durable transaction tests passed');
 })().catch(error => { console.error(error); process.exitCode = 1; });

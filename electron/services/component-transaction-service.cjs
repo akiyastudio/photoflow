@@ -103,8 +103,25 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
   const journalRoot = path.join(root, '.transactions');
   const active = new Map();
   const recoveries = new Map();
+  let globalRecovery = null;
   let installRootIdentity = null;
   let journalRootIdentity = null;
+  const busyError = message => Object.assign(new Error(message), { code: 'COMPONENT_LIFECYCLE_BUSY' });
+  const beginActiveOperation = (componentId, kind) => {
+    if (globalRecovery || recoveries.has(componentId) || active.has(componentId)) throw busyError('组件事务或恢复正在进行');
+    let resolveSettled;
+    const operation = {
+      kind,
+      settled: new Promise(resolve => { resolveSettled = resolve; }),
+      release: () => {
+        if (active.get(componentId) !== operation) return;
+        active.delete(componentId);
+        resolveSettled();
+      },
+    };
+    active.set(componentId, operation);
+    return operation;
+  };
   const fileFor = componentId => path.join(journalRoot, `${componentId}.json`);
   const ensureRoots = async () => {
     await fs.promises.mkdir(root, { recursive: true });
@@ -236,8 +253,7 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
   };
   const install = async ({ componentId, container, destination, stagingPath, stagingIdentity, stagingTreeIdentity, previousInstalled = true, previousEnabled = getComponentEnabled(componentId), desiredEnabled = true, validatePublished, commitHostState, onAdmitted = () => undefined }) => {
     if (!COMPONENT_ID.test(componentId)) throw new Error('组件 ID 无效');
-    if (active.has(componentId)) throw Object.assign(new Error('组件事务正在进行'), { code: 'COMPONENT_LIFECYCLE_BUSY' });
-    active.set(componentId, 'install');
+    const activeOperation = beginActiveOperation(componentId, 'install');
     let record;
     let publicationStarted = false;
     let hostCommitted = false;
@@ -318,7 +334,7 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
       throw error;
     }
     finally {
-      active.delete(componentId);
+      activeOperation.release();
     }
   };
   const advanceCleanup = async original => {
@@ -396,8 +412,7 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
   };
   const uninstall = async ({ componentId, container, destination, targetPath, targetIdentity, targetTreeIdentity, clearUserData, previousEnabled = getComponentEnabled(componentId) }) => {
     if (!COMPONENT_ID.test(componentId)) throw new Error('组件 ID 无效');
-    if (active.has(componentId)) throw Object.assign(new Error('组件事务正在进行'), { code: 'COMPONENT_LIFECYCLE_BUSY' });
-    active.set(componentId, 'uninstall');
+    const activeOperation = beginActiveOperation(componentId, 'uninstall');
     let record;
     let quarantined = false;
     try {
@@ -431,7 +446,7 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
       throw error;
     }
     finally {
-      active.delete(componentId);
+      activeOperation.release();
     }
   };
   const recoverOnce = async (componentIdFilter = '') => {
@@ -469,18 +484,42 @@ const createComponentTransactionService = ({ fs, path, crypto, installRoot, capt
     }
     return results;
   };
-  const recover = (componentIdFilter = '') => {
-    if (componentIdFilter && active.has(componentIdFilter)) {
-      return Promise.reject(Object.assign(new Error('组件事务正在进行，不能并发恢复'), { code: 'COMPONENT_LIFECYCLE_BUSY' }));
-    }
-    const key = componentIdFilter || '*';
-    const existingRecovery = recoveries.get(key);
+  const startFilteredRecovery = componentId => {
+    if (active.has(componentId)) return Promise.reject(busyError('组件事务正在进行，不能并发恢复'));
+    const existingRecovery = recoveries.get(componentId);
     if (existingRecovery) return existingRecovery;
-    const operation = recoverOnce(componentIdFilter);
-    recoveries.set(key, operation);
-    return operation.finally(() => {
-      if (recoveries.get(key) === operation) recoveries.delete(key);
+    const operation = recoverOnce(componentId);
+    const exposed = operation.finally(() => {
+      if (recoveries.get(componentId) === exposed) recoveries.delete(componentId);
     });
+    recoveries.set(componentId, exposed);
+    return exposed;
+  };
+  const recover = componentIdFilter => {
+    const componentId = String(componentIdFilter || '');
+    if (componentId) {
+      if (!globalRecovery) return startFilteredRecovery(componentId);
+      // A filtered caller joins the global pass, then rechecks in case a journal
+      // appeared after the global directory snapshot but before its commit point.
+      return globalRecovery.then(results => {
+        const componentResults = results.filter(result => result.componentId === componentId);
+        return componentResults.length ? componentResults : startFilteredRecovery(componentId);
+      });
+    }
+    if (globalRecovery) return globalRecovery;
+    const operation = (async () => {
+      // Yield once so globalRecovery is visible before new component operations
+      // can attempt admission.
+      await Promise.resolve();
+      await Promise.allSettled([...recoveries.values()]);
+      await Promise.all([...active.values()].map(item => item.settled));
+      return recoverOnce('');
+    })();
+    const exposed = operation.finally(() => {
+      if (globalRecovery === exposed) globalRecovery = null;
+    });
+    globalRecovery = exposed;
+    return exposed;
   };
   return { active, install, uninstall, recover, journalRoot, validateJournal };
 };
