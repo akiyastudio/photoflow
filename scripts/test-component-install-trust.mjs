@@ -123,6 +123,7 @@ assert.match(mainSource, /snapshotComponentArchive\(archivePath, packageSnapshot
 assert.match(mainSource, /confirmComponentPackageInstall[\s\S]*confirmComponentBackgroundStop[\s\S]*enterComponentInstallTransition[\s\S]*extractComponentArchive[\s\S]*captureComponentTreeIdentity/);
 assert.match(mainSource, /fs\.promises\.cp[\s\S]*captureVerifiedComponentTreeIdentity\(stagingPath[\s\S]*componentTransactions\.install/);
 assert.match(mainSource, /if \(!confirmed\) return \{ success: false, cancelled: true \}/);
+assert.match(mainSource, /packageSnapshotPath && packageSnapshotReceipt[\s\S]*queueSystemFilesystemCleanup\(deferredCleanup/);
 
 const temporaryRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'component-install-trust-'));
 try {

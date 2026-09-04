@@ -985,6 +985,7 @@ const registerSystemIpc = context => {
     let packageStagePath = '';
     let packageSnapshotPath = '';
     let packageSnapshotNodeIdentity = null;
+    let packageSnapshotReceipt = null;
     let packageStageNodeIdentity = null;
     let packageStageTreeIdentity = null;
     let componentId = '';
@@ -1017,7 +1018,9 @@ const registerSystemIpc = context => {
       packageStagePath = path.join(app.getPath('temp'), `photoflow-component-package-${process.pid}-${Date.now()}-${crypto.randomUUID()}`);
       packageSnapshotPath = `${packageStagePath}.zip`;
       const sourceIdentity = await snapshotComponentArchive(archivePath, packageSnapshotPath, operation);
-      packageSnapshotNodeIdentity = directoryNodeIdentity(await fs.promises.lstat(packageSnapshotPath));
+      const packageSnapshotStat = await fs.promises.lstat(packageSnapshotPath);
+      packageSnapshotNodeIdentity = directoryNodeIdentity(packageSnapshotStat);
+      packageSnapshotReceipt = { path: packageSnapshotPath, kind: 'file', nodeIdentity: packageSnapshotNodeIdentity, size: packageSnapshotStat.size, sha256: sourceIdentity.sha256, mode: packageSnapshotStat.mode & 0o777 };
       const packageSizeBytes = sourceIdentity.size;
       const snapshotPackage = inspectComponentArchive(packageSnapshotPath, { ...operation, inspectionToken: sourceIdentity.inspectionToken });
       validateComponentPackageInspection(snapshotPackage, { expectedId: componentId, platform: process.platform, arch: process.arch });
@@ -1084,7 +1087,7 @@ const registerSystemIpc = context => {
       });
       const cleanupPaths = [
         packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeDigest: componentTreeIdentityDigest(packageStageTreeIdentity) } : null,
-        packageSnapshotPath && packageSnapshotNodeIdentity ? { path: packageSnapshotPath, kind: 'file', nodeIdentity: packageSnapshotNodeIdentity } : null,
+        packageSnapshotReceipt,
       ].filter(Boolean);
       packageStagePath = '';
       packageSnapshotPath = '';
@@ -1098,9 +1101,9 @@ const registerSystemIpc = context => {
       return { success: false, error: error.message || String(error), operationId: error?.journal?.operationId, cleanupPending: Boolean(error?.journal) || Boolean(pendingCleanup?.length), outcomeUnknown: Boolean(error?.outcomeUnknown), ...(error?.recoveryPath ? { recoveryPath: error.recoveryPath } : {}) };
     } finally {
       const deferredCleanup = [
-        stagingPath && stagingNodeIdentity && componentTreeIdentity ? { path: stagingPath, kind: 'directory', nodeIdentity: stagingNodeIdentity, treeIdentity: componentTreeIdentity } : null,
-        packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeIdentity: packageStageTreeIdentity } : null,
-        packageSnapshotPath && packageSnapshotNodeIdentity ? { path: packageSnapshotPath, kind: 'file', nodeIdentity: packageSnapshotNodeIdentity } : null,
+        stagingPath && stagingNodeIdentity && componentTreeIdentity ? { path: stagingPath, kind: 'directory', nodeIdentity: stagingNodeIdentity, treeDigest: componentTreeIdentityDigest(componentTreeIdentity) } : null,
+        packageStagePath && packageStageNodeIdentity && packageStageTreeIdentity ? { path: packageStagePath, kind: 'directory', nodeIdentity: packageStageNodeIdentity, treeDigest: componentTreeIdentityDigest(packageStageTreeIdentity) } : null,
+        packageSnapshotPath && packageSnapshotReceipt,
       ].filter(Boolean);
       if (deferredCleanup.length) queueSystemFilesystemCleanup(deferredCleanup, `恢复“${componentId || '未知组件'}”安装临时文件`);
       capabilityBarrier?.release?.();

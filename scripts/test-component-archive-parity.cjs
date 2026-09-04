@@ -4,7 +4,7 @@ const fs = require('node:fs');
 const os = require('node:os');
 const path = require('node:path');
 const { Transform } = require('node:stream');
-const { MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_PACKAGE_BYTES, captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, cleanupOwnedComponentPath: cleanupOwnedComponentPathRaw, componentCleanupIntentPaths, componentSubtreeIdentity, componentTreeIdentityDigest, componentTreeIdentityReceipt, extractComponentArchive, finalizeComponentCleanupProof, inspectComponentArchive, persistComponentCleanupIntent, reserveComponentInstallCapacity, snapshotComponentArchive, validateComponentTreeIdentityReceipt } = require('../electron/component-package-archive.cjs');
+const { MAX_ARCHIVE_BYTES, MAX_ENTRY_BYTES, MAX_PACKAGE_BYTES, captureComponentTreeIdentity, captureVerifiedComponentTreeIdentity, cleanupOwnedComponentPath: cleanupOwnedComponentPathRaw, componentCleanupIntentPaths, componentSubtreeIdentity, componentTreeIdentityDigest, componentTreeIdentityReceipt, createComponentCleanupOrchestrator, extractComponentArchive, finalizeComponentCleanupProof, inspectComponentArchive, persistComponentCleanupIntent, reserveComponentInstallCapacity, snapshotComponentArchive, validateComponentTreeIdentityReceipt } = require('../electron/component-package-archive.cjs');
 const { createComponentRegistry, readComponentPackageManifest } = require('../electron/component-registry.cjs');
 const { verifyComponentPackage } = require('./verify-component-packages.cjs');
 const { writeZip } = require('./test-helpers/zip-fixture.cjs');
@@ -16,6 +16,7 @@ const base = () => [['pkg/component.json', manifest], ['pkg/worker.cjs', 'module
 const rejection = fn => { try { fn(); return false; } catch { return true; } };
 const testDeleteOwned = async ({ receipt, isolatedPath }) => { const stat = fs.lstatSync(isolatedPath); assert.equal(stat.dev, receipt.nodeIdentity.dev); assert.equal(stat.ino, receipt.nodeIdentity.ino); if (receipt.kind === 'directory') await fs.promises.rm(isolatedPath, { recursive: true, force: false }); else await fs.promises.unlink(isolatedPath); };
 const cleanupOwnedComponentPath = receipt => cleanupOwnedComponentPathRaw(receipt, { deleteOwned: testDeleteOwned });
+const receiptForFile = filePath => { const stat = fs.lstatSync(filePath); return { path: filePath, kind: 'file', nodeIdentity: { dev: stat.dev, ino: stat.ino, birthtimeMs: stat.birthtimeMs }, size: stat.size, sha256: crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex'), mode: stat.mode & 0o777 }; };
 
 (async () => {
   try {
@@ -171,6 +172,7 @@ const cleanupOwnedComponentPath = receipt => cleanupOwnedComponentPathRaw(receip
     assert.equal(fs.readdirSync(root).filter(name => name.startsWith('intent-only-crash.cleanup-')).length, 0, 'durably completed cleanup reclaims normal sidecars');
     for (let index = 0; index < 5; index += 1) { const target = path.join(root, `bounded-sidecars-${index}`); fs.mkdirSync(target); fs.writeFileSync(path.join(target, 'a'), 'a'); const boundedReceipt = await receiptForDirectory(target); await cleanupOwnedComponentPath(boundedReceipt); await finalizeComponentCleanupProof(boundedReceipt); }
     assert.equal(fs.readdirSync(root).filter(name => name.includes('bounded-sidecars-') && name.includes('.cleanup-')).length, 0, 'repeated successful cleanup does not accumulate intent, marker, or tmp sidecars');
+    const orchestratedRoot = path.join(root, 'orchestrated-cleanup'); fs.mkdirSync(orchestratedRoot); fs.writeFileSync(path.join(orchestratedRoot, 'a'), 'a'); const orchestratedReceipt = await receiptForDirectory(orchestratedRoot); const phases = []; const orchestrator = createComponentCleanupOrchestrator({ deleteOwned: testDeleteOwned, persistPhase: async phase => { phases.push(phase); return true; } }); const orchestrated = await orchestrator.run(orchestratedReceipt); assert.equal(orchestrated.status, 'complete'); assert.deepEqual(phases, ['pending', 'data-complete']); assert.equal((await orchestrator.finalize(orchestratedReceipt)).status, 'pending'); assert.equal((await orchestrator.finalize(orchestratedReceipt, { completionFlushed: true })).status, 'complete');
 
     const renamedCrashRoot = path.join(root, 'renamed-before-delete-crash'); fs.mkdirSync(renamedCrashRoot); fs.writeFileSync(path.join(renamedCrashRoot, 'a'), 'a');
     const renamedCrashReceipt = await receiptForDirectory(renamedCrashRoot); await persistComponentCleanupIntent(renamedCrashReceipt); const renamedCrashPaths = componentCleanupIntentPaths(renamedCrashReceipt); fs.renameSync(renamedCrashRoot, renamedCrashPaths.isolatedPath); await cleanupOwnedComponentPath(renamedCrashReceipt);
@@ -188,12 +190,17 @@ const cleanupOwnedComponentPath = receipt => cleanupOwnedComponentPathRaw(receip
     try { await assert.rejects(cleanupOwnedComponentPath(partialCrashReceipt), /partial delete/); } finally { fs.promises.rm = originalCleanupRm; }
     await cleanupOwnedComponentPath(partialCrashReceipt); assert.equal(fs.existsSync(componentCleanupIntentPaths(partialCrashReceipt).isolatedPath), false, 'partial-delete crash resumes without revisiting deleted nodes');
 
+    const missingProofRoot = path.join(root, 'missing-proof-after-partial'); fs.mkdirSync(missingProofRoot); fs.writeFileSync(path.join(missingProofRoot, 'a'), 'a'); fs.writeFileSync(path.join(missingProofRoot, 'b'), 'b'); const missingProofReceipt = await receiptForDirectory(missingProofRoot);
+    await assert.rejects(cleanupOwnedComponentPathRaw(missingProofReceipt, { deleteOwned: async ({ isolatedPath }) => { await fs.promises.unlink(path.join(isolatedPath, 'a')); throw new Error('partial before proof loss'); } }), /partial before proof loss/);
+    const missingProofPaths = componentCleanupIntentPaths(missingProofReceipt); fs.rmSync(missingProofPaths.proofPath);
+    await assert.rejects(cleanupOwnedComponentPath(missingProofReceipt), /完整证明与原始目录收据不一致/);
+
     const unknownAfterPartialRoot = path.join(root, 'unknown-after-partial'); fs.mkdirSync(unknownAfterPartialRoot); fs.writeFileSync(path.join(unknownAfterPartialRoot, 'a'), 'a'); fs.writeFileSync(path.join(unknownAfterPartialRoot, 'b'), 'b'); const unknownAfterPartialReceipt = await receiptForDirectory(unknownAfterPartialRoot);
     await assert.rejects(cleanupOwnedComponentPathRaw(unknownAfterPartialReceipt, { deleteOwned: async ({ isolatedPath }) => { await fs.promises.unlink(path.join(isolatedPath, 'a')); throw new Error('partial stop'); } }), /partial stop/);
     const unknownAfterPartialPaths = componentCleanupIntentPaths(unknownAfterPartialReceipt); fs.writeFileSync(path.join(unknownAfterPartialPaths.isolatedPath, 'unknown'), 'injected');
     await assert.rejects(cleanupOwnedComponentPath(unknownAfterPartialReceipt), /新增或变化节点/); assert.equal(fs.existsSync(path.join(unknownAfterPartialPaths.isolatedPath, 'unknown')), true);
 
-    const swappedFile = path.join(root, 'cleanup-swap.txt'); fs.writeFileSync(swappedFile, 'owned'); const swappedStat = fs.lstatSync(swappedFile); const swappedReceipt = { path: swappedFile, kind: 'file', nodeIdentity: { dev: swappedStat.dev, ino: swappedStat.ino, birthtimeMs: swappedStat.birthtimeMs } }; const ownedElsewhere = `${swappedFile}.owned`;
+    const swappedFile = path.join(root, 'cleanup-swap.txt'); fs.writeFileSync(swappedFile, 'owned'); const swappedReceipt = receiptForFile(swappedFile); const ownedElsewhere = `${swappedFile}.owned`;
     const originalRename = fs.promises.rename; let cleanupSwapInjected = false;
     fs.promises.rename = async (sourcePath, destinationPath) => { if (!cleanupSwapInjected && path.resolve(sourcePath) === path.resolve(swappedFile)) { cleanupSwapInjected = true; await originalRename(sourcePath, ownedElsewhere); fs.writeFileSync(swappedFile, 'replacement'); } return originalRename(sourcePath, destinationPath); };
     try { await assert.rejects(cleanupOwnedComponentPath(swappedReceipt), /replacement/); } finally { fs.promises.rename = originalRename; }
@@ -205,7 +212,7 @@ const cleanupOwnedComponentPath = receipt => cleanupOwnedComponentPathRaw(receip
     try { await assert.rejects(cleanupOwnedComponentPath(swappedDirectoryReceipt), /replacement|身份已变化/); } finally { fs.promises.rename = originalRename; }
     assert.equal(fs.readFileSync(path.join(swappedDirectory, 'replacement'), 'utf8'), 'replacement'); assert.equal(fs.readFileSync(path.join(ownedDirectoryElsewhere, 'owned'), 'utf8'), 'owned', 'directory path swap preserves replacement and owned tree');
 
-    const finalSwapFile = path.join(root, 'final-delete-swap.txt'); fs.writeFileSync(finalSwapFile, 'owned'); const finalSwapStat = fs.lstatSync(finalSwapFile); const finalSwapReceipt = { path: finalSwapFile, kind: 'file', nodeIdentity: { dev: finalSwapStat.dev, ino: finalSwapStat.ino, birthtimeMs: finalSwapStat.birthtimeMs } }; const finalSwapOwned = `${finalSwapFile}.owned-final`;
+    const finalSwapFile = path.join(root, 'final-delete-swap.txt'); fs.writeFileSync(finalSwapFile, 'owned'); const finalSwapReceipt = receiptForFile(finalSwapFile); const finalSwapOwned = `${finalSwapFile}.owned-final`;
     await assert.rejects(cleanupOwnedComponentPathRaw(finalSwapReceipt, { deleteOwned: async ({ isolatedPath }) => { await originalRename(isolatedPath, finalSwapOwned); fs.writeFileSync(isolatedPath, 'replacement'); throw new Error('bound delete rejected swapped final path'); } }), /bound delete|身份/);
     assert.equal(fs.readFileSync(componentCleanupIntentPaths(finalSwapReceipt).isolatedPath, 'utf8'), 'replacement'); assert.equal(fs.readFileSync(finalSwapOwned, 'utf8'), 'owned');
 
@@ -219,6 +226,10 @@ const cleanupOwnedComponentPath = receipt => cleanupOwnedComponentPathRaw(receip
     assert.equal(fs.readdirSync(root).filter(name => name.startsWith('oversized-sidecar.cleanup-')).length, 1, 'repeated oversized/corrupt intent cannot create unbounded sidecars');
     fs.rmSync(oversizedPaths.intentPath); await persistComponentCleanupIntent(oversizedSidecarReceipt); fs.renameSync(oversizedSidecarRoot, oversizedPaths.isolatedPath); fs.writeFileSync(oversizedPaths.verifiedPath, Buffer.alloc(20 * 1024));
     await assert.rejects(cleanupOwnedComponentPath(oversizedSidecarReceipt), /大小无效/); assert.equal(fs.existsSync(oversizedPaths.isolatedPath), true, 'oversized marker never authorizes deletion');
+
+    const replacedProofRoot = path.join(root, 'replaced-proof'); fs.mkdirSync(replacedProofRoot); fs.writeFileSync(path.join(replacedProofRoot, 'a'), 'a'); const replacedProofReceipt = await receiptForDirectory(replacedProofRoot);
+    await assert.rejects(cleanupOwnedComponentPathRaw(replacedProofReceipt, { deleteOwned: async () => { throw new Error('stop after marker'); } }), /stop after marker/); const replacedProofPaths = componentCleanupIntentPaths(replacedProofReceipt); fs.writeFileSync(replacedProofPaths.proofPath, JSON.stringify({ schemaVersion: 1, kind: 'directory', entries: [] }));
+    await assert.rejects(cleanupOwnedComponentPath(replacedProofReceipt), /未绑定原始收据|完整证明/);
     const systemIpcSource = fs.readFileSync(path.join(__dirname, '..', 'electron', 'modules', 'system-ipc.cjs'), 'utf8');
     assert.match(systemIpcSource, /error\?\.cleanupPendingReceipts[\s\S]*pendingCleanup[\s\S]*queueSystemFilesystemCleanup\(pendingCleanup/);
     assert.match(systemIpcSource, /filter\(candidate => candidate && typeof candidate === 'object'[\s\S]*candidate\.nodeIdentity/);
