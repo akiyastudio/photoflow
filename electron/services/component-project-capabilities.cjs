@@ -2,12 +2,15 @@ const { COMPONENT_HOST_ERROR_CODES: CODES, hostError } = require('../contracts/c
 const { adoptLegacyStorageV1 } = require('./component-storage-adoption.cjs');
 const { nextComponentRevision, normalizeComponentRevision } = require('./config-mutation-service.cjs');
 const { pipeline } = require('node:stream/promises');
+const { Transform } = require('node:stream');
 
 const MAX_MEDIA_PAGE_SIZE = 200;
 const MAX_INPUT_TOKENS = 2000;
 const MAX_SETTINGS_BYTES = 256 * 1024;
 const MAX_INLINE_WRITE_BYTES = 8 * 1024 * 1024;
 const MAX_STAGE_BYTES = 2 * 1024 * 1024 * 1024;
+const MAX_INPUT_ENTRIES = 20_000;
+const MAX_INPUT_DEPTH = 64;
 const INPUT_TOKEN_TTL_MS = 10 * 60 * 1000;
 const INPUT_RESERVATION_TTL_MS = 30 * 60 * 1000;
 const CURSOR_TTL_MS = 5 * 60 * 1000;
@@ -28,7 +31,16 @@ const commitOperations = new Map();
 const outputTargetOperations = new Map();
 const versionOperations = new Map();
 const storageAdoptions = new Map();
-const discardInputGrant = (fs, grant) => { if (grant?.snapshotRoot) void fs.promises.rm(grant.snapshotRoot, { recursive: true, force: true }).catch(() => undefined); };
+const componentInputRoots = new Map();
+const inputRootInitialization = new Map();
+const discardInputGrant = (fs, grant) => {
+  clearTimeout(grant?.cleanupTimer); if (grant) grant.cleanupTimer = null;
+  if (!grant?.snapshotRoot || grant.snapshotCleanup) return grant?.snapshotCleanup || Promise.resolve();
+  const snapshotRoot = grant.snapshotRoot;
+  grant.snapshotRoot = ''; grant.snapshotPath = '';
+  grant.snapshotCleanup = fs.promises.rm(snapshotRoot, { recursive: true, force: true }).finally(() => { grant.snapshotCleanup = null; });
+  return grant.snapshotCleanup;
+};
 
 const insideOrEqual = (path, root, candidate) => {
   const relative = path.relative(path.resolve(root), path.resolve(candidate));
@@ -58,7 +70,7 @@ const pruneExpiringMaps = (fs, now) => {
   for (const [key, value] of inputGrants) {
     if (value.reservedBy && value.reservationExpiresAt > now) continue;
     if (value.reservedBy) { delete value.reservedBy; delete value.reservationExpiresAt; value.expiresAt = value.originalExpiresAt ?? value.expiresAt; delete value.originalExpiresAt; }
-    if (value.expiresAt <= now) { inputGrants.delete(key); discardInputGrant(fs, value); }
+    if (value.expiresAt <= now) { inputGrants.delete(key); void discardInputGrant(fs, value).catch(() => undefined); }
   }
   for (const [key, value] of listSessions) if (value.expiresAt <= now) listSessions.delete(key);
 };
@@ -131,7 +143,7 @@ const adoptExistingOutput = async ({ fs, path, crypto, componentRoot, componentI
   return receipt;
 };
 const resetComponentHostCapabilityStateForTest = () => {
-  inputGrants.clear(); listSessions.clear(); outputStages.clear(); componentTaskHandles.clear(); committedOutputs.clear(); createdVersions.clear(); commitOperations.clear(); outputTargetOperations.clear(); versionOperations.clear(); storageAdoptions.clear();
+  inputGrants.clear(); listSessions.clear(); outputStages.clear(); componentTaskHandles.clear(); committedOutputs.clear(); createdVersions.clear(); commitOperations.clear(); outputTargetOperations.clear(); versionOperations.clear(); storageAdoptions.clear(); componentInputRoots.clear(); inputRootInitialization.clear();
 };
 
 const registerComponentProjectCapabilities = ({
@@ -218,8 +230,10 @@ const registerComponentProjectCapabilities = ({
     const token = `component-input:${crypto.randomUUID()}`;
     const expiresAt = Date.now() + INPUT_TOKEN_TTL_MS;
     const stat = fs.lstatSync(filePath);
-    inputGrants.set(token, { filePath, scope: scopeKey(descriptor, context), expiresAt, usesRemaining: 1, boundary, snapshotPath: '', snapshotRoot: '',
-      identity: { dev: String(stat.dev), ino: String(stat.ino), size: stat.size, mtimeMs: stat.mtimeMs } });
+    const grant = { filePath, scope: scopeKey(descriptor, context), expiresAt, usesRemaining: 1, boundary, snapshotPath: '', snapshotRoot: '', cleanupTimer: null,
+      identity: { dev: String(stat.dev), ino: String(stat.ino), size: stat.size, mtimeMs: stat.mtimeMs } };
+    grant.cleanupTimer = setTimeout(() => { if (inputGrants.get(token) === grant && !grant.reservedBy) { inputGrants.delete(token); void discardInputGrant(fs, grant).catch(() => undefined); } }, INPUT_TOKEN_TTL_MS);
+    grant.cleanupTimer.unref?.(); inputGrants.set(token, grant);
     return { token, expiresAt };
   };
   const samePhysicalPath = (left, right) => process.platform === 'win32'
@@ -242,44 +256,83 @@ const registerComponentProjectCapabilities = ({
       return { grant, handle, stat: opened, realPath };
     } catch {
       await handle?.close().catch(() => undefined);
-      inputGrants.delete(String(token || ''));
+      const key=String(token||''); if(inputGrants.get(key)===grant)inputGrants.delete(key); await discardInputGrant(fs,grant).catch(()=>undefined);
       throw hostError(CODES.PERMISSION_DENIED, 'Component input changed after authorization');
     }
+  };
+  const copyDirectorySnapshot = async (sourceRoot, destinationRoot, grant) => {
+    const rootIdentity = await fs.promises.lstat(sourceRoot);
+    const pending = [{ source: sourceRoot, destination: destinationRoot, depth: 0 }];
+    let entries = 0; let bytes = 0;
+    while (pending.length) {
+      const current = pending.pop();
+      if (current.depth > MAX_INPUT_DEPTH) throw hostError(CODES.LIMIT_EXCEEDED, 'Component directory input snapshot is too deep');
+      const sourceStat = await fs.promises.lstat(current.source);
+      if (!sourceStat.isDirectory() || sourceStat.isSymbolicLink()) throw hostError(CODES.PERMISSION_DENIED, 'Component directory input contains an unsafe directory');
+      const canonical = await fs.promises.realpath(current.source);
+      if (!insideOrEqual(path, sourceRoot, canonical)) throw hostError(CODES.PERMISSION_DENIED, 'Component directory input escapes through a link');
+      await fs.promises.mkdir(current.destination, { recursive: false });
+      const directory = await fs.promises.opendir(current.source);
+      for await (const entry of directory) {
+        entries += 1;
+        if (entries > MAX_INPUT_ENTRIES) throw hostError(CODES.LIMIT_EXCEEDED, 'Component directory input snapshot has too many entries');
+        const source = path.join(current.source, entry.name); const destination = path.join(current.destination, entry.name);
+        const before = await fs.promises.lstat(source);
+        if (before.isSymbolicLink()) throw hostError(CODES.PERMISSION_DENIED, 'Component directory input contains a symbolic link');
+        if (before.isDirectory()) { pending.push({ source, destination, depth: current.depth + 1 }); continue; }
+        if (!before.isFile()) throw hostError(CODES.PERMISSION_DENIED, 'Component directory input contains an unsupported file type');
+        let sourceHandle; let destinationHandle;
+        try {
+          sourceHandle = await fs.promises.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+          const opened = await sourceHandle.stat();
+          if (!opened.isFile() || String(opened.dev) !== String(before.dev) || String(opened.ino) !== String(before.ino) || opened.size !== before.size || opened.mtimeMs !== before.mtimeMs) throw hostError(CODES.PERMISSION_DENIED, 'Component directory input changed while snapshotting');
+          destinationHandle = await fs.promises.open(destination, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+          const limiter = new Transform({ transform(chunk, _encoding, callback) { bytes += chunk.length; callback(bytes > MAX_STAGE_BYTES ? hostError(CODES.LIMIT_EXCEEDED, 'Component directory input snapshot is too large') : null, chunk); } });
+          await pipeline(sourceHandle.createReadStream({ autoClose: false }), limiter, destinationHandle.createWriteStream({ autoClose: false }));
+          const after = await sourceHandle.stat(); const copied = await destinationHandle.stat();
+          if (String(after.dev) !== String(before.dev) || String(after.ino) !== String(before.ino) || after.size !== before.size || after.mtimeMs !== before.mtimeMs || copied.size !== before.size) throw hostError(CODES.PERMISSION_DENIED, 'Component directory input changed while snapshotting');
+        } finally { await sourceHandle?.close().catch(() => undefined); await destinationHandle?.close().catch(() => undefined); }
+      }
+    }
+    const afterRoot = await fs.promises.lstat(sourceRoot);
+    if (String(afterRoot.dev) !== String(rootIdentity.dev) || String(afterRoot.ino) !== String(rootIdentity.ino) || String(afterRoot.dev) !== grant.identity.dev || String(afterRoot.ino) !== grant.identity.ino) throw hostError(CODES.PERMISSION_DENIED, 'Component directory input changed while snapshotting');
   };
   const materializeVerifiedGrant = async (grant, token, descriptor, context) => {
     if (grant.snapshotPath) {
       const cached = await fs.promises.lstat(grant.snapshotPath).catch(() => null);
       if (cached && !cached.isSymbolicLink() && (cached.isFile() || cached.isDirectory())) return grant.snapshotPath;
-      discardInputGrant(fs, grant); grant.snapshotPath = ''; grant.snapshotRoot = '';
+      await discardInputGrant(fs, grant).catch(() => undefined);
     }
     const opened = await openVerifiedInputGrant(grant, token);
     const scope = bound(context, descriptor);
-    const directory = path.join(scope.componentRoot, 'inputs', crypto.randomUUID());
+    const inputRoot=path.join(scope.componentRoot,'inputs');const rootKey=path.resolve(inputRoot);let initialization=inputRootInitialization.get(rootKey);if(!initialization){initialization=fs.promises.rm(inputRoot,{recursive:true,force:true}).catch(error=>{inputRootInitialization.delete(rootKey);throw error;});inputRootInitialization.set(rootKey,initialization);}await initialization;let roots=componentInputRoots.get(descriptor.componentId);if(!roots){roots=new Set();componentInputRoots.set(descriptor.componentId,roots);}roots.add(inputRoot);
+    const directory = path.join(inputRoot, crypto.randomUUID());
     const destination = path.join(directory, path.basename(opened.realPath));
-    await fs.promises.mkdir(directory, { recursive: true });
+    grant.snapshotRoot = directory; grant.snapshotPath = ''; grant.snapshotOwner = grant.reservedBy || String(token);
+    await fs.promises.mkdir(path.dirname(directory), { recursive: true });
+    await fs.promises.mkdir(directory, { recursive: false });
     try {
       if (opened.handle) {
         await pipeline(opened.handle.createReadStream({ autoClose: false }), fs.createWriteStream(destination, { flags: 'wx' }));
         const after = await opened.handle.stat();
         if (String(after.dev) !== grant.identity.dev || String(after.ino) !== grant.identity.ino || after.size !== grant.identity.size || after.mtimeMs !== grant.identity.mtimeMs) throw hostError(CODES.PERMISSION_DENIED, 'Component input changed while snapshotting');
       } else {
-        await fs.promises.cp(opened.realPath, destination, { recursive: true, dereference: false, errorOnExist: true, force: false });
-        const pending = [destination]; let entries = 0; let bytes = 0;
-        while (pending.length) { const directoryPath = pending.pop(); for (const entry of await fs.promises.readdir(directoryPath, { withFileTypes: true })) { if (++entries > 20000) throw hostError(CODES.LIMIT_EXCEEDED, 'Component directory input snapshot is too large'); const child = path.join(directoryPath, entry.name); if (entry.isSymbolicLink()) throw hostError(CODES.PERMISSION_DENIED, 'Component directory input contains a symbolic link'); if (entry.isDirectory()) pending.push(child); else if (entry.isFile()) { bytes += (await fs.promises.stat(child)).size; if (bytes > MAX_STAGE_BYTES) throw hostError(CODES.LIMIT_EXCEEDED, 'Component directory input snapshot is too large'); } else throw hostError(CODES.PERMISSION_DENIED, 'Component directory input contains an unsupported file type'); } }
+        await copyDirectorySnapshot(opened.realPath, destination, grant);
       }
-    } catch (error) { await fs.promises.rm(directory, { recursive: true, force: true }).catch(() => undefined); throw error; }
+    } catch (error) { await discardInputGrant(fs, grant).catch(() => undefined); throw error; }
     finally { await opened.handle?.close().catch(() => undefined); }
-    grant.snapshotRoot = directory; grant.snapshotPath = destination;
+    grant.snapshotPath = destination;
     return destination;
   };
   const snapshotInputGrant = async (token, descriptor, context, consume = true) => {
     pruneExpiringMaps(fs, Date.now());
     const grant = inputGrants.get(String(token || ''));
     if (!grant) throw hostError(CODES.TOKEN_EXPIRED, 'Component input token is missing or expired');
+    if (grant.consumed) throw hostError(CODES.TOKEN_EXPIRED, 'Component input token was already consumed');
     if (grant.scope !== scopeKey(descriptor, context)) throw hostError(CODES.TOKEN_SCOPE, 'Component input token belongs to another component or project');
     if (grant.reservedBy) throw hostError(CODES.CONFLICT, 'Component input token is reserved by another operation');
     const destination = await materializeVerifiedGrant(grant, token, descriptor, context);
-    if (consume && --grant.usesRemaining <= 0) inputGrants.delete(String(token));
+    if (consume && --grant.usesRemaining <= 0) { grant.consumed = true; grant.expiresAt = Math.min(grant.expiresAt, Date.now() + INPUT_TOKEN_TTL_MS); }
     return destination;
   };
   const consumeInput = (token, descriptor, context, consume = true) => snapshotInputGrant(token, descriptor, context, consume);
@@ -379,7 +432,8 @@ const registerComponentProjectCapabilities = ({
     if (payload.action !== 'materialize') throw hostError(CODES.INVALID_REQUEST, 'Unknown input token action');
     const source = await consumeInput(payload.token, descriptor, context);
     const stat = await fs.promises.stat(source);
-    return { inputId: path.basename(path.dirname(source)), privatePath: source, byteLength: stat.size };
+    const grant = inputGrants.get(String(payload.token || ''));
+    return { inputId: path.basename(path.dirname(source)), privatePath: source, byteLength: stat.size, expiresAt: grant?.expiresAt || Date.now() + INPUT_TOKEN_TTL_MS };
   });
 
   broker.register('component.storage', async (payload, context, descriptor) => {
@@ -498,8 +552,18 @@ const registerComponentProjectCapabilities = ({
     if (!ancestorStat?.isDirectory() || ancestorStat.isSymbolicLink()) throw hostError(CODES.PERMISSION_DENIED, 'Output target ancestor is unsafe');
     const canonicalAncestor = await fs.promises.realpath(ancestor).catch(() => null);
     if (!canonicalAncestor || !insideOrEqual(path, canonicalProjectRoot, canonicalAncestor)) throw hostError(CODES.PERMISSION_DENIED, 'Output target escapes through a linked directory');
-    if (createParent) await fs.promises.mkdir(parent, { recursive: true });
-    const existingParent = await fs.promises.realpath(parent).catch(() => null);
+    if (createParent && ancestor !== parent) {
+      const missing = []; let cursor = parent;
+      while (cursor !== ancestor) { missing.push(cursor); cursor = path.dirname(cursor); }
+      for (const directory of missing.reverse()) {
+        try { await fs.promises.mkdir(directory, { recursive: false }); }
+        catch (error) { if (error?.code !== 'EEXIST') throw error; }
+        const createdStat = await fs.promises.lstat(directory);
+        const createdReal = await fs.promises.realpath(directory);
+        if (!createdStat.isDirectory() || createdStat.isSymbolicLink() || !insideOrEqual(path, canonicalProjectRoot, createdReal)) throw hostError(CODES.PERMISSION_DENIED, 'Output target parent is unsafe');
+      }
+    }
+    const existingParent = await fs.promises.realpath(parent).catch(error => error?.code === 'ENOENT' ? null : Promise.reject(error));
     if (existingParent && !insideOrEqual(path, canonicalProjectRoot, existingParent)) throw hostError(CODES.PERMISSION_DENIED, 'Output target escapes through a linked directory');
     return destination;
   };
@@ -663,27 +727,39 @@ const registerComponentProjectCapabilities = ({
     return operation;
   };
   const acquireOutputTargets = async (scope, outputs) => {
-    const destinations = await Promise.all(outputs.map(output => safeDestination(scope, output.relativePath, false)));
-    const keys = [...new Set(destinations.map(value => process.platform === 'win32' ? path.resolve(value).toLowerCase() : path.resolve(value)))].sort();
-    const leases = [];
-    for (const key of keys) {
-      const previous = outputTargetOperations.get(key) || Promise.resolve();
-      let release; const current = new Promise(resolve => { release = resolve; });
-      const tail = previous.catch(() => undefined).then(() => current);
-      outputTargetOperations.set(key, tail);
-      await previous.catch(() => undefined);
-      leases.push({ key, tail, release });
+    const identities = [];
+    for (const output of outputs) {
+      const destination = await safeDestination(scope, output.relativePath, true);
+      const parent = path.dirname(destination); const realParent = await fs.promises.realpath(parent); const stat = await fs.promises.lstat(parent);
+      const canonicalParent = process.platform === 'win32' ? path.resolve(realParent).toLowerCase() : path.resolve(realParent);
+      identities.push({ key: `${canonicalParent}\0${process.platform === 'win32' ? path.basename(destination).toLowerCase() : path.basename(destination)}`, parent, realParent, dev: String(stat.dev), ino: String(stat.ino) });
     }
-    return () => { for (const lease of leases.reverse()) { lease.release(); void lease.tail.finally(() => { if (outputTargetOperations.get(lease.key) === lease.tail) outputTargetOperations.delete(lease.key); }); } };
+    const byKey = new Map(identities.map(identity => [identity.key, identity]));
+    const keys = [...byKey.keys()].sort();
+    const leases = [];
+    const releaseLease = lease => { lease.release(); void lease.tail.finally(() => { if (outputTargetOperations.get(lease.key) === lease.tail) outputTargetOperations.delete(lease.key); }); };
+    try {
+      for (const key of keys) {
+        const previous = outputTargetOperations.get(key) || Promise.resolve();
+        let release; const current = new Promise(resolve => { release = resolve; });
+        const tail = previous.catch(() => undefined).then(() => current);
+        outputTargetOperations.set(key, tail);
+        await previous.catch(() => undefined);
+        const identity = byKey.get(key); const currentStat = await fs.promises.lstat(identity.parent); const currentReal = await fs.promises.realpath(identity.parent);
+        if (!currentStat.isDirectory() || currentStat.isSymbolicLink() || String(currentStat.dev) !== identity.dev || String(currentStat.ino) !== identity.ino || !samePhysicalPath(currentReal, identity.realParent)) { const failedLease={key,tail,release}; releaseLease(failedLease); throw hostError(CODES.PERMISSION_DENIED, 'Output target parent changed while acquiring publication lock'); }
+        leases.push({ key, tail, release });
+      }
+    } catch (error) { for (const lease of leases.reverse()) releaseLease(lease); throw error; }
+    return () => { for (const lease of leases.reverse()) releaseLease(lease); };
   };
   const publishNoReplace = async (pending, destination) => {
     try { await fs.promises.link(pending, destination); }
     catch (error) {
       if (error?.code === 'EEXIST') throw hostError(CODES.CONFLICT, `Output already exists: ${path.basename(destination)}`);
       if (!['EXDEV', 'ENOTSUP', 'EPERM'].includes(error?.code)) throw error;
-      let source; let target;
-      try { source = await fs.promises.open(pending, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)); target = await fs.promises.open(destination, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600); await pipeline(source.createReadStream({ autoClose: false }), target.createWriteStream({ autoClose: false })); }
-      catch (copyError) { if (copyError?.code === 'EEXIST') throw hostError(CODES.CONFLICT, `Output already exists: ${path.basename(destination)}`); await fs.promises.rm(destination, { force: true }).catch(() => undefined); throw copyError; }
+      let source; let target; let targetCreated=false;
+      try { source = await fs.promises.open(pending, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0)); const before=await source.stat();if(!before.isFile())throw hostError(CODES.PERMISSION_DENIED,'Pending output is unsafe'); target = await fs.promises.open(destination, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);targetCreated=true; await pipeline(source.createReadStream({ autoClose: false }), target.createWriteStream({ autoClose: false }));const after=await source.stat(),published=await target.stat();if(String(after.dev)!==String(before.dev)||String(after.ino)!==String(before.ino)||after.size!==before.size||after.mtimeMs!==before.mtimeMs||published.size!==before.size)throw hostError(CODES.CONFLICT,'Pending output changed while publishing'); }
+      catch (copyError) { if (copyError?.code === 'EEXIST') throw hostError(CODES.CONFLICT, `Output already exists: ${path.basename(destination)}`); if(targetCreated)await fs.promises.rm(destination, { force: true }).catch(() => undefined); throw copyError; }
       finally { await source?.close().catch(() => undefined); await target?.close().catch(() => undefined); }
     }
     await fs.promises.rm(pending, { force: true });
@@ -728,9 +804,17 @@ const registerComponentProjectCapabilities = ({
       const directory = path.join(scope.componentRoot, 'imported-outputs', importId); const privatePath = path.join(directory, path.basename(output.relativePath));
       const source = path.resolve(scope.projectRoot, output.relativePath); await fs.promises.mkdir(directory, { recursive: true });
       if (!await fileMatchesDigest(privatePath, output.size, output.sha256)) {
-        const pending = `${privatePath}.${crypto.randomUUID()}.tmp`; await fs.promises.copyFile(source, pending, fs.constants.COPYFILE_EXCL);
-        if (!await fileMatchesDigest(pending, output.size, output.sha256)) { await fs.promises.rm(pending, { force: true }); throw hostError(CODES.CONFLICT, 'Owned output digest changed during private materialization'); }
-        await fs.promises.rm(privatePath, { force: true }); await fs.promises.rename(pending, privatePath);
+        const pending = `${privatePath}.${crypto.randomUUID()}.tmp`; let sourceHandle; let targetHandle;
+        try {
+          sourceHandle = await fs.promises.open(source, fs.constants.O_RDONLY | (fs.constants.O_NOFOLLOW || 0));
+          const before = await sourceHandle.stat();
+          if (!before.isFile() || before.size !== output.size) throw hostError(CODES.CONFLICT, 'Owned output changed before private materialization');
+          targetHandle = await fs.promises.open(pending, fs.constants.O_WRONLY | fs.constants.O_CREAT | fs.constants.O_EXCL, 0o600);
+          await pipeline(sourceHandle.createReadStream({ autoClose: false }), targetHandle.createWriteStream({ autoClose: false }));
+          const after = await sourceHandle.stat();
+          if (String(after.dev) !== String(before.dev) || String(after.ino) !== String(before.ino) || after.size !== before.size || after.mtimeMs !== before.mtimeMs || !await fileMatchesDigest(pending, output.size, output.sha256)) throw hostError(CODES.CONFLICT, 'Owned output digest changed during private materialization');
+          await fs.promises.rm(privatePath, { force: true }); await fs.promises.rename(pending, privatePath);
+        } finally { await sourceHandle?.close().catch(() => undefined); await targetHandle?.close().catch(() => undefined); await fs.promises.rm(pending, { force: true }).catch(() => undefined); }
       }
       return { importId, privatePath, byteLength: output.size, sha256: output.sha256, outputRef: { commitId, artifactId } };
     }
@@ -759,7 +843,11 @@ const registerComponentProjectCapabilities = ({
       let stagePath = path.join(stage.payloadRoot, sourceName);
       let hostCreated = false;
       if (payload.sourceName) { sourceName = assertRelativePath(path, payload.sourceName, 'staged sourceName'); stagePath = path.resolve(stage.payloadRoot, sourceName); }
-      else if (payload.inputToken) { await fs.promises.copyFile(await consumeInput(payload.inputToken, descriptor, context), stagePath, fs.constants.COPYFILE_EXCL); hostCreated = true; }
+      else if (payload.inputToken) {
+        const token = String(payload.inputToken); const snapshot = await consumeInput(token, descriptor, context);
+        try { await fs.promises.copyFile(snapshot, stagePath, fs.constants.COPYFILE_EXCL); hostCreated = true; }
+        finally { const grant = inputGrants.get(token); if (grant?.consumed) { inputGrants.delete(token); await discardInputGrant(fs, grant).catch(() => undefined); } }
+      }
       else {
         const bytes = Buffer.from(String(payload.base64 || ''), 'base64');
         if (!bytes.length || bytes.length > MAX_INLINE_WRITE_BYTES) throw hostError(CODES.LIMIT_EXCEEDED, 'Inline output must be between 1 byte and 8 MiB');
@@ -1112,25 +1200,27 @@ const registerComponentProjectCapabilities = ({
       if (values.length !== tokens.length) throw hostError(CODES.INVALID_REQUEST, 'Input tokens must be unique');
       const grants = values.map(token => {
         const grant = inputGrants.get(token);
-        if (!grant) throw hostError(CODES.TOKEN_EXPIRED, 'Component input token is missing or expired');
+        if (!grant || grant.consumed) throw hostError(CODES.TOKEN_EXPIRED, 'Component input token is missing, expired, or consumed');
         if (grant.scope !== scopeKey(descriptor, context)) throw hostError(CODES.TOKEN_SCOPE, 'Component input token belongs to another component or project');
         if (grant.reservedBy && grant.reservedBy !== reservationId) throw hostError(CODES.CONFLICT, 'Component input token is reserved by another operation');
         return { token, grant };
       });
-      grants.forEach(({ grant }) => { grant.originalExpiresAt ??= grant.expiresAt; grant.reservedBy = reservationId; grant.reservationExpiresAt = Date.now() + INPUT_RESERVATION_TTL_MS; });
+      grants.forEach(({ grant }) => { clearTimeout(grant.cleanupTimer); grant.cleanupTimer=null; grant.originalExpiresAt ??= grant.expiresAt; grant.reservedBy = reservationId; grant.snapshotOwner = reservationId; grant.reservationExpiresAt = Number.POSITIVE_INFINITY; });
       try {
         const snapshots = [];
         for (const { token, grant } of grants) {
           snapshots.push({ token, filePath: await materializeVerifiedGrant(grant, token, descriptor, context) });
         }
         return snapshots;
-      } catch (error) { for (const { grant } of grants) { delete grant.reservedBy; delete grant.reservationExpiresAt; } throw error; }
+      } catch (error) { const current=Date.now();for (const {token,grant} of grants) { grant.expiresAt=grant.originalExpiresAt??grant.expiresAt;delete grant.originalExpiresAt;delete grant.reservedBy;delete grant.reservationExpiresAt;grant.snapshotOwner=token;if(grant.expiresAt<=current){inputGrants.delete(token);await discardInputGrant(fs,grant).catch(()=>undefined);}else{grant.cleanupTimer=setTimeout(()=>{if(inputGrants.get(token)===grant&&!grant.reservedBy){inputGrants.delete(token);void discardInputGrant(fs,grant).catch(()=>undefined);}},grant.expiresAt-current);grant.cleanupTimer.unref?.();} } throw error; }
     },
-    commitReservation: reservationId => { for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) inputGrants.delete(token); },
-    releaseReservation: reservationId => { const current = Date.now(); for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) { grant.expiresAt = grant.originalExpiresAt ?? grant.expiresAt; delete grant.originalExpiresAt; delete grant.reservedBy; delete grant.reservationExpiresAt; if (grant.expiresAt <= current) inputGrants.delete(token); } },
-    clearComponent: componentId => {
+    commitReservation: async reservationId => { const cleanups=[];for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) { inputGrants.delete(token); cleanups.push(discardInputGrant(fs, grant)); } const results=await Promise.allSettled(cleanups);const errors=results.filter(result=>result.status==='rejected').map(result=>result.reason);if(errors.length)throw new AggregateError(errors,'Unable to clean committed component input snapshots'); },
+    releaseReservation: reservationId => { const current = Date.now(); for (const [token, grant] of inputGrants) if (grant.reservedBy === reservationId) { grant.expiresAt = grant.originalExpiresAt ?? grant.expiresAt; delete grant.originalExpiresAt; delete grant.reservedBy; delete grant.reservationExpiresAt; grant.snapshotOwner = token; if (grant.expiresAt <= current) { inputGrants.delete(token); void discardInputGrant(fs, grant).catch(() => undefined); } else { grant.cleanupTimer=setTimeout(()=>{if(inputGrants.get(token)===grant&&!grant.reservedBy){inputGrants.delete(token);void discardInputGrant(fs,grant).catch(()=>undefined);}},grant.expiresAt-current);grant.cleanupTimer.unref?.(); } } },
+    clearComponent: async componentId => {
       const prefix = `${String(componentId || '')}\0`;
-      for (const [token, grant] of inputGrants) if (String(grant.scope || '').startsWith(prefix)) { inputGrants.delete(token); discardInputGrant(fs, grant); }
+      const cleanups=[];for (const [token, grant] of inputGrants) if (String(grant.scope || '').startsWith(prefix)) { inputGrants.delete(token); cleanups.push(discardInputGrant(fs, grant)); }
+      for(const root of componentInputRoots.get(String(componentId||''))||[]){inputRootInitialization.delete(path.resolve(root));cleanups.push(fs.promises.rm(root,{recursive:true,force:true}));}componentInputRoots.delete(String(componentId||''));
+      const results=await Promise.allSettled(cleanups);const errors=results.filter(result=>result.status==='rejected').map(result=>result.reason);if(errors.length)throw new AggregateError(errors,`Unable to clear component input snapshots for ${componentId}`);
     },
   };
 };

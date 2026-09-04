@@ -4,15 +4,16 @@ import type { ComponentSettingsFormField, ComponentSettingsPageContribution, Com
 import { ComponentSettingsPageSurface } from './ComponentSettingsPageSurface';
 
 type DeclarativePage = Extract<ComponentSettingsPageContribution, { renderMode: 'declarative' }> | Extract<ComponentSettingsPageContribution, { renderMode: 'hybrid' }>;
-type Values = Record<string, ComponentSettingsValue>;
+type DraftValue = ComponentSettingsValue | string;
+type Values = Record<string, DraftValue>;
 
-const FieldControl = ({ field, value, saving, onDraft, onCommit }: { field: ComponentSettingsFormField; value: ComponentSettingsValue; saving: boolean; onDraft: (value: ComponentSettingsValue) => void; onCommit: (value: ComponentSettingsValue) => void }) => {
+const FieldControl = ({ field, value, saving, onDraft, onCommit }: { field: ComponentSettingsFormField; value: DraftValue; saving: boolean; onDraft: (value: DraftValue) => void; onCommit: (value: DraftValue) => void }) => {
   const inputId = `component-setting-${field.id}`;
   if (field.type === 'toggle') return <div className="flex justify-end"><input id={inputId} type="checkbox" checked={Boolean(value)} disabled={saving} onChange={event => onCommit(event.target.checked)} className="h-4 w-4 accent-blue-600"/></div>;
   if (field.type === 'select') return <div className="pf-control-cluster ml-auto max-w-sm"><select id={inputId} value={String(value)} disabled={saving} onChange={event => onCommit(event.target.value)} className="pf-select min-w-0 flex-1">{field.options.map(option => <option key={option.value} value={option.value}>{option.label}</option>)}</select>{saving && <Loader2 size={15} className="shrink-0 animate-spin text-blue-600"/>}</div>;
   if (field.type === 'text') return <div className="pf-control-cluster ml-auto max-w-sm"><input id={inputId} value={String(value)} maxLength={field.maxLength} placeholder={field.placeholder} disabled={saving} onChange={event => onDraft(event.target.value)} onBlur={event => onCommit(event.target.value)} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} className="pf-input min-w-0 flex-1 px-3"/>{saving && <Loader2 size={15} className="shrink-0 animate-spin text-blue-600"/>}</div>;
-  const numericValue = typeof value === 'number' ? value : field.default;
-  if (field.type === 'number') return <div className="pf-control-cluster ml-auto max-w-sm"><input id={inputId} type="number" value={numericValue} min={field.min} max={field.max} step={field.step} disabled={saving} onChange={event => onDraft(Number(event.target.value))} onBlur={event => onCommit(Number(event.target.value))} className="pf-input min-w-0 flex-1 px-3"/>{field.suffix && <span className="shrink-0 text-xs font-medium text-slate-500">{field.suffix}</span>}{saving && <Loader2 size={15} className="shrink-0 animate-spin text-blue-600"/>}</div>;
+  const numericValue = typeof value === 'number' || typeof value === 'string' ? value : field.default;
+  if (field.type === 'number') return <div className="pf-control-cluster ml-auto max-w-sm"><input id={inputId} type="number" value={numericValue} min={field.min} max={field.max} step={field.step} disabled={saving} onChange={event => onDraft(event.target.value)} onBlur={event => onCommit(event.target.value)} className="pf-input min-w-0 flex-1 px-3"/>{field.suffix && <span className="shrink-0 text-xs font-medium text-slate-500">{field.suffix}</span>}{saving && <Loader2 size={15} className="shrink-0 animate-spin text-blue-600"/>}</div>;
   return <div className="pf-control-cluster ml-auto max-w-sm"><input id={inputId} type="range" value={numericValue} min={field.min} max={field.max} step={field.step} disabled={saving} onChange={event => onDraft(Number(event.target.value))} onPointerUp={event => onCommit(Number(event.currentTarget.value))} onKeyUp={event => onCommit(Number(event.currentTarget.value))} className="min-w-0 flex-1 accent-blue-600"/><output htmlFor={inputId} className="min-w-16 text-right text-sm font-bold tabular-nums text-slate-700">{numericValue}{field.suffix || ''}</output>{saving && <Loader2 size={15} className="shrink-0 animate-spin text-blue-600"/>}</div>;
 };
 
@@ -28,43 +29,56 @@ export const ComponentDeclarativeSettingsSurface = ({ page }: { page: Declarativ
   const committedRef = useRef<Values>({});
   const pendingRef = useRef<Values>({});
   const queueRef = useRef<Promise<void>>(Promise.resolve());
+  const savingCounts = useRef(new Map<string,number>());
   const loadGeneration = useRef(0);
+  const pageGeneration = useRef(0);
+  const pageKey = `${page.componentId}\u001f${page.componentVersion}\u001f${page.pageId}`;
+  const activePageKey = useRef(pageKey); activePageKey.current=pageKey;
 
   const load = useCallback(async () => {
+    const currentPageGeneration = pageGeneration.current;
     const generation = ++loadGeneration.current;
     setLoading(true); setLoadError(''); setSaveError('');
     try {
       const result = await window.electronAPI.readComponentSettingsForm({ componentId: page.componentId, pageId: page.pageId });
-      if (generation !== loadGeneration.current) return;
+      if (generation !== loadGeneration.current || currentPageGeneration !== pageGeneration.current) return;
       if (!result.success || !result.values) { setLoadError(result.error || '无法读取组件设置'); return; }
       committedRef.current = result.values; pendingRef.current = {}; setValues(result.values);
-    } catch (error) { if (generation === loadGeneration.current) setLoadError(error instanceof Error ? error.message : String(error)); }
-    finally { if (generation === loadGeneration.current) setLoading(false); }
-  }, [page.componentId, page.pageId]);
+    } catch (error) { if (generation === loadGeneration.current && currentPageGeneration === pageGeneration.current) setLoadError(error instanceof Error ? error.message : String(error)); }
+    finally { if (generation === loadGeneration.current && currentPageGeneration === pageGeneration.current) setLoading(false); }
+  }, [page.componentId, page.pageId, pageKey]);
 
-  useEffect(() => { void load(); return () => { loadGeneration.current += 1; }; }, [load]);
-  const handleCustomReady = useCallback(() => { setCustomLoadError(''); setCustomReady(true); }, []);
-  const handleCustomError = useCallback((message: string) => { setCustomReady(false); setCustomLoadError(message); }, []);
+  useEffect(() => { pageGeneration.current += 1; loadGeneration.current += 1; committedRef.current={}; pendingRef.current={}; queueRef.current=Promise.resolve(); savingCounts.current.clear(); setValues({}); setLoading(true); setLoadError(''); setSaveError(''); setSavingIds(new Set()); setCustomReady(false); setCustomLoadError(''); setCustomAttempt(0); void load(); return () => { loadGeneration.current += 1; pageGeneration.current += 1; }; }, [load, pageKey]);
+  const handleCustomReady = useCallback(() => { if(activePageKey.current!==pageKey)return; setCustomLoadError(''); setCustomReady(true); }, [pageKey]);
+  const handleCustomError = useCallback((message: string) => { if(activePageKey.current!==pageKey)return; setCustomReady(false); setCustomLoadError(message); }, [pageKey]);
   const retryHybridLoad = () => {
     if (loadError) void load();
     if (customLoadError) { setCustomLoadError(''); setCustomReady(false); setCustomAttempt(current => current + 1); }
   };
-  const draft = (id: string, value: ComponentSettingsValue) => { pendingRef.current = { ...pendingRef.current, [id]: value }; setValues(current => ({ ...current, [id]: value })); };
-  const commit = (id: string, value: ComponentSettingsValue) => {
+  const draft = (id: string, value: DraftValue) => { pendingRef.current = { ...pendingRef.current, [id]: value }; setValues(current => ({ ...current, [id]: value })); };
+  const commit = (id: string, draftValue: DraftValue) => {
+    const field=page.form.groups.flatMap(group=>group.fields).find(candidate=>candidate.id===id);
+    let value: ComponentSettingsValue=draftValue as ComponentSettingsValue;
+    if(field?.type==='number'){const text=String(draftValue).trim();const parsed=text===''?Number.NaN:typeof draftValue==='number'?draftValue:Number(text);const stepOffset=(parsed-field.min)/field.step;const validStep=Number.isInteger(stepOffset)||Math.abs(stepOffset-Math.round(stepOffset))<1e-9;if(!Number.isFinite(parsed)||parsed<field.min||parsed>field.max||!validStep){const next={...pendingRef.current};delete next[id];pendingRef.current=next;setValues({...committedRef.current,...next});setSaveError(`${field.label}不是有效数值`);return;}value=parsed;}
+    const generation=pageGeneration.current; const targetComponentId=page.componentId; const targetPageId=page.pageId;
     if (Object.is(committedRef.current[id], value) && !Object.hasOwn(pendingRef.current, id)) return;
-    draft(id, value); setSaveError(''); setSavingIds(current => new Set(current).add(id));
+    draft(id, value); setSaveError(''); savingCounts.current.set(id,(savingCounts.current.get(id)||0)+1); setSavingIds(current => new Set(current).add(id));
+    let attempted: DraftValue=value;
     const run = async () => {
       const desired = pendingRef.current[id];
-      const result = await window.electronAPI.updateComponentSettingsForm({ componentId: page.componentId, pageId: page.pageId, patch: { [id]: desired } });
+      attempted=desired;
+      if(generation!==pageGeneration.current)return;
+      const result = await window.electronAPI.updateComponentSettingsForm({ componentId: targetComponentId, pageId: targetPageId, patch: { [id]: desired as ComponentSettingsValue } });
+      if(generation!==pageGeneration.current)return;
       if (!result.success || !result.values) throw new Error(result.error || '保存组件设置失败');
       committedRef.current = result.values;
       if (Object.is(pendingRef.current[id], desired)) { const next = { ...pendingRef.current }; delete next[id]; pendingRef.current = next; }
       setValues({ ...result.values, ...pendingRef.current });
     };
-    const queued = queueRef.current.catch(() => undefined).then(run).catch(error => {
-      const next = { ...pendingRef.current }; delete next[id]; pendingRef.current = next;
+    const queued = queueRef.current.catch(() => undefined).then(run).catch(error => { if(generation!==pageGeneration.current)return;
+      const next = { ...pendingRef.current }; if(Object.is(next[id],attempted))delete next[id]; pendingRef.current = next;
       setValues({ ...committedRef.current, ...next }); setSaveError(error instanceof Error ? error.message : String(error));
-    }).finally(() => setSavingIds(current => { const next = new Set(current); next.delete(id); return next; }));
+    }).finally(() => {if(generation===pageGeneration.current){const count=Math.max(0,(savingCounts.current.get(id)||1)-1);if(count)savingCounts.current.set(id,count);else savingCounts.current.delete(id);setSavingIds(current => { const next = new Set(current); if(!count)next.delete(id); return next; });}});
     queueRef.current = queued;
   };
 

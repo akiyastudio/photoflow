@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import type { ComponentSettingsPageContribution, ComponentStatus } from '../../types';
-import { readCachedComponentStatuses } from './component-cache';
+import { COMPONENT_CACHE_VERSION, readCachedComponentStatuses } from './component-cache';
 import { componentHostCatalogKey } from './useComponentPages';
 
 type UseComponentCatalogOptions = {
@@ -9,7 +9,7 @@ type UseComponentCatalogOptions = {
 };
 
 const cacheComponents = (components: ComponentStatus[]) => {
-  try { window.localStorage.setItem('photoflow:components-cache', JSON.stringify(components.slice(0, 512))); }
+  try { window.localStorage.setItem('photoflow:components-cache', JSON.stringify({schemaVersion:COMPONENT_CACHE_VERSION,components:components.slice(0,512)})); }
   catch { /* Cache quota or privacy mode must not turn a successful refresh into a failure. */ }
 };
 
@@ -64,10 +64,12 @@ export const useComponentCatalog = ({ onError, onSettingsPagesChanged }: UseComp
 
   useEffect(() => window.electronAPI.onComponentsStatusChanged(result => {
     if (!result.success) return;
+    refreshGeneration.current += 1;
     const nextComponents = result.components || [];
     setComponents(nextComponents);
     cacheComponents(nextComponents);
     setComponentInstallPath(result.installPath || '');
+    setComponentsLoading(false);
   }), []);
 
   return { components, componentInstallPath, componentsLoading, componentSettingsPages, refreshComponents, handleComponentsChanged };

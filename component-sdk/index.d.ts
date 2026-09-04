@@ -31,7 +31,7 @@ export interface OriginalMediaVariant { url: string; byteLength: number; derived
 export interface RestrictedInput { token: string; expiresAt: number }
 export interface MediaVariantsResponse { mediaRef: { photoId?: string; versionId?: string; relativePath?: string }; metadata: { photoId: string; versionId: string; currentVersionId: string; displayName: string; originalName: string; relativePath: string; isCurrent: boolean; fileMissing: boolean }; variants: { thumbnail?: DerivedMediaVariant; preview?: DerivedMediaVariant; original?: OriginalMediaVariant }; input?: RestrictedInput }
 export interface InputMaterializeRequest { action: 'materialize'; token: string }
-export interface InputMaterializeResponse { inputId: string; privatePath: string; byteLength: number }
+export interface InputMaterializeResponse { inputId: string; privatePath: string; byteLength: number; expiresAt: number }
 export type ComponentStorageRequest = Record<string, never>;
 export interface ComponentStorageAdoptionPending {
   schemaVersion: 1; kind: 'component-storage-adoption'; state: 'pending'; componentId: string;

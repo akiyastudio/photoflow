@@ -416,6 +416,7 @@ const parseComponentHostManifest = (manifest, componentRoot, developmentFiles = 
   }
   return Object.freeze({
     componentId,
+    componentRoot: path.resolve(componentRoot),
     componentVersion: requiredText(manifest.version, 'component version', 80),
     contractVersion,
     adoptionGrants: Object.freeze([...adoptionGrants]),

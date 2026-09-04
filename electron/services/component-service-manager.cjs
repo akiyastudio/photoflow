@@ -38,6 +38,10 @@ const prepareReady = session => {
     session.readyReject = error => { session.readySettled = true; reject(error); };
   });
 };
+const rememberCompletedParent = (session, id) => {
+  (session.completedParentIds ||= new Map()).set(String(id), Date.now());
+  while (session.completedParentIds.size > 256) session.completedParentIds.delete(session.completedParentIds.keys().next().value);
+};
 
 class ComponentServiceManager {
   constructor({ registry, processSupervisor, capabilityBroker, executablePath = process.execPath, writeLog = () => undefined, requestTimeoutMs = REQUEST_TIMEOUT_MS, longRequestTimeoutMs = LONG_REQUEST_TIMEOUT_MS }) {
@@ -223,7 +227,7 @@ class ComponentServiceManager {
       pending.onTimeout = () => {
         if (session.pending.get(id) !== pending) return;
         session.pending.delete(id);
-        (session.completedParentIds ||= new Map()).set(id, Date.now());
+        rememberCompletedParent(session, id);
         let cancelError = null;
         try { this.writeFrame(session, { type: 'cancel', id, reason: 'deadline-exceeded' }); }
         catch (error) { cancelError = error; }
@@ -285,6 +289,7 @@ class ComponentServiceManager {
         restart: { enabled: true, maxRestarts: 2, windowMs: 60000, backoffMs: [100, 500] },
         onSpawn: (child, managed) => this.attach(session, child, managed),
       });
+      if (this.destroyed) { await session.managed.stop('component-service-manager-destroy'); throw new Error('Component service manager is destroyed'); }
       session.managed.on('restart-exhausted', () => {
         if (!session.readySettled) session.readyReject(new Error('Component service restart limit reached'));
       });
@@ -326,6 +331,11 @@ class ComponentServiceManager {
       }
     };
     child.stdout.on('data', onData);
+    const recycleSafely=reason=>{if(recycled)return;recycled=true;try{managed.recycle(reason);}catch{/* stream errors must not crash the host */}};
+    child.stdout.on('error', () => recycleSafely('stdout-error'));
+    child.stderr?.on?.('data', value => { try { const bytes = Buffer.isBuffer(value) ? value : Buffer.from(value); this.writeLog('warn', 'Component service stderr', { componentId: session.descriptor.componentId, byteCount: Math.min(bytes.length, MAX_LINE_BYTES) }); } catch { /* diagnostic streams are best effort */ } });
+    child.stderr?.on?.('error', () => recycleSafely('stderr-error'));
+    child.stdin?.on?.('error', () => recycleSafely('stdin-error'));
     child.stdout.on('end', () => {
       if (!recycled && bufferedBytes) { recycled = true; managed.recycle('unterminated-protocol-frame'); }
     });
@@ -358,8 +368,7 @@ class ComponentServiceManager {
         return;
       }
       session.pending.delete(String(frame.id));
-      (session.completedParentIds ||= new Map()).set(String(frame.id), Date.now());
-      while (session.completedParentIds.size > 256) session.completedParentIds.delete(session.completedParentIds.keys().next().value);
+      rememberCompletedParent(session, frame.id);
       clearTimeout(pending.timer);
       if (frame.ok === false) {
         const error = new Error(String(frame.error || 'Component service request failed'));
@@ -372,6 +381,7 @@ class ComponentServiceManager {
     if (frame?.type === 'capability') {
       const parent = session.pending.get(String(frame.parentId || ''));
       if (!parent) { if (session.completedParentIds?.has(String(frame.parentId || ''))) throw new Error('Component service sent a capability after its parent completed'); this.writeFrame(session, { type: 'capability-response', id: frame.id, ok: false, error: 'Unknown parent request' }); return; }
+      if (parent.deferredResponse) throw new Error('Component service sent a capability after its parent response');
       const capabilityId = String(frame.id || '');
       if (!capabilityId || parent.seenCapabilityIds.has(capabilityId)) throw new Error('Component service sent an invalid or duplicate capability id');
       if (parent.activeCapabilities >= MAX_CONCURRENT_CAPABILITIES || parent.capabilityCount >= MAX_CAPABILITIES_PER_REQUEST) throw new Error('Component service exceeded nested capability limits');
@@ -439,49 +449,58 @@ class ComponentServiceManager {
   }
 
   async quiesceForStorageSnapshot({ timeoutMs = 5000 } = {}) {
-    if (this.backupRestoreLeaseCount > 0) { await this.backupRestoreIdle; return this.quiesceForStorageSnapshot({ timeoutMs }); }
+    if (this.destroyed) throw new Error('Component service manager is destroyed');
+    const deadline = Date.now() + Math.max(1, Number(timeoutMs) || 5000);
+    const beforeDeadline = (promise, message = 'Component service is busy; storage snapshot was deferred') => {
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) { const error = new Error(message); error.code = 'COMPONENT_BUSY'; throw error; }
+      let timer; return Promise.race([promise, new Promise((_, reject) => { timer = setTimeout(() => { const error = new Error(message); error.code = 'COMPONENT_BUSY'; reject(error); }, remaining); timer.unref?.(); })]).finally(() => clearTimeout(timer));
+    };
+    if (this.backupRestoreLeaseCount > 0) await beforeDeadline(this.backupRestoreIdle);
     if (this.storageSnapshotBarrier) {
-      await this.storageSnapshotBarrier.released;
-      return this.quiesceForStorageSnapshot({ timeoutMs });
+      await beforeDeadline(this.storageSnapshotBarrier.released);
     }
     let releaseBarrier;
-    const barrier = { released: new Promise(resolve => { releaseBarrier = resolve; }), release: () => releaseBarrier() };
+    let barrierReleased = false;
+    const barrier = { released: new Promise(resolve => { releaseBarrier = resolve; }), release: () => { if (!barrierReleased) { barrierReleased = true; releaseBarrier(); } } };
     this.storageSnapshotBarrier = barrier;
+    let descriptors = []; let stopWork = null;
+    try {
     if (this.activeInvocations > 0) {
       let timer;
       let activityNotify;
       try {
         await Promise.race([
           new Promise(resolve => { activityNotify = resolve; this.activityWaiters.add(resolve); }),
-          new Promise((_, reject) => { timer = setTimeout(() => { const error = new Error('Component service is busy; storage snapshot was deferred'); error.code = 'COMPONENT_BUSY'; reject(error); }, timeoutMs); }),
+            new Promise((_, reject) => { timer = setTimeout(() => { const error = new Error('Component service is busy; storage snapshot was deferred'); error.code = 'COMPONENT_BUSY'; reject(error); }, Math.max(1, deadline - Date.now())); }),
         ]);
-      } catch (error) {
-        if (this.storageSnapshotBarrier === barrier) this.storageSnapshotBarrier = null;
-        releaseBarrier();
-        throw error;
       } finally { clearTimeout(timer); if (activityNotify) this.activityWaiters.delete(activityNotify); }
     }
-    await Promise.allSettled([...this.sessionTransitions.values()]);
-    const descriptors = [...this.sessions.values()].map(session => session.descriptor);
-    const stopResults = await Promise.allSettled(descriptors.map(descriptor => this.stop(descriptor.componentId, 'component-storage-snapshot')));
+    await beforeDeadline(Promise.allSettled([...this.sessionTransitions.values()]));
+    descriptors = [...this.sessions.values()].map(session => session.descriptor);
+    stopWork = Promise.allSettled(descriptors.map(descriptor => this.stop(descriptor.componentId, 'component-storage-snapshot')));
+    const stopResults = await beforeDeadline(stopWork);
     const stopErrors = stopResults.filter(result => result.status === 'rejected').map(result => result.reason);
     if (stopErrors.length) {
-      if (this.storageSnapshotBarrier === barrier) this.storageSnapshotBarrier = null;
-      releaseBarrier();
-      const restoreResults = await Promise.allSettled(descriptors.map(descriptor => this.ensureSession(descriptor)));
-      const restoreErrors = restoreResults.filter(result => result.status === 'rejected').map(result => result.reason);
-      throw new AggregateError([...stopErrors, ...restoreErrors], 'Unable to quiesce every component service for storage snapshot');
+      throw new AggregateError(stopErrors, 'Unable to quiesce every component service for storage snapshot');
     }
     let resumed = false;
     return async () => {
       if (resumed) return;
       resumed = true;
       if (this.storageSnapshotBarrier === barrier) this.storageSnapshotBarrier = null;
-      releaseBarrier();
+      barrier.release();
       const results = await Promise.allSettled(descriptors.map(descriptor => this.ensureSession(descriptor)));
       const errors = results.filter(result => result.status === 'rejected').map(result => result.reason);
       if (errors.length) throw new AggregateError(errors, 'Unable to resume every component service after storage snapshot');
     };
+    } catch (error) {
+      if (this.storageSnapshotBarrier === barrier) this.storageSnapshotBarrier = null;
+      barrier.release();
+      const restore = async () => { if (stopWork) await stopWork; if (!this.destroyed) await Promise.allSettled(descriptors.map(descriptor => this.ensureSession(descriptor))); };
+      void restore().catch(failure => { try { this.writeLog('warn', 'Component services could not be fully restored after quiesce failure', { error: failure.message || String(failure) }); } catch { /* best effort */ } });
+      throw error;
+    }
   }
 
   async destroy() {
@@ -493,7 +512,9 @@ class ComponentServiceManager {
     await Promise.allSettled([...this.sessionTransitions.values()]);
     const sessions = [...this.sessions.values()];
     this.sessions.clear();
-    await Promise.all(sessions.map(session => session.managed.stop('component-service-manager-destroy')));
+    const results=await Promise.allSettled(sessions.map(session => session.managed.stop('component-service-manager-destroy')));
+    const errors=results.filter(result=>result.status==='rejected').map(result=>result.reason);
+    if(errors.length)throw new AggregateError(errors,'Unable to stop every component service during destroy');
   }
 }
 

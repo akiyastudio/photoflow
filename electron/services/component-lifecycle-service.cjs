@@ -10,13 +10,19 @@ const componentDataRoot = (app, componentId, environment = process.env) => {
     ? path.join(localAppData, 'PhotoFlow', 'components', String(componentId))
     : path.join(app.getPath('userData'), 'component-data', String(componentId));
 };
-const runProcess = ({spawn,command,args,cwd,report,env,timeoutMs=10*60*1000}) => new Promise((resolve,reject)=>{
-  const child=spawn(command,args,{cwd,windowsHide:true,env});let output='',lineBuffer='',settled=false,timedOut=false;
-  const finish=(error,value)=>{if(settled)return;settled=true;clearTimeout(timer);if(error)reject(error);else resolve(value);};
-  const finishProcess=(code,signal)=>finish(code===0&&!timedOut?null:new Error(timedOut?'组件 lifecycle 进程超时':output.trim()||`组件 lifecycle 进程失败（退出代码 ${code??'unknown'}，信号 ${signal||'none'}）`),output);
-  const consume=chunk=>{const text=chunk.toString('utf8');output=(output+text).slice(-16000);lineBuffer=(lineBuffer+text).slice(-4096);let newline;while((newline=lineBuffer.indexOf('\n'))>=0){const line=lineBuffer.slice(0,newline).replace(/\r$/,'');lineBuffer=lineBuffer.slice(newline+1);const match=/^PHOTOFLOW_PROGRESS\|(\d{1,3})\|(.{1,240})$/.exec(line.trim());if(match)report(Math.max(1,Math.min(99,Number(match[1]))),match[2],{phase:'running'});}};
-  const timer=setTimeout(()=>{timedOut=true;try{child.kill();}catch{/* best effort */}},Math.max(1000,Math.min(30*60*1000,Number(timeoutMs)||10*60*1000)));timer.unref?.();
-  child.stdout.on('data',consume);child.stderr.on('data',consume);child.once('error',error=>finish(error));child.once('close',finishProcess);child.once('exit',(code,signal)=>{if(typeof child.stdout.readableEnded!=='boolean'&&typeof child.stderr.readableEnded!=='boolean')finishProcess(code,signal);});
+const runProcess = ({spawn,command,args,cwd,report,env,timeoutMs=10*60*1000,killGraceMs=5000}) => new Promise((resolve,reject)=>{
+  const child=spawn(command,args,{cwd,windowsHide:true,env});let output='',settled=false,timedOut=false,spawnError=null,closeCode=null,closeSignal=null;
+  const buffers={stdout:'',stderr:''};
+  const consumeLine=line=>{const match=/^PHOTOFLOW_PROGRESS\|(\d{1,3})\|(.{1,240})$/.exec(line.replace(/\r$/,'').trim());if(match)report(Math.max(1,Math.min(99,Number(match[1]))),match[2],{phase:'running'});};
+  const consume=(stream,chunk)=>{const text=chunk.toString('utf8');output=(output+text).slice(-16000);buffers[stream]=(buffers[stream]+text).slice(-8192);let newline;while((newline=buffers[stream].indexOf('\n'))>=0){consumeLine(buffers[stream].slice(0,newline));buffers[stream]=buffers[stream].slice(newline+1);}};
+  const flush=()=>{for(const stream of Object.keys(buffers)){if(buffers[stream])consumeLine(buffers[stream]);buffers[stream]='';}};
+  const finish=()=>{if(settled)return;settled=true;clearTimeout(timer);clearTimeout(killTimer);flush();const error=spawnError||(closeCode===0&&!timedOut?null:new Error(timedOut?'组件 lifecycle 进程超时':output.trim()||`组件 lifecycle 进程失败（退出代码 ${closeCode??'unknown'}，信号 ${closeSignal||'none'}）`));if(error)reject(error);else resolve(output);};
+  let killTimer;
+  const timer=setTimeout(()=>{timedOut=true;try{child.kill();}catch{/* best effort */}killTimer=setTimeout(()=>{try{child.kill('SIGKILL');}catch{/* best effort */}finish();},Math.max(100,Number(killGraceMs)||5000));killTimer.unref?.();},Math.max(1000,Math.min(30*60*1000,Number(timeoutMs)||10*60*1000)));timer.unref?.();
+  child.stdout.on('data',chunk=>consume('stdout',chunk));child.stderr.on('data',chunk=>consume('stderr',chunk));
+  child.once('error',error=>{spawnError=error;finish();});
+  child.once('close',(code,signal)=>{closeCode=code;closeSignal=signal;finish();});
+  child.once('exit',(code,signal)=>{closeCode=code;closeSignal=signal;if(typeof child.stdout?.readableEnded!=='boolean'&&typeof child.stderr?.readableEnded!=='boolean')setImmediate(finish);});
 });
 
 const createComponentLifecycleService = ({app,backgroundTasks,pluginService,spawn,environment=process.env,invalidateComponentStatus=()=>undefined,writeLog=()=>undefined}) => {

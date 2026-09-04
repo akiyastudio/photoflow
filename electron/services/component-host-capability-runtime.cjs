@@ -20,7 +20,7 @@ const createComponentHostCapabilityRuntime = dependencies => {
   const secretsService = createComponentSecretsService(dependencies); const networkService = createComponentNetworkService({ ...dependencies, secretsService });
   componentCapabilityBroker.register('component.secrets', secretsService.invoke);
   componentCapabilityBroker.register('network.fetch', networkService.invoke);
-  const clearComponentCapabilityState = componentId => { projectDomain?.clearComponent?.(componentId); runtimeExecution?.clearComponent?.(componentId); writeDomain?.clearComponent?.(componentId); };
+  const clearComponentCapabilityState = async componentId => { const results=await Promise.allSettled([projectDomain?.clearComponent?.(componentId),runtimeExecution?.clearComponent?.(componentId),writeDomain?.clearComponent?.(componentId)]);const errors=results.filter(result=>result.status==='rejected').map(result=>result.reason);if(errors.length)throw new AggregateError(errors,`Unable to clear every capability state for ${componentId}`); };
   return { componentCapabilityBroker, componentInputGrants: projectDomain, componentNotificationService, clearComponentCapabilityState, clearComponentSecretData: secretsService.removeComponentData, abortComponentNetworkRequests: networkService.clearComponent };
 };
 

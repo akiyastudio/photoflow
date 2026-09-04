@@ -38,6 +38,18 @@ const diagnosticToken = value => {
   const token = String(value || '').trim();
   return /^[a-z0-9_.:-]{1,80}$/i.test(token) ? token : 'unknown';
 };
+const componentPartition = componentId => `persist:component-host-${String(componentId || '').toLowerCase()}`;
+const filePathHasLink = async (fs, root, candidate) => {
+  const relative = path.relative(root, candidate);
+  if (relative.startsWith('..') || path.isAbsolute(relative)) return true;
+  let cursor = root;
+  for (const segment of relative.split(path.sep).filter(Boolean)) {
+    cursor = path.join(cursor, segment);
+    const stat = await fs.promises.lstat(cursor);
+    if (stat.isSymbolicLink()) return true;
+  }
+  return false;
+};
 const componentSurfaceCss = (theme, surface) => {
   const dark = theme === 'dark';
   const thumb = dark ? '#374151' : '#cbd5e1';
@@ -72,6 +84,7 @@ class ComponentViewManager {
     this.resolvedTheme = 'light';
     this.activeInstanceId = '';
     this.activationGeneration = 0;
+    this.partitionSessions = new Map();
     this.hostSurfaceState = { rendererToken: '', revision: -1, suspended: false };
     this.registerComponentSdkIpc();
   }
@@ -238,11 +251,14 @@ class ComponentViewManager {
         retainedSettings.settingsCloseTimer = null;
         retainedSettings.settingsLeases.add(leaseId);
         retainedSettings.leaseGeneration += 1;
-        await retainedSettings.readyPromise;
-        if (this.instances.get(settingsKey) !== retainedSettings || retainedSettings.view.webContents.isDestroyed()) throw new Error('Component page open was superseded');
-        if (!retainedSettings.settingsLeases.has(leaseId)) throw new Error('Component settings page lease was released');
-        if (!this.activate(retainedSettings.instanceId, activationGeneration)) { this.releaseSettings(request); throw new Error('Component page open was superseded'); }
-        return this.publicInstance(retainedSettings, leaseId);
+        retainedSettings.latestOpenGeneration = activationGeneration;
+        try {
+          await retainedSettings.readyPromise;
+          if (this.instances.get(settingsKey) !== retainedSettings || retainedSettings.view.webContents.isDestroyed()) throw new Error('Component page open was superseded');
+          if (!retainedSettings.settingsLeases.has(leaseId)) throw new Error('Component settings page lease was released');
+          if (!this.activate(retainedSettings.instanceId, activationGeneration)) throw new Error('Component page open was superseded');
+          return this.publicInstance(retainedSettings, leaseId);
+        } catch (error) { this.releaseSettings(request); throw error; }
       }
     }
     const key = settingsKey || (contribution ? componentContributionKey(request, surface) : componentPageKey(request));
@@ -253,8 +269,9 @@ class ComponentViewManager {
       existing = null;
     }
     if (existing) {
+      existing.latestOpenGeneration = activationGeneration;
       if (surface === 'application.settings') { clearTimeout(existing.settingsCloseTimer); existing.settingsCloseTimer = null; existing.settingsLeases.add(leaseId); existing.leaseGeneration += 1; }
-      await existing.readyPromise;
+      try { await existing.readyPromise;
       if (this.instances.get(key) !== existing || existing.view.webContents.isDestroyed()) throw new Error('Component page open was superseded');
       if (surface === 'application.settings' && !existing.settingsLeases.has(leaseId)) throw new Error('Component settings page lease was released');
       existing.context = Object.freeze({
@@ -266,14 +283,15 @@ class ComponentViewManager {
         ...(!applicationLevel ? normalizeOpenScope(request) : { scopeRelativePath: '', selectedRelativePaths: [], sourcePageId: '' }), contributionId: contribution?.id || '',
       });
       if (!existing.view.webContents.isDestroyed()) existing.view.webContents.send('component-sdk:context-changed', this.publicContext(existing));
-      if (!this.activate(existing.instanceId, activationGeneration)) { if (surface === 'application.settings') this.releaseSettings(request); throw new Error('Component page open was superseded'); }
+      if (!this.activate(existing.instanceId, activationGeneration)) throw new Error('Component page open was superseded');
       return this.publicInstance(existing, leaseId);
+      } catch (error) { if (surface === 'application.settings') this.releaseSettings(request); throw error; }
     }
     const instanceId = `component-page-${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const selectedPreloadPath = selectComponentPreload(descriptor, { core: this.preloadPath });
     const view = new this.WebContentsView({ webPreferences: {
       preload: selectedPreloadPath,
-      partition: `persist:component-host-${descriptor.componentId.toLowerCase()}`,
+      partition: componentPartition(descriptor.componentId),
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
@@ -285,6 +303,7 @@ class ComponentViewManager {
       readyPromise: null,
       settingsLeases: new Set(surface === 'application.settings' ? [leaseId] : []),
       leaseGeneration: 1,
+      latestOpenGeneration: activationGeneration,
       settingsCloseTimer: null,
       logicalActive: false,
       requestedBounds: { x: 0, y: 0, width: 0, height: 0 },
@@ -310,6 +329,10 @@ class ComponentViewManager {
     this.instancesById.set(instanceId, instance);
     const senderId = view.webContents.id;
     this.senderBindings.set(senderId, instance);
+    this.partitionSessions.set(descriptor.componentId, view.webContents.session);
+    const componentRoot = descriptor.componentRoot ? path.resolve(descriptor.componentRoot) : '';
+    let canonicalComponentRoot='';
+    if(componentRoot){const componentRootStat = await require('node:fs').promises.lstat(componentRoot);canonicalComponentRoot = await require('node:fs').promises.realpath(componentRoot);if (!componentRootStat.isDirectory() || componentRootStat.isSymbolicLink()) { this.close(instanceId); throw new Error('Component root is unsafe'); }}
     const diagnostic = (level, message, details = {}) => this.writeLog(level, message, {
       componentId: descriptor.componentId,
       contractVersion: descriptor.contractVersion,
@@ -339,23 +362,26 @@ class ComponentViewManager {
     view.webContents.on('will-attach-webview', event => event.preventDefault());
     view.webContents.session.setPermissionCheckHandler(() => false);
     view.webContents.session.setPermissionRequestHandler((_contents, _permission, callback) => callback(false));
-    view.webContents.session.webRequest?.onBeforeRequest?.((details, callback) => {
+    view.webContents.session.webRequest?.onBeforeRequest?.((details, callback) => { void (async () => {
       let allowed = false;
       try {
         const requestUrl = new URL(details.url);
         if (['data:', 'blob:'].includes(requestUrl.protocol)) allowed = true;
         else if (requestUrl.protocol === 'file:') {
-          const candidate = path.resolve(fileURLToPath(requestUrl)); const root = path.resolve(descriptor.componentRoot);
-          const relative = path.relative(root, candidate); allowed = !relative.startsWith('..') && !path.isAbsolute(relative);
+          if(!componentRoot)throw new Error('Component root is unavailable');
+          const fs = require('node:fs'); const candidate = path.resolve(fileURLToPath(requestUrl));
+          const stat = await fs.promises.lstat(candidate); const canonicalCandidate = await fs.promises.realpath(candidate);
+          const relative = path.relative(canonicalComponentRoot, canonicalCandidate);
+          allowed = (stat.isFile() || stat.isDirectory()) && !stat.isSymbolicLink() && !relative.startsWith('..') && !path.isAbsolute(relative) && !await filePathHasLink(fs, componentRoot, candidate);
         }
       } catch { allowed = false; }
       callback({ cancel: !allowed });
-    });
+    })(); });
     view.webContents.once('destroyed', () => {
       this.senderBindings.delete(senderId);
       if (this.instances.get(key) === instance) this.instances.delete(key);
       if (this.instancesById.get(instanceId) === instance) this.instancesById.delete(instanceId);
-      if (![...this.senderBindings.values()].some(bound => bound.context.componentId === descriptor.componentId)) { this.notificationService?.clearComponent?.(descriptor.componentId); this.clearComponentCapabilityState?.(descriptor.componentId); }
+      if (![...this.senderBindings.values()].some(bound => bound.context.componentId === descriptor.componentId)) { this.notificationService?.clearComponent?.(descriptor.componentId); void Promise.resolve(this.clearComponentCapabilityState?.(descriptor.componentId)).catch(error=>this.writeLog('warn','Unable to clear component capability state',{componentId:descriptor.componentId,error:error?.message||String(error)})); }
     });
     this.mainWindow.contentView.addChildView(view);
     this.onViewStackChanged();
@@ -367,7 +393,11 @@ class ComponentViewManager {
     try { await instance.readyPromise; }
     catch (error) { if (this.instances.get(key) === instance) this.close(instanceId); throw error; }
     if (surface === 'application.settings' && !instance.settingsLeases.has(leaseId)) throw new Error('Component settings page lease was released');
-    if (!this.activate(instanceId, activationGeneration)) { this.close(instanceId); throw new Error('Component page open was superseded'); }
+    if (!this.activate(instanceId, activationGeneration)) {
+      if (surface === 'application.settings') this.releaseSettings(request);
+      if (instance.latestOpenGeneration === activationGeneration) this.close(instanceId);
+      throw new Error('Component page open was superseded');
+    }
     return this.publicInstance(instance, leaseId);
   }
 
@@ -503,8 +533,22 @@ class ComponentViewManager {
       .map(instance => instance.instanceId);
     ids.forEach(id => this.close(id));
     this.notificationService?.clearComponent?.(normalizedId);
-    this.clearComponentCapabilityState?.(normalizedId);
+    void Promise.resolve(this.clearComponentCapabilityState?.(normalizedId)).catch(error=>this.writeLog('warn','Unable to clear component capability state',{componentId:normalizedId,error:error?.message||String(error)}));
     return ids.length;
+  }
+
+  async clearComponentPartitionStorage(componentId) {
+    const normalizedId = String(componentId || '');
+    this.closeComponent(normalizedId);
+    const session = this.partitionSessions.get(normalizedId);
+    if (!session) return false;
+    const failures = [];
+    for (const operation of [() => session.clearStorageData?.(), () => session.clearCache?.(), () => session.clearAuthCache?.()]) {
+      try { await operation(); } catch (error) { failures.push(error); }
+    }
+    if (failures.length) throw new AggregateError(failures, `Unable to clear component partition ${componentPartition(normalizedId)}`);
+    this.partitionSessions.delete(normalizedId);
+    return true;
   }
 
   destroy() { [...this.instances.values()].forEach(instance => this.close(instance.instanceId)); this.notificationService?.destroy?.(); }

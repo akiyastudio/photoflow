@@ -6,7 +6,7 @@ import { useUserFacingToast } from '../app/useUserFacingToast';
 type ComponentHostBrowserPage = { id: string; projectId: string; kind: 'project' | 'inspiration'; project?: WorkspaceProject | null };
 
 export const componentHostCatalogKey = (components: ComponentStatus[]) => components
-  .map(component => [component.id, component.version, component.installed ? 1 : 0, component.enabled === false ? 0 : 1, component.compatible ? 1 : 0, component.status || ''].join(':'))
+  .map(component => [component.id, component.version, component.installed ? 1 : 0, component.enabled === false ? 0 : 1, component.compatible ? 1 : 0, component.runtimeAvailable === false ? 0 : 1, component.status || '', [...(component.capabilities || [component.capability]).filter(Boolean)].sort().join(',')].join(':'))
   .sort()
   .join('|');
 
@@ -38,16 +38,6 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
   }, [catalogKey]);
   useEffect(() => { let active = true; void window.electronAPI.getComponentContributions().then(result => { if (active) setContributions(result.success ? result.contributions || [] : []); }).catch(() => { if (active) setContributions([]); }); return () => { active = false; }; }, [catalogKey]);
   useEffect(() => { activeIdentityRef.current = activeIdentity; }, [activeIdentity]);
-
-  useEffect(() => {
-    const installedIds = new Set(components.filter(component => component.installed && component.enabled !== false).map(component => component.id));
-    const unavailablePages = pages.filter(page => !installedIds.has(page.componentId));
-    if (!unavailablePages.length) return;
-    unavailablePages.forEach(page => openGenerations.current.set(page.identity, (openGenerations.current.get(page.identity) || 0) + 1));
-    unavailablePages.forEach(page => { if (page.instanceId) void window.electronAPI.closeComponentPage(page.instanceId).catch(() => undefined); });
-    setPages(current => current.filter(page => installedIds.has(page.componentId)));
-    if (unavailablePages.some(page => page.identity === activeIdentity)) { activeIdentityRef.current = ''; setActiveIdentity(''); }
-  }, [activeIdentity, components, pages]);
 
   useEffect(() => {
     const unavailablePages = pages.filter(page => !componentPageIsAvailable(page, components));
@@ -84,6 +74,7 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     if (inflight && inflightFingerprints.current.get(ensured.page.identity) === fingerprint) return inflight;
     if (inflight) inflightOpens.current.delete(ensured.page.identity);
     const generation = (openGenerations.current.get(ensured.page.identity) || 0) + 1;
+    const activationToken = ++activationGeneration.current;
     openGenerations.current.set(ensured.page.identity, generation);
     openScopes.current.set(ensured.page.identity, { workspacePath, projectId: project.id });
     setPages(current => ensureComponentPage(current, action, project, workspacePath, insertAfterTabId).pages);
@@ -93,13 +84,13 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     const operation = (async () => {
       const result = await window.electronAPI.openComponentPage({ componentId: action.componentId, pageId: action.pageId, workspacePath, projectId: project.id, projectName: project.name, projectStatus: project.status, ...scope })
         .catch(error => ({ success: false, page: undefined, error: error instanceof Error ? error.message : String(error) }));
-      if (generation !== openGenerations.current.get(ensured.page.identity)) {
+      if (generation !== openGenerations.current.get(ensured.page.identity) || activationToken !== activationGeneration.current || activeIdentityRef.current !== ensured.page.identity) {
         if (result.page?.instanceId) void window.electronAPI.closeComponentPage(result.page.instanceId).catch(() => undefined);
         return false;
       }
       if (!result.success || !result.page) {
         if (ensured.created) setPages(current => closeComponentPage(current, ensured.page.identity));
-        setActiveIdentity(current => current === ensured.page.identity && ensured.created ? '' : current);
+        setActiveIdentity(current => { const next = activationToken === activationGeneration.current && current === ensured.page.identity && ensured.created ? '' : current; activeIdentityRef.current = next; return next; });
         toast.show(`打开组件页失败：${result.error || '未知错误'}`, { tone: 'error', dedupeKey: `component-page-open:${action.componentId}:${action.pageId}` }); return false;
       }
       setPages(current => bindComponentPageInstance(current, ensured.page.identity, result.page!.instanceId));
@@ -114,16 +105,17 @@ export const useComponentPages = ({ browserPages, components, onProjectFallback,
     openGenerations.current.set(page.identity, (openGenerations.current.get(page.identity) || 0) + 1);
     inflightOpens.current.delete(page.identity); inflightOwners.current.delete(page.identity); inflightFingerprints.current.delete(page.identity); openScopes.current.delete(page.identity);
     activationGeneration.current += 1;
-    if (page.instanceId) await window.electronAPI.closeComponentPage(page.instanceId).catch(() => undefined);
     setPages(current => closeComponentPage(current, page.identity));
-    if (activeIdentityRef.current !== page.identity) return;
-    activeIdentityRef.current = ''; setActiveIdentity('');
-    const browserPage = browserPages.find(candidate => candidate.projectId === page.projectId);
-    if (browserPage) onProjectFallback(browserPage); else onHomeFallback();
+    if (activeIdentityRef.current === page.identity) {
+      activeIdentityRef.current = ''; setActiveIdentity('');
+      const browserPage = browserPages.find(candidate => candidate.projectId === page.projectId);
+      if (browserPage) onProjectFallback(browserPage); else onHomeFallback();
+    }
+    if (page.instanceId) await window.electronAPI.closeComponentPage(page.instanceId).catch(() => undefined);
   }, [browserPages, onHomeFallback, onProjectFallback]);
   const disposeProject = useCallback((workspacePath: string, projectId: string) => {
-    for (const page of pages) if (page.projectId === projectId && page.workspacePath.replace(/\\/g, '/').toLocaleLowerCase() === workspacePath.replace(/\\/g, '/').toLocaleLowerCase()) openGenerations.current.set(page.identity, (openGenerations.current.get(page.identity) || 0) + 1);
-    for (const [identity, scope] of openScopes.current) if (scope.projectId === projectId && scope.workspacePath.replace(/\\/g, '/').toLocaleLowerCase() === workspacePath.replace(/\\/g, '/').toLocaleLowerCase()) openGenerations.current.set(identity, (openGenerations.current.get(identity) || 0) + 1);
+    for (const page of pages) if (page.projectId === projectId && page.workspacePath.replace(/\\/g, '/').toLocaleLowerCase() === workspacePath.replace(/\\/g, '/').toLocaleLowerCase()) { openGenerations.current.set(page.identity, (openGenerations.current.get(page.identity) || 0) + 1); inflightOpens.current.delete(page.identity); }
+    for (const [identity, scope] of openScopes.current) if (scope.projectId === projectId && scope.workspacePath.replace(/\\/g, '/').toLocaleLowerCase() === workspacePath.replace(/\\/g, '/').toLocaleLowerCase()) { openGenerations.current.set(identity, (openGenerations.current.get(identity) || 0) + 1); inflightOpens.current.delete(identity); openScopes.current.delete(identity); }
     activationGeneration.current += 1;
     void window.electronAPI.closeProjectComponentPages(workspacePath, projectId).catch(() => undefined);
     setPages(current => closeProjectComponentPages(current, workspacePath, projectId));

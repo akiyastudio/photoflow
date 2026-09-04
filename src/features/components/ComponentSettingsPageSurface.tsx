@@ -16,21 +16,22 @@ export const ComponentSettingsPageSurface = ({ page, onError, onReady, visible =
   const onErrorRef = useRef(onError);
   const onReadyRef = useRef(onReady);
   const [instanceId, setInstanceId] = useState('');
+  const openGeneration = useRef(0);
 
   useEffect(() => { onErrorRef.current = onError; }, [onError]);
   useEffect(() => { onReadyRef.current = onReady; }, [onReady]);
 
   useEffect(() => {
-    let disposed = false;
+    let disposed = false; const generation=++openGeneration.current; setInstanceId('');
     const leaseId = `settings-${globalThis.crypto.randomUUID()}`;
     void window.electronAPI.openComponentSettingsPage({ componentId: page.componentId, pageId: page.pageId, leaseId }).then(result => {
       if (!result.success || !result.page) throw new Error(result.error || '打开组件设置页失败');
-      if (result.page.leaseId !== leaseId) throw new Error('组件设置页 lease 不匹配');
-      if (disposed) { void window.electronAPI.releaseComponentSettingsPage({ componentId: page.componentId, pageId: page.pageId, leaseId }).catch(() => undefined); return; }
+      if (result.page.leaseId !== leaseId) { void window.electronAPI.releaseComponentSettingsPage({ componentId: page.componentId, pageId: page.pageId, leaseId }).catch(() => undefined); throw new Error('组件设置页 lease 不匹配'); }
+      if (disposed || generation!==openGeneration.current) { void window.electronAPI.releaseComponentSettingsPage({ componentId: page.componentId, pageId: page.pageId, leaseId }).catch(() => undefined); return; }
       setInstanceId(result.page.instanceId); onReadyRef.current?.();
-    }).catch(error => { if (!disposed) onErrorRef.current(error instanceof Error ? error.message : String(error)); });
+    }).catch(error => { if (!disposed && generation===openGeneration.current) onErrorRef.current(error instanceof Error ? error.message : String(error)); });
     return () => {
-      disposed = true;
+      disposed = true; openGeneration.current+=1;
       void window.electronAPI.releaseComponentSettingsPage({ componentId: page.componentId, pageId: page.pageId, leaseId }).catch(() => undefined);
     };
   }, [page.componentId, page.componentVersion, page.pageId]);

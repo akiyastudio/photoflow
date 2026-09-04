@@ -55,17 +55,17 @@ const readZipEntries = archivePath => {
   const size = fs.statSync(archivePath).size;
   if (!Number.isSafeInteger(size) || size < 22) throw new Error('ZIP 文件过小或大小无效');
   const fd = fs.openSync(archivePath, 'r');
+  try {
   const tailLength = Math.min(size, 65_557); const tailStart = size - tailLength; const tail = readExact(fd, tailLength, tailStart);
   let eocd = -1;
   for (let offset = tail.length - 22; offset >= 0; offset -= 1) {
     if (tail.readUInt32LE(offset) === 0x06054b50 && offset + 22 + tail.readUInt16LE(offset + 20) === tail.length) { eocd = offset; break; }
   }
-  if (eocd < 0) { fs.closeSync(fd); throw new Error('ZIP 中央目录缺失或包已损坏'); }
-  if (tail.readUInt16LE(eocd + 4) !== 0 || tail.readUInt16LE(eocd + 6) !== 0 || tail.readUInt16LE(eocd + 8) !== tail.readUInt16LE(eocd + 10)) { fs.closeSync(fd); throw new Error('不支持多卷 ZIP 组件包'); }
+  if (eocd < 0) throw new Error('ZIP 中央目录缺失或包已损坏');
+  if (tail.readUInt16LE(eocd + 4) !== 0 || tail.readUInt16LE(eocd + 6) !== 0 || tail.readUInt16LE(eocd + 8) !== tail.readUInt16LE(eocd + 10)) throw new Error('不支持多卷 ZIP 组件包');
   const count = tail.readUInt16LE(eocd + 10); const directorySize = tail.readUInt32LE(eocd + 12); const directoryOffset = tail.readUInt32LE(eocd + 16); const absoluteEocd = tailStart + eocd;
-  if (!count || count > 10000 || count === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff || directorySize > 64 * 1024 * 1024 || directoryOffset + directorySize !== absoluteEocd) { fs.closeSync(fd); throw new Error('ZIP 中央目录越界或包已损坏'); }
-  let directory;
-  try { directory = readExact(fd, directorySize, directoryOffset); } finally { fs.closeSync(fd); }
+  if (!count || count > 10000 || count === 0xffff || directorySize === 0xffffffff || directoryOffset === 0xffffffff || directorySize > 64 * 1024 * 1024 || directoryOffset + directorySize !== absoluteEocd) throw new Error('ZIP 中央目录越界或包已损坏');
+  const directory = readExact(fd, directorySize, directoryOffset);
   const entries = [];
   const names = new Set();
   let offset = 0;
@@ -86,6 +86,7 @@ const readZipEntries = archivePath => {
   }
   if (offset !== directory.length) throw new Error('ZIP 中央目录条目数量不一致');
   return { archive: Object.freeze({ archivePath, size }), entries };
+  } finally { fs.closeSync(fd); }
 };
 const readZipEntry = (archive, entry) => {
   if (entry.flags & 1) throw new Error('不支持加密组件包');
