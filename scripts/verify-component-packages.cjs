@@ -93,6 +93,11 @@ const assertSourceIdentity = (archivePath, expected) => {
   const current = fs.statSync(archivePath, { throwIfNoEntry: false });
   if (!current?.isFile() || !sameIdentity(expected, identityFor(current))) throw new Error(`组件包在验证期间被替换或修改：${archivePath}`);
 };
+const captureArtifactIdentity = artifactPath => {
+  const stat = fs.statSync(artifactPath, { throwIfNoEntry: false });
+  if (!stat?.isFile() || !Number.isSafeInteger(stat.size)) throw new Error(`交付物不存在或不是普通文件：${artifactPath}`);
+  return identityFor(stat);
+};
 const hashStableArtifact = async archivePath => {
   const handle = await fs.promises.open(archivePath, 'r');
   try {
@@ -211,7 +216,7 @@ const verifyComponentPackage = async archivePath => {
     const packageHash = crypto.createHash('sha256');
     await pipeline(fs.createReadStream(isolatedArchive), new Transform({ transform(chunk, encoding, callback) { packageHash.update(chunk); callback(); } }));
     assertSourceIdentity(absoluteArchive, sourceIdentity);
-    return { fileName, size: archive.size, sha256: packageHash.digest('hex'), componentId: manifest.id, version: manifest.version, platform, arch };
+    return { fileName, size: archive.size, sha256: packageHash.digest('hex'), componentId: manifest.id, version: manifest.version, platform, arch, sourceIdentity };
   } finally { fs.rmSync(temporaryRoot, { recursive: true, force: true }); }
 };
 
@@ -243,6 +248,7 @@ const exactKeys = (value, keys, label) => {
 };
 const verifyComponentPackageReceipt = async (archivePath, expected) => {
   const absoluteArchive = path.resolve(archivePath);
+  const verified = await verifyComponentPackage(absoluteArchive);
   const receiptPath = receiptPathFor(absoluteArchive);
   let receiptFd;
   try { receiptFd = fs.openSync(receiptPath, 'r'); }
@@ -265,9 +271,9 @@ const verifyComponentPackageReceipt = async (archivePath, expected) => {
   const expectedIdentity = { id: String(expected.id), version: String(expected.version), platform: String(expected.platform), arch: String(expected.arch) };
   if (JSON.stringify(receipt.component) !== JSON.stringify(expectedIdentity)) throw new Error(`组件验证回执身份与当前发布集合不一致：${path.basename(absoluteArchive)}`);
   if (receipt.archive.fileName !== path.basename(absoluteArchive) || !Number.isSafeInteger(receipt.archive.size) || !/^[a-f0-9]{64}$/.test(receipt.archive.sha256)) throw new Error('组件验证回执 archive 字段无效');
-  const actual = await hashStableArtifact(absoluteArchive);
-  if (actual.size !== receipt.archive.size || actual.sha256 !== receipt.archive.sha256) throw new Error(`组件 ZIP 与完整验证回执不一致，必须重新完整验证：${path.basename(absoluteArchive)}`);
-  return { fileName: receipt.archive.fileName, size: actual.size, sha256: actual.sha256, componentId: receipt.component.id, version: receipt.component.version, platform: receipt.component.platform, arch: receipt.component.arch, sourceIdentity: actual.identity, receiptPath, receiptIdentity, verificationReceipt: { schemaVersion: receipt.schemaVersion, verifierVersion: receipt.verifierVersion, command: receipt.command, status: receipt.status, verifiedAt: receipt.verifiedAt } };
+  if (verified.fileName !== receipt.archive.fileName || verified.size !== receipt.archive.size || verified.sha256 !== receipt.archive.sha256
+    || verified.componentId !== receipt.component.id || String(verified.version) !== receipt.component.version || verified.platform !== receipt.component.platform || verified.arch !== receipt.component.arch) throw new Error(`组件 ZIP 与审计回执不一致：${path.basename(absoluteArchive)}`);
+  return { ...verified, receiptPath, receiptIdentity, verificationReceipt: { schemaVersion: receipt.schemaVersion, verifierVersion: receipt.verifierVersion, command: receipt.command, status: receipt.status, verifiedAt: receipt.verifiedAt, trust: 'informational' } };
 };
 
 const parseArguments = values => {
@@ -308,4 +314,4 @@ const run = async () => {
 
 if (require.main === module) run().catch(error => { console.error(`Component package verification failed: ${error.message || error}`); process.exitCode = 1; });
 
-module.exports = { verifyComponentPackage, verifyComponentPackageReceipt, writeVerificationReceipt, expectedComponentPackages, parseArguments, receiptPathFor, hashStableArtifact, assertSourceIdentity };
+module.exports = { verifyComponentPackage, verifyComponentPackageReceipt, writeVerificationReceipt, expectedComponentPackages, parseArguments, receiptPathFor, hashStableArtifact, captureArtifactIdentity, assertSourceIdentity };

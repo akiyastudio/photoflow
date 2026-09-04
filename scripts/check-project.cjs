@@ -1,6 +1,7 @@
 const { spawnSync } = require('child_process');
 const path = require('node:path');
-const { writeQualityReceipt, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
+const crypto = require('node:crypto');
+const { writeQualityReceipt, clearQualityReceipt, readGitHead, assertGitHead, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const qualityStartedAt = new Date().toISOString();
@@ -11,6 +12,12 @@ const testsOnly = process.argv.includes('--tests-only');
 const releaseReady = process.argv.includes('--release-ready');
 const releaseQuality = process.argv.includes('--release-quality');
 const componentRelease = releaseReady || releaseQuality;
+let qualityAttempt = null;
+if (releaseQuality) {
+  clearQualityReceipt(repositoryRoot);
+  qualityAttempt = { gitCommit: readGitHead(repositoryRoot), attemptId: crypto.randomUUID() };
+  assertCleanGitWorktree(repositoryRoot);
+}
 
 const steps = [
   ['Python environment', ['run', 'check:python']],
@@ -67,10 +74,9 @@ for (const [label, args] of steps) {
 }
 
 if (releaseQuality) {
-  const commit = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true });
-  if (commit.error || commit.status !== 0) throw new Error('无法读取发布质量门禁对应的 Git HEAD');
+  assertGitHead(repositoryRoot, qualityAttempt.gitCommit);
   assertCleanGitWorktree(repositoryRoot);
-  const receipt = writeQualityReceipt({ repositoryRoot, gitCommit: commit.stdout.trim(), startedAt: qualityStartedAt, finishedAt: new Date().toISOString() });
+  const receipt = writeQualityReceipt({ repositoryRoot, ...qualityAttempt, startedAt: qualityStartedAt, finishedAt: new Date().toISOString() });
   console.log(`Release quality receipt recorded for ${receipt.gitCommit}; this is test evidence, not a signature or legal approval.`);
 }
 

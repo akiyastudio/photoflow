@@ -4,7 +4,7 @@ const crypto = require('node:crypto');
 const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
-const { verifyComponentPackage, verifyComponentPackageReceipt, writeVerificationReceipt, receiptPathFor } = require('./verify-component-packages.cjs');
+const { verifyComponentPackage, verifyComponentPackageReceipt, writeVerificationReceipt, receiptPathFor, captureArtifactIdentity, assertSourceIdentity } = require('./verify-component-packages.cjs');
 const { writeZip } = require('./test-helpers/zip-fixture.cjs');
 
 const root = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-component-verifier-test-'));
@@ -43,13 +43,14 @@ const verifierTemporaryDirectories = () => new Set(fs.readdirSync(os.tmpdir()).f
     await assert.rejects(verifyComponentPackageReceipt(archive, expectedReceiptIdentity), /回执缺失/);
     writeVerificationReceipt(archive, result);
     const receiptVerified = await verifyComponentPackageReceipt(archive, expectedReceiptIdentity);
-    assert.deepEqual({ fileName: receiptVerified.fileName, size: receiptVerified.size, sha256: receiptVerified.sha256, componentId: receiptVerified.componentId, version: receiptVerified.version, platform: receiptVerified.platform, arch: receiptVerified.arch }, result);
+    const { sourceIdentity: _sourceIdentity, ...publicResult } = result;
+    assert.deepEqual({ fileName: receiptVerified.fileName, size: receiptVerified.size, sha256: receiptVerified.sha256, componentId: receiptVerified.componentId, version: receiptVerified.version, platform: receiptVerified.platform, arch: receiptVerified.arch }, publicResult);
     assert.equal(receiptVerified.verificationReceipt.status, 'passed');
     const receiptPath = receiptPathFor(archive);
     const alteredReceipt = JSON.parse(fs.readFileSync(receiptPath, 'utf8'));
     alteredReceipt.archive.sha256 = '0'.repeat(64);
     fs.writeFileSync(receiptPath, JSON.stringify(alteredReceipt));
-    await assert.rejects(verifyComponentPackageReceipt(archive, expectedReceiptIdentity), /必须重新完整验证/);
+    await assert.rejects(verifyComponentPackageReceipt(archive, expectedReceiptIdentity), /审计回执不一致|必须重新完整验证/);
     fs.rmSync(receiptPath);
 
     const integrityManifest = { ...manifest, integrity: 'component-integrity.json' };
@@ -91,6 +92,20 @@ const verifierTemporaryDirectories = () => new Set(fs.readdirSync(os.tmpdir()).f
     const wrongName = path.join(root, `PhotoFlow-wrong-id-1.2.3-${process.platform}-${process.arch}.zip`);
     zip(wrongName, goodEntries);
     await expectFailure(wrongName, /文件名身份不匹配/);
+
+    const fakeArchive = path.join(root, `PhotoFlow-forged-receipt-1.0.0-${process.platform}-${process.arch}.zip`);
+    const fakeBytes = Buffer.alloc(46, 0x41);
+    fs.writeFileSync(fakeArchive, fakeBytes);
+    writeVerificationReceipt(fakeArchive, { fileName: path.basename(fakeArchive), size: fakeBytes.length, sha256: crypto.createHash('sha256').update(fakeBytes).digest('hex'), componentId: 'forged-receipt', version: '1.0.0', platform: process.platform, arch: process.arch });
+    await assert.rejects(verifyComponentPackageReceipt(fakeArchive, { id: 'forged-receipt', version: '1.0.0', platform: process.platform, arch: process.arch }), /ZIP|组件包/);
+
+    const fencedInstaller = path.join(root, 'Setup.exe');
+    fs.writeFileSync(fencedInstaller, 'approved bytes');
+    const approvedIdentity = captureArtifactIdentity(fencedInstaller);
+    const replacement = path.join(root, 'replacement.exe');
+    fs.writeFileSync(replacement, 'different final bytes');
+    fs.renameSync(replacement, fencedInstaller);
+    assert.throws(() => assertSourceIdentity(fencedInstaller, approvedIdentity), /替换或修改/);
 
     const emptyRoot = path.join(root, 'empty');
     fs.mkdirSync(emptyRoot);

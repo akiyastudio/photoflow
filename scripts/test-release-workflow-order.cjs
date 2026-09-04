@@ -4,7 +4,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { PREPARE_STEPS } = require('./prepare-release.cjs');
-const { writeQualityReceipt, validateQualityReceipt, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
+const { writeQualityReceipt, validateQualityReceipt, clearQualityReceipt, readGitHead, assertGitHead, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
 
 const root = path.resolve(__dirname, '..');
 const packageJson = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
@@ -14,9 +14,14 @@ assert.equal(packageJson.scripts['check:release:quality'], 'node scripts/check-p
 assert.equal(packageJson.scripts['check:release:final'], 'node scripts/check-final-release-ready.cjs');
 const finalSource = fs.readFileSync(path.join(root, 'scripts', 'check-final-release-ready.cjs'), 'utf8');
 assert(finalSource.indexOf('test-legal-release-evidence.cjs') < finalSource.indexOf('generate-delivery-manifest.cjs'), 'final approval must be checked before regenerating delivery metadata');
+assert(finalSource.includes('assertSourceIdentity(installerPath, installerIdentity)') && finalSource.includes('setup.sha256') && finalSource.includes('approval.installerSha256'), 'final gate must fence installer identity and equate approved and manifested hashes');
 const publishSource = fs.readFileSync(path.join(root, 'scripts', 'publish-release.cjs'), 'utf8');
 assert(publishSource.indexOf('runLegalReleaseReadyGate(installerPath)') < publishSource.indexOf('generate-delivery-manifest.cjs'), 'publish must recheck approval before delivery metadata');
 assert(publishSource.indexOf('generate-delivery-manifest.cjs') < publishSource.indexOf('let token = String(process.env.PHOTOFLOW_ADMIN_TOKEN'), 'publish must validate all artifacts before reading a token or using the network');
+assert(publishSource.includes('assertSourceIdentity(installerPath, installerIdentity)') && publishSource.includes('setup.sha256') && publishSource.includes('approval.installerSha256'), 'publish must fence installer identity and equate approved and manifested hashes');
+const deliverySource = fs.readFileSync(path.join(root, 'scripts', 'generate-delivery-manifest.cjs'), 'utf8');
+assert(deliverySource.indexOf('runQualityGate();') < deliverySource.indexOf('validateQualityReceipt('), 'an informational quality receipt must never skip the real quality gate');
+assert(deliverySource.indexOf('verifyComponentPackageReceipt(component.path') > deliverySource.indexOf('runQualityGate();'), 'component ZIPs must be fully verified after the real quality gate');
 const fixtureRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'photoflow-release-receipt-'));
 try {
   const git = args => { const result = spawnSync('git', args, { cwd: fixtureRoot, encoding: 'utf8', windowsHide: true }); assert.equal(result.status, 0, result.stderr); };
@@ -26,12 +31,21 @@ try {
   git(['add', 'component.json', '.gitignore']);
   git(['-c', 'user.name=PhotoFlow Test', '-c', 'user.email=test@photoflow.invalid', 'commit', '--quiet', '-m', 'fixture']);
   assert.equal(assertCleanGitWorktree(fixtureRoot).status, 'clean');
-  const quality = writeQualityReceipt({ repositoryRoot: fixtureRoot, gitCommit: 'a'.repeat(40), startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:01:00.000Z' });
-  assert.equal(validateQualityReceipt({ repositoryRoot: fixtureRoot, gitCommit: 'a'.repeat(40) }).status, 'passed');
+  const quality = writeQualityReceipt({ repositoryRoot: fixtureRoot, gitCommit: 'a'.repeat(40), attemptId: '11111111-1111-4111-8111-111111111111', startedAt: '2026-01-01T00:00:00.000Z', finishedAt: '2026-01-01T00:01:00.000Z' });
+  assert.equal(validateQualityReceipt({ repositoryRoot: fixtureRoot, gitCommit: 'a'.repeat(40), now: Date.parse('2026-01-01T00:01:01.000Z') }).status, 'observed-passed');
+  assert.equal(quality.trust, 'informational');
   assert.equal(quality.command, 'npm run check:release:quality');
   fs.writeFileSync(path.join(fixtureRoot, 'component.json'), '{"dirty":true}');
   assert.throws(() => assertCleanGitWorktree(fixtureRoot), /未提交|构建输入/);
   git(['checkout', '--', 'component.json']);
-  assert.throws(() => validateQualityReceipt({ repositoryRoot: fixtureRoot, gitCommit: 'b'.repeat(40) }), /不对应当前 HEAD/);
+  assert.throws(() => validateQualityReceipt({ repositoryRoot: fixtureRoot, gitCommit: 'b'.repeat(40), now: Date.parse('2026-01-01T00:01:01.000Z') }), /不对应当前 HEAD/);
+  const startHead = readGitHead(fixtureRoot);
+  fs.writeFileSync(path.join(fixtureRoot, 'component.json'), '{"next":true}');
+  git(['add', 'component.json']);
+  git(['-c', 'user.name=PhotoFlow Test', '-c', 'user.email=test@photoflow.invalid', 'commit', '--quiet', '-m', 'next']);
+  assert.equal(assertCleanGitWorktree(fixtureRoot).status, 'clean');
+  assert.throws(() => assertGitHead(fixtureRoot, startHead), /HEAD 已变化/);
+  clearQualityReceipt(fixtureRoot);
+  assert.throws(() => validateQualityReceipt({ repositoryRoot: fixtureRoot, gitCommit: readGitHead(fixtureRoot) }), /回执缺失/);
 } finally { fs.rmSync(fixtureRoot, { recursive: true, force: true }); }
 console.log('Release workflow ordering tests passed.');

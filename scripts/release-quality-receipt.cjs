@@ -26,12 +26,23 @@ const atomicWriteJson = (target, value) => {
   }
 };
 
-const writeQualityReceipt = ({ repositoryRoot, gitCommit, startedAt, finishedAt }) => {
-  const receipt = { schemaVersion: SCHEMA_VERSION, toolVersion: TOOL_VERSION, command: COMMAND, status: 'passed', gitCommit, startedAt, finishedAt };
+const clearQualityReceipt = repositoryRoot => fs.rmSync(receiptPathFor(repositoryRoot), { force: true });
+const readGitHead = repositoryRoot => {
+  const result = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true });
+  if (result.error || result.status !== 0) throw new Error('无法读取发布质量门禁对应的 Git HEAD');
+  return result.stdout.trim();
+};
+const assertGitHead = (repositoryRoot, expected) => {
+  const current = readGitHead(repositoryRoot);
+  if (current !== expected) throw new Error(`发布质量门禁期间 HEAD 已变化：${expected} -> ${current}`);
+  return current;
+};
+const writeQualityReceipt = ({ repositoryRoot, gitCommit, startedAt, finishedAt, attemptId }) => {
+  const receipt = { schemaVersion: SCHEMA_VERSION, toolVersion: TOOL_VERSION, command: COMMAND, status: 'observed-passed', trust: 'informational', gitCommit, attemptId, startedAt, finishedAt };
   atomicWriteJson(receiptPathFor(repositoryRoot), receipt);
   return receipt;
 };
-const validateQualityReceipt = ({ repositoryRoot, gitCommit }) => {
+const validateQualityReceipt = ({ repositoryRoot, gitCommit, now = Date.now() }) => {
   const receiptPath = receiptPathFor(repositoryRoot);
   let fd;
   try { fd = fs.openSync(receiptPath, 'r'); }
@@ -46,11 +57,11 @@ const validateQualityReceipt = ({ repositoryRoot, gitCommit }) => {
     const pathStat = fs.statSync(receiptPath, { throwIfNoEntry: false });
     if (!sameIdentity(identity, identityFor(fs.fstatSync(fd))) || !pathStat || !sameIdentity(identity, identityFor(pathStat))) throw new Error('发布质量门禁回执在读取期间被替换');
   } finally { fs.closeSync(fd); }
-  const keys = ['schemaVersion', 'toolVersion', 'command', 'status', 'gitCommit', 'startedAt', 'finishedAt'];
+  const keys = ['schemaVersion', 'toolVersion', 'command', 'status', 'trust', 'gitCommit', 'attemptId', 'startedAt', 'finishedAt'];
   if (!receipt || typeof receipt !== 'object' || Array.isArray(receipt) || Object.keys(receipt).sort().join('\0') !== keys.sort().join('\0')
-    || receipt.schemaVersion !== SCHEMA_VERSION || receipt.toolVersion !== TOOL_VERSION || receipt.command !== COMMAND || receipt.status !== 'passed'
+    || receipt.schemaVersion !== SCHEMA_VERSION || receipt.toolVersion !== TOOL_VERSION || receipt.command !== COMMAND || receipt.status !== 'observed-passed' || receipt.trust !== 'informational' || !/^[0-9a-f-]{36}$/i.test(receipt.attemptId)
     || receipt.gitCommit !== gitCommit || !Number.isFinite(Date.parse(receipt.startedAt)) || !Number.isFinite(Date.parse(receipt.finishedAt))
-    || Date.parse(receipt.finishedAt) < Date.parse(receipt.startedAt)) throw new Error('发布质量门禁回执无效或不对应当前 HEAD；请重新运行 release:prepare');
+    || Date.parse(receipt.finishedAt) < Date.parse(receipt.startedAt) || Date.parse(receipt.finishedAt) > now + 60_000 || now - Date.parse(receipt.finishedAt) > 5 * 60_000) throw new Error('发布质量门禁回执无效、过期或不对应当前 HEAD；请重新运行 release:prepare');
   Object.defineProperties(receipt, { sourceIdentity: { value: identity }, sourcePath: { value: receiptPath } });
   return receipt;
 };
@@ -61,4 +72,4 @@ const assertCleanGitWorktree = repositoryRoot => {
   return { status: 'clean' };
 };
 
-module.exports = { COMMAND, atomicWriteJson, receiptPathFor, writeQualityReceipt, validateQualityReceipt, assertCleanGitWorktree };
+module.exports = { COMMAND, atomicWriteJson, receiptPathFor, clearQualityReceipt, readGitHead, assertGitHead, writeQualityReceipt, validateQualityReceipt, assertCleanGitWorktree };

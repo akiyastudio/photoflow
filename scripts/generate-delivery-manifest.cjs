@@ -3,11 +3,20 @@ const fs = require('node:fs');
 const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const { verifyComponentPackageReceipt, expectedComponentPackages, hashStableArtifact, assertSourceIdentity } = require('./verify-component-packages.cjs');
-const { validateQualityReceipt, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
+const { validateQualityReceipt, clearQualityReceipt, readGitHead, assertGitHead, assertCleanGitWorktree } = require('./release-quality-receipt.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const installerRoot = path.join(repositoryRoot, 'artifacts', 'installers');
 const outputPath = path.join(installerRoot, 'DELIVERY-MANIFEST.json');
+
+const runQualityGate = () => {
+  const npmCli = process.env.npm_execpath;
+  if (!npmCli) throw new Error('npm_execpath is unavailable; delivery verification must run through npm');
+  clearQualityReceipt(repositoryRoot);
+  const result = spawnSync(process.execPath, [npmCli, 'run', 'check:release:quality'], { cwd: repositoryRoot, stdio: 'inherit', windowsHide: true });
+  if (result.error) throw result.error;
+  if (result.status !== 0) throw new Error('发布质量门禁失败；旧回执已失效且未生成交付清单');
+};
 
 const findInstaller = version => {
   const explicitIndex = process.argv.indexOf('--installer');
@@ -19,18 +28,17 @@ const findInstaller = version => {
 };
 
 const generateDeliveryManifest = async () => {
-  const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
-  const version = String(packageJson.version);
   fs.mkdirSync(installerRoot, { recursive: true });
   fs.rmSync(outputPath, { force: true });
   const temporary = `${outputPath}.${crypto.randomUUID()}.tmp`;
   let completed = false;
   try {
-    const commitResult = spawnSync('git', ['rev-parse', 'HEAD'], { cwd: repositoryRoot, encoding: 'utf8', windowsHide: true });
-    if (commitResult.error || commitResult.status !== 0) throw new Error('无法读取交付清单对应的 Git HEAD');
-    const gitCommit = commitResult.stdout.trim();
+    runQualityGate();
+    const gitCommit = readGitHead(repositoryRoot);
     const qualityGate = validateQualityReceipt({ repositoryRoot, gitCommit });
     const sourceWorktree = assertCleanGitWorktree(repositoryRoot);
+    const packageJson = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'package.json'), 'utf8'));
+    const version = String(packageJson.version);
     const installerPath = findInstaller(version);
     const installer = await hashStableArtifact(installerPath);
     const sources = [{ path: qualityGate.sourcePath, identity: qualityGate.sourceIdentity }, { path: installerPath, identity: installer.identity }];
@@ -52,6 +60,7 @@ const generateDeliveryManifest = async () => {
     try { fs.writeFileSync(fd, `${JSON.stringify(manifest, null, 2)}\n`, 'utf8'); fs.fsyncSync(fd); }
     finally { fs.closeSync(fd); }
     for (const source of sources) assertSourceIdentity(source.path, source.identity);
+    assertGitHead(repositoryRoot, gitCommit);
     assertCleanGitWorktree(repositoryRoot);
     fs.renameSync(temporary, outputPath);
     if (process.platform !== 'win32') {
@@ -69,4 +78,4 @@ const generateDeliveryManifest = async () => {
 
 if (require.main === module) generateDeliveryManifest().catch(error => { console.error(`Delivery manifest generation failed: ${error.message || error}`); process.exitCode = 1; });
 
-module.exports = { generateDeliveryManifest };
+module.exports = { generateDeliveryManifest, runQualityGate };

@@ -4,6 +4,7 @@ const path = require('path');
 const readline = require('readline/promises');
 const { stdin, stdout } = require('process');
 const releaseConfig = require('./release-config.cjs');
+const { captureArtifactIdentity, assertSourceIdentity } = require('./verify-component-packages.cjs');
 
 const repositoryRoot = path.resolve(__dirname, '..');
 const VERSION_PATTERN = /^\d+\.\d+\.\d+$/;
@@ -177,11 +178,17 @@ const run = async () => {
   }
   const installerPath = path.resolve(args.installer || findInstaller(version));
   if (!fs.existsSync(installerPath) || !fs.statSync(installerPath).isFile()) throw new Error(`安装包不存在：${installerPath}`);
+  const installerIdentity = captureArtifactIdentity(installerPath);
   runLegalReleaseReadyGate(installerPath);
   runCommand(process.execPath, [
     path.join(repositoryRoot, 'scripts', 'generate-delivery-manifest.cjs'),
     '--installer', installerPath,
   ], '验证 Setup 与组件 ZIP 并生成交付清单（组件 ZIP 不由本发布脚本上传）');
+  assertSourceIdentity(installerPath, installerIdentity);
+  const approval = JSON.parse(fs.readFileSync(path.join(repositoryRoot, 'docs', 'legal', 'RELEASE_APPROVAL.json'), 'utf8'));
+  const delivery = JSON.parse(fs.readFileSync(path.join(installerRoot, 'DELIVERY-MANIFEST.json'), 'utf8'));
+  const setup = delivery.artifacts.find(artifact => artifact.type === 'setup' && artifact.fileName === path.basename(installerPath));
+  if (!setup || String(setup.sha256).toLowerCase() !== String(approval.installerSha256).toLowerCase()) throw new Error('最终批准哈希与交付清单 Setup 哈希不一致');
 
   let token = String(process.env.PHOTOFLOW_ADMIN_TOKEN || '').trim() || readWindowsUserToken();
   let persistToken = false;
@@ -214,6 +221,7 @@ const run = async () => {
     const mandatoryArgument = String(mandatory);
 
     console.log('\n正在验证 CloudBase release 发布接口和管理员 Token……');
+    assertSourceIdentity(installerPath, installerIdentity);
     await assertPublisherReady(token);
     if (persistToken && persistWindowsUserToken(token)) {
       console.log('管理员 Token 已保存到 Windows 用户环境变量，以后发布会自动读取。');
@@ -224,6 +232,7 @@ const run = async () => {
       await terminal.question('确认下载地址已经提供新版本后，按回车写入 release 数据库……');
     }
 
+    assertSourceIdentity(installerPath, installerIdentity);
     runCommand(process.execPath, [
       path.join(repositoryRoot, 'scripts', 'generate-release-json.cjs'),
       '--version', version,
